@@ -6,7 +6,7 @@ Claude Code launches MCP servers as subprocesses over stdio. agent-trace sits
 between Claude Code and the MCP server, capturing every tool call.
 
 ```
-Claude Code ←→ agent-trace record ←→ MCP Server
+Claude Code ←→ agent-strace record ←→ MCP Server
                      ↓
               .agent-traces/
 ```
@@ -17,10 +17,10 @@ Claude Code ←→ agent-trace record ←→ MCP Server
 
 ```bash
 # With uv (recommended)
-uv tool install agent-trace
+uv tool install agent-strace
 
 # Or with pip
-pip install agent-trace
+pip install agent-strace
 ```
 
 ### 2. Add a traced MCP server
@@ -32,7 +32,7 @@ Use `claude mcp add` with agent-trace wrapping the server command:
 claude mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem /tmp
 
 # Use:
-claude mcp add filesystem -- agent-trace record --name filesystem -- npx -y @modelcontextprotocol/server-filesystem /tmp
+claude mcp add filesystem -- agent-strace record --name filesystem -- npx -y @modelcontextprotocol/server-filesystem /tmp
 ```
 
 The `--name` flag tags the session so you can identify which server it came from.
@@ -43,7 +43,7 @@ The `--name` flag tags the session so you can identify which server it came from
 {
   "mcpServers": {
     "filesystem": {
-      "command": "agent-trace",
+      "command": "agent-strace",
       "args": [
         "record",
         "--name", "filesystem",
@@ -63,11 +63,11 @@ Every tool call Claude Code makes through the MCP server is now traced.
 
 ```bash
 # List all sessions
-agent-trace list
+agent-strace list
 
 # Replay the latest
-agent-trace replay
+agent-strace replay
 
 # Show stats
-agent-trace stats
+agent-strace stats
 ```

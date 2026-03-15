@@ -10,19 +10,19 @@ We have `strace` for syscalls. We have `tcpdump` for packets. We have nothing fo
 
 When a coding agent rewrites 20 files in a background session, you get a pull request. You don't get the story of how it got there. Which files did it read first? What context was in the window when it decided to change the approach? Why did it call the same tool three times?
 
-LangSmith traces LLM calls. That's one layer. The gap is everything around it: tool calls, file operations, decision points, error recovery. `agent-trace` captures the full picture.
+LangSmith traces LLM calls. That's one layer. The gap is everything around it: tool calls, file operations, decision points, error recovery. `agent-strace` captures the full picture.
 
 ## Install
 
 ```bash
 # With uv (recommended)
-uv tool install agent-trace
+uv tool install agent-strace
 
 # Or with pip
-pip install agent-trace
+pip install agent-strace
 
 # Or run without installing
-uvx agent-trace replay
+uvx agent-strace replay
 ```
 
 **Zero dependencies.** Python 3.10+ standard library only.
@@ -35,16 +35,16 @@ Wrap any MCP server. Every message between agent and server is captured.
 
 ```bash
 # Record a session
-agent-trace record -- npx -y @modelcontextprotocol/server-filesystem /tmp
+agent-strace record -- npx -y @modelcontextprotocol/server-filesystem /tmp
 
 # List recorded sessions
-agent-trace list
+agent-strace list
 
 # Replay the last session
-agent-trace replay
+agent-strace replay
 
 # Replay a specific session (prefix match works)
-agent-trace replay a84664
+agent-strace replay a84664
 ```
 
 ### Option 2: Python decorator
@@ -75,18 +75,18 @@ search_codebase("authenticate")
 call_llm([{"role": "user", "content": "Fix the bug"}])
 
 meta = end_session()
-print(f"Replay with: agent-trace replay {meta.session_id}")
+print(f"Replay with: agent-strace replay {meta.session_id}")
 ```
 
 ## CLI commands
 
 ```
-agent-trace record -- <command>    Record an MCP server session
-agent-trace replay [session-id]    Replay a session (default: latest)
-agent-trace list                   List all sessions
-agent-trace stats [session-id]     Show tool call frequency and timing
-agent-trace inspect <session-id>   Dump full session as JSON
-agent-trace export <session-id>    Export as JSON, CSV, or NDJSON
+agent-strace record -- <command>    Record an MCP server session
+agent-strace replay [session-id]    Replay a session (default: latest)
+agent-strace list                   List all sessions
+agent-strace stats [session-id]     Show tool call frequency and timing
+agent-strace inspect <session-id>   Dump full session as JSON
+agent-strace export <session-id>    Export as JSON, CSV, or NDJSON
 ```
 
 ### Replay output
@@ -146,23 +146,23 @@ Session Summary
 
 ```bash
 # Show only tool calls and errors
-agent-trace replay --filter tool_call,error
+agent-strace replay --filter tool_call,error
 
 # Replay with timing (watch it unfold)
-agent-trace replay --live --speed 2
+agent-strace replay --live --speed 2
 ```
 
 ### Export
 
 ```bash
 # JSON array
-agent-trace export a84664 --format json
+agent-strace export a84664 --format json
 
 # CSV (for spreadsheets)
-agent-trace export a84664 --format csv
+agent-strace export a84664 --format csv
 
 # NDJSON (for streaming pipelines)
-agent-trace export a84664 --format ndjson
+agent-strace export a84664 --format ndjson
 ```
 
 ## Trace format
@@ -210,7 +210,7 @@ Events link to each other. A `tool_result` has a `parent_id` pointing to its `to
 
 ## Use with Claude Code, Cursor, Windsurf
 
-agent-trace works with any tool that launches MCP servers. The idea is simple: instead of launching the MCP server directly, launch it through `agent-trace record`. The agent and server don't know the proxy exists.
+agent-strace works with any tool that launches MCP servers. The idea is simple: instead of launching the MCP server directly, launch it through `agent-strace record`. The agent and server don't know the proxy exists.
 
 ### Claude Code
 
@@ -219,7 +219,7 @@ agent-trace works with any tool that launches MCP servers. The idea is simple: i
 claude mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem /tmp
 
 # Use:
-claude mcp add filesystem -- agent-trace record --name filesystem -- npx -y @modelcontextprotocol/server-filesystem /tmp
+claude mcp add filesystem -- agent-strace record --name filesystem -- npx -y @modelcontextprotocol/server-filesystem /tmp
 ```
 
 Or edit `.claude/mcp.json`:
@@ -228,7 +228,7 @@ Or edit `.claude/mcp.json`:
 {
   "mcpServers": {
     "filesystem": {
-      "command": "agent-trace",
+      "command": "agent-strace",
       "args": ["record", "--name", "filesystem", "--", "npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
     }
   }
@@ -243,7 +243,7 @@ Edit `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (per-project):
 {
   "mcpServers": {
     "filesystem": {
-      "command": "agent-trace",
+      "command": "agent-strace",
       "args": ["record", "--name", "filesystem", "--", "npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
     }
   }
@@ -258,7 +258,7 @@ Edit `~/.codeium/windsurf/mcp_config.json`:
 {
   "mcpServers": {
     "filesystem": {
-      "command": "agent-trace",
+      "command": "agent-strace",
       "args": ["record", "--name", "filesystem", "--", "npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
     }
   }
@@ -269,10 +269,10 @@ Edit `~/.codeium/windsurf/mcp_config.json`:
 
 The pattern is the same for any tool that uses MCP over stdio:
 
-1. Replace the server `command` with `agent-trace`
+1. Replace the server `command` with `agent-strace`
 2. Prepend `record --name <label> --` to the original args
 3. Use the tool normally
-4. Run `agent-trace replay` to see what happened
+4. Run `agent-strace replay` to see what happened
 
 See the [examples/](examples/) directory for full config files.
 
@@ -281,7 +281,7 @@ See the [examples/](examples/) directory for full config files.
 ### MCP proxy mode
 
 ```
-Agent ←→ agent-trace proxy ←→ MCP Server
+Agent ←→ agent-strace proxy ←→ MCP Server
               ↓
          .agent-traces/
 ```

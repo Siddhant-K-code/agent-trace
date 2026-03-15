@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "agent-trace"
+name = "agent-strace"
 version = "0.1.0"
 description = "strace for AI agents. Capture and replay every tool call, LLM request, and decision point."
 readme = "README.md"
@@ -27,7 +27,7 @@ classifiers = [
 ]
 
 [project.scripts]
-agent-trace = "agent_trace.cli:main"
+agent-strace = "agent_trace.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/Siddhant-K-code/agent-trace"

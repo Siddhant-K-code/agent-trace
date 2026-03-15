@@ -1,11 +1,11 @@
 """CLI entry point.
 
 Usage:
-    agent-trace record -- <server-command> [args...]
-    agent-trace replay [session-id]
-    agent-trace list
-    agent-trace inspect <session-id>
-    agent-trace export <session-id> [--format json|csv]
+    agent-strace record -- <server-command> [args...]
+    agent-strace replay [session-id]
+    agent-strace list
+    agent-strace inspect <session-id>
+    agent-strace export <session-id> [--format json|csv]
 """
 
 from __future__ import annotations
@@ -42,8 +42,8 @@ def cmd_record(args: argparse.Namespace) -> int:
 
     if not args.quiet:
         sys.stderr.write(
-            f"agent-trace: recording session {meta.session_id}\n"
-            f"agent-trace: command: {' '.join(args.command)}\n"
+            f"agent-strace: recording session {meta.session_id}\n"
+            f"agent-strace: command: {' '.join(args.command)}\n"
         )
 
     on_event = _print_live_event if args.verbose else None
@@ -59,11 +59,11 @@ def cmd_record(args: argparse.Namespace) -> int:
 
     if not args.quiet:
         sys.stderr.write(
-            f"\nagent-trace: session {meta.session_id} complete\n"
-            f"agent-trace: {meta.tool_calls} tool calls, "
+            f"\nagent-strace: session {meta.session_id} complete\n"
+            f"agent-strace: {meta.tool_calls} tool calls, "
             f"{meta.llm_requests} llm requests, "
             f"{meta.errors} errors\n"
-            f"agent-trace: replay with: agent-trace replay {meta.session_id}\n"
+            f"agent-strace: replay with: agent-trace replay {meta.session_id}\n"
         )
 
     return returncode
@@ -241,10 +241,10 @@ def cmd_stats(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="agent-trace",
+        prog="agent-strace",
         description="strace for AI agents. Capture and replay every tool call.",
     )
-    parser.add_argument("--version", action="version", version=f"agent-trace {__version__}")
+    parser.add_argument("--version", action="version", version=f"agent-strace {__version__}")
     parser.add_argument(
         "--trace-dir",
         default=".agent-traces",

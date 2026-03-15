@@ -128,7 +128,7 @@ def main():
     print(f"  LLM requests: {meta.llm_requests}")
     print(f"  Errors: {meta.errors}")
     print(f"  Duration: {meta.total_duration_ms:.0f}ms")
-    print(f"\nReplay with: python -m agent_trace.cli replay {meta.session_id}")
+    print(f"\nReplay with: agent-strace replay {meta.session_id}")
 
 
 if __name__ == "__main__":

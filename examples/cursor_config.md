@@ -12,10 +12,10 @@ so every tool call is captured.
 
 ```bash
 # With uv (recommended)
-uv tool install agent-trace
+uv tool install agent-strace
 
 # Or with pip
-pip install agent-trace
+pip install agent-strace
 ```
 
 ### 2. Edit your MCP config
@@ -26,7 +26,7 @@ Open `~/.cursor/mcp.json` (or `.cursor/mcp.json` in your project):
 {
   "mcpServers": {
     "filesystem": {
-      "command": "agent-trace",
+      "command": "agent-strace",
       "args": [
         "record",
         "--name", "filesystem",
@@ -35,7 +35,7 @@ Open `~/.cursor/mcp.json` (or `.cursor/mcp.json` in your project):
       ]
     },
     "github": {
-      "command": "agent-trace",
+      "command": "agent-strace",
       "args": [
         "record",
         "--name", "github",
@@ -60,7 +60,7 @@ All MCP tool calls are captured in `.agent-traces/`.
 ### 4. Replay
 
 ```bash
-agent-trace list
-agent-trace replay
-agent-trace stats
+agent-strace list
+agent-strace replay
+agent-strace stats
 ```

@@ -11,10 +11,10 @@ agent-trace wraps the server command to capture every tool call.
 
 ```bash
 # With uv (recommended)
-uv tool install agent-trace
+uv tool install agent-strace
 
 # Or with pip
-pip install agent-trace
+pip install agent-strace
 ```
 
 ### 2. Edit your MCP config
@@ -25,7 +25,7 @@ Open `~/.codeium/windsurf/mcp_config.json`:
 {
   "mcpServers": {
     "filesystem": {
-      "command": "agent-trace",
+      "command": "agent-strace",
       "args": [
         "record",
         "--name", "filesystem",
@@ -44,7 +44,7 @@ All MCP tool calls are captured in `.agent-traces/`.
 ### 4. Replay
 
 ```bash
-agent-trace list
-agent-trace replay
-agent-trace stats
+agent-strace list
+agent-strace replay
+agent-strace stats
 ```
