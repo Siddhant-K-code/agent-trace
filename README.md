@@ -347,4 +347,4 @@ uv tool install -e .
 
 ## License
 
-Apache 2.0
+AGPL-3.0. You can use, modify, and distribute this freely. If you modify it and distribute or run it as a service, you must open-source your changes under the same license.
