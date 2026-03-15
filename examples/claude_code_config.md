@@ -9,17 +9,20 @@ subagent spawn, and MCP tool call.
 
 ```
 Claude Code agentic loop
-  ├── PreToolUse   → agent-strace hook pre-tool         (logs tool_call)
-  ├── PostToolUse  → agent-strace hook post-tool         (logs tool_result)
-  ├── PostToolUseFailure → agent-strace hook post-tool-failure (logs error)
-  ├── SessionStart → agent-strace hook session-start     (starts trace)
-  └── SessionEnd   → agent-strace hook session-end       (closes trace)
-                          ↓
-                    .agent-traces/
+  ├── UserPromptSubmit   → agent-strace hook user-prompt        (logs user prompt)
+  ├── PreToolUse         → agent-strace hook pre-tool           (logs tool_call)
+  ├── PostToolUse        → agent-strace hook post-tool          (logs tool_result)
+  ├── PostToolUseFailure → agent-strace hook post-tool-failure  (logs error)
+  ├── Stop               → agent-strace hook stop               (logs assistant response)
+  ├── SessionStart       → agent-strace hook session-start      (starts trace)
+  └── SessionEnd         → agent-strace hook session-end        (closes trace)
+                               ↓
+                         .agent-traces/
 ```
 
-This captures all tool calls, not just MCP. Claude Code's built-in tools (Bash, Edit,
-Write, Read, Agent, Grep, Glob, WebFetch, WebSearch) are all traced.
+This captures the full conversation: user prompts, assistant responses, and all tool
+calls. Claude Code's built-in tools (Bash, Edit, Write, Read, Agent, Grep, Glob,
+WebFetch, WebSearch) and all MCP tools are traced.
 
 ## Setup
 
@@ -55,6 +58,13 @@ This prints the JSON you need to add to your settings file.
 ```json
 {
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "agent-strace hook user-prompt" }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "",
@@ -76,6 +86,13 @@ This prints the JSON you need to add to your settings file.
         "matcher": "",
         "hooks": [
           { "type": "command", "command": "agent-strace hook post-tool-failure" }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "agent-strace hook stop" }
         ]
       }
     ],
@@ -118,8 +135,10 @@ agent-strace stats
 
 ## What gets captured
 
-| Claude Code tool | Trace event type | Example data |
+| Source | Trace event type | Data |
 |---|---|---|
+| User prompt | user_prompt | the text the user typed |
+| Assistant response | assistant_response | Claude's final text response |
 | `Bash` | tool_call / tool_result | command, output |
 | `Edit` | tool_call / tool_result | file path, old/new text |
 | `Write` | tool_call / tool_result | file path, content |

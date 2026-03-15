@@ -296,6 +296,9 @@ def cmd_setup(args: argparse.Namespace) -> None:
 
     config = {
         "hooks": {
+            "UserPromptSubmit": [{
+                "hooks": [{"type": "command", "command": f"{cmd_prefix} user-prompt"}],
+            }],
             "PreToolUse": [{
                 "matcher": "",
                 "hooks": [{"type": "command", "command": f"{cmd_prefix} pre-tool"}],
@@ -307,6 +310,9 @@ def cmd_setup(args: argparse.Namespace) -> None:
             "PostToolUseFailure": [{
                 "matcher": "",
                 "hooks": [{"type": "command", "command": f"{cmd_prefix} post-tool-failure"}],
+            }],
+            "Stop": [{
+                "hooks": [{"type": "command", "command": f"{cmd_prefix} stop"}],
             }],
             "SessionStart": [{
                 "hooks": [{"type": "command", "command": f"{cmd_prefix} session-start"}],
@@ -326,8 +332,9 @@ def cmd_setup(args: argparse.Namespace) -> None:
 
     sys.stdout.write(output + "\n")
     sys.stderr.write(
-        "\nThis captures every tool call Claude Code makes: "
-        "Bash, Edit, Write, Read, Agent, and all MCP tools.\n"
+        "\nThis captures the full Claude Code session: user prompts, "
+        "assistant responses, and every tool call (Bash, Edit, Write, "
+        "Read, Agent, and all MCP tools).\n"
         "Replay with: agent-strace replay\n"
     )
 

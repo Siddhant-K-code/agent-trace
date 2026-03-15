@@ -221,6 +221,61 @@ def handle_pre_tool(input_data: dict) -> None:
     _write_pending_calls(pending)
 
 
+def handle_user_prompt(input_data: dict) -> None:
+    """Handle UserPromptSubmit hook event. Logs the user's prompt."""
+    store = _get_store()
+    session_id = _read_active_session()
+    if not session_id:
+        return
+
+    redact = _should_redact()
+    prompt = input_data.get("prompt", "")
+
+    event_data = {"prompt": prompt}
+    if redact:
+        event_data = redact_data(event_data)
+
+    store.append_event(
+        session_id,
+        TraceEvent(
+            event_type=EventType.USER_PROMPT,
+            session_id=session_id,
+            data=event_data,
+        ),
+    )
+
+
+def handle_stop(input_data: dict) -> None:
+    """Handle Stop hook event. Logs the assistant's final response."""
+    store = _get_store()
+    session_id = _read_active_session()
+    if not session_id:
+        return
+
+    # Skip if this is a recursive stop hook call
+    if input_data.get("stop_hook_active"):
+        return
+
+    redact = _should_redact()
+    text = input_data.get("last_assistant_message", "")
+
+    if not text:
+        return
+
+    event_data = {"text": text}
+    if redact:
+        event_data = redact_data(event_data)
+
+    store.append_event(
+        session_id,
+        TraceEvent(
+            event_type=EventType.ASSISTANT_RESPONSE,
+            session_id=session_id,
+            data=event_data,
+        ),
+    )
+
+
 def handle_post_tool(input_data: dict, failed: bool = False) -> None:
     """Handle PostToolUse / PostToolUseFailure hook event."""
     store = _get_store()
@@ -280,7 +335,7 @@ def hook_main(args: list[str]) -> None:
     """Entry point for `agent-strace hook <event>` CLI command."""
     if not args:
         sys.stderr.write("Usage: agent-strace hook <event>\n")
-        sys.stderr.write("Events: session-start, session-end, pre-tool, post-tool, post-tool-failure\n")
+        sys.stderr.write("Events: session-start, session-end, pre-tool, post-tool, post-tool-failure, user-prompt, stop\n")
         sys.exit(1)
 
     event = args[0]
@@ -292,6 +347,8 @@ def hook_main(args: list[str]) -> None:
         "pre-tool": handle_pre_tool,
         "post-tool": lambda d: handle_post_tool(d, failed=False),
         "post-tool-failure": lambda d: handle_post_tool(d, failed=True),
+        "user-prompt": handle_user_prompt,
+        "stop": handle_stop,
     }
 
     handler = handlers.get(event)

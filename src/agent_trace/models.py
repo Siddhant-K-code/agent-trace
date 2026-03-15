@@ -15,6 +15,8 @@ Event types:
   - error: something failed
   - session_start: trace session began
   - session_end: trace session ended
+  - user_prompt: user submitted a prompt to the agent
+  - assistant_response: agent produced a text response
 """
 
 from __future__ import annotations
@@ -38,6 +40,8 @@ class EventType(str, Enum):
     FILE_WRITE = "file_write"
     DECISION = "decision"
     ERROR = "error"
+    USER_PROMPT = "user_prompt"
+    ASSISTANT_RESPONSE = "assistant_response"
 
 
 @dataclass

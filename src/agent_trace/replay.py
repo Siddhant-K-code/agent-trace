@@ -41,6 +41,8 @@ EVENT_COLORS = {
     EventType.FILE_WRITE: C.YELLOW,
     EventType.DECISION: C.WHITE,
     EventType.ERROR: C.RED,
+    EventType.USER_PROMPT: C.GREEN,
+    EventType.ASSISTANT_RESPONSE: C.MAGENTA,
 }
 
 EVENT_ICONS = {
@@ -54,6 +56,8 @@ EVENT_ICONS = {
     EventType.FILE_WRITE: "📝",
     EventType.DECISION: "◆",
     EventType.ERROR: "✗",
+    EventType.USER_PROMPT: "👤",
+    EventType.ASSISTANT_RESPONSE: "🤖",
 }
 
 
@@ -157,6 +161,23 @@ def format_event(event: TraceEvent, base_ts: float | None = None) -> str:
         parts.append(f"{color}{C.BOLD}decision{C.RESET} {C.WHITE}{choice}{C.RESET}")
         if reason:
             parts.append(f"\n{C.GRAY}{'':>14}  reason: {reason[:120]}{C.RESET}")
+
+    elif event.event_type == EventType.USER_PROMPT:
+        prompt = event.data.get("prompt", "")
+        preview = prompt[:150]
+        if len(prompt) > 150:
+            preview += "..."
+        parts.append(f"{color}{C.BOLD}user_prompt{C.RESET}")
+        parts.append(f"\n{C.GRAY}{'':>14}  \"{preview}\"{C.RESET}")
+
+    elif event.event_type == EventType.ASSISTANT_RESPONSE:
+        text = event.data.get("text", "")
+        preview = text[:150]
+        if len(text) > 150:
+            preview += "..."
+        parts.append(f"{color}{C.BOLD}assistant_response{C.RESET}")
+        if preview:
+            parts.append(f"\n{C.GRAY}{'':>14}  \"{preview}\"{C.RESET}")
 
     return " ".join(parts)
 

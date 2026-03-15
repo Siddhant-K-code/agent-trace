@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-strace"
-version = "0.2.0"
+version = "0.2.1"
 description = "strace for AI agents. Capture and replay every tool call, LLM request, and decision point."
 readme = "README.md"
 license = "AGPL-3.0-only"

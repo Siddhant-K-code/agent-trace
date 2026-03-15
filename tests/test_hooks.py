@@ -18,6 +18,8 @@ from agent_trace.hooks import (
     handle_session_end,
     handle_pre_tool,
     handle_post_tool,
+    handle_user_prompt,
+    handle_stop,
 )
 from agent_trace.models import EventType
 from agent_trace.store import TraceStore
@@ -196,6 +198,127 @@ class TestHooksToolCapture(unittest.TestCase):
         self.assertLess(len(results[0].data["result"]), 2000)
 
 
+class TestHooksUserPrompt(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["AGENT_TRACE_DIR"] = self.tmpdir
+        os.environ.pop("AGENT_TRACE_REDACT", None)
+        handle_session_start({"session_id": "prompttest1234567", "source": "startup"})
+        self.session_id = _read_active_session()
+
+    def tearDown(self):
+        os.environ.pop("AGENT_TRACE_DIR", None)
+
+    def test_user_prompt_logged(self):
+        handle_user_prompt({
+            "prompt": "Fix the authentication bug in src/auth.py",
+        })
+
+        store = TraceStore(self.tmpdir)
+        events = store.load_events(self.session_id)
+        prompts = [e for e in events if e.event_type == EventType.USER_PROMPT]
+        self.assertEqual(len(prompts), 1)
+        self.assertEqual(prompts[0].data["prompt"], "Fix the authentication bug in src/auth.py")
+
+    def test_multiple_prompts_logged(self):
+        handle_user_prompt({"prompt": "First prompt"})
+        handle_user_prompt({"prompt": "Second prompt"})
+        handle_user_prompt({"prompt": "Third prompt"})
+
+        store = TraceStore(self.tmpdir)
+        events = store.load_events(self.session_id)
+        prompts = [e for e in events if e.event_type == EventType.USER_PROMPT]
+        self.assertEqual(len(prompts), 3)
+        self.assertEqual(prompts[0].data["prompt"], "First prompt")
+        self.assertEqual(prompts[2].data["prompt"], "Third prompt")
+
+    def test_empty_prompt_logged(self):
+        handle_user_prompt({"prompt": ""})
+
+        store = TraceStore(self.tmpdir)
+        events = store.load_events(self.session_id)
+        prompts = [e for e in events if e.event_type == EventType.USER_PROMPT]
+        self.assertEqual(len(prompts), 1)
+
+    def test_prompt_without_session_is_noop(self):
+        _clear_active_session()
+        handle_user_prompt({"prompt": "test"})  # should not raise
+
+
+class TestHooksStop(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["AGENT_TRACE_DIR"] = self.tmpdir
+        os.environ.pop("AGENT_TRACE_REDACT", None)
+        handle_session_start({"session_id": "stoptest12345678", "source": "startup"})
+        self.session_id = _read_active_session()
+
+    def tearDown(self):
+        os.environ.pop("AGENT_TRACE_DIR", None)
+
+    def test_stop_logs_assistant_response(self):
+        handle_stop({
+            "last_assistant_message": "I've fixed the bug. The issue was in the token refresh logic.",
+        })
+
+        store = TraceStore(self.tmpdir)
+        events = store.load_events(self.session_id)
+        responses = [e for e in events if e.event_type == EventType.ASSISTANT_RESPONSE]
+        self.assertEqual(len(responses), 1)
+        self.assertIn("fixed the bug", responses[0].data["text"])
+
+    def test_stop_skips_when_stop_hook_active(self):
+        handle_stop({
+            "stop_hook_active": True,
+            "last_assistant_message": "Should not be logged",
+        })
+
+        store = TraceStore(self.tmpdir)
+        events = store.load_events(self.session_id)
+        responses = [e for e in events if e.event_type == EventType.ASSISTANT_RESPONSE]
+        self.assertEqual(len(responses), 0)
+
+    def test_stop_skips_empty_message(self):
+        handle_stop({
+            "last_assistant_message": "",
+        })
+
+        store = TraceStore(self.tmpdir)
+        events = store.load_events(self.session_id)
+        responses = [e for e in events if e.event_type == EventType.ASSISTANT_RESPONSE]
+        self.assertEqual(len(responses), 0)
+
+    def test_stop_without_session_is_noop(self):
+        _clear_active_session()
+        handle_stop({"last_assistant_message": "test"})  # should not raise
+
+    def test_full_conversation_flow(self):
+        """Simulate a real Claude Code turn: prompt -> tools -> response."""
+        handle_user_prompt({"prompt": "Fix the login bug"})
+        handle_pre_tool({"tool_name": "Read", "tool_input": {"file_path": "/src/auth.py"}})
+        handle_post_tool({"tool_name": "Read", "tool_output": "def login(): ..."}, failed=False)
+        handle_pre_tool({"tool_name": "Edit", "tool_input": {"file_path": "/src/auth.py", "old_string": "a", "new_string": "b"}})
+        handle_post_tool({"tool_name": "Edit", "tool_output": "File edited"}, failed=False)
+        handle_stop({"last_assistant_message": "I've fixed the login bug by updating the auth logic."})
+
+        store = TraceStore(self.tmpdir)
+        events = store.load_events(self.session_id)
+
+        # Filter out session_start
+        events = [e for e in events if e.event_type != EventType.SESSION_START]
+
+        # Verify the full flow
+        self.assertEqual(events[0].event_type, EventType.USER_PROMPT)
+        self.assertEqual(events[1].event_type, EventType.TOOL_CALL)
+        self.assertEqual(events[1].data["tool_name"], "Read")
+        self.assertEqual(events[2].event_type, EventType.TOOL_RESULT)
+        self.assertEqual(events[3].event_type, EventType.TOOL_CALL)
+        self.assertEqual(events[3].data["tool_name"], "Edit")
+        self.assertEqual(events[4].event_type, EventType.TOOL_RESULT)
+        self.assertEqual(events[5].event_type, EventType.ASSISTANT_RESPONSE)
+        self.assertIn("fixed the login bug", events[5].data["text"])
+
+
 class TestHooksRedaction(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
@@ -207,6 +330,17 @@ class TestHooksRedaction(unittest.TestCase):
     def tearDown(self):
         os.environ.pop("AGENT_TRACE_DIR", None)
         os.environ.pop("AGENT_TRACE_REDACT", None)
+
+    def test_secrets_redacted_in_user_prompt(self):
+        handle_user_prompt({
+            "prompt": "Use this API key: sk-abc123def456ghi789jkl012mno345pqr678",
+        })
+
+        store = TraceStore(self.tmpdir)
+        events = store.load_events(self.session_id)
+        prompts = [e for e in events if e.event_type == EventType.USER_PROMPT]
+        self.assertEqual(len(prompts), 1)
+        self.assertNotIn("sk-abc123", str(prompts[0].data))
 
     def test_secrets_redacted_in_tool_input(self):
         handle_pre_tool({

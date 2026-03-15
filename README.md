@@ -10,7 +10,7 @@ We have `strace` for syscalls. We have `tcpdump` for packets. We have nothing fo
 
 When a coding agent rewrites 20 files in a background session, you get a pull request. You don't get the story of how it got there. Which files did it read first? What context was in the window when it decided to change the approach? Why did it call the same tool three times?
 
-LangSmith traces LLM calls. That's one layer. The gap is everything around it: tool calls, file operations, decision points, error recovery. `agent-strace` captures the full picture.
+Existing tools trace LLM calls. That's one layer. The gap is everything around it: tool calls, file operations, decision points, error recovery. `agent-strace` captures the full picture.
 
 ## Install
 
@@ -45,9 +45,11 @@ Or add the hooks manually to `.claude/settings.json`:
 ```json
 {
   "hooks": {
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "agent-strace hook user-prompt" }] }],
     "PreToolUse": [{ "matcher": "", "hooks": [{ "type": "command", "command": "agent-strace hook pre-tool" }] }],
     "PostToolUse": [{ "matcher": "", "hooks": [{ "type": "command", "command": "agent-strace hook post-tool" }] }],
     "PostToolUseFailure": [{ "matcher": "", "hooks": [{ "type": "command", "command": "agent-strace hook post-tool-failure" }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "agent-strace hook stop" }] }],
     "SessionStart": [{ "hooks": [{ "type": "command", "command": "agent-strace hook session-start" }] }],
     "SessionEnd": [{ "hooks": [{ "type": "command", "command": "agent-strace hook session-end" }] }]
   }
@@ -255,6 +257,8 @@ Each event is a single JSON line:
 |------|-------------|
 | `session_start` | Trace session began |
 | `session_end` | Trace session ended |
+| `user_prompt` | User submitted a prompt to the agent |
+| `assistant_response` | Agent produced a text response |
 | `tool_call` | Agent invoked a tool |
 | `tool_result` | Tool returned a result |
 | `llm_request` | Agent sent a prompt to an LLM |
@@ -326,16 +330,18 @@ See the [examples/](examples/) directory for full config files.
 
 ```
 Claude Code agentic loop
+  ├── UserPromptSubmit   → agent-strace hook user-prompt
   ├── PreToolUse         → agent-strace hook pre-tool
   ├── PostToolUse        → agent-strace hook post-tool
   ├── PostToolUseFailure → agent-strace hook post-tool-failure
+  ├── Stop               → agent-strace hook stop
   ├── SessionStart       → agent-strace hook session-start
   └── SessionEnd         → agent-strace hook session-end
                                ↓
                          .agent-traces/
 ```
 
-Claude Code fires hook events for every tool call in its agentic loop. agent-strace registers as a hook handler, receives JSON on stdin with the tool name, input, and output, and writes trace events. This captures all built-in tools (Bash, Edit, Write, Read, Agent, Grep, Glob, WebFetch, WebSearch) and all MCP tools. Session state is tracked via `.agent-traces/.active-session` so separate hook processes can correlate PreToolUse with PostToolUse for latency measurement.
+Claude Code fires hook events at every stage of its agentic loop. agent-strace registers as a hook handler, receives JSON on stdin, and writes trace events. This captures the full conversation: user prompts, assistant text responses, and all tool calls (Bash, Edit, Write, Read, Agent, Grep, Glob, WebFetch, WebSearch, and all MCP tools). Session state is tracked via `.agent-traces/.active-session` so separate hook processes can correlate PreToolUse with PostToolUse for latency measurement.
 
 ### MCP stdio proxy
 
