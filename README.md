@@ -488,6 +488,10 @@ uv tool install -e .
 - [The Agentic Engineering Guide](https://agents.siddhantkhare.com) - chapters 7, 9, 10 cover agent security; chapters 14, 15, 16 cover observability
 - [OpenTelemetry GenAI](https://opentelemetry.io/docs/specs/semconv/gen-ai/) - semantic conventions for LLM tracing (complementary)
 
+## Sponsor
+
+If agent-trace saves you time debugging agent sessions, consider [sponsoring the project](https://github.com/sponsors/Siddhant-K-code). It helps me keep building tools like this and releasing them for free.
+
 ## License
 
-AGPL-3.0. You can use, modify, and distribute this freely. If you modify it and distribute or run it as a service, you must open-source your changes under the same license.
+MIT. Use it however you want.
