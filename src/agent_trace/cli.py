@@ -22,6 +22,8 @@ import time
 from . import __version__
 from .hooks import hook_main
 from .http_proxy import HTTPProxyServer
+from .cost import cmd_cost
+from .explain import cmd_explain
 from .jsonl_import import cmd_import
 from .models import EventType, SessionMeta, TraceEvent
 from .proxy import MCPProxy
@@ -439,6 +441,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_import.add_argument("--discover", action="store_true", help="list available Claude Code sessions")
     p_import.add_argument("--claude-dir", default="~/.claude", help="Claude config directory (default: ~/.claude)")
 
+    # explain
+    p_explain = sub.add_parser("explain", help="explain a session in plain English")
+    p_explain.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
+
+    # cost
+    p_cost = sub.add_parser("cost", help="estimate token cost for a session")
+    p_cost.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
+    p_cost.add_argument("--model", default="sonnet",
+                        choices=["sonnet", "opus", "haiku", "gpt4", "gpt4o"],
+                        help="model pricing to use (default: sonnet)")
+    p_cost.add_argument("--input-price", type=float, dest="input_price",
+                        help="custom input price per 1M tokens (overrides --model)")
+    p_cost.add_argument("--output-price", type=float, dest="output_price",
+                        help="custom output price per 1M tokens (overrides --model)")
+
     return parser
 
 
@@ -468,6 +485,8 @@ def main() -> None:
         "export": cmd_export,
         "stats": cmd_stats,
         "import": cmd_import,
+        "explain": cmd_explain,
+        "cost": cmd_cost,
     }
 
     handler = handlers.get(args.command)
