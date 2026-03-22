@@ -110,7 +110,78 @@ agent-strace list                          List all sessions
 agent-strace stats [session-id]            Show tool call frequency and timing
 agent-strace inspect <session-id>          Dump full session as JSON
 agent-strace export <session-id>           Export as JSON, CSV, NDJSON, or OTLP
+agent-strace import <session.jsonl>        Import a Claude Code JSONL session log
+agent-strace explain [session-id]          Explain a session in plain English
+agent-strace cost [session-id]             Estimate token cost for a session
 ```
+
+### Import existing Claude Code sessions
+
+Already ran a session without hooks? Import it directly from Claude Code's native JSONL logs:
+
+```bash
+# Discover available sessions
+agent-strace import --discover
+
+# Import a specific session
+agent-strace import ~/.claude/projects/<project>/<session-id>.jsonl
+
+# Then use it like any captured session
+agent-strace replay <session-id>
+agent-strace explain <session-id>
+agent-strace stats <session-id>
+```
+
+Claude Code stores session logs in `~/.claude/projects/`. The import captures tool calls, token usage, subagent invocations, and session metadata.
+
+### Explain a session
+
+Get a plain-English breakdown of what the agent did, organized by phase, with retry and wasted-time detection:
+
+```bash
+agent-strace explain           # latest session
+agent-strace explain abc123    # specific session
+```
+
+```
+Session: abc123 (2m 05s, 47 events)
+
+Phase 1: fix the auth module (0:00–0:05, 5 events)
+  Read: AGENTS.md, src/auth.py
+
+Phase 2: run tests — FAILED (0:05–1:20, 12 events)
+  Ran: python -m pytest
+  Ran: python -m pytest  ← retry
+
+Phase 3: run tests (1:20–2:05, 8 events)
+  Ran: uv run pytest
+
+Files touched: 3 read, 0 written
+Retries: 1 (wasted 1m 15s, 60% of session)
+```
+
+### Estimate cost
+
+Break down estimated token usage and dollar cost by phase. Flags wasted spend on failed phases.
+
+```bash
+agent-strace cost                          # latest session, sonnet pricing
+agent-strace cost abc123 --model opus      # specific session and model
+agent-strace cost abc123 --input-price 3.0 --output-price 15.0  # custom pricing
+```
+
+```
+Session: abc123 — Estimated cost: $0.0042
+Model: sonnet  |  8,200 input tokens, 3,100 output tokens
+
+  Phase 1: fix the auth module          $0.0008  (19%)  ...
+  Phase 2: run tests — FAILED           $0.0021  (50%)  ...  ← wasted
+  Phase 3: run tests                    $0.0013  (31%)  ...
+
+Wasted on failed phases: $0.0021 (50%)
+```
+
+Supported models: `sonnet` (default), `opus`, `haiku`, `gpt4`, `gpt4o`. Token counts are estimated from payload size (`len / 4`); see [ADR-0008](ADRs/0008-token-cost-estimation-heuristic.md) for details.
 
 ### Secret redaction
 
@@ -450,13 +521,17 @@ src/agent_trace/
   otlp.py           # OTLP/HTTP JSON exporter
   replay.py         # terminal replay and display
   decorator.py      # @trace_tool, @trace_llm_call, log_decision
+  jsonl_import.py   # Claude Code JSONL session import
+  explain.py        # session phase detection and plain-English summary
+  cost.py           # token and cost estimation
   cli.py            # CLI entry point
+ADRs/               # Architecture Decision Records
 ```
 
 ## Running tests
 
 ```bash
-python -m unittest discover -s tests -v
+pytest
 ```
 
 ## Development
@@ -466,7 +541,7 @@ git clone https://github.com/Siddhant-K-code/agent-trace.git
 cd agent-trace
 
 # Run tests
-python -m unittest discover -s tests -v
+pytest
 
 # Run the example
 PYTHONPATH=src python examples/basic_agent.py
@@ -483,6 +558,7 @@ uv tool install -e .
 
 ## Related
 
+- [Architecture Decision Records](ADRs/) - design decisions and their rationale
 - [The agent observability gap (blog)](https://siddhantkhare.com/writing/agent-observability-gap) - the problem this tool addresses
 - [The agent observability gap (thread)](https://x.com/Siddhant_K_code/status/2032834557628788940) - discussion on X
 - [The Agentic Engineering Guide](https://agents.siddhantkhare.com) - chapters 7, 9, 10 cover agent security; chapters 14, 15, 16 cover observability
