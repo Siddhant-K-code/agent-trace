@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, TextIO
 
@@ -81,7 +82,7 @@ def _phase_label(events: list[TraceEvent], index: int) -> str:
             return label
     # Fall back to dominant tool type
     tool_names = [
-        e.data.get("tool_name", "")
+        e.data.get("tool_name", "").lower()
         for e in events
         if e.event_type == EventType.TOOL_CALL
     ]
@@ -158,7 +159,6 @@ def _annotate_phase(phase: Phase) -> None:
                     phase.files_written.append(path)
 
     # Retry detection: same command appears more than once in this phase
-    from collections import Counter
     counts = Counter(seen_commands)
     phase.retry_count = sum(c - 1 for c in counts.values() if c > 1)
     phase.failed = has_error
@@ -190,11 +190,7 @@ def format_explain(result: ExplainResult, out: TextIO = sys.stdout) -> None:
       f"({_fmt_duration(result.total_duration)}, {result.total_events} events)\n\n")
 
     for phase in result.phases:
-        status = ""
-        if phase.failed and phase.retry_count > 0:
-            status = " — FAILED"
-        elif phase.failed:
-            status = " — FAILED"
+        status = " — FAILED" if phase.failed else ""
 
         time_range = (
             f"{_fmt_offset(phase.start_offset)}–{_fmt_offset(phase.end_offset)}"

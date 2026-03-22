@@ -69,23 +69,17 @@ def _estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
+INPUT_TYPES = {EventType.USER_PROMPT, EventType.LLM_REQUEST, EventType.TOOL_CALL}
+OUTPUT_TYPES = {EventType.ASSISTANT_RESPONSE, EventType.LLM_RESPONSE, EventType.TOOL_RESULT}
+
+
 def _event_tokens(event: TraceEvent) -> tuple[int, int]:
     """Return (input_tokens, output_tokens) estimated for one event."""
-    if event.event_type in (EventType.USER_PROMPT, EventType.LLM_REQUEST):
-        text = json.dumps(event.data)
-        return _estimate_tokens(text), 0
+    if event.event_type in INPUT_TYPES:
+        return _estimate_tokens(json.dumps(event.data)), 0
 
-    if event.event_type in (EventType.ASSISTANT_RESPONSE, EventType.LLM_RESPONSE):
-        text = json.dumps(event.data)
-        return 0, _estimate_tokens(text)
-
-    if event.event_type == EventType.TOOL_CALL:
-        text = json.dumps(event.data)
-        return _estimate_tokens(text), 0
-
-    if event.event_type == EventType.TOOL_RESULT:
-        text = json.dumps(event.data)
-        return 0, _estimate_tokens(text)
+    if event.event_type in OUTPUT_TYPES:
+        return 0, _estimate_tokens(json.dumps(event.data))
 
     return 0, 0
 
@@ -119,6 +113,10 @@ def estimate_cost(
     output_price: float | None = None,
 ) -> CostResult:
     """Estimate cost for *session_id*, broken down by phase."""
+    if (input_price is None) != (output_price is None):
+        raise ValueError(
+            "Both --input-price and --output-price must be provided together"
+        )
     if input_price is not None and output_price is not None:
         PRICING["custom"] = {"input": input_price, "output": output_price}
         model = "custom"
@@ -204,6 +202,12 @@ def cmd_cost(args: argparse.Namespace) -> int:
     model = getattr(args, "model", DEFAULT_MODEL) or DEFAULT_MODEL
     input_price = getattr(args, "input_price", None)
     output_price = getattr(args, "output_price", None)
+
+    if (input_price is None) != (output_price is None):
+        sys.stderr.write(
+            "Error: --input-price and --output-price must be provided together.\n"
+        )
+        return 1
 
     result = estimate_cost(
         store, full_id,

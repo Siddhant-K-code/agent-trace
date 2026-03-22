@@ -1,7 +1,6 @@
 """Tests for session explain."""
 
 import tempfile
-import time
 import unittest
 
 from agent_trace.explain import (
@@ -18,20 +17,6 @@ from agent_trace.store import TraceStore
 def _make_event(event_type: EventType, ts: float, session_id: str = "s1", **data) -> TraceEvent:
     return TraceEvent(event_type=event_type, timestamp=ts, session_id=session_id, data=data)
 
-
-def _make_store(events: list[TraceEvent], session_id: str = "s1") -> TraceStore:
-    with tempfile.TemporaryDirectory() as d:
-        store = TraceStore(d)
-        meta = SessionMeta(
-            session_id=session_id,
-            started_at=events[0].timestamp if events else time.time(),
-            total_duration_ms=(events[-1].timestamp - events[0].timestamp) * 1000 if len(events) > 1 else 0,
-        )
-        store.create_session(meta)
-        for e in events:
-            store.append_event(session_id, e)
-        store.update_meta(meta)
-        return store, d
 
 
 class TestBuildPhases(unittest.TestCase):
@@ -124,8 +109,6 @@ class TestBuildPhases(unittest.TestCase):
 
 class TestExplainSession(unittest.TestCase):
     def _build(self, events, session_id="sess1"):
-        store = TraceStore.__new__(TraceStore)
-        import tempfile, os
         d = tempfile.mkdtemp()
         store = TraceStore(d)
         meta = SessionMeta(
