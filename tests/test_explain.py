@@ -1,5 +1,6 @@
 """Tests for session explain."""
 
+import io
 import tempfile
 import unittest
 
@@ -153,7 +154,6 @@ class TestExplainSession(unittest.TestCase):
 
 class TestFormatExplain(unittest.TestCase):
     def test_output_contains_session_id(self):
-        import io
         result = ExplainResult(
             session_id="abc123",
             total_duration=60.0,
@@ -173,7 +173,6 @@ class TestFormatExplain(unittest.TestCase):
         self.assertIn("README.md", output)
 
     def test_output_shows_retry_summary(self):
-        import io
         result = ExplainResult(
             session_id="xyz",
             total_duration=120.0,
