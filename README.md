@@ -183,6 +183,8 @@ Wasted on failed phases: $0.0021 (50%)
 
 Supported models: `sonnet` (default), `opus`, `haiku`, `gpt4`, `gpt4o`. Token counts are estimated from payload size (`len / 4`); see [ADR-0008](ADRs/0008-token-cost-estimation-heuristic.md) for details.
 
+See [examples/session_analysis.md](examples/session_analysis.md) for a full walkthrough combining `import`, `explain`, and `cost`.
+
 ### Secret redaction
 
 Pass `--redact` to strip API keys, tokens, and credentials from traces before they hit disk.
