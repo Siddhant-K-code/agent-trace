@@ -33,12 +33,12 @@ def cmd_import(args: argparse.Namespace) -> int:
             sys.stderr.write("No Claude Code sessions found.\n")
             return 1
 
-        sys.stderr.write(f"\nFound {len(sessions)} Claude Code sessions:\n\n")
+        sys.stdout.write(f"\nFound {len(sessions)} Claude Code sessions:\n\n")
         for s in sessions:
-            sys.stderr.write(
+            sys.stdout.write(
                 f"  {s['session_id'][:12]}  {s['size_kb']:>6} KB  {s['project']}\n"
             )
-        sys.stderr.write("\nImport with: agent-strace import <path-to-session.jsonl>\n")
+        sys.stdout.write("\nImport with: agent-strace import <path-to-session.jsonl>\n")
         return 0
 
     if not args.path:
@@ -199,11 +199,11 @@ def import_jsonl(
                 extra_meta["version"] = raw.get("version", "")
 
     if not session_id:
-        session_id = path.stem[:16]
+        session_id = path.stem
 
     # Create session
     meta = SessionMeta(
-        session_id=session_id[:16],
+        session_id=session_id,
         started_at=first_ts,
         agent_name="claude-code",
         command=f"imported from {path.name} (branch: {extra_meta.get('git_branch', '')}, v{extra_meta.get('version', '')})",
@@ -231,7 +231,8 @@ def import_jsonl(
             if isinstance(content, list):
                 tool_results = _extract_tool_results(content)
                 for tr in tool_results:
-                    preview = tr["content"][:200] if tr["content"] else ""
+                    _c = tr["content"]
+                    preview = (_c[:2000] + "..." if len(_c) > 2000 else _c) if _c else ""
                     event = TraceEvent(
                         event_type=EventType.TOOL_RESULT,
                         timestamp=ts,
@@ -243,9 +244,10 @@ def import_jsonl(
                     )
                     store.append_event(meta.session_id, event)
 
-                # Also check toolUseResult
+                # Also check toolUseResult — only if no content-block tool_results
+                # were already emitted to avoid duplicate TOOL_RESULT events.
                 tr_data = raw.get("toolUseResult")
-                if tr_data and isinstance(tr_data, dict):
+                if tr_data and isinstance(tr_data, dict) and not tool_results:
                     stdout = tr_data.get("stdout", "") or ""
                     stderr = tr_data.get("stderr", "") or ""
                     if stdout or stderr:
@@ -306,10 +308,10 @@ def import_jsonl(
                     store.append_event(meta.session_id, event)
                     meta.tool_calls += 1
 
-            # Log assistant text (if any, and no tool calls)
-            if text and not (
-                isinstance(content, list) and _extract_tool_calls(content)
-            ):
+            # Log assistant text whenever present, including messages that also
+            # contain tool calls (Claude Code often emits reasoning text alongside
+            # a tool_use block in the same message).
+            if text:
                 event = TraceEvent(
                     event_type=EventType.ASSISTANT_RESPONSE,
                     timestamp=ts,
@@ -395,29 +397,12 @@ def discover_claude_sessions(
         project_name = _decode_project_path(project_dir.name)
 
         for jsonl_file in sorted(project_dir.glob("*.jsonl")):
-            # Peek at first entry for session ID
-            sid = ""
-            try:
-                with open(jsonl_file, encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            raw = json.loads(line)
-                            sid = raw.get("sessionId", "")
-                            if sid:
-                                break
-                        except json.JSONDecodeError:
-                            continue
-            except OSError:
-                continue
-
+            # Claude Code names files <session-uuid>.jsonl, so the stem is the ID.
             sessions.append(
                 {
                     "path": jsonl_file,
                     "project": project_name,
-                    "session_id": sid or jsonl_file.stem,
+                    "session_id": jsonl_file.stem,
                     "size_kb": jsonl_file.stat().st_size // 1024,
                 }
             )
@@ -428,25 +413,9 @@ def discover_claude_sessions(
 def _decode_project_path(encoded: str) -> str:
     """Decode Claude Code's encoded project directory name.
 
-    Claude Code encodes paths by replacing '/' with '-'.
+    Claude Code encodes a path by replacing each '/' with '-' and prepending '-'.
     e.g. '-home-user-proj-myapp' -> '/home/user/proj/myapp'
     """
     if not encoded.startswith("-"):
         return encoded
-
-    parts = encoded.split("-")
-    parts = parts[1:]  # remove leading empty string
-
-    result = ""
-    i = 0
-    while i < len(parts):
-        best_len = 1
-        for j in range(len(parts), i, -1):
-            candidate = result + "/" + "-".join(parts[i:j])
-            if Path(candidate).exists():
-                best_len = j - i
-                break
-        result += "/" + "-".join(parts[i : i + best_len])
-        i += best_len
-
-    return result
+    return encoded.replace("-", "/")
