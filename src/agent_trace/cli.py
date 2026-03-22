@@ -22,6 +22,7 @@ import time
 from . import __version__
 from .hooks import hook_main
 from .http_proxy import HTTPProxyServer
+from .jsonl_import import cmd_import
 from .models import EventType, SessionMeta, TraceEvent
 from .proxy import MCPProxy
 from .replay import format_event, format_summary, list_sessions, replay_session
@@ -432,6 +433,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_setup.add_argument("--redact", action="store_true", help="enable secret redaction")
     p_setup.add_argument("--global", dest="global_config", action="store_true", help="output config for ~/.claude/settings.json (all projects)")
 
+    # import (Claude Code JSONL session logs)
+    p_import = sub.add_parser("import", help="import a Claude Code JSONL session log")
+    p_import.add_argument("path", nargs="?", help="path to .jsonl session file")
+    p_import.add_argument("--discover", action="store_true", help="list available Claude Code sessions")
+    p_import.add_argument("--claude-dir", default="~/.claude", help="Claude config directory (default: ~/.claude)")
+
     return parser
 
 
@@ -460,6 +467,7 @@ def main() -> None:
         "inspect": cmd_inspect,
         "export": cmd_export,
         "stats": cmd_stats,
+        "import": cmd_import,
     }
 
     handler = handlers.get(args.command)
