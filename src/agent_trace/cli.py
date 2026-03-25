@@ -23,8 +23,10 @@ from . import __version__
 from .hooks import hook_main
 from .http_proxy import HTTPProxyServer
 from .cost import cmd_cost
+from .diff import cmd_diff
 from .explain import cmd_explain
 from .jsonl_import import cmd_import
+from .why import cmd_why
 from .models import EventType, SessionMeta, TraceEvent
 from .proxy import MCPProxy
 from .replay import format_event, format_summary, list_sessions, replay_session
@@ -445,6 +447,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_explain = sub.add_parser("explain", help="explain a session in plain English")
     p_explain.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
 
+    # diff
+    p_diff = sub.add_parser("diff", help="compare two sessions structurally")
+    p_diff.add_argument("session_a", help="first session ID or prefix")
+    p_diff.add_argument("session_b", help="second session ID or prefix")
+
+    # why
+    p_why = sub.add_parser("why", help="trace the causal chain for a specific event")
+    p_why.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
+    p_why.add_argument("event_number", type=int, help="1-based event number (from replay output)")
+
     # cost
     p_cost = sub.add_parser("cost", help="estimate token cost for a session")
     p_cost.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
@@ -487,6 +499,8 @@ def main() -> None:
         "import": cmd_import,
         "explain": cmd_explain,
         "cost": cmd_cost,
+        "diff": cmd_diff,
+        "why": cmd_why,
     }
 
     handler = handlers.get(args.command)
