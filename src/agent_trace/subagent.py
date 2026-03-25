@@ -69,6 +69,8 @@ def build_tree(store: TraceStore, root_session_id: str) -> SessionNode:
             children_of.setdefault(m.parent_session_id, []).append(m)
 
     def _build(session_id: str, current_depth: int) -> SessionNode:
+        if session_id not in meta_by_id:
+            raise KeyError(f"Session not found in store: {session_id}")
         meta = meta_by_id[session_id]
         events = store.load_events(session_id)
         node = SessionNode(meta=meta, events=events)
@@ -93,6 +95,8 @@ def aggregate_stats(node: SessionNode) -> AggregatedStats:
         llm_requests=node.meta.llm_requests,
         errors=node.meta.errors,
         total_tokens=node.meta.total_tokens,
+        # Duration is wall-clock: subagents run within parent time, so we take
+        # the max of the root's own duration and each child subtree's duration.
         total_duration_ms=node.meta.total_duration_ms,
     )
     for child in node.children:
@@ -102,9 +106,10 @@ def aggregate_stats(node: SessionNode) -> AggregatedStats:
         stats.llm_requests += child_stats.llm_requests
         stats.errors += child_stats.errors
         stats.total_tokens += child_stats.total_tokens
-        # Duration: use wall-clock max, not sum (subagents run within parent time)
+        # Keep the root's own duration as the floor; a child subtree longer
+        # than the root would indicate clock skew — still take the max.
         stats.total_duration_ms = max(
-            stats.total_duration_ms, child_stats.total_duration_ms
+            node.meta.total_duration_ms, child_stats.total_duration_ms
         )
     return stats
 
