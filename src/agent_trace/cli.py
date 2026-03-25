@@ -25,6 +25,7 @@ from .http_proxy import HTTPProxyServer
 from .cost import cmd_cost
 from .explain import cmd_explain
 from .jsonl_import import cmd_import
+from .subagent import cmd_replay_tree, cmd_stats_tree
 from .models import EventType, SessionMeta, TraceEvent
 from .proxy import MCPProxy
 from .replay import format_event, format_summary, list_sessions, replay_session
@@ -121,6 +122,10 @@ def cmd_record_http(args: argparse.Namespace) -> int:
 
 def cmd_replay(args: argparse.Namespace) -> int:
     """Replay a recorded session."""
+    # Delegate to tree replay when subagent flags are set
+    if getattr(args, "expand_subagents", False) or getattr(args, "tree", False):
+        return cmd_replay_tree(args)
+
     store = TraceStore(args.trace_dir)
 
     session_id = args.session_id
@@ -257,6 +262,9 @@ def cmd_export(args: argparse.Namespace) -> int:
 
 def cmd_stats(args: argparse.Namespace) -> int:
     """Show statistics for a session."""
+    if getattr(args, "include_subagents", False):
+        return cmd_stats_tree(args)
+
     store = TraceStore(args.trace_dir)
 
     session_id = args.session_id
@@ -406,6 +414,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_replay.add_argument("--filter", "-f", help="comma-separated event types to show")
     p_replay.add_argument("--speed", "-s", type=float, default=0, help="replay speed multiplier (0=instant)")
     p_replay.add_argument("--live", "-l", action="store_true", help="replay with timing delays")
+    p_replay.add_argument("--expand-subagents", action="store_true",
+                          help="inline subagent sessions under their parent tool_call")
+    p_replay.add_argument("--tree", action="store_true",
+                          help="show session hierarchy tree without full event replay")
 
     # list
     sub.add_parser("list", help="list all recorded sessions")
@@ -425,6 +437,8 @@ def build_parser() -> argparse.ArgumentParser:
     # stats
     p_stats = sub.add_parser("stats", help="show session statistics")
     p_stats.add_argument("session_id", nargs="?", help="session ID (default: latest)")
+    p_stats.add_argument("--include-subagents", action="store_true",
+                         help="roll up stats across all subagent sessions")
 
     # hook (called by Claude Code hooks system)
     p_hook = sub.add_parser("hook", help="handle a Claude Code hook event (internal)")
