@@ -77,7 +77,11 @@ class Policy:
             return None
         try:
             return cls.from_dict(json.loads(p.read_text()))
-        except (json.JSONDecodeError, OSError):
+        except json.JSONDecodeError as exc:
+            sys.stderr.write(f"Warning: malformed policy file {p}: {exc}\n")
+            return None
+        except OSError as exc:
+            sys.stderr.write(f"Warning: could not read policy file {p}: {exc}\n")
             return None
 
 
@@ -266,13 +270,16 @@ def _audit_event(
                 verdict=verdict, reason=reason,
             ))
 
-    # --- Generic tool call (mcp tools, agent, etc.) ---
+    # --- Generic tool call (MCP tools, Agent, TodoWrite, etc.) ---
+    # No policy rules cover arbitrary tool types; always no_policy regardless
+    # of whether a policy file is loaded. Add explicit tool rules to the policy
+    # file's "commands" section to cover these if needed.
     else:
         entries.append(AuditEntry(
             event=event, event_index=index,
             action=f"Tool: {data.get('tool_name', '?')}",
             verdict="no_policy",
-            reason="no policy for this tool type",
+            reason="no policy rule for this tool type",
         ))
 
     return entries
