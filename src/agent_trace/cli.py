@@ -26,11 +26,11 @@ from .cost import cmd_cost
 from .diff import cmd_diff
 from .explain import cmd_explain
 from .jsonl_import import cmd_import
-from .why import cmd_why
 from .models import EventType, SessionMeta, TraceEvent
 from .proxy import MCPProxy
 from .replay import format_event, format_summary, list_sessions, replay_session
 from .store import TraceStore
+from .why import cmd_why
 
 
 def _print_live_event(event: TraceEvent) -> None:

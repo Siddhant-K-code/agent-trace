@@ -58,7 +58,6 @@ def _event_paths(event: TraceEvent) -> set[str]:
             val = args.get(key, "")
             if val:
                 paths.add(str(val))
-    result = data.get("result", "") or data.get("content_preview", "")
     return paths
 
 
@@ -102,7 +101,6 @@ def build_causal_chain(events: list[TraceEvent], target_index: int) -> CausalCha
 
         # 2. Scan backwards for the most recent causal predecessor
         target_paths = _event_paths(event)
-        target_tool = event.data.get("tool_name", "").lower()
 
         for prev_idx in range(idx - 1, -1, -1):
             prev = events[prev_idx]
