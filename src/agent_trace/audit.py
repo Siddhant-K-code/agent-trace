@@ -142,7 +142,11 @@ def _cmd_matches(cmd: str, patterns: list[str]) -> bool:
         pat_lower = pat.lower().strip()
         if cmd_lower == pat_lower:
             return True
-        if cmd_lower.startswith(pat_lower):
+        # Prefix match only at a word boundary (followed by space or end of string)
+        if cmd_lower.startswith(pat_lower) and (
+            len(cmd_lower) == len(pat_lower)
+            or cmd_lower[len(pat_lower)] == " "
+        ):
             return True
         if fnmatch.fnmatch(cmd_lower, pat_lower):
             return True
@@ -183,7 +187,7 @@ def _audit_event(
 
     # --- File read ---
     if tool_name in ("read", "view"):
-        path = str(args.get("file_path", args.get("path", "")))
+        path = str(args.get("file_path") or args.get("path") or "")
         if path:
             sensitive = _is_sensitive(path)
             if policy and (policy.file_read_allow or policy.file_read_deny):
@@ -203,7 +207,7 @@ def _audit_event(
 
     # --- File write / edit ---
     elif tool_name in ("write", "edit", "create"):
-        path = str(args.get("file_path", args.get("path", "")))
+        path = str(args.get("file_path") or args.get("path") or "")
         if path:
             sensitive = _is_sensitive(path)
             if policy and (policy.file_write_allow or policy.file_write_deny):

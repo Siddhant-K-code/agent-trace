@@ -88,6 +88,14 @@ class TestCmdMatches(unittest.TestCase):
     def test_case_insensitive(self):
         self.assertTrue(_cmd_matches("PYTEST", ["pytest"]))
 
+    def test_prefix_no_false_positive(self):
+        # "curl" pattern must not match "curling" command
+        self.assertFalse(_cmd_matches("curling --help", ["curl"]))
+
+    def test_prefix_with_args_matches(self):
+        # "curl" pattern should match "curl https://example.com"
+        self.assertTrue(_cmd_matches("curl https://example.com", ["curl"]))
+
 
 class TestNoPolicyFile(unittest.TestCase):
     def test_all_entries_no_policy(self):
