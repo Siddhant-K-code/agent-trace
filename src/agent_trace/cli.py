@@ -25,11 +25,11 @@ from .http_proxy import HTTPProxyServer
 from .cost import cmd_cost
 from .explain import cmd_explain
 from .jsonl_import import cmd_import
-from .subagent import cmd_replay_tree, cmd_stats_tree
 from .models import EventType, SessionMeta, TraceEvent
 from .proxy import MCPProxy
 from .replay import format_event, format_summary, list_sessions, replay_session
 from .store import TraceStore
+from .subagent import cmd_replay_tree, cmd_stats_tree
 
 
 def _print_live_event(event: TraceEvent) -> None:

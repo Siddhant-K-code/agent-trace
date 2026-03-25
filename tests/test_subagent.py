@@ -1,6 +1,7 @@
 """Tests for subagent tracing."""
 
 import io
+import json
 import tempfile
 import unittest
 
@@ -53,14 +54,12 @@ class TestSessionMetaSubagentFields(unittest.TestCase):
 
     def test_zero_depth_omitted_from_json(self):
         meta = SessionMeta(session_id="root1")
-        import json
         d = json.loads(meta.to_json())
         # depth=0 should be omitted (zero value)
         self.assertNotIn("depth", d)
 
     def test_nonzero_depth_included_in_json(self):
         meta = SessionMeta(session_id="child1", depth=2)
-        import json
         d = json.loads(meta.to_json())
         self.assertEqual(d["depth"], 2)
 
