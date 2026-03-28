@@ -81,6 +81,11 @@ def build_tree(store: TraceStore, root_session_id: str) -> SessionNode:
                 key=lambda m: m.started_at,
             ):
                 node.children.append(_build(child_meta.session_id, current_depth + 1))
+        elif children_of.get(session_id):
+            sys.stderr.write(
+                f"agent-strace: subagent tree truncated at depth {MAX_DEPTH}"
+                f" for session {session_id[:12]}\n"
+            )
 
         return node
 
@@ -106,10 +111,10 @@ def aggregate_stats(node: SessionNode) -> AggregatedStats:
         stats.llm_requests += child_stats.llm_requests
         stats.errors += child_stats.errors
         stats.total_tokens += child_stats.total_tokens
-        # Keep the root's own duration as the floor; a child subtree longer
-        # than the root would indicate clock skew — still take the max.
+        # Duration is wall-clock: subagents run within parent time, so take
+        # the running max across all children (not the root's fixed value).
         stats.total_duration_ms = max(
-            node.meta.total_duration_ms, child_stats.total_duration_ms
+            stats.total_duration_ms, child_stats.total_duration_ms
         )
     return stats
 
@@ -127,10 +132,11 @@ def _fmt_offset(base_ts: float, ts: float) -> str:
     return f"+{m}m{s:04.1f}s"
 
 
-def _indent(depth: int) -> str:
+def _indent(depth: int, last_child: bool = False) -> str:
     if depth == 0:
         return ""
-    return "│  " * (depth - 1) + "├─ "
+    connector = "└─ " if last_child else "├─ "
+    return "│  " * (depth - 1) + connector
 
 
 def format_tree(
@@ -138,6 +144,7 @@ def format_tree(
     base_ts: float | None = None,
     out: TextIO = sys.stdout,
     expand: bool = True,
+    last_child: bool = False,
 ) -> None:
     """Render the session tree to *out*.
 
@@ -149,11 +156,13 @@ def format_tree(
         Timestamp origin for relative offsets. Defaults to root session start.
     expand : bool
         If True, inline subagent events under their parent tool_call.
+    last_child : bool
+        Whether this node is the last child of its parent (affects tree chars).
     """
     if base_ts is None:
         base_ts = node.meta.started_at
 
-    indent = _indent(node.depth)
+    indent = _indent(node.depth, last_child=last_child)
     w = out.write
 
     # Session header
@@ -194,7 +203,9 @@ def format_tree(
             # Inline expand subagent if this tool_call spawned one
             if expand and event.event_id in children_by_event:
                 child = children_by_event[event.event_id]
-                format_tree(child, base_ts=base_ts, out=out, expand=expand)
+                is_last = child == node.children[-1] if node.children else True
+                format_tree(child, base_ts=base_ts, out=out, expand=expand,
+                            last_child=is_last)
 
         elif event.event_type == EventType.TOOL_RESULT:
             preview = (event.data.get("result", "") or
@@ -221,20 +232,24 @@ def format_tree(
     w("\n")
 
 
-def format_tree_summary(node: SessionNode, out: TextIO = sys.stdout) -> None:
+def format_tree_summary(
+    node: SessionNode,
+    out: TextIO = sys.stdout,
+    last_child: bool = False,
+) -> None:
     """Print a compact tree structure showing session hierarchy."""
     w = out.write
-    indent = "  " * node.depth
+    indent = _indent(node.depth, last_child=last_child)
 
     duration = node.meta.total_duration_ms / 1000 if node.meta.total_duration_ms else 0
-    w(f"{indent}{'└─' if node.depth > 0 else '  '} {node.meta.session_id[:12]}"
+    w(f"{indent}{node.meta.session_id[:12]}"
       f"  {duration:.1f}s"
       f"  {node.meta.tool_calls} tools"
       f"  {node.meta.total_tokens:,} tokens"
       f"{'  ✗ ' + str(node.meta.errors) + ' errors' if node.meta.errors else ''}\n")
 
-    for child in node.children:
-        format_tree_summary(child, out=out)
+    for i, child in enumerate(node.children):
+        format_tree_summary(child, out=out, last_child=(i == len(node.children) - 1))
 
 
 # ---------------------------------------------------------------------------
