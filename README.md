@@ -55,6 +55,7 @@ Then use Claude Code normally.
 ```bash
 agent-strace list     # list sessions
 agent-strace replay   # replay the latest
+agent-strace explain  # plain-English summary of what the agent did
 agent-strace stats    # tool call frequency and timing
 ```
 
@@ -109,12 +110,12 @@ agent-strace replay [session-id]                Replay a session (default: lates
 agent-strace replay --expand-subagents          Inline subagent sessions under parent tool_call
 agent-strace replay --tree                      Show session hierarchy without full replay
 agent-strace list                               List all sessions
+agent-strace explain [session-id]               Explain a session in plain English
 agent-strace stats [session-id]                 Show tool call frequency and timing
 agent-strace stats --include-subagents          Roll up stats across the full subagent tree
 agent-strace inspect <session-id>               Dump full session as JSON
 agent-strace export <session-id>                Export as JSON, CSV, NDJSON, or OTLP
 agent-strace import <session.jsonl>             Import a Claude Code JSONL session log
-agent-strace explain [session-id]               Explain a session in plain English
 agent-strace cost [session-id]                  Estimate token cost for a session
 agent-strace diff <session-a> <session-b>       Compare two sessions structurally
 agent-strace why [session-id] <event-number>    Trace the causal chain for an event
@@ -424,7 +425,7 @@ Subagent sessions are linked via `parent_session_id` and `parent_event_id` in se
 
 ### Session diff
 
-Compare two sessions structurally. Phases are aligned by label using LCS, then per-phase differences in files touched, commands run, and outcomes are reported:
+Compare two sessions structurally. Useful for understanding why the same prompt produces different results across runs, or comparing a broken session against a known-good one. Phases are aligned by label using LCS, then per-phase differences in files touched, commands run, and outcomes are reported:
 
 ```bash
 agent-strace diff abc123 def456
@@ -445,7 +446,7 @@ Diverged at phase 2:
 
 ### Causal chain (why)
 
-Trace backwards from any event to find what caused it. Event numbers match the output of `agent-strace replay`:
+Trace backwards from any event to find what caused it. Run `agent-strace replay <session-id>` first — the `#N` numbers in the left column are the event numbers:
 
 ```bash
 agent-strace why abc123 4
@@ -474,6 +475,9 @@ Check every tool call in a session against a policy file. Auto-flags sensitive f
 ```bash
 agent-strace audit                          # latest session, no policy required
 agent-strace audit abc123 --policy .agent-scope.json
+
+# In CI: fail the build if the agent accessed anything outside policy
+agent-strace audit --policy .agent-scope.json || exit 1
 ```
 
 ```
