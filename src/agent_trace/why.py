@@ -105,18 +105,22 @@ def build_causal_chain(events: list[TraceEvent], target_index: int) -> CausalCha
         for prev_idx in range(idx - 1, -1, -1):
             prev = events[prev_idx]
 
-            # Error → immediately following tool_call is a retry.
-            # Only fire when the error is the closest preceding substantive
-            # event (skip over tool_result events which may sit between them).
+            # Error → retry: only fire when the target tool_call repeats the
+            # same tool name as the tool_call that immediately preceded the
+            # error. This avoids attributing unrelated commands (e.g. git
+            # status after a failed pytest) as retries.
             if (prev.event_type == EventType.ERROR
                     and event.event_type == EventType.TOOL_CALL):
-                # Check nothing substantive sits between the error and this call
-                intervening = events[prev_idx + 1:idx]
-                non_result = [e for e in intervening
-                              if e.event_type != EventType.TOOL_RESULT]
-                if not non_result:
-                    _walk(prev_idx, f"retry after error at #{prev_idx + 1}")
-                    return
+                # Find the tool_call that caused the error (the one just before it)
+                causing_idx = prev_idx - 1
+                while causing_idx >= 0 and events[causing_idx].event_type == EventType.TOOL_RESULT:
+                    causing_idx -= 1
+                if causing_idx >= 0 and events[causing_idx].event_type == EventType.TOOL_CALL:
+                    causing_tool = events[causing_idx].data.get("tool_name", "")
+                    target_tool = event.data.get("tool_name", "")
+                    if causing_tool and causing_tool == target_tool:
+                        _walk(prev_idx, f"retry after error at #{prev_idx + 1}")
+                        return
 
             # tool_result containing a path that this tool_call references
             if (prev.event_type == EventType.TOOL_RESULT and target_paths):
