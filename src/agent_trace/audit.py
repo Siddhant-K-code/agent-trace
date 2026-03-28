@@ -130,16 +130,54 @@ class AuditReport:
 # ---------------------------------------------------------------------------
 
 def _glob_match(path: str, patterns: list[str]) -> bool:
-    # PurePath.match() supports ** as a recursive wildcard (unlike fnmatch).
-    # Fall back to fnmatch on the bare filename for simple patterns like ".env".
-    p = Path(path)
-    name = p.name
+    """Match *path* against any of *patterns*.
+
+    Supports ``**`` as a recursive wildcard (matches zero or more path
+    components) in addition to the standard fnmatch ``*`` and ``?``.
+    Also matches against the bare filename so ``.env`` catches
+    ``config/.env``.
+    """
+    name = Path(path).name
+    norm_path = path.replace("\\", "/")
     for pat in patterns:
-        if p.match(pat):
+        norm_pat = pat.replace("\\", "/")
+        if fnmatch.fnmatch(norm_path, norm_pat):
             return True
-        # Also match against the bare filename so ".env" catches "config/.env"
-        if fnmatch.fnmatch(name, pat):
+        if fnmatch.fnmatch(name, norm_pat):
             return True
+        if "**" in norm_pat and _glob_match_recursive(norm_path, norm_pat):
+            return True
+    return False
+
+
+def _glob_match_recursive(path: str, pattern: str) -> bool:
+    """Match path against a pattern that may contain ``**`` wildcards.
+
+    ``**`` matches zero or more path components (including none).
+    """
+    path_parts = path.split("/")
+    pat_parts = pattern.split("/")
+    return _match_parts(path_parts, pat_parts)
+
+
+def _match_parts(path_parts: list[str], pat_parts: list[str]) -> bool:
+    """Recursively match path_parts against pat_parts."""
+    if not pat_parts:
+        return not path_parts
+    if not path_parts:
+        # Only match if remaining pattern is all **
+        return all(p == "**" for p in pat_parts)
+
+    if pat_parts[0] == "**":
+        # ** can match zero components (skip it) or one+ components (consume one path part)
+        return (
+            _match_parts(path_parts, pat_parts[1:])          # match zero
+            or _match_parts(path_parts[1:], pat_parts)        # match one, keep **
+        )
+
+    if fnmatch.fnmatch(path_parts[0], pat_parts[0]):
+        return _match_parts(path_parts[1:], pat_parts[1:])
+
     return False
 
 

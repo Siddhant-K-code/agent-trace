@@ -51,6 +51,9 @@ class TestGlobMatch(unittest.TestCase):
     def test_glob_pattern_nested(self):
         self.assertTrue(_glob_match("src/utils/path.py", ["src/**"]))
 
+    def test_glob_pattern_deeply_nested(self):
+        self.assertTrue(_glob_match("src/a/b/c/deep.py", ["src/**"]))
+
     def test_no_match(self):
         self.assertFalse(_glob_match("README.md", ["src/**", "tests/**"]))
 
