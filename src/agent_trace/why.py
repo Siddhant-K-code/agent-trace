@@ -105,11 +105,18 @@ def build_causal_chain(events: list[TraceEvent], target_index: int) -> CausalCha
         for prev_idx in range(idx - 1, -1, -1):
             prev = events[prev_idx]
 
-            # Error → next tool_call is a retry
+            # Error → immediately following tool_call is a retry.
+            # Only fire when the error is the closest preceding substantive
+            # event (skip over tool_result events which may sit between them).
             if (prev.event_type == EventType.ERROR
                     and event.event_type == EventType.TOOL_CALL):
-                _walk(prev_idx, f"retry after error at #{prev_idx + 1}")
-                return
+                # Check nothing substantive sits between the error and this call
+                intervening = events[prev_idx + 1:idx]
+                non_result = [e for e in intervening
+                              if e.event_type != EventType.TOOL_RESULT]
+                if not non_result:
+                    _walk(prev_idx, f"retry after error at #{prev_idx + 1}")
+                    return
 
             # tool_result containing a path that this tool_call references
             if (prev.event_type == EventType.TOOL_RESULT and target_paths):
@@ -118,13 +125,23 @@ def build_causal_chain(events: list[TraceEvent], target_index: int) -> CausalCha
                     _walk(prev_idx, f"result at #{prev_idx + 1} referenced path")
                     return
 
-            # file_read → file_write of same file
+            # file_read → file_write of same file: only match actual write ops
             if (prev.event_type in (EventType.TOOL_CALL, EventType.FILE_READ)
-                    and event.event_type in (EventType.TOOL_CALL, EventType.FILE_WRITE)):
+                    and event.event_type == EventType.FILE_WRITE):
                 prev_paths = _event_paths(prev)
                 if target_paths & prev_paths:
                     _walk(prev_idx, f"read at #{prev_idx + 1} informed write")
                     return
+
+            # Write tool calls (Write/Edit) via tool_call event type
+            if (prev.event_type in (EventType.TOOL_CALL, EventType.FILE_READ)
+                    and event.event_type == EventType.TOOL_CALL):
+                tool = event.data.get("tool_name", "").lower()
+                if tool in ("write", "edit", "create"):
+                    prev_paths = _event_paths(prev)
+                    if target_paths & prev_paths:
+                        _walk(prev_idx, f"read at #{prev_idx + 1} informed write")
+                        return
 
             # user_prompt is always a root cause
             if prev.event_type == EventType.USER_PROMPT:

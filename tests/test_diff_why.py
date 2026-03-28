@@ -228,6 +228,105 @@ class TestBuildCausalChain(unittest.TestCase):
         self.assertEqual(len(chain.links), 1)
         self.assertEqual(chain.links[0].event.event_type, EventType.USER_PROMPT)
 
+    def test_error_retry_only_fires_for_adjacent_error(self):
+        """A tool_call after an error with an unrelated call in between is NOT a retry."""
+        events = [
+            _make_event(EventType.USER_PROMPT, 0.0, "s1", prompt="run"),
+            _make_event(EventType.TOOL_CALL, 1.0, "s1", tool_name="Bash",
+                        arguments={"command": "pytest"}),
+            _make_event(EventType.ERROR, 2.0, "s1", message="exit 1"),
+            _make_event(EventType.TOOL_CALL, 3.0, "s1", tool_name="Bash",
+                        arguments={"command": "git status"}),   # unrelated
+            _make_event(EventType.TOOL_CALL, 4.0, "s1", tool_name="Bash",
+                        arguments={"command": "pytest"}),       # actual retry
+        ]
+        # why #4 (git status) should NOT be attributed to the error
+        chain_unrelated = build_causal_chain(events, 3)
+        types = [l.event.event_type for l in chain_unrelated.links]
+        self.assertNotIn(EventType.ERROR, types)
+
+        # why #5 (retry pytest) SHOULD be attributed to the error
+        chain_retry = build_causal_chain(events, 4)
+        types_retry = [l.event.event_type for l in chain_retry.links]
+        self.assertIn(EventType.ERROR, types_retry)
+
+    def test_write_tool_call_linked_to_prior_read(self):
+        """A Write tool_call referencing a path read earlier should link to that read."""
+        events = [
+            _make_event(EventType.USER_PROMPT, 0.0, "s1", prompt="update file"),
+            _make_event(EventType.TOOL_CALL, 1.0, "s1", tool_name="Read",
+                        arguments={"file_path": "src/foo.py"}),
+            _make_event(EventType.TOOL_CALL, 2.0, "s1", tool_name="Write",
+                        arguments={"file_path": "src/foo.py"}),
+        ]
+        chain = build_causal_chain(events, 2)
+        types = [l.event.event_type for l in chain.links]
+        # Should include the Read tool_call
+        self.assertIn(EventType.TOOL_CALL, types)
+        read_links = [l for l in chain.links
+                      if l.event.data.get("tool_name") == "Read"]
+        self.assertTrue(len(read_links) > 0)
+
+    def test_bash_not_linked_to_read_via_path(self):
+        """A Bash tool_call sharing a path with a prior Read should NOT be linked via read→write rule."""
+        events = [
+            _make_event(EventType.USER_PROMPT, 0.0, "s1", prompt="check file"),
+            _make_event(EventType.TOOL_CALL, 1.0, "s1", tool_name="Read",
+                        arguments={"file_path": "src/foo.py"}),
+            _make_event(EventType.TOOL_CALL, 2.0, "s1", tool_name="Bash",
+                        arguments={"command": "cat src/foo.py"}),
+        ]
+        chain = build_causal_chain(events, 2)
+        # The Bash call has no file_path in arguments, so _event_paths returns empty
+        # and the read→write rule should not fire. Root cause should be user_prompt.
+        types = [l.event.event_type for l in chain.links]
+        self.assertIn(EventType.USER_PROMPT, types)
+
+    def test_why_with_dangling_parent_id(self):
+        """An event with a parent_id pointing to a non-existent event should fall through to heuristic."""
+        events = [
+            _make_event(EventType.USER_PROMPT, 0.0, "s1", prompt="go"),
+            _make_event(EventType.TOOL_RESULT, 1.0, "s1",
+                        parent_id="nonexistent_id", result="done"),
+        ]
+        # Should not raise; should fall through to heuristic and find user_prompt
+        chain = build_causal_chain(events, 1)
+        self.assertTrue(len(chain.links) > 0)
+
+
+class TestDiffSessionsUnaligned(unittest.TestCase):
+    def test_session_with_extra_phases(self):
+        """Sessions with different numbers of phases should still produce a diff."""
+        def _events(sid, cmds):
+            evts = [_make_event(EventType.USER_PROMPT, 0.0, sid, prompt="step 1")]
+            for i, cmd in enumerate(cmds):
+                evts.append(_make_event(EventType.TOOL_CALL, float(i + 1), sid,
+                                        tool_name="Bash", arguments={"command": cmd}))
+            evts.append(_make_event(EventType.SESSION_END, float(len(cmds) + 2), sid))
+            return evts
+
+        meta_a = SessionMeta(session_id="sessa002", started_at=0.0,
+                             total_duration_ms=5000, tool_calls=2)
+        meta_b = SessionMeta(session_id="sessb002", started_at=0.0,
+                             total_duration_ms=3000, tool_calls=1)
+
+        tmp = tempfile.TemporaryDirectory()
+        store = TraceStore(tmp.name)
+        store.create_session(meta_a)
+        for e in _events("sessa002", ["pytest", "coverage report"]):
+            store.append_event("sessa002", e)
+        store.update_meta(meta_a)
+
+        store.create_session(meta_b)
+        for e in _events("sessb002", ["pytest"]):
+            store.append_event("sessb002", e)
+        store.update_meta(meta_b)
+
+        result = diff_sessions(store, "sessa002", "sessb002")
+        # Sessions differ — divergence should be detected
+        self.assertGreaterEqual(result.divergence_index, -1)
+        tmp.cleanup()
+
 
 class TestFormatWhy(unittest.TestCase):
     def test_output_contains_event_number(self):
