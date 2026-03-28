@@ -45,8 +45,11 @@ class TestGlobMatch(unittest.TestCase):
     def test_exact_match(self):
         self.assertTrue(_glob_match(".env", [".env"]))
 
-    def test_glob_pattern(self):
+    def test_glob_pattern_single_level(self):
         self.assertTrue(_glob_match("src/auth.py", ["src/**"]))
+
+    def test_glob_pattern_nested(self):
+        self.assertTrue(_glob_match("src/utils/path.py", ["src/**"]))
 
     def test_no_match(self):
         self.assertFalse(_glob_match("README.md", ["src/**", "tests/**"]))
@@ -73,6 +76,16 @@ class TestIsSensitive(unittest.TestCase):
 
     def test_readme(self):
         self.assertFalse(_is_sensitive("README.md"))
+
+    def test_secret_manager_not_sensitive(self):
+        # *secret* was removed — source files with "secret" in name are not flagged
+        self.assertFalse(_is_sensitive("src/secret_manager.py"))
+
+    def test_secrets_json_is_sensitive(self):
+        self.assertTrue(_is_sensitive("secrets.json"))
+
+    def test_secrets_yaml_is_sensitive(self):
+        self.assertTrue(_is_sensitive("secrets.yaml"))
 
 
 class TestCmdMatches(unittest.TestCase):
@@ -230,6 +243,104 @@ class TestNetworkAccessCheck(unittest.TestCase):
         net_entries = [e for e in report.entries if "Network access" in e.action]
         self.assertTrue(len(net_entries) > 0)
         self.assertEqual(net_entries[0].verdict, "allowed")
+        tmp2.cleanup()
+
+
+class TestGrepGlobPolicy(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.policy_path = _write_policy({
+            "files": {
+                "read": {"allow": ["src/**"], "deny": [".env"]}
+            }
+        }, self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_grep_denied_path(self):
+        events = [_make_event(EventType.TOOL_CALL, 1.0, "sess1",
+                              tool_name="Grep", arguments={"pattern": ".env"})]
+        store, tmp2 = _make_store(events)
+        report = audit_session(store, "sess1", policy_path=self.policy_path)
+        self.assertEqual(report.entries[0].verdict, "denied")
+        tmp2.cleanup()
+
+    def test_glob_allowed_path(self):
+        events = [_make_event(EventType.TOOL_CALL, 1.0, "sess1",
+                              tool_name="Glob", arguments={"pattern": "src/**"})]
+        store, tmp2 = _make_store(events)
+        report = audit_session(store, "sess1", policy_path=self.policy_path)
+        self.assertEqual(report.entries[0].verdict, "allowed")
+        tmp2.cleanup()
+
+    def test_grep_sensitive_flagged(self):
+        events = [_make_event(EventType.TOOL_CALL, 1.0, "sess1",
+                              tool_name="Grep", arguments={"pattern": ".env"})]
+        store, tmp2 = _make_store(events)
+        report = audit_session(store, "sess1", policy_path="/nonexistent")
+        self.assertTrue(report.entries[0].sensitive)
+        tmp2.cleanup()
+
+
+class TestNetworkCommandDoubleEntry(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.policy_path = _write_policy({
+            "commands": {"deny": ["curl"]},
+            "network": {"deny_all": True, "allow": ["localhost"]},
+        }, self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_curl_with_denied_url_produces_one_entry(self):
+        """curl to a denied URL should produce one network violation, not two."""
+        events = [_make_event(EventType.TOOL_CALL, 1.0, "sess1",
+                              tool_name="Bash",
+                              arguments={"command": "curl https://evil.com/data"})]
+        store, tmp2 = _make_store(events)
+        report = audit_session(store, "sess1", policy_path=self.policy_path)
+        denied = report.denied
+        # Only the network entry — no duplicate command entry
+        self.assertEqual(len(denied), 1)
+        self.assertIn("Network access", denied[0].action)
+        tmp2.cleanup()
+
+    def test_curl_to_allowed_host_still_checks_command_policy(self):
+        """curl to an allowed host should still be checked against command policy."""
+        events = [_make_event(EventType.TOOL_CALL, 1.0, "sess1",
+                              tool_name="Bash",
+                              arguments={"command": "curl http://localhost/health"})]
+        store, tmp2 = _make_store(events)
+        report = audit_session(store, "sess1", policy_path=self.policy_path)
+        # Network: allowed. Command: denied by commands.deny
+        cmd_entries = [e for e in report.entries if e.action.startswith("Ran:")]
+        self.assertTrue(len(cmd_entries) > 0)
+        self.assertEqual(cmd_entries[0].verdict, "denied")
+        tmp2.cleanup()
+
+
+class TestMalformedPolicy(unittest.TestCase):
+    def test_malformed_json_returns_none(self):
+        tmp = tempfile.TemporaryDirectory()
+        path = str(Path(tmp.name) / ".agent-scope.json")
+        Path(path).write_text("{not valid json")
+        policy = Policy.load(path)
+        self.assertIsNone(policy)
+        tmp.cleanup()
+
+    def test_malformed_policy_audit_continues_as_no_policy(self):
+        tmp = tempfile.TemporaryDirectory()
+        path = str(Path(tmp.name) / ".agent-scope.json")
+        Path(path).write_text("{not valid json")
+        events = [_make_event(EventType.TOOL_CALL, 1.0, "sess1",
+                              tool_name="Read", arguments={"file_path": "src/auth.py"})]
+        store, tmp2 = _make_store(events)
+        report = audit_session(store, "sess1", policy_path=path)
+        self.assertFalse(report.policy_loaded)
+        self.assertEqual(report.entries[0].verdict, "no_policy")
+        tmp.cleanup()
         tmp2.cleanup()
 
 

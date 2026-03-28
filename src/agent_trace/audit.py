@@ -25,7 +25,8 @@ from .store import TraceStore
 
 SENSITIVE_PATTERNS: list[str] = [
     ".env", ".env.*", "*.env",
-    "config/secrets*", "secrets.*", "*secret*",
+    "secrets.json", "secrets.yaml", "secrets.yml", "secrets.toml",
+    "config/secrets*",
     "*.pem", "*.key", "*.p12", "*.pfx",
     ".ssh/*", "id_rsa", "id_ed25519",
     ".aws/credentials", ".aws/config",
@@ -129,9 +130,15 @@ class AuditReport:
 # ---------------------------------------------------------------------------
 
 def _glob_match(path: str, patterns: list[str]) -> bool:
-    name = Path(path).name
+    # PurePath.match() supports ** as a recursive wildcard (unlike fnmatch).
+    # Fall back to fnmatch on the bare filename for simple patterns like ".env".
+    p = Path(path)
+    name = p.name
     for pat in patterns:
-        if fnmatch.fnmatch(path, pat) or fnmatch.fnmatch(name, pat):
+        if p.match(pat):
+            return True
+        # Also match against the bare filename so ".env" catches "config/.env"
+        if fnmatch.fnmatch(name, pat):
             return True
     return False
 
@@ -189,9 +196,15 @@ def _audit_event(
     tool_name = data.get("tool_name", "").lower()
     args = data.get("arguments", {}) or {}
 
-    # --- File read ---
-    if tool_name in ("read", "view"):
-        path = str(args.get("file_path") or args.get("path") or "")
+    # --- File read (Read, View, Grep, Glob) ---
+    if tool_name in ("read", "view", "grep", "glob"):
+        # Grep uses "path" or "pattern"; Glob uses "pattern" or "path"
+        path = str(
+            args.get("file_path")
+            or args.get("path")
+            or args.get("pattern")
+            or ""
+        )
         if path:
             sensitive = _is_sensitive(path)
             if policy and (policy.file_read_allow or policy.file_read_deny):
@@ -203,9 +216,10 @@ def _audit_event(
                     verdict, reason = "allowed", "matches files.read.allow"
             else:
                 verdict, reason = "no_policy", "no file read policy"
+            action_verb = "Glob" if tool_name == "glob" else ("Grep" if tool_name == "grep" else "Read")
             entries.append(AuditEntry(
                 event=event, event_index=index,
-                action=f"Read {path}",
+                action=f"{action_verb} {path}",
                 verdict=verdict, reason=reason, sensitive=sensitive,
             ))
 
@@ -235,6 +249,7 @@ def _audit_event(
         if cmd:
             # Network access check: scan command for URLs
             urls = _extract_urls(cmd)
+            network_denied = False
             for url_host in urls:
                 if policy:
                     net_ok = _url_allowed(url_host, policy)
@@ -244,6 +259,8 @@ def _audit_event(
                         if net_ok
                         else "denied by network.deny_all"
                     )
+                    if not net_ok:
+                        network_denied = True
                 else:
                     net_verdict = "no_policy"
                     net_reason = "no network policy"
@@ -253,8 +270,11 @@ def _audit_event(
                     verdict=net_verdict, reason=net_reason,
                 ))
 
-            # Command policy check
-            if policy and (policy.cmd_allow or policy.cmd_deny):
+            # Command policy check — skip if a network violation already covers
+            # this event to avoid double-counting the same command.
+            if network_denied:
+                pass
+            elif policy and (policy.cmd_allow or policy.cmd_deny):
                 if _cmd_matches(cmd, policy.cmd_deny):
                     verdict, reason = "denied", "denied by commands.deny"
                 elif policy.cmd_allow and not _cmd_matches(cmd, policy.cmd_allow):
@@ -264,11 +284,12 @@ def _audit_event(
             else:
                 verdict, reason = "no_policy", "no command policy"
 
-            entries.append(AuditEntry(
-                event=event, event_index=index,
-                action=f"Ran: {cmd[:80]}{'...' if len(cmd) > 80 else ''}",
-                verdict=verdict, reason=reason,
-            ))
+            if not network_denied:
+                entries.append(AuditEntry(
+                    event=event, event_index=index,
+                    action=f"Ran: {cmd[:80]}{'...' if len(cmd) > 80 else ''}",
+                    verdict=verdict, reason=reason,
+                ))
 
     # --- Generic tool call (MCP tools, Agent, TodoWrite, etc.) ---
     # No policy rules cover arbitrary tool types; always no_policy regardless
