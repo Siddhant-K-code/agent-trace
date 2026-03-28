@@ -32,6 +32,8 @@ from .models import EventType, SessionMeta, TraceEvent
 from .proxy import MCPProxy
 from .replay import format_event, format_summary, list_sessions, replay_session
 from .store import TraceStore
+from .subagent import cmd_replay_tree, cmd_stats_tree
+from .why import cmd_why
 
 
 def _print_live_event(event: TraceEvent) -> None:
@@ -124,6 +126,10 @@ def cmd_record_http(args: argparse.Namespace) -> int:
 
 def cmd_replay(args: argparse.Namespace) -> int:
     """Replay a recorded session."""
+    # Delegate to tree replay when subagent flags are set
+    if getattr(args, "expand_subagents", False) or getattr(args, "tree", False):
+        return cmd_replay_tree(args)
+
     store = TraceStore(args.trace_dir)
 
     session_id = args.session_id
@@ -260,6 +266,9 @@ def cmd_export(args: argparse.Namespace) -> int:
 
 def cmd_stats(args: argparse.Namespace) -> int:
     """Show statistics for a session."""
+    if getattr(args, "include_subagents", False):
+        return cmd_stats_tree(args)
+
     store = TraceStore(args.trace_dir)
 
     session_id = args.session_id
@@ -409,6 +418,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_replay.add_argument("--filter", "-f", help="comma-separated event types to show")
     p_replay.add_argument("--speed", "-s", type=float, default=0, help="replay speed multiplier (0=instant)")
     p_replay.add_argument("--live", "-l", action="store_true", help="replay with timing delays")
+    p_replay.add_argument("--expand-subagents", action="store_true",
+                          help="inline subagent sessions under their parent tool_call")
+    p_replay.add_argument("--tree", action="store_true",
+                          help="show session hierarchy tree without full event replay")
 
     # list
     sub.add_parser("list", help="list all recorded sessions")
@@ -428,6 +441,8 @@ def build_parser() -> argparse.ArgumentParser:
     # stats
     p_stats = sub.add_parser("stats", help="show session statistics")
     p_stats.add_argument("session_id", nargs="?", help="session ID (default: latest)")
+    p_stats.add_argument("--include-subagents", action="store_true",
+                         help="roll up stats across all subagent sessions")
 
     # hook (called by Claude Code hooks system)
     p_hook = sub.add_parser("hook", help="handle a Claude Code hook event (internal)")
@@ -447,6 +462,16 @@ def build_parser() -> argparse.ArgumentParser:
     # explain
     p_explain = sub.add_parser("explain", help="explain a session in plain English")
     p_explain.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
+
+    # diff
+    p_diff = sub.add_parser("diff", help="compare two sessions structurally")
+    p_diff.add_argument("session_a", help="first session ID or prefix")
+    p_diff.add_argument("session_b", help="second session ID or prefix")
+
+    # why
+    p_why = sub.add_parser("why", help="trace the causal chain for a specific event")
+    p_why.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
+    p_why.add_argument("event_number", type=int, help="1-based event number (from replay output)")
 
     # cost
     p_cost = sub.add_parser("cost", help="estimate token cost for a session")
@@ -496,6 +521,8 @@ def main() -> None:
         "import": cmd_import,
         "explain": cmd_explain,
         "cost": cmd_cost,
+        "diff": cmd_diff,
+        "why": cmd_why,
         "audit": cmd_audit,
     }
 
