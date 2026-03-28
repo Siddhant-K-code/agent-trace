@@ -106,19 +106,28 @@ def build_causal_chain(events: list[TraceEvent], target_index: int) -> CausalCha
             prev = events[prev_idx]
 
             # Error → retry: only fire when the target tool_call repeats the
-            # same tool name as the tool_call that immediately preceded the
-            # error. This avoids attributing unrelated commands (e.g. git
-            # status after a failed pytest) as retries.
+            # same tool name AND command as the call that caused the error.
+            # This avoids attributing unrelated commands (e.g. git status
+            # after a failed pytest) as retries.
             if (prev.event_type == EventType.ERROR
                     and event.event_type == EventType.TOOL_CALL):
-                # Find the tool_call that caused the error (the one just before it)
+                # Find the tool_call that caused the error (skip tool_results)
                 causing_idx = prev_idx - 1
                 while causing_idx >= 0 and events[causing_idx].event_type == EventType.TOOL_RESULT:
                     causing_idx -= 1
                 if causing_idx >= 0 and events[causing_idx].event_type == EventType.TOOL_CALL:
-                    causing_tool = events[causing_idx].data.get("tool_name", "")
-                    target_tool = event.data.get("tool_name", "")
-                    if causing_tool and causing_tool == target_tool:
+                    causing = events[causing_idx].data
+                    target = event.data
+                    same_tool = causing.get("tool_name", "") == target.get("tool_name", "")
+                    # For Bash, also require the same command string
+                    causing_args = causing.get("arguments", {}) or {}
+                    target_args = target.get("arguments", {}) or {}
+                    if same_tool and causing.get("tool_name", "").lower() == "bash":
+                        same_cmd = causing_args.get("command", "") == target_args.get("command", "")
+                        if same_cmd:
+                            _walk(prev_idx, f"retry after error at #{prev_idx + 1}")
+                            return
+                    elif same_tool:
                         _walk(prev_idx, f"retry after error at #{prev_idx + 1}")
                         return
 
