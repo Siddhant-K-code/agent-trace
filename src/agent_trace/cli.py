@@ -25,8 +25,12 @@ from .http_proxy import HTTPProxyServer
 from .audit import cmd_audit
 from .cost import cmd_cost
 from .diff import cmd_diff
+from .eval import cmd_eval
 from .explain import cmd_explain
 from .jsonl_import import cmd_import
+from .postmortem import cmd_postmortem
+from .share import cmd_share
+from .watch import cmd_watch
 from .why import cmd_why
 from .models import EventType, SessionMeta, TraceEvent
 from .proxy import MCPProxy
@@ -490,6 +494,65 @@ def build_parser() -> argparse.ArgumentParser:
     p_audit.add_argument("--policy", default=".agent-scope.json",
                          help="path to policy file (default: .agent-scope.json)")
 
+    # share
+    p_share = sub.add_parser("share", help="generate a self-contained HTML replay of a session")
+    p_share.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
+    p_share.add_argument("--output", "-o", help="output file path (default: session-<id>.html)")
+    p_share.add_argument("--stdout", action="store_true", help="write HTML to stdout instead of a file")
+    p_share.add_argument("--open", action="store_true", help="open the HTML file in the browser after creation")
+    p_share.add_argument("--postmortem", action="store_true", help="include postmortem analysis in the HTML")
+
+    # postmortem
+    p_postmortem = sub.add_parser("postmortem", help="generate a structured postmortem for a failed session")
+    p_postmortem.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
+    p_postmortem.add_argument("--agents-md", default="AGENTS.md",
+                              help="path to AGENTS.md for violation detection (default: AGENTS.md)")
+
+    # eval
+    p_eval = sub.add_parser("eval", help="score, compare, and regression-test agent sessions")
+    eval_sub = p_eval.add_subparsers(dest="eval_command")
+
+    p_eval_run = eval_sub.add_parser("run", help="score a session against configured scorers")
+    p_eval_run.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
+    p_eval_run.add_argument("--dataset", help="path to dataset JSONL file")
+    p_eval_run.add_argument("--format", choices=["table", "json"], default="table")
+    p_eval_run.add_argument("--config", default=".agent-evals.yaml",
+                            help="eval config file (default: .agent-evals.yaml)")
+
+    p_eval_compare = eval_sub.add_parser("compare", help="compare two sessions across all scorers")
+    p_eval_compare.add_argument("session_a", help="first session ID or prefix")
+    p_eval_compare.add_argument("session_b", help="second session ID or prefix")
+    p_eval_compare.add_argument("--config", default=".agent-evals.yaml")
+
+    p_eval_ci = eval_sub.add_parser("ci", help="run evals and exit 1 if any scorer fails")
+    p_eval_ci.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
+    p_eval_ci.add_argument("--dataset", help="path to dataset JSONL file")
+    p_eval_ci.add_argument("--config", default=".agent-evals.yaml")
+
+    p_eval_dataset = eval_sub.add_parser("dataset", help="manage eval datasets")
+    dataset_sub = p_eval_dataset.add_subparsers(dest="dataset_command")
+    p_ds_add = dataset_sub.add_parser("add", help="add a session to the dataset")
+    p_ds_add.add_argument("--session", required=True, help="session ID to add")
+    p_ds_add.add_argument("--label", default="", help="human-readable label")
+    p_ds_add.add_argument("--dataset", default=".agent-traces/datasets/default.jsonl")
+    dataset_sub.add_parser("list", help="list dataset entries").add_argument(
+        "--dataset", default=".agent-traces/datasets/default.jsonl"
+    )
+    p_ds_export = dataset_sub.add_parser("export", help="export dataset to JSONL")
+    p_ds_export.add_argument("--dataset", default=".agent-traces/datasets/default.jsonl")
+
+    # watch
+    p_watch = sub.add_parser("watch", help="monitor a live session with circuit breakers")
+    p_watch.add_argument("session_id", nargs="?", help="session ID to watch (default: latest active)")
+    p_watch.add_argument("--max-retries", type=int, default=5, help="max retries before alert (default: 5)")
+    p_watch.add_argument("--max-cost", type=float, default=10.0, help="max cost in dollars (default: 10)")
+    p_watch.add_argument("--max-duration", type=int, default=1800, help="max duration in seconds (default: 1800)")
+    p_watch.add_argument("--on-violation", choices=["terminal", "file", "kill"], default="terminal",
+                         help="action on violation (default: terminal)")
+    p_watch.add_argument("--webhook", help="webhook URL for alerts")
+    p_watch.add_argument("--config", help="path to .agent-watch.json config file")
+    p_watch.add_argument("--alert", choices=["terminal", "file", "webhook", "kill"], default="terminal")
+
     return parser
 
 
@@ -524,6 +587,10 @@ def main() -> None:
         "diff": cmd_diff,
         "why": cmd_why,
         "audit": cmd_audit,
+        "share": cmd_share,
+        "postmortem": cmd_postmortem,
+        "eval": cmd_eval,
+        "watch": cmd_watch,
     }
 
     handler = handlers.get(args.command)
