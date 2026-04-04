@@ -96,12 +96,10 @@ def _event_summary(event: TraceEvent) -> str:
 
 def _render_event(event: TraceEvent, base_ts: float, is_error: bool = False) -> str:
     badge_cls = _EVENT_BADGE_CLASS.get(event.event_type, "badge-white")
-    offset = event.event_type and (event.timestamp - base_ts)
     ts_str = _fmt_ts(event.timestamp - base_ts)
     summary = _esc(_event_summary(event))
     et_label = _esc(event.event_type.value)
     detail_json = _esc(json.dumps(event.data, indent=2))
-    detail_id = f"ev-{event.event_id}"
     error_cls = " event-error" if is_error else ""
     expanded = " open" if is_error else ""
 
@@ -261,7 +259,7 @@ h2 { font-size: 14px; color: #8b949e; margin: 16px 0 8px; text-transform: upperc
 }
 """
 
-_JS = """
+_JS = r"""
 (function() {
   // Collect all event types present in this session
   var allEvents = Array.from(document.querySelectorAll('details.event'));

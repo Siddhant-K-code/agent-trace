@@ -95,13 +95,8 @@ def _detect_agents_md_violations(
         if m2:
             forbidden_cmd = m2.group(1)
             forbidden[forbidden_cmd] = "(see AGENTS.md)"
-        # "always use X" — record X as required (we'll check if something else was used)
-        m3 = re.search(r"always\s+use\s+(\w+)", line_lower)
-        if m3:
-            required = m3.group(1)
-            # If we later see a different tool used for the same purpose, flag it
-            # For now just record the requirement
-            pass
+        # "always use X" — not yet implemented; would require knowing
+        # which tools are equivalent alternatives to X
 
     violations = []
     for event in events:
