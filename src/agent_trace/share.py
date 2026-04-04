@@ -106,7 +106,7 @@ def _render_event(event: TraceEvent, base_ts: float, is_error: bool = False) -> 
     expanded = " open" if is_error else ""
 
     return f"""
-    <details class="event{error_cls}"{expanded}>
+    <details class="event{error_cls}"{expanded} data-type="{et_label}">
       <summary>
         <span class="ts">{_esc(ts_str)}</span>
         <span class="badge {badge_cls}">{et_label}</span>
@@ -179,6 +179,47 @@ h2 { font-size: 14px; color: #8b949e; margin: 16px 0 8px; text-transform: upperc
 .badge-yellow { background: #3a2d0d; color: #e3b341; }
 .badge-red    { background: #3a0d0d; color: #f85149; }
 .badge-white  { background: #21262d; color: #c9d1d9; }
+/* ── Search / filter bar ── */
+.search-bar {
+  position: sticky; top: 0; z-index: 100;
+  background: #0d1117; border-bottom: 1px solid #21262d;
+  padding: 10px 0 12px; margin-bottom: 12px;
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+}
+.search-input {
+  flex: 1; min-width: 200px;
+  background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+  color: #c9d1d9; font-family: inherit; font-size: 13px;
+  padding: 6px 10px; outline: none;
+}
+.search-input:focus { border-color: #58a6ff; }
+.search-input::placeholder { color: #484f58; }
+.filter-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.chip {
+  padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: bold;
+  cursor: pointer; border: 1px solid transparent; user-select: none;
+  transition: opacity 0.1s;
+}
+.chip.active  { opacity: 1; }
+.chip.inactive { opacity: 0.35; }
+.chip-all     { background: #21262d; color: #c9d1d9; border-color: #30363d; }
+.chip-tool_call       { background: #0d2d3a; color: #39c5cf; }
+.chip-tool_result     { background: #0d1f3a; color: #58a6ff; }
+.chip-llm_request     { background: #2d1f4a; color: #bc8cff; }
+.chip-llm_response    { background: #2d1f4a; color: #bc8cff; }
+.chip-file_read       { background: #3a2d0d; color: #e3b341; }
+.chip-file_write      { background: #3a2d0d; color: #e3b341; }
+.chip-user_prompt     { background: #1a4731; color: #3fb950; }
+.chip-assistant_response { background: #2d1f4a; color: #bc8cff; }
+.chip-error           { background: #3a0d0d; color: #f85149; }
+.chip-decision        { background: #21262d; color: #c9d1d9; }
+.chip-session_start   { background: #1a4731; color: #3fb950; }
+.chip-session_end     { background: #1a4731; color: #3fb950; }
+.search-count { color: #484f58; font-size: 11px; white-space: nowrap; }
+.search-highlight { background: #3a2d0d; color: #e3b341; border-radius: 2px; padding: 0 1px; }
+.event-hidden { display: none !important; }
+.phase-all-hidden > .events-list { display: none; }
+/* ── Phases ── */
 .phase {
   border: 1px solid #21262d; border-radius: 8px;
   margin-bottom: 12px; overflow: hidden;
@@ -216,13 +257,207 @@ h2 { font-size: 14px; color: #8b949e; margin: 16px 0 8px; text-transform: upperc
   body { padding: 8px; font-size: 12px; }
   .meta-grid { gap: 8px; }
   .event > summary { white-space: normal; }
+  .search-bar { position: static; }
 }
 """
 
 _JS = """
-document.querySelectorAll('details.phase').forEach(function(ph) {
-  ph.addEventListener('toggle', function() {});
-});
+(function() {
+  // Collect all event types present in this session
+  var allEvents = Array.from(document.querySelectorAll('details.event'));
+  var typesPresent = {};
+  allEvents.forEach(function(el) {
+    var badge = el.querySelector('.badge');
+    if (badge) typesPresent[badge.textContent.trim()] = true;
+  });
+
+  // Build filter chip set (only types that exist in this session)
+  var filterBar = document.getElementById('filter-bar');
+  var chipsContainer = filterBar.querySelector('.filter-chips');
+  var activeTypes = new Set(['__all__']);
+
+  // "All" chip
+  var allChip = document.createElement('span');
+  allChip.className = 'chip chip-all active';
+  allChip.dataset.type = '__all__';
+  allChip.textContent = 'all';
+  chipsContainer.appendChild(allChip);
+
+  Object.keys(typesPresent).sort().forEach(function(t) {
+    var chip = document.createElement('span');
+    var cls = t.replace(/_/g, '_');
+    chip.className = 'chip chip-' + cls + ' active';
+    chip.dataset.type = t;
+    chip.textContent = t.replace(/_/g, '\u200b_'); // allow wrap at underscores
+    chipsContainer.appendChild(chip);
+  });
+
+  var searchInput = document.getElementById('search-input');
+  var countEl = document.getElementById('search-count');
+
+  function escapeRe(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  function stripHighlights(el) {
+    el.querySelectorAll('.search-highlight').forEach(function(h) {
+      h.replaceWith(document.createTextNode(h.textContent));
+    });
+    // Normalize adjacent text nodes
+    el.normalize();
+  }
+
+  function highlightText(el, re) {
+    // Only highlight in .event-summary and .badge text nodes
+    var targets = el.querySelectorAll('.event-summary, .badge');
+    targets.forEach(function(target) {
+      target.childNodes.forEach(function(node) {
+        if (node.nodeType !== 3) return; // text nodes only
+        var text = node.textContent;
+        if (!re.test(text)) return;
+        re.lastIndex = 0;
+        var frag = document.createDocumentFragment();
+        var last = 0, m;
+        while ((m = re.exec(text)) !== null) {
+          if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+          var mark = document.createElement('mark');
+          mark.className = 'search-highlight';
+          mark.textContent = m[0];
+          frag.appendChild(mark);
+          last = re.lastIndex;
+          if (m[0].length === 0) { re.lastIndex++; break; }
+        }
+        if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+        node.parentNode.replaceChild(frag, node);
+      });
+    });
+  }
+
+  function applyFilters() {
+    var query = searchInput.value.trim().toLowerCase();
+    var re = query ? new RegExp(escapeRe(query), 'gi') : null;
+    var showAll = activeTypes.has('__all__');
+    var visible = 0;
+
+    allEvents.forEach(function(el) {
+      // Remove old highlights
+      stripHighlights(el);
+
+      var badge = el.querySelector('.badge');
+      var evType = badge ? badge.textContent.trim() : '';
+      var summaryEl = el.querySelector('.event-summary');
+      var summaryText = summaryEl ? summaryEl.textContent.toLowerCase() : '';
+      var detailEl = el.querySelector('.event-detail');
+      var detailText = detailEl ? detailEl.textContent.toLowerCase() : '';
+
+      // Type filter
+      var typeMatch = showAll || activeTypes.has(evType);
+
+      // Text filter: match against badge + summary + detail JSON
+      var textMatch = !query ||
+        evType.toLowerCase().includes(query) ||
+        summaryText.includes(query) ||
+        detailText.includes(query);
+
+      if (typeMatch && textMatch) {
+        el.classList.remove('event-hidden');
+        visible++;
+        if (re) highlightText(el, re);
+        // Auto-open if text matched inside detail
+        if (re && detailText.includes(query) && !el.open) {
+          el.open = true;
+        }
+      } else {
+        el.classList.add('event-hidden');
+      }
+    });
+
+    // Hide phases where all events are hidden
+    document.querySelectorAll('details.phase').forEach(function(phase) {
+      var phaseEvents = phase.querySelectorAll('details.event');
+      var anyVisible = Array.from(phaseEvents).some(function(e) {
+        return !e.classList.contains('event-hidden');
+      });
+      if (phaseEvents.length > 0) {
+        phase.classList.toggle('event-hidden', !anyVisible);
+      }
+    });
+
+    var total = allEvents.length;
+    countEl.textContent = query || !showAll
+      ? visible + ' / ' + total + ' events'
+      : total + ' events';
+  }
+
+  // Chip click handler
+  chipsContainer.addEventListener('click', function(e) {
+    var chip = e.target.closest('.chip');
+    if (!chip) return;
+    var type = chip.dataset.type;
+
+    if (type === '__all__') {
+      // Toggle: if all active → deactivate all type chips, keep only "all"
+      // If "all" clicked while some inactive → activate everything
+      var allActive = Array.from(chipsContainer.querySelectorAll('.chip:not(.chip-all)'))
+        .every(function(c) { return c.classList.contains('active'); });
+      activeTypes.clear();
+      activeTypes.add('__all__');
+      chipsContainer.querySelectorAll('.chip').forEach(function(c) {
+        c.classList.toggle('active', true);
+        c.classList.toggle('inactive', false);
+      });
+    } else {
+      // Clicking a type chip: deselect "all", toggle this type
+      activeTypes.delete('__all__');
+      var allChipEl = chipsContainer.querySelector('.chip-all');
+      allChipEl.classList.remove('active');
+      allChipEl.classList.add('inactive');
+
+      if (activeTypes.has(type)) {
+        activeTypes.delete(type);
+        chip.classList.remove('active');
+        chip.classList.add('inactive');
+      } else {
+        activeTypes.add(type);
+        chip.classList.add('active');
+        chip.classList.remove('inactive');
+      }
+
+      // If all type chips are now active, restore "all"
+      var typeChips = Array.from(chipsContainer.querySelectorAll('.chip:not(.chip-all)'));
+      if (typeChips.every(function(c) { return activeTypes.has(c.dataset.type); })) {
+        activeTypes.add('__all__');
+        allChipEl.classList.add('active');
+        allChipEl.classList.remove('inactive');
+      }
+    }
+    applyFilters();
+  });
+
+  // Search input handler (debounced)
+  var debounceTimer;
+  searchInput.addEventListener('input', function() {
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(applyFilters, 120);
+  });
+
+  // Keyboard shortcut: / to focus search
+  document.addEventListener('keydown', function(e) {
+    if (e.key === '/' && document.activeElement !== searchInput) {
+      e.preventDefault();
+      searchInput.focus();
+      searchInput.select();
+    }
+    if (e.key === 'Escape' && document.activeElement === searchInput) {
+      searchInput.value = '';
+      applyFilters();
+      searchInput.blur();
+    }
+  });
+
+  // Initial count
+  applyFilters();
+})();
 """
 
 
@@ -331,6 +566,19 @@ def render_html(
 </div>
 
 {postmortem_html}
+
+<div class="search-bar" id="filter-bar">
+  <input
+    id="search-input"
+    class="search-input"
+    type="search"
+    placeholder="Search events… (press / to focus, Esc to clear)"
+    autocomplete="off"
+    spellcheck="false"
+  >
+  <div class="filter-chips"></div>
+  <span class="search-count" id="search-count"></span>
+</div>
 
 <h2>Session Phases</h2>
 {phases_html}
