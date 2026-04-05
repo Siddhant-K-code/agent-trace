@@ -19,9 +19,15 @@ from .scorers import ScoreResult, run_scorer
 class EvalReport:
     session_id: str
     results: list[ScoreResult]
-    passed: int
-    failed: int
     config: EvalConfig
+
+    @property
+    def passed(self) -> int:
+        return sum(1 for r in self.results if r.passed)
+
+    @property
+    def failed(self) -> int:
+        return sum(1 for r in self.results if not r.passed)
 
     @property
     def overall_passed(self) -> bool:
@@ -68,8 +74,6 @@ def run_eval(
     return EvalReport(
         session_id=session_id,
         results=results,
-        passed=passed,
-        failed=failed,
         config=config,
     )
 
@@ -218,7 +222,8 @@ def cmd_eval_ci(args: argparse.Namespace) -> int:
         return 1
 
     report = run_eval(store, session_id, config)
-    format_report_table(report)
+    # Route table to stderr so CI output is pipeable without noise
+    format_report_table(report, out=sys.stderr)
 
     if report.overall_passed:
         sys.stderr.write("CI: all scorers passed\n")
