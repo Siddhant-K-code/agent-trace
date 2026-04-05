@@ -122,6 +122,11 @@ class TestScoreRegex(unittest.TestCase):
         result = score_regex(events, pattern=r"5 passed", event_type="tool_result")
         self.assertTrue(result.passed)
 
+    def test_invalid_regex_returns_score_result(self):
+        result = score_regex([], pattern="[invalid(regex")
+        self.assertFalse(result.passed)
+        self.assertIn("invalid pattern", result.reason)
+
 
 # ---------------------------------------------------------------------------
 # Scorer: cost_under
@@ -181,6 +186,26 @@ class TestScoreFilesScoped(unittest.TestCase):
         events = _ok_events()
         result = score_files_scoped(events, allowed_paths=["src/"])
         self.assertTrue(result.passed)
+
+    def test_all_violations_scores_zero(self):
+        events = self._write_events(["/etc/bad1", "/etc/bad2", "/etc/bad3"])
+        result = score_files_scoped(events, allowed_paths=["src/"])
+        self.assertAlmostEqual(result.score, 0.0)
+
+    def test_partial_violations_proportional(self):
+        events = self._write_events(["src/ok.py", "/etc/bad"])
+        result = score_files_scoped(events, allowed_paths=["src/"])
+        self.assertAlmostEqual(result.score, 0.5)
+
+    def test_report_passed_failed_are_live(self):
+        from agent_trace.eval.runner import EvalReport
+        from agent_trace.eval.scorers import ScoreResult
+        from agent_trace.eval.config import EvalConfig
+        report = EvalReport("s1", [], EvalConfig.default())
+        self.assertEqual(report.passed, 0)
+        report.results.append(ScoreResult("no_errors", 0.0, 1.0, False))
+        self.assertEqual(report.failed, 1)
+        self.assertFalse(report.overall_passed)
 
 
 # ---------------------------------------------------------------------------
