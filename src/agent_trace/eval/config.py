@@ -14,7 +14,6 @@ from pathlib import Path
 class ScorerConfig:
     type: str
     threshold: float = 1.0
-    weight: float = 1.0
     # Extra scorer-specific params stored as a dict
     params: dict = field(default_factory=dict)
 

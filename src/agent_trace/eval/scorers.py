@@ -53,7 +53,11 @@ def score_regex(
     except ValueError:
         return ScoreResult("regex", 0.0, threshold, False, f"unknown event_type: {event_type}")
 
-    compiled = re.compile(pattern)
+    try:
+        compiled = re.compile(pattern)
+    except re.error as exc:
+        return ScoreResult("regex", 0.0, threshold, False, f"invalid pattern: {exc}")
+
     for event in events:
         if event.event_type != et:
             continue
@@ -114,7 +118,14 @@ def score_files_scoped(
     if not violations:
         return ScoreResult("files_scoped", 1.0, threshold, True, "all files within allowed paths")
 
-    score = max(0.0, 1.0 - len(violations) / max(1, len(violations) + 1))
+    # Count total scoped file ops to compute a meaningful ratio
+    total_ops = sum(
+        1 for e in events
+        if e.event_type == EventType.TOOL_CALL
+        and e.data.get("tool_name", "").lower() in ("read", "write", "edit", "view", "create")
+        and (e.data.get("arguments") or {}).get("file_path") or (e.data.get("arguments") or {}).get("path")
+    )
+    score = max(0.0, 1.0 - len(violations) / max(1, total_ops))
     reason = f"{len(violations)} file(s) outside allowed paths: {', '.join(violations[:3])}"
     return ScoreResult("files_scoped", score, threshold, score >= threshold, reason)
 
