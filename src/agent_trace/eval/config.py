@@ -6,7 +6,6 @@ Supports a minimal subset of YAML: string keys, scalar values, and lists.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -94,9 +93,7 @@ def _parse_minimal_yaml(text: str) -> dict:
         if i >= len(lines):
             return i, {}
 
-        first_line = lines[i]
-        first_indent = _indent(first_line)
-        first_content = first_line.strip()
+        first_content = lines[i].strip()
 
         # Determine block type from first non-blank line
         if first_content.startswith("- "):
