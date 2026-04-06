@@ -16,7 +16,7 @@ import urllib.request
 from collections import Counter, deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, TextIO
+from typing import TextIO
 
 from .cost import _dollars, _event_tokens
 from .models import EventType, TraceEvent
@@ -174,8 +174,10 @@ def _dispatch_alert(
     action: str | None = None,
 ) -> None:
     action = action or config.on_violation
+    # terminal is always shown regardless of action so the operator watching
+    # the process sees every alert; file/webhook are additive channels
     _alert_terminal(message)
-    if action == "file":
+    if action in ("file", "kill"):
         _alert_file(message, config.alert_log)
     if config.webhook_url:
         _alert_webhook(message, config.webhook_url)
@@ -223,7 +225,7 @@ def check_event(
 
     # --- Cost threshold ---
     if state.estimated_cost > config.max_cost_dollars:
-        key_id = f"cost:{int(state.estimated_cost)}"
+        key_id = "cost"
         if key_id not in state.fired:
             state.fired.add(key_id)
             violations.append(
@@ -317,13 +319,6 @@ def watch_session(
 
     state = WatchState(start_time=time.time())
 
-    # Try to read agent PID from meta
-    try:
-        meta = store.load_meta(session_id)
-        # PID not stored in meta currently; placeholder for future use
-    except Exception:
-        pass
-
     out.write(f"[watch] Monitoring session {session_id[:12]}...\n")
     out.flush()
 
@@ -343,9 +338,10 @@ def watch_session(
                 out.write(f"[watch] Session ended ({event_count} events, ${state.estimated_cost:.4f})\n")
                 break
 
-            # Idle timeout
+            # Idle timeout: checked on each new event, so triggers on the
+            # first event that arrives after the idle window has elapsed.
             if time.time() - last_event_time > max_idle_seconds:
-                out.write(f"[watch] No events for {max_idle_seconds:.0f}s — stopping\n")
+                out.write(f"[watch] No events for {max_idle_seconds:.0f}s - stopping\n")
                 break
 
     except KeyboardInterrupt:

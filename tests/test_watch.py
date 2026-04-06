@@ -105,11 +105,23 @@ class TestCostThreshold(unittest.TestCase):
     def test_violation_when_cost_exceeds_threshold(self):
         config = _default_config(max_cost_dollars=0.0)
         state = WatchState()
-        # Force cost above threshold by setting it directly
         state.estimated_cost = 0.01
         event = _make_event(EventType.ASSISTANT_RESPONSE, 0.0, text="x" * 10000)
         violations = check_event(event, config, state)
         self.assertTrue(any("CostWatcher" in v for v in violations))
+
+    def test_cost_violation_fires_only_once(self):
+        config = _default_config(max_cost_dollars=0.0)
+        state = WatchState()
+        state.estimated_cost = 0.01
+        all_violations = []
+        for _ in range(5):
+            all_violations.extend(check_event(
+                _make_event(EventType.ASSISTANT_RESPONSE, 0.0, text="x"),
+                config, state,
+            ))
+        cost_violations = [v for v in all_violations if "CostWatcher" in v]
+        self.assertEqual(len(cost_violations), 1)
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +185,16 @@ class TestAlertTerminal(unittest.TestCase):
         _alert_terminal("test alert", out=buf)
         self.assertIn("test alert", buf.getvalue())
         self.assertIn("[watch]", buf.getvalue())
+
+    def test_dispatch_always_writes_terminal(self):
+        from agent_trace.watch import _dispatch_alert, WatcherConfig, WatchState
+        import unittest.mock as mock
+        config = WatcherConfig(on_violation="file")
+        state = WatchState()
+        with mock.patch("agent_trace.watch._alert_terminal") as mock_terminal, \
+             mock.patch("agent_trace.watch._alert_file"):
+            _dispatch_alert("msg", config, state)
+            mock_terminal.assert_called_once()
 
 
 class TestAlertFile(unittest.TestCase):
