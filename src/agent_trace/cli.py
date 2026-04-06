@@ -514,7 +514,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_eval_run = eval_sub.add_parser("run", help="score a session against configured scorers")
     p_eval_run.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
-    p_eval_run.add_argument("--dataset", help="path to dataset JSONL file")
     p_eval_run.add_argument("--format", choices=["table", "json"], default="table")
     p_eval_run.add_argument("--config", default=".agent-evals.yaml",
                             help="eval config file (default: .agent-evals.yaml)")
@@ -526,7 +525,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_eval_ci = eval_sub.add_parser("ci", help="run evals and exit 1 if any scorer fails")
     p_eval_ci.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
-    p_eval_ci.add_argument("--dataset", help="path to dataset JSONL file")
     p_eval_ci.add_argument("--config", default=".agent-evals.yaml")
 
     p_eval_dataset = eval_sub.add_parser("dataset", help="manage eval datasets")
@@ -551,7 +549,6 @@ def build_parser() -> argparse.ArgumentParser:
                          help="action on violation (default: terminal)")
     p_watch.add_argument("--webhook", help="webhook URL for alerts")
     p_watch.add_argument("--config", help="path to .agent-watch.json config file")
-    p_watch.add_argument("--alert", choices=["terminal", "file", "webhook", "kill"], default="terminal")
 
     return parser
 
