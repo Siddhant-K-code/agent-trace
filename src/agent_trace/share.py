@@ -19,6 +19,8 @@ from .cost import estimate_cost
 from .explain import explain_session
 from .models import EventType, TraceEvent, SessionMeta
 from .store import TraceStore
+from .subagent import build_tree, aggregate_stats, SessionNode
+from .annotate import load_annotations, Annotation, LABEL_COLOURS, DEFAULT_LABEL_COLOUR
 
 
 # ---------------------------------------------------------------------------
@@ -463,6 +465,54 @@ _JS = r"""
 # HTML assembly
 # ---------------------------------------------------------------------------
 
+def _render_subagent_tree_html(tree: "SessionNode", stats: object) -> str:
+    """Render a collapsible subagent hierarchy section for the share HTML."""
+
+    def _node_html(node: "SessionNode", depth: int = 0) -> str:
+        indent = depth * 20
+        sid = node.meta.session_id[:12]
+        dur = node.meta.total_duration_ms / 1000 if node.meta.total_duration_ms else 0
+        err_badge = (
+            f'<span style="color:#f85149;margin-left:8px">✗ {node.meta.errors} err</span>'
+            if node.meta.errors else ""
+        )
+        children_html = "".join(_node_html(c, depth + 1) for c in node.children)
+        toggle = "▶" if node.children else "·"
+        return f"""
+<div class="tree-node" style="margin-left:{indent}px">
+  <span class="tree-toggle">{toggle}</span>
+  <span class="tree-sid">{_esc(sid)}</span>
+  <span class="tree-meta">
+    depth={node.meta.depth}
+    &nbsp;·&nbsp;{dur:.1f}s
+    &nbsp;·&nbsp;{node.meta.tool_calls} tools
+    &nbsp;·&nbsp;{node.meta.total_tokens:,} tok
+    {err_badge}
+  </span>
+  {children_html}
+</div>"""
+
+    tree_body = _node_html(tree)
+    agg = stats
+    return f"""
+<h2>Subagent Tree</h2>
+<div style="background:#161b22;border:1px solid #30363d;border-radius:6px;padding:16px;margin-bottom:20px;font-size:.85em">
+  <div style="color:#8b949e;margin-bottom:12px">
+    {getattr(agg,'session_count',1)} sessions &nbsp;·&nbsp;
+    {getattr(agg,'tool_calls',0)} total tool calls &nbsp;·&nbsp;
+    {getattr(agg,'total_tokens',0):,} total tokens
+    {f'&nbsp;·&nbsp;<span style="color:#f85149">{agg.errors} errors</span>' if getattr(agg,'errors',0) else ''}
+  </div>
+  <div class="subagent-tree">{tree_body}</div>
+</div>
+<style>
+.tree-node{{padding:3px 0;font-family:monospace}}
+.tree-toggle{{color:#8b949e;margin-right:6px;cursor:pointer}}
+.tree-sid{{color:#58a6ff;font-weight:bold}}
+.tree-meta{{color:#8b949e;margin-left:10px;font-size:.9em}}
+</style>"""
+
+
 def render_html(
     store: TraceStore,
     session_id: str,
@@ -546,6 +596,41 @@ def render_html(
       {f'· <span class="cost-wasted">Wasted: ${wasted_cost:.4f}</span>' if wasted_cost > 0 else ""}
     </p>"""
 
+    # Subagent tree section
+    tree_html = ""
+    try:
+        tree = build_tree(store, session_id)
+        if tree.children:
+            stats = aggregate_stats(tree)
+            tree_html = _render_subagent_tree_html(tree, stats)
+    except Exception:
+        pass
+
+    # Annotations
+    annotations = load_annotations(store, session_id)
+    annotations_by_event: dict[str, list[Annotation]] = {}
+    for ann in annotations:
+        if ann.event_id:
+            annotations_by_event.setdefault(ann.event_id, []).append(ann)
+
+    # Bookmark sidebar
+    bookmarks_html = ""
+    if annotations:
+        items = ""
+        for ann in annotations:
+            label_str = f"[{ann.label}] " if ann.label else ""
+            note_str = ann.note[:60] if ann.note else ann.annotation_id
+            colour = LABEL_COLOURS.get(ann.label, DEFAULT_LABEL_COLOUR)
+            items += (
+                f'<li><a href="#ev-{_esc(ann.event_id)}" style="color:{colour}">'
+                f'{_esc(label_str)}{_esc(note_str)}</a></li>\n'
+            )
+        bookmarks_html = f"""
+<div class="bookmarks">
+  <h3>Bookmarks</h3>
+  <ul>{items}</ul>
+</div>"""
+
     generated = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     return f"""<!DOCTYPE html>
@@ -562,8 +647,11 @@ def render_html(
   <div class="meta-grid">{meta_html}
   </div>
 </div>
+{bookmarks_html}
 
 {postmortem_html}
+
+{tree_html}
 
 <div class="search-bar" id="filter-bar">
   <input
