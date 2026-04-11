@@ -158,7 +158,7 @@ class TestSessionToOTLP(unittest.TestCase):
         child_spans = [s for s in spans[1:] if s.get("parentSpanId") == root_id]
         self.assertGreater(len(child_spans), 0)
 
-        bash_span = [s for s in child_spans if s["name"] == "Bash"]
+        bash_span = [s for s in child_spans if "bash" in s["name"].lower()]
         self.assertEqual(len(bash_span), 1)
 
     def test_error_span_has_error_status(self):
@@ -221,7 +221,7 @@ class TestSessionToOTLP(unittest.TestCase):
         payload = session_to_otlp(meta, events)
         spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
 
-        bash_span = [s for s in spans if s["name"] == "Bash"][0]
+        bash_span = [s for s in spans if "bash" in s["name"].lower()][0]
         attr_keys = [a["key"] for a in bash_span["attributes"]]
         self.assertIn("tool.input.command", attr_keys)
 
@@ -230,7 +230,7 @@ class TestSessionToOTLP(unittest.TestCase):
         payload = session_to_otlp(meta, events)
         spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
 
-        bash_span = [s for s in spans if s["name"] == "Bash"][0]
+        bash_span = [s for s in spans if "bash" in s["name"].lower()][0]
         start = int(bash_span["startTimeUnixNano"])
         end = int(bash_span["endTimeUnixNano"])
         self.assertGreater(end, start)

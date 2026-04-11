@@ -29,6 +29,21 @@ from .models import EventType, SessionMeta, TraceEvent
 from .store import TraceStore
 
 
+# ---------------------------------------------------------------------------
+# OTel semantic conventions for GenAI (opentelemetry-semantic-conventions 1.27+)
+# https://opentelemetry.io/docs/specs/semconv/gen-ai/
+# ---------------------------------------------------------------------------
+
+_SEMCONV_SYSTEM = "gen_ai.system"
+_SEMCONV_OP = "gen_ai.operation.name"
+_SEMCONV_MODEL = "gen_ai.request.model"
+_SEMCONV_INPUT_TOKENS = "gen_ai.usage.input_tokens"
+_SEMCONV_OUTPUT_TOKENS = "gen_ai.usage.output_tokens"
+_SEMCONV_TOOL_NAME = "gen_ai.tool.name"
+_SEMCONV_TOOL_CALL_ID = "gen_ai.tool.call.id"
+_SEMCONV_FINISH_REASON = "gen_ai.response.finish_reasons"
+
+
 def _to_trace_id(session_id: str) -> str:
     """Convert session ID to a 32-hex-char trace ID."""
     h = hashlib.sha256(session_id.encode()).hexdigest()
@@ -87,25 +102,50 @@ def session_to_otlp(
     meta: SessionMeta,
     events: list[TraceEvent],
     service_name: str = "agent-trace",
+    parent_span_id: str = "",
+    parent_trace_id: str = "",
 ) -> dict:
     """Convert an agent-trace session to OTLP JSON trace format.
 
     Returns the full ExportTraceServiceRequest body ready to POST.
+
+    Args:
+        parent_span_id: When set, the root span is linked as a child of this
+            span (used for subagent hierarchy).
+        parent_trace_id: When set, the root span shares this trace ID so all
+            subagent spans appear in the same trace in the backend.
     """
-    trace_id = _to_trace_id(meta.session_id)
+    # Use parent trace ID for subagents so they appear in the same trace
+    trace_id = parent_trace_id if parent_trace_id else _to_trace_id(meta.session_id)
 
     # Root span covers the entire session
     root_span_id = _to_span_id(f"root-{meta.session_id}")
     root_start = _ts_to_nanos(meta.started_at)
     root_end = _ts_to_nanos(meta.ended_at or (meta.started_at + (meta.total_duration_ms or 0) / 1000))
 
+    # Detect provider from agent name for semantic conventions
+    agent_lower = (meta.agent_name or "").lower()
+    if "claude" in agent_lower or "anthropic" in agent_lower:
+        gen_ai_system = "anthropic"
+    elif "gpt" in agent_lower or "openai" in agent_lower:
+        gen_ai_system = "openai"
+    elif "gemini" in agent_lower or "google" in agent_lower:
+        gen_ai_system = "google"
+    else:
+        gen_ai_system = "unknown"
+
     root_attrs = _make_attributes({
+        # Standard OTel resource attributes
         "agent.name": meta.agent_name or "unknown",
         "agent.command": meta.command or "",
         "agent.session_id": meta.session_id,
         "agent.tool_calls": meta.tool_calls,
         "agent.llm_requests": meta.llm_requests,
         "agent.errors": meta.errors,
+        "agent.depth": meta.depth,
+        # GenAI semantic conventions
+        _SEMCONV_SYSTEM: gen_ai_system,
+        _SEMCONV_OP: "agent.session",
     })
 
     # Collect span events (user prompts, assistant responses, decisions)
@@ -156,7 +196,11 @@ def session_to_otlp(
             span_start = call_event.timestamp if call_event else event.timestamp
             duration_ns = _duration_to_nanos(event.duration_ms)
 
-            span_attrs = {"tool.name": tool_name}
+            span_attrs = {
+                _SEMCONV_TOOL_NAME: tool_name,
+                _SEMCONV_OP: "tool.call",
+                _SEMCONV_TOOL_CALL_ID: (call_event.event_id if call_event else event.event_id),
+            }
             if call_event:
                 args = call_event.data.get("arguments", {})
                 if args:
@@ -171,8 +215,8 @@ def session_to_otlp(
                 "traceId": trace_id,
                 "spanId": _to_span_id(call_event.event_id if call_event else event.event_id),
                 "parentSpanId": root_span_id,
-                "name": tool_name,
-                "kind": 1,  # SPAN_KIND_INTERNAL
+                "name": f"tool/{tool_name}",
+                "kind": 3,  # SPAN_KIND_CLIENT
                 "startTimeUnixNano": _ts_to_nanos(span_start),
                 "endTimeUnixNano": _ts_to_nanos(span_start + duration_ns / 1_000_000_000),
                 "attributes": _make_attributes(span_attrs),
@@ -214,12 +258,25 @@ def session_to_otlp(
                 })],
             })
 
-        elif event.event_type in (EventType.LLM_REQUEST, EventType.LLM_RESPONSE):
-            root_events.append(_make_event(
-                event.event_type.value,
-                event.timestamp,
-                event.data,
-            ))
+        elif event.event_type == EventType.LLM_REQUEST:
+            llm_attrs: dict = {_SEMCONV_OP: "chat"}
+            model = event.data.get("model", "")
+            if model:
+                llm_attrs[_SEMCONV_MODEL] = model
+            inp_tok = event.data.get("input_tokens", 0)
+            if inp_tok:
+                llm_attrs[_SEMCONV_INPUT_TOKENS] = inp_tok
+            root_events.append(_make_event("gen_ai.system.message", event.timestamp, llm_attrs))
+
+        elif event.event_type == EventType.LLM_RESPONSE:
+            llm_attrs = {_SEMCONV_OP: "chat"}
+            out_tok = event.data.get("output_tokens", 0)
+            if out_tok:
+                llm_attrs[_SEMCONV_OUTPUT_TOKENS] = out_tok
+            finish = event.data.get("stop_reason", event.data.get("finish_reason", ""))
+            if finish:
+                llm_attrs[_SEMCONV_FINISH_REASON] = finish
+            root_events.append(_make_event("gen_ai.assistant.message", event.timestamp, llm_attrs))
 
     # Emit any unmatched tool_calls as spans (no result received)
     for call_event in pending_calls.values():
@@ -240,7 +297,7 @@ def session_to_otlp(
         })
 
     # Build root span
-    root_span = {
+    root_span: dict = {
         "traceId": trace_id,
         "spanId": root_span_id,
         "name": f"agent-session ({meta.agent_name or 'agent'})",
@@ -251,6 +308,9 @@ def session_to_otlp(
         "events": root_events,
         "status": {"code": 2 if meta.errors > 0 else 1},
     }
+    # Link to parent span for subagent hierarchy
+    if parent_span_id:
+        root_span["parentSpanId"] = parent_span_id
 
     all_spans = [root_span] + child_spans
 
@@ -267,6 +327,65 @@ def session_to_otlp(
                 "scope": {
                     "name": "agent-trace",
                 },
+                "spans": all_spans,
+            }],
+        }],
+    }
+
+
+def tree_to_otlp(
+    store: TraceStore,
+    root_session_id: str,
+    service_name: str = "agent-trace",
+) -> dict:
+    """Export a full subagent tree as a single OTLP trace.
+
+    All sessions in the tree share the same trace_id. Each subagent session's
+    root span is parented to the tool_call span that spawned it.
+    """
+    from .subagent import build_tree, SessionNode
+
+    tree = build_tree(store, root_session_id)
+    root_trace_id = _to_trace_id(root_session_id)
+    all_spans: list[dict] = []
+
+    def _collect(node: SessionNode, parent_span_id: str = "") -> None:
+        meta = node.meta
+        events = node.events
+        payload = session_to_otlp(
+            meta, events, service_name,
+            parent_span_id=parent_span_id,
+            parent_trace_id=root_trace_id,
+        )
+        spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
+        all_spans.extend(spans)
+
+        # The root span of this session is the first span
+        session_root_span_id = _to_span_id(f"root-{meta.session_id}")
+
+        for child in node.children:
+            # Parent span for child = the tool_call span that spawned it
+            spawning_span_id = (
+                _to_span_id(child.meta.parent_event_id)
+                if child.meta.parent_event_id
+                else session_root_span_id
+            )
+            _collect(child, parent_span_id=spawning_span_id)
+
+    _collect(tree)
+
+    root_meta = store.load_meta(root_session_id)
+    return {
+        "resourceSpans": [{
+            "resource": {
+                "attributes": _make_attributes({
+                    "service.name": service_name,
+                    "service.version": "agent-trace",
+                    "agent.session_id": root_session_id,
+                }),
+            },
+            "scopeSpans": [{
+                "scope": {"name": "agent-trace"},
                 "spans": all_spans,
             }],
         }],
