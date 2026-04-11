@@ -86,3 +86,7 @@ class TraceStore:
             if d.name.startswith(prefix) and (d / "meta.json").exists():
                 return d.name
         return None
+
+    def annotations_path(self, session_id: str) -> Path:
+        """Return the path to the annotations sidecar file."""
+        return self._session_dir(session_id) / "annotations.jsonl"
