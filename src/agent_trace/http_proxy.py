@@ -28,7 +28,7 @@ from urllib.parse import urlparse
 
 from .models import EventType, SessionMeta, TraceEvent
 from .proxy import _classify_message
-from .redact import redact_data
+from .masking import MaskingConfig, mask_event_data
 from .store import TraceStore
 
 
@@ -41,13 +41,18 @@ class _ProxyHandler(BaseHTTPRequestHandler):
     meta: SessionMeta | None = None
     on_event: Callable[[TraceEvent], None] | None = None
     redact: bool = False
+    masking_config: MaskingConfig | None = None
     pending_calls: dict[Any, TraceEvent] = {}
 
     def _emit(self, event: TraceEvent) -> None:
         if self.meta:
             event.session_id = self.meta.session_id
-        if self.redact:
-            event.data = redact_data(event.data)
+        if self.redact or self.masking_config:
+            event.data = mask_event_data(
+                event.data,
+                config=self.masking_config,
+                redact_secrets=self.redact,
+            )
         if self.store and self.meta:
             self.store.append_event(self.meta.session_id, event)
 
