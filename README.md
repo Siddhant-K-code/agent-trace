@@ -1,5 +1,10 @@
 # agent-trace
 
+[![PyPI](https://img.shields.io/pypi/v/agent-strace)](https://pypi.org/project/agent-strace/)
+[![Python](https://img.shields.io/pypi/pyversions/agent-strace)](https://pypi.org/project/agent-strace/)
+[![License](https://img.shields.io/github/license/Siddhant-K-code/agent-trace)](LICENSE)
+[![CI](https://github.com/Siddhant-K-code/agent-trace/actions/workflows/test.yml/badge.svg)](https://github.com/Siddhant-K-code/agent-trace/actions/workflows/test.yml)
+
 `strace` for AI agents. Capture and replay every tool call, prompt, and response from Claude Code, Cursor, or any MCP client.
 
 ## Why
@@ -118,8 +123,15 @@ agent-strace export <session-id>                Export as JSON, CSV, NDJSON, or 
 agent-strace import <session.jsonl>             Import a Claude Code JSONL session log
 agent-strace cost [session-id]                  Estimate token cost for a session
 agent-strace diff <session-a> <session-b>       Compare two sessions structurally
+agent-strace diff --semantic <a> <b>            Compare sessions by outcome, not event order
 agent-strace why [session-id] <event-number>    Trace the causal chain for an event
 agent-strace audit [session-id] [--policy]      Check tool calls against a policy file
+agent-strace policy [--output file]             Generate .agent-scope.json from observed traces
+agent-strace dashboard [--last N] [--html file] Aggregate stats and trends across sessions
+agent-strace annotate <session-id> <offset>     Add notes, labels, or bookmarks to events
+agent-strace token-budget <session-id>          Check token usage against model context limit
+agent-strace watch [--max-context-pct N]        Watch a live session with per-operation limits
+agent-strace share <session-id> [-o file]       Export a self-contained HTML report
 ```
 
 ### Import existing Claude Code sessions
@@ -518,6 +530,142 @@ Exits with code 1 when violations are found — usable in CI.
 
 Glob patterns support `**` as a recursive wildcard. File read policy applies to `Read`, `View`, `Grep`, and `Glob` tool calls. Network policy checks URLs embedded in `Bash` commands.
 
+### Auto-generate a policy from your traces
+
+Instead of writing `.agent-scope.json` by hand, let agent-trace observe a few sessions and generate one for you:
+
+```bash
+# Dry-run: print the suggested policy without writing anything
+agent-strace policy
+
+# Write it to disk
+agent-strace policy --output .agent-scope.json
+
+# Observe a specific set of sessions
+agent-strace policy --last 20 --output .agent-scope.json
+```
+
+The generated policy covers every file path and command the agent actually used, collapsed into glob patterns. Review it, tighten the deny list, then commit it alongside your code.
+
+### PII masking
+
+Sensitive data is masked before it hits disk. Useful when tracing agents that handle user data, credentials, or anything you wouldn't want in a log file.
+
+```bash
+# Stdio proxy with masking
+agent-strace record --mask -- npx -y @modelcontextprotocol/server-filesystem /tmp
+
+# HTTP proxy with masking
+agent-strace record-http https://mcp.example.com --mask
+```
+
+Masked by default: email addresses, phone numbers, credit card numbers, US Social Security Numbers, and AWS ARNs. You can also call `mask_event_data()` directly to sanitise events from an existing session before sharing or exporting them.
+
+### Multi-session dashboard
+
+Get an aggregate view across all your sessions — useful for spotting trends, outliers, and cost spikes without opening each session individually.
+
+```bash
+agent-strace dashboard                    # all sessions
+agent-strace dashboard --last 20          # last 20 sessions
+agent-strace dashboard --since 2024-06-01 # since a date
+agent-strace dashboard --html report.html # self-contained HTML export
+```
+
+The terminal view shows total tool calls, errors, tokens, and estimated cost, plus ASCII sparkline charts for each metric over time and a top-tools frequency table. The HTML export is self-contained — no server needed.
+
+### Session attribution
+
+Every session records who and what spawned it. When you open a trace you'll see the OS user, the detected agent provider, the git repo and branch, and the chain of parent processes.
+
+```bash
+agent-strace show SESSION_ID
+# Attribution
+#   User:     alice
+#   Provider: claude-code
+#   Branch:   feat/my-feature
+#   Commit:   a1b2c3d
+#   CWD:      /home/alice/projects/myapp
+```
+
+Detected providers: `claude-code`, `cursor`, `github-copilot`, `cody`, `continue`, and a generic `mcp-client` fallback. Attribution is collected automatically — nothing to configure.
+
+### Replay annotations
+
+Add notes, labels, and bookmarks to any event in a recorded session. Useful for code review, debugging, and building eval datasets.
+
+```bash
+# Add a note to event #12
+agent-strace annotate SESSION_ID 12 --note "Why did it call bash here instead of write_file?"
+
+# Tag an event
+agent-strace annotate SESSION_ID 12 --label regression
+
+# Bookmark for quick navigation in the HTML viewer
+agent-strace annotate SESSION_ID 12 --bookmark
+
+# List all annotations
+agent-strace annotate SESSION_ID --list
+
+# Remove one
+agent-strace annotate SESSION_ID 12 --delete ANNOTATION_ID
+```
+
+Annotations persist alongside the session and appear as a bookmarks sidebar in shared HTML reports. They're also useful for building eval datasets — label sessions as `pass` / `fail` / `interesting` and filter on those labels later.
+
+### Token budget tracking
+
+Long-running agents can silently burn through a model's context window. The token budget command shows how close you are and warns before you hit the limit.
+
+```bash
+agent-strace token-budget SESSION_ID
+agent-strace token-budget SESSION_ID --model claude-3-5-sonnet
+agent-strace token-budget SESSION_ID --model gpt-4o --warn-at 75
+```
+
+In watch mode, the same threshold applies in real time:
+
+```bash
+agent-strace watch --max-context-pct 80 SESSION_ID
+```
+
+Supported models and their limits:
+
+| Model | Context |
+|---|---|
+| claude-3-5-sonnet | 200k tokens |
+| claude-3-opus | 200k tokens |
+| gpt-4o | 128k tokens |
+| gpt-4-turbo | 128k tokens |
+| gemini-1.5-pro | 1M tokens |
+
+Pass `--limit` to set a custom ceiling for any other model.
+
+### Semantic session diff
+
+Compare two sessions by *outcome* rather than raw event order. Useful for regression testing agent behaviour across model versions or prompt changes.
+
+```bash
+agent-strace diff SESSION_A SESSION_B --semantic
+```
+
+```
+Semantic diff: SESSION_A vs SESSION_B
+
+Tools added:    write_file
+Tools removed:  bash
+Δ tool calls:   +3
+Δ errors:       -2
+Δ tokens:       +1,200
+Outcome:        improved (fewer errors, same task completed)
+```
+
+Export a structured JSON report for CI assertions:
+
+```bash
+agent-strace diff SESSION_A SESSION_B --semantic --eval-config eval.json
+```
+
 ## Production tracing (OTLP export)
 
 Export sessions as OpenTelemetry spans to your existing observability stack. Sessions become traces. Tool calls become spans with duration and inputs. Errors get exception events. Zero new dependencies.
@@ -651,17 +799,25 @@ src/agent_trace/
   hooks.py          # Claude Code hooks integration
   proxy.py          # MCP stdio proxy
   http_proxy.py     # MCP HTTP/SSE proxy
-  redact.py         # secret redaction
-  otlp.py           # OTLP/HTTP JSON exporter
+  redact.py         # secret redaction (key/value pattern matching)
+  masking.py        # PII masking (email, phone, CC, SSN, ARN)
+  otlp.py           # OTLP/HTTP JSON exporter with GenAI semantic conventions
   replay.py         # terminal replay and display
   decorator.py      # @trace_tool, @trace_llm_call, log_decision
   jsonl_import.py   # Claude Code JSONL session import
   explain.py        # session phase detection and plain-English summary
   cost.py           # token and cost estimation
   subagent.py       # parent-child session tree, tree replay, stats rollup
-  diff.py           # structural session comparison (LCS phase alignment)
+  diff.py           # structural and semantic session comparison
   why.py            # causal chain tracing (backwards event walk)
   audit.py          # policy-based tool call checking, sensitive file detection
+  policy.py         # generate .agent-scope.json from observed traces
+  attribution.py    # session attribution (user, process ancestry, git context)
+  dashboard.py      # multi-session aggregate view and trend charts
+  annotate.py       # replay annotations (notes, labels, bookmarks)
+  token_budget.py   # token budget tracking and context window early warning
+  watch.py          # live session watcher with per-operation enforcement
+  share.py          # self-contained HTML report export
   cli.py            # CLI entry point
 ADRs/               # Architecture Decision Records
 ```
