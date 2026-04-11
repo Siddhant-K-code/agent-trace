@@ -315,14 +315,19 @@ def check_event(
     # --- Token budget ---
     if event.event_type == EventType.LLM_REQUEST:
         if state.token_budget_watcher is None:
-            from .token_budget import TokenBudgetWatcher
-            state.token_budget_watcher = TokenBudgetWatcher(
-                threshold=getattr(config, "max_context_pct", 0.9) / 100.0
-                if getattr(config, "max_context_pct", None) else 0.9
-            )
-        msg = state.token_budget_watcher.update(event)
-        if msg:
-            violations.append(msg)
+            try:
+                from .token_budget import TokenBudgetWatcher
+                threshold = (
+                    getattr(config, "max_context_pct", 90) / 100.0
+                    if getattr(config, "max_context_pct", None) else 0.9
+                )
+                state.token_budget_watcher = TokenBudgetWatcher(threshold=threshold)
+            except ImportError:
+                state.token_budget_watcher = False  # module not yet available
+        if state.token_budget_watcher:
+            msg = state.token_budget_watcher.update(event)
+            if msg:
+                violations.append(msg)
 
     # --- Per-operation enforcement rules ---
     if event.event_type == EventType.TOOL_CALL and config.operation_rules:
