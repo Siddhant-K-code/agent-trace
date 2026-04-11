@@ -66,6 +66,25 @@ def _kill_process(pid: int) -> None:
 # ---------------------------------------------------------------------------
 
 @dataclass
+class OperationRule:
+    """A per-operation enforcement rule."""
+    tool_name: str          # e.g. "bash", "write", "*"
+    pattern: str            # glob pattern matched against command/path
+    action: str             # "alert" | "block"
+    reason: str = ""        # human-readable explanation
+
+    def matches(self, tool: str, target: str) -> bool:
+        import fnmatch
+        tool_match = (
+            self.tool_name == "*"
+            or self.tool_name.lower() == tool.lower()
+        )
+        if not tool_match:
+            return False
+        return fnmatch.fnmatch(target.lower(), self.pattern.lower()) or self.pattern == "*"
+
+
+@dataclass
 class WatcherConfig:
     max_retries: int = 5
     max_cost_dollars: float = 10.0
@@ -76,6 +95,10 @@ class WatcherConfig:
     on_violation: str = "terminal"   # terminal | file | kill
     webhook_url: str = ""
     alert_log: str = ".agent-traces/alerts.log"
+    # Per-operation enforcement rules
+    operation_rules: list[OperationRule] = field(default_factory=list)
+    # Token budget threshold (1–100, percentage of context window)
+    max_context_pct: int = 90
 
     @classmethod
     def from_dict(cls, d: dict) -> "WatcherConfig":
@@ -86,6 +109,17 @@ class WatcherConfig:
         loop_cfg = watchers.get("loop", {})
         scope_cfg = watchers.get("scope", {})
         webhook = d.get("webhook", {})
+
+        # Parse per-operation rules
+        rules: list[OperationRule] = []
+        for rule_dict in d.get("operation_rules", []):
+            rules.append(OperationRule(
+                tool_name=rule_dict.get("tool", "*"),
+                pattern=rule_dict.get("pattern", "*"),
+                action=rule_dict.get("action", "alert"),
+                reason=rule_dict.get("reason", ""),
+            ))
+
         return cls(
             max_retries=int(retry_cfg.get("max", 5)),
             max_cost_dollars=float(cost_cfg.get("max_dollars", 10.0)),
@@ -95,6 +129,8 @@ class WatcherConfig:
             scope_policy=str(scope_cfg.get("policy", ".agent-scope.json")),
             on_violation=str(retry_cfg.get("alert", "terminal")),
             webhook_url=str(webhook.get("url", "")),
+            operation_rules=rules,
+            max_context_pct=int(d.get("max_context_pct", 90)),
         )
 
     @classmethod
@@ -123,6 +159,8 @@ class WatchState:
     fired: set = field(default_factory=set)
     # Agent PID (from session meta, if available)
     agent_pid: int | None = None
+    # Token budget watcher (lazy-initialised on first LLM_REQUEST)
+    token_budget_watcher: object | None = None
 
 
 def _event_key(event: TraceEvent) -> str:
@@ -273,6 +311,47 @@ def check_event(
                                 violations.append(f"ScopeWatcher: write to {path} denied by policy")
             except Exception:
                 pass
+
+    # --- Token budget ---
+    if event.event_type == EventType.LLM_REQUEST:
+        if state.token_budget_watcher is None:
+            try:
+                from .token_budget import TokenBudgetWatcher
+                threshold = (
+                    getattr(config, "max_context_pct", 90) / 100.0
+                    if getattr(config, "max_context_pct", None) else 0.9
+                )
+                state.token_budget_watcher = TokenBudgetWatcher(threshold=threshold)
+            except ImportError:
+                state.token_budget_watcher = False  # module not yet available
+        if state.token_budget_watcher:
+            msg = state.token_budget_watcher.update(event)
+            if msg:
+                violations.append(msg)
+
+    # --- Per-operation enforcement rules ---
+    if event.event_type == EventType.TOOL_CALL and config.operation_rules:
+        tool_name = event.data.get("tool_name", "").lower()
+        args = event.data.get("arguments", {}) or {}
+        # Derive the target string: command for bash, path for file ops
+        if tool_name == "bash":
+            target = str(args.get("command", "")).strip()
+        else:
+            target = str(
+                args.get("file_path") or args.get("path") or args.get("pattern") or ""
+            ).strip()
+
+        for rule in config.operation_rules:
+            if rule.matches(tool_name, target):
+                reason_suffix = f": {rule.reason}" if rule.reason else ""
+                msg = (
+                    f"OperationWatcher: {rule.action} {tool_name}"
+                    f" '{target[:60]}'{reason_suffix}"
+                )
+                key_id = f"op:{rule.tool_name}:{rule.pattern}:{target[:40]}"
+                if key_id not in state.fired:
+                    state.fired.add(key_id)
+                    violations.append(msg)
 
     return violations
 
