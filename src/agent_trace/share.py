@@ -20,7 +20,15 @@ from .explain import explain_session
 from .models import EventType, TraceEvent, SessionMeta
 from .store import TraceStore
 from .subagent import build_tree, aggregate_stats, SessionNode
-from .annotate import load_annotations, Annotation, LABEL_COLOURS, DEFAULT_LABEL_COLOUR
+try:
+    from .annotate import load_annotations, Annotation, LABEL_COLOURS, DEFAULT_LABEL_COLOUR
+    _ANNOTATE_AVAILABLE = True
+except ImportError:
+    _ANNOTATE_AVAILABLE = False
+    def load_annotations(store, session_id):  # type: ignore[misc]
+        return []
+    LABEL_COLOURS: dict = {}
+    DEFAULT_LABEL_COLOUR = "#8b949e"
 
 
 # ---------------------------------------------------------------------------
