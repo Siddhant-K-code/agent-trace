@@ -287,6 +287,10 @@ def cmd_policy(args: argparse.Namespace) -> int:
             return 1
         session_ids_raw = [s.session_id for s in all_sessions]
 
+    # Default: dry-run when no --output given
+    if not output_path and not dry_run:
+        dry_run = True
+
     # Resolve prefixes
     resolved: list[str] = []
     for sid in session_ids_raw:
