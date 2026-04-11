@@ -12,6 +12,7 @@ to meta.json at session start. It is never updated after that.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import sys
 from dataclasses import asdict, dataclass, field
@@ -50,7 +51,7 @@ class Attribution:
 
     @classmethod
     def from_dict(cls, d: dict) -> "Attribution":
-        known = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
+        known = {f.name for f in dataclasses.fields(cls)}
         return cls(**{k: v for k, v in d.items() if k in known})
 
 
