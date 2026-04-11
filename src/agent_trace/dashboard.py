@@ -15,8 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TextIO
 
-from .cost import estimate_cost
-from .models import EventType, SessionMeta
+from .models import SessionMeta
 from .store import TraceStore
 
 
@@ -199,7 +198,7 @@ def render_html_dashboard(report: DashboardReport) -> str:
 
     # Sparkline data for Chart.js-free inline SVG
     costs = [s.estimated_cost for s in reversed(report.summaries[:20])]
-    max_c = max(costs) if costs else 1.0
+    max_c = max(costs) or 1.0
     spark_points = ""
     if costs:
         w = 200
