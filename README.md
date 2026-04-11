@@ -1,5 +1,6 @@
 # agent-trace
 
+[![Run in Ona](https://ona.com/run-in-ona.svg)](https://app.ona.com/#https://github.com/Siddhant-K-code/agent-trace)
 [![PyPI](https://img.shields.io/pypi/v/agent-strace)](https://pypi.org/project/agent-strace/)
 [![Python](https://img.shields.io/pypi/pyversions/agent-strace)](https://pypi.org/project/agent-strace/)
 [![License](https://img.shields.io/github/license/Siddhant-K-code/agent-trace)](LICENSE)
