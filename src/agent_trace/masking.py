@@ -28,9 +28,11 @@ _EMAIL_RE = re.compile(
 )
 
 # Phone numbers (US and international formats)
+# Require a separator (space, dash, dot, or parens) to reduce false positives
+# on plain numeric sequences like IP addresses or version numbers.
 _PHONE_RE = re.compile(
     r"(?<!\d)(?:\+?1[\s\-.]?)?"
-    r"(?:\(?\d{3}\)?[\s\-.]?)"
+    r"(?:\(\d{3}\)[\s\-.]|\d{3}[\-.])"  # area code must have separator
     r"\d{3}[\s\-.]?\d{4}"
     r"(?!\d)"
 )
@@ -136,9 +138,10 @@ def _mask_string(value: str, config: MaskingConfig) -> str:
         result = _IPV4_RE.sub(repl, result)
 
     if config.mask_aws_arns:
-        result = _AWS_ARN_RE.sub(
-            lambda m: m.group(0).replace(m.group(1), repl), result
-        )
+        # Replace only the account ID portion (group 1) within the ARN
+        def _mask_arn(m: re.Match) -> str:
+            return m.group(0).replace(m.group(1), repl, 1)
+        result = _AWS_ARN_RE.sub(_mask_arn, result)
 
     for pat_str in config.custom_patterns:
         try:
