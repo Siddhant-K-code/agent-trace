@@ -15,6 +15,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import sys
 import time
@@ -58,7 +59,7 @@ class Annotation:
     @classmethod
     def from_json(cls, line: str) -> "Annotation":
         d = json.loads(line)
-        known = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
+        known = {f.name for f in dataclasses.fields(cls)}
         return cls(**{k: v for k, v in d.items() if k in known})
 
     @property
@@ -71,7 +72,7 @@ class Annotation:
 # ---------------------------------------------------------------------------
 
 def _annotations_path(store: TraceStore, session_id: str) -> Path:
-    return store._session_dir(session_id) / "annotations.jsonl"
+    return store.annotations_path(session_id)
 
 
 def add_annotation(
