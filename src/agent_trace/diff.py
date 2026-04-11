@@ -1,15 +1,17 @@
-"""Session diff: structural behavioral comparison of two sessions.
+"""Session diff: structural and semantic comparison of two sessions.
 
-Compares two sessions by their phase structure (from explain), finds the
-divergence point, and reports differences in files touched, commands run,
-outcomes, duration, and cost.
+Two modes:
+  - Structural (default): compares phase structure, divergence point, files/commands per phase.
+  - Semantic (--semantic): compares outcome-level metrics — files touched, commands run,
+    cost, duration, errors, and eval scores.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TextIO
 
 from .explain import Phase, build_phases, explain_session
@@ -229,6 +231,202 @@ def format_diff(result: SessionDiff, out: TextIO = sys.stdout) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Semantic diff
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SemanticDiffReport:
+    session_a: str
+    session_b: str
+    # Metrics
+    duration_a: float
+    duration_b: float
+    cost_a: float
+    cost_b: float
+    errors_a: int
+    errors_b: int
+    tool_calls_a: int
+    tool_calls_b: int
+    llm_requests_a: int
+    llm_requests_b: int
+    retries_a: int
+    retries_b: int
+    # File sets
+    files_read_both: list[str] = field(default_factory=list)
+    files_read_a_only: list[str] = field(default_factory=list)
+    files_read_b_only: list[str] = field(default_factory=list)
+    files_written_both: list[str] = field(default_factory=list)
+    files_written_a_only: list[str] = field(default_factory=list)
+    files_written_b_only: list[str] = field(default_factory=list)
+    # Command sets
+    cmds_both: list[str] = field(default_factory=list)
+    cmds_a_only: list[str] = field(default_factory=list)
+    cmds_b_only: list[str] = field(default_factory=list)
+    # Eval scores (optional)
+    eval_scores_a: dict = field(default_factory=dict)
+    eval_scores_b: dict = field(default_factory=dict)
+    # Verdict
+    verdict: str = ""   # "A is better" | "B is better" | "inconclusive"
+
+
+def semantic_diff(
+    store: TraceStore,
+    session_a: str,
+    session_b: str,
+    eval_config: str = ".agent-evals.yaml",
+) -> SemanticDiffReport:
+    """Compare two sessions at the outcome level."""
+    from .cost import estimate_cost
+
+    result_a = explain_session(store, session_a)
+    result_b = explain_session(store, session_b)
+    meta_a = store.load_meta(session_a)
+    meta_b = store.load_meta(session_b)
+
+    # Cost
+    try:
+        cost_a = estimate_cost(store, session_a).total_cost
+    except Exception:
+        cost_a = 0.0
+    try:
+        cost_b = estimate_cost(store, session_b).total_cost
+    except Exception:
+        cost_b = 0.0
+
+    # Aggregate files and commands across all phases
+    def _collect(result):
+        reads: set[str] = set()
+        writes: set[str] = set()
+        cmds: set[str] = set()
+        for p in result.phases:
+            reads.update(p.files_read)
+            writes.update(p.files_written)
+            cmds.update(p.commands)
+        return reads, writes, cmds
+
+    reads_a, writes_a, cmds_a = _collect(result_a)
+    reads_b, writes_b, cmds_b = _collect(result_b)
+
+    # Eval scores
+    eval_a: dict = {}
+    eval_b: dict = {}
+    try:
+        from .eval import run_evals
+        import os
+        if os.path.exists(eval_config):
+            eval_a = {r.scorer_name: r.score for r in run_evals(store, session_a, eval_config)}
+            eval_b = {r.scorer_name: r.score for r in run_evals(store, session_b, eval_config)}
+    except Exception:
+        pass
+
+    # Verdict: B is better if it has fewer errors, lower cost, shorter duration
+    # and is not worse on any metric
+    def _verdict() -> str:
+        a_wins = 0
+        b_wins = 0
+        metrics = [
+            (meta_a.errors, meta_b.errors, True),       # lower is better
+            (cost_a, cost_b, True),
+            (result_a.total_duration, result_b.total_duration, True),
+            (result_a.total_retries, result_b.total_retries, True),
+        ]
+        for va, vb, lower_better in metrics:
+            if lower_better:
+                if va > vb:
+                    b_wins += 1
+                elif vb > va:
+                    a_wins += 1
+        if b_wins > 0 and a_wins == 0:
+            return "B is better"
+        if a_wins > 0 and b_wins == 0:
+            return "A is better"
+        return "inconclusive"
+
+    return SemanticDiffReport(
+        session_a=session_a,
+        session_b=session_b,
+        duration_a=result_a.total_duration,
+        duration_b=result_b.total_duration,
+        cost_a=cost_a,
+        cost_b=cost_b,
+        errors_a=meta_a.errors,
+        errors_b=meta_b.errors,
+        tool_calls_a=meta_a.tool_calls,
+        tool_calls_b=meta_b.tool_calls,
+        llm_requests_a=meta_a.llm_requests,
+        llm_requests_b=meta_b.llm_requests,
+        retries_a=result_a.total_retries,
+        retries_b=result_b.total_retries,
+        files_read_both=sorted(reads_a & reads_b),
+        files_read_a_only=sorted(reads_a - reads_b),
+        files_read_b_only=sorted(reads_b - reads_a),
+        files_written_both=sorted(writes_a & writes_b),
+        files_written_a_only=sorted(writes_a - writes_b),
+        files_written_b_only=sorted(writes_b - writes_a),
+        cmds_both=sorted(cmds_a & cmds_b),
+        cmds_a_only=sorted(cmds_a - cmds_b),
+        cmds_b_only=sorted(cmds_b - cmds_a),
+        eval_scores_a=eval_a,
+        eval_scores_b=eval_b,
+        verdict=_verdict(),
+    )
+
+
+def _pct_change(a: float, b: float) -> str:
+    if a == 0:
+        return "n/a"
+    pct = (b - a) / a * 100
+    sign = "+" if pct > 0 else ""
+    return f"{sign}{pct:.0f}%"
+
+
+def format_semantic_diff(report: SemanticDiffReport, out: TextIO = sys.stdout) -> None:
+    w = out.write
+    a = report.session_a[:12]
+    b = report.session_b[:12]
+
+    w(f"\nSemantic diff: {a} vs {b}\n")
+    w("─" * 69 + "\n")
+    w(f"  {'':30}  {'Session A':>12}  {'Session B':>12}  {'Change':>8}\n")
+    w("─" * 69 + "\n")
+
+    def _row(label: str, va, vb, fmt=str, lower_better: bool = True) -> None:
+        change = _pct_change(float(va), float(vb)) if isinstance(va, (int, float)) else ""
+        w(f"  {label:<30}  {fmt(va):>12}  {fmt(vb):>12}  {change:>8}\n")
+
+    _row("Duration", _fmt_duration(report.duration_a), _fmt_duration(report.duration_b), fmt=str)
+    _row("Cost", f"${report.cost_a:.4f}", f"${report.cost_b:.4f}", fmt=str)
+    _row("Errors", report.errors_a, report.errors_b)
+    _row("Tool calls", report.tool_calls_a, report.tool_calls_b)
+    _row("LLM requests", report.llm_requests_a, report.llm_requests_b)
+    _row("Retries", report.retries_a, report.retries_b)
+    w("─" * 69 + "\n")
+
+    def _file_rows(label: str, both: list, a_only: list, b_only: list) -> None:
+        if both:
+            w(f"  {label} (both)    {', '.join(both[:3])}{'...' if len(both)>3 else ''}\n")
+        for f in a_only[:3]:
+            w(f"  {label} (A only)  {f}\n")
+        for f in b_only[:3]:
+            w(f"  {label} (B only)  {f}\n")
+
+    _file_rows("Files read", report.files_read_both, report.files_read_a_only, report.files_read_b_only)
+    _file_rows("Files written", report.files_written_both, report.files_written_a_only, report.files_written_b_only)
+    _file_rows("Commands", report.cmds_both, report.cmds_a_only, report.cmds_b_only)
+
+    if report.eval_scores_a or report.eval_scores_b:
+        w("─" * 69 + "\n")
+        all_scorers = sorted(set(report.eval_scores_a) | set(report.eval_scores_b))
+        for scorer in all_scorers:
+            sa = report.eval_scores_a.get(scorer, "n/a")
+            sb = report.eval_scores_b.get(scorer, "n/a")
+            w(f"  Eval {scorer:<25}  {str(sa):>12}  {str(sb):>12}\n")
+
+    w("─" * 69 + "\n")
+    w(f"  Verdict: {report.verdict}\n\n")
+
+
+# ---------------------------------------------------------------------------
 # CLI handler
 # ---------------------------------------------------------------------------
 
@@ -244,6 +442,12 @@ def cmd_diff(args: argparse.Namespace) -> int:
     if not id_b:
         sys.stderr.write(f"Session not found: {args.session_b}\n")
         return 1
+
+    if getattr(args, "semantic", False):
+        eval_config = getattr(args, "eval_config", ".agent-evals.yaml") or ".agent-evals.yaml"
+        report = semantic_diff(store, id_a, id_b, eval_config=eval_config)
+        format_semantic_diff(report)
+        return 0
 
     result = diff_sessions(store, id_a, id_b)
     format_diff(result)
