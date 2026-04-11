@@ -23,4 +23,4 @@ jobs:
         run: uv build
 
       - name: Publish to PyPI
-        run: uv publish --skip-existing
+        run: uv publish --check-url https://pypi.org/simple/agent-strace/
