@@ -22,14 +22,18 @@ import time
 from . import __version__
 from .hooks import hook_main
 from .http_proxy import HTTPProxyServer
+from .annotate import cmd_annotate
 from .audit import cmd_audit
 from .cost import cmd_cost
+from .dashboard import cmd_dashboard
 from .diff import cmd_diff
 from .eval import cmd_eval
 from .explain import cmd_explain
 from .jsonl_import import cmd_import
+from .policy import cmd_policy
 from .postmortem import cmd_postmortem
 from .share import cmd_share
+from .token_budget import cmd_token_budget
 from .watch import cmd_watch
 from .why import cmd_why
 from .models import EventType, SessionMeta, TraceEvent
@@ -549,6 +553,44 @@ def build_parser() -> argparse.ArgumentParser:
                          help="action on violation (default: terminal)")
     p_watch.add_argument("--webhook", help="webhook URL for alerts")
     p_watch.add_argument("--config", help="path to .agent-watch.json config file")
+    p_watch.add_argument("--max-context-pct", type=int, default=90, dest="max_context_pct",
+                         help="alert when context window is this %% full (default: 90)")
+
+    # policy
+    p_policy = sub.add_parser("policy", help="suggest a .agent-scope.json policy from observed traces")
+    p_policy.add_argument("session_ids", nargs="*", help="session IDs to analyse (default: all)")
+    p_policy.add_argument("--output", "-o", default=".agent-scope.json",
+                          help="output path (default: .agent-scope.json)")
+    p_policy.add_argument("--dry-run", action="store_true", help="print policy without writing")
+
+    # dashboard
+    p_dash = sub.add_parser("dashboard", help="aggregate view across sessions")
+    p_dash.add_argument("--limit", type=int, default=50, help="max sessions to show (default: 50)")
+    p_dash.add_argument("--agent", default="", help="filter by agent name")
+    p_dash.add_argument("--output", "-o", help="write HTML dashboard to this file")
+
+    # annotate
+    p_ann = sub.add_parser("annotate", help="attach notes, labels, and bookmarks to trace events")
+    p_ann.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
+    p_ann.add_argument("--event", help="event ID to annotate")
+    p_ann.add_argument("--at", help="time offset to annotate (e.g. 2m14s)")
+    p_ann.add_argument("--note", help="text note to attach")
+    p_ann.add_argument("--label", help="label chip (e.g. root-cause, decision, retry)")
+    p_ann.add_argument("--author", help="author name or email")
+    p_ann.add_argument("--list", action="store_true", help="list all annotations for the session")
+    p_ann.add_argument("--delete", metavar="ANNOTATION_ID", help="delete an annotation by ID")
+
+    # token-budget
+    p_tb = sub.add_parser("token-budget", help="show context window usage for a session")
+    p_tb.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
+    p_tb.add_argument("--warning-threshold", type=float, default=0.9, dest="warning_threshold",
+                      help="warn at this fraction of context limit (default: 0.9)")
+
+    # diff --semantic and --eval-config flags (extend existing diff parser)
+    p_diff.add_argument("--semantic", action="store_true",
+                        help="semantic outcome-level diff (files, cost, errors)")
+    p_diff.add_argument("--eval-config", default=".agent-evals.yaml", dest="eval_config",
+                        help="eval config for score comparison")
 
     return parser
 
@@ -588,6 +630,10 @@ def main() -> None:
         "postmortem": cmd_postmortem,
         "eval": cmd_eval,
         "watch": cmd_watch,
+        "policy": cmd_policy,
+        "dashboard": cmd_dashboard,
+        "annotate": cmd_annotate,
+        "token-budget": cmd_token_budget,
     }
 
     handler = handlers.get(args.command)
