@@ -46,6 +46,7 @@ import time
 from pathlib import Path
 
 from .models import EventType, SessionMeta, TraceEvent
+from .attribution import collect_attribution
 from .redact import redact_data
 from .store import TraceStore
 
@@ -126,9 +127,11 @@ def handle_session_start(input_data: dict) -> None:
     redact = _should_redact()
 
     session_id = input_data.get("session_id", "")
+    attr = collect_attribution()
     meta = SessionMeta(
         agent_name="claude-code",
         command=f"claude-code ({input_data.get('source', 'startup')})",
+        attribution=attr.to_dict(),
     )
     # Use Claude Code's session ID as part of our session ID for correlation
     if session_id:
