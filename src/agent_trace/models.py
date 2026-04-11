@@ -84,6 +84,8 @@ class SessionMeta:
     parent_session_id: str = ""   # session ID of the spawning agent
     parent_event_id: str = ""     # event_id of the tool_call that spawned this session
     depth: int = 0                # nesting depth (0 = root, 1 = first subagent, etc.)
+    # Attribution (who/what started this session)
+    attribution: dict = field(default_factory=dict)
 
     def to_json(self) -> str:
         d = asdict(self)
