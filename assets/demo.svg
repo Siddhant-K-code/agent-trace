@@ -1,0 +1,155 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 600" font-family="'Cascadia Code','Fira Mono','Menlo',monospace" font-size="13">
+  <!-- Background -->
+  <rect width="860" height="600" rx="8" fill="#0d1117"/>
+
+  <!-- Title bar -->
+  <rect width="860" height="36" rx="8" fill="#161b22"/>
+  <rect y="28" width="860" height="8" fill="#161b22"/>
+  <circle cx="20" cy="18" r="6" fill="#ff5f57"/>
+  <circle cx="40" cy="18" r="6" fill="#febc2e"/>
+  <circle cx="60" cy="18" r="6" fill="#28c840"/>
+  <text x="430" y="23" text-anchor="middle" fill="#8b949e" font-size="12">agent-trace — session replay</text>
+
+  <!-- Prompt -->
+  <text x="16" y="60" fill="#58a6ff">$</text>
+  <text x="28" y="60" fill="#e6edf3">agent-trace replay 201da364-edd6-49</text>
+
+  <!-- Session header box -->
+  <rect x="16" y="72" width="828" height="2" fill="#21262d"/>
+
+  <text x="16" y="90"  fill="#8b949e">Session Summary</text>
+  <text x="16" y="106" fill="#21262d">────────────────────────────────────────────────────────────────────────</text>
+  <text x="16" y="122" fill="#8b949e">Session:  </text><text x="90" y="122" fill="#e6edf3">201da364-edd6-49</text>
+  <text x="16" y="138" fill="#8b949e">Command:  </text><text x="90" y="138" fill="#e6edf3">claude-code (startup)</text>
+  <text x="16" y="154" fill="#8b949e">Agent:    </text><text x="90" y="154" fill="#e6edf3">claude-code</text>
+  <text x="16" y="170" fill="#8b949e">Duration: </text><text x="90" y="170" fill="#e6edf3">112.54s</text>
+  <text x="16" y="186" fill="#8b949e">Tool calls:</text><text x="96" y="186" fill="#e6edf3">8</text>
+  <text x="16" y="202" fill="#8b949e">Errors:   </text><text x="90" y="202" fill="#ff7b72">3</text>
+  <text x="16" y="214" fill="#21262d">────────────────────────────────────────────────────────────────────────</text>
+
+  <!-- Timeline -->
+  <!-- session_start -->
+  <text x="16"  y="232" fill="#8b949e">+ 0.00s</text>
+  <text x="76"  y="232" fill="#3fb950">▶</text>
+  <text x="90"  y="232" fill="#e6edf3">session_start</text>
+
+  <!-- user_prompt -->
+  <text x="16"  y="250" fill="#8b949e">+ 0.07s</text>
+  <text x="76"  y="250" fill="#58a6ff">👤</text>
+  <text x="94"  y="250" fill="#79c0ff">user_prompt</text>
+  <text x="190" y="250" fill="#8b949e">"how many tests does this project have? run them and tell me the results"</text>
+
+  <!-- tool_call Glob 1 -->
+  <text x="16"  y="268" fill="#8b949e">+ 3.55s</text>
+  <text x="76"  y="268" fill="#d2a8ff">→</text>
+  <text x="90"  y="268" fill="#d2a8ff">tool_call</text>
+  <text x="170" y="268" fill="#e6edf3">Glob</text>
+  <text x="210" y="268" fill="#8b949e">**/*.test.*</text>
+
+  <!-- tool_call Glob 2 -->
+  <text x="16"  y="284" fill="#8b949e">+ 3.55s</text>
+  <text x="76"  y="284" fill="#d2a8ff">→</text>
+  <text x="90"  y="284" fill="#d2a8ff">tool_call</text>
+  <text x="170" y="284" fill="#e6edf3">Glob</text>
+  <text x="210" y="284" fill="#8b949e">**/test_*.*</text>
+
+  <!-- tool_result Glob -->
+  <text x="16"  y="300" fill="#8b949e">+ 3.60s</text>
+  <text x="76"  y="300" fill="#3fb950">←</text>
+  <text x="90"  y="300" fill="#3fb950">tool_result</text>
+  <text x="178" y="300" fill="#e6edf3">Glob</text>
+  <text x="218" y="300" fill="#8b949e">(51ms)</text>
+
+  <!-- tool_call Bash 1 -->
+  <text x="16"  y="318" fill="#8b949e">+ 6.06s</text>
+  <text x="76"  y="318" fill="#d2a8ff">→</text>
+  <text x="90"  y="318" fill="#d2a8ff">tool_call</text>
+  <text x="170" y="318" fill="#e6edf3">Bash</text>
+  <text x="210" y="318" fill="#8b949e">$ python -m pytest tests/ -v 2&gt;&amp;1</text>
+
+  <!-- error 1 -->
+  <text x="16"  y="334" fill="#8b949e">+27.65s</text>
+  <text x="76"  y="334" fill="#ff7b72">✗</text>
+  <text x="90"  y="334" fill="#ff7b72">error</text>
+  <text x="138" y="334" fill="#e6edf3">Bash</text>
+  <text x="178" y="334" fill="#ff7b72">Command failed with exit code 1</text>
+
+  <!-- tool_call Bash 2 -->
+  <text x="16"  y="352" fill="#8b949e">+29.89s</text>
+  <text x="76"  y="352" fill="#d2a8ff">→</text>
+  <text x="90"  y="352" fill="#d2a8ff">tool_call</text>
+  <text x="170" y="352" fill="#e6edf3">Bash</text>
+  <text x="210" y="352" fill="#8b949e">$ python3 -m pytest tests/ -v 2&gt;&amp;1</text>
+
+  <!-- error 2 -->
+  <text x="16"  y="368" fill="#8b949e">+40.56s</text>
+  <text x="76"  y="368" fill="#ff7b72">✗</text>
+  <text x="90"  y="368" fill="#ff7b72">error</text>
+  <text x="138" y="368" fill="#e6edf3">Bash</text>
+  <text x="178" y="368" fill="#ff7b72">No module named pytest</text>
+
+  <!-- tool_call Bash 3 -->
+  <text x="16"  y="386" fill="#8b949e">+45.96s</text>
+  <text x="76"  y="386" fill="#d2a8ff">→</text>
+  <text x="90"  y="386" fill="#d2a8ff">tool_call</text>
+  <text x="170" y="386" fill="#e6edf3">Bash</text>
+  <text x="210" y="386" fill="#8b949e">$ which pytest || ls /Users/siddhant/Desktop/test-agent-trace/ 2&gt;&amp;1</text>
+
+  <!-- tool_result Bash -->
+  <text x="16"  y="402" fill="#8b949e">+46.01s</text>
+  <text x="76"  y="402" fill="#3fb950">←</text>
+  <text x="90"  y="402" fill="#3fb950">tool_result</text>
+  <text x="178" y="402" fill="#e6edf3">Bash</text>
+  <text x="218" y="402" fill="#8b949e">(51ms)</text>
+
+  <!-- tool_call Read -->
+  <text x="16"  y="420" fill="#8b949e">+48.18s</text>
+  <text x="76"  y="420" fill="#d2a8ff">→</text>
+  <text x="90"  y="420" fill="#d2a8ff">tool_call</text>
+  <text x="170" y="420" fill="#e6edf3">Read</text>
+  <text x="214" y="420" fill="#8b949e">/Users/siddhant/Desktop/test-agent-trace/pyproject.toml</text>
+
+  <!-- tool_result Read -->
+  <text x="16"  y="436" fill="#8b949e">+48.23s</text>
+  <text x="76"  y="436" fill="#3fb950">←</text>
+  <text x="90"  y="436" fill="#3fb950">tool_result</text>
+  <text x="178" y="436" fill="#e6edf3">Read</text>
+  <text x="218" y="436" fill="#8b949e">(43ms)</text>
+
+  <!-- tool_call Bash 4 -->
+  <text x="16"  y="454" fill="#8b949e">+51.43s</text>
+  <text x="76"  y="454" fill="#d2a8ff">→</text>
+  <text x="90"  y="454" fill="#d2a8ff">tool_call</text>
+  <text x="170" y="454" fill="#e6edf3">Bash</text>
+  <text x="210" y="454" fill="#8b949e">$ uv run --with pytest pytest tests/ -v 2&gt;&amp;1</text>
+
+  <!-- tool_result Bash final -->
+  <text x="16"  y="470" fill="#8b949e">+1m43.67s</text>
+  <text x="84"  y="470" fill="#3fb950">←</text>
+  <text x="98"  y="470" fill="#3fb950">tool_result</text>
+  <text x="186" y="470" fill="#e6edf3">Bash</text>
+  <text x="226" y="470" fill="#8b949e">(5.88s)</text>
+  <text x="290" y="470" fill="#3fb950">75 tests, all passing in 3.60s</text>
+
+  <!-- assistant_response -->
+  <text x="16"  y="488" fill="#8b949e">+1m52.54s</text>
+  <text x="84"  y="488" fill="#ffa657">🤖</text>
+  <text x="102" y="488" fill="#ffa657">assistant_response</text>
+  <text x="254" y="488" fill="#8b949e">"75 tests, all passing in 3.60s. Breakdown by file: ..."</text>
+
+  <!-- Divider -->
+  <line x1="16" y1="502" x2="844" y2="502" stroke="#21262d" stroke-width="1"/>
+
+  <!-- Footer -->
+  <text x="16" y="522" fill="#8b949e" font-size="11">Tool calls show actual values: commands, file paths, glob patterns.</text>
+  <text x="16" y="538" fill="#8b949e" font-size="11">Errors show what failed. Assistant responses are stripped of markdown.</text>
+
+  <!-- install badge -->
+  <rect x="16" y="554" width="260" height="24" rx="4" fill="#161b22" stroke="#21262d" stroke-width="1"/>
+  <text x="26" y="570" fill="#58a6ff" font-size="12">$</text>
+  <text x="38" y="570" fill="#e6edf3" font-size="12">uv tool install agent-strace</text>
+
+  <rect x="288" y="554" width="260" height="24" rx="4" fill="#161b22" stroke="#21262d" stroke-width="1"/>
+  <text x="298" y="570" fill="#58a6ff" font-size="12">$</text>
+  <text x="310" y="570" fill="#e6edf3" font-size="12">agent-trace replay &lt;session-id&gt;</text>
+</svg>

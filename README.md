@@ -8,6 +8,8 @@
 
 `strace` for AI agents. Capture and replay every tool call, prompt, and response from Claude Code, Cursor, or any MCP client.
 
+![demo](assets/demo.svg)
+
 ## Why
 
 A coding agent rewrites 20 files in a background session. You get a pull request. You do not get the story. Which files did it read first? Why did it call the same tool three times? What failed before it found the fix?
