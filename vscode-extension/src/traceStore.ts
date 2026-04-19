@@ -114,7 +114,7 @@ export class TraceWatcher extends vscode.Disposable {
 
   private activeSessionWatcher: fs.FSWatcher | null = null;
   private eventsWatcher: fs.FSWatcher | null = null;
-  private pollTimer: NodeJS.Timeout | null = null;
+  private pollTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(workspaceRoot: string, traceDir: string) {
     super(() => this.dispose());
@@ -140,23 +140,23 @@ export class TraceWatcher extends vscode.Disposable {
   // -------------------------------------------------------------------------
 
   private _watchActiveSessionFile(): void {
-    // Watch the parent directory so we catch creation of .active-session
     const dir = this.traceDir;
-    if (!fs.existsSync(dir)) {
-      // Retry when the directory appears
-      this.pollTimer = setTimeout(() => this._watchActiveSessionFile(), 2000);
-      return;
-    }
 
-    try {
-      this.activeSessionWatcher = fs.watch(dir, (_event, filename) => {
-        if (filename === ".active-session") {
-          this._checkActiveSession();
-        }
-      });
-    } catch {
-      // Fall back to polling if fs.watch fails (e.g. network FS)
-      this.pollTimer = setInterval(() => this._checkActiveSession(), 1000);
+    // Always use polling as primary — fs.watch silently fails on network/FUSE
+    // filesystems (e.g. Gitpod, WSL, Docker volumes) without throwing.
+    this.pollTimer = setInterval(() => this._checkActiveSession(), 500);
+
+    // Also try fs.watch as a faster secondary trigger (best-effort)
+    if (fs.existsSync(dir)) {
+      try {
+        this.activeSessionWatcher = fs.watch(dir, (_event, filename) => {
+          if (filename === ".active-session") {
+            this._checkActiveSession();
+          }
+        });
+      } catch {
+        // polling already running, ignore
+      }
     }
   }
 
@@ -226,21 +226,26 @@ export class TraceWatcher extends vscode.Disposable {
 
   private _watchEventsFile(sessionId: string): void {
     const eventsFile = path.join(this.traceDir, sessionId, "events.ndjson");
-    if (!fs.existsSync(eventsFile)) { return; }
 
-    try {
-      this.eventsWatcher = fs.watch(eventsFile, () => {
-        this._readNewEvents();
-      });
-    } catch {
-      // Polling fallback
-      const timer = setInterval(() => {
-        if (this.currentSessionId !== sessionId) {
-          clearInterval(timer);
-          return;
-        }
-        this._readNewEvents();
-      }, 500);
+    // Always poll — fs.watch silently fails on network/FUSE filesystems.
+    // 300ms gives snappy updates without hammering the FS.
+    const timer = setInterval(() => {
+      if (this.currentSessionId !== sessionId) {
+        clearInterval(timer);
+        return;
+      }
+      this._readNewEvents();
+    }, 300);
+
+    // Also try fs.watch as a faster secondary trigger (best-effort)
+    if (fs.existsSync(eventsFile)) {
+      try {
+        this.eventsWatcher = fs.watch(eventsFile, () => {
+          this._readNewEvents();
+        });
+      } catch {
+        // polling already running, ignore
+      }
     }
   }
 
@@ -384,7 +389,7 @@ export class TraceWatcher extends vscode.Disposable {
   override dispose(): void {
     this.activeSessionWatcher?.close();
     this.eventsWatcher?.close();
-    if (this.pollTimer) { clearTimeout(this.pollTimer); }
+    if (this.pollTimer) { clearInterval(this.pollTimer); }
     this._onSessionStart.dispose();
     this._onSessionEnd.dispose();
     this._onEvent.dispose();
