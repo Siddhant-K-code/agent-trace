@@ -23,6 +23,11 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      - name: Resize icon to 128x128
+        run: |
+          npm install sharp
+          node -e "require('sharp')('../Agent trace.png').resize(128,128,{fit:'cover'}).png().toFile('icon.png').then(()=>console.log('done')).catch(e=>{console.error(e);process.exit(1);})"
+
       - name: Install vsce
         run: npm install -g @vscode/vsce
 
