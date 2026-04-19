@@ -26,6 +26,7 @@ from .annotate import cmd_annotate
 from .audit import cmd_audit
 from .cost import cmd_cost
 from .dashboard import cmd_dashboard
+from .shadow_ai import cmd_audit_tools
 from .diff import cmd_diff
 from .eval import cmd_eval
 from .explain import cmd_explain
@@ -586,6 +587,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_tb.add_argument("--warning-threshold", type=float, default=0.9, dest="warning_threshold",
                       help="warn at this fraction of context limit (default: 0.9)")
 
+    # audit-tools (shadow AI detection)
+    p_at = sub.add_parser("audit-tools", help="detect which AI tools are active in a repository")
+    p_at.add_argument("--repo", default=".", help="path to git repository (default: .)")
+    p_at.add_argument("--since", default="90 days ago",
+                      help="how far back to scan git history (default: '90 days ago')")
+    p_at.add_argument("--approved", default="",
+                      help="comma-separated list of approved tool names")
+
     # diff --semantic and --eval-config flags (extend existing diff parser)
     p_diff.add_argument("--semantic", action="store_true",
                         help="semantic outcome-level diff (files, cost, errors)")
@@ -634,6 +643,7 @@ def main() -> None:
         "dashboard": cmd_dashboard,
         "annotate": cmd_annotate,
         "token-budget": cmd_token_budget,
+        "audit-tools": cmd_audit_tools,
     }
 
     handler = handlers.get(args.command)
