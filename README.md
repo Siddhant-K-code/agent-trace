@@ -5,6 +5,7 @@
 [![Python](https://img.shields.io/pypi/pyversions/agent-strace)](https://pypi.org/project/agent-strace/)
 [![License](https://img.shields.io/github/license/Siddhant-K-code/agent-trace)](LICENSE)
 [![CI](https://github.com/Siddhant-K-code/agent-trace/actions/workflows/test.yml/badge.svg)](https://github.com/Siddhant-K-code/agent-trace/actions/workflows/test.yml)
+[![Open VSX](https://img.shields.io/open-vsx/v/Siddhant-K-code/agent-strace)](https://open-vsx.org/extension/Siddhant-K-code/agent-strace)
 
 `strace` for AI agents. Capture and replay every tool call, prompt, and response from Claude Code, Cursor, or any MCP client — then analyse, diff, audit, and share what happened.
 
@@ -30,6 +31,50 @@ uvx agent-strace replay
 ```
 
 **Zero dependencies.** Python 3.10+ standard library only.
+
+## VS Code / Cursor extension
+
+Install the **agent-strace** extension to see live session activity without leaving the editor.
+
+**Install:**
+- Search `agent-strace` in the Extensions panel (VS Code, Cursor, or any Open VSX-compatible editor)
+- Or install from [open-vsx.org/extension/Siddhant-K-code/agent-strace](https://open-vsx.org/extension/Siddhant-K-code/agent-strace)
+
+**What you get:**
+
+| Feature | Description |
+|---|---|
+| Status bar | Live cost, tool call count, and active tool name. Click to open the event stream. |
+| Gutter annotations | Blue border on files the agent read, amber on files it modified. Inline label shows read/write counts. |
+| Event stream panel | Live feed in the Explorer sidebar — every tool call, file op, LLM request, and error. |
+| Pause button | Stops the agent mid-session via SIGSTOP. Requires `agent-strace watch` running in a terminal. |
+
+**Setup:**
+
+```bash
+# 1. Install agent-strace
+pip install agent-strace
+
+# 2. Add hooks to Claude Code (one-time)
+agent-strace setup
+
+# 3. Open your project in VS Code / Cursor
+# The extension activates automatically when .agent-traces/ exists
+
+# 4. Start Claude Code — the status bar item appears immediately
+```
+
+The extension activates automatically when a `.agent-traces/` directory exists in the workspace root. No configuration required.
+
+**Pause / resume** (optional — requires watch running):
+
+```bash
+# In a separate terminal, start the watcher
+agent-strace watch
+
+# Then use the Pause button in the event stream panel,
+# or run: agent-trace: Pause Agent from the command palette
+```
 
 ## Quick start
 
