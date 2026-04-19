@@ -88,21 +88,65 @@ def _resolve_price(model: str) -> float:
     return DEFAULT_INPUT_PRICE
 
 
-def _classify_event(event: TraceEvent) -> str | None:
-    """Return content type label for an event, or None to skip."""
+def _extract_tokens_by_type(event: TraceEvent) -> dict[str, int]:
+    """Return a mapping of content_type → estimated token count for one event.
+
+    LLM_REQUEST events may contain multiple content types simultaneously
+    (system prompt + tool definitions + user messages). Each is measured
+    independently so the per-type breakdown is accurate.
+    """
+    result: dict[str, int] = {}
     et = event.event_type
+    data = event.data
+
     if et == EventType.LLM_REQUEST:
-        data = event.data
-        if "system" in data or "system_prompt" in data:
-            return "system_prompt"
-        if "tools" in data or "tool_definitions" in data:
-            return "tool_definitions"
-        return "user_messages"
-    if et == EventType.USER_PROMPT:
-        return "user_messages"
-    if et in (EventType.ASSISTANT_RESPONSE, EventType.LLM_RESPONSE):
-        return "assistant_messages"
-    return None
+        # System prompt — Anthropic top-level key or OpenAI role=system message
+        system_text = ""
+        if "system" in data:
+            system_text = json.dumps(data["system"])
+        elif "system_prompt" in data:
+            system_text = json.dumps(data["system_prompt"])
+        else:
+            # OpenAI format: look for role=system inside messages array
+            for msg in data.get("messages", []):
+                if isinstance(msg, dict) and msg.get("role") == "system":
+                    system_text += json.dumps(msg.get("content", ""))
+        if system_text:
+            result["system_prompt"] = _estimate_tokens(system_text)
+
+        # Tool definitions
+        tools_text = ""
+        if "tools" in data:
+            tools_text = json.dumps(data["tools"])
+        elif "tool_definitions" in data:
+            tools_text = json.dumps(data["tool_definitions"])
+        if tools_text:
+            result["tool_definitions"] = _estimate_tokens(tools_text)
+
+        # User messages (non-system messages in the messages array)
+        user_text = ""
+        for msg in data.get("messages", []):
+            if isinstance(msg, dict) and msg.get("role") != "system":
+                user_text += json.dumps(msg.get("content", ""))
+        # Also count any top-level prompt field
+        if "prompt" in data:
+            user_text += json.dumps(data["prompt"])
+        if user_text:
+            result["user_messages"] = _estimate_tokens(user_text)
+
+        # Fallback: if none of the above matched, count the whole payload
+        if not result:
+            result["user_messages"] = _estimate_tokens(json.dumps(data))
+
+    elif et == EventType.USER_PROMPT:
+        content = json.dumps(data.get("content", data))
+        result["user_messages"] = _estimate_tokens(content)
+
+    elif et in (EventType.ASSISTANT_RESPONSE, EventType.LLM_RESPONSE):
+        content = json.dumps(data.get("content", data))
+        result["assistant_messages"] = _estimate_tokens(content)
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -185,14 +229,19 @@ def analyse_inflation(
             events = store.load_events(sid)
         except Exception:
             continue
-        sessions_analysed += 1
+
+        session_raw = 0
         for event in events:
-            ct = _classify_event(event)
-            if ct is None:
-                continue
-            raw = _estimate_tokens(json.dumps(event.data))
-            raw_tokens[ct] = raw_tokens.get(ct, 0) + raw
-            total_raw += raw
+            by_type = _extract_tokens_by_type(event)
+            for ct, count in by_type.items():
+                raw_tokens[ct] = raw_tokens.get(ct, 0) + count
+                session_raw += count
+                total_raw += count
+
+        # Only count sessions that contributed LLM/prompt content — sessions
+        # with only tool calls would dilute the per-session average.
+        if session_raw > 0:
+            sessions_analysed += 1
 
     if sessions_analysed == 0:
         sessions_analysed = 1
