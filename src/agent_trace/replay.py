@@ -9,6 +9,7 @@ from __future__ import annotations
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TextIO
 
 from .models import EventType, TraceEvent, SessionMeta
@@ -385,3 +386,235 @@ def list_sessions(store: TraceStore, out: TextIO = sys.stdout) -> None:
 
     out.write(f"{C.GRAY}{'─' * 70}{C.RESET}\n")
     out.write(f"  {len(sessions)} session(s)\n\n")
+
+
+# ---------------------------------------------------------------------------
+# HTML replay viewer (#40)
+# ---------------------------------------------------------------------------
+
+_HTML_TEMPLATE = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>agent-strace: {session_id}</title>
+<style>
+  :root {{
+    --bg: #0d1117; --surface: #161b22; --border: #30363d;
+    --text: #e6edf3; --dim: #8b949e; --green: #3fb950; --red: #f85149;
+    --yellow: #d29922; --blue: #58a6ff; --purple: #bc8cff; --cyan: #39d353;
+  }}
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ background: var(--bg); color: var(--text); font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; }}
+  header {{ background: var(--surface); border-bottom: 1px solid var(--border); padding: 12px 20px; display: flex; align-items: center; gap: 16px; position: sticky; top: 0; z-index: 10; }}
+  header h1 {{ font-size: 14px; font-weight: 600; }}
+  .meta {{ color: var(--dim); font-size: 12px; }}
+  .cost-counter {{ margin-left: auto; color: var(--green); font-weight: 600; }}
+  .controls {{ display: flex; gap: 8px; }}
+  button {{ background: var(--surface); border: 1px solid var(--border); color: var(--text); padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }}
+  button:hover {{ background: var(--border); }}
+  #timeline {{ padding: 16px 20px; max-width: 1100px; margin: 0 auto; }}
+  .event {{ border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; overflow: hidden; opacity: 0; transform: translateY(4px); transition: opacity 0.2s, transform 0.2s; }}
+  .event.visible {{ opacity: 1; transform: none; }}
+  .event-header {{ display: flex; align-items: center; gap: 10px; padding: 8px 12px; cursor: pointer; user-select: none; }}
+  .event-header:hover {{ background: rgba(255,255,255,0.03); }}
+  .ts {{ color: var(--dim); font-size: 11px; min-width: 70px; }}
+  .icon {{ font-size: 14px; min-width: 20px; text-align: center; }}
+  .type {{ font-weight: 600; font-size: 12px; min-width: 130px; }}
+  .summary {{ color: var(--dim); font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+  .dur {{ color: var(--dim); font-size: 11px; margin-left: auto; }}
+  .event-body {{ display: none; padding: 10px 12px; border-top: 1px solid var(--border); background: rgba(0,0,0,0.2); }}
+  .event-body.open {{ display: block; }}
+  pre {{ white-space: pre-wrap; word-break: break-all; font-size: 12px; color: var(--dim); max-height: 300px; overflow-y: auto; }}
+  .type-tool_call {{ border-left: 3px solid var(--cyan); }}
+  .type-tool_result {{ border-left: 3px solid var(--blue); }}
+  .type-llm_request {{ border-left: 3px solid var(--purple); }}
+  .type-llm_response {{ border-left: 3px solid var(--purple); }}
+  .type-session_start, .type-session_end {{ border-left: 3px solid var(--green); }}
+  .type-error {{ border-left: 3px solid var(--red); }}
+  .type-user_prompt {{ border-left: 3px solid var(--green); }}
+  .type-assistant_response {{ border-left: 3px solid var(--purple); }}
+  .type-file_read, .type-file_write {{ border-left: 3px solid var(--yellow); }}
+  #scrubber {{ width: 100%; margin: 8px 0; accent-color: var(--blue); }}
+  .paused {{ opacity: 0.5; }}
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>agent-strace replay</h1>
+    <div class="meta">{session_id} &nbsp;·&nbsp; {event_count} events &nbsp;·&nbsp; {duration}</div>
+  </div>
+  <div class="controls">
+    <button id="btn-play" onclick="togglePlay()">⏸ Pause</button>
+    <button onclick="showAll()">Show all</button>
+  </div>
+  <div class="cost-counter">$<span id="cost">0.0000</span></div>
+</header>
+<div id="timeline">
+  <input type="range" id="scrubber" min="0" max="{max_idx}" value="0" oninput="scrubTo(this.value)">
+</div>
+<script>
+const EVENTS = {events_json};
+const COSTS = {costs_json};
+let playing = true;
+let currentIdx = 0;
+let timer = null;
+
+function fmtTs(offset) {{
+  if (offset < 60) return '+' + offset.toFixed(1) + 's';
+  return '+' + Math.floor(offset/60) + 'm' + (offset%60).toFixed(0).padStart(2,'0') + 's';
+}}
+
+function icon(type) {{
+  const m = {{tool_call:'→',tool_result:'←',llm_request:'⬆',llm_response:'⬇',
+    session_start:'▶',session_end:'■',file_read:'📖',file_write:'📝',
+    error:'✗',user_prompt:'👤',assistant_response:'🤖',decision:'◆'}};
+  return m[type] || '·';
+}}
+
+function summary(ev) {{
+  const d = ev.data || {{}};
+  if (ev.event_type === 'tool_call') return (d.tool_name||'') + ' ' + JSON.stringify(d.arguments||{{}}).slice(0,60);
+  if (ev.event_type === 'tool_result') return String(d.content||d.result||'').slice(0,80);
+  if (ev.event_type === 'llm_request') return (d.model||'') + ' (' + (d.message_count||0) + ' msgs)';
+  if (ev.event_type === 'llm_response') return (d.total_tokens||0) + ' tokens';
+  if (ev.event_type === 'user_prompt') return String(d.content||'').slice(0,80);
+  if (ev.event_type === 'assistant_response') return String(d.content||'').slice(0,80);
+  return '';
+}}
+
+function renderEvent(ev, idx) {{
+  const div = document.createElement('div');
+  div.className = 'event type-' + ev.event_type;
+  div.id = 'ev-' + idx;
+  const dur = ev.duration_ms ? (ev.duration_ms < 1000 ? ev.duration_ms.toFixed(0)+'ms' : (ev.duration_ms/1000).toFixed(1)+'s') : '';
+  div.innerHTML = `
+    <div class="event-header" onclick="toggle(${{idx}})">
+      <span class="ts">${{fmtTs(ev._offset||0)}}</span>
+      <span class="icon">${{icon(ev.event_type)}}</span>
+      <span class="type">${{ev.event_type}}</span>
+      <span class="summary">${{summary(ev)}}</span>
+      <span class="dur">${{dur}}</span>
+    </div>
+    <div class="event-body" id="body-${{idx}}">
+      <pre>${{JSON.stringify(ev.data||{{}}, null, 2)}}</pre>
+    </div>`;
+  return div;
+}}
+
+function toggle(idx) {{
+  const body = document.getElementById('body-' + idx);
+  body.classList.toggle('open');
+}}
+
+function showEvent(idx) {{
+  if (idx >= EVENTS.length) {{ playing = false; return; }}
+  const ev = EVENTS[idx];
+  const div = renderEvent(ev, idx);
+  document.getElementById('timeline').appendChild(div);
+  requestAnimationFrame(() => div.classList.add('visible'));
+  document.getElementById('cost').textContent = COSTS[idx].toFixed(4);
+  document.getElementById('scrubber').value = idx;
+  currentIdx = idx + 1;
+}}
+
+function showAll() {{
+  clearTimeout(timer);
+  playing = false;
+  document.getElementById('btn-play').textContent = '▶ Play';
+  while (currentIdx < EVENTS.length) showEvent(currentIdx);
+}}
+
+function scrubTo(val) {{
+  clearTimeout(timer);
+  playing = false;
+  document.getElementById('btn-play').textContent = '▶ Play';
+  const tl = document.getElementById('timeline');
+  // Remove events after scrubber range
+  const existing = tl.querySelectorAll('.event');
+  existing.forEach(el => el.remove());
+  currentIdx = 0;
+  for (let i = 0; i <= parseInt(val); i++) showEvent(i);
+}}
+
+function togglePlay() {{
+  playing = !playing;
+  document.getElementById('btn-play').textContent = playing ? '⏸ Pause' : '▶ Play';
+  if (playing) scheduleNext();
+}}
+
+function scheduleNext() {{
+  if (!playing || currentIdx >= EVENTS.length) return;
+  const ev = EVENTS[currentIdx];
+  const next = EVENTS[currentIdx + 1];
+  const delay = next ? Math.min((next._offset - ev._offset) * 1000 / 4, 800) : 0;
+  showEvent(currentIdx);
+  timer = setTimeout(scheduleNext, Math.max(delay, 80));
+}}
+
+// Start playback
+scheduleNext();
+</script>
+</body>
+</html>
+"""
+
+
+def replay_to_html(
+    store: TraceStore,
+    session_id: str,
+    output_path: str | None = None,
+) -> str:
+    """Generate a self-contained HTML replay viewer for a session.
+
+    Returns the HTML string. If output_path is given, also writes to disk.
+    """
+    import json as _json
+    from .cost import _dollars, _event_tokens
+
+    meta = store.load_meta(session_id)
+    events = store.load_events(session_id)
+
+    if not events:
+        return "<html><body>No events found.</body></html>"
+
+    base_ts = events[0].timestamp
+    duration_s = events[-1].timestamp - base_ts
+    if duration_s < 60:
+        duration_str = f"{duration_s:.0f}s"
+    else:
+        duration_str = f"{int(duration_s)//60}m {int(duration_s)%60:02d}s"
+
+    # Build event list with offset and running cost
+    events_data = []
+    costs_data = []
+    running_cost = 0.0
+    for e in events:
+        d = dict(e.data)
+        d_out = {
+            "event_type": e.event_type.value,
+            "event_id": e.event_id,
+            "_offset": round(e.timestamp - base_ts, 3),
+            "duration_ms": e.duration_ms,
+            "data": d,
+        }
+        inp, out = _event_tokens(e)
+        running_cost += _dollars(inp, out, "sonnet")
+        events_data.append(d_out)
+        costs_data.append(round(running_cost, 6))
+
+    html = _HTML_TEMPLATE.format(
+        session_id=session_id[:16],
+        event_count=len(events),
+        duration=duration_str,
+        max_idx=len(events) - 1,
+        events_json=_json.dumps(events_data, separators=(",", ":")),
+        costs_json=_json.dumps(costs_data, separators=(",", ":")),
+    )
+
+    if output_path:
+        Path(output_path).write_text(html, encoding="utf-8")
+
+    return html
