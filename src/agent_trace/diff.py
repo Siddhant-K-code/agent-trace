@@ -1,9 +1,11 @@
 """Session diff: structural and semantic comparison of two sessions.
 
-Two modes:
+Three modes:
   - Structural (default): compares phase structure, divergence point, files/commands per phase.
   - Semantic (--semantic): compares outcome-level metrics — files touched, commands run,
     cost, duration, errors, and eval scores.
+  - Compare (--compare): rich side-by-side table with cost, duration, tool calls,
+    redundant reads, context resets, and a deterministic verdict.
 """
 
 from __future__ import annotations
@@ -194,6 +196,8 @@ def format_diff(result: SessionDiff, out: TextIO = sys.stdout) -> None:
 
     if result.divergence_index == -1:
         w("Sessions are structurally identical.\n\n")
+    elif result.divergence_index == 0 and not result.phase_diffs:
+        w("Sessions diverge from the start (no common phases).\n\n")
     else:
         w(f"Diverged at phase {result.divergence_index + 1}:\n\n")
 
@@ -427,6 +431,258 @@ def format_semantic_diff(report: SemanticDiffReport, out: TextIO = sys.stdout) -
 
 
 # ---------------------------------------------------------------------------
+# Rich comparison (--compare)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CompareReport:
+    session_a: str
+    session_b: str
+    label_a: str          # short label (model name or session prefix)
+    label_b: str
+    # Metrics
+    duration_a: float
+    duration_b: float
+    cost_a: float
+    cost_b: float
+    tool_calls_a: int
+    tool_calls_b: int
+    redundant_reads_a: int
+    redundant_reads_b: int
+    context_resets_a: int
+    context_resets_b: int
+    files_modified_a: int
+    files_modified_b: int
+    errors_a: int
+    errors_b: int
+    # Approach divergence: list of (step_index, description_a, description_b)
+    divergence_points: list[tuple[int, str, str]] = field(default_factory=list)
+    verdict: str = ""     # e.g. "session-a was 26% cheaper, 28% faster"
+
+
+def _count_redundant_reads(events) -> int:
+    """Count tool_call read events for files already read in this session."""
+    seen: set[str] = set()
+    redundant = 0
+    for e in events:
+        if e.event_type == EventType.TOOL_CALL:
+            name = e.data.get("tool_name", "").lower()
+            args = e.data.get("arguments", {}) or {}
+            if name in ("read", "read_file", "view"):
+                path = str(args.get("file_path") or args.get("path") or "")
+                if path:
+                    if path in seen:
+                        redundant += 1
+                    else:
+                        seen.add(path)
+    return redundant
+
+
+def _count_context_resets(events) -> int:
+    """Count LLM requests that appear to start a new context (session_start or large gap)."""
+    resets = 0
+    last_ts: float | None = None
+    for e in events:
+        if e.event_type == EventType.LLM_REQUEST:
+            if last_ts is not None and (e.timestamp - last_ts) > 120:
+                resets += 1
+            last_ts = e.timestamp
+    return resets
+
+
+def _build_label(store: TraceStore, session_id: str) -> str:
+    """Build a short display label from session meta."""
+    try:
+        meta = store.load_meta(session_id)
+        if meta.agent_name:
+            return meta.agent_name[:20]
+    except Exception:
+        pass
+    return session_id[:12]
+
+
+def compare_sessions(
+    store: TraceStore,
+    session_a: str,
+    session_b: str,
+) -> CompareReport:
+    """Produce a rich side-by-side comparison of two sessions."""
+    from .cost import estimate_cost
+
+    meta_a = store.load_meta(session_a)
+    meta_b = store.load_meta(session_b)
+    events_a = store.load_events(session_a)
+    events_b = store.load_events(session_b)
+
+    result_a = explain_session(store, session_a)
+    result_b = explain_session(store, session_b)
+
+    try:
+        cost_a = estimate_cost(store, session_a).total_cost
+    except Exception:
+        cost_a = 0.0
+    try:
+        cost_b = estimate_cost(store, session_b).total_cost
+    except Exception:
+        cost_b = 0.0
+
+    # Files modified
+    files_mod_a = len({
+        str((e.data.get("arguments") or {}).get("file_path") or
+            (e.data.get("arguments") or {}).get("path") or "")
+        for e in events_a
+        if e.event_type == EventType.TOOL_CALL
+        and e.data.get("tool_name", "").lower() in ("write", "edit", "create", "str_replace")
+        and ((e.data.get("arguments") or {}).get("file_path") or
+             (e.data.get("arguments") or {}).get("path"))
+    })
+    files_mod_b = len({
+        str((e.data.get("arguments") or {}).get("file_path") or
+            (e.data.get("arguments") or {}).get("path") or "")
+        for e in events_b
+        if e.event_type == EventType.TOOL_CALL
+        and e.data.get("tool_name", "").lower() in ("write", "edit", "create", "str_replace")
+        and ((e.data.get("arguments") or {}).get("file_path") or
+             (e.data.get("arguments") or {}).get("path"))
+    })
+
+    # Approach divergence: compare phase sequences
+    divergence_points: list[tuple[int, str, str]] = []
+    phases_a = result_a.phases
+    phases_b = result_b.phases
+    for i, (pa, pb) in enumerate(zip(phases_a, phases_b)):
+        if pa.name.lower().strip() != pb.name.lower().strip():
+            divergence_points.append((i + 1, pa.name, pb.name))
+        else:
+            # Same phase label but different files/commands
+            files_a = set(pa.files_read + pa.files_written)
+            files_b = set(pb.files_read + pb.files_written)
+            diff_files = (files_a ^ files_b) - {""}
+            if diff_files:
+                sample = sorted(diff_files)[:2]
+                divergence_points.append((
+                    i + 1,
+                    f"{pa.name} (used {', '.join(sorted(files_a - files_b)[:2]) or '—'})",
+                    f"{pb.name} (used {', '.join(sorted(files_b - files_a)[:2]) or '—'})",
+                ))
+        if len(divergence_points) >= 3:
+            break
+
+    # Verdict: deterministic from metrics (lower is better for all three)
+    def _verdict() -> str:
+        dur_a = result_a.total_duration
+        dur_b = result_b.total_duration
+        comparisons = [
+            (cost_a, cost_b, "cheaper"),
+            (dur_a, dur_b, "faster"),
+            (float(meta_a.errors), float(meta_b.errors), "fewer errors"),
+        ]
+        a_wins, b_wins = 0, 0
+        parts_a: list[str] = []
+        parts_b: list[str] = []
+        for va, vb, label in comparisons:
+            if va < vb and vb > 0:
+                pct = int((vb - va) / vb * 100)
+                parts_a.append(f"{pct}% {label}")
+                a_wins += 1
+            elif vb < va and va > 0:
+                pct = int((va - vb) / va * 100)
+                parts_b.append(f"{pct}% {label}")
+                b_wins += 1
+        la = _build_label(store, session_a)
+        lb = _build_label(store, session_b)
+        if a_wins > b_wins and parts_a:
+            return f"{la} was {', '.join(parts_a[:2])}"
+        if b_wins > a_wins and parts_b:
+            return f"{lb} was {', '.join(parts_b[:2])}"
+        return "inconclusive — sessions performed similarly"
+
+    return CompareReport(
+        session_a=session_a,
+        session_b=session_b,
+        label_a=_build_label(store, session_a),
+        label_b=_build_label(store, session_b),
+        duration_a=result_a.total_duration,
+        duration_b=result_b.total_duration,
+        cost_a=cost_a,
+        cost_b=cost_b,
+        tool_calls_a=meta_a.tool_calls,
+        tool_calls_b=meta_b.tool_calls,
+        redundant_reads_a=_count_redundant_reads(events_a),
+        redundant_reads_b=_count_redundant_reads(events_b),
+        context_resets_a=_count_context_resets(events_a),
+        context_resets_b=_count_context_resets(events_b),
+        files_modified_a=files_mod_a,
+        files_modified_b=files_mod_b,
+        errors_a=meta_a.errors,
+        errors_b=meta_b.errors,
+        divergence_points=divergence_points,
+        verdict=_verdict(),
+    )
+
+
+def format_compare(report: CompareReport, out: TextIO = sys.stdout) -> None:
+    w = out.write
+    la = report.label_a[:18]
+    lb = report.label_b[:18]
+    sep = "─" * 65
+
+    w(f"\nSession Comparison\n{sep}\n")
+    w(f"  {'':30}  {la:>16}  {lb:>16}  {'change':>8}\n")
+    w(f"{sep}\n")
+
+    def _pct(a: float, b: float) -> str:
+        if a == 0:
+            return ""
+        pct = (b - a) / a * 100
+        sign = "+" if pct >= 0 else ""
+        return f"{sign}{pct:.0f}%"
+
+    def _row(label: str, va: str, vb: str, raw_a: float = 0.0, raw_b: float = 0.0,
+             same_note: str = "") -> None:
+        change = _pct(raw_a, raw_b) if raw_a or raw_b else ""
+        note = f"  ({same_note})" if same_note else ""
+        w(f"  {label:<30}  {va:>16}  {vb:>16}  {change:>8}{note}\n")
+
+    def _fmt_dur(s: float) -> str:
+        if s < 60:
+            return f"{s:.0f}s"
+        return f"{int(s)//60}m {int(s)%60:02d}s"
+
+    _row("Duration",
+         _fmt_dur(report.duration_a), _fmt_dur(report.duration_b),
+         raw_a=report.duration_a, raw_b=report.duration_b)
+    _row("Total cost",
+         f"${report.cost_a:.4f}", f"${report.cost_b:.4f}",
+         raw_a=report.cost_a, raw_b=report.cost_b)
+    _row("Tool calls",
+         str(report.tool_calls_a), str(report.tool_calls_b),
+         raw_a=report.tool_calls_a, raw_b=report.tool_calls_b)
+    _row("Redundant reads",
+         str(report.redundant_reads_a), str(report.redundant_reads_b),
+         raw_a=report.redundant_reads_a, raw_b=report.redundant_reads_b)
+    _row("Context resets",
+         str(report.context_resets_a), str(report.context_resets_b),
+         raw_a=report.context_resets_a, raw_b=report.context_resets_b)
+    _row("Files modified",
+         str(report.files_modified_a), str(report.files_modified_b),
+         same_note="same" if report.files_modified_a == report.files_modified_b else "")
+    _row("Errors",
+         str(report.errors_a), str(report.errors_b),
+         raw_a=report.errors_a, raw_b=report.errors_b)
+    w(f"{sep}\n")
+
+    if report.divergence_points:
+        w("Approach divergence:\n")
+        for step, da, db in report.divergence_points:
+            w(f"  Step {step}: {report.label_a[:10]} — {da[:50]}\n")
+            w(f"         {report.label_b[:10]} — {db[:50]}\n")
+        w(f"{sep}\n")
+
+    w(f"Verdict: {report.verdict}\n{sep}\n\n")
+
+
+# ---------------------------------------------------------------------------
 # CLI handler
 # ---------------------------------------------------------------------------
 
@@ -442,6 +698,11 @@ def cmd_diff(args: argparse.Namespace) -> int:
     if not id_b:
         sys.stderr.write(f"Session not found: {args.session_b}\n")
         return 1
+
+    if getattr(args, "compare", False):
+        report = compare_sessions(store, id_a, id_b)
+        format_compare(report)
+        return 0
 
     if getattr(args, "semantic", False):
         eval_config = getattr(args, "eval_config", ".agent-evals.yaml") or ".agent-evals.yaml"

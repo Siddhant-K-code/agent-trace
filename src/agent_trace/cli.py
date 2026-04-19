@@ -593,6 +593,8 @@ def build_parser() -> argparse.ArgumentParser:
     # diff --semantic and --eval-config flags (extend existing diff parser)
     p_diff.add_argument("--semantic", action="store_true",
                         help="semantic outcome-level diff (files, cost, errors)")
+    p_diff.add_argument("--compare", action="store_true",
+                        help="rich side-by-side comparison table with verdict")
     p_diff.add_argument("--eval-config", default=".agent-evals.yaml", dest="eval_config",
                         help="eval config for score comparison")
 
