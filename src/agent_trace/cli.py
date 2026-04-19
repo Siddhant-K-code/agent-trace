@@ -26,6 +26,7 @@ from .a2a import cmd_a2a_tree
 from .annotate import cmd_annotate
 from .oncall import cmd_oncall
 from .freshness import cmd_freshness
+from .standup import cmd_standup
 from .audit import cmd_audit
 from .cost import cmd_cost
 from .curve import cmd_curve
@@ -641,6 +642,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_fresh.add_argument("--scope", default="", help="file glob to limit scope")
     p_fresh.add_argument("--repo", default=".", help="path to git repository (default: .)")
 
+    # standup (agent standup report)
+    p_standup = sub.add_parser("standup", help="plain-English summary of what the agent did")
+    p_standup.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
+    p_standup.add_argument("--no-llm", action="store_true", dest="no_llm",
+                           help="structured output only, no LLM narrative (default)")
+
     # diff --semantic and --eval-config flags (extend existing diff parser)
     p_diff.add_argument("--semantic", action="store_true",
                         help="semantic outcome-level diff (files, cost, errors)")
@@ -697,6 +704,7 @@ def main() -> None:
         "a2a-tree": cmd_a2a_tree,
         "oncall": cmd_oncall,
         "freshness": cmd_freshness,
+        "standup": cmd_standup,
     }
 
     handler = handlers.get(args.command)
