@@ -28,6 +28,7 @@ from .cost import cmd_cost
 from .curve import cmd_curve
 from .dashboard import cmd_dashboard
 from .shadow_ai import cmd_audit_tools
+from .inflation import cmd_inflation
 from .diff import cmd_diff
 from .eval import cmd_eval
 from .explain import cmd_explain
@@ -607,6 +608,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_curve.add_argument("--export", choices=["csv"], default="",
                          help="export results (csv)")
 
+    # inflation (token inflation calculator)
+    p_inf = sub.add_parser("inflation", help="measure tokenizer cost impact across model versions")
+    p_inf.add_argument("--compare", default="claude-opus-4-6,claude-opus-4-7",
+                       help="comma-separated model pair to compare (default: claude-opus-4-6,claude-opus-4-7)")
+    p_inf.add_argument("--sessions", type=int, default=30,
+                       help="number of recent sessions to analyse (default: 30)")
+    p_inf.add_argument("--daily-sessions", type=float, default=8.0, dest="daily_sessions",
+                       help="assumed sessions per day for projections (default: 8)")
+
     # diff --semantic and --eval-config flags (extend existing diff parser)
     p_diff.add_argument("--semantic", action="store_true",
                         help="semantic outcome-level diff (files, cost, errors)")
@@ -659,6 +669,7 @@ def main() -> None:
         "token-budget": cmd_token_budget,
         "audit-tools": cmd_audit_tools,
         "curve": cmd_curve,
+        "inflation": cmd_inflation,
     }
 
     handler = handlers.get(args.command)
