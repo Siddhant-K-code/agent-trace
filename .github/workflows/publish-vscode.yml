@@ -6,9 +6,6 @@ on:
 
 jobs:
   publish:
-    # Only run for releases that touch the extension (tag starts with vscode-*)
-    # OR for any release if the extension version changed.
-    # Simple approach: run on every release, vsce --check-url skips if already published.
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -25,14 +22,18 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Compile TypeScript
-        run: npm run compile
-
       - name: Install vsce
         run: npm install -g @vscode/vsce
 
+      # vscode:prepublish runs `tsc` automatically before packaging
       - name: Package extension
-        run: vsce package
+        run: vsce package --out agent-trace.vsix
+
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-trace-vsix
+          path: vscode-extension/agent-trace.vsix
 
       - name: Publish to VS Code Marketplace
-        run: vsce publish --pat ${{ secrets.VSCE_PAT }}
+        run: vsce publish --packagePath agent-trace.vsix --pat ${{ secrets.VSCE_PAT }}
