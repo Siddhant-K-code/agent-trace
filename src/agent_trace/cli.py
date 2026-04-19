@@ -25,6 +25,7 @@ from .http_proxy import HTTPProxyServer
 from .annotate import cmd_annotate
 from .audit import cmd_audit
 from .cost import cmd_cost
+from .curve import cmd_curve
 from .dashboard import cmd_dashboard
 from .shadow_ai import cmd_audit_tools
 from .diff import cmd_diff
@@ -599,6 +600,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_at.add_argument("--approved", default="",
                       help="comma-separated list of approved tool names")
 
+    # curve (personal cost curve)
+    p_curve = sub.add_parser("curve", help="show your personal agent cost-efficiency curve by task type")
+    p_curve.add_argument("--min-sessions", type=int, default=20, dest="min_sessions",
+                         help="minimum sessions for meaningful analysis (default: 20)")
+    p_curve.add_argument("--export", choices=["csv"], default="",
+                         help="export results (csv)")
+
     # diff --semantic and --eval-config flags (extend existing diff parser)
     p_diff.add_argument("--semantic", action="store_true",
                         help="semantic outcome-level diff (files, cost, errors)")
@@ -650,6 +658,7 @@ def main() -> None:
         "annotate": cmd_annotate,
         "token-budget": cmd_token_budget,
         "audit-tools": cmd_audit_tools,
+        "curve": cmd_curve,
     }
 
     handler = handlers.get(args.command)
