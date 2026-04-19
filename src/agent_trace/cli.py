@@ -22,6 +22,7 @@ import time
 from . import __version__
 from .hooks import hook_main
 from .http_proxy import HTTPProxyServer
+from .a2a import cmd_a2a_tree
 from .annotate import cmd_annotate
 from .audit import cmd_audit
 from .cost import cmd_cost
@@ -617,6 +618,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_inf.add_argument("--daily-sessions", type=float, default=8.0, dest="daily_sessions",
                        help="assumed sessions per day for projections (default: 8)")
 
+    # a2a-tree (A2A agent call graph)
+    p_a2a = sub.add_parser("a2a-tree", help="show the agent-to-agent call graph for a session")
+    p_a2a.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
+    p_a2a.add_argument("--format", choices=["text", "json"], default="text",
+                       help="output format: text tree or OTLP-compatible JSON spans (default: text)")
+
     # diff --semantic and --eval-config flags (extend existing diff parser)
     p_diff.add_argument("--semantic", action="store_true",
                         help="semantic outcome-level diff (files, cost, errors)")
@@ -670,6 +677,7 @@ def main() -> None:
         "audit-tools": cmd_audit_tools,
         "curve": cmd_curve,
         "inflation": cmd_inflation,
+        "a2a-tree": cmd_a2a_tree,
     }
 
     handler = handlers.get(args.command)
