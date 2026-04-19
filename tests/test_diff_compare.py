@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import io
 import time
-
-import pytest
+import unittest
 
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
 
 
-def _make_store(tmp_path) -> TraceStore:
-    return TraceStore(str(tmp_path / "traces"))
+def _make_store(tmp_dir: str) -> TraceStore:
+    import os
+    path = os.path.join(tmp_dir, "traces")
+    return TraceStore(path)
 
 
 def _make_two_sessions(store: TraceStore):
@@ -33,35 +34,54 @@ def _make_two_sessions(store: TraceStore):
             TraceEvent(event_type=EventType.SESSION_END, session_id=sid, data={}),
         ]:
             store.append_event(sid, event)
-
     sessions = store.list_sessions()
-    return sessions[1].session_id, sessions[0].session_id  # oldest first
+    return sessions[1].session_id, sessions[0].session_id
 
 
-class TestCompare:
-    def test_compare_sessions_returns_report(self, tmp_path):
+class TestCompareReport(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_compare_sessions_returns_report(self):
         from agent_trace.diff import compare_sessions
-        store = _make_store(tmp_path)
+        store = _make_store(self._tmp)
         sid_a, sid_b = _make_two_sessions(store)
         report = compare_sessions(store, sid_a, sid_b)
-        assert report.session_a == sid_a
-        assert report.session_b == sid_b
-        assert isinstance(report.cost_a, float)
-        assert isinstance(report.tool_calls_a, int)
-        assert isinstance(report.verdict, str)
+        self.assertEqual(report.session_a, sid_a)
+        self.assertEqual(report.session_b, sid_b)
+        self.assertIsInstance(report.cost_a, float)
+        self.assertIsInstance(report.tool_calls_a, int)
+        self.assertIsInstance(report.verdict, str)
 
-    def test_format_compare_output(self, tmp_path):
+    def test_format_compare_output(self):
         from agent_trace.diff import compare_sessions, format_compare
-        store = _make_store(tmp_path)
+        store = _make_store(self._tmp)
         sid_a, sid_b = _make_two_sessions(store)
         report = compare_sessions(store, sid_a, sid_b)
         buf = io.StringIO()
         format_compare(report, out=buf)
         output = buf.getvalue()
-        assert "Session Comparison" in output
-        assert "Duration" in output
-        assert "Verdict" in output
+        self.assertIn("Session Comparison", output)
+        self.assertIn("Duration", output)
+        self.assertIn("Verdict", output)
 
+    def test_format_compare_has_change_column(self):
+        from agent_trace.diff import compare_sessions, format_compare
+        store = _make_store(self._tmp)
+        sid_a, sid_b = _make_two_sessions(store)
+        report = compare_sessions(store, sid_a, sid_b)
+        buf = io.StringIO()
+        format_compare(report, out=buf)
+        # Header must include "change" column
+        self.assertIn("change", buf.getvalue())
+
+
+class TestCompareHelpers(unittest.TestCase):
     def test_redundant_reads_counted(self):
         from agent_trace.diff import _count_redundant_reads
         events = [
@@ -78,7 +98,21 @@ class TestCompare:
                 data={"tool_name": "read", "arguments": {"file_path": "src/bar.py"}},
             ),
         ]
-        assert _count_redundant_reads(events) == 1
+        self.assertEqual(_count_redundant_reads(events), 1)
+
+    def test_no_redundant_reads_unique_files(self):
+        from agent_trace.diff import _count_redundant_reads
+        events = [
+            TraceEvent(
+                event_type=EventType.TOOL_CALL,
+                data={"tool_name": "read", "arguments": {"file_path": "a.py"}},
+            ),
+            TraceEvent(
+                event_type=EventType.TOOL_CALL,
+                data={"tool_name": "read", "arguments": {"file_path": "b.py"}},
+            ),
+        ]
+        self.assertEqual(_count_redundant_reads(events), 0)
 
     def test_context_resets_counted(self):
         from agent_trace.diff import _count_context_resets
@@ -87,7 +121,7 @@ class TestCompare:
             TraceEvent(event_type=EventType.LLM_REQUEST, timestamp=now, data={}),
             TraceEvent(event_type=EventType.LLM_REQUEST, timestamp=now + 200, data={}),
         ]
-        assert _count_context_resets(events) == 1
+        self.assertEqual(_count_context_resets(events), 1)
 
     def test_no_context_resets_within_window(self):
         from agent_trace.diff import _count_context_resets
@@ -96,10 +130,10 @@ class TestCompare:
             TraceEvent(event_type=EventType.LLM_REQUEST, timestamp=now, data={}),
             TraceEvent(event_type=EventType.LLM_REQUEST, timestamp=now + 30, data={}),
         ]
-        assert _count_context_resets(events) == 0
+        self.assertEqual(_count_context_resets(events), 0)
 
     def test_cli_has_compare_flag(self):
         from agent_trace.cli import build_parser
         parser = build_parser()
         args = parser.parse_args(["diff", "abc", "def", "--compare"])
-        assert args.compare is True
+        self.assertTrue(args.compare)
