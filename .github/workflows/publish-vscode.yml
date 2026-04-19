@@ -43,5 +43,9 @@ jobs:
       - name: Install ovsx
         run: npm install -g ovsx
 
+      - name: Create Open VSX namespace
+        run: ovsx create-namespace Siddhant-K-code --pat ${{ secrets.OVSX_PAT }}
+        continue-on-error: true
+
       - name: Publish to Open VSX Registry
         run: ovsx publish agent-strace.vsix --pat ${{ secrets.OVSX_PAT }}
