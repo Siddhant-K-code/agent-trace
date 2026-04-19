@@ -16,9 +16,6 @@
   "keywords": ["ai", "agent", "trace", "observability", "claude", "mcp"],
   "icon": "icon.png",
   "pricing": "Free",
-  "sponsor": {
-    "url": "https://github.com/sponsors/Siddhant-K-code"
-  },
   "activationEvents": [
     "workspaceContains:.agent-traces"
   ],
