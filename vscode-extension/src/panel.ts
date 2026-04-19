@@ -6,7 +6,6 @@
  * Includes a Pause / Resume button that posts a command back.
  */
 
-import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
@@ -77,7 +76,12 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
   constructor(private readonly extensionUri: vscode.Uri) {}
 
   private _getNonce(): string {
-    return crypto.randomBytes(16).toString("base64");
+    let text = "";
+    const possible = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    for (let i = 0; i < 32; i++) {
+      text += possible.charAt(Math.floor(Math.random() * possible.length));
+    }
+    return text;
   }
 
   resolveWebviewView(
