@@ -555,6 +555,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_watch.add_argument("--config", help="path to .agent-watch.json config file")
     p_watch.add_argument("--max-context-pct", type=int, default=90, dest="max_context_pct",
                          help="alert when context window is this %% full (default: 90)")
+    p_watch.add_argument("--rules", metavar="RULES_FILE",
+                         help="YAML/JSON rules file for rule-based kill switch (nanny mode)")
+    p_watch.add_argument("--dry-run", action="store_true", dest="dry_run",
+                         help="evaluate rules without taking action (for testing)")
 
     # policy
     p_policy = sub.add_parser("policy", help="suggest a .agent-scope.json policy from observed traces")
