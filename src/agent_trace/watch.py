@@ -1,14 +1,21 @@
-"""Live session monitoring with circuit breakers.
+"""Live session monitoring with circuit breakers and rule-based kill switch.
 
 Tails the active session's events.ndjson and triggers alerts when
 configurable thresholds are exceeded. Zero new dependencies — stdlib only.
+
+Rule-based nanny (--rules rules.yaml):
+  Evaluates declarative rules on every event. Supports pause (SIGSTOP/SIGCONT)
+  and kill (SIGTERM) actions with optional notifications. Auto-generates a
+  postmortem when a kill action fires.
 """
 
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
+import re
 import signal
 import sys
 import time
@@ -16,7 +23,7 @@ import urllib.request
 from collections import Counter, deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TextIO
+from typing import Any, TextIO
 
 from .cost import _dollars, _event_tokens
 from .models import EventType, TraceEvent
@@ -57,8 +64,176 @@ def _alert_webhook(message: str, url: str) -> None:
 def _kill_process(pid: int) -> None:
     try:
         os.kill(pid, signal.SIGTERM)
+        time.sleep(5)
+        os.kill(pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         pass
+
+
+def _pause_process(pid: int) -> None:
+    try:
+        os.kill(pid, signal.SIGSTOP)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _resume_process(pid: int) -> None:
+    try:
+        os.kill(pid, signal.SIGCONT)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Nanny rules (--rules rules.yaml)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class NannyRule:
+    """A declarative rule evaluated on every event."""
+    name: str
+    condition: str          # e.g. "files_modified > 20", "cost_usd > 5.00"
+    action: str             # "pause" | "kill" | "alert"
+    notify: str = ""        # e.g. "slack:#alerts", "email:me@example.com"
+    fired: bool = field(default=False, compare=False)
+
+    # Parsed condition components (set by _parse_condition)
+    _metric: str = field(default="", init=False, repr=False)
+    _op: str = field(default="", init=False, repr=False)
+    _threshold: Any = field(default=None, init=False, repr=False)
+    _pattern: str = field(default="", init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._parse_condition()
+
+    def _parse_condition(self) -> None:
+        """Parse condition string into metric, operator, threshold."""
+        cond = self.condition.strip()
+
+        # file_path matches "/etc/**"
+        m = re.match(r'file_path\s+matches\s+"([^"]+)"', cond)
+        if not m:
+            m = re.match(r"file_path\s+matches\s+'([^']+)'", cond)
+        if m:
+            self._metric = "file_path"
+            self._op = "matches"
+            self._pattern = m.group(1)
+            return
+
+        # numeric comparisons: metric op value
+        m = re.match(r'(\w+)\s*(>=|<=|>|<|==)\s*([0-9.]+)', cond)
+        if m:
+            self._metric = m.group(1)
+            self._op = m.group(2)
+            raw = m.group(3)
+            self._threshold = float(raw) if "." in raw else int(raw)
+
+    def evaluate(self, metrics: dict[str, Any], event: TraceEvent | None = None) -> bool:
+        """Return True if this rule's condition is satisfied."""
+        if self._metric == "file_path" and self._op == "matches" and event:
+            if event.event_type == EventType.TOOL_CALL:
+                args = event.data.get("arguments", {}) or {}
+                path = str(
+                    args.get("file_path") or args.get("path") or ""
+                )
+                return bool(path and fnmatch.fnmatch(path, self._pattern))
+            return False
+
+        if not self._metric or self._threshold is None:
+            return False
+
+        value = metrics.get(self._metric)
+        if value is None:
+            return False
+
+        op = self._op
+        t = self._threshold
+        if op == ">":
+            return value > t
+        if op == ">=":
+            return value >= t
+        if op == "<":
+            return value < t
+        if op == "<=":
+            return value <= t
+        if op == "==":
+            return value == t
+        return False
+
+
+def _load_nanny_rules(path: str) -> list[NannyRule]:
+    """Load rules from a YAML or JSON file. Returns [] on error."""
+    p = Path(path)
+    if not p.exists():
+        return []
+    text = p.read_text()
+    try:
+        # Try JSON first (no extra dep)
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        # Minimal YAML parser for simple rule files (no PyYAML required)
+        data = _parse_simple_yaml(text)
+
+    rules: list[NannyRule] = []
+    for r in data.get("rules", []):
+        try:
+            rules.append(NannyRule(
+                name=r.get("name", "unnamed"),
+                condition=r.get("condition", ""),
+                action=r.get("action", "alert"),
+                notify=r.get("notify", ""),
+            ))
+        except Exception:
+            pass
+    return rules
+
+
+def _parse_simple_yaml(text: str) -> dict:
+    """Parse a minimal subset of YAML sufficient for rules files.
+
+    Handles: top-level 'rules:' list with string scalar fields.
+    Does not handle anchors, multi-line values, or complex types.
+    """
+    result: dict = {"rules": []}
+    current_rule: dict | None = None
+    in_rules = False
+
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        stripped = line.lstrip()
+
+        if stripped.startswith("#") or not stripped:
+            continue
+
+        if stripped == "rules:":
+            in_rules = True
+            continue
+
+        if not in_rules:
+            continue
+
+        # New list item
+        if stripped.startswith("- "):
+            if current_rule is not None:
+                result["rules"].append(current_rule)
+            # Inline key: value after the dash
+            rest = stripped[2:].strip()
+            current_rule = {}
+            if ":" in rest:
+                k, _, v = rest.partition(":")
+                current_rule[k.strip()] = v.strip().strip('"').strip("'")
+        elif stripped.startswith("-") and stripped == "-":
+            if current_rule is not None:
+                result["rules"].append(current_rule)
+            current_rule = {}
+        elif current_rule is not None and ":" in stripped:
+            k, _, v = stripped.partition(":")
+            current_rule[k.strip()] = v.strip().strip('"').strip("'")
+
+    if current_rule is not None:
+        result["rules"].append(current_rule)
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +336,22 @@ class WatchState:
     agent_pid: int | None = None
     # Token budget watcher (lazy-initialised on first LLM_REQUEST)
     token_budget_watcher: object | None = None
+    # Nanny rule metrics
+    files_modified: int = 0          # distinct files written/edited
+    files_modified_set: set = field(default_factory=set)
+    consecutive_test_failures: int = 0
+    duration_minutes: float = 0.0
+    paused: bool = False             # True when agent is SIGSTOP'd
+
+    def nanny_metrics(self) -> dict:
+        """Return current metric snapshot for nanny rule evaluation."""
+        elapsed = time.time() - self.start_time
+        return {
+            "files_modified": self.files_modified,
+            "cost_usd": self.estimated_cost,
+            "consecutive_test_failures": self.consecutive_test_failures,
+            "duration_minutes": elapsed / 60.0,
+        }
 
 
 def _event_key(event: TraceEvent) -> str:
@@ -210,18 +401,57 @@ def _dispatch_alert(
     config: WatcherConfig,
     state: WatchState,
     action: str | None = None,
+    notify: str = "",
+    dry_run: bool = False,
 ) -> None:
     action = action or config.on_violation
     # terminal is always shown regardless of action so the operator watching
     # the process sees every alert; file/webhook are additive channels
     _alert_terminal(message)
-    if action in ("file", "kill"):
+    if action in ("file", "kill", "pause"):
         _alert_file(message, config.alert_log)
     if config.webhook_url:
         _alert_webhook(message, config.webhook_url)
-    if action == "kill" and state.agent_pid:
+    # notify field from nanny rules (e.g. "slack:#alerts")
+    if notify and notify.startswith("slack:") and config.webhook_url:
+        _alert_webhook(f"[{notify}] {message}", config.webhook_url)
+
+    if dry_run:
+        _alert_terminal(f"[dry-run] would {action} agent process")
+        return
+
+    if action == "pause" and state.agent_pid and not state.paused:
+        _alert_terminal(f"Pausing agent process {state.agent_pid} (SIGSTOP)")
+        _pause_process(state.agent_pid)
+        state.paused = True
+    elif action == "kill" and state.agent_pid:
         _alert_terminal(f"Killing agent process {state.agent_pid}")
         _kill_process(state.agent_pid)
+
+
+def _dispatch_nanny_rule(
+    rule: NannyRule,
+    event: TraceEvent,
+    store: TraceStore,
+    session_id: str,
+    state: WatchState,
+    config: WatcherConfig,
+    dry_run: bool = False,
+) -> None:
+    """Fire a nanny rule: alert, pause, or kill."""
+    msg = f"NannyRule '{rule.name}': {rule.condition} → {rule.action}"
+    _dispatch_alert(msg, config, state, action=rule.action, notify=rule.notify, dry_run=dry_run)
+
+    # Auto-generate postmortem on kill
+    if rule.action == "kill" and not dry_run:
+        try:
+            from .postmortem import generate_postmortem, format_postmortem
+            pm = generate_postmortem(store, session_id)
+            pm_path = Path(config.alert_log).parent / f"postmortem-{session_id[:12]}.md"
+            pm_path.write_text(format_postmortem(pm))
+            _alert_terminal(f"Postmortem written to {pm_path}")
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +469,29 @@ def check_event(
     # --- Cost accumulation ---
     inp, out = _event_tokens(event)
     state.estimated_cost += _dollars(inp, out, "sonnet")
+
+    # --- Track files modified (for nanny rules) ---
+    if event.event_type == EventType.TOOL_CALL:
+        _name = event.data.get("tool_name", "").lower()
+        _args = event.data.get("arguments", {}) or {}
+        if _name in ("write", "edit", "create", "str_replace"):
+            _path = str(_args.get("file_path") or _args.get("path") or "")
+            if _path and _path not in state.files_modified_set:
+                state.files_modified_set.add(_path)
+                state.files_modified = len(state.files_modified_set)
+
+    # --- Track consecutive test failures (for nanny rules) ---
+    if event.event_type == EventType.TOOL_RESULT:
+        _content = str(event.data.get("content", ""))
+        _is_test_fail = any(
+            kw in _content.lower()
+            for kw in ("failed", "error", "assertion", "traceback", "exit code 1")
+        )
+        if _is_test_fail:
+            state.consecutive_test_failures += 1
+        elif event.data.get("is_error") is False:
+            # Successful result resets the counter
+            state.consecutive_test_failures = 0
 
     # --- Loop detection ---
     key = _event_key(event)
@@ -389,6 +642,8 @@ def watch_session(
     out: TextIO = sys.stderr,
     poll_interval: float = 0.5,
     max_idle_seconds: float = 300.0,
+    nanny_rules: list[NannyRule] | None = None,
+    dry_run: bool = False,
 ) -> None:
     """Watch a session's event stream and fire alerts on violations."""
     events_file = store._session_dir(session_id) / "events.ndjson"
@@ -398,7 +653,10 @@ def watch_session(
 
     state = WatchState(start_time=time.time())
 
-    out.write(f"[watch] Monitoring session {session_id[:12]}...\n")
+    mode = " [dry-run]" if dry_run else ""
+    out.write(f"[watch] Monitoring session {session_id[:12]}...{mode}\n")
+    if nanny_rules:
+        out.write(f"[watch] {len(nanny_rules)} nanny rule(s) active\n")
     out.flush()
 
     last_event_time = time.time()
@@ -411,7 +669,20 @@ def watch_session(
 
             violations = check_event(event, config, state)
             for msg in violations:
-                _dispatch_alert(msg, config, state)
+                _dispatch_alert(msg, config, state, dry_run=dry_run)
+
+            # --- Nanny rule evaluation ---
+            if nanny_rules:
+                metrics = state.nanny_metrics()
+                for rule in nanny_rules:
+                    if rule.fired:
+                        continue
+                    if rule.evaluate(metrics, event):
+                        rule.fired = True
+                        _dispatch_nanny_rule(
+                            rule, event, store, session_id,
+                            state, config, dry_run=dry_run,
+                        )
 
             if event.event_type == EventType.SESSION_END:
                 out.write(f"[watch] Session ended ({event_count} events, ${state.estimated_cost:.4f})\n")
@@ -447,6 +718,16 @@ def cmd_watch(args: argparse.Namespace) -> int:
             webhook_url=getattr(args, "webhook", "") or "",
         )
 
+    # Load nanny rules if --rules provided
+    nanny_rules: list[NannyRule] | None = None
+    rules_path = getattr(args, "rules", None)
+    if rules_path:
+        nanny_rules = _load_nanny_rules(rules_path)
+        if not nanny_rules:
+            sys.stderr.write(f"[watch] Warning: no rules loaded from {rules_path}\n")
+
+    dry_run = getattr(args, "dry_run", False)
+
     session_id = getattr(args, "session_id", None)
     if not session_id:
         session_id = store.get_latest_session_id()
@@ -459,5 +740,5 @@ def cmd_watch(args: argparse.Namespace) -> int:
         sys.stderr.write(f"Session not found: {session_id}\n")
         return 1
 
-    watch_session(store, full_id, config)
+    watch_session(store, full_id, config, nanny_rules=nanny_rules, dry_run=dry_run)
     return 0
