@@ -2,7 +2,7 @@
   "name": "agent-strace",
   "displayName": "agent-strace",
   "description": "Live session overlay for agent-strace: status bar, gutter annotations, and event stream panel.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "Siddhant-K-code",
   "license": "MIT",
   "repository": {

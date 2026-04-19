@@ -53,4 +53,4 @@ jobs:
         continue-on-error: true
 
       - name: Publish to Open VSX Registry
-        run: ovsx publish agent-strace.vsix --pat ${{ secrets.OVSX_PAT }}
+        run: ovsx publish agent-strace.vsix --pat ${{ secrets.OVSX_PAT }} --skip-duplicate
