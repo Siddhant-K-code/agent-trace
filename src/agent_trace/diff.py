@@ -196,6 +196,8 @@ def format_diff(result: SessionDiff, out: TextIO = sys.stdout) -> None:
 
     if result.divergence_index == -1:
         w("Sessions are structurally identical.\n\n")
+    elif result.divergence_index == 0 and not result.phase_diffs:
+        w("Sessions diverge from the start (no common phases).\n\n")
     else:
         w(f"Diverged at phase {result.divergence_index + 1}:\n\n")
 
@@ -566,19 +568,19 @@ def compare_sessions(
         if len(divergence_points) >= 3:
             break
 
-    # Verdict: deterministic from metrics
+    # Verdict: deterministic from metrics (lower is better for all three)
     def _verdict() -> str:
         dur_a = result_a.total_duration
         dur_b = result_b.total_duration
-        metrics = [
+        comparisons = [
             (cost_a, cost_b, "cheaper"),
             (dur_a, dur_b, "faster"),
-            (meta_a.errors, meta_b.errors, "fewer errors"),
+            (float(meta_a.errors), float(meta_b.errors), "fewer errors"),
         ]
         a_wins, b_wins = 0, 0
         parts_a: list[str] = []
         parts_b: list[str] = []
-        for va, vb, label in metrics:
+        for va, vb, label in comparisons:
             if va < vb and vb > 0:
                 pct = int((vb - va) / vb * 100)
                 parts_a.append(f"{pct}% {label}")
@@ -626,28 +628,48 @@ def format_compare(report: CompareReport, out: TextIO = sys.stdout) -> None:
     sep = "─" * 65
 
     w(f"\nSession Comparison\n{sep}\n")
-    w(f"  {'':30}  {la:>16}  {lb:>16}\n")
+    w(f"  {'':30}  {la:>16}  {lb:>16}  {'change':>8}\n")
     w(f"{sep}\n")
 
-    def _row(label: str, va: str, vb: str, same_note: str = "") -> None:
+    def _pct(a: float, b: float) -> str:
+        if a == 0:
+            return ""
+        pct = (b - a) / a * 100
+        sign = "+" if pct >= 0 else ""
+        return f"{sign}{pct:.0f}%"
+
+    def _row(label: str, va: str, vb: str, raw_a: float = 0.0, raw_b: float = 0.0,
+             same_note: str = "") -> None:
+        change = _pct(raw_a, raw_b) if raw_a or raw_b else ""
         note = f"  ({same_note})" if same_note else ""
-        w(f"  {label:<30}  {va:>16}  {vb:>16}{note}\n")
+        w(f"  {label:<30}  {va:>16}  {vb:>16}  {change:>8}{note}\n")
 
     def _fmt_dur(s: float) -> str:
         if s < 60:
             return f"{s:.0f}s"
         return f"{int(s)//60}m {int(s)%60:02d}s"
 
-    _row("Duration", _fmt_dur(report.duration_a), _fmt_dur(report.duration_b))
+    _row("Duration",
+         _fmt_dur(report.duration_a), _fmt_dur(report.duration_b),
+         raw_a=report.duration_a, raw_b=report.duration_b)
     _row("Total cost",
-         f"${report.cost_a:.4f}", f"${report.cost_b:.4f}")
-    _row("Tool calls", str(report.tool_calls_a), str(report.tool_calls_b))
-    _row("Redundant reads", str(report.redundant_reads_a), str(report.redundant_reads_b))
-    _row("Context resets", str(report.context_resets_a), str(report.context_resets_b))
+         f"${report.cost_a:.4f}", f"${report.cost_b:.4f}",
+         raw_a=report.cost_a, raw_b=report.cost_b)
+    _row("Tool calls",
+         str(report.tool_calls_a), str(report.tool_calls_b),
+         raw_a=report.tool_calls_a, raw_b=report.tool_calls_b)
+    _row("Redundant reads",
+         str(report.redundant_reads_a), str(report.redundant_reads_b),
+         raw_a=report.redundant_reads_a, raw_b=report.redundant_reads_b)
+    _row("Context resets",
+         str(report.context_resets_a), str(report.context_resets_b),
+         raw_a=report.context_resets_a, raw_b=report.context_resets_b)
     _row("Files modified",
          str(report.files_modified_a), str(report.files_modified_b),
-         "same" if report.files_modified_a == report.files_modified_b else "")
-    _row("Errors", str(report.errors_a), str(report.errors_b))
+         same_note="same" if report.files_modified_a == report.files_modified_b else "")
+    _row("Errors",
+         str(report.errors_a), str(report.errors_b),
+         raw_a=report.errors_a, raw_b=report.errors_b)
     w(f"{sep}\n")
 
     if report.divergence_points:
