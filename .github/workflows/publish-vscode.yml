@@ -1,0 +1,38 @@
+name: Publish VS Code Extension
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    # Only run for releases that touch the extension (tag starts with vscode-*)
+    # OR for any release if the extension version changed.
+    # Simple approach: run on every release, vsce --check-url skips if already published.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: vscode-extension
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Compile TypeScript
+        run: npm run compile
+
+      - name: Install vsce
+        run: npm install -g @vscode/vsce
+
+      - name: Package extension
+        run: vsce package
+
+      - name: Publish to VS Code Marketplace
+        run: vsce publish --pat ${{ secrets.VSCE_PAT }}
