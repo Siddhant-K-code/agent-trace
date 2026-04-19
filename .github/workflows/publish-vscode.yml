@@ -37,3 +37,10 @@ jobs:
 
       - name: Publish to VS Code Marketplace
         run: vsce publish --packagePath agent-strace.vsix --pat ${{ secrets.VSCE_PAT }}
+        continue-on-error: true
+
+      - name: Install ovsx
+        run: npm install -g ovsx
+
+      - name: Publish to Open VSX Registry
+        run: ovsx publish agent-strace.vsix --pat ${{ secrets.OVSX_PAT }}
