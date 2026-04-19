@@ -62,12 +62,23 @@ def _alert_webhook(message: str, url: str) -> None:
 
 
 def _kill_process(pid: int) -> None:
+    """Send SIGTERM; escalate to SIGKILL after 5s in a background thread."""
+    import threading
+
     try:
         os.kill(pid, signal.SIGTERM)
-        time.sleep(5)
-        os.kill(pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
-        pass
+        return
+
+    def _escalate() -> None:
+        time.sleep(5)
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    t = threading.Thread(target=_escalate, daemon=True)
+    t.start()
 
 
 def _pause_process(pid: int) -> None:
@@ -489,8 +500,8 @@ def check_event(
         )
         if _is_test_fail:
             state.consecutive_test_failures += 1
-        elif event.data.get("is_error") is False:
-            # Successful result resets the counter
+        elif not event.data.get("is_error", False):
+            # Non-error result resets the counter (is_error absent = success)
             state.consecutive_test_failures = 0
 
     # --- Loop detection ---
@@ -540,7 +551,10 @@ def check_event(
         config.loop_max_repeats,
     )
     if loop_msg:
-        key_id = f"loop:{loop_msg[:40]}"
+        # Key on the sequence pattern only (strip the " × N" count suffix)
+        # so dedup fires once per unique loop, not once per repeat increment.
+        seq_part = loop_msg.split(" × ")[0]
+        key_id = f"loop:{seq_part[:60]}"
         if key_id not in state.fired:
             state.fired.add(key_id)
             violations.append(f"LoopWatcher: {loop_msg}")
@@ -613,10 +627,17 @@ def check_event(
 # File tailer
 # ---------------------------------------------------------------------------
 
+_IDLE_SENTINEL = object()  # yielded when poll_interval elapses with no new event
+
+
 def _tail_events(events_file: Path, poll_interval: float = 0.5):
-    """Generator that yields new TraceEvent lines as they appear."""
+    """Generator that yields TraceEvent objects or _IDLE_SENTINEL each poll cycle.
+
+    Yields _IDLE_SENTINEL when no new line arrived during the poll interval,
+    allowing callers to implement idle-timeout logic without blocking.
+    """
     with open(events_file, "r", encoding="utf-8") as f:
-        # Skip existing content
+        # Skip existing content — start from the end of the file
         f.seek(0, 2)
         while True:
             line = f.readline()
@@ -629,6 +650,7 @@ def _tail_events(events_file: Path, poll_interval: float = 0.5):
                         pass
             else:
                 time.sleep(poll_interval)
+                yield _IDLE_SENTINEL
 
 
 # ---------------------------------------------------------------------------
@@ -663,7 +685,17 @@ def watch_session(
     event_count = 0
 
     try:
-        for event in _tail_events(events_file, poll_interval=poll_interval):
+        for item in _tail_events(events_file, poll_interval=poll_interval):
+            # Idle timeout: checked on every poll cycle (including when no
+            # event arrived), so it fires reliably after max_idle_seconds.
+            if time.time() - last_event_time > max_idle_seconds:
+                out.write(f"[watch] No events for {max_idle_seconds:.0f}s - stopping\n")
+                break
+
+            if item is _IDLE_SENTINEL:
+                continue
+
+            event: TraceEvent = item  # type: ignore[assignment]
             event_count += 1
             last_event_time = time.time()
 
@@ -686,12 +718,6 @@ def watch_session(
 
             if event.event_type == EventType.SESSION_END:
                 out.write(f"[watch] Session ended ({event_count} events, ${state.estimated_cost:.4f})\n")
-                break
-
-            # Idle timeout: checked on each new event, so triggers on the
-            # first event that arrives after the idle window has elapsed.
-            if time.time() - last_event_time > max_idle_seconds:
-                out.write(f"[watch] No events for {max_idle_seconds:.0f}s - stopping\n")
                 break
 
     except KeyboardInterrupt:
