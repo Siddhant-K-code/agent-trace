@@ -164,6 +164,14 @@ def cmd_replay(args: argparse.Namespace) -> int:
             sys.stderr.write(f"Invalid filter: {e}\n")
             return 1
 
+    fmt = getattr(args, "format", "terminal") or "terminal"
+    if fmt == "html":
+        from .replay import replay_to_html
+        output_path = getattr(args, "output", "") or f"session-{session_id[:12]}.html"
+        replay_to_html(store, session_id, output_path=output_path)
+        sys.stdout.write(f"HTML replay written to {output_path}\n")
+        return 0
+
     replay_session(
         store=store,
         session_id=session_id,
@@ -426,6 +434,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_replay.add_argument("--filter", "-f", help="comma-separated event types to show")
     p_replay.add_argument("--speed", "-s", type=float, default=0, help="replay speed multiplier (0=instant)")
     p_replay.add_argument("--live", "-l", action="store_true", help="replay with timing delays")
+    p_replay.add_argument("--format", choices=["terminal", "html"], default="terminal",
+                          help="output format: terminal timeline or self-contained HTML viewer (default: terminal)")
+    p_replay.add_argument("--output", "-o", default="",
+                          help="output file path for --format html (default: session-<id>.html)")
     p_replay.add_argument("--expand-subagents", action="store_true",
                           help="inline subagent sessions under their parent tool_call")
     p_replay.add_argument("--tree", action="store_true",
