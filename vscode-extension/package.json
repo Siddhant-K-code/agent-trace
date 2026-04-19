@@ -1,0 +1,85 @@
+{
+  "name": "agent-trace",
+  "displayName": "agent-trace",
+  "description": "Live session overlay for agent-trace: status bar, gutter annotations, and event stream panel.",
+  "version": "0.1.0",
+  "publisher": "Siddhant-K-code",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Siddhant-K-code/agent-trace"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "keywords": ["ai", "agent", "trace", "observability", "claude", "mcp"],
+  "icon": "icon.png",
+  "activationEvents": [
+    "workspaceContains:.agent-traces"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "agentTrace.pauseAgent",
+        "title": "agent-trace: Pause Agent",
+        "icon": "$(debug-pause)"
+      },
+      {
+        "command": "agentTrace.resumeAgent",
+        "title": "agent-trace: Resume Agent",
+        "icon": "$(debug-continue)"
+      },
+      {
+        "command": "agentTrace.openPanel",
+        "title": "agent-trace: Open Event Stream"
+      },
+      {
+        "command": "agentTrace.clearDecorations",
+        "title": "agent-trace: Clear File Decorations"
+      }
+    ],
+    "views": {
+      "explorer": [
+        {
+          "type": "webview",
+          "id": "agentTrace.eventStream",
+          "name": "Agent Trace",
+          "when": "agentTrace.sessionActive"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "agent-trace",
+      "properties": {
+        "agentTrace.traceDir": {
+          "type": "string",
+          "default": ".agent-traces",
+          "description": "Path to the trace store directory, relative to workspace root."
+        },
+        "agentTrace.showGutterAnnotations": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show gutter icons on files the agent has read or modified."
+        },
+        "agentTrace.showInlineText": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show inline read/write counts at the top of agent-touched files."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0"
+  }
+}

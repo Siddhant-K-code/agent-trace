@@ -630,6 +630,27 @@ def check_event(
 _IDLE_SENTINEL = object()  # yielded when poll_interval elapses with no new event
 
 
+def _check_pause_file(store: "TraceStore", state: "WatchState", out: "TextIO") -> None:
+    """Honour a .pause-request file written by the VS Code extension.
+
+    Presence of the file → SIGSTOP the agent (if a PID is known).
+    Absence after a pause → SIGCONT to resume.
+    """
+    pause_file = store.base_dir / ".pause-request"
+    wants_pause = pause_file.exists()
+
+    if wants_pause and not state.paused and state.agent_pid:
+        out.write(f"[watch] Pause requested by editor — SIGSTOP pid {state.agent_pid}\n")
+        out.flush()
+        _pause_process(state.agent_pid)
+        state.paused = True
+    elif not wants_pause and state.paused and state.agent_pid:
+        out.write(f"[watch] Resume requested by editor — SIGCONT pid {state.agent_pid}\n")
+        out.flush()
+        _resume_process(state.agent_pid)
+        state.paused = False
+
+
 def _tail_events(events_file: Path, poll_interval: float = 0.5):
     """Generator that yields TraceEvent objects or _IDLE_SENTINEL each poll cycle.
 
@@ -693,6 +714,8 @@ def watch_session(
                 break
 
             if item is _IDLE_SENTINEL:
+                # Check for pause-request signal file written by the VS Code extension
+                _check_pause_file(store, state, out)
                 continue
 
             event: TraceEvent = item  # type: ignore[assignment]
