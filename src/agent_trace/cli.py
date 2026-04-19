@@ -25,6 +25,7 @@ from .http_proxy import HTTPProxyServer
 from .a2a import cmd_a2a_tree
 from .annotate import cmd_annotate
 from .oncall import cmd_oncall
+from .freshness import cmd_freshness
 from .audit import cmd_audit
 from .cost import cmd_cost
 from .curve import cmd_curve
@@ -634,6 +635,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_oncall.add_argument("--since-days", type=int, default=30, dest="since_days",
                           help="how many days of sessions to scan (default: 30)")
 
+    # freshness (context freshness check)
+    p_fresh = sub.add_parser("freshness", help="check how stale the agent context is since last session")
+    p_fresh.add_argument("--since", default="", help="check changes since this date (YYYY-MM-DD)")
+    p_fresh.add_argument("--scope", default="", help="file glob to limit scope")
+    p_fresh.add_argument("--repo", default=".", help="path to git repository (default: .)")
+
     # diff --semantic and --eval-config flags (extend existing diff parser)
     p_diff.add_argument("--semantic", action="store_true",
                         help="semantic outcome-level diff (files, cost, errors)")
@@ -689,6 +696,7 @@ def main() -> None:
         "inflation": cmd_inflation,
         "a2a-tree": cmd_a2a_tree,
         "oncall": cmd_oncall,
+        "freshness": cmd_freshness,
     }
 
     handler = handlers.get(args.command)
