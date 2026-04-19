@@ -6,7 +6,7 @@
 [![License](https://img.shields.io/github/license/Siddhant-K-code/agent-trace)](LICENSE)
 [![CI](https://github.com/Siddhant-K-code/agent-trace/actions/workflows/test.yml/badge.svg)](https://github.com/Siddhant-K-code/agent-trace/actions/workflows/test.yml)
 
-`strace` for AI agents. Capture and replay every tool call, prompt, and response from Claude Code, Cursor, or any MCP client.
+`strace` for AI agents. Capture and replay every tool call, prompt, and response from Claude Code, Cursor, or any MCP client — then analyse, diff, audit, and share what happened.
 
 ![demo](assets/demo.svg)
 
@@ -115,6 +115,7 @@ agent-strace hook <event>                       Handle a Claude Code hook event 
 agent-strace record -- <command>                Record an MCP stdio server session
 agent-strace record-http <url> [--port N]       Record an MCP HTTP/SSE server session
 agent-strace replay [session-id]                Replay a session (default: latest)
+agent-strace replay --format html [-o file]     Export a self-contained HTML replay viewer
 agent-strace replay --expand-subagents          Inline subagent sessions under parent tool_call
 agent-strace replay --tree                      Show session hierarchy without full replay
 agent-strace list                               List all sessions
@@ -126,15 +127,23 @@ agent-strace export <session-id>                Export as JSON, CSV, NDJSON, or 
 agent-strace import <session.jsonl>             Import a Claude Code JSONL session log
 agent-strace cost [session-id]                  Estimate token cost for a session
 agent-strace diff <session-a> <session-b>       Compare two sessions structurally
+agent-strace diff --compare <a> <b>             Side-by-side table with verdict
 agent-strace diff --semantic <a> <b>            Compare sessions by outcome, not event order
 agent-strace why [session-id] <event-number>    Trace the causal chain for an event
 agent-strace audit [session-id] [--policy]      Check tool calls against a policy file
+agent-strace audit-tools [--repo .] [--approved] Scan a repo for shadow AI tool usage
 agent-strace policy [--output file]             Generate .agent-scope.json from observed traces
 agent-strace dashboard [--last N] [--html file] Aggregate stats and trends across sessions
 agent-strace annotate <session-id> <offset>     Add notes, labels, or bookmarks to events
 agent-strace token-budget <session-id>          Check token usage against model context limit
-agent-strace watch [--max-context-pct N]        Watch a live session with per-operation limits
+agent-strace watch [--rules file]               Watch a live session; kill/pause on rule breach
 agent-strace share <session-id> [-o file]       Export a self-contained HTML report
+agent-strace standup [--session id]             Standup report from session trace (no LLM)
+agent-strace freshness [--scope glob]           Context freshness check vs last session
+agent-strace oncall --rotation-start DATE       On-call readiness for agent-modified files
+agent-strace curve [--export csv]               Personal agent cost-efficiency curve
+agent-strace inflation [--compare m1,m2]        Token inflation calculator across model versions
+agent-strace a2a-tree [session-id]              Visualise A2A agent call graph
 ```
 
 ### Import existing Claude Code sessions
@@ -669,6 +678,125 @@ Export a structured JSON report for CI assertions:
 agent-strace diff SESSION_A SESSION_B --semantic --eval-config eval.json
 ```
 
+### Rich side-by-side comparison
+
+`--compare` produces a structured table across cost, duration, tool calls, redundant reads, context resets, files modified, and errors — with a deterministic verdict requiring no LLM.
+
+```bash
+agent-strace diff SESSION_A SESSION_B --compare
+```
+
+New metrics: **redundant reads** (files read more than once), **context resets** (LLM requests separated by >120s), **approach divergence** (first phase pairs where behaviour differs). Useful for asserting on in CI.
+
+### Kill switch for runaway sessions
+
+Add a declarative rules file to `agent-strace watch` to pause, kill, or alert when a session crosses a threshold.
+
+```bash
+agent-strace watch --rules .watch-rules.json
+agent-strace watch --rules .watch-rules.json --dry-run  # evaluate without acting
+```
+
+**Rule conditions:** `files_modified`, `cost_usd`, `consecutive_test_failures`, `duration_minutes`, `file_path` (glob).
+
+**Actions:**
+- `pause` — SIGSTOP the agent process (resume with SIGCONT)
+- `kill` — SIGTERM, then SIGKILL after 5s; auto-generates a postmortem
+- `alert` — log only, no interruption
+
+### Shadow AI detection
+
+Scan a repository for AI tool usage signatures — no network calls, no API keys.
+
+```bash
+agent-strace audit-tools
+agent-strace audit-tools --repo . --since "90 days ago" --approved cursor,copilot
+```
+
+Detected tools: Claude Code, Cursor, GitHub Copilot, Codex/ChatGPT, Windsurf, Aider — identified via file signals (`.cursorrules`, `CLAUDE.md`, `.github/copilot-instructions.md`, etc.) and commit message patterns. Flags unapproved tools, unknown LLM API endpoints in `.env` history, and PII patterns in recently committed files.
+
+### HTML session replay viewer
+
+Generate a single-file HTML viewer for any session. No server, no dependencies — open in any browser.
+
+```bash
+agent-strace replay --format html
+agent-strace replay --format html --output review.html SESSION_ID
+```
+
+The viewer includes an animated event timeline, scrubber bar, running cost counter, click-to-expand event detail, color-coded event types, and dark theme. All event data is embedded as a JSON constant — useful for attaching to PR reviews.
+
+### Standup report
+
+Generate a structured standup from a session trace — no LLM call required.
+
+```bash
+agent-strace standup
+agent-strace standup --session SESSION_ID
+```
+
+Report covers: files read and modified, approaches tried (including abandoned ones detected from retry patterns), new dependencies added, TODO/FIXME comments written, large changes and auth/migration patterns to review, and session stats (tool calls, retries, errors).
+
+### Context freshness check
+
+Before handing a task to an agent, check how stale its last view of the codebase is.
+
+```bash
+agent-strace freshness
+agent-strace freshness --since 2026-04-01 --scope "src/**"
+```
+
+Reports files changed since the last session, per-file change type and line count, a freshness score 0–100, and estimated catch-up reading time. Scope is auto-detected from `CLAUDE.md` / `AGENTS.md`, or overridden with `--scope`.
+
+### On-call readiness
+
+Cross-reference agent-modified files against git history to surface cognitive gaps before a rotation.
+
+```bash
+agent-strace oncall --rotation-start 2026-04-25
+agent-strace oncall --rotation-start 2026-04-25 --scope "src/payments/**"
+```
+
+For each file the agent has written in the last N days: how long ago it was modified, lines changed, estimated reading time, and total catch-up time before rotation.
+
+### Cost-efficiency curve
+
+Analyse stored session history to see which task types are worth delegating to an agent.
+
+```bash
+agent-strace curve
+agent-strace curve --min-sessions 10 --export csv
+```
+
+Sessions are classified into 10 task types (unit tests, debugging, refactoring, architecture, etc.) and compared against a community sweet-spot benchmark. Verdict per type: **efficient / over sweet spot / do this yourself**. Potential monthly savings are calculated for types running above 1.5× their sweet spot.
+
+### Token inflation calculator
+
+Measure the tokenizer cost impact of switching model versions before committing to an upgrade — no API calls required.
+
+```bash
+agent-strace inflation
+agent-strace inflation --compare claude-opus-4-6,claude-opus-4-7 --sessions 30
+```
+
+Applies per-model inflation factors to stored session content and breaks down the impact by content type (system prompt, tool definitions, user messages, assistant messages). Projects per-session, daily, and monthly cost delta.
+
+| Model | Factor |
+|---|---|
+| claude-opus-4-7 | 1.38× (community median: 1.3–1.47×, April 2026) |
+| gpt-4o | 1.05× (cl100k_base → o200k_base) |
+
+### A2A protocol support
+
+First-class support for agent-to-agent calls following the Google A2A spec. A2A calls are captured as `TOOL_CALL` events with `event_subtype=a2a_call` — backward-compatible with all existing replay and export tooling.
+
+```bash
+agent-strace a2a-tree
+agent-strace a2a-tree SESSION_ID --format json
+```
+
+Builds the full agent call graph by following `sub_session_id` links and `parent_session_id` back-references. Renders as an ASCII tree or exports as OTLP-compatible spans for Jaeger, Tempo, or any OpenTelemetry backend.
+
 ## Production tracing (OTLP export)
 
 Export sessions as OpenTelemetry spans to your existing observability stack. Sessions become traces. Tool calls become spans with duration and inputs. Errors get exception events. Zero new dependencies.
@@ -805,22 +933,29 @@ src/agent_trace/
   redact.py         # secret redaction (key/value pattern matching)
   masking.py        # PII masking (email, phone, CC, SSN, ARN)
   otlp.py           # OTLP/HTTP JSON exporter with GenAI semantic conventions
-  replay.py         # terminal replay and display
+  replay.py         # terminal replay, HTML viewer export
   decorator.py      # @trace_tool, @trace_llm_call, log_decision
   jsonl_import.py   # Claude Code JSONL session import
   explain.py        # session phase detection and plain-English summary
   cost.py           # token and cost estimation
   subagent.py       # parent-child session tree, tree replay, stats rollup
-  diff.py           # structural and semantic session comparison
+  diff.py           # structural, semantic, and side-by-side session comparison
   why.py            # causal chain tracing (backwards event walk)
   audit.py          # policy-based tool call checking, sensitive file detection
+  audit_tools.py    # shadow AI detection (file signals + commit patterns)
   policy.py         # generate .agent-scope.json from observed traces
   attribution.py    # session attribution (user, process ancestry, git context)
   dashboard.py      # multi-session aggregate view and trend charts
   annotate.py       # replay annotations (notes, labels, bookmarks)
   token_budget.py   # token budget tracking and context window early warning
-  watch.py          # live session watcher with per-operation enforcement
+  watch.py          # live session watcher with rule-based kill switch
   share.py          # self-contained HTML report export
+  standup.py        # standup report from session trace (no LLM)
+  freshness.py      # context freshness check vs last session
+  oncall.py         # on-call readiness for agent-modified files
+  curve.py          # personal agent cost-efficiency curve
+  inflation.py      # token inflation calculator across model versions
+  a2a.py            # A2A protocol support and cross-agent trace correlation
   cli.py            # CLI entry point
 ADRs/               # Architecture Decision Records
 ```
