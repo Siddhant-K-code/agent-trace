@@ -6,6 +6,7 @@
 [![License](https://img.shields.io/github/license/Siddhant-K-code/agent-trace)](LICENSE)
 [![CI](https://github.com/Siddhant-K-code/agent-trace/actions/workflows/test.yml/badge.svg)](https://github.com/Siddhant-K-code/agent-trace/actions/workflows/test.yml)
 [![Open VSX](https://img.shields.io/open-vsx/v/Siddhant-K-code/agent-strace)](https://open-vsx.org/extension/Siddhant-K-code/agent-strace)
+[![VS Marketplace](https://img.shields.io/badge/VS%20Marketplace-v0.1.2-blue?logo=visual-studio-code)](https://marketplace.visualstudio.com/items?itemName=Siddhant-K-code.agent-strace)
 
 `strace` for AI agents. Capture and replay every tool call, prompt, and response from Claude Code, Cursor, or any MCP client — then analyse, diff, audit, and share what happened.
 
