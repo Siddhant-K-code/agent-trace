@@ -8,7 +8,7 @@
 [![Open VSX](https://img.shields.io/open-vsx/v/Siddhant-K-code/agent-strace)](https://open-vsx.org/extension/Siddhant-K-code/agent-strace)
 [![VS Marketplace](https://img.shields.io/badge/VS%20Marketplace-v0.1.2-blue?logo=visual-studio-code)](https://marketplace.visualstudio.com/items?itemName=Siddhant-K-code.agent-strace)
 
-`strace` for AI agents. Capture and replay every tool call, prompt, and response from Claude Code, Cursor, or any MCP client — then analyse, diff, audit, and share what happened.
+`strace` for AI agents. Capture and replay every tool call, prompt, and response from Claude Code, Cursor, Gemini CLI, or any MCP client — then analyse, diff, audit, and share what happened.
 
 ![demo](assets/demo.svg)
 
@@ -17,6 +17,8 @@
 A coding agent rewrites 20 files in a background session. You get a pull request. You do not get the story. Which files did it read first? Why did it call the same tool three times? What failed before it found the fix?
 
 Most tools trace LLM calls. That is one layer. The gap is everything around it: tool calls, file operations, decision points, error recovery, the actual commands the agent ran. `agent-strace` captures the full session and lets you replay it later. Export to Datadog, Honeycomb, New Relic, or Splunk when you need production observability.
+
+Set rules to stop the agent automatically — cost ceiling, wrong file touched, too many tool calls. The agent stops. No prompt, no retry, no damage.
 
 ## Install
 
@@ -177,7 +179,7 @@ agent-strace diff --compare <a> <b>             Side-by-side table with verdict
 agent-strace diff --semantic <a> <b>            Compare sessions by outcome, not event order
 agent-strace why [session-id] <event-number>    Trace the causal chain for an event
 agent-strace audit [session-id] [--policy]      Check tool calls against a policy file
-agent-strace audit-tools [--repo .] [--approved] Scan a repo for shadow AI tool usage
+agent-strace audit-tools [--repo .] [--approved] Detect Shadow MCP servers and undeclared agent activity in any repo
 agent-strace policy [--output file]             Generate .agent-scope.json from observed traces
 agent-strace dashboard [--last N] [--html file] Aggregate stats and trends across sessions
 agent-strace annotate <session-id> <offset>     Add notes, labels, or bookmarks to events
@@ -736,11 +738,21 @@ New metrics: **redundant reads** (files read more than once), **context resets**
 
 ### Kill switch for runaway sessions
 
-Add a declarative rules file to `agent-strace watch` to pause, kill, or alert when a session crosses a threshold.
+Add a declarative rules file to `agent-strace watch` to pause, kill, or alert when a session crosses a threshold. The agent stops when a rule fires — no prompt, no retry, no damage.
 
 ```bash
 agent-strace watch --rules .watch-rules.json
 agent-strace watch --rules .watch-rules.json --dry-run  # evaluate without acting
+```
+
+Example `.watch-rules.json`:
+
+```json
+[
+  { "condition": "cost_usd", "threshold": 0.50, "action": "kill" },
+  { "condition": "file_path", "glob": "**/production.env", "action": "kill" },
+  { "condition": "files_modified", "threshold": 30, "action": "pause" }
+]
 ```
 
 **Rule conditions:** `files_modified`, `cost_usd`, `consecutive_test_failures`, `duration_minutes`, `file_path` (glob).
@@ -750,16 +762,16 @@ agent-strace watch --rules .watch-rules.json --dry-run  # evaluate without actin
 - `kill` — SIGTERM, then SIGKILL after 5s; auto-generates a postmortem
 - `alert` — log only, no interruption
 
-### Shadow AI detection
+### Shadow MCP detection
 
-Scan a repository for AI tool usage signatures — no network calls, no API keys.
+Detect Shadow MCP servers and undeclared agent activity in any repo — no network calls, no API keys. A [CSA survey of 418 security professionals](https://cloudsecurityalliance.org/press-releases/2026/04/21/new-cloud-security-alliance-survey-reveals-82-of-enterprises-have-unknown-ai-agents-in-their-environments) found 82% of enterprises discovered at least one AI agent their security team didn't know about in the past year. `audit-tools` finds yours.
 
 ```bash
 agent-strace audit-tools
 agent-strace audit-tools --repo . --since "90 days ago" --approved cursor,copilot
 ```
 
-Detected tools: Claude Code, Cursor, GitHub Copilot, Codex/ChatGPT, Windsurf, Aider — identified via file signals (`.cursorrules`, `CLAUDE.md`, `.github/copilot-instructions.md`, etc.) and commit message patterns. Flags unapproved tools, unknown LLM API endpoints in `.env` history, and PII patterns in recently committed files.
+Detected tools: Claude Code, Cursor, GitHub Copilot, Codex/ChatGPT, Windsurf, Aider, Gemini CLI — identified via file signals (`.cursorrules`, `CLAUDE.md`, `.github/copilot-instructions.md`, etc.) and commit message patterns. Flags unapproved tools, unknown LLM API endpoints in `.env` history, and PII patterns in recently committed files.
 
 ### HTML session replay viewer
 
