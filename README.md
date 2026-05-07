@@ -855,6 +855,67 @@ agent-strace a2a-tree SESSION_ID --format json
 
 Builds the full agent call graph by following `sub_session_id` links and `parent_session_id` back-references. Renders as an ASCII tree or exports as OTLP-compatible spans for Jaeger, Tempo, or any OpenTelemetry backend.
 
+## Use with security-critical codebases
+
+When AI coding agents work on codebases that handle secrets, attestation logic, or cryptographic material, agent-strace provides two things: an audit trail of every file touched and every command run, and automatic redaction of secrets before they reach any log.
+
+### Recommended setup for sensitive repos
+
+Add `.claude/settings.json` to the repo root and commit it. Every developer who works on the repo gets the same instrumentation automatically:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": ".*",
+      "hooks": [{ "type": "command", "command": "agent-strace hook pre-tool" }]
+    }],
+    "PostToolUse": [{
+      "matcher": ".*",
+      "hooks": [{ "type": "command", "command": "agent-strace hook post-tool" }]
+    }]
+  }
+}
+```
+
+Or use the setup command:
+
+```bash
+cd your-sensitive-repo
+agent-strace setup --redact
+```
+
+### Secret redaction for TEE and confidential computing stacks
+
+For codebases that handle TEE secrets, the following patterns are redacted automatically:
+
+| Secret type | Pattern matched |
+|-------------|----------------|
+| EKM shared secrets | 64-char hex strings (e.g. `EKM_SHARED_SECRET`) |
+| Bearer tokens | `Bearer [A-Za-z0-9+/=]{20,}` |
+| Anthropic API keys | `sk-ant-...` |
+| AWS credentials | `AKIA...`, `aws_secret_access_key` |
+| Private keys | PEM blocks |
+
+If your codebase uses custom secret formats, add patterns via `--redact-pattern`:
+
+```bash
+agent-strace setup --redact --redact-pattern "ATTESTATION_KEY=[A-Fa-f0-9]{64}"
+```
+
+### Example: scoping agents away from sensitive components
+
+Combine with [agentic-authz](https://github.com/Siddhant-K-code/agentic-authz) to enforce that agents cannot access security-critical components at all, and use agent-strace to audit everything they do access:
+
+```
+Agent scope:        frontend/ only (enforced by OpenFGA — no tuple = no access)
+agent-strace scope: all tool calls logged, secrets redacted, exported to Grafana
+```
+
+Any attempt by the agent to read `cvm/attestation-service/` or `cvm/auth-service/` is blocked at the authorization layer before it reaches the filesystem. agent-strace logs the denied attempt with the reason.
+
+---
+
 ## Production tracing (OTLP export)
 
 Export sessions as OpenTelemetry spans to your existing observability stack. Sessions become traces. Tool calls become spans with duration and inputs. Errors get exception events. Zero new dependencies.
