@@ -1,0 +1,80 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # Skip if the commit is itself a version bump (prevents infinite loop)
+    if: "!startsWith(github.event.head_commit.message, 'chore: bump version to')"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Read current version
+        id: current
+        run: |
+          VERSION=$(grep '^__version__' src/agent_trace/__init__.py | sed 's/.*"\(.*\)"/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Compute next patch version
+        id: next
+        run: |
+          CURRENT="${{ steps.current.outputs.version }}"
+          MAJOR=$(echo "$CURRENT" | cut -d. -f1)
+          MINOR=$(echo "$CURRENT" | cut -d. -f2)
+          PATCH=$(echo "$CURRENT" | cut -d. -f3)
+          NEXT_PATCH=$((PATCH + 1))
+          NEXT="${MAJOR}.${MINOR}.${NEXT_PATCH}"
+          echo "version=$NEXT" >> "$GITHUB_OUTPUT"
+
+      - name: Bump version in source
+        run: |
+          NEXT="${{ steps.next.outputs.version }}"
+          sed -i "s/__version__ = \".*\"/__version__ = \"${NEXT}\"/" src/agent_trace/__init__.py
+
+      - name: Build changelog from commits since last tag
+        id: changelog
+        run: |
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -z "$LAST_TAG" ]; then
+            COMMITS=$(git log --pretty=format:"- %s" | head -20)
+          else
+            COMMITS=$(git log "${LAST_TAG}..HEAD" --pretty=format:"- %s")
+          fi
+          # Write to file to preserve newlines
+          echo "$COMMITS" > /tmp/changelog.txt
+          echo "Changelog entries written."
+
+      - name: Commit version bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add src/agent_trace/__init__.py
+          git commit -m "chore: bump version to ${{ steps.next.outputs.version }}"
+          git push
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NEXT="${{ steps.next.outputs.version }}"
+          TAG="v${NEXT}"
+          TITLE="v${NEXT}"
+          BODY=$(cat /tmp/changelog.txt)
+
+          gh release create "$TAG" \
+            --title "$TITLE" \
+            --notes "$BODY" \
+            --target main
