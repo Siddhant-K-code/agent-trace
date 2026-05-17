@@ -163,6 +163,85 @@ def score_custom(
     return ScoreResult(name, score, threshold, score >= threshold, "custom scorer")
 
 
+def score_llm_judge(
+    events: list[TraceEvent],
+    prompt: str,
+    base_url: str,
+    api_key: str,
+    model: str = "gpt-4o-mini",
+    threshold: float = 1.0,
+) -> ScoreResult:
+    """Call an LLM to judge the session. Returns a score in [0, 1].
+
+    The prompt receives a compact session summary. The LLM must respond
+    with JSON: {"score": <float 0-1>, "reason": "<string>"}.
+    Uses urllib.request — zero new dependencies.
+    """
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    if not base_url or not api_key:
+        return ScoreResult("llm_judge", 0.0, threshold, False,
+                           "base_url and api_key required for llm_judge scorer")
+
+    # Build a compact session summary for the LLM
+    tool_calls = [e for e in events if e.event_type == EventType.TOOL_CALL]
+    errors = [e for e in events if e.event_type == EventType.ERROR]
+    summary_lines = [
+        f"Session: {len(events)} events, {len(tool_calls)} tool calls, {len(errors)} errors.",
+    ]
+    for ev in tool_calls[:15]:
+        name = ev.data.get("tool_name", "unknown")
+        summary_lines.append(f"  TOOL_CALL: {name}")
+    for ev in errors[:5]:
+        msg = str(ev.data.get("message", ""))[:80]
+        summary_lines.append(f"  ERROR: {msg}")
+    session_summary = "\n".join(summary_lines)
+
+    full_prompt = (
+        f"{prompt}\n\n"
+        f"Session summary:\n{session_summary}\n\n"
+        "Respond with JSON only: {\"score\": <float 0.0-1.0>, \"reason\": \"<one sentence>\"}"
+    )
+
+    payload = _json.dumps({
+        "model": model,
+        "messages": [{"role": "user", "content": full_prompt}],
+        "temperature": 0.1,
+        "max_tokens": 256,
+    }).encode()
+
+    url = base_url.rstrip("/") + "/chat/completions"
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = _json.loads(resp.read())
+            content = data["choices"][0]["message"]["content"].strip()
+            # Strip markdown fences if present
+            if content.startswith("```"):
+                content = "\n".join(content.split("\n")[1:])
+            if content.endswith("```"):
+                content = "\n".join(content.split("\n")[:-1])
+            result = _json.loads(content)
+            score = float(max(0.0, min(1.0, result.get("score", 0.0))))
+            reason = str(result.get("reason", ""))[:200]
+            return ScoreResult("llm_judge", score, threshold, score >= threshold, reason)
+    except (urllib.error.URLError, urllib.error.HTTPError) as exc:
+        return ScoreResult("llm_judge", 0.0, threshold, False, f"LLM request failed: {exc}")
+    except (_json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        return ScoreResult("llm_judge", 0.0, threshold, False, f"LLM response parse error: {exc}")
+
+
 # ---------------------------------------------------------------------------
 # Scorer registry (name → factory)
 # ---------------------------------------------------------------------------
@@ -204,6 +283,17 @@ def run_scorer(
         return score_duration_under(
             events,
             max_seconds=float(config.get("max_seconds", 120.0)),
+            threshold=threshold,
+        )
+
+    if name == "llm_judge":
+        import os
+        return score_llm_judge(
+            events,
+            prompt=config.get("prompt", "Did the agent complete the task correctly?"),
+            base_url=config.get("base_url", "") or os.environ.get("OPENAI_BASE_URL", "") or os.environ.get("AGENT_STRACE_LLM_URL", ""),
+            api_key=config.get("api_key", "") or os.environ.get("OPENAI_API_KEY", "") or os.environ.get("AGENT_STRACE_LLM_KEY", ""),
+            model=config.get("model", "gpt-4o-mini"),
             threshold=threshold,
         )
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 from dataclasses import dataclass, field
 
 from ..store import TraceStore
@@ -211,8 +212,74 @@ def cmd_eval_compare(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_baseline(path: str) -> dict[str, float]:
+    """Load a saved baseline: {scorer_name: score}."""
+    p = Path(path)
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        return {}
+
+
+def _save_baseline(path: str, report: "EvalReport") -> None:
+    """Save current scores as a baseline file."""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    data = {r.scorer: r.score for r in report.results}
+    p.write_text(json.dumps(data, indent=2))
+
+
+def _write_github_summary(report: "EvalReport", baseline: dict[str, float], tolerance: float) -> None:
+    """Write a PR-comment-ready Markdown summary to .agent-traces/eval-summary.md."""
+    lines = ["## agent-strace eval\n"]
+    lines.append("| Judge | Pass rate | Baseline | Delta | Status |")
+    lines.append("|---|---|---|---|---|")
+    for r in report.results:
+        base_score = baseline.get(r.scorer)
+        if base_score is not None:
+            delta = r.score - base_score
+            delta_str = f"{delta:+.0%}"
+            regressed = delta < -tolerance
+            status = "❌" if regressed else "✅"
+            base_str = f"{base_score:.0%}"
+        else:
+            delta_str = "—"
+            status = "✅" if r.passed else "❌"
+            base_str = "—"
+        lines.append(f"| `{r.scorer}` | {r.score:.0%} | {base_str} | {delta_str} | {status} |")
+
+    lines.append("")
+    if report.overall_passed:
+        lines.append("**Result: PASS**")
+    else:
+        lines.append(f"**Result: FAIL** — {report.failed} scorer(s) below threshold.")
+
+    failing = [r for r in report.results if not r.passed]
+    if failing:
+        lines.append("")
+        lines.append("<details>")
+        lines.append("<summary>Failing scorers</summary>")
+        lines.append("")
+        for r in failing:
+            lines.append(f"- `{r.scorer}` — score {r.score:.2f} (threshold {r.threshold:.2f}): {r.reason}")
+        lines.append("")
+        lines.append("</details>")
+
+    summary_path = Path(".agent-traces/eval-summary.md")
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text("\n".join(lines) + "\n")
+    sys.stderr.write(f"GitHub summary written to {summary_path}\n")
+
+
 def cmd_eval_ci(args: argparse.Namespace) -> int:
-    """Run evals and exit 1 if any scorer fails (for CI integration)."""
+    """Run evals and exit 1 if any scorer fails (for CI integration).
+
+    Supports baseline comparison (--baseline), saving baselines
+    (--save-baseline), regression tolerance (--tolerance), and
+    GitHub Actions PR comment output (--github-summary).
+    """
     store = TraceStore(args.trace_dir)
     config = load_config(getattr(args, "config", ".agent-evals.yaml"))
 
@@ -222,12 +289,44 @@ def cmd_eval_ci(args: argparse.Namespace) -> int:
         return 1
 
     report = run_eval(store, session_id, config)
-    # Route table to stderr so CI output is pipeable without noise
     format_report_table(report, out=sys.stderr)
 
-    if report.overall_passed:
-        sys.stderr.write("CI: all scorers passed\n")
+    # Save baseline if requested
+    save_baseline_path = getattr(args, "save_baseline", None)
+    if save_baseline_path:
+        _save_baseline(save_baseline_path, report)
+        sys.stderr.write(f"Baseline saved to {save_baseline_path}\n")
         return 0
-    else:
-        sys.stderr.write(f"CI: {report.failed} scorer(s) failed\n")
+
+    # Load baseline for comparison
+    baseline_path = getattr(args, "baseline", None)
+    baseline: dict[str, float] = {}
+    if baseline_path:
+        baseline = _load_baseline(baseline_path)
+
+    tolerance = float(getattr(args, "tolerance", 0.0) or 0.0)
+
+    # GitHub summary
+    if getattr(args, "github_summary", False):
+        _write_github_summary(report, baseline, tolerance)
+
+    # Determine pass/fail with optional baseline regression check
+    failed = False
+    if not report.overall_passed:
+        failed = True
+    elif baseline:
+        for r in report.results:
+            base_score = baseline.get(r.scorer)
+            if base_score is not None and (r.score - base_score) < -tolerance:
+                sys.stderr.write(
+                    f"CI: {r.scorer} regressed {r.score:.2f} vs baseline {base_score:.2f} "
+                    f"(tolerance {tolerance:.2f})\n"
+                )
+                failed = True
+
+    if failed:
+        sys.stderr.write(f"CI: FAIL — {report.failed} scorer(s) failed\n")
         return 1
+
+    sys.stderr.write("CI: PASS — all scorers passed\n")
+    return 0

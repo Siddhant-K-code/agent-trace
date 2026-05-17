@@ -575,6 +575,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_eval_ci = eval_sub.add_parser("ci", help="run evals and exit 1 if any scorer fails")
     p_eval_ci.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
     p_eval_ci.add_argument("--config", default=".agent-evals.yaml")
+    p_eval_ci.add_argument("--baseline", metavar="FILE",
+                           help="compare scores against a saved baseline JSON")
+    p_eval_ci.add_argument("--save-baseline", dest="save_baseline", metavar="FILE",
+                           help="save current scores as a baseline and exit")
+    p_eval_ci.add_argument("--tolerance", type=float, default=0.0, metavar="N",
+                           help="allow up to N regression vs baseline before failing (default: 0)")
+    p_eval_ci.add_argument("--github-summary", dest="github_summary", action="store_true",
+                           help="write PR-comment Markdown to .agent-traces/eval-summary.md")
 
     p_eval_dataset = eval_sub.add_parser("dataset", help="manage eval datasets")
     dataset_sub = p_eval_dataset.add_subparsers(dest="dataset_command")
@@ -587,6 +595,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_ds_export = dataset_sub.add_parser("export", help="export dataset to JSONL")
     p_ds_export.add_argument("--dataset", default=".agent-traces/datasets/default.jsonl")
+    p_ds_auto = dataset_sub.add_parser("auto", help="auto-populate dataset from sessions by signal filter")
+    p_ds_auto.add_argument("--name", default="default", help="dataset name (default: default)")
+    p_ds_auto.add_argument("--dataset", default="", help="explicit dataset path (overrides --name)")
+    p_ds_auto.add_argument("--filter", default="has-errors",
+                           help="filter: has-errors, high-retry, cost-above:N, wide-blast, "
+                                "long-duration:Ns, low-eval-score:N (default: has-errors)")
+    p_ds_auto.add_argument("--since", default="7d", metavar="Nd",
+                           help="look back N days (default: 7d)")
+    p_ds_auto.add_argument("--label", default="", help="label for added entries")
 
     # watch
     p_watch = sub.add_parser("watch", help="monitor a live session with circuit breakers")
