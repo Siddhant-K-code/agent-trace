@@ -1,0 +1,100 @@
+# Agent eval CI workflow
+#
+# Runs eval scorers on every PR that touches agent config files.
+# Fails the PR if any scorer drops below its threshold.
+# Posts a score summary as a PR comment.
+#
+# Prerequisites:
+#   1. Capture at least one session: agent-strace record -- <your-agent-command>
+#   2. Save a baseline: agent-strace eval ci --save-baseline .agent-traces/baselines/main.json
+#   3. Commit .agent-evals.yaml and .agent-traces/baselines/main.json to the repo
+
+name: Agent eval
+
+on:
+  pull_request:
+    paths:
+      - "AGENTS.md"
+      - "CLAUDE.md"
+      - ".claude/**"
+      - ".agent-evals.yaml"
+      - ".agent-traces/datasets/**"
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install agent-strace
+        run: pip install agent-strace
+
+      # Score the latest session in the dataset against all configured scorers.
+      # Exits 1 if any scorer is below threshold or regresses vs baseline.
+      - name: Run eval
+        env:
+          # Required only if using the llm_judge scorer.
+          # Remove if using heuristic scorers only (no_errors, cost_under, etc.)
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          agent-strace eval ci \
+            --baseline .agent-traces/baselines/main.json \
+            --tolerance 0.05 \
+            --github-summary
+
+      # Post the Markdown summary as a PR comment so reviewers see the score delta.
+      - name: Post eval summary
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const summaryPath = '.agent-traces/eval-summary.md';
+            if (!fs.existsSync(summaryPath)) {
+              console.log('No eval summary found — skipping comment.');
+              return;
+            }
+            const summary = fs.readFileSync(summaryPath, 'utf8');
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: summary,
+            });
+
+  # Optional: update the baseline on every merge to main.
+  # Commit the updated baseline back to the repo so future PRs compare against it.
+  update-baseline:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install agent-strace
+        run: pip install agent-strace
+
+      - name: Save new baseline
+        run: |
+          mkdir -p .agent-traces/baselines
+          agent-strace eval ci \
+            --save-baseline .agent-traces/baselines/main.json
+
+      - name: Commit updated baseline
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .agent-traces/baselines/main.json
+          git diff --staged --quiet || git commit -m "chore: update eval baseline [skip ci]"
+          git push

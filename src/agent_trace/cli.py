@@ -23,6 +23,7 @@ from . import __version__
 from .hooks import hook_main
 from .http_proxy import HTTPProxyServer
 from .a2a import cmd_a2a_tree
+from .mcp_server import cmd_mcp
 from .annotate import cmd_annotate
 from .drift import cmd_drift
 from .langfuse_export import cmd_export_scores
@@ -747,6 +748,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_standup.add_argument("--no-llm", action="store_true", dest="no_llm",
                            help="structured output only, no LLM narrative (default)")
 
+    # mcp (MCP server — expose traces as queryable tools)
+    p_mcp = sub.add_parser(
+        "mcp",
+        help="start an MCP server that exposes session traces as queryable tools",
+    )
+    p_mcp.add_argument(
+        "--transport",
+        choices=["stdio"],
+        default="stdio",
+        help="transport protocol (default: stdio)",
+    )
+
     # diff --semantic and --eval-config flags (extend existing diff parser)
     p_diff.add_argument("--semantic", action="store_true",
                         help="semantic outcome-level diff (files, cost, errors)")
@@ -806,6 +819,7 @@ def main() -> None:
         "oncall": cmd_oncall,
         "freshness": cmd_freshness,
         "standup": cmd_standup,
+        "mcp": cmd_mcp,
     }
 
     handler = handlers.get(args.command)

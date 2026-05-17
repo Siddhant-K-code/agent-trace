@@ -185,6 +185,7 @@ print(f"Replay with: agent-strace replay {meta.session_id}")
 | `inflation` | Token inflation across model versions |
 | `curve` | Personal cost-efficiency curve |
 | `a2a-tree` | Cross-agent trace correlation (A2A protocol) |
+| `mcp` | MCP server — expose traces as queryable tools for a debugging agent |
 
 ```
 agent-strace setup [--redact] [--global]        Generate Claude Code hooks config
@@ -1203,6 +1204,75 @@ agent-strace export <session-id> --format otlp > trace.json
 | session_id | trace ID |
 | event_id | span ID |
 | parent_id | parent span ID |
+
+## Debug with MCP
+
+`agent-strace mcp` starts an MCP server that exposes your session store as queryable tools. Any MCP-compatible client (Claude Code, Cursor, VS Code Copilot) can then query traces conversationally — the debugging agent reads its own execution history and surfaces what went wrong.
+
+```bash
+agent-strace mcp
+```
+
+**Claude Code config** (`.claude/settings.json`):
+
+```json
+{
+  "mcpServers": {
+    "agent-trace": {
+      "command": "agent-strace",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+**Cursor config** (`.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "agent-trace": {
+      "command": "agent-strace",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Once connected, you can ask the debugging agent questions like:
+
+> "Look at the most recent session and tell me why it called bash three times in a row."
+> "Which files did the agent write in session abc123 that it didn't write in def456?"
+> "Find all sessions where the agent hit an error after calling npm test."
+
+### MCP tools
+
+| Tool | Description |
+|---|---|
+| `list_sessions` | List captured sessions with metadata (timestamp, tool calls, cost, tokens) |
+| `get_session` | Full event stream for a session, with optional event type filter |
+| `search_events` | Filter events by tool name, file path, exit code, or error flag across sessions |
+| `get_session_summary` | Plain-English phase breakdown — what the agent did, files touched, retries |
+| `diff_sessions` | Compare two sessions: tool call delta, file overlap, cost delta, error delta |
+
+### Example interactions
+
+```
+# List recent sessions
+list_sessions(limit=5)
+
+# Get all errors from a session
+search_events(session_id="abc123", has_error=true)
+
+# Find all sessions where the agent wrote to package-lock.json
+search_events(file_path="package-lock.json")
+
+# Compare two sessions after changing AGENTS.md
+diff_sessions(session_a="before_change", session_b="after_change")
+
+# Get a plain-English summary of what went wrong
+get_session_summary(session_id="abc123")
+```
 
 ## How it works
 
