@@ -24,6 +24,7 @@ from .hooks import hook_main
 from .http_proxy import HTTPProxyServer
 from .a2a import cmd_a2a_tree
 from .annotate import cmd_annotate
+from .drift import cmd_drift
 from .oncall import cmd_oncall
 from .freshness import cmd_freshness
 from .standup import cmd_standup
@@ -654,6 +655,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_fresh.add_argument("--scope", default="", help="file glob to limit scope")
     p_fresh.add_argument("--repo", default=".", help="path to git repository (default: .)")
 
+    # drift (behavioral drift detection)
+    p_drift = sub.add_parser("drift", help="detect behavioral drift across sessions")
+    p_drift.add_argument("--since", metavar="Nd", help="analyse sessions from the last N days (e.g. 30d)")
+    p_drift.add_argument("--baseline", metavar="FILE",
+                         help="path to a saved behavioral fingerprint JSON, or a date range YYYY-MM-DD:YYYY-MM-DD")
+    p_drift.add_argument("--current", metavar="RANGE",
+                         help="current window as YYYY-MM-DD:YYYY-MM-DD")
+    p_drift.add_argument("--baseline-range", metavar="RANGE", dest="baseline_range",
+                         help="baseline window as YYYY-MM-DD:YYYY-MM-DD")
+    p_drift.add_argument("--save-baseline", metavar="FILE", dest="save_baseline",
+                         help="save current fingerprint to FILE and exit")
+    p_drift.add_argument("--threshold", type=float, default=0.20,
+                         help="drift score above which to alert (default: 0.20)")
+    p_drift.add_argument("--format", choices=["table", "json"], default="table",
+                         help="output format (default: table)")
+
     # standup (agent standup report)
     p_standup = sub.add_parser("standup", help="plain-English summary of what the agent did")
     p_standup.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
@@ -714,6 +731,7 @@ def main() -> None:
         "curve": cmd_curve,
         "inflation": cmd_inflation,
         "a2a-tree": cmd_a2a_tree,
+        "drift": cmd_drift,
         "oncall": cmd_oncall,
         "freshness": cmd_freshness,
         "standup": cmd_standup,
