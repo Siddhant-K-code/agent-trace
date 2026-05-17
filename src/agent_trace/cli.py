@@ -25,6 +25,7 @@ from .http_proxy import HTTPProxyServer
 from .a2a import cmd_a2a_tree
 from .annotate import cmd_annotate
 from .drift import cmd_drift
+from .langfuse_export import cmd_export_scores
 from .oncall import cmd_oncall
 from .freshness import cmd_freshness
 from .standup import cmd_standup
@@ -223,6 +224,10 @@ def cmd_inspect(args: argparse.Namespace) -> int:
 
 
 def cmd_export(args: argparse.Namespace) -> int:
+    # Route to Langfuse/OTLP export when --scores, --metrics, or --backend is set
+    if getattr(args, "scores", False) or getattr(args, "metrics", False) or getattr(args, "backend", None):
+        return cmd_export_scores(args)
+
     """Export a session to JSON, CSV, or OTLP."""
     store = TraceStore(args.trace_dir)
 
@@ -460,11 +465,30 @@ def build_parser() -> argparse.ArgumentParser:
 
     # export
     p_export = sub.add_parser("export", help="export a session")
-    p_export.add_argument("session_id", help="session ID or prefix")
+    p_export.add_argument("session_id", nargs="?", help="session ID or prefix")
     p_export.add_argument("--format", choices=["json", "csv", "ndjson", "otlp"], default="json")
     p_export.add_argument("--endpoint", help="OTLP collector URL (e.g. http://localhost:4318)")
     p_export.add_argument("--header", action="append", help="HTTP header for OTLP (e.g. 'x-honeycomb-team: KEY')")
     p_export.add_argument("--service-name", default="agent-trace", help="OTel service name (default: agent-trace)")
+    # Langfuse / OTLP metrics flags
+    p_export.add_argument("--scores", action="store_true",
+                          help="include eval scores in export")
+    p_export.add_argument("--metrics", action="store_true",
+                          help="export behavioral metrics as OTLP gauges")
+    p_export.add_argument("--backend", choices=["langfuse", "otlp"],
+                          help="export backend: langfuse or otlp")
+    p_export.add_argument("--since", metavar="Nd",
+                          help="export sessions from the last N days (e.g. 7d)")
+    p_export.add_argument("--langfuse-public-key", dest="langfuse_public_key", metavar="KEY",
+                          help="Langfuse public key (overrides LANGFUSE_PUBLIC_KEY)")
+    p_export.add_argument("--langfuse-secret-key", dest="langfuse_secret_key", metavar="KEY",
+                          help="Langfuse secret key (overrides LANGFUSE_SECRET_KEY)")
+    p_export.add_argument("--langfuse-host", dest="langfuse_host", metavar="URL",
+                          help="Langfuse host (default: https://cloud.langfuse.com)")
+    p_export.add_argument("--otlp-endpoint", dest="otlp_endpoint", metavar="URL",
+                          help="OTLP metrics endpoint (overrides OTEL_EXPORTER_OTLP_ENDPOINT)")
+    p_export.add_argument("--otlp-headers", dest="otlp_headers", metavar="HEADERS",
+                          help="OTLP headers as key=value,key=value")
 
     # stats
     p_stats = sub.add_parser("stats", help="show session statistics")
