@@ -591,6 +591,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_dash.add_argument("--limit", type=int, default=50, help="max sessions to show (default: 50)")
     p_dash.add_argument("--agent", default="", help="filter by agent name")
     p_dash.add_argument("--output", "-o", help="write HTML dashboard to this file")
+    p_dash.add_argument("--trend", action="store_true",
+                        help="show quality and behavioral metrics over time")
+    p_dash.add_argument("--since", metavar="Nd",
+                        help="limit trend to sessions from the last N days (e.g. 30d)")
+    p_dash.add_argument("--html", metavar="FILE",
+                        help="write self-contained HTML trend report to FILE")
+    dash_sub = p_dash.add_subparsers(dest="dash_command")
+    p_dash_ann = dash_sub.add_parser("annotate", help="add a timeline annotation")
+    p_dash_ann.add_argument("--date", required=True, help="date in YYYY-MM-DD format")
+    p_dash_ann.add_argument("--note", required=True, help="annotation text")
 
     # annotate
     p_ann = sub.add_parser("annotate", help="attach notes, labels, and bookmarks to trace events")
