@@ -26,6 +26,7 @@ from .a2a import cmd_a2a_tree
 from .annotate import cmd_annotate
 from .drift import cmd_drift
 from .oncall import cmd_oncall
+from .optimize import cmd_optimize
 from .freshness import cmd_freshness
 from .standup import cmd_standup
 from .audit import cmd_audit
@@ -681,6 +682,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_drift.add_argument("--format", choices=["table", "json"], default="table",
                          help="output format (default: table)")
 
+    # optimize (propose AGENTS.md / skill file improvements from trace failures)
+    p_opt = sub.add_parser("optimize", help="propose instruction file improvements from trace failures")
+    p_opt.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
+    p_opt.add_argument("--target", default="AGENTS.md",
+                       help="instruction file to improve (default: AGENTS.md)")
+    p_opt.add_argument("--dataset", metavar="NAME",
+                       help="use a named dataset instead of a single session")
+    p_opt.add_argument("--dry-run", action="store_true", dest="dry_run",
+                       help="show proposed diff without writing")
+    p_opt.add_argument("--apply", action="store_true",
+                       help="write proposed additions to the target file")
+    p_opt.add_argument("--base-url", dest="base_url", metavar="URL",
+                       help="OpenAI-compatible LLM base URL (overrides OPENAI_BASE_URL)")
+    p_opt.add_argument("--model", metavar="MODEL", default="gpt-4o-mini",
+                       help="LLM model name (default: gpt-4o-mini)")
+    p_opt.add_argument("--api-key", dest="api_key", metavar="KEY",
+                       help="LLM API key (overrides OPENAI_API_KEY)")
+
     # standup (agent standup report)
     p_standup = sub.add_parser("standup", help="plain-English summary of what the agent did")
     p_standup.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
@@ -742,6 +761,7 @@ def main() -> None:
         "inflation": cmd_inflation,
         "a2a-tree": cmd_a2a_tree,
         "drift": cmd_drift,
+        "optimize": cmd_optimize,
         "oncall": cmd_oncall,
         "freshness": cmd_freshness,
         "standup": cmd_standup,
