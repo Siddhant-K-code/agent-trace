@@ -157,6 +157,35 @@ print(f"Replay with: agent-strace replay {meta.session_id}")
 
 ## CLI commands
 
+| Command | What it does |
+|---|---|
+| `record` | Capture an MCP stdio session |
+| `record-http` | Capture an MCP HTTP/SSE session |
+| `replay` | Replay a session in the terminal or as HTML |
+| `inspect` | Show raw events for a session |
+| `stats` | Summary stats for a session |
+| `eval` | Score a session against configurable criteria |
+| `eval ci` | CI gate — exits non-zero if any scorer fails |
+| `eval compare` | Compare two sessions side by side |
+| `drift` | Detect behavioral drift across sessions |
+| `optimize` | Propose AGENTS.md improvements from trace failures |
+| `dashboard` | Aggregate view across sessions |
+| `dashboard --trend` | Eval quality and behavioral metrics over time (HTML) |
+| `export` | Export a session (JSON, CSV, OTLP, Langfuse) |
+| `diff` | Semantic diff between two sessions |
+| `why` | Causal chain for a tool call |
+| `explain` | Plain-English session summary |
+| `cost` | Estimate session cost |
+| `standup` | Structured standup report from a session |
+| `oncall` | On-call readiness report for agent-modified files |
+| `freshness` | Context freshness check vs last session |
+| `watch` | Live session monitor with kill-switch rules |
+| `annotate` | Add annotations to session events |
+| `audit-tools` | Shadow AI / MCP detection |
+| `inflation` | Token inflation across model versions |
+| `curve` | Personal cost-efficiency curve |
+| `a2a-tree` | Cross-agent trace correlation (A2A protocol) |
+
 ```
 agent-strace setup [--redact] [--global]        Generate Claude Code hooks config
 agent-strace hook <event>                       Handle a Claude Code hook event (internal)
@@ -607,6 +636,38 @@ agent-strace policy --last 20 --output .agent-scope.json
 
 The generated policy covers every file path and command the agent actually used, collapsed into glob patterns. Review it, tighten the deny list, then commit it alongside your code.
 
+### Optimize instruction files from trace failures
+
+Analyze sessions or datasets, cluster failures by root cause, and propose concrete additions to `AGENTS.md`, `CLAUDE.md`, or any instruction file. Three built-in heuristic patterns require no LLM.
+
+```bash
+# Show proposed additions to AGENTS.md (dry run, no writes)
+agent-strace optimize --target AGENTS.md
+
+# Analyze a dataset of failures
+agent-strace optimize --dataset auth-failures --target AGENTS.md
+
+# Apply changes
+agent-strace optimize --target AGENTS.md --apply
+
+# Use a local Ollama model for LLM-assisted clustering
+agent-strace optimize --target AGENTS.md \
+  --base-url http://localhost:11434/v1 \
+  --model llama3 \
+  --api-key ollama \
+  --apply
+```
+
+Built-in heuristic patterns (no LLM required):
+
+| Pattern | Detection | Proposed fix |
+|---|---|---|
+| `blind-retry` | Same tool called 3+ times consecutively | Add retry policy to AGENTS.md |
+| `error-no-change` | Tool retried after error with no write in between | Add error-handling rule |
+| `wide-blast-radius` | More than 8 distinct files written in one session | Add scope discipline rule |
+
+When `OPENAI_API_KEY` and `OPENAI_BASE_URL` are set (or `--api-key` / `--base-url`), the command uses an LLM to cluster failures and generate more targeted proposals. Falls back to heuristics if the LLM call fails.
+
 ### PII masking
 
 Sensitive data is masked before it hits disk. Useful when tracing agents that handle user data, credentials, or anything you wouldn't want in a log file.
@@ -621,6 +682,69 @@ agent-strace record-http https://mcp.example.com --mask
 
 Masked by default: email addresses, phone numbers, credit card numbers, US Social Security Numbers, and AWS ARNs. You can also call `mask_event_data()` directly to sanitise events from an existing session before sharing or exporting them.
 
+### Eval scoring
+
+Score a session against configurable criteria. Built-in scorers require no LLM — they run on trace structure alone.
+
+```bash
+# Score the latest session (uses .agent-evals.yaml if present)
+agent-strace eval
+
+# Score a specific session
+agent-strace eval abc123
+
+# JSON output
+agent-strace eval abc123 --format json
+
+# Compare two sessions
+agent-strace eval compare abc123 def456
+```
+
+Built-in scorers:
+
+| Scorer | What it checks |
+|---|---|
+| `no_errors` | Session had zero ERROR events |
+| `cost_under` | Estimated cost stayed below a dollar threshold |
+| `files_scoped` | All file operations were within allowed paths |
+| `duration_under` | Session completed within a time limit |
+| `regex` | A pattern matched in agent responses |
+
+Configure scorers in `.agent-evals.yaml`:
+
+```yaml
+scorers:
+  - type: no_errors
+    threshold: 1.0
+  - type: cost_under
+    max_dollars: 0.10
+    threshold: 1.0
+  - type: files_scoped
+    allowed_paths: ["src/", "tests/"]
+    threshold: 0.90
+
+thresholds:
+  pass: 0.85
+  warn: 0.70
+```
+
+#### CI gate
+
+Block merges when agent quality regresses:
+
+```bash
+agent-strace eval ci
+```
+
+Exits non-zero if any scorer fails. Add to GitHub Actions:
+
+```yaml
+- name: Eval agent session
+  run: agent-strace eval ci
+  env:
+    PYTHONPATH: src
+```
+
 ### Multi-session dashboard
 
 Get an aggregate view across all your sessions — useful for spotting trends, outliers, and cost spikes without opening each session individually.
@@ -633,6 +757,28 @@ agent-strace dashboard --html report.html # self-contained HTML export
 ```
 
 The terminal view shows total tool calls, errors, tokens, and estimated cost, plus ASCII sparkline charts for each metric over time and a top-tools frequency table. The HTML export is self-contained — no server needed.
+
+### Eval trend dashboard
+
+See whether your agent is getting better or worse over time. Reads eval scores from `agent-strace eval` and behavioral metrics from session events, then renders a self-contained HTML report with inline SVG charts.
+
+```bash
+# Terminal summary
+agent-strace dashboard --trend --since 30d
+
+# Self-contained HTML report (no CDN, no JS libraries)
+agent-strace dashboard --trend --since 30d --html trend-report.html
+
+# Add a timeline annotation (appears as a vertical marker on all charts)
+agent-strace dashboard annotate --date 2026-05-10 --note "Added retry policy to AGENTS.md"
+```
+
+The HTML report shows:
+- **Eval quality**: pass rate per judge over time, with annotation markers for config changes
+- **Behavioral metrics**: error rate, retry rate, cost, session duration as sparklines
+- **Recent sessions table**: eval scores inline, click any row to open the full replay
+
+The file is fully self-contained — attach it to a PR, commit it as a weekly snapshot, or share it with someone who doesn't have agent-strace installed.
 
 ### Session attribution
 
@@ -761,6 +907,37 @@ Example `.watch-rules.json`:
 - `pause` — SIGSTOP the agent process (resume with SIGCONT)
 - `kill` — SIGTERM, then SIGKILL after 5s; auto-generates a postmortem
 - `alert` — log only, no interruption
+
+### Behavioral drift detection
+
+Detect when agent behavior has shifted across sessions — without an LLM. Computes a behavioral fingerprint (tool mix, error rate, retry pattern, blast radius, session duration, decision depth) and measures how much the current window has diverged from a baseline using Jensen-Shannon divergence.
+
+```bash
+# Detect drift over the last 30 days (splits window in half automatically)
+agent-strace drift --since 30d
+
+# Compare against a saved baseline
+agent-strace drift --baseline .agent-traces/baselines/behavior-main.json
+
+# Save current fingerprint as a baseline
+agent-strace drift --since 30d --save-baseline .agent-traces/baselines/behavior-main.json
+
+# JSON output for CI
+agent-strace drift --since 30d --format json
+```
+
+Exits non-zero when the overall drift score exceeds `--threshold` (default: `0.20`). Commit baseline fingerprints alongside your agent config — they're under 2KB.
+
+Six dimensions tracked:
+
+| Dimension | Drift signal |
+|---|---|
+| Tool mix | Agent suddenly calling Bash 40% more often |
+| Error rate | New class of errors appearing |
+| Retry pattern | Agent retrying more after a model update |
+| Blast radius | Agent touching more files per task |
+| Session duration | Sessions getting longer |
+| Decision depth | Agent making fewer explicit decisions |
 
 ### Shadow MCP detection
 
@@ -965,6 +1142,47 @@ agent-strace export <session-id> --format otlp \
 agent-strace export <session-id> --format otlp \
   --endpoint http://localhost:4318
 ```
+
+### Langfuse export
+
+Export sessions and eval scores to [Langfuse](https://langfuse.com) (open-source LLM observability). Sessions appear as Traces, tool calls as Spans, LLM calls as Generations, and eval scores as Langfuse Scores.
+
+```bash
+# Set credentials
+export LANGFUSE_PUBLIC_KEY=pk-lf-...
+export LANGFUSE_SECRET_KEY=sk-lf-...
+
+# Export latest session with eval scores
+agent-strace export --scores --backend langfuse
+
+# Export last 7 days
+agent-strace export --since 7d --scores --backend langfuse
+
+# Self-hosted Langfuse
+agent-strace export --scores --backend langfuse \
+  --langfuse-host https://langfuse.your-domain.com
+```
+
+### Export behavioral metrics to any OTLP backend
+
+Export per-session behavioral metrics as OTLP gauge metrics — compatible with Datadog, Honeycomb, Grafana, New Relic, and any OpenTelemetry-compatible backend.
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=https://api.honeycomb.io
+
+agent-strace export --metrics --backend otlp --since 30d
+```
+
+Metrics exported:
+
+| Metric | Description |
+|---|---|
+| `agent_strace.session.cost_usd` | Estimated cost per session |
+| `agent_strace.session.error_rate` | Errors / tool calls |
+| `agent_strace.session.retry_rate` | Consecutive same-tool retries / tool calls |
+| `agent_strace.session.blast_radius` | Distinct files written |
+| `agent_strace.session.duration_s` | Wall-clock session duration |
+| `agent_strace.eval.score` | Judge score per session (one per judge, with `judge=` attribute) |
 
 ### Dump OTLP JSON without sending
 
