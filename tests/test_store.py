@@ -59,6 +59,60 @@ class TestTraceStore(unittest.TestCase):
         sessions = self.store.list_sessions()
         self.assertEqual(len(sessions), 2)
 
+    def test_list_sessions_sorted_newest_first_by_started_at(self):
+        old = SessionMeta(session_id="zz-old", started_at=1.0)
+        new = SessionMeta(session_id="aa-new", started_at=2.0)
+        self.store.create_session(old)
+        self.store.create_session(new)
+
+        sessions = self.store.list_sessions()
+        self.assertEqual(
+            [(m.session_id, m.started_at) for m in sessions],
+            [("aa-new", 2.0), ("zz-old", 1.0)],
+        )
+
+    def test_list_sessions_uses_session_id_tiebreaker(self):
+        lower = SessionMeta(session_id="aa-same", started_at=1.0)
+        higher = SessionMeta(session_id="zz-same", started_at=1.0)
+        self.store.create_session(lower)
+        self.store.create_session(higher)
+
+        sessions = self.store.list_sessions()
+        self.assertEqual([m.session_id for m in sessions], ["zz-same", "aa-same"])
+
+    def test_list_sessions_skips_malformed_metadata(self):
+        valid = SessionMeta(session_id="valid", started_at=1.0)
+        self.store.create_session(valid)
+
+        malformed_dir = os.path.join(self.tmpdir, "malformed")
+        os.makedirs(malformed_dir)
+        with open(os.path.join(malformed_dir, "meta.json"), "w") as f:
+            f.write("{not json")
+        with open(os.path.join(self.tmpdir, "loose-file"), "w") as f:
+            f.write("ignored")
+
+        sessions = self.store.list_sessions()
+        self.assertEqual([m.session_id for m in sessions], ["valid"])
+
+    def test_get_latest_session_returns_newest_meta(self):
+        old = SessionMeta(session_id="zz-old", started_at=1.0)
+        new = SessionMeta(session_id="aa-new", started_at=2.0)
+        self.store.create_session(old)
+        self.store.create_session(new)
+
+        latest = self.store.get_latest_session()
+        self.assertIsNotNone(latest)
+        self.assertEqual(latest.session_id, "aa-new")
+        self.assertEqual(latest.started_at, 2.0)
+
+    def test_get_latest_session_id_uses_started_at_not_session_id(self):
+        old = SessionMeta(session_id="zz-old", started_at=1.0)
+        new = SessionMeta(session_id="aa-new", started_at=2.0)
+        self.store.create_session(old)
+        self.store.create_session(new)
+
+        self.assertEqual(self.store.get_latest_session_id(), "aa-new")
+
     def test_find_session_by_prefix(self):
         meta = SessionMeta()
         self.store.create_session(meta)

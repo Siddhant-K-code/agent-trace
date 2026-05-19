@@ -57,23 +57,36 @@ class TraceStore:
         return events
 
     def list_sessions(self) -> list[SessionMeta]:
+        """Return valid sessions sorted newest first by started_at, then descending session ID."""
         if not self.base_dir.exists():
             return []
         sessions = []
-        for d in sorted(self.base_dir.iterdir(), reverse=True):
+        for d in self.base_dir.iterdir():
             meta_file = d / "meta.json"
             if meta_file.exists():
                 try:
                     sessions.append(SessionMeta.from_json(meta_file.read_text()))
                 except (json.JSONDecodeError, TypeError):
                     continue
-        return sessions
+        return sorted(
+            sessions,
+            key=lambda meta: (meta.started_at, meta.session_id),
+            reverse=True,
+        )
 
-    def get_latest_session_id(self) -> str | None:
+    def get_latest_session(self) -> SessionMeta | None:
+        """Return the newest session metadata, or None when the store is empty."""
         sessions = self.list_sessions()
         if not sessions:
             return None
-        return sessions[0].session_id
+        return sessions[0]
+
+    def get_latest_session_id(self) -> str | None:
+        """Return the newest session ID, or None when the store is empty."""
+        latest = self.get_latest_session()
+        if not latest:
+            return None
+        return latest.session_id
 
     def session_exists(self, session_id: str) -> bool:
         return (self._session_dir(session_id) / "meta.json").exists()

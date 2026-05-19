@@ -28,6 +28,5 @@ The default trace directory is `.agent-traces/` relative to the working director
 - **Zero dependencies** — NDJSON is readable with `cat`, `grep`, `jq`, or any JSON parser in any language.
 - **Append-safe** — file appends are atomic at the OS level for writes smaller than the filesystem block size (~4KB). A single NDJSON line is always well under this limit.
 - **No locking required** — Claude Code fires hooks sequentially, so concurrent writes from the same session are not expected.
-- **No indexing** — session listing is O(n) directory iteration. Prefix matching for session IDs is O(n) over sessions. Acceptable for tens to hundreds of sessions.
-- **Session listing is sorted by directory name** (reverse-alphabetical), not by `started_at` timestamp. UUID hex strings are not time-ordered, so the "latest" session is determined by sort order, not creation time. This is a known simplification.
+- **No indexing** — session listing is O(n) directory iteration. Loaded metadata is sorted newest-first by `started_at`, with descending session ID as a deterministic tie-breaker. Prefix matching for session IDs remains O(n) over sessions. Acceptable for tens to hundreds of sessions.
 - **No compaction or rotation** — traces grow indefinitely. Cleanup is manual.

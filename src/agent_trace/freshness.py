@@ -172,8 +172,7 @@ def analyse_freshness(
 ) -> FreshnessReport:
     """Compute context freshness relative to the last session."""
     # Find last session timestamp
-    all_metas = store.list_sessions()
-    last_meta = all_metas[-1] if all_metas else None
+    last_meta = store.get_latest_session()
     last_ts = last_meta.started_at if last_meta else None
     last_sid = last_meta.session_id if last_meta else ""
 

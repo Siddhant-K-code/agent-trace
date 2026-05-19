@@ -72,6 +72,18 @@ class TestFreshnessAnalysis(unittest.TestCase):
         self.assertGreaterEqual(report.freshness_score, 0)
         self.assertLessEqual(report.freshness_score, 100)
 
+    def test_analyse_freshness_uses_newest_session_by_started_at(self):
+        from agent_trace.freshness import analyse_freshness
+        store = _make_store(self._tmp)
+        old = SessionMeta(session_id="aa-old", started_at=1.0)
+        new = SessionMeta(session_id="zz-new", started_at=2.0)
+        store.create_session(old)
+        store.create_session(new)
+
+        report = analyse_freshness(store, repo=self._tmp)
+        self.assertEqual(report.last_session_id, "zz-new")
+        self.assertEqual(report.last_session_ts, 2.0)
+
     def test_freshness_score_100_when_no_changes(self):
         from agent_trace.freshness import analyse_freshness
         store = _make_store(self._tmp)
@@ -103,5 +115,4 @@ class TestFreshnessAnalysis(unittest.TestCase):
         args = parser.parse_args(["freshness", "--since", "2026-01-01", "--scope", "src/**"])
         self.assertEqual(args.since, "2026-01-01")
         self.assertEqual(args.scope, "src/**")
-
 
