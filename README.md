@@ -1523,6 +1523,7 @@ uv tool install -e .
 
 ## Related
 
+- [AGENTS.md integration guide](docs/agents-md-integration.md) - how to use agent-strace with AGENTS.md for drift detection and CI gating
 - [Architecture Decision Records](ADRs/) - design decisions and their rationale
 - [The agent observability gap (blog)](https://siddhantkhare.com/writing/agent-observability-gap) - the problem this tool addresses
 - [The agent observability gap (thread)](https://x.com/Siddhant_K_code/status/2032834557628788940) - discussion on X
