@@ -303,6 +303,40 @@ Supported models: `sonnet` (default), `opus`, `haiku`, `gpt4`, `gpt4o`. Token co
 
 See [examples/session_analysis.md](examples/session_analysis.md) for a full walkthrough combining `import`, `explain`, and `cost`.
 
+### Session regression testing (compare)
+
+Compare two sessions structurally and get a verdict on whether agent behaviour improved or regressed. Useful when changing models, prompts, or tool implementations.
+
+```bash
+# Compare two existing sessions
+agent-strace compare <session-id-a> <session-id-b>
+
+# Compare the last 2 sessions with a given task tag
+agent-strace compare --tag refactor-auth
+
+# Machine-readable output
+agent-strace compare <session-id-a> <session-id-b> --format json
+```
+
+Example output:
+
+```
+Session Comparison
+─────────────────────────────────────────────────────────────────
+                                 a84664242afa    bf1207728ee6    change
+─────────────────────────────────────────────────────────────────
+  Duration                              18m 00s         12m 00s     -33%
+  Total cost                            $4.2300         $2.8700     -32%
+  Tool calls                                 14              11     -21%
+  Files modified                              2               2    (same)
+  Errors                                      0               0
+─────────────────────────────────────────────────────────────────
+Verdict: bf1207728ee6 was 32% cheaper, 33% faster
+Decision divergence:  2 point(s)
+```
+
+`decision divergence` is the edit distance between the two sessions' decision event sequences — no LLM call required. `--tag` compares the last N sessions whose `agent_name` or `command` contains the tag string.
+
 ### Weekly spend digest (budget-report)
 
 Aggregate cost across sessions for a configurable time window. Shows total spend, top sessions, cost by tool, and savings from watchdog budget ceilings.

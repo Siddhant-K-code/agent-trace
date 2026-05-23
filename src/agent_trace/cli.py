@@ -48,6 +48,7 @@ from .token_budget import cmd_token_budget
 from .anonymize import cmd_anonymize_export
 from .integrations import detect_and_instrument, _INTEGRATIONS
 from .budget_report import cmd_budget_report
+from .compare import cmd_compare
 from .lint import cmd_lint
 from .retention import cmd_retention
 from .sample import cmd_sample
@@ -882,6 +883,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_sample.add_argument("--seed", type=int, default=None,
                           help="random seed for reproducible random sampling")
 
+    # compare
+    p_compare = sub.add_parser("compare", help="session-to-session regression report")
+    p_compare.add_argument("session_id_a", nargs="?",
+                           help="first session ID (baseline)")
+    p_compare.add_argument("session_id_b", nargs="?",
+                           help="second session ID (candidate)")
+    p_compare.add_argument("--rerun", action="store_true",
+                           help="re-run the original prompt and compare live")
+    p_compare.add_argument("--model", metavar="MODEL",
+                           help="model to use for --rerun")
+    p_compare.add_argument("--tag", metavar="TAG",
+                           help="compare the last N sessions matching this tag")
+    p_compare.add_argument("--last", type=int, default=2, metavar="N",
+                           help="number of tagged sessions to compare (default: 2)")
+    p_compare.add_argument("--format", choices=["text", "json"], default="text",
+                           dest="format", help="output format (default: text)")
+
     # budget-report
     p_budget = sub.add_parser("budget-report", help="weekly spend digest across sessions")
     p_budget.add_argument("--since", metavar="DATE",
@@ -1034,6 +1052,7 @@ def main() -> None:
         "mcp": cmd_mcp,
         "auto": cmd_auto,
         "budget-report": cmd_budget_report,
+        "compare": cmd_compare,
         "lint": cmd_lint,
         "retention": cmd_retention,
         "sample": cmd_sample,
