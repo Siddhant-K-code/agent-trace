@@ -8,7 +8,7 @@ This file tells AI coding agents how to work with the agent-strace repository.
 src/agent_trace/    Core library — one module per feature
 tests/              One test file per module (test_<module>.py)
 ADRs/               Architecture Decision Records — read before adding dependencies
-docs/               Integration guides
+docs/               User-facing documentation (setup, commands, production, integrations, security)
 examples/           Usage examples for each integration
 pyproject.toml      Package config and optional extras
 ```
@@ -41,15 +41,36 @@ python -m pytest tests/test_watch.py -v
 3. Import and register it in `cli.py`
 4. Add new `EventType` values to `models.py` if needed
 5. Write tests in `tests/test_<feature>.py`
-6. Update README.md with the new command and an example
+6. Add the command to the appropriate table in `README.md` (one line, linked to docs/)
+7. Add full flag reference to `docs/commands.md`
+8. If the feature involves production export, update `docs/production.md`
+9. If the feature involves a new integration, update `docs/integrations.md`
 
 ## Version bumping
 
-- New feature (new CLI command, new integration, new flag): bump minor (`0.38.1` → `0.39.0`)
-- Bug fix or small improvement: bump patch (`0.38.1` → `0.38.2`)
+Current version: `0.51.0` in `src/agent_trace/__init__.py`.
+
+- New feature (new command, new flag, new integration): bump minor (`0.51.0` → `0.52.0`)
+- Bug fix or small improvement: bump patch (`0.51.0` → `0.51.1`)
 - Breaking change to CLI or storage format: bump major — check with maintainer first
 
-Version is in `src/agent_trace/__init__.py`.
+## docs/ structure
+
+The `docs/` directory contains user-facing documentation. Keep these files current when adding features:
+
+| File | Contents |
+|---|---|
+| `docs/setup.md` | Full setup for all 3 integration paths, complete JSON configs |
+| `docs/commands.md` | Full flag reference for every command |
+| `docs/production.md` | Per-backend OTLP setup (Datadog, Honeycomb, Grafana, etc.) |
+| `docs/server.md` | Server-side collector setup, Docker, API reference |
+| `docs/integrations.md` | Auto-instrumentation for each framework |
+| `docs/vscode.md` | VS Code extension docs (setup, commands, settings) |
+| `docs/security.md` | Secret redaction, PII anonymization, policy files |
+
+## README policy
+
+`README.md` is a landing page, not documentation. It must stay under 300 lines. Detailed content goes in `docs/`. Do not add detailed flag descriptions, long examples, or configuration dumps to `README.md`.
 
 ## ADRs to read before making architectural decisions
 
