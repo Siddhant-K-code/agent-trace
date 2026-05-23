@@ -11,7 +11,10 @@ import * as vscode from "vscode";
 import { DecorationManager } from "./decorations";
 import { EventStreamPanel } from "./panel";
 import { PauseManager } from "./pauseAgent";
-import { StatusBarManager } from "./statusBar";
+import { LiveStreamPanel } from "./liveStream";
+import { PostMortemManager } from "./postMortem";
+import { SessionTreeProvider } from "./sessionTree";
+import { StatusBarManager, WatchdogStatusBar } from "./statusBar";
 import { TraceWatcher } from "./traceStore";
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -30,9 +33,13 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const watcher = new TraceWatcher(workspaceRoot, traceDirSetting);
   const statusBar = new StatusBarManager();
+  const watchdogBar = new WatchdogStatusBar();
   const decorations = new DecorationManager();
   const pauseManager = new PauseManager(traceDir);
   const panel = new EventStreamPanel(context.extensionUri);
+  const postMortem = new PostMortemManager(traceDir);
+  const liveStream = new LiveStreamPanel(context.extensionUri);
+  const sessionTree = new SessionTreeProvider(traceDir);
 
   // -------------------------------------------------------------------------
   // Webview panel registration
@@ -55,6 +62,7 @@ export function activate(context: vscode.ExtensionContext): void {
       true
     );
     statusBar.update(state);
+    watchdogBar.onSessionStart(traceDir, state);
     decorations.update(state);
     panel.onSessionStart(state);
   });
@@ -66,6 +74,7 @@ export function activate(context: vscode.ExtensionContext): void {
       false
     );
     statusBar.update(null);
+    watchdogBar.onSessionEnd();
     decorations.update(null);
     panel.onSessionEnd(state);
     pauseManager.cleanup();
@@ -73,6 +82,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   watcher.onStateChange((state) => {
     statusBar.update(state);
+    watchdogBar.onStateChange(state);
     if (config.get<boolean>("showGutterAnnotations", true)) {
       decorations.update(state);
     }
@@ -141,8 +151,42 @@ export function activate(context: vscode.ExtensionContext): void {
 
   watcher.start();
 
+  // Register session browser tree view
+  const treeView = vscode.window.registerTreeDataProvider(
+    "agentTrace.sessionBrowser",
+    sessionTree
+  );
+
+  // Register commands for new features
+  context.subscriptions.push(
+    vscode.commands.registerCommand("agentTrace.openLiveStream", () => {
+      liveStream.open();
+    }),
+    vscode.commands.registerCommand("agentTrace.openPostMortem", (sessionId?: string) => {
+      if (sessionId) {
+        postMortem.openForSession(sessionId);
+      } else {
+        // Prompt user to pick a session
+        vscode.window.showInputBox({ prompt: "Enter session ID" }).then((id) => {
+          if (id) { postMortem.openForSession(id); }
+        });
+      }
+    }),
+    vscode.commands.registerCommand("agentTrace.refreshSessionBrowser", () => {
+      sessionTree.refresh();
+    }),
+    vscode.commands.registerCommand("agentTrace.revealSession", (sessionId: string) => {
+      // Refresh tree and let the user find the session
+      sessionTree.refresh();
+    })
+  );
+
+  // Start post-mortem watcher
+  postMortem.start();
+
   // Register disposables
-  context.subscriptions.push(watcher, statusBar, decorations);
+  context.subscriptions.push(watcher, statusBar, watchdogBar, decorations,
+    postMortem, liveStream, treeView, { dispose: () => sessionTree.dispose() });
 }
 
 export function deactivate(): void {

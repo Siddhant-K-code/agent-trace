@@ -2,7 +2,7 @@
   "name": "agent-strace",
   "displayName": "agent-strace",
   "description": "Live session overlay for agent-strace: status bar, gutter annotations, and event stream panel.",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "publisher": "Siddhant-K-code",
   "license": "MIT",
   "repository": {
@@ -21,6 +21,25 @@
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
+      {
+        "command": "agentTrace.openLiveStream",
+        "title": "agent-trace: Open Live Stream",
+        "icon": "$(broadcast)"
+      },
+      {
+        "command": "agentTrace.openPostMortem",
+        "title": "agent-trace: View Post-Mortem",
+        "icon": "$(file-text)"
+      },
+      {
+        "command": "agentTrace.refreshSessionBrowser",
+        "title": "agent-trace: Refresh Session Browser",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "agentTrace.revealSession",
+        "title": "agent-trace: Reveal Session in Browser"
+      },
       {
         "command": "agentTrace.pauseAgent",
         "title": "agent-trace: Pause Agent",
@@ -47,6 +66,32 @@
           "id": "agentTrace.eventStream",
           "name": "Agent Trace",
           "when": "agentTrace.sessionActive"
+        },
+        {
+          "id": "agentTrace.sessionBrowser",
+          "name": "Agent Trace Sessions",
+          "when": "workspaceContains:.agent-traces"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "agentTrace.refreshSessionBrowser",
+          "when": "view == agentTrace.sessionBrowser",
+          "group": "navigation"
+        },
+        {
+          "command": "agentTrace.openLiveStream",
+          "when": "view == agentTrace.sessionBrowser",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "agentTrace.openPostMortem",
+          "when": "view == agentTrace.sessionBrowser && viewItem == sessionWithPostMortem",
+          "group": "inline"
         }
       ]
     },
@@ -67,6 +112,21 @@
           "type": "boolean",
           "default": true,
           "description": "Show inline read/write counts at the top of agent-touched files."
+        },
+        "agentTrace.watchdogPollIntervalSeconds": {
+          "type": "number",
+          "default": 5,
+          "description": "How often (in seconds) the watchdog status bar polls for cost and elapsed time."
+        },
+        "agentTrace.collectorEndpoint": {
+          "type": "string",
+          "default": "",
+          "description": "Remote agent-strace server endpoint (e.g. http://collector:4317). Leave empty to use local .agent-traces/."
+        },
+        "agentTrace.sessionBrowserRefreshInterval": {
+          "type": "number",
+          "default": 5,
+          "description": "How often (in seconds) the session browser tree view refreshes."
         }
       }
     }
