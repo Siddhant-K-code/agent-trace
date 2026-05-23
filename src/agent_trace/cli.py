@@ -45,6 +45,7 @@ from .policy import cmd_policy
 from .postmortem import cmd_postmortem
 from .share import cmd_share
 from .token_budget import cmd_token_budget
+from .retention import cmd_retention
 from .watch import cmd_watch
 from .why import cmd_why
 from .models import EventType, SessionMeta, TraceEvent
@@ -772,6 +773,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="transport protocol (default: stdio)",
     )
 
+    # retention
+    p_ret = sub.add_parser("retention", help="manage session data retention")
+    ret_sub = p_ret.add_subparsers(dest="retention_command")
+
+    ret_sub.add_parser("status", help="show retention status and what would be deleted")
+
+    p_ret_clean = ret_sub.add_parser("clean", help="delete sessions that exceed retention limits")
+    p_ret_clean.add_argument("--dry-run", action="store_true",
+                             help="show what would be deleted without deleting")
+    p_ret_clean.add_argument("--max-age-days", type=int, dest="max_age_days", metavar="N",
+                             help="delete sessions older than N days")
+    p_ret_clean.add_argument("--max-sessions", type=int, dest="max_sessions", metavar="N",
+                             help="keep only the most recent N sessions")
+    p_ret_clean.add_argument("--max-size-mb", type=float, dest="max_size_mb", metavar="MB",
+                             help="delete oldest sessions when storage exceeds MB")
+    p_ret_clean.add_argument("--config", metavar="FILE",
+                             help="path to .agent-strace.yaml config file")
+
     # diff --semantic and --eval-config flags (extend existing diff parser)
     p_diff.add_argument("--semantic", action="store_true",
                         help="semantic outcome-level diff (files, cost, errors)")
@@ -832,6 +851,7 @@ def main() -> None:
         "freshness": cmd_freshness,
         "standup": cmd_standup,
         "mcp": cmd_mcp,
+        "retention": cmd_retention,
     }
 
     handler = handlers.get(args.command)

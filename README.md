@@ -216,6 +216,8 @@ agent-strace dashboard [--last N] [--html file] Aggregate stats and trends acros
 agent-strace annotate <session-id> <offset>     Add notes, labels, or bookmarks to events
 agent-strace token-budget <session-id>          Check token usage against model context limit
 agent-strace replay [session-id] [--limit N]    Replay a session (--limit caps events shown)
+agent-strace retention status                   Show session count, size, and what policy would delete
+agent-strace retention clean [--dry-run]        Delete sessions that exceed retention limits
 agent-strace watch [--timeout DURATION] [--budget $] [--on-death CMD] [--rules file]
                                                 Watch a live session; kill/pause on rule breach
 agent-strace share <session-id> [-o file]       Export a self-contained HTML report
@@ -296,6 +298,39 @@ Wasted on failed phases: $0.0021 (50%)
 Supported models: `sonnet` (default), `opus`, `haiku`, `gpt4`, `gpt4o`. Token counts are estimated from payload size (`len / 4`); see [ADR-0008](ADRs/0008-token-cost-estimation-heuristic.md) for details.
 
 See [examples/session_analysis.md](examples/session_analysis.md) for a full walkthrough combining `import`, `explain`, and `cost`.
+
+### Data retention
+
+Enforce configurable retention policies to automatically delete old session data — required for GDPR, SOC 2, and internal data policies.
+
+```bash
+# Check current status and what policy would delete
+agent-strace retention status
+
+# Preview what would be deleted (no changes made)
+agent-strace retention clean --dry-run
+
+# Delete sessions older than 30 days
+agent-strace retention clean --max-age-days 30
+
+# Keep only the 1000 most recent sessions
+agent-strace retention clean --max-sessions 1000
+
+# Delete oldest sessions when storage exceeds 500 MB
+agent-strace retention clean --max-size-mb 500
+```
+
+Configure via `.agent-strace.yaml`:
+
+```yaml
+retention:
+  max_age_days: 30
+  max_sessions: 1000
+  max_size_mb: 500
+  on_delete: log    # log deletions to .agent-traces/retention.log
+```
+
+Policies are applied in order: age → count → size. Deletions are logged with session ID and timestamp (not content).
 
 ### Secret redaction
 
