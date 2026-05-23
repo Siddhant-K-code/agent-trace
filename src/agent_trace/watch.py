@@ -334,6 +334,49 @@ class WatcherConfig:
     # Watchdog: command to run after kill, with {post_mortem_path} substituted
     on_death_cmd: str = ""
 
+    @classmethod
+    def from_dict(cls, d: dict) -> "WatcherConfig":
+        watchers = d.get("watchers", {})
+        retry_cfg = watchers.get("retry", {})
+        cost_cfg = watchers.get("cost", {})
+        dur_cfg = watchers.get("duration", {})
+        loop_cfg = watchers.get("loop", {})
+        scope_cfg = watchers.get("scope", {})
+        webhook = d.get("webhook", {})
+
+        # Parse per-operation rules
+        rules: list[OperationRule] = []
+        for rule_dict in d.get("operation_rules", []):
+            rules.append(OperationRule(
+                tool_name=rule_dict.get("tool", "*"),
+                pattern=rule_dict.get("pattern", "*"),
+                action=rule_dict.get("action", "alert"),
+                reason=rule_dict.get("reason", ""),
+            ))
+
+        return cls(
+            max_retries=int(retry_cfg.get("max", 5)),
+            max_cost_dollars=float(cost_cfg.get("max_dollars", 10.0)),
+            max_duration_seconds=float(dur_cfg.get("max_minutes", 30)) * 60,
+            loop_sequence_length=int(loop_cfg.get("sequence_length", 3)),
+            loop_max_repeats=int(loop_cfg.get("max_repeats", 3)),
+            scope_policy=str(scope_cfg.get("policy", ".agent-scope.json")),
+            on_violation=str(retry_cfg.get("alert", "terminal")),
+            webhook_url=str(webhook.get("url", "")),
+            operation_rules=rules,
+            max_context_pct=int(d.get("max_context_pct", 90)),
+        )
+
+    @classmethod
+    def load(cls, path: str) -> "WatcherConfig":
+        p = Path(path)
+        if not p.exists():
+            return cls()
+        try:
+            return cls.from_dict(json.loads(p.read_text()))
+        except Exception:
+            return cls()
+
 
 # ---------------------------------------------------------------------------
 # Push-based event streaming
@@ -428,49 +471,6 @@ class EventStreamer:
                     )
         except Exception as exc:
             sys.stderr.write(f"[stream] POST to {self.config.url} failed: {exc}\n")
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "WatcherConfig":
-        watchers = d.get("watchers", {})
-        retry_cfg = watchers.get("retry", {})
-        cost_cfg = watchers.get("cost", {})
-        dur_cfg = watchers.get("duration", {})
-        loop_cfg = watchers.get("loop", {})
-        scope_cfg = watchers.get("scope", {})
-        webhook = d.get("webhook", {})
-
-        # Parse per-operation rules
-        rules: list[OperationRule] = []
-        for rule_dict in d.get("operation_rules", []):
-            rules.append(OperationRule(
-                tool_name=rule_dict.get("tool", "*"),
-                pattern=rule_dict.get("pattern", "*"),
-                action=rule_dict.get("action", "alert"),
-                reason=rule_dict.get("reason", ""),
-            ))
-
-        return cls(
-            max_retries=int(retry_cfg.get("max", 5)),
-            max_cost_dollars=float(cost_cfg.get("max_dollars", 10.0)),
-            max_duration_seconds=float(dur_cfg.get("max_minutes", 30)) * 60,
-            loop_sequence_length=int(loop_cfg.get("sequence_length", 3)),
-            loop_max_repeats=int(loop_cfg.get("max_repeats", 3)),
-            scope_policy=str(scope_cfg.get("policy", ".agent-scope.json")),
-            on_violation=str(retry_cfg.get("alert", "terminal")),
-            webhook_url=str(webhook.get("url", "")),
-            operation_rules=rules,
-            max_context_pct=int(d.get("max_context_pct", 90)),
-        )
-
-    @classmethod
-    def load(cls, path: str) -> "WatcherConfig":
-        p = Path(path)
-        if not p.exists():
-            return cls()
-        try:
-            return cls.from_dict(json.loads(p.read_text()))
-        except Exception:
-            return cls()
 
 
 @dataclass
