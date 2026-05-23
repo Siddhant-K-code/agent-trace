@@ -47,6 +47,7 @@ from .share import cmd_share
 from .token_budget import cmd_token_budget
 from .anonymize import cmd_anonymize_export
 from .integrations import detect_and_instrument, _INTEGRATIONS
+from .budget_report import cmd_budget_report
 from .lint import cmd_lint
 from .retention import cmd_retention
 from .sample import cmd_sample
@@ -881,6 +882,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_sample.add_argument("--seed", type=int, default=None,
                           help="random seed for reproducible random sampling")
 
+    # budget-report
+    p_budget = sub.add_parser("budget-report", help="weekly spend digest across sessions")
+    p_budget.add_argument("--since", metavar="DATE",
+                          help="start of window (ISO date or duration like 7d; default: 7 days ago)")
+    p_budget.add_argument("--until", metavar="DATE",
+                          help="end of window (ISO date; default: now)")
+    p_budget.add_argument("--format", choices=["text", "markdown", "json"], default="text",
+                          dest="format", help="output format (default: text)")
+    p_budget.add_argument("--endpoint", metavar="URL",
+                          help="remote collector endpoint (not yet implemented)")
+
     # lint
     p_lint = sub.add_parser("lint", help="analyse a session for bad behaviour patterns")
     p_lint.add_argument("session_id", nargs="?",
@@ -1021,6 +1033,7 @@ def main() -> None:
         "standup": cmd_standup,
         "mcp": cmd_mcp,
         "auto": cmd_auto,
+        "budget-report": cmd_budget_report,
         "lint": cmd_lint,
         "retention": cmd_retention,
         "sample": cmd_sample,

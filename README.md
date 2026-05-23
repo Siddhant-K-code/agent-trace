@@ -303,6 +303,48 @@ Supported models: `sonnet` (default), `opus`, `haiku`, `gpt4`, `gpt4o`. Token co
 
 See [examples/session_analysis.md](examples/session_analysis.md) for a full walkthrough combining `import`, `explain`, and `cost`.
 
+### Weekly spend digest (budget-report)
+
+Aggregate cost across sessions for a configurable time window. Shows total spend, top sessions, cost by tool, and savings from watchdog budget ceilings.
+
+```bash
+# Last 7 days (default)
+agent-strace budget-report
+
+# Custom window
+agent-strace budget-report --since 2026-05-01 --until 2026-05-23
+
+# Markdown output (paste into Slack or email)
+agent-strace budget-report --format markdown
+
+# Machine-readable JSON
+agent-strace budget-report --format json
+```
+
+Example output:
+
+```
+Budget Report — May 16 to May 23, 2026
+
+Total spend:        $47.23  (↑ 12% vs prior period)
+Sessions:           34      (↑ 3 vs prior period)
+Avg cost/session:   $1.39
+
+Top 5 most expensive sessions:
+  1. a84664242afa  $8.43  refactor-auth                   2026-05-21
+  2. bf1207728ee6  $6.21  add-test-coverage               2026-05-22
+  3. c91ab3312fde  $4.87  fix-login-bug  ⚠ watchdog       2026-05-20
+
+Cost by tool (estimated):
+  Bash                  $18.43  (39%)
+  Read                  $12.11  (26%)
+  Write                  $9.87  (21%)
+
+Sessions terminated by watchdog:  3  ($14.21 saved by budget ceiling)
+```
+
+Week-over-week delta is shown when prior-period data exists. The `--format markdown` output is designed to paste directly into Slack without editing.
+
 ### Static behaviour analysis (lint)
 
 Analyse a session for known bad patterns — tool loops, reasoning spirals, budget proximity, context saturation, redundant reads, error-retry loops, and sessions that produced no output.
