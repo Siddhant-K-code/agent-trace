@@ -303,6 +303,58 @@ Supported models: `sonnet` (default), `opus`, `haiku`, `gpt4`, `gpt4o`. Token co
 
 See [examples/session_analysis.md](examples/session_analysis.md) for a full walkthrough combining `import`, `explain`, and `cost`.
 
+### Static behaviour analysis (lint)
+
+Analyse a session for known bad patterns — tool loops, reasoning spirals, budget proximity, context saturation, redundant reads, error-retry loops, and sessions that produced no output.
+
+```bash
+# Lint the latest session
+agent-strace lint
+
+# Lint a specific session
+agent-strace lint <session-id>
+
+# Lint all sessions from the last 7 days
+agent-strace lint --all --since 7d
+
+# Machine-readable output for CI
+agent-strace lint <session-id> --format json
+
+# Exit code 1 on any WARN or ERROR (CI gate)
+agent-strace lint <session-id> --strict
+```
+
+Example output:
+
+```
+WARN   tool-loop              "Bash" called 7 times consecutively (events 34–41). Possible loop.
+WARN   reasoning-spiral       4 consecutive LLM calls with no tool call (events 12–15). Agent may be over-reasoning.
+ERROR  budget-proximity       Session reached 94% of a $5.00 budget ceiling. Consider raising or splitting the task.
+INFO   context-saturation     Input tokens exceeded 80% of model context window at event 28.
+INFO   redundant-read         "README.md" read 3 times in this session. Consider caching.
+
+2 error(s), 2 warning(s), 2 info(s). Use --strict for non-zero exit on warnings.
+```
+
+Rules are configurable via `.agent-strace-lint.json`:
+
+```json
+{
+  "tool-loop": { "threshold": 7 },
+  "reasoning-spiral": { "enabled": false }
+}
+```
+
+| Rule | Level | Trigger |
+|---|---|---|
+| `tool-loop` | WARN | Same tool called 5+ times consecutively |
+| `reasoning-spiral` | WARN | 3+ consecutive LLM calls with no tool call |
+| `budget-proximity` | ERROR | Session cost exceeded 90% of watchdog budget ceiling |
+| `context-saturation` | INFO | Input tokens exceeded 80% of model context window |
+| `redundant-read` | INFO | Same file read 3+ times in a session |
+| `error-retry-loop` | WARN | Same tool errored and was retried 3+ times |
+| `no-output` | WARN | Session completed with no write or file-modifying tool calls |
+
 ### Data retention
 
 Enforce configurable retention policies to automatically delete old session data — required for GDPR, SOC 2, and internal data policies.

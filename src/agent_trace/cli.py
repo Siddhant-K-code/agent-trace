@@ -47,6 +47,7 @@ from .share import cmd_share
 from .token_budget import cmd_token_budget
 from .anonymize import cmd_anonymize_export
 from .integrations import detect_and_instrument, _INTEGRATIONS
+from .lint import cmd_lint
 from .retention import cmd_retention
 from .sample import cmd_sample
 from .server import cmd_server
@@ -880,6 +881,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_sample.add_argument("--seed", type=int, default=None,
                           help="random seed for reproducible random sampling")
 
+    # lint
+    p_lint = sub.add_parser("lint", help="analyse a session for bad behaviour patterns")
+    p_lint.add_argument("session_id", nargs="?",
+                        help="session ID to lint (default: latest)")
+    p_lint.add_argument("--all", action="store_true", dest="all",
+                        help="lint all sessions in the store")
+    p_lint.add_argument("--since", metavar="DURATION",
+                        help="with --all, only sessions newer than this (e.g. 7d, 24h)")
+    p_lint.add_argument("--strict", action="store_true",
+                        help="exit with code 1 on any WARN or ERROR (for CI)")
+    p_lint.add_argument("--format", choices=["text", "json"], default="text",
+                        help="output format (default: text)")
+    p_lint.add_argument("--config", metavar="FILE",
+                        help="path to .agent-strace-lint.json config file")
+
     # retention
     p_ret = sub.add_parser("retention", help="manage session data retention")
     ret_sub = p_ret.add_subparsers(dest="retention_command")
@@ -1005,6 +1021,7 @@ def main() -> None:
         "standup": cmd_standup,
         "mcp": cmd_mcp,
         "auto": cmd_auto,
+        "lint": cmd_lint,
         "retention": cmd_retention,
         "sample": cmd_sample,
         "server": cmd_server,
