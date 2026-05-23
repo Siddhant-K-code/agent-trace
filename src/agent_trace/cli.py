@@ -48,6 +48,7 @@ from .token_budget import cmd_token_budget
 from .anonymize import cmd_anonymize_export
 from .retention import cmd_retention
 from .sample import cmd_sample
+from .server import cmd_server
 from .watch import cmd_watch
 from .why import cmd_why
 from .models import EventType, SessionMeta, TraceEvent
@@ -818,6 +819,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="transport protocol (default: stdio)",
     )
 
+    # server (event collector)
+    p_server = sub.add_parser(
+        "server",
+        help="start a server-side event collector (receives events from remote agents)",
+    )
+    p_server.add_argument("--port", type=int, default=4317,
+                          help="port to listen on (default: 4317)")
+    p_server.add_argument("--host", default="0.0.0.0",
+                          help="host to bind to (default: 0.0.0.0)")
+    p_server.add_argument("--storage", metavar="DIR",
+                          help="storage directory for traces "
+                               "(default: $AGENT_STRACE_STORAGE or .agent-traces)")
+
     # sample
     p_sample = sub.add_parser(
         "sample",
@@ -918,6 +932,7 @@ def main() -> None:
         "mcp": cmd_mcp,
         "retention": cmd_retention,
         "sample": cmd_sample,
+        "server": cmd_server,
     }
 
     handler = handlers.get(args.command)

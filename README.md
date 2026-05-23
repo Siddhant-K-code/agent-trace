@@ -220,6 +220,7 @@ agent-strace retention status                   Show session count, size, and wh
 agent-strace retention clean [--dry-run]        Delete sessions that exceed retention limits
 agent-strace sample --strategy worst --n 20     Export worst/diverse/random/recent sessions as JSONL
 agent-strace export <session> --format otlp-genai  Export with OTel GenAI semantic conventions
+agent-strace server [--port 4317] [--storage DIR]  Start a server-side event collector
 agent-strace watch [--timeout DURATION] [--budget $] [--on-death CMD] [--rules file]
                                                 Watch a live session; kill/pause on rule breach
 agent-strace share <session-id> [-o file]       Export a self-contained HTML report
@@ -1220,6 +1221,43 @@ agent-strace scope: all tool calls logged, secrets redacted, exported to Grafana
 Any attempt by the agent to read `cvm/attestation-service/` or `cvm/auth-service/` is blocked at the authorization layer before it reaches the filesystem. agent-strace logs the denied attempt with the reason.
 
 ---
+
+## Server-side event collector
+
+Run a central collector so agents in containers, CI, and serverless functions can send traces over the network — no local disk required.
+
+```bash
+# Start the collector
+agent-strace server --port 4317 --storage ./traces
+
+# Agents point to it via environment variable — no code changes required
+AGENT_STRACE_ENDPOINT=http://collector:4317 python my_agent.py
+```
+
+The server writes traces in the same `.agent-traces/` format as local mode. All existing CLI commands work against its storage.
+
+### API
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/events` | Receive a batch of NDJSON events |
+| `POST` | `/sessions` | Create or update session metadata |
+| `GET` | `/sessions` | List all sessions |
+| `GET` | `/sessions/<id>/events` | Stream events for a session |
+| `GET` | `/health` | Liveness check |
+
+### Docker
+
+```dockerfile
+FROM python:3.12-slim
+RUN pip install agent-strace
+ENV AGENT_STRACE_STORAGE=/data
+VOLUME /data
+EXPOSE 4317
+CMD ["agent-strace", "server", "--port", "4317"]
+```
+
+No authentication in v1 — intended for internal/private network use. Add a reverse proxy (nginx, Caddy) for auth.
 
 ## Production tracing (OTLP export)
 

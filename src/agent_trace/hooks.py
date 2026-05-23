@@ -63,6 +63,21 @@ def _get_store() -> TraceStore:
     return TraceStore(_get_store_dir())
 
 
+def _get_remote_endpoint() -> str:
+    """Return AGENT_STRACE_ENDPOINT if set, else empty string."""
+    return os.environ.get("AGENT_STRACE_ENDPOINT", "").rstrip("/")
+
+
+def _write_event(store: TraceStore, session_id: str, event: TraceEvent) -> None:
+    """Write an event to local store or remote collector, depending on env."""
+    endpoint = _get_remote_endpoint()
+    if endpoint:
+        from .server import send_event_to_endpoint
+        send_event_to_endpoint(event, endpoint)
+    else:
+        store.append_event(session_id, event)
+
+
 def _active_session_path() -> Path:
     return Path(_get_store_dir()) / ".active-session"
 
@@ -149,7 +164,7 @@ def handle_session_start(input_data: dict) -> None:
     if redact:
         event_data = redact_data(event_data)
 
-    store.append_event(
+    _write_event(store, 
         meta.session_id,
         TraceEvent(
             event_type=EventType.SESSION_START,
@@ -171,7 +186,7 @@ def handle_session_end(input_data: dict) -> None:
         meta.ended_at = time.time()
         meta.total_duration_ms = (meta.ended_at - meta.started_at) * 1000
 
-        store.append_event(
+        _write_event(store, 
             session_id,
             TraceEvent(
                 event_type=EventType.SESSION_END,
@@ -207,7 +222,7 @@ def handle_pre_tool(input_data: dict) -> None:
         session_id=session_id,
         data=event_data,
     )
-    store.append_event(session_id, event)
+    _write_event(store, session_id, event)
 
     # Update meta
     meta = store.load_meta(session_id)
@@ -238,7 +253,7 @@ def handle_user_prompt(input_data: dict) -> None:
     if redact:
         event_data = redact_data(event_data)
 
-    store.append_event(
+    _write_event(store, 
         session_id,
         TraceEvent(
             event_type=EventType.USER_PROMPT,
@@ -269,7 +284,7 @@ def handle_stop(input_data: dict) -> None:
     if redact:
         event_data = redact_data(event_data)
 
-    store.append_event(
+    _write_event(store, 
         session_id,
         TraceEvent(
             event_type=EventType.ASSISTANT_RESPONSE,
@@ -325,7 +340,7 @@ def handle_post_tool(input_data: dict, failed: bool = False) -> None:
         event.duration_ms = (event.timestamp - call_info["timestamp"]) * 1000
         _write_pending_calls(pending)
 
-    store.append_event(session_id, event)
+    _write_event(store, session_id, event)
 
     # Update meta on errors
     if failed:
