@@ -7,6 +7,13 @@ Rule-based nanny (--rules rules.yaml):
   Evaluates declarative rules on every event. Supports pause (SIGSTOP/SIGCONT)
   and kill (SIGTERM) actions with optional notifications. Auto-generates a
   postmortem when a kill action fires.
+
+Watchdog mode (--timeout / --budget):
+  Enforces a wall-clock timeout and/or token-cost ceiling. When either limit
+  is breached the agent process is terminated and a structured post-mortem
+  JSON file is written to the session directory. An optional --on-death
+  command is invoked with the post-mortem path substituted for
+  {post_mortem_path}.
 """
 
 from __future__ import annotations
@@ -17,6 +24,7 @@ import json
 import os
 import re
 import signal
+import subprocess
 import sys
 import time
 import urllib.request
@@ -28,6 +36,42 @@ from typing import Any, TextIO
 from .cost import _dollars, _event_tokens
 from .models import EventType, TraceEvent
 from .store import TraceStore
+
+
+# ---------------------------------------------------------------------------
+# Duration parsing
+# ---------------------------------------------------------------------------
+
+def _parse_duration(value: str) -> float:
+    """Parse a human-readable duration string to seconds.
+
+    Accepts: 30s, 5m, 2h, 1h30m, 90 (bare number = seconds).
+    """
+    value = value.strip()
+    if not value:
+        raise ValueError("empty duration")
+
+    # bare number → seconds
+    try:
+        return float(value)
+    except ValueError:
+        pass
+
+    total = 0.0
+    pattern = re.compile(r"(\d+(?:\.\d+)?)\s*([smhd]?)")
+    for m in pattern.finditer(value.lower()):
+        num, unit = float(m.group(1)), m.group(2)
+        if unit == "d":
+            total += num * 86400
+        elif unit == "h":
+            total += num * 3600
+        elif unit == "m":
+            total += num * 60
+        else:  # 's' or no unit
+            total += num
+    if total == 0.0:
+        raise ValueError(f"cannot parse duration: {value!r}")
+    return total
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +329,8 @@ class WatcherConfig:
     operation_rules: list[OperationRule] = field(default_factory=list)
     # Token budget threshold (1–100, percentage of context window)
     max_context_pct: int = 90
+    # Watchdog: command to run after kill, with {post_mortem_path} substituted
+    on_death_cmd: str = ""
 
     @classmethod
     def from_dict(cls, d: dict) -> "WatcherConfig":
@@ -414,6 +460,8 @@ def _dispatch_alert(
     action: str | None = None,
     notify: str = "",
     dry_run: bool = False,
+    store: TraceStore | None = None,
+    session_id: str = "",
 ) -> None:
     action = action or config.on_violation
     # terminal is always shown regardless of action so the operator watching
@@ -437,7 +485,78 @@ def _dispatch_alert(
         state.paused = True
     elif action == "kill" and state.agent_pid:
         _alert_terminal(f"Killing agent process {state.agent_pid}")
+        # Write watchdog post-mortem JSON before killing
+        pm_path: Path | None = None
+        if store and session_id:
+            pm_path = _write_watchdog_postmortem(store, session_id, state, reason=message)
+            if pm_path:
+                _alert_terminal(f"Post-mortem written to {pm_path}")
+        if config.on_death_cmd:
+            _invoke_on_death(config.on_death_cmd, pm_path)
         _kill_process(state.agent_pid)
+
+
+def _write_watchdog_postmortem(
+    store: TraceStore,
+    session_id: str,
+    state: WatchState,
+    reason: str,
+) -> Path | None:
+    """Write a structured JSON post-mortem to the session directory.
+
+    Returns the path written, or None on failure.
+    """
+    try:
+        events = store.load_events(session_id)
+        meta = store.load_meta(session_id)
+    except Exception:
+        return None
+
+    last_tool_call = None
+    last_llm_response = None
+    for ev in reversed(events):
+        if last_tool_call is None and ev.event_type == EventType.TOOL_CALL:
+            last_tool_call = ev.data
+        if last_llm_response is None and ev.event_type == EventType.LLM_RESPONSE:
+            last_llm_response = ev.data
+        if last_tool_call and last_llm_response:
+            break
+
+    elapsed = time.time() - state.start_time
+    pm = {
+        "session_id": session_id,
+        "terminated_at": time.time(),
+        "reason": reason,
+        "elapsed_seconds": round(elapsed, 2),
+        "cost_at_death": round(state.estimated_cost, 6),
+        "last_tool_call": last_tool_call,
+        "last_llm_response": last_llm_response,
+        "recovery_context": (
+            f"Session {session_id} was terminated after {elapsed:.0f}s "
+            f"(${state.estimated_cost:.4f} spent). "
+            f"Reason: {reason}. "
+            "Resume from the last tool call above."
+        ),
+    }
+
+    pm_path = store._session_dir(session_id) / "watchdog-postmortem.json"
+    try:
+        pm_path.write_text(json.dumps(pm, indent=2))
+        return pm_path
+    except Exception:
+        return None
+
+
+def _invoke_on_death(on_death_cmd: str, pm_path: Path | None) -> None:
+    """Run the --on-death command with {post_mortem_path} substituted."""
+    if not on_death_cmd:
+        return
+    path_str = str(pm_path) if pm_path else ""
+    cmd = on_death_cmd.replace("{post_mortem_path}", path_str)
+    try:
+        subprocess.Popen(cmd, shell=True)
+    except Exception as exc:
+        sys.stderr.write(f"[watch] on-death command failed: {exc}\n")
 
 
 def _dispatch_nanny_rule(
@@ -455,14 +574,12 @@ def _dispatch_nanny_rule(
 
     # Auto-generate postmortem on kill
     if rule.action == "kill" and not dry_run:
-        try:
-            from .postmortem import generate_postmortem, format_postmortem
-            pm = generate_postmortem(store, session_id)
-            pm_path = Path(config.alert_log).parent / f"postmortem-{session_id[:12]}.md"
-            pm_path.write_text(format_postmortem(pm))
-            _alert_terminal(f"Postmortem written to {pm_path}")
-        except Exception:
-            pass
+        pm_path = _write_watchdog_postmortem(store, session_id, state, reason=msg)
+        if pm_path:
+            _alert_terminal(f"Post-mortem written to {pm_path}")
+        on_death = getattr(config, "on_death_cmd", "")
+        if on_death:
+            _invoke_on_death(on_death, pm_path)
 
 
 # ---------------------------------------------------------------------------
@@ -724,7 +841,10 @@ def watch_session(
 
             violations = check_event(event, config, state)
             for msg in violations:
-                _dispatch_alert(msg, config, state, dry_run=dry_run)
+                _dispatch_alert(
+                    msg, config, state, dry_run=dry_run,
+                    store=store, session_id=session_id,
+                )
 
             # --- Nanny rule evaluation ---
             if nanny_rules:
@@ -759,12 +879,33 @@ def cmd_watch(args: argparse.Namespace) -> int:
     if config_path:
         config = WatcherConfig.load(config_path)
     else:
+        # --timeout is a friendlier alias for --max-duration
+        max_duration = getattr(args, "max_duration", 1800)
+        timeout_str = getattr(args, "timeout", None)
+        if timeout_str:
+            try:
+                max_duration = _parse_duration(timeout_str)
+            except ValueError as exc:
+                sys.stderr.write(f"[watch] invalid --timeout value: {exc}\n")
+                return 1
+
+        # --budget is a friendlier alias for --max-cost
+        max_cost = getattr(args, "max_cost", 10.0)
+        budget_str = getattr(args, "budget", None)
+        if budget_str is not None:
+            try:
+                max_cost = float(budget_str)
+            except ValueError:
+                sys.stderr.write(f"[watch] invalid --budget value: {budget_str!r}\n")
+                return 1
+
         config = WatcherConfig(
             max_retries=getattr(args, "max_retries", 5),
-            max_cost_dollars=getattr(args, "max_cost", 10.0),
-            max_duration_seconds=getattr(args, "max_duration", 1800),
+            max_cost_dollars=max_cost,
+            max_duration_seconds=max_duration,
             on_violation=getattr(args, "on_violation", "terminal"),
             webhook_url=getattr(args, "webhook", "") or "",
+            on_death_cmd=getattr(args, "on_death", "") or "",
         )
 
     # Load nanny rules if --rules provided

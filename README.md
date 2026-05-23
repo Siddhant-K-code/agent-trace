@@ -214,7 +214,8 @@ agent-strace policy [--output file]             Generate .agent-scope.json from 
 agent-strace dashboard [--last N] [--html file] Aggregate stats and trends across sessions
 agent-strace annotate <session-id> <offset>     Add notes, labels, or bookmarks to events
 agent-strace token-budget <session-id>          Check token usage against model context limit
-agent-strace watch [--rules file]               Watch a live session; kill/pause on rule breach
+agent-strace watch [--timeout DURATION] [--budget $] [--on-death CMD] [--rules file]
+                                                Watch a live session; kill/pause on rule breach
 agent-strace share <session-id> [-o file]       Export a self-contained HTML report
 agent-strace standup [--session id]             Standup report from session trace (no LLM)
 agent-strace freshness [--scope glob]           Context freshness check vs last session
@@ -882,6 +883,42 @@ agent-strace diff SESSION_A SESSION_B --compare
 ```
 
 New metrics: **redundant reads** (files read more than once), **context resets** (LLM requests separated by >120s), **approach divergence** (first phase pairs where behaviour differs). Useful for asserting on in CI.
+
+### Watchdog mode — timeout, budget ceiling, and post-mortem
+
+Enforce a wall-clock timeout and/or token-cost ceiling on any session. When either limit is breached the agent process is terminated and a structured `watchdog-postmortem.json` is written to the session directory. An optional `--on-death` command is invoked with the post-mortem path.
+
+```bash
+# Kill after 30 minutes
+agent-strace watch --timeout 30m --on-violation kill SESSION_ID
+
+# Kill when spend exceeds $5
+agent-strace watch --budget 5.00 --on-violation kill SESSION_ID
+
+# Both limits, with a recovery script
+agent-strace watch \
+  --timeout 30m \
+  --budget 5.00 \
+  --on-violation kill \
+  --on-death "python recover.py --post-mortem {post_mortem_path}" \
+  SESSION_ID
+```
+
+`--timeout` accepts human-readable durations: `30s`, `5m`, `2h`, `1h30m`.
+
+The `watchdog-postmortem.json` written on kill contains:
+
+```json
+{
+  "session_id": "abc123",
+  "reason": "DurationWatcher: 1800s elapsed",
+  "elapsed_seconds": 1800.0,
+  "cost_at_death": 2.34,
+  "last_tool_call": { "tool_name": "Bash", "arguments": { "command": "pytest" } },
+  "last_llm_response": { "model": "claude-3-5-sonnet", "content": "..." },
+  "recovery_context": "Session abc123 was terminated after 1800s ($2.34 spent). ..."
+}
+```
 
 ### Kill switch for runaway sessions
 

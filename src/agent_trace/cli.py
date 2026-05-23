@@ -612,6 +612,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_watch.add_argument("--max-retries", type=int, default=5, help="max retries before alert (default: 5)")
     p_watch.add_argument("--max-cost", type=float, default=10.0, help="max cost in dollars (default: 10)")
     p_watch.add_argument("--max-duration", type=int, default=1800, help="max duration in seconds (default: 1800)")
+    p_watch.add_argument("--timeout", metavar="DURATION",
+                         help="wall-clock timeout before killing the agent (e.g. 30m, 2h, 90s); "
+                              "alias for --max-duration with human-readable units")
+    p_watch.add_argument("--budget", type=float, metavar="DOLLARS",
+                         help="token-cost ceiling in dollars before killing the agent; "
+                              "alias for --max-cost")
+    p_watch.add_argument("--on-death", dest="on_death", metavar="CMD",
+                         help="command to run after the agent is killed; "
+                              "{post_mortem_path} is substituted with the post-mortem JSON path")
     p_watch.add_argument("--on-violation", choices=["terminal", "file", "kill"], default="terminal",
                          help="action on violation (default: terminal)")
     p_watch.add_argument("--webhook", help="webhook URL for alerts")
