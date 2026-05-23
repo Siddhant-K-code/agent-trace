@@ -1038,6 +1038,39 @@ Example `.watch-rules.json`:
 - `kill`: SIGTERM, then SIGKILL after 5s; auto-generates a postmortem
 - `alert`: log only, no interruption
 
+### Push-based event streaming
+
+Stream events to an external HTTP endpoint in real-time as they arrive during a watched session. Events are batched and POSTed as [NDJSON](https://ndjsonl.org) (`application/x-ndjson`), so any HTTP server or log aggregator can consume them.
+
+```bash
+# Stream all events to a collector
+agent-strace watch --stream-to https://collector.example.com/events SESSION_ID
+
+# Tune batch size and flush interval
+agent-strace watch \
+  --stream-to https://collector.example.com/events \
+  --stream-batch-size 20 \
+  --stream-flush-interval 5.0 \
+  SESSION_ID
+```
+
+Each POST body contains one JSON object per line:
+
+```
+{"event_type":"tool_call","timestamp":1700000001.0,"session_id":"abc123","data":{...}}
+{"event_type":"llm_response","timestamp":1700000002.5,"session_id":"abc123","data":{...}}
+```
+
+**Options:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--stream-to URL` | — | HTTP endpoint to POST events to |
+| `--stream-batch-size N` | `10` | Max events per POST |
+| `--stream-flush-interval S` | `2.0` | Max seconds between flushes |
+
+HTTP failures are logged to stderr but never interrupt the watch loop. The background flush thread is a daemon and is stopped cleanly when the session ends or the watcher exits.
+
 ### Behavioral drift detection
 
 Detect when agent behavior has shifted across sessions without an LLM. Computes a behavioral fingerprint across six dimensions (tool mix, error rate, retry pattern, blast radius, session duration, decision depth) and measures divergence from a baseline using Jensen-Shannon divergence.

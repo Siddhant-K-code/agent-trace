@@ -22,10 +22,12 @@ import argparse
 import fnmatch
 import json
 import os
+import queue
 import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from collections import Counter, deque
@@ -331,6 +333,101 @@ class WatcherConfig:
     max_context_pct: int = 90
     # Watchdog: command to run after kill, with {post_mortem_path} substituted
     on_death_cmd: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Push-based event streaming
+# ---------------------------------------------------------------------------
+
+@dataclass
+class StreamConfig:
+    """Configuration for push-based event streaming."""
+    url: str = ""                    # webhook URL or collector endpoint
+    batch_size: int = 10             # max events per POST
+    flush_interval: float = 1.0     # max seconds between flushes
+    headers: dict[str, str] = field(default_factory=dict)
+    # Filter: only stream these event types (empty = all)
+    event_types: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_url(cls, url: str, headers: dict[str, str] | None = None) -> "StreamConfig":
+        return cls(url=url, headers=headers or {})
+
+
+class EventStreamer:
+    """Background thread that batches and POSTs events to a remote URL.
+
+    Thread-safe: events are enqueued from the watch loop and flushed by a
+    dedicated daemon thread. Failures are logged to stderr but never block
+    the watch loop.
+    """
+
+    def __init__(self, config: StreamConfig) -> None:
+        self.config = config
+        self._queue: queue.Queue[TraceEvent | None] = queue.Queue()
+        self._thread = threading.Thread(target=self._worker, daemon=True)
+        self._thread.start()
+
+    def enqueue(self, event: TraceEvent) -> None:
+        """Add an event to the outbound queue (non-blocking)."""
+        if self.config.event_types:
+            if event.event_type.value not in self.config.event_types:
+                return
+        self._queue.put(event)
+
+    def stop(self) -> None:
+        """Signal the worker to flush and exit."""
+        self._queue.put(None)  # sentinel
+        self._thread.join(timeout=5.0)
+
+    def _worker(self) -> None:
+        batch: list[TraceEvent] = []
+        last_flush = time.time()
+
+        while True:
+            try:
+                timeout = max(0.01, self.config.flush_interval - (time.time() - last_flush))
+                item = self._queue.get(timeout=timeout)
+                if item is None:
+                    # Sentinel: flush remaining and exit
+                    if batch:
+                        self._flush(batch)
+                    return
+                batch.append(item)
+            except queue.Empty:
+                pass
+
+            now = time.time()
+            should_flush = (
+                len(batch) >= self.config.batch_size
+                or (batch and now - last_flush >= self.config.flush_interval)
+            )
+            if should_flush:
+                self._flush(batch)
+                batch = []
+                last_flush = now
+
+    def _flush(self, events: list[TraceEvent]) -> None:
+        """POST a batch of events as NDJSON."""
+        if not events or not self.config.url:
+            return
+        body = "\n".join(e.to_json() for e in events).encode("utf-8")
+        headers = {"Content-Type": "application/x-ndjson"}
+        headers.update(self.config.headers)
+        req = urllib.request.Request(
+            self.config.url,
+            data=body,
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                if resp.status not in (200, 202):
+                    sys.stderr.write(
+                        f"[stream] POST to {self.config.url} returned {resp.status}\n"
+                    )
+        except Exception as exc:
+            sys.stderr.write(f"[stream] POST to {self.config.url} failed: {exc}\n")
 
     @classmethod
     def from_dict(cls, d: dict) -> "WatcherConfig":
@@ -804,8 +901,13 @@ def watch_session(
     max_idle_seconds: float = 300.0,
     nanny_rules: list[NannyRule] | None = None,
     dry_run: bool = False,
+    stream_config: StreamConfig | None = None,
 ) -> None:
-    """Watch a session's event stream and fire alerts on violations."""
+    """Watch a session's event stream and fire alerts on violations.
+
+    stream_config: when set, events are pushed in real-time to the configured
+    URL as they arrive (push-based streaming).
+    """
     events_file = store._session_dir(session_id) / "events.ndjson"
     if not events_file.exists():
         out.write(f"[watch] events file not found: {events_file}\n")
@@ -817,7 +919,13 @@ def watch_session(
     out.write(f"[watch] Monitoring session {session_id[:12]}...{mode}\n")
     if nanny_rules:
         out.write(f"[watch] {len(nanny_rules)} nanny rule(s) active\n")
+    if stream_config and stream_config.url:
+        out.write(f"[watch] Streaming events to {stream_config.url}\n")
     out.flush()
+
+    streamer: EventStreamer | None = None
+    if stream_config and stream_config.url:
+        streamer = EventStreamer(stream_config)
 
     last_event_time = time.time()
     event_count = 0
@@ -838,6 +946,10 @@ def watch_session(
             event: TraceEvent = item  # type: ignore[assignment]
             event_count += 1
             last_event_time = time.time()
+
+            # Push event to stream if configured
+            if streamer:
+                streamer.enqueue(event)
 
             violations = check_event(event, config, state)
             for msg in violations:
@@ -865,6 +977,9 @@ def watch_session(
 
     except KeyboardInterrupt:
         out.write("\n[watch] Stopped.\n")
+    finally:
+        if streamer:
+            streamer.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -930,5 +1045,16 @@ def cmd_watch(args: argparse.Namespace) -> int:
         sys.stderr.write(f"Session not found: {session_id}\n")
         return 1
 
-    watch_session(store, full_id, config, nanny_rules=nanny_rules, dry_run=dry_run)
+    # Build StreamConfig if --stream-to was provided
+    stream_cfg: StreamConfig | None = None
+    stream_url = getattr(args, "stream_to", None)
+    if stream_url:
+        stream_cfg = StreamConfig(
+            url=stream_url,
+            batch_size=getattr(args, "stream_batch_size", 10),
+            flush_interval=getattr(args, "stream_flush_interval", 2.0),
+        )
+
+    watch_session(store, full_id, config, nanny_rules=nanny_rules, dry_run=dry_run,
+                  stream_config=stream_cfg)
     return 0

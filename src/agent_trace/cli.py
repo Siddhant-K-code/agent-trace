@@ -682,6 +682,14 @@ def build_parser() -> argparse.ArgumentParser:
                          help="YAML/JSON rules file for rule-based kill switch (nanny mode)")
     p_watch.add_argument("--dry-run", action="store_true", dest="dry_run",
                          help="evaluate rules without taking action (for testing)")
+    p_watch.add_argument("--stream-to", dest="stream_to", metavar="URL",
+                         help="push events in real-time to this HTTP endpoint as NDJSON")
+    p_watch.add_argument("--stream-batch-size", dest="stream_batch_size", type=int, default=10,
+                         metavar="N",
+                         help="number of events per batch when streaming (default: 10)")
+    p_watch.add_argument("--stream-flush-interval", dest="stream_flush_interval", type=float,
+                         default=2.0, metavar="SECONDS",
+                         help="max seconds between flushes when streaming (default: 2.0)")
 
     # policy
     p_policy = sub.add_parser("policy", help="suggest a .agent-scope.json policy from observed traces")
