@@ -218,6 +218,7 @@ agent-strace token-budget <session-id>          Check token usage against model 
 agent-strace replay [session-id] [--limit N]    Replay a session (--limit caps events shown)
 agent-strace retention status                   Show session count, size, and what policy would delete
 agent-strace retention clean [--dry-run]        Delete sessions that exceed retention limits
+agent-strace sample --strategy worst --n 20     Export worst/diverse/random/recent sessions as JSONL
 agent-strace watch [--timeout DURATION] [--budget $] [--on-death CMD] [--rules file]
                                                 Watch a live session; kill/pause on rule breach
 agent-strace share <session-id> [-o file]       Export a self-contained HTML report
@@ -796,6 +797,29 @@ agent-strace dashboard --html report.html # self-contained HTML export
 ```
 
 The terminal view shows total tool calls, errors, tokens, and estimated cost, plus ASCII sparkline charts for each metric over time and a top-tools frequency table. The HTML export is self-contained. No server needed.
+
+### Dataset auto-sampler
+
+Export the sessions most useful for regression suites and eval datasets — without manual inspection.
+
+```bash
+# Export the 20 worst-performing sessions (highest error/retry/cost)
+agent-strace sample --strategy worst --n 20 --output regression.jsonl
+
+# Export 10 sessions that maximise behavioral variety
+agent-strace sample --strategy diverse --n 10 --output diverse.jsonl
+
+# Export the 5 most recent sessions
+agent-strace sample --strategy recent --n 5 --output recent.jsonl
+
+# Random sample, reproducible with a seed
+agent-strace sample --strategy random --n 15 --seed 42 --output random.jsonl
+
+# Skip sessions with identical tool call sequences
+agent-strace sample --strategy worst --n 20 --deduplicate --output regression.jsonl
+```
+
+Output is JSONL — one session per line — with full event data and a score breakdown. Compatible with LangSmith, Braintrust, and any custom eval framework.
 
 ### Eval trend dashboard
 

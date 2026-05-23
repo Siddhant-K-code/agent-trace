@@ -46,6 +46,7 @@ from .postmortem import cmd_postmortem
 from .share import cmd_share
 from .token_budget import cmd_token_budget
 from .retention import cmd_retention
+from .sample import cmd_sample
 from .watch import cmd_watch
 from .why import cmd_why
 from .models import EventType, SessionMeta, TraceEvent
@@ -773,6 +774,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="transport protocol (default: stdio)",
     )
 
+    # sample
+    p_sample = sub.add_parser(
+        "sample",
+        help="export worst/diverse/random/recent sessions as a JSONL regression suite",
+    )
+    p_sample.add_argument(
+        "--strategy",
+        choices=["worst", "diverse", "random", "recent"],
+        default="worst",
+        help="sampling strategy (default: worst)",
+    )
+    p_sample.add_argument("--n", type=int, default=20, metavar="N",
+                          help="number of sessions to sample (default: 20)")
+    p_sample.add_argument("--output", "-o", default="sample.jsonl",
+                          help="output JSONL file path (default: sample.jsonl)")
+    p_sample.add_argument("--deduplicate", action="store_true",
+                          help="skip sessions with identical tool call sequences")
+    p_sample.add_argument("--seed", type=int, default=None,
+                          help="random seed for reproducible random sampling")
+
     # retention
     p_ret = sub.add_parser("retention", help="manage session data retention")
     ret_sub = p_ret.add_subparsers(dest="retention_command")
@@ -852,6 +873,7 @@ def main() -> None:
         "standup": cmd_standup,
         "mcp": cmd_mcp,
         "retention": cmd_retention,
+        "sample": cmd_sample,
     }
 
     handler = handlers.get(args.command)
