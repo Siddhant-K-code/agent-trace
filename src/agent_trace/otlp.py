@@ -392,6 +392,292 @@ def tree_to_otlp(
     }
 
 
+def session_to_otlp_genai(
+    meta: SessionMeta,
+    events: list[TraceEvent],
+    service_name: str = "agent-trace",
+    parent_span_id: str = "",
+    parent_trace_id: str = "",
+) -> dict:
+    """Convert a session to OTLP JSON using strict OTel GenAI semantic conventions.
+
+    Differences from session_to_otlp():
+    - LLM request/response pairs become gen_ai.client.operation child spans
+      (not just events on the root span)
+    - Root span carries gen_ai.agent.id and gen_ai.agent.name
+    - Error events use the OTel exception event format
+    - Tool calls carry gen_ai.tool.name and gen_ai.tool.call.id
+    - gen_ai.system is derived from the model name when possible
+
+    See: https://opentelemetry.io/docs/specs/semconv/gen-ai/
+    """
+    trace_id = parent_trace_id if parent_trace_id else _to_trace_id(meta.session_id)
+    root_span_id = _to_span_id(f"root-{meta.session_id}")
+    root_start = _ts_to_nanos(meta.started_at)
+    root_end = _ts_to_nanos(
+        meta.ended_at or (meta.started_at + (meta.total_duration_ms or 0) / 1000)
+    )
+
+    # Detect provider
+    agent_lower = (meta.agent_name or "").lower()
+    if "claude" in agent_lower or "anthropic" in agent_lower:
+        gen_ai_system = "anthropic"
+    elif "gpt" in agent_lower or "openai" in agent_lower:
+        gen_ai_system = "openai"
+    elif "gemini" in agent_lower or "google" in agent_lower:
+        gen_ai_system = "google"
+    else:
+        gen_ai_system = "unknown"
+
+    root_attrs = _make_attributes({
+        # GenAI agent attributes
+        "gen_ai.agent.id": meta.session_id,
+        "gen_ai.agent.name": meta.agent_name or "agent",
+        _SEMCONV_SYSTEM: gen_ai_system,
+        _SEMCONV_OP: "agent.session",
+        # Standard resource attributes
+        "agent.session_id": meta.session_id,
+        "agent.tool_calls": meta.tool_calls,
+        "agent.llm_requests": meta.llm_requests,
+        "agent.errors": meta.errors,
+    })
+
+    root_events: list[dict] = []
+    child_spans: list[dict] = []
+
+    # Pair LLM requests with their responses
+    pending_llm: dict[str, TraceEvent] = {}
+    pending_calls: dict[str, TraceEvent] = {}
+
+    for event in events:
+        if event.event_type == EventType.USER_PROMPT:
+            root_events.append(_make_event(
+                "gen_ai.user.message",
+                event.timestamp,
+                {"gen_ai.prompt": event.data.get("prompt", "")[:1000]},
+            ))
+
+        elif event.event_type == EventType.ASSISTANT_RESPONSE:
+            text = event.data.get("text", "")
+            root_events.append(_make_event(
+                "gen_ai.assistant.message",
+                event.timestamp,
+                {"gen_ai.completion": text[:1000]},
+            ))
+
+        elif event.event_type == EventType.LLM_REQUEST:
+            pending_llm[event.event_id] = event
+
+        elif event.event_type == EventType.LLM_RESPONSE:
+            # Find matching request
+            req_event = None
+            if event.parent_id and event.parent_id in pending_llm:
+                req_event = pending_llm.pop(event.parent_id)
+            elif pending_llm:
+                # Take the oldest unmatched request
+                oldest_id = next(iter(pending_llm))
+                req_event = pending_llm.pop(oldest_id)
+
+            span_start = req_event.timestamp if req_event else event.timestamp
+            span_end = event.timestamp
+
+            # Derive gen_ai.system from model name if not already known
+            model = event.data.get("model", "") or (
+                req_event.data.get("model", "") if req_event else ""
+            )
+            system = gen_ai_system
+            if model:
+                m = model.lower()
+                if "claude" in m:
+                    system = "anthropic"
+                elif "gpt" in m or "o1" in m or "o3" in m:
+                    system = "openai"
+                elif "gemini" in m:
+                    system = "google"
+
+            llm_attrs: dict = {
+                _SEMCONV_SYSTEM: system,
+                _SEMCONV_OP: "chat",
+            }
+            if model:
+                llm_attrs[_SEMCONV_MODEL] = model
+            if req_event:
+                max_tok = req_event.data.get("max_tokens")
+                if max_tok:
+                    llm_attrs["gen_ai.request.max_tokens"] = max_tok
+                inp_tok = req_event.data.get("input_tokens", 0)
+                if inp_tok:
+                    llm_attrs[_SEMCONV_INPUT_TOKENS] = inp_tok
+
+            out_tok = event.data.get("output_tokens", 0)
+            if out_tok:
+                llm_attrs[_SEMCONV_OUTPUT_TOKENS] = out_tok
+            finish = event.data.get("stop_reason") or event.data.get("finish_reason", "")
+            if finish:
+                llm_attrs[_SEMCONV_FINISH_REASON] = finish
+
+            llm_span_id = _to_span_id(
+                req_event.event_id if req_event else event.event_id
+            )
+            child_spans.append({
+                "traceId": trace_id,
+                "spanId": llm_span_id,
+                "parentSpanId": root_span_id,
+                "name": "gen_ai.client.operation",
+                "kind": 3,  # SPAN_KIND_CLIENT
+                "startTimeUnixNano": _ts_to_nanos(span_start),
+                "endTimeUnixNano": _ts_to_nanos(max(span_end, span_start + 0.001)),
+                "attributes": _make_attributes(llm_attrs),
+                "status": {"code": 1},  # STATUS_CODE_OK
+            })
+
+        elif event.event_type == EventType.TOOL_CALL:
+            pending_calls[event.event_id] = event
+
+        elif event.event_type == EventType.TOOL_RESULT:
+            call_event = None
+            if event.parent_id and event.parent_id in pending_calls:
+                call_event = pending_calls.pop(event.parent_id)
+
+            tool_name = event.data.get("tool_name", "") or (
+                call_event.data.get("tool_name", "tool") if call_event else "tool"
+            )
+            span_start = call_event.timestamp if call_event else event.timestamp
+            duration_ns = _duration_to_nanos(event.duration_ms)
+
+            tool_attrs: dict = {
+                _SEMCONV_TOOL_NAME: tool_name,
+                _SEMCONV_OP: "execute",
+                _SEMCONV_TOOL_CALL_ID: (
+                    call_event.event_id if call_event else event.event_id
+                ),
+            }
+            if call_event:
+                for k, v in call_event.data.get("arguments", {}).items():
+                    tool_attrs[f"gen_ai.tool.input.{k}"] = str(v)[:200]
+            result = event.data.get("result", "")
+            if result:
+                tool_attrs["gen_ai.tool.output"] = str(result)[:500]
+
+            child_spans.append({
+                "traceId": trace_id,
+                "spanId": _to_span_id(
+                    call_event.event_id if call_event else event.event_id
+                ),
+                "parentSpanId": root_span_id,
+                "name": f"gen_ai.tool.call/{tool_name}",
+                "kind": 3,  # SPAN_KIND_CLIENT
+                "startTimeUnixNano": _ts_to_nanos(span_start),
+                "endTimeUnixNano": _ts_to_nanos(
+                    span_start + duration_ns / 1_000_000_000
+                ),
+                "attributes": _make_attributes(tool_attrs),
+                "status": {"code": 1},
+            })
+
+        elif event.event_type == EventType.ERROR:
+            call_event = None
+            if event.parent_id and event.parent_id in pending_calls:
+                call_event = pending_calls.pop(event.parent_id)
+
+            tool_name = event.data.get("tool_name", "error")
+            error_msg = event.data.get("error", "") or event.data.get("message", "")
+            span_start = call_event.timestamp if call_event else event.timestamp
+            duration_ns = _duration_to_nanos(event.duration_ms)
+
+            exc_event = _make_event("exception", event.timestamp, {
+                "exception.type": event.data.get("error_type", "Error"),
+                "exception.message": str(error_msg)[:500],
+                "exception.escaped": False,
+            })
+
+            child_spans.append({
+                "traceId": trace_id,
+                "spanId": _to_span_id(
+                    call_event.event_id if call_event else event.event_id
+                ),
+                "parentSpanId": root_span_id,
+                "name": f"gen_ai.tool.call/{tool_name}",
+                "kind": 3,
+                "startTimeUnixNano": _ts_to_nanos(span_start),
+                "endTimeUnixNano": _ts_to_nanos(
+                    span_start + duration_ns / 1_000_000_000
+                ),
+                "attributes": _make_attributes({
+                    _SEMCONV_TOOL_NAME: tool_name,
+                    _SEMCONV_OP: "execute",
+                }),
+                "events": [exc_event],
+                "status": {"code": 2, "message": str(error_msg)[:200]},
+            })
+
+    # Emit unmatched LLM requests as minimal spans
+    for req_event in pending_llm.values():
+        model = req_event.data.get("model", "")
+        llm_attrs = {_SEMCONV_SYSTEM: gen_ai_system, _SEMCONV_OP: "chat"}
+        if model:
+            llm_attrs[_SEMCONV_MODEL] = model
+        child_spans.append({
+            "traceId": trace_id,
+            "spanId": _to_span_id(req_event.event_id),
+            "parentSpanId": root_span_id,
+            "name": "gen_ai.client.operation",
+            "kind": 3,
+            "startTimeUnixNano": _ts_to_nanos(req_event.timestamp),
+            "endTimeUnixNano": _ts_to_nanos(req_event.timestamp + 0.001),
+            "attributes": _make_attributes(llm_attrs),
+            "status": {"code": 0},
+        })
+
+    # Emit unmatched tool calls
+    for call_event in pending_calls.values():
+        tool_name = call_event.data.get("tool_name", "tool")
+        child_spans.append({
+            "traceId": trace_id,
+            "spanId": _to_span_id(call_event.event_id),
+            "parentSpanId": root_span_id,
+            "name": f"gen_ai.tool.call/{tool_name}",
+            "kind": 3,
+            "startTimeUnixNano": _ts_to_nanos(call_event.timestamp),
+            "endTimeUnixNano": _ts_to_nanos(call_event.timestamp + 0.001),
+            "attributes": _make_attributes({
+                _SEMCONV_TOOL_NAME: tool_name,
+                _SEMCONV_OP: "execute",
+            }),
+            "status": {"code": 0},
+        })
+
+    root_span: dict = {
+        "traceId": trace_id,
+        "spanId": root_span_id,
+        "name": f"gen_ai.agent.session ({meta.agent_name or 'agent'})",
+        "kind": 1,  # SPAN_KIND_INTERNAL
+        "startTimeUnixNano": root_start,
+        "endTimeUnixNano": root_end,
+        "attributes": root_attrs,
+        "events": root_events,
+        "status": {"code": 2 if meta.errors > 0 else 1},
+    }
+    if parent_span_id:
+        root_span["parentSpanId"] = parent_span_id
+
+    return {
+        "resourceSpans": [{
+            "resource": {
+                "attributes": _make_attributes({
+                    "service.name": service_name,
+                    "service.version": "agent-trace",
+                    "agent.session_id": meta.session_id,
+                }),
+            },
+            "scopeSpans": [{
+                "scope": {"name": "agent-trace", "version": "genai-semconv-1.27"},
+                "spans": [root_span] + child_spans,
+            }],
+        }],
+    }
+
+
 def export_otlp(
     store: TraceStore,
     session_id: str,

@@ -219,6 +219,7 @@ agent-strace replay [session-id] [--limit N]    Replay a session (--limit caps e
 agent-strace retention status                   Show session count, size, and what policy would delete
 agent-strace retention clean [--dry-run]        Delete sessions that exceed retention limits
 agent-strace sample --strategy worst --n 20     Export worst/diverse/random/recent sessions as JSONL
+agent-strace export <session> --format otlp-genai  Export with OTel GenAI semantic conventions
 agent-strace watch [--timeout DURATION] [--budget $] [--on-death CMD] [--rules file]
                                                 Watch a live session; kill/pause on rule breach
 agent-strace share <session-id> [-o file]       Export a self-contained HTML report
@@ -1223,6 +1224,26 @@ Any attempt by the agent to read `cvm/attestation-service/` or `cvm/auth-service
 ## Production tracing (OTLP export)
 
 Export sessions as OpenTelemetry spans to your existing observability stack. Sessions become traces. Tool calls become spans with duration and inputs. Errors get exception events. No new dependencies.
+
+### OTel GenAI semantic conventions
+
+Use `--format otlp-genai` to export with strict [OTel GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/). This produces AI-native spans that populate token usage charts, cost views, and LLM dashboards in Datadog, Grafana, and Honeycomb automatically.
+
+```bash
+agent-strace export <session-id> --format otlp-genai \
+  --endpoint http://localhost:4318
+```
+
+Key differences from `--format otlp`:
+
+| Aspect | `--format otlp` | `--format otlp-genai` |
+|---|---|---|
+| LLM calls | Events on root span | `gen_ai.client.operation` child spans |
+| Tool calls | `tool/<name>` spans | `gen_ai.tool.call/<name>` spans |
+| Root span | `agent.name` attribute | `gen_ai.agent.id` + `gen_ai.agent.name` |
+| Errors | Custom error span | OTel `exception` event format |
+
+`--format otlp` is unchanged for backwards compatibility.
 
 ### Datadog
 
