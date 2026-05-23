@@ -49,6 +49,7 @@ from .anonymize import cmd_anonymize_export
 from .integrations import detect_and_instrument, _INTEGRATIONS
 from .budget_report import cmd_budget_report
 from .compare import cmd_compare
+from .timeline import cmd_timeline
 from .config_watch import cmd_config_watch
 from .lint import cmd_lint
 from .retention import cmd_retention
@@ -572,6 +573,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_explain = sub.add_parser("explain", help="explain a session in plain English")
     p_explain.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
 
+    # timeline
+    p_timeline = sub.add_parser("timeline",
+                                 help="structured chronological view of a session by phase")
+    p_timeline.add_argument("session_id", nargs="?",
+                             help="session ID or prefix (default: latest)")
+    p_timeline.add_argument("--model", default="sonnet",
+                             choices=["sonnet", "opus", "haiku", "gpt4", "gpt4o"],
+                             help="model pricing for cost estimates (default: sonnet)")
+    p_timeline.add_argument("--format", choices=["text", "json"], default="text",
+                             help="output format (default: text)")
+
     # diff
     p_diff = sub.add_parser("diff", help="compare two sessions structurally")
     p_diff.add_argument("session_a", help="first session ID or prefix")
@@ -1055,6 +1067,7 @@ def main() -> None:
         "stats": cmd_stats,
         "import": cmd_import,
         "explain": cmd_explain,
+        "timeline": cmd_timeline,
         "cost": cmd_cost,
         "diff": cmd_diff,
         "why": cmd_why,

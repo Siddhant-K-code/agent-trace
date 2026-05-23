@@ -186,6 +186,7 @@ print(f"Replay with: agent-strace replay {meta.session_id}")
 | `curve` | Personal cost-efficiency curve |
 | `a2a-tree` | Cross-agent trace correlation (A2A protocol) |
 | `mcp` | MCP server: expose traces as queryable tools for a debugging agent |
+| `timeline` | Structured phase-by-phase view of a session with costs, retries, and wasted spend |
 | `config-watch` | Snapshot and diff AGENTS.md and other config files; find affected sessions |
 
 ```
@@ -238,6 +239,8 @@ agent-strace oncall --rotation-start DATE       On-call readiness for agent-modi
 agent-strace curve [--export csv]               Personal agent cost-efficiency curve
 agent-strace inflation [--compare m1,m2]        Token inflation calculator across model versions
 agent-strace a2a-tree [session-id]              Visualise A2A agent call graph
+agent-strace timeline [session-id] [--format text|json] [--model MODEL]
+                                                Structured phase-by-phase session view with costs and retries
 agent-strace config-watch snapshot [--label TEXT] [--watch PATH]
                                                 Snapshot current config file state
 agent-strace config-watch check [--format text|json] [--watch PATH]
@@ -445,6 +448,55 @@ Rules are configurable via `.agent-strace-lint.json`:
 | `redundant-read` | INFO | Same file read 3+ times in a session |
 | `error-retry-loop` | WARN | Same tool errored and was retried 3+ times |
 | `no-output` | WARN | Session completed with no write or file-modifying tool calls |
+
+### Session timeline
+
+A structured, phase-by-phase view of what happened in a session — tool calls, file operations, LLM requests, errors, retries, and a wasted-spend callout for failed phases.
+
+```bash
+# Timeline for the latest session
+agent-strace timeline
+
+# Timeline for a specific session
+agent-strace timeline <session-id>
+
+# Machine-readable output
+agent-strace timeline <session-id> --format json
+
+# Use a different model for cost estimates
+agent-strace timeline <session-id> --model opus
+```
+
+Example output:
+
+```
+Session: abc123def456 | 2026-05-19 14:32 | 4m 12s | $0.0043 | 3 errors
+
+Phase 1: Setup (0:00–0:45)  $0.0008
+  ✓ Read src/auth/handler.go
+  ✓ Read src/auth/middleware.go
+
+Phase 2: Implementation (0:45–2:10)  $0.0031
+  · Run Bash (1.2s)
+      pytest tests/test_auth.py
+  ✗ Error: Bash
+      FAILED tests/test_auth.py::TestAuthHandler
+  · Run Bash (attempt 2) (1.1s)
+      pytest tests/test_auth.py
+  ✗ Error: Bash
+      FAILED tests/test_auth.py::TestAuthHandler
+  ✓ Write src/auth/handler.go  +3 lines
+  ✓ Run Bash (0.9s)
+
+  ⚠ 2 retries in this phase
+
+⚠ Wasted spend: 2 retries on failed phases = ~$0.0008 (19% of session cost)
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--format` | `text` | `text` or `json` |
+| `--model` | `sonnet` | Pricing model for cost estimates: `sonnet`, `opus`, `haiku`, `gpt4`, `gpt4o` |
 
 ### Config change detector
 
