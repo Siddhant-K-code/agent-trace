@@ -193,6 +193,7 @@ agent-strace hook <event>                       Handle a Claude Code hook event 
 agent-strace record -- <command>                Record an MCP stdio server session
 agent-strace record-http <url> [--port N]       Record an MCP HTTP/SSE server session
 agent-strace replay [session-id]                Replay a session (default: latest)
+agent-strace replay [session-id] --limit N      Cap output at N events (fast inspection of large sessions)
 agent-strace replay --format html [-o file]     Export a self-contained HTML replay viewer
 agent-strace replay --expand-subagents          Inline subagent sessions under parent tool_call
 agent-strace replay --tree                      Show session hierarchy without full replay
@@ -214,6 +215,7 @@ agent-strace policy [--output file]             Generate .agent-scope.json from 
 agent-strace dashboard [--last N] [--html file] Aggregate stats and trends across sessions
 agent-strace annotate <session-id> <offset>     Add notes, labels, or bookmarks to events
 agent-strace token-budget <session-id>          Check token usage against model context limit
+agent-strace replay [session-id] [--limit N]    Replay a session (--limit caps events shown)
 agent-strace watch [--timeout DURATION] [--budget $] [--on-death CMD] [--rules file]
                                                 Watch a live session; kill/pause on rule breach
 agent-strace share <session-id> [-o file]       Export a self-contained HTML report

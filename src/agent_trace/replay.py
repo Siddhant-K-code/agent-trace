@@ -319,6 +319,9 @@ def format_summary(meta: SessionMeta) -> str:
     return "\n".join(lines)
 
 
+_LARGE_SESSION_THRESHOLD = 200  # show progress indicator above this count
+
+
 def replay_session(
     store: TraceStore,
     session_id: str,
@@ -326,8 +329,14 @@ def replay_session(
     speed: float = 1.0,
     live: bool = False,
     out: TextIO = sys.stdout,
+    limit: int | None = None,
 ) -> None:
-    """Replay a trace session to the terminal."""
+    """Replay a trace session to the terminal.
+
+    limit: cap the number of events rendered (most recent N are shown when
+           combined with a filter; first N otherwise). Useful for quick
+           inspection of large sessions without waiting for full render.
+    """
     meta = store.load_meta(session_id)
     events = store.load_events(session_id)
 
@@ -338,9 +347,36 @@ def replay_session(
     if event_filter:
         events = [e for e in events if e.event_type in event_filter]
 
+    total_before_limit = len(events)
+
+    # Apply limit: show the first N events (head), not tail, so the timeline
+    # reads chronologically. Emit a notice when events are truncated.
+    if limit is not None and limit > 0 and len(events) > limit:
+        events = events[:limit]
+        truncated = total_before_limit - limit
+    else:
+        truncated = 0
+
     base_ts = events[0].timestamp if events else None
 
+    # Progress indicator for large sessions (written to stderr so it doesn't
+    # pollute piped output)
+    large = total_before_limit > _LARGE_SESSION_THRESHOLD
+    if large:
+        sys.stderr.write(
+            f"[replay] Loading {total_before_limit} events"
+            + (f" (showing first {limit})" if truncated else "")
+            + "...\n"
+        )
+        sys.stderr.flush()
+
     out.write(format_summary(meta) + "\n\n")
+
+    if truncated:
+        out.write(
+            f"{C.GRAY}[showing first {limit} of {total_before_limit} events — "
+            f"use --limit {total_before_limit} to see all]{C.RESET}\n\n"
+        )
 
     prev_ts = base_ts
     for event in events:
@@ -351,6 +387,12 @@ def replay_session(
             prev_ts = event.timestamp
 
         out.write(format_event(event, base_ts) + "\n")
+
+    if truncated:
+        out.write(
+            f"\n{C.GRAY}[{truncated} more events not shown — "
+            f"use --limit {total_before_limit} to see all]{C.RESET}\n"
+        )
 
     out.write("\n")
 

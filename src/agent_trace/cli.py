@@ -189,6 +189,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
         event_filter=event_filter,
         speed=args.speed,
         live=args.live,
+        limit=getattr(args, "limit", None),
     )
     return 0
 
@@ -449,6 +450,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_replay.add_argument("--filter", "-f", help="comma-separated event types to show")
     p_replay.add_argument("--speed", "-s", type=float, default=0, help="replay speed multiplier (0=instant)")
     p_replay.add_argument("--live", "-l", action="store_true", help="replay with timing delays")
+    p_replay.add_argument("--limit", "-n", type=int, default=None, metavar="N",
+                          help="cap output at N events (default: all); useful for quick inspection of large sessions")
     p_replay.add_argument("--format", choices=["terminal", "html"], default="terminal",
                           help="output format: terminal timeline or self-contained HTML viewer (default: terminal)")
     p_replay.add_argument("--output", "-o", default="",
