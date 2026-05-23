@@ -5,7 +5,7 @@
 [![Python](https://img.shields.io/pypi/pyversions/agent-strace)](https://pypi.org/project/agent-strace/)
 [![CI](https://github.com/Siddhant-K-code/agent-trace/actions/workflows/test.yml/badge.svg)](https://github.com/Siddhant-K-code/agent-trace/actions/workflows/test.yml)
 [![Open VSX](https://img.shields.io/open-vsx/v/Siddhant-K-code/agent-strace)](https://open-vsx.org/extension/Siddhant-K-code/agent-strace)
-[![VS Marketplace](https://img.shields.io/badge/VS%20Marketplace-v0.2.0-blue?logo=visual-studio-code)](https://marketplace.visualstudio.com/items?itemName=Siddhant-K-code.agent-strace)
+[![VS Marketplace](https://img.shields.io/badge/VS%20Marketplace-v0.2.1-blue?logo=visual-studio-code)](https://marketplace.visualstudio.com/items?itemName=Siddhant-K-code.agent-strace)
 [![License](https://img.shields.io/github/license/Siddhant-K-code/agent-trace)](LICENSE)
 
 `strace` for AI agents.

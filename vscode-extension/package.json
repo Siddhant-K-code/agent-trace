@@ -2,7 +2,7 @@
   "name": "agent-strace",
   "displayName": "agent-strace",
   "description": "Live session overlay for agent-strace: status bar, gutter annotations, and event stream panel.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "Siddhant-K-code",
   "license": "MIT",
   "repository": {
@@ -12,8 +12,17 @@
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["Other"],
-  "keywords": ["ai", "agent", "trace", "observability", "claude", "mcp"],
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "ai",
+    "agent",
+    "trace",
+    "observability",
+    "claude",
+    "mcp"
+  ],
   "icon": "icon.png",
   "activationEvents": [
     "workspaceContains:.agent-traces"
