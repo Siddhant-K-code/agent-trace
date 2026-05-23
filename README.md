@@ -186,6 +186,7 @@ print(f"Replay with: agent-strace replay {meta.session_id}")
 | `curve` | Personal cost-efficiency curve |
 | `a2a-tree` | Cross-agent trace correlation (A2A protocol) |
 | `mcp` | MCP server: expose traces as queryable tools for a debugging agent |
+| `config-watch` | Snapshot and diff AGENTS.md and other config files; find affected sessions |
 
 ```
 agent-strace setup [--redact] [--global]        Generate Claude Code hooks config
@@ -237,6 +238,14 @@ agent-strace oncall --rotation-start DATE       On-call readiness for agent-modi
 agent-strace curve [--export csv]               Personal agent cost-efficiency curve
 agent-strace inflation [--compare m1,m2]        Token inflation calculator across model versions
 agent-strace a2a-tree [session-id]              Visualise A2A agent call graph
+agent-strace config-watch snapshot [--label TEXT] [--watch PATH]
+                                                Snapshot current config file state
+agent-strace config-watch check [--format text|json] [--watch PATH]
+                                                Diff current state vs last snapshot (exit 1 if changed)
+agent-strace config-watch history [--format text|json]
+                                                List all snapshots
+agent-strace config-watch affected [--since DURATION] [--format text|json]
+                                                Sessions that ran after a config change
 ```
 
 ### Import existing Claude Code sessions
@@ -436,6 +445,58 @@ Rules are configurable via `.agent-strace-lint.json`:
 | `redundant-read` | INFO | Same file read 3+ times in a session |
 | `error-retry-loop` | WARN | Same tool errored and was retried 3+ times |
 | `no-output` | WARN | Session completed with no write or file-modifying tool calls |
+
+### Config change detector
+
+Track changes to AGENTS.md and other agent configuration files. Snapshot the current state before a change, then check what drifted and which sessions ran after it.
+
+```bash
+# Record a snapshot of all watched config files
+agent-strace config-watch snapshot
+
+# Add a label to identify the snapshot
+agent-strace config-watch snapshot --label "before-prompt-refactor"
+
+# Check whether anything changed since the last snapshot (exit 1 if yes)
+agent-strace config-watch check
+
+# Machine-readable diff
+agent-strace config-watch check --format json
+
+# List all snapshots
+agent-strace config-watch history
+
+# Find sessions that ran after a config change
+agent-strace config-watch affected
+
+# Limit to sessions from the last 7 days
+agent-strace config-watch affected --since 7d
+```
+
+Example output:
+
+```
+$ agent-strace config-watch check
+CHANGED  AGENTS.md          (sha256: a1b2c3d4 → e5f6a7b8)
+ADDED    .claude/settings.json
+No changes to: CLAUDE.md, system_prompt.md
+
+$ agent-strace config-watch affected
+2 session(s) ran after a config change:
+
+  abc123def456  2026-05-20T14:32:01  (after change to: AGENTS.md)
+  789xyz012abc  2026-05-20T15:10:44  (after change to: AGENTS.md)
+
+Run `agent-strace drift` to compare behaviour before and after the change.
+```
+
+Watched files by default: `AGENTS.md`, `CLAUDE.md`, `system_prompt.md`, `system_prompt.txt`, `.cursorrules`, `.github/copilot-instructions.md`. Add extra paths with `--watch`:
+
+```bash
+agent-strace config-watch snapshot --watch .claude/settings.json --watch custom_prompt.txt
+```
+
+Snapshots are stored in `.agent-traces/config-snapshots.json`. Use `check` as a CI gate — it exits 1 when config has changed since the last snapshot.
 
 ### Data retention
 

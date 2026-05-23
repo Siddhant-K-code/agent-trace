@@ -49,6 +49,7 @@ from .anonymize import cmd_anonymize_export
 from .integrations import detect_and_instrument, _INTEGRATIONS
 from .budget_report import cmd_budget_report
 from .compare import cmd_compare
+from .config_watch import cmd_config_watch
 from .lint import cmd_lint
 from .retention import cmd_retention
 from .sample import cmd_sample
@@ -883,6 +884,32 @@ def build_parser() -> argparse.ArgumentParser:
     p_sample.add_argument("--seed", type=int, default=None,
                           help="random seed for reproducible random sampling")
 
+    # config-watch
+    p_cw = sub.add_parser("config-watch",
+                          help="detect AGENTS.md and config file changes between sessions")
+    cw_sub = p_cw.add_subparsers(dest="config_watch_command")
+
+    cw_snap = cw_sub.add_parser("snapshot", help="record a snapshot of current config files")
+    cw_snap.add_argument("--label", metavar="TEXT",
+                         help="human-readable label for this snapshot")
+    cw_snap.add_argument("--watch", metavar="PATH", action="append",
+                         help="additional file to watch (repeatable)")
+
+    cw_check = cw_sub.add_parser("check",
+                                  help="check whether config has changed since last snapshot")
+    cw_check.add_argument("--watch", metavar="PATH", action="append",
+                          help="additional file to watch (repeatable)")
+    cw_check.add_argument("--format", choices=["text", "json"], default="text")
+
+    cw_hist = cw_sub.add_parser("history", help="show full snapshot history")
+    cw_hist.add_argument("--format", choices=["text", "json"], default="text")
+
+    cw_aff = cw_sub.add_parser("affected",
+                                help="list sessions that ran after a config change")
+    cw_aff.add_argument("--since", metavar="DURATION",
+                        help="only sessions newer than this (e.g. 7d, 24h)")
+    cw_aff.add_argument("--format", choices=["text", "json"], default="text")
+
     # compare
     p_compare = sub.add_parser("compare", help="session-to-session regression report")
     p_compare.add_argument("session_id_a", nargs="?",
@@ -1053,6 +1080,7 @@ def main() -> None:
         "auto": cmd_auto,
         "budget-report": cmd_budget_report,
         "compare": cmd_compare,
+        "config-watch": cmd_config_watch,
         "lint": cmd_lint,
         "retention": cmd_retention,
         "sample": cmd_sample,
