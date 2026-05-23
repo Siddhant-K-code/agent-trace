@@ -46,6 +46,7 @@ from .postmortem import cmd_postmortem
 from .share import cmd_share
 from .token_budget import cmd_token_budget
 from .anonymize import cmd_anonymize_export
+from .integrations import detect_and_instrument, _INTEGRATIONS
 from .retention import cmd_retention
 from .sample import cmd_sample
 from .server import cmd_server
@@ -819,6 +820,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="transport protocol (default: stdio)",
     )
 
+    # auto (auto-instrumentation)
+    p_auto = sub.add_parser(
+        "auto",
+        help="run a command with auto-instrumentation for agent frameworks",
+    )
+    p_auto.add_argument(
+        "--framework", "-f",
+        metavar="NAME",
+        help=(
+            "framework to instrument: "
+            + ", ".join(sorted(set(_INTEGRATIONS.keys())))
+            + " (or 'detect' to auto-detect)"
+        ),
+    )
+    p_auto.add_argument("--detect", action="store_true",
+                        help="auto-detect and instrument all installed frameworks")
+    p_auto.add_argument("command", nargs=argparse.REMAINDER,
+                        help="command to run with instrumentation")
+
     # server (event collector)
     p_server = sub.add_parser(
         "server",
@@ -881,6 +901,52 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def cmd_auto(args: argparse.Namespace) -> int:
+    """Run a command with auto-instrumentation applied."""
+    import subprocess
+    import os
+
+    command = getattr(args, "command", [])
+    # Strip leading '--' separator
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        sys.stderr.write("Usage: agent-strace auto [--framework NAME] -- <command>\n")
+        return 1
+
+    # Determine which frameworks to instrument
+    if getattr(args, "detect", False):
+        env_val = "detect"
+    elif getattr(args, "framework", None):
+        env_val = args.framework
+    else:
+        env_val = "detect"
+
+    env = os.environ.copy()
+    env["AGENT_STRACE_AUTO_INSTRUMENT"] = env_val
+
+    # Inject agent_trace.auto into PYTHONSTARTUP or sitecustomize is complex;
+    # instead set PYTHONPATH and use -c to import auto before the script.
+    # Simplest approach: set env var and let the user's code import agent_trace.auto,
+    # or use python -c "import agent_trace.auto; exec(open(script).read())"
+    # For subprocess execution, we prepend the auto-import via PYTHONSTARTUP.
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+        f.write("import agent_trace.auto\n")
+        startup_path = f.name
+
+    env["PYTHONSTARTUP"] = startup_path
+
+    try:
+        result = subprocess.run(command, env=env)
+        return result.returncode
+    finally:
+        try:
+            os.unlink(startup_path)
+        except OSError:
+            pass
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -930,6 +996,7 @@ def main() -> None:
         "freshness": cmd_freshness,
         "standup": cmd_standup,
         "mcp": cmd_mcp,
+        "auto": cmd_auto,
         "retention": cmd_retention,
         "sample": cmd_sample,
         "server": cmd_server,

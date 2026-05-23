@@ -221,6 +221,7 @@ agent-strace retention clean [--dry-run]        Delete sessions that exceed rete
 agent-strace sample --strategy worst --n 20     Export worst/diverse/random/recent sessions as JSONL
 agent-strace export <session> --format otlp-genai  Export with OTel GenAI semantic conventions
 agent-strace server [--port 4317] [--storage DIR]  Start a server-side event collector
+agent-strace auto [--framework NAME] -- <cmd>      Run a command with auto-instrumentation
 agent-strace watch [--timeout DURATION] [--budget $] [--on-death CMD] [--rules file]
                                                 Watch a live session; kill/pause on rule breach
 agent-strace share <session-id> [-o file]       Export a self-contained HTML report
@@ -1221,6 +1222,38 @@ agent-strace scope: all tool calls logged, secrets redacted, exported to Grafana
 Any attempt by the agent to read `cvm/attestation-service/` or `cvm/auth-service/` is blocked at the authorization layer before it reaches the filesystem. agent-strace logs the denied attempt with the reason.
 
 ---
+
+## Auto-instrumentation
+
+Instrument any supported agent framework without modifying application code.
+
+```bash
+# Instrument a specific framework
+agent-strace auto --framework langchain -- python my_agent.py
+
+# Auto-detect all installed frameworks
+agent-strace auto --detect -- python my_agent.py
+
+# Via environment variable (no CLI wrapper needed)
+AGENT_STRACE_AUTO_INSTRUMENT=langchain,litellm python my_agent.py
+
+# Or in code
+from agent_trace.integrations import instrument_langchain
+instrument_langchain()
+```
+
+Supported frameworks:
+
+| Framework | Install | What's traced |
+|---|---|---|
+| OpenAI Agents SDK | `pip install agent-strace[openai-agents]` | Runner.run, FunctionTool calls |
+| LangChain / LangGraph | `pip install agent-strace[langchain]` | BaseTool._run, BaseChatModel._generate |
+| LiteLLM | `pip install agent-strace[litellm]` | litellm.completion |
+| Anthropic SDK | `pip install anthropic` | messages.create |
+| OpenAI SDK | `pip install openai` | chat.completions.create |
+| AWS Strands | `pip install agent-strace[strands]` | Agent.__call__, BaseTool.invoke |
+
+Each integration is an optional extra — the core package stays dependency-free (ADR-0003).
 
 ## Server-side event collector
 
