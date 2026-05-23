@@ -333,6 +333,34 @@ retention:
 
 Policies are applied in order: age → count → size. Deletions are logged with session ID and timestamp (not content).
 
+### Trace anonymization
+
+Strip identifying information from traces at export time — original session data is never modified. Complements secret redaction (which strips secrets at capture time).
+
+```bash
+# Preview what would be anonymized
+agent-strace export SESSION_ID --anonymize --dry-run
+
+# Export with anonymization applied
+agent-strace export SESSION_ID --anonymize --output trace-anon.json
+```
+
+Anonymized by default:
+- Home directory paths → `~/relative/path`
+- Hostnames → `<hostname>`
+- OS usernames → `<user>`
+- Email addresses → `<email>`
+
+Add custom patterns via `.agent-strace/anonymize.yaml`:
+
+```yaml
+rules:
+  - pattern: "ACME Corp"
+    replacement: "<company>"
+  - pattern: "192\.168\.\d+\.\d+"
+    replacement: "<internal-ip>"
+```
+
 ### Secret redaction
 
 Strip API keys, tokens, and credentials from traces before they hit disk.

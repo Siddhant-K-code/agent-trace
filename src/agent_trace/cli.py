@@ -45,6 +45,7 @@ from .policy import cmd_policy
 from .postmortem import cmd_postmortem
 from .share import cmd_share
 from .token_budget import cmd_token_budget
+from .anonymize import cmd_anonymize_export
 from .retention import cmd_retention
 from .sample import cmd_sample
 from .watch import cmd_watch
@@ -229,11 +230,14 @@ def cmd_inspect(args: argparse.Namespace) -> int:
 
 
 def cmd_export(args: argparse.Namespace) -> int:
+    """Export a session to JSON, CSV, or OTLP."""
     # Route to Langfuse/OTLP export when --scores, --metrics, or --backend is set
     if getattr(args, "scores", False) or getattr(args, "metrics", False) or getattr(args, "backend", None):
         return cmd_export_scores(args)
 
-    """Export a session to JSON, CSV, or OTLP."""
+    # Route to anonymized export when --anonymize is set
+    if getattr(args, "anonymize", False):
+        return cmd_anonymize_export(args)
     store = TraceStore(args.trace_dir)
 
     session_id = args.session_id
@@ -496,6 +500,14 @@ def build_parser() -> argparse.ArgumentParser:
                           help="OTLP metrics endpoint (overrides OTEL_EXPORTER_OTLP_ENDPOINT)")
     p_export.add_argument("--otlp-headers", dest="otlp_headers", metavar="HEADERS",
                           help="OTLP headers as key=value,key=value")
+    p_export.add_argument("--anonymize", action="store_true",
+                          help="strip identifying information (paths, hostnames, emails, usernames) from the export")
+    p_export.add_argument("--anonymize-config", dest="anonymize_config", metavar="FILE",
+                          help="path to custom anonymization rules YAML file")
+    p_export.add_argument("--output", "-o", default="",
+                          help="output file path for anonymized export")
+    p_export.add_argument("--dry-run", action="store_true",
+                          help="show what would be anonymized without writing output (use with --anonymize)")
 
     # stats
     p_stats = sub.add_parser("stats", help="show session statistics")
