@@ -6,6 +6,27 @@ See [ADR-0012](../ADRs/0012-server-side-event-collector.md) for design rationale
 
 ---
 
+## Hosted collector
+
+> **Status: planned.** A managed `collector.agent-strace.dev` endpoint is on the roadmap. When available, it will implement the same API as `agent-strace server` — no client changes required.
+>
+> Track progress and sign up for early access: [agent-strace/collector](https://github.com/Siddhant-K-code/agent-strace-collector) *(infrastructure repo, separate from this package)*
+
+Once live, the only change needed is the endpoint:
+
+```bash
+# Self-hosted (today)
+AGENT_STRACE_ENDPOINT=http://localhost:4317 python my_agent.py
+
+# Hosted (when available — no other changes)
+AGENT_STRACE_ENDPOINT=https://collector.agent-strace.dev python my_agent.py
+AGENT_STRACE_AUTH_KEY=ast_<your-key>
+```
+
+The hosted endpoint will implement the same API documented below, with API key auth (see [Authentication](#authentication)) and a free tier for individual developers.
+
+---
+
 ## Quick start
 
 ```bash
