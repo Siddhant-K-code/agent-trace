@@ -875,6 +875,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_server.add_argument("--storage", metavar="DIR",
                           help="storage directory for traces "
                                "(default: $AGENT_STRACE_STORAGE or .agent-traces)")
+    p_server.add_argument("--auth-key", metavar="KEY", dest="auth_key",
+                          help="require Authorization: Bearer <KEY> on all requests "
+                               "(also read from AGENT_STRACE_AUTH_KEY env var)")
+    p_server_sub = p_server.add_subparsers(dest="server_subcommand")
+    p_server_sub.add_parser("keygen", help="generate a new ast_-prefixed API key")
 
     # sample
     p_sample = sub.add_parser(

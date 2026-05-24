@@ -58,9 +58,40 @@ When multiple agents send to the same collector, sessions are linked via `parent
 
 ---
 
-## Security note
+## Authentication
 
-No authentication in v1 — intended for internal/private network use. Add a reverse proxy (nginx, Caddy) for auth and TLS.
+By default the server runs unauthenticated (local use). For any network-accessible deployment, enable API key auth:
+
+```bash
+# Generate a key
+agent-strace server keygen
+# → ast_a3f9b2c1d4e5f6a7b8c9d0e1f2a3b4c5
+
+# Start server with key enforcement
+agent-strace server --auth-key ast_a3f9b2c1d4e5f6a7b8c9d0e1f2a3b4c5
+
+# Or via environment variable
+AGENT_STRACE_AUTH_KEY=ast_a3f9b2c1d4e5f6a7b8c9d0e1f2a3b4c5 agent-strace server
+```
+
+Requests without a matching `Authorization: Bearer <key>` header receive `401 Unauthorized`.
+
+**Client side** — set `AGENT_STRACE_AUTH_KEY` alongside `AGENT_STRACE_ENDPOINT` and all outbound requests include the header automatically:
+
+```bash
+export AGENT_STRACE_ENDPOINT=https://collector.example.com
+export AGENT_STRACE_AUTH_KEY=ast_a3f9b2c1d4e5f6a7b8c9d0e1f2a3b4c5
+python my_agent.py
+```
+
+The `--stream-headers` flag on `agent-strace watch` also works for one-off overrides:
+
+```bash
+agent-strace watch --stream-to https://collector.example.com \
+  --stream-headers "Authorization=Bearer ast_..."
+```
+
+Key format: `ast_` prefix + 32 hex characters. Generated with `secrets.token_hex(16)` — no new dependencies.
 
 ---
 

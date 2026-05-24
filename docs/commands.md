@@ -336,9 +336,19 @@ Export sessions as JSONL for eval datasets. Compatible with LangSmith, Braintrus
 
 ### `server`
 ```
-agent-strace server [--port N] [--storage DIR]
+agent-strace server [--port N] [--host HOST] [--storage DIR] [--auth-key KEY]
+agent-strace server keygen
 ```
 Start a server-side event collector. See [server.md](server.md).
+
+| Flag | Description |
+|---|---|
+| `--port N` | Port to listen on (default: 4317) |
+| `--host HOST` | Host to bind to (default: 0.0.0.0) |
+| `--storage DIR` | Trace storage directory (default: `$AGENT_STRACE_STORAGE` or `.agent-traces`) |
+| `--auth-key KEY` | Require `Authorization: Bearer KEY` on all requests (also read from `AGENT_STRACE_AUTH_KEY`) |
+
+`keygen` prints a new `ast_`-prefixed API key to stdout. Set `AGENT_STRACE_AUTH_KEY` on the client side to inject the header automatically into all outbound collector requests.
 
 ### `auto`
 ```

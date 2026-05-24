@@ -14,11 +14,20 @@ API:
 Usage:
     agent-strace server --port 4317 --storage ./traces
 
+    # With API key authentication
+    agent-strace server keygen                          # generate a key
+    agent-strace server --auth-key ast_<key>            # enforce auth
+    AGENT_STRACE_AUTH_KEY=ast_<key> agent-strace server # via env var
+
 Agents point to it via environment variable:
     AGENT_STRACE_ENDPOINT=http://collector:4317 python my_agent.py
 
-No authentication in v1 — intended for internal/private network use.
-Add a reverse proxy (nginx, Caddy) for auth.
+    # With auth key on the client side
+    AGENT_STRACE_ENDPOINT=https://collector.example.com
+    AGENT_STRACE_AUTH_KEY=ast_<key>
+
+Without --auth-key / AGENT_STRACE_AUTH_KEY the server runs unauthenticated
+(original behaviour, unchanged for local use).
 
 See ADR-0012 for architecture decisions.
 """
@@ -28,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import secrets
 import sys
 import threading
 import time
@@ -41,26 +51,45 @@ from .store import TraceStore, DEFAULT_TRACE_DIR
 
 
 # ---------------------------------------------------------------------------
+# Key generation
+# ---------------------------------------------------------------------------
+
+KEY_PREFIX = "ast_"
+
+
+def generate_api_key() -> str:
+    """Return a new ``ast_``-prefixed API key using secrets.token_hex."""
+    return KEY_PREFIX + secrets.token_hex(16)
+
+
+# ---------------------------------------------------------------------------
 # Remote event sender (used by hooks when AGENT_STRACE_ENDPOINT is set)
 # ---------------------------------------------------------------------------
+
+def _auth_headers() -> dict[str, str]:
+    """Return Authorization header dict if AGENT_STRACE_AUTH_KEY is set."""
+    key = os.environ.get("AGENT_STRACE_AUTH_KEY", "").strip()
+    if key:
+        return {"Authorization": f"Bearer {key}"}
+    return {}
+
 
 def send_event_to_endpoint(event: TraceEvent, endpoint: str) -> bool:
     """POST a single event to a remote collector.
 
     Returns True on success. Failures are logged to stderr but never raise —
     the hook must not block the agent.
+
+    When AGENT_STRACE_AUTH_KEY is set, injects ``Authorization: Bearer``
+    automatically.
     """
     import urllib.request
     import urllib.error
 
     url = endpoint.rstrip("/") + "/events"
     body = (event.to_json() + "\n").encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=body,
-        headers={"Content-Type": "application/x-ndjson"},
-        method="POST",
-    )
+    headers = {"Content-Type": "application/x-ndjson", **_auth_headers()}
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=5) as resp:
             return resp.status in (200, 202)
@@ -70,18 +99,18 @@ def send_event_to_endpoint(event: TraceEvent, endpoint: str) -> bool:
 
 
 def send_session_meta_to_endpoint(meta: SessionMeta, endpoint: str) -> bool:
-    """POST session metadata to a remote collector."""
+    """POST session metadata to a remote collector.
+
+    When AGENT_STRACE_AUTH_KEY is set, injects ``Authorization: Bearer``
+    automatically.
+    """
     import urllib.request
     import urllib.error
 
     url = endpoint.rstrip("/") + "/sessions"
     body = meta.to_json().encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+    headers = {"Content-Type": "application/json", **_auth_headers()}
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=5) as resp:
             return resp.status in (200, 202)
@@ -100,10 +129,18 @@ class CollectorHandler(BaseHTTPRequestHandler):
     # Injected by the server setup
     store: TraceStore
     _lock: threading.Lock
+    _auth_key: str  # empty string = no auth required
 
     def log_message(self, fmt: str, *args: Any) -> None:
         # Suppress default access log; write to stderr with our prefix
         sys.stderr.write(f"[server] {fmt % args}\n")
+
+    def _check_auth(self) -> bool:
+        """Return True if the request is authorised (or auth is disabled)."""
+        if not self._auth_key:
+            return True
+        auth = self.headers.get("Authorization", "")
+        return auth == f"Bearer {self._auth_key}"
 
     def _send_json(self, status: int, data: dict) -> None:
         body = json.dumps(data).encode("utf-8")
@@ -132,6 +169,9 @@ class CollectorHandler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------------
 
     def do_GET(self) -> None:
+        if not self._check_auth():
+            self._send_json(401, {"error": "Unauthorized"})
+            return
         path = urlparse(self.path).path.rstrip("/")
 
         if path == "/health":
@@ -180,6 +220,9 @@ class CollectorHandler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------------
 
     def do_POST(self) -> None:
+        if not self._check_auth():
+            self._send_json(401, {"error": "Unauthorized"})
+            return
         path = urlparse(self.path).path.rstrip("/")
         body = self._read_body()
 
@@ -248,12 +291,13 @@ class CollectorHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": str(exc)})
 
 
-def _make_handler(store: TraceStore, lock: threading.Lock) -> type:
-    """Return a CollectorHandler subclass with store and lock injected."""
+def _make_handler(store: TraceStore, lock: threading.Lock, auth_key: str = "") -> type:
+    """Return a CollectorHandler subclass with store, lock, and auth key injected."""
     class Handler(CollectorHandler):
         pass
     Handler.store = store
     Handler._lock = lock
+    Handler._auth_key = auth_key
     return Handler
 
 
@@ -265,15 +309,21 @@ def run_server(
     port: int,
     storage_dir: str,
     host: str = "0.0.0.0",
+    auth_key: str = "",
 ) -> None:
-    """Start the collector server and block until interrupted."""
+    """Start the collector server and block until interrupted.
+
+    When *auth_key* is non-empty, all requests must include
+    ``Authorization: Bearer <auth_key>`` or receive 401.
+    """
     store = TraceStore(storage_dir)
     lock = threading.Lock()
-    handler_class = _make_handler(store, lock)
+    handler_class = _make_handler(store, lock, auth_key=auth_key)
 
     server = HTTPServer((host, port), handler_class)
+    auth_note = " (auth enabled)" if auth_key else " (no auth)"
     sys.stderr.write(
-        f"[agent-strace server] listening on {host}:{port}\n"
+        f"[agent-strace server] listening on {host}:{port}{auth_note}\n"
         f"[agent-strace server] storage: {Path(storage_dir).resolve()}\n"
         f"[agent-strace server] health: http://{host}:{port}/health\n"
     )
@@ -290,10 +340,20 @@ def run_server(
 # ---------------------------------------------------------------------------
 
 def cmd_server(args: argparse.Namespace) -> int:
+    subcommand = getattr(args, "server_subcommand", None)
+
+    if subcommand == "keygen":
+        sys.stdout.write(generate_api_key() + "\n")
+        return 0
+
     port = getattr(args, "port", 4317)
     storage = getattr(args, "storage", None) or os.environ.get(
         "AGENT_STRACE_STORAGE", DEFAULT_TRACE_DIR
     )
     host = getattr(args, "host", "0.0.0.0")
-    run_server(port=port, storage_dir=storage, host=host)
+    auth_key = (
+        getattr(args, "auth_key", None)
+        or os.environ.get("AGENT_STRACE_AUTH_KEY", "")
+    ).strip()
+    run_server(port=port, storage_dir=storage, host=host, auth_key=auth_key)
     return 0

@@ -48,10 +48,10 @@ python -m pytest tests/test_watch.py -v
 
 ## Version bumping
 
-Current version: `0.51.1` in `src/agent_trace/__init__.py`.
+Current version: `0.52.0` in `src/agent_trace/__init__.py`.
 
-- New feature (new command, new flag, new integration): bump minor (`0.51.1` → `0.52.0`)
-- Bug fix or small improvement: bump patch (`0.51.1` → `0.51.2`)
+- New feature (new command, new flag, new integration): bump minor (`0.52.0` → `0.53.0`)
+- Bug fix or small improvement: bump patch (`0.52.0` → `0.52.1`)
 - Breaking change to CLI or storage format: bump major — check with maintainer first
 
 ## docs/ structure
