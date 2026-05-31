@@ -32,10 +32,12 @@ _INTEGRATIONS: dict[str, tuple[str, str]] = {
     "openai-agents": ("agent_trace.integrations.openai_agents", "instrument_openai_agents"),
     "openai_agents": ("agent_trace.integrations.openai_agents", "instrument_openai_agents"),
     "langchain": ("agent_trace.integrations.langchain", "instrument_langchain"),
+    "langgraph": ("agent_trace.integrations.langchain", "instrument_langchain"),
     "litellm": ("agent_trace.integrations.litellm", "instrument_litellm"),
     "anthropic": ("agent_trace.integrations.anthropic", "instrument_anthropic"),
     "openai": ("agent_trace.integrations.openai", "instrument_openai"),
     "strands": ("agent_trace.integrations.strands", "instrument_strands"),
+    "crewai": ("agent_trace.integrations.crewai", "instrument_crewai"),
 }
 
 # Frameworks that can be auto-detected by checking importability
@@ -46,6 +48,7 @@ _DETECTABLE: list[str] = [
     "anthropic",
     "openai",
     "strands",
+    "crewai",
 ]
 
 _FRAMEWORK_PROBE: dict[str, str] = {
@@ -55,6 +58,7 @@ _FRAMEWORK_PROBE: dict[str, str] = {
     "anthropic": "anthropic",
     "openai": "openai",
     "strands": "strands",
+    "crewai": "crewai",
 }
 
 
@@ -100,6 +104,11 @@ def instrument_openai(**kwargs):
 def instrument_strands(**kwargs):
     """Instrument AWS Strands Agents."""
     return _import_integration("strands")(**kwargs)
+
+
+def instrument_crewai(**kwargs):
+    """Instrument CrewAI."""
+    return _import_integration("crewai")(**kwargs)
 
 
 def detect_and_instrument() -> list[str]:

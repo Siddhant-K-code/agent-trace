@@ -33,6 +33,7 @@ litellm = ["litellm>=1.0.0"]
 anthropic = ["anthropic>=0.20.0"]
 openai = ["openai>=1.0.0"]
 strands = ["strands-agents>=0.1.0"]
+crewai = ["crewai>=0.28.0"]
 all-integrations = [
     "openai-agents>=0.0.1",
     "langchain-core>=0.1.0",
@@ -40,6 +41,7 @@ all-integrations = [
     "anthropic>=0.20.0",
     "openai>=1.0.0",
     "strands-agents>=0.1.0",
+    "crewai>=0.28.0",
 ]
 
 [project.scripts]

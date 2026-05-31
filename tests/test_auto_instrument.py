@@ -27,7 +27,7 @@ from agent_trace.store import TraceStore
 
 class TestIntegrationRegistry(unittest.TestCase):
     def test_all_expected_frameworks_registered(self):
-        for name in ("openai-agents", "langchain", "litellm", "anthropic", "openai", "strands"):
+        for name in ("openai-agents", "langchain", "litellm", "anthropic", "openai", "strands", "crewai", "langgraph"):
             self.assertIn(name, _INTEGRATIONS, f"{name} not in registry")
 
     def test_import_unknown_raises_value_error(self):
@@ -327,6 +327,74 @@ class TestAutoCLIRegistered(unittest.TestCase):
 # pyproject.toml optional extras
 # ---------------------------------------------------------------------------
 
+class TestCrewAIIntegration(unittest.TestCase):
+    def setUp(self):
+        import agent_trace.integrations.crewai as m
+        m._PATCHED = False
+        m._orig_kickoff = None
+        m._orig_execute_task = None
+        m._orig_task_execute = None
+
+    def test_raises_import_error_when_not_installed(self):
+        from agent_trace.integrations.crewai import instrument_crewai
+        with patch.dict(sys.modules, {"crewai": None}):
+            with self.assertRaises(ImportError):
+                instrument_crewai()
+
+    def test_idempotent_when_already_patched(self):
+        import agent_trace.integrations.crewai as m
+        m._PATCHED = True
+        from agent_trace.integrations.crewai import instrument_crewai
+        instrument_crewai()  # should not raise or re-patch
+        self.assertTrue(m._PATCHED)
+
+    def test_uninstrument_resets_flag(self):
+        import agent_trace.integrations.crewai as m
+        m._PATCHED = True
+        from agent_trace.integrations.crewai import uninstrument_crewai
+        uninstrument_crewai()
+        self.assertFalse(m._PATCHED)
+
+    def test_registered_in_integrations(self):
+        self.assertIn("crewai", _INTEGRATIONS)
+        self.assertIn("crewai", _FRAMEWORK_PROBE)
+
+
+class TestLangGraphIntegration(unittest.TestCase):
+    def setUp(self):
+        import agent_trace.integrations.langchain as m
+        m._PATCHED = False
+        m._orig_compile = None
+
+    def test_langgraph_alias_resolves_to_langchain_module(self):
+        entry = _INTEGRATIONS.get("langgraph")
+        self.assertIsNotNone(entry)
+        module_path, func_name = entry
+        self.assertIn("langchain", module_path)
+        self.assertEqual(func_name, "instrument_langchain")
+
+    def test_compile_patch_skipped_when_langgraph_not_installed(self):
+        """instrument_langchain must not crash when langgraph is absent."""
+        import agent_trace.integrations.langchain as m
+        # Simulate langgraph absent by temporarily hiding it
+        with patch.dict(sys.modules, {"langgraph": None, "langgraph.graph": None}):
+            try:
+                from agent_trace.integrations.langchain import instrument_langchain
+                instrument_langchain()
+            except ImportError:
+                pass  # langchain_core also absent — that's fine
+        # No exception means the best-effort skip worked
+        m._PATCHED = False
+
+    def test_uninstrument_restores_compile(self):
+        import agent_trace.integrations.langchain as m
+        m._PATCHED = True
+        from agent_trace.integrations.langchain import uninstrument_langchain
+        uninstrument_langchain()
+        self.assertFalse(m._PATCHED)
+        self.assertIsNone(m._orig_compile)
+
+
 class TestOptionalExtras(unittest.TestCase):
     def test_pyproject_has_optional_deps(self):
         # tomllib is stdlib in 3.11+; fall back to manual parsing on 3.10
@@ -341,7 +409,7 @@ class TestOptionalExtras(unittest.TestCase):
                 # Parse manually: just check the raw text
                 pyproject = Path(__file__).parent.parent / "pyproject.toml"
                 text = pyproject.read_text()
-                for name in ("openai-agents", "langchain", "litellm", "anthropic", "openai", "strands", "all-integrations"):
+                for name in ("openai-agents", "langchain", "litellm", "anthropic", "openai", "strands", "crewai", "all-integrations"):
                     self.assertIn(name, text, f"Missing optional extra: {name}")
                 return
 
@@ -349,7 +417,7 @@ class TestOptionalExtras(unittest.TestCase):
         with open(pyproject, "rb") as f:
             data = _load(f)
         extras = data.get("project", {}).get("optional-dependencies", {})
-        for name in ("openai-agents", "langchain", "litellm", "anthropic", "openai", "strands"):
+        for name in ("openai-agents", "langchain", "litellm", "anthropic", "openai", "strands", "crewai"):
             self.assertIn(name, extras, f"Missing optional extra: {name}")
         self.assertIn("all-integrations", extras)
 
