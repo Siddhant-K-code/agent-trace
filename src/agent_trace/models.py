@@ -53,6 +53,8 @@ class TraceEvent:
     parent_id: str = ""  # links tool_result to tool_call, llm_response to llm_request
     duration_ms: float | None = None
     data: dict[str, Any] = field(default_factory=dict)
+    # SHA-256 hex digest of the previous event's JSON line (empty on first event)
+    prev_hash: str = ""
 
     def to_json(self) -> str:
         d = asdict(self)

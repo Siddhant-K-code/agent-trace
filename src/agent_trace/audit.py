@@ -419,6 +419,74 @@ def format_audit(report: AuditReport, out: TextIO = sys.stdout) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Hash-chain verification
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ChainVerifyResult:
+    session_id: str
+    ok: bool
+    total_events: int
+    broken_at: int | None = None   # 0-based index of first broken link
+    broken_event_id: str = ""
+
+    def format(self, out: TextIO = sys.stdout) -> None:
+        if self.ok:
+            out.write(f"✅ Chain intact — {self.total_events} events verified\n")
+        else:
+            out.write(
+                f"❌ Chain broken at event #{self.broken_at} "
+                f"(id={self.broken_event_id})\n"
+                f"   {self.total_events} events checked — session may have been tampered with\n"
+            )
+
+
+def verify_chain(store: TraceStore, session_id: str) -> ChainVerifyResult:
+    """Verify the SHA-256 hash chain for a session's event log.
+
+    Each event stores prev_hash = SHA-256(previous event JSON line).
+    Events without prev_hash (written before v0.62.0) are skipped.
+    Returns ChainVerifyResult with ok=True if no broken links are found.
+    """
+    import hashlib
+
+    events_path = store._session_dir(session_id) / "events.ndjson"
+    if not events_path.exists():
+        return ChainVerifyResult(session_id=session_id, ok=False,
+                                 total_events=0, broken_at=0)
+
+    lines = [l for l in events_path.read_text().splitlines() if l.strip()]
+    if not lines:
+        return ChainVerifyResult(session_id=session_id, ok=True, total_events=0)
+
+    import json as _json
+    prev_line = ""
+    checked = 0
+    for i, line in enumerate(lines):
+        try:
+            obj = _json.loads(line)
+        except Exception:
+            continue
+        stored_hash = obj.get("prev_hash", "")
+        if not stored_hash:
+            # Pre-v0.62.0 event — no hash, skip
+            prev_line = line
+            continue
+        expected = hashlib.sha256(prev_line.encode()).hexdigest() if prev_line else ""
+        if stored_hash != expected:
+            event_id = obj.get("event_id", "")
+            return ChainVerifyResult(
+                session_id=session_id, ok=False,
+                total_events=len(lines), broken_at=i,
+                broken_event_id=event_id,
+            )
+        prev_line = line
+        checked += 1
+
+    return ChainVerifyResult(session_id=session_id, ok=True, total_events=len(lines))
+
+
+# ---------------------------------------------------------------------------
 # CLI handler
 # ---------------------------------------------------------------------------
 
@@ -435,6 +503,13 @@ def cmd_audit(args: argparse.Namespace) -> int:
     if not full_id:
         sys.stderr.write(f"Session not found: {session_id}\n")
         return 1
+
+    # --verify-chain: check hash chain integrity before policy audit
+    if getattr(args, "verify_chain", False):
+        chain_result = verify_chain(store, full_id)
+        chain_result.format()
+        if not chain_result.ok:
+            return 1
 
     policy_path = getattr(args, "policy", ".agent-scope.json")
     report = audit_session(store, full_id, policy_path=policy_path)

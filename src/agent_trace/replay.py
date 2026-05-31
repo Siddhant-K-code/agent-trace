@@ -660,3 +660,166 @@ def replay_to_html(
         Path(output_path).write_text(html, encoding="utf-8")
 
     return html
+
+
+# ---------------------------------------------------------------------------
+# Dual-session diff HTML viewer
+# ---------------------------------------------------------------------------
+
+_DIFF_HTML_TEMPLATE = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>agent-strace diff: {sid_a} vs {sid_b}</title>
+<style>
+  body{{font-family:monospace;background:#0d1117;color:#c9d1d9;margin:0;padding:16px}}
+  h1{{font-size:1rem;color:#58a6ff;margin-bottom:4px}}
+  .subtitle{{color:#8b949e;font-size:.8rem;margin-bottom:16px}}
+  .grid{{display:grid;grid-template-columns:1fr 1fr;gap:12px}}
+  .col{{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:12px;overflow-y:auto;max-height:80vh}}
+  .col h2{{font-size:.85rem;color:#58a6ff;margin:0 0 8px}}
+  .event{{padding:4px 6px;border-radius:4px;margin-bottom:4px;font-size:.78rem;border-left:3px solid transparent}}
+  .event.tool_call{{border-color:#3fb950;background:#0d2b0d}}
+  .event.tool_result{{border-color:#1f6feb;background:#0d1b2e}}
+  .event.llm_request{{border-color:#d29922;background:#2b1d00}}
+  .event.llm_response{{border-color:#d29922;background:#2b1d00}}
+  .event.error{{border-color:#f85149;background:#2d0d0d}}
+  .event.decision{{border-color:#bc8cff;background:#1a0d2e}}
+  .event.only-a{{outline:2px solid #f85149}}
+  .event.only-b{{outline:2px solid #3fb950}}
+  .legend{{display:flex;gap:16px;font-size:.75rem;margin-bottom:12px;flex-wrap:wrap}}
+  .legend span{{padding:2px 8px;border-radius:3px}}
+  .leg-a{{background:#2d0d0d;border:1px solid #f85149;color:#f85149}}
+  .leg-b{{background:#0d2b0d;border:1px solid #3fb950;color:#3fb950}}
+  .leg-both{{background:#161b22;border:1px solid #30363d}}
+  .stats{{display:flex;gap:24px;margin-bottom:12px;font-size:.8rem}}
+  .stat{{color:#8b949e}}.stat b{{color:#c9d1d9}}
+</style>
+</head>
+<body>
+<h1>agent-strace diff</h1>
+<div class="subtitle">{sid_a} &nbsp;vs&nbsp; {sid_b}</div>
+<div class="legend">
+  <span class="leg-a">only in A</span>
+  <span class="leg-b">only in B</span>
+  <span class="leg-both">in both</span>
+</div>
+<div class="stats">
+  <div class="stat">A: <b>{count_a}</b> events &nbsp; <b>${cost_a:.4f}</b></div>
+  <div class="stat">B: <b>{count_b}</b> events &nbsp; <b>${cost_b:.4f}</b></div>
+  <div class="stat">Divergence index: <b>{divergence_index:.0%}</b></div>
+</div>
+<div class="grid">
+  <div class="col">
+    <h2>A &mdash; {sid_a}</h2>
+    <div id="col-a"></div>
+  </div>
+  <div class="col">
+    <h2>B &mdash; {sid_b}</h2>
+    <div id="col-b"></div>
+  </div>
+</div>
+<script>
+const eventsA = {events_a_json};
+const eventsB = {events_b_json};
+const onlyA = new Set({only_a_json});
+const onlyB = new Set({only_b_json});
+
+function renderEvents(events, onlySet, colId) {{
+  const col = document.getElementById(colId);
+  events.forEach(e => {{
+    const div = document.createElement('div');
+    const et = e.event_type;
+    div.className = 'event ' + et + (onlySet.has(e.event_id) ? (colId==='col-a' ? ' only-a' : ' only-b') : '');
+    const tool = e.data.tool_name || e.data.model || '';
+    const label = tool ? et + ' · ' + tool : et;
+    const offset = e._offset !== undefined ? ' +' + e._offset.toFixed(1) + 's' : '';
+    div.textContent = label + offset;
+    div.title = JSON.stringify(e.data, null, 2);
+    col.appendChild(div);
+  }});
+}}
+renderEvents(eventsA, onlyA, 'col-a');
+renderEvents(eventsB, onlyB, 'col-b');
+</script>
+</body>
+</html>
+"""
+
+
+def replay_to_html_diff(
+    store: TraceStore,
+    session_a: str,
+    session_b: str,
+    output_path: str | None = None,
+) -> str:
+    """Generate a side-by-side HTML diff viewer for two sessions.
+
+    Events present in only one session are highlighted with a coloured outline.
+    Returns the HTML string; writes to output_path if given.
+    """
+    import json as _json
+    from .cost import _dollars, _event_tokens
+    from .diff import diff_sessions
+
+    events_a = store.load_events(session_a)
+    events_b = store.load_events(session_b)
+
+    def _build_event_data(events: list) -> list[dict]:
+        base_ts = events[0].timestamp if events else 0.0
+        result = []
+        for e in events:
+            result.append({
+                "event_type": e.event_type.value,
+                "event_id": e.event_id,
+                "_offset": round(e.timestamp - base_ts, 3),
+                "duration_ms": e.duration_ms,
+                "data": dict(e.data),
+            })
+        return result
+
+    def _session_cost(events: list) -> float:
+        total = 0.0
+        for e in events:
+            inp, out = _event_tokens(e)
+            total += _dollars(inp, out, "sonnet")
+        return total
+
+    # Compute which event_ids are unique to each session (by tool_name+type key)
+    def _event_key(e) -> str:
+        return f"{e.event_type.value}:{e.data.get('tool_name','')}"
+
+    keys_a = {_event_key(e) for e in events_a}
+    keys_b = {_event_key(e) for e in events_b}
+    only_a_keys = keys_a - keys_b
+    only_b_keys = keys_b - keys_a
+
+    only_a_ids = [e.event_id for e in events_a if _event_key(e) in only_a_keys]
+    only_b_ids = [e.event_id for e in events_b if _event_key(e) in only_b_keys]
+
+    # Divergence index from diff engine
+    try:
+        diff_result = diff_sessions(store, session_a, session_b)
+        divergence_index = diff_result.divergence_index
+    except Exception:
+        divergence_index = 0.0
+
+    html = _DIFF_HTML_TEMPLATE.format(
+        sid_a=session_a[:16],
+        sid_b=session_b[:16],
+        count_a=len(events_a),
+        count_b=len(events_b),
+        cost_a=_session_cost(events_a),
+        cost_b=_session_cost(events_b),
+        divergence_index=divergence_index,
+        events_a_json=_json.dumps(_build_event_data(events_a), separators=(",", ":")),
+        events_b_json=_json.dumps(_build_event_data(events_b), separators=(",", ":")),
+        only_a_json=_json.dumps(only_a_ids, separators=(",", ":")),
+        only_b_json=_json.dumps(only_b_ids, separators=(",", ":")),
+    )
+
+    if output_path:
+        Path(output_path).write_text(html, encoding="utf-8")
+
+    return html

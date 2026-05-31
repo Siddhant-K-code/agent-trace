@@ -188,6 +188,18 @@ def cmd_replay(args: argparse.Namespace) -> int:
             return 1
 
     fmt = getattr(args, "format", "terminal") or "terminal"
+
+    # --diff: side-by-side HTML diff viewer
+    diff_session_id = getattr(args, "diff", "") or ""
+    if diff_session_id:
+        from .replay import replay_to_html_diff
+        diff_full = store.find_session(diff_session_id) or diff_session_id
+        output_path = getattr(args, "output", "") or \
+            f"diff-{session_id[:8]}-vs-{diff_full[:8]}.html"
+        replay_to_html_diff(store, session_id, diff_full, output_path=output_path)
+        sys.stdout.write(f"Diff HTML written to {output_path}\n")
+        return 0
+
     if fmt == "html":
         from .replay import replay_to_html
         output_path = getattr(args, "output", "") or f"session-{session_id[:12]}.html"
@@ -499,6 +511,8 @@ def build_parser() -> argparse.ArgumentParser:
                           help="cap output at N events (default: all); useful for quick inspection of large sessions")
     p_replay.add_argument("--format", choices=["terminal", "html"], default="terminal",
                           help="output format: terminal timeline or self-contained HTML viewer (default: terminal)")
+    p_replay.add_argument("--diff", metavar="SESSION_B",
+                         help="generate side-by-side HTML diff against SESSION_B")
     p_replay.add_argument("--output", "-o", default="",
                           help="output file path for --format html (default: session-<id>.html)")
     p_replay.add_argument("--expand-subagents", action="store_true",
@@ -610,6 +624,8 @@ def build_parser() -> argparse.ArgumentParser:
     # audit
     p_audit = sub.add_parser("audit", help="check session tool calls against a policy file")
     p_audit.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
+    p_audit.add_argument("--verify-chain", dest="verify_chain", action="store_true",
+                         help="verify SHA-256 hash chain integrity before policy audit")
     p_audit.add_argument("--policy", default=".agent-scope.json",
                          help="path to policy file (default: .agent-scope.json)")
 

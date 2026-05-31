@@ -37,6 +37,15 @@ class TraceStore:
 
     def append_event(self, session_id: str, event: TraceEvent) -> None:
         f = self._session_dir(session_id) / "events.ndjson"
+        # Compute hash chain: SHA-256 of the last line in the file
+        if not event.prev_hash:
+            try:
+                import hashlib as _hashlib
+                text = f.read_text() if f.exists() else ""
+                last_line = text.rstrip("\n").rsplit("\n", 1)[-1] if text.strip() else ""
+                event.prev_hash = _hashlib.sha256(last_line.encode()).hexdigest() if last_line else ""
+            except Exception:
+                pass
         with open(f, "a") as fh:
             fh.write(event.to_json() + "\n")
 
