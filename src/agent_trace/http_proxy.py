@@ -29,6 +29,7 @@ from urllib.parse import urlparse
 from .models import EventType, SessionMeta, TraceEvent
 from .proxy import _classify_message
 from .masking import MaskingConfig, mask_event_data
+from .propagation import extract_traceparent, inject_traceparent
 from .store import TraceStore
 
 
@@ -82,6 +83,16 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_length) if content_length > 0 else b""
 
+        # Extract upstream traceparent so we can continue the trace chain
+        inbound_ctx = extract_traceparent(dict(self.headers))
+        upstream_trace_id = inbound_ctx["trace_id"] if inbound_ctx else ""
+
+        # If the upstream agent carries an agent-trace session ID in tracestate,
+        # record it as the parent session for cross-agent correlation.
+        if inbound_ctx and inbound_ctx.get("at_session_id") and self.meta:
+            if not self.meta.parent_session_id:
+                self.meta.parent_session_id = inbound_ctx["at_session_id"]
+
         # trace the request
         try:
             msg = json.loads(body.decode("utf-8"))
@@ -106,10 +117,34 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         if auth:
             headers["Authorization"] = auth
 
+        # Inject W3C traceparent so downstream agents can correlate back
+        if self.meta:
+            headers = inject_traceparent(
+                headers,
+                session_id=self.meta.session_id,
+                trace_id=upstream_trace_id,
+            )
+
         try:
             conn.request("POST", self._remote_path(self.path), body=body, headers=headers)
             resp = conn.getresponse()
             resp_body = resp.read()
+
+            # Extract traceparent from response — if the downstream agent
+            # runs agent-trace it will echo its session ID in tracestate,
+            # letting us auto-link the sub-session without manual wiring.
+            resp_headers = dict(resp.getheaders())
+            resp_ctx = extract_traceparent(resp_headers)
+            if resp_ctx and resp_ctx.get("at_session_id") and self.meta:
+                child_sid = resp_ctx["at_session_id"]
+                if child_sid != self.meta.session_id and self.store:
+                    from .a2a import link_sub_session
+                    link_sub_session(
+                        self.store,
+                        parent_session_id=self.meta.session_id,
+                        parent_event_id="",
+                        child_session_id=child_sid,
+                    )
 
             # trace the response
             try:
