@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import functools
 import inspect
+import threading
 import time
 from typing import Any, Callable
 
@@ -26,10 +27,21 @@ from .models import EventType, SessionMeta, TraceEvent
 from .redact import redact_data
 from .store import TraceStore
 
-# module-level active session
-_active_store: TraceStore | None = None
-_active_session: SessionMeta | None = None
-_active_redact: bool = False
+# Thread-local session state so concurrent agents in the same process
+# don't overwrite each other's active session.
+_local = threading.local()
+
+
+def _get_active_store() -> TraceStore | None:
+    return getattr(_local, "store", None)
+
+
+def _get_active_session() -> SessionMeta | None:
+    return getattr(_local, "session", None)
+
+
+def _get_active_redact() -> bool:
+    return getattr(_local, "redact", False)
 
 
 def start_session(
@@ -38,65 +50,66 @@ def start_session(
     redact: bool = False,
 ) -> str:
     """Start a new trace session. Returns the session ID."""
-    global _active_store, _active_session, _active_redact
-
-    _active_store = TraceStore(trace_dir)
-    _active_session = SessionMeta(agent_name=name)
-    _active_redact = redact
-    _active_store.create_session(_active_session)
+    _local.store = TraceStore(trace_dir)
+    _local.session = SessionMeta(agent_name=name)
+    _local.redact = redact
+    _local.store.create_session(_local.session)
 
     event = TraceEvent(
         event_type=EventType.SESSION_START,
-        session_id=_active_session.session_id,
+        session_id=_local.session.session_id,
         data={"agent_name": name},
     )
-    _active_store.append_event(_active_session.session_id, event)
+    _local.store.append_event(_local.session.session_id, event)
 
-    return _active_session.session_id
+    return _local.session.session_id
 
 
 def end_session() -> SessionMeta | None:
     """End the active trace session. Returns session metadata."""
-    global _active_store, _active_session
+    store = _get_active_store()
+    session = _get_active_session()
 
-    if not _active_store or not _active_session:
+    if not store or not session:
         return None
 
-    _active_session.ended_at = time.time()
-    _active_session.total_duration_ms = (
-        _active_session.ended_at - _active_session.started_at
+    session.ended_at = time.time()
+    session.total_duration_ms = (
+        session.ended_at - session.started_at
     ) * 1000
 
     event = TraceEvent(
         event_type=EventType.SESSION_END,
-        session_id=_active_session.session_id,
+        session_id=session.session_id,
         data={
-            "duration_ms": _active_session.total_duration_ms,
-            "tool_calls": _active_session.tool_calls,
-            "errors": _active_session.errors,
+            "duration_ms": session.total_duration_ms,
+            "tool_calls": session.tool_calls,
+            "errors": session.errors,
         },
     )
-    _active_store.append_event(_active_session.session_id, event)
-    _active_store.update_meta(_active_session)
+    store.append_event(session.session_id, event)
+    store.update_meta(session)
 
-    meta = _active_session
-    _active_store = None
-    _active_session = None
-    _active_redact = False
+    meta = session
+    _local.store = None
+    _local.session = None
+    _local.redact = False
     return meta
 
 
 def _emit_event(event: TraceEvent) -> None:
-    if _active_store and _active_session:
-        event.session_id = _active_session.session_id
-        if _active_redact:
+    store = _get_active_store()
+    session = _get_active_session()
+    if store and session:
+        event.session_id = session.session_id
+        if _get_active_redact():
             event.data = redact_data(event.data)
-        _active_store.append_event(_active_session.session_id, event)
+        store.append_event(session.session_id, event)
 
         if event.event_type == EventType.TOOL_CALL:
-            _active_session.tool_calls += 1
+            session.tool_calls += 1
         elif event.event_type == EventType.ERROR:
-            _active_session.errors += 1
+            session.errors += 1
 
 
 def trace_tool(_func: Callable | None = None, *, name: str = ""):
@@ -198,8 +211,9 @@ def trace_llm_call(_func: Callable | None = None, *, name: str = ""):
             )
             _emit_event(req_event)
 
-            if _active_session:
-                _active_session.llm_requests += 1
+            session = _get_active_session()
+            if session:
+                session.llm_requests += 1
 
             start = time.time()
             try:

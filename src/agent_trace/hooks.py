@@ -52,7 +52,14 @@ from .store import TraceStore
 
 # Pending tool calls are tracked in a file so separate hook processes
 # can link PostToolUse back to PreToolUse for latency measurement.
+# The file is keyed by event_id (not tool name) so concurrent calls to
+# the same tool don't overwrite each other.
 _PENDING_FILE = ".pending-calls.json"
+
+# Each Claude Code session gets its own state files, derived from the
+# session ID passed in the SessionStart payload.  This prevents concurrent
+# agents sharing the same AGENT_TRACE_DIR from corrupting each other.
+_CLAUDE_SESSION_ID_ENV = "AGENT_TRACE_CLAUDE_SESSION_ID"
 
 
 def _get_store_dir() -> str:
@@ -78,12 +85,24 @@ def _write_event(store: TraceStore, session_id: str, event: TraceEvent) -> None:
         store.append_event(session_id, event)
 
 
+def _state_suffix() -> str:
+    """Return a filename suffix scoped to the current Claude Code session.
+
+    Claude Code sets AGENT_TRACE_CLAUDE_SESSION_ID (written by handle_session_start).
+    Using it as a suffix isolates concurrent agents that share AGENT_TRACE_DIR.
+    """
+    sid = os.environ.get(_CLAUDE_SESSION_ID_ENV, "")
+    return f".{sid}" if sid else ""
+
+
 def _active_session_path() -> Path:
-    return Path(_get_store_dir()) / ".active-session"
+    return Path(_get_store_dir()) / f".active-session{_state_suffix()}"
 
 
 def _pending_calls_path() -> Path:
-    return Path(_get_store_dir()) / _PENDING_FILE
+    suffix = _state_suffix()
+    name = _PENDING_FILE.replace(".json", f"{suffix}.json")
+    return Path(_get_store_dir()) / name
 
 
 def _read_active_session() -> str | None:
@@ -153,6 +172,13 @@ def handle_session_start(input_data: dict) -> None:
         meta.session_id = session_id[:16]
 
     store.create_session(meta)
+
+    # Expose the Claude Code session ID so subsequent hook processes
+    # (which run as separate OS processes) can derive the same state-file
+    # paths via _state_suffix().
+    if session_id:
+        os.environ[_CLAUDE_SESSION_ID_ENV] = session_id
+
     _write_active_session(meta.session_id)
     _write_pending_calls({})
 
@@ -230,10 +256,12 @@ def handle_pre_tool(input_data: dict) -> None:
         meta.tool_calls += 1
         store.update_meta(meta)
 
-    # Track pending call for latency measurement
+    # Track pending call for latency measurement.
+    # Keyed by event_id (not tool_name) so concurrent calls to the same
+    # tool don't overwrite each other.
     pending = _read_pending_calls()
-    pending[tool_name] = {
-        "event_id": event.event_id,
+    pending[event.event_id] = {
+        "tool_name": tool_name,
         "timestamp": event.timestamp,
     }
     _write_pending_calls(pending)
@@ -332,11 +360,19 @@ def handle_post_tool(input_data: dict, failed: bool = False) -> None:
         data=event_data,
     )
 
-    # Link to pending call for latency
+    # Link to the earliest pending call for this tool name, then remove it.
+    # Pending entries are keyed by event_id so concurrent same-tool calls
+    # don't collide; we match by tool_name in the value and pick the oldest.
     pending = _read_pending_calls()
-    call_info = pending.pop(tool_name, None)
-    if call_info:
-        event.parent_id = call_info["event_id"]
+    match_id = None
+    match_ts = float("inf")
+    for eid, info in pending.items():
+        if info.get("tool_name") == tool_name and info["timestamp"] < match_ts:
+            match_id = eid
+            match_ts = info["timestamp"]
+    if match_id:
+        call_info = pending.pop(match_id)
+        event.parent_id = match_id
         event.duration_ms = (event.timestamp - call_info["timestamp"]) * 1000
         _write_pending_calls(pending)
 

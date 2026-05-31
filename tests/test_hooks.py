@@ -363,14 +363,16 @@ class TestPendingCalls(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
         os.environ["AGENT_TRACE_DIR"] = self.tmpdir
+        os.environ.pop("AGENT_TRACE_CLAUDE_SESSION_ID", None)
 
     def tearDown(self):
         os.environ.pop("AGENT_TRACE_DIR", None)
+        os.environ.pop("AGENT_TRACE_CLAUDE_SESSION_ID", None)
 
     def test_read_write_pending_calls(self):
-        _write_pending_calls({"Bash": {"event_id": "abc", "timestamp": 1.0}})
+        _write_pending_calls({"abc123": {"tool_name": "Bash", "timestamp": 1.0}})
         calls = _read_pending_calls()
-        self.assertEqual(calls["Bash"]["event_id"], "abc")
+        self.assertEqual(calls["abc123"]["tool_name"], "Bash")
 
     def test_read_empty_pending_calls(self):
         calls = _read_pending_calls()
@@ -381,6 +383,91 @@ class TestPendingCalls(unittest.TestCase):
         self.assertEqual(_read_active_session(), "test123")
         _clear_active_session()
         self.assertIsNone(_read_active_session())
+
+
+class TestConcurrentToolCalls(unittest.TestCase):
+    """Verify that two concurrent calls to the same tool don't collide."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["AGENT_TRACE_DIR"] = self.tmpdir
+        os.environ.pop("AGENT_TRACE_CLAUDE_SESSION_ID", None)
+        handle_session_start({"session_id": "concurrent1234567", "source": "startup"})
+        self.session_id = _read_active_session()
+
+    def tearDown(self):
+        os.environ.pop("AGENT_TRACE_DIR", None)
+        os.environ.pop("AGENT_TRACE_CLAUDE_SESSION_ID", None)
+
+    def test_two_concurrent_same_tool_calls_linked_correctly(self):
+        """Two Bash calls in flight simultaneously must each link to their own result."""
+        handle_pre_tool({"tool_name": "Bash", "tool_input": {"command": "echo first"}})
+        handle_pre_tool({"tool_name": "Bash", "tool_input": {"command": "echo second"}})
+
+        store = TraceStore(self.tmpdir)
+        events = store.load_events(self.session_id)
+        calls = [e for e in events if e.event_type == EventType.TOOL_CALL]
+        self.assertEqual(len(calls), 2)
+
+        # Resolve first call
+        handle_post_tool({"tool_name": "Bash", "tool_output": "first"}, failed=False)
+        # Resolve second call
+        handle_post_tool({"tool_name": "Bash", "tool_output": "second"}, failed=False)
+
+        events = store.load_events(self.session_id)
+        results = [e for e in events if e.event_type == EventType.TOOL_RESULT]
+        self.assertEqual(len(results), 2)
+
+        # Both results must have a parent_id pointing to one of the calls
+        call_ids = {c.event_id for c in calls}
+        for result in results:
+            self.assertIn(result.parent_id, call_ids, "result must link to a call event_id")
+
+        # The two results must link to different call events
+        linked_ids = {r.parent_id for r in results}
+        self.assertEqual(len(linked_ids), 2, "each result must link to a distinct call")
+
+    def test_pending_calls_keyed_by_event_id(self):
+        """Pending calls file must use event_id as key, not tool name."""
+        handle_pre_tool({"tool_name": "Read", "tool_input": {"file_path": "/a"}})
+        handle_pre_tool({"tool_name": "Read", "tool_input": {"file_path": "/b"}})
+
+        pending = _read_pending_calls()
+        self.assertEqual(len(pending), 2)
+        for key, val in pending.items():
+            # key must look like a UUID hex fragment, not a tool name
+            self.assertNotEqual(key, "Read")
+            self.assertEqual(val["tool_name"], "Read")
+
+
+class TestConcurrentAgentIsolation(unittest.TestCase):
+    """Verify that two agents sharing AGENT_TRACE_DIR don't corrupt each other."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["AGENT_TRACE_DIR"] = self.tmpdir
+
+    def tearDown(self):
+        os.environ.pop("AGENT_TRACE_DIR", None)
+        os.environ.pop("AGENT_TRACE_CLAUDE_SESSION_ID", None)
+
+    def test_separate_claude_sessions_use_separate_state_files(self):
+        """Two Claude Code sessions must write to different .active-session files."""
+        # Agent 1
+        os.environ["AGENT_TRACE_CLAUDE_SESSION_ID"] = "agent1session00001"
+        handle_session_start({"session_id": "agent1session00001", "source": "startup"})
+        sid1 = _read_active_session()
+
+        # Agent 2
+        os.environ["AGENT_TRACE_CLAUDE_SESSION_ID"] = "agent2session00002"
+        handle_session_start({"session_id": "agent2session00002", "source": "startup"})
+        sid2 = _read_active_session()
+
+        self.assertNotEqual(sid1, sid2)
+
+        # Switch back to agent 1 — its session must still be intact
+        os.environ["AGENT_TRACE_CLAUDE_SESSION_ID"] = "agent1session00001"
+        self.assertEqual(_read_active_session(), sid1)
 
 
 if __name__ == "__main__":

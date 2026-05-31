@@ -149,5 +149,63 @@ class TestDecorator(unittest.TestCase):
         self.assertEqual(result, "ok")
 
 
+class TestDecoratorThreadSafety(unittest.TestCase):
+    """Verify concurrent agents in the same process use isolated sessions."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def test_concurrent_sessions_are_isolated(self):
+        """Two threads each running start_session/end_session must not share state."""
+        import threading
+
+        results = {}
+        errors = []
+
+        def run_agent(agent_name):
+            try:
+                sid = start_session(name=agent_name, trace_dir=self.tmpdir)
+
+                @trace_tool
+                def work() -> str:
+                    return agent_name
+
+                work()
+                work()
+                meta = end_session()
+                results[agent_name] = (sid, meta.tool_calls)
+            except Exception as e:
+                errors.append(e)
+
+        t1 = threading.Thread(target=run_agent, args=("agent-alpha",))
+        t2 = threading.Thread(target=run_agent, args=("agent-beta",))
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        self.assertEqual(errors, [])
+        self.assertIn("agent-alpha", results)
+        self.assertIn("agent-beta", results)
+
+        sid_alpha, calls_alpha = results["agent-alpha"]
+        sid_beta, calls_beta = results["agent-beta"]
+
+        # Sessions must be distinct
+        self.assertNotEqual(sid_alpha, sid_beta)
+        # Each agent must see exactly its own 2 tool calls
+        self.assertEqual(calls_alpha, 2)
+        self.assertEqual(calls_beta, 2)
+
+        # Verify events on disk are also isolated
+        store = TraceStore(self.tmpdir)
+        events_alpha = store.load_events(sid_alpha)
+        events_beta = store.load_events(sid_beta)
+        calls_in_alpha = [e for e in events_alpha if e.event_type == EventType.TOOL_CALL]
+        calls_in_beta = [e for e in events_beta if e.event_type == EventType.TOOL_CALL]
+        self.assertEqual(len(calls_in_alpha), 2)
+        self.assertEqual(len(calls_in_beta), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
