@@ -398,6 +398,33 @@ class TestEvalCiBaseline(unittest.TestCase):
             os.chdir(orig)
         self.assertIn("—", summary)
 
+    def test_github_step_summary_env_var_used_when_set(self):
+        """When GITHUB_STEP_SUMMARY is set, write there instead of the local file."""
+        import os, tempfile
+        report = _make_report([("no_errors", 1.0, 1.0, True)])
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+            gha_path = f.name
+        try:
+            orig_env = os.environ.get("GITHUB_STEP_SUMMARY")
+            os.environ["GITHUB_STEP_SUMMARY"] = gha_path
+            orig = os.getcwd()
+            os.chdir(self.tmp)
+            try:
+                _write_github_summary(report, {}, tolerance=0.0)
+            finally:
+                os.chdir(orig)
+                if orig_env is None:
+                    os.environ.pop("GITHUB_STEP_SUMMARY", None)
+                else:
+                    os.environ["GITHUB_STEP_SUMMARY"] = orig_env
+
+            content = Path(gha_path).read_text()
+            self.assertIn("agent-strace eval", content)
+            # Local fallback file must NOT have been written
+            self.assertFalse((Path(self.tmp) / ".agent-traces" / "eval-summary.md").exists())
+        finally:
+            os.unlink(gha_path)
+
 
 if __name__ == "__main__":
     unittest.main()

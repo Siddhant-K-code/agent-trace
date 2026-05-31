@@ -1,0 +1,89 @@
+name: agent-trace eval
+description: Run agent-trace evals in CI, post results to the step summary, and fail on regression.
+
+inputs:
+  config:
+    description: Path to eval config file
+    default: .agent-evals.yaml
+  baseline:
+    description: Path to baseline scores file (optional)
+    default: ""
+  save-baseline:
+    description: Save scores as new baseline after run
+    default: "false"
+  tolerance:
+    description: Regression tolerance (0.0–1.0, default 0.05)
+    default: "0.05"
+  trace-dir:
+    description: Directory where agent-trace sessions are stored
+    default: .agent-traces
+  python-version:
+    description: Python version to use
+    default: "3.12"
+  install-extras:
+    description: Comma-separated optional extras to install (e.g. openai,anthropic)
+    default: ""
+
+outputs:
+  passed:
+    description: "true if all scorers passed, false otherwise"
+    value: ${{ steps.eval.outputs.passed }}
+  summary-path:
+    description: Path to the written eval summary markdown file
+    value: ${{ steps.eval.outputs.summary-path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install agent-trace
+      shell: bash
+      run: |
+        EXTRAS="${{ inputs.install-extras }}"
+        if [ -n "$EXTRAS" ]; then
+          pip install "agent-trace[$EXTRAS]"
+        else
+          pip install agent-trace
+        fi
+
+    - name: Run evals
+      id: eval
+      shell: bash
+      env:
+        GITHUB_STEP_SUMMARY: ${{ env.GITHUB_STEP_SUMMARY }}
+      run: |
+        ARGS="--config ${{ inputs.config }} --trace-dir ${{ inputs.trace-dir }}"
+        ARGS="$ARGS --tolerance ${{ inputs.tolerance }}"
+        ARGS="$ARGS --github-summary"
+
+        if [ -n "${{ inputs.baseline }}" ]; then
+          ARGS="$ARGS --baseline ${{ inputs.baseline }}"
+        fi
+
+        if [ "${{ inputs.save-baseline }}" = "true" ]; then
+          ARGS="$ARGS --save-baseline"
+        fi
+
+        if agent-strace eval ci $ARGS; then
+          echo "passed=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "passed=false" >> "$GITHUB_OUTPUT"
+          exit 1
+        fi
+
+        SUMMARY=".agent-traces/eval-summary.md"
+        if [ -f "$SUMMARY" ]; then
+          echo "summary-path=$SUMMARY" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Upload trace artifacts
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: agent-traces
+        path: ${{ inputs.trace-dir }}
+        if-no-files-found: ignore

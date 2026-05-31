@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -267,10 +268,19 @@ def _write_github_summary(report: "EvalReport", baseline: dict[str, float], tole
         lines.append("")
         lines.append("</details>")
 
-    summary_path = Path(".agent-traces/eval-summary.md")
-    summary_path.parent.mkdir(parents=True, exist_ok=True)
-    summary_path.write_text("\n".join(lines) + "\n")
-    sys.stderr.write(f"GitHub summary written to {summary_path}\n")
+    content = "\n".join(lines) + "\n"
+
+    # Write to $GITHUB_STEP_SUMMARY when running inside GitHub Actions
+    gha_summary = os.environ.get("GITHUB_STEP_SUMMARY", "")
+    if gha_summary:
+        with open(gha_summary, "a", encoding="utf-8") as f:
+            f.write(content)
+        sys.stderr.write(f"GitHub Actions step summary written to {gha_summary}\n")
+    else:
+        summary_path = Path(".agent-traces/eval-summary.md")
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        summary_path.write_text(content)
+        sys.stderr.write(f"GitHub summary written to {summary_path}\n")
 
 
 def cmd_eval_ci(args: argparse.Namespace) -> int:

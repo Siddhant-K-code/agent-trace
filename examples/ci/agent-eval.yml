@@ -2,7 +2,7 @@
 #
 # Runs eval scorers on every PR that touches agent config files.
 # Fails the PR if any scorer drops below its threshold.
-# Posts a score summary as a PR comment.
+# Posts a score summary to the GitHub Actions step summary.
 #
 # Prerequisites:
 #   1. Capture at least one session: agent-strace record -- <your-agent-command>
@@ -27,49 +27,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      # Uses the reusable action bundled with agent-trace.
+      # Results appear in the GitHub Actions step summary automatically.
+      - name: Run agent-trace eval
+        uses: Siddhant-K-code/agent-trace@main
         with:
-          python-version: "3.12"
-
-      - name: Install agent-strace
-        run: pip install agent-strace
-
-      # Score the latest session in the dataset against all configured scorers.
-      # Exits 1 if any scorer is below threshold or regresses vs baseline.
-      - name: Run eval
+          baseline: .agent-traces/baselines/main.json
+          tolerance: "0.05"
         env:
           # Required only if using the llm_judge scorer.
-          # Remove if using heuristic scorers only (no_errors, cost_under, etc.)
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: |
-          agent-strace eval ci \
-            --baseline .agent-traces/baselines/main.json \
-            --tolerance 0.05 \
-            --github-summary
 
-      # Post the Markdown summary as a PR comment so reviewers see the score delta.
-      - name: Post eval summary
-        if: always()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const summaryPath = '.agent-traces/eval-summary.md';
-            if (!fs.existsSync(summaryPath)) {
-              console.log('No eval summary found — skipping comment.');
-              return;
-            }
-            const summary = fs.readFileSync(summaryPath, 'utf8');
-            await github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: summary,
-            });
-
-  # Optional: update the baseline on every merge to main.
-  # Commit the updated baseline back to the repo so future PRs compare against it.
+  # Update the baseline on every merge to main so future PRs compare against it.
   update-baseline:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
