@@ -25,6 +25,7 @@ from .http_proxy import HTTPProxyServer
 from .a2a import cmd_a2a_tree
 from .mcp_server import cmd_mcp
 from .annotate import cmd_annotate
+from .approval import cmd_approval
 from .baseline import cmd_baseline
 from .compliance import cmd_compliance
 from .drift import cmd_drift
@@ -847,6 +848,30 @@ def build_parser() -> argparse.ArgumentParser:
                            default=".agent-traces/baseline.json",
                            help="baseline file (default: .agent-traces/baseline.json)")
 
+    # approval (human-in-the-loop)
+    p_appr = sub.add_parser("approval", help="manage human-in-the-loop approval requests")
+    appr_sub = p_appr.add_subparsers(dest="approval_cmd")
+
+    p_appr_list = appr_sub.add_parser("list", help="list approval requests")
+    p_appr_list.add_argument("--state", choices=["pending", "approved", "denied"],
+                             help="filter by state (default: all)")
+
+    p_appr_show = appr_sub.add_parser("show", help="show details of a request")
+    p_appr_show.add_argument("request_id", help="request ID or prefix")
+
+    p_appr_approve = appr_sub.add_parser("approve", help="approve a pending request")
+    p_appr_approve.add_argument("request_id", help="request ID or prefix")
+    p_appr_approve.add_argument("--by", default="", help="approver name")
+    p_appr_approve.add_argument("--no-resume", dest="no_resume", action="store_true",
+                                help="approve without sending SIGCONT to the agent")
+
+    p_appr_deny = appr_sub.add_parser("deny", help="deny a pending request")
+    p_appr_deny.add_argument("request_id", help="request ID or prefix")
+    p_appr_deny.add_argument("--reason", default="", help="reason for denial")
+    p_appr_deny.add_argument("--by", default="", help="reviewer name")
+    p_appr_deny.add_argument("--no-kill", dest="no_kill", action="store_true",
+                             help="deny without sending SIGTERM to the agent")
+
     # compliance (compliance export)
     p_comp = sub.add_parser("compliance", help="export compliance reports (EU AI Act, SOC 2, HIPAA)")
     comp_sub = p_comp.add_subparsers(dest="compliance_cmd")
@@ -1190,6 +1215,7 @@ def main() -> None:
         "identity": cmd_identity,
         "workspace": cmd_workspace,
         "compliance": cmd_compliance,
+        "approval": cmd_approval,
         "optimize": cmd_optimize,
         "oncall": cmd_oncall,
         "freshness": cmd_freshness,

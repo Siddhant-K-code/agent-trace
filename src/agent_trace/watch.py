@@ -150,7 +150,7 @@ class NannyRule:
     """A declarative rule evaluated on every event."""
     name: str
     condition: str          # e.g. "files_modified > 20", "cost_usd > 5.00"
-    action: str             # "pause" | "kill" | "alert"
+    action: str             # "pause" | "kill" | "alert" | "require_approval"
     notify: str = ""        # e.g. "slack:#alerts", "email:me@example.com"
     fired: bool = field(default=False, compare=False)
 
@@ -613,6 +613,30 @@ def _dispatch_alert(
     # terminal is always shown regardless of action so the operator watching
     # the process sees every alert; file/webhook are additive channels
     _alert_terminal(message)
+    if action == "require_approval":
+        # Pause the agent and create an approval request
+        if state.agent_pid and not state.paused:
+            _pause_process(state.agent_pid)
+            state.paused = True
+        if store and state.session_id:
+            try:
+                from .approval import create_approval_request, poll_for_decision
+                req = create_approval_request(
+                    store,
+                    session_id=state.session_id,
+                    rule_name=notify or "watch-rule",
+                    tool_name="",
+                    agent_pid=state.agent_pid or 0,
+                )
+                _alert_terminal(
+                    f"[HITL] Approval required for rule '{notify or 'watch-rule'}'. "
+                    f"Request ID: {req.request_id}\n"
+                    f"  Run: agent-strace approval approve {req.request_id}"
+                )
+            except Exception:
+                pass
+        return
+
     if action in ("file", "kill", "pause"):
         _alert_file(message, config.alert_log)
     if config.webhook_url:
