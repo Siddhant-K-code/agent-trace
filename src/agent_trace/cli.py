@@ -1001,6 +1001,8 @@ def build_parser() -> argparse.ArgumentParser:
                           help="start of window (ISO date or duration like 7d; default: 7 days ago)")
     p_budget.add_argument("--until", metavar="DATE",
                           help="end of window (ISO date; default: now)")
+    p_budget.add_argument("--team", metavar="TEAM",
+                         help="filter report to a specific team name")
     p_budget.add_argument("--format", choices=["text", "markdown", "json"], default="text",
                           dest="format", help="output format (default: text)")
     p_budget.add_argument("--endpoint", metavar="URL",

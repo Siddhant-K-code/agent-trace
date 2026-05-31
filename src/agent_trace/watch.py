@@ -617,9 +617,25 @@ def _dispatch_alert(
         _alert_file(message, config.alert_log)
     if config.webhook_url:
         _alert_webhook(message, config.webhook_url)
-    # notify field from nanny rules (e.g. "slack:#alerts")
-    if notify and notify.startswith("slack:") and config.webhook_url:
-        _alert_webhook(f"[{notify}] {message}", config.webhook_url)
+
+    # Route to Slack/Teams via notify.py when env vars or rule hint is set
+    try:
+        from .notify import notify as _notify, notify_violation as _notify_violation
+        import os as _os
+        has_slack = bool(_os.environ.get("AGENT_STRACE_SLACK_WEBHOOK"))
+        has_teams = bool(_os.environ.get("AGENT_STRACE_TEAMS_WEBHOOK"))
+        if has_slack or has_teams:
+            _notify_violation(
+                rule_name=notify or "watch-rule",
+                tool_name="",
+                session_id=session_id,
+                action=action or "alert",
+            )
+        elif notify and notify.startswith("slack:") and config.webhook_url:
+            # Legacy: route slack: hint through the generic webhook URL
+            _alert_webhook(f"[{notify}] {message}", config.webhook_url)
+    except Exception:
+        pass
 
     if dry_run:
         _alert_terminal(f"[dry-run] would {action} agent process")

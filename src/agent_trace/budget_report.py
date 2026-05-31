@@ -33,6 +33,7 @@ class SessionSpend:
     tool_breakdown: dict[str, float]   # tool_name -> estimated cost share
     watchdog_terminated: bool = False
     watchdog_budget: float | None = None   # budget ceiling at time of kill
+    team: str = ""                         # team name (from SessionMeta.team)
 
 
 @dataclass
@@ -188,6 +189,7 @@ def build_report(
             tool_breakdown=breakdown,
             watchdog_terminated=watchdog_terminated,
             watchdog_budget=watchdog_budget,
+            team=getattr(meta, "team", "") or "",
         )
 
         if in_window:
@@ -222,6 +224,22 @@ def _fmt_delta(current: float, prior: float, higher_is_worse: bool = True) -> st
     arrow = "↑" if pct > 0 else "↓"
     direction = "worse" if (pct > 0) == higher_is_worse else "better"
     return f"({arrow} {abs(pct):.0f}% vs prior period)"
+
+
+def team_summary(sessions: list[SessionSpend]) -> dict[str, dict]:
+    """Aggregate spend by team. Returns {team_name: {cost, sessions, agents}}."""
+    teams: dict[str, dict] = {}
+    for s in sessions:
+        key = s.team or "(unassigned)"
+        if key not in teams:
+            teams[key] = {"cost": 0.0, "sessions": 0, "agents": set()}
+        teams[key]["cost"] += s.cost
+        teams[key]["sessions"] += 1
+        teams[key]["agents"].add(s.agent_name)
+    # Convert sets to counts for serialisability
+    for v in teams.values():
+        v["agents"] = len(v["agents"])
+    return dict(sorted(teams.items(), key=lambda x: x[1]["cost"], reverse=True))
 
 
 def format_report_text(report: BudgetReport, out: TextIO = sys.stdout) -> None:
@@ -262,6 +280,16 @@ def format_report_text(report: BudgetReport, out: TextIO = sys.stdout) -> None:
         for tool, cost in list(tool_totals.items())[:8]:
             pct = cost / report.total_cost * 100
             w(f"  {tool:<20}  ${cost:.2f}  ({pct:.0f}%)\n")
+        w("\n")
+
+    # Team breakdown (only shown when at least one session has a team set)
+    teams = team_summary(report.sessions)
+    if any(k != "(unassigned)" for k in teams):
+        w("Cost by team:\n")
+        for team_name, stats in teams.items():
+            pct = stats["cost"] / report.total_cost * 100 if report.total_cost else 0
+            w(f"  {team_name:<24}  ${stats['cost']:.2f}  ({pct:.0f}%)  "
+              f"{stats['sessions']} sessions  {stats['agents']} agents\n")
         w("\n")
 
     # Watchdog savings
@@ -374,6 +402,7 @@ def _parse_date(s: str) -> float:
 def cmd_budget_report(args: argparse.Namespace) -> int:
     store = TraceStore(args.trace_dir)
     fmt = getattr(args, "format", "text")
+    team_filter = getattr(args, "team", "") or ""
 
     # Time window
     since_str = getattr(args, "since", None)
@@ -384,6 +413,11 @@ def cmd_budget_report(args: argparse.Namespace) -> int:
     window_start = _parse_date(since_str) if since_str else (window_end - 7 * 86400)
 
     report = build_report(store, window_start, window_end)
+
+    # Apply team filter
+    if team_filter:
+        report.sessions = [s for s in report.sessions if s.team == team_filter]
+        report.prior_sessions = [s for s in report.prior_sessions if s.team == team_filter]
 
     if fmt == "json":
         sys.stdout.write(format_report_json(report) + "\n")

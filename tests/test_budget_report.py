@@ -15,6 +15,7 @@ from agent_trace.budget_report import (
     format_report_json,
     format_report_markdown,
     format_report_text,
+    team_summary,
     cmd_budget_report,
     _parse_date,
     _read_postmortem,
@@ -389,6 +390,109 @@ class TestCmdBudgetReport(unittest.TestCase):
         args = self._args(store.base_dir, since="7d", until="1d")
         result = cmd_budget_report(args)
         self.assertEqual(result, 0)
+
+
+class TestTeamSummary(unittest.TestCase):
+    def _make_spends(self):
+        return [
+            SessionSpend("s1", "agent-a", time.time(), 1.0, {}, team="backend"),
+            SessionSpend("s2", "agent-b", time.time(), 2.0, {}, team="backend"),
+            SessionSpend("s3", "agent-c", time.time(), 0.5, {}, team="frontend"),
+            SessionSpend("s4", "agent-d", time.time(), 0.3, {}, team=""),
+        ]
+
+    def test_groups_by_team(self):
+        spends = self._make_spends()
+        summary = team_summary(spends)
+        self.assertIn("backend", summary)
+        self.assertIn("frontend", summary)
+        self.assertIn("(unassigned)", summary)
+
+    def test_cost_aggregated_per_team(self):
+        spends = self._make_spends()
+        summary = team_summary(spends)
+        self.assertAlmostEqual(summary["backend"]["cost"], 3.0)
+        self.assertAlmostEqual(summary["frontend"]["cost"], 0.5)
+
+    def test_session_count_per_team(self):
+        spends = self._make_spends()
+        summary = team_summary(spends)
+        self.assertEqual(summary["backend"]["sessions"], 2)
+        self.assertEqual(summary["frontend"]["sessions"], 1)
+
+    def test_agent_count_per_team(self):
+        spends = self._make_spends()
+        summary = team_summary(spends)
+        self.assertEqual(summary["backend"]["agents"], 2)
+
+    def test_sorted_by_cost_descending(self):
+        spends = self._make_spends()
+        summary = team_summary(spends)
+        costs = [v["cost"] for v in summary.values()]
+        self.assertEqual(costs, sorted(costs, reverse=True))
+
+    def test_empty_sessions(self):
+        self.assertEqual(team_summary([]), {})
+
+
+class TestTeamBudgetFilter(unittest.TestCase):
+    def _args(self, trace_dir, team=""):
+        import argparse
+        args = argparse.Namespace()
+        args.trace_dir = str(trace_dir)
+        args.format = "text"
+        args.since = None
+        args.until = None
+        args.team = team
+        return args
+
+    def test_team_filter_excludes_other_teams(self):
+        import io, tempfile
+        from unittest.mock import patch
+        tmpdir = tempfile.mkdtemp()
+        store = TraceStore(tmpdir)
+        now = time.time()
+
+        # Add two sessions with different teams
+        for team in ("alpha", "beta"):
+            meta = SessionMeta(agent_name=f"agent-{team}")
+            meta.team = team
+            meta.started_at = now - 86400
+            meta.ended_at = now
+            store.create_session(meta)
+            store.update_meta(meta)
+
+        args = self._args(tmpdir, team="alpha")
+        captured = io.StringIO()
+        with patch("sys.stdout", captured):
+            cmd_budget_report(args)
+        output = captured.getvalue()
+        self.assertIn("agent-alpha", output)
+        self.assertNotIn("agent-beta", output)
+
+    def test_team_breakdown_shown_in_text_output(self):
+        import io, tempfile
+        from unittest.mock import patch
+        tmpdir = tempfile.mkdtemp()
+        store = TraceStore(tmpdir)
+        now = time.time()
+
+        for team in ("alpha", "beta"):
+            meta = SessionMeta(agent_name=f"agent-{team}")
+            meta.team = team
+            meta.started_at = now - 86400
+            meta.ended_at = now
+            store.create_session(meta)
+            store.update_meta(meta)
+
+        args = self._args(tmpdir)
+        captured = io.StringIO()
+        with patch("sys.stdout", captured):
+            cmd_budget_report(args)
+        output = captured.getvalue()
+        self.assertIn("Cost by team", output)
+        self.assertIn("alpha", output)
+        self.assertIn("beta", output)
 
 
 if __name__ == "__main__":
