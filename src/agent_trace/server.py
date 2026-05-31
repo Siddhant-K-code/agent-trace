@@ -48,6 +48,7 @@ from urllib.parse import urlparse
 
 from .models import SessionMeta, TraceEvent
 from .store import TraceStore, DEFAULT_TRACE_DIR
+from . import web_dashboard as _wd
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +131,7 @@ class CollectorHandler(BaseHTTPRequestHandler):
     store: TraceStore
     _lock: threading.Lock
     _auth_key: str  # empty string = no auth required
+    _dashboard: bool = False  # serve web dashboard UI
 
     def log_message(self, fmt: str, *args: Any) -> None:
         # Suppress default access log; write to stderr with our prefix
@@ -168,11 +170,61 @@ class CollectorHandler(BaseHTTPRequestHandler):
     # GET
     # ------------------------------------------------------------------
 
+    def _send_html(self, status: int, html: str) -> None:
+        body = html.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self) -> None:
         if not self._check_auth():
             self._send_json(401, {"error": "Unauthorized"})
             return
         path = urlparse(self.path).path.rstrip("/")
+
+        # ------------------------------------------------------------------
+        # Dashboard UI routes (only when --dashboard is enabled)
+        # ------------------------------------------------------------------
+        if self._dashboard:
+            if path == "" or path == "/":
+                self._send_html(200, _wd.render_sessions_page())
+                return
+            if path == "/cost":
+                self._send_html(200, _wd.render_cost_page())
+                return
+            if path == "/violations":
+                self._send_html(200, _wd.render_violations_page())
+                return
+            if path == "/health":
+                self._send_html(200, _wd.render_health_page())
+                return
+            parts = path.split("/")
+            if len(parts) == 3 and parts[1] == "session":
+                self._send_html(200, _wd.render_detail_page(parts[2]))
+                return
+            # Dashboard API endpoints
+            if path == "/api/sessions":
+                body = _wd.api_sessions(self.store).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if len(parts) == 5 and parts[1] == "api" and parts[2] == "sessions" and parts[4] == "events":
+                result = _wd.api_session_events(self.store, parts[3])
+                if result is None:
+                    self._send_json(404, {"error": f"session not found: {parts[3]}"})
+                    return
+                body = result.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
 
         if path == "/health":
             self._send_json(200, {"status": "ok", "sessions": len(self.store.list_sessions())})
@@ -291,13 +343,19 @@ class CollectorHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": str(exc)})
 
 
-def _make_handler(store: TraceStore, lock: threading.Lock, auth_key: str = "") -> type:
-    """Return a CollectorHandler subclass with store, lock, and auth key injected."""
+def _make_handler(
+    store: TraceStore,
+    lock: threading.Lock,
+    auth_key: str = "",
+    dashboard: bool = False,
+) -> type:
+    """Return a CollectorHandler subclass with store, lock, auth key, and dashboard flag injected."""
     class Handler(CollectorHandler):
         pass
     Handler.store = store
     Handler._lock = lock
     Handler._auth_key = auth_key
+    Handler._dashboard = dashboard
     return Handler
 
 
@@ -310,22 +368,25 @@ def run_server(
     storage_dir: str,
     host: str = "0.0.0.0",
     auth_key: str = "",
+    dashboard: bool = False,
 ) -> None:
     """Start the collector server and block until interrupted.
 
     When *auth_key* is non-empty, all requests must include
     ``Authorization: Bearer <auth_key>`` or receive 401.
+    When *dashboard* is True, the server also serves a browser-based UI at ``/``.
     """
     store = TraceStore(storage_dir)
     lock = threading.Lock()
-    handler_class = _make_handler(store, lock, auth_key=auth_key)
+    handler_class = _make_handler(store, lock, auth_key=auth_key, dashboard=dashboard)
 
     server = HTTPServer((host, port), handler_class)
     auth_note = " (auth enabled)" if auth_key else " (no auth)"
+    dash_note = f"\n[agent-strace server] dashboard: http://{host}:{port}/" if dashboard else ""
     sys.stderr.write(
         f"[agent-strace server] listening on {host}:{port}{auth_note}\n"
         f"[agent-strace server] storage: {Path(storage_dir).resolve()}\n"
-        f"[agent-strace server] health: http://{host}:{port}/health\n"
+        f"[agent-strace server] health: http://{host}:{port}/health{dash_note}\n"
     )
     try:
         server.serve_forever()
@@ -355,5 +416,6 @@ def cmd_server(args: argparse.Namespace) -> int:
         getattr(args, "auth_key", None)
         or os.environ.get("AGENT_STRACE_AUTH_KEY", "")
     ).strip()
-    run_server(port=port, storage_dir=storage, host=host, auth_key=auth_key)
+    dashboard = getattr(args, "dashboard", False)
+    run_server(port=port, storage_dir=storage, host=host, auth_key=auth_key, dashboard=dashboard)
     return 0

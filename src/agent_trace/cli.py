@@ -994,6 +994,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_server.add_argument("--storage", metavar="DIR",
                           help="storage directory for traces "
                                "(default: $AGENT_STRACE_STORAGE or .agent-traces)")
+    p_server.add_argument("--dashboard", action="store_true",
+                          help="serve a browser-based session dashboard at /")
     p_server.add_argument("--auth-key", metavar="KEY", dest="auth_key",
                           help="require Authorization: Bearer <KEY> on all requests "
                                "(also read from AGENT_STRACE_AUTH_KEY env var)")
