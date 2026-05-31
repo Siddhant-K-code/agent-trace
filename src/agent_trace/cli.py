@@ -25,7 +25,9 @@ from .http_proxy import HTTPProxyServer
 from .a2a import cmd_a2a_tree
 from .mcp_server import cmd_mcp
 from .annotate import cmd_annotate
+from .baseline import cmd_baseline
 from .drift import cmd_drift
+from .identity import cmd_identity
 from .langfuse_export import cmd_export_scores
 from .oncall import cmd_oncall
 from .optimize import cmd_optimize
@@ -700,6 +702,8 @@ def build_parser() -> argparse.ArgumentParser:
                          help="YAML/JSON rules file for rule-based kill switch (nanny mode)")
     p_watch.add_argument("--dry-run", action="store_true", dest="dry_run",
                          help="evaluate rules without taking action (for testing)")
+    p_watch.add_argument("--stream-otlp", dest="stream_otlp", action="store_true",
+                         help="stream events as OTLP JSON spans instead of raw NDJSON")
     p_watch.add_argument("--stream-to", dest="stream_to", metavar="URL",
                          help="push events in real-time to this HTTP endpoint as NDJSON")
     p_watch.add_argument("--stream-batch-size", dest="stream_batch_size", type=int, default=10,
@@ -801,6 +805,43 @@ def build_parser() -> argparse.ArgumentParser:
     p_fresh.add_argument("--since", default="", help="check changes since this date (YYYY-MM-DD)")
     p_fresh.add_argument("--scope", default="", help="file glob to limit scope")
     p_fresh.add_argument("--repo", default=".", help="path to git repository (default: .)")
+
+    # baseline (statistical baseline and anomaly detection)
+    p_baseline = sub.add_parser("baseline", help="build and check statistical session baselines")
+    baseline_sub = p_baseline.add_subparsers(dest="baseline_cmd")
+
+    p_bl_update = baseline_sub.add_parser("update", help="build baseline from recent sessions")
+    p_bl_update.add_argument("--since", type=float, default=30.0, dest="since_days",
+                             metavar="DAYS", help="sessions from the last N days (default: 30)")
+    p_bl_update.add_argument("--output", default=".agent-traces/baseline.json",
+                             help="output path (default: .agent-traces/baseline.json)")
+
+    p_bl_check = baseline_sub.add_parser("check", help="check a session against the baseline")
+    p_bl_check.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
+    p_bl_check.add_argument("--baseline", dest="baseline_path",
+                            default=".agent-traces/baseline.json",
+                            help="baseline file (default: .agent-traces/baseline.json)")
+    p_bl_check.add_argument("--sigma", type=float, default=2.0,
+                            help="anomaly threshold in standard deviations (default: 2.0)")
+
+    p_bl_show = baseline_sub.add_parser("show", help="show baseline statistics")
+    p_bl_show.add_argument("--baseline", dest="baseline_path",
+                           default=".agent-traces/baseline.json",
+                           help="baseline file (default: .agent-traces/baseline.json)")
+
+    # identity (per-agent machine identity and session signing)
+    p_identity = sub.add_parser("identity", help="manage agent machine identity and sign sessions")
+    identity_sub = p_identity.add_subparsers(dest="identity_cmd")
+
+    identity_sub.add_parser("show", help="show or create the machine identity")
+
+    p_id_sign = identity_sub.add_parser("sign", help="sign a session with the machine identity")
+    p_id_sign.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
+    p_id_sign.add_argument("--agent-name", dest="agent_name", default="",
+                           help="agent name to embed in the identity")
+
+    p_id_verify = identity_sub.add_parser("verify", help="verify a session's signature")
+    p_id_verify.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
 
     # drift (behavioral drift detection)
     p_drift = sub.add_parser("drift", help="detect behavioral drift across sessions")
@@ -1099,7 +1140,9 @@ def main() -> None:
         "curve": cmd_curve,
         "inflation": cmd_inflation,
         "a2a-tree": cmd_a2a_tree,
+        "baseline": cmd_baseline,
         "drift": cmd_drift,
+        "identity": cmd_identity,
         "optimize": cmd_optimize,
         "oncall": cmd_oncall,
         "freshness": cmd_freshness,

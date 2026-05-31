@@ -385,16 +385,21 @@ class WatcherConfig:
 @dataclass
 class StreamConfig:
     """Configuration for push-based event streaming."""
-    url: str = ""                    # webhook URL or collector endpoint
+    url: str = ""                    # webhook URL or OTLP collector endpoint
     batch_size: int = 10             # max events per POST
     flush_interval: float = 1.0     # max seconds between flushes
     headers: dict[str, str] = field(default_factory=dict)
     # Filter: only stream these event types (empty = all)
     event_types: list[str] = field(default_factory=list)
+    # When True, flush as OTLP JSON spans instead of raw NDJSON
+    otlp: bool = False
+    # OTel service name used in OTLP spans
+    service_name: str = "agent-trace"
 
     @classmethod
-    def from_url(cls, url: str, headers: dict[str, str] | None = None) -> "StreamConfig":
-        return cls(url=url, headers=headers or {})
+    def from_url(cls, url: str, headers: dict[str, str] | None = None,
+                 otlp: bool = False) -> "StreamConfig":
+        return cls(url=url, headers=headers or {}, otlp=otlp)
 
 
 class EventStreamer:
@@ -451,9 +456,15 @@ class EventStreamer:
                 last_flush = now
 
     def _flush(self, events: list[TraceEvent]) -> None:
-        """POST a batch of events as NDJSON."""
+        """POST a batch of events as NDJSON or OTLP JSON spans."""
         if not events or not self.config.url:
             return
+        if self.config.otlp:
+            self._flush_otlp(events)
+        else:
+            self._flush_ndjson(events)
+
+    def _flush_ndjson(self, events: list[TraceEvent]) -> None:
         body = "\n".join(e.to_json() for e in events).encode("utf-8")
         headers = {"Content-Type": "application/x-ndjson"}
         headers.update(self.config.headers)
@@ -471,6 +482,44 @@ class EventStreamer:
                     )
         except Exception as exc:
             sys.stderr.write(f"[stream] POST to {self.config.url} failed: {exc}\n")
+
+    def _flush_otlp(self, events: list[TraceEvent]) -> None:
+        """Convert events to OTLP GenAI spans and POST to /v1/traces."""
+        import json as _json
+        try:
+            from .otlp import session_to_otlp_genai
+            from .models import SessionMeta as _SessionMeta
+        except ImportError:
+            self._flush_ndjson(events)
+            return
+
+        # Group by session_id; build a minimal SessionMeta for each group
+        by_session: dict[str, list[TraceEvent]] = {}
+        for ev in events:
+            by_session.setdefault(ev.session_id, []).append(ev)
+
+        url = self.config.url.rstrip("/") + "/v1/traces"
+        for sid, evs in by_session.items():
+            meta = _SessionMeta(agent_name=self.config.service_name)
+            meta.session_id = sid
+            try:
+                payload = session_to_otlp_genai(
+                    meta, evs, service_name=self.config.service_name
+                )
+            except Exception:
+                continue
+            body = _json.dumps(payload).encode("utf-8")
+            req_headers = {"Content-Type": "application/json"}
+            req_headers.update(self.config.headers)
+            req = urllib.request.Request(url, data=body, headers=req_headers, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    if resp.status not in (200, 202):
+                        sys.stderr.write(
+                            f"[stream] OTLP POST to {url} returned {resp.status}\n"
+                        )
+            except Exception as exc:
+                sys.stderr.write(f"[stream] OTLP POST to {url} failed: {exc}\n")
 
 
 @dataclass
@@ -1054,6 +1103,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
             url=stream_url,
             batch_size=getattr(args, "stream_batch_size", 10),
             flush_interval=getattr(args, "stream_flush_interval", 2.0),
+            otlp=getattr(args, "stream_otlp", False),
         )
 
     watch_session(store, full_id, config, nanny_rules=nanny_rules, dry_run=dry_run,
