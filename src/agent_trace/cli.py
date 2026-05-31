@@ -28,6 +28,7 @@ from .annotate import cmd_annotate
 from .approval import cmd_approval
 from .rbac import cmd_rbac
 from .iac import cmd_apply, cmd_config_diff
+from .sso import cmd_auth
 from .baseline import cmd_baseline
 from .compliance import cmd_compliance
 from .drift import cmd_drift
@@ -904,6 +905,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_rbac_check.add_argument("--workspace", metavar="ID", default="",
                               help="workspace context for the check")
 
+    # auth (SSO login/logout/status)
+    p_auth = sub.add_parser("auth", help="authenticate with a hosted collector via SSO")
+    auth_sub = p_auth.add_subparsers(dest="auth_cmd")
+
+    p_auth_login = auth_sub.add_parser("login", help="log in to a hosted collector")
+    p_auth_login.add_argument("--server", metavar="URL", required=True,
+                              help="hosted collector URL")
+    p_auth_login.add_argument("--force", action="store_true",
+                              help="re-authenticate even if already logged in")
+
+    p_auth_logout = auth_sub.add_parser("logout", help="remove stored token")
+    p_auth_logout.add_argument("--server", metavar="URL", required=True,
+                               help="hosted collector URL")
+
+    p_auth_status = auth_sub.add_parser("status", help="show stored token status")
+    p_auth_status.add_argument("--server", metavar="URL", default="",
+                               help="check a specific server (omit for all)")
+
     # apply (IaC — apply .agent-strace.yaml to local store or hosted collector)
     p_apply = sub.add_parser("apply", help="apply .agent-strace.yaml config to local store or hosted collector")
     p_apply.add_argument("--config", metavar="FILE", default=".agent-strace.yaml",
@@ -1052,6 +1071,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_server.add_argument("--auth-key", metavar="KEY", dest="auth_key",
                           help="require Authorization: Bearer <KEY> on all requests "
                                "(also read from AGENT_STRACE_AUTH_KEY env var)")
+    p_server.add_argument("--auth", choices=["oidc"], default="",
+                          help="enable SSO authentication (oidc)")
+    p_server.add_argument("--oidc-issuer", metavar="URL", dest="oidc_issuer", default="",
+                          help="OIDC issuer URL (e.g. https://accounts.google.com)")
+    p_server.add_argument("--oidc-client-id", metavar="ID", dest="oidc_client_id", default="",
+                          help="OIDC client ID")
+    p_server.add_argument("--oidc-client-secret", metavar="SECRET",
+                          dest="oidc_client_secret", default="",
+                          help="OIDC client secret")
+    p_server.add_argument("--enforce-sso", action="store_true", dest="enforce_sso",
+                          help="reject API key fallback when SSO is configured")
     p_server_sub = p_server.add_subparsers(dest="server_subcommand")
     p_server_sub.add_parser("keygen", help="generate a new ast_-prefixed API key")
 
@@ -1274,6 +1304,7 @@ def main() -> None:
         "rbac": cmd_rbac,
         "apply": cmd_apply,
         "config-diff": cmd_config_diff,
+        "auth": cmd_auth,
         "optimize": cmd_optimize,
         "oncall": cmd_oncall,
         "freshness": cmd_freshness,

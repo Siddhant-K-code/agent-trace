@@ -34,6 +34,7 @@ anthropic = ["anthropic>=0.20.0"]
 openai = ["openai>=1.0.0"]
 strands = ["strands-agents>=0.1.0"]
 crewai = ["crewai>=0.28.0"]
+oidc = ["authlib>=1.3.0"]
 all-integrations = [
     "openai-agents>=0.0.1",
     "langchain-core>=0.1.0",
