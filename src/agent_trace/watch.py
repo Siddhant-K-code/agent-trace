@@ -1021,6 +1021,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
             on_violation=getattr(args, "on_violation", "terminal"),
             webhook_url=getattr(args, "webhook", "") or "",
             on_death_cmd=getattr(args, "on_death", "") or "",
+            scope_policy=getattr(args, "policy", None) or ".agent-scope.json",
         )
 
     # Load nanny rules if --rules provided

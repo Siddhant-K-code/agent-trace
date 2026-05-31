@@ -694,6 +694,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_watch.add_argument("--config", help="path to .agent-watch.json config file")
     p_watch.add_argument("--max-context-pct", type=int, default=90, dest="max_context_pct",
                          help="alert when context window is this %% full (default: 90)")
+    p_watch.add_argument("--policy", metavar="POLICY_FILE",
+                         help="path to scope policy file (default: .agent-scope.json)")
     p_watch.add_argument("--rules", metavar="RULES_FILE",
                          help="YAML/JSON rules file for rule-based kill switch (nanny mode)")
     p_watch.add_argument("--dry-run", action="store_true", dest="dry_run",
@@ -740,6 +742,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_ann.add_argument("--author", help="author name or email")
     p_ann.add_argument("--list", action="store_true", help="list all annotations for the session")
     p_ann.add_argument("--delete", metavar="ANNOTATION_ID", help="delete an annotation by ID")
+    p_ann.add_argument("--filter-label", dest="filter_label", metavar="LABEL",
+                       help="filter listed annotations by label")
+    p_ann.add_argument("--filter-author", dest="filter_author", metavar="AUTHOR",
+                       help="filter listed annotations by author")
+    p_ann.add_argument("--since", metavar="Nd",
+                       help="filter listed annotations created in the last N days (e.g. 7d)")
+    p_ann.add_argument("--export-format", dest="export_format", choices=["json"],
+                       help="output format for --list (default: terminal)")
 
     # token-budget
     p_tb = sub.add_parser("token-budget", help="show context window usage for a session")

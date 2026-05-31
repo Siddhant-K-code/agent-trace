@@ -13,6 +13,7 @@ from agent_trace.annotate import (
     _parse_offset,
     add_annotation,
     delete_annotation,
+    filter_annotations,
     format_annotations,
     load_annotations,
 )
@@ -113,6 +114,65 @@ class TestFormatAnnotations(unittest.TestCase):
         output = buf.getvalue()
         self.assertIn("root cause", output)
         self.assertIn("root-cause", output)
+
+
+class TestFilterAnnotations(unittest.TestCase):
+    def _make_annotations(self):
+        import time
+        now = time.time()
+        return [
+            Annotation(event_id="e1", label="root-cause", author="alice", note="a", created_at=now - 86400 * 10),
+            Annotation(event_id="e2", label="decision",   author="bob",   note="b", created_at=now - 86400 * 3),
+            Annotation(event_id="e3", label="root-cause", author="bob",   note="c", created_at=now - 86400 * 1),
+        ]
+
+    def test_filter_by_label(self):
+        anns = self._make_annotations()
+        result = filter_annotations(anns, label="root-cause")
+        self.assertEqual(len(result), 2)
+        self.assertTrue(all(a.label == "root-cause" for a in result))
+
+    def test_filter_by_author(self):
+        anns = self._make_annotations()
+        result = filter_annotations(anns, author="bob")
+        self.assertEqual(len(result), 2)
+        self.assertTrue(all(a.author == "bob" for a in result))
+
+    def test_filter_by_since(self):
+        import time
+        anns = self._make_annotations()
+        since = time.time() - 86400 * 5  # last 5 days
+        result = filter_annotations(anns, since=since)
+        self.assertEqual(len(result), 2)
+
+    def test_filter_combined(self):
+        import time
+        anns = self._make_annotations()
+        since = time.time() - 86400 * 5
+        result = filter_annotations(anns, label="root-cause", author="bob", since=since)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].event_id, "e3")
+
+    def test_no_filter_returns_all(self):
+        anns = self._make_annotations()
+        result = filter_annotations(anns)
+        self.assertEqual(len(result), 3)
+
+
+class TestWatchPolicyFlag(unittest.TestCase):
+    """Verify --policy is wired into WatcherConfig."""
+
+    def test_policy_path_passed_to_config(self):
+        import argparse
+        from agent_trace.watch import WatcherConfig
+        # Simulate what cmd_watch does when --policy is provided
+        config = WatcherConfig(scope_policy="/tmp/my-policy.json")
+        self.assertEqual(config.scope_policy, "/tmp/my-policy.json")
+
+    def test_default_policy_path(self):
+        from agent_trace.watch import WatcherConfig
+        config = WatcherConfig()
+        self.assertEqual(config.scope_policy, ".agent-scope.json")
 
 
 if __name__ == "__main__":

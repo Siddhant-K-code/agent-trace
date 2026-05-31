@@ -144,7 +144,7 @@ Check token usage against model context limit.
 ### `watch`
 ```
 agent-strace watch [session-id] [--timeout DURATION] [--budget $N] [--on-violation ACTION]
-                   [--on-death CMD] [--rules FILE] [--stream-to URL]
+                   [--on-death CMD] [--policy FILE] [--rules FILE] [--stream-to URL]
                    [--stream-batch-size N] [--stream-flush-interval S]
                    [--max-context-pct N] [--dry-run]
 ```
@@ -156,6 +156,7 @@ Live session monitor with kill-switch rules.
 | `--budget $N` | Kill when spend exceeds N dollars |
 | `--on-violation kill\|pause\|alert` | Action when a rule fires |
 | `--on-death CMD` | Command to run after kill (receives `{post_mortem_path}`) |
+| `--policy FILE` | Scope policy file to enforce (default: `.agent-scope.json`) |
 | `--rules FILE` | JSON rules file |
 | `--stream-to URL` | Stream events to HTTP endpoint in real-time |
 | `--dry-run` | Evaluate rules without acting |
@@ -374,10 +375,26 @@ Visualise the A2A agent call graph. Exports as OTLP spans for Jaeger, Tempo, or 
 
 ### `annotate`
 ```
-agent-strace annotate <session-id> <event-offset> [--note TEXT] [--label TEXT]
-                      [--bookmark] [--list] [--delete ANNOTATION_ID]
+agent-strace annotate <session-id> [--event ID] [--at OFFSET] [--note TEXT] [--label LABEL]
+                      [--author NAME] [--list] [--delete ANNOTATION_ID]
+                      [--filter-label LABEL] [--filter-author AUTHOR] [--since Nd]
+                      [--export-format json]
 ```
 Add notes, labels, and bookmarks to session events. Annotations appear in shared HTML reports.
+
+| Flag | Description |
+|---|---|
+| `--event ID` | Event ID to annotate |
+| `--at OFFSET` | Time offset to annotate (e.g. `2m14s`, `1:30`) |
+| `--note TEXT` | Text note to attach |
+| `--label LABEL` | Label chip (`root-cause`, `decision`, `retry`, `fix`, `question`) |
+| `--author NAME` | Author name or email |
+| `--list` | List all annotations for the session |
+| `--delete ID` | Delete an annotation by ID |
+| `--filter-label LABEL` | Filter `--list` by label |
+| `--filter-author AUTHOR` | Filter `--list` by author |
+| `--since Nd` | Filter `--list` to annotations created in the last N days |
+| `--export-format json` | Output `--list` as JSON instead of terminal text |
 
 ### `retention`
 ```

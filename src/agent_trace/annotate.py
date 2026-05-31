@@ -181,6 +181,23 @@ def _find_event_by_offset(
 # Formatting
 # ---------------------------------------------------------------------------
 
+def filter_annotations(
+    annotations: list[Annotation],
+    label: str = "",
+    author: str = "",
+    since: float = 0.0,
+) -> list[Annotation]:
+    """Filter annotations by label, author, and/or minimum created_at timestamp."""
+    result = annotations
+    if label:
+        result = [a for a in result if a.label == label]
+    if author:
+        result = [a for a in result if a.author == author]
+    if since:
+        result = [a for a in result if a.created_at >= since]
+    return result
+
+
 def format_annotations(
     annotations: list[Annotation],
     out: TextIO = sys.stdout,
@@ -220,10 +237,32 @@ def cmd_annotate(args: argparse.Namespace) -> int:
         sys.stderr.write(f"Session not found: {session_id}\n")
         return 1
 
-    # --list
+    # --list (with optional filters)
     if getattr(args, "list", False):
         annotations = load_annotations(store, full_id)
-        format_annotations(annotations)
+
+        # Apply filters
+        filter_label = getattr(args, "filter_label", "") or ""
+        filter_author = getattr(args, "filter_author", "") or ""
+        since_str = getattr(args, "since", "") or ""
+        since_ts = 0.0
+        if since_str:
+            import re as _re
+            m = _re.fullmatch(r"(\d+)d", since_str.strip())
+            if m:
+                since_ts = time.time() - int(m.group(1)) * 86400
+            else:
+                sys.stderr.write(f"Invalid --since value: {since_str!r} (use e.g. 7d)\n")
+                return 1
+        annotations = filter_annotations(annotations, label=filter_label,
+                                         author=filter_author, since=since_ts)
+
+        export_fmt = getattr(args, "export_format", "") or ""
+        if export_fmt == "json":
+            import dataclasses as _dc
+            sys.stdout.write(json.dumps([_dc.asdict(a) for a in annotations], indent=2) + "\n")
+        else:
+            format_annotations(annotations)
         return 0
 
     # --delete
