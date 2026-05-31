@@ -26,6 +26,7 @@ from .a2a import cmd_a2a_tree
 from .mcp_server import cmd_mcp
 from .annotate import cmd_annotate
 from .approval import cmd_approval
+from .rbac import cmd_rbac
 from .baseline import cmd_baseline
 from .compliance import cmd_compliance
 from .drift import cmd_drift
@@ -872,6 +873,36 @@ def build_parser() -> argparse.ArgumentParser:
     p_appr_deny.add_argument("--no-kill", dest="no_kill", action="store_true",
                              help="deny without sending SIGTERM to the agent")
 
+    # rbac (role-based access control)
+    p_rbac = sub.add_parser("rbac", help="manage role-based access control assignments")
+    rbac_sub = p_rbac.add_subparsers(dest="rbac_cmd")
+
+    p_rbac_assign = rbac_sub.add_parser("assign", help="assign a role to a user or group")
+    p_rbac_assign.add_argument("--user", metavar="EMAIL", default="", help="user email")
+    p_rbac_assign.add_argument("--group", metavar="GROUP", default="", help="group identifier")
+    p_rbac_assign.add_argument("--role", required=True,
+                               help="role to assign (owner/admin/member/viewer/machine or workspace:*)")
+    p_rbac_assign.add_argument("--workspace", metavar="ID", default="",
+                               help="workspace ID for workspace-scoped role")
+    p_rbac_assign.add_argument("--by", default="", help="assigner name for audit trail")
+
+    p_rbac_revoke = rbac_sub.add_parser("revoke", help="revoke a role assignment")
+    p_rbac_revoke.add_argument("--user", metavar="EMAIL", default="", help="user email")
+    p_rbac_revoke.add_argument("--group", metavar="GROUP", default="", help="group identifier")
+    p_rbac_revoke.add_argument("--workspace", metavar="ID", default="",
+                               help="workspace ID (omit for org-level)")
+
+    p_rbac_list = rbac_sub.add_parser("list", help="list all role assignments")
+    p_rbac_list.add_argument("--workspace", metavar="ID", default="",
+                             help="filter by workspace ID")
+
+    p_rbac_check = rbac_sub.add_parser("check", help="check if a user can perform an action")
+    p_rbac_check.add_argument("--user", metavar="EMAIL", required=True)
+    p_rbac_check.add_argument("--action", required=True,
+                              help="action to check (e.g. read_sessions, manage_policies)")
+    p_rbac_check.add_argument("--workspace", metavar="ID", default="",
+                              help="workspace context for the check")
+
     # compliance (compliance export)
     p_comp = sub.add_parser("compliance", help="export compliance reports (EU AI Act, SOC 2, HIPAA)")
     comp_sub = p_comp.add_subparsers(dest="compliance_cmd")
@@ -1218,6 +1249,7 @@ def main() -> None:
         "workspace": cmd_workspace,
         "compliance": cmd_compliance,
         "approval": cmd_approval,
+        "rbac": cmd_rbac,
         "optimize": cmd_optimize,
         "oncall": cmd_oncall,
         "freshness": cmd_freshness,
