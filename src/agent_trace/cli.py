@@ -27,6 +27,7 @@ from .mcp_server import cmd_mcp
 from .annotate import cmd_annotate
 from .approval import cmd_approval
 from .rbac import cmd_rbac
+from .iac import cmd_apply, cmd_config_diff
 from .baseline import cmd_baseline
 from .compliance import cmd_compliance
 from .drift import cmd_drift
@@ -903,6 +904,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_rbac_check.add_argument("--workspace", metavar="ID", default="",
                               help="workspace context for the check")
 
+    # apply (IaC — apply .agent-strace.yaml to local store or hosted collector)
+    p_apply = sub.add_parser("apply", help="apply .agent-strace.yaml config to local store or hosted collector")
+    p_apply.add_argument("--config", metavar="FILE", default=".agent-strace.yaml",
+                         help="config file (default: .agent-strace.yaml)")
+    p_apply.add_argument("--server", metavar="URL", default="",
+                         help="hosted collector URL (omit for local apply)")
+    p_apply.add_argument("--auth-key", metavar="KEY", dest="auth_key", default="",
+                         help="API key for hosted collector")
+    p_apply.add_argument("--dry-run", action="store_true", dest="dry_run",
+                         help="show planned changes without applying")
+    p_apply.add_argument("--dir", metavar="DIR", default=None,
+                         help="trace store directory (default: .agent-traces)")
+
+    # config-diff (IaC — show drift between config file and local store)
+    p_cdiff = sub.add_parser("config-diff",
+                              help="show drift between .agent-strace.yaml and current store state")
+    p_cdiff.add_argument("--config", metavar="FILE", default=".agent-strace.yaml",
+                         help="config file (default: .agent-strace.yaml)")
+    p_cdiff.add_argument("--dir", metavar="DIR", default=None,
+                         help="trace store directory (default: .agent-traces)")
+
     # compliance (compliance export)
     p_comp = sub.add_parser("compliance", help="export compliance reports (EU AI Act, SOC 2, HIPAA)")
     comp_sub = p_comp.add_subparsers(dest="compliance_cmd")
@@ -1250,6 +1272,8 @@ def main() -> None:
         "compliance": cmd_compliance,
         "approval": cmd_approval,
         "rbac": cmd_rbac,
+        "apply": cmd_apply,
+        "config-diff": cmd_config_diff,
         "optimize": cmd_optimize,
         "oncall": cmd_oncall,
         "freshness": cmd_freshness,
