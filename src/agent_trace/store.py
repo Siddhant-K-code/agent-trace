@@ -6,6 +6,14 @@ Traces are stored as directories:
       meta.json       # session metadata
       events.ndjson   # newline-delimited JSON events
 
+  With workspace isolation:
+  .agent-traces/
+    workspaces/
+      <workspace-id>/
+        <session-id>/
+          meta.json
+          events.ndjson
+
 NDJSON is append-only. No database. No dependencies. Just files.
 """
 
@@ -19,15 +27,42 @@ from .models import EventType, SessionMeta, TraceEvent
 
 DEFAULT_TRACE_DIR = ".agent-traces"
 
+# Env var for workspace isolation — sessions are stored under
+# .agent-traces/workspaces/<workspace-id>/ when this is set.
+_WORKSPACE_ENV = "AGENT_STRACE_WORKSPACE"
+
+
+def _workspace_base(base_dir: str | Path, workspace_id: str) -> Path:
+    """Return the workspace-scoped subdirectory path."""
+    return Path(base_dir) / "workspaces" / workspace_id
+
 
 class TraceStore:
-    def __init__(self, base_dir: str | Path = DEFAULT_TRACE_DIR):
-        self.base_dir = Path(base_dir)
+    def __init__(self, base_dir: str | Path = DEFAULT_TRACE_DIR,
+                 workspace_id: str = ""):
+        """Create a TraceStore.
+
+        workspace_id scopes all reads/writes to a subdirectory:
+          <base_dir>/workspaces/<workspace_id>/
+
+        If workspace_id is empty, the AGENT_STRACE_WORKSPACE env var is
+        checked. If that is also empty, the flat layout is used.
+        """
+        wid = workspace_id or os.environ.get(_WORKSPACE_ENV, "")
+        if wid:
+            self.base_dir = _workspace_base(base_dir, wid)
+            self.workspace_id = wid
+        else:
+            self.base_dir = Path(base_dir)
+            self.workspace_id = ""
 
     def _session_dir(self, session_id: str) -> Path:
         return self.base_dir / session_id
 
     def create_session(self, meta: SessionMeta) -> Path:
+        # Stamp workspace_id onto meta so it's visible in exports/reports
+        if self.workspace_id and not getattr(meta, "workspace_id", ""):
+            meta.workspace_id = self.workspace_id
         d = self._session_dir(meta.session_id)
         d.mkdir(parents=True, exist_ok=True)
         (d / "meta.json").write_text(meta.to_json())

@@ -88,6 +88,9 @@ class SessionMeta:
     depth: int = 0                # nesting depth (0 = root, 1 = first subagent, etc.)
     # Team grouping (optional — used for team budget reports)
     team: str = ""
+    # Workspace isolation — sessions in different workspaces are stored in
+    # separate subdirectories and never appear in each other's listings
+    workspace_id: str = ""
     # Attribution (who/what started this session)
     attribution: dict = field(default_factory=dict)
 

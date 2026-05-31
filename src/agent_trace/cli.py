@@ -26,8 +26,10 @@ from .a2a import cmd_a2a_tree
 from .mcp_server import cmd_mcp
 from .annotate import cmd_annotate
 from .baseline import cmd_baseline
+from .compliance import cmd_compliance
 from .drift import cmd_drift
 from .identity import cmd_identity
+from .workspace import cmd_workspace
 from .langfuse_export import cmd_export_scores
 from .oncall import cmd_oncall
 from .optimize import cmd_optimize
@@ -845,6 +847,31 @@ def build_parser() -> argparse.ArgumentParser:
                            default=".agent-traces/baseline.json",
                            help="baseline file (default: .agent-traces/baseline.json)")
 
+    # compliance (compliance export)
+    p_comp = sub.add_parser("compliance", help="export compliance reports (EU AI Act, SOC 2, HIPAA)")
+    comp_sub = p_comp.add_subparsers(dest="compliance_cmd")
+    p_comp_exp = comp_sub.add_parser("export", help="export compliance report")
+    p_comp_exp.add_argument("session_id", nargs="?",
+                            help="session ID or prefix (default: all recent sessions)")
+    p_comp_exp.add_argument("--framework", choices=["eu-ai-act", "soc2", "hipaa", "all"],
+                            default="all", help="compliance framework (default: all)")
+    p_comp_exp.add_argument("--since", metavar="Nd",
+                            help="export sessions from last N days (e.g. 30d)")
+    p_comp_exp.add_argument("--output", "-o", metavar="FILE",
+                            help="write JSON report to FILE instead of stdout")
+
+    # workspace (workspace isolation)
+    p_ws = sub.add_parser("workspace", help="manage isolated workspaces")
+    ws_sub = p_ws.add_subparsers(dest="workspace_cmd")
+    ws_sub.add_parser("list", help="list all workspaces")
+    p_ws_use = ws_sub.add_parser("use", help="print shell export for a workspace")
+    p_ws_use.add_argument("workspace_id", help="workspace ID to activate")
+    p_ws_new = ws_sub.add_parser("new", help="create a new workspace")
+    p_ws_new.add_argument("workspace_id", help="workspace ID to create")
+    p_ws_rm = ws_sub.add_parser("rm", help="delete a workspace and all its sessions")
+    p_ws_rm.add_argument("workspace_id", help="workspace ID to delete")
+    p_ws_rm.add_argument("--force", action="store_true", help="skip confirmation")
+
     # identity (per-agent machine identity and session signing)
     p_identity = sub.add_parser("identity", help="manage agent machine identity and sign sessions")
     identity_sub = p_identity.add_subparsers(dest="identity_cmd")
@@ -1161,6 +1188,8 @@ def main() -> None:
         "baseline": cmd_baseline,
         "drift": cmd_drift,
         "identity": cmd_identity,
+        "workspace": cmd_workspace,
+        "compliance": cmd_compliance,
         "optimize": cmd_optimize,
         "oncall": cmd_oncall,
         "freshness": cmd_freshness,
