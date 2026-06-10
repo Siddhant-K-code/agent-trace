@@ -66,9 +66,8 @@ class TraceStore:
         d = self._session_dir(meta.session_id)
         d.mkdir(parents=True, exist_ok=True)
         (d / "meta.json").write_text(meta.to_json())
-        # Always truncate — ensures a reused session ID (e.g. same Claude Code
-        # session across restarts) starts with a clean event stream.
-        (d / "events.ndjson").write_text("")
+        # create empty events file
+        (d / "events.ndjson").touch()
         return d
 
     def append_event(self, session_id: str, event: TraceEvent) -> None:
