@@ -38,6 +38,7 @@ from typing import Any, TextIO
 
 from .cost import _dollars, _event_tokens
 from .models import EventType, TraceEvent
+from .postmortem import clear_heartbeat, write_heartbeat
 from .project_budget import (
     ProjectBudgetConfig,
     ProjectBudgetStatus,
@@ -1125,13 +1126,20 @@ def watch_session(
         streamer = EventStreamer(stream_config)
 
     last_event_time = time.time()
+    last_heartbeat_time = 0.0
     event_count = 0
+    clean_session_end = False
 
     try:
         for item in _tail_events(events_file, poll_interval=poll_interval):
+            now = time.time()
+            if now - last_heartbeat_time >= 5.0:
+                write_heartbeat(store, session_id)
+                last_heartbeat_time = now
+
             # Idle timeout: checked on every poll cycle (including when no
             # event arrived), so it fires reliably after max_idle_seconds.
-            if time.time() - last_event_time > max_idle_seconds:
+            if now - last_event_time > max_idle_seconds:
                 out.write(f"[watch] No events for {max_idle_seconds:.0f}s - stopping\n")
                 break
 
@@ -1192,6 +1200,8 @@ def watch_session(
                         )
 
             if event.event_type == EventType.SESSION_END:
+                clean_session_end = True
+                clear_heartbeat(store, session_id)
                 out.write(f"[watch] Session ended ({event_count} events, ${state.estimated_cost:.4f})\n")
                 break
 
@@ -1200,6 +1210,8 @@ def watch_session(
     finally:
         if streamer:
             streamer.stop()
+        if clean_session_end:
+            clear_heartbeat(store, session_id)
 
 
 # ---------------------------------------------------------------------------

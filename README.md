@@ -90,7 +90,7 @@ Full setup guide: [docs/setup.md](docs/setup.md)
 | Command | What it does |
 |---|---|
 | [`agent-strace watch`](docs/commands.md#watch) | Live monitor with kill-switch rules |
-| [`agent-strace watch --timeout 30m --budget $5`](docs/commands.md#watch) | Watchdog mode — kills on limit, writes post-mortem |
+| [`agent-strace watch --timeout 30m --budget $5`](docs/commands.md#watch) | Watchdog mode — kills on limit and heartbeats sessions for postmortems |
 | [`agent-strace mcp-scan`](docs/commands.md#mcp-scan) | Scan runtime MCP poisoning indicators |
 | [`agent-strace audit <id>`](docs/commands.md#audit) | Audit tool calls against a policy file |
 | [`agent-strace approval list`](docs/commands.md#approval) | Human-in-the-loop approval queue |

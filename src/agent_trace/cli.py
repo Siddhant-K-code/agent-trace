@@ -917,6 +917,9 @@ def build_parser() -> argparse.ArgumentParser:
     # postmortem
     p_postmortem = sub.add_parser("postmortem", help="generate a structured postmortem for a failed session")
     p_postmortem.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
+    p_postmortem.add_argument("--list", action="store_true", help="list crashed sessions")
+    p_postmortem.add_argument("--stale-after", type=float, default=30.0, metavar="SECONDS",
+                              help="heartbeat age before a live session is treated as crashed (default: 30)")
     p_postmortem.add_argument("--agents-md", default="AGENTS.md",
                               help="path to AGENTS.md for violation detection (default: AGENTS.md)")
 

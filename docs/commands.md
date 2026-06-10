@@ -259,9 +259,19 @@ Detect Shadow MCP servers and undeclared agent activity. No network calls, no AP
 
 ### `postmortem`
 ```
-agent-strace postmortem [session-id]
+agent-strace postmortem [session-id] [--list] [--stale-after SECONDS]
 ```
-View the watchdog post-mortem for a killed session.
+Generate a structured postmortem for failed or crashed sessions. `watch`
+writes a lightweight heartbeat while monitoring; if the heartbeat becomes
+stale and the session has no clean `SESSION_END`, `postmortem` classifies the
+crash and writes `.agent-traces/<session-id>/postmortem.md` with recovery
+context.
+
+| Flag | Description |
+|---|---|
+| `--list` | List crashed sessions and write missing `postmortem.md` files |
+| `--stale-after SECONDS` | Heartbeat age before a session is treated as crashed (default: 30) |
+| `--agents-md FILE` | AGENTS.md file used for instruction-violation checks |
 
 ### `approval`
 ```

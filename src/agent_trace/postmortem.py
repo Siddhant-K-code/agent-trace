@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import argparse
 import html
+import json
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
@@ -22,6 +24,10 @@ from .store import TraceStore
 # ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
+
+HEARTBEAT_FILE = ".heartbeat"
+CRASH_POSTMORTEM_FILE = "postmortem.md"
+DEFAULT_STALE_SECONDS = 30.0
 
 @dataclass
 class TimelineEntry:
@@ -46,6 +52,20 @@ class PostmortemReport:
     total_cost: float
     recommendations: list[str]
     agents_md_violations: list[str]  # instructions contradicted by the agent
+    crash_reason: str = ""
+    crash_detail: str = ""
+    recovery_context: str = ""
+
+
+@dataclass
+class CrashInfo:
+    session_id: str
+    reason: str
+    detail: str
+    stale_seconds: float = 0.0
+    exit_code: int | None = None
+    last_event_type: str = ""
+    last_event_at: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +165,184 @@ def _find_root_cause(events: list[TraceEvent], base_ts: float) -> tuple[int, str
     return -1, "No failure detected", 0.0
 
 
+def heartbeat_path(store: TraceStore, session_id: str) -> Path:
+    """Return the heartbeat sidecar path for a session."""
+    return store._session_dir(session_id) / HEARTBEAT_FILE
+
+
+def write_heartbeat(store: TraceStore, session_id: str) -> None:
+    """Touch the session heartbeat file with lightweight JSON metadata."""
+    path = heartbeat_path(store, session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"session_id": session_id, "updated_at": time.time()}
+    path.write_text(json.dumps(payload, separators=(",", ":")))
+
+
+def clear_heartbeat(store: TraceStore, session_id: str) -> None:
+    """Remove the heartbeat file after a clean session end."""
+    try:
+        heartbeat_path(store, session_id).unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _has_clean_session_end(events: list[TraceEvent]) -> bool:
+    for event in reversed(events):
+        if event.event_type == EventType.SESSION_END:
+            exit_code = event.data.get("exit_code")
+            return exit_code in (None, 0)
+    return False
+
+
+def _session_exit_code(events: list[TraceEvent]) -> int | None:
+    for event in reversed(events):
+        if event.event_type == EventType.SESSION_END:
+            raw = event.data.get("exit_code")
+            if raw is None:
+                return None
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _event_text(events: list[TraceEvent], limit: int = 20) -> str:
+    chunks = []
+    for event in events[-limit:]:
+        chunks.append(event.event_type.value)
+        chunks.append(json.dumps(event.data, sort_keys=True, default=str))
+    return "\n".join(chunks).lower()
+
+
+def _last_action(events: list[TraceEvent]) -> str:
+    for event in reversed(events):
+        if event.event_type in (EventType.SESSION_START, EventType.SESSION_END):
+            continue
+        return _describe_event(event)
+    return "No recorded action"
+
+
+def _describe_event(event: TraceEvent) -> str:
+    if event.event_type == EventType.TOOL_CALL:
+        name = event.data.get("tool_name", "?")
+        args = event.data.get("arguments", {}) or {}
+        target = (
+            args.get("command")
+            or args.get("file_path")
+            or args.get("path")
+            or args.get("url")
+            or ""
+        )
+        return f"{name}({str(target)[:100]})" if target else f"Tool: {name}"
+    if event.event_type in (EventType.LLM_REQUEST, EventType.USER_PROMPT):
+        text = event.data.get("prompt") or event.data.get("text") or event.data
+        return f"Prompt: {str(text)[:100]}"
+    if event.event_type == EventType.ERROR:
+        return f"Error: {event.data.get('message', event.data.get('error', 'error'))}"
+    return event.event_type.value
+
+
+def _classify_crash(
+    events: list[TraceEvent],
+    exit_code: int | None = None,
+    stale: bool = False,
+) -> tuple[str, str]:
+    text = _event_text(events)
+
+    if exit_code == 137:
+        return "SIGKILL", "Process exited with code 137"
+    if exit_code == 143:
+        return "SIGTERM", "Process exited with code 143"
+    if exit_code == 124:
+        return "timeout", "Process exited with timeout code 124"
+    if exit_code is not None and exit_code != 0:
+        if "memoryerror" in text or "out of memory" in text or "oom" in text:
+            return "OOM", "Memory failure signal found near session end"
+        if "traceback" in text:
+            return "unhandled_exception", f"Process exited with code {exit_code}"
+        return "nonzero_exit", f"Process exited with code {exit_code}"
+
+    if "memoryerror" in text or "out of memory" in text or "oom" in text:
+        return "OOM", "Memory failure signal found near session end"
+    if "context length" in text or "context window" in text or "maximum context" in text:
+        return "context_window_exceeded", "Context window error found near session end"
+    if "timeout" in text or "timed out" in text:
+        return "timeout", "Timeout signal found near session end"
+    if "traceback" in text:
+        return "unhandled_exception", "Python traceback found near session end"
+    if "connectionerror" in text or "network" in text or "connection refused" in text:
+        return "network_failure", "Network failure signal found near session end"
+    if stale:
+        return "unknown", "Heartbeat is stale and no clean SESSION_END event was recorded"
+    return "unknown", "No specific crash signature detected"
+
+
+def detect_crash(
+    store: TraceStore,
+    session_id: str,
+    stale_after_seconds: float = DEFAULT_STALE_SECONDS,
+    now: float | None = None,
+) -> CrashInfo | None:
+    """Detect a crashed or stale session without mutating the store."""
+    current_time = time.time() if now is None else now
+    try:
+        meta = store.load_meta(session_id)
+        events = store.load_events(session_id)
+    except Exception:
+        return None
+
+    exit_code = _session_exit_code(events)
+    if exit_code not in (None, 0):
+        reason, detail = _classify_crash(events, exit_code=exit_code)
+    else:
+        if meta.ended_at or _has_clean_session_end(events):
+            return None
+        hb_path = heartbeat_path(store, session_id)
+        if not hb_path.exists():
+            return None
+        stale_seconds = max(0.0, current_time - hb_path.stat().st_mtime)
+        if stale_seconds < stale_after_seconds:
+            return None
+        reason, detail = _classify_crash(events, stale=True)
+        return CrashInfo(
+            session_id=session_id,
+            reason=reason,
+            detail=detail,
+            stale_seconds=stale_seconds,
+            last_event_type=events[-1].event_type.value if events else "",
+            last_event_at=events[-1].timestamp if events else meta.started_at,
+        )
+
+    return CrashInfo(
+        session_id=session_id,
+        reason=reason,
+        detail=detail,
+        exit_code=exit_code,
+        last_event_type=events[-1].event_type.value if events else "",
+        last_event_at=events[-1].timestamp if events else meta.started_at,
+    )
+
+
+def find_crashed_sessions(
+    store: TraceStore,
+    stale_after_seconds: float = DEFAULT_STALE_SECONDS,
+    now: float | None = None,
+) -> list[CrashInfo]:
+    """Return crashed/stale sessions sorted newest first."""
+    crashes = []
+    for meta in store.list_sessions():
+        crash = detect_crash(
+            store,
+            meta.session_id,
+            stale_after_seconds=stale_after_seconds,
+            now=now,
+        )
+        if crash:
+            crashes.append(crash)
+    return crashes
+
+
 def _build_timeline(
     events: list[TraceEvent],
     base_ts: float,
@@ -162,7 +360,7 @@ def _build_timeline(
             entries.append(TimelineEntry(offset, "Session start"))
 
         elif event.event_type == EventType.SESSION_END:
-            entries.append(TimelineEntry(offset, "Session end", is_failure=is_failure))
+            entries.append(TimelineEntry(offset, "Session end", is_root_cause=is_root, is_failure=is_failure))
 
         elif event.event_type == EventType.USER_PROMPT:
             prompt = str(event.data.get("prompt", ""))[:80]
@@ -245,6 +443,100 @@ def _generate_recommendations(
     return recs
 
 
+def _file_write_summary(events: list[TraceEvent]) -> list[str]:
+    paths: list[str] = []
+    for event in events:
+        if event.event_type == EventType.TOOL_CALL:
+            name = str(event.data.get("tool_name", "")).lower()
+            if name not in ("write", "edit", "create", "str_replace"):
+                continue
+            args = event.data.get("arguments", {}) or {}
+            path = str(args.get("file_path") or args.get("path") or "")
+            if path and path not in paths:
+                paths.append(path)
+        elif event.event_type == EventType.FILE_WRITE:
+            path = str(event.data.get("uri") or event.data.get("path") or "")
+            if path and path not in paths:
+                paths.append(path)
+    return paths
+
+
+def _last_prompt(events: list[TraceEvent]) -> str:
+    for event in reversed(events):
+        if event.event_type in (EventType.USER_PROMPT, EventType.LLM_REQUEST):
+            text = event.data.get("prompt") or event.data.get("text") or event.data
+            return str(text).replace("\n", " ")[:240]
+    return ""
+
+
+def _build_recovery_context(
+    session_id: str,
+    events: list[TraceEvent],
+    crash: CrashInfo | None,
+) -> str:
+    reason = crash.reason if crash else "failure"
+    detail = crash.detail if crash else "See the root cause and timeline above."
+    last_action = _last_action(events)
+    prompt = _last_prompt(events)
+    writes = _file_write_summary(events)
+
+    lines = [
+        f"Previous session {session_id} stopped before a clean completion.",
+        f"Crash reason: {reason} - {detail}",
+        f"Last recorded action: {last_action}",
+    ]
+    if prompt:
+        lines.append(f"Last prompt/request: {prompt}")
+    if writes:
+        lines.append("Files modified before the stop:")
+        for path in writes[:12]:
+            lines.append(f"- {path}")
+        if len(writes) > 12:
+            lines.append(f"- ... {len(writes) - 12} more")
+    lines.append(
+        "Resume by inspecting the files above, checking for partial writes, "
+        "then continue from the last recorded action."
+    )
+    return "\n".join(lines)
+
+
+def write_crash_postmortem(
+    store: TraceStore,
+    report: PostmortemReport,
+) -> Path:
+    """Persist a Markdown postmortem for a crashed session."""
+    path = store._session_dir(report.session_id) / CRASH_POSTMORTEM_FILE
+    lines = [
+        f"# Postmortem: {report.session_id}",
+        "",
+        f"Status: {report.status_summary}",
+        f"Root cause: {report.root_cause}",
+    ]
+    if report.crash_reason:
+        lines.append(f"Crash reason: {report.crash_reason}")
+    if report.crash_detail:
+        lines.append(f"Crash detail: {report.crash_detail}")
+    lines.extend([
+        "",
+        "## Last Timeline",
+    ])
+    for entry in report.timeline[-20:]:
+        marker = " [root cause]" if entry.is_root_cause else ""
+        lines.append(f"- {_fmt_offset(entry.offset)} {entry.description}{marker}")
+    lines.extend([
+        "",
+        "## Recovery Context",
+        "",
+        report.recovery_context or "No recovery context available.",
+        "",
+        "## Recommendations",
+    ])
+    for rec in report.recommendations:
+        lines.append(f"- {rec}")
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -253,16 +545,27 @@ def analyze_session(
     store: TraceStore,
     session_id: str,
     agents_md_path: str | Path = "AGENTS.md",
+    stale_after_seconds: float = DEFAULT_STALE_SECONDS,
 ) -> PostmortemReport:
     meta = store.load_meta(session_id)
     events = store.load_events(session_id)
     explain = explain_session(store, session_id)
+    crash = detect_crash(store, session_id, stale_after_seconds=stale_after_seconds)
 
     base_ts = events[0].timestamp if events else meta.started_at
     total_seconds = meta.total_duration_ms / 1000 if meta.total_duration_ms else 0.0
-    failed = any(p.failed for p in explain.phases)
+    if not total_seconds and events:
+        total_seconds = max(0.0, events[-1].timestamp - base_ts)
+    failed = crash is not None or any(p.failed for p in explain.phases)
 
     root_cause_idx, root_cause_desc, root_cause_offset = _find_root_cause(events, base_ts)
+    if crash and root_cause_idx < 0:
+        root_cause_idx = len(events) - 1 if events else -1
+        root_cause_desc = f"Crash: {crash.reason} ({crash.detail})"
+        root_cause_offset = (
+            max(0.0, crash.last_event_at - base_ts)
+            if crash.last_event_at else 0.0
+        )
 
     # Wasted time = time after root cause
     wasted_seconds = 0.0
@@ -288,7 +591,15 @@ def analyze_session(
     timeline = _build_timeline(events, base_ts, root_cause_idx)
 
     # Status summary
-    if failed:
+    if crash:
+        if total_seconds:
+            mins = int(total_seconds) // 60
+            secs = int(total_seconds) % 60
+            duration_str = f"{mins}m {secs:02d}s" if mins else f"{secs}s"
+            status_summary = f"CRASHED ({crash.reason} after {duration_str})"
+        else:
+            status_summary = f"CRASHED ({crash.reason})"
+    elif failed:
         mins = int(total_seconds) // 60
         secs = int(total_seconds) % 60
         duration_str = f"{mins}m {secs:02d}s" if mins else f"{secs}s"
@@ -306,6 +617,7 @@ def analyze_session(
         "root_cause": root_cause_desc,
         "retry_count": retry_count,
     })
+    recovery_context = _build_recovery_context(session_id, events, crash) if failed else ""
 
     return PostmortemReport(
         session_id=session_id,
@@ -320,6 +632,9 @@ def analyze_session(
         total_cost=total_cost,
         recommendations=recommendations,
         agents_md_violations=violations,
+        crash_reason=crash.reason if crash else "",
+        crash_detail=crash.detail if crash else "",
+        recovery_context=recovery_context,
     )
 
 
@@ -338,6 +653,8 @@ def format_postmortem(report: PostmortemReport, out: TextIO = sys.stdout) -> Non
     w(f"\nPOSTMORTEM: Session {report.session_id}\n")
     w(f"Status:     {report.status_summary}\n")
     w(f"Root cause: {report.root_cause}\n\n")
+    if report.crash_reason:
+        w(f"Crash:      {report.crash_reason} — {report.crash_detail}\n\n")
 
     w("Timeline:\n")
     for entry in report.timeline:
@@ -364,10 +681,33 @@ def format_postmortem(report: PostmortemReport, out: TextIO = sys.stdout) -> Non
         for v in report.agents_md_violations:
             w(f"  - {v}\n")
 
+    if report.recovery_context:
+        w("\nRecovery context:\n")
+        for line in report.recovery_context.splitlines():
+            w(f"  {line}\n" if line else "\n")
+
     w("\nRecommendations:\n")
     for i, rec in enumerate(report.recommendations, 1):
         w(f"  {i}. {rec}\n")
 
+    w("\n")
+
+
+def format_crash_list(crashes: list[CrashInfo], out: TextIO = sys.stdout) -> None:
+    w = out.write
+    if not crashes:
+        w("No crashed sessions found.\n")
+        return
+
+    w("\nCrashed sessions\n")
+    w("────────────────────────────────────────────────────────────\n")
+    w(f"{'Session':<18} {'Reason':<22} {'Stale':>8}  Detail\n")
+    for crash in crashes:
+        stale = f"{crash.stale_seconds:.0f}s" if crash.stale_seconds else "-"
+        w(
+            f"{crash.session_id:<18} {crash.reason:<22} {stale:>8}  "
+            f"{crash.detail[:70]}\n"
+        )
     w("\n")
 
 
@@ -441,6 +781,23 @@ def render_postmortem_html(report: PostmortemReport) -> str:
 
 def cmd_postmortem(args: argparse.Namespace) -> int:
     store = TraceStore(args.trace_dir)
+    stale_after = float(getattr(args, "stale_after", DEFAULT_STALE_SECONDS))
+
+    if getattr(args, "list", False):
+        crashes = find_crashed_sessions(store, stale_after_seconds=stale_after)
+        for crash in crashes:
+            try:
+                report = analyze_session(
+                    store,
+                    crash.session_id,
+                    agents_md_path=getattr(args, "agents_md", "AGENTS.md"),
+                    stale_after_seconds=stale_after,
+                )
+                write_crash_postmortem(store, report)
+            except Exception:
+                pass
+        format_crash_list(crashes, out=sys.stdout)
+        return 1 if crashes else 0
 
     session_id = args.session_id
     if not session_id:
@@ -454,6 +811,14 @@ def cmd_postmortem(args: argparse.Namespace) -> int:
         return 1
 
     agents_md = getattr(args, "agents_md", "AGENTS.md")
-    report = analyze_session(store, full_id, agents_md_path=agents_md)
-    format_postmortem(report)
+    report = analyze_session(
+        store,
+        full_id,
+        agents_md_path=agents_md,
+        stale_after_seconds=stale_after,
+    )
+    if report.crash_reason:
+        pm_path = write_crash_postmortem(store, report)
+        sys.stderr.write(f"Post-mortem written: {pm_path}\n")
+    format_postmortem(report, out=sys.stdout)
     return 1 if report.failed else 0
