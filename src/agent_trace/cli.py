@@ -273,7 +273,12 @@ def cmd_export(args: argparse.Namespace) -> int:
     store = TraceStore(args.trace_dir)
 
     session_id = args.session_id
-    if not store.session_exists(session_id):
+    if not session_id:
+        session_id = store.get_latest_session_id()
+        if not session_id:
+            sys.stderr.write("No sessions found.\n")
+            return 1
+    elif not store.session_exists(session_id):
         found = store.find_session(session_id)
         if found:
             session_id = found
