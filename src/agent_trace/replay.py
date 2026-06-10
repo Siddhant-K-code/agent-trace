@@ -443,7 +443,12 @@ def list_sessions(store: TraceStore, out: TextIO = sys.stdout) -> None:
         )
 
     out.write(f"{C.GRAY}{'─' * 70}{C.RESET}\n")
-    out.write(f"  {len(sessions)} session(s)\n\n")
+    out.write(f"  {len(sessions)} session(s)\n")
+    out.write(
+        f"  {C.DIM}Tools = MCP tool calls  "
+        f"LLM = sampling/createMessage or @trace_llm_call  "
+        f"Err = protocol errors{C.RESET}\n\n"
+    )
 
 
 # ---------------------------------------------------------------------------
