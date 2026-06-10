@@ -681,6 +681,43 @@ def _gemini_hooks_config(args: argparse.Namespace) -> dict:
     }
 
 
+def _cursor_hooks_config(args: argparse.Namespace) -> dict:
+    cmd_prefix = _hook_command_prefix(args, provider="cursor")
+    return {
+        "version": 1,
+        "hooks": {
+            "sessionStart": [{
+                "type": "command",
+                "command": f"{cmd_prefix} session-start",
+            }],
+            "beforeSubmitPrompt": [{
+                "type": "command",
+                "command": f"{cmd_prefix} before-submit-prompt",
+            }],
+            "beforeShellExecution": [{
+                "type": "command",
+                "command": f"{cmd_prefix} before-shell-execution",
+            }],
+            "afterShellExecution": [{
+                "type": "command",
+                "command": f"{cmd_prefix} after-shell-execution",
+            }],
+            "afterFileEdit": [{
+                "type": "command",
+                "command": f"{cmd_prefix} after-file-edit",
+            }],
+            "afterAgentResponse": [{
+                "type": "command",
+                "command": f"{cmd_prefix} after-agent-response",
+            }],
+            "sessionEnd": [{
+                "type": "command",
+                "command": f"{cmd_prefix} session-end",
+            }],
+        },
+    }
+
+
 def _gemini_extension_manifest() -> dict:
     return {
         "name": "agent-strace",
@@ -705,6 +742,18 @@ def _write_gemini_extension(args: argparse.Namespace) -> tuple[Path, Path]:
     return manifest_path, hooks_path
 
 
+def _cursor_config_dir() -> Path:
+    return Path(os.environ.get("CURSOR_CONFIG_DIR", ".cursor")).expanduser()
+
+
+def _write_cursor_hooks_config(args: argparse.Namespace) -> Path:
+    config_dir = _cursor_config_dir()
+    config_dir.mkdir(parents=True, exist_ok=True)
+    hooks_path = config_dir / "hooks.json"
+    hooks_path.write_text(json.dumps(_cursor_hooks_config(args), indent=2) + "\n")
+    return hooks_path
+
+
 def cmd_setup(args: argparse.Namespace) -> None:
     """Generate hooks configuration for supported agent CLIs."""
     cli = getattr(args, "cli", "claude") or "claude"
@@ -720,6 +769,9 @@ def cmd_setup(args: argparse.Namespace) -> None:
             f"Wrote Gemini CLI extension manifest: {manifest_path}\n"
             f"Wrote Gemini CLI hooks config: {hooks_path}\n"
         )
+    if cli in ("cursor", "all"):
+        hooks_path = _write_cursor_hooks_config(args)
+        sys.stderr.write(f"Wrote Cursor hooks config: {hooks_path}\n")
 
     for idx, (name, path, config) in enumerate(configs):
         if idx:
@@ -729,10 +781,14 @@ def cmd_setup(args: argparse.Namespace) -> None:
 
     if cli == "gemini":
         sys.stdout.write(json.dumps(_gemini_hooks_config(args), indent=2) + "\n")
+    if cli == "cursor":
+        sys.stdout.write(json.dumps(_cursor_hooks_config(args), indent=2) + "\n")
 
     sys.stderr.write(
-        "\nThis captures full agent sessions: user prompts, assistant "
-        "responses, and hook-visible tool calls.\n"
+        "\nThis captures hook-visible agent sessions: user prompts, assistant "
+        "responses, and tool calls or edits exposed by the provider.\n"
+        "For Cursor, MCP proxy tracing still captures MCP calls; native hooks "
+        "capture only the prompt, shell, file-edit, and response events Cursor emits.\n"
         "Replay with: agent-strace replay\n"
     )
 
@@ -873,7 +929,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # hook (called by agent CLI hooks systems)
     p_hook = sub.add_parser("hook", help="handle an agent CLI hook event (internal)")
-    p_hook.add_argument("--provider", choices=["claude", "codex", "gemini"], default="claude",
+    p_hook.add_argument("--provider", choices=["claude", "codex", "gemini", "cursor"], default="claude",
                         help="hook provider (default: claude)")
     p_hook.add_argument("event", nargs="?", help="hook event: session-start, session-end, pre-tool, post-tool, post-tool-failure")
 
@@ -891,7 +947,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="disable automatic secret redaction in generated hooks",
     )
     p_setup.add_argument("--global", dest="global_config", action="store_true", help="output config for ~/.claude/settings.json (all projects)")
-    p_setup.add_argument("--cli", choices=["claude", "codex", "gemini", "all"], default="claude",
+    p_setup.add_argument("--cli", choices=["claude", "codex", "gemini", "cursor", "all"], default="claude",
                          help="agent CLI to configure (default: claude)")
 
     # import (Claude Code JSONL session logs)

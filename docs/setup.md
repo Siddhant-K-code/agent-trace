@@ -6,7 +6,7 @@ Three ways to capture agent sessions. Pick the one that matches your agent.
 
 ## Option 1: CLI hooks (recommended)
 
-Captures everything: user prompts, assistant responses, and every tool call (Bash, Edit, Write, Read, Agent, Grep, Glob, WebFetch, WebSearch, all MCP tools).
+Captures the lifecycle events exposed by each CLI: user prompts, assistant responses, and hook-visible tool calls or edits. Claude Code exposes broad tool coverage; Cursor coverage depends on the native events Cursor emits.
 
 ```bash
 # Generate Claude Code hooks config
@@ -17,6 +17,9 @@ agent-strace setup --cli codex
 
 # Install Gemini CLI extension hooks
 agent-strace setup --cli gemini
+
+# Install Cursor project hooks
+agent-strace setup --cli cursor
 
 # Configure all supported hook integrations
 agent-strace setup --cli all
@@ -97,6 +100,34 @@ Set `GEMINI_CONFIG_DIR` to install into a different Gemini config directory. The
 ```
 
 Gemini sends one JSON object to each command hook on stdin. agent-strace records `session_id`, `tool_name`, `tool_input`, `tool_response`, `prompt`, and `prompt_response` into the same `.agent-traces/` session store used by Claude Code and Codex.
+
+### Cursor hooks
+
+`agent-strace setup --cli cursor` writes a project-local Cursor hooks file:
+
+```
+.cursor/
+└── hooks.json
+```
+
+Set `CURSOR_CONFIG_DIR` to write the file somewhere else. The generated config registers Cursor-native prompt, shell, file-edit, assistant-response, session-start, and session-end command hooks:
+
+```json
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [{ "type": "command", "command": "agent-strace hook --provider cursor session-start" }],
+    "beforeSubmitPrompt": [{ "type": "command", "command": "agent-strace hook --provider cursor before-submit-prompt" }],
+    "beforeShellExecution": [{ "type": "command", "command": "agent-strace hook --provider cursor before-shell-execution" }],
+    "afterShellExecution": [{ "type": "command", "command": "agent-strace hook --provider cursor after-shell-execution" }],
+    "afterFileEdit": [{ "type": "command", "command": "agent-strace hook --provider cursor after-file-edit" }],
+    "afterAgentResponse": [{ "type": "command", "command": "agent-strace hook --provider cursor after-agent-response" }],
+    "sessionEnd": [{ "type": "command", "command": "agent-strace hook --provider cursor session-end" }]
+  }
+}
+```
+
+Cursor hook coverage depends on the events Cursor emits. Native hooks capture prompts, shell commands, file edits, and agent responses when available. MCP server tool calls are still captured most reliably through the MCP proxy configuration below.
 
 ### Import existing sessions
 

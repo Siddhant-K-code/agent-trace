@@ -62,17 +62,20 @@ _PENDING_FILE = ".pending-calls.json"
 _CLAUDE_SESSION_ID_ENV = "AGENT_TRACE_CLAUDE_SESSION_ID"
 _CODEX_SESSION_ID_ENV = "AGENT_TRACE_CODEX_SESSION_ID"
 _GEMINI_SESSION_ID_ENV = "AGENT_TRACE_GEMINI_SESSION_ID"
+_CURSOR_SESSION_ID_ENV = "AGENT_TRACE_CURSOR_SESSION_ID"
 
 _PROVIDER_ENV = {
     "claude": _CLAUDE_SESSION_ID_ENV,
     "codex": _CODEX_SESSION_ID_ENV,
     "gemini": _GEMINI_SESSION_ID_ENV,
+    "cursor": _CURSOR_SESSION_ID_ENV,
 }
 
 _PROVIDER_AGENT = {
     "claude": "claude-code",
     "codex": "openai-codex",
     "gemini": "gemini-cli",
+    "cursor": "cursor-agent",
 }
 
 
@@ -203,7 +206,7 @@ def _should_redact() -> bool:
 def _normalise_payload(input_data: dict, provider: str, event: str) -> dict:
     """Map provider-specific hook payloads to the Claude-shaped fields."""
     data = dict(input_data)
-    if provider not in ("codex", "gemini"):
+    if provider not in ("codex", "gemini", "cursor"):
         return data
 
     if event in {"pre-tool", "post-tool", "post-tool-failure"}:
@@ -212,14 +215,25 @@ def _normalise_payload(input_data: dict, provider: str, event: str) -> dict:
             data.setdefault("tool_name", tool.get("name") or tool.get("tool_name") or "")
             data.setdefault("tool_input", tool.get("input") or tool.get("arguments") or {})
             data.setdefault("tool_output", tool.get("output") or tool.get("response") or "")
+        command = data.get("command")
+        if command and not data.get("tool_name"):
+            data.setdefault("tool_name", "shell")
+            data.setdefault("tool_input", {"command": command})
+        if data.get("file_path") or data.get("path"):
+            data.setdefault("tool_name", data.get("tool_name") or "file_edit")
+            data.setdefault("tool_input", {
+                "file_path": data.get("file_path") or data.get("path"),
+            })
         data.setdefault("tool_input", data.get("input") or data.get("arguments") or {})
         data.setdefault("tool_output", data.get("tool_response", data.get("output", "")))
 
-    if provider == "gemini":
+    if provider in ("gemini", "cursor"):
         if event == "session-start":
             data.setdefault("source", data.get("hook_event_name", "startup"))
         if event == "user-prompt":
-            data.setdefault("prompt", data.get("user_prompt") or data.get("input", {}).get("prompt", ""))
+            input_value = data.get("input", {})
+            prompt = input_value.get("prompt", "") if isinstance(input_value, dict) else input_value
+            data.setdefault("prompt", data.get("user_prompt") or data.get("prompt") or prompt or "")
         if event == "stop":
             data.setdefault("last_assistant_message", data.get("prompt_response", ""))
 
@@ -408,6 +422,34 @@ def handle_stop(input_data: dict, provider: str = "claude") -> None:
     )
 
 
+def handle_file_write(input_data: dict, provider: str = "claude") -> None:
+    """Handle provider file-edit hooks as file_write events."""
+    store = _get_store()
+    session_id = _resolve_session_id(input_data, provider=provider)
+    if not session_id:
+        return
+
+    redact = _should_redact()
+    data = {
+        "path": input_data.get("file_path") or input_data.get("path") or input_data.get("uri") or "",
+    }
+    for key in ("diff", "patch", "change_summary", "turn_id", "permission_mode"):
+        if input_data.get(key) not in (None, ""):
+            data[key] = input_data.get(key)
+    if redact:
+        data = redact_data(data)
+
+    _write_event(
+        store,
+        session_id,
+        TraceEvent(
+            event_type=EventType.FILE_WRITE,
+            session_id=session_id,
+            data=data,
+        ),
+    )
+
+
 def handle_post_tool(input_data: dict, failed: bool = False, provider: str = "claude") -> None:
     """Handle PostToolUse / PostToolUseFailure hook event."""
     store = _get_store()
@@ -419,7 +461,7 @@ def handle_post_tool(input_data: dict, failed: bool = False, provider: str = "cl
     tool_name = input_data.get("tool_name", "unknown")
     tool_output = input_data.get("tool_output", input_data.get("tool_response", ""))
 
-    if provider in ("codex", "gemini") and not failed:
+    if provider in ("codex", "gemini", "cursor") and not failed:
         if isinstance(tool_output, dict):
             exit_code = tool_output.get("exit_code")
             failed = (
@@ -509,7 +551,7 @@ def hook_main(args: list[str]) -> None:
         sys.exit(1)
 
     if not rest:
-        sys.stderr.write("Usage: agent-strace hook [--provider claude|codex|gemini] <event>\n")
+        sys.stderr.write("Usage: agent-strace hook [--provider claude|codex|gemini|cursor] <event>\n")
         sys.exit(1)
 
     aliases = {
@@ -520,6 +562,11 @@ def hook_main(args: list[str]) -> None:
         "before-agent": "user-prompt",
         "before-prompt": "user-prompt",
         "after-agent": "stop",
+        "before-submit-prompt": "user-prompt",
+        "before-shell-execution": "pre-tool",
+        "after-shell-execution": "post-tool",
+        "after-file-edit": "file-write",
+        "after-agent-response": "stop",
     }
     event = aliases.get(rest[0], rest[0])
     input_data = _normalise_payload(_read_stdin(), provider, event)
@@ -531,6 +578,7 @@ def hook_main(args: list[str]) -> None:
         "post-tool": lambda d: handle_post_tool(d, failed=False, provider=provider),
         "post-tool-failure": lambda d: handle_post_tool(d, failed=True, provider=provider),
         "user-prompt": lambda d: handle_user_prompt(d, provider=provider),
+        "file-write": lambda d: handle_file_write(d, provider=provider),
         "stop": lambda d: handle_stop(d, provider=provider),
     }
 
