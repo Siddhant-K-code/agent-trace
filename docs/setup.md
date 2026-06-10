@@ -15,8 +15,8 @@ agent-strace setup
 # For all projects (global config)
 agent-strace setup --global
 
-# With secret redaction enabled
-agent-strace setup --redact
+# Trusted local traces only: disable secret redaction
+agent-strace setup --no-redact
 ```
 
 `agent-strace setup` prints the hooks JSON. Add it to `~/.claude/settings.json` (user-level, applies to all projects):
@@ -122,7 +122,7 @@ Wraps your tool functions directly. No MCP required.
 ```python
 from agent_trace import trace_tool, trace_llm_call, start_session, end_session, log_decision
 
-start_session(name="my-agent")  # add redact=True to strip secrets
+start_session(name="my-agent")  # use redact=False only for trusted local traces
 
 @trace_tool
 def search_codebase(query: str) -> str:
@@ -153,15 +153,9 @@ For repos that handle secrets, attestation logic, or cryptographic material:
 
 ```bash
 cd your-sensitive-repo
-agent-strace setup --redact
+agent-strace setup
 ```
 
-This enables automatic redaction of API keys, tokens, and credentials before they hit disk. Detected patterns: OpenAI (`sk-*`), GitHub (`ghp_*`, `github_pat_*`), AWS (`AKIA*`), Anthropic (`sk-ant-*`), Slack (`xox*`), JWTs, Bearer tokens, connection strings, and any value under keys like `password`, `secret`, `token`, `api_key`, `authorization`.
-
-Add custom patterns:
-
-```bash
-agent-strace setup --redact --redact-pattern "ATTESTATION_KEY=[A-Fa-f0-9]{64}"
-```
+Secret redaction is enabled by default for all capture paths. It redacts API keys, tokens, credentials, private keys, basic-auth URLs, and connection strings before they hit disk. Detected patterns include OpenAI (`sk-*`), GitHub (`ghp_*`, `github_pat_*`), AWS (`AKIA*` and AWS credential key names), Anthropic (`sk-ant-*`), Slack (`xox*`), JWTs, Bearer tokens, and any value under keys like `password`, `secret`, `token`, `api_key`, or `authorization`.
 
 See [security.md](security.md) for the full security guide.

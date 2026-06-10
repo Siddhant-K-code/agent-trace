@@ -96,7 +96,7 @@ Full setup guide: [docs/setup.md](docs/setup.md)
 | [`agent-strace apply`](docs/commands.md#apply) | Apply `.agent-strace.yaml` config to local store or collector |
 | [`agent-strace workspace new`](docs/commands.md#workspace) | Create an isolated workspace |
 | [`agent-strace compliance export`](docs/commands.md#compliance) | Export compliance reports (EU AI Act, SOC 2, HIPAA) |
-| [`agent-strace record --redact`](docs/commands.md#record) | Strip secrets from traces before storage |
+| [`agent-strace record`](docs/commands.md#record) | Strip secrets from traces before storage by default |
 | [`agent-strace export --anonymize`](docs/commands.md#export) | Remove PII at export time |
 
 ### Analyse across sessions

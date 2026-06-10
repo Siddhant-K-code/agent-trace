@@ -13,8 +13,12 @@ from agent_trace.store import TraceStore
 
 class TestTraceStore(unittest.TestCase):
     def setUp(self):
+        os.environ.pop("AGENT_TRACE_NO_REDACT", None)
         self.tmpdir = tempfile.mkdtemp()
         self.store = TraceStore(self.tmpdir)
+
+    def tearDown(self):
+        os.environ.pop("AGENT_TRACE_NO_REDACT", None)
 
     def test_create_and_load_session(self):
         meta = SessionMeta(agent_name="test-agent")
@@ -150,6 +154,74 @@ class TestTraceStore(unittest.TestCase):
 
         events = self.store.load_events(meta.session_id)
         self.assertEqual(events, [])
+
+    def test_append_event_redacts_secrets_by_default(self):
+        meta = SessionMeta()
+        self.store.create_session(meta)
+
+        event = TraceEvent(
+            event_type=EventType.TOOL_CALL,
+            session_id=meta.session_id,
+            data={
+                "tool_name": "http_request",
+                "arguments": {
+                    "headers": {
+                        "Authorization": "Bearer sk-abc123def456ghi789jkl012mno345pqr678",
+                    },
+                },
+            },
+        )
+
+        self.store.append_event(meta.session_id, event)
+
+        events = self.store.load_events(meta.session_id)
+        self.assertTrue(events[0].redacted)
+        self.assertNotIn("sk-abc123", str(events[0].data))
+        self.assertIn("[REDACTED:", str(events[0].data))
+
+    def test_append_event_allows_redaction_opt_out(self):
+        store = TraceStore(self.tmpdir, redact=False)
+        meta = SessionMeta()
+        store.create_session(meta)
+
+        event = TraceEvent(
+            event_type=EventType.USER_PROMPT,
+            session_id=meta.session_id,
+            data={"prompt": "use sk-abc123def456ghi789jkl012mno345pqr678"},
+        )
+        store.append_event(meta.session_id, event)
+
+        events = store.load_events(meta.session_id)
+        self.assertFalse(events[0].redacted)
+        self.assertIn("sk-abc123", str(events[0].data))
+
+    def test_append_event_respects_no_redact_env(self):
+        os.environ["AGENT_TRACE_NO_REDACT"] = "1"
+        store = TraceStore(self.tmpdir)
+        meta = SessionMeta()
+        store.create_session(meta)
+
+        event = TraceEvent(
+            event_type=EventType.USER_PROMPT,
+            session_id=meta.session_id,
+            data={"prompt": "use sk-abc123def456ghi789jkl012mno345pqr678"},
+        )
+        store.append_event(meta.session_id, event)
+
+        events = store.load_events(meta.session_id)
+        self.assertFalse(events[0].redacted)
+        self.assertIn("sk-abc123", str(events[0].data))
+
+    def test_create_session_redacts_metadata_by_default(self):
+        meta = SessionMeta(
+            agent_name="test-agent",
+            command="run --api-key sk-abc123def456ghi789jkl012mno345pqr678",
+        )
+        self.store.create_session(meta)
+
+        loaded = self.store.load_meta(meta.session_id)
+        self.assertTrue(loaded.redacted)
+        self.assertNotIn("sk-abc123", loaded.command)
 
 
 if __name__ == "__main__":

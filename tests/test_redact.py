@@ -6,47 +6,56 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from agent_trace.redact import REDACTED, redact_data, redact_value
+from agent_trace.redact import redact_data, redact_data_with_status, redact_value, redaction_marker
 
 
 class TestRedactValue(unittest.TestCase):
     def test_openai_key(self):
         result = redact_value("sk-abc123def456ghi789jkl012mno345pqr678")
-        self.assertEqual(result, REDACTED)
+        self.assertEqual(result, redaction_marker("openai-key"))
 
     def test_github_token(self):
         result = redact_value("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl")
-        self.assertEqual(result, REDACTED)
+        self.assertEqual(result, redaction_marker("github-token"))
 
     def test_github_pat(self):
         result = redact_value("github_pat_ABCDEFGHIJKLMNOPQRSTUV_1234567890")
-        self.assertEqual(result, REDACTED)
+        self.assertEqual(result, redaction_marker("github-token"))
 
     def test_aws_key(self):
         result = redact_value("AKIAIOSFODNN7EXAMPLE")
-        self.assertEqual(result, REDACTED)
+        self.assertEqual(result, redaction_marker("aws-access-key"))
 
     def test_bearer_token(self):
         result = redact_value("Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.test")
-        self.assertIn(REDACTED, result)
+        self.assertIn(redaction_marker("bearer-token"), result)
 
     def test_connection_string(self):
         result = redact_value("postgres://user:pass@host:5432/db")
-        self.assertEqual(result, REDACTED)
+        self.assertEqual(result, redaction_marker("connection-string"))
 
     def test_jwt(self):
         jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
         result = redact_value(jwt)
-        self.assertEqual(result, REDACTED)
+        self.assertEqual(result, redaction_marker("jwt"))
 
     def test_anthropic_key(self):
         result = redact_value("sk-ant-api03-abcdefghijklmnopqrstuvwxyz")
-        self.assertEqual(result, REDACTED)
+        self.assertEqual(result, redaction_marker("anthropic-key"))
 
     def test_slack_token(self):
         # Use a clearly fake token that still matches the xox[bpras]-... pattern
         result = redact_value("xoxb-fake-test-token-value")
-        self.assertEqual(result, REDACTED)
+        self.assertEqual(result, redaction_marker("slack-token"))
+
+    def test_private_key(self):
+        key = "-----BEGIN PRIVATE KEY-----\nabc123\n-----END PRIVATE KEY-----"
+        result = redact_value(key)
+        self.assertEqual(result, redaction_marker("private-key"))
+
+    def test_basic_auth_url(self):
+        result = redact_value("https://alice:secret@example.com/path")
+        self.assertEqual(result, f"https://{redaction_marker('basic-auth')}@example.com/path")
 
     def test_safe_string_unchanged(self):
         result = redact_value("hello world")
@@ -58,7 +67,7 @@ class TestRedactValue(unittest.TestCase):
 
     def test_inline_redaction(self):
         result = redact_value("Authorization: Bearer sk-abc123def456ghi789jkl012mno345pqr678")
-        self.assertIn(REDACTED, result)
+        self.assertIn("[REDACTED:", result)
         self.assertNotIn("sk-abc", result)
 
 
@@ -67,17 +76,17 @@ class TestRedactData(unittest.TestCase):
         data = {"username": "alice", "password": "secret123"}
         result = redact_data(data)
         self.assertEqual(result["username"], "alice")
-        self.assertEqual(result["password"], REDACTED)
+        self.assertEqual(result["password"], redaction_marker("sensitive"))
 
     def test_redact_api_key(self):
         data = {"api_key": "sk-abc123def456ghi789jkl012mno345pqr678"}
         result = redact_data(data)
-        self.assertEqual(result["api_key"], REDACTED)
+        self.assertEqual(result["api_key"], redaction_marker("sensitive"))
 
     def test_redact_token_key(self):
         data = {"token": "some-secret-value", "name": "test"}
         result = redact_data(data)
-        self.assertEqual(result["token"], REDACTED)
+        self.assertEqual(result["token"], redaction_marker("sensitive"))
         self.assertEqual(result["name"], "test")
 
     def test_redact_nested_dict(self):
@@ -88,7 +97,7 @@ class TestRedactData(unittest.TestCase):
             }
         }
         result = redact_data(data)
-        self.assertEqual(result["config"]["database_url"], REDACTED)
+        self.assertEqual(result["config"]["database_url"], redaction_marker("sensitive"))
         self.assertEqual(result["config"]["name"], "myapp")
 
     def test_redact_list_values(self):
@@ -109,7 +118,7 @@ class TestRedactData(unittest.TestCase):
             }
         }
         result = redact_data(data)
-        self.assertEqual(result["arguments"]["url"], REDACTED)
+        self.assertEqual(result["arguments"]["url"], redaction_marker("connection-string"))
         self.assertEqual(result["arguments"]["query"], "SELECT * FROM users")
 
     def test_non_string_values_unchanged(self):
@@ -127,7 +136,13 @@ class TestRedactData(unittest.TestCase):
         # keys are checked lowercase
         result = redact_data(data)
         # "Password" lowered is "password" which is in SENSITIVE_KEYS
-        self.assertEqual(result["Password"], REDACTED)
+        self.assertEqual(result["Password"], redaction_marker("sensitive"))
+
+    def test_aws_env_var_key_names(self):
+        data = {"AWS_SECRET_ACCESS_KEY": "secret", "AWS_SESSION_TOKEN": "token"}
+        result = redact_data(data)
+        self.assertEqual(result["AWS_SECRET_ACCESS_KEY"], redaction_marker("sensitive"))
+        self.assertEqual(result["AWS_SESSION_TOKEN"], redaction_marker("sensitive"))
 
     def test_tool_call_with_secrets(self):
         """Simulate a real tool call event data with secrets."""
@@ -145,8 +160,14 @@ class TestRedactData(unittest.TestCase):
         result = redact_data(data)
         self.assertEqual(result["tool_name"], "http_request")
         self.assertEqual(result["arguments"]["url"], "https://api.example.com/data")
-        self.assertIn(REDACTED, result["arguments"]["headers"]["Authorization"])
-        self.assertEqual(result["arguments"]["api_key"], REDACTED)
+        self.assertIn("[REDACTED:", result["arguments"]["headers"]["Authorization"])
+        self.assertEqual(result["arguments"]["api_key"], redaction_marker("sensitive"))
+
+    def test_redact_data_with_status(self):
+        data = {"text": "hello sk-abc123def456ghi789jkl012mno345pqr678"}
+        result, changed = redact_data_with_status(data)
+        self.assertTrue(changed)
+        self.assertNotIn("sk-abc123", str(result))
 
 
 if __name__ == "__main__":

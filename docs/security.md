@@ -6,15 +6,16 @@ agent-strace provides two complementary mechanisms for keeping sensitive data ou
 
 ## Secret redaction
 
-Strips API keys, tokens, and credentials before they hit disk. The original data is never stored.
+Strips API keys, tokens, and credentials before they hit disk. The original data is never stored. Redaction is enabled by default for all trace writes.
 
 ```bash
-# Enable redaction when capturing
-agent-strace record --redact -- npx -y @modelcontextprotocol/server-filesystem /tmp
-agent-strace record-http https://mcp.example.com --redact
+# Default: redact before writing traces
+agent-strace record -- npx -y @modelcontextprotocol/server-filesystem /tmp
+agent-strace record-http https://mcp.example.com
 
-# Or via setup (Claude Code hooks)
-agent-strace setup --redact
+# Trusted local traces only
+agent-strace record --no-redact -- npx -y @modelcontextprotocol/server-filesystem /tmp
+agent-strace setup --no-redact
 ```
 
 Detected patterns:
@@ -29,17 +30,12 @@ Detected patterns:
 | JWTs | Three base64 segments separated by `.` |
 | Bearer tokens | `Bearer [A-Za-z0-9+/=]{20,}` |
 | Connection strings | `postgres://`, `mysql://`, `mongodb://` |
+| Basic-auth URLs | `https://user:pass@example.com` |
 | Key-named values | Any value under keys: `password`, `secret`, `token`, `api_key`, `authorization` |
 | EKM shared secrets | 64-char hex strings |
 | Private keys | PEM blocks |
 
-Redacted values become `[REDACTED]`. See [ADR-0007](../ADRs/0007-heuristic-redaction.md) for design rationale.
-
-### Custom patterns
-
-```bash
-agent-strace setup --redact --redact-pattern "ATTESTATION_KEY=[A-Fa-f0-9]{64}"
-```
+Redacted values become typed markers such as `[REDACTED:openai-key]`, `[REDACTED:bearer-token]`, or `[REDACTED:sensitive]`. Events with redaction are marked with `"redacted": true`. See [ADR-0007](../ADRs/0007-heuristic-redaction.md) for design rationale.
 
 ---
 
@@ -224,7 +220,7 @@ Or use the setup command:
 
 ```bash
 cd your-sensitive-repo
-agent-strace setup --redact
+agent-strace setup
 ```
 
 Combine with [agentic-authz](https://github.com/Siddhant-K-code/agentic-authz) to block agents from security-critical components entirely, and use agent-strace to audit everything they do access.

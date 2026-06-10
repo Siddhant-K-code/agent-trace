@@ -47,7 +47,7 @@ from pathlib import Path
 
 from .models import EventType, SessionMeta, TraceEvent
 from .attribution import collect_attribution
-from .redact import redact_data
+from .redact import redact_data, redact_data_with_status, redaction_enabled
 from .store import TraceStore
 
 # Pending tool calls are tracked in a file so separate hook processes
@@ -79,6 +79,12 @@ def _write_event(store: TraceStore, session_id: str, event: TraceEvent) -> None:
     """Write an event to local store or remote collector, depending on env."""
     endpoint = _get_remote_endpoint()
     if endpoint:
+        if redaction_enabled():
+            event.data, changed = redact_data_with_status(event.data)
+            if changed:
+                if not event.redacted:
+                    sys.stderr.write("agent-strace: redacted secrets from trace event\n")
+                event.redacted = True
         from .server import send_event_to_endpoint
         send_event_to_endpoint(event, endpoint)
     else:
@@ -170,7 +176,10 @@ def _read_stdin() -> dict:
 
 
 def _should_redact() -> bool:
-    return os.environ.get("AGENT_TRACE_REDACT", "").lower() in ("1", "true", "yes")
+    return (
+        redaction_enabled()
+        and os.environ.get("AGENT_TRACE_REDACT", "").lower() in ("1", "true", "yes")
+    )
 
 
 def handle_session_start(input_data: dict) -> None:

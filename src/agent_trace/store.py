@@ -21,9 +21,11 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 from .models import EventType, SessionMeta, TraceEvent
+from .redact import redact_data_with_status, redaction_enabled
 
 DEFAULT_TRACE_DIR = ".agent-traces"
 
@@ -38,8 +40,12 @@ def _workspace_base(base_dir: str | Path, workspace_id: str) -> Path:
 
 
 class TraceStore:
-    def __init__(self, base_dir: str | Path = DEFAULT_TRACE_DIR,
-                 workspace_id: str = ""):
+    def __init__(
+        self,
+        base_dir: str | Path = DEFAULT_TRACE_DIR,
+        workspace_id: str = "",
+        redact: bool | None = None,
+    ):
         """Create a TraceStore.
 
         workspace_id scopes all reads/writes to a subdirectory:
@@ -55,6 +61,37 @@ class TraceStore:
         else:
             self.base_dir = Path(base_dir)
             self.workspace_id = ""
+        self.redact = redaction_enabled() if redact is None else redact
+
+    def _warn_redacted(self, item: str) -> None:
+        sys.stderr.write(f"agent-strace: redacted secrets from {item}\n")
+
+    def _redact_event(self, event: TraceEvent) -> None:
+        if not self.redact:
+            return
+        redacted_data, changed = redact_data_with_status(event.data)
+        if changed:
+            event.data = redacted_data
+            if not event.redacted:
+                self._warn_redacted("trace event")
+            event.redacted = True
+
+    def _redact_meta(self, meta: SessionMeta) -> None:
+        if not self.redact:
+            return
+        redacted, changed = redact_data_with_status({
+            "agent_name": meta.agent_name,
+            "command": meta.command,
+            "attribution": meta.attribution,
+        })
+        if changed:
+            already_redacted = meta.redacted
+            meta.agent_name = redacted.get("agent_name", meta.agent_name)
+            meta.command = redacted.get("command", meta.command)
+            meta.attribution = redacted.get("attribution", meta.attribution)
+            meta.redacted = True
+            if not already_redacted:
+                self._warn_redacted("session metadata")
 
     def _session_dir(self, session_id: str) -> Path:
         return self.base_dir / session_id
@@ -63,6 +100,7 @@ class TraceStore:
         # Stamp workspace_id onto meta so it's visible in exports/reports
         if self.workspace_id and not getattr(meta, "workspace_id", ""):
             meta.workspace_id = self.workspace_id
+        self._redact_meta(meta)
         d = self._session_dir(meta.session_id)
         d.mkdir(parents=True, exist_ok=True)
         (d / "meta.json").write_text(meta.to_json())
@@ -72,6 +110,7 @@ class TraceStore:
 
     def append_event(self, session_id: str, event: TraceEvent) -> None:
         f = self._session_dir(session_id) / "events.ndjson"
+        self._redact_event(event)
         # Compute hash chain: SHA-256 of the last line in the file
         if not event.prev_hash:
             try:
@@ -86,6 +125,7 @@ class TraceStore:
 
     def update_meta(self, meta: SessionMeta) -> None:
         f = self._session_dir(meta.session_id) / "meta.json"
+        self._redact_meta(meta)
         f.write_text(meta.to_json())
 
     def load_meta(self, session_id: str) -> SessionMeta:

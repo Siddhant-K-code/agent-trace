@@ -47,12 +47,12 @@ def _get_active_redact() -> bool:
 def start_session(
     name: str = "",
     trace_dir: str = ".agent-traces",
-    redact: bool = False,
+    redact: bool | None = None,
 ) -> str:
     """Start a new trace session. Returns the session ID."""
-    _local.store = TraceStore(trace_dir)
+    _local.store = TraceStore(trace_dir, redact=redact)
     _local.session = SessionMeta(agent_name=name)
-    _local.redact = redact
+    _local.redact = _local.store.redact
     _local.store.create_session(_local.session)
 
     event = TraceEvent(

@@ -55,10 +55,14 @@ class TraceEvent:
     data: dict[str, Any] = field(default_factory=dict)
     # SHA-256 hex digest of the previous event's JSON line (empty on first event)
     prev_hash: str = ""
+    # True when secret redaction changed or protected this event before write
+    redacted: bool = False
 
     def to_json(self) -> str:
         d = asdict(self)
         d["event_type"] = self.event_type.value
+        if not d.get("redacted"):
+            d.pop("redacted", None)
         # drop None values
         d = {k: v for k, v in d.items() if v is not None and v != ""}
         return json.dumps(d, separators=(",", ":"))
@@ -93,6 +97,8 @@ class SessionMeta:
     workspace_id: str = ""
     # Attribution (who/what started this session)
     attribution: dict = field(default_factory=dict)
+    # True when secret redaction changed or protected session metadata
+    redacted: bool = False
 
     def to_json(self) -> str:
         d = asdict(self)

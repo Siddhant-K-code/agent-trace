@@ -1,9 +1,9 @@
 """CLI entry point.
 
 Usage:
-    agent-strace record [--redact] -- <server-command> [args...]
-    agent-strace record-http [--redact] --url <remote-url> [--port <local-port>]
-    agent-strace setup [--redact] [--global]
+    agent-strace record [--no-redact] -- <server-command> [args...]
+    agent-strace record-http [--no-redact] --url <remote-url> [--port <local-port>]
+    agent-strace setup [--no-redact] [--global]
     agent-strace hook <event>
     agent-strace replay [session-id]
     agent-strace list
@@ -80,9 +80,18 @@ def _print_live_event(event: TraceEvent) -> None:
     sys.stderr.flush()
 
 
+def _redact_setting(args: argparse.Namespace) -> bool | None:
+    """Return explicit redaction setting, or None to use env/defaults."""
+    if getattr(args, "no_redact", False):
+        return False
+    if getattr(args, "redact", False):
+        return True
+    return None
+
+
 def cmd_record(args: argparse.Namespace) -> int:
     """Record an MCP server session."""
-    store = TraceStore(args.trace_dir)
+    store = TraceStore(args.trace_dir, redact=_redact_setting(args))
 
     server_cmd = args.server_cmd
     # Strip leading '--' separator added by argparse REMAINDER
@@ -127,7 +136,7 @@ def cmd_record(args: argparse.Namespace) -> int:
 
 def cmd_record_http(args: argparse.Namespace) -> int:
     """Record a remote MCP server session over HTTP/SSE."""
-    store = TraceStore(args.trace_dir)
+    store = TraceStore(args.trace_dir, redact=_redact_setting(args))
 
     meta = SessionMeta(
         agent_name=args.name or "",
@@ -443,7 +452,9 @@ def cmd_stats(args: argparse.Namespace) -> int:
 def cmd_setup(args: argparse.Namespace) -> None:
     """Generate Claude Code hooks configuration."""
     redact_env = ""
-    if args.redact:
+    if args.no_redact:
+        redact_env = "AGENT_TRACE_NO_REDACT=1 "
+    elif args.redact:
         redact_env = "AGENT_TRACE_REDACT=1 "
 
     cmd_prefix = f"{redact_env}agent-strace hook"
@@ -507,7 +518,17 @@ def build_parser() -> argparse.ArgumentParser:
     # record
     p_record = sub.add_parser("record", help="record an MCP server session (stdio)")
     p_record.add_argument("--name", "-n", help="name for this agent/session")
-    p_record.add_argument("--redact", action="store_true", help="redact secrets from trace data")
+    record_redaction = p_record.add_mutually_exclusive_group()
+    record_redaction.add_argument(
+        "--redact",
+        action="store_true",
+        help="redact secrets from trace data (default)",
+    )
+    record_redaction.add_argument(
+        "--no-redact",
+        action="store_true",
+        help="disable automatic secret redaction",
+    )
     p_record.add_argument("--verbose", "-v", action="store_true", help="print events to stderr during recording")
     p_record.add_argument("--quiet", "-q", action="store_true", help="suppress all output except errors")
     p_record.add_argument("server_cmd", nargs=argparse.REMAINDER, help="MCP server command to run")
@@ -517,7 +538,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_record_http.add_argument("--url", "-u", required=True, help="remote MCP server URL")
     p_record_http.add_argument("--port", "-p", type=int, default=5100, help="local proxy port (default: 5100)")
     p_record_http.add_argument("--name", "-n", help="name for this agent/session")
-    p_record_http.add_argument("--redact", action="store_true", help="redact secrets from trace data")
+    record_http_redaction = p_record_http.add_mutually_exclusive_group()
+    record_http_redaction.add_argument(
+        "--redact",
+        action="store_true",
+        help="redact secrets from trace data (default)",
+    )
+    record_http_redaction.add_argument(
+        "--no-redact",
+        action="store_true",
+        help="disable automatic secret redaction",
+    )
     p_record_http.add_argument("--verbose", "-v", action="store_true", help="print events to stderr during recording")
     p_record_http.add_argument("--quiet", "-q", action="store_true", help="suppress all output except errors")
 
@@ -596,7 +627,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     # setup (generate Claude Code hooks config)
     p_setup = sub.add_parser("setup", help="generate Claude Code hooks configuration")
-    p_setup.add_argument("--redact", action="store_true", help="enable secret redaction")
+    setup_redaction = p_setup.add_mutually_exclusive_group()
+    setup_redaction.add_argument(
+        "--redact",
+        action="store_true",
+        help="enable secret redaction explicitly (default)",
+    )
+    setup_redaction.add_argument(
+        "--no-redact",
+        action="store_true",
+        help="disable automatic secret redaction in generated hooks",
+    )
     p_setup.add_argument("--global", dest="global_config", action="store_true", help="output config for ~/.claude/settings.json (all projects)")
 
     # import (Claude Code JSONL session logs)

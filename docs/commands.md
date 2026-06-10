@@ -8,27 +8,28 @@ Full flag reference for every `agent-strace` command.
 
 ### `record`
 ```
-agent-strace record [--name NAME] [--redact] [--mask] -- <command>
+agent-strace record [--name NAME] [--no-redact] [--mask] -- <command>
 ```
 Capture an MCP stdio server session. Wraps `<command>` as a transparent proxy.
 
 | Flag | Description |
 |---|---|
 | `--name NAME` | Label for the session |
-| `--redact` | Strip secrets before writing to disk |
+| `--redact` | Strip secrets before writing to disk; kept for compatibility because this is now the default |
+| `--no-redact` | Disable automatic secret redaction |
 | `--mask` | Mask PII (email, phone, CC, SSN) |
 
 ### `record-http`
 ```
-agent-strace record-http <url> [--port N] [--redact] [--mask]
+agent-strace record-http <url> [--port N] [--no-redact] [--mask]
 ```
 Capture an MCP HTTP/SSE server session. Listens on `--port` (default: 3100) and proxies to `<url>`.
 
 ### `setup`
 ```
-agent-strace setup [--redact] [--global]
+agent-strace setup [--no-redact] [--global]
 ```
-Print Claude Code hooks config JSON for `~/.claude/settings.json`. Use `--global` to scope hooks to all projects (default scopes to the current project).
+Print Claude Code hooks config JSON for `~/.claude/settings.json`. Use `--global` to scope hooks to all projects (default scopes to the current project). Secret redaction is enabled by default; use `--no-redact` only for trusted local traces.
 
 ### `import`
 ```
