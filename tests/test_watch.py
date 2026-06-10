@@ -10,6 +10,7 @@ from collections import deque
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
+from agent_trace.cli import build_parser
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
 from agent_trace.watch import (
@@ -20,6 +21,7 @@ from agent_trace.watch import (
     _alert_file,
     _apply_builtin_rules_spec,
     _detect_loop,
+    _detect_spin_loop,
     _event_key,
 )
 
@@ -41,6 +43,8 @@ def _default_config(**kwargs) -> WatcherConfig:
         max_retries=3,
         max_cost_dollars=10.0,
         max_duration_seconds=3600.0,
+        loop_threshold=99,
+        loop_window=10,
         loop_sequence_length=3,
         loop_max_repeats=3,
         on_violation="terminal",
@@ -151,6 +155,31 @@ class TestDurationLimit(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestLoopDetection(unittest.TestCase):
+    def test_detects_identical_tool_call_spin_loop(self):
+        recent = deque([
+            _event_key(_bash_event("pytest")),
+            "user_prompt",
+            _event_key(_bash_event("pytest")),
+            _event_key(_bash_event("pytest")),
+        ], maxlen=30)
+        result = _detect_spin_loop(recent, threshold=3, window=10)
+        self.assertIsNotNone(result)
+        self.assertIn("identical tool call repeated 3 times", result)
+
+    def test_spin_loop_respects_window(self):
+        repeated = _event_key(_bash_event("pytest"))
+        recent = deque([repeated, repeated, "user_prompt", "assistant_response", repeated], maxlen=30)
+        result = _detect_spin_loop(recent, threshold=3, window=3)
+        self.assertIsNone(result)
+
+    def test_check_event_reports_spin_loop(self):
+        config = _default_config(loop_threshold=3, loop_window=10)
+        state = WatchState()
+        violations = []
+        for _ in range(3):
+            violations.extend(check_event(_bash_event("pytest"), config, state))
+        self.assertTrue(any("LoopWatcher" in v for v in violations))
+
     def test_no_loop_with_varied_events(self):
         recent = deque(["a", "b", "c", "d", "e", "f"], maxlen=30)
         result = _detect_loop(recent, seq_len=3, max_repeats=3)
@@ -229,6 +258,7 @@ class TestWatcherConfigLoad(unittest.TestCase):
                 "retry": {"max": 2, "alert": "terminal"},
                 "cost": {"max_dollars": 5.0},
                 "duration": {"max_minutes": 10},
+                "loop": {"identical_calls": 4, "window": 12},
             }
         }
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
@@ -239,6 +269,8 @@ class TestWatcherConfigLoad(unittest.TestCase):
             self.assertEqual(config.max_retries, 2)
             self.assertAlmostEqual(config.max_cost_dollars, 5.0)
             self.assertAlmostEqual(config.max_duration_seconds, 600.0)
+            self.assertEqual(config.loop_threshold, 4)
+            self.assertEqual(config.loop_window, 12)
         finally:
             os.unlink(path)
 
@@ -247,12 +279,22 @@ class TestBuiltInRules(unittest.TestCase):
     def test_builtin_rules_spec_enables_mcp_poisoning_and_limits(self):
         config = WatcherConfig()
 
-        warnings = _apply_builtin_rules_spec("mcp-poisoning,budget:$5,timeout:30m", config)
+        warnings = _apply_builtin_rules_spec("mcp-poisoning,loop:4/12,budget:$5,timeout:30m", config)
 
         self.assertEqual(warnings, [])
         self.assertIn("mcp-poisoning", config.built_in_rules)
+        self.assertIn("loop", config.built_in_rules)
+        self.assertEqual(config.loop_threshold, 4)
+        self.assertEqual(config.loop_window, 12)
         self.assertEqual(config.max_cost_dollars, 5.0)
         self.assertEqual(config.max_duration_seconds, 1800.0)
+
+    def test_watch_parser_registers_loop_flags(self):
+        parser = build_parser()
+        args = parser.parse_args(["watch", "--loop-threshold", "4", "--loop-window", "12"])
+        self.assertEqual(args.command, "watch")
+        self.assertEqual(args.loop_threshold, 4)
+        self.assertEqual(args.loop_window, 12)
 
     def test_mcp_poisoning_rule_alerts_on_exfil_sequence(self):
         config = WatcherConfig(built_in_rules={"mcp-poisoning"})

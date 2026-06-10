@@ -922,6 +922,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_watch.add_argument("--budget", type=float, metavar="DOLLARS",
                          help="token-cost ceiling in dollars before killing the agent; "
                               "alias for --max-cost")
+    p_watch.add_argument("--loop-threshold", type=int, metavar="N",
+                         help="alert when an identical tool call repeats N times (default: 3)")
+    p_watch.add_argument("--loop-window", type=int, metavar="N",
+                         help="events to scan for repeated identical tool calls (default: 10)")
     p_watch.add_argument("--on-death", dest="on_death", metavar="CMD",
                          help="command to run after the agent is killed; "
                               "{post_mortem_path} is substituted with the post-mortem JSON path")

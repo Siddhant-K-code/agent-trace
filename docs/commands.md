@@ -147,7 +147,7 @@ Check token usage against model context limit.
 agent-strace watch [session-id] [--timeout DURATION] [--budget $N] [--on-violation ACTION]
                    [--on-death CMD] [--policy FILE] [--rules FILE_OR_BUILTINS] [--stream-to URL]
                    [--stream-batch-size N] [--stream-flush-interval S]
-                   [--max-context-pct N] [--dry-run]
+                   [--loop-threshold N] [--loop-window N] [--max-context-pct N] [--dry-run]
 ```
 Live session monitor with kill-switch rules.
 
@@ -155,10 +155,12 @@ Live session monitor with kill-switch rules.
 |---|---|
 | `--timeout DURATION` | Kill after duration (e.g. `30m`, `2h`) |
 | `--budget $N` | Kill when spend exceeds N dollars |
-| `--on-violation kill\|pause\|alert` | Action when a rule fires |
+| `--loop-threshold N` | Alert when the same tool call and arguments repeat N times; default is 3 |
+| `--loop-window N` | Number of recent events to scan for repeated identical tool calls; default is 10 |
+| `--on-violation terminal\|file\|kill` | Action when a rule fires |
 | `--on-death CMD` | Command to run after kill (receives `{post_mortem_path}`) |
 | `--policy FILE` | Scope policy file to enforce (default: `.agent-scope.json`) |
-| `--rules FILE_OR_BUILTINS` | JSON/YAML rules file, or comma-separated built-ins such as `mcp-poisoning,budget:$5,timeout:30m` |
+| `--rules FILE_OR_BUILTINS` | JSON/YAML rules file, or comma-separated built-ins such as `mcp-poisoning,loop:3/10,budget:$5,timeout:30m` |
 | `--stream-to URL` | Stream events to HTTP endpoint in real-time |
 | `--dry-run` | Evaluate rules without acting |
 
@@ -171,6 +173,14 @@ Live session monitor with kill-switch rules.
     { "name": "large edit", "condition": "files_modified > 30", "action": "pause" }
   ]
 }
+```
+
+Built-in `loop` rule config:
+```yaml
+watchers:
+  loop:
+    identical_calls: 3
+    window: 10
 ```
 
 ### `mcp-scan`

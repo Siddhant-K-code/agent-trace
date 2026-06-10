@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import hashlib
 import json
 import os
 import queue
@@ -321,6 +322,8 @@ class WatcherConfig:
     max_retries: int = 5
     max_cost_dollars: float = 10.0
     max_duration_seconds: float = 1800.0
+    loop_threshold: int = 3
+    loop_window: int = 10
     loop_sequence_length: int = 3
     loop_max_repeats: int = 3
     scope_policy: str = ".agent-scope.json"
@@ -360,6 +363,11 @@ class WatcherConfig:
             max_retries=int(retry_cfg.get("max", 5)),
             max_cost_dollars=float(cost_cfg.get("max_dollars", 10.0)),
             max_duration_seconds=float(dur_cfg.get("max_minutes", 30)) * 60,
+            loop_threshold=int(loop_cfg.get(
+                "identical_calls",
+                loop_cfg.get("threshold", loop_cfg.get("max_repeats", 3)),
+            )),
+            loop_window=int(loop_cfg.get("window", 10)),
             loop_sequence_length=int(loop_cfg.get("sequence_length", 3)),
             loop_max_repeats=int(loop_cfg.get("max_repeats", 3)),
             scope_policy=str(scope_cfg.get("policy", ".agent-scope.json")),
@@ -535,7 +543,7 @@ class WatchState:
     # Session start time
     start_time: float = field(default_factory=time.time)
     # Recent event sequence for loop detection (circular buffer)
-    recent_events: deque = field(default_factory=lambda: deque(maxlen=30))
+    recent_events: deque = field(default_factory=lambda: deque(maxlen=500))
     # Violations already fired (to avoid duplicate alerts)
     fired: set = field(default_factory=set)
     # Agent PID (from session meta, if available)
@@ -566,9 +574,37 @@ def _event_key(event: TraceEvent) -> str:
     if event.event_type == EventType.TOOL_CALL:
         name = event.data.get("tool_name", "?")
         args = event.data.get("arguments", {}) or {}
-        cmd = str(args.get("command", args.get("file_path", "")))[:40]
-        return f"{name}:{cmd}"
+        arg_text = json.dumps(args, sort_keys=True, default=str)
+        arg_hash = hashlib.sha256(arg_text.encode("utf-8")).hexdigest()[:12]
+        preview = str(
+            args.get("command")
+            or args.get("file_path")
+            or args.get("path")
+            or args.get("url")
+            or ""
+        )[:40]
+        return f"{name}:{preview}:{arg_hash}"
     return event.event_type.value
+
+
+def _detect_spin_loop(
+    recent: deque,
+    threshold: int,
+    window: int,
+) -> str | None:
+    """Detect repeated identical tool calls within the last window events."""
+    threshold = max(2, int(threshold))
+    window = max(threshold, int(window))
+    items = [item for item in list(recent)[-window:] if ":" in str(item)]
+    if len(items) < threshold:
+        return None
+
+    counts = Counter(items)
+    key, count = counts.most_common(1)[0]
+    if count >= threshold:
+        display = str(key).rsplit(":", 1)[0]
+        return f"identical tool call repeated {count} times in last {window} events ({display})"
+    return None
 
 
 def _detect_loop(
@@ -851,7 +887,19 @@ def check_event(
                 f"DurationWatcher: {elapsed:.0f}s elapsed (threshold: {config.max_duration_seconds:.0f}s)"
             )
 
-    # --- Loop detection ---
+    # --- Spin loop detection: repeated identical tool calls in a window ---
+    spin_msg = _detect_spin_loop(
+        state.recent_events,
+        config.loop_threshold,
+        config.loop_window,
+    )
+    if spin_msg:
+        key_id = f"spin-loop:{spin_msg.rsplit('(', 1)[-1][:80]}"
+        if key_id not in state.fired:
+            state.fired.add(key_id)
+            violations.append(f"LoopWatcher: {spin_msg}")
+
+    # --- Sequence loop detection: repeated event sequence ---
     loop_msg = _detect_loop(
         state.recent_events,
         config.loop_sequence_length,
@@ -1132,15 +1180,24 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 sys.stderr.write(f"[watch] invalid --budget value: {budget_str!r}\n")
                 return 1
 
+        loop_threshold = getattr(args, "loop_threshold", None)
+        loop_window = getattr(args, "loop_window", None)
+
         config = WatcherConfig(
             max_retries=getattr(args, "max_retries", 5),
             max_cost_dollars=max_cost,
             max_duration_seconds=max_duration,
+            loop_threshold=3 if loop_threshold is None else int(loop_threshold),
+            loop_window=10 if loop_window is None else int(loop_window),
             on_violation=getattr(args, "on_violation", "terminal"),
             webhook_url=getattr(args, "webhook", "") or "",
             on_death_cmd=getattr(args, "on_death", "") or "",
             scope_policy=getattr(args, "policy", None) or ".agent-scope.json",
         )
+    if getattr(args, "loop_threshold", None) is not None:
+        config.loop_threshold = int(getattr(args, "loop_threshold"))
+    if getattr(args, "loop_window", None) is not None:
+        config.loop_window = int(getattr(args, "loop_window"))
 
     # Load nanny rules if --rules provided
     nanny_rules: list[NannyRule] | None = None
@@ -1198,6 +1255,22 @@ def _apply_builtin_rules_spec(spec: str, config: WatcherConfig) -> list[str]:
             continue
         if item == "mcp-poisoning":
             config.built_in_rules.add("mcp-poisoning")
+            continue
+        if item == "loop":
+            config.built_in_rules.add("loop")
+            continue
+        if item.startswith("loop:"):
+            value = item.split(":", 1)[1].strip()
+            try:
+                if "/" in value:
+                    threshold, window = value.split("/", 1)
+                    config.loop_threshold = int(threshold)
+                    config.loop_window = int(window)
+                else:
+                    config.loop_threshold = int(value)
+                config.built_in_rules.add("loop")
+            except ValueError:
+                warnings.append(f"invalid loop rule {item!r}")
             continue
         if item.startswith("budget:"):
             value = item.split(":", 1)[1].strip().lstrip("$")
