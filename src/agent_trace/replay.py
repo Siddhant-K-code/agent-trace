@@ -296,7 +296,14 @@ def format_event(event: TraceEvent, base_ts: float | None = None) -> str:
 def format_summary(meta: SessionMeta) -> str:
     """Format session summary."""
     started = datetime.fromtimestamp(meta.started_at, tz=timezone.utc)
-    duration = meta.total_duration_ms / 1000 if meta.total_duration_ms else 0
+    if meta.total_duration_ms:
+        duration_s = meta.total_duration_ms / 1000
+    elif meta.ended_at:
+        duration_s = meta.ended_at - meta.started_at
+    else:
+        duration_s = None
+
+    duration_str = f"{duration_s:.2f}s" if duration_s is not None else "—"
 
     lines = [
         f"",
@@ -304,7 +311,7 @@ def format_summary(meta: SessionMeta) -> str:
         f"{C.GRAY}{'─' * 50}{C.RESET}",
         f"  Session:    {meta.session_id}",
         f"  Started:    {started.strftime('%Y-%m-%d %H:%M:%S UTC')}",
-        f"  Duration:   {duration:.2f}s",
+        f"  Duration:   {duration_str}",
         f"  Tool calls: {meta.tool_calls}",
         f"  LLM reqs:   {meta.llm_requests}",
         f"  Errors:     {meta.errors}",
@@ -414,13 +421,22 @@ def list_sessions(store: TraceStore, out: TextIO = sys.stdout) -> None:
 
     for meta in sessions:
         started = datetime.fromtimestamp(meta.started_at, tz=timezone.utc)
-        duration = meta.total_duration_ms / 1000 if meta.total_duration_ms else 0
+
+        # Prefer explicit total_duration_ms; fall back to ended_at - started_at;
+        # show "—" for sessions that never completed (crashed / still running).
+        if meta.total_duration_ms:
+            duration_str = f"{meta.total_duration_ms / 1000:>9.1f}s"
+        elif meta.ended_at:
+            duration_str = f"{meta.ended_at - meta.started_at:>9.1f}s"
+        else:
+            duration_str = f"{C.DIM}{'—':>9} {C.RESET}"
+
         err_color = C.RED if meta.errors > 0 else C.DIM
 
         out.write(
             f"  {meta.session_id:<18} "
             f"{started.strftime('%Y-%m-%d %H:%M:%S'):<22} "
-            f"{duration:>9.1f}s "
+            f"{duration_str} "
             f"{meta.tool_calls:>6} "
             f"{meta.llm_requests:>5} "
             f"{err_color}{meta.errors:>4}{C.RESET}\n"
