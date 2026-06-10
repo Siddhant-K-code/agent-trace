@@ -333,6 +333,8 @@ class WatcherConfig:
     max_context_pct: int = 90
     # Watchdog: command to run after kill, with {post_mortem_path} substituted
     on_death_cmd: str = ""
+    # Built-in rule names enabled via --rules mcp-poisoning,budget:$5,...
+    built_in_rules: set[str] = field(default_factory=set)
 
     @classmethod
     def from_dict(cls, d: dict) -> "WatcherConfig":
@@ -365,6 +367,7 @@ class WatcherConfig:
             webhook_url=str(webhook.get("url", "")),
             operation_rules=rules,
             max_context_pct=int(d.get("max_context_pct", 90)),
+            built_in_rules=set(d.get("built_in_rules", [])),
         )
 
     @classmethod
@@ -545,6 +548,7 @@ class WatchState:
     consecutive_test_failures: int = 0
     duration_minutes: float = 0.0
     paused: bool = False             # True when agent is SIGSTOP'd
+    mcp_scan_events: list[TraceEvent] = field(default_factory=list)
 
     def nanny_metrics(self) -> dict:
         """Return current metric snapshot for nanny rule evaluation."""
@@ -923,6 +927,31 @@ def check_event(
                     state.fired.add(key_id)
                     violations.append(msg)
 
+    # --- Built-in MCP poisoning detection ---
+    if "mcp-poisoning" in config.built_in_rules:
+        state.mcp_scan_events.append(event)
+        state.mcp_scan_events = state.mcp_scan_events[-80:]
+        try:
+            from .mcp_scan import scan_live_event
+            findings = scan_live_event(
+                state.mcp_scan_events,
+                event,
+                event.session_id,
+                project_root=".",
+            )
+        except Exception:
+            findings = []
+        for finding in findings:
+            detail_key = json.dumps(finding.details, sort_keys=True, default=str)
+            key_id = f"mcp:{finding.kind}:{finding.tool_name}:{detail_key}"
+            if key_id in state.fired:
+                continue
+            state.fired.add(key_id)
+            violations.append(
+                f"McpPoisoningWatcher: {finding.severity.upper()} {finding.kind}: "
+                f"{finding.message}"
+            )
+
     return violations
 
 
@@ -1117,9 +1146,14 @@ def cmd_watch(args: argparse.Namespace) -> int:
     nanny_rules: list[NannyRule] | None = None
     rules_path = getattr(args, "rules", None)
     if rules_path:
-        nanny_rules = _load_nanny_rules(rules_path)
-        if not nanny_rules:
-            sys.stderr.write(f"[watch] Warning: no rules loaded from {rules_path}\n")
+        if Path(rules_path).exists():
+            nanny_rules = _load_nanny_rules(rules_path)
+            if not nanny_rules:
+                sys.stderr.write(f"[watch] Warning: no rules loaded from {rules_path}\n")
+        else:
+            warnings = _apply_builtin_rules_spec(rules_path, config)
+            for warning in warnings:
+                sys.stderr.write(f"[watch] Warning: {warning}\n")
 
     dry_run = getattr(args, "dry_run", False)
 
@@ -1149,3 +1183,35 @@ def cmd_watch(args: argparse.Namespace) -> int:
     watch_session(store, full_id, config, nanny_rules=nanny_rules, dry_run=dry_run,
                   stream_config=stream_cfg)
     return 0
+
+
+def _apply_builtin_rules_spec(spec: str, config: WatcherConfig) -> list[str]:
+    """Apply comma-separated built-in watch rules to config.
+
+    Existing --rules FILE behaviour is preserved by cmd_watch; this parser is
+    used only when the provided value is not a path on disk.
+    """
+    warnings: list[str] = []
+    for raw in spec.split(","):
+        item = raw.strip()
+        if not item:
+            continue
+        if item == "mcp-poisoning":
+            config.built_in_rules.add("mcp-poisoning")
+            continue
+        if item.startswith("budget:"):
+            value = item.split(":", 1)[1].strip().lstrip("$")
+            try:
+                config.max_cost_dollars = float(value)
+            except ValueError:
+                warnings.append(f"invalid budget rule {item!r}")
+            continue
+        if item.startswith("timeout:"):
+            value = item.split(":", 1)[1].strip()
+            try:
+                config.max_duration_seconds = _parse_duration(value)
+            except ValueError:
+                warnings.append(f"invalid timeout rule {item!r}")
+            continue
+        warnings.append(f"unknown built-in rule {item!r}")
+    return warnings

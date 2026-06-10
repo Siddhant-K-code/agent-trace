@@ -145,7 +145,7 @@ Check token usage against model context limit.
 ### `watch`
 ```
 agent-strace watch [session-id] [--timeout DURATION] [--budget $N] [--on-violation ACTION]
-                   [--on-death CMD] [--policy FILE] [--rules FILE] [--stream-to URL]
+                   [--on-death CMD] [--policy FILE] [--rules FILE_OR_BUILTINS] [--stream-to URL]
                    [--stream-batch-size N] [--stream-flush-interval S]
                    [--max-context-pct N] [--dry-run]
 ```
@@ -158,18 +158,38 @@ Live session monitor with kill-switch rules.
 | `--on-violation kill\|pause\|alert` | Action when a rule fires |
 | `--on-death CMD` | Command to run after kill (receives `{post_mortem_path}`) |
 | `--policy FILE` | Scope policy file to enforce (default: `.agent-scope.json`) |
-| `--rules FILE` | JSON rules file |
+| `--rules FILE_OR_BUILTINS` | JSON/YAML rules file, or comma-separated built-ins such as `mcp-poisoning,budget:$5,timeout:30m` |
 | `--stream-to URL` | Stream events to HTTP endpoint in real-time |
 | `--dry-run` | Evaluate rules without acting |
 
 **Rules file format** (`.watch-rules.json`):
 ```json
-[
-  { "condition": "cost_usd", "threshold": 0.50, "action": "kill" },
-  { "condition": "file_path", "glob": "**/production.env", "action": "kill" },
-  { "condition": "files_modified", "threshold": 30, "action": "pause" }
-]
+{
+  "rules": [
+    { "name": "cost cap", "condition": "cost_usd > 0.50", "action": "kill" },
+    { "name": "protected env", "condition": "file_path matches \"**/production.env\"", "action": "kill" },
+    { "name": "large edit", "condition": "files_modified > 30", "action": "pause" }
+  ]
+}
 ```
+
+### `mcp-scan`
+```
+agent-strace mcp-scan [--session ID] [--since DURATION_OR_DATE] [--watch]
+                       [--patterns FILE] [--project-root DIR] [--format text|json]
+```
+Scan recorded sessions for runtime MCP tool poisoning indicators. Checks include suspicious tool description instructions, description hash drift against earlier sessions, and risky sequences such as credential reads followed by external HTTP calls.
+
+| Flag | Description |
+|---|---|
+| `--session ID` | Scan one session by ID or prefix |
+| `--since DURATION_OR_DATE` | Scan recent sessions since a duration or ISO date (default: `7d`) |
+| `--watch` | Tail the selected/latest session and alert as new events arrive |
+| `--patterns FILE` | Add regex patterns from a plain text file |
+| `--project-root DIR` | Root used to detect writes outside the project (default: `.`) |
+| `--format text\|json` | Output format (default: `text`) |
+
+Custom patterns are read from `~/.agent-strace/mcp-patterns.txt` by default. Add one case-insensitive regex per line; blank lines and `#` comments are ignored.
 
 ### `audit`
 ```

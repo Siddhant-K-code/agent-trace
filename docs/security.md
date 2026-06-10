@@ -197,6 +197,29 @@ Detected tools: Claude Code, Cursor, GitHub Copilot, Codex/ChatGPT, Windsurf, Ai
 
 ---
 
+## Runtime MCP poisoning scan
+
+`agent-strace mcp-scan` scans the session store for runtime MCP poisoning indicators. It works on the tool descriptions and tool calls the agent actually saw during the session.
+
+```bash
+agent-strace mcp-scan
+agent-strace mcp-scan --session abc123
+agent-strace mcp-scan --watch
+agent-strace watch --rules mcp-poisoning,budget:$5,timeout:30m
+```
+
+The scanner checks:
+
+| Check | What it catches |
+|---|---|
+| Description pattern match | Tool descriptions containing instruction override text such as `SYSTEM:`, `ignore previous instructions`, or `<HIDDEN>` |
+| Description drift | A tool name whose runtime description changed since an earlier session |
+| Behavioural sequence | Credential reads followed by external HTTP, environment dumps followed by external HTTP, mass reads followed by compression, and writes outside the project root |
+
+Add custom regexes to `~/.agent-strace/mcp-patterns.txt`, one pattern per line. The scan is local and deterministic; it does not call a remote reputation service.
+
+---
+
 ## Recommended setup for sensitive repos
 
 Commit `.claude/settings.json` to the repo root so every developer gets the same instrumentation:

