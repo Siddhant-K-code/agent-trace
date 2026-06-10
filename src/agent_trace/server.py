@@ -387,6 +387,13 @@ def run_server(
         f"[agent-strace server] listening on {host}:{port}{auth_note}\n"
         f"[agent-strace server] storage: {Path(storage_dir).resolve()}\n"
         f"[agent-strace server] health: http://{host}:{port}/health{dash_note}\n"
+        f"\n"
+        f"[agent-strace server] purpose : collect traces from remote agents\n"
+        f"[agent-strace server] usage   : set AGENT_STRACE_ENDPOINT=http://<this-host>:{port} on each agent machine\n"
+        f"[agent-strace server] api     : POST /events  POST /sessions  GET /sessions  GET /sessions/<id>/events\n"
+        f"[agent-strace server] inspect : agent-strace list / replay / export  (reads the same storage dir)\n"
+        f"[agent-strace server] html    : agent-strace replay --format html    (shareable single-file viewer)\n"
+        f"[agent-strace server] otlp    : agent-strace export --format otlp --endpoint <collector-url>\n"
     )
     try:
         server.serve_forever()
