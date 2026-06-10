@@ -450,16 +450,18 @@ def cmd_stats(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_setup(args: argparse.Namespace) -> None:
-    """Generate Claude Code hooks configuration."""
+def _hook_command_prefix(args: argparse.Namespace, provider: str = "claude") -> str:
     redact_env = ""
     if args.no_redact:
         redact_env = "AGENT_TRACE_NO_REDACT=1 "
     elif args.redact:
         redact_env = "AGENT_TRACE_REDACT=1 "
+    provider_arg = "" if provider == "claude" else f"--provider {provider} "
+    return f"{redact_env}agent-strace hook {provider_arg}".rstrip()
 
-    cmd_prefix = f"{redact_env}agent-strace hook"
 
+def _claude_hooks_config(args: argparse.Namespace) -> dict:
+    cmd_prefix = _hook_command_prefix(args, provider="claude")
     config = {
         "hooks": {
             "UserPromptSubmit": [{
@@ -488,16 +490,69 @@ def cmd_setup(args: argparse.Namespace) -> None:
             }],
         }
     }
+    return config
 
-    output = json.dumps(config, indent=2)
 
-    sys.stderr.write("Add this to ~/.claude/settings.json:\n\n")
+def _codex_hooks_config(args: argparse.Namespace) -> dict:
+    cmd_prefix = _hook_command_prefix(args, provider="codex")
+    return {
+        "hooks": {
+            "SessionStart": [{
+                "matcher": "startup|resume|clear|compact",
+                "hooks": [{
+                    "type": "command",
+                    "command": f"{cmd_prefix} session-start",
+                }],
+            }],
+            "UserPromptSubmit": [{
+                "hooks": [{
+                    "type": "command",
+                    "command": f"{cmd_prefix} user-prompt",
+                }],
+            }],
+            "PreToolUse": [{
+                "matcher": ".*",
+                "hooks": [{
+                    "type": "command",
+                    "command": f"{cmd_prefix} pre-tool",
+                }],
+            }],
+            "PostToolUse": [{
+                "matcher": ".*",
+                "hooks": [{
+                    "type": "command",
+                    "command": f"{cmd_prefix} post-tool",
+                }],
+            }],
+            "Stop": [{
+                "hooks": [{
+                    "type": "command",
+                    "command": f"{cmd_prefix} stop",
+                }],
+            }],
+        }
+    }
 
-    sys.stdout.write(output + "\n")
+
+def cmd_setup(args: argparse.Namespace) -> None:
+    """Generate hooks configuration for supported agent CLIs."""
+    cli = getattr(args, "cli", "claude") or "claude"
+
+    configs: list[tuple[str, str, dict]] = []
+    if cli in ("claude", "all"):
+        configs.append(("Claude Code", "~/.claude/settings.json", _claude_hooks_config(args)))
+    if cli in ("codex", "all"):
+        configs.append(("OpenAI Codex", "~/.codex/hooks.json", _codex_hooks_config(args)))
+
+    for idx, (name, path, config) in enumerate(configs):
+        if idx:
+            sys.stdout.write("\n")
+        sys.stderr.write(f"Add this to {path} for {name}:\n\n")
+        sys.stdout.write(json.dumps(config, indent=2) + "\n")
+
     sys.stderr.write(
-        "\nThis captures the full Claude Code session: user prompts, "
-        "assistant responses, and every tool call (Bash, Edit, Write, "
-        "Read, Agent, and all MCP tools).\n"
+        "\nThis captures full agent sessions: user prompts, assistant "
+        "responses, and hook-visible tool calls.\n"
         "Replay with: agent-strace replay\n"
     )
 
@@ -622,12 +677,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_stats.add_argument("--include-subagents", action="store_true",
                          help="roll up stats across all subagent sessions")
 
-    # hook (called by Claude Code hooks system)
-    p_hook = sub.add_parser("hook", help="handle a Claude Code hook event (internal)")
+    # hook (called by agent CLI hooks systems)
+    p_hook = sub.add_parser("hook", help="handle an agent CLI hook event (internal)")
+    p_hook.add_argument("--provider", choices=["claude", "codex"], default="claude",
+                        help="hook provider (default: claude)")
     p_hook.add_argument("event", nargs="?", help="hook event: session-start, session-end, pre-tool, post-tool, post-tool-failure")
 
-    # setup (generate Claude Code hooks config)
-    p_setup = sub.add_parser("setup", help="generate Claude Code hooks configuration")
+    # setup (generate agent CLI hooks config)
+    p_setup = sub.add_parser("setup", help="generate agent CLI hooks configuration")
     setup_redaction = p_setup.add_mutually_exclusive_group()
     setup_redaction.add_argument(
         "--redact",
@@ -640,6 +697,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="disable automatic secret redaction in generated hooks",
     )
     p_setup.add_argument("--global", dest="global_config", action="store_true", help="output config for ~/.claude/settings.json (all projects)")
+    p_setup.add_argument("--cli", choices=["claude", "codex", "all"], default="claude",
+                         help="agent CLI to configure (default: claude)")
 
     # import (Claude Code JSONL session logs)
     p_import = sub.add_parser("import", help="import a Claude Code JSONL session log")
@@ -1332,7 +1391,10 @@ def main() -> None:
 
     # hook subcommand is handled separately (reads stdin)
     if args.command == "hook":
-        hook_main([args.event] if args.event else [])
+        hook_args = ["--provider", getattr(args, "provider", "claude")]
+        if args.event:
+            hook_args.append(args.event)
+        hook_main(hook_args)
         sys.exit(0)
 
     if args.command == "setup":

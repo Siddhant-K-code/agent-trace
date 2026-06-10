@@ -27,9 +27,9 @@ Capture an MCP HTTP/SSE server session. Listens on `--port` (default: 3100) and 
 
 ### `setup`
 ```
-agent-strace setup [--no-redact] [--global]
+agent-strace setup [--cli claude|codex|all] [--no-redact] [--global]
 ```
-Print Claude Code hooks config JSON for `~/.claude/settings.json`. Use `--global` to scope hooks to all projects (default scopes to the current project). Secret redaction is enabled by default; use `--no-redact` only for trusted local traces.
+Print hooks config JSON for supported agent CLIs. `--cli claude` prints Claude Code settings JSON for `~/.claude/settings.json`; `--cli codex` prints OpenAI Codex hooks JSON for `~/.codex/hooks.json`; `--cli all` prints both. Secret redaction is enabled by default; use `--no-redact` only for trusted local traces.
 
 ### `import`
 ```

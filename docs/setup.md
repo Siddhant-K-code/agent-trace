@@ -4,13 +4,19 @@ Three ways to capture agent sessions. Pick the one that matches your agent.
 
 ---
 
-## Option 1: Claude Code hooks (recommended)
+## Option 1: CLI hooks (recommended)
 
 Captures everything: user prompts, assistant responses, and every tool call (Bash, Edit, Write, Read, Agent, Grep, Glob, WebFetch, WebSearch, all MCP tools).
 
 ```bash
-# Generate and apply hooks config
+# Generate Claude Code hooks config
 agent-strace setup
+
+# Generate OpenAI Codex hooks config
+agent-strace setup --cli codex
+
+# Generate both hook configs
+agent-strace setup --cli all
 
 # For all projects (global config)
 agent-strace setup --global
@@ -42,6 +48,24 @@ agent-strace list     # list sessions
 agent-strace replay   # replay the latest
 agent-strace explain  # plain-English summary
 ```
+
+### OpenAI Codex hooks
+
+`agent-strace setup --cli codex` prints hooks JSON for `~/.codex/hooks.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [{ "matcher": "startup|resume|clear|compact", "hooks": [{ "type": "command", "command": "agent-strace hook --provider codex session-start" }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "agent-strace hook --provider codex user-prompt" }] }],
+    "PreToolUse": [{ "matcher": ".*", "hooks": [{ "type": "command", "command": "agent-strace hook --provider codex pre-tool" }] }],
+    "PostToolUse": [{ "matcher": ".*", "hooks": [{ "type": "command", "command": "agent-strace hook --provider codex post-tool" }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "agent-strace hook --provider codex stop" }] }]
+  }
+}
+```
+
+Codex sends one JSON object to each command hook on stdin. agent-strace records the common Codex fields (`session_id`, `turn_id`, `tool_use_id`, `tool_name`, `tool_input`, `tool_response`, `prompt`, and `last_assistant_message`) into the same `.agent-traces/` session store used by Claude Code.
 
 ### Import existing sessions
 

@@ -1,8 +1,8 @@
-"""Claude Code hooks integration.
+"""Agent CLI hooks integration.
 
-Captures every tool call Claude Code makes — not just MCP calls.
-Uses Claude Code's hooks system (PreToolUse, PostToolUse, SessionStart,
-SessionEnd) to trace Bash, Edit, Write, Read, Agent, and all other tools.
+Captures every tool call supported CLIs make, not just MCP calls. Uses the
+Claude Code and OpenAI Codex hooks systems to trace Bash, Edit, Write, Read,
+Agent, apply_patch, and all other hook-visible tools.
 
 Usage:
     # In .claude/settings.json or ~/.claude/settings.json:
@@ -60,6 +60,17 @@ _PENDING_FILE = ".pending-calls.json"
 # session ID passed in the SessionStart payload.  This prevents concurrent
 # agents sharing the same AGENT_TRACE_DIR from corrupting each other.
 _CLAUDE_SESSION_ID_ENV = "AGENT_TRACE_CLAUDE_SESSION_ID"
+_CODEX_SESSION_ID_ENV = "AGENT_TRACE_CODEX_SESSION_ID"
+
+_PROVIDER_ENV = {
+    "claude": _CLAUDE_SESSION_ID_ENV,
+    "codex": _CODEX_SESSION_ID_ENV,
+}
+
+_PROVIDER_AGENT = {
+    "claude": "claude-code",
+    "codex": "openai-codex",
+}
 
 
 def _get_store_dir() -> str:
@@ -91,34 +102,38 @@ def _write_event(store: TraceStore, session_id: str, event: TraceEvent) -> None:
         store.append_event(session_id, event)
 
 
-def _state_suffix() -> str:
-    """Return a filename suffix scoped to the current Claude Code session.
+def _provider_env(provider: str = "claude") -> str:
+    return _PROVIDER_ENV.get(provider, _CLAUDE_SESSION_ID_ENV)
 
-    Claude Code sets AGENT_TRACE_CLAUDE_SESSION_ID (written by handle_session_start).
-    Using it as a suffix isolates concurrent agents that share AGENT_TRACE_DIR.
+
+def _state_suffix(provider: str = "claude") -> str:
+    """Return a filename suffix scoped to the current hook provider session.
+
+    Providers pass session_id on every hook payload. handle_session_start also
+    sets a provider-specific env var for same-process tests and manual use.
     """
-    sid = os.environ.get(_CLAUDE_SESSION_ID_ENV, "")
+    sid = os.environ.get(_provider_env(provider), "")
     return f".{sid}" if sid else ""
 
 
-def _active_session_path() -> Path:
-    return Path(_get_store_dir()) / f".active-session{_state_suffix()}"
+def _active_session_path(provider: str = "claude") -> Path:
+    return Path(_get_store_dir()) / f".active-session{_state_suffix(provider)}"
 
 
-def _pending_calls_path() -> Path:
-    suffix = _state_suffix()
+def _pending_calls_path(provider: str = "claude") -> Path:
+    suffix = _state_suffix(provider)
     name = _PENDING_FILE.replace(".json", f"{suffix}.json")
     return Path(_get_store_dir()) / name
 
 
-def _read_active_session() -> str | None:
-    path = _active_session_path()
+def _read_active_session(provider: str = "claude") -> str | None:
+    path = _active_session_path(provider)
     if path.exists():
         return path.read_text().strip()
     return None
 
 
-def _resolve_session_id(input_data: dict) -> str | None:
+def _resolve_session_id(input_data: dict, provider: str = "claude") -> str | None:
     """Return the agent-trace session ID for this hook invocation.
 
     Claude Code passes session_id in every hook payload. We derive our
@@ -133,23 +148,23 @@ def _resolve_session_id(input_data: dict) -> str | None:
     raw = input_data.get("session_id", "")
     if raw:
         return raw[:16]
-    return _read_active_session()
+    return _read_active_session(provider)
 
 
-def _write_active_session(session_id: str) -> None:
-    path = _active_session_path()
+def _write_active_session(session_id: str, provider: str = "claude") -> None:
+    path = _active_session_path(provider)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(session_id)
 
 
-def _clear_active_session() -> None:
-    path = _active_session_path()
+def _clear_active_session(provider: str = "claude") -> None:
+    path = _active_session_path(provider)
     if path.exists():
         path.unlink()
 
 
-def _read_pending_calls() -> dict:
-    path = _pending_calls_path()
+def _read_pending_calls(provider: str = "claude") -> dict:
+    path = _pending_calls_path(provider)
     if path.exists():
         try:
             return json.loads(path.read_text())
@@ -158,8 +173,8 @@ def _read_pending_calls() -> dict:
     return {}
 
 
-def _write_pending_calls(calls: dict) -> None:
-    path = _pending_calls_path()
+def _write_pending_calls(calls: dict, provider: str = "claude") -> None:
+    path = _pending_calls_path(provider)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(calls))
 
@@ -182,16 +197,38 @@ def _should_redact() -> bool:
     )
 
 
-def handle_session_start(input_data: dict) -> None:
+def _normalise_payload(input_data: dict, provider: str, event: str) -> dict:
+    """Map provider-specific hook payloads to the Claude-shaped fields."""
+    data = dict(input_data)
+    if provider != "codex":
+        return data
+
+    if event in {"pre-tool", "post-tool", "post-tool-failure"}:
+        tool = data.get("tool")
+        if isinstance(tool, dict):
+            data.setdefault("tool_name", tool.get("name") or tool.get("tool_name") or "")
+            data.setdefault("tool_input", tool.get("input") or tool.get("arguments") or {})
+            data.setdefault("tool_output", tool.get("output") or tool.get("response") or "")
+        data.setdefault("tool_input", data.get("input") or data.get("arguments") or {})
+        data.setdefault("tool_output", data.get("tool_response", data.get("output", "")))
+
+    if event == "stop" and data.get("last_assistant_message") is None:
+        data["last_assistant_message"] = data.get("assistant_message") or data.get("message") or ""
+
+    return data
+
+
+def handle_session_start(input_data: dict, provider: str = "claude") -> None:
     """Handle SessionStart hook event."""
     store = _get_store()
     redact = _should_redact()
 
     session_id = input_data.get("session_id", "")
+    agent_name = _PROVIDER_AGENT.get(provider, "agent-cli")
     attr = collect_attribution()
     meta = SessionMeta(
-        agent_name="claude-code",
-        command=f"claude-code ({input_data.get('source', 'startup')})",
+        agent_name=agent_name,
+        command=f"{agent_name} ({input_data.get('source', 'startup')})",
         attribution=attr.to_dict(),
     )
     # Use Claude Code's session ID as part of our session ID for correlation
@@ -201,16 +238,20 @@ def handle_session_start(input_data: dict) -> None:
     store.create_session(meta)
 
     if session_id:
-        os.environ[_CLAUDE_SESSION_ID_ENV] = session_id
+        os.environ[_provider_env(provider)] = session_id
 
-    _write_active_session(meta.session_id)
-    _write_pending_calls({})
+    _write_active_session(meta.session_id, provider=provider)
+    _write_pending_calls({}, provider=provider)
 
     event_data = {
-        "mode": "claude-code-hooks",
+        "mode": f"{agent_name}-hooks",
+        "provider": provider,
         "source": input_data.get("source", "startup"),
         "model": input_data.get("model", ""),
     }
+    for key in ("cwd", "transcript_path", "permission_mode"):
+        if input_data.get(key) not in (None, ""):
+            event_data[key] = input_data.get(key)
     if redact:
         event_data = redact_data(event_data)
 
@@ -224,10 +265,10 @@ def handle_session_start(input_data: dict) -> None:
     )
 
 
-def handle_session_end(input_data: dict) -> None:
+def handle_session_end(input_data: dict, provider: str = "claude") -> None:
     """Handle SessionEnd hook event."""
     store = _get_store()
-    session_id = _resolve_session_id(input_data)
+    session_id = _resolve_session_id(input_data, provider=provider)
     if not session_id:
         return
 
@@ -246,13 +287,13 @@ def handle_session_end(input_data: dict) -> None:
         )
         store.update_meta(meta)
 
-    _clear_active_session()
+    _clear_active_session(provider=provider)
 
 
-def handle_pre_tool(input_data: dict) -> None:
+def handle_pre_tool(input_data: dict, provider: str = "claude") -> None:
     """Handle PreToolUse hook event. Logs tool_call and tracks pending calls."""
     store = _get_store()
-    session_id = _resolve_session_id(input_data)
+    session_id = _resolve_session_id(input_data, provider=provider)
     if not session_id:
         return
 
@@ -264,6 +305,9 @@ def handle_pre_tool(input_data: dict) -> None:
         "tool_name": tool_name,
         "arguments": tool_input,
     }
+    for key in ("tool_use_id", "turn_id", "permission_mode"):
+        if input_data.get(key) not in (None, ""):
+            event_data[key] = input_data.get(key)
     if redact:
         event_data = redact_data(event_data)
 
@@ -283,18 +327,19 @@ def handle_pre_tool(input_data: dict) -> None:
     # Track pending call for latency measurement.
     # Keyed by event_id (not tool_name) so concurrent calls to the same
     # tool don't overwrite each other.
-    pending = _read_pending_calls()
+    pending = _read_pending_calls(provider=provider)
     pending[event.event_id] = {
         "tool_name": tool_name,
+        "tool_use_id": input_data.get("tool_use_id", ""),
         "timestamp": event.timestamp,
     }
-    _write_pending_calls(pending)
+    _write_pending_calls(pending, provider=provider)
 
 
-def handle_user_prompt(input_data: dict) -> None:
+def handle_user_prompt(input_data: dict, provider: str = "claude") -> None:
     """Handle UserPromptSubmit hook event. Logs the user's prompt."""
     store = _get_store()
-    session_id = _resolve_session_id(input_data)
+    session_id = _resolve_session_id(input_data, provider=provider)
     if not session_id:
         return
 
@@ -302,6 +347,9 @@ def handle_user_prompt(input_data: dict) -> None:
     prompt = input_data.get("prompt", "")
 
     event_data = {"prompt": prompt}
+    for key in ("turn_id", "permission_mode"):
+        if input_data.get(key) not in (None, ""):
+            event_data[key] = input_data.get(key)
     if redact:
         event_data = redact_data(event_data)
 
@@ -315,10 +363,10 @@ def handle_user_prompt(input_data: dict) -> None:
     )
 
 
-def handle_stop(input_data: dict) -> None:
+def handle_stop(input_data: dict, provider: str = "claude") -> None:
     """Handle Stop hook event. Logs the assistant's final response."""
     store = _get_store()
-    session_id = _resolve_session_id(input_data)
+    session_id = _resolve_session_id(input_data, provider=provider)
     if not session_id:
         return
 
@@ -333,6 +381,9 @@ def handle_stop(input_data: dict) -> None:
         return
 
     event_data = {"text": text}
+    for key in ("turn_id", "permission_mode"):
+        if input_data.get(key) not in (None, ""):
+            event_data[key] = input_data.get(key)
     if redact:
         event_data = redact_data(event_data)
 
@@ -346,16 +397,25 @@ def handle_stop(input_data: dict) -> None:
     )
 
 
-def handle_post_tool(input_data: dict, failed: bool = False) -> None:
+def handle_post_tool(input_data: dict, failed: bool = False, provider: str = "claude") -> None:
     """Handle PostToolUse / PostToolUseFailure hook event."""
     store = _get_store()
-    session_id = _resolve_session_id(input_data)
+    session_id = _resolve_session_id(input_data, provider=provider)
     if not session_id:
         return
 
     redact = _should_redact()
     tool_name = input_data.get("tool_name", "unknown")
-    tool_output = input_data.get("tool_output", "")
+    tool_output = input_data.get("tool_output", input_data.get("tool_response", ""))
+
+    if provider == "codex" and not failed:
+        if isinstance(tool_output, dict):
+            exit_code = tool_output.get("exit_code")
+            failed = (
+                bool(tool_output.get("error"))
+                or tool_output.get("success") is False
+                or (isinstance(exit_code, int) and exit_code != 0)
+            )
 
     if failed:
         event_type = EventType.ERROR
@@ -374,6 +434,9 @@ def handle_post_tool(input_data: dict, failed: bool = False) -> None:
             "tool_name": tool_name,
             "result": output_str,
         }
+    for key in ("tool_use_id", "turn_id", "permission_mode"):
+        if input_data.get(key) not in (None, ""):
+            event_data[key] = input_data.get(key)
 
     if redact:
         event_data = redact_data(event_data)
@@ -387,18 +450,22 @@ def handle_post_tool(input_data: dict, failed: bool = False) -> None:
     # Link to the earliest pending call for this tool name, then remove it.
     # Pending entries are keyed by event_id so concurrent same-tool calls
     # don't collide; we match by tool_name in the value and pick the oldest.
-    pending = _read_pending_calls()
+    pending = _read_pending_calls(provider=provider)
     match_id = None
     match_ts = float("inf")
+    tool_use_id = input_data.get("tool_use_id", "")
     for eid, info in pending.items():
-        if info.get("tool_name") == tool_name and info["timestamp"] < match_ts:
+        if tool_use_id and info.get("tool_use_id") == tool_use_id:
+            match_id = eid
+            break
+        if not tool_use_id and info.get("tool_name") == tool_name and info["timestamp"] < match_ts:
             match_id = eid
             match_ts = info["timestamp"]
     if match_id:
         call_info = pending.pop(match_id)
         event.parent_id = match_id
         event.duration_ms = (event.timestamp - call_info["timestamp"]) * 1000
-        _write_pending_calls(pending)
+        _write_pending_calls(pending, provider=provider)
 
     _write_event(store, session_id, event)
 
@@ -412,22 +479,39 @@ def handle_post_tool(input_data: dict, failed: bool = False) -> None:
 
 def hook_main(args: list[str]) -> None:
     """Entry point for `agent-strace hook <event>` CLI command."""
+    provider = "claude"
+    rest = list(args)
+    if rest[:1] == ["--provider"] and len(rest) >= 2:
+        provider = rest[1]
+        rest = rest[2:]
+    elif rest and rest[0] in ("claude", "codex") and len(rest) >= 2:
+        provider = rest[0]
+        rest = rest[1:]
+
     if not args:
         sys.stderr.write("Usage: agent-strace hook <event>\n")
         sys.stderr.write("Events: session-start, session-end, pre-tool, post-tool, post-tool-failure, user-prompt, stop\n")
         sys.exit(1)
 
-    event = args[0]
-    input_data = _read_stdin()
+    if provider not in _PROVIDER_AGENT:
+        sys.stderr.write(f"Unknown hook provider: {provider}\n")
+        sys.exit(1)
+
+    if not rest:
+        sys.stderr.write("Usage: agent-strace hook [--provider claude|codex] <event>\n")
+        sys.exit(1)
+
+    event = rest[0]
+    input_data = _normalise_payload(_read_stdin(), provider, event)
 
     handlers = {
-        "session-start": handle_session_start,
-        "session-end": handle_session_end,
-        "pre-tool": handle_pre_tool,
-        "post-tool": lambda d: handle_post_tool(d, failed=False),
-        "post-tool-failure": lambda d: handle_post_tool(d, failed=True),
-        "user-prompt": handle_user_prompt,
-        "stop": handle_stop,
+        "session-start": lambda d: handle_session_start(d, provider=provider),
+        "session-end": lambda d: handle_session_end(d, provider=provider),
+        "pre-tool": lambda d: handle_pre_tool(d, provider=provider),
+        "post-tool": lambda d: handle_post_tool(d, failed=False, provider=provider),
+        "post-tool-failure": lambda d: handle_post_tool(d, failed=True, provider=provider),
+        "user-prompt": lambda d: handle_user_prompt(d, provider=provider),
+        "stop": lambda d: handle_stop(d, provider=provider),
     }
 
     handler = handlers.get(event)

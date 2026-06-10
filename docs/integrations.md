@@ -48,6 +48,19 @@ Each integration is an optional extra — the core package stays dependency-free
 
 ---
 
+## Agent CLI hooks
+
+Use setup-generated hooks when the agent CLI has its own lifecycle hook system.
+
+| CLI | Setup | What's traced |
+|---|---|---|
+| Claude Code | `agent-strace setup --cli claude` | Session start/end, user prompts, assistant responses, tool calls/results |
+| OpenAI Codex | `agent-strace setup --cli codex` | Session start, user prompts, assistant responses, `PreToolUse`/`PostToolUse` tools |
+
+Both paths write the same event stream under `.agent-traces/`, so replay, timeline, explain, why, watch, export, and audit commands work the same way after capture.
+
+---
+
 ## OpenAI Agents SDK
 
 ```python

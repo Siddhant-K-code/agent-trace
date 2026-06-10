@@ -36,12 +36,13 @@ uvx agent-strace replay
 
 ## Quick start
 
-**Option 1: Claude Code hooks** — captures everything (prompts, responses, every tool call)
+**Option 1: CLI hooks** — captures prompts, responses, and hook-visible tool calls
 
 ```bash
-agent-strace setup   # prints hooks config — add to ~/.claude/settings.json
-agent-strace list    # list sessions
-agent-strace replay  # replay the latest
+agent-strace setup             # Claude Code hooks for ~/.claude/settings.json
+agent-strace setup --cli codex # OpenAI Codex hooks for ~/.codex/hooks.json
+agent-strace list              # list sessions
+agent-strace replay            # replay the latest
 ```
 
 Full config and JSON: [docs/setup.md](docs/setup.md)
@@ -138,7 +139,7 @@ Install **agent-strace** from the [Extensions panel](https://open-vsx.org/extens
 
 ```bash
 pip install agent-strace   # 1. install
-agent-strace setup         # 2. add hooks to Claude Code
+agent-strace setup         # 2. add hooks to Claude Code or use --cli codex for Codex
 # 3. open project in VS Code — extension activates when .agent-traces/ exists
 # 4. start Claude Code — status bar appears immediately
 ```
