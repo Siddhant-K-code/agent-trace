@@ -60,6 +60,7 @@ from .integrations import detect_and_instrument, _INTEGRATIONS
 from .budget_report import cmd_budget_report
 from .team_report import cmd_team_report
 from .compare import cmd_compare
+from .freeze import cmd_freeze, cmd_regression
 from .timeline import cmd_timeline
 from .config_watch import cmd_config_watch
 from .lint import cmd_lint
@@ -1246,6 +1247,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_fingerprint.add_argument("--format", choices=["text", "json"], default="text",
                                help="output format (default: text)")
 
+    # freeze/regression (tool-call sequence fixtures)
+    p_freeze = sub.add_parser("freeze", help="freeze a session's tool-call sequence as a fixture")
+    p_freeze.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
+    p_freeze.add_argument("--output", "-o", metavar="FILE",
+                          help="write fixture JSON to FILE")
+    p_freeze.add_argument("--task", default="", help="task description to store in the fixture")
+    p_freeze.add_argument("--format", choices=["text", "json"], default="text",
+                          help="output format (default: text)")
+
+    p_regression = sub.add_parser("regression", help="compare a session against a frozen fixture")
+    p_regression.add_argument("fixture_file", help="fixture JSON written by agent-strace freeze")
+    p_regression.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
+    p_regression.add_argument("--threshold", type=float, default=0.0,
+                              help="allowed divergence before failing (default: 0.0)")
+    p_regression.add_argument("--format", choices=["text", "json"], default="text",
+                              help="output format (default: text)")
+
     # optimize (propose AGENTS.md / skill file improvements from trace failures)
     p_opt = sub.add_parser("optimize", help="propose instruction file improvements from trace failures")
     p_opt.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
@@ -1579,6 +1597,8 @@ def main() -> None:
         "budget-report": cmd_budget_report,
         "team-report": cmd_team_report,
         "compare": cmd_compare,
+        "freeze": cmd_freeze,
+        "regression": cmd_regression,
         "config-watch": cmd_config_watch,
         "lint": cmd_lint,
         "retention": cmd_retention,

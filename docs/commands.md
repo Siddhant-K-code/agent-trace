@@ -336,6 +336,13 @@ agent-strace fingerprint --compare A.json B.json [--threshold N] [--format text|
 ```
 Characterize an agent's recent behavior: tool mix, error rate, retry rate, file touch radius, duration, and decision depth. Saved JSON fingerprints can be used as drift baselines or compared directly.
 
+### `freeze`
+```
+agent-strace freeze [session-id] [--output FILE] [--task TEXT] [--format text|json]
+agent-strace regression <fixture-file> [session-id] [--threshold N] [--format text|json]
+```
+Freeze a session's tool-call sequence as a JSON fixture containing tool names and stable input hashes, not raw tool inputs. `regression` compares a later session against the fixture and exits non-zero when structural divergence exceeds `--threshold` (default: `0.0`).
+
 ### `lint`
 ```
 agent-strace lint [session-id] [--all] [--since DURATION] [--strict] [--format text|json]
