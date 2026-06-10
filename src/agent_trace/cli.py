@@ -322,13 +322,20 @@ def cmd_export(args: argparse.Namespace) -> int:
             use_genai = False  # explicit --format otlp keeps legacy behaviour
 
         if not endpoint:
-            # No endpoint: dump OTLP JSON to stdout
+            # No endpoint: write OTLP JSON to --output file or stdout
             meta = store.load_meta(session_id)
             if use_genai:
                 payload = session_to_otlp_genai(meta, events, service_name=args.service_name)
             else:
                 payload = session_to_otlp(meta, events, service_name=args.service_name)
-            sys.stdout.write(json.dumps(payload, indent=2) + "\n")
+            output_path = getattr(args, "output", "") or ""
+            if not output_path:
+                fmt_suffix = "otlp-genai" if use_genai else "otlp"
+                output_path = f"trace-{session_id[:12]}-{fmt_suffix}.json"
+            with open(output_path, "w") as f:
+                f.write(json.dumps(payload, indent=2) + "\n")
+            sys.stderr.write(f"OTLP payload written to {output_path}\n")
+            sys.stderr.write(f"Send to a collector: agent-strace export --format {args.format} --endpoint <url>\n")
             return 0
 
         # Build headers from --header flags

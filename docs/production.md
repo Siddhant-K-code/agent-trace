@@ -1,5 +1,24 @@
 # Production tracing (OTLP export)
 
+## Quick demo (no signup required)
+
+Spin up Jaeger locally — one Docker command, full trace UI in the browser:
+
+```bash
+# Start Jaeger (OTLP on 4318, UI on 16686)
+docker run --rm -d --name jaeger \
+  -p 16686:16686 -p 4318:4318 \
+  jaegertracing/all-in-one:latest
+
+# Export your session
+agent-strace export --format otlp-genai --endpoint http://localhost:4318
+
+# Open the UI
+open http://localhost:16686
+```
+
+Select service `agent-trace` in the Jaeger UI to see the full trace.
+
 Export sessions as OpenTelemetry spans to your existing observability stack. Sessions become traces. Tool calls become spans with duration and inputs. Errors get exception events. No new dependencies.
 
 ---
