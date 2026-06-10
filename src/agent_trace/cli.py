@@ -84,22 +84,27 @@ def cmd_record(args: argparse.Namespace) -> int:
     """Record an MCP server session."""
     store = TraceStore(args.trace_dir)
 
+    server_cmd = args.server_cmd
+    # Strip leading '--' separator added by argparse REMAINDER
+    if server_cmd and server_cmd[0] == "--":
+        server_cmd = server_cmd[1:]
+
     meta = SessionMeta(
         agent_name=args.name or "",
-        command=" ".join(args.command),
+        command=" ".join(server_cmd),
     )
     store.create_session(meta)
 
     if not args.quiet:
         sys.stderr.write(
             f"agent-strace: recording session {meta.session_id}\n"
-            f"agent-strace: command: {' '.join(args.command)}\n"
+            f"agent-strace: command: {' '.join(server_cmd)}\n"
         )
 
     on_event = _print_live_event if args.verbose else None
 
     proxy = MCPProxy(
-        server_command=args.command,
+        server_command=server_cmd,
         store=store,
         session_meta=meta,
         on_event=on_event,
@@ -493,7 +498,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_record.add_argument("--redact", action="store_true", help="redact secrets from trace data")
     p_record.add_argument("--verbose", "-v", action="store_true", help="print events to stderr during recording")
     p_record.add_argument("--quiet", "-q", action="store_true", help="suppress all output except errors")
-    p_record.add_argument("command", nargs=argparse.REMAINDER, help="MCP server command to run")
+    p_record.add_argument("server_cmd", nargs=argparse.REMAINDER, help="MCP server command to run")
 
     # record-http
     p_record_http = sub.add_parser("record-http", help="record a remote MCP server session (HTTP/SSE)")
@@ -1048,7 +1053,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_auto.add_argument("--detect", action="store_true",
                         help="auto-detect and instrument all installed frameworks")
-    p_auto.add_argument("command", nargs=argparse.REMAINDER,
+    p_auto.add_argument("server_cmd", nargs=argparse.REMAINDER,
                         help="command to run with instrumentation")
 
     # server (event collector)
@@ -1207,7 +1212,7 @@ def cmd_auto(args: argparse.Namespace) -> int:
     import subprocess
     import os
 
-    command = getattr(args, "command", [])
+    command = getattr(args, "server_cmd", [])
     # Strip leading '--' separator
     if command and command[0] == "--":
         command = command[1:]
