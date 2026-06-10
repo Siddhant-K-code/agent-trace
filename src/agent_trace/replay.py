@@ -71,7 +71,7 @@ def _format_timestamp(ts: float, base_ts: float | None = None) -> str:
         minutes = int(offset // 60)
         seconds = offset % 60
         return f"+{minutes}m{seconds:05.2f}s"
-    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+    dt = datetime.fromtimestamp(ts).astimezone()
     return dt.strftime("%H:%M:%S.%f")[:-3]
 
 
@@ -295,7 +295,7 @@ def format_event(event: TraceEvent, base_ts: float | None = None) -> str:
 
 def format_summary(meta: SessionMeta) -> str:
     """Format session summary."""
-    started = datetime.fromtimestamp(meta.started_at, tz=timezone.utc)
+    started = datetime.fromtimestamp(meta.started_at).astimezone()
     if meta.total_duration_ms:
         duration_s = meta.total_duration_ms / 1000
     elif meta.ended_at:
@@ -310,7 +310,7 @@ def format_summary(meta: SessionMeta) -> str:
         f"{C.BOLD}Session Summary{C.RESET}",
         f"{C.GRAY}{'─' * 50}{C.RESET}",
         f"  Session:    {meta.session_id}",
-        f"  Started:    {started.strftime('%Y-%m-%d %H:%M:%S UTC')}",
+        f"  Started:    {started.strftime('%Y-%m-%d %H:%M:%S %Z')}",
         f"  Duration:   {duration_str}",
         f"  Tool calls: {meta.tool_calls}",
         f"  LLM reqs:   {meta.llm_requests}",
@@ -415,12 +415,14 @@ def list_sessions(store: TraceStore, out: TextIO = sys.stdout) -> None:
     out.write(f"\n{C.BOLD}Captured Sessions{C.RESET}\n")
     out.write(f"{C.GRAY}{'─' * 70}{C.RESET}\n")
     out.write(
-        f"  {C.DIM}{'ID':<18} {'Started':<22} {'Duration':>10} {'Tools':>6} {'LLM':>5} {'Err':>4}{C.RESET}\n"
+        f"  {C.DIM}{'ID':<18} {'Started':<26} {'Duration':>10} {'Tools':>6} {'LLM':>5} {'Err':>4}{C.RESET}\n"
     )
     out.write(f"{C.GRAY}{'─' * 70}{C.RESET}\n")
 
     for meta in sessions:
-        started = datetime.fromtimestamp(meta.started_at, tz=timezone.utc)
+        # Display in local time with timezone abbreviation (e.g. "06:45:46 IST")
+        started_local = datetime.fromtimestamp(meta.started_at).astimezone()
+        started_str = started_local.strftime("%Y-%m-%d %H:%M:%S ") + started_local.strftime("%Z")
 
         # Prefer explicit total_duration_ms; fall back to ended_at - started_at;
         # show "—" for sessions that never completed (crashed / still running).
@@ -435,7 +437,7 @@ def list_sessions(store: TraceStore, out: TextIO = sys.stdout) -> None:
 
         out.write(
             f"  {meta.session_id:<18} "
-            f"{started.strftime('%Y-%m-%d %H:%M:%S'):<22} "
+            f"{started_str:<26} "
             f"{duration_str} "
             f"{meta.tool_calls:>6} "
             f"{meta.llm_requests:>5} "
