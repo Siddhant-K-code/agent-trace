@@ -38,6 +38,13 @@ from typing import Any, TextIO
 
 from .cost import _dollars, _event_tokens
 from .models import EventType, TraceEvent
+from .project_budget import (
+    ProjectBudgetConfig,
+    ProjectBudgetStatus,
+    format_project_budget_status,
+    load_project_budget_config,
+    project_budget_status,
+)
 from .store import TraceStore
 
 
@@ -714,7 +721,9 @@ def _dispatch_alert(
         # Write watchdog post-mortem JSON before killing
         pm_path: Path | None = None
         if store and session_id:
-            pm_path = _write_watchdog_postmortem(store, session_id, state, reason=message)
+            pm_path = _write_watchdog_postmortem(
+                store, session_id, state, reason=message, config=config
+            )
             if pm_path:
                 _alert_terminal(f"Post-mortem written to {pm_path}")
         if config.on_death_cmd:
@@ -727,6 +736,7 @@ def _write_watchdog_postmortem(
     session_id: str,
     state: WatchState,
     reason: str,
+    config: WatcherConfig | None = None,
 ) -> Path | None:
     """Write a structured JSON post-mortem to the session directory.
 
@@ -764,6 +774,9 @@ def _write_watchdog_postmortem(
             "Resume from the last tool call above."
         ),
     }
+    if config is not None:
+        pm["max_cost_dollars"] = config.max_cost_dollars
+        pm["budget_at_death"] = config.max_cost_dollars
 
     pm_path = store._session_dir(session_id) / "watchdog-postmortem.json"
     try:
@@ -800,7 +813,9 @@ def _dispatch_nanny_rule(
 
     # Auto-generate postmortem on kill
     if rule.action == "kill" and not dry_run:
-        pm_path = _write_watchdog_postmortem(store, session_id, state, reason=msg)
+        pm_path = _write_watchdog_postmortem(
+            store, session_id, state, reason=msg, config=config
+        )
         if pm_path:
             _alert_terminal(f"Post-mortem written to {pm_path}")
         on_death = getattr(config, "on_death_cmd", "")
@@ -1068,6 +1083,7 @@ def watch_session(
     nanny_rules: list[NannyRule] | None = None,
     dry_run: bool = False,
     stream_config: StreamConfig | None = None,
+    project_budget_config: ProjectBudgetConfig | None = None,
 ) -> None:
     """Watch a session's event stream and fire alerts on violations.
 
@@ -1088,6 +1104,21 @@ def watch_session(
     if stream_config and stream_config.url:
         out.write(f"[watch] Streaming events to {stream_config.url}\n")
     out.flush()
+
+    project_budget_base_spend = 0.0
+    if project_budget_config and project_budget_config.enabled:
+        budget_status = project_budget_status(
+            store,
+            project_budget_config,
+            exclude_session_id=session_id,
+        )
+        project_budget_base_spend = budget_status.spent
+        if budget_status.should_warn:
+            msg = format_project_budget_status(budget_status)
+            state.fired.add("project-budget")
+            out.write(f"[watch] {msg}\n")
+            out.flush()
+            _alert_file(msg, config.alert_log)
 
     streamer: EventStreamer | None = None
     if stream_config and stream_config.url:
@@ -1119,10 +1150,33 @@ def watch_session(
 
             violations = check_event(event, config, state)
             for msg in violations:
+                action = None
+                if (
+                    project_budget_config
+                    and project_budget_config.per_session_max
+                    and msg.startswith("CostWatcher")
+                ):
+                    action = "kill"
                 _dispatch_alert(
-                    msg, config, state, dry_run=dry_run,
+                    msg, config, state, action=action, dry_run=dry_run,
                     store=store, session_id=session_id,
                 )
+
+            if project_budget_config and project_budget_config.enabled:
+                budget_status = ProjectBudgetStatus(
+                    config=project_budget_config,
+                    spent=project_budget_base_spend + state.estimated_cost,
+                    window_start=time.time() - 7 * 24 * 60 * 60,
+                    window_end=time.time(),
+                )
+                if budget_status.should_warn and "project-budget" not in state.fired:
+                    state.fired.add("project-budget")
+                    msg = format_project_budget_status(budget_status)
+                    out.write(f"[watch] {msg}\n")
+                    out.flush()
+                    _alert_file(msg, config.alert_log)
+                    if config.webhook_url:
+                        _alert_webhook(msg, config.webhook_url)
 
             # --- Nanny rule evaluation ---
             if nanny_rules:
@@ -1199,6 +1253,12 @@ def cmd_watch(args: argparse.Namespace) -> int:
     if getattr(args, "loop_window", None) is not None:
         config.loop_window = int(getattr(args, "loop_window"))
 
+    project_budget_config = load_project_budget_config(config_path)
+    if config_path and not project_budget_config.enabled:
+        project_budget_config = load_project_budget_config()
+    if project_budget_config.per_session_max:
+        config.max_cost_dollars = project_budget_config.per_session_max
+
     # Load nanny rules if --rules provided
     nanny_rules: list[NannyRule] | None = None
     rules_path = getattr(args, "rules", None)
@@ -1237,8 +1297,15 @@ def cmd_watch(args: argparse.Namespace) -> int:
             otlp=getattr(args, "stream_otlp", False),
         )
 
-    watch_session(store, full_id, config, nanny_rules=nanny_rules, dry_run=dry_run,
-                  stream_config=stream_cfg)
+    watch_session(
+        store,
+        full_id,
+        config,
+        nanny_rules=nanny_rules,
+        dry_run=dry_run,
+        stream_config=stream_cfg,
+        project_budget_config=project_budget_config,
+    )
     return 0
 
 

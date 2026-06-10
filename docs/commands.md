@@ -173,6 +173,20 @@ Live session monitor with kill-switch rules.
 | `--stream-to URL` | Stream events to HTTP endpoint in real-time |
 | `--dry-run` | Evaluate rules without acting |
 
+**Project budget config** (`.agent-strace.yaml`):
+```yaml
+budget:
+  weekly: 20.00
+  warn_at: 0.80
+  stop_at: 1.00
+  per_session_max: 5.00
+```
+
+When this block is present, `watch` checks rolling seven-day spend at startup
+and during the session. `warn_at` writes a terminal warning and alert-log entry.
+`stop_at` blocks new `record` and `record-http` sessions. `per_session_max`
+uses the watchdog cost guard and kills only the over-budget session.
+
 **Rules file format** (`.watch-rules.json`):
 ```json
 {

@@ -53,6 +53,7 @@ from .explain import cmd_explain
 from .jsonl_import import cmd_import
 from .policy import cmd_policy
 from .postmortem import cmd_postmortem
+from .project_budget import enforce_new_session_budget, load_project_budget_config
 from .share import cmd_share
 from .token_budget import cmd_token_budget
 from .anonymize import cmd_anonymize_export
@@ -125,6 +126,11 @@ def _parent_depth(store: TraceStore, parent_session_id: str) -> int:
 def cmd_record(args: argparse.Namespace) -> int:
     """Record an MCP server session."""
     store = TraceStore(args.trace_dir, redact=_redact_setting(args))
+    budget_config = load_project_budget_config()
+    if budget_config.enabled and not enforce_new_session_budget(
+        store, budget_config, sys.stderr
+    ):
+        return 1
 
     server_cmd = args.server_cmd
     # Strip leading '--' separator added by argparse REMAINDER
@@ -174,6 +180,11 @@ def cmd_record(args: argparse.Namespace) -> int:
 def cmd_record_http(args: argparse.Namespace) -> int:
     """Record a remote MCP server session over HTTP/SSE."""
     store = TraceStore(args.trace_dir, redact=_redact_setting(args))
+    budget_config = load_project_budget_config()
+    if budget_config.enabled and not enforce_new_session_budget(
+        store, budget_config, sys.stderr
+    ):
+        return 1
 
     parent_session_id = _resolve_parent_session_id(store, args)
     meta = SessionMeta(
