@@ -431,7 +431,7 @@ def cmd_search(args: argparse.Namespace) -> int:
     store = TraceStore(args.trace_dir)
     results = search_sessions(store, query)
 
-    if getattr(args, "limit", 0):
+    if getattr(args, "limit", 0) > 0:
         results = results[: args.limit]
 
     if getattr(args, "format", "text") == "json":
