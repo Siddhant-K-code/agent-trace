@@ -279,7 +279,10 @@ class TestBuiltInRules(unittest.TestCase):
     def test_builtin_rules_spec_enables_mcp_poisoning_and_limits(self):
         config = WatcherConfig()
 
-        warnings = _apply_builtin_rules_spec("mcp-poisoning,loop:4/12,budget:$5,timeout:30m", config)
+        warnings = _apply_builtin_rules_spec(
+            "mcp-poisoning,loop:4/12,budget:$5,timeout:30m,cognitive-debt:0.8",
+            config,
+        )
 
         self.assertEqual(warnings, [])
         self.assertIn("mcp-poisoning", config.built_in_rules)
@@ -288,6 +291,8 @@ class TestBuiltInRules(unittest.TestCase):
         self.assertEqual(config.loop_window, 12)
         self.assertEqual(config.max_cost_dollars, 5.0)
         self.assertEqual(config.max_duration_seconds, 1800.0)
+        self.assertIn("cognitive-debt", config.built_in_rules)
+        self.assertAlmostEqual(config.cognitive_debt_threshold, 0.8)
 
     def test_watch_parser_registers_loop_flags(self):
         parser = build_parser()
@@ -316,6 +321,19 @@ class TestBuiltInRules(unittest.TestCase):
         violations = check_event(http_event, config, state)
 
         self.assertTrue(any("McpPoisoningWatcher" in v for v in violations))
+
+    def test_cognitive_debt_rule_alerts_on_live_write(self):
+        config = WatcherConfig(built_in_rules={"cognitive-debt"}, cognitive_debt_threshold=0.8)
+        state = WatchState()
+        event = _make_event(
+            EventType.FILE_WRITE,
+            0.0,
+            path="src/app.py",
+        )
+
+        violations = check_event(event, config, state)
+
+        self.assertTrue(any("CognitiveDebtWatcher" in v for v in violations))
 
 
 # ---------------------------------------------------------------------------

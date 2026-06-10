@@ -169,7 +169,7 @@ Live session monitor with kill-switch rules.
 | `--on-violation terminal\|file\|kill` | Action when a rule fires |
 | `--on-death CMD` | Command to run after kill (receives `{post_mortem_path}`) |
 | `--policy FILE` | Scope policy file to enforce (default: `.agent-scope.json`) |
-| `--rules FILE_OR_BUILTINS` | JSON/YAML rules file, or comma-separated built-ins such as `mcp-poisoning,loop:3/10,budget:$5,timeout:30m` |
+| `--rules FILE_OR_BUILTINS` | JSON/YAML rules file, or comma-separated built-ins such as `mcp-poisoning,loop:3/10,budget:$5,timeout:30m,cognitive-debt:0.8` |
 | `--stream-to URL` | Stream events to HTTP endpoint in real-time |
 | `--dry-run` | Evaluate rules without acting |
 
@@ -446,6 +446,26 @@ Team cost attribution across recorded sessions. By default it groups spend by gi
 | `--by author|branch|pr` | Group by git author, active branch, or PR inferred from branch names like `pr-123` |
 | `--export text|csv|json` | Output format. `csv` is intended for spreadsheets and finance workflows |
 | `--outlier-threshold N` | Flag sessions whose cost is above `N` times the report average; default is `2.0` |
+
+### `cognitive-debt`
+```
+agent-strace cognitive-debt [--session ID] [--since DATE] [--until DATE]
+                            [--by author|branch] [--threshold N]
+                            [--format text|json] [--github-token TOKEN]
+```
+Measure unreviewed agent-written code from trace file-write events and local git history. The report works without a GitHub token; when git history is unavailable it still reports agent-written lines and treats review evidence as unknown.
+
+| Flag | Description |
+|---|---|
+| `--session ID` | Score one session by ID or prefix |
+| `--since DATE` | Start of reporting window. Accepts ISO dates or durations like `30d`; default is `30d` |
+| `--until DATE` | End of reporting window. Accepts ISO dates or durations like `7d`; default is now |
+| `--by author|branch` | Group summary rows by git author or branch |
+| `--threshold N` | Flag sessions above this debt score; default is `0.7` |
+| `--format text|json` | Output format |
+| `--github-token TOKEN` | Optional GitHub token for merged PR review/comment enrichment; local git works without it |
+
+`agent-strace watch --rules cognitive-debt:0.8` enables a live rule that alerts when a session has modified files that have not yet had human review.
 
 ### `standup`
 ```

@@ -346,6 +346,7 @@ class WatcherConfig:
     on_death_cmd: str = ""
     # Built-in rule names enabled via --rules mcp-poisoning,budget:$5,...
     built_in_rules: set[str] = field(default_factory=set)
+    cognitive_debt_threshold: float | None = None
 
     @classmethod
     def from_dict(cls, d: dict) -> "WatcherConfig":
@@ -384,6 +385,10 @@ class WatcherConfig:
             operation_rules=rules,
             max_context_pct=int(d.get("max_context_pct", 90)),
             built_in_rules=set(d.get("built_in_rules", [])),
+            cognitive_debt_threshold=(
+                float(d["cognitive_debt_threshold"])
+                if d.get("cognitive_debt_threshold") is not None else None
+            ),
         )
 
     @classmethod
@@ -849,6 +854,11 @@ def check_event(
             if _path and _path not in state.files_modified_set:
                 state.files_modified_set.add(_path)
                 state.files_modified = len(state.files_modified_set)
+    elif event.event_type == EventType.FILE_WRITE:
+        _path = str(event.data.get("path") or event.data.get("file_path") or event.data.get("uri") or "")
+        if _path and _path not in state.files_modified_set:
+            state.files_modified_set.add(_path)
+            state.files_modified = len(state.files_modified_set)
 
     # --- Track consecutive test failures (for nanny rules) ---
     if event.event_type == EventType.TOOL_RESULT:
@@ -892,6 +902,21 @@ def check_event(
             violations.append(
                 f"CostWatcher: ${state.estimated_cost:.2f} (threshold: ${config.max_cost_dollars})"
             )
+
+    # --- Live cognitive debt threshold ---
+    if "cognitive-debt" in config.built_in_rules and state.files_modified > 0:
+        threshold = config.cognitive_debt_threshold
+        if threshold is None:
+            threshold = 0.8
+        live_score = 1.0
+        if live_score > threshold:
+            key_id = "cognitive-debt"
+            if key_id not in state.fired:
+                state.fired.add(key_id)
+                violations.append(
+                    f"CognitiveDebtWatcher: live debt score {live_score:.2f} "
+                    f"({state.files_modified} modified files, no review yet; threshold: {threshold:g})"
+                )
 
     # --- Duration threshold ---
     elapsed = time.time() - state.start_time
@@ -1364,6 +1389,14 @@ def _apply_builtin_rules_spec(spec: str, config: WatcherConfig) -> list[str]:
                 config.max_duration_seconds = _parse_duration(value)
             except ValueError:
                 warnings.append(f"invalid timeout rule {item!r}")
+            continue
+        if item.startswith("cognitive-debt:"):
+            value = item.split(":", 1)[1].strip()
+            try:
+                config.cognitive_debt_threshold = float(value)
+                config.built_in_rules.add("cognitive-debt")
+            except ValueError:
+                warnings.append(f"invalid cognitive-debt rule {item!r}")
             continue
         warnings.append(f"unknown built-in rule {item!r}")
     return warnings

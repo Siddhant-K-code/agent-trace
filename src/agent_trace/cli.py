@@ -43,6 +43,7 @@ from .freshness import cmd_freshness
 from .standup import cmd_standup
 from .audit import cmd_audit, verify_chain
 from .cost import cmd_cost
+from .cognitive_debt import cmd_cognitive_debt
 from .curve import cmd_curve
 from .dashboard import cmd_dashboard
 from .shadow_ai import cmd_audit_tools
@@ -1056,6 +1057,23 @@ def build_parser() -> argparse.ArgumentParser:
                          default=2.0, metavar="SECONDS",
                          help="max seconds between flushes when streaming (default: 2.0)")
 
+    # cognitive-debt
+    p_debt = sub.add_parser("cognitive-debt", help="measure unreviewed agent-written code")
+    p_debt.add_argument("--session", metavar="ID", default="",
+                        help="session ID or prefix to score (default: recent sessions)")
+    p_debt.add_argument("--since", default="30d", metavar="DATE",
+                        help="start of reporting window, ISO date or duration (default: 30d)")
+    p_debt.add_argument("--until", default="", metavar="DATE",
+                        help="end of reporting window, ISO date or duration (default: now)")
+    p_debt.add_argument("--by", choices=["author", "branch"], default="author",
+                        help="group summary rows by author or branch (default: author)")
+    p_debt.add_argument("--threshold", type=float, default=0.7,
+                        help="flag sessions above this debt score (default: 0.7)")
+    p_debt.add_argument("--format", choices=["text", "json"], default="text",
+                        help="output format (default: text)")
+    p_debt.add_argument("--github-token", default="",
+                        help="GitHub token for optional PR review/comment enrichment")
+
     # mcp-scan
     p_mcp_scan = sub.add_parser("mcp-scan", help="scan runtime MCP tool poisoning indicators")
     p_mcp_scan.add_argument("--session", metavar="ID",
@@ -1670,6 +1688,7 @@ def main() -> None:
         "explain": cmd_explain,
         "timeline": cmd_timeline,
         "cost": cmd_cost,
+        "cognitive-debt": cmd_cognitive_debt,
         "diff": cmd_diff,
         "why": cmd_why,
         "audit": cmd_audit,
