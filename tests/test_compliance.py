@@ -9,7 +9,15 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from agent_trace.compliance import export_compliance, export_compliance_bulk
+from agent_trace.cli import build_parser
+from agent_trace.compliance import (
+    build_audit_readiness,
+    export_compliance,
+    export_compliance_bulk,
+    export_eu_ai_act,
+    select_sessions,
+    verify_eu_ai_act_export,
+)
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
 
@@ -164,6 +172,112 @@ class TestBulkExport(unittest.TestCase):
 
         reports = export_compliance_bulk(self.store, "soc2", since_days=30)
         self.assertEqual(len(reports), 0)
+
+
+class TestEuAiActArticleExport(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.store = TraceStore(self.tmpdir)
+
+    def test_article_12_and_13_blocks_present(self):
+        sid = _make_session(self.store, ["Bash", "Read"], errors=1)
+        report = export_eu_ai_act(self.store, [sid])
+
+        self.assertIn("compliance_metadata", report)
+        self.assertIn("article_12", report)
+        self.assertIn("article_13", report)
+        self.assertEqual(report["compliance_metadata"]["articles_covered"], ["Article 12", "Article 13"])
+        self.assertEqual(report["compliance_metadata"]["session_count"], 1)
+
+    def test_article_12_events_include_hashes(self):
+        sid = _make_session(self.store, ["Bash", "Read"])
+        report = export_eu_ai_act(self.store, [sid])
+        events = report["sessions"][0]["article_12"]["events"]
+
+        self.assertGreaterEqual(len(events), 2)
+        self.assertIn("prev_hash", events[1])
+        self.assertIn("line_hash", events[1])
+        self.assertTrue(events[1]["line_hash"])
+
+    def test_article_13_lists_tools_and_oversight(self):
+        sid = _make_session(self.store, ["Bash"], errors=1)
+        report = export_eu_ai_act(self.store, [sid])
+        article_13 = report["sessions"][0]["article_13"]
+
+        self.assertIn("Bash", article_13["capabilities_summary"]["tools_used"])
+        self.assertEqual(len(article_13["human_oversight_points"]), 1)
+
+    def test_select_sessions_honours_since_until(self):
+        recent = _make_session(self.store, ["Bash"])
+        old_meta = SessionMeta(agent_name="old")
+        old_meta.started_at = time.time() - 86400 * 60
+        old_meta.ended_at = old_meta.started_at + 10
+        self.store.create_session(old_meta)
+        self.store.update_meta(old_meta)
+
+        selected = select_sessions(self.store, since="30d")
+
+        self.assertIn(recent, selected)
+        self.assertNotIn(old_meta.session_id, selected)
+
+    def test_verify_export_detects_tampered_hash_link(self):
+        sid = _make_session(self.store, ["Bash", "Read"])
+        report = export_eu_ai_act(self.store, [sid])
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(report, f)
+            ok_path = f.name
+
+        self.assertTrue(verify_eu_ai_act_export(ok_path)["ok"])
+
+        report["sessions"][0]["article_12"]["events"][1]["prev_hash"] = "bad"
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(report, f)
+            bad_path = f.name
+
+        result = verify_eu_ai_act_export(bad_path)
+        self.assertFalse(result["ok"])
+        self.assertEqual(len(result["failures"]), 1)
+
+
+class TestAuditReadiness(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.store = TraceStore(self.tmpdir)
+
+    def test_readiness_report_has_checks(self):
+        _make_session(self.store, ["Bash"])
+
+        report = build_audit_readiness(self.store, retention_days=0)
+
+        self.assertIn("hash_chain_integrity", report["checks"])
+        self.assertIn("retention_coverage", report["checks"])
+        self.assertIn("timestamp_continuity", report["checks"])
+        self.assertIn("compliance_score", report)
+
+    def test_empty_store_is_not_ready(self):
+        report = build_audit_readiness(self.store)
+        self.assertFalse(report["ready"])
+        self.assertEqual(report["compliance_score"], 0)
+
+
+class TestComplianceCliParser(unittest.TestCase):
+    def test_export_accepts_eu_ai_act_format_and_all(self):
+        parser = build_parser()
+        args = parser.parse_args(["export", "--format", "eu-ai-act", "--all", "--since", "30d"])
+        self.assertEqual(args.format, "eu-ai-act")
+        self.assertTrue(args.all)
+
+    def test_audit_readiness_command_registered(self):
+        parser = build_parser()
+        args = parser.parse_args(["audit-readiness", "--format", "json"])
+        self.assertEqual(args.command, "audit-readiness")
+        self.assertEqual(args.format, "json")
+
+    def test_verify_from_export_registered(self):
+        parser = build_parser()
+        args = parser.parse_args(["verify", "--from-export", "audit.json"])
+        self.assertEqual(args.command, "verify")
+        self.assertEqual(args.from_export, "audit.json")
 
 
 if __name__ == "__main__":

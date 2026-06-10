@@ -123,6 +123,7 @@ Full setup guide: [docs/setup.md](docs/setup.md)
 | Command | What it does |
 |---|---|
 | [`agent-strace export --format otlp-genai`](docs/production.md) | Export to Datadog, Honeycomb, Grafana, Jaeger |
+| [`agent-strace export --format eu-ai-act`](docs/commands.md#export) | Generate Article 12/13 audit packages |
 | [`agent-strace export --metrics`](docs/production.md#behavioral-metrics) | Export per-session behavioral metrics as OTLP gauges |
 | [`agent-strace identity show`](docs/commands.md#identity) | Machine identity — sign and verify sessions |
 | [`agent-strace server`](docs/server.md) | Server-side collector for multi-agent, multi-machine |

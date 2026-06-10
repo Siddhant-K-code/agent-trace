@@ -166,6 +166,32 @@ Use `baseline check` as a CI gate — it exits 1 when the session is anomalous:
 agent-strace baseline check $SESSION_ID || echo "Session outside baseline"
 ```
 
+## EU AI Act Audit Packages
+
+`agent-strace export --format eu-ai-act` creates a local JSON package for
+Article 12 logging evidence and Article 13 transparency documentation:
+
+```bash
+agent-strace export <session-id> --format eu-ai-act --output compliance-report.json
+
+agent-strace export --all --since 2026-01-01 --until 2026-03-31 \
+  --format eu-ai-act --output Q1-2026-audit.json
+```
+
+The export includes event summaries, data categories processed, tools and
+models observed, human oversight points, and hash-chain integrity metadata.
+Verify the exported chain links with:
+
+```bash
+agent-strace verify --from-export compliance-report.json
+```
+
+Before exporting a store for review, run:
+
+```bash
+agent-strace audit-readiness
+```
+
 ---
 
 ## Behavioral metrics

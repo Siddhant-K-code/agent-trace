@@ -32,7 +32,7 @@ from .rbac import cmd_rbac
 from .iac import cmd_apply, cmd_config_diff
 from .sso import cmd_auth
 from .baseline import cmd_baseline
-from .compliance import cmd_compliance
+from .compliance import cmd_audit_readiness, cmd_compliance, cmd_export_eu_ai_act, cmd_verify_export
 from .drift import cmd_drift, cmd_fingerprint
 from .identity import cmd_identity
 from .workspace import cmd_workspace
@@ -41,7 +41,7 @@ from .oncall import cmd_oncall
 from .optimize import cmd_optimize
 from .freshness import cmd_freshness
 from .standup import cmd_standup
-from .audit import cmd_audit
+from .audit import cmd_audit, verify_chain
 from .cost import cmd_cost
 from .curve import cmd_curve
 from .dashboard import cmd_dashboard
@@ -331,6 +331,9 @@ def cmd_export(args: argparse.Namespace) -> int:
     # Route to anonymized export when --anonymize is set
     if getattr(args, "anonymize", False):
         return cmd_anonymize_export(args)
+
+    if getattr(args, "format", "") == "eu-ai-act":
+        return cmd_export_eu_ai_act(args)
     store = TraceStore(args.trace_dir)
 
     session_id = args.session_id
@@ -435,6 +438,35 @@ def cmd_export(args: argparse.Namespace) -> int:
             return 0 if ok else 1
 
     return 0
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    """Verify a session hash chain or an exported EU AI Act package."""
+    if getattr(args, "from_export", ""):
+        return cmd_verify_export(args)
+
+    store = TraceStore(args.trace_dir)
+    session_id = getattr(args, "session_id", None) or store.get_latest_session_id()
+    if not session_id:
+        sys.stderr.write("No sessions found.\n")
+        return 1
+    full_id = store.find_session(session_id) or session_id
+    if not store.session_exists(full_id):
+        sys.stderr.write(f"Session not found: {session_id}\n")
+        return 1
+
+    result = verify_chain(store, full_id)
+    if getattr(args, "format", "text") == "json":
+        sys.stdout.write(json.dumps({
+            "session_id": result.session_id,
+            "ok": result.ok,
+            "total_events": result.total_events,
+            "broken_at": result.broken_at,
+            "broken_event_id": result.broken_event_id,
+        }, indent=2) + "\n")
+    else:
+        result.format(sys.stdout)
+    return 0 if result.ok else 1
 
 
 def cmd_stats(args: argparse.Namespace) -> int:
@@ -793,7 +825,7 @@ def build_parser() -> argparse.ArgumentParser:
     # export
     p_export = sub.add_parser("export", help="export a session")
     p_export.add_argument("session_id", nargs="?", help="session ID or prefix")
-    p_export.add_argument("--format", choices=["json", "csv", "ndjson", "otlp", "otlp-genai"],
+    p_export.add_argument("--format", choices=["json", "csv", "ndjson", "otlp", "otlp-genai", "eu-ai-act"],
                           default="json",
                           help="output format (otlp-genai uses strict OTel GenAI semantic conventions)")
     p_export.add_argument("--endpoint", help="OTLP collector URL (e.g. http://localhost:4318)")
@@ -808,6 +840,10 @@ def build_parser() -> argparse.ArgumentParser:
                           help="export backend: langfuse or otlp")
     p_export.add_argument("--since", metavar="Nd",
                           help="export sessions from the last N days (e.g. 7d)")
+    p_export.add_argument("--until", metavar="DATE",
+                          help="upper time bound for batch exports (ISO date or timestamp)")
+    p_export.add_argument("--all", action="store_true",
+                          help="export all sessions in the selected time window")
     p_export.add_argument("--langfuse-public-key", dest="langfuse_public_key", metavar="KEY",
                           help="Langfuse public key (overrides LANGFUSE_PUBLIC_KEY)")
     p_export.add_argument("--langfuse-secret-key", dest="langfuse_secret_key", metavar="KEY",
@@ -823,7 +859,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_export.add_argument("--anonymize-config", dest="anonymize_config", metavar="FILE",
                           help="path to custom anonymization rules YAML file")
     p_export.add_argument("--output", "-o", default="",
-                          help="output file path for anonymized export")
+                          help="output file path")
     p_export.add_argument("--dry-run", action="store_true",
                           help="show what would be anonymized without writing output (use with --anonymize)")
 
@@ -905,6 +941,13 @@ def build_parser() -> argparse.ArgumentParser:
                          help="verify SHA-256 hash chain integrity before policy audit")
     p_audit.add_argument("--policy", default=".agent-scope.json",
                          help="path to policy file (default: .agent-scope.json)")
+
+    # verify
+    p_verify = sub.add_parser("verify", help="verify session or exported trace integrity")
+    p_verify.add_argument("session_id", nargs="?", help="session ID or prefix")
+    p_verify.add_argument("--from-export", dest="from_export", metavar="FILE",
+                          help="verify hash chain from an EU AI Act export")
+    p_verify.add_argument("--format", choices=["text", "json"], default="text")
 
     # share
     p_share = sub.add_parser("share", help="generate a self-contained HTML replay of a session")
@@ -1249,6 +1292,12 @@ def build_parser() -> argparse.ArgumentParser:
                             help="export sessions from last N days (e.g. 30d)")
     p_comp_exp.add_argument("--output", "-o", metavar="FILE",
                             help="write JSON report to FILE instead of stdout")
+
+    # audit-readiness
+    p_ready = sub.add_parser("audit-readiness", help="check EU AI Act audit export readiness")
+    p_ready.add_argument("--retention-days", type=float, default=90.0,
+                         help="required retention coverage in days (default: 90)")
+    p_ready.add_argument("--format", choices=["text", "json"], default="text")
 
     # workspace (workspace isolation)
     p_ws = sub.add_parser("workspace", help="manage isolated workspaces")
@@ -1624,6 +1673,7 @@ def main() -> None:
         "diff": cmd_diff,
         "why": cmd_why,
         "audit": cmd_audit,
+        "verify": cmd_verify,
         "share": cmd_share,
         "postmortem": cmd_postmortem,
         "eval": cmd_eval,
@@ -1644,6 +1694,7 @@ def main() -> None:
         "identity": cmd_identity,
         "workspace": cmd_workspace,
         "compliance": cmd_compliance,
+        "audit-readiness": cmd_audit_readiness,
         "approval": cmd_approval,
         "rbac": cmd_rbac,
         "apply": cmd_apply,

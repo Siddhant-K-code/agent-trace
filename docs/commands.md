@@ -245,6 +245,14 @@ Check tool calls against a policy file. Flags sensitive file access even without
 }
 ```
 
+### `verify`
+```
+agent-strace verify [session-id] [--format text|json]
+agent-strace verify --from-export FILE [--format text|json]
+```
+Verify a session hash chain, or verify the chain links embedded in an EU AI Act
+export package.
+
 ### `policy`
 ```
 agent-strace policy [--last N] [--output FILE]
@@ -328,9 +336,8 @@ Isolated workspaces — each workspace has its own session store. Use `use` to p
 
 ### `compliance`
 ```
-agent-strace compliance export --framework eu-ai-act|soc2|hipaa
-                                [--since DATE] [--until DATE]
-                                [--output FILE] [--format json|markdown]
+agent-strace compliance export [session-id] --framework eu-ai-act|soc2|hipaa|all
+                                [--since Nd] [--output FILE]
 ```
 Export a compliance report for the specified framework. Covers session retention, data handling, access logs, and policy enforcement evidence.
 
@@ -339,6 +346,24 @@ Export a compliance report for the specified framework. Covers session retention
 | `eu-ai-act` | Transparency, human oversight, data governance |
 | `soc2` | Access control, availability, confidentiality |
 | `hipaa` | PHI handling, audit trail, access logs |
+
+For an auditor-facing EU AI Act Article 12/13 package, use the session export path:
+
+```
+agent-strace export <session-id> --format eu-ai-act --output compliance-report.json
+agent-strace export --all --since 2026-01-01 --until 2026-03-31 \
+  --format eu-ai-act --output Q1-audit.json
+agent-strace verify --from-export compliance-report.json
+agent-strace audit-readiness [--format text|json]
+```
+
+### `audit-readiness`
+```
+agent-strace audit-readiness [--retention-days N] [--format text|json]
+```
+Check whether the local trace store has hash-chain integrity, retention
+coverage, timestamp continuity, and hash-chain presence before generating an
+EU AI Act audit package.
 
 ---
 
@@ -474,12 +499,16 @@ Track changes to AGENTS.md and other config files. `check` exits 1 when config h
 
 ### `export`
 ```
-agent-strace export <session-id> [--format json|csv|ndjson|otlp|otlp-genai]
+agent-strace export <session-id> [--format json|csv|ndjson|otlp|otlp-genai|eu-ai-act]
                     [--endpoint URL] [--header KEY:VALUE] [--service-name NAME]
                     [--anonymize] [--scores] [--metrics] [--backend otlp|langfuse]
-                    [--since DURATION] [--langfuse-host URL]
+                    [--all] [--since DURATION_OR_DATE] [--until DATE] [--output FILE]
 ```
 Export a session. See [production.md](production.md) for per-backend OTLP setup.
+
+`--format eu-ai-act` writes a structured JSON package with Article 12 logging
+evidence, Article 13 transparency documentation, hash-chain integrity metadata,
+and event-level line hashes for `agent-strace verify --from-export`.
 
 ### `share`
 ```
