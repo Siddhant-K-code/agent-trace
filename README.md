@@ -105,6 +105,7 @@ Full setup guide: [docs/setup.md](docs/setup.md)
 |---|---|
 | [`agent-strace dashboard`](docs/commands.md#dashboard) | Multi-session overview |
 | [`agent-strace budget-report`](docs/commands.md#budget-report) | Weekly spend digest |
+| [`agent-strace search "<query>"`](docs/commands.md#search) | Find sessions by tool, file, error, cost, or date |
 | [`agent-strace lint <id>`](docs/commands.md#lint) | Flag bad behaviour patterns (loops, spirals, waste) |
 | [`agent-strace drift`](docs/commands.md#drift) | Detect behavioural drift over time |
 | [`agent-strace standup`](docs/commands.md#standup) | Plain-English summary of yesterday's sessions |

@@ -62,6 +62,7 @@ from .config_watch import cmd_config_watch
 from .lint import cmd_lint
 from .retention import cmd_retention
 from .sample import cmd_sample
+from .search import cmd_search
 from .server import cmd_server
 from .watch import cmd_watch
 from .why import cmd_why
@@ -1216,6 +1217,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_budget.add_argument("--endpoint", metavar="URL",
                           help="remote collector endpoint (not yet implemented)")
 
+    # search
+    p_search = sub.add_parser(
+        "search",
+        help="query the local session store (tool:, file:, error:, cost:, date:)",
+    )
+    p_search.add_argument(
+        "query", nargs="+",
+        help='query string, e.g. "tool:bash AND error:permission"',
+    )
+    p_search.add_argument("--format", choices=["text", "json"], default="text",
+                          help="output format (default: text)")
+    p_search.add_argument("--limit", type=int, default=0, metavar="N",
+                          help="show at most N results (default: all)")
+
     # lint
     p_lint = sub.add_parser("lint", help="analyse a session for bad behaviour patterns")
     p_lint.add_argument("session_id", nargs="?",
@@ -1372,6 +1387,7 @@ def main() -> None:
         "lint": cmd_lint,
         "retention": cmd_retention,
         "sample": cmd_sample,
+        "search": cmd_search,
         "server": cmd_server,
     }
 

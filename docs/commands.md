@@ -331,6 +331,30 @@ agent-strace budget-report [--since DATE] [--until DATE] [--format text|markdown
 ```
 Weekly spend digest: total cost, top sessions, cost by tool, watchdog savings.
 
+### `search`
+```
+agent-strace search "<query>" [--format text|json] [--limit N]
+```
+Query the local `.agent-traces/` store. Predicates are matched in-process — no index, no new dependencies.
+
+| Predicate | Matches sessions that |
+|---|---|
+| `tool:<name>` | called a tool whose name contains `<name>` |
+| `file:<path>` | read or wrote a file whose path contains `<path>` |
+| `error:<text>` | have an error message containing `<text>` (empty matches any error) |
+| `cost:>N` / `cost:<N` / `cost:N` | cost more / less than / about N dollars |
+| `date:<spec>` | started within a window: `today`, `yesterday`, `this-week`, `this-month`, `Nd` (last N days), `YYYY-MM-DD`, or `YYYY-MM-DD:YYYY-MM-DD` |
+
+Combine predicates with `AND` / `OR` (case-insensitive). `AND` binds tighter than `OR`. Quote values containing spaces.
+
+```bash
+agent-strace search "tool:bash AND error:permission"
+agent-strace search "file:src/auth.py OR cost:>2.00"
+agent-strace search "date:this-week AND tool:write_file"
+```
+
+Output is a table of matching sessions (id, start time, cost, tool count); pipe an id into `agent-strace replay <id>`. Exits non-zero when nothing matches so it composes in scripts.
+
 ### `standup`
 ```
 agent-strace standup [--session SESSION_ID]
