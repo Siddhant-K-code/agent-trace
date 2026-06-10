@@ -8,20 +8,23 @@ Full flag reference for every `agent-strace` command.
 
 ### `record`
 ```
-agent-strace record [--name NAME] [--no-redact] [--mask] -- <command>
+agent-strace record [--name NAME] [--parent SESSION] [--no-redact] [--mask] -- <command>
 ```
 Capture an MCP stdio server session. Wraps `<command>` as a transparent proxy.
 
 | Flag | Description |
 |---|---|
 | `--name NAME` | Label for the session |
+| `--parent SESSION` | Link this session as a child of a parent session |
 | `--redact` | Strip secrets before writing to disk; kept for compatibility because this is now the default |
 | `--no-redact` | Disable automatic secret redaction |
 | `--mask` | Mask PII (email, phone, CC, SSN) |
 
+`AGENT_STRACE_PARENT_SESSION` can also be set by orchestrators that spawn child agents.
+
 ### `record-http`
 ```
-agent-strace record-http <url> [--port N] [--no-redact] [--mask]
+agent-strace record-http <url> [--port N] [--parent SESSION] [--no-redact] [--mask]
 ```
 Capture an MCP HTTP/SSE server session. Listens on `--port` (default: 3100) and proxies to `<url>`.
 
@@ -57,6 +60,12 @@ agent-strace replay [session-id] [--format terminal|html] [--live] [--speed N]
 | `--limit N` | Cap at N events |
 | `--expand-subagents` | Inline subagent sessions under parent tool_call |
 | `--tree` | Show session hierarchy without full replay |
+
+### `tree`
+```
+agent-strace tree [session-id] [--format text|json]
+```
+Show the parent/child session hierarchy for a root session, including per-node cost, tool calls, status, and duration. Parent links come from `record --parent`, `AGENT_STRACE_PARENT_SESSION`, A2A trace propagation, or imported trace metadata.
 
 ### `list`
 ```

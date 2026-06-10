@@ -74,7 +74,7 @@ from .models import EventType, SessionMeta, TraceEvent
 from .proxy import MCPProxy
 from .replay import format_event, format_summary, list_sessions, replay_session
 from .store import TraceStore
-from .subagent import cmd_replay_tree, cmd_stats_tree
+from .subagent import cmd_replay_tree, cmd_stats_tree, cmd_tree
 from .why import cmd_why
 
 
@@ -94,6 +94,34 @@ def _redact_setting(args: argparse.Namespace) -> bool | None:
     return None
 
 
+def _parent_session_id(args: argparse.Namespace) -> str:
+    return (
+        getattr(args, "parent", None)
+        or os.environ.get("AGENT_STRACE_PARENT_SESSION", "")
+    )
+
+
+def _resolve_parent_session_id(store: TraceStore, args: argparse.Namespace) -> str:
+    raw = _parent_session_id(args)
+    if not raw:
+        return ""
+    return store.find_session(raw) or raw
+
+
+def _parent_event_id() -> str:
+    return os.environ.get("AGENT_STRACE_PARENT_EVENT", "")
+
+
+def _parent_depth(store: TraceStore, parent_session_id: str) -> int:
+    if not parent_session_id:
+        return 0
+    try:
+        parent_meta = store.load_meta(parent_session_id)
+        return parent_meta.depth + 1
+    except Exception:
+        return 1
+
+
 def cmd_record(args: argparse.Namespace) -> int:
     """Record an MCP server session."""
     store = TraceStore(args.trace_dir, redact=_redact_setting(args))
@@ -103,9 +131,13 @@ def cmd_record(args: argparse.Namespace) -> int:
     if server_cmd and server_cmd[0] == "--":
         server_cmd = server_cmd[1:]
 
+    parent_session_id = _resolve_parent_session_id(store, args)
     meta = SessionMeta(
         agent_name=args.name or "",
         command=" ".join(server_cmd),
+        parent_session_id=parent_session_id,
+        parent_event_id=_parent_event_id(),
+        depth=_parent_depth(store, parent_session_id),
     )
     store.create_session(meta)
 
@@ -143,9 +175,13 @@ def cmd_record_http(args: argparse.Namespace) -> int:
     """Record a remote MCP server session over HTTP/SSE."""
     store = TraceStore(args.trace_dir, redact=_redact_setting(args))
 
+    parent_session_id = _resolve_parent_session_id(store, args)
     meta = SessionMeta(
         agent_name=args.name or "",
         command=f"http-proxy -> {args.url}",
+        parent_session_id=parent_session_id,
+        parent_event_id=_parent_event_id(),
+        depth=_parent_depth(store, parent_session_id),
     )
     store.create_session(meta)
 
@@ -686,6 +722,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_record.add_argument("--verbose", "-v", action="store_true", help="print events to stderr during recording")
     p_record.add_argument("--quiet", "-q", action="store_true", help="suppress all output except errors")
+    p_record.add_argument("--parent", metavar="SESSION",
+                          help="parent session ID for subagent correlation")
     p_record.add_argument("server_cmd", nargs=argparse.REMAINDER, help="MCP server command to run")
 
     # record-http
@@ -706,6 +744,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_record_http.add_argument("--verbose", "-v", action="store_true", help="print events to stderr during recording")
     p_record_http.add_argument("--quiet", "-q", action="store_true", help="suppress all output except errors")
+    p_record_http.add_argument("--parent", metavar="SESSION",
+                               help="parent session ID for subagent correlation")
 
     # replay
     p_replay = sub.add_parser("replay", help="replay a recorded session")
@@ -725,6 +765,12 @@ def build_parser() -> argparse.ArgumentParser:
                           help="inline subagent sessions under their parent tool_call")
     p_replay.add_argument("--tree", action="store_true",
                           help="show session hierarchy tree without full event replay")
+
+    # tree
+    p_tree = sub.add_parser("tree", help="show a parent/child session hierarchy")
+    p_tree.add_argument("session_id", nargs="?", help="root session ID or prefix (default: latest)")
+    p_tree.add_argument("--format", choices=["text", "json"], default="text",
+                        help="output format (default: text)")
 
     # list
     sub.add_parser("list", help="list all recorded sessions")
@@ -1580,6 +1626,7 @@ def main() -> None:
         "baseline": cmd_baseline,
         "drift": cmd_drift,
         "fingerprint": cmd_fingerprint,
+        "tree": cmd_tree,
         "identity": cmd_identity,
         "workspace": cmd_workspace,
         "compliance": cmd_compliance,

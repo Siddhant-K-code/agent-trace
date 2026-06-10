@@ -112,6 +112,7 @@ Full setup guide: [docs/setup.md](docs/setup.md)
 | [`agent-strace lint <id>`](docs/commands.md#lint) | Flag bad behaviour patterns (loops, spirals, waste) |
 | [`agent-strace drift`](docs/commands.md#drift) | Detect behavioural drift over time |
 | [`agent-strace fingerprint`](docs/commands.md#fingerprint) | Baseline an agent's behavioural profile |
+| [`agent-strace tree`](docs/commands.md#tree) | Show parent/child session hierarchy |
 | [`agent-strace freeze`](docs/commands.md#freeze) | Freeze a tool-call sequence for regression checks |
 | [`agent-strace standup`](docs/commands.md#standup) | Plain-English summary of yesterday's sessions |
 | [`agent-strace eval <id>`](docs/commands.md#eval) | Score a session against behavioural baselines |

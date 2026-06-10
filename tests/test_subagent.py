@@ -2,9 +2,17 @@
 
 import io
 import json
+import argparse
 import tempfile
 import unittest
+from unittest.mock import patch
 
+from agent_trace.cli import (
+    build_parser,
+    _parent_depth,
+    _parent_session_id,
+    _resolve_parent_session_id,
+)
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
 from agent_trace.subagent import (
@@ -12,8 +20,11 @@ from agent_trace.subagent import (
     SessionNode,
     aggregate_stats,
     build_tree,
+    cmd_tree,
     format_tree,
+    format_session_tree,
     format_tree_summary,
+    tree_to_dict,
 )
 
 
@@ -254,6 +265,102 @@ class TestFormatTree(unittest.TestCase):
         buf = io.StringIO()
         format_tree(root_node, out=buf, expand=False)
         self.assertNotIn("child003", buf.getvalue())
+
+
+class TestSessionTreeCommand(unittest.TestCase):
+    def _make_tree(self):
+        root_meta = SessionMeta(
+            session_id="rootcmd1",
+            agent_name="orchestrator",
+            started_at=0.0,
+            tool_calls=3,
+            llm_requests=1,
+            total_duration_ms=4000,
+        )
+        child_meta = SessionMeta(
+            session_id="childcmd1",
+            agent_name="worker",
+            started_at=1.0,
+            parent_session_id="rootcmd1",
+            depth=1,
+            tool_calls=2,
+            total_duration_ms=1500,
+        )
+        return _make_store_with_sessions([
+            (root_meta, [_make_event(EventType.SESSION_END, 4.0, "rootcmd1")]),
+            (child_meta, [_make_event(EventType.SESSION_END, 2.0, "childcmd1")]),
+        ])
+
+    def test_tree_to_dict_contains_children(self):
+        store, tmp = self._make_tree()
+        tree = build_tree(store, "rootcmd1")
+        data = tree_to_dict(tree, {"rootcmd1": 0.01, "childcmd1": 0.02})
+        self.assertEqual(data["session_id"], "rootcmd1")
+        self.assertEqual(data["children"][0]["session_id"], "childcmd1")
+        self.assertEqual(data["children"][0]["cost_usd"], 0.02)
+        tmp.cleanup()
+
+    def test_format_session_tree_contains_cost_and_child(self):
+        store, tmp = self._make_tree()
+        tree = build_tree(store, "rootcmd1")
+        buf = io.StringIO()
+        format_session_tree(tree, costs={"rootcmd1": 0.01, "childcmd1": 0.02}, out=buf)
+        output = buf.getvalue()
+        self.assertIn("rootcmd1", output)
+        self.assertIn("childcmd1", output)
+        self.assertIn("$0.0100", output)
+        tmp.cleanup()
+
+    def test_cmd_tree_json(self):
+        store, tmp = self._make_tree()
+        captured = io.StringIO()
+        args = argparse.Namespace(
+            trace_dir=store.base_dir,
+            session_id="root",
+            format="json",
+        )
+        with patch("sys.stdout", captured):
+            result = cmd_tree(args)
+        self.assertEqual(result, 0)
+        data = json.loads(captured.getvalue())
+        self.assertEqual(data["total_sessions"], 2)
+        self.assertEqual(data["tree"]["children"][0]["session_id"], "childcmd1")
+        tmp.cleanup()
+
+    def test_parser_registers_tree_and_parent_flags(self):
+        parser = build_parser()
+        tree_args = parser.parse_args(["tree", "root", "--format", "json"])
+        self.assertEqual(tree_args.command, "tree")
+        self.assertEqual(tree_args.session_id, "root")
+
+        record_args = parser.parse_args(["record", "--parent", "root123", "--", "server"])
+        self.assertEqual(record_args.parent, "root123")
+
+    def test_parent_session_id_prefers_flag_over_env(self):
+        args = argparse.Namespace(parent="from-flag")
+        with patch.dict("os.environ", {"AGENT_STRACE_PARENT_SESSION": "from-env"}):
+            self.assertEqual(_parent_session_id(args), "from-flag")
+
+    def test_parent_session_id_reads_env(self):
+        args = argparse.Namespace(parent=None)
+        with patch.dict("os.environ", {"AGENT_STRACE_PARENT_SESSION": "from-env"}):
+            self.assertEqual(_parent_session_id(args), "from-env")
+
+    def test_parent_depth_uses_parent_meta(self):
+        tmp = tempfile.TemporaryDirectory()
+        store = TraceStore(tmp.name)
+        store.create_session(SessionMeta(session_id="parent1", depth=2))
+        self.assertEqual(_parent_depth(store, "parent1"), 3)
+        self.assertEqual(_parent_depth(store, "missing"), 1)
+        tmp.cleanup()
+
+    def test_resolve_parent_session_id_expands_prefix(self):
+        tmp = tempfile.TemporaryDirectory()
+        store = TraceStore(tmp.name)
+        store.create_session(SessionMeta(session_id="parent123456"))
+        args = argparse.Namespace(parent="parent")
+        self.assertEqual(_resolve_parent_session_id(store, args), "parent123456")
+        tmp.cleanup()
 
 
 class TestAggregateStatsDuration(unittest.TestCase):

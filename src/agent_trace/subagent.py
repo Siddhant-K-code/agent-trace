@@ -11,6 +11,7 @@ parent_event_id. This module provides:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from dataclasses import dataclass, field
 from typing import TextIO
@@ -252,6 +253,89 @@ def format_tree_summary(
         format_tree_summary(child, out=out, last_child=(i == len(node.children) - 1))
 
 
+def _status(meta: SessionMeta) -> str:
+    if meta.errors:
+        return "error"
+    return "ok"
+
+
+def _duration_seconds(meta: SessionMeta) -> float:
+    if meta.total_duration_ms:
+        return meta.total_duration_ms / 1000
+    if meta.ended_at and meta.started_at:
+        return max(0.0, meta.ended_at - meta.started_at)
+    return 0.0
+
+
+def _node_cost(store: TraceStore, session_id: str) -> float:
+    try:
+        from .cost import estimate_cost
+        return estimate_cost(store, session_id).total_cost
+    except Exception:
+        return 0.0
+
+
+def _cost_map(store: TraceStore, node: SessionNode) -> dict[str, float]:
+    costs = {node.meta.session_id: _node_cost(store, node.meta.session_id)}
+    for child in node.children:
+        costs.update(_cost_map(store, child))
+    return costs
+
+
+def tree_to_dict(
+    node: SessionNode,
+    costs: dict[str, float] | None = None,
+) -> dict:
+    costs = costs or {}
+    return {
+        "session_id": node.meta.session_id,
+        "agent": node.meta.agent_name or node.meta.command or "",
+        "depth": node.depth,
+        "parent_session_id": node.meta.parent_session_id,
+        "parent_event_id": node.meta.parent_event_id,
+        "cost_usd": round(costs.get(node.meta.session_id, 0.0), 6),
+        "tool_calls": node.meta.tool_calls,
+        "llm_requests": node.meta.llm_requests,
+        "errors": node.meta.errors,
+        "status": _status(node.meta),
+        "duration_s": round(_duration_seconds(node.meta), 3),
+        "children": [tree_to_dict(child, costs) for child in node.children],
+    }
+
+
+def format_session_tree(
+    node: SessionNode,
+    costs: dict[str, float] | None = None,
+    out: TextIO = sys.stdout,
+    last_child: bool = False,
+) -> None:
+    """Print a compact tree with per-session cost, calls, status, and duration."""
+    costs = costs or {}
+    indent = _indent(node.depth, last_child=last_child)
+    duration = _duration_seconds(node.meta)
+    status = "✗" if node.meta.errors else "✓"
+    agent = node.meta.agent_name or node.meta.command or "session"
+    out.write(
+        f"{indent}{node.meta.session_id[:12]}  "
+        f"{agent[:28]:<28}  "
+        f"${costs.get(node.meta.session_id, 0.0):.4f}  "
+        f"{node.meta.tool_calls} tools  "
+        f"{duration:.1f}s  "
+        f"{status}"
+    )
+    if node.meta.errors:
+        out.write(f"  {node.meta.errors} errors")
+    out.write("\n")
+
+    for i, child in enumerate(node.children):
+        format_session_tree(
+            child,
+            costs=costs,
+            out=out,
+            last_child=(i == len(node.children) - 1),
+        )
+
+
 # ---------------------------------------------------------------------------
 # CLI handlers
 # ---------------------------------------------------------------------------
@@ -320,4 +404,49 @@ def cmd_stats_tree(args: argparse.Namespace) -> int:
         format_tree_summary(tree)
         sys.stdout.write("\n")
 
+    return 0
+
+
+def cmd_tree(args: argparse.Namespace) -> int:
+    store = TraceStore(args.trace_dir)
+
+    session_id = args.session_id or store.get_latest_session_id()
+    if not session_id:
+        sys.stderr.write("No sessions found.\n")
+        return 1
+    full_id = store.find_session(session_id)
+    if not full_id:
+        sys.stderr.write(f"Session not found: {session_id}\n")
+        return 1
+
+    try:
+        tree = build_tree(store, full_id)
+    except KeyError as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 1
+
+    costs = _cost_map(store, tree)
+    stats = aggregate_stats(tree)
+    if getattr(args, "format", "text") == "json":
+        data = {
+            "root_session_id": full_id,
+            "total_sessions": stats.session_count,
+            "total_cost_usd": round(sum(costs.values()), 6),
+            "total_tool_calls": stats.tool_calls,
+            "total_llm_requests": stats.llm_requests,
+            "total_errors": stats.errors,
+            "tree": tree_to_dict(tree, costs),
+        }
+        sys.stdout.write(json.dumps(data, indent=2, sort_keys=True) + "\n")
+        return 0
+
+    sys.stdout.write(f"\nSession tree for {full_id[:12]}\n\n")
+    format_session_tree(tree, costs=costs)
+    sys.stdout.write(
+        f"\nTotal: {stats.session_count} sessions, "
+        f"${sum(costs.values()):.4f}, "
+        f"{stats.tool_calls} tool calls, "
+        f"{stats.llm_requests} LLM requests"
+        f"{', ' + str(stats.errors) + ' errors' if stats.errors else ''}\n\n"
+    )
     return 0
