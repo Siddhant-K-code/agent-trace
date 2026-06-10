@@ -467,6 +467,21 @@ Measure unreviewed agent-written code from trace file-write events and local git
 
 `agent-strace watch --rules cognitive-debt:0.8` enables a live rule that alerts when a session has modified files that have not yet had human review.
 
+### `context-score`
+```
+agent-strace context-score [--file AGENTS.md] [--history N] [--compare]
+                           [--min-sessions N] [--format text|json]
+```
+Score AGENTS.md, CLAUDE.md, or GEMINI.md from actual session outcomes. The command groups sessions by context-file hashes recorded by `config-watch`, then compares cost efficiency, tool efficiency, lint findings, and scope adherence between versions. If no version history exists, it reports current-version stats only.
+
+| Flag | Description |
+|---|---|
+| `--file PATH` | Context file to score; defaults to the first existing AGENTS.md, CLAUDE.md, or GEMINI.md |
+| `--history N` | Days of session history to analyse; default is `30` |
+| `--compare` | Compare current context version against the previous version |
+| `--min-sessions N` | Minimum sessions per version before scoring; default is `5` |
+| `--format text|json` | Output format |
+
 ### `standup`
 ```
 agent-strace standup [--session SESSION_ID]

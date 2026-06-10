@@ -44,6 +44,7 @@ from .standup import cmd_standup
 from .audit import cmd_audit, verify_chain
 from .cost import cmd_cost
 from .cognitive_debt import cmd_cognitive_debt
+from .context_score import cmd_context_score
 from .curve import cmd_curve
 from .dashboard import cmd_dashboard
 from .shadow_ai import cmd_audit_tools
@@ -1074,6 +1075,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_debt.add_argument("--github-token", default="",
                         help="GitHub token for optional PR review/comment enrichment")
 
+    # context-score
+    p_context_score = sub.add_parser("context-score", help="score AGENTS.md / CLAUDE.md from session outcomes")
+    p_context_score.add_argument("--file", default="",
+                                 help="context file to score (default: AGENTS.md, CLAUDE.md, or GEMINI.md)")
+    p_context_score.add_argument("--history", type=int, default=30,
+                                 help="days of session history to analyse (default: 30)")
+    p_context_score.add_argument("--compare", action="store_true",
+                                 help="compare current context version against the previous version")
+    p_context_score.add_argument("--min-sessions", type=int, default=5,
+                                 help="minimum sessions per version before scoring (default: 5)")
+    p_context_score.add_argument("--format", choices=["text", "json"], default="text",
+                                 help="output format (default: text)")
+
     # mcp-scan
     p_mcp_scan = sub.add_parser("mcp-scan", help="scan runtime MCP tool poisoning indicators")
     p_mcp_scan.add_argument("--session", metavar="ID",
@@ -1689,6 +1703,7 @@ def main() -> None:
         "timeline": cmd_timeline,
         "cost": cmd_cost,
         "cognitive-debt": cmd_cognitive_debt,
+        "context-score": cmd_context_score,
         "diff": cmd_diff,
         "why": cmd_why,
         "audit": cmd_audit,
