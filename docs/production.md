@@ -2,22 +2,38 @@
 
 ## Quick demo (no signup required)
 
-Spin up Jaeger locally — one Docker command, full trace UI in the browser:
+Jaeger v2 ships as a single binary — no Docker needed. Download from [github.com/jaegertracing/jaeger/releases](https://github.com/jaegertracing/jaeger/releases), unzip, and run:
 
 ```bash
-# Start Jaeger (OTLP on 4318, UI on 16686)
-docker run --rm -d --name jaeger \
-  -p 16686:16686 -p 4318:4318 \
-  jaegertracing/all-in-one:latest
+# macOS
+curl -L https://github.com/jaegertracing/jaeger/releases/download/v2.19.0/jaeger-v2.19.0-darwin-amd64.tar.gz | tar xz
+./jaeger --config-file=/dev/null &
 
-# Export your session
-agent-strace export --format otlp-genai --endpoint http://localhost:4318
+# Linux
+curl -L https://github.com/jaegertracing/jaeger/releases/download/v2.19.0/jaeger-v2.19.0-linux-amd64.tar.gz | tar xz
+./jaeger --config-file=/dev/null &
 
-# Open the UI
-open http://localhost:16686
+# Windows — download the zip, unzip, run jaeger.exe
 ```
 
-Select service `agent-trace` in the Jaeger UI to see the full trace.
+Then export your session and open the UI:
+
+```bash
+agent-strace export --format otlp-genai --endpoint http://localhost:4318
+open http://localhost:16686   # select service "agent-trace"
+```
+
+Or save to a file first and inspect before sending:
+
+```bash
+agent-strace export --format otlp-genai                  # saves trace-<id>-otlp-genai.json
+agent-strace export --format otlp-genai --output my.json # custom filename
+```
+
+Prefer Docker? One command:
+```bash
+docker run --rm -d --name jaeger -p 16686:16686 -p 4318:4318 jaegertracing/all-in-one:latest
+```
 
 Export sessions as OpenTelemetry spans to your existing observability stack. Sessions become traces. Tool calls become spans with duration and inputs. Errors get exception events. No new dependencies.
 
