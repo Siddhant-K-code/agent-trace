@@ -15,7 +15,10 @@ agent-strace setup
 # Generate OpenAI Codex hooks config
 agent-strace setup --cli codex
 
-# Generate both hook configs
+# Install Gemini CLI extension hooks
+agent-strace setup --cli gemini
+
+# Configure all supported hook integrations
 agent-strace setup --cli all
 
 # For all projects (global config)
@@ -66,6 +69,34 @@ agent-strace explain  # plain-English summary
 ```
 
 Codex sends one JSON object to each command hook on stdin. agent-strace records the common Codex fields (`session_id`, `turn_id`, `tool_use_id`, `tool_name`, `tool_input`, `tool_response`, `prompt`, and `last_assistant_message`) into the same `.agent-traces/` session store used by Claude Code.
+
+### Gemini CLI hooks
+
+`agent-strace setup --cli gemini` writes a Gemini CLI extension:
+
+```
+~/.gemini/extensions/agent-strace/
+├── gemini-extension.json
+└── hooks/
+    └── hooks.json
+```
+
+Set `GEMINI_CONFIG_DIR` to install into a different Gemini config directory. The generated `hooks.json` registers `SessionStart`, `BeforeAgent`, `BeforeTool`, `AfterTool`, `AfterAgent`, and `SessionEnd` command hooks:
+
+```json
+{
+  "hooks": {
+    "BeforeTool": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "agent-strace hook --provider gemini pre-tool" }] }],
+    "AfterTool": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "agent-strace hook --provider gemini post-tool" }] }],
+    "BeforeAgent": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "agent-strace hook --provider gemini user-prompt" }] }],
+    "AfterAgent": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "agent-strace hook --provider gemini stop" }] }],
+    "SessionStart": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "agent-strace hook --provider gemini session-start" }] }],
+    "SessionEnd": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "agent-strace hook --provider gemini session-end" }] }]
+  }
+}
+```
+
+Gemini sends one JSON object to each command hook on stdin. agent-strace records `session_id`, `tool_name`, `tool_input`, `tool_response`, `prompt`, and `prompt_response` into the same `.agent-traces/` session store used by Claude Code and Codex.
 
 ### Import existing sessions
 

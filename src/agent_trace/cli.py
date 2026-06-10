@@ -16,8 +16,10 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import sys
 import time
+from pathlib import Path
 
 from . import __version__
 from .hooks import hook_main
@@ -534,6 +536,92 @@ def _codex_hooks_config(args: argparse.Namespace) -> dict:
     }
 
 
+def _gemini_hooks_config(args: argparse.Namespace) -> dict:
+    cmd_prefix = _hook_command_prefix(args, provider="gemini")
+    return {
+        "hooks": {
+            "SessionStart": [{
+                "matcher": "*",
+                "hooks": [{
+                    "name": "agent-strace-session-start",
+                    "type": "command",
+                    "command": f"{cmd_prefix} session-start",
+                    "timeout": 5000,
+                }],
+            }],
+            "BeforeAgent": [{
+                "matcher": "*",
+                "hooks": [{
+                    "name": "agent-strace-user-prompt",
+                    "type": "command",
+                    "command": f"{cmd_prefix} user-prompt",
+                    "timeout": 5000,
+                }],
+            }],
+            "BeforeTool": [{
+                "matcher": "*",
+                "hooks": [{
+                    "name": "agent-strace-tool-call",
+                    "type": "command",
+                    "command": f"{cmd_prefix} pre-tool",
+                    "timeout": 5000,
+                }],
+            }],
+            "AfterTool": [{
+                "matcher": "*",
+                "hooks": [{
+                    "name": "agent-strace-tool-result",
+                    "type": "command",
+                    "command": f"{cmd_prefix} post-tool",
+                    "timeout": 5000,
+                }],
+            }],
+            "AfterAgent": [{
+                "matcher": "*",
+                "hooks": [{
+                    "name": "agent-strace-assistant-response",
+                    "type": "command",
+                    "command": f"{cmd_prefix} stop",
+                    "timeout": 5000,
+                }],
+            }],
+            "SessionEnd": [{
+                "matcher": "*",
+                "hooks": [{
+                    "name": "agent-strace-session-end",
+                    "type": "command",
+                    "command": f"{cmd_prefix} session-end",
+                    "timeout": 5000,
+                }],
+            }],
+        }
+    }
+
+
+def _gemini_extension_manifest() -> dict:
+    return {
+        "name": "agent-strace",
+        "version": __version__,
+        "description": "Capture and replay Gemini CLI sessions with agent-strace",
+    }
+
+
+def _gemini_config_dir() -> Path:
+    return Path(os.environ.get("GEMINI_CONFIG_DIR", "~/.gemini")).expanduser()
+
+
+def _write_gemini_extension(args: argparse.Namespace) -> tuple[Path, Path]:
+    extension_dir = _gemini_config_dir() / "extensions" / "agent-strace"
+    hooks_dir = extension_dir / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest_path = extension_dir / "gemini-extension.json"
+    hooks_path = hooks_dir / "hooks.json"
+    manifest_path.write_text(json.dumps(_gemini_extension_manifest(), indent=2) + "\n")
+    hooks_path.write_text(json.dumps(_gemini_hooks_config(args), indent=2) + "\n")
+    return manifest_path, hooks_path
+
+
 def cmd_setup(args: argparse.Namespace) -> None:
     """Generate hooks configuration for supported agent CLIs."""
     cli = getattr(args, "cli", "claude") or "claude"
@@ -543,12 +631,21 @@ def cmd_setup(args: argparse.Namespace) -> None:
         configs.append(("Claude Code", "~/.claude/settings.json", _claude_hooks_config(args)))
     if cli in ("codex", "all"):
         configs.append(("OpenAI Codex", "~/.codex/hooks.json", _codex_hooks_config(args)))
+    if cli in ("gemini", "all"):
+        manifest_path, hooks_path = _write_gemini_extension(args)
+        sys.stderr.write(
+            f"Wrote Gemini CLI extension manifest: {manifest_path}\n"
+            f"Wrote Gemini CLI hooks config: {hooks_path}\n"
+        )
 
     for idx, (name, path, config) in enumerate(configs):
         if idx:
             sys.stdout.write("\n")
         sys.stderr.write(f"Add this to {path} for {name}:\n\n")
         sys.stdout.write(json.dumps(config, indent=2) + "\n")
+
+    if cli == "gemini":
+        sys.stdout.write(json.dumps(_gemini_hooks_config(args), indent=2) + "\n")
 
     sys.stderr.write(
         "\nThis captures full agent sessions: user prompts, assistant "
@@ -679,7 +776,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # hook (called by agent CLI hooks systems)
     p_hook = sub.add_parser("hook", help="handle an agent CLI hook event (internal)")
-    p_hook.add_argument("--provider", choices=["claude", "codex"], default="claude",
+    p_hook.add_argument("--provider", choices=["claude", "codex", "gemini"], default="claude",
                         help="hook provider (default: claude)")
     p_hook.add_argument("event", nargs="?", help="hook event: session-start, session-end, pre-tool, post-tool, post-tool-failure")
 
@@ -697,7 +794,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="disable automatic secret redaction in generated hooks",
     )
     p_setup.add_argument("--global", dest="global_config", action="store_true", help="output config for ~/.claude/settings.json (all projects)")
-    p_setup.add_argument("--cli", choices=["claude", "codex", "all"], default="claude",
+    p_setup.add_argument("--cli", choices=["claude", "codex", "gemini", "all"], default="claude",
                          help="agent CLI to configure (default: claude)")
 
     # import (Claude Code JSONL session logs)

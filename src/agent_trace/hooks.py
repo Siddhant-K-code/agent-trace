@@ -61,15 +61,18 @@ _PENDING_FILE = ".pending-calls.json"
 # agents sharing the same AGENT_TRACE_DIR from corrupting each other.
 _CLAUDE_SESSION_ID_ENV = "AGENT_TRACE_CLAUDE_SESSION_ID"
 _CODEX_SESSION_ID_ENV = "AGENT_TRACE_CODEX_SESSION_ID"
+_GEMINI_SESSION_ID_ENV = "AGENT_TRACE_GEMINI_SESSION_ID"
 
 _PROVIDER_ENV = {
     "claude": _CLAUDE_SESSION_ID_ENV,
     "codex": _CODEX_SESSION_ID_ENV,
+    "gemini": _GEMINI_SESSION_ID_ENV,
 }
 
 _PROVIDER_AGENT = {
     "claude": "claude-code",
     "codex": "openai-codex",
+    "gemini": "gemini-cli",
 }
 
 
@@ -200,7 +203,7 @@ def _should_redact() -> bool:
 def _normalise_payload(input_data: dict, provider: str, event: str) -> dict:
     """Map provider-specific hook payloads to the Claude-shaped fields."""
     data = dict(input_data)
-    if provider != "codex":
+    if provider not in ("codex", "gemini"):
         return data
 
     if event in {"pre-tool", "post-tool", "post-tool-failure"}:
@@ -211,6 +214,14 @@ def _normalise_payload(input_data: dict, provider: str, event: str) -> dict:
             data.setdefault("tool_output", tool.get("output") or tool.get("response") or "")
         data.setdefault("tool_input", data.get("input") or data.get("arguments") or {})
         data.setdefault("tool_output", data.get("tool_response", data.get("output", "")))
+
+    if provider == "gemini":
+        if event == "session-start":
+            data.setdefault("source", data.get("hook_event_name", "startup"))
+        if event == "user-prompt":
+            data.setdefault("prompt", data.get("user_prompt") or data.get("input", {}).get("prompt", ""))
+        if event == "stop":
+            data.setdefault("last_assistant_message", data.get("prompt_response", ""))
 
     if event == "stop" and data.get("last_assistant_message") is None:
         data["last_assistant_message"] = data.get("assistant_message") or data.get("message") or ""
@@ -408,7 +419,7 @@ def handle_post_tool(input_data: dict, failed: bool = False, provider: str = "cl
     tool_name = input_data.get("tool_name", "unknown")
     tool_output = input_data.get("tool_output", input_data.get("tool_response", ""))
 
-    if provider == "codex" and not failed:
+    if provider in ("codex", "gemini") and not failed:
         if isinstance(tool_output, dict):
             exit_code = tool_output.get("exit_code")
             failed = (
@@ -484,7 +495,7 @@ def hook_main(args: list[str]) -> None:
     if rest[:1] == ["--provider"] and len(rest) >= 2:
         provider = rest[1]
         rest = rest[2:]
-    elif rest and rest[0] in ("claude", "codex") and len(rest) >= 2:
+    elif rest and rest[0] in _PROVIDER_AGENT and len(rest) >= 2:
         provider = rest[0]
         rest = rest[1:]
 
@@ -498,10 +509,19 @@ def hook_main(args: list[str]) -> None:
         sys.exit(1)
 
     if not rest:
-        sys.stderr.write("Usage: agent-strace hook [--provider claude|codex] <event>\n")
+        sys.stderr.write("Usage: agent-strace hook [--provider claude|codex|gemini] <event>\n")
         sys.exit(1)
 
-    event = rest[0]
+    aliases = {
+        "before-tool": "pre-tool",
+        "before-tool-call": "pre-tool",
+        "after-tool": "post-tool",
+        "after-tool-call": "post-tool",
+        "before-agent": "user-prompt",
+        "before-prompt": "user-prompt",
+        "after-agent": "stop",
+    }
+    event = aliases.get(rest[0], rest[0])
     input_data = _normalise_payload(_read_stdin(), provider, event)
 
     handlers = {

@@ -41,6 +41,7 @@ uvx agent-strace replay
 ```bash
 agent-strace setup             # Claude Code hooks for ~/.claude/settings.json
 agent-strace setup --cli codex # OpenAI Codex hooks for ~/.codex/hooks.json
+agent-strace setup --cli gemini # Gemini CLI extension under ~/.gemini/extensions
 agent-strace list              # list sessions
 agent-strace replay            # replay the latest
 ```
@@ -139,7 +140,7 @@ Install **agent-strace** from the [Extensions panel](https://open-vsx.org/extens
 
 ```bash
 pip install agent-strace   # 1. install
-agent-strace setup         # 2. add hooks to Claude Code or use --cli codex for Codex
+agent-strace setup         # 2. add hooks to Claude Code; use --cli codex or --cli gemini for other CLIs
 # 3. open project in VS Code — extension activates when .agent-traces/ exists
 # 4. start Claude Code — status bar appears immediately
 ```

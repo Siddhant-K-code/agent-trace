@@ -56,8 +56,9 @@ Use setup-generated hooks when the agent CLI has its own lifecycle hook system.
 |---|---|---|
 | Claude Code | `agent-strace setup --cli claude` | Session start/end, user prompts, assistant responses, tool calls/results |
 | OpenAI Codex | `agent-strace setup --cli codex` | Session start, user prompts, assistant responses, `PreToolUse`/`PostToolUse` tools |
+| Gemini CLI | `agent-strace setup --cli gemini` | Session start/end, prompts, assistant responses, `BeforeTool`/`AfterTool` tools |
 
-Both paths write the same event stream under `.agent-traces/`, so replay, timeline, explain, why, watch, export, and audit commands work the same way after capture.
+All paths write the same event stream under `.agent-traces/`, so replay, timeline, explain, why, watch, export, and audit commands work the same way after capture.
 
 ---
 
