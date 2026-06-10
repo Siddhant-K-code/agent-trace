@@ -19,7 +19,7 @@ agent-strace setup --global
 agent-strace setup --redact
 ```
 
-`agent-strace setup` prints the hooks JSON. Add it to `.claude/settings.json`:
+`agent-strace setup` prints the hooks JSON. Add it to `~/.claude/settings.json` (user-level, applies to all projects):
 
 ```json
 {

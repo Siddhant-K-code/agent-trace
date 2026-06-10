@@ -462,10 +462,7 @@ def cmd_setup(args: argparse.Namespace) -> None:
 
     output = json.dumps(config, indent=2)
 
-    if args.global_config:
-        sys.stderr.write("Add this to ~/.claude/settings.json:\n\n")
-    else:
-        sys.stderr.write("Add this to .claude/settings.json:\n\n")
+    sys.stderr.write("Add this to ~/.claude/settings.json:\n\n")
 
     sys.stdout.write(output + "\n")
     sys.stderr.write(
