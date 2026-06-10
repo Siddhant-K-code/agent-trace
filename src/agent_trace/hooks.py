@@ -112,6 +112,24 @@ def _read_active_session() -> str | None:
     return None
 
 
+def _resolve_session_id(input_data: dict) -> str | None:
+    """Return the agent-trace session ID for this hook invocation.
+
+    Claude Code passes session_id in every hook payload. We derive our
+    session ID from it the same way handle_session_start does (first 16
+    chars). This is the reliable path — it works even when the env var
+    AGENT_TRACE_CLAUDE_SESSION_ID is not set (i.e. in all hook processes
+    other than the SessionStart process that wrote it).
+
+    Falls back to _read_active_session() for hooks that don't carry a
+    session_id (e.g. SessionEnd).
+    """
+    raw = input_data.get("session_id", "")
+    if raw:
+        return raw[:16]
+    return _read_active_session()
+
+
 def _write_active_session(session_id: str) -> None:
     path = _active_session_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -173,9 +191,6 @@ def handle_session_start(input_data: dict) -> None:
 
     store.create_session(meta)
 
-    # Expose the Claude Code session ID so subsequent hook processes
-    # (which run as separate OS processes) can derive the same state-file
-    # paths via _state_suffix().
     if session_id:
         os.environ[_CLAUDE_SESSION_ID_ENV] = session_id
 
@@ -203,7 +218,7 @@ def handle_session_start(input_data: dict) -> None:
 def handle_session_end(input_data: dict) -> None:
     """Handle SessionEnd hook event."""
     store = _get_store()
-    session_id = _read_active_session()
+    session_id = _resolve_session_id(input_data)
     if not session_id:
         return
 
@@ -228,7 +243,7 @@ def handle_session_end(input_data: dict) -> None:
 def handle_pre_tool(input_data: dict) -> None:
     """Handle PreToolUse hook event. Logs tool_call and tracks pending calls."""
     store = _get_store()
-    session_id = _read_active_session()
+    session_id = _resolve_session_id(input_data)
     if not session_id:
         return
 
@@ -270,7 +285,7 @@ def handle_pre_tool(input_data: dict) -> None:
 def handle_user_prompt(input_data: dict) -> None:
     """Handle UserPromptSubmit hook event. Logs the user's prompt."""
     store = _get_store()
-    session_id = _read_active_session()
+    session_id = _resolve_session_id(input_data)
     if not session_id:
         return
 
@@ -294,7 +309,7 @@ def handle_user_prompt(input_data: dict) -> None:
 def handle_stop(input_data: dict) -> None:
     """Handle Stop hook event. Logs the assistant's final response."""
     store = _get_store()
-    session_id = _read_active_session()
+    session_id = _resolve_session_id(input_data)
     if not session_id:
         return
 
@@ -325,7 +340,7 @@ def handle_stop(input_data: dict) -> None:
 def handle_post_tool(input_data: dict, failed: bool = False) -> None:
     """Handle PostToolUse / PostToolUseFailure hook event."""
     store = _get_store()
-    session_id = _read_active_session()
+    session_id = _resolve_session_id(input_data)
     if not session_id:
         return
 
