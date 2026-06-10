@@ -14,7 +14,7 @@ Usage:
   agent-strace mcp                  # stdio transport (default)
   agent-strace mcp --trace-dir DIR  # custom trace directory
 
-Claude Code config (.claude/settings.json):
+Claude Code config (~/.claude/settings.json):
   {
     "mcpServers": {
       "agent-trace": {

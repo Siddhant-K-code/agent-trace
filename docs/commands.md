@@ -28,7 +28,7 @@ Capture an MCP HTTP/SSE server session. Listens on `--port` (default: 3100) and 
 ```
 agent-strace setup [--redact] [--global]
 ```
-Print Claude Code hooks config JSON. Add `--global` to write to `~/.claude/settings.json`.
+Print Claude Code hooks config JSON for `~/.claude/settings.json`. Use `--global` to scope hooks to all projects (default scopes to the current project).
 
 ### `import`
 ```

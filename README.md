@@ -39,7 +39,7 @@ uvx agent-strace replay
 **Option 1: Claude Code hooks** — captures everything (prompts, responses, every tool call)
 
 ```bash
-agent-strace setup   # prints hooks config — add to .claude/settings.json
+agent-strace setup   # prints hooks config — add to ~/.claude/settings.json
 agent-strace list    # list sessions
 agent-strace replay  # replay the latest
 ```
