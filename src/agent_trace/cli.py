@@ -58,6 +58,7 @@ from .token_budget import cmd_token_budget
 from .anonymize import cmd_anonymize_export
 from .integrations import detect_and_instrument, _INTEGRATIONS
 from .budget_report import cmd_budget_report
+from .team_report import cmd_team_report
 from .compare import cmd_compare
 from .timeline import cmd_timeline
 from .config_watch import cmd_config_watch
@@ -1388,6 +1389,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_budget.add_argument("--endpoint", metavar="URL",
                           help="remote collector endpoint (not yet implemented)")
 
+    # team-report
+    p_team_report = sub.add_parser("team-report", help="cost attribution by git author, branch, or PR")
+    p_team_report.add_argument("--since", metavar="DATE",
+                               help="start of window (ISO date or duration like 7d; default: 7 days ago)")
+    p_team_report.add_argument("--until", metavar="DATE",
+                               help="end of window (ISO date or duration like 7d; default: now)")
+    p_team_report.add_argument("--by", choices=["author", "branch", "pr"], default="author",
+                               help="group by git author, branch, or PR (default: author)")
+    p_team_report.add_argument("--export", choices=["text", "csv", "json"], default="text",
+                               help="output format (default: text)")
+    p_team_report.add_argument("--outlier-threshold", type=float, default=2.0,
+                               help="flag sessions above N times average cost (default: 2.0)")
+
     # lint
     p_lint = sub.add_parser("lint", help="analyse a session for bad behaviour patterns")
     p_lint.add_argument("session_id", nargs="?",
@@ -1543,6 +1557,7 @@ def main() -> None:
         "mcp": cmd_mcp,
         "auto": cmd_auto,
         "budget-report": cmd_budget_report,
+        "team-report": cmd_team_report,
         "compare": cmd_compare,
         "config-watch": cmd_config_watch,
         "lint": cmd_lint,

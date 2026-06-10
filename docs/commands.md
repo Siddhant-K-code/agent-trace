@@ -351,6 +351,20 @@ agent-strace budget-report [--since DATE] [--until DATE] [--format text|markdown
 ```
 Weekly spend digest: total cost, top sessions, cost by tool, watchdog savings.
 
+### `team-report`
+```
+agent-strace team-report [--since DATE] [--until DATE] [--by author|branch|pr] [--export text|csv|json] [--outlier-threshold N]
+```
+Team cost attribution across recorded sessions. By default it groups spend by git author, using the last author of modified files when git is available. If git is unavailable or a file has no history, it falls back to session attribution and the local user.
+
+| Flag | Description |
+|---|---|
+| `--since DATE` | Start of reporting window. Accepts ISO dates or durations like `7d`; default is 7 days ago |
+| `--until DATE` | End of reporting window. Accepts ISO dates or durations like `7d`; default is now |
+| `--by author|branch|pr` | Group by git author, active branch, or PR inferred from branch names like `pr-123` |
+| `--export text|csv|json` | Output format. `csv` is intended for spreadsheets and finance workflows |
+| `--outlier-threshold N` | Flag sessions whose cost is above `N` times the report average; default is `2.0` |
+
 ### `standup`
 ```
 agent-strace standup [--session SESSION_ID]
