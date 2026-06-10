@@ -111,6 +111,7 @@ Full setup guide: [docs/setup.md](docs/setup.md)
 | [`agent-strace team-report`](docs/commands.md#team-report) | Team spend by author, branch, or PR |
 | [`agent-strace lint <id>`](docs/commands.md#lint) | Flag bad behaviour patterns (loops, spirals, waste) |
 | [`agent-strace drift`](docs/commands.md#drift) | Detect behavioural drift over time |
+| [`agent-strace fingerprint`](docs/commands.md#fingerprint) | Baseline an agent's behavioural profile |
 | [`agent-strace standup`](docs/commands.md#standup) | Plain-English summary of yesterday's sessions |
 | [`agent-strace eval <id>`](docs/commands.md#eval) | Score a session against behavioural baselines |
 | [`agent-strace eval ci`](docs/commands.md#eval) | Fail CI on behavioural regression |

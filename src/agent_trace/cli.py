@@ -33,7 +33,7 @@ from .iac import cmd_apply, cmd_config_diff
 from .sso import cmd_auth
 from .baseline import cmd_baseline
 from .compliance import cmd_compliance
-from .drift import cmd_drift
+from .drift import cmd_drift, cmd_fingerprint
 from .identity import cmd_identity
 from .workspace import cmd_workspace
 from .langfuse_export import cmd_export_scores
@@ -1231,6 +1231,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_drift.add_argument("--format", choices=["table", "json"], default="table",
                          help="output format (default: table)")
 
+    # fingerprint (behavioral profile)
+    p_fingerprint = sub.add_parser("fingerprint", help="characterize an agent's behavioral profile")
+    p_fingerprint.add_argument("--sessions", type=int, default=20, metavar="N",
+                               help="number of recent sessions to analyze (default: 20)")
+    p_fingerprint.add_argument("--output", "-o", metavar="FILE",
+                               help="write fingerprint JSON to FILE")
+    p_fingerprint.add_argument("--id", default="", metavar="ID",
+                               help="fingerprint ID to store in JSON")
+    p_fingerprint.add_argument("--compare", nargs=2, metavar=("A.json", "B.json"),
+                               help="compare two saved fingerprint JSON files")
+    p_fingerprint.add_argument("--threshold", type=float, default=0.20,
+                               help="comparison score above which to alert (default: 0.20)")
+    p_fingerprint.add_argument("--format", choices=["text", "json"], default="text",
+                               help="output format (default: text)")
+
     # optimize (propose AGENTS.md / skill file improvements from trace failures)
     p_opt = sub.add_parser("optimize", help="propose instruction file improvements from trace failures")
     p_opt.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
@@ -1546,6 +1561,7 @@ def main() -> None:
         "a2a-tree": cmd_a2a_tree,
         "baseline": cmd_baseline,
         "drift": cmd_drift,
+        "fingerprint": cmd_fingerprint,
         "identity": cmd_identity,
         "workspace": cmd_workspace,
         "compliance": cmd_compliance,

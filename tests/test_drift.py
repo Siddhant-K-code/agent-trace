@@ -1,20 +1,26 @@
 """Tests for behavioral drift detection."""
 
 import json
+import argparse
+import io
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from agent_trace.cli import build_parser
 from agent_trace.drift import (
     BehavioralFingerprint,
     DistStats,
     SessionMetrics,
+    cmd_fingerprint,
     _dist_stats,
     _js_divergence,
     _stats_divergence,
     compute_drift,
     compute_fingerprint,
+    print_fingerprint,
     print_report,
 )
 from agent_trace.models import EventType, SessionMeta, TraceEvent
@@ -240,7 +246,16 @@ class TestComputeDrift(unittest.TestCase):
         fp = self._make_fp({"Bash": 1.0})
         report = compute_drift(fp, fp)
         names = {d.name for d in report.dimensions}
-        expected = {"tool_mix", "error_rate", "retry_rate", "blast_radius", "session_duration_s", "decision_depth"}
+        expected = {
+            "tool_mix",
+            "error_rate",
+            "retry_rate",
+            "tool_calls",
+            "cost_usd",
+            "blast_radius",
+            "session_duration_s",
+            "decision_depth",
+        }
         self.assertEqual(names, expected)
 
 
@@ -304,6 +319,112 @@ class TestDriftEndToEnd(unittest.TestCase):
         loaded = BehavioralFingerprint.from_json(Path(path).read_text())
         self.assertEqual(loaded.fingerprint_id, "saved_fp")
         self.assertEqual(loaded.sessions, 3)
+
+
+class TestFingerprintCommand(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.store = _make_store(self.tmp)
+
+    def _args(self, **kwargs):
+        defaults = dict(
+            trace_dir=self.tmp,
+            sessions=20,
+            output=None,
+            id="",
+            compare=None,
+            threshold=0.20,
+            format="text",
+        )
+        defaults.update(kwargs)
+        return argparse.Namespace(**defaults)
+
+    def test_print_fingerprint_contains_profile(self):
+        now = time.time()
+        _add_session(self.store, "fp_print", [_tool_call("Bash", now)], started_at=now)
+        fp = compute_fingerprint(self.store, ["fp_print"], fingerprint_id="fp")
+        out = io.StringIO()
+        print_fingerprint(fp, out)
+        text = out.getvalue()
+        self.assertIn("Behavioral fingerprint", text)
+        self.assertIn("Tool call profile", text)
+        self.assertIn("Bash", text)
+
+    def test_cmd_fingerprint_json(self):
+        now = time.time()
+        _add_session(self.store, "fp_json", [_tool_call("Read", now)], started_at=now)
+        captured = io.StringIO()
+
+        with patch("sys.stdout", captured):
+            result = cmd_fingerprint(self._args(format="json"))
+
+        self.assertEqual(result, 0)
+        data = json.loads(captured.getvalue())
+        self.assertEqual(data["sessions"], 1)
+        self.assertIn("Read", data["tool_mix"])
+        self.assertIn("tool_calls", data)
+        self.assertIn("cost_usd", data)
+
+    def test_cmd_fingerprint_writes_output(self):
+        now = time.time()
+        _add_session(self.store, "fp_out", [_tool_call("Write", now)], started_at=now)
+        output = Path(self.tmp) / "fingerprint.json"
+
+        result = cmd_fingerprint(self._args(output=str(output), id="saved"))
+
+        self.assertEqual(result, 0)
+        data = json.loads(output.read_text())
+        self.assertEqual(data["fingerprint_id"], "saved")
+        self.assertEqual(data["sessions"], 1)
+
+    def test_cmd_fingerprint_json_with_output_keeps_stdout_parseable(self):
+        now = time.time()
+        _add_session(self.store, "fp_json_out", [_tool_call("Read", now)], started_at=now)
+        output = Path(self.tmp) / "fingerprint.json"
+        captured = io.StringIO()
+
+        with patch("sys.stdout", captured):
+            result = cmd_fingerprint(self._args(output=str(output), format="json"))
+
+        self.assertEqual(result, 0)
+        data = json.loads(captured.getvalue())
+        self.assertEqual(data["sessions"], 1)
+        self.assertTrue(output.exists())
+
+    def test_cmd_fingerprint_compare_json(self):
+        first = BehavioralFingerprint(
+            fingerprint_id="a",
+            sessions=2,
+            period_start="2026-01-01",
+            period_end="2026-01-02",
+            tool_mix={"Bash": 1.0},
+        )
+        second = BehavioralFingerprint(
+            fingerprint_id="b",
+            sessions=2,
+            period_start="2026-01-03",
+            period_end="2026-01-04",
+            tool_mix={"Read": 1.0},
+        )
+        a_path = Path(self.tmp) / "a.json"
+        b_path = Path(self.tmp) / "b.json"
+        a_path.write_text(first.to_json())
+        b_path.write_text(second.to_json())
+        captured = io.StringIO()
+
+        with patch("sys.stdout", captured):
+            result = cmd_fingerprint(self._args(compare=[str(a_path), str(b_path)], format="json"))
+
+        self.assertEqual(result, 1)
+        data = json.loads(captured.getvalue())
+        self.assertEqual(data["label"], "high")
+
+    def test_parser_registers_fingerprint(self):
+        parser = build_parser()
+        args = parser.parse_args(["fingerprint", "--sessions", "5", "--output", "fp.json"])
+        self.assertEqual(args.command, "fingerprint")
+        self.assertEqual(args.sessions, 5)
+        self.assertEqual(args.output, "fp.json")
 
 
 if __name__ == "__main__":

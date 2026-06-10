@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TextIO
 
+from .cost import estimate_cost
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -49,6 +50,8 @@ class BehavioralFingerprint:
     # Per-session distributions
     error_rate: DistStats = field(default_factory=DistStats)
     retry_rate: DistStats = field(default_factory=DistStats)
+    tool_calls: DistStats = field(default_factory=DistStats)
+    cost_usd: DistStats = field(default_factory=DistStats)
     blast_radius: DistStats = field(default_factory=DistStats)
     session_duration_s: DistStats = field(default_factory=DistStats)
     decision_depth: DistStats = field(default_factory=DistStats)
@@ -61,6 +64,8 @@ class BehavioralFingerprint:
             "tool_mix": {k: round(v, 4) for k, v in self.tool_mix.items()},
             "error_rate": self.error_rate.to_dict(),
             "retry_rate": self.retry_rate.to_dict(),
+            "tool_calls": self.tool_calls.to_dict(),
+            "cost_usd": self.cost_usd.to_dict(),
             "blast_radius": self.blast_radius.to_dict(),
             "session_duration_s": self.session_duration_s.to_dict(),
             "decision_depth": self.decision_depth.to_dict(),
@@ -79,7 +84,15 @@ class BehavioralFingerprint:
             period_end=d.get("period", {}).get("end", ""),
             tool_mix=d.get("tool_mix", {}),
         )
-        for attr in ("error_rate", "retry_rate", "blast_radius", "session_duration_s", "decision_depth"):
+        for attr in (
+            "error_rate",
+            "retry_rate",
+            "tool_calls",
+            "cost_usd",
+            "blast_radius",
+            "session_duration_s",
+            "decision_depth",
+        ):
             raw = d.get(attr, {})
             setattr(fp, attr, DistStats(
                 mean=raw.get("mean", 0.0),
@@ -210,11 +223,17 @@ class SessionMetrics:
     error_count: int
     total_tool_calls: int
     retry_count: int
+    cost_usd: float
     blast_radius: int          # distinct files written
     decision_count: int
 
 
-def _extract_metrics(session_id: str, events: list[TraceEvent], meta_started: float) -> SessionMetrics:
+def _extract_metrics(
+    session_id: str,
+    events: list[TraceEvent],
+    meta_started: float,
+    cost_usd: float = 0.0,
+) -> SessionMetrics:
     tool_mix: dict[str, int] = {}
     error_count = 0
     total_tool_calls = 0
@@ -262,9 +281,17 @@ def _extract_metrics(session_id: str, events: list[TraceEvent], meta_started: fl
         error_count=error_count,
         total_tool_calls=total_tool_calls,
         retry_count=retry_count,
+        cost_usd=cost_usd,
         blast_radius=len(files_written),
         decision_count=decision_count,
     )
+
+
+def _session_cost(store: TraceStore, session_id: str) -> float:
+    try:
+        return estimate_cost(store, session_id).total_cost
+    except Exception:
+        return 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -286,7 +313,7 @@ def compute_fingerprint(
         try:
             meta = store.load_meta(sid)
             events = store.load_events(sid)
-            m = _extract_metrics(sid, events, meta.started_at)
+            m = _extract_metrics(sid, events, meta.started_at, _session_cost(store, sid))
             all_metrics.append(m)
             timestamps.append(meta.started_at)
         except Exception:
@@ -310,6 +337,8 @@ def compute_fingerprint(
     retry_rates = [
         m.retry_count / max(m.total_tool_calls, 1) for m in all_metrics
     ]
+    tool_calls = [float(m.total_tool_calls) for m in all_metrics]
+    costs = [m.cost_usd for m in all_metrics]
     blast_radii = [float(m.blast_radius) for m in all_metrics]
     durations = [m.duration_s for m in all_metrics]
     decisions = [float(m.decision_count) for m in all_metrics]
@@ -325,6 +354,8 @@ def compute_fingerprint(
         tool_mix=tool_mix_frac,
         error_rate=_dist_stats(error_rates),
         retry_rate=_dist_stats(retry_rates),
+        tool_calls=_dist_stats(tool_calls),
+        cost_usd=_dist_stats(costs),
         blast_radius=_dist_stats(blast_radii),
         session_duration_s=_dist_stats(durations),
         decision_depth=_dist_stats(decisions),
@@ -356,6 +387,8 @@ def compute_drift(
     for attr, label in [
         ("error_rate", "error_rate"),
         ("retry_rate", "retry_rate"),
+        ("tool_calls", "tool_calls"),
+        ("cost_usd", "cost_usd"),
         ("blast_radius", "blast_radius"),
         ("session_duration_s", "session_duration"),
         ("decision_depth", "decision_depth"),
@@ -372,7 +405,7 @@ def compute_drift(
         ))
 
     # Weighted average (tool_mix weighted 2x, others 1x)
-    weights = [2.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    weights = [2.0] + [1.0] * (len(dimensions) - 1)
     overall = sum(d.score * w for d, w in zip(dimensions, weights)) / sum(weights)
 
     return DriftReport(
@@ -392,6 +425,58 @@ def _top_tools(tool_mix: dict[str, float], n: int = 3) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Fingerprint terminal output
+# ---------------------------------------------------------------------------
+
+def _fmt_seconds(seconds: float) -> str:
+    if seconds >= 3600:
+        return f"{seconds / 3600:.1f}h"
+    if seconds >= 60:
+        return f"{seconds / 60:.1f}m"
+    return f"{seconds:.1f}s"
+
+
+def print_fingerprint(fp: BehavioralFingerprint, out: TextIO = sys.stdout) -> None:
+    w = out.write
+    w("\nBehavioral fingerprint\n")
+    w(f"ID:       {fp.fingerprint_id or '(none)'}\n")
+    w(f"Period:   {fp.period_start or '-'} to {fp.period_end or '-'}\n")
+    w(f"Sessions: {fp.sessions}\n")
+    w("─" * 70 + "\n")
+
+    if fp.sessions == 0:
+        w("No sessions available for fingerprinting.\n\n")
+        return
+
+    w("Tool call profile:\n")
+    if fp.tool_mix:
+        for tool, frac in sorted(fp.tool_mix.items(), key=lambda item: item[1], reverse=True):
+            w(f"  {tool:<22} {frac:>6.0%}\n")
+    else:
+        w("  (no tool calls)\n")
+
+    w("\nSession profile (per session):\n")
+    w(f"  {'Metric':<22} {'Median':>10} {'P95':>10} {'Mean':>10}\n")
+    w("  " + "-" * 46 + "\n")
+    w(
+        f"  {'duration':<22} "
+        f"{_fmt_seconds(fp.session_duration_s.p50):>10} "
+        f"{_fmt_seconds(fp.session_duration_s.p95):>10} "
+        f"{_fmt_seconds(fp.session_duration_s.mean):>10}\n"
+    )
+    for label, stats in [
+        ("tool calls", fp.tool_calls),
+        ("cost usd", fp.cost_usd),
+        ("error rate", fp.error_rate),
+        ("retry rate", fp.retry_rate),
+        ("file touch radius", fp.blast_radius),
+        ("decision depth", fp.decision_depth),
+    ]:
+        w(f"  {label:<22} {stats.p50:>10.2f} {stats.p95:>10.2f} {stats.mean:>10.2f}\n")
+    w("\n")
+
+
+# ---------------------------------------------------------------------------
 # Session filtering helpers
 # ---------------------------------------------------------------------------
 
@@ -403,6 +488,10 @@ def _sessions_in_window(store: TraceStore, since_days: float) -> list[str]:
         if meta.started_at >= cutoff:
             result.append(meta.session_id)
     return result
+
+
+def _latest_sessions(store: TraceStore, limit: int) -> list[str]:
+    return [meta.session_id for meta in store.list_sessions()[:max(0, limit)]]
 
 
 def _sessions_in_range(store: TraceStore, start_ts: float, end_ts: float) -> list[str]:
@@ -540,3 +629,66 @@ def cmd_drift(args: argparse.Namespace) -> int:
         print_report(report)
 
     return 1 if report.exceeded else 0
+
+
+def cmd_fingerprint(args: argparse.Namespace) -> int:
+    compare_paths = getattr(args, "compare", None) or []
+    fmt = getattr(args, "format", "text") or "text"
+
+    if compare_paths:
+        if len(compare_paths) != 2:
+            sys.stderr.write("Specify exactly two fingerprint files with --compare.\n")
+            return 1
+        try:
+            first = BehavioralFingerprint.from_json(Path(compare_paths[0]).read_text())
+            second = BehavioralFingerprint.from_json(Path(compare_paths[1]).read_text())
+        except Exception as exc:
+            sys.stderr.write(f"Could not read fingerprint file: {exc}\n")
+            return 1
+        report = compute_drift(first, second, threshold=getattr(args, "threshold", 0.20))
+        if fmt == "json":
+            data = {
+                "overall_score": report.overall_score,
+                "threshold": report.threshold,
+                "exceeded": report.exceeded,
+                "label": report.label,
+                "baseline_sessions": report.baseline_sessions,
+                "current_sessions": report.current_sessions,
+                "dimensions": [
+                    {
+                        "name": d.name,
+                        "score": d.score,
+                        "label": d.label,
+                        "first": d.baseline_summary,
+                        "second": d.current_summary,
+                    }
+                    for d in report.dimensions
+                ],
+            }
+            sys.stdout.write(json.dumps(data, indent=2) + "\n")
+        else:
+            print_report(report)
+        return 1 if report.exceeded else 0
+
+    store = TraceStore(args.trace_dir)
+    sessions = int(getattr(args, "sessions", 20) or 20)
+    session_ids = _latest_sessions(store, sessions)
+    fp = compute_fingerprint(store, session_ids, fingerprint_id=getattr(args, "id", "") or "")
+
+    output = getattr(args, "output", None)
+    if output:
+        out_path = Path(output)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(fp.to_json() + "\n")
+        message = f"Behavioral fingerprint saved to {out_path}\n"
+        if fmt == "json":
+            sys.stderr.write(message)
+        else:
+            sys.stdout.write(message)
+
+    if fmt == "json":
+        sys.stdout.write(fp.to_json() + "\n")
+    elif not output:
+        print_fingerprint(fp)
+
+    return 0 if fp.sessions > 0 else 1

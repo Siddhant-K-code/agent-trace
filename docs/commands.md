@@ -329,6 +329,13 @@ agent-strace drift [--since DURATION] [--baseline FILE] [--save-baseline FILE]
 ```
 Detect behavioral drift across sessions. Exits non-zero when drift score exceeds `--threshold` (default: 0.20).
 
+### `fingerprint`
+```
+agent-strace fingerprint [--sessions N] [--output FILE] [--format text|json]
+agent-strace fingerprint --compare A.json B.json [--threshold N] [--format text|json]
+```
+Characterize an agent's recent behavior: tool mix, error rate, retry rate, file touch radius, duration, and decision depth. Saved JSON fingerprints can be used as drift baselines or compared directly.
+
 ### `lint`
 ```
 agent-strace lint [session-id] [--all] [--since DURATION] [--strict] [--format text|json]
