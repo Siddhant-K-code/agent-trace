@@ -591,7 +591,7 @@ def build_audit_readiness(
 def format_audit_readiness(report: dict, out: TextIO = sys.stdout) -> None:
     checks = report["checks"]
     out.write("EU AI Act readiness check\n")
-    out.write("─────────────────────────\n")
+    out.write("-------------------------\n")
     out.write(f"Sessions analysed: {report['session_count']}\n")
     out.write(
         f"{'OK' if checks['hash_chain_integrity']['ok'] else 'FAIL'} "
@@ -659,11 +659,11 @@ def cmd_verify_export(args: argparse.Namespace) -> int:
         sys.stdout.write(json.dumps(result, indent=2) + "\n")
     elif result["ok"]:
         sys.stdout.write(
-            f"Export hash chain intact — {result['checked_events']} events checked\n"
+            f"Export hash chain intact - {result['checked_events']} events checked\n"
         )
     else:
         sys.stdout.write(
-            f"Export hash chain failed — {len(result['failures'])} broken links\n"
+            f"Export hash chain failed - {len(result['failures'])} broken links\n"
         )
     return 0 if result["ok"] else 1
 
