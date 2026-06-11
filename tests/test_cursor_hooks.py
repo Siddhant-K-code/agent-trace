@@ -143,9 +143,18 @@ class TestCursorSetup(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
         os.environ["CURSOR_CONFIG_DIR"] = self.tmpdir
+        self.codex_dir = tempfile.mkdtemp()
+        os.environ["CODEX_CONFIG_DIR"] = self.codex_dir
+        self.gemini_dir = tempfile.mkdtemp()
+        os.environ["GEMINI_CONFIG_DIR"] = self.gemini_dir
+        self.copilot_home = tempfile.mkdtemp()
+        os.environ["COPILOT_HOME"] = self.copilot_home
 
     def tearDown(self):
         os.environ.pop("CURSOR_CONFIG_DIR", None)
+        os.environ.pop("CODEX_CONFIG_DIR", None)
+        os.environ.pop("GEMINI_CONFIG_DIR", None)
+        os.environ.pop("COPILOT_HOME", None)
 
     def test_setup_cli_cursor_writes_hooks_json(self):
         args = argparse.Namespace(
@@ -189,6 +198,7 @@ class TestCursorSetup(unittest.TestCase):
             cmd_setup(args)
 
         self.assertTrue((Path(self.tmpdir) / "hooks.json").exists())
+        self.assertTrue((Path(self.copilot_home) / "hooks" / "agent-strace.json").exists())
         self.assertIn("agent-strace hook --provider codex user-prompt", out.getvalue())
         self.assertIn("Cursor hooks config", err.getvalue())
 

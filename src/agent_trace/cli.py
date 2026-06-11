@@ -619,6 +619,54 @@ def _codex_hooks_config(args: argparse.Namespace) -> dict:
     }
 
 
+def _copilot_hooks_config(args: argparse.Namespace) -> dict:
+    cmd_prefix = _hook_command_prefix(args, provider="copilot")
+    return {
+        "version": 1,
+        "hooks": {
+            "SessionStart": [{
+                "hooks": [{
+                    "type": "command",
+                    "command": f"{cmd_prefix} session-start",
+                }],
+            }],
+            "UserPromptSubmit": [{
+                "hooks": [{
+                    "type": "command",
+                    "command": f"{cmd_prefix} user-prompt",
+                }],
+            }],
+            "PreToolUse": [{
+                "matcher": ".*",
+                "hooks": [{
+                    "type": "command",
+                    "command": f"{cmd_prefix} pre-tool",
+                }],
+            }],
+            "PostToolUse": [{
+                "matcher": ".*",
+                "hooks": [{
+                    "type": "command",
+                    "command": f"{cmd_prefix} post-tool",
+                }],
+            }],
+            "PostToolUseFailure": [{
+                "matcher": ".*",
+                "hooks": [{
+                    "type": "command",
+                    "command": f"{cmd_prefix} post-tool-failure",
+                }],
+            }],
+            "AgentStop": [{
+                "hooks": [{
+                    "type": "command",
+                    "command": f"{cmd_prefix} stop",
+                }],
+            }],
+        }
+    }
+
+
 def _gemini_hooks_config(args: argparse.Namespace) -> dict:
     cmd_prefix = _hook_command_prefix(args, provider="gemini")
     return {
@@ -730,6 +778,18 @@ def _gemini_config_dir() -> Path:
     return Path(os.environ.get("GEMINI_CONFIG_DIR", "~/.gemini")).expanduser()
 
 
+def _codex_config_dir() -> Path:
+    return Path(os.environ.get("CODEX_CONFIG_DIR", "~/.codex")).expanduser()
+
+
+def _write_codex_hooks_config(args: argparse.Namespace) -> Path:
+    config_dir = _codex_config_dir()
+    config_dir.mkdir(parents=True, exist_ok=True)
+    hooks_path = config_dir / "hooks.json"
+    hooks_path.write_text(json.dumps(_codex_hooks_config(args), indent=2) + "\n")
+    return hooks_path
+
+
 def _write_gemini_extension(args: argparse.Namespace) -> tuple[Path, Path]:
     extension_dir = _gemini_config_dir() / "extensions" / "agent-strace"
     hooks_dir = extension_dir / "hooks"
@@ -746,11 +806,23 @@ def _cursor_config_dir() -> Path:
     return Path(os.environ.get("CURSOR_CONFIG_DIR", ".cursor")).expanduser()
 
 
+def _copilot_config_dir() -> Path:
+    return Path(os.environ.get("COPILOT_HOME", "~/.copilot")).expanduser()
+
+
 def _write_cursor_hooks_config(args: argparse.Namespace) -> Path:
     config_dir = _cursor_config_dir()
     config_dir.mkdir(parents=True, exist_ok=True)
     hooks_path = config_dir / "hooks.json"
     hooks_path.write_text(json.dumps(_cursor_hooks_config(args), indent=2) + "\n")
+    return hooks_path
+
+
+def _write_copilot_hooks_config(args: argparse.Namespace) -> Path:
+    hooks_dir = _copilot_config_dir() / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    hooks_path = hooks_dir / "agent-strace.json"
+    hooks_path.write_text(json.dumps(_copilot_hooks_config(args), indent=2) + "\n")
     return hooks_path
 
 
@@ -762,7 +834,9 @@ def cmd_setup(args: argparse.Namespace) -> None:
     if cli in ("claude", "all"):
         configs.append(("Claude Code", "~/.claude/settings.json", _claude_hooks_config(args)))
     if cli in ("codex", "all"):
-        configs.append(("OpenAI Codex", "~/.codex/hooks.json", _codex_hooks_config(args)))
+        hooks_path = _write_codex_hooks_config(args)
+        sys.stderr.write(f"Wrote OpenAI Codex hooks config: {hooks_path}\n")
+        configs.append(("OpenAI Codex", str(hooks_path), _codex_hooks_config(args)))
     if cli in ("gemini", "all"):
         manifest_path, hooks_path = _write_gemini_extension(args)
         sys.stderr.write(
@@ -772,11 +846,17 @@ def cmd_setup(args: argparse.Namespace) -> None:
     if cli in ("cursor", "all"):
         hooks_path = _write_cursor_hooks_config(args)
         sys.stderr.write(f"Wrote Cursor hooks config: {hooks_path}\n")
+    if cli in ("copilot", "all"):
+        hooks_path = _write_copilot_hooks_config(args)
+        sys.stderr.write(f"Wrote GitHub Copilot hooks config: {hooks_path}\n")
 
     for idx, (name, path, config) in enumerate(configs):
         if idx:
             sys.stdout.write("\n")
-        sys.stderr.write(f"Add this to {path} for {name}:\n\n")
+        if name == "OpenAI Codex":
+            sys.stderr.write(f"Installed {name} hooks at {path}; JSON:\n\n")
+        else:
+            sys.stderr.write(f"Add this to {path} for {name}:\n\n")
         sys.stdout.write(json.dumps(config, indent=2) + "\n")
 
     if cli in ("codex", "all"):
@@ -791,6 +871,8 @@ def cmd_setup(args: argparse.Namespace) -> None:
         sys.stdout.write(json.dumps(_gemini_hooks_config(args), indent=2) + "\n")
     if cli == "cursor":
         sys.stdout.write(json.dumps(_cursor_hooks_config(args), indent=2) + "\n")
+    if cli == "copilot":
+        sys.stdout.write(json.dumps(_copilot_hooks_config(args), indent=2) + "\n")
 
     sys.stderr.write(
         "\nThis captures hook-visible agent sessions: user prompts, assistant "
@@ -937,7 +1019,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # hook (called by agent CLI hooks systems)
     p_hook = sub.add_parser("hook", help="handle an agent CLI hook event (internal)")
-    p_hook.add_argument("--provider", choices=["claude", "codex", "gemini", "cursor"], default="claude",
+    p_hook.add_argument("--provider", choices=["claude", "codex", "gemini", "cursor", "copilot"], default="claude",
                         help="hook provider (default: claude)")
     p_hook.add_argument("event", nargs="?", help="hook event: session-start, session-end, pre-tool, post-tool, post-tool-failure")
 
@@ -955,7 +1037,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="disable automatic secret redaction in generated hooks",
     )
     p_setup.add_argument("--global", dest="global_config", action="store_true", help="output config for ~/.claude/settings.json (all projects)")
-    p_setup.add_argument("--cli", choices=["claude", "codex", "gemini", "cursor", "all"], default="claude",
+    p_setup.add_argument("--cli", choices=["claude", "codex", "gemini", "cursor", "copilot", "all"], default="claude",
                          help="agent CLI to configure (default: claude)")
 
     # import (Claude Code JSONL session logs)

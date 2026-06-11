@@ -7,6 +7,7 @@ import os
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from agent_trace.cli import cmd_setup
@@ -158,6 +159,19 @@ class TestCodexHooks(unittest.TestCase):
 
 
 class TestCodexSetup(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["CODEX_CONFIG_DIR"] = self.tmpdir
+        self.gemini_dir = tempfile.mkdtemp()
+        os.environ["GEMINI_CONFIG_DIR"] = self.gemini_dir
+        self.copilot_home = tempfile.mkdtemp()
+        os.environ["COPILOT_HOME"] = self.copilot_home
+
+    def tearDown(self):
+        os.environ.pop("CODEX_CONFIG_DIR", None)
+        os.environ.pop("GEMINI_CONFIG_DIR", None)
+        os.environ.pop("COPILOT_HOME", None)
+
     def test_setup_cli_codex_outputs_hooks_json(self):
         args = argparse.Namespace(
             redact=False,
@@ -172,7 +186,10 @@ class TestCodexSetup(unittest.TestCase):
             cmd_setup(args)
 
         config = json.loads(out.getvalue())
+        written_config = json.loads((Path(self.tmpdir) / "hooks.json").read_text())
         err_text = err.getvalue()
+        self.assertEqual(written_config, config)
+        self.assertIn("Wrote OpenAI Codex hooks config", err_text)
         self.assertIn("~/.codex/hooks.json", err_text)
         self.assertIn("Codex hook checklist", err_text)
         self.assertIn("~/.codex/hooks/hooks.json", err_text)
@@ -203,8 +220,11 @@ class TestCodexSetup(unittest.TestCase):
         text = out.getvalue()
         self.assertIn("agent-strace hook user-prompt", text)
         self.assertIn("agent-strace hook --provider codex user-prompt", text)
+        self.assertTrue((Path(self.tmpdir) / "hooks.json").exists())
+        self.assertTrue((Path(self.copilot_home) / "hooks" / "agent-strace.json").exists())
         self.assertIn("~/.claude/settings.json", err.getvalue())
         self.assertIn("~/.codex/hooks.json", err.getvalue())
+        self.assertIn("GitHub Copilot hooks config", err.getvalue())
         self.assertIn("Codex hook checklist", err.getvalue())
 
 

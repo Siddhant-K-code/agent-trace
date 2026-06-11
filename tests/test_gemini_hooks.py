@@ -170,9 +170,18 @@ class TestGeminiSetup(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
         os.environ["GEMINI_CONFIG_DIR"] = self.tmpdir
+        self.codex_dir = tempfile.mkdtemp()
+        os.environ["CODEX_CONFIG_DIR"] = self.codex_dir
+        self.cursor_dir = tempfile.mkdtemp()
+        os.environ["CURSOR_CONFIG_DIR"] = self.cursor_dir
+        self.copilot_home = tempfile.mkdtemp()
+        os.environ["COPILOT_HOME"] = self.copilot_home
 
     def tearDown(self):
         os.environ.pop("GEMINI_CONFIG_DIR", None)
+        os.environ.pop("CODEX_CONFIG_DIR", None)
+        os.environ.pop("CURSOR_CONFIG_DIR", None)
+        os.environ.pop("COPILOT_HOME", None)
 
     def test_setup_cli_gemini_writes_extension_files(self):
         args = argparse.Namespace(
@@ -221,8 +230,12 @@ class TestGeminiSetup(unittest.TestCase):
         extension_dir = Path(self.tmpdir) / "extensions" / "agent-strace"
         self.assertTrue((extension_dir / "gemini-extension.json").exists())
         self.assertTrue((extension_dir / "hooks" / "hooks.json").exists())
+        self.assertTrue((Path(self.codex_dir) / "hooks.json").exists())
+        self.assertTrue((Path(self.cursor_dir) / "hooks.json").exists())
+        self.assertTrue((Path(self.copilot_home) / "hooks" / "agent-strace.json").exists())
         self.assertIn("agent-strace hook --provider codex user-prompt", out.getvalue())
         self.assertIn("Gemini CLI extension", err.getvalue())
+        self.assertIn("GitHub Copilot hooks config", err.getvalue())
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ Captures the lifecycle events exposed by each CLI: user prompts, assistant respo
 # Generate Claude Code hooks config
 agent-strace setup
 
-# Generate OpenAI Codex hooks config
+# Install OpenAI Codex user-level hooks
 agent-strace setup --cli codex
 
 # Install Gemini CLI extension hooks
@@ -20,6 +20,9 @@ agent-strace setup --cli gemini
 
 # Install Cursor project hooks
 agent-strace setup --cli cursor
+
+# Install GitHub Copilot CLI user-level hooks
+agent-strace setup --cli copilot
 
 # Configure all supported hook integrations
 agent-strace setup --cli all
@@ -57,7 +60,7 @@ agent-strace explain  # plain-English summary
 
 ### OpenAI Codex hooks
 
-`agent-strace setup --cli codex` prints hooks JSON for `~/.codex/hooks.json`:
+`agent-strace setup --cli codex` writes user-level hooks to `$CODEX_CONFIG_DIR/hooks.json` or `~/.codex/hooks.json`, and also prints the JSON:
 
 ```json
 {
@@ -134,6 +137,34 @@ Set `CURSOR_CONFIG_DIR` to write the file somewhere else. The generated config r
 ```
 
 Cursor hook coverage depends on the events Cursor emits. Native hooks capture prompts, shell commands, file edits, and agent responses when available. MCP server tool calls are still captured most reliably through the MCP proxy configuration below.
+
+### GitHub Copilot CLI hooks
+
+`agent-strace setup --cli copilot` writes user-level Copilot hooks:
+
+```
+~/.copilot/
+└── hooks/
+    └── agent-strace.json
+```
+
+Set `COPILOT_HOME` to install into a different Copilot config directory. The generated config registers Copilot lifecycle hooks using the VS Code-compatible event names:
+
+```json
+{
+  "version": 1,
+  "hooks": {
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "agent-strace hook --provider copilot session-start" }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "agent-strace hook --provider copilot user-prompt" }] }],
+    "PreToolUse": [{ "matcher": ".*", "hooks": [{ "type": "command", "command": "agent-strace hook --provider copilot pre-tool" }] }],
+    "PostToolUse": [{ "matcher": ".*", "hooks": [{ "type": "command", "command": "agent-strace hook --provider copilot post-tool" }] }],
+    "PostToolUseFailure": [{ "matcher": ".*", "hooks": [{ "type": "command", "command": "agent-strace hook --provider copilot post-tool-failure" }] }],
+    "AgentStop": [{ "hooks": [{ "type": "command", "command": "agent-strace hook --provider copilot stop" }] }]
+  }
+}
+```
+
+Copilot sends hook payloads on stdin. agent-strace records session starts, user prompts, and hook-visible tool calls/results. `AgentStop` is registered so sessions can receive stop events when Copilot emits useful payload data; assistant text capture depends on the fields Copilot includes.
 
 ### Import existing sessions
 

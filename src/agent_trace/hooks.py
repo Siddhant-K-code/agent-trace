@@ -1,8 +1,8 @@
 """Agent CLI hooks integration.
 
-Captures every tool call supported CLIs make, not just MCP calls. Uses the
-Claude Code and OpenAI Codex hooks systems to trace Bash, Edit, Write, Read,
-Agent, apply_patch, and all other hook-visible tools.
+Captures hook-visible tool calls from supported agent CLIs, not just MCP
+calls. Uses provider hook systems such as Claude Code, OpenAI Codex, Gemini,
+Cursor, and GitHub Copilot.
 
 Usage:
     # In .claude/settings.json or ~/.claude/settings.json:
@@ -63,12 +63,14 @@ _CLAUDE_SESSION_ID_ENV = "AGENT_TRACE_CLAUDE_SESSION_ID"
 _CODEX_SESSION_ID_ENV = "AGENT_TRACE_CODEX_SESSION_ID"
 _GEMINI_SESSION_ID_ENV = "AGENT_TRACE_GEMINI_SESSION_ID"
 _CURSOR_SESSION_ID_ENV = "AGENT_TRACE_CURSOR_SESSION_ID"
+_COPILOT_SESSION_ID_ENV = "AGENT_TRACE_COPILOT_SESSION_ID"
 
 _PROVIDER_ENV = {
     "claude": _CLAUDE_SESSION_ID_ENV,
     "codex": _CODEX_SESSION_ID_ENV,
     "gemini": _GEMINI_SESSION_ID_ENV,
     "cursor": _CURSOR_SESSION_ID_ENV,
+    "copilot": _COPILOT_SESSION_ID_ENV,
 }
 
 _PROVIDER_AGENT = {
@@ -76,6 +78,7 @@ _PROVIDER_AGENT = {
     "codex": "openai-codex",
     "gemini": "gemini-cli",
     "cursor": "cursor-agent",
+    "copilot": "github-copilot",
 }
 
 
@@ -206,8 +209,12 @@ def _should_redact() -> bool:
 def _normalise_payload(input_data: dict, provider: str, event: str) -> dict:
     """Map provider-specific hook payloads to the Claude-shaped fields."""
     data = dict(input_data)
-    if provider not in ("codex", "gemini", "cursor"):
+    if provider not in ("codex", "gemini", "cursor", "copilot"):
         return data
+
+    data.setdefault("session_id", data.get("sessionId") or "")
+    data.setdefault("turn_id", data.get("turnId") or "")
+    data.setdefault("tool_use_id", data.get("toolUseId") or "")
 
     if event in {"pre-tool", "post-tool", "post-tool-failure"}:
         tool = data.get("tool")
@@ -215,6 +222,12 @@ def _normalise_payload(input_data: dict, provider: str, event: str) -> dict:
             data.setdefault("tool_name", tool.get("name") or tool.get("tool_name") or "")
             data.setdefault("tool_input", tool.get("input") or tool.get("arguments") or {})
             data.setdefault("tool_output", tool.get("output") or tool.get("response") or "")
+        if data.get("toolName") and not data.get("tool_name"):
+            data["tool_name"] = data.get("toolName")
+        if data.get("toolArgs") is not None and "tool_input" not in data:
+            data["tool_input"] = data.get("toolArgs")
+        if (data.get("toolResult") is not None or data.get("textResultForLlm") is not None) and "tool_output" not in data:
+            data["tool_output"] = data.get("toolResult", data.get("textResultForLlm", ""))
         command = data.get("command")
         if command and not data.get("tool_name"):
             data.setdefault("tool_name", "shell")
@@ -227,13 +240,13 @@ def _normalise_payload(input_data: dict, provider: str, event: str) -> dict:
         data.setdefault("tool_input", data.get("input") or data.get("arguments") or {})
         data.setdefault("tool_output", data.get("tool_response", data.get("output", "")))
 
-    if provider in ("gemini", "cursor"):
+    if provider in ("gemini", "cursor", "copilot"):
         if event == "session-start":
             data.setdefault("source", data.get("hook_event_name", "startup"))
         if event == "user-prompt":
             input_value = data.get("input", {})
             prompt = input_value.get("prompt", "") if isinstance(input_value, dict) else input_value
-            data.setdefault("prompt", data.get("user_prompt") or data.get("prompt") or prompt or "")
+            data.setdefault("prompt", data.get("user_prompt") or data.get("prompt") or data.get("initialPrompt") or prompt or "")
         if event == "stop":
             data.setdefault("last_assistant_message", data.get("prompt_response", ""))
 
@@ -461,7 +474,7 @@ def handle_post_tool(input_data: dict, failed: bool = False, provider: str = "cl
     tool_name = input_data.get("tool_name", "unknown")
     tool_output = input_data.get("tool_output", input_data.get("tool_response", ""))
 
-    if provider in ("codex", "gemini", "cursor") and not failed:
+    if provider in ("codex", "gemini", "cursor", "copilot") and not failed:
         if isinstance(tool_output, dict):
             exit_code = tool_output.get("exit_code")
             failed = (
@@ -551,7 +564,7 @@ def hook_main(args: list[str]) -> None:
         sys.exit(1)
 
     if not rest:
-        sys.stderr.write("Usage: agent-strace hook [--provider claude|codex|gemini|cursor] <event>\n")
+        sys.stderr.write("Usage: agent-strace hook [--provider claude|codex|gemini|cursor|copilot] <event>\n")
         sys.exit(1)
 
     aliases = {
@@ -567,6 +580,14 @@ def hook_main(args: list[str]) -> None:
         "after-shell-execution": "post-tool",
         "after-file-edit": "file-write",
         "after-agent-response": "stop",
+        "SessionStart": "session-start",
+        "SessionEnd": "session-end",
+        "UserPromptSubmit": "user-prompt",
+        "PreToolUse": "pre-tool",
+        "PostToolUse": "post-tool",
+        "PostToolUseFailure": "post-tool-failure",
+        "AgentStop": "stop",
+        "agent-stop": "stop",
     }
     event = aliases.get(rest[0], rest[0])
     input_data = _normalise_payload(_read_stdin(), provider, event)
