@@ -779,6 +779,14 @@ def cmd_setup(args: argparse.Namespace) -> None:
         sys.stderr.write(f"Add this to {path} for {name}:\n\n")
         sys.stdout.write(json.dumps(config, indent=2) + "\n")
 
+    if cli in ("codex", "all"):
+        sys.stderr.write(
+            "\nCodex hook checklist:\n"
+            "- Put the JSON at ~/.codex/hooks.json or <repo>/.codex/hooks.json, not ~/.codex/hooks/hooks.json.\n"
+            "- In ~/.codex/config.toml, remove [features].hooks = false if present.\n"
+            "- Reload Codex, then review and trust command hooks in the Hooks UI or /hooks.\n"
+        )
+
     if cli == "gemini":
         sys.stdout.write(json.dumps(_gemini_hooks_config(args), indent=2) + "\n")
     if cli == "cursor":

@@ -172,7 +172,11 @@ class TestCodexSetup(unittest.TestCase):
             cmd_setup(args)
 
         config = json.loads(out.getvalue())
-        self.assertIn("~/.codex/hooks.json", err.getvalue())
+        err_text = err.getvalue()
+        self.assertIn("~/.codex/hooks.json", err_text)
+        self.assertIn("Codex hook checklist", err_text)
+        self.assertIn("~/.codex/hooks/hooks.json", err_text)
+        self.assertIn("[features].hooks = false", err_text)
         self.assertIn("SessionStart", config["hooks"])
         self.assertEqual(
             config["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
@@ -201,6 +205,7 @@ class TestCodexSetup(unittest.TestCase):
         self.assertIn("agent-strace hook --provider codex user-prompt", text)
         self.assertIn("~/.claude/settings.json", err.getvalue())
         self.assertIn("~/.codex/hooks.json", err.getvalue())
+        self.assertIn("Codex hook checklist", err.getvalue())
 
 
 if __name__ == "__main__":

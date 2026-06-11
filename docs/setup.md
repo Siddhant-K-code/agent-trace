@@ -73,6 +73,12 @@ agent-strace explain  # plain-English summary
 
 Codex sends one JSON object to each command hook on stdin. agent-strace records the common Codex fields (`session_id`, `turn_id`, `tool_use_id`, `tool_name`, `tool_input`, `tool_response`, `prompt`, and `last_assistant_message`) into the same `.agent-traces/` session store used by Claude Code.
 
+If Codex does not list the hooks after you create the file:
+
+- Use the root `~/.codex/hooks.json` file for user-level hooks, or `<repo>/.codex/hooks.json` for project-level hooks. `~/.codex/hooks/hooks.json` is for plugin-bundled hooks and is not the normal user config path.
+- Check `~/.codex/config.toml` and remove `[features].hooks = false` if present. Hooks are enabled by default unless a user, system, or admin config layer disables them.
+- Reload Codex or press refresh in the Hooks view. Non-managed command hooks must be reviewed and trusted before they run.
+
 ### Gemini CLI hooks
 
 `agent-strace setup --cli gemini` writes a Gemini CLI extension:
