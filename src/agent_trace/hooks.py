@@ -215,6 +215,8 @@ def _normalise_payload(input_data: dict, provider: str, event: str) -> dict:
     data.setdefault("session_id", data.get("sessionId") or "")
     data.setdefault("turn_id", data.get("turnId") or "")
     data.setdefault("tool_use_id", data.get("toolUseId") or "")
+    data.setdefault("stop_reason", data.get("stopReason") or "")
+    data.setdefault("transcript_path", data.get("transcriptPath") or "")
 
     if event in {"pre-tool", "post-tool", "post-tool-failure"}:
         tool = data.get("tool")
@@ -246,12 +248,18 @@ def _normalise_payload(input_data: dict, provider: str, event: str) -> dict:
         if event == "user-prompt":
             input_value = data.get("input", {})
             prompt = input_value.get("prompt", "") if isinstance(input_value, dict) else input_value
-            data.setdefault("prompt", data.get("user_prompt") or data.get("prompt") or data.get("initialPrompt") or prompt or "")
+            data.setdefault("prompt", data.get("user_prompt") or data.get("prompt") or data.get("initialPrompt") or data.get("initial_prompt") or prompt or "")
         if event == "stop":
             data.setdefault("last_assistant_message", data.get("prompt_response", ""))
 
     if event == "stop" and data.get("last_assistant_message") is None:
-        data["last_assistant_message"] = data.get("assistant_message") or data.get("message") or ""
+        data["last_assistant_message"] = (
+            data.get("assistant_message")
+            or data.get("message")
+            or data.get("response")
+            or data.get("text")
+            or ""
+        )
 
     return data
 
@@ -315,12 +323,17 @@ def handle_session_end(input_data: dict, provider: str = "claude") -> None:
         meta.ended_at = time.time()
         meta.total_duration_ms = (meta.ended_at - meta.started_at) * 1000
 
+        event_data = {"duration_ms": meta.total_duration_ms}
+        for key in ("reason", "stop_reason", "cwd", "transcript_path", "hook_event_name"):
+            if input_data.get(key) not in (None, ""):
+                event_data[key] = input_data.get(key)
+
         _write_event(store, 
             session_id,
             TraceEvent(
                 event_type=EventType.SESSION_END,
                 session_id=session_id,
-                data={"duration_ms": meta.total_duration_ms},
+                data=event_data,
             ),
         )
         store.update_meta(meta)
@@ -415,11 +428,20 @@ def handle_stop(input_data: dict, provider: str = "claude") -> None:
     redact = _should_redact()
     text = input_data.get("last_assistant_message", "")
 
-    if not text:
-        return
-
-    event_data = {"text": text}
-    for key in ("turn_id", "permission_mode"):
+    event_data = {
+        "text": text,
+        "hook_event": "stop",
+        "provider": provider,
+    }
+    for key in (
+        "turn_id",
+        "permission_mode",
+        "stop_reason",
+        "reason",
+        "transcript_path",
+        "cwd",
+        "hook_event_name",
+    ):
         if input_data.get(key) not in (None, ""):
             event_data[key] = input_data.get(key)
     if redact:
@@ -580,13 +602,22 @@ def hook_main(args: list[str]) -> None:
         "after-shell-execution": "post-tool",
         "after-file-edit": "file-write",
         "after-agent-response": "stop",
+        "afterAgentResponse": "stop",
+        "sessionStart": "session-start",
+        "sessionEnd": "session-end",
         "SessionStart": "session-start",
         "SessionEnd": "session-end",
+        "userPromptSubmitted": "user-prompt",
         "UserPromptSubmit": "user-prompt",
+        "preToolUse": "pre-tool",
         "PreToolUse": "pre-tool",
+        "postToolUse": "post-tool",
         "PostToolUse": "post-tool",
+        "postToolUseFailure": "post-tool-failure",
         "PostToolUseFailure": "post-tool-failure",
+        "agentStop": "stop",
         "AgentStop": "stop",
+        "Stop": "stop",
         "agent-stop": "stop",
     }
     event = aliases.get(rest[0], rest[0])

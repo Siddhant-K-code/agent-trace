@@ -278,15 +278,20 @@ class TestHooksStop(unittest.TestCase):
         responses = [e for e in events if e.event_type == EventType.ASSISTANT_RESPONSE]
         self.assertEqual(len(responses), 0)
 
-    def test_stop_skips_empty_message(self):
+    def test_stop_records_marker_without_message(self):
         handle_stop({
             "last_assistant_message": "",
+            "stop_reason": "end_turn",
+            "transcript_path": "/tmp/transcript.jsonl",
         })
 
         store = TraceStore(self.tmpdir)
         events = store.load_events(self.session_id)
         responses = [e for e in events if e.event_type == EventType.ASSISTANT_RESPONSE]
-        self.assertEqual(len(responses), 0)
+        self.assertEqual(len(responses), 1)
+        self.assertEqual(responses[0].data["hook_event"], "stop")
+        self.assertEqual(responses[0].data["stop_reason"], "end_turn")
+        self.assertEqual(responses[0].data["transcript_path"], "/tmp/transcript.jsonl")
 
     def test_stop_without_session_is_noop(self):
         _clear_active_session()

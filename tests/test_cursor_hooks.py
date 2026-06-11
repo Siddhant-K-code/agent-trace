@@ -177,9 +177,14 @@ class TestCursorSetup(unittest.TestCase):
         self.assertIn("beforeSubmitPrompt", hooks["hooks"])
         self.assertIn("beforeShellExecution", hooks["hooks"])
         self.assertIn("afterFileEdit", hooks["hooks"])
+        self.assertIn("stop", hooks["hooks"])
         self.assertEqual(
             hooks["hooks"]["afterFileEdit"][0]["command"],
             "agent-strace hook --provider cursor after-file-edit",
+        )
+        self.assertEqual(
+            hooks["hooks"]["stop"][0]["command"],
+            "agent-strace hook --provider cursor stop",
         )
         self.assertEqual(printed_hooks, hooks)
         self.assertIn("Cursor hooks config", err.getvalue())

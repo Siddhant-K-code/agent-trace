@@ -65,12 +65,24 @@ class TestCopilotHooks(unittest.TestCase):
         with patch.object(sys, "stdin", io.StringIO(result_payload)):
             hook_main(["--provider", "copilot", "post-tool"])
 
+        stop_payload = json.dumps({
+            "sessionId": "copilotsession123456",
+            "stopReason": "end_turn",
+            "transcriptPath": "/tmp/copilot-transcript.jsonl",
+        })
+        with patch.object(sys, "stdin", io.StringIO(stop_payload)):
+            hook_main(["--provider", "copilot", "agentStop"])
+
         store = TraceStore(self.tmpdir)
         meta = store.load_meta(session_id)
         events = store.load_events(session_id)
         prompts = [event for event in events if event.event_type == EventType.USER_PROMPT]
         calls = [event for event in events if event.event_type == EventType.TOOL_CALL]
         results = [event for event in events if event.event_type == EventType.TOOL_RESULT]
+        stops = [
+            event for event in events
+            if event.event_type == EventType.ASSISTANT_RESPONSE and event.data.get("hook_event") == "stop"
+        ]
 
         self.assertEqual(meta.agent_name, "github-copilot")
         self.assertEqual(events[0].data["provider"], "copilot")
@@ -78,6 +90,8 @@ class TestCopilotHooks(unittest.TestCase):
         self.assertEqual(calls[0].data["tool_name"], "terminal")
         self.assertEqual(calls[0].data["arguments"]["command"], "pytest")
         self.assertEqual(results[0].parent_id, calls[0].event_id)
+        self.assertEqual(stops[0].data["stop_reason"], "end_turn")
+        self.assertEqual(stops[0].data["transcript_path"], "/tmp/copilot-transcript.jsonl")
 
 
 class TestCopilotSetup(unittest.TestCase):
@@ -109,9 +123,15 @@ class TestCopilotSetup(unittest.TestCase):
         self.assertEqual(hooks["version"], 1)
         self.assertIn("SessionStart", hooks["hooks"])
         self.assertIn("PostToolUseFailure", hooks["hooks"])
+        self.assertIn("Stop", hooks["hooks"])
+        self.assertIn("SessionEnd", hooks["hooks"])
         self.assertEqual(
             hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
             "agent-strace hook --provider copilot user-prompt",
+        )
+        self.assertEqual(
+            hooks["hooks"]["Stop"][0]["hooks"][0]["command"],
+            "agent-strace hook --provider copilot stop",
         )
         self.assertIn("GitHub Copilot hooks config", err.getvalue())
 

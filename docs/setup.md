@@ -131,12 +131,13 @@ Set `CURSOR_CONFIG_DIR` to write the file somewhere else. The generated config r
     "afterShellExecution": [{ "type": "command", "command": "agent-strace hook --provider cursor after-shell-execution" }],
     "afterFileEdit": [{ "type": "command", "command": "agent-strace hook --provider cursor after-file-edit" }],
     "afterAgentResponse": [{ "type": "command", "command": "agent-strace hook --provider cursor after-agent-response" }],
+    "stop": [{ "type": "command", "command": "agent-strace hook --provider cursor stop" }],
     "sessionEnd": [{ "type": "command", "command": "agent-strace hook --provider cursor session-end" }]
   }
 }
 ```
 
-Cursor hook coverage depends on the events Cursor emits. Native hooks capture prompts, shell commands, file edits, and agent responses when available. MCP server tool calls are still captured most reliably through the MCP proxy configuration below.
+Cursor hook coverage depends on the events Cursor emits. Native hooks capture prompts, shell commands, file edits, stop markers, and agent responses when available. MCP server tool calls are still captured most reliably through the MCP proxy configuration below.
 
 ### GitHub Copilot CLI hooks
 
@@ -159,12 +160,15 @@ Set `COPILOT_HOME` to install into a different Copilot config directory. The gen
     "PreToolUse": [{ "matcher": ".*", "hooks": [{ "type": "command", "command": "agent-strace hook --provider copilot pre-tool" }] }],
     "PostToolUse": [{ "matcher": ".*", "hooks": [{ "type": "command", "command": "agent-strace hook --provider copilot post-tool" }] }],
     "PostToolUseFailure": [{ "matcher": ".*", "hooks": [{ "type": "command", "command": "agent-strace hook --provider copilot post-tool-failure" }] }],
-    "AgentStop": [{ "hooks": [{ "type": "command", "command": "agent-strace hook --provider copilot stop" }] }]
+    "Stop": [{ "hooks": [{ "type": "command", "command": "agent-strace hook --provider copilot stop" }] }],
+    "SessionEnd": [{ "hooks": [{ "type": "command", "command": "agent-strace hook --provider copilot session-end" }] }]
   }
 }
 ```
 
-Copilot sends hook payloads on stdin. agent-strace records session starts, user prompts, and hook-visible tool calls/results. `AgentStop` is registered so sessions can receive stop events when Copilot emits useful payload data; assistant text capture depends on the fields Copilot includes.
+Copilot sends hook payloads on stdin. agent-strace records session starts, user prompts, hook-visible tool calls/results, stop markers, and session ends. Assistant text capture depends on the fields Copilot includes; stop hooks often provide `transcript_path` and `stop_reason` rather than response text.
+
+Stop and session-end coverage is provider-defined. agent-strace records these hooks when the agent CLI emits them, including empty stop payloads, but it cannot force an agent to emit a stop hook for every UI action such as deleting a conversation or interrupting a run.
 
 ### Import existing sessions
 

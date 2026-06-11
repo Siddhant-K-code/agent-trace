@@ -657,10 +657,16 @@ def _copilot_hooks_config(args: argparse.Namespace) -> dict:
                     "command": f"{cmd_prefix} post-tool-failure",
                 }],
             }],
-            "AgentStop": [{
+            "Stop": [{
                 "hooks": [{
                     "type": "command",
                     "command": f"{cmd_prefix} stop",
+                }],
+            }],
+            "SessionEnd": [{
+                "hooks": [{
+                    "type": "command",
+                    "command": f"{cmd_prefix} session-end",
                 }],
             }],
         }
@@ -757,6 +763,10 @@ def _cursor_hooks_config(args: argparse.Namespace) -> dict:
             "afterAgentResponse": [{
                 "type": "command",
                 "command": f"{cmd_prefix} after-agent-response",
+            }],
+            "stop": [{
+                "type": "command",
+                "command": f"{cmd_prefix} stop",
             }],
             "sessionEnd": [{
                 "type": "command",
