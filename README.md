@@ -50,7 +50,7 @@ agent-strace replay            # replay the latest
 
 Full config and JSON: [docs/setup.md](docs/setup.md)
 
-**Option 2: MCP proxy** — wraps any MCP server, works with Cursor and Windsurf
+**Option 2: MCP proxy** — wraps any MCP server, works with Cursor, Windsurf, and Copilot Desktop MCP servers
 
 ```bash
 agent-strace record -- npx -y @modelcontextprotocol/server-filesystem /tmp
