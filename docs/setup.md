@@ -194,6 +194,60 @@ agent-strace record -- npx -y @modelcontextprotocol/server-filesystem /tmp
 agent-strace replay
 ```
 
+### GitHub Copilot Desktop
+
+GitHub Copilot Desktop can connect to local MCP servers, but it does not expose the same hook system as Copilot CLI. For Copilot Desktop, agent-strace traces the MCP traffic that passes through a wrapped MCP server. It does not capture the full Copilot chat transcript, internal planning, token usage, or non-MCP file edits.
+
+Use one shared trace directory so all wrapped MCP servers write to the same store:
+
+```bash
+mkdir -p ~/.agent-strace/traces
+which agent-strace
+```
+
+Desktop apps often do not inherit the same shell `PATH` as your terminal. If `which agent-strace` prints `/Users/alice/.local/bin/agent-strace`, use that full path in Copilot Desktop.
+
+Add an unwrapped reader server if you want Copilot to query existing traces:
+
+| Field | Value |
+|---|---|
+| Server name | `agent-trace` |
+| Type | `Local` |
+| Command | `/Users/alice/.local/bin/agent-strace` |
+| Arguments | `--trace-dir /Users/alice/.agent-strace/traces mcp` |
+
+This server only exposes tools such as `list_sessions`, `get_session`, `search_events`, `get_session_summary`, and `diff_sessions`. It does not record Copilot Desktop activity by itself.
+
+Wrap each MCP server whose tool traffic you want to record. For example, to trace the filesystem MCP server:
+
+| Field | Value |
+|---|---|
+| Server name | `filesystem-traced` |
+| Type | `Local` |
+| Command | `/Users/alice/.local/bin/agent-strace` |
+| Arguments | `--trace-dir /Users/alice/.agent-strace/traces record --name copilot-filesystem -- npx -y @modelcontextprotocol/server-filesystem /Users/alice` |
+
+Disable any unwrapped duplicate filesystem MCP server, otherwise Copilot may call the unwrapped server and bypass the recorder.
+
+Ask Copilot Desktop to use the traced server:
+
+```text
+Use the filesystem-traced MCP server to list files in /Users/alice/Desktop.
+```
+
+Then inspect the captured session:
+
+```bash
+TRACE=/Users/alice/.agent-strace/traces
+
+agent-strace --trace-dir "$TRACE" list
+grep -Rl '"event_type":"tool_call"' "$TRACE"/*/events.ndjson
+agent-strace --trace-dir "$TRACE" replay <session-id>
+agent-strace --trace-dir "$TRACE" inspect <session-id>
+```
+
+Long-lived MCP servers may keep `meta.json` counters stale while Copilot Desktop is still running. If `agent-strace list` shows `Tool calls: 0` but `replay` or `inspect` shows `tool_call` and `tool_result` events, the capture is working and the summary metadata has not been finalized yet.
+
 ### Cursor
 
 Edit `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (per-project):

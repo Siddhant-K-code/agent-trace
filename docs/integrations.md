@@ -59,8 +59,11 @@ Use setup-generated hooks when the agent CLI has its own lifecycle hook system.
 | Gemini CLI | `agent-strace setup --cli gemini` | Session start/end, prompts, assistant responses, `BeforeTool`/`AfterTool` tools |
 | Cursor | `agent-strace setup --cli cursor` | Session start/end, prompts, shell execution, file edits, assistant responses when emitted by Cursor hooks |
 | GitHub Copilot CLI | `agent-strace setup --cli copilot` | Session starts, prompts, hook-visible tool calls/results, and stop payloads when emitted by Copilot hooks |
+| GitHub Copilot Desktop | Wrap each local MCP server with `agent-strace record -- ...` | MCP initialize/tool call/tool result traffic for wrapped servers only; full chat transcripts and non-MCP activity are not exposed |
 
 All paths write the same event stream under `.agent-traces/`, so replay, timeline, explain, why, watch, export, and audit commands work the same way after capture.
+
+For Copilot Desktop, use a shared absolute trace directory such as `/Users/alice/.agent-strace/traces`, configure `agent-strace --trace-dir <dir> mcp` as an optional trace-reader MCP server, and wrap each tool-providing MCP server with `agent-strace --trace-dir <dir> record --name <label> -- <original-command> <args>`. See [setup.md](setup.md#github-copilot-desktop) for the full Local server field values and validation commands.
 
 ---
 
