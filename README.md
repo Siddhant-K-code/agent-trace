@@ -1,3 +1,14 @@
+> [!NOTE]
+> `agent-trace` is prior systems work, not my current product lane.
+> I keep it public as an OSS reference for local-first trace and replay of AI agent tool use, and as background for my work on reviewable AI-assisted engineering.
+
+> [!IMPORTANT]
+> The core idea is not “more autonomous agents.”
+> The core idea is making AI-assisted work inspectable after the fact: what ran, what changed, what failed, and where a human should review.
+
+> [!WARNING]
+> This project is experimental. Do not treat it as a production security boundary without your own threat model, controls, and testing.
+
 # agent-trace
 
 [![Run in Ona](https://ona.com/run-in-ona.svg)](https://app.ona.com/#https://github.com/Siddhant-K-code/agent-trace)
