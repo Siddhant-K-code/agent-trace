@@ -19,6 +19,7 @@
 [![Open VSX](https://img.shields.io/open-vsx/v/Siddhant-K-code/agent-strace)](https://open-vsx.org/extension/Siddhant-K-code/agent-strace)
 [![VS Marketplace](https://img.shields.io/badge/VS%20Marketplace-v0.2.1-blue?logo=visual-studio-code)](https://marketplace.visualstudio.com/items?itemName=Siddhant-K-code.agent-strace)
 [![License](https://img.shields.io/github/license/Siddhant-K-code/agent-trace)](LICENSE)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/agent-strace?period=total&units=INTERNATIONAL_SYSTEM&left_color=ORANGE&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/agent-strace)
 
 `strace` for AI agents.
 
