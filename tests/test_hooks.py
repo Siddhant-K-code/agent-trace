@@ -474,6 +474,27 @@ class TestConcurrentAgentIsolation(unittest.TestCase):
         os.environ["AGENT_TRACE_CLAUDE_SESSION_ID"] = "agent1session00001"
         self.assertEqual(_read_active_session(), sid1)
 
+    def test_ending_older_session_preserves_newer_canonical_marker(self):
+        """An older concurrent session must not clear the extension pointer."""
+        os.environ["AGENT_TRACE_CLAUDE_SESSION_ID"] = "agent1session00001"
+        _write_active_session("agent1session000")
+
+        os.environ["AGENT_TRACE_CLAUDE_SESSION_ID"] = "agent2session00002"
+        _write_active_session("agent2session000")
+
+        canonical = os.path.join(self.tmpdir, ".active-session")
+        with open(canonical) as fh:
+            self.assertEqual(fh.read(), "agent2session000")
+
+        os.environ["AGENT_TRACE_CLAUDE_SESSION_ID"] = "agent1session00001"
+        _clear_active_session()
+        with open(canonical) as fh:
+            self.assertEqual(fh.read(), "agent2session000")
+
+        os.environ["AGENT_TRACE_CLAUDE_SESSION_ID"] = "agent2session00002"
+        _clear_active_session()
+        self.assertFalse(os.path.exists(canonical))
+
 
 if __name__ == "__main__":
     unittest.main()

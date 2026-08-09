@@ -130,6 +130,11 @@ def _active_session_path(provider: str = "claude") -> Path:
     return Path(_get_store_dir()) / f".active-session{_state_suffix(provider)}"
 
 
+def _canonical_active_session_path() -> Path:
+    """Return the active-session marker consumed by editor integrations."""
+    return Path(_get_store_dir()) / ".active-session"
+
+
 def _pending_calls_path(provider: str = "claude") -> Path:
     suffix = _state_suffix(provider)
     name = _PENDING_FILE.replace(".json", f"{suffix}.json")
@@ -157,6 +162,11 @@ def _resolve_session_id(input_data: dict, provider: str = "claude") -> str | Non
     """
     raw = input_data.get("session_id", "")
     if raw:
+        raw = str(raw)
+        # Hook events run in separate processes, so restore the provider-scoped
+        # state suffix from every payload rather than relying on SessionStart's
+        # process-local environment mutation.
+        os.environ[_provider_env(provider)] = raw
         return raw[:16]
     return _read_active_session(provider)
 
@@ -166,11 +176,37 @@ def _write_active_session(session_id: str, provider: str = "claude") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(session_id)
 
+    # Provider-scoped markers preserve concurrent hook state. The canonical
+    # marker is a compatibility pointer for the VS Code/OpenVSX extension and
+    # other consumers defined by ADR-0002.
+    canonical = _canonical_active_session_path()
+    if path != canonical:
+        canonical.write_text(session_id)
+
 
 def _clear_active_session(provider: str = "claude") -> None:
     path = _active_session_path(provider)
+    session_id = ""
     if path.exists():
+        session_id = path.read_text().strip()
         path.unlink()
+
+    canonical = _canonical_active_session_path()
+    if path == canonical:
+        # Some providers omit the conversation ID from SessionEnd. Remove any
+        # scoped marker that points at the same local session as the canonical
+        # fallback so stale state cannot survive the completed session.
+        if session_id:
+            for scoped in canonical.parent.glob(".active-session.*"):
+                if scoped.read_text().strip() == session_id:
+                    scoped.unlink()
+        return
+
+    if not session_id:
+        raw = os.environ.get(_provider_env(provider), "")
+        session_id = raw[:16]
+    if canonical.exists() and canonical.read_text().strip() == session_id:
+        canonical.unlink()
 
 
 def _read_pending_calls(provider: str = "claude") -> dict:
@@ -213,7 +249,10 @@ def _normalise_payload(input_data: dict, provider: str, event: str) -> dict:
     if provider not in ("codex", "gemini", "cursor", "copilot"):
         return data
 
-    data.setdefault("session_id", data.get("sessionId") or "")
+    data.setdefault(
+        "session_id",
+        data.get("sessionId") or data.get("conversation_id") or "",
+    )
     data.setdefault("turn_id", data.get("turnId") or "")
     data.setdefault("tool_use_id", data.get("toolUseId") or "")
     data.setdefault("stop_reason", data.get("stopReason") or "")

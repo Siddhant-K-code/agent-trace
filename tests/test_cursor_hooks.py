@@ -16,6 +16,7 @@ from agent_trace.hooks import (
     handle_file_write,
     handle_post_tool,
     handle_pre_tool,
+    handle_session_end,
     handle_session_start,
     handle_stop,
     handle_user_prompt,
@@ -37,8 +38,9 @@ class TestCursorHooks(unittest.TestCase):
         os.environ.pop("AGENT_TRACE_CURSOR_SESSION_ID", None)
 
     def test_cursor_session_start_creates_session(self):
+        raw_session_id = "cursorsession123456789"
         handle_session_start({
-            "session_id": "cursorsession123456789",
+            "session_id": raw_session_id,
             "source": "startup",
             "model": "cursor-agent",
             "cwd": "/work/repo",
@@ -54,6 +56,23 @@ class TestCursorHooks(unittest.TestCase):
         self.assertEqual(events[0].event_type, EventType.SESSION_START)
         self.assertEqual(events[0].data["provider"], "cursor")
         self.assertEqual(events[0].data["mode"], "cursor-agent-hooks")
+
+        canonical = Path(self.tmpdir) / ".active-session"
+        scoped = Path(self.tmpdir) / f".active-session.{raw_session_id}"
+        self.assertEqual(canonical.read_text(), session_id)
+        self.assertEqual(scoped.read_text(), session_id)
+
+        # Cursor invokes each hook in a fresh process, so SessionStart's
+        # process-local environment does not survive until SessionEnd.
+        os.environ.pop("AGENT_TRACE_CURSOR_SESSION_ID", None)
+        with patch("agent_trace.hooks._product_telemetry.capture"):
+            handle_session_end(
+                {"session_id": raw_session_id, "reason": "completed"},
+                provider="cursor",
+            )
+
+        self.assertFalse(canonical.exists())
+        self.assertFalse(scoped.exists())
 
     def test_cursor_shell_execution_is_linked(self):
         handle_session_start({"session_id": "cursorshell123456", "source": "startup"}, provider="cursor")
@@ -75,6 +94,22 @@ class TestCursorHooks(unittest.TestCase):
         results = [event for event in events if event.event_type == EventType.TOOL_RESULT]
         self.assertEqual(calls[0].data["arguments"]["command"], "pytest tests/")
         self.assertEqual(results[0].parent_id, calls[0].event_id)
+
+    def test_cursor_session_end_without_id_clears_matching_scoped_marker(self):
+        raw_session_id = "cursorfallback123456789"
+        handle_session_start(
+            {"session_id": raw_session_id, "source": "startup"},
+            provider="cursor",
+        )
+        os.environ.pop("AGENT_TRACE_CURSOR_SESSION_ID", None)
+
+        with patch("agent_trace.hooks._product_telemetry.capture"):
+            handle_session_end({}, provider="cursor")
+
+        self.assertFalse((Path(self.tmpdir) / ".active-session").exists())
+        self.assertFalse(
+            (Path(self.tmpdir) / f".active-session.{raw_session_id}").exists()
+        )
 
     def test_cursor_prompt_response_and_file_edit(self):
         handle_session_start({"session_id": "cursorprompt12345", "source": "startup"}, provider="cursor")
@@ -103,29 +138,38 @@ class TestCursorHooks(unittest.TestCase):
         self.assertIn("Refactor", responses[0].data["text"])
 
     def test_hook_main_accepts_cursor_aliases(self):
-        handle_session_start({"session_id": "cursoralias12345", "source": "startup"}, provider="cursor")
-        session_id = _read_active_session(provider="cursor")
+        conversation_id = "cursoralias123456789"
+        start_payload = json.dumps({
+            "conversation_id": conversation_id,
+            "hook_event_name": "sessionStart",
+        })
+        with patch.object(sys, "stdin", io.StringIO(start_payload)):
+            hook_main(["--provider", "cursor", "sessionStart"])
+        session_id = conversation_id[:16]
 
         shell_payload = json.dumps({
-            "session_id": "cursoralias12345",
+            "conversation_id": conversation_id,
             "command": "python -m pytest",
         })
+        os.environ.pop("AGENT_TRACE_CURSOR_SESSION_ID", None)
         with patch.object(sys, "stdin", io.StringIO(shell_payload)):
             hook_main(["--provider", "cursor", "before-shell-execution"])
 
         result_payload = json.dumps({
-            "session_id": "cursoralias12345",
+            "conversation_id": conversation_id,
             "command": "python -m pytest",
             "tool_response": {"exit_code": 1, "output": "failed"},
         })
+        os.environ.pop("AGENT_TRACE_CURSOR_SESSION_ID", None)
         with patch.object(sys, "stdin", io.StringIO(result_payload)):
             hook_main(["--provider", "cursor", "after-shell-execution"])
 
         payload = json.dumps({
-            "session_id": "cursoralias12345",
+            "conversation_id": conversation_id,
             "file_path": "src/app.py",
             "diff": "+x",
         })
+        os.environ.pop("AGENT_TRACE_CURSOR_SESSION_ID", None)
         with patch.object(sys, "stdin", io.StringIO(payload)):
             hook_main(["--provider", "cursor", "after-file-edit"])
 
@@ -137,6 +181,22 @@ class TestCursorHooks(unittest.TestCase):
         self.assertEqual(calls[0].data["arguments"]["command"], "python -m pytest")
         self.assertEqual(errors[0].parent_id, calls[0].event_id)
         self.assertEqual(writes[0].data["path"], "src/app.py")
+
+        os.environ.pop("AGENT_TRACE_CURSOR_SESSION_ID", None)
+        end_payload = json.dumps({
+            "conversation_id": conversation_id,
+            "hook_event_name": "sessionEnd",
+        })
+        with (
+            patch.object(sys, "stdin", io.StringIO(end_payload)),
+            patch("agent_trace.hooks._product_telemetry.capture"),
+        ):
+            hook_main(["--provider", "cursor", "sessionEnd"])
+
+        self.assertFalse((Path(self.tmpdir) / ".active-session").exists())
+        self.assertFalse(
+            (Path(self.tmpdir) / f".active-session.{conversation_id}").exists()
+        )
 
 
 class TestCursorSetup(unittest.TestCase):
