@@ -54,6 +54,8 @@ All commands are available from the Command Palette (`Cmd/Ctrl+Shift+P`):
 | `agent-trace: Resume Agent` | Send SIGCONT to resume a paused agent |
 | `agent-trace: Open Panel` | Open the main agent-strace panel |
 | `agent-trace: Clear Decorations` | Remove all gutter annotations from the editor |
+| `agent-trace: Enable Product Telemetry` | Enable anonymous extension usage telemetry |
+| `agent-trace: Disable Product Telemetry` | Opt out and delete the extension's anonymous ID |
 
 ---
 
@@ -85,6 +87,24 @@ All settings are under `agentTrace.*` in VS Code settings:
 | `agentTrace.sessionBrowserRefreshInterval` | `5` | How often (in seconds) the session browser refreshes |
 | `agentTrace.showGutterAnnotations` | `true` | Show gutter icons on files the agent read or modified |
 | `agentTrace.showInlineText` | `true` | Show inline read/write counts at the top of agent-touched files |
+| `agentTrace.telemetry.enabled` | `true` | Send privacy-preserving anonymous extension usage events |
+
+---
+
+## Product telemetry
+
+Anonymous extension telemetry is enabled by default. On first activation, the
+extension displays a non-blocking disclosure and an immediate disable action.
+Disable it at any time with the `agentTrace.telemetry.enabled` application
+setting or **agent-trace: Disable Product Telemetry**. The editor-wide telemetry
+switch, `DO_NOT_TRACK=1`, and `AGENT_STRACE_TELEMETRY=0` are also respected.
+
+The extension measures activation, fixed command names and outcomes, and
+session success/duration with aggregate tool and error counts. It never sends
+prompts, responses, event or trace contents, paths, repository data, session
+IDs, command arguments, endpoints, usernames, hostnames, or exception messages.
+PostHog person profiles and GeoIP enrichment are disabled. See
+[Product telemetry](telemetry.md) for the exact schema.
 
 ---
 

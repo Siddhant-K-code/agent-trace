@@ -2,7 +2,7 @@
   "name": "agent-strace",
   "displayName": "agent-strace",
   "description": "Live session overlay for agent-strace: status bar, gutter annotations, and event stream panel.",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "publisher": "Siddhant-K-code",
   "license": "MIT",
   "repository": {
@@ -66,6 +66,14 @@
       {
         "command": "agentTrace.clearDecorations",
         "title": "agent-trace: Clear File Decorations"
+      },
+      {
+        "command": "agentTrace.enableTelemetry",
+        "title": "agent-trace: Enable Product Telemetry"
+      },
+      {
+        "command": "agentTrace.disableTelemetry",
+        "title": "agent-trace: Disable Product Telemetry"
       }
     ],
     "views": {
@@ -136,6 +144,12 @@
           "type": "number",
           "default": 5,
           "description": "How often (in seconds) the session browser tree view refreshes."
+        },
+        "agentTrace.telemetry.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "application",
+          "markdownDescription": "Send anonymous extension usage telemetry to help improve agent-strace. No prompts, trace contents, paths, session IDs, command arguments, or repository data are sent. Disable this setting to opt out."
         }
       }
     }
@@ -143,6 +157,7 @@
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
+    "test": "npm run compile && node --test out/telemetryCore.test.js",
     "watch": "tsc -watch -p ./",
     "lint": "eslint src --ext ts"
   },

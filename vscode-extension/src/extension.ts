@@ -15,11 +15,14 @@ import { LiveStreamPanel } from "./liveStream";
 import { PostMortemManager } from "./postMortem";
 import { SessionTreeProvider } from "./sessionTree";
 import { StatusBarManager, WatchdogStatusBar } from "./statusBar";
+import { ExtensionTelemetry } from "./telemetry";
 import { TraceWatcher } from "./traceStore";
 
 export function activate(context: vscode.ExtensionContext): void {
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  if (!workspaceRoot) { return; }
+  if (!workspaceRoot) {
+    return;
+  }
 
   const config = vscode.workspace.getConfiguration("agentTrace");
   const traceDirSetting = config.get<string>("traceDir", ".agent-traces")!;
@@ -40,6 +43,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const postMortem = new PostMortemManager(traceDir);
   const liveStream = new LiveStreamPanel(context.extensionUri);
   const sessionTree = new SessionTreeProvider(traceDir);
+  const telemetry = new ExtensionTelemetry(context);
 
   // -------------------------------------------------------------------------
   // Webview panel registration
@@ -48,7 +52,7 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(EventStreamPanel.viewId, panel, {
       webviewOptions: { retainContextWhenHidden: true },
-    })
+    }),
   );
 
   // -------------------------------------------------------------------------
@@ -56,10 +60,11 @@ export function activate(context: vscode.ExtensionContext): void {
   // -------------------------------------------------------------------------
 
   watcher.onSessionStart((state) => {
+    telemetry.captureSessionStarted();
     vscode.commands.executeCommand(
       "setContext",
       "agentTrace.sessionActive",
-      true
+      true,
     );
     statusBar.update(state);
     watchdogBar.onSessionStart(traceDir, state);
@@ -68,10 +73,11 @@ export function activate(context: vscode.ExtensionContext): void {
   });
 
   watcher.onSessionEnd((state) => {
+    telemetry.captureSessionCompleted(state);
     vscode.commands.executeCommand(
       "setContext",
       "agentTrace.sessionActive",
-      false
+      false,
     );
     statusBar.update(null);
     watchdogBar.onSessionEnd();
@@ -97,38 +103,54 @@ export function activate(context: vscode.ExtensionContext): void {
   // -------------------------------------------------------------------------
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("agentTrace.pauseAgent", () => {
-      const state = watcher.state;
-      if (!state) {
-        vscode.window.showWarningMessage("agent-trace: no active session to pause.");
-        return;
-      }
-      pauseManager.pause(state);
-      statusBar.update(state);
-      vscode.window.setStatusBarMessage("agent-trace: agent paused.", 3000);
-    })
+    vscode.commands.registerCommand(
+      "agentTrace.pauseAgent",
+      telemetry.trackCommand("pause_agent", () => {
+        const state = watcher.state;
+        if (!state) {
+          vscode.window.showWarningMessage(
+            "agent-trace: no active session to pause.",
+          );
+          return;
+        }
+        pauseManager.pause(state);
+        statusBar.update(state);
+        vscode.window.setStatusBarMessage("agent-trace: agent paused.", 3000);
+      }),
+    ),
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("agentTrace.resumeAgent", () => {
-      const state = watcher.state;
-      if (!state) { return; }
-      pauseManager.resume(state);
-      statusBar.update(state);
-      vscode.window.setStatusBarMessage("agent-trace: agent resumed.", 3000);
-    })
+    vscode.commands.registerCommand(
+      "agentTrace.resumeAgent",
+      telemetry.trackCommand("resume_agent", () => {
+        const state = watcher.state;
+        if (!state) {
+          return;
+        }
+        pauseManager.resume(state);
+        statusBar.update(state);
+        vscode.window.setStatusBarMessage("agent-trace: agent resumed.", 3000);
+      }),
+    ),
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("agentTrace.openPanel", () => {
-      vscode.commands.executeCommand("agentTrace.eventStream.focus");
-    })
+    vscode.commands.registerCommand(
+      "agentTrace.openPanel",
+      telemetry.trackCommand("open_panel", () => {
+        vscode.commands.executeCommand("agentTrace.eventStream.focus");
+      }),
+    ),
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("agentTrace.clearDecorations", () => {
-      decorations.clear();
-    })
+    vscode.commands.registerCommand(
+      "agentTrace.clearDecorations",
+      telemetry.trackCommand("clear_decorations", () => {
+        decorations.clear();
+      }),
+    ),
   );
 
   // -------------------------------------------------------------------------
@@ -137,56 +159,112 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration("agentTrace")) {
+      const telemetryChanged = e.affectsConfiguration(
+        "agentTrace.telemetry.enabled",
+      );
+      if (telemetryChanged) {
+        telemetry.handleConfigurationChange();
+      }
+      if (e.affectsConfiguration("agentTrace") && !telemetryChanged) {
         vscode.window.showInformationMessage(
-          "agent-trace: configuration changed — reload window to apply."
+          "agent-trace: configuration changed — reload window to apply.",
         );
       }
-    })
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.env.onDidChangeTelemetryEnabled((enabled) => {
+      telemetry.handleEditorTelemetryChange(enabled);
+    }),
   );
 
   // -------------------------------------------------------------------------
   // Start watching
   // -------------------------------------------------------------------------
 
+  telemetry.initialize();
   watcher.start();
 
   // Register session browser tree view
   const treeView = vscode.window.registerTreeDataProvider(
     "agentTrace.sessionBrowser",
-    sessionTree
+    sessionTree,
   );
 
   // Register commands for new features
   context.subscriptions.push(
-    vscode.commands.registerCommand("agentTrace.openLiveStream", () => {
-      liveStream.open();
-    }),
-    vscode.commands.registerCommand("agentTrace.openPostMortem", (sessionId?: string) => {
-      if (sessionId) {
-        postMortem.openForSession(sessionId);
-      } else {
-        // Prompt user to pick a session
-        vscode.window.showInputBox({ prompt: "Enter session ID" }).then((id) => {
-          if (id) { postMortem.openForSession(id); }
-        });
-      }
-    }),
-    vscode.commands.registerCommand("agentTrace.refreshSessionBrowser", () => {
-      sessionTree.refresh();
-    }),
-    vscode.commands.registerCommand("agentTrace.revealSession", (sessionId: string) => {
-      // Refresh tree and let the user find the session
-      sessionTree.refresh();
-    })
+    vscode.commands.registerCommand(
+      "agentTrace.openLiveStream",
+      telemetry.trackCommand("open_live_stream", () => {
+        liveStream.open();
+      }),
+    ),
+    vscode.commands.registerCommand(
+      "agentTrace.openPostMortem",
+      telemetry.trackCommand("open_post_mortem", (sessionId?: unknown) => {
+        if (typeof sessionId === "string" && sessionId) {
+          postMortem.openForSession(sessionId);
+        } else {
+          // Prompt user to pick a session
+          return vscode.window
+            .showInputBox({ prompt: "Enter session ID" })
+            .then((id) => {
+              if (id) {
+                postMortem.openForSession(id);
+              }
+            });
+        }
+      }),
+    ),
+    vscode.commands.registerCommand(
+      "agentTrace.refreshSessionBrowser",
+      telemetry.trackCommand("refresh_session_browser", () => {
+        sessionTree.refresh();
+      }),
+    ),
+    vscode.commands.registerCommand(
+      "agentTrace.revealSession",
+      telemetry.trackCommand("reveal_session", (_sessionId?: unknown) => {
+        // Refresh tree and let the user find the session
+        sessionTree.refresh();
+      }),
+    ),
+    vscode.commands.registerCommand(
+      "agentTrace.enableTelemetry",
+      telemetry.trackCommand("enable_telemetry", async () => {
+        await telemetry.setEnabled(true, "command");
+        vscode.window.showInformationMessage(
+          "agent-strace: anonymous product telemetry enabled.",
+        );
+      }),
+    ),
+    vscode.commands.registerCommand(
+      "agentTrace.disableTelemetry",
+      telemetry.trackCommand("disable_telemetry", async () => {
+        await telemetry.setEnabled(false, "command");
+        vscode.window.showInformationMessage(
+          "agent-strace: anonymous product telemetry disabled and anonymous ID deleted.",
+        );
+      }),
+    ),
   );
 
   // Start post-mortem watcher
   postMortem.start();
 
   // Register disposables
-  context.subscriptions.push(watcher, statusBar, watchdogBar, decorations,
-    postMortem, liveStream, treeView, { dispose: () => sessionTree.dispose() });
+  context.subscriptions.push(
+    watcher,
+    statusBar,
+    watchdogBar,
+    decorations,
+    postMortem,
+    liveStream,
+    treeView,
+    telemetry,
+    { dispose: () => sessionTree.dispose() },
+  );
 }
 
 export function deactivate(): void {

@@ -63,6 +63,8 @@ All commands are available from the Command Palette (`Cmd/Ctrl+Shift+P`):
 | `agent-trace: Pause Agent` | Send SIGSTOP to the agent (requires `watch` running) |
 | `agent-trace: Resume Agent` | Send SIGCONT to resume a paused agent |
 | `agent-trace: Clear File Decorations` | Remove all gutter annotations from the editor |
+| `agent-trace: Enable Product Telemetry` | Enable anonymous extension usage telemetry |
+| `agent-trace: Disable Product Telemetry` | Opt out and delete the extension's anonymous ID |
 
 ## Watchdog integration
 
@@ -85,10 +87,24 @@ When the watchdog kills a session, the post-mortem viewer opens automatically. T
 | `agentTrace.sessionBrowserRefreshInterval` | `5` | How often (seconds) the session browser refreshes |
 | `agentTrace.showGutterAnnotations` | `true` | Gutter icons on agent-touched files |
 | `agentTrace.showInlineText` | `true` | Inline read/write counts at top of file |
+| `agentTrace.telemetry.enabled` | `true` | Send privacy-preserving anonymous extension usage events |
+
+## Product telemetry
+
+Anonymous extension telemetry is enabled by default with a one-time,
+non-blocking disclosure. Disable it using `agentTrace.telemetry.enabled`, the
+Command Palette, VS Code's editor-wide telemetry switch, `DO_NOT_TRACK=1`, or
+`AGENT_STRACE_TELEMETRY=0`.
+
+The extension sends activation, fixed command names/outcomes, and session
+success/duration with aggregate tool/error counts. It never sends prompts,
+responses, trace contents, paths, repository data, session IDs, command
+arguments, endpoints, usernames, hostnames, or exception messages. See the
+[full telemetry schema](../docs/telemetry.md).
 
 ## How it works
 
-The extension watches `.agent-traces/.active-session` for the current session ID, then tails `events.ndjson` for new events using `fs.watch`. No polling when idle. No network calls. No new processes.
+The extension watches `.agent-traces/.active-session` for the current session ID, then tails `events.ndjson` for new events using `fs.watch`. No polling when idle and no new processes. Its only outbound network path, other than an explicitly configured live-stream collector, is the documented best-effort anonymous product telemetry above.
 
 Pause works by writing `.agent-traces/.pause-request` — `agent-strace watch` checks for this file on every poll cycle and sends SIGSTOP / SIGCONT to the agent PID.
 
