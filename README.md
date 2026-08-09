@@ -17,7 +17,7 @@
 [![CI](https://github.com/Siddhant-K-code/agent-trace/actions/workflows/test.yml/badge.svg)](https://github.com/Siddhant-K-code/agent-trace/actions/workflows/test.yml)
 [![GitHub Marketplace](https://img.shields.io/badge/Marketplace-agent--trace%20eval-blue?logo=github)](https://github.com/marketplace/actions/agent-trace-eval)
 [![Open VSX](https://img.shields.io/open-vsx/v/Siddhant-K-code/agent-strace)](https://open-vsx.org/extension/Siddhant-K-code/agent-strace)
-[![VS Marketplace](https://img.shields.io/badge/VS%20Marketplace-v0.2.1-blue?logo=visual-studio-code)](https://marketplace.visualstudio.com/items?itemName=Siddhant-K-code.agent-strace)
+[![VS Marketplace](https://img.shields.io/badge/VS%20Marketplace-v0.3.0-blue?logo=visual-studio-code)](https://marketplace.visualstudio.com/items?itemName=Siddhant-K-code.agent-strace)
 [![License](https://img.shields.io/github/license/Siddhant-K-code/agent-trace)](LICENSE)
 [![PyPI Downloads](https://static.pepy.tech/personalized-badge/agent-strace?period=total&units=INTERNATIONAL_SYSTEM&left_color=ORANGE&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/agent-strace)
 
@@ -152,6 +152,10 @@ Full flag reference: [docs/commands.md](docs/commands.md)
 ## VS Code extension
 
 Install **agent-strace** from the [Extensions panel](https://open-vsx.org/extension/Siddhant-K-code/agent-strace) to see live session activity without leaving the editor.
+
+Anonymous extension usage telemetry is enabled by default and can be disabled
+from the Command Palette or `agentTrace.telemetry.enabled` setting. No prompts,
+trace contents, paths, session IDs, command arguments, or repository data are sent.
 
 | Feature | Description |
 |---|---|

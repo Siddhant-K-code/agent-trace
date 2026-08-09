@@ -2,12 +2,15 @@
 
 agent-strace provides two complementary mechanisms for keeping sensitive data out of traces: secret redaction (at capture time) and PII anonymization (at export time). A policy file lets you audit and restrict what the agent is allowed to do.
 
-Anonymous product telemetry is a separate, default-on data path that can be
-disabled with `agent-strace telemetry disable`, `DO_NOT_TRACK=1`, or
-`AGENT_STRACE_TELEMETRY=0`. It never reads trace contents. Its fixed schema
-excludes prompts, responses, command arguments, paths, repository data, session
-IDs, endpoints, and exception messages. See [Product telemetry](telemetry.md)
-for the complete schema and controls.
+Anonymous product telemetry is a separate, default-on data path. CLI telemetry
+can be disabled with `agent-strace telemetry disable`; extension telemetry can
+be disabled with the `agentTrace.telemetry.enabled` setting or the Command
+Palette. `DO_NOT_TRACK=1`, `AGENT_STRACE_TELEMETRY=0`, and the editor-wide
+telemetry switch also disable extension telemetry. Both clients use fixed
+schemas that exclude prompts, responses, command arguments, paths, repository
+data, session IDs, endpoints, and exception messages. The extension sends only
+session success, duration, and aggregate tool/error counts—not trace contents.
+See [Product telemetry](telemetry.md) for the complete schemas and controls.
 
 ---
 
