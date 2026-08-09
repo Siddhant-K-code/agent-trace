@@ -1,0 +1,14 @@
+{
+  "name": "agent-strace",
+  "build": {
+    "context": ".",
+    "dockerfile": "Dockerfile"
+  },
+  "features": {
+    "ghcr.io/devcontainers/features/python": {},
+    "ghcr.io/devcontainers/features/node": {}
+  },
+  "remoteEnv": {
+    "PATH": "${containerWorkspaceFolder}/.venv/bin:${containerEnv:PATH}"
+  }
+}
