@@ -1058,7 +1058,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     telemetry_sub = p_telemetry.add_subparsers(dest="telemetry_command")
     telemetry_sub.add_parser("status", help="show telemetry status and collected fields")
-    telemetry_sub.add_parser("enable", help="opt in to anonymous product telemetry")
+    telemetry_sub.add_parser("enable", help="explicitly enable anonymous product telemetry")
     telemetry_sub.add_parser("disable", help="opt out and delete the anonymous installation ID")
 
     # import (Claude Code JSONL session logs)
@@ -1955,7 +1955,7 @@ def main() -> None:
     if args.command == "telemetry":
         sys.exit(_product_telemetry.cmd_telemetry(args))
 
-    _product_telemetry.maybe_prompt_for_consent()
+    _product_telemetry.maybe_show_telemetry_notice()
 
     handlers = {
         "setup": cmd_setup,

@@ -1,6 +1,6 @@
 # ADR-0013: Opt-in Anonymous Product Telemetry
 
-**Status:** Accepted
+**Status:** Superseded by ADR-0014
 **Date:** 2026-08
 **Deciders:** Siddhant Khare
 

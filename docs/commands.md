@@ -38,11 +38,12 @@ Print or install hooks config for supported agent CLIs. `--cli claude` prints Cl
 ```
 agent-strace telemetry [status|enable|disable]
 ```
-Show or change consent for anonymous product telemetry. Telemetry is disabled
-until the user opts in. `disable` also deletes the local anonymous installation
-ID. `DO_NOT_TRACK=1` or `AGENT_STRACE_TELEMETRY=0` always disables collection;
-`AGENT_STRACE_TELEMETRY=1` explicitly enables it, including in CI. See
-[telemetry.md](telemetry.md) for the exact event schema and maintainer setup.
+Show or change the anonymous product telemetry preference. Telemetry is enabled
+by default outside CI. `disable` persists an opt-out and deletes the local
+anonymous installation ID. `DO_NOT_TRACK=1` or `AGENT_STRACE_TELEMETRY=0`
+always disables collection; `AGENT_STRACE_TELEMETRY=1` explicitly enables it,
+including in CI. See [telemetry.md](telemetry.md) for the exact event schema and
+maintainer setup.
 
 ### `import`
 ```
