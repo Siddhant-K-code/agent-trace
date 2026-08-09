@@ -1,0 +1,56 @@
+tasks:
+  install-dependencies:
+    name: Install dependencies
+    description: Install agent-strace and the VS Code extension dependencies.
+    command: |
+      python -m venv .venv
+      .venv/bin/python -m pip install --editable .
+      if [ -f vscode-extension/package-lock.json ]; then
+        npm --prefix vscode-extension ci
+      else
+        npm --prefix vscode-extension install --no-package-lock
+      fi
+    triggeredBy:
+      - manual
+      - postDevcontainerStart
+      - prebuild
+
+  build:
+    name: Build
+    description: Build the Python package and compile the VS Code extension.
+    command: |
+      .venv/bin/python -m pip wheel --no-deps --wheel-dir /tmp/agent-strace-dist .
+      npm --prefix vscode-extension run compile
+    triggeredBy:
+      - manual
+    dependsOn:
+      - install-dependencies
+
+  test:
+    name: Test
+    description: Run the Python and VS Code extension test suites.
+    command: |
+      PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
+      if node -e "const p = require('./vscode-extension/package.json'); process.exit(p.scripts?.test ? 0 : 1)"; then
+        npm --prefix vscode-extension test
+      else
+        npm --prefix vscode-extension run compile
+      fi
+    triggeredBy:
+      - manual
+    dependsOn:
+      - install-dependencies
+
+services:
+  agent-strace-server:
+    name: Agent Trace Server
+    description: Run the local agent-strace collector with a private forwarded port.
+    commands:
+      start: |
+        gitpod environment port open 4317 --dont-wait --admission creator_only --name "Agent Trace Server"
+        exec .venv/bin/agent-strace server --host 0.0.0.0 --port 4317 --storage .agent-traces
+      ready: |
+        curl --fail --silent http://localhost:4317/health >/dev/null
+    triggeredBy:
+      - manual
+      - postEnvironmentStart
