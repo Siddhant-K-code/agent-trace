@@ -110,6 +110,7 @@ Full setup guide: [docs/setup.md](docs/setup.md)
 | [`agent-strace approval list`](docs/commands.md#approval) | Human-in-the-loop approval queue |
 | [`agent-strace rbac assign`](docs/commands.md#rbac) | Org and workspace-scoped role assignments |
 | [`agent-strace auth login`](docs/commands.md#auth) | SSO/OIDC login to a hosted collector |
+| [`agent-strace telemetry status`](docs/telemetry.md) | Inspect, enable, or disable anonymous CLI usage telemetry |
 | [`agent-strace apply`](docs/commands.md#apply) | Apply `.agent-strace.yaml` config to local store or collector |
 | [`agent-strace workspace new`](docs/commands.md#workspace) | Create an isolated workspace |
 | [`agent-strace compliance export`](docs/commands.md#compliance) | Export compliance reports (EU AI Act, SOC 2, HIPAA) |

@@ -34,6 +34,16 @@ agent-strace setup [--cli claude|codex|gemini|cursor|copilot|all] [--no-redact] 
 ```
 Print or install hooks config for supported agent CLIs. `--cli claude` prints Claude Code settings JSON for `~/.claude/settings.json`; `--cli codex` writes `$CODEX_CONFIG_DIR/hooks.json` or `~/.codex/hooks.json`; `--cli gemini` writes a Gemini CLI extension under `$GEMINI_CONFIG_DIR/extensions/agent-strace` or `~/.gemini/extensions/agent-strace`; `--cli cursor` writes `.cursor/hooks.json` or `$CURSOR_CONFIG_DIR/hooks.json`; `--cli copilot` writes `$COPILOT_HOME/hooks/agent-strace.json` or `~/.copilot/hooks/agent-strace.json`; `--cli all` configures all supported CLIs. Secret redaction is enabled by default; use `--no-redact` only for trusted local traces.
 
+### `telemetry`
+```
+agent-strace telemetry [status|enable|disable]
+```
+Show or change consent for anonymous product telemetry. Telemetry is disabled
+until the user opts in. `disable` also deletes the local anonymous installation
+ID. `DO_NOT_TRACK=1` or `AGENT_STRACE_TELEMETRY=0` always disables collection;
+`AGENT_STRACE_TELEMETRY=1` explicitly enables it, including in CI. See
+[telemetry.md](telemetry.md) for the exact event schema and maintainer setup.
+
 ### `import`
 ```
 agent-strace import <path.jsonl> [--discover]
