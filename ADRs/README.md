@@ -39,7 +39,8 @@ What are the trade-offs, limitations, and follow-on effects?
 | [0010](0010-session-explain-phase-detection.md) | Session Explanation via Prompt-Boundary Phase Detection | Accepted |
 | [0011](0011-otlp-genai-semantic-conventions.md) | OTLP GenAI Semantic Conventions Export Format | Accepted |
 | [0012](0012-server-side-event-collector.md) | Server-Side Event Collector | Accepted |
-| [0013](0013-opt-in-product-telemetry.md) | Opt-in Anonymous Product Telemetry | Accepted |
+| [0013](0013-opt-in-product-telemetry.md) | Opt-in Anonymous Product Telemetry | Superseded by ADR-0014 |
+| [0014](0014-default-on-product-telemetry.md) | Default-on Anonymous Product Telemetry | Accepted |
 
 ## Adding a new ADR
 

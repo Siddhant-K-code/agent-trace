@@ -69,10 +69,10 @@ class TelemetryTestCase(unittest.TestCase):
         self.tmp.cleanup()
 
 
-class TestTelemetryConsent(TelemetryTestCase):
-    def test_default_is_disabled_without_creating_an_identifier(self):
+class TestTelemetryPreference(TelemetryTestCase):
+    def test_default_is_enabled_without_eagerly_creating_an_identifier(self):
         self.assertEqual(telemetry.consent_state(), "unset")
-        self.assertFalse(telemetry.telemetry_enabled())
+        self.assertTrue(telemetry.telemetry_enabled())
         self.assertFalse(self.config_path.exists())
 
     def test_enable_and_disable_manage_anonymous_identifier(self):
@@ -93,6 +93,22 @@ class TestTelemetryConsent(TelemetryTestCase):
         os.environ["DO_NOT_TRACK"] = "1"
         self.assertFalse(telemetry.telemetry_enabled())
 
+    def test_environment_can_disable_the_default(self):
+        os.environ["AGENT_STRACE_TELEMETRY"] = "0"
+        self.assertFalse(telemetry.telemetry_enabled())
+        self.assertEqual(telemetry.consent_state(), "unset")
+
+    def test_stored_opt_out_prevents_capture(self):
+        telemetry.set_telemetry_enabled(False)
+        with patch.object(telemetry.request, "urlopen") as urlopen:
+            self.assertFalse(
+                telemetry.capture(
+                    telemetry.CLI_COMMAND_COMPLETED,
+                    {"command": "list", "success": True},
+                )
+            )
+        urlopen.assert_not_called()
+
     def test_environment_can_explicitly_enable_ci(self):
         os.environ["CI"] = "true"
         self.assertFalse(telemetry.telemetry_enabled())
@@ -109,20 +125,21 @@ class TestTelemetryConsent(TelemetryTestCase):
             )
         self.assertEqual(telemetry.consent_state(), "unset")
 
-    def test_interactive_prompt_records_explicit_opt_in(self):
+    def test_interactive_notice_discloses_default_once_without_prompting(self):
         os.environ["AGENT_STRACE_TELEMETRY_TOKEN"] = "phc_public_project_token"
-        input_stream = _TTY("yes\n")
         output_stream = _TTY()
-        with patch.object(telemetry, "capture", return_value=True) as capture:
-            prompted = telemetry.maybe_prompt_for_consent(input_stream, output_stream)
+        shown = telemetry.maybe_show_telemetry_notice(output_stream)
 
-        self.assertTrue(prompted)
-        self.assertEqual(telemetry.consent_state(), "enabled")
+        self.assertTrue(shown)
+        self.assertEqual(telemetry.consent_state(), "unset")
+        self.assertTrue(telemetry.telemetry_enabled())
+        self.assertTrue(json.loads(self.config_path.read_text())["notice_shown"])
+        self.assertIn("enabled by default", output_stream.getvalue())
         self.assertIn("No prompts, arguments, paths", output_stream.getvalue())
-        capture.assert_called_once_with(
-            telemetry.TELEMETRY_ENABLED,
-            {"source": "first_run_prompt"},
-        )
+
+        second_output = _TTY()
+        self.assertFalse(telemetry.maybe_show_telemetry_notice(second_output))
+        self.assertEqual(second_output.getvalue(), "")
 
 
 class TestTelemetryPayload(TelemetryTestCase):
@@ -165,7 +182,6 @@ class TestTelemetryPayload(TelemetryTestCase):
         self.assertNotIn("command", payload["properties"])
 
     def test_capture_posts_to_posthog_without_raising(self):
-        os.environ["AGENT_STRACE_TELEMETRY"] = "1"
         os.environ["AGENT_STRACE_TELEMETRY_HOST"] = "https://eu.i.posthog.com"
         with patch.object(telemetry.request, "urlopen", return_value=_Response()) as urlopen:
             sent = telemetry.capture(
@@ -179,6 +195,11 @@ class TestTelemetryPayload(TelemetryTestCase):
         body = json.loads(request_arg.data)
         self.assertEqual(body["event"], telemetry.CLI_COMMAND_COMPLETED)
         self.assertEqual(body["properties"]["command"], "list")
+        self.assertRegex(body["distinct_id"], r"^[0-9a-f]{32}$")
+        self.assertRegex(
+            json.loads(self.config_path.read_text())["anonymous_id"],
+            r"^[0-9a-f]{32}$",
+        )
 
     def test_network_failure_is_silent(self):
         os.environ["AGENT_STRACE_TELEMETRY"] = "1"
@@ -243,6 +264,7 @@ class TestCliTelemetry(TelemetryTestCase):
         output = io.StringIO()
         with patch("sys.stdout", output):
             self.assertEqual(telemetry.cmd_telemetry(args), 0)
+        self.assertIn("enabled (enabled by default)", output.getvalue())
         self.assertIn("Never collected: prompts", output.getvalue())
 
 

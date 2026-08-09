@@ -4,9 +4,10 @@ agent-strace can send anonymous product usage events to a PostHog project owned
 by the project maintainer. This is separate from agent tracing: no `.agent-traces/`
 files or event data are read by the telemetry client.
 
-Telemetry is disabled until the user explicitly opts in. On a configured build,
-the first interactive CLI invocation asks once, with a default of **No**.
-Non-interactive use and CI do not prompt.
+Telemetry is enabled by default on a configured build. The first interactive
+CLI invocation shows a one-time disclosure with the disable command; it does
+not block for input. CI remains disabled by default to avoid ephemeral
+installation identifiers and test noise.
 
 ## User controls
 
@@ -21,9 +22,12 @@ AGENT_STRACE_TELEMETRY=0 agent-strace list
 AGENT_STRACE_TELEMETRY=1 agent-strace list
 ```
 
-Consent and a random installation ID are stored in
-`~/.agent-strace/telemetry.json`. Disabling telemetry deletes the identifier.
-CI is disabled by default; `AGENT_STRACE_TELEMETRY=1` is required to enable it.
+An unset preference means telemetry is enabled. A random installation ID is
+created on the first event and stored in `~/.agent-strace/telemetry.json`.
+`agent-strace telemetry disable` persists the opt-out and deletes the
+identifier. `DO_NOT_TRACK=1` and `AGENT_STRACE_TELEMETRY=0` disable telemetry
+without changing the stored preference. CI is disabled by default;
+`AGENT_STRACE_TELEMETRY=1` is required to enable it there.
 
 ## Collected fields
 
@@ -33,7 +37,7 @@ There are three events:
 |---|---|
 | `agent_strace_cli_command_completed` | command, subcommand, success, exit code, duration, error type, integration, export format/backend |
 | `agent_strace_session_completed` | provider, capture method, success, duration |
-| `agent_strace_telemetry_enabled` | consent source |
+| `agent_strace_telemetry_enabled` | explicit enablement source |
 
 Every event also includes the anonymous installation ID, telemetry schema
 version, agent-strace version, Python major/minor version, OS family, and CI
@@ -67,15 +71,15 @@ No database or deployed service is required. Use a managed PostHog project:
    export AGENT_STRACE_TELEMETRY_HOST="https://us.i.posthog.com"
    export AGENT_STRACE_TELEMETRY_CONFIG="$(mktemp)"
 
-   agent-strace telemetry enable
    agent-strace list
    agent-strace telemetry status
+   agent-strace telemetry disable
    ```
 
 5. In PostHog's live events view, confirm that
-   `agent_strace_telemetry_enabled` and
-   `agent_strace_cli_command_completed` arrived and contain only the documented
-   properties.
+   `agent_strace_cli_command_completed` arrived and contains only the documented
+   properties. Running `agent-strace telemetry enable` explicitly also sends
+   `agent_strace_telemetry_enabled`.
 6. Commit the public project token and publish the release. End users do not set
    a token; it is part of the distributed package.
 

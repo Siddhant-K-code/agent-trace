@@ -1,9 +1,9 @@
 """Privacy-preserving product telemetry for the agent-strace CLI.
 
-Telemetry is disabled until the user explicitly opts in.  When enabled, the
-client sends a small allow-listed event directly to PostHog's public capture
-API.  It never reads or sends trace events, prompts, command arguments, file
-paths, repository metadata, or session identifiers.
+Telemetry is enabled by default and can be disabled at any time.  The client
+sends a small allow-listed event directly to PostHog's public capture API.  It
+never reads or sends trace events, prompts, command arguments, file paths,
+repository metadata, or session identifiers.
 
 The PostHog project token is intentionally a public, write-only ingestion
 token.  Set ``DEFAULT_POSTHOG_PROJECT_TOKEN`` before publishing a release, or
@@ -142,7 +142,7 @@ def _in_ci() -> bool:
 
 
 def consent_state() -> str:
-    """Return the persisted consent state: enabled, disabled, or unset."""
+    """Return the persisted preference state: enabled, disabled, or unset."""
     enabled = _read_config().get("enabled")
     if enabled is True:
         return "enabled"
@@ -165,14 +165,16 @@ def telemetry_enabled() -> bool:
     if _in_ci() or os.environ.get("PYTEST_CURRENT_TEST"):
         return False
 
-    return consent_state() == "enabled"
+    # An unset preference uses the product default.  Only an explicit opt-out
+    # disables telemetry outside CI and test processes.
+    return consent_state() != "disabled"
 
 
 def set_telemetry_enabled(enabled: bool) -> bool:
     """Persist the user's telemetry preference.
 
     Disabling telemetry deletes the anonymous installation identifier.  A
-    later opt-in therefore starts with a new identity.
+    later re-enable therefore starts with a new identity.
     """
     current = _read_config()
     data: dict[str, Any] = {
@@ -312,15 +314,15 @@ def capture(event: str, properties: dict[str, Any] | None = None) -> bool:
         return False
 
 
-def maybe_prompt_for_consent(
-    input_stream: TextIO | None = None,
+def maybe_show_telemetry_notice(
     output_stream: TextIO | None = None,
 ) -> bool:
-    """Prompt once on an interactive CLI, returning True if a choice was made."""
-    input_stream = input_stream or sys.stdin
+    """Show the default-on disclosure once on an interactive CLI."""
     output_stream = output_stream or sys.stderr
+    data = _read_config()
     if (
         consent_state() != "unset"
+        or data.get("notice_shown") is True
         or os.environ.get(_ENABLED_ENV) is not None
         or _parse_bool(os.environ.get("DO_NOT_TRACK")) is True
         or _in_ci()
@@ -329,29 +331,24 @@ def maybe_prompt_for_consent(
     ):
         return False
     try:
-        if not input_stream.isatty() or not output_stream.isatty():
+        if not output_stream.isatty():
             return False
         output_stream.write(
-            "Help improve agent-strace by sending anonymous CLI usage?\n"
-            "No prompts, arguments, paths, repository data, or trace contents are sent. "
-            "[y/N] "
+            "Anonymous product telemetry is enabled by default. "
+            "No prompts, arguments, paths, repository data, or trace contents are sent.\n"
+            "Disable at any time with: agent-strace telemetry disable\n"
         )
         output_stream.flush()
-        answer = input_stream.readline().strip().lower()
-        enabled = answer in {"y", "yes"}
-        set_telemetry_enabled(enabled)
-        if enabled:
-            capture(TELEMETRY_ENABLED, {"source": "first_run_prompt"})
-            output_stream.write("Anonymous telemetry enabled. Disable with: agent-strace telemetry disable\n")
-        else:
-            output_stream.write("Anonymous telemetry disabled. Enable with: agent-strace telemetry enable\n")
+        data["notice_shown"] = True
+        data["updated_at"] = datetime.now(timezone.utc).isoformat()
+        _write_config(data)
         return True
-    except (OSError, EOFError):
+    except OSError:
         return False
 
 
 def cmd_telemetry(args: argparse.Namespace) -> int:
-    """Manage anonymous product telemetry consent."""
+    """Manage the anonymous product telemetry preference."""
     action = getattr(args, "telemetry_command", None) or "status"
     if action == "enable":
         if not set_telemetry_enabled(True):
@@ -380,14 +377,14 @@ def cmd_telemetry(args: argparse.Namespace) -> int:
         source = "DO_NOT_TRACK"
     elif _parse_bool(os.environ.get(_ENABLED_ENV)) is not None:
         source = _ENABLED_ENV
-    elif state == "unset":
-        source = "no consent recorded"
     elif _in_ci():
         source = "CI default"
+    elif state == "unset":
+        source = "enabled by default"
 
     sys.stdout.write(
         f"Anonymous product telemetry: {effective} ({source})\n"
-        f"Stored consent: {state}\n"
+        f"Stored preference: {state}\n"
         f"PostHog destination: "
         f"{_posthog_host() if telemetry_configured() else 'not configured'}\n"
         "Collected: command/subcommand, success, duration, integration/export format, "
