@@ -31,7 +31,9 @@ from . import __version__
 # PostHog project tokens are public ingestion tokens, not personal API keys.
 # Replace this value with the project token from Project settings before a
 # release.  The environment override is useful for local verification.
-DEFAULT_POSTHOG_PROJECT_TOKEN = ""
+DEFAULT_POSTHOG_PROJECT_TOKEN = (
+    "phc_yWjxK7ibJuFfskDuTr4HbXGdyGvFC6V3Y3fRwNDiRK6x"
+)
 DEFAULT_POSTHOG_HOST = "https://us.i.posthog.com"
 
 TELEMETRY_SCHEMA_VERSION = 1
