@@ -37,6 +37,9 @@ What are the trade-offs, limitations, and follow-on effects?
 | [0008](0008-token-cost-estimation-heuristic.md) | Token and Cost Estimation via Character-Count Heuristic | Accepted |
 | [0009](0009-claude-code-jsonl-import.md) | Claude Code JSONL Session Import | Accepted |
 | [0010](0010-session-explain-phase-detection.md) | Session Explanation via Prompt-Boundary Phase Detection | Accepted |
+| [0011](0011-otlp-genai-semantic-conventions.md) | OTLP GenAI Semantic Conventions Export Format | Accepted |
+| [0012](0012-server-side-event-collector.md) | Server-Side Event Collector | Accepted |
+| [0013](0013-opt-in-product-telemetry.md) | Opt-in Anonymous Product Telemetry | Accepted |
 
 ## Adding a new ADR
 

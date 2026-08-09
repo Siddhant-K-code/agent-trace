@@ -58,6 +58,7 @@ from .postmortem import cmd_postmortem
 from .project_budget import enforce_new_session_budget, load_project_budget_config
 from .share import cmd_share
 from .token_budget import cmd_token_budget
+from . import telemetry as _product_telemetry
 from .anonymize import cmd_anonymize_export
 from .integrations import detect_and_instrument, _INTEGRATIONS
 from .budget_report import cmd_budget_report
@@ -1050,6 +1051,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_setup.add_argument("--cli", choices=["claude", "codex", "gemini", "cursor", "copilot", "all"], default="claude",
                          help="agent CLI to configure (default: claude)")
 
+    # anonymous product telemetry controls
+    p_telemetry = sub.add_parser(
+        "telemetry",
+        help="show, enable, or disable anonymous product telemetry",
+    )
+    telemetry_sub = p_telemetry.add_subparsers(dest="telemetry_command")
+    telemetry_sub.add_parser("status", help="show telemetry status and collected fields")
+    telemetry_sub.add_parser("enable", help="opt in to anonymous product telemetry")
+    telemetry_sub.add_parser("disable", help="opt out and delete the anonymous installation ID")
+
     # import (Claude Code JSONL session logs)
     p_import = sub.add_parser("import", help="import a Claude Code JSONL session log")
     p_import.add_argument("path", nargs="?", help="path to .jsonl session file")
@@ -1826,6 +1837,105 @@ def cmd_auto(args: argparse.Namespace) -> int:
             pass
 
 
+_TELEMETRY_SUBCOMMAND_ATTRS = (
+    "eval_command",
+    "dataset_command",
+    "dash_command",
+    "baseline_cmd",
+    "approval_cmd",
+    "rbac_cmd",
+    "auth_cmd",
+    "compliance_cmd",
+    "workspace_cmd",
+    "identity_cmd",
+    "server_subcommand",
+    "config_watch_command",
+    "retention_command",
+)
+
+
+def _telemetry_command_properties(args: argparse.Namespace) -> dict:
+    """Return only low-cardinality, non-user-authored CLI properties."""
+    properties = {"command": args.command}
+    subcommands = [
+        getattr(args, name, "")
+        for name in _TELEMETRY_SUBCOMMAND_ATTRS
+        if getattr(args, name, "")
+    ]
+    if subcommands:
+        properties["subcommand"] = ".".join(subcommands)
+
+    if args.command == "setup":
+        properties["integration"] = getattr(args, "cli", "claude") or "claude"
+    elif args.command == "auto":
+        framework = getattr(args, "framework", "") or (
+            "detect" if getattr(args, "detect", False) else ""
+        )
+        if framework:
+            properties["integration"] = framework
+    elif args.command == "export":
+        properties["export_format"] = getattr(args, "format", "json")
+        backend = getattr(args, "backend", "") or ""
+        if backend:
+            properties["backend"] = backend
+    return properties
+
+
+def _normalise_exit_code(value) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    return 1
+
+
+def _run_with_product_telemetry(args: argparse.Namespace, handler):
+    """Run a CLI handler and emit one best-effort completion event."""
+    started_at = time.monotonic()
+    base = _telemetry_command_properties(args)
+    try:
+        result = handler(args)
+    except SystemExit as exc:
+        exit_code = _normalise_exit_code(exc.code)
+        _product_telemetry.capture(
+            _product_telemetry.CLI_COMMAND_COMPLETED,
+            {
+                **base,
+                "success": exit_code == 0,
+                "exit_code": exit_code,
+                "duration_ms": _product_telemetry.monotonic_ms_since(started_at),
+                "error_type": "SystemExit",
+            },
+        )
+        raise
+    except BaseException as exc:
+        _product_telemetry.capture(
+            _product_telemetry.CLI_COMMAND_COMPLETED,
+            {
+                **base,
+                "success": False,
+                "exit_code": 1,
+                "duration_ms": _product_telemetry.monotonic_ms_since(started_at),
+                "error_type": type(exc).__name__,
+            },
+        )
+        raise
+
+    exit_code = _normalise_exit_code(result)
+    _product_telemetry.capture(
+        _product_telemetry.CLI_COMMAND_COMPLETED,
+        {
+            **base,
+            "success": exit_code == 0,
+            "exit_code": exit_code,
+            "duration_ms": _product_telemetry.monotonic_ms_since(started_at),
+        },
+    )
+    return result
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -1842,11 +1952,13 @@ def main() -> None:
         hook_main(hook_args)
         sys.exit(0)
 
-    if args.command == "setup":
-        cmd_setup(args)
-        sys.exit(0)
+    if args.command == "telemetry":
+        sys.exit(_product_telemetry.cmd_telemetry(args))
+
+    _product_telemetry.maybe_prompt_for_consent()
 
     handlers = {
+        "setup": cmd_setup,
         "record": cmd_record,
         "record-http": cmd_record_http,
         "replay": cmd_replay,
@@ -1910,7 +2022,7 @@ def main() -> None:
 
     handler = handlers.get(args.command)
     if handler:
-        sys.exit(handler(args))
+        sys.exit(_run_with_product_telemetry(args, handler))
     else:
         parser.print_help()
         sys.exit(1)

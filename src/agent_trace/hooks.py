@@ -49,6 +49,7 @@ from .models import EventType, SessionMeta, TraceEvent
 from .attribution import collect_attribution
 from .redact import redact_data, redact_data_with_status, redaction_enabled
 from .store import TraceStore
+from . import telemetry as _product_telemetry
 
 # Pending tool calls are tracked in a file so separate hook processes
 # can link PostToolUse back to PreToolUse for latency measurement.
@@ -337,6 +338,15 @@ def handle_session_end(input_data: dict, provider: str = "claude") -> None:
             ),
         )
         store.update_meta(meta)
+        _product_telemetry.capture(
+            _product_telemetry.SESSION_COMPLETED,
+            {
+                "provider": provider,
+                "capture_method": "hooks",
+                "success": meta.errors == 0,
+                "duration_ms": int(meta.total_duration_ms),
+            },
+        )
 
     _clear_active_session(provider=provider)
 
