@@ -373,6 +373,16 @@ class TestRuleNoOutput(unittest.TestCase):
 # Config loading
 # ---------------------------------------------------------------------------
 
+class TestCompactionRuleRegistration(unittest.TestCase):
+    def test_post_compaction_regression_is_enabled_and_registered(self):
+        from agent_trace import lint as lint_module
+
+        config = DEFAULT_CONFIG["post-compaction-regression"]
+        self.assertTrue(config["enabled"])
+        self.assertEqual(config["level"], LintLevel.WARN)
+        self.assertIn("post-compaction-regression", lint_module._RULES)
+
+
 class TestLoadConfig(unittest.TestCase):
     def test_defaults_returned_when_no_file(self):
         config = _load_config(None)

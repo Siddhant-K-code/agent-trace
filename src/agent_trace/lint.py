@@ -85,6 +85,12 @@ DEFAULT_CONFIG: dict = {
         "level": LintLevel.INFO,
         "threshold": 0.80,     # fraction of context window
     },
+    "post-compaction-regression": {
+        "enabled": True,
+        "level": LintLevel.WARN,
+        "compaction_threshold": 0.50,
+        "behavior_window": 50,
+    },
     "redundant-read": {
         "enabled": True,
         "level": LintLevel.INFO,
@@ -387,6 +393,15 @@ def _rule_no_output(events: list[TraceEvent], cfg: dict) -> list[LintResult]:
     return []
 
 
+def _rule_post_compaction_regression(
+    events: list[TraceEvent], cfg: dict,
+) -> list[LintResult]:
+    """Run the compaction analyzer lazily to keep module imports acyclic."""
+    from .compaction import _rule_post_compaction_regression as compaction_rule
+
+    return compaction_rule(events, cfg)
+
+
 # ---------------------------------------------------------------------------
 # Rule registry
 # ---------------------------------------------------------------------------
@@ -396,6 +411,7 @@ _RULES: dict[str, Callable[[list[TraceEvent], dict], list[LintResult]]] = {
     "reasoning-spiral": _rule_reasoning_spiral,
     "budget-proximity": _rule_budget_proximity,
     "context-saturation": _rule_context_saturation,
+    "post-compaction-regression": _rule_post_compaction_regression,
     "redundant-read": _rule_redundant_read,
     "error-retry-loop": _rule_error_retry_loop,
     "no-output": _rule_no_output,

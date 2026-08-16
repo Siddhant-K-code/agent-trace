@@ -70,6 +70,12 @@ class TestJSONLImport(unittest.TestCase):
         self.assertIn(EventType.USER_PROMPT, types)
         self.assertIn(EventType.ASSISTANT_RESPONSE, types)
         self.assertIn(EventType.SESSION_END, types)
+        response = next(
+            event for event in events
+            if event.event_type == EventType.ASSISTANT_RESPONSE
+        )
+        self.assertEqual(response.data["usage"]["input_tokens"], 100)
+        self.assertEqual(response.data["context_stream"], "main")
 
     def test_import_tool_calls(self):
         path = self._write_jsonl([
@@ -140,6 +146,109 @@ class TestJSONLImport(unittest.TestCase):
         self.assertEqual(len(tool_calls), 1)
         self.assertEqual(tool_calls[0].data["tool_name"], "Agent")
         self.assertEqual(tool_calls[0].data["subagent_type"], "Explore")
+
+    def test_import_preserves_stable_sidechain_identity(self):
+        path = self._write_jsonl([
+            {
+                "type": "assistant",
+                "sessionId": "sidechains",
+                "timestamp": "2025-01-01T00:00:00Z",
+                "isSidechain": True,
+                "agentId": "research",
+                "uuid": "a1",
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-sonnet-4",
+                    "content": [],
+                    "usage": {"input_tokens": 100, "output_tokens": 1},
+                },
+            },
+            {
+                "type": "assistant",
+                "sessionId": "sidechains",
+                "timestamp": "2025-01-01T00:00:01Z",
+                "isSidechain": True,
+                "agentId": "research",
+                "uuid": "a2",
+                "parentUuid": "a1",
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-sonnet-4",
+                    "content": [],
+                    "usage": {"input_tokens": 90, "output_tokens": 1},
+                },
+            },
+            {
+                "type": "assistant",
+                "sessionId": "sidechains",
+                "timestamp": "2025-01-01T00:00:02Z",
+                "isSidechain": True,
+                "agentId": "review",
+                "uuid": "b1",
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-sonnet-4",
+                    "content": [],
+                    "usage": {"input_tokens": 80, "output_tokens": 1},
+                },
+            },
+        ])
+
+        session_id = import_jsonl(path, store=self.store)
+        responses = [
+            event for event in self.store.load_events(session_id)
+            if event.event_type == EventType.ASSISTANT_RESPONSE
+        ]
+
+        self.assertEqual(responses[0].data["context_stream"], "sidechain:research")
+        self.assertEqual(responses[1].data["context_stream"], "sidechain:research")
+        self.assertEqual(responses[2].data["context_stream"], "sidechain:review")
+
+    def test_boundary_embedded_summary_is_not_overwritten_by_next_user(self):
+        path = self._write_jsonl([
+            {
+                "type": "system",
+                "subtype": "compact_boundary",
+                "sessionId": "embedded-summary",
+                "timestamp": "2025-01-01T00:00:00Z",
+                "uuid": "boundary",
+                "content": "Retain the Redis compatibility constraint.",
+            },
+            {
+                "type": "user",
+                "sessionId": "embedded-summary",
+                "timestamp": "2025-01-01T00:00:01Z",
+                "uuid": "user",
+                "parentUuid": "boundary",
+                "message": {"role": "user", "content": "Please continue."},
+            },
+            {
+                "type": "assistant",
+                "sessionId": "embedded-summary",
+                "timestamp": "2025-01-01T00:00:02Z",
+                "uuid": "assistant",
+                "parentUuid": "user",
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-sonnet-4",
+                    "content": [],
+                    "usage": {"input_tokens": 10_000},
+                },
+            },
+        ])
+
+        session_id = import_jsonl(path, store=self.store)
+        events = self.store.load_events(session_id)
+        prompt = next(e for e in events if e.event_type == EventType.USER_PROMPT)
+        response = next(
+            e for e in events if e.event_type == EventType.ASSISTANT_RESPONSE
+        )
+
+        self.assertNotIn("is_compaction_summary", prompt.data)
+        self.assertEqual(
+            response.data["context_summary"],
+            "Retain the Redis compatibility constraint.",
+        )
 
     def test_import_queue_operations_skipped(self):
         path = self._write_jsonl([

@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from .cost import _dollars, _event_tokens
+from .compaction import CompactionCheckpointWatcher
 from .models import EventType, TraceEvent
 from .postmortem import clear_heartbeat, write_heartbeat
 from .project_budget import (
@@ -1110,6 +1111,7 @@ def watch_session(
     dry_run: bool = False,
     stream_config: StreamConfig | None = None,
     project_budget_config: ProjectBudgetConfig | None = None,
+    checkpoint_watcher: CompactionCheckpointWatcher | None = None,
 ) -> None:
     """Watch a session's event stream and fire alerts on violations.
 
@@ -1145,6 +1147,13 @@ def watch_session(
         out.write(f"[watch] {len(nanny_rules)} nanny rule(s) active\n")
     if stream_config and stream_config.url:
         out.write(f"[watch] Streaming events to {stream_config.url}\n")
+    if checkpoint_watcher:
+        try:
+            checkpoint_path = checkpoint_watcher.checkpoint_current()
+            if checkpoint_path:
+                out.write(f"[watch] Compaction checkpoint written to {checkpoint_path}\n")
+        except OSError as exc:
+            out.write(f"[watch] Could not write compaction checkpoint: {exc}\n")
     out.flush()
 
     project_budget_base_spend = 0.0
@@ -1192,6 +1201,18 @@ def watch_session(
             event: TraceEvent = item  # type: ignore[assignment]
             event_count += 1
             last_event_time = time.time()
+
+            if checkpoint_watcher:
+                try:
+                    checkpoint_path = checkpoint_watcher.update(event)
+                    if checkpoint_path:
+                        out.write(
+                            f"[watch] Compaction checkpoint written to {checkpoint_path}\n"
+                        )
+                        out.flush()
+                except OSError as exc:
+                    out.write(f"[watch] Could not write compaction checkpoint: {exc}\n")
+                    out.flush()
 
             # Push event to stream if configured
             if streamer:
@@ -1339,6 +1360,18 @@ def cmd_watch(args: argparse.Namespace) -> int:
         sys.stderr.write(f"Session not found: {session_id}\n")
         return 1
 
+    checkpoint_watcher: CompactionCheckpointWatcher | None = None
+    if getattr(args, "compaction_checkpoint", False):
+        try:
+            checkpoint_watcher = CompactionCheckpointWatcher(
+                store,
+                full_id,
+                checkpoint_at=float(getattr(args, "checkpoint_at", 0.80)),
+            )
+        except ValueError as exc:
+            sys.stderr.write(f"[watch] invalid checkpoint threshold: {exc}\n")
+            return 1
+
     # Build StreamConfig if --stream-to was provided
     stream_cfg: StreamConfig | None = None
     stream_url = getattr(args, "stream_to", None)
@@ -1358,6 +1391,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
         dry_run=dry_run,
         stream_config=stream_cfg,
         project_budget_config=project_budget_config,
+        checkpoint_watcher=checkpoint_watcher,
     )
     return 0
 

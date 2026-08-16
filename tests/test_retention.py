@@ -210,6 +210,33 @@ class TestDeleteSessions(unittest.TestCase):
         self.assertEqual(deleted, 1)
         self.assertFalse(session_dir.exists())
 
+    def test_deletes_compaction_checkpoint_with_session(self):
+        store, _ = _make_store()
+        meta = _add_session(store, age_days=40)
+        checkpoint = store.base_dir / "checkpoints" / f"{meta.session_id}.md"
+        checkpoint.parent.mkdir(parents=True)
+        checkpoint.write_text("sensitive recovery context")
+
+        deleted = delete_sessions(
+            store, [meta.session_id], RetentionConfig(on_delete="silent")
+        )
+
+        self.assertEqual(deleted, 1)
+        self.assertFalse(checkpoint.exists())
+
+    def test_deletes_orphaned_compaction_checkpoint(self):
+        store, _ = _make_store()
+        checkpoint = store.base_dir / "checkpoints" / "missing-session.md"
+        checkpoint.parent.mkdir(parents=True)
+        checkpoint.write_text("orphaned recovery context")
+
+        deleted = delete_sessions(
+            store, ["missing-session"], RetentionConfig(on_delete="silent")
+        )
+
+        self.assertEqual(deleted, 0)
+        self.assertFalse(checkpoint.exists())
+
     def test_logs_deletion_when_on_delete_log(self):
         store, tmpdir = _make_store()
         meta = _add_session(store, age_days=40)

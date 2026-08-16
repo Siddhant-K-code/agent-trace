@@ -98,6 +98,7 @@ Full setup guide: [docs/setup.md](docs/setup.md)
 | [`agent-strace why <id> <event>`](docs/commands.md#why) | Causal chain for a specific decision |
 | [`agent-strace diff <id-a> <id-b>`](docs/commands.md#diff) | Structural or semantic session comparison |
 | [`agent-strace compare <id-a> <id-b>`](docs/commands.md#compare) | Regression report with verdict |
+| [`agent-strace compaction <id>`](docs/compaction.md) | Inspect context loss and behavior changes after compaction |
 
 ### Control and protect
 

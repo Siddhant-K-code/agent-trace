@@ -136,6 +136,27 @@ def _extract_text(content: Any) -> str:
     return ""
 
 
+def _explicit_sidechain_id(raw: dict[str, Any]) -> str:
+    """Return a provider-supplied sidechain identity when one is available."""
+    for key in ("agentId", "agent_id", "sidechainId", "sidechain_id"):
+        value = raw.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
+def _is_compaction_summary(raw: dict[str, Any], text: str, pending: bool) -> bool:
+    """Recognise Claude Code's synthetic post-compaction user message."""
+    if raw.get("isCompactSummary") or raw.get("isCompactionSummary"):
+        return True
+    lowered = text.lstrip().lower()
+    if lowered.startswith(
+        "this session is being continued from a previous conversation that ran out of context"
+    ):
+        return True
+    return pending and bool(text)
+
+
 def import_jsonl(
     path: str | Path,
     store: TraceStore | None = None,
@@ -210,18 +231,50 @@ def import_jsonl(
     )
     store.create_session(meta)
 
+    # UUID ancestry keeps separate Claude sidechains separate even when the
+    # source version does not include an explicit agentId on every entry.
+    stream_by_uuid: dict[str, str] = {}
+    pending_compaction: set[str] = set()
+    pending_context: dict[str, str] = {}
+
     # Second pass: convert entries to TraceEvents
     for raw in entries:
         entry_type = raw.get("type", "")
         ts = _parse_iso_timestamp(raw.get("timestamp", ""))
         msg = raw.get("message", {})
         if not isinstance(msg, dict):
-            continue
+            msg = {}
 
         content = msg.get("content", "")
         usage = msg.get("usage", {})
         model = msg.get("model", "")
-        is_sidechain = raw.get("isSidechain", False)
+        is_sidechain = bool(raw.get("isSidechain", False))
+        raw_uuid = str(raw.get("uuid", ""))
+        parent_uuid = str(raw.get("parentUuid", ""))
+        if is_sidechain:
+            explicit_id = _explicit_sidechain_id(raw)
+            inherited = stream_by_uuid.get(parent_uuid, "")
+            if explicit_id:
+                context_stream = f"sidechain:{explicit_id}"
+            elif inherited and inherited != "main":
+                context_stream = inherited
+            else:
+                context_stream = f"sidechain:{raw_uuid or parent_uuid or 'unknown'}"
+        else:
+            context_stream = "main"
+        if raw_uuid:
+            stream_by_uuid[raw_uuid] = context_stream
+
+        provenance: dict[str, Any] = {"context_stream": context_stream}
+        if is_sidechain:
+            provenance["is_sidechain"] = True
+        if raw_uuid:
+            provenance["source_uuid"] = raw_uuid
+        if parent_uuid:
+            provenance["source_parent_uuid"] = parent_uuid
+        explicit_id = _explicit_sidechain_id(raw)
+        if explicit_id:
+            provenance["source_agent_id"] = explicit_id
 
         # User entry
         if entry_type == "user":
@@ -240,6 +293,7 @@ def import_jsonl(
                         data={
                             "tool_use_id": tr["tool_use_id"],
                             "content_preview": preview,
+                            **provenance,
                         },
                     )
                     store.append_event(meta.session_id, event)
@@ -261,16 +315,31 @@ def import_jsonl(
                             data={
                                 "result": result_text,
                                 "content_types": ["text"],
+                                **provenance,
                             },
                         )
                         store.append_event(meta.session_id, event)
 
             if text and not text.startswith("{"):
+                is_summary = _is_compaction_summary(
+                    raw, text, context_stream in pending_compaction,
+                )
+                prompt_data: dict[str, Any] = {
+                    "prompt": text[:2000],
+                    **provenance,
+                }
+                if is_summary:
+                    prompt_data.update({
+                        "is_compaction_summary": True,
+                        "context_summary": text,
+                    })
+                    pending_context[context_stream] = text
+                    pending_compaction.discard(context_stream)
                 event = TraceEvent(
                     event_type=EventType.USER_PROMPT,
                     timestamp=ts,
                     session_id=meta.session_id,
-                    data={"prompt": text[:2000]},
+                    data=prompt_data,
                 )
                 store.append_event(meta.session_id, event)
 
@@ -286,10 +355,8 @@ def import_jsonl(
                         "tool_name": tc["name"],
                         "arguments": tc["input"],
                         "request_id": tc["id"],
+                        **provenance,
                     }
-                    # Tag subagent calls
-                    if is_sidechain:
-                        tool_data["is_sidechain"] = True
                     caller = tc.get("caller", {})
                     if caller.get("type"):
                         tool_data["caller_type"] = caller["type"]
@@ -311,15 +378,23 @@ def import_jsonl(
             # Log assistant text whenever present, including messages that also
             # contain tool calls (Claude Code often emits reasoning text alongside
             # a tool_use block in the same message).
-            if text:
+            if text or usage:
+                response_data: dict[str, Any] = {
+                    "model": model,
+                    **provenance,
+                }
+                if text:
+                    response_data["text"] = text[:2000]
+                if isinstance(usage, dict) and usage:
+                    response_data["usage"] = dict(usage)
+                summary = pending_context.pop(context_stream, "")
+                if summary:
+                    response_data["context_summary"] = summary
                 event = TraceEvent(
                     event_type=EventType.ASSISTANT_RESPONSE,
                     timestamp=ts,
                     session_id=meta.session_id,
-                    data={
-                        "text": text[:2000],
-                        "model": model,
-                    },
+                    data=response_data,
                 )
                 store.append_event(meta.session_id, event)
 
@@ -342,6 +417,15 @@ def import_jsonl(
                 duration_ms = raw.get("durationMs", 0)
                 if duration_ms:
                     meta.total_duration_ms += duration_ms
+            elif subtype in {"compact_boundary", "compaction_boundary"}:
+                summary = _extract_text(raw.get("content", ""))
+                if not summary:
+                    summary = _extract_text(msg.get("content", ""))
+                if summary:
+                    pending_context[context_stream] = summary
+                    pending_compaction.discard(context_stream)
+                else:
+                    pending_compaction.add(context_stream)
 
     # Finalize session
     meta.ended_at = last_ts if last_ts > 0 else meta.started_at
