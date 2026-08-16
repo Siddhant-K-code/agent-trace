@@ -107,6 +107,7 @@ Full setup guide: [docs/setup.md](docs/setup.md)
 | [`agent-strace watch --timeout 30m --budget $5`](docs/commands.md#watch) | Watchdog mode — kills on limit and heartbeats sessions for postmortems |
 | [`agent-strace mcp-scan`](docs/commands.md#mcp-scan) | Scan runtime MCP poisoning indicators |
 | [`agent-strace audit <id>`](docs/commands.md#audit) | Audit tool calls against a policy file |
+| [`agent-strace policy backtest`](docs/commands.md#policy) | Test policy impact against historical sessions |
 | [`agent-strace approval list`](docs/commands.md#approval) | Human-in-the-loop approval queue |
 | [`agent-strace rbac assign`](docs/commands.md#rbac) | Org and workspace-scoped role assignments |
 | [`agent-strace auth login`](docs/commands.md#auth) | SSO/OIDC login to a hosted collector |

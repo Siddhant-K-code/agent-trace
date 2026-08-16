@@ -278,6 +278,8 @@ def cmd_policy(args: argparse.Namespace) -> int:
     store = TraceStore(args.trace_dir)
 
     session_ids_raw: list[str] = getattr(args, "session_ids", []) or []
+    output_path = getattr(args, "output", None)
+    dry_run = getattr(args, "dry_run", False)
 
     # If no sessions specified, use all sessions
     if not session_ids_raw:
@@ -301,9 +303,6 @@ def cmd_policy(args: argparse.Namespace) -> int:
         resolved.append(full)
 
     suggestion = suggest_policy(store, resolved)
-
-    output_path = getattr(args, "output", None)
-    dry_run = getattr(args, "dry_run", False)
 
     if dry_run or not output_path:
         format_suggestion(suggestion, dry_run=True)
