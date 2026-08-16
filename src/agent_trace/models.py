@@ -97,6 +97,12 @@ class SessionMeta:
     workspace_id: str = ""
     # Attribution (who/what started this session)
     attribution: dict = field(default_factory=dict)
+    # Upstream W3C trace context (optional).  Integrations such as Temporal
+    # persist these fields so an offline OTLP export can retain the original
+    # distributed trace and parent span.
+    trace_id: str = ""
+    parent_span_id: str = ""
+    trace_flags: str = ""
     # True when secret redaction changed or protected session metadata
     redacted: bool = False
 

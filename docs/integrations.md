@@ -206,3 +206,37 @@ if ctx:
 Pass `trace_id` from the extracted context into `inject_traceparent` on any further outbound calls to propagate the same trace ID through the full call chain.
 
 The implementation follows [W3C Trace Context Level 1](https://www.w3.org/TR/trace-context/). No third-party dependencies required.
+
+---
+
+## Temporal workflows
+
+Agent spans can be attached beneath an existing Temporal activity span without
+adding the Temporal SDK to agent-strace. Expose the activity's W3C `traceparent`
+to the agent process as `AGENT_STRACE_TEMPORAL_TRACE_PARENT` (preferred) or
+`TEMPORAL_TRACE_PARENT`, then start the normal watcher:
+
+```bash
+export AGENT_STRACE_TEMPORAL_TRACE_PARENT="00-<trace-id>-<activity-span-id>-01"
+agent-strace watch "$AGENT_SESSION_ID"
+```
+
+The watcher validates the value and stores the upstream trace ID, parent span
+ID, and trace flags in additive session metadata. This makes later exports work
+after the activity process exits:
+
+```bash
+# Write inspectable OTLP/JSON
+agent-strace export "$AGENT_SESSION_ID" --format temporal --output temporal-trace.json
+
+# Or send it to Jaeger, Tempo, Datadog, or another OTLP/HTTP collector
+agent-strace export "$AGENT_SESSION_ID" --format temporal \
+  --endpoint http://localhost:4318 \
+  --header "Authorization: Bearer $OTLP_TOKEN"
+```
+
+The session root span reuses Temporal's trace ID and sets the Temporal activity
+span as its parent; LLM and tool spans remain children of the session root. The
+setup belongs in the activity worker or agent launcher, so Temporal workflow
+definitions do not need to change. Export remains HTTP/JSON only and uses no
+Temporal, OpenTelemetry, or gRPC runtime dependency.

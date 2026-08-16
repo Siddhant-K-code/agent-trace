@@ -1121,6 +1121,22 @@ def watch_session(
         out.write(f"[watch] events file not found: {events_file}\n")
         return
 
+    # Temporal's OTel interceptor can pass the activity's W3C traceparent to
+    # the agent process.  Persist it before tailing so later/offline exports
+    # remain children of the activity span even after the environment is gone.
+    try:
+        from .temporal import attach_temporal_trace_context
+
+        temporal_context = attach_temporal_trace_context(store, session_id)
+    except ValueError as exc:
+        out.write(f"[watch] Invalid Temporal trace context: {exc}\n")
+        temporal_context = None
+    if temporal_context is not None:
+        out.write(
+            "[watch] Attached Temporal parent span "
+            f"{temporal_context.parent_span_id}\n"
+        )
+
     state = WatchState(start_time=time.time())
 
     mode = " [dry-run]" if dry_run else ""

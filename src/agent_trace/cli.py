@@ -376,10 +376,11 @@ def cmd_export(args: argparse.Namespace) -> int:
         for e in events:
             sys.stdout.write(e.to_json() + "\n")
 
-    elif args.format in ("otlp", "otlp-genai"):
+    elif args.format in ("otlp", "otlp-genai", "temporal"):
         from .otlp import export_otlp, session_to_otlp, session_to_otlp_genai
 
         use_genai = args.format == "otlp-genai"
+        use_temporal = args.format == "temporal"
         endpoint = args.endpoint
 
         # When --endpoint is set and format is plain otlp, default to otlp-genai
@@ -391,13 +392,20 @@ def cmd_export(args: argparse.Namespace) -> int:
         if not endpoint:
             # No endpoint: write OTLP JSON to --output file or stdout
             meta = store.load_meta(session_id)
-            if use_genai:
-                payload = session_to_otlp_genai(meta, events, service_name=args.service_name)
-            else:
-                payload = session_to_otlp(meta, events, service_name=args.service_name)
+            try:
+                if use_temporal:
+                    from .temporal import session_to_temporal_otlp
+                    payload = session_to_temporal_otlp(meta, events, service_name=args.service_name)
+                elif use_genai:
+                    payload = session_to_otlp_genai(meta, events, service_name=args.service_name)
+                else:
+                    payload = session_to_otlp(meta, events, service_name=args.service_name)
+            except ValueError as exc:
+                sys.stderr.write(f"Temporal export failed: {exc}\n")
+                return 1
             output_path = getattr(args, "output", "") or ""
             if not output_path:
-                fmt_suffix = "otlp-genai" if use_genai else "otlp"
+                fmt_suffix = args.format
                 output_path = f"trace-{session_id[:12]}-{fmt_suffix}.json"
             with open(output_path, "w") as f:
                 f.write(json.dumps(payload, indent=2) + "\n")
@@ -412,7 +420,17 @@ def cmd_export(args: argparse.Namespace) -> int:
                 key, val = h.split(":", 1)
                 headers[key.strip()] = val.strip()
 
-        if use_genai:
+        if use_temporal:
+            from .temporal import export_temporal_otlp
+            ok = export_temporal_otlp(
+                store=store,
+                session_id=session_id,
+                endpoint=endpoint,
+                headers=headers,
+                service_name=args.service_name,
+            )
+            return 0 if ok else 1
+        elif use_genai:
             # Export using GenAI conventions
             import urllib.request, urllib.error
             meta = store.load_meta(session_id)
@@ -984,9 +1002,9 @@ def build_parser() -> argparse.ArgumentParser:
     # export
     p_export = sub.add_parser("export", help="export a session")
     p_export.add_argument("session_id", nargs="?", help="session ID or prefix")
-    p_export.add_argument("--format", choices=["json", "csv", "ndjson", "otlp", "otlp-genai", "eu-ai-act"],
+    p_export.add_argument("--format", choices=["json", "csv", "ndjson", "otlp", "otlp-genai", "temporal", "eu-ai-act"],
                           default="json",
-                          help="output format (otlp-genai uses strict OTel GenAI semantic conventions)")
+                          help="output format (temporal preserves an upstream activity parent span)")
     p_export.add_argument("--endpoint", help="OTLP collector URL (e.g. http://localhost:4318)")
     p_export.add_argument("--header", action="append", help="HTTP header for OTLP (e.g. 'x-honeycomb-team: KEY')")
     p_export.add_argument("--service-name", default="agent-trace", help="OTel service name (default: agent-trace)")
