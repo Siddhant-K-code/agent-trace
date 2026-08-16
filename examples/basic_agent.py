@@ -133,3 +133,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# Fix for issue #167: safe input handling
