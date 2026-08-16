@@ -42,7 +42,7 @@ from .optimize import cmd_optimize
 from .freshness import cmd_freshness
 from .standup import cmd_standup
 from .audit import cmd_audit, verify_chain
-from .cost import cmd_cost
+from .cost import PRICING, cmd_cost
 from .cognitive_debt import cmd_cognitive_debt
 from .context_score import cmd_context_score
 from .curve import cmd_curve
@@ -69,6 +69,7 @@ from .anonymize import cmd_anonymize_export
 from .integrations import detect_and_instrument, _INTEGRATIONS
 from .budget_report import cmd_budget_report
 from .team_report import cmd_team_report
+from .org_report import cmd_org_report
 from .tenancy import cmd_tenant
 from .compare import cmd_compare
 from .compaction import cmd_compaction
@@ -1925,6 +1926,51 @@ def build_parser() -> argparse.ArgumentParser:
     p_team_report.add_argument("--outlier-threshold", type=float, default=2.0,
                                help="flag sessions above N times average cost (default: 2.0)")
 
+    # organization-wide estimated usage/cost digest
+    p_org_report = sub.add_parser(
+        "org-report", help="organization-wide estimated agent usage and cost digest"
+    )
+    p_org_report.add_argument(
+        "--month", metavar="YYYY-MM",
+        help="UTC report month (default: current month)",
+    )
+    p_org_report.add_argument(
+        "--team", metavar="SELECTOR",
+        help="team tag or workspace; use tag:NAME/workspace:NAME if ambiguous",
+    )
+    p_org_report.add_argument(
+        "--format", choices=["text", "json", "html"], default="text",
+        help="output format (default: text)",
+    )
+    p_org_report.add_argument(
+        "--anonymize", action="store_true",
+        help="replace team and attributed identity labels with report-local aliases",
+    )
+    p_org_report.add_argument(
+        "--output", "-o", metavar="FILE",
+        help="atomically write the complete report to a file",
+    )
+    p_org_report.add_argument(
+        "--endpoint", metavar="URL",
+        help="explicit authenticated collector instance to read instead of --trace-dir",
+    )
+    p_org_report.add_argument(
+        "--auth-key-file", metavar="FILE",
+        help="read collector bearer key from FILE (or use AGENT_STRACE_AUTH_KEY)",
+    )
+    p_org_report.add_argument(
+        "--ca-file", metavar="FILE",
+        help="custom CA bundle for an HTTPS collector",
+    )
+    p_org_report.add_argument(
+        "--allow-insecure-http", action="store_true",
+        help="allow plain HTTP to a non-loopback collector",
+    )
+    p_org_report.add_argument(
+        "--model", default="sonnet", choices=sorted(PRICING),
+        help="pricing model for offline estimates (default: sonnet)",
+    )
+
     # lint
     p_lint = sub.add_parser("lint", help="analyse a session for bad behaviour patterns")
     p_lint.add_argument("session_id", nargs="?",
@@ -2281,6 +2327,7 @@ def main() -> None:
         "auto": cmd_auto,
         "budget-report": cmd_budget_report,
         "team-report": cmd_team_report,
+        "org-report": cmd_org_report,
         "compare": cmd_compare,
         "freeze": cmd_freeze,
         "regression": cmd_regression,

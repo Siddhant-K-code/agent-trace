@@ -551,6 +551,35 @@ Team cost attribution across recorded sessions. By default it groups spend by gi
 | `--export text|csv|json` | Output format. `csv` is intended for spreadsheets and finance workflows |
 | `--outlier-threshold N` | Flag sessions whose cost is above `N` times the report average; default is `2.0` |
 
+### `org-report`
+```
+agent-strace org-report [--month YYYY-MM] [--team SELECTOR]
+                         [--format text|json|html] [--anonymize]
+                         [--model MODEL] [-o FILE]
+                         [--endpoint URL] [--auth-key-file FILE]
+                         [--ca-file FILE] [--allow-insecure-http]
+```
+Build a monthly organization digest from the flat trace directory plus all
+workspace stores, or from one explicitly selected authenticated collector.
+Spend is an offline estimate for sessions with usable event data; the report
+shows its coverage and labels averages as per cost-estimated session. Task
+types and anomaly callouts are heuristics, not completion or efficiency
+measurements. See the [organization reporting guide](org-report.md) for the
+security boundary and interpretation details.
+
+| Flag | Description |
+|---|---|
+| `--month YYYY-MM` | Half-open UTC calendar month; default is the current UTC month |
+| `--team SELECTOR` | Exact team tag or workspace. Use `tag:NAME` or `workspace:NAME` to resolve a name collision |
+| `--format text\|json\|html` | Terminal text, strict versioned JSON, or self-contained static HTML |
+| `--anonymize` | Replace team/workspace and attributed identity labels with deterministic aliases local to this report |
+| `--model MODEL` | Bundled offline pricing model; default is `sonnet` |
+| `--output FILE`, `-o FILE` | Atomically write the complete report; symlinked destinations are refused |
+| `--endpoint URL` | Explicit collector base URL. This command never infers it from `AGENT_STRACE_ENDPOINT` |
+| `--auth-key-file FILE` | Read the collector bearer key from a file; otherwise use `AGENT_STRACE_AUTH_KEY` |
+| `--ca-file FILE` | Trust a custom CA bundle for the HTTPS collector |
+| `--allow-insecure-http` | Opt in to plain HTTP for a non-loopback collector |
+
 ### `cognitive-debt`
 ```
 agent-strace cognitive-debt [--session ID] [--since DATE] [--until DATE]

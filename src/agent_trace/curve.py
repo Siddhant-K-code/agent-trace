@@ -60,13 +60,17 @@ SWEET_SPOTS: dict[str, float] = {
 }
 
 
-def _classify_session(agent_name: str, command: str) -> str:
+def classify_session(agent_name: str, command: str) -> str:
     """Return the task type label for a session based on its name/command."""
     text = (agent_name + " " + command).lower()
     for task_type, keywords in TASK_CLASSIFIERS:
         if any(kw in text for kw in keywords):
             return task_type
     return DEFAULT_TASK_TYPE
+
+
+# Backward-compatible alias for callers that imported the original helper.
+_classify_session = classify_session
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +145,7 @@ def analyse_curve(
 
     for meta in all_metas:
         sid = meta.session_id
-        task_type = _classify_session(meta.agent_name, meta.command)
+        task_type = classify_session(meta.agent_name, meta.command)
 
         try:
             cost = estimate_cost(store, sid).total_cost
