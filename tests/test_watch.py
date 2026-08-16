@@ -23,6 +23,8 @@ from agent_trace.watch import (
     _detect_loop,
     _detect_spin_loop,
     _event_key,
+    cmd_watch,
+    watch_session,
 )
 
 
@@ -300,6 +302,76 @@ class TestBuiltInRules(unittest.TestCase):
         self.assertEqual(args.command, "watch")
         self.assertEqual(args.loop_threshold, 4)
         self.assertEqual(args.loop_window, 12)
+
+    def test_compaction_cli_and_watch_flags_are_registered(self):
+        parser = build_parser()
+        compaction = parser.parse_args([
+            "compaction", "abc123", "--diff", "--behavior-diff",
+            "--compaction-threshold", "0.65",
+        ])
+        self.assertEqual(compaction.command, "compaction")
+        self.assertEqual(compaction.session_id, "abc123")
+        self.assertTrue(compaction.diff)
+        self.assertTrue(compaction.behavior_diff)
+        self.assertEqual(compaction.compaction_threshold, 0.65)
+
+        watch = parser.parse_args([
+            "watch", "abc123", "--compaction-checkpoint", "--checkpoint-at", "0.75",
+        ])
+        self.assertTrue(watch.compaction_checkpoint)
+        self.assertEqual(watch.checkpoint_at, 0.75)
+
+    def test_cmd_watch_wires_compaction_checkpoint_watcher(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TraceStore(tmp, redact=False)
+            meta = SessionMeta(session_id="checkpoint-session", started_at=1.0)
+            store.create_session(meta)
+            args = build_parser().parse_args([
+                "--trace-dir", tmp, "watch", meta.session_id,
+                "--compaction-checkpoint", "--checkpoint-at", "0.75",
+            ])
+
+            with patch("agent_trace.watch.watch_session") as watch_session_mock:
+                result = cmd_watch(args)
+
+            self.assertEqual(result, 0)
+            watcher = watch_session_mock.call_args.kwargs["checkpoint_watcher"]
+            self.assertIsNotNone(watcher)
+            self.assertEqual(watcher.checkpoint_at, 0.75)
+
+    def test_watch_loop_checks_existing_and_new_checkpoint_state(self):
+        class FakeCheckpointWatcher:
+            def __init__(self):
+                self.updated = []
+
+            def checkpoint_current(self):
+                return Path("initial-checkpoint.md")
+
+            def update(self, event):
+                self.updated.append(event)
+                return Path("updated-checkpoint.md") if len(self.updated) == 1 else None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TraceStore(tmp, redact=False)
+            meta = SessionMeta(session_id="checkpoint-loop", started_at=1.0)
+            store.create_session(meta)
+            event = _make_event(EventType.LLM_REQUEST, 2.0, input_tokens=160_000)
+            end = _make_event(EventType.SESSION_END, 3.0, exit_code=0)
+            watcher = FakeCheckpointWatcher()
+            output = io.StringIO()
+
+            with patch("agent_trace.watch._tail_events", return_value=iter([event, end])):
+                watch_session(
+                    store,
+                    meta.session_id,
+                    _default_config(),
+                    out=output,
+                    checkpoint_watcher=watcher,
+                )
+
+            self.assertEqual(watcher.updated, [event, end])
+            self.assertIn("initial-checkpoint.md", output.getvalue())
+            self.assertIn("updated-checkpoint.md", output.getvalue())
 
     def test_mcp_poisoning_rule_alerts_on_exfil_sequence(self):
         config = WatcherConfig(built_in_rules={"mcp-poisoning"})

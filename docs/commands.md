@@ -175,6 +175,24 @@ agent-strace token-budget <session-id> [--model MODEL] [--warn-at PCT]
 ```
 Check token usage against model context limit.
 
+### `compaction`
+```
+agent-strace compaction [SESSION_ID] [--diff] [--behavior-diff]
+                         [--compaction-threshold RATIO]
+```
+Detect provider-reported input-token drops between consecutive model requests
+and report the context discarded by compaction.
+
+| Flag | Description |
+|---|---|
+| `SESSION_ID` | Session ID or prefix (default: latest) |
+| `--diff` | Classify constraints, decisions, and file context as survived or likely dropped |
+| `--behavior-diff` | Compare lint findings, re-reads, loops, and exploration around compaction |
+| `--compaction-threshold RATIO` | Minimum token drop ratio (default: `0.50`) |
+
+See the [context compaction guide](compaction.md) for interpretation and live
+checkpoint setup.
+
 ---
 
 ## Control and protection
@@ -184,7 +202,8 @@ Check token usage against model context limit.
 agent-strace watch [session-id] [--timeout DURATION] [--budget $N] [--on-violation ACTION]
                    [--on-death CMD] [--policy FILE] [--rules FILE_OR_BUILTINS] [--stream-to URL]
                    [--stream-batch-size N] [--stream-flush-interval S]
-                   [--loop-threshold N] [--loop-window N] [--max-context-pct N] [--dry-run]
+                   [--loop-threshold N] [--loop-window N] [--max-context-pct N]
+                   [--compaction-checkpoint] [--checkpoint-at RATIO] [--dry-run]
 ```
 Live session monitor with kill-switch rules.
 
@@ -196,6 +215,8 @@ Live session monitor with kill-switch rules.
 | `--loop-window N` | Number of recent events to scan for repeated identical tool calls; default is 10 |
 | `--on-violation terminal\|file\|kill` | Action when a rule fires |
 | `--on-death CMD` | Command to run after kill (receives `{post_mortem_path}`) |
+| `--compaction-checkpoint` | Write a recovery checkpoint before context saturation |
+| `--checkpoint-at RATIO` | Context fill ratio that triggers a checkpoint (default: `0.80`) |
 | `--policy FILE` | Scope policy file to enforce (default: `.agent-scope.json`) |
 | `--rules FILE_OR_BUILTINS` | JSON/YAML rules file, or comma-separated built-ins such as `mcp-poisoning,loop:3/10,budget:$5,timeout:30m,cognitive-debt:0.8` |
 | `--stream-to URL` | Stream events to HTTP endpoint in real-time |
@@ -453,7 +474,11 @@ Freeze a session's tool-call sequence as a JSON fixture containing tool names an
 ```
 agent-strace lint [session-id] [--all] [--since DURATION] [--strict] [--format text|json]
 ```
-Flag bad behavior patterns: tool loops, reasoning spirals, budget proximity, context saturation, redundant reads, error-retry loops, no-output sessions.
+Flag bad behavior patterns: tool loops, reasoning spirals, budget proximity,
+context saturation, redundant reads, error-retry loops, no-output sessions, and
+post-compaction regressions. The `post-compaction-regression` rule warns when
+re-reading, exploration, context saturation, or other lint findings increase
+after a detected compaction.
 
 `--strict` exits 1 on any WARN or ERROR. Configure rules via `.agent-strace-lint.json`.
 

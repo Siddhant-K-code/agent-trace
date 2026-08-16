@@ -70,6 +70,7 @@ from .integrations import detect_and_instrument, _INTEGRATIONS
 from .budget_report import cmd_budget_report
 from .team_report import cmd_team_report
 from .compare import cmd_compare
+from .compaction import cmd_compaction
 from .freeze import cmd_freeze, cmd_regression
 from .timeline import cmd_timeline
 from .config_watch import cmd_config_watch
@@ -1284,6 +1285,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_watch.add_argument("--config", help="path to .agent-watch.json config file")
     p_watch.add_argument("--max-context-pct", type=int, default=90, dest="max_context_pct",
                          help="alert when context window is this %% full (default: 90)")
+    p_watch.add_argument(
+        "--compaction-checkpoint", action="store_true",
+        help="write a recovery checkpoint before context saturation",
+    )
+    p_watch.add_argument(
+        "--checkpoint-at", type=float, default=0.80, metavar="RATIO",
+        help="context fill ratio for compaction checkpoints (default: 0.80)",
+    )
     p_watch.add_argument("--policy", metavar="POLICY_FILE",
                          help="path to scope policy file (default: .agent-scope.json)")
     p_watch.add_argument("--rules", metavar="RULES_FILE",
@@ -1330,6 +1339,24 @@ def build_parser() -> argparse.ArgumentParser:
                                  help="minimum sessions per version before scoring (default: 5)")
     p_context_score.add_argument("--format", choices=["text", "json"], default="text",
                                  help="output format (default: text)")
+
+    # compaction
+    p_compaction = sub.add_parser(
+        "compaction", help="detect and analyse context compaction events"
+    )
+    p_compaction.add_argument(
+        "session_id", nargs="?", help="session ID or prefix (default: latest)"
+    )
+    p_compaction.add_argument(
+        "--diff", action="store_true", help="show constraints and decisions that survived or dropped"
+    )
+    p_compaction.add_argument(
+        "--behavior-diff", action="store_true", help="compare behavior and lint findings around compaction"
+    )
+    p_compaction.add_argument(
+        "--compaction-threshold", type=float, default=0.50, metavar="RATIO",
+        help="minimum input-token drop ratio (default: 0.50)",
+    )
 
     # mcp-scan
     p_mcp_scan = sub.add_parser("mcp-scan", help="scan runtime MCP tool poisoning indicators")
@@ -2171,6 +2198,7 @@ def main() -> None:
         "cost": cmd_cost,
         "cognitive-debt": cmd_cognitive_debt,
         "context-score": cmd_context_score,
+        "compaction": cmd_compaction,
         "diff": cmd_diff,
         "why": cmd_why,
         "audit": cmd_audit,

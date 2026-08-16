@@ -150,6 +150,17 @@ def _store_size_bytes(store: TraceStore) -> int:
     return total
 
 
+def _retained_session_size_bytes(store: TraceStore, session_id: str) -> int:
+    """Return session storage plus its compaction checkpoint sidecar."""
+    total = _session_size_bytes(store._session_dir(session_id))
+    checkpoint = store.base_dir / "checkpoints" / f"{session_id}.md"
+    try:
+        total += checkpoint.stat().st_size
+    except OSError:
+        pass
+    return total
+
+
 # ---------------------------------------------------------------------------
 # Retention logic
 # ---------------------------------------------------------------------------
@@ -216,7 +227,7 @@ def compute_sessions_to_delete(
             for meta in surviving:
                 if total <= max_bytes:
                     break
-                size = _session_size_bytes(store._session_dir(meta.session_id))
+                size = _retained_session_size_bytes(store, meta.session_id)
                 to_delete.add(meta.session_id)
                 total -= size
 
@@ -241,7 +252,7 @@ def get_retention_status(store: TraceStore, config: RetentionConfig) -> Retentio
     total_bytes = _store_size_bytes(store)
     to_delete = compute_sessions_to_delete(store, config)
     bytes_to_free = sum(
-        _session_size_bytes(store._session_dir(sid)) for sid in to_delete
+        _retained_session_size_bytes(store, sid) for sid in to_delete
     )
 
     return RetentionStatus(
@@ -266,9 +277,11 @@ def delete_sessions(
 
     for sid in session_ids:
         session_dir = store._session_dir(sid)
-        if not session_dir.exists():
-            continue
+        checkpoint_path = store.base_dir / "checkpoints" / f"{sid}.md"
         try:
+            checkpoint_path.unlink(missing_ok=True)
+            if not session_dir.exists():
+                continue
             shutil.rmtree(session_dir)
             deleted += 1
             if config.on_delete == "log":
@@ -335,7 +348,7 @@ def cmd_retention_clean(args: argparse.Namespace, out: TextIO = sys.stdout) -> i
         return 0
 
     bytes_to_free = sum(
-        _session_size_bytes(store._session_dir(sid)) for sid in to_delete
+        _retained_session_size_bytes(store, sid) for sid in to_delete
     )
     mb_to_free = bytes_to_free / (1024 * 1024)
 
