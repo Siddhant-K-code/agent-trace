@@ -541,7 +541,7 @@ def _watch_session(
     patterns: list[tuple[str, re.Pattern[str]]] | None = None,
     project_root: str = "",
 ) -> int:
-    events_file = store._session_dir(session_id) / "events.ndjson"
+    events_file = store._session_file(session_id, "events.ndjson", "event stream")
     if not events_file.exists():
         out.write(f"events file not found: {events_file}\n")
         return 1

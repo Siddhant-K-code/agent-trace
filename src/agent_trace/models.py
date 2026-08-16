@@ -22,6 +22,7 @@ Event types:
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -57,6 +58,10 @@ class TraceEvent:
     prev_hash: str = ""
     # True when secret redaction changed or protected this event before write
     redacted: bool = False
+    # Appended after all pre-v0.90 fields to preserve positional construction.
+    tenant_id: str = field(
+        default_factory=lambda: os.environ.get("AGENT_STRACE_TENANT_ID", "").strip()
+    )
 
     def to_json(self) -> str:
         d = asdict(self)
@@ -71,6 +76,9 @@ class TraceEvent:
     def from_json(cls, line: str) -> TraceEvent:
         d = json.loads(line)
         d["event_type"] = EventType(d["event_type"])
+        # Deserialising a legacy event must not accidentally assign the
+        # current process tenant to historical data.
+        d.setdefault("tenant_id", "")
         return cls(**d)
 
 
@@ -105,6 +113,10 @@ class SessionMeta:
     trace_flags: str = ""
     # True when secret redaction changed or protected session metadata
     redacted: bool = False
+    # Appended after all pre-v0.90 fields to preserve positional construction.
+    tenant_id: str = field(
+        default_factory=lambda: os.environ.get("AGENT_STRACE_TENANT_ID", "").strip()
+    )
 
     def to_json(self) -> str:
         d = asdict(self)
@@ -113,4 +125,8 @@ class SessionMeta:
 
     @classmethod
     def from_json(cls, text: str) -> SessionMeta:
-        return cls(**json.loads(text))
+        data = json.loads(text)
+        # Keep pre-tenancy metadata untagged even when the reader itself is
+        # running with AGENT_STRACE_TENANT_ID set.
+        data.setdefault("tenant_id", "")
+        return cls(**data)

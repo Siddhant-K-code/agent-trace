@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from agent_trace.cli import cmd_setup
 from agent_trace.hooks import (
+    _active_session_path,
     _read_active_session,
     handle_file_write,
     handle_post_tool,
@@ -58,7 +59,7 @@ class TestCursorHooks(unittest.TestCase):
         self.assertEqual(events[0].data["mode"], "cursor-agent-hooks")
 
         canonical = Path(self.tmpdir) / ".active-session"
-        scoped = Path(self.tmpdir) / f".active-session.{raw_session_id}"
+        scoped = _active_session_path(provider="cursor")
         self.assertEqual(canonical.read_text(), session_id)
         self.assertEqual(scoped.read_text(), session_id)
 
@@ -101,15 +102,14 @@ class TestCursorHooks(unittest.TestCase):
             {"session_id": raw_session_id, "source": "startup"},
             provider="cursor",
         )
+        scoped = _active_session_path(provider="cursor")
         os.environ.pop("AGENT_TRACE_CURSOR_SESSION_ID", None)
 
         with patch("agent_trace.hooks._product_telemetry.capture"):
             handle_session_end({}, provider="cursor")
 
         self.assertFalse((Path(self.tmpdir) / ".active-session").exists())
-        self.assertFalse(
-            (Path(self.tmpdir) / f".active-session.{raw_session_id}").exists()
-        )
+        self.assertFalse(scoped.exists())
 
     def test_cursor_prompt_response_and_file_edit(self):
         handle_session_start({"session_id": "cursorprompt12345", "source": "startup"}, provider="cursor")
@@ -194,9 +194,7 @@ class TestCursorHooks(unittest.TestCase):
             hook_main(["--provider", "cursor", "sessionEnd"])
 
         self.assertFalse((Path(self.tmpdir) / ".active-session").exists())
-        self.assertFalse(
-            (Path(self.tmpdir) / f".active-session.{conversation_id}").exists()
-        )
+        self.assertFalse(_active_session_path(provider="cursor").exists())
 
 
 class TestCursorSetup(unittest.TestCase):

@@ -66,10 +66,15 @@ docker run -p 4317:4317 -v $(pwd)/traces:/data agent-strace-server
 | `POST` | `/events` | Receive a batch of NDJSON events |
 | `POST` | `/sessions` | Create or update session metadata |
 | `GET` | `/sessions` | List all sessions |
+| `GET` | `/sessions/<id>` | Read metadata for a session |
 | `GET` | `/sessions/<id>/events` | Stream events for a session |
 | `GET` | `/health` | Liveness check |
 
 Events are accepted as NDJSON (`application/x-ndjson`), one event per line.
+GET session IDs are URL-decoded as one containment-safe path component, so
+legacy IDs containing spaces, Unicode, or more than 128 characters remain
+readable. POST routes retain the strict 1–128 character ASCII policy for new
+session IDs.
 
 ---
 
@@ -96,6 +101,13 @@ AGENT_STRACE_AUTH_KEY=ast_a3f9b2c1d4e5f6a7b8c9d0e1f2a3b4c5 agent-strace server
 ```
 
 Requests without a matching `Authorization: Bearer <key>` header receive `401 Unauthorized`.
+
+The key authorizes the entire collector instance; it is not scoped to a
+`tenant_id`. Treat one collector and storage root as one organization boundary,
+and run separate authenticated instances for organizations that must not access
+one another. Tenant filters are customer-level scoping inside that boundary,
+not an authorization mechanism. Managed multi-organization hosting is tracked
+separately in [issue #129](https://github.com/Siddhant-K-code/agent-trace/issues/129).
 
 **Client side** — set `AGENT_STRACE_AUTH_KEY` alongside `AGENT_STRACE_ENDPOINT` and all outbound requests include the header automatically:
 

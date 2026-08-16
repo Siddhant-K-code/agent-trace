@@ -312,6 +312,11 @@ def session_to_otlp(
     if parent_span_id:
         root_span["parentSpanId"] = parent_span_id
 
+    if meta.tenant_id:
+        tenant_attributes = _make_attributes({"tenant_id": meta.tenant_id})
+        for span in [root_span] + child_spans:
+            span.setdefault("attributes", []).extend(tenant_attributes)
+
     all_spans = [root_span] + child_spans
 
     return {
@@ -321,6 +326,7 @@ def session_to_otlp(
                     "service.name": service_name,
                     "service.version": "agent-trace",
                     "agent.session_id": meta.session_id,
+                    **({"tenant_id": meta.tenant_id} if meta.tenant_id else {}),
                 }),
             },
             "scopeSpans": [{
@@ -382,6 +388,7 @@ def tree_to_otlp(
                     "service.name": service_name,
                     "service.version": "agent-trace",
                     "agent.session_id": root_session_id,
+                    **({"tenant_id": root_meta.tenant_id} if root_meta.tenant_id else {}),
                 }),
             },
             "scopeSpans": [{
@@ -661,6 +668,11 @@ def session_to_otlp_genai(
     if parent_span_id:
         root_span["parentSpanId"] = parent_span_id
 
+    if meta.tenant_id:
+        tenant_attributes = _make_attributes({"tenant_id": meta.tenant_id})
+        for span in [root_span] + child_spans:
+            span.setdefault("attributes", []).extend(tenant_attributes)
+
     return {
         "resourceSpans": [{
             "resource": {
@@ -668,6 +680,7 @@ def session_to_otlp_genai(
                     "service.name": service_name,
                     "service.version": "agent-trace",
                     "agent.session_id": meta.session_id,
+                    **({"tenant_id": meta.tenant_id} if meta.tenant_id else {}),
                 }),
             },
             "scopeSpans": [{

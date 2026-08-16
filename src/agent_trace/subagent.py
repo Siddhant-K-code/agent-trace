@@ -58,10 +58,20 @@ def build_tree(store: TraceStore, root_session_id: str) -> SessionNode:
     parent_session_id matches a session already in the tree.
     Depth is bounded by MAX_DEPTH.
     """
+    try:
+        root_meta = store.load_meta(root_session_id)
+    except FileNotFoundError as exc:
+        raise KeyError(f"Session not found in store: {root_session_id}") from exc
+    tenant_id = root_meta.tenant_id
     all_meta = store.list_sessions()
 
     # Index by session_id for fast lookup
     meta_by_id: dict[str, SessionMeta] = {m.session_id: m for m in all_meta}
+
+    if root_meta.parent_session_id and root_meta.parent_session_id in meta_by_id:
+        parent = meta_by_id[root_meta.parent_session_id]
+        if parent.tenant_id != tenant_id:
+            raise ValueError("cross-tenant parent link rejected")
 
     # Index children by parent_session_id
     children_of: dict[str, list[SessionMeta]] = {}
@@ -81,6 +91,10 @@ def build_tree(store: TraceStore, root_session_id: str) -> SessionNode:
                 children_of.get(session_id, []),
                 key=lambda m: m.started_at,
             ):
+                if child_meta.tenant_id != tenant_id:
+                    raise ValueError(
+                        f"cross-tenant child link rejected for session {child_meta.session_id}"
+                    )
                 node.children.append(_build(child_meta.session_id, current_depth + 1))
         elif children_of.get(session_id):
             sys.stderr.write(

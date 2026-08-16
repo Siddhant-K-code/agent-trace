@@ -80,9 +80,10 @@ Show the parent/child session hierarchy for a root session, including per-node c
 
 ### `list`
 ```
-agent-strace list
+agent-strace list [--tenant ID]
 ```
 List all captured sessions with ID, timestamp, duration, tool calls, and errors.
+`--tenant ID` performs an exact tenant match before listing metadata.
 
 ### `inspect`
 ```
@@ -127,6 +128,7 @@ Trace the causal chain backwards from event `#N`. Run `replay` first to see even
 ```
 agent-strace cost [session-id] [--model MODEL] [--input-price N] [--output-price N]
 agent-strace cost --breakdown provider [--since DATE_OR_DURATION] [--csv] [--live-pricing]
+agent-strace cost --tenant ID [--since DATE_OR_DURATION]
 ```
 Token and dollar cost by phase. Flags wasted spend on failed phases.
 
@@ -145,6 +147,7 @@ the stable columns `provider`, `model`, `session_id`, `input_tokens`,
 | `--since DATE_OR_DURATION` | `30d` | ISO date or duration such as `7d`, `24h`, or `2w` |
 | `--csv` | off | Emit raw per-session/model rows instead of the dashboard |
 | `--live-pricing` | off | Request authoritative live rates; error when compatible provider APIs are unavailable rather than scrape or guess |
+| `--tenant ID` | — | Scope an explicit session or aggregate the selected time window to one tenant |
 
 Pricing estimates exclude caching, batch discounts, regional or service-tier
 differences, long-context premiums, and non-token charges. To update the bundled
@@ -204,6 +207,7 @@ agent-strace watch [session-id] [--timeout DURATION] [--budget $N] [--on-violati
                    [--stream-batch-size N] [--stream-flush-interval S]
                    [--loop-threshold N] [--loop-window N] [--max-context-pct N]
                    [--compaction-checkpoint] [--checkpoint-at RATIO] [--dry-run]
+                   [--tenant-id ID]
 ```
 Live session monitor with kill-switch rules.
 
@@ -221,6 +225,7 @@ Live session monitor with kill-switch rules.
 | `--rules FILE_OR_BUILTINS` | JSON/YAML rules file, or comma-separated built-ins such as `mcp-poisoning,loop:3/10,budget:$5,timeout:30m,cognitive-debt:0.8` |
 | `--stream-to URL` | Stream events to HTTP endpoint in real-time |
 | `--dry-run` | Evaluate rules without acting |
+| `--tenant-id ID` | Tag the session and all events; defaults to `AGENT_STRACE_TENANT_ID` |
 
 **Project budget config** (`.agent-strace.yaml`):
 ```yaml
@@ -772,6 +777,17 @@ retention:
   max_size_mb: 500
   on_delete: log
 ```
+
+### `tenant`
+```
+agent-strace tenant report [--month YYYY-MM] [--model MODEL] [--format text|json]
+agent-strace tenant export ID [--format json] [--output FILE]
+agent-strace tenant delete ID --confirm
+```
+Report monthly cost allocation, produce a tenant-scoped subject access export,
+or irreversibly erase all local trace data for one tenant. Deletion requires
+`--confirm` and appends a minimal audit record. See the
+[multi-tenant deployment guide](tenancy.md) for isolation and GDPR notes.
 
 ---
 

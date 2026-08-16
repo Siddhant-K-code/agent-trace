@@ -144,6 +144,16 @@ class CostResult:
 
 
 @dataclass(frozen=True)
+class TenantCostResult:
+    tenant_id: str
+    since: str
+    sessions: int
+    total_cost: float
+    input_tokens: int
+    output_tokens: int
+
+
+@dataclass(frozen=True)
 class ModelPrice:
     """One model's bundled, offline token rates."""
 
@@ -512,6 +522,7 @@ def build_provider_cost_report(
     now: float | None = None,
     live_pricing: bool = False,
     pricing_table: Mapping[str, Mapping[str, float]] = PRICING,
+    tenant_id: str | None = None,
 ) -> ProviderCostReport:
     """Aggregate stored session usage by inferred provider and model.
 
@@ -531,7 +542,7 @@ def build_provider_cost_report(
     cutoff = parse_since(since_value, now=generated_at)
     records: list[ProviderCostRecord] = []
 
-    for meta in store.list_sessions():
+    for meta in store.list_sessions(tenant_id=tenant_id):
         if meta.started_at < cutoff or meta.started_at > generated_at:
             continue
         try:
@@ -617,6 +628,47 @@ def estimate_cost(
     )
 
 
+def build_tenant_cost_report(
+    store: TraceStore,
+    tenant_id: str,
+    since: str = "30d",
+    model: str = DEFAULT_MODEL,
+    input_price: float | None = None,
+    output_price: float | None = None,
+    now: float | None = None,
+) -> TenantCostResult:
+    """Aggregate legacy per-session estimates for one exact tenant tag."""
+    generated_at = _time.time() if now is None else float(now)
+    cutoff = parse_since(since, now=generated_at)
+    sessions = total_input = total_output = 0
+    total_cost = 0.0
+    for meta in store.list_sessions(tenant_id=tenant_id):
+        if meta.started_at < cutoff or meta.started_at > generated_at:
+            continue
+        try:
+            result = estimate_cost(
+                store,
+                meta.session_id,
+                model=model,
+                input_price=input_price,
+                output_price=output_price,
+            )
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+        sessions += 1
+        total_input += result.input_tokens
+        total_output += result.output_tokens
+        total_cost += result.total_cost
+    return TenantCostResult(
+        tenant_id=tenant_id,
+        since=since,
+        sessions=sessions,
+        total_cost=total_cost,
+        input_tokens=total_input,
+        output_tokens=total_output,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Formatting
 # ---------------------------------------------------------------------------
@@ -642,6 +694,16 @@ def format_cost(result: CostResult, out: TextIO = sys.stdout) -> None:
     if result.wasted_cost > 0:
         wasted_pct = result.wasted_cost / (result.total_cost or 1e-9) * 100
         w(f"Wasted on failed phases: ${result.wasted_cost:.4f} ({wasted_pct:.0f}%)\n\n")
+
+
+def format_tenant_cost(result: TenantCostResult, out: TextIO = sys.stdout) -> None:
+    out.write(
+        f"Tenant: {result.tenant_id}\n"
+        f"Window: {_since_description(result.since)}\n"
+        f"Sessions: {result.sessions}\n"
+        f"Estimated cost: ${result.total_cost:.4f}\n"
+        f"Tokens: {result.input_tokens:,} input, {result.output_tokens:,} output\n"
+    )
 
 
 def _since_description(value: str) -> str:
@@ -716,6 +778,14 @@ def format_provider_cost_csv(
 
 def cmd_cost(args: argparse.Namespace) -> int:
     store = TraceStore(args.trace_dir)
+    tenant_id = getattr(args, "tenant", None)
+    if tenant_id is not None:
+        from .store import validate_tenant_id
+        try:
+            tenant_id = validate_tenant_id(tenant_id)
+        except ValueError as exc:
+            sys.stderr.write(f"Error: {exc}\n")
+            return 1
 
     breakdown = getattr(args, "breakdown", None)
     if breakdown:
@@ -727,6 +797,7 @@ def cmd_cost(args: argparse.Namespace) -> int:
                 store,
                 since=getattr(args, "since", None) or "30d",
                 live_pricing=bool(getattr(args, "live_pricing", False)),
+                tenant_id=tenant_id,
             )
         except (ValueError, LivePricingUnavailable) as exc:
             sys.stderr.write(f"Error: {exc}\n")
@@ -738,19 +809,43 @@ def cmd_cost(args: argparse.Namespace) -> int:
         return 0
 
     session_id = getattr(args, "session_id", None)
+    model = getattr(args, "model", DEFAULT_MODEL) or DEFAULT_MODEL
+    input_price = getattr(args, "input_price", None)
+    output_price = getattr(args, "output_price", None)
+
+    if tenant_id is not None and not session_id:
+        if (input_price is None) != (output_price is None):
+            sys.stderr.write(
+                "Error: --input-price and --output-price must be provided together.\n"
+            )
+            return 1
+        try:
+            report = build_tenant_cost_report(
+                store,
+                tenant_id,
+                since=getattr(args, "since", None) or "30d",
+                model=model,
+                input_price=input_price,
+                output_price=output_price,
+            )
+        except ValueError as exc:
+            sys.stderr.write(f"Error: {exc}\n")
+            return 1
+        format_tenant_cost(report)
+        return 0
+
     if not session_id:
         session_id = store.get_latest_session_id()
     if not session_id:
         sys.stderr.write("No sessions found.\n")
         return 1
-    full_id = store.find_session(session_id)
+    full_id = store.find_session(session_id, tenant_id=tenant_id)
     if not full_id:
-        sys.stderr.write(f"Session not found: {session_id}\n")
+        if tenant_id:
+            sys.stderr.write(f"Session not found for tenant {tenant_id}: {session_id}\n")
+        else:
+            sys.stderr.write(f"Session not found: {session_id}\n")
         return 1
-
-    model = getattr(args, "model", DEFAULT_MODEL) or DEFAULT_MODEL
-    input_price = getattr(args, "input_price", None)
-    output_price = getattr(args, "output_price", None)
 
     if (input_price is None) != (output_price is None):
         sys.stderr.write(

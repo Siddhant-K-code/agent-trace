@@ -72,7 +72,7 @@ def _parse_time_bound(value: str | None, default: float | None = None) -> float 
 
 
 def _load_event_lines(store: TraceStore, session_id: str) -> list[str]:
-    path = store._session_dir(session_id) / "events.ndjson"
+    path = store._session_file(session_id, "events.ndjson", "event stream")
     if not path.exists():
         return []
     return [line for line in path.read_text().splitlines() if line.strip()]

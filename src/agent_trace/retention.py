@@ -153,7 +153,7 @@ def _store_size_bytes(store: TraceStore) -> int:
 def _retained_session_size_bytes(store: TraceStore, session_id: str) -> int:
     """Return session storage plus its compaction checkpoint sidecar."""
     total = _session_size_bytes(store._session_dir(session_id))
-    checkpoint = store.base_dir / "checkpoints" / f"{session_id}.md"
+    checkpoint = store.checkpoint_path(session_id)
     try:
         total += checkpoint.stat().st_size
     except OSError:
@@ -277,7 +277,7 @@ def delete_sessions(
 
     for sid in session_ids:
         session_dir = store._session_dir(sid)
-        checkpoint_path = store.base_dir / "checkpoints" / f"{sid}.md"
+        checkpoint_path = store.checkpoint_path(sid)
         try:
             checkpoint_path.unlink(missing_ok=True)
             if not session_dir.exists():
