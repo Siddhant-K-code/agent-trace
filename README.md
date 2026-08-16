@@ -148,6 +148,7 @@ Full setup guide: [docs/setup.md](docs/setup.md)
 | [`agent-strace identity show`](docs/commands.md#identity) | Machine identity — sign and verify sessions |
 | [`agent-strace server`](docs/server.md) | Server-side collector for multi-agent, multi-machine |
 | [`agent-strace share <id>`](docs/commands.md#share) | Generate a shareable HTML replay |
+| [`agent-strace pr-comment`](docs/commands.md#pr-comment) | Post or update a session summary on the current PR |
 | [`agent-strace sample`](docs/commands.md#sample) | Export worst sessions as JSONL for eval datasets |
 
 Full flag reference: [docs/commands.md](docs/commands.md)

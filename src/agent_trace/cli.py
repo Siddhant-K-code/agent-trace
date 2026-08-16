@@ -59,6 +59,7 @@ from .policy_backtest import (
     cmd_policy_coverage,
     cmd_policy_diff,
 )
+from .pr_comment import cmd_pr_comment
 from .postmortem import cmd_postmortem
 from .project_budget import enforce_new_session_budget, load_project_budget_config
 from .share import cmd_share
@@ -1157,6 +1158,37 @@ def build_parser() -> argparse.ArgumentParser:
     p_share.add_argument("--open", action="store_true", help="open the HTML file in the browser after creation")
     p_share.add_argument("--postmortem", action="store_true", help="include postmortem analysis in the HTML")
 
+    # pr-comment
+    p_pr_comment = sub.add_parser(
+        "pr-comment", help="post a session summary to the current pull request"
+    )
+    p_pr_comment.add_argument(
+        "session_id", nargs="?", help="session ID or prefix (default: sessions attributed to this branch)"
+    )
+    p_pr_comment.add_argument(
+        "--dry-run", action="store_true", help="print the comment without making a network request"
+    )
+    p_pr_comment.add_argument(
+        "--platform", choices=("github", "gitlab"), default="github",
+        help="review platform (default: github)",
+    )
+    p_pr_comment.add_argument(
+        "--repo", default="", metavar="OWNER/REPO",
+        help="repository or GitLab project (default: inferred from CI or git)",
+    )
+    p_pr_comment.add_argument(
+        "--pr", type=int, metavar="NUMBER",
+        help="pull/merge request number (default: inferred from CI or branch)",
+    )
+    p_pr_comment.add_argument(
+        "--api-url", default="", metavar="URL",
+        help="GitHub Enterprise or self-hosted GitLab API URL",
+    )
+    p_pr_comment.add_argument(
+        "--share-url", default="", metavar="URL",
+        help="optional replay URL; {session_id} is replaced per session",
+    )
+
     # postmortem
     p_postmortem = sub.add_parser("postmortem", help="generate a structured postmortem for a failed session")
     p_postmortem.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
@@ -2144,6 +2176,7 @@ def main() -> None:
         "audit": cmd_audit,
         "verify": cmd_verify,
         "share": cmd_share,
+        "pr-comment": cmd_pr_comment,
         "postmortem": cmd_postmortem,
         "eval": cmd_eval,
         "watch": cmd_watch,

@@ -27,6 +27,12 @@ inputs:
   install-extras:
     description: Comma-separated optional extras to install (e.g. openai,anthropic)
     default: ""
+  post-pr-comment:
+    description: Post or update an agent session summary on the pull request
+    default: "false"
+  github-token:
+    description: GitHub token used only when post-pr-comment is true
+    default: ""
 
 outputs:
   passed:
@@ -92,3 +98,20 @@ runs:
         name: agent-traces
         path: ${{ inputs.trace-dir }}
         if-no-files-found: ignore
+
+    - name: Post agent-trace PR comment
+      if: ${{ always() && inputs.post-pr-comment == 'true' }}
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        PR_COMMENT_TRACE_DIR: ${{ inputs.trace-dir }}
+        PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        PR_BASE_REPOSITORY: ${{ github.repository }}
+      run: |
+        if [ -n "$PR_HEAD_REPOSITORY" ] && [ "$PR_HEAD_REPOSITORY" != "$PR_BASE_REPOSITORY" ]; then
+          echo "::notice::Skipping PR comment for a fork because pull_request tokens are read-only."
+        elif find "$PR_COMMENT_TRACE_DIR" -mindepth 2 -name meta.json -print -quit 2>/dev/null | grep -q .; then
+          agent-strace --trace-dir "$PR_COMMENT_TRACE_DIR" pr-comment
+        else
+          echo "::notice::No agent-trace sessions found; skipping PR comment."
+        fi
