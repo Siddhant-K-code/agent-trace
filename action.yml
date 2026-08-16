@@ -13,8 +13,8 @@ inputs:
     description: Path to baseline scores file (optional)
     default: ""
   save-baseline:
-    description: Save scores as new baseline after run
-    default: "false"
+    description: Path to save current scores as a new baseline (optional)
+    default: ""
   tolerance:
     description: Regression tolerance (0.0–1.0, default 0.05)
     default: "0.05"
@@ -58,30 +58,31 @@ runs:
       id: eval
       shell: bash
       env:
-        GITHUB_STEP_SUMMARY: ${{ env.GITHUB_STEP_SUMMARY }}
+        EVAL_CONFIG: ${{ inputs.config }}
+        EVAL_BASELINE: ${{ inputs.baseline }}
+        EVAL_SAVE_BASELINE: ${{ inputs.save-baseline }}
+        EVAL_TOLERANCE: ${{ inputs.tolerance }}
+        EVAL_TRACE_DIR: ${{ inputs.trace-dir }}
       run: |
-        ARGS="--config ${{ inputs.config }} --trace-dir ${{ inputs.trace-dir }}"
-        ARGS="$ARGS --tolerance ${{ inputs.tolerance }}"
-        ARGS="$ARGS --github-summary"
+        ARGS=(--config "$EVAL_CONFIG" --tolerance "$EVAL_TOLERANCE")
 
-        if [ -n "${{ inputs.baseline }}" ]; then
-          ARGS="$ARGS --baseline ${{ inputs.baseline }}"
+        if [ -n "$EVAL_BASELINE" ]; then
+          ARGS+=(--baseline "$EVAL_BASELINE")
         fi
 
-        if [ "${{ inputs.save-baseline }}" = "true" ]; then
-          ARGS="$ARGS --save-baseline"
+        if [ -n "$EVAL_SAVE_BASELINE" ]; then
+          ARGS+=(--save-baseline "$EVAL_SAVE_BASELINE")
         fi
 
-        if agent-strace eval ci $ARGS; then
+        if agent-strace --trace-dir "$EVAL_TRACE_DIR" eval "${ARGS[@]}"; then
           echo "passed=true" >> "$GITHUB_OUTPUT"
         else
           echo "passed=false" >> "$GITHUB_OUTPUT"
           exit 1
         fi
 
-        SUMMARY=".agent-traces/eval-summary.md"
-        if [ -f "$SUMMARY" ]; then
-          echo "summary-path=$SUMMARY" >> "$GITHUB_OUTPUT"
+        if [ -n "$GITHUB_STEP_SUMMARY" ] && [ -f "$GITHUB_STEP_SUMMARY" ]; then
+          echo "summary-path=$GITHUB_STEP_SUMMARY" >> "$GITHUB_OUTPUT"
         fi
 
     - name: Upload trace artifacts

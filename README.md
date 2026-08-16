@@ -132,8 +132,8 @@ Full setup guide: [docs/setup.md](docs/setup.md)
 | [`agent-strace tree`](docs/commands.md#tree) | Show parent/child session hierarchy |
 | [`agent-strace freeze`](docs/commands.md#freeze) | Freeze a tool-call sequence for regression checks |
 | [`agent-strace standup`](docs/commands.md#standup) | Plain-English summary of yesterday's sessions |
-| [`agent-strace eval <id>`](docs/commands.md#eval) | Score a session against behavioural baselines |
-| [`agent-strace eval ci`](docs/commands.md#eval) | Fail CI on behavioural regression |
+| [`agent-strace eval <id>`](docs/commands.md#eval) | Gate a session on named quality criteria and baselines |
+| [`agent-strace eval ci`](docs/commands.md#eval) | Run the legacy normalized-score CI workflow |
 
 ### Export and integrate
 

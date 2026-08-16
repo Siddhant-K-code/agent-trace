@@ -7,9 +7,14 @@ built-in scorers.
 
 from __future__ import annotations
 
+import importlib
+import inspect
+import json
+import math
+import os
 import re
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 from ..cost import estimate_cost
 from ..models import EventType, TraceEvent
@@ -27,6 +32,319 @@ class ScoreResult:
     @property
     def status(self) -> str:
         return "pass" if self.passed else "fail"
+
+
+class MetricError(ValueError):
+    """Raised when a raw eval metric cannot be computed reliably."""
+
+
+MetricValue = int | float | str | bool
+
+
+_READ_TOOLS = {
+    "read",
+    "read_file",
+    "file_read",
+    "view",
+    "open_file",
+}
+
+
+def _as_number(value: object) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def measure_cost_usd(store: TraceStore, session_id: str) -> float:
+    """Return estimated total session cost in US dollars."""
+
+    return estimate_cost(store, session_id).total_cost
+
+
+def measure_error_count(events: list[TraceEvent]) -> int:
+    """Return the number of explicit error events."""
+
+    return sum(1 for event in events if event.event_type == EventType.ERROR)
+
+
+def measure_session_status(events: list[TraceEvent], meta: object | None = None) -> str:
+    """Classify a session as completed, killed, or timeout."""
+
+    end_event = next(
+        (event for event in reversed(events) if event.event_type == EventType.SESSION_END),
+        None,
+    )
+    if end_event is None:
+        return "completed" if getattr(meta, "ended_at", None) else "killed"
+
+    data = end_event.data
+    explicit = data.get("status") or data.get("session_status")
+    if explicit:
+        normalized = str(explicit).strip().lower().replace("-", "_")
+        if normalized in {"completed", "complete", "success", "succeeded"}:
+            return "completed"
+        if normalized in {"timeout", "timed_out"}:
+            return "timeout"
+        if normalized in {
+            "killed", "cancelled", "canceled", "interrupted", "terminated",
+            "failed", "failure", "aborted", "error",
+        }:
+            return "killed"
+
+    reason = " ".join(
+        str(data.get(key, ""))
+        for key in ("reason", "stop_reason", "termination_reason")
+    ).lower()
+    if "timeout" in reason or "timed out" in reason:
+        return "timeout"
+    if any(word in reason for word in ("kill", "cancel", "interrupt", "terminate")):
+        return "killed"
+
+    exit_code = _as_number(data.get("exit_code"))
+    if exit_code == 124:
+        return "timeout"
+    if exit_code is not None and exit_code != 0:
+        return "killed"
+    return "completed"
+
+
+def _read_path(event: TraceEvent) -> str:
+    if event.event_type == EventType.FILE_READ:
+        return str(
+            event.data.get("path")
+            or event.data.get("file_path")
+            or event.data.get("uri")
+            or ""
+        )
+    if event.event_type != EventType.TOOL_CALL:
+        return ""
+    tool_name = str(event.data.get("tool_name", "")).strip().lower().replace("-", "_")
+    if tool_name not in _READ_TOOLS and not tool_name.endswith(("read_file", "file_read")):
+        return ""
+    arguments = event.data.get("arguments", {}) or {}
+    if not isinstance(arguments, dict):
+        return ""
+    return str(arguments.get("file_path") or arguments.get("path") or arguments.get("uri") or "")
+
+
+def measure_redundant_read_ratio(events: list[TraceEvent]) -> float:
+    """Return repeated reads after the first read divided by all file reads."""
+
+    seen: set[str] = set()
+    reads = 0
+    redundant = 0
+    for event in events:
+        path = _read_path(event)
+        if not path:
+            continue
+        normalized = os.path.normcase(os.path.normpath(path))
+        reads += 1
+        if normalized in seen:
+            redundant += 1
+        else:
+            seen.add(normalized)
+    return redundant / reads if reads else 0.0
+
+
+def measure_tool_call_count(events: list[TraceEvent]) -> int:
+    """Return the number of tool-call events."""
+
+    return sum(1 for event in events if event.event_type == EventType.TOOL_CALL)
+
+
+def _context_payloads(data: dict[str, Any]) -> list[dict[str, Any]]:
+    payloads = [data]
+    usage = data.get("usage")
+    if isinstance(usage, dict):
+        payloads.insert(0, usage)
+    return payloads
+
+
+def measure_context_fill_ratio(
+    events: list[TraceEvent],
+    context_window: float = 200_000,
+) -> float:
+    """Return the maximum observed prompt/context window utilization."""
+
+    configured_window = _as_number(context_window)
+    if configured_window is None or configured_window <= 0:
+        raise MetricError("context_window must be greater than zero")
+
+    maximum = 0.0
+    for event in events:
+        if event.event_type not in {EventType.LLM_REQUEST, EventType.LLM_RESPONSE}:
+            continue
+        data = event.data
+        payloads = _context_payloads(data)
+
+        for payload in payloads:
+            for key in ("context_fill_ratio", "context_usage_ratio"):
+                explicit_ratio = _as_number(payload.get(key))
+                if explicit_ratio is not None:
+                    maximum = max(maximum, explicit_ratio)
+
+        input_tokens: float | None = None
+        for payload in payloads:
+            primary = next(
+                (
+                    number
+                    for key in ("input_tokens", "prompt_tokens")
+                    if (number := _as_number(payload.get(key))) is not None
+                ),
+                None,
+            )
+            if primary is not None:
+                cache_tokens = sum(
+                    _as_number(payload.get(key)) or 0.0
+                    for key in ("cache_read_input_tokens", "cache_creation_input_tokens")
+                )
+                input_tokens = primary + cache_tokens
+                break
+
+        if input_tokens is None and event.event_type == EventType.LLM_REQUEST:
+            context_content = {
+                key: data[key]
+                for key in ("messages", "prompt", "content")
+                if key in data
+            }
+            if context_content:
+                input_tokens = max(1, len(json.dumps(context_content, default=str)) // 4)
+
+        event_window = next(
+            (
+                number
+                for payload in payloads
+                for key in ("context_window", "context_window_tokens", "max_context_tokens")
+                if (number := _as_number(payload.get(key))) is not None and number > 0
+            ),
+            configured_window,
+        )
+        if input_tokens is not None:
+            maximum = max(maximum, input_tokens / event_window)
+    return maximum
+
+
+def measure_duration_seconds(events: list[TraceEvent], meta: object | None = None) -> float:
+    """Return wall-clock session duration in seconds."""
+
+    duration_ms = _as_number(getattr(meta, "total_duration_ms", None))
+    if duration_ms is not None and duration_ms > 0:
+        return duration_ms / 1000.0
+    started_at = _as_number(getattr(meta, "started_at", None))
+    ended_at = _as_number(getattr(meta, "ended_at", None))
+    if started_at is not None and ended_at is not None and ended_at >= started_at:
+        return ended_at - started_at
+    if len(events) < 2:
+        return 0.0
+    timestamps = [event.timestamp for event in events]
+    return max(0.0, max(timestamps) - min(timestamps))
+
+
+def measure_lint_violations(store: TraceStore, session_id: str) -> int:
+    """Return the total number of findings from all enabled lint rules."""
+
+    from ..lint import lint_session
+
+    return len(lint_session(store, session_id).findings)
+
+
+BUILTIN_METRICS = {
+    "cost_usd",
+    "error_count",
+    "session_status",
+    "redundant_read_ratio",
+    "tool_call_count",
+    "context_fill_ratio",
+    "max_context_fill_ratio",
+    "duration_seconds",
+    "lint_violations",
+}
+
+
+def _run_custom_metric(
+    reference: str,
+    events: list[TraceEvent],
+    store: TraceStore,
+    session_id: str,
+    params: dict[str, Any],
+) -> MetricValue:
+    module_name, separator, attribute = reference.partition(":")
+    if not separator:
+        module_name, dot, attribute = reference.rpartition(".")
+        if not dot:
+            raise MetricError(f"unknown scorer: {reference}")
+    if not module_name or not attribute:
+        raise MetricError(f"invalid custom scorer reference: {reference}")
+
+    try:
+        function = getattr(importlib.import_module(module_name), attribute)
+    except (ImportError, AttributeError) as exc:
+        raise MetricError(f"could not load custom scorer {reference!r}: {exc}") from exc
+    if not callable(function):
+        raise MetricError(f"custom scorer {reference!r} is not callable")
+
+    try:
+        signature = inspect.signature(function)
+        parameters = signature.parameters
+        has_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values())
+        if "events" not in parameters and not has_kwargs:
+            return function(events)
+        available = {"events": events, "store": store, "session_id": session_id, **params}
+        kwargs = {
+            key: value
+            for key, value in available.items()
+            if has_kwargs or key in parameters
+        }
+        return function(**kwargs)
+    except MetricError:
+        raise
+    except Exception as exc:
+        raise MetricError(f"custom scorer {reference!r} failed: {exc}") from exc
+
+
+def measure_metric(
+    name: str,
+    events: list[TraceEvent],
+    store: TraceStore,
+    session_id: str,
+    params: dict[str, Any] | None = None,
+) -> MetricValue:
+    """Measure a raw built-in or importable custom scorer value."""
+
+    params = params or {}
+    meta = store.load_meta(session_id)
+    if name == "cost_usd":
+        value: MetricValue = measure_cost_usd(store, session_id)
+    elif name == "error_count":
+        value = measure_error_count(events)
+    elif name == "session_status":
+        value = measure_session_status(events, meta)
+    elif name == "redundant_read_ratio":
+        value = measure_redundant_read_ratio(events)
+    elif name == "tool_call_count":
+        value = measure_tool_call_count(events)
+    elif name in {"context_fill_ratio", "max_context_fill_ratio"}:
+        value = measure_context_fill_ratio(
+            events,
+            context_window=params.get("context_window", params.get("context_window_tokens", 200_000)),
+        )
+    elif name == "duration_seconds":
+        value = measure_duration_seconds(events, meta)
+    elif name == "lint_violations":
+        value = measure_lint_violations(store, session_id)
+    else:
+        value = _run_custom_metric(name, events, store, session_id, params)
+
+    if isinstance(value, float) and not math.isfinite(value):
+        raise MetricError(f"scorer {name!r} returned a non-finite number")
+    if not isinstance(value, (int, float, str, bool)):
+        raise MetricError(f"scorer {name!r} returned unsupported value {type(value).__name__}")
+    return value
 
 
 # ---------------------------------------------------------------------------

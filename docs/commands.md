@@ -422,21 +422,47 @@ Flag bad behavior patterns: tool loops, reasoning spirals, budget proximity, con
 
 ### `eval`
 ```
-agent-strace eval [session-id] [--format text|json]
+agent-strace eval [session-id] [--config FILE] [--baseline FILE]
+                  [--save-baseline FILE] [--tolerance N] [--format table|json]
+agent-strace eval run [session-id]
 agent-strace eval compare <session-a> <session-b>
 agent-strace eval ci
 ```
-Score a session against configurable criteria. `eval ci` exits non-zero if any scorer fails.
+Gate the latest or selected session against named, raw-value criteria. The direct
+command exits `1` when a criterion fails or a score regresses beyond the allowed
+tolerance, making it suitable for CI. The `run`, `compare`, and `ci` subcommands
+remain available for legacy normalized scorers.
 
-Configure scorers in `.agent-evals.yaml`:
+Configure named criteria in `.agent-evals.yaml`:
 ```yaml
-scorers:
-  - type: no_errors
-  - type: cost_under
-    max_dollars: 0.10
-  - type: files_scoped
-    allowed_paths: ["src/", "tests/"]
+evals:
+  - name: cost-ceiling
+    scorer: cost_usd
+    threshold: 0.50
+    fail_on: above
+  - name: no-errors
+    scorer: error_count
+    threshold: 0
+    fail_on: above
+  - name: task-completed
+    scorer: session_status
+    expected: completed
+    fail_on: not_equal
 ```
+
+Built-in scorers are `cost_usd`, `error_count`, `session_status`,
+`redundant_read_ratio`, `tool_call_count`, `context_fill_ratio`,
+`duration_seconds`, and `lint_violations`. A custom Python callable can be
+referenced as `package.module:function` and receives session events plus any
+criterion-specific parameters it declares.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--config FILE` | `.agent-evals.yaml` | Named criteria configuration |
+| `--baseline FILE` | — | Compare current raw scores with a saved baseline |
+| `--save-baseline FILE` | — | Save current scores as versioned JSON |
+| `--tolerance N` | `0` | Allowed fractional regression from the baseline |
+| `--format table\|json` | `table` | Human-readable or machine-readable output |
 
 ### `budget-report`
 ```
@@ -666,14 +692,13 @@ The `agent-trace eval` composite action runs evals in CI, posts a scored table t
     config: .agent-evals.yaml
     baseline: .agent-evals-baseline.json
     tolerance: "0.05"
-    save-baseline: "false"
 ```
 
 | Input | Default | Description |
 |---|---|---|
 | `config` | `.agent-evals.yaml` | Eval config file |
 | `baseline` | none | Baseline scores file for regression gating |
-| `save-baseline` | `false` | Overwrite baseline with current scores |
+| `save-baseline` | none | Path to write current scores as a new baseline |
 | `tolerance` | `0.05` | Max allowed score regression (0.0 to 1.0) |
 | `trace-dir` | `.agent-traces` | Session storage directory |
 | `python-version` | `3.12` | Python version |

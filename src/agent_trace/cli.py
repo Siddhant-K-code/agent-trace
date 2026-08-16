@@ -1139,6 +1139,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_eval = sub.add_parser("eval", help="score, compare, and regression-test agent sessions")
     eval_sub = p_eval.add_subparsers(dest="eval_command")
 
+    p_eval_gate = eval_sub.add_parser("gate", help="evaluate named criteria (default)")
+    p_eval_gate.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
+    p_eval_gate.add_argument("--config", default=".agent-evals.yaml",
+                             help="named eval config file (default: .agent-evals.yaml)")
+    p_eval_gate.add_argument("--baseline", metavar="FILE",
+                             help="fail on score regressions from a saved baseline")
+    p_eval_gate.add_argument("--save-baseline", dest="save_baseline", metavar="FILE",
+                             help="write current named scores to a baseline JSON file")
+    p_eval_gate.add_argument("--tolerance", type=float, default=0.0, metavar="N",
+                             help="allowed fractional regression from baseline (default: 0)")
+    p_eval_gate.add_argument("--format", choices=["table", "text", "json"], default="table",
+                             help="output format (default: table)")
+
     p_eval_run = eval_sub.add_parser("run", help="score a session against configured scorers")
     p_eval_run.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
     p_eval_run.add_argument("--format", choices=["table", "json"], default="table")
@@ -1936,9 +1949,45 @@ def _run_with_product_telemetry(args: argparse.Namespace, handler):
     return result
 
 
+_EVAL_EXPLICIT_SUBCOMMANDS = {"gate", "run", "compare", "ci", "dataset"}
+
+
+def _normalise_eval_argv(argv: list[str]) -> list[str]:
+    """Insert the default ``eval gate`` action for the direct CLI form.
+
+    Keeping the explicit legacy subcommands preserves compatibility while
+    allowing ``agent-strace eval [SESSION_ID] --baseline ...`` as documented.
+    """
+    normalised = list(argv)
+    command_index = 0
+    while command_index < len(normalised):
+        current = normalised[command_index]
+        if current == "--trace-dir":
+            command_index += 2
+            continue
+        if current.startswith("--trace-dir=") or current in {"--version"}:
+            command_index += 1
+            continue
+        break
+
+    if command_index >= len(normalised) or normalised[command_index] != "eval":
+        return normalised
+
+    next_index = command_index + 1
+    if next_index >= len(normalised):
+        normalised.insert(next_index, "gate")
+        return normalised
+
+    next_arg = normalised[next_index]
+    if next_arg in {"-h", "--help"} or next_arg in _EVAL_EXPLICIT_SUBCOMMANDS:
+        return normalised
+    normalised.insert(next_index, "gate")
+    return normalised
+
+
 def main() -> None:
     parser = build_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(_normalise_eval_argv(sys.argv[1:]))
 
     if not args.command:
         parser.print_help()
