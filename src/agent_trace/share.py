@@ -692,6 +692,10 @@ def render_html(
 # ---------------------------------------------------------------------------
 
 def cmd_share(args: argparse.Namespace) -> int:
+    if getattr(args, "assignment", False):
+        from .assignment import cmd_share_assignment
+        return cmd_share_assignment(args)
+
     store = TraceStore(args.trace_dir)
 
     session_id = args.session_id

@@ -1,0 +1,22 @@
+{
+  "errors": 0,
+  "finding_count": 0,
+  "findings": [],
+  "infos": 0,
+  "limitation": "Findings are deterministic process signals over minimized telemetry, not candidate-quality or task-correctness judgments.",
+  "rule_counts": {
+    "context-saturation": 0,
+    "error-retry-loop": 0,
+    "no-output": 0,
+    "reasoning-spiral": 0,
+    "redundant-read": 0,
+    "tool-loop": 0
+  },
+  "schema": "agent-strace-assignment-lint/v1",
+  "session_ref": "Session-001",
+  "unavailable_rules": [
+    "budget-proximity",
+    "post-compaction-regression"
+  ],
+  "warnings": 0
+}

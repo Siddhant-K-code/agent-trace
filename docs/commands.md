@@ -719,8 +719,38 @@ and event-level line hashes for `agent-strace verify --from-export`.
 ### `share`
 ```
 agent-strace share <session-id> [-o FILE]
+agent-strace share --assignment [session-id] --output submission.zip
 ```
 Generate a self-contained HTML report. No server needed.
+
+`--assignment` instead creates a deterministic, privacy-minimized ZIP with a
+sanitized trace, offline replay, derived stats/cost/lint reports, and a versioned
+manifest. It cannot be combined with `--stdout`, `--open`, or `--postmortem`.
+The output name must have a lowercase `.zip` suffix and is atomically written
+with owner-only permissions. See the [assignment review guide](hiring.md) for
+the privacy boundary and interpretation limits.
+
+### `score`
+```
+agent-strace score SUBMISSION.zip --rubric FILE [--format text|json]
+agent-strace score DIRECTORY --rubric FILE --compare [--format text|json]
+```
+Validate an assignment bundle without extracting it, then apply a strict,
+deterministic process-telemetry rubric. Comparison mode considers only direct
+children with a lowercase `.zip` suffix, anonymizes input filenames, rejects
+duplicate bundles, and gives equal scores the same rank with digest-stable tie
+ordering.
+
+| Flag | Description |
+|---|---|
+| `SUBMISSION.zip` | One canonical assignment bundle |
+| `DIRECTORY` | Directory of direct lowercase `.zip` files; requires `--compare` |
+| `--rubric FILE` | Required strict assignment rubric; symbolic links are rejected |
+| `--compare` | Score and rank a bounded directory batch |
+| `--format text\|json` | Human-readable table/detail or versioned JSON (default: `text`) |
+
+Invalid archives and rubrics exit non-zero. A low rubric score is a report for
+human review, not a pass/fail hiring gate. See [hiring.md](hiring.md).
 
 ### `pr-comment`
 ```

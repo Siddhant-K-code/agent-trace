@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agent-strace assignment replay</title>
+<style>:root{color-scheme:light;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+body{max-width:1100px;margin:0 auto;padding:24px;color:#172033;background:#f7f8fb}
+.header,.event,.phase,p,ul{background:#fff;border:1px solid #d9deea;border-radius:8px;padding:14px}
+.meta-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px}
+.meta-label{font-size:.75rem;color:#59647a;text-transform:uppercase}.meta-value{font-weight:700}
+.event{margin:8px 0}.event summary{cursor:pointer}.ts{display:inline-block;min-width:90px;color:#59647a}
+.badge{margin-right:10px;color:#263b70}.event-summary{color:#333}.event-detail{overflow:auto;white-space:pre-wrap}
+.search-bar{display:flex;gap:8px;margin:16px 0}.search-input{width:100%;padding:9px}
+.footer{margin-top:24px;color:#59647a;font-size:.8rem}</style>
+</head>
+<body>
+<div class="header">
+  <h1>agent-strace minimized assignment replay</h1>
+  <div class="meta-grid">
+    <div class="meta-item"><div class="meta-label">Session</div><div class="meta-value">Session-001</div></div>
+    <div class="meta-item"><div class="meta-label">Events</div><div class="meta-value">3</div></div>
+    <div class="meta-item"><div class="meta-label">Duration</div><div class="meta-value">2.000s</div></div>
+    <div class="meta-item"><div class="meta-label">Recorded status</div><div class="meta-value">completed</div></div>
+    <div class="meta-item"><div class="meta-label">Estimated cost</div><div class="meta-value">$0.000027</div></div>
+    <div class="meta-item"><div class="meta-label">Lint signals</div><div class="meta-value">0</div></div>
+  </div>
+</div>
+<p>All source prompts, results, commands, paths, file contents, environment data, identities, and custom model identifiers were omitted before this viewer was built.</p>
+<div class="search-bar" id="filter-bar">
+  <input id="search-input" class="search-input" type="search" placeholder="Search minimized events" autocomplete="off" spellcheck="false">
+  <div class="filter-chips"></div><span class="search-count" id="search-count"></span>
+</div>
+<h2>Minimized event stream</h2>
+<details class="phase" open><summary class="phase-header">Recorded process telemetry</summary><div class="events-list"><details class="event" data-type="session_start"><summary><span class="ts">+0.000s</span><span class="badge badge-white">session_start</span><span class="event-summary">content omitted</span></summary><pre class="event-detail">{
+  &quot;content_omitted&quot;: true
+}</pre></details>
+<details class="event" data-type="tool_call"><summary><span class="ts">+1.000s</span><span class="badge badge-white">tool_call</span><span class="event-summary">write (Tool-001); arguments omitted</span></summary><pre class="event-detail">{
+  &quot;arguments_omitted&quot;: true,
+  &quot;content_omitted&quot;: true,
+  &quot;tool_category&quot;: &quot;write&quot;,
+  &quot;tool_ref&quot;: &quot;Tool-001&quot;
+}</pre></details>
+<details class="event" data-type="session_end"><summary><span class="ts">+2.000s</span><span class="badge badge-white">session_end</span><span class="event-summary">recorded process status: completed</span></summary><pre class="event-detail">{
+  &quot;content_omitted&quot;: true,
+  &quot;recorded_status&quot;: &quot;completed&quot;
+}</pre></details></div></details>
+<h2>Interpretation limitations</h2><ul><li>The bundle contains minimized process telemetry, not prompts, results, commands, paths, file contents, environment data, or candidate identity.</li><li>Completed is a recorded process-termination status; it does not establish task completion or correctness.</li><li>Cost is an offline estimate from aggregate token estimates and bundled rates; the minimized trace cannot independently reproduce source content lengths.</li><li>SHA-256 member digests detect internal inconsistency but provide no issuer signature, provenance proof, or authenticity guarantee.</li><li>Scores are deterministic rubric arithmetic for human review, not a hiring decision or a measure of candidate, protected-attribute, task, or outcome quality.</li></ul>
+<div class="footer">Generated deterministically from the sanitized trace copy. No external resources.</div>
+<script>(()=>{const q=document.getElementById('search-input');if(!q)return;const rows=[...document.querySelectorAll('.event')];
+const count=document.getElementById('search-count');function filter(){const value=q.value.toLowerCase();let shown=0;
+for(const row of rows){const match=!value||row.textContent.toLowerCase().includes(value);row.hidden=!match;if(match)shown++;}
+count.textContent=`${shown}/${rows.length}`;}q.addEventListener('input',filter);filter();})();</script>
+</body>
+</html>

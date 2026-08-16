@@ -1,0 +1,23 @@
+{
+  "duration_seconds": 2.0,
+  "error_count": 0,
+  "estimated_cost_usd": 2.7e-05,
+  "event_count": 3,
+  "lint_violation_count": 0,
+  "metric_semantics": {
+    "cost_usd": "offline estimated USD cost from aggregate token estimates",
+    "duration_seconds": "span between the minimum and maximum validated event timestamps",
+    "error_count": "count of explicit error events",
+    "lint_violations": "count of deterministic findings over minimized telemetry",
+    "redundant_read_ratio": "repeated anonymous resource reads after the first divided by all anonymous resource reads",
+    "session_status": "recorded process termination only; not task completion or correctness",
+    "tool_call_count": "count of recorded tool-call events"
+  },
+  "model_count": 0,
+  "model_refs": [],
+  "redundant_read_ratio": 0.0,
+  "schema": "agent-strace-assignment-stats/v1",
+  "session_ref": "Session-001",
+  "session_status": "completed",
+  "tool_call_count": 1
+}

@@ -1,0 +1,55 @@
+{
+  "bundle_digest": "sha256:54f280974d4015665bff0ca662dbf6bc9c043610c65e728afe498121f810a907",
+  "bundle_version": 1,
+  "integrity": {
+    "algorithm": "SHA-256",
+    "authenticity": "not_provided",
+    "bundle_digest_scope": "canonical manifest core and member digests; manifest itself excluded",
+    "member_digest_scope": "exact uncompressed payload bytes"
+  },
+  "limitations": [
+    "The bundle contains minimized process telemetry, not prompts, results, commands, paths, file contents, environment data, or candidate identity.",
+    "Completed is a recorded process-termination status; it does not establish task completion or correctness.",
+    "Cost is an offline estimate from aggregate token estimates and bundled rates; the minimized trace cannot independently reproduce source content lengths.",
+    "SHA-256 member digests detect internal inconsistency but provide no issuer signature, provenance proof, or authenticity guarantee.",
+    "Scores are deterministic rubric arithmetic for human review, not a hiring decision or a measure of candidate, protected-attribute, task, or outcome quality."
+  ],
+  "member_sha256": {
+    "cost.json": "sha256:3fb8b87519a749984b5e3e9749a2dcfc596bc99f69ae097db41576410c4c299c",
+    "lint.json": "sha256:b311bdf42a21e0179b7a6220fe6bb1a8e9b1019dcffda06e302bfbf67f9e0d7c",
+    "replay.html": "sha256:321e05253d4db95b7e0ce8a899824bddf4cdc1b4b21c30b8f8a5ab881b5efdce",
+    "stats.json": "sha256:ee0b69854a32cbc82c494d7535572ab316d87d6312df91a8773c5db29f7a76d4",
+    "trace.ndjson": "sha256:204e5510ce7b51712ffa2c3d3d14f20e494c026a3d6422258f792097de45cec4"
+  },
+  "payload_members": [
+    "trace.ndjson",
+    "replay.html",
+    "stats.json",
+    "cost.json",
+    "lint.json"
+  ],
+  "privacy": {
+    "anonymous_event_tool_resource_and_model_refs": true,
+    "prompts_results_commands_paths_file_contents_environment_urls_omitted": true,
+    "raw_identity_omitted": true,
+    "relative_timestamps": true
+  },
+  "producer": {
+    "name": "agent-strace",
+    "version": "0.93.0"
+  },
+  "schema": "agent-strace-assignment-bundle/v1",
+  "submission_ref": "Submission",
+  "summary": {
+    "duration_seconds": 2.0,
+    "error_count": 0,
+    "estimated_cost_usd": 2.7e-05,
+    "event_count": 3,
+    "lint_violation_count": 0,
+    "model_count": 0,
+    "redundant_read_ratio": 0.0,
+    "session_ref": "Session-001",
+    "session_status": "completed",
+    "tool_call_count": 1
+  }
+}
