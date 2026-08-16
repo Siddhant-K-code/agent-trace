@@ -109,6 +109,26 @@ one another. Tenant filters are customer-level scoping inside that boundary,
 not an authorization mechanism. Managed multi-organization hosting is tracked
 separately in [issue #129](https://github.com/Siddhant-K-code/agent-trace/issues/129).
 
+### Organization reports from a collector
+
+`agent-strace org-report --endpoint https://collector.example.com` reads the
+existing `GET /sessions` and `GET /sessions/<id>/events` endpoints. It refuses
+collectors that expose the session list without authentication. Supply the key
+through `AGENT_STRACE_AUTH_KEY` or `--auth-key-file`; there is no literal key
+flag, and `AGENT_STRACE_ENDPOINT` is deliberately ignored for this reporting
+command.
+
+The read client requires HTTPS except for loopback HTTP, rejects redirects and
+credential-bearing URLs, disables ambient HTTP proxies, and applies bounded
+response, session, event, line, nesting, and total-byte limits. `--ca-file`
+adds a private CA. `--allow-insecure-http` is an explicit opt-in for a
+non-loopback test collector and should not be used on untrusted networks.
+
+Collector reports use one metadata request followed by one event request for
+each session selected after the month/team metadata filters. These N+1 reads
+are bounded but are not a transactionally consistent snapshot; the generated
+report records that limitation. See [Organization reporting](org-report.md).
+
 **Client side** — set `AGENT_STRACE_AUTH_KEY` alongside `AGENT_STRACE_ENDPOINT` and all outbound requests include the header automatically:
 
 ```bash

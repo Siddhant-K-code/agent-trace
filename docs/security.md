@@ -97,6 +97,24 @@ rules:
     replacement: "<internal-ip>"
 ```
 
+### Organization-report anonymization
+
+`agent-strace org-report --anonymize` replaces complete persisted identity
+labels (including `user@hostname` composites) and team/workspace labels with
+deterministic aliases such as `Identity-001` and `Team-001`. Aliases are sorted
+and local to that report; they are not unsalted hashes and never use the
+collector authentication key. Aggregate output has no standalone session ID,
+path, branch, hostname, tenant, or raw-event fields. The default,
+non-anonymized report may show team labels and an attributed identity such as
+`user@hostname` when it appears in an anomaly callout; use `--anonymize` before
+sharing a report outside the organization.
+
+For remote collector input, one authenticated collector instance and key is the
+organization boundary. Team, workspace, and tenant metadata are reporting
+labels, not authorization controls. Use separate authenticated collectors for
+organizations that must be isolated. Static HTML escapes all labels and has no
+external assets.
+
 ---
 
 ## Policy files

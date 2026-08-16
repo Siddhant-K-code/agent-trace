@@ -126,6 +126,7 @@ Full setup guide: [docs/setup.md](docs/setup.md)
 | [`agent-strace dashboard`](docs/commands.md#dashboard) | Multi-session overview |
 | [`agent-strace budget-report`](docs/commands.md#budget-report) | Weekly spend digest |
 | [`agent-strace team-report`](docs/commands.md#team-report) | Team spend by author, branch, or PR |
+| [`agent-strace org-report`](docs/org-report.md) | Monthly organization usage and estimated-cost digest |
 | [`agent-strace cost --breakdown provider`](docs/commands.md#cost) | Offline spend by provider and model |
 | [`agent-strace tenant report`](docs/tenancy.md) | Per-customer cost, export, and erasure workflows |
 | [`agent-strace cognitive-debt`](docs/commands.md#cognitive-debt) | Unreviewed agent-written code by session |

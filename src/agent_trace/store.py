@@ -1040,7 +1040,10 @@ class TraceStore:
         )
 
     def list_sessions_strict(
-        self, tenant_id: str | None = None,
+        self,
+        tenant_id: str | None = None,
+        *,
+        validate_events: bool = True,
     ) -> list[SessionMeta]:
         """Strictly discover sessions for report/export/erasure workflows.
 
@@ -1091,7 +1094,8 @@ class TraceStore:
                 raise ValueError(f"invalid core file for session {session_id}")
             try:
                 meta = self.load_meta(session_id)
-                self.load_events(session_id)
+                if validate_events:
+                    self.load_events(session_id)
             except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
                 raise ValueError(
                     f"corrupt session in tenant store: {session_id}"

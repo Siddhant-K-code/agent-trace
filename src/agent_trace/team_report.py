@@ -101,6 +101,38 @@ def _working_dir(meta: SessionMeta) -> str:
     return str(wd)
 
 
+def session_engineer_attribution(meta: SessionMeta) -> tuple[str, str]:
+    """Return ``(identifier, confidence)`` from persisted attribution only."""
+    attr = _meta_attr(meta)
+    explicit = (
+        attr.get("actor_id")
+        or attr.get("engineer_id")
+        or attr.get("user_id")
+        or attr.get("git_author")
+        or attr.get("git_author_email")
+    )
+    if explicit:
+        return str(explicit), "explicit"
+    user = str(attr.get("os_user") or "")
+    host = str(attr.get("hostname") or "")
+    if user and host:
+        return f"{user}@{host}", "host-user"
+    if user:
+        return user, "user-only"
+    return "(unknown)", "unavailable"
+
+
+def session_engineer(meta: SessionMeta) -> str:
+    """Return the stable engineer identifier persisted with a session.
+
+    Organization-wide reports must not inspect the reporting machine's git
+    configuration, especially when the session came from a remote collector.
+    This helper therefore uses stored attribution only.  The legacy team
+    report keeps its local-git fallback below for backward compatibility.
+    """
+    return session_engineer_attribution(meta)[0]
+
+
 def _fallback_author(meta: SessionMeta) -> str:
     attr = _meta_attr(meta)
     cwd = _working_dir(meta)
