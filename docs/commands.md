@@ -588,12 +588,17 @@ Track changes to AGENTS.md and other config files. `check` exits 1 when config h
 
 ### `export`
 ```
-agent-strace export <session-id> [--format json|csv|ndjson|otlp|otlp-genai|eu-ai-act]
+agent-strace export <session-id> [--format json|csv|ndjson|otlp|otlp-genai|temporal|eu-ai-act]
                     [--endpoint URL] [--header KEY:VALUE] [--service-name NAME]
                     [--anonymize] [--scores] [--metrics] [--backend otlp|langfuse]
                     [--all] [--since DURATION_OR_DATE] [--until DATE] [--output FILE]
 ```
 Export a session. See [production.md](production.md) for per-backend OTLP setup.
+
+`--format temporal` emits OTLP/HTTP JSON using the upstream W3C trace ID and
+Temporal activity parent span previously captured by `watch`. It can be written
+to a file or sent directly with `--endpoint`. See
+[Temporal workflows](integrations.md#temporal-workflows).
 
 `--format eu-ai-act` writes a structured JSON package with Article 12 logging
 evidence, Article 13 transparency documentation, hash-chain integrity metadata,

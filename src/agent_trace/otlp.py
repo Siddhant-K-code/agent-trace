@@ -708,6 +708,21 @@ def export_otlp(
         return False
 
     payload = session_to_otlp(meta, events, service_name)
+    return export_otlp_payload(
+        payload,
+        endpoint,
+        headers=headers,
+        event_count=len(events),
+    )
+
+
+def export_otlp_payload(
+    payload: dict,
+    endpoint: str,
+    headers: dict[str, str] | None = None,
+    event_count: int = 0,
+) -> bool:
+    """Send a prepared ExportTraceServiceRequest via OTLP/HTTP JSON."""
     body = json.dumps(payload).encode("utf-8")
 
     # POST to /v1/traces
@@ -725,7 +740,7 @@ def export_otlp(
         with urllib.request.urlopen(req, timeout=30) as resp:
             status = resp.status
             if status in (200, 202):
-                sys.stderr.write(f"Exported {len(events)} events to {url} (HTTP {status})\n")
+                sys.stderr.write(f"Exported {event_count} events to {url} (HTTP {status})\n")
                 return True
             else:
                 sys.stderr.write(f"OTLP export returned HTTP {status}\n")
