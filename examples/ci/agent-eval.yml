@@ -11,6 +11,10 @@
 
 name: Agent eval
 
+permissions:
+  contents: read
+  pull-requests: write
+
 on:
   pull_request:
     paths:
@@ -18,7 +22,7 @@ on:
       - "CLAUDE.md"
       - ".claude/**"
       - ".agent-evals.yaml"
-      - ".agent-traces/datasets/**"
+      - ".agent-traces/**"
 
 jobs:
   eval:
@@ -34,6 +38,8 @@ jobs:
         with:
           baseline: .agent-traces/baselines/main.json
           tolerance: "0.05"
+          post-pr-comment: "true"
+          github-token: ${{ secrets.GITHUB_TOKEN }}
         env:
           # Required only if using the llm_judge scorer.
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}

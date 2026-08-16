@@ -630,6 +630,32 @@ agent-strace share <session-id> [-o FILE]
 ```
 Generate a self-contained HTML report. No server needed.
 
+### `pr-comment`
+```
+agent-strace pr-comment [SESSION_ID] [--dry-run] [--platform github|gitlab]
+                           [--repo OWNER/REPO] [--pr NUMBER]
+                           [--api-url URL] [--share-url URL]
+```
+Post a structured session summary to the current branch's open pull request or
+merge request. The comment includes duration, cost, model, status, tool calls,
+files changed, lint findings, errors, redundant reads, and replay commands.
+An embedded marker makes repeated runs update the existing comment.
+
+| Flag | Description |
+|---|---|
+| `SESSION_ID` | Explicit session ID or prefix; otherwise use sessions attributed to the current branch |
+| `--dry-run` | Render locally without resolving a PR or making a network request |
+| `--platform github\|gitlab` | Review platform (default: `github`) |
+| `--repo OWNER/REPO` | Override the repository/project inferred from CI or the git remote |
+| `--pr NUMBER` | Override the PR/MR number inferred from CI or the current branch |
+| `--api-url URL` | GitHub Enterprise or self-hosted GitLab API base URL |
+| `--share-url URL` | Optional HTML replay URL; `{session_id}` is replaced for each session |
+
+GitHub uses `GITHUB_TOKEN` or `GH_TOKEN`. GitLab requires a writable project or
+personal access token in `GITLAB_TOKEN`, `GITLAB_ACCESS_TOKEN`, or
+`PRIVATE_TOKEN`; GitLab job tokens cannot write merge-request notes. Tokens are
+read only from the environment.
+
 ### `sample`
 ```
 agent-strace sample [--strategy worst|diverse|recent|random] [--n N]
@@ -729,11 +755,18 @@ retention:
 The `agent-trace eval` composite action runs evals in CI, posts a scored table to the GitHub Actions step summary, and exits non-zero on regression.
 
 ```yaml
-- uses: Siddhant-K-code/agent-trace@gha-v1
-  with:
-    config: .agent-evals.yaml
-    baseline: .agent-evals-baseline.json
-    tolerance: "0.05"
+permissions:
+  contents: read
+  pull-requests: write
+
+steps:
+  - uses: Siddhant-K-code/agent-trace@v0.88.0
+    with:
+      config: .agent-evals.yaml
+      baseline: .agent-evals-baseline.json
+      tolerance: "0.05"
+      post-pr-comment: "true"
+      github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
 | Input | Default | Description |
@@ -745,6 +778,8 @@ The `agent-trace eval` composite action runs evals in CI, posts a scored table t
 | `trace-dir` | `.agent-traces` | Session storage directory |
 | `python-version` | `3.12` | Python version |
 | `install-extras` | none | Optional extras, e.g. `openai,anthropic` |
+| `post-pr-comment` | `false` | Post or update the structured session summary on the PR |
+| `github-token` | none | Token for PR comments; pass `${{ secrets.GITHUB_TOKEN }}` |
 
 | Output | Description |
 |---|---|
