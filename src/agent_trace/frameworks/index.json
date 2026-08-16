@@ -1,0 +1,24 @@
+{
+  "schema": "agent-strace-compliance-manifest-index/v1",
+  "index_version": "2026-08-16",
+  "manifests": [
+    {
+      "framework": "eu-ai-act",
+      "file": "eu-ai-act.json",
+      "mapping_version": "1.0.0",
+      "sha256": "566acfb9bd5a357d5a32166714d2e274456ac39491118418bcc83bfec070ec27"
+    },
+    {
+      "framework": "owasp-agentic",
+      "file": "owasp-agentic.json",
+      "mapping_version": "1.0.0",
+      "sha256": "d562c15a90b484c114cc449ae08c57e484bf57e5caff19ef02d3375c7e861eac"
+    },
+    {
+      "framework": "aicpa-tsc",
+      "file": "aicpa-tsc.json",
+      "mapping_version": "1.0.0",
+      "sha256": "0656bd5bd33a68fb2fb2b2fc0d2dd0afeb9db037494d54dc9bdefa5a53bc36a0"
+    }
+  ]
+}

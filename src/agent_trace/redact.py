@@ -142,7 +142,20 @@ def redact_data(data: Any, parent_key: str = "") -> Any:
     if isinstance(data, dict):
         result = {}
         for k, v in data.items():
-            if isinstance(v, str) and _is_sensitive_key(k):
+            # The compliance-report authorization evidence contract includes
+            # a policy content digest. Preserve only that exact namespaced,
+            # schema-validated digest shape; arbitrary 64-character values
+            # remain covered by the ordinary hex-token redactor.
+            is_authorization_policy_digest = (
+                parent_key == "agent_trace_authorization"
+                and data.get("schema") == "agent-strace-authorization/v1"
+                and k == "policy_sha256"
+                and isinstance(v, str)
+                and re.fullmatch(r"sha256:[0-9a-f]{64}", v) is not None
+            )
+            if is_authorization_policy_digest:
+                result[k] = v
+            elif isinstance(v, str) and _is_sensitive_key(k):
                 result[k] = redaction_marker("sensitive")
             else:
                 result[k] = redact_data(v, parent_key=k)
