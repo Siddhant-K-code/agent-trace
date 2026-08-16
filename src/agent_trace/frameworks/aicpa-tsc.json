@@ -1,0 +1,65 @@
+{
+  "schema": "agent-strace-compliance-framework/v1",
+  "mapping_version": "1.0.0",
+  "framework": {
+    "id": "aicpa-tsc",
+    "title": "AICPA Trust Services Criteria evidence crosswalk",
+    "framework_edition": "2017 Trust Services Criteria (With Revised Points of Focus – 2022)",
+    "source_url": "https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022",
+    "source_as_of": "2023-09-30",
+    "source_checked_at": "2026-08-16",
+    "licensing_requirements_url": "https://www.aicpa-cima.com/resources/landing/licensing-for-teams",
+    "content_use_notice": "AICPA Trust Services Criteria identifiers are referenced for an original evidence crosswalk. Criterion text is not reproduced; consult the licensed official source and its terms of use.",
+    "applicability_policy": "not_assessed"
+  },
+  "controls": [
+    {
+      "id": "CC6.1",
+      "title": "Observed logical-access activity",
+      "mapping_note": "Agent-strace-authored crosswalk for recorded tool access and sensitive-resource classifications; this label is not AICPA criterion wording.",
+      "detectors": ["access_activity_evidence", "sensitive_access_signal"]
+    },
+    {
+      "id": "CC6.2",
+      "title": "Observed identity context",
+      "mapping_note": "Agent-strace-authored crosswalk for persisted actor attribution and identity coverage; this label is not AICPA criterion wording.",
+      "detectors": ["identity_evidence", "identity_privilege_signal"]
+    },
+    {
+      "id": "CC6.3",
+      "title": "Identity and access lifecycle telemetry",
+      "mapping_note": "Agent-strace does not currently capture identity or access removal and modification lifecycle evidence. Per-call authorization is deliberately not treated as evidence for this criterion; this label is not AICPA criterion wording.",
+      "detectors": ["identity_lifecycle_evidence"]
+    },
+    {
+      "id": "CC6.6",
+      "title": "Observed network-boundary activity",
+      "mapping_note": "Agent-strace-authored crosswalk for network operations visible in tool telemetry; this label is not AICPA criterion wording.",
+      "detectors": ["network_activity_evidence", "external_network_signal"]
+    },
+    {
+      "id": "CC6.7",
+      "title": "Observed restricted-data movement signals",
+      "mapping_note": "Agent-strace-authored crosswalk for sensitive-resource and external-network combinations; this label is not AICPA criterion wording.",
+      "detectors": ["sensitive_access_signal", "external_network_signal"]
+    },
+    {
+      "id": "CC7.2",
+      "title": "Observed monitoring and trace-integrity evidence",
+      "mapping_note": "Agent-strace-authored crosswalk for event-result coverage and local hash-chain state; local chains are not independently anchored. This label is not AICPA criterion wording.",
+      "detectors": ["monitoring_evidence", "integrity_evidence"]
+    },
+    {
+      "id": "CC7.3",
+      "title": "Observed evaluation of security-event signals",
+      "mapping_note": "Agent-strace-authored crosswalk for recorded denials, errors, and repeated-failure patterns; this label is not AICPA criterion wording.",
+      "detectors": ["risk_event_evidence", "cascading_failure_signal"]
+    },
+    {
+      "id": "CC8.1",
+      "title": "Observed change activity and authorization context",
+      "mapping_note": "Agent-strace-authored crosswalk for file-change or code-execution operations and their authorization basis; this label is not AICPA criterion wording.",
+      "detectors": ["change_activity_evidence", "authorization_coverage_signal"]
+    }
+  ]
+}

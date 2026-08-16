@@ -1,0 +1,82 @@
+{
+  "schema": "agent-strace-compliance-framework/v1",
+  "mapping_version": "1.0.0",
+  "framework": {
+    "id": "owasp-agentic",
+    "title": "OWASP Top 10 for Agentic Applications 2026",
+    "framework_edition": "OWASP Top 10 for Agentic Applications 2026",
+    "source_url": "https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/",
+    "source_as_of": "2025-12-09",
+    "source_published": "2025-12-09",
+    "source_checked_at": "2026-08-16",
+    "license": "CC-BY-SA-4.0",
+    "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+    "license_scope": "This framework manifest is adapted material licensed under CC-BY-SA-4.0; agent-strace code remains MIT licensed.",
+    "attribution": "OWASP Foundation, OWASP Top 10 for Agentic Applications 2026",
+    "content_use_notice": "Framework identifiers and titles are attributed to OWASP; detector descriptions and mappings are original agent-strace content. Review the official source for updates.",
+    "changes_notice": "Adapted into a machine-readable evidence crosswalk; original detector descriptions and conservative assessment semantics were added, and source risk descriptions are not reproduced.",
+    "applicability_policy": "not_assessed"
+  },
+  "controls": [
+    {
+      "id": "ASI01",
+      "title": "Agent Goal Hijack",
+      "mapping_note": "Looks only for explicit injection or goal-manipulation signals recorded by the tracing source; it does not infer intent from prompt text.",
+      "detectors": ["goal_hijack_signal"]
+    },
+    {
+      "id": "ASI02",
+      "title": "Tool Misuse and Exploitation",
+      "mapping_note": "Reports explicit recorded tool-misuse signals. Missing or retrospective authorization is reported only as an evidence gap, never as proof of misuse.",
+      "detectors": ["tool_misuse_signal", "authorization_coverage_signal"]
+    },
+    {
+      "id": "ASI03",
+      "title": "Identity and Privilege Abuse",
+      "mapping_note": "Measures persisted identity and authorization coverage for sensitive operations without consulting the reporting machine identity. Coverage or its absence does not establish identity or privilege abuse.",
+      "detectors": ["identity_privilege_signal", "identity_evidence"]
+    },
+    {
+      "id": "ASI04",
+      "title": "Agentic Supply Chain Vulnerabilities",
+      "mapping_note": "Flags recorded package or component installation activity heuristically; it does not perform CVE, dependency, provenance, or SBOM analysis.",
+      "detectors": ["supply_chain_signal"]
+    },
+    {
+      "id": "ASI05",
+      "title": "Unexpected Code Execution (RCE)",
+      "mapping_note": "Reports explicit unexpected-execution signals. Missing, denied, or retrospective authorization is reported only as an evidence gap, never as proof of unexpected execution.",
+      "detectors": ["unexpected_code_execution_signal"]
+    },
+    {
+      "id": "ASI06",
+      "title": "Memory & Context Poisoning",
+      "mapping_note": "Uses only explicit memory or context poisoning indicators emitted by integrations; absence of those indicators is not an assessment.",
+      "detectors": ["memory_context_signal"]
+    },
+    {
+      "id": "ASI07",
+      "title": "Insecure Inter-Agent Communication",
+      "mapping_note": "Measures recorded inter-agent activity. Errors and uncovered authorization are evidence gaps or structural heuristics, not proof of insecure communication.",
+      "detectors": ["inter_agent_signal"]
+    },
+    {
+      "id": "ASI08",
+      "title": "Cascading Failures",
+      "mapping_note": "Uses repeated correlated errors followed by continued operations as a structural signal, without assigning a cause.",
+      "detectors": ["cascading_failure_signal"]
+    },
+    {
+      "id": "ASI09",
+      "title": "Human-Agent Trust Exploitation",
+      "mapping_note": "Reports recorded human-approval evidence. Missing recorded approval is only an evidence gap and does not establish exploitation or assess human judgment.",
+      "detectors": ["oversight_evidence", "human_trust_signal"]
+    },
+    {
+      "id": "ASI10",
+      "title": "Rogue Agents",
+      "mapping_note": "Reports explicit rogue-agent signals. A retry after a denial is only a heuristic sequence and evidence gap; it does not establish rogue behavior, agency, or motive.",
+      "detectors": ["rogue_agent_signal"]
+    }
+  ]
+}

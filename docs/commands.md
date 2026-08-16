@@ -415,6 +415,11 @@ agent-strace compliance export [session-id] --framework eu-ai-act|soc2|hipaa|all
 ```
 Export a compliance report for the specified framework. Covers session retention, data handling, access logs, and policy enforcement evidence.
 
+This is the legacy compatibility command. For a privacy-minimized, explicitly
+heuristic evidence crosswalk with current versioned framework manifests, use
+[`compliance-report`](#compliance-report). The two output schemas and claims
+are intentionally separate.
+
 | Framework | Coverage |
 |---|---|
 | `eu-ai-act` | Transparency, human oversight, data governance |
@@ -430,6 +435,34 @@ agent-strace export --all --since 2026-01-01 --until 2026-03-31 \
 agent-strace verify --from-export compliance-report.json
 agent-strace audit-readiness [--format text|json]
 ```
+
+### `compliance-report`
+
+```
+agent-strace compliance-report --framework aicpa-tsc|owasp-agentic|eu-ai-act
+    [--since UTC_OR_DURATION] [--until UTC]
+    [--format json|sarif|pdf] [--output FILE]
+    [--policy FILE] [--rescan [installed|FILE]]
+```
+
+Build a privacy-minimized evidence crosswalk from the flat trace store and all
+workspace stores. It reports only `evidence_observed`, `risk_signal`, `gap`, or
+`not_assessed`. These are evidence labels, not control conclusions. JSON is the
+authoritative output; SARIF and PDF are deterministic limited projections.
+See the [compliance evidence guide](compliance-report.md) for interpretation,
+framework sources, privacy behavior, and limitations.
+
+| Flag | Description |
+|---|---|
+| `--framework ID` | Required crosswalk: `aicpa-tsc`, `owasp-agentic`, or `eu-ai-act` |
+| `--since VALUE` | Inclusive UTC timestamp/date or duration such as `90d`; default is `90d` |
+| `--until UTC` | Exclusive UTC timestamp/date; default is the fixed snapshot time |
+| `--format FORMAT` | `json` (authoritative), `sarif`, or `pdf`; default is `json` |
+| `--output FILE`, `-o FILE` | Atomically write a nonsymlinked private file with mode `0600`; required for PDF |
+| `--policy FILE` | Evaluate a bounded local policy at report time; outcomes are `would_allow`/`would_deny`, never historical authorization |
+| `--rescan [installed\|FILE]` | With no value or `installed`, explicitly reuse the installed manifest; a file selects a local versioned JSON manifest. Performs no network, CVE, or SBOM scan |
+
+PDF support is optional: `pip install 'agent-strace[pdf]'`.
 
 ### `audit-readiness`
 ```

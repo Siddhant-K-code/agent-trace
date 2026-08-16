@@ -33,6 +33,7 @@ from .iac import cmd_apply, cmd_config_diff
 from .sso import cmd_auth
 from .baseline import cmd_baseline
 from .compliance import cmd_audit_readiness, cmd_compliance, cmd_export_eu_ai_act, cmd_verify_export
+from .compliance_report import cmd_compliance_report
 from .drift import cmd_drift, cmd_fingerprint
 from .identity import cmd_identity
 from .workspace import cmd_workspace
@@ -1671,6 +1672,41 @@ def build_parser() -> argparse.ArgumentParser:
     p_comp_exp.add_argument("--output", "-o", metavar="FILE",
                             help="write JSON report to FILE instead of stdout")
 
+    # compliance-report (isolated heuristic evidence crosswalk)
+    p_compliance_report = sub.add_parser(
+        "compliance-report",
+        help="generate a heuristic framework evidence crosswalk",
+    )
+    p_compliance_report.add_argument(
+        "--framework", required=True,
+        choices=["aicpa-tsc", "owasp-agentic", "eu-ai-act"],
+        help="framework evidence crosswalk to use",
+    )
+    p_compliance_report.add_argument(
+        "--since", default="90d", metavar="UTC_OR_DURATION",
+        help="inclusive UTC start or relative duration (default: 90d)",
+    )
+    p_compliance_report.add_argument(
+        "--until", metavar="UTC",
+        help="exclusive UTC end (default: snapshot time)",
+    )
+    p_compliance_report.add_argument(
+        "--format", choices=["json", "sarif", "pdf"], default="json",
+        help="output projection (default: authoritative JSON)",
+    )
+    p_compliance_report.add_argument(
+        "--output", "-o", metavar="FILE",
+        help="atomically write a private (0600) report file",
+    )
+    p_compliance_report.add_argument(
+        "--policy", metavar="FILE",
+        help="evaluate a local policy retrospectively (never historical authorization)",
+    )
+    p_compliance_report.add_argument(
+        "--rescan", nargs="?", const="installed", metavar="INSTALLED_OR_FILE",
+        help="re-run using 'installed' or an explicit local JSON manifest",
+    )
+
     # audit-readiness
     p_ready = sub.add_parser("audit-readiness", help="check EU AI Act audit export readiness")
     p_ready.add_argument("--retention-days", type=float, default=90.0,
@@ -2313,6 +2349,7 @@ def main() -> None:
         "identity": cmd_identity,
         "workspace": cmd_workspace,
         "compliance": cmd_compliance,
+        "compliance-report": cmd_compliance_report,
         "audit-readiness": cmd_audit_readiness,
         "approval": cmd_approval,
         "rbac": cmd_rbac,

@@ -1,0 +1,53 @@
+{
+  "schema": "agent-strace-compliance-framework/v1",
+  "mapping_version": "1.0.0",
+  "framework": {
+    "id": "eu-ai-act",
+    "title": "EU Artificial Intelligence Act runtime-evidence crosswalk",
+    "framework_edition": "Regulation (EU) 2024/1689 consolidated 2026-07-27, as amended by Regulation (EU) 2026/1744",
+    "source_url": "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX%3A02024R1689-20260727",
+    "source_as_of": "2026-07-27",
+    "amendment_url": "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX%3A32026R1744",
+    "source_checked_at": "2026-08-16",
+    "application_note": "Under Article 113 as amended, the Regulation generally applies from 2 August 2026, subject to its specified exceptions and transition dates. Chapter III Sections 1–3, except Article 6(5), apply from 2 December 2027 for high-risk systems referred to in Article 6(2) and Annex III, and from 2 August 2028 for high-risk systems referred to in Article 6(1) and Annex I. This crosswalk does not determine role, system classification, applicability, or the date applicable to any deployment.",
+    "applicability_policy": "not_assessed"
+  },
+  "controls": [
+    {
+      "id": "Article 9",
+      "title": "Observed runtime risk-event evidence",
+      "mapping_note": "Operational crosswalk for recorded errors, denials, and policy signals; applicability and satisfaction of legal requirements are not assessed.",
+      "detectors": ["risk_event_evidence", "cascading_failure_signal"]
+    },
+    {
+      "id": "Article 12",
+      "title": "Observed record-keeping and integrity coverage",
+      "mapping_note": "Operational crosswalk for trace-event coverage and local hash-link state; applicability and satisfaction of legal requirements are not assessed.",
+      "detectors": ["recordkeeping_evidence", "integrity_evidence"]
+    },
+    {
+      "id": "Article 14",
+      "title": "Observed human-oversight evidence",
+      "mapping_note": "Operational crosswalk for recorded approval and policy-intervention telemetry; it does not assess oversight design or effectiveness.",
+      "detectors": ["oversight_evidence", "human_trust_signal"]
+    },
+    {
+      "id": "Article 15",
+      "title": "Observed robustness and error telemetry",
+      "mapping_note": "Operational crosswalk for correlated results, errors, repeated-failure signals, and integrity coverage; it does not test accuracy or cybersecurity controls.",
+      "detectors": ["monitoring_evidence", "cascading_failure_signal", "integrity_evidence"]
+    },
+    {
+      "id": "Article 19",
+      "title": "Observed provider log-retention evidence",
+      "mapping_note": "Operational crosswalk for the presence, time span, and integrity state of provider-controlled trace records; it does not assess provider status, the required retention period, or legal sufficiency.",
+      "detectors": ["recordkeeping_evidence", "integrity_evidence"]
+    },
+    {
+      "id": "Article 26",
+      "title": "Observed deployer monitoring context",
+      "mapping_note": "Operational crosswalk for persisted identity, authorization, and runtime-monitoring evidence; deployer status and legal applicability are not assessed.",
+      "detectors": ["identity_evidence", "authorization_evidence", "monitoring_evidence"]
+    }
+  ]
+}
