@@ -124,6 +124,7 @@ Full setup guide: [docs/setup.md](docs/setup.md)
 | [`agent-strace dashboard`](docs/commands.md#dashboard) | Multi-session overview |
 | [`agent-strace budget-report`](docs/commands.md#budget-report) | Weekly spend digest |
 | [`agent-strace team-report`](docs/commands.md#team-report) | Team spend by author, branch, or PR |
+| [`agent-strace cost --breakdown provider`](docs/commands.md#cost) | Offline spend by provider and model |
 | [`agent-strace cognitive-debt`](docs/commands.md#cognitive-debt) | Unreviewed agent-written code by session |
 | [`agent-strace context-score`](docs/commands.md#context-score) | Score AGENTS.md and CLAUDE.md from session outcomes |
 | [`agent-strace lint <id>`](docs/commands.md#lint) | Flag bad behaviour patterns (loops, spirals, waste) |

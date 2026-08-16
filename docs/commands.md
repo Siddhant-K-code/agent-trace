@@ -126,14 +126,31 @@ Trace the causal chain backwards from event `#N`. Run `replay` first to see even
 ### `cost`
 ```
 agent-strace cost [session-id] [--model MODEL] [--input-price N] [--output-price N]
+agent-strace cost --breakdown provider [--since DATE_OR_DURATION] [--csv] [--live-pricing]
 ```
 Token and dollar cost by phase. Flags wasted spend on failed phases.
+
+`--breakdown provider` aggregates all stored sessions in the selected window by
+inferred provider and model. It uses actual recorded token counters and a bundled,
+dated pricing snapshot, so the default path makes no network calls. CSV output has
+the stable columns `provider`, `model`, `session_id`, `input_tokens`,
+`output_tokens`, and `cost_usd`.
 
 | Flag | Default | Description |
 |---|---|---|
 | `--model` | `sonnet` | `sonnet`, `opus`, `haiku`, `gpt4`, `gpt4o` |
 | `--input-price` | — | Custom input price per 1M tokens (requires `--output-price`) |
 | `--output-price` | — | Custom output price per 1M tokens (requires `--input-price`) |
+| `--breakdown provider` | — | Aggregate Anthropic, OpenAI, AWS Bedrock, and Gemini usage |
+| `--since DATE_OR_DURATION` | `30d` | ISO date or duration such as `7d`, `24h`, or `2w` |
+| `--csv` | off | Emit raw per-session/model rows instead of the dashboard |
+| `--live-pricing` | off | Request authoritative live rates; error when compatible provider APIs are unavailable rather than scrape or guess |
+
+Pricing estimates exclude caching, batch discounts, regional or service-tier
+differences, long-context premiums, and non-token charges. To update the bundled
+table, check the official URLs in `PRICING_SOURCES`, update `PRICING` and
+`_MODEL_PROVIDERS`, advance `PRICING_SNAPSHOT_DATE`, and extend
+`tests/test_provider_cost.py` for every added model family.
 
 ### `diff`
 ```

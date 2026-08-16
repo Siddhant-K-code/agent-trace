@@ -1102,6 +1102,14 @@ def build_parser() -> argparse.ArgumentParser:
                         help="custom input price per 1M tokens (overrides --model)")
     p_cost.add_argument("--output-price", type=float, dest="output_price",
                         help="custom output price per 1M tokens (overrides --model)")
+    p_cost.add_argument("--breakdown", choices=["provider"],
+                        help="aggregate stored sessions by provider and model")
+    p_cost.add_argument("--since", default="30d", metavar="DATE_OR_DURATION",
+                        help="provider report start date or duration (default: 30d)")
+    p_cost.add_argument("--csv", action="store_true",
+                        help="export raw provider cost rows as CSV")
+    p_cost.add_argument("--live-pricing", dest="live_pricing", action="store_true",
+                        help="request live prices; fail safely when authoritative APIs are unavailable")
 
     # audit
     p_audit = sub.add_parser("audit", help="check session tool calls against a policy file")
