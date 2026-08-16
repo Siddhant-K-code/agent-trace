@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 
 @dataclass
@@ -19,8 +20,21 @@ class ScorerConfig:
 
 
 @dataclass
+class EvalCriterionConfig:
+    """One named, raw-value criterion from the ``evals`` config block."""
+
+    name: str
+    scorer: str
+    fail_on: str
+    threshold: Any = None
+    expected: Any = None
+    params: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class EvalConfig:
     scorers: list[ScorerConfig] = field(default_factory=list)
+    evals: list[EvalCriterionConfig] = field(default_factory=list)
     pass_threshold: float = 0.85
     warn_threshold: float = 0.70
 
@@ -220,4 +234,94 @@ def load_config(path: str | Path = ".agent-evals.yaml") -> EvalConfig:
     if not scorers:
         scorers = EvalConfig.default().scorers
 
-    return EvalConfig(scorers=scorers, pass_threshold=pass_t, warn_threshold=warn_t)
+    evals: list[EvalCriterionConfig] = []
+    for raw_eval in data.get("evals", []) or []:
+        try:
+            evals.append(_criterion_from_mapping(raw_eval))
+        except (TypeError, ValueError):
+            # ``load_config`` historically falls back instead of rejecting bad
+            # input.  The strict gate loader below reports schema errors to CI.
+            continue
+
+    return EvalConfig(
+        scorers=scorers,
+        evals=evals,
+        pass_threshold=pass_t,
+        warn_threshold=warn_t,
+    )
+
+
+_FAIL_MODES = {
+    "above",
+    "at_or_above",
+    "below",
+    "at_or_below",
+    "equal",
+    "not_equal",
+}
+
+
+def _criterion_from_mapping(raw: object) -> EvalCriterionConfig:
+    if not isinstance(raw, dict):
+        raise TypeError("each eval must be a mapping")
+
+    name = str(raw.get("name", "")).strip()
+    scorer = str(raw.get("scorer", "")).strip()
+    fail_on = str(raw.get("fail_on", "")).strip().lower().replace("-", "_")
+    if not name:
+        raise ValueError("each eval requires a name")
+    if not scorer:
+        raise ValueError(f"eval {name!r} requires a scorer")
+    if fail_on not in _FAIL_MODES:
+        modes = ", ".join(sorted(_FAIL_MODES))
+        raise ValueError(f"eval {name!r} has invalid fail_on {fail_on!r}; expected one of {modes}")
+
+    threshold = raw.get("threshold")
+    expected = raw.get("expected")
+    if fail_on in {"above", "at_or_above", "below", "at_or_below", "equal"}:
+        if "threshold" not in raw:
+            raise ValueError(f"eval {name!r} requires threshold for fail_on: {fail_on}")
+    elif "expected" not in raw:
+        raise ValueError(f"eval {name!r} requires expected for fail_on: {fail_on}")
+
+    reserved = {"name", "scorer", "threshold", "expected", "fail_on"}
+    params = {key: value for key, value in raw.items() if key not in reserved}
+    return EvalCriterionConfig(
+        name=name,
+        scorer=scorer,
+        fail_on=fail_on,
+        threshold=threshold,
+        expected=expected,
+        params=params,
+    )
+
+
+def load_gate_config(path: str | Path = ".agent-evals.yaml") -> EvalConfig:
+    """Load and strictly validate named eval criteria.
+
+    The legacy :func:`load_config` remains deliberately forgiving.  A CI gate
+    must not silently replace a missing or malformed policy with defaults, so
+    this entry point raises ``FileNotFoundError`` or ``ValueError`` instead.
+    """
+
+    config_path = Path(path)
+    if not config_path.exists():
+        raise FileNotFoundError(f"eval config not found: {config_path}")
+    try:
+        data = _parse_minimal_yaml(config_path.read_text(encoding="utf-8"))
+    except OSError:
+        raise
+    except Exception as exc:
+        raise ValueError(f"could not parse eval config {config_path}: {exc}") from exc
+
+    raw_evals = data.get("evals")
+    if not isinstance(raw_evals, list) or not raw_evals:
+        raise ValueError(f"eval config {config_path} must contain a non-empty 'evals' list")
+
+    evals = [_criterion_from_mapping(raw_eval) for raw_eval in raw_evals]
+    names: set[str] = set()
+    for criterion in evals:
+        if criterion.name in names:
+            raise ValueError(f"duplicate eval name: {criterion.name!r}")
+        names.add(criterion.name)
+    return EvalConfig(evals=evals)

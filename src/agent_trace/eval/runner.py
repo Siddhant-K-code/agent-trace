@@ -11,10 +11,11 @@ import os
 import sys
 from pathlib import Path
 from dataclasses import dataclass, field
+from typing import Any, TextIO
 
 from ..store import TraceStore
-from .config import EvalConfig, load_config
-from .scorers import ScoreResult, run_scorer
+from .config import EvalConfig, EvalCriterionConfig, load_config, load_gate_config
+from .scorers import MetricError, MetricValue, ScoreResult, measure_metric, run_scorer
 
 
 @dataclass
@@ -121,6 +122,316 @@ def format_report_json(report: EvalReport, out=sys.stdout) -> None:
         ],
     }
     out.write(json.dumps(data, indent=2) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# Named eval gates
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CriterionResult:
+    name: str
+    scorer: str
+    score: MetricValue | None
+    fail_on: str
+    threshold: Any = None
+    expected: Any = None
+    criterion_passed: bool = False
+    baseline: MetricValue | None = None
+    regressed: bool = False
+    reason: str = ""
+
+    @property
+    def target(self) -> Any:
+        return self.expected if self.fail_on == "not_equal" else self.threshold
+
+    @property
+    def passed(self) -> bool:
+        return self.criterion_passed and not self.regressed
+
+
+@dataclass
+class GateReport:
+    session_id: str
+    results: list[CriterionResult]
+
+    @property
+    def failed(self) -> int:
+        return sum(1 for result in self.results if not result.passed)
+
+    @property
+    def passed(self) -> int:
+        return len(self.results) - self.failed
+
+    @property
+    def regressions(self) -> int:
+        return sum(1 for result in self.results if result.regressed)
+
+    @property
+    def overall_passed(self) -> bool:
+        return bool(self.results) and self.failed == 0
+
+
+def _numeric(value: object, label: str) -> float:
+    if isinstance(value, bool):
+        raise MetricError(f"{label} must be numeric")
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise MetricError(f"{label} must be numeric") from exc
+    if number != number or number in (float("inf"), float("-inf")):
+        raise MetricError(f"{label} must be finite")
+    return number
+
+
+def _criterion_failed(score: MetricValue, criterion: EvalCriterionConfig) -> bool:
+    mode = criterion.fail_on
+    target = criterion.expected if mode == "not_equal" else criterion.threshold
+    if mode in {"above", "at_or_above", "below", "at_or_below"}:
+        actual_number = _numeric(score, f"score from {criterion.scorer!r}")
+        target_number = _numeric(target, f"threshold for {criterion.name!r}")
+        if mode == "above":
+            return actual_number > target_number
+        if mode == "at_or_above":
+            return actual_number >= target_number
+        if mode == "below":
+            return actual_number < target_number
+        return actual_number <= target_number
+    if mode == "equal":
+        return score == target
+    if mode == "not_equal":
+        return score != target
+    raise MetricError(f"unsupported fail_on mode: {mode}")
+
+
+def _is_regression(
+    current: MetricValue,
+    baseline: MetricValue,
+    fail_on: str,
+    tolerance: float,
+) -> bool:
+    lower_is_better = fail_on in {"above", "at_or_above"}
+    higher_is_better = fail_on in {"below", "at_or_below"}
+    if lower_is_better or higher_is_better:
+        current_number = _numeric(current, "current score")
+        baseline_number = _numeric(baseline, "baseline score")
+        # Tolerance is a fractional change.  For a zero baseline, treating the
+        # fraction itself as an absolute allowance keeps zero-cost/count gates
+        # usable while still catching a one-error regression at tolerance .05.
+        allowance = abs(baseline_number) * tolerance
+        if baseline_number == 0:
+            allowance = tolerance
+        if lower_is_better:
+            return current_number > baseline_number + allowance
+        return current_number < baseline_number - allowance
+    return current != baseline
+
+
+def run_eval_gate(
+    store: TraceStore,
+    session_id: str,
+    config: EvalConfig,
+    baseline: dict[str, MetricValue] | None = None,
+    tolerance: float = 0.0,
+) -> GateReport:
+    """Measure and gate one session against named raw-value criteria."""
+
+    if tolerance < 0:
+        raise ValueError("tolerance must be non-negative")
+    events = store.load_events(session_id)
+    results: list[CriterionResult] = []
+    baseline = baseline or {}
+
+    for criterion in config.evals:
+        try:
+            score = measure_metric(
+                criterion.scorer,
+                events,
+                store,
+                session_id,
+                criterion.params,
+            )
+            failed = _criterion_failed(score, criterion)
+            result = CriterionResult(
+                name=criterion.name,
+                scorer=criterion.scorer,
+                score=score,
+                fail_on=criterion.fail_on,
+                threshold=criterion.threshold,
+                expected=criterion.expected,
+                criterion_passed=not failed,
+            )
+            if criterion.name in baseline:
+                result.baseline = baseline[criterion.name]
+                result.regressed = _is_regression(
+                    score,
+                    result.baseline,
+                    criterion.fail_on,
+                    tolerance,
+                )
+                if result.regressed:
+                    result.reason = f"regressed from baseline {result.baseline!r}"
+        except Exception as exc:
+            result = CriterionResult(
+                name=criterion.name,
+                scorer=criterion.scorer,
+                score=None,
+                fail_on=criterion.fail_on,
+                threshold=criterion.threshold,
+                expected=criterion.expected,
+                criterion_passed=False,
+                reason=str(exc),
+            )
+        results.append(result)
+    return GateReport(session_id=session_id, results=results)
+
+
+def _display_value(value: object, scorer: str = "") -> str:
+    if value is None:
+        return "—"
+    if scorer == "cost_usd" and isinstance(value, (int, float)):
+        return f"${value:.4f}"
+    if isinstance(value, float):
+        return f"{value:.4f}".rstrip("0").rstrip(".")
+    return str(value)
+
+
+def format_gate_table(report: GateReport, out: TextIO = sys.stdout) -> None:
+    """Render a human-readable named-eval result table."""
+
+    name_width = max(20, *(len(result.name) for result in report.results))
+    out.write(f"Eval results — session {report.session_id}\n")
+    out.write("─" * 72 + "\n")
+    out.write(f"{'Eval':<{name_width}}  {'Score':<14}  {'Threshold':<14}  Result\n")
+    out.write("─" * 72 + "\n")
+    for result in report.results:
+        score = _display_value(result.score, result.scorer)
+        target = _display_value(result.target, result.scorer)
+        status = "pass" if result.passed else "fail"
+        suffix = f" — {result.reason}" if result.reason else ""
+        out.write(f"{result.name:<{name_width}}  {score:<14}  {target:<14}  {status}{suffix}\n")
+    out.write("─" * 72 + "\n")
+    overall = "PASS" if report.overall_passed else "FAIL"
+    out.write(f"Overall: {overall} ({report.failed}/{len(report.results)} evals failed)\n")
+
+
+def gate_report_data(report: GateReport) -> dict[str, Any]:
+    return {
+        "session_id": report.session_id,
+        "passed": report.overall_passed,
+        "pass_count": report.passed,
+        "fail_count": report.failed,
+        "regression_count": report.regressions,
+        "results": [
+            {
+                "name": result.name,
+                "scorer": result.scorer,
+                "score": result.score,
+                "threshold": result.threshold,
+                "expected": result.expected,
+                "fail_on": result.fail_on,
+                "baseline": result.baseline,
+                "regressed": result.regressed,
+                "criterion_passed": result.criterion_passed,
+                "passed": result.passed,
+                "reason": result.reason,
+            }
+            for result in report.results
+        ],
+    }
+
+
+def format_gate_json(report: GateReport, out: TextIO = sys.stdout) -> None:
+    out.write(json.dumps(gate_report_data(report), indent=2) + "\n")
+
+
+def save_gate_baseline(path: str | Path, report: GateReport) -> None:
+    """Save raw named scores in a versioned, machine-readable baseline."""
+
+    unavailable = [result.name for result in report.results if result.score is None]
+    if unavailable:
+        raise ValueError(f"cannot save unavailable scores: {', '.join(unavailable)}")
+    baseline_path = Path(path)
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        "version": 1,
+        "session_id": report.session_id,
+        "scores": {result.name: result.score for result in report.results},
+    }
+    baseline_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def load_gate_baseline(path: str | Path) -> dict[str, MetricValue]:
+    """Load a named baseline, accepting both versioned and flat mappings."""
+
+    baseline_path = Path(path)
+    try:
+        data = json.loads(baseline_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise ValueError(f"baseline not found: {baseline_path}") from None
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"could not read baseline {baseline_path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"baseline {baseline_path} must be a JSON object")
+    raw_scores = data.get("scores", data)
+    if not isinstance(raw_scores, dict):
+        raise ValueError(f"baseline {baseline_path} has invalid scores")
+
+    scores: dict[str, MetricValue] = {}
+    for name, raw_value in raw_scores.items():
+        value = raw_value.get("score") if isinstance(raw_value, dict) else raw_value
+        if not isinstance(value, (int, float, str, bool)) or value is None:
+            raise ValueError(f"baseline score for {name!r} has an unsupported value")
+        scores[str(name)] = value
+    return scores
+
+
+def _markdown_cell(value: object) -> str:
+    return str(value).replace("|", "\\|").replace("\n", " ")
+
+
+def write_gate_github_summary(
+    report: GateReport,
+    path: str | Path | None = None,
+) -> Path | None:
+    """Append a Markdown result table to the GitHub Actions step summary."""
+
+    destination = Path(path) if path else None
+    if destination is None:
+        env_path = os.environ.get("GITHUB_STEP_SUMMARY")
+        if not env_path:
+            return None
+        destination = Path(env_path)
+
+    lines = [
+        "## agent-strace eval",
+        "",
+        "| Eval | Scorer | Score | Threshold | Baseline | Result |",
+        "|---|---|---:|---:|---:|---|",
+    ]
+    for result in report.results:
+        status = "✅ pass" if result.passed else "❌ fail"
+        lines.append(
+            "| "
+            + " | ".join(
+                _markdown_cell(value)
+                for value in (
+                    result.name,
+                    result.scorer,
+                    _display_value(result.score, result.scorer),
+                    _display_value(result.target, result.scorer),
+                    _display_value(result.baseline, result.scorer),
+                    status,
+                )
+            )
+            + " |"
+        )
+    overall = "PASS" if report.overall_passed else "FAIL"
+    lines.extend(("", f"**Overall: {overall}** — {report.failed}/{len(report.results)} evals failed.", ""))
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("a", encoding="utf-8") as summary:
+        summary.write("\n".join(lines))
+    return destination
 
 
 # ---------------------------------------------------------------------------
@@ -340,3 +651,62 @@ def cmd_eval_ci(args: argparse.Namespace) -> int:
 
     sys.stderr.write("CI: PASS — all scorers passed\n")
     return 0
+
+
+def cmd_eval_gate(args: argparse.Namespace) -> int:
+    """CLI handler for the named eval-as-a-gate workflow."""
+
+    try:
+        config = load_gate_config(getattr(args, "config", ".agent-evals.yaml"))
+    except (OSError, ValueError) as exc:
+        sys.stderr.write(f"Eval config error: {exc}\n")
+        return 1
+
+    store = TraceStore(args.trace_dir)
+    session_id = _resolve_session(store, getattr(args, "session_id", None))
+    if not session_id:
+        requested = getattr(args, "session_id", None)
+        if requested:
+            sys.stderr.write(f"Session not found: {requested}\n")
+        else:
+            sys.stderr.write("No sessions found.\n")
+        return 1
+
+    baseline: dict[str, MetricValue] = {}
+    baseline_path = getattr(args, "baseline", None)
+    if baseline_path:
+        try:
+            baseline = load_gate_baseline(baseline_path)
+        except ValueError as exc:
+            sys.stderr.write(f"Baseline error: {exc}\n")
+            return 1
+
+    try:
+        tolerance = float(getattr(args, "tolerance", 0.0) or 0.0)
+        report = run_eval_gate(store, session_id, config, baseline, tolerance)
+    except (OSError, TypeError, ValueError) as exc:
+        sys.stderr.write(f"Eval error: {exc}\n")
+        return 1
+
+    if getattr(args, "format", "table") == "json":
+        format_gate_json(report, out=sys.stdout)
+    else:
+        format_gate_table(report, out=sys.stdout)
+
+    save_path = getattr(args, "save_baseline", None)
+    if save_path:
+        try:
+            save_gate_baseline(save_path, report)
+        except (OSError, ValueError) as exc:
+            sys.stderr.write(f"Baseline error: {exc}\n")
+            return 1
+        sys.stderr.write(f"Baseline saved to {save_path}\n")
+
+    try:
+        write_gate_github_summary(report)
+    except OSError as exc:
+        sys.stderr.write(f"GitHub summary error: {exc}\n")
+        return 1
+    if save_path:
+        return 0
+    return 0 if report.overall_passed else 1
