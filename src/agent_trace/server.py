@@ -44,10 +44,15 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from .models import SessionMeta, TraceEvent
-from .store import TraceStore, DEFAULT_TRACE_DIR
+from .store import (
+    TraceStore,
+    DEFAULT_TRACE_DIR,
+    validate_session_id,
+    validate_stored_id,
+)
 from . import web_dashboard as _wd
 
 
@@ -56,6 +61,13 @@ from . import web_dashboard as _wd
 # ---------------------------------------------------------------------------
 
 KEY_PREFIX = "ast_"
+
+
+def _decode_read_session_id(segment: str) -> str:
+    """Decode one URL segment and permit containment-safe legacy IDs."""
+    return validate_stored_id(
+        unquote(segment, encoding="utf-8", errors="strict"), "stored session ID"
+    )
 
 
 def generate_api_key() -> str:
@@ -202,7 +214,12 @@ class CollectorHandler(BaseHTTPRequestHandler):
                 return
             parts = path.split("/")
             if len(parts) == 3 and parts[1] == "session":
-                self._send_html(200, _wd.render_detail_page(parts[2]))
+                try:
+                    session_id = _decode_read_session_id(parts[2])
+                except (UnicodeDecodeError, ValueError) as exc:
+                    self._send_json(400, {"error": str(exc)})
+                    return
+                self._send_html(200, _wd.render_detail_page(session_id))
                 return
             # Dashboard API endpoints
             if path == "/api/sessions":
@@ -214,7 +231,12 @@ class CollectorHandler(BaseHTTPRequestHandler):
                 self.wfile.write(body)
                 return
             if len(parts) == 5 and parts[1] == "api" and parts[2] == "sessions" and parts[4] == "events":
-                result = _wd.api_session_events(self.store, parts[3])
+                try:
+                    session_id = _decode_read_session_id(parts[3])
+                except (UnicodeDecodeError, ValueError) as exc:
+                    self._send_json(400, {"error": str(exc)})
+                    return
+                result = _wd.api_session_events(self.store, session_id)
                 if result is None:
                     self._send_json(404, {"error": f"session not found: {parts[3]}"})
                     return
@@ -239,7 +261,11 @@ class CollectorHandler(BaseHTTPRequestHandler):
         # /sessions/<id>/events
         parts = path.split("/")
         if len(parts) == 4 and parts[1] == "sessions" and parts[3] == "events":
-            session_id = parts[2]
+            try:
+                session_id = _decode_read_session_id(parts[2])
+            except (UnicodeDecodeError, ValueError) as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
             if not self.store.session_exists(session_id):
                 found = self.store.find_session(session_id)
                 if found:
@@ -253,7 +279,11 @@ class CollectorHandler(BaseHTTPRequestHandler):
 
         # /sessions/<id>
         if len(parts) == 3 and parts[1] == "sessions":
-            session_id = parts[2]
+            try:
+                session_id = _decode_read_session_id(parts[2])
+            except (UnicodeDecodeError, ValueError) as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
             if not self.store.session_exists(session_id):
                 found = self.store.find_session(session_id)
                 if found:
@@ -298,14 +328,14 @@ class CollectorHandler(BaseHTTPRequestHandler):
                 continue
             try:
                 event = TraceEvent.from_json(line)
-                session_id = event.session_id
+                session_id = validate_session_id(event.session_id)
                 if not session_id:
                     errors += 1
                     continue
                 with self._lock:
                     # Auto-create session if it doesn't exist
                     if not self.store.session_exists(session_id):
-                        meta = SessionMeta()
+                        meta = SessionMeta(tenant_id=event.tenant_id)
                         meta.session_id = session_id
                         self.store.create_session(meta)
                     self.store.append_event(session_id, event)
@@ -325,13 +355,22 @@ class CollectorHandler(BaseHTTPRequestHandler):
             if not session_id:
                 self._send_json(400, {"error": "session_id required"})
                 return
+            session_id = validate_session_id(session_id)
 
             with self._lock:
                 if self.store.session_exists(session_id):
                     # Update existing meta
                     meta = self.store.load_meta(session_id)
+                    incoming_tenant = str(data.get("tenant_id", "") or "").strip()
+                    if "tenant_id" in data:
+                        if meta.tenant_id and incoming_tenant != meta.tenant_id:
+                            self._send_json(409, {"error": "session tenant cannot be cleared or changed"})
+                            return
+                        if not meta.tenant_id and incoming_tenant:
+                            self.store.tag_session(session_id, incoming_tenant)
+                            meta = self.store.load_meta(session_id)
                     for k, v in data.items():
-                        if hasattr(meta, k):
+                        if k not in {"session_id", "tenant_id"} and hasattr(meta, k):
                             setattr(meta, k, v)
                     self.store.update_meta(meta)
                 else:

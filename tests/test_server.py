@@ -10,6 +10,7 @@ import time
 import unittest
 import urllib.request
 import urllib.error
+from urllib.parse import quote
 from pathlib import Path
 
 from agent_trace.models import EventType, SessionMeta, TraceEvent
@@ -181,6 +182,46 @@ class TestPostSessions(unittest.TestCase):
         status, resp = _post(f"{self.base}/sessions", body)
         self.assertEqual(status, 400)
 
+    def test_existing_tenant_cannot_be_cleared_or_changed(self):
+        meta = SessionMeta(session_id="tenant-session", tenant_id="tenant-a")
+        self.store.create_session(meta)
+        for tenant_id in ("", "tenant-b"):
+            body = json.dumps({
+                "session_id": meta.session_id, "tenant_id": tenant_id,
+            }).encode("utf-8")
+            status, _ = _post(f"{self.base}/sessions", body)
+            self.assertEqual(status, 409)
+        self.assertEqual(self.store.load_meta(meta.session_id).tenant_id, "tenant-a")
+
+    def test_first_tenant_assignment_retags_existing_events(self):
+        meta = SessionMeta(session_id="legacy-tenant-session", tenant_id="")
+        self.store.create_session(meta)
+        self.store.append_event(meta.session_id, TraceEvent(
+            event_type=EventType.USER_PROMPT,
+            session_id=meta.session_id,
+            data={"prompt": "hello"},
+            tenant_id="",
+        ))
+        body = json.dumps({
+            "session_id": meta.session_id, "tenant_id": "tenant-a",
+        }).encode("utf-8")
+
+        status, _ = _post(f"{self.base}/sessions", body)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(self.store.load_meta(meta.session_id).tenant_id, "tenant-a")
+        raw = json.loads(
+            (self.store._session_dir(meta.session_id) / "events.ndjson").read_text()
+        )
+        self.assertEqual(raw["tenant_id"], "tenant-a")
+
+    def test_path_traversal_session_id_is_rejected(self):
+        status, _ = _post(
+            f"{self.base}/sessions",
+            json.dumps({"session_id": "../escape"}).encode("utf-8"),
+        )
+        self.assertEqual(status, 400)
+
 
 # ---------------------------------------------------------------------------
 # GET /sessions
@@ -238,6 +279,37 @@ class TestGetSessionEvents(unittest.TestCase):
         self.assertEqual(len(lines), 1)
         parsed = json.loads(lines[0])
         self.assertEqual(parsed["event_type"], "tool_call")
+
+    def test_get_reads_url_decoded_safe_legacy_id_but_post_rejects_it(self):
+        legacy_id = "Legacy café session " + "x" * 130
+        session_dir = self.store.base_dir / legacy_id
+        session_dir.mkdir()
+        meta = SessionMeta(session_id=legacy_id)
+        event = TraceEvent(
+            event_type=EventType.TOOL_CALL,
+            session_id=legacy_id,
+            data={"tool_name": "Read"},
+        )
+        (session_dir / "meta.json").write_text(meta.to_json())
+        (session_dir / "events.ndjson").write_text(event.to_json() + "\n")
+        encoded = quote(legacy_id, safe="")
+
+        status, body = _get(f"{self.base}/sessions/{encoded}")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["session_id"], legacy_id)
+        status, body = _get(f"{self.base}/sessions/{encoded}/events")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["session_id"], legacy_id)
+
+        status, _ = _post(
+            f"{self.base}/sessions", meta.to_json().encode("utf-8")
+        )
+        self.assertEqual(status, 400)
+
+    def test_get_rejects_url_encoded_path_separator(self):
+        encoded = quote("../escape", safe="")
+        status, _ = _get(f"{self.base}/sessions/{encoded}/events")
+        self.assertEqual(status, 400)
 
     def test_get_events_unknown_session_returns_404(self):
         status, body = _get(f"{self.base}/sessions/nonexistent/events")

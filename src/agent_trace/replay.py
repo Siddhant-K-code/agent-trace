@@ -404,9 +404,13 @@ def replay_session(
     out.write("\n")
 
 
-def list_sessions(store: TraceStore, out: TextIO = sys.stdout) -> None:
+def list_sessions(
+    store: TraceStore,
+    out: TextIO = sys.stdout,
+    tenant_id: str | None = None,
+) -> None:
     """List all captured sessions."""
-    sessions = store.list_sessions()
+    sessions = store.list_sessions(tenant_id=tenant_id)
 
     if not sessions:
         out.write("No traces found.\n")
@@ -446,6 +450,8 @@ def list_sessions(store: TraceStore, out: TextIO = sys.stdout) -> None:
 
     out.write(f"{C.GRAY}{'─' * 70}{C.RESET}\n")
     out.write(f"  {len(sessions)} session(s)\n")
+    if tenant_id is not None:
+        out.write(f"  {C.DIM}Tenant: {tenant_id}{C.RESET}\n")
     out.write(
         f"  {C.DIM}Tools = MCP tool calls  "
         f"LLM = sampling/createMessage or @trace_llm_call  "

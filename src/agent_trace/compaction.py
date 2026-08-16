@@ -928,9 +928,9 @@ def write_checkpoint(
     """Write ``checkpoints/<session>.md`` without touching trace storage."""
     if events is None:
         events = store.load_events(session_id)
-    checkpoint_dir = store.base_dir / "checkpoints"
+    path = store.checkpoint_path(session_id)
+    checkpoint_dir = path.parent
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    path = checkpoint_dir / f"{session_id}.md"
     path.write_text(
         build_checkpoint_markdown(events, session_id, timestamp), encoding="utf-8",
     )

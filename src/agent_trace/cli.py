@@ -69,6 +69,7 @@ from .anonymize import cmd_anonymize_export
 from .integrations import detect_and_instrument, _INTEGRATIONS
 from .budget_report import cmd_budget_report
 from .team_report import cmd_team_report
+from .tenancy import cmd_tenant
 from .compare import cmd_compare
 from .compaction import cmd_compaction
 from .freeze import cmd_freeze, cmd_regression
@@ -303,7 +304,15 @@ def cmd_replay(args: argparse.Namespace) -> int:
 def cmd_list(args: argparse.Namespace) -> int:
     """List all recorded sessions."""
     store = TraceStore(args.trace_dir)
-    list_sessions(store)
+    tenant_id = getattr(args, "tenant", None)
+    if tenant_id is not None:
+        from .store import validate_tenant_id
+        try:
+            tenant_id = validate_tenant_id(tenant_id)
+        except ValueError as exc:
+            sys.stderr.write(f"Error: {exc}\n")
+            return 1
+    list_sessions(store, tenant_id=tenant_id)
     return 0
 
 
@@ -1000,7 +1009,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="output format (default: text)")
 
     # list
-    sub.add_parser("list", help="list all recorded sessions")
+    p_list = sub.add_parser("list", help="list all recorded sessions")
+    p_list.add_argument("--tenant", metavar="ID", help="show only sessions for this tenant")
 
     # inspect
     p_inspect = sub.add_parser("inspect", help="inspect a session as raw JSON")
@@ -1135,6 +1145,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="export raw provider cost rows as CSV")
     p_cost.add_argument("--live-pricing", dest="live_pricing", action="store_true",
                         help="request live prices; fail safely when authoritative APIs are unavailable")
+    p_cost.add_argument("--tenant", metavar="ID",
+                        help="scope session lookup or aggregate cost to one tenant")
 
     # audit
     p_audit = sub.add_parser("audit", help="check session tool calls against a policy file")
@@ -1263,6 +1275,9 @@ def build_parser() -> argparse.ArgumentParser:
     # watch
     p_watch = sub.add_parser("watch", help="monitor a live session with circuit breakers")
     p_watch.add_argument("session_id", nargs="?", help="session ID to watch (default: latest active)")
+    p_watch.add_argument("--tenant-id", dest="tenant_id", metavar="ID",
+                         help="tag this session and its events with a tenant ID; "
+                              "defaults to AGENT_STRACE_TENANT_ID")
     p_watch.add_argument("--max-retries", type=int, default=5, help="max retries before alert (default: 5)")
     p_watch.add_argument("--max-cost", type=float, default=10.0, help="max cost in dollars (default: 10)")
     p_watch.add_argument("--max-duration", type=int, default=1800, help="max duration in seconds (default: 1800)")
@@ -1943,6 +1958,29 @@ def build_parser() -> argparse.ArgumentParser:
     p_ret_clean.add_argument("--config", metavar="FILE",
                              help="path to .agent-strace.yaml config file")
 
+    # tenant isolation, reporting, and GDPR workflows
+    p_tenant = sub.add_parser("tenant", help="report, export, or delete tenant trace data")
+    tenant_sub = p_tenant.add_subparsers(dest="tenant_command")
+
+    p_tenant_report = tenant_sub.add_parser("report", help="cost rollup across all tenants")
+    p_tenant_report.add_argument("--month", metavar="YYYY-MM",
+                                 help="UTC report month (default: current month)")
+    p_tenant_report.add_argument("--model", default="sonnet",
+                                 choices=["sonnet", "opus", "haiku", "gpt4", "gpt4o"],
+                                 help="pricing model for estimates (default: sonnet)")
+    p_tenant_report.add_argument("--format", choices=["text", "json"], default="text")
+
+    p_tenant_export = tenant_sub.add_parser("export", help="export all sessions for one tenant")
+    p_tenant_export.add_argument("tenant_id", metavar="ID")
+    p_tenant_export.add_argument("--format", choices=["json"], default="json")
+    p_tenant_export.add_argument("--output", "-o", metavar="FILE",
+                                 help="write JSON to a file instead of stdout")
+
+    p_tenant_delete = tenant_sub.add_parser("delete", help="hard-delete all data for one tenant")
+    p_tenant_delete.add_argument("tenant_id", metavar="ID")
+    p_tenant_delete.add_argument("--confirm", action="store_true",
+                                 help="confirm the irreversible deletion")
+
     # diff --semantic and --eval-config flags (extend existing diff parser)
     p_diff.add_argument("--semantic", action="store_true",
                         help="semantic outcome-level diff (files, cost, errors)")
@@ -2014,6 +2052,7 @@ _TELEMETRY_SUBCOMMAND_ATTRS = (
     "server_subcommand",
     "config_watch_command",
     "retention_command",
+    "tenant_command",
 )
 
 
@@ -2248,6 +2287,7 @@ def main() -> None:
         "config-watch": cmd_config_watch,
         "lint": cmd_lint,
         "retention": cmd_retention,
+        "tenant": cmd_tenant,
         "sample": cmd_sample,
         "server": cmd_server,
     }

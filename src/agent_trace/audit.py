@@ -450,7 +450,7 @@ def verify_chain(store: TraceStore, session_id: str) -> ChainVerifyResult:
     """
     import hashlib
 
-    events_path = store._session_dir(session_id) / "events.ndjson"
+    events_path = store._session_file(session_id, "events.ndjson", "event stream")
     if not events_path.exists():
         return ChainVerifyResult(session_id=session_id, ok=False,
                                  total_events=0, broken_at=0)

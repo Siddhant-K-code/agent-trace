@@ -5,15 +5,18 @@ import os
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from agent_trace.hooks import (
+    _active_session_path,
     _read_active_session,
     _write_active_session,
     _clear_active_session,
     _read_pending_calls,
     _write_pending_calls,
+    _state_suffix,
     handle_session_start,
     handle_session_end,
     handle_pre_tool,
@@ -494,6 +497,30 @@ class TestConcurrentAgentIsolation(unittest.TestCase):
         os.environ["AGENT_TRACE_CLAUDE_SESSION_ID"] = "agent2session00002"
         _clear_active_session()
         self.assertFalse(os.path.exists(canonical))
+
+    def test_provider_session_state_suffix_is_hashed_and_contained(self):
+        raw = "abcdefghijklmnop/../../outside-marker"
+        os.environ["AGENT_TRACE_CLAUDE_SESSION_ID"] = raw
+        suffix = _state_suffix("claude")
+        active = _active_session_path("claude")
+
+        self.assertRegex(suffix, r"^\.v2\.claude\.[0-9a-f]+\.[0-9a-f]{64}$")
+        self.assertEqual(active.parent, Path(self.tmpdir))
+        self.assertNotIn(raw, active.name)
+
+        handle_session_start({"session_id": raw, "source": "startup"})
+        self.assertTrue(active.exists())
+        self.assertFalse((Path(self.tmpdir).parent / "outside-marker").exists())
+
+    def test_distinct_raw_provider_ids_cannot_collide(self):
+        os.environ["AGENT_TRACE_CLAUDE_SESSION_ID"] = "same/id"
+        first = _state_suffix("claude")
+        os.environ["AGENT_TRACE_CLAUDE_SESSION_ID"] = "same_id"
+        second = _state_suffix("claude")
+        os.environ["AGENT_TRACE_CURSOR_SESSION_ID"] = "same/id"
+        third = _state_suffix("cursor")
+
+        self.assertEqual(len({first, second, third}), 3)
 
 
 if __name__ == "__main__":

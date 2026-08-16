@@ -32,13 +32,14 @@ Usage:
 The hook script reads JSON from stdin (provided by Claude Code), converts
 it to a TraceEvent, and appends it to the active session's trace store.
 
-Session state is tracked via a file at .agent-traces/.active-session so
-that PreToolUse and PostToolUse hooks (which run as separate processes)
-can find the current session.
+Session state is tracked via an .active-session file in the flat trace store
+or active workspace store so hooks running as separate processes can find the
+current session without colliding with another workspace.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -91,6 +92,11 @@ def _get_store() -> TraceStore:
     return TraceStore(_get_store_dir())
 
 
+def _get_state_dir() -> Path:
+    """Keep hook coordination state inside the active workspace scope."""
+    return _get_store().base_dir
+
+
 def _get_remote_endpoint() -> str:
     """Return AGENT_STRACE_ENDPOINT if set, else empty string."""
     return os.environ.get("AGENT_STRACE_ENDPOINT", "").rstrip("/")
@@ -112,6 +118,15 @@ def _write_event(store: TraceStore, session_id: str, event: TraceEvent) -> None:
         store.append_event(session_id, event)
 
 
+def _write_session_meta(meta: SessionMeta) -> None:
+    """Best-effort metadata propagation to a configured remote collector."""
+    endpoint = _get_remote_endpoint()
+    if not endpoint:
+        return
+    from .server import send_session_meta_to_endpoint
+    send_session_meta_to_endpoint(meta, endpoint)
+
+
 def _provider_env(provider: str = "claude") -> str:
     return _PROVIDER_ENV.get(provider, _CLAUDE_SESSION_ID_ENV)
 
@@ -123,22 +138,27 @@ def _state_suffix(provider: str = "claude") -> str:
     sets a provider-specific env var for same-process tests and manual use.
     """
     sid = os.environ.get(_provider_env(provider), "")
-    return f".{sid}" if sid else ""
+    if not sid:
+        return ""
+    provider_key = provider if provider in _PROVIDER_ENV else "claude"
+    local_session_hex = sid[:16].encode("utf-8").hex()
+    digest = hashlib.sha256(f"{provider_key}\0{sid}".encode()).hexdigest()
+    return f".v2.{provider_key}.{local_session_hex}.{digest}"
 
 
 def _active_session_path(provider: str = "claude") -> Path:
-    return Path(_get_store_dir()) / f".active-session{_state_suffix(provider)}"
+    return _get_state_dir() / f".active-session{_state_suffix(provider)}"
 
 
 def _canonical_active_session_path() -> Path:
     """Return the active-session marker consumed by editor integrations."""
-    return Path(_get_store_dir()) / ".active-session"
+    return _get_state_dir() / ".active-session"
 
 
 def _pending_calls_path(provider: str = "claude") -> Path:
     suffix = _state_suffix(provider)
     name = _PENDING_FILE.replace(".json", f"{suffix}.json")
-    return Path(_get_store_dir()) / name
+    return _get_state_dir() / name
 
 
 def _read_active_session(provider: str = "claude") -> str | None:
@@ -322,6 +342,7 @@ def handle_session_start(input_data: dict, provider: str = "claude") -> None:
         meta.session_id = session_id[:16]
 
     store.create_session(meta)
+    _write_session_meta(meta)
 
     if session_id:
         os.environ[_provider_env(provider)] = session_id
@@ -377,6 +398,7 @@ def handle_session_end(input_data: dict, provider: str = "claude") -> None:
             ),
         )
         store.update_meta(meta)
+        _write_session_meta(meta)
         _product_telemetry.capture(
             _product_telemetry.SESSION_COMPLETED,
             {

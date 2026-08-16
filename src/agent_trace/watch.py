@@ -527,6 +527,7 @@ class EventStreamer:
         for sid, evs in by_session.items():
             meta = _SessionMeta(agent_name=self.config.service_name)
             meta.session_id = sid
+            meta.tenant_id = next((ev.tenant_id for ev in evs if ev.tenant_id), "")
             try:
                 payload = session_to_otlp_genai(
                     meta, evs, service_name=self.config.service_name
@@ -1118,7 +1119,7 @@ def watch_session(
     stream_config: when set, events are pushed in real-time to the configured
     URL as they arrive (push-based streaming).
     """
-    events_file = store._session_dir(session_id) / "events.ndjson"
+    events_file = store._session_file(session_id, "events.ndjson", "event stream")
     if not events_file.exists():
         out.write(f"[watch] events file not found: {events_file}\n")
         return
@@ -1359,6 +1360,21 @@ def cmd_watch(args: argparse.Namespace) -> int:
     if not full_id:
         sys.stderr.write(f"Session not found: {session_id}\n")
         return 1
+
+    tenant_id = (
+        getattr(args, "tenant_id", None)
+        or os.environ.get("AGENT_STRACE_TENANT_ID", "")
+    )
+    if tenant_id:
+        try:
+            tagged_events = store.tag_session(full_id, tenant_id)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            sys.stderr.write(f"[watch] could not assign tenant: {exc}\n")
+            return 1
+        sys.stderr.write(
+            f"[watch] Tenant {tenant_id.strip()} assigned to "
+            f"{tagged_events} existing event(s).\n"
+        )
 
     checkpoint_watcher: CompactionCheckpointWatcher | None = None
     if getattr(args, "compaction_checkpoint", False):
