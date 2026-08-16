@@ -1,0 +1,18 @@
+task: "Implement rate limiting middleware"
+max_cost_usd: 0.50
+max_duration_minutes: 30
+criteria:
+  - name: task-completed
+    scorer: session_status
+    expected: completed
+    weight: 3
+  - name: cost-efficiency
+    scorer: cost_usd
+    threshold: 0.50
+    fail_on: above
+    weight: 2
+  - name: no-tool-loops
+    scorer: lint_violations
+    rule: tool-loop
+    threshold: 0
+    weight: 2

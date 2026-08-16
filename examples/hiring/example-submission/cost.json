@@ -1,0 +1,13 @@
+{
+  "currency": "USD",
+  "estimated": true,
+  "input_rate_per_million": 3.0,
+  "input_tokens": 9,
+  "limitation": "Offline estimate only; aggregate token estimates are derived before content minimization and are not provider billing records.",
+  "output_rate_per_million": 15.0,
+  "output_tokens": 0,
+  "pricing_profile": "bundled-default-v1",
+  "pricing_snapshot_date": "2026-08-16",
+  "schema": "agent-strace-assignment-cost/v1",
+  "total_cost_usd": 2.7e-05
+}

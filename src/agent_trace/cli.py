@@ -64,6 +64,7 @@ from .pr_comment import cmd_pr_comment
 from .postmortem import cmd_postmortem
 from .project_budget import enforce_new_session_budget, load_project_budget_config
 from .share import cmd_share
+from .assignment import cmd_score
 from .token_budget import cmd_token_budget
 from . import telemetry as _product_telemetry
 from .anonymize import cmd_anonymize_export
@@ -1172,6 +1173,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_share.add_argument("--stdout", action="store_true", help="write HTML to stdout instead of a file")
     p_share.add_argument("--open", action="store_true", help="open the HTML file in the browser after creation")
     p_share.add_argument("--postmortem", action="store_true", help="include postmortem analysis in the HTML")
+    p_share.add_argument(
+        "--assignment", action="store_true",
+        help="create a privacy-minimized deterministic assignment ZIP instead of ordinary HTML",
+    )
+
+    # score (assignment bundles; separate from session eval)
+    p_score = sub.add_parser(
+        "score", help="review assignment bundle process telemetry against a rubric"
+    )
+    p_score.add_argument(
+        "submission", help="assignment .zip, or a directory of direct .zip files with --compare"
+    )
+    p_score.add_argument("--rubric", required=True, metavar="FILE", help="strict assignment rubric YAML")
+    p_score.add_argument(
+        "--compare", action="store_true",
+        help="rank direct lowercase .zip files in the submission directory with stable ties",
+    )
+    p_score.add_argument(
+        "--format", choices=("text", "json"), default="text",
+        help="output format (default: text)",
+    )
 
     # pr-comment
     p_pr_comment = sub.add_parser(
@@ -2325,6 +2347,7 @@ def main() -> None:
         "audit": cmd_audit,
         "verify": cmd_verify,
         "share": cmd_share,
+        "score": cmd_score,
         "pr-comment": cmd_pr_comment,
         "postmortem": cmd_postmortem,
         "eval": cmd_eval,
