@@ -283,9 +283,29 @@ export package.
 
 ### `policy`
 ```
-agent-strace policy [--last N] [--output FILE]
+agent-strace policy [generate] [SESSION_ID ...] [--output FILE] [--dry-run]
+agent-strace policy backtest [--policy FILE] [--days N] [--show-sessions] [--format text|json]
+agent-strace policy diff OLD_POLICY NEW_POLICY [--days N] [--format text|json]
+agent-strace policy coverage [--policy FILE] [--days N] [--show-uncovered] [--format text|json]
 ```
-Generate `.agent-scope.json` from observed traces. Review and tighten before committing.
+Generate `.agent-scope.json` from observed traces, or evaluate a proposed policy
+offline against stored sessions before enforcement. The existing bare `policy`
+form remains an alias for `policy generate`.
+
+| Command / flag | Description |
+|---|---|
+| `generate [SESSION_ID ...]` | Suggest a policy from selected sessions, or all sessions by default |
+| `backtest` | Report per-rule matches and calls/sessions that would be blocked |
+| `diff OLD NEW` | Compare both policies over the identical history window |
+| `coverage` | Measure the fraction of tool calls matched by an explicit rule |
+| `--policy FILE` | Policy to evaluate (default: `.agent-scope.json`) |
+| `--days N` | Evaluate sessions started in the last N days (default: `30`) |
+| `--show-sessions` | List session IDs containing calls that would be blocked |
+| `--show-uncovered` | List calls that did not match an explicit rule |
+| `--format text\|json` | Human-readable or machine-readable output |
+
+Backtesting is read-only and uses the same matching semantics as `audit`; it
+never enforces a policy or contacts a remote service.
 
 ### `audit-tools`
 ```

@@ -54,6 +54,11 @@ from .eval import cmd_eval
 from .explain import cmd_explain
 from .jsonl_import import cmd_import
 from .policy import cmd_policy
+from .policy_backtest import (
+    cmd_policy_backtest,
+    cmd_policy_coverage,
+    cmd_policy_diff,
+)
 from .postmortem import cmd_postmortem
 from .project_budget import enforce_new_session_budget, load_project_budget_config
 from .share import cmd_share
@@ -1310,11 +1315,71 @@ def build_parser() -> argparse.ArgumentParser:
                             help="output format (default: text)")
 
     # policy
-    p_policy = sub.add_parser("policy", help="suggest a .agent-scope.json policy from observed traces")
-    p_policy.add_argument("session_ids", nargs="*", help="session IDs to analyse (default: all)")
-    p_policy.add_argument("--output", "-o", default=".agent-scope.json",
-                          help="output path (default: .agent-scope.json)")
-    p_policy.add_argument("--dry-run", action="store_true", help="print policy without writing")
+    p_policy = sub.add_parser("policy", help="generate and test .agent-scope.json policies")
+    policy_sub = p_policy.add_subparsers(dest="policy_command")
+
+    p_policy_generate = policy_sub.add_parser(
+        "generate", help="suggest a policy from observed traces"
+    )
+    p_policy_generate.add_argument(
+        "session_ids", nargs="*", help="session IDs to analyse (default: all)"
+    )
+    p_policy_generate.add_argument(
+        "--output", "-o", default=".agent-scope.json",
+        help="output path (default: .agent-scope.json)",
+    )
+    p_policy_generate.add_argument(
+        "--dry-run", action="store_true", help="print policy without writing"
+    )
+
+    p_policy_backtest = policy_sub.add_parser(
+        "backtest", help="simulate a policy against historical sessions"
+    )
+    p_policy_backtest.add_argument(
+        "--policy", default=".agent-scope.json",
+        help="policy file (default: .agent-scope.json)",
+    )
+    p_policy_backtest.add_argument(
+        "--days", type=int, default=30, help="history window in days (default: 30)"
+    )
+    p_policy_backtest.add_argument(
+        "--show-sessions", action="store_true", help="list sessions the policy would block"
+    )
+    p_policy_backtest.add_argument(
+        "--format", choices=("text", "json"), default="text",
+        help="output format (default: text)",
+    )
+
+    p_policy_diff = policy_sub.add_parser(
+        "diff", help="compare two policies against the same session history"
+    )
+    p_policy_diff.add_argument("old_policy", help="current policy file")
+    p_policy_diff.add_argument("new_policy", help="proposed policy file")
+    p_policy_diff.add_argument(
+        "--days", type=int, default=30, help="history window in days (default: 30)"
+    )
+    p_policy_diff.add_argument(
+        "--format", choices=("text", "json"), default="text",
+        help="output format (default: text)",
+    )
+
+    p_policy_coverage = policy_sub.add_parser(
+        "coverage", help="measure explicit-rule coverage over historical sessions"
+    )
+    p_policy_coverage.add_argument(
+        "--policy", default=".agent-scope.json",
+        help="policy file (default: .agent-scope.json)",
+    )
+    p_policy_coverage.add_argument(
+        "--days", type=int, default=30, help="history window in days (default: 30)"
+    )
+    p_policy_coverage.add_argument(
+        "--show-uncovered", action="store_true", help="list tool calls with no explicit rule"
+    )
+    p_policy_coverage.add_argument(
+        "--format", choices=("text", "json"), default="text",
+        help="output format (default: text)",
+    )
 
     # dashboard
     p_dash = sub.add_parser("dashboard", help="aggregate view across sessions")
@@ -1976,6 +2041,41 @@ def _run_with_product_telemetry(args: argparse.Namespace, handler):
 
 
 _EVAL_EXPLICIT_SUBCOMMANDS = {"gate", "run", "compare", "ci", "dataset"}
+_POLICY_EXPLICIT_SUBCOMMANDS = {"generate", "backtest", "diff", "coverage"}
+
+
+def _command_index(argv: list[str]) -> int:
+    """Return the first non-global-option argument index."""
+    command_index = 0
+    while command_index < len(argv):
+        current = argv[command_index]
+        if current == "--trace-dir":
+            command_index += 2
+            continue
+        if current.startswith("--trace-dir=") or current in {"--version"}:
+            command_index += 1
+            continue
+        break
+    return command_index
+
+
+def _normalise_policy_argv(argv: list[str]) -> list[str]:
+    """Route the legacy bare ``policy`` form through ``policy generate``."""
+    normalised = list(argv)
+    command_index = _command_index(normalised)
+    if command_index >= len(normalised) or normalised[command_index] != "policy":
+        return normalised
+
+    next_index = command_index + 1
+    if next_index >= len(normalised):
+        normalised.insert(next_index, "generate")
+        return normalised
+
+    next_arg = normalised[next_index]
+    if next_arg in {"-h", "--help"} or next_arg in _POLICY_EXPLICIT_SUBCOMMANDS:
+        return normalised
+    normalised.insert(next_index, "generate")
+    return normalised
 
 
 def _normalise_eval_argv(argv: list[str]) -> list[str]:
@@ -1985,16 +2085,7 @@ def _normalise_eval_argv(argv: list[str]) -> list[str]:
     allowing ``agent-strace eval [SESSION_ID] --baseline ...`` as documented.
     """
     normalised = list(argv)
-    command_index = 0
-    while command_index < len(normalised):
-        current = normalised[command_index]
-        if current == "--trace-dir":
-            command_index += 2
-            continue
-        if current.startswith("--trace-dir=") or current in {"--version"}:
-            command_index += 1
-            continue
-        break
+    command_index = _command_index(normalised)
 
     if command_index >= len(normalised) or normalised[command_index] != "eval":
         return normalised
@@ -2013,7 +2104,8 @@ def _normalise_eval_argv(argv: list[str]) -> list[str]:
 
 def main() -> None:
     parser = build_parser()
-    args = parser.parse_args(_normalise_eval_argv(sys.argv[1:]))
+    argv = _normalise_policy_argv(sys.argv[1:])
+    args = parser.parse_args(_normalise_eval_argv(argv))
 
     if not args.command:
         parser.print_help()
@@ -2056,7 +2148,11 @@ def main() -> None:
         "eval": cmd_eval,
         "watch": cmd_watch,
         "mcp-scan": cmd_mcp_scan,
-        "policy": cmd_policy,
+        "policy": {
+            "backtest": cmd_policy_backtest,
+            "diff": cmd_policy_diff,
+            "coverage": cmd_policy_coverage,
+        }.get(getattr(args, "policy_command", ""), cmd_policy),
         "dashboard": cmd_dashboard,
         "annotate": cmd_annotate,
         "token-budget": cmd_token_budget,
