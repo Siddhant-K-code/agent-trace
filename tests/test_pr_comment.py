@@ -574,6 +574,9 @@ class TestCommand(unittest.TestCase):
 
     def test_composite_action_registers_safe_opt_in_comment_step(self):
         action = (Path(__file__).parents[1] / "action.yml").read_text()
+        self.assertIn('pip install "agent-strace[$EXTRAS]"', action)
+        self.assertIn("pip install agent-strace", action)
+        self.assertNotIn("pip install agent-trace", action)
         self.assertIn("  post-pr-comment:\n", action)
         self.assertIn("  github-token:\n", action)
         self.assertIn("inputs.post-pr-comment == 'true'", action)

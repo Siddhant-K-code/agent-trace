@@ -55,9 +55,9 @@ runs:
       run: |
         EXTRAS="${{ inputs.install-extras }}"
         if [ -n "$EXTRAS" ]; then
-          pip install "agent-trace[$EXTRAS]"
+          pip install "agent-strace[$EXTRAS]"
         else
-          pip install agent-trace
+          pip install agent-strace
         fi
 
     - name: Run evals

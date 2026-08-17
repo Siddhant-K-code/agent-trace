@@ -1085,7 +1085,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="disable automatic secret redaction in generated hooks",
     )
-    p_setup.add_argument("--global", dest="global_config", action="store_true", help="output config for ~/.claude/settings.json (all projects)")
+    p_setup.add_argument(
+        "--global",
+        dest="global_config",
+        action="store_true",
+        help="compatibility flag; Claude setup already targets ~/.claude/settings.json",
+    )
     p_setup.add_argument("--cli", choices=["claude", "codex", "gemini", "cursor", "copilot", "all"], default="claude",
                          help="agent CLI to configure (default: claude)")
 
