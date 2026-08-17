@@ -34,7 +34,7 @@ jobs:
       # Uses the reusable action bundled with agent-trace.
       # Results appear in the GitHub Actions step summary automatically.
       - name: Run agent-trace eval
-        uses: Siddhant-K-code/agent-trace@main
+        uses: Siddhant-K-code/agent-trace@v0.93.1
         with:
           baseline: .agent-traces/baselines/main.json
           tolerance: "0.05"

@@ -10,7 +10,7 @@ See [ADR-0012](../ADRs/0012-server-side-event-collector.md) for design rationale
 
 > **Status: planned.** A managed `collector.agent-strace.dev` endpoint is on the roadmap. When available, it will implement the same API as `agent-strace server` — no client changes required.
 >
-> Track progress and sign up for early access: [agent-strace/collector](https://github.com/Siddhant-K-code/agent-strace-collector) *(infrastructure repo, separate from this package)*
+> Track design and implementation progress in [agent-trace issue #129](https://github.com/Siddhant-K-code/agent-trace/issues/129).
 
 Once live, the only change needed is the endpoint:
 

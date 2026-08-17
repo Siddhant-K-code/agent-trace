@@ -17,7 +17,7 @@ OIDC flow:
 Token validation uses the IdP's JWKS endpoint. Requires ``authlib`` or
 ``PyJWT`` as an optional extra:
 
-    pip install agent-trace[oidc]
+    pip install agent-strace[oidc]
 
 Without the optional dep, the server still starts but token signature
 verification is skipped (suitable for development/testing only).
@@ -166,7 +166,7 @@ def verify_id_token(id_token: str, discovery: dict, client_id: str) -> dict:
     # No verification library — decode without verification (dev only)
     sys.stderr.write(
         "[sso] WARNING: id_token signature not verified. "
-        "Install agent-trace[oidc] for production use.\n"
+        "Install agent-strace[oidc] for production use.\n"
     )
     return decode_id_token_claims(id_token)
 

@@ -1,6 +1,9 @@
 # Security
 
-agent-strace provides two complementary mechanisms for keeping sensitive data out of traces: secret redaction (at capture time) and PII anonymization (at export time). A policy file lets you audit and restrict what the agent is allowed to do.
+agent-strace provides complementary mechanisms for keeping sensitive data out
+of traces and derived reports: secret redaction at capture time, PII
+anonymization at export time, and privacy-minimized report formats. A policy
+file lets you audit and restrict what the agent is allowed to do.
 
 Anonymous product telemetry is a separate, default-on data path. CLI telemetry
 can be disabled with `agent-strace telemetry disable`; extension telemetry can
@@ -115,6 +118,21 @@ labels, not authorization controls. Use separate authenticated collectors for
 organizations that must be isolated. Static HTML escapes all labels and has no
 external assets.
 
+### Privacy-minimized reports and bundles
+
+Use the purpose-built derived formats when raw trace content is not required:
+
+- assignment submissions include allowlisted, anonymous process telemetry; see
+  [Assignment submissions and review](hiring.md#responsible-interpretation)
+- compliance crosswalks omit prompts, commands, URLs, and raw identifiers; see
+  [Compliance evidence crosswalk](compliance-report.md#privacy-and-integrity)
+- organization reports support `--anonymize` for external sharing; see
+  [Organization reporting](org-report.md#output-and-privacy)
+
+These formats have narrower disclosure boundaries than ordinary
+`agent-strace share` output, which can include replay data such as prompts,
+tool results, commands, and paths.
+
 ---
 
 ## Policy files
@@ -164,29 +182,42 @@ agent-strace policy --last 20 --output .agent-scope.json
 
 ## Role-based access control
 
-Restrict who can read, export, or delete sessions on a hosted collector.
+Manage org-level and workspace-scoped permissions for users and groups.
 
 ```bash
-# Assign a role
-agent-strace rbac assign --user alice@example.com --role editor --scope org
+# Assign an org-level role
+agent-strace rbac assign --user alice@example.com --role admin --by security@example.com
 
 # Scope to a specific workspace
-agent-strace rbac assign --user bob@example.com --role viewer --scope workspace --workspace prod
+agent-strace rbac assign --user bob@example.com --role workspace:viewer --workspace prod
+
+# Assign a role to a group
+agent-strace rbac assign --group engineering --role member
 
 # Check access
-agent-strace rbac check --user alice@example.com --action export --resource sessions
+agent-strace rbac check --user alice@example.com --action export_compliance
+agent-strace rbac check --user bob@example.com --action read_sessions --workspace prod
 
 # List all assignments
 agent-strace rbac list
+
+# Revoke the workspace assignment
+agent-strace rbac revoke --user bob@example.com --workspace prod
 ```
 
-| Role | Permissions |
+| Role | Scope and permissions |
 |---|---|
-| `admin` | Full access: read, write, delete, manage roles |
-| `editor` | Read and export sessions, run evals |
+| `owner` | Full org access, including RBAC, billing, and SSO management |
+| `admin` | Read and run agents; annotate; manage policies, identities, and workspaces; export compliance data |
+| `member` | Read sessions, run agents, and annotate |
 | `viewer` | Read sessions only |
+| `machine` | Programmatic identity with read-session access |
+| `workspace:admin` | `admin` permissions in the named workspace |
+| `workspace:member` | `member` permissions in the named workspace |
+| `workspace:viewer` | `viewer` permissions in the named workspace |
 
-Assignments are stored in `.agent-strace/rbac.json` (local) or on the hosted collector.
+Workspace roles require `--workspace ID`; org roles must omit it. Assignments are
+stored locally in `.agent-traces/rbac.json` by default.
 
 ---
 

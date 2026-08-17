@@ -331,13 +331,15 @@ class TestHooksRedaction(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
         os.environ["AGENT_TRACE_DIR"] = self.tmpdir
-        os.environ["AGENT_TRACE_REDACT"] = "1"
+        os.environ.pop("AGENT_TRACE_REDACT", None)
+        os.environ.pop("AGENT_TRACE_NO_REDACT", None)
         handle_session_start({"session_id": "redacttest123456", "source": "startup"})
         self.session_id = _read_active_session()
 
     def tearDown(self):
         os.environ.pop("AGENT_TRACE_DIR", None)
         os.environ.pop("AGENT_TRACE_REDACT", None)
+        os.environ.pop("AGENT_TRACE_NO_REDACT", None)
 
     def test_secrets_redacted_in_user_prompt(self):
         handle_user_prompt({
@@ -349,6 +351,18 @@ class TestHooksRedaction(unittest.TestCase):
         prompts = [e for e in events if e.event_type == EventType.USER_PROMPT]
         self.assertEqual(len(prompts), 1)
         self.assertNotIn("sk-abc123", str(prompts[0].data))
+
+    def test_no_redact_environment_opt_out_preserves_secret(self):
+        os.environ["AGENT_TRACE_NO_REDACT"] = "1"
+        handle_user_prompt({
+            "prompt": "Use this API key: sk-abc123def456ghi789jkl012mno345pqr678",
+        })
+
+        store = TraceStore(self.tmpdir, redact=False)
+        events = store.load_events(self.session_id)
+        prompts = [e for e in events if e.event_type == EventType.USER_PROMPT]
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("sk-abc123", str(prompts[0].data))
 
     def test_secrets_redacted_in_tool_input(self):
         handle_pre_tool({

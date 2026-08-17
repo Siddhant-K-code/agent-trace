@@ -141,11 +141,12 @@ agent-strace watch \
 
 ## Baseline anomaly detection
 
-Build a statistical baseline from recent sessions and alert when a new session deviates:
+Build a statistical baseline from completed sessions that started recently and
+alert when a new session deviates:
 
 ```bash
-# Build baseline from the last 50 sessions
-agent-strace baseline update --sessions 50
+# Build a baseline from completed sessions that started in the last 30 days
+agent-strace baseline update --since 30
 
 # Check a session against the baseline
 agent-strace baseline check <session-id>
@@ -154,16 +155,29 @@ agent-strace baseline check <session-id>
 agent-strace baseline show
 ```
 
-Metrics tracked: cost, duration, tool call count, error rate, retry rate, blast radius. Each metric gets a mean and standard deviation. A session is flagged when any metric exceeds `--threshold` standard deviations from the mean (default: 2.0).
+Metrics tracked: cost, tool call count, duration, error rate, and LLM request
+count. Each metric gets a mean and sample standard deviation. A session is
+flagged when any comparable metric exceeds `--sigma` standard deviations from
+the mean (default: `2.0`). At least three baseline samples are required before
+a metric is compared.
 
 ```bash
-agent-strace baseline check <session-id> --threshold 2.5 --format json
+agent-strace baseline check <session-id> --sigma 2.5
+```
+
+Use the same custom profile path when updating, checking, and displaying a
+baseline:
+
+```bash
+agent-strace baseline update --since 14 --output .agent-traces/ci-baseline.json
+agent-strace baseline check <session-id> --baseline .agent-traces/ci-baseline.json
+agent-strace baseline show --baseline .agent-traces/ci-baseline.json
 ```
 
 Use `baseline check` as a CI gate — it exits 1 when the session is anomalous:
 
 ```bash
-agent-strace baseline check $SESSION_ID || echo "Session outside baseline"
+agent-strace baseline check "$SESSION_ID"
 ```
 
 ## EU AI Act Audit Packages

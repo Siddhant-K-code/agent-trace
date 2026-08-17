@@ -18,7 +18,7 @@ pyproject.toml      Package config and optional extras
 - **Zero runtime dependencies in `src/agent_trace/`.** Use Python stdlib only. If a feature requires a third-party package, it must be an optional extra in `pyproject.toml` under `[project.optional-dependencies]`, imported lazily inside the function with a clear `ImportError` message. See ADR-0003.
 - **Never change the `.agent-traces/` storage format** in a way that breaks existing sessions. Adding new fields is fine. Removing or renaming existing fields requires a major version bump and human approval.
 - **Every new CLI command must be registered in `cli.py`** following the existing subparser pattern.
-- **Every new feature must have tests** in `tests/test_<module>.py`. Run `python -m pytest tests/ -v` to verify.
+- **Every new feature must have tests** in `tests/test_<module>.py`. Run `python -m unittest discover -s tests -v` to verify.
 - **OTLP export uses HTTP/JSON only** — no gRPC. See ADR-0006.
 
 ## Development workflow
@@ -28,10 +28,10 @@ pyproject.toml      Package config and optional extras
 pip install -e .
 
 # Run tests
-python -m pytest tests/ -v
+python -m unittest discover -s tests -v
 
 # Run a single test file
-python -m pytest tests/test_watch.py -v
+python -m unittest discover -s tests -p 'test_watch.py' -v
 ```
 
 ## Adding a new feature
@@ -48,10 +48,10 @@ python -m pytest tests/test_watch.py -v
 
 ## Version bumping
 
-Current version: `0.52.0` in `src/agent_trace/__init__.py`.
+Current version: `0.93.1` in `src/agent_trace/__init__.py`.
 
-- New feature (new command, new flag, new integration): bump minor (`0.52.0` → `0.53.0`)
-- Bug fix or small improvement: bump patch (`0.52.0` → `0.52.1`)
+- New feature (new command, new flag, new integration): bump minor (`0.93.1` → `0.94.0`)
+- Bug fix or small improvement: bump patch (`0.93.1` → `0.93.2`)
 - Breaking change to CLI or storage format: bump major — check with maintainer first
 
 ## docs/ structure
