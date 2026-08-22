@@ -66,7 +66,13 @@ copilot plugin marketplace add Siddhant-K-code/agent-trace
 copilot plugin install agent-strace@agent-trace
 ```
 
-See the [Copilot CLI plugin guide](docs/copilot-plugin.md) for verification and usage.
+Restart Copilot CLI, then use `/agent` to select
+`agent-strace:trace-analyst`. Traces are written to `.agent-traces/` in the
+repository you opened. Do not also run `agent-strace setup --cli copilot`,
+which would register duplicate hooks.
+
+See the [Copilot CLI plugin guide](docs/copilot-plugin.md) for verification,
+updates, and usage.
 
 **Option 2: MCP proxy** — wraps any MCP server, works with Cursor, Windsurf, and Copilot Desktop MCP servers
 
