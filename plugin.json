@@ -1,7 +1,7 @@
 {
   "name": "agent-strace",
   "description": "Capture, replay, and analyze GitHub Copilot CLI agent sessions.",
-  "version": "0.94.0",
+  "version": "0.94.1",
   "author": {
     "name": "Siddhant Khare",
     "email": "siddhantkhare2694@gmail.com"

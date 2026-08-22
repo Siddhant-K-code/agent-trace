@@ -6,13 +6,13 @@
   },
   "metadata": {
     "description": "GitHub Copilot CLI plugins for agent observability.",
-    "version": "0.94.0"
+    "version": "0.94.1"
   },
   "plugins": [
     {
       "name": "agent-strace",
       "description": "Capture, replay, and analyze GitHub Copilot CLI agent sessions.",
-      "version": "0.94.0",
+      "version": "0.94.1",
       "source": ".",
       "author": {
         "name": "Siddhant Khare",

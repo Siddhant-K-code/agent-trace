@@ -30,9 +30,10 @@ copilot plugin list
 agent-strace --version
 ```
 
-In an interactive Copilot CLI session, use `/agent` to select `trace-analyst` or
-run `/skills list` to confirm the `agent-strace` skill loaded. New sessions are
-written to `.agent-traces/` in the working directory.
+In an interactive Copilot CLI session, use `/agent` to select
+`agent-strace:trace-analyst` or run `/skills list` to confirm the `agent-strace`
+skill loaded. New sessions are written to `.agent-traces/` in the working
+directory.
 
 ## Use
 
