@@ -288,8 +288,21 @@ def _normalise_payload(input_data: dict, provider: str, event: str) -> dict:
             data["tool_name"] = data.get("toolName")
         if data.get("toolArgs") is not None and "tool_input" not in data:
             data["tool_input"] = data.get("toolArgs")
-        if (data.get("toolResult") is not None or data.get("textResultForLlm") is not None) and "tool_output" not in data:
-            data["tool_output"] = data.get("toolResult", data.get("textResultForLlm", ""))
+        result = data.get("toolResult", data.get("tool_result"))
+        if isinstance(result, dict) and "tool_output" not in data:
+            for key in ("textResultForLlm", "text_result_for_llm", "output"):
+                if key in result:
+                    data["tool_output"] = result[key]
+                    break
+            else:
+                data["tool_output"] = result
+        elif result is not None and "tool_output" not in data:
+            data["tool_output"] = result
+        if data.get("textResultForLlm") is not None and "tool_output" not in data:
+            data["tool_output"] = data.get("textResultForLlm")
+        if event == "post-tool-failure" and data.get("error") and "tool_output" not in data:
+            error = data["error"]
+            data["tool_output"] = error.get("message", error) if isinstance(error, dict) else error
         command = data.get("command")
         if command and not data.get("tool_name"):
             data.setdefault("tool_name", "shell")
@@ -341,7 +354,18 @@ def handle_session_start(input_data: dict, provider: str = "claude") -> None:
     if session_id:
         meta.session_id = session_id[:16]
 
-    store.create_session(meta)
+    source = input_data.get("source", "startup")
+    if source == "resume" and session_id:
+        try:
+            existing_meta = store.load_meta(meta.session_id)
+        except FileNotFoundError:
+            store.create_session(meta)
+        else:
+            existing_meta.ended_at = None
+            meta = existing_meta
+            store.update_meta(meta)
+    else:
+        store.create_session(meta)
     _write_session_meta(meta)
 
     if session_id:
@@ -353,7 +377,7 @@ def handle_session_start(input_data: dict, provider: str = "claude") -> None:
     event_data = {
         "mode": f"{agent_name}-hooks",
         "provider": provider,
-        "source": input_data.get("source", "startup"),
+        "source": source,
         "model": input_data.get("model", ""),
     }
     for key in ("cwd", "transcript_path", "permission_mode"):

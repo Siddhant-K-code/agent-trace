@@ -141,7 +141,14 @@ Cursor hook coverage depends on the events Cursor emits. Native hooks capture pr
 
 ### GitHub Copilot CLI hooks
 
-`agent-strace setup --cli copilot` writes user-level Copilot hooks:
+The recommended setup is the Copilot CLI plugin, which bundles the hooks plus a trace analyst agent and skill:
+
+```bash
+copilot plugin marketplace add Siddhant-K-code/agent-trace
+copilot plugin install agent-strace@agent-trace
+```
+
+See [Copilot CLI plugin](copilot-plugin.md) for verification and usage. Alternatively, `agent-strace setup --cli copilot` writes only the user-level Copilot hooks:
 
 ```
 ~/.copilot/
@@ -149,19 +156,19 @@ Cursor hook coverage depends on the events Cursor emits. Native hooks capture pr
     └── agent-strace.json
 ```
 
-Set `COPILOT_HOME` to install into a different Copilot config directory. The generated config registers Copilot lifecycle hooks using the VS Code-compatible event names:
+Set `COPILOT_HOME` to install into a different Copilot config directory. The generated config registers Copilot lifecycle hooks using the native event names:
 
 ```json
 {
   "version": 1,
   "hooks": {
-    "SessionStart": [{ "hooks": [{ "type": "command", "command": "agent-strace hook --provider copilot session-start" }] }],
-    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "agent-strace hook --provider copilot user-prompt" }] }],
-    "PreToolUse": [{ "matcher": ".*", "hooks": [{ "type": "command", "command": "agent-strace hook --provider copilot pre-tool" }] }],
-    "PostToolUse": [{ "matcher": ".*", "hooks": [{ "type": "command", "command": "agent-strace hook --provider copilot post-tool" }] }],
-    "PostToolUseFailure": [{ "matcher": ".*", "hooks": [{ "type": "command", "command": "agent-strace hook --provider copilot post-tool-failure" }] }],
-    "Stop": [{ "hooks": [{ "type": "command", "command": "agent-strace hook --provider copilot stop" }] }],
-    "SessionEnd": [{ "hooks": [{ "type": "command", "command": "agent-strace hook --provider copilot session-end" }] }]
+    "sessionStart": [{ "type": "command", "command": "agent-strace hook --provider copilot session-start", "timeoutSec": 10 }],
+    "userPromptSubmitted": [{ "type": "command", "command": "agent-strace hook --provider copilot user-prompt", "timeoutSec": 10 }],
+    "preToolUse": [{ "type": "command", "command": "agent-strace hook --provider copilot pre-tool", "timeoutSec": 10 }],
+    "postToolUse": [{ "type": "command", "command": "agent-strace hook --provider copilot post-tool", "timeoutSec": 10 }],
+    "postToolUseFailure": [{ "type": "command", "command": "agent-strace hook --provider copilot post-tool-failure", "timeoutSec": 10 }],
+    "agentStop": [{ "type": "command", "command": "agent-strace hook --provider copilot stop", "timeoutSec": 10 }],
+    "sessionEnd": [{ "type": "command", "command": "agent-strace hook --provider copilot session-end", "timeoutSec": 10 }]
   }
 }
 ```

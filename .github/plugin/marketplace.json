@@ -1,0 +1,32 @@
+{
+  "name": "agent-trace",
+  "owner": {
+    "name": "Siddhant Khare",
+    "email": "siddhantkhare2694@gmail.com"
+  },
+  "metadata": {
+    "description": "GitHub Copilot CLI plugins for agent observability.",
+    "version": "0.94.0"
+  },
+  "plugins": [
+    {
+      "name": "agent-strace",
+      "description": "Capture, replay, and analyze GitHub Copilot CLI agent sessions.",
+      "version": "0.94.0",
+      "source": ".",
+      "author": {
+        "name": "Siddhant Khare",
+        "email": "siddhantkhare2694@gmail.com"
+      },
+      "homepage": "https://github.com/Siddhant-K-code/agent-trace",
+      "repository": "https://github.com/Siddhant-K-code/agent-trace",
+      "license": "MIT",
+      "keywords": [
+        "agents",
+        "copilot-cli",
+        "observability",
+        "tracing"
+      ]
+    }
+  ]
+}
