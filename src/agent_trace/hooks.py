@@ -44,6 +44,7 @@ import json
 import os
 import sys
 import time
+from contextvars import ContextVar
 from pathlib import Path
 
 from .models import EventType, SessionMeta, TraceEvent
@@ -66,6 +67,10 @@ _CODEX_SESSION_ID_ENV = "AGENT_TRACE_CODEX_SESSION_ID"
 _GEMINI_SESSION_ID_ENV = "AGENT_TRACE_GEMINI_SESSION_ID"
 _CURSOR_SESSION_ID_ENV = "AGENT_TRACE_CURSOR_SESSION_ID"
 _COPILOT_SESSION_ID_ENV = "AGENT_TRACE_COPILOT_SESSION_ID"
+_HOOK_STORE_DIR: ContextVar[str | None] = ContextVar(
+    "agent_trace_hook_store_dir",
+    default=None,
+)
 
 _PROVIDER_ENV = {
     "claude": _CLAUDE_SESSION_ID_ENV,
@@ -85,7 +90,25 @@ _PROVIDER_AGENT = {
 
 
 def _get_store_dir() -> str:
-    return os.environ.get("AGENT_TRACE_DIR", ".agent-traces")
+    if "AGENT_TRACE_DIR" in os.environ:
+        return os.environ["AGENT_TRACE_DIR"]
+    return _HOOK_STORE_DIR.get() or ".agent-traces"
+
+
+def _payload_store_dir(input_data: dict) -> str | None:
+    """Resolve a safe workspace-local trace directory from a hook payload."""
+    cwd = input_data.get("cwd")
+    if not isinstance(cwd, str) or not cwd:
+        return None
+
+    try:
+        workspace = Path(cwd)
+        if not workspace.is_absolute() or not workspace.is_dir():
+            return None
+    except (OSError, ValueError):
+        return None
+
+    return str(workspace / ".agent-traces")
 
 
 def _get_store() -> TraceStore:
@@ -735,9 +758,12 @@ def hook_main(args: list[str]) -> None:
         sys.stderr.write(f"Valid events: {', '.join(handlers.keys())}\n")
         sys.exit(1)
 
+    store_dir_token = _HOOK_STORE_DIR.set(_payload_store_dir(input_data))
     try:
         handler(input_data)
     except Exception as e:
         # Hooks must not crash Claude Code. Log and exit cleanly.
         sys.stderr.write(f"agent-strace hook error: {e}\n")
         sys.exit(0)
+    finally:
+        _HOOK_STORE_DIR.reset(store_dir_token)

@@ -187,6 +187,95 @@ class TestCopilotHooks(unittest.TestCase):
         self.assertEqual(starts[-1].data["source"], "resume")
 
 
+class TestHookPayloadStoreDirectory(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tempdir.name)
+        self.process_cwd = self.root / "installed-plugin"
+        self.payload_cwd = self.root / "repository"
+        self.process_cwd.mkdir()
+        self.payload_cwd.mkdir()
+        self.original_cwd = Path.cwd()
+        os.environ.pop("AGENT_TRACE_DIR", None)
+        os.environ.pop("AGENT_TRACE_CLAUDE_SESSION_ID", None)
+        os.environ.pop("AGENT_TRACE_COPILOT_SESSION_ID", None)
+        os.chdir(self.process_cwd)
+
+    def tearDown(self):
+        os.chdir(self.original_cwd)
+        os.environ.pop("AGENT_TRACE_DIR", None)
+        os.environ.pop("AGENT_TRACE_CLAUDE_SESSION_ID", None)
+        os.environ.pop("AGENT_TRACE_COPILOT_SESSION_ID", None)
+        self.tempdir.cleanup()
+
+    def _dispatch_start(self, provider, payload):
+        with patch.object(sys, "stdin", io.StringIO(json.dumps(payload))):
+            hook_main(["--provider", provider, "session-start"])
+
+    def test_hook_main_uses_payload_cwd_for_camel_and_snake_payloads(self):
+        copilot_session = "copilot-cwd-session"
+        claude_session = "claude-cwd-session"
+
+        self._dispatch_start("copilot", {
+            "sessionId": copilot_session,
+            "cwd": str(self.payload_cwd),
+            "source": "startup",
+        })
+        self._dispatch_start("claude", {
+            "session_id": claude_session,
+            "cwd": str(self.payload_cwd),
+            "source": "startup",
+        })
+
+        store = TraceStore(self.payload_cwd / ".agent-traces")
+        self.assertIsNotNone(store.load_meta(copilot_session[:16]))
+        self.assertIsNotNone(store.load_meta(claude_session[:16]))
+        self.assertFalse((self.process_cwd / ".agent-traces").exists())
+
+    def test_explicit_trace_dir_takes_precedence_over_payload_cwd(self):
+        explicit_dir = self.root / "explicit-traces"
+        os.environ["AGENT_TRACE_DIR"] = str(explicit_dir)
+        session = "explicit-dir-session"
+
+        self._dispatch_start("copilot", {
+            "sessionId": session,
+            "cwd": str(self.payload_cwd),
+            "source": "startup",
+        })
+
+        self.assertIsNotNone(TraceStore(explicit_dir).load_meta(session[:16]))
+        self.assertFalse((self.payload_cwd / ".agent-traces").exists())
+        self.assertFalse((self.process_cwd / ".agent-traces").exists())
+
+    def test_invalid_payload_cwd_falls_back_without_using_invalid_path(self):
+        non_directory = self.root / "not-a-directory"
+        non_directory.write_text("not a directory")
+        relative_directory = self.process_cwd / "relative-directory"
+        relative_directory.mkdir()
+        invalid_cwds = (
+            ("non-string", [str(self.payload_cwd)]),
+            ("non-directory", str(non_directory)),
+            ("relative", relative_directory.name),
+        )
+
+        for index, (case, cwd) in enumerate(invalid_cwds):
+            session = f"invalid-cwd-{index}-session"
+            with self.subTest(case=case):
+                self._dispatch_start("copilot", {
+                    "sessionId": session,
+                    "cwd": cwd,
+                    "source": "startup",
+                })
+                self.assertIsNotNone(
+                    TraceStore(self.process_cwd / ".agent-traces").load_meta(
+                        session[:16]
+                    )
+                )
+
+        self.assertFalse((non_directory / ".agent-traces").exists())
+        self.assertFalse((relative_directory / ".agent-traces").exists())
+
+
 class TestCopilotSetup(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
