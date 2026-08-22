@@ -93,6 +93,99 @@ class TestCopilotHooks(unittest.TestCase):
         self.assertEqual(stops[0].data["stop_reason"], "end_turn")
         self.assertEqual(stops[0].data["transcript_path"], "/tmp/copilot-transcript.jsonl")
 
+    def test_copilot_hook_main_records_official_tool_result_payloads(self):
+        with patch.object(sys, "stdin", io.StringIO(json.dumps({
+            "sessionId": "copilotofficial123",
+            "source": "startup",
+        }))):
+            hook_main(["--provider", "copilot", "session-start"])
+
+        with patch.object(sys, "stdin", io.StringIO(json.dumps({
+            "sessionId": "copilotofficial123",
+            "toolName": "bash",
+            "toolArgs": {"command": "echo ok"},
+        }))):
+            hook_main(["--provider", "copilot", "pre-tool"])
+
+        with patch.object(sys, "stdin", io.StringIO(json.dumps({
+            "sessionId": "copilotofficial123",
+            "toolName": "bash",
+            "toolArgs": {"command": "echo ok"},
+            "toolResult": {
+                "resultType": "success",
+                "textResultForLlm": "ok",
+            },
+        }))):
+            hook_main(["--provider", "copilot", "post-tool"])
+
+        session_id = _read_active_session(provider="copilot")
+        events = TraceStore(self.tmpdir).load_events(session_id)
+        results = [event for event in events if event.event_type == EventType.TOOL_RESULT]
+
+        self.assertEqual(results[0].data["result"], "ok")
+
+    def test_copilot_hook_main_records_official_failure_payload(self):
+        with patch.object(sys, "stdin", io.StringIO(json.dumps({
+            "sessionId": "copilotfailure123",
+            "source": "startup",
+        }))):
+            hook_main(["--provider", "copilot", "session-start"])
+
+        with patch.object(sys, "stdin", io.StringIO(json.dumps({
+            "sessionId": "copilotfailure123",
+            "toolName": "bash",
+            "toolArgs": {"command": "false"},
+        }))):
+            hook_main(["--provider", "copilot", "pre-tool"])
+
+        with patch.object(sys, "stdin", io.StringIO(json.dumps({
+            "sessionId": "copilotfailure123",
+            "toolName": "bash",
+            "toolArgs": {"command": "false"},
+            "error": "Command exited with status 1",
+        }))):
+            hook_main(["--provider", "copilot", "post-tool-failure"])
+
+        session_id = _read_active_session(provider="copilot")
+        events = TraceStore(self.tmpdir).load_events(session_id)
+        errors = [event for event in events if event.event_type == EventType.ERROR]
+
+        self.assertEqual(errors[0].data["error"], "Command exited with status 1")
+
+    def test_copilot_resume_preserves_existing_session_metadata(self):
+        session_payload = {
+            "sessionId": "copilotresume1234",
+            "source": "startup",
+        }
+        with patch.object(sys, "stdin", io.StringIO(json.dumps(session_payload))):
+            hook_main(["--provider", "copilot", "session-start"])
+
+        store = TraceStore(self.tmpdir)
+        session_id = _read_active_session(provider="copilot")
+        meta = store.load_meta(session_id)
+        started_at = meta.started_at
+        meta.ended_at = started_at + 4
+        meta.total_duration_ms = 4000
+        meta.tool_calls = 3
+        meta.errors = 1
+        store.update_meta(meta)
+
+        session_payload["source"] = "resume"
+        with patch.object(sys, "stdin", io.StringIO(json.dumps(session_payload))):
+            hook_main(["--provider", "copilot", "session-start"])
+
+        resumed = store.load_meta(session_id)
+        events = store.load_events(session_id)
+        starts = [event for event in events if event.event_type == EventType.SESSION_START]
+
+        self.assertEqual(resumed.started_at, started_at)
+        self.assertIsNone(resumed.ended_at)
+        self.assertEqual(resumed.total_duration_ms, 4000)
+        self.assertEqual(resumed.tool_calls, 3)
+        self.assertEqual(resumed.errors, 1)
+        self.assertEqual(len(starts), 2)
+        self.assertEqual(starts[-1].data["source"], "resume")
+
 
 class TestCopilotSetup(unittest.TestCase):
     def setUp(self):
@@ -121,16 +214,16 @@ class TestCopilotSetup(unittest.TestCase):
 
         self.assertEqual(printed_hooks, hooks)
         self.assertEqual(hooks["version"], 1)
-        self.assertIn("SessionStart", hooks["hooks"])
-        self.assertIn("PostToolUseFailure", hooks["hooks"])
-        self.assertIn("Stop", hooks["hooks"])
-        self.assertIn("SessionEnd", hooks["hooks"])
+        self.assertIn("sessionStart", hooks["hooks"])
+        self.assertIn("postToolUseFailure", hooks["hooks"])
+        self.assertIn("agentStop", hooks["hooks"])
+        self.assertIn("sessionEnd", hooks["hooks"])
         self.assertEqual(
-            hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
+            hooks["hooks"]["userPromptSubmitted"][0]["command"],
             "agent-strace hook --provider copilot user-prompt",
         )
         self.assertEqual(
-            hooks["hooks"]["Stop"][0]["hooks"][0]["command"],
+            hooks["hooks"]["agentStop"][0]["command"],
             "agent-strace hook --provider copilot stop",
         )
         self.assertIn("GitHub Copilot hooks config", err.getvalue())

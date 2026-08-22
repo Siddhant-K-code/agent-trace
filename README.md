@@ -57,6 +57,17 @@ agent-strace replay            # replay the latest
 
 Full config and JSON: [docs/setup.md](docs/setup.md)
 
+### GitHub Copilot CLI plugin
+
+After installing `agent-strace`, install the repository as a Copilot CLI plugin to enable tracing hooks plus the trace analyst agent and skill:
+
+```bash
+copilot plugin marketplace add Siddhant-K-code/agent-trace
+copilot plugin install agent-strace@agent-trace
+```
+
+See the [Copilot CLI plugin guide](docs/copilot-plugin.md) for verification and usage.
+
 **Option 2: MCP proxy** — wraps any MCP server, works with Cursor, Windsurf, and Copilot Desktop MCP servers
 
 ```bash

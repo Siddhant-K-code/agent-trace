@@ -662,50 +662,40 @@ def _copilot_hooks_config(args: argparse.Namespace) -> dict:
     return {
         "version": 1,
         "hooks": {
-            "SessionStart": [{
-                "hooks": [{
-                    "type": "command",
-                    "command": f"{cmd_prefix} session-start",
-                }],
+            "sessionStart": [{
+                "type": "command",
+                "command": f"{cmd_prefix} session-start",
+                "timeoutSec": 10,
             }],
-            "UserPromptSubmit": [{
-                "hooks": [{
-                    "type": "command",
-                    "command": f"{cmd_prefix} user-prompt",
-                }],
+            "userPromptSubmitted": [{
+                "type": "command",
+                "command": f"{cmd_prefix} user-prompt",
+                "timeoutSec": 10,
             }],
-            "PreToolUse": [{
-                "matcher": ".*",
-                "hooks": [{
-                    "type": "command",
-                    "command": f"{cmd_prefix} pre-tool",
-                }],
+            "preToolUse": [{
+                "type": "command",
+                "command": f"{cmd_prefix} pre-tool",
+                "timeoutSec": 10,
             }],
-            "PostToolUse": [{
-                "matcher": ".*",
-                "hooks": [{
-                    "type": "command",
-                    "command": f"{cmd_prefix} post-tool",
-                }],
+            "postToolUse": [{
+                "type": "command",
+                "command": f"{cmd_prefix} post-tool",
+                "timeoutSec": 10,
             }],
-            "PostToolUseFailure": [{
-                "matcher": ".*",
-                "hooks": [{
-                    "type": "command",
-                    "command": f"{cmd_prefix} post-tool-failure",
-                }],
+            "postToolUseFailure": [{
+                "type": "command",
+                "command": f"{cmd_prefix} post-tool-failure",
+                "timeoutSec": 10,
             }],
-            "Stop": [{
-                "hooks": [{
-                    "type": "command",
-                    "command": f"{cmd_prefix} stop",
-                }],
+            "agentStop": [{
+                "type": "command",
+                "command": f"{cmd_prefix} stop",
+                "timeoutSec": 10,
             }],
-            "SessionEnd": [{
-                "hooks": [{
-                    "type": "command",
-                    "command": f"{cmd_prefix} session-end",
-                }],
+            "sessionEnd": [{
+                "type": "command",
+                "command": f"{cmd_prefix} session-end",
+                "timeoutSec": 10,
             }],
         }
     }

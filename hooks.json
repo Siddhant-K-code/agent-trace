@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "command": "agent-strace hook --provider copilot session-start",
+        "timeoutSec": 10
+      }
+    ],
+    "userPromptSubmitted": [
+      {
+        "type": "command",
+        "command": "agent-strace hook --provider copilot user-prompt",
+        "timeoutSec": 10
+      }
+    ],
+    "preToolUse": [
+      {
+        "type": "command",
+        "command": "agent-strace hook --provider copilot pre-tool",
+        "timeoutSec": 10
+      }
+    ],
+    "postToolUse": [
+      {
+        "type": "command",
+        "command": "agent-strace hook --provider copilot post-tool",
+        "timeoutSec": 10
+      }
+    ],
+    "postToolUseFailure": [
+      {
+        "type": "command",
+        "command": "agent-strace hook --provider copilot post-tool-failure",
+        "timeoutSec": 10
+      }
+    ],
+    "agentStop": [
+      {
+        "type": "command",
+        "command": "agent-strace hook --provider copilot stop",
+        "timeoutSec": 10
+      }
+    ],
+    "sessionEnd": [
+      {
+        "type": "command",
+        "command": "agent-strace hook --provider copilot session-end",
+        "timeoutSec": 10
+      }
+    ]
+  }
+}
