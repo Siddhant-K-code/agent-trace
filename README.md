@@ -1,7 +1,3 @@
-> [!NOTE]
-> `agent-trace` is prior systems work, not my current product lane.
-> I keep it public as an OSS reference for local-first trace and replay of AI agent tool use, and as background for my work on reviewable AI-assisted engineering.
-
 > [!IMPORTANT]
 > The core idea is not “more autonomous agents.”
 > The core idea is making AI-assisted work inspectable after the fact: what ran, what changed, what failed, and where a human should review.
@@ -11,7 +7,6 @@
 
 # agent-trace
 
-[![Run in Ona](https://ona.com/run-in-ona.svg)](https://app.ona.com/#https://github.com/Siddhant-K-code/agent-trace)
 [![PyPI](https://img.shields.io/pypi/v/agent-strace)](https://pypi.org/project/agent-strace/)
 [![Python](https://img.shields.io/pypi/pyversions/agent-strace)](https://pypi.org/project/agent-strace/)
 [![CI](https://github.com/Siddhant-K-code/agent-trace/actions/workflows/test.yml/badge.svg)](https://github.com/Siddhant-K-code/agent-trace/actions/workflows/test.yml)
