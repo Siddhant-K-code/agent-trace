@@ -285,19 +285,15 @@ def assess_evidence_health(
     session whose end marker is unexpectedly absent.
     """
     event_list = list(events)
-    if not event_list:
-        return EvidenceHealthResult(
-            status=EvidenceHealthStatus.UNKNOWN,
-            reasons=(_reason("no_events", "no captured events are available for review"),),
-            provider=provider,
-            capture_method=capture_method,
-            event_count=0,
+    no_events = not event_list
+    if no_events:
+        reasons = [_reason("no_events", "no captured events are available for review")]
+        invalid = False
+    else:
+        reasons, invalid = _structural_reasons(
+            event_list,
+            session_finalized=session_finalized,
         )
-
-    reasons, invalid = _structural_reasons(
-        event_list,
-        session_finalized=session_finalized,
-    )
 
     for failure in export_failures:
         failure_text = str(failure).strip()
@@ -328,7 +324,7 @@ def assess_evidence_health(
 
     if invalid:
         status = EvidenceHealthStatus.INVALID
-    elif active_only:
+    elif no_events or active_only:
         status = EvidenceHealthStatus.UNKNOWN
     elif reasons:
         status = EvidenceHealthStatus.PARTIAL
