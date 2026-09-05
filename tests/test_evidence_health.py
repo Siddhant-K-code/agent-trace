@@ -61,6 +61,23 @@ class TestEvidenceHealth(unittest.TestCase):
         self.assertEqual(result.status, EvidenceHealthStatus.UNKNOWN)
         self.assertEqual([reason.code for reason in result.reasons], ["no_events"])
 
+    def test_empty_evidence_keeps_observable_failures_and_declared_limits(self):
+        result = assess_evidence_health(
+            [],
+            provider_blind_spots=["tool execution is not exposed by this capture adapter"],
+            export_failures=["collector rejected batch 1"],
+        )
+
+        self.assertEqual(result.status, EvidenceHealthStatus.UNKNOWN)
+        self.assertEqual(
+            [reason.code for reason in result.reasons],
+            ["no_events", "export_failure", "provider_blind_spot"],
+        )
+        self.assertEqual(
+            result.reasons[-1].kind,
+            EvidenceHealthReasonKind.PROVIDER_LIMITATION,
+        )
+
     def test_active_session_without_end_is_unknown_not_partial(self):
         events = [
             event(EventType.SESSION_START, 1.0, "start"),
