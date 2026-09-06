@@ -76,7 +76,10 @@ class _RelationshipSpec:
     result_type: EventType
     missing_result_code: str
     orphan_result_code: str
+    duplicate_outcome_code: str
+    out_of_order_outcome_code: str
     label: str
+    error_is_terminal: bool = False
 
 
 _RELATIONSHIPS = (
@@ -85,13 +88,18 @@ _RELATIONSHIPS = (
         result_type=EventType.TOOL_RESULT,
         missing_result_code="unpaired_tool_call",
         orphan_result_code="orphan_tool_result",
+        duplicate_outcome_code="duplicate_tool_outcome",
+        out_of_order_outcome_code="out_of_order_tool_outcome",
         label="tool",
+        error_is_terminal=True,
     ),
     _RelationshipSpec(
         request_type=EventType.LLM_REQUEST,
         result_type=EventType.LLM_RESPONSE,
         missing_result_code="unpaired_llm_request",
         orphan_result_code="orphan_llm_response",
+        duplicate_outcome_code="duplicate_llm_outcome",
+        out_of_order_outcome_code="out_of_order_llm_outcome",
         label="LLM",
     ),
 )
@@ -116,39 +124,79 @@ def _relationship_reasons(
     events: Sequence[TraceEvent],
     spec: _RelationshipSpec,
 ) -> list[EvidenceHealthReason]:
-    requests = {event.event_id: event for event in events if event.event_type == spec.request_type}
-    results = [event for event in events if event.event_type == spec.result_type]
-    paired_request_ids: set[str] = set()
+    request_positions = {
+        event.event_id: index
+        for index, event in enumerate(events)
+        if event.event_type == spec.request_type
+    }
+    requests = {
+        event.event_id: event
+        for event in events
+        if event.event_type == spec.request_type
+    }
+    outcomes_by_request: dict[str, list[tuple[int, TraceEvent]]] = {}
     reasons: list[EvidenceHealthReason] = []
 
-    for result in results:
-        parent_id = result.parent_id.strip()
-        if parent_id and parent_id in requests:
-            paired_request_ids.add(parent_id)
+    for index, event in enumerate(events):
+        is_result = event.event_type == spec.result_type
+        is_terminal_error = (
+            spec.error_is_terminal
+            and event.event_type == EventType.ERROR
+            and event.parent_id.strip() in requests
+        )
+        if not is_result and not is_terminal_error:
             continue
 
-        detail = (
-            f" references unknown parent {parent_id!r}"
-            if parent_id
-            else " has no parent_id"
-        )
-        reasons.append(
-            _reason(
-                spec.orphan_result_code,
-                f"{spec.label} result {result.event_id!r}{detail}",
-                event=result,
+        parent_id = event.parent_id.strip()
+        if parent_id and parent_id in requests:
+            outcomes_by_request.setdefault(parent_id, []).append((index, event))
+            continue
+
+        if is_result:
+            detail = (
+                f" references unknown parent {parent_id!r}"
+                if parent_id
+                else " has no parent_id"
             )
-        )
+            reasons.append(
+                _reason(
+                    spec.orphan_result_code,
+                    f"{spec.label} result {event.event_id!r}{detail}",
+                    event=event,
+                )
+            )
 
     for request_id, request in requests.items():
-        if request_id not in paired_request_ids:
+        outcomes = outcomes_by_request.get(request_id, [])
+        if not outcomes:
             reasons.append(
                 _reason(
                     spec.missing_result_code,
-                    f"{spec.label} request {request_id!r} has no recorded result",
+                    f"{spec.label} request {request_id!r} has no recorded terminal outcome",
                     event=request,
                 )
             )
+            continue
+
+        if len(outcomes) > 1:
+            reasons.append(
+                _reason(
+                    spec.duplicate_outcome_code,
+                    f"{spec.label} request {request_id!r} has {len(outcomes)} recorded terminal outcomes",
+                    event=outcomes[1][1],
+                )
+            )
+
+        request_position = request_positions[request_id]
+        for outcome_position, outcome in outcomes:
+            if outcome_position < request_position:
+                reasons.append(
+                    _reason(
+                        spec.out_of_order_outcome_code,
+                        f"{spec.label} outcome {outcome.event_id!r} appears before request {request_id!r}",
+                        event=outcome,
+                    )
+                )
 
     return reasons
 
