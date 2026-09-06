@@ -55,6 +55,64 @@ class TestEvidenceHealth(unittest.TestCase):
         self.assertEqual(result.provider, "codex")
         self.assertEqual(result.capture_method, "hooks")
 
+    def test_failed_tool_call_error_is_a_terminal_outcome(self):
+        events = [
+            event(EventType.SESSION_START, 1.0, "start"),
+            event(EventType.TOOL_CALL, 2.0, "tool-call"),
+            event(EventType.ERROR, 3.0, "tool-error", parent_id="tool-call"),
+            event(EventType.SESSION_END, 4.0, "end"),
+        ]
+
+        result = assess_evidence_health(events, session_finalized=True)
+
+        self.assertEqual(result.status, EvidenceHealthStatus.HEALTHY)
+        self.assertNotIn("unpaired_tool_call", [reason.code for reason in result.reasons])
+
+    def test_out_of_order_tool_result_is_partial(self):
+        events = [
+            event(EventType.SESSION_START, 1.0, "start"),
+            event(EventType.TOOL_RESULT, 2.0, "tool-result", parent_id="tool-call"),
+            event(EventType.TOOL_CALL, 3.0, "tool-call"),
+            event(EventType.SESSION_END, 4.0, "end"),
+        ]
+
+        result = assess_evidence_health(events, session_finalized=True)
+        codes = [reason.code for reason in result.reasons]
+
+        self.assertEqual(result.status, EvidenceHealthStatus.PARTIAL)
+        self.assertIn("out_of_order_tool_outcome", codes)
+        self.assertNotIn("unpaired_tool_call", codes)
+
+    def test_duplicate_tool_terminal_outcomes_are_partial(self):
+        events = [
+            event(EventType.SESSION_START, 1.0, "start"),
+            event(EventType.TOOL_CALL, 2.0, "tool-call"),
+            event(EventType.TOOL_RESULT, 3.0, "tool-result", parent_id="tool-call"),
+            event(EventType.ERROR, 4.0, "tool-error", parent_id="tool-call"),
+            event(EventType.SESSION_END, 5.0, "end"),
+        ]
+
+        result = assess_evidence_health(events, session_finalized=True)
+        codes = [reason.code for reason in result.reasons]
+
+        self.assertEqual(result.status, EvidenceHealthStatus.PARTIAL)
+        self.assertIn("duplicate_tool_outcome", codes)
+        self.assertNotIn("unpaired_tool_call", codes)
+
+    def test_duplicate_llm_responses_are_partial(self):
+        events = [
+            event(EventType.SESSION_START, 1.0, "start"),
+            event(EventType.LLM_REQUEST, 2.0, "llm-request"),
+            event(EventType.LLM_RESPONSE, 3.0, "llm-response-1", parent_id="llm-request"),
+            event(EventType.LLM_RESPONSE, 4.0, "llm-response-2", parent_id="llm-request"),
+            event(EventType.SESSION_END, 5.0, "end"),
+        ]
+
+        result = assess_evidence_health(events, session_finalized=True)
+
+        self.assertEqual(result.status, EvidenceHealthStatus.PARTIAL)
+        self.assertIn("duplicate_llm_outcome", [reason.code for reason in result.reasons])
+
     def test_empty_evidence_is_unknown(self):
         result = assess_evidence_health([])
 
