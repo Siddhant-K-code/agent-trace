@@ -28,6 +28,23 @@ class TestRepresentativeEvidenceFixture(unittest.TestCase):
         self.assertEqual(len(self.events), self.expected["expected_event_count"])
         self.assertEqual({event.session_id for event in self.events}, {self.expected["session_id"]})
 
+    def test_fixture_metadata_matches_session_start(self):
+        starts = [event for event in self.events if event.event_type == EventType.SESSION_START]
+        self.assertEqual(len(starts), 1)
+        self.assertEqual(starts[0].data["provider"], self.expected["provider"])
+        self.assertEqual(starts[0].data["fixture_version"], self.expected["fixture_version"])
+        self.assertEqual(starts[0].session_id, self.expected["session_id"])
+
+    def test_failed_call_has_one_terminal_outcome(self):
+        by_id = {event.event_id: event for event in self.events}
+        failure = by_id[self.expected["expected_failure_event_id"]]
+        children = [
+            child for child in self.events
+            if child.parent_id == failure.parent_id
+            and child.event_type in (EventType.TOOL_RESULT, EventType.ERROR)
+        ]
+        self.assertEqual([child.event_id for child in children], [failure.event_id])
+
     def test_fixture_covers_review_workflow(self):
         kinds = {event.event_type for event in self.events}
         for required in (
