@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Iterable, Literal
 
@@ -83,6 +84,11 @@ def build_disclosure_preview(
             tool_result_count += 1
 
         keys = {str(key).lower() for key in event.data}
+        # Hook TOOL_CALL payloads keep command/path arguments in data["arguments"].
+        # Only inspect key names; never copy argument values into this preview.
+        arguments = event.data.get("arguments")
+        if event.event_type == EventType.TOOL_CALL and isinstance(arguments, Mapping):
+            keys.update(str(key).lower() for key in arguments)
         if event.event_type == EventType.TOOL_CALL and keys & _COMMAND_KEYS:
             command_count += 1
         if event.event_type in {EventType.FILE_READ, EventType.FILE_WRITE} or keys & _PATH_KEYS:
