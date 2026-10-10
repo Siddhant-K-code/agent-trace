@@ -2,7 +2,6 @@
 {"event_type":"user_prompt","timestamp":1789300801.0,"event_id":"ev-prompt","session_id":"fixture-review-001","data":{"content":"[REDACTED synthetic request] fix the failing example test","redaction_reason":"synthetic-secret-marker"},"redacted":true}
 {"event_type":"file_read","timestamp":1789300802.0,"event_id":"ev-read","session_id":"fixture-review-001","data":{"path":"src/example.py","source":"repository"}}
 {"event_type":"tool_call","timestamp":1789300803.0,"event_id":"tool-test-1","session_id":"fixture-review-001","data":{"tool":"shell","command":"python -m pytest -q tests/test_example.py"}}
-{"event_type":"tool_result","timestamp":1789300804.0,"event_id":"result-test-1","session_id":"fixture-review-001","parent_id":"tool-test-1","duration_ms":620.0,"data":{"exit_code":1,"output":"1 failed"}}
 {"event_type":"error","timestamp":1789300804.1,"event_id":"ev-error","session_id":"fixture-review-001","parent_id":"tool-test-1","data":{"message":"example test failed","recoverable":true}}
 {"event_type":"file_write","timestamp":1789300805.0,"event_id":"ev-write","session_id":"fixture-review-001","data":{"path":"src/example.py","summary":"adjusted deterministic example output"}}
 {"event_type":"tool_call","timestamp":1789300806.0,"event_id":"tool-test-2","session_id":"fixture-review-001","data":{"tool":"shell","command":"python -m pytest -q tests/test_example.py","retry_of":"tool-test-1"}}
