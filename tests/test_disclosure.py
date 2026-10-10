@@ -57,6 +57,26 @@ class TestDisclosurePreview(unittest.TestCase):
         ):
             self.assertNotIn(secret, payload)
 
+    def test_hook_style_nested_arguments_count_without_exposing_values(self):
+        event = TraceEvent(
+            event_type=EventType.TOOL_CALL,
+            data={
+                "tool_name": "Bash",
+                "arguments": {
+                    "command": "SECRET-EXECUTION",
+                    "file_path": "/private/hook-file",
+                },
+            },
+        )
+
+        preview = build_disclosure_preview([event])
+        self.assertEqual(preview.command_count, 1)
+        self.assertEqual(preview.path_count, 1)
+        self.assertEqual(preview.tool_input_count, 1)
+        serialized = json.dumps(preview.to_dict())
+        self.assertNotIn("SECRET-EXECUTION", serialized)
+        self.assertNotIn("/private/hook-file", serialized)
+
     def test_include_content_changes_mode_not_preview_values(self):
         event = TraceEvent(
             event_type=EventType.USER_PROMPT,
