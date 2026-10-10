@@ -7,7 +7,7 @@
       "capture_method": "cli_hooks",
       "setup_command": "agent-strace setup --cli claude",
       "config_location": "~/.claude/settings.json",
-      "rollback": "Remove the AgentTrace hook commands written by agent-strace setup from ~/.claude/settings.json.",
+      "rollback": "The setup command only prints Claude hook JSON; it does not change ~/.claude/settings.json. If you manually merged the generated hook entries there, remove only AgentTrace's commands while retaining other hooks.",
       "verification_status": "unverified",
       "tested_version": null,
       "last_verified": null,
@@ -35,7 +35,7 @@
       "capture_method": "cli_hooks",
       "setup_command": "agent-strace setup --cli codex",
       "config_location": "~/.codex/hooks.json",
-      "rollback": "Remove the AgentTrace hook commands written by agent-strace setup from ~/.codex/hooks.json.",
+      "rollback": "Before running setup, copy ~/.codex/hooks.json to a safe backup if it exists. The setup command overwrites hooks.json rather than merging with existing hooks. To roll back, restore that backup; without one, remove AgentTrace hooks manually, but previous hooks overwritten by setup cannot be reconstructed.",
       "verification_status": "unverified",
       "tested_version": null,
       "last_verified": null,
@@ -49,11 +49,12 @@
         "file": "provider_defined",
         "command": "provider_defined",
         "error": "provider_defined",
-        "stop": "unavailable"
+        "stop": "captured"
       },
       "privacy": "Events pass through AgentTrace's normal redaction path; hook visibility is limited to fields emitted by the provider.",
       "known_gaps": [
-        "The current integration documentation does not claim a Codex session-end or stop hook.",
+        "The setup command replaces hooks.json; restoring previously configured hooks requires a backup.",
+        "The current integration documentation does not claim a Codex session-end hook.",
         "File, command, and error coverage depends on PreToolUse/PostToolUse payloads.",
         "This entry is intentionally marked unverified until a clean-environment versioned verification run is recorded."
       ]
