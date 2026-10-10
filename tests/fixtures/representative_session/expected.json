@@ -2,7 +2,7 @@
   "fixture_version": 1,
   "session_id": "fixture-review-001",
   "provider": "synthetic",
-  "expected_event_count": 13,
+  "expected_event_count": 12,
   "expected_failure_event_id": "ev-error",
   "expected_retry_call_id": "tool-test-2",
   "expected_recovery_result_id": "result-test-2",
