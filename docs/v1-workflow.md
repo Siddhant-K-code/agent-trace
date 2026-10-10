@@ -27,6 +27,14 @@ from optional or experimental surfaces.
    Configure only the adapter you actually use. Secret redaction is enabled by
    default. See [setup](setup.md) for adapter-specific limits.
 
+   **Claude Code requires a manual installation step:** `agent-strace setup`
+   prints hook JSON; it does **not** write `~/.claude/settings.json`.
+   Copy the generated `hooks` entries into that file, merging them with
+   existing hooks instead of replacing unrelated settings. See the
+   [Claude Code hook example](setup.md#option-1-cli-hooks-recommended).
+   For Codex, back up an existing `~/.codex/hooks.json` before running
+   setup because the command overwrites that file.
+
 3. **Verify that capture works before trusting a session.**
    This stage is a **v1 candidate, not yet a stable top-level CLI contract**.
    Provider/capture verification is tracked in #239. Until that lands, verify
