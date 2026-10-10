@@ -57,6 +57,7 @@ class EvidenceHealthResult:
     schema_version: int = EVIDENCE_HEALTH_SCHEMA_VERSION
     provider: str = ""
     capture_method: str = ""
+    capture_matrix_version: str = ""
     observed_start: bool = False
     observed_end: bool = False
     event_count: int = 0
@@ -202,6 +203,37 @@ def _relationship_reasons(
     return reasons
 
 
+def _orphan_error_reasons(events: Sequence[TraceEvent]) -> list[EvidenceHealthReason]:
+    """Report ERROR events that cannot be tied to any tool or LLM request."""
+    request_ids = {
+        event.event_id
+        for event in events
+        if event.event_type in (EventType.TOOL_CALL, EventType.LLM_REQUEST)
+    }
+    reasons: list[EvidenceHealthReason] = []
+    for event in events:
+        if event.event_type != EventType.ERROR:
+            continue
+        parent_id = event.parent_id.strip()
+        if not parent_id:
+            reasons.append(
+                _reason(
+                    "unlinked_error",
+                    f"error event {event.event_id!r} has no parent_id",
+                    event=event,
+                )
+            )
+        elif parent_id not in request_ids:
+            reasons.append(
+                _reason(
+                    "orphan_error",
+                    f"error event {event.event_id!r} references unknown parent {parent_id!r}",
+                    event=event,
+                )
+            )
+    return reasons
+
+
 def _structural_reasons(
     events: Sequence[TraceEvent],
     *,
@@ -312,6 +344,7 @@ def _structural_reasons(
 
     for spec in _RELATIONSHIPS:
         reasons.extend(_relationship_reasons(events, spec))
+    reasons.extend(_orphan_error_reasons(events))
 
     return reasons, invalid
 
@@ -321,6 +354,7 @@ def assess_evidence_health(
     *,
     provider: str = "",
     capture_method: str = "",
+    capture_matrix_version: str = "",
     provider_blind_spots: Iterable[str] = (),
     session_finalized: bool | None = None,
     export_failures: Iterable[str] = (),
@@ -328,7 +362,9 @@ def assess_evidence_health(
     """Assess whether a captured session is structurally reviewable.
 
     ``provider_blind_spots`` must come from declared provider/capture metadata.
-    This function never invents a provider limitation from an absent event.
+    Pass its version or stable reference in ``capture_matrix_version`` so callers
+    can interpret limitations after the capture matrix changes. This function
+    never invents a provider limitation from an absent event.
 
     ``session_finalized=False`` distinguishes an active session from a completed
     session whose end marker is unexpectedly absent.
@@ -385,6 +421,7 @@ def assess_evidence_health(
         reasons=tuple(reasons),
         provider=provider,
         capture_method=capture_method,
+        capture_matrix_version=capture_matrix_version,
         observed_start=any(event.event_type == EventType.SESSION_START for event in event_list),
         observed_end=any(event.event_type == EventType.SESSION_END for event in event_list),
         event_count=len(event_list),
