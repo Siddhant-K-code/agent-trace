@@ -185,6 +185,36 @@ class TestEvidenceHealth(unittest.TestCase):
         self.assertEqual(result.status, EvidenceHealthStatus.PARTIAL)
         self.assertEqual(codes, {"unpaired_tool_call", "orphan_tool_result"})
 
+    def test_orphan_error_with_unknown_parent_is_partial(self):
+        events = [
+            event(EventType.SESSION_START, 1.0, "start"),
+            event(EventType.TOOL_CALL, 2.0, "call-without-result"),
+            event(EventType.ERROR, 3.0, "orphan-error", parent_id="typo-call"),
+            event(EventType.SESSION_END, 4.0, "end"),
+        ]
+
+        result = assess_evidence_health(events, session_finalized=True)
+        reasons = {reason.code: reason for reason in result.reasons}
+
+        self.assertEqual(result.status, EvidenceHealthStatus.PARTIAL)
+        self.assertIn("unpaired_tool_call", reasons)
+        self.assertEqual(reasons["orphan_error"].event_id, "orphan-error")
+        self.assertEqual(reasons["orphan_error"].kind, EvidenceHealthReasonKind.OBSERVED)
+        self.assertIn("typo-call", reasons["orphan_error"].message)
+
+    def test_error_without_parent_cannot_be_silently_healthy(self):
+        events = [
+            event(EventType.SESSION_START, 1.0, "start"),
+            event(EventType.ERROR, 2.0, "unlinked-error"),
+            event(EventType.SESSION_END, 3.0, "end"),
+        ]
+
+        result = assess_evidence_health(events, session_finalized=True)
+
+        self.assertEqual(result.status, EvidenceHealthStatus.PARTIAL)
+        self.assertEqual([reason.code for reason in result.reasons], ["unlinked_error"])
+        self.assertEqual(result.reasons[0].event_id, "unlinked-error")
+
     def test_timestamp_regression_is_partial(self):
         events = [
             event(EventType.SESSION_START, 1.0, "start"),
@@ -267,8 +297,15 @@ class TestEvidenceHealth(unittest.TestCase):
             event(EventType.SESSION_END, 2.0, "end"),
         ]
 
-        payload = assess_evidence_health(events, session_finalized=True).to_dict()
+        payload = assess_evidence_health(
+            events,
+            provider="codex",
+            capture_method="hooks",
+            capture_matrix_version="codex-hooks-matrix-v1",
+            session_finalized=True,
+        ).to_dict()
 
+        self.assertEqual(payload["capture_matrix_version"], "codex-hooks-matrix-v1")
         self.assertEqual(payload["schema_version"], EVIDENCE_HEALTH_SCHEMA_VERSION)
         self.assertEqual(payload["status"], "healthy")
         self.assertEqual(payload["reasons"], ())
