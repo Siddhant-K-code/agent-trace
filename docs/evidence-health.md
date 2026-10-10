@@ -25,7 +25,8 @@ The first version checks:
 - mixed session IDs;
 - non-finite timestamps and timestamp regressions;
 - unpaired tool calls/results;
-- unpaired LLM requests/responses; and
+- unpaired LLM requests/responses;
+- `ERROR` events with a missing or unknown parent request (retaining the error event ID); and
 - export/drop failures explicitly reported by the caller.
 
 The calculation is deterministic and local. It performs no network calls.
@@ -41,6 +42,7 @@ health = assess_evidence_health(
     events,
     provider="codex",
     capture_method="hooks",
+    capture_matrix_version="<actual matrix version or stable reference>",
     provider_blind_spots=[
         "example limitation supplied by the capture matrix",
     ],
@@ -48,7 +50,7 @@ health = assess_evidence_health(
 )
 ```
 
-A declared blind spot makes the result `partial` even when the observed event stream is structurally clean. This prevents `healthy` from becoming a false claim about activity a provider cannot expose.
+A declared blind spot makes the result `partial` even when the observed event stream is structurally clean. Include the applicable `capture_matrix_version` in the assessment so downstream consumers can interpret provider limitations against the version of the matrix used to declare them. An empty version means the adapter did not supply a reference; it must not be interpreted as verified completeness. This prevents `healthy` from becoming a false claim about activity a provider cannot expose.
 
 ## Integration boundary
 
