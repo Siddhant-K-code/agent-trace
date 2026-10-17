@@ -62,6 +62,14 @@ agent-strace explain  # plain-English summary
 
 `agent-strace setup --cli codex` writes user-level hooks to `$CODEX_CONFIG_DIR/hooks.json` or `~/.codex/hooks.json`, and also prints the JSON:
 
+Before replacing an existing file, setup copies its original bytes once to `$CODEX_CONFIG_DIR/hooks.json.agent-strace.bak` (or `~/.codex/hooks.json.agent-strace.bak`). Repeated setup runs preserve that first backup. To restore the pre-AgentTrace config at the default location:
+
+```bash
+cp ~/.codex/hooks.json.agent-strace.bak ~/.codex/hooks.json
+```
+
+When using `CODEX_CONFIG_DIR`, run `cp "$CODEX_CONFIG_DIR/hooks.json.agent-strace.bak" "$CODEX_CONFIG_DIR/hooks.json"` instead. If no config existed before setup, no backup is created; remove the generated file with `rm ~/.codex/hooks.json` (or `rm "$CODEX_CONFIG_DIR/hooks.json"`).
+
 ```json
 {
   "hooks": {

@@ -20,8 +20,8 @@ The machine-readable source is [`capture-matrix.json`](capture-matrix.json). An 
 ## OpenAI Codex
 
 - Config: `~/.codex/hooks.json`
-- Warning: the setup command **overwrites** `~/.codex/hooks.json`; back up an existing file *before* running it. The old hook configuration cannot be recovered by merely deleting AgentTrace commands.
-- Rollback: restore the backup of `hooks.json`; if no backup exists, remove AgentTrace commands manually, knowing previously overwritten hooks are not recoverable from this file.
+- Backup: before overwriting an existing config, setup preserves its original bytes once at `~/.codex/hooks.json.agent-strace.bak`. Repeated setup runs do not overwrite that pre-AgentTrace snapshot.
+- Rollback: run `cp ~/.codex/hooks.json.agent-strace.bak ~/.codex/hooks.json`. If no config existed before setup, no backup is created; run `rm ~/.codex/hooks.json` instead.
 - Current documented coverage: session start, user prompts, assistant responses, `PreToolUse`/`PostToolUse` tool activity, and `Stop` (captured as a stop event, **not** as session end).
 - Known gap: no separate Codex session-end event is claimed; file, command, and error detail depends on provider payloads.
 

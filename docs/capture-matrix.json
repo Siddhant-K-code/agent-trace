@@ -35,7 +35,7 @@
       "capture_method": "cli_hooks",
       "setup_command": "agent-strace setup --cli codex",
       "config_location": "~/.codex/hooks.json",
-      "rollback": "Before running setup, copy ~/.codex/hooks.json to a safe backup if it exists. The setup command overwrites hooks.json rather than merging with existing hooks. To roll back, restore that backup; without one, remove AgentTrace hooks manually, but previous hooks overwritten by setup cannot be reconstructed.",
+      "rollback": "Setup preserves the original bytes once at ~/.codex/hooks.json.agent-strace.bak before overwriting an existing file. Restore them with cp ~/.codex/hooks.json.agent-strace.bak ~/.codex/hooks.json. If no file existed before setup, remove the generated config with rm ~/.codex/hooks.json.",
       "verification_status": "unverified",
       "tested_version": null,
       "last_verified": null,
@@ -53,7 +53,7 @@
       },
       "privacy": "Events pass through AgentTrace's normal redaction path; hook visibility is limited to fields emitted by the provider.",
       "known_gaps": [
-        "The setup command replaces hooks.json; restoring previously configured hooks requires a backup.",
+        "The setup command replaces hooks.json rather than merging; repeated runs retain the first hooks.json.agent-strace.bak snapshot.",
         "The current integration documentation does not claim a Codex session-end hook.",
         "File, command, and error coverage depends on PreToolUse/PostToolUse payloads.",
         "This entry is intentionally marked unverified until a clean-environment versioned verification run is recorded."
