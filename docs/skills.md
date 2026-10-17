@@ -164,9 +164,22 @@ summarized per skill:
 | `tests_after_load` | Loaded sessions with a test command after the load |
 
 **Never loaded** lists skills that were available in at least `--min-sessions`
-sessions (default 5) but never loaded. This is usually the most actionable
-output. The skill may not be triggering: check its `name` and `description`
-frontmatter, or whether the work it covers ever came up.
+sessions (default 5) but never loaded. It is a starting point for
+investigation, not evidence that a skill is broken. Two caveats apply, and are
+included in JSON output as `caveats.never_loaded` and summarized in one line in
+text output:
+
+- **Availability is not relevance.** A skill that was never loaded may simply
+  not match any task in the window. The trace cannot tell whether a task
+  should have triggered it.
+- **Availability reflects today's filesystem.** Sessions that ran before a
+  skill was installed are still counted as "available", so `sessions_available`
+  is over-counted for recently added skills. There is no install-time heuristic
+  to correct for this. Narrowing `--since` reduces the effect.
+
+To find out whether a never-loaded skill fails to trigger, pair the list with a
+trigger eval: run tasks where the skill is relevant and check whether it loads.
+If it does not, check its `name` and `description` frontmatter.
 
 **Loaded vs available-but-not-loaded** compares session-level facts (any test
 run, any error, `session_end` recorded) between the two groups, with n shown for
@@ -186,6 +199,7 @@ a session that cannot be read is skipped and counted in
 
 - What the skill set looked like when an old session ran (availability is read
   now).
+- Whether any task in the window should have triggered a given skill.
 - Whether auto-injected context files were read or used.
 - Skills a provider injects without a tool call, file read, or prompt mention.
 - Whether non-command guidance (tone, judgement, ordering, "prefer X over Y")

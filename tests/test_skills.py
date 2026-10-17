@@ -538,6 +538,26 @@ class TestAggregate(SkillsTestBase):
         report = aggregate_reports(self._reports(0, 3), min_sessions=5)
         self.assertEqual(report["never_loaded"], [])
 
+    def test_never_loaded_carries_caveats(self):
+        report = aggregate_reports(self._reports(2, 5), min_sessions=5)
+        caveats = report["caveats"]["never_loaded"]
+
+        self.assertEqual(len(caveats), 2)
+        self.assertIn("not relevance", caveats[0])
+        self.assertIn("over-counted", caveats[1])
+        out = io.StringIO()
+        format_aggregate_text(report, out)
+        section = out.getvalue().split("Never loaded", 1)[1].splitlines()
+        self.assertTrue(section[1].strip().startswith("Caveat:"))
+        self.assertIn("trigger eval", section[1])
+        self.assertIn("never-used", section[2])
+
+        empty = aggregate_reports(self._reports(0, 3), min_sessions=5)
+        self.assertEqual(empty["caveats"]["never_loaded"], caveats)
+        out = io.StringIO()
+        format_aggregate_text(empty, out)
+        self.assertNotIn("Caveat:", out.getvalue())
+
     def test_comparison_suppressed_below_min_n(self):
         report = aggregate_reports(self._reports(2, 8), min_sessions=3)
         comparison = self._skill(report, "deploy-check")["comparison"]

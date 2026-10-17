@@ -73,6 +73,13 @@ NOT_MEASURABLE = (
     "Outcome facts after a load are not causal; task mix is not controlled.",
 )
 
+NEVER_LOADED_CAVEATS = (
+    "Availability is not relevance: a skill that was never loaded may simply not "
+    "match any task in the window.",
+    "Availability reflects today's filesystem, so sessions from before a skill was "
+    "installed are over-counted as available.",
+)
+
 _SKILL_FILE = "SKILL.md"
 _MAX_RESOURCE_FILES = 500
 _MAX_REPORTED_PATHS = 10
@@ -1227,6 +1234,7 @@ def aggregate_reports(
         "availability_basis": "filesystem_now",
         "skills": skills,
         "never_loaded": sorted(never_loaded, key=lambda item: (-item["sessions_available"], item["name"])),
+        "caveats": {"never_loaded": list(NEVER_LOADED_CAVEATS)},
         "not_measurable": list(NOT_MEASURABLE),
     }
 
@@ -1440,6 +1448,9 @@ def format_aggregate_text(report: Mapping[str, Any], out: TextIO | None = None) 
 
     w(f"\nNever loaded (available in >= {report['min_sessions']} sessions, loaded in 0):\n")
     if report["never_loaded"]:
+        w("  Caveat: availability is not relevance (no task in the window may have needed the skill), and it "
+          "reflects today's filesystem, so sessions before install are over-counted. Pair with a trigger "
+          "eval on tasks where the skill applies.\n")
         for item in report["never_loaded"]:
             w(f"  {item['name']} (available in {item['sessions_available']} sessions)\n")
     else:
