@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "providers": [
+    {
+      "id": "claude",
+      "name": "Claude Code",
+      "capture_method": "cli_hooks",
+      "setup_command": "agent-strace setup --cli claude",
+      "config_location": "~/.claude/settings.json",
+      "rollback": "The setup command only prints Claude hook JSON; it does not change ~/.claude/settings.json. If you manually merged the generated hook entries there, remove only AgentTrace's commands while retaining other hooks.",
+      "verification_status": "unverified",
+      "tested_version": null,
+      "last_verified": null,
+      "fixture_test_reference": null,
+      "coverage": {
+        "session_start": "captured",
+        "session_end": "captured",
+        "prompt": "captured",
+        "response": "captured",
+        "tool": "captured",
+        "file": "provider_defined",
+        "command": "provider_defined",
+        "error": "provider_defined",
+        "stop": "captured"
+      },
+      "privacy": "Events pass through AgentTrace's normal redaction path; hook visibility is limited to fields emitted by the provider.",
+      "known_gaps": [
+        "File and command semantics depend on the tool payload exposed by Claude Code hooks.",
+        "This entry is intentionally marked unverified until a clean-environment versioned verification run is recorded."
+      ]
+    },
+    {
+      "id": "codex",
+      "name": "OpenAI Codex",
+      "capture_method": "cli_hooks",
+      "setup_command": "agent-strace setup --cli codex",
+      "config_location": "~/.codex/hooks.json",
+      "rollback": "Setup preserves the original bytes once at ~/.codex/hooks.json.agent-strace.bak before overwriting an existing file. Restore them with cp ~/.codex/hooks.json.agent-strace.bak ~/.codex/hooks.json. If no file existed before setup, remove the generated config with rm ~/.codex/hooks.json.",
+      "verification_status": "unverified",
+      "tested_version": null,
+      "last_verified": null,
+      "fixture_test_reference": "tests/test_codex_hooks.py",
+      "coverage": {
+        "session_start": "captured",
+        "session_end": "unavailable",
+        "prompt": "captured",
+        "response": "captured",
+        "tool": "captured",
+        "file": "provider_defined",
+        "command": "provider_defined",
+        "error": "provider_defined",
+        "stop": "captured"
+      },
+      "privacy": "Events pass through AgentTrace's normal redaction path; hook visibility is limited to fields emitted by the provider.",
+      "known_gaps": [
+        "The setup command replaces hooks.json rather than merging; repeated runs retain the first hooks.json.agent-strace.bak snapshot.",
+        "The current integration documentation does not claim a Codex session-end hook.",
+        "File, command, and error coverage depends on PreToolUse/PostToolUse payloads.",
+        "This entry is intentionally marked unverified until a clean-environment versioned verification run is recorded."
+      ]
+    }
+  ]
+}

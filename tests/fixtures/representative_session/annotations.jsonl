@@ -1,0 +1,1 @@
+{"annotation_id":"ann-human-1","session_id":"fixture-review-001","event_id":"ev-error","offset_seconds":4.1,"label":"decision","note":"Human correction: treat the first failure as recoverable evidence and verify the retry before concluding the task failed.","author":"fixture-reviewer","created_at":1789300812.0}
