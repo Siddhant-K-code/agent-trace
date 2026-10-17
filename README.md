@@ -68,6 +68,8 @@ agent-strace replay            # replay the latest
 
 Full config and JSON: [docs/setup.md](docs/setup.md)
 
+Provider coverage and known gaps: [docs/capture-matrix.md](docs/capture-matrix.md)
+
 ### GitHub Copilot CLI plugin
 
 After installing `agent-strace`, install the repository as a Copilot CLI plugin to enable tracing hooks plus the trace analyst agent and skill:
