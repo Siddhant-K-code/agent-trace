@@ -17,6 +17,7 @@ import argparse
 import csv
 import json
 import os
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -820,12 +821,40 @@ def _codex_config_dir() -> Path:
     return Path(os.environ.get("CODEX_CONFIG_DIR", "~/.codex")).expanduser()
 
 
-def _write_codex_hooks_config(args: argparse.Namespace) -> Path:
+def _write_codex_hooks_config(args: argparse.Namespace) -> tuple[Path, Path | None, bool]:
     config_dir = _codex_config_dir()
     config_dir.mkdir(parents=True, exist_ok=True)
     hooks_path = config_dir / "hooks.json"
-    hooks_path.write_text(json.dumps(_codex_hooks_config(args), indent=2) + "\n")
-    return hooks_path
+    backup_path = hooks_path.with_name(f"{hooks_path.name}.agent-strace.bak")
+    existing_backup = None
+    backup_created = False
+
+    if hooks_path.exists():
+        original_bytes = hooks_path.read_bytes()
+        original_mode = hooks_path.stat().st_mode & 0o777
+        try:
+            backup_fd = os.open(
+                backup_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                original_mode,
+            )
+        except FileExistsError:
+            existing_backup = backup_path
+        else:
+            try:
+                with os.fdopen(backup_fd, "wb") as backup_file:
+                    backup_file.write(original_bytes)
+            except Exception:
+                backup_path.unlink(missing_ok=True)
+                raise
+            existing_backup = backup_path
+            backup_created = True
+
+    hooks_path.write_text(
+        json.dumps(_codex_hooks_config(args), indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return hooks_path, existing_backup, backup_created
 
 
 def _write_gemini_extension(args: argparse.Namespace) -> tuple[Path, Path]:
@@ -872,7 +901,19 @@ def cmd_setup(args: argparse.Namespace) -> None:
     if cli in ("claude", "all"):
         configs.append(("Claude Code", "~/.claude/settings.json", _claude_hooks_config(args)))
     if cli in ("codex", "all"):
-        hooks_path = _write_codex_hooks_config(args)
+        hooks_path, backup_path, backup_created = _write_codex_hooks_config(args)
+        if backup_created:
+            sys.stderr.write(
+                f"Backed up existing OpenAI Codex hooks config: {backup_path}\n"
+            )
+        elif backup_path is not None:
+            sys.stderr.write(
+                f"Preserved existing OpenAI Codex hooks backup (not overwritten): {backup_path}\n"
+            )
+        else:
+            sys.stderr.write(
+                f"No existing OpenAI Codex hooks config to back up at {hooks_path}\n"
+            )
         sys.stderr.write(f"Wrote OpenAI Codex hooks config: {hooks_path}\n")
         configs.append(("OpenAI Codex", str(hooks_path), _codex_hooks_config(args)))
     if cli in ("gemini", "all"):
@@ -898,9 +939,18 @@ def cmd_setup(args: argparse.Namespace) -> None:
         sys.stdout.write(json.dumps(config, indent=2) + "\n")
 
     if cli in ("codex", "all"):
+        codex_hooks_path = _codex_config_dir() / "hooks.json"
+        backup_path = codex_hooks_path.with_name(
+            f"{codex_hooks_path.name}.agent-strace.bak"
+        )
+        restore_command = (
+            f"cp {shlex.quote(str(backup_path))} "
+            f"{shlex.quote(str(codex_hooks_path))}"
+        )
         sys.stderr.write(
             "\nCodex hook checklist:\n"
             "- Put the JSON at ~/.codex/hooks.json or <repo>/.codex/hooks.json, not ~/.codex/hooks/hooks.json.\n"
+            f"- Restore the pre-AgentTrace config, when backed up, with: {restore_command}\n"
             "- In ~/.codex/config.toml, remove [features].hooks = false if present.\n"
             "- Reload Codex, then review and trust command hooks in the Hooks UI or /hooks.\n"
         )

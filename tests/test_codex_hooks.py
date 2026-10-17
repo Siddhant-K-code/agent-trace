@@ -164,12 +164,15 @@ class TestCodexSetup(unittest.TestCase):
         os.environ["CODEX_CONFIG_DIR"] = self.tmpdir
         self.gemini_dir = tempfile.mkdtemp()
         os.environ["GEMINI_CONFIG_DIR"] = self.gemini_dir
+        self.cursor_dir = tempfile.mkdtemp()
+        os.environ["CURSOR_CONFIG_DIR"] = self.cursor_dir
         self.copilot_home = tempfile.mkdtemp()
         os.environ["COPILOT_HOME"] = self.copilot_home
 
     def tearDown(self):
         os.environ.pop("CODEX_CONFIG_DIR", None)
         os.environ.pop("GEMINI_CONFIG_DIR", None)
+        os.environ.pop("CURSOR_CONFIG_DIR", None)
         os.environ.pop("COPILOT_HOME", None)
 
     def test_setup_cli_codex_outputs_hooks_json(self):
@@ -189,6 +192,8 @@ class TestCodexSetup(unittest.TestCase):
         written_config = json.loads((Path(self.tmpdir) / "hooks.json").read_text())
         err_text = err.getvalue()
         self.assertEqual(written_config, config)
+        self.assertFalse((Path(self.tmpdir) / "hooks.json.agent-strace.bak").exists())
+        self.assertIn("No existing OpenAI Codex hooks config to back up", err_text)
         self.assertIn("Wrote OpenAI Codex hooks config", err_text)
         self.assertIn("~/.codex/hooks.json", err_text)
         self.assertIn("Codex hook checklist", err_text)
@@ -202,6 +207,78 @@ class TestCodexSetup(unittest.TestCase):
         self.assertEqual(
             config["hooks"]["PostToolUse"][0]["hooks"][0]["command"],
             "agent-strace hook --provider codex post-tool",
+        )
+
+    def test_setup_cli_codex_backs_up_existing_file_bytes(self):
+        hooks_path = Path(self.tmpdir) / "hooks.json"
+        backup_path = Path(self.tmpdir) / "hooks.json.agent-strace.bak"
+        original_bytes = b'{"custom": "hooks"}\r\n\xff'
+        hooks_path.write_bytes(original_bytes)
+        args = argparse.Namespace(
+            redact=False,
+            no_redact=False,
+            global_config=False,
+            cli="codex",
+        )
+
+        err = io.StringIO()
+        with patch.object(sys, "stdout", io.StringIO()), patch.object(sys, "stderr", err):
+            cmd_setup(args)
+
+        self.assertEqual(backup_path.read_bytes(), original_bytes)
+        self.assertIn(
+            f"Backed up existing OpenAI Codex hooks config: {backup_path}",
+            err.getvalue(),
+        )
+        self.assertIn(f"cp {backup_path} {hooks_path}", err.getvalue())
+
+    def test_setup_cli_codex_without_existing_file_does_not_create_backup(self):
+        hooks_path = Path(self.tmpdir) / "hooks.json"
+        backup_path = Path(self.tmpdir) / "hooks.json.agent-strace.bak"
+        args = argparse.Namespace(
+            redact=False,
+            no_redact=False,
+            global_config=False,
+            cli="codex",
+        )
+
+        err = io.StringIO()
+        with patch.object(sys, "stdout", io.StringIO()), patch.object(sys, "stderr", err):
+            cmd_setup(args)
+
+        self.assertTrue(hooks_path.exists())
+        self.assertFalse(backup_path.exists())
+        self.assertIn(
+            f"No existing OpenAI Codex hooks config to back up at {hooks_path}",
+            err.getvalue(),
+        )
+
+    def test_repeated_setup_preserves_original_codex_backup(self):
+        hooks_path = Path(self.tmpdir) / "hooks.json"
+        backup_path = Path(self.tmpdir) / "hooks.json.agent-strace.bak"
+        original_bytes = b'{"original": true}\n'
+        hooks_path.write_bytes(original_bytes)
+        args = argparse.Namespace(
+            redact=False,
+            no_redact=False,
+            global_config=False,
+            cli="codex",
+        )
+
+        with patch.object(sys, "stdout", io.StringIO()), patch.object(
+            sys, "stderr", io.StringIO()
+        ):
+            cmd_setup(args)
+        hooks_path.write_bytes(b'{"changed_after_first_setup": true}\n')
+
+        err = io.StringIO()
+        with patch.object(sys, "stdout", io.StringIO()), patch.object(sys, "stderr", err):
+            cmd_setup(args)
+
+        self.assertEqual(backup_path.read_bytes(), original_bytes)
+        self.assertIn(
+            f"Preserved existing OpenAI Codex hooks backup (not overwritten): {backup_path}",
+            err.getvalue(),
         )
 
     def test_setup_cli_all_outputs_claude_and_codex_sections(self):
