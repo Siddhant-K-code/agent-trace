@@ -47,6 +47,7 @@ from .audit import cmd_audit, verify_chain
 from .cost import PRICING, cmd_cost
 from .cognitive_debt import cmd_cognitive_debt
 from .context_score import cmd_context_score
+from .skills import cmd_skills
 from .curve import cmd_curve
 from .dashboard import cmd_dashboard
 from .shadow_ai import cmd_audit_tools
@@ -1424,6 +1425,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_context_score.add_argument("--format", choices=["text", "json"], default="text",
                                  help="output format (default: text)")
 
+    # skills
+    p_skills = sub.add_parser(
+        "skills",
+        help="report skill availability, loads, follow signals, and post-load facts (no scores)",
+    )
+    p_skills.add_argument("session_id", nargs="?",
+                          help="session ID or prefix (default: aggregate across sessions)")
+    p_skills.add_argument("--since", default="30d", metavar="DATE",
+                          help="aggregate window start, ISO date or duration (default: 30d)")
+    p_skills.add_argument("--workspace", default="", metavar="PATH",
+                          help="repo root for skill discovery when a session has no recorded cwd "
+                               "(default: current directory)")
+    p_skills.add_argument("--skills-dir", action="append", default=[], dest="skills_dirs",
+                          metavar="DIR", help="extra skill directory to scan (repeatable)")
+    p_skills.add_argument("--min-sessions", type=int, default=5,
+                          help="minimum sessions for never-loaded and comparison output (default: 5)")
+    p_skills.add_argument("--format", choices=["text", "json"], default="text",
+                          help="output format (default: text)")
+
     # compaction
     p_compaction = sub.add_parser(
         "compaction", help="detect and analyse context compaction events"
@@ -2386,6 +2406,7 @@ def main() -> None:
         "cost": cmd_cost,
         "cognitive-debt": cmd_cognitive_debt,
         "context-score": cmd_context_score,
+        "skills": cmd_skills,
         "compaction": cmd_compaction,
         "diff": cmd_diff,
         "why": cmd_why,
