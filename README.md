@@ -41,6 +41,17 @@ uvx agent-strace replay
 
 **Zero dependencies.** Python 3.10+ standard library only.
 
+## Start here: local review
+
+The v1 product direction is a focused local evidence-review path: configure one
+capture adapter, record a session, check what evidence was actually captured,
+review it locally, then inspect disclosure before sharing or exporting.
+
+See **[the canonical v1 local review workflow](docs/v1-workflow.md)** for the
+supported/candidate/experimental surface split and the current release gates.
+The larger command inventory below remains available, but it is not all part of
+the v1 compatibility promise.
+
 ## Quick start
 
 **Option 1: CLI hooks** — captures prompts, responses, and hook-visible tool calls
