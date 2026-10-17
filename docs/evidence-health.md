@@ -24,12 +24,17 @@ The first version checks:
 - duplicate event IDs;
 - mixed session IDs;
 - non-finite timestamps and timestamp regressions;
-- unpaired tool calls/results;
-- unpaired LLM requests/responses;
+- unpaired tool calls/results once the session is finalized;
+- unpaired LLM requests/responses once the session is finalized;
 - `ERROR` events with a missing or unknown parent request (retaining the error event ID); and
 - export/drop failures explicitly reported by the caller.
 
 The calculation is deterministic and local. It performs no network calls.
+
+For an active session (`session_finalized=False`), a tool call or LLM request
+without a terminal outcome is treated as in flight rather than as missing
+evidence. Orphan, duplicate, invalid, and out-of-order outcomes are still
+reported immediately.
 
 ## Provider limitations
 

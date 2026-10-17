@@ -160,6 +160,41 @@ class TestEvidenceHealth(unittest.TestCase):
         self.assertEqual(result.status, EvidenceHealthStatus.UNKNOWN)
         self.assertEqual([reason.code for reason in result.reasons], ["session_active"])
 
+    def test_active_tool_call_without_result_is_treated_as_in_flight(self):
+        events = [
+            event(EventType.SESSION_START, 1.0, "start"),
+            event(EventType.TOOL_CALL, 2.0, "tool-call"),
+        ]
+
+        result = assess_evidence_health(events, session_finalized=False)
+
+        self.assertEqual(result.status, EvidenceHealthStatus.UNKNOWN)
+        self.assertEqual([reason.code for reason in result.reasons], ["session_active"])
+
+    def test_active_llm_request_without_response_is_treated_as_in_flight(self):
+        events = [
+            event(EventType.SESSION_START, 1.0, "start"),
+            event(EventType.LLM_REQUEST, 2.0, "llm-request"),
+        ]
+
+        result = assess_evidence_health(events, session_finalized=False)
+
+        self.assertEqual(result.status, EvidenceHealthStatus.UNKNOWN)
+        self.assertEqual([reason.code for reason in result.reasons], ["session_active"])
+
+    def test_active_session_still_reports_orphan_outcomes(self):
+        events = [
+            event(EventType.SESSION_START, 1.0, "start"),
+            event(EventType.TOOL_CALL, 2.0, "in-flight-tool-call"),
+            event(EventType.TOOL_RESULT, 3.0, "orphan-result", parent_id="unknown-call"),
+        ]
+
+        result = assess_evidence_health(events, session_finalized=False)
+        codes = {reason.code for reason in result.reasons}
+
+        self.assertEqual(result.status, EvidenceHealthStatus.PARTIAL)
+        self.assertEqual(codes, {"session_active", "orphan_tool_result"})
+
     def test_finalized_session_without_end_is_partial(self):
         events = [
             event(EventType.SESSION_START, 1.0, "start"),

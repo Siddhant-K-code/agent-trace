@@ -125,6 +125,8 @@ def _reason(
 def _relationship_reasons(
     events: Sequence[TraceEvent],
     spec: _RelationshipSpec,
+    *,
+    require_terminal_outcome: bool,
 ) -> list[EvidenceHealthReason]:
     request_positions = {
         event.event_id: index
@@ -171,13 +173,14 @@ def _relationship_reasons(
     for request_id, request in requests.items():
         outcomes = outcomes_by_request.get(request_id, [])
         if not outcomes:
-            reasons.append(
-                _reason(
-                    spec.missing_result_code,
-                    f"{spec.label} request {request_id!r} has no recorded terminal outcome",
-                    event=request,
+            if require_terminal_outcome:
+                reasons.append(
+                    _reason(
+                        spec.missing_result_code,
+                        f"{spec.label} request {request_id!r} has no recorded terminal outcome",
+                        event=request,
+                    )
                 )
-            )
             continue
 
         if len(outcomes) > 1:
@@ -343,7 +346,13 @@ def _structural_reasons(
         event_ids.add(event.event_id)
 
     for spec in _RELATIONSHIPS:
-        reasons.extend(_relationship_reasons(events, spec))
+        reasons.extend(
+            _relationship_reasons(
+                events,
+                spec,
+                require_terminal_outcome=session_finalized is not False,
+            )
+        )
     reasons.extend(_orphan_error_reasons(events))
 
     return reasons, invalid
