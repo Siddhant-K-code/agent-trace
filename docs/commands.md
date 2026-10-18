@@ -1016,6 +1016,63 @@ or irreversibly erase all local trace data for one tenant. Deletion requires
 `--confirm` and appends a minimal audit record. See the
 [multi-tenant deployment guide](tenancy.md) for isolation and GDPR notes.
 
+### `backfill-meta`
+```
+agent-strace backfill-meta [--apply] [--agent-name NAME] [--format text|json]
+```
+Write `meta.json` for session directories that have `events.ndjson` but no
+metadata. Stores captured before the subagent capture fix contain many of
+these: GitHub Copilot CLI subagents (the `task` tool) fired prompt, tool and
+stop hooks but never `sessionStart`. `list`, `skills` and the other readers
+that list sessions skip those directories, and `tenant report`, `tenant export`,
+`tenant delete` and `org-report` stop with "unrecognized or incomplete session
+directory" while any of them exist.
+
+The command scans the flat store and every `workspaces/<id>/` store. It is a
+dry run unless `--apply` is given.
+
+| Flag | Description |
+|---|---|
+| `--apply` | Write the metadata. Without it nothing is written |
+| `--agent-name NAME` | Agent name when the events do not identify one (default: `agent-cli`, the hooks' default) |
+| `--format text\|json` | Output format (default: `text`) |
+
+Metadata is derived from the events, with the same field meaning as the
+hook-written metadata:
+
+| Field | Value |
+|---|---|
+| `started_at` / `ended_at` | Earliest and latest event timestamps |
+| `total_duration_ms` | `ended_at - started_at` |
+| `tool_calls` / `errors` / `llm_requests` | Count of `tool_call`, `error` and `llm_request` events |
+| `agent_name` | From a hook `session_start` mode or a hook `stop` response provider; otherwise `--agent-name`; otherwise `agent-cli` |
+| `command` | `"<agent_name> (backfilled)"`, distinct from captured metadata and from hook metadata marked `(no session-start)` |
+| `tenant_id` | The single tenant ID on the events, or empty. `AGENT_STRACE_TENANT_ID` is ignored |
+| `workspace_id` | The workspace store the directory is in |
+| `attribution` | Empty: the current user and git state do not describe the original capture |
+
+Safety:
+
+- `events.ndjson` is only read, so the hash chain checked by `verify` is unchanged.
+- `meta.json` is created exclusively and never replaces an existing file, even one that appears during the run.
+- Writes hold the store write lock used by every other writer.
+- Symlinked entries and workspaces are reported and never followed. Invalid
+  session IDs, empty or unparseable event streams, and events naming another
+  session are reported and skipped.
+- Sessions covered by a tenant erasure tombstone, or named by a pending tenant
+  delete or tag journal, are skipped so erased data is never resurrected. An
+  unreadable erasure audit or journal blocks the whole store.
+- Event streams with more than one tenant ID, and parents whose child sessions
+  belong to another tenant, are skipped.
+- Directories with `identity.json` are skipped: the signature covers metadata
+  fields that cannot be rebuilt.
+
+Backfilled sessions keep their original timestamps, so retention age limits
+apply to them as soon as they are visible. Run `agent-strace retention status`
+after `--apply` and before the next `retention clean`.
+
+Exit status is 1 when a store cannot be scanned or a write fails, otherwise 0.
+
 ---
 
 ## GitHub Actions

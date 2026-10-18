@@ -233,3 +233,7 @@ It does not measure:
   without a session start. agent-strace records them as their own sessions,
   and the eval scores every session in a run, so a load inside a subagent
   counts. The report notes runs whose only load was in such a session.
+  `skills` (the history report) only reads sessions with `meta.json`. Stores
+  captured before the subagent capture fix may need
+  [`agent-strace backfill-meta --apply`](commands.md#backfill-meta) before
+  `skills` counts subagent loads.

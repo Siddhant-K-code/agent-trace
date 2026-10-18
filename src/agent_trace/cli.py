@@ -87,6 +87,7 @@ from .config_watch import cmd_config_watch
 from .lint import cmd_lint
 from .mcp_scan import cmd_mcp_scan
 from .retention import cmd_retention
+from .backfill import cmd_backfill_meta
 from .sample import cmd_sample
 from .server import cmd_server
 from .watch import cmd_watch
@@ -2209,6 +2210,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_tenant_delete.add_argument("--confirm", action="store_true",
                                  help="confirm the irreversible deletion")
 
+    # backfill-meta
+    p_backfill = sub.add_parser(
+        "backfill-meta",
+        help="write missing meta.json for session dirs that only have events",
+    )
+    p_backfill.add_argument("--apply", action="store_true",
+                            help="write metadata (default: dry run that writes nothing)")
+    p_backfill.add_argument("--agent-name", default="", dest="agent_name", metavar="NAME",
+                            help="agent name when the events do not identify one "
+                                 "(default: agent-cli)")
+    p_backfill.add_argument("--format", choices=["text", "json"], default="text",
+                            help="output format (default: text)")
+
     # diff --semantic and --eval-config flags (extend existing diff parser)
     p_diff.add_argument("--semantic", action="store_true",
                         help="semantic outcome-level diff (files, cost, errors)")
@@ -2534,6 +2548,7 @@ def main() -> None:
         "lint": cmd_lint,
         "retention": cmd_retention,
         "tenant": cmd_tenant,
+        "backfill-meta": cmd_backfill_meta,
         "sample": cmd_sample,
         "server": cmd_server,
     }
