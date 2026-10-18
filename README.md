@@ -155,6 +155,7 @@ Full setup guide: [docs/setup.md](docs/setup.md)
 | [`agent-strace compliance-report`](docs/compliance-report.md) | Privacy-minimized framework evidence crosswalk |
 | [`agent-strace cost --breakdown provider`](docs/commands.md#cost) | Offline spend by provider and model |
 | [`agent-strace tenant report`](docs/tenancy.md) | Per-customer cost, export, and erasure workflows |
+| [`agent-strace backfill-meta`](docs/commands.md#backfill-meta) | Write missing metadata for older subagent session dirs (dry run by default) |
 | [`agent-strace cognitive-debt`](docs/commands.md#cognitive-debt) | Unreviewed agent-written code by session |
 | [`agent-strace context-score`](docs/commands.md#context-score) | Compare efficiency stats (cost, tool calls, lint, scope) across AGENTS.md/CLAUDE.md versions. Not an outcome score |
 | [`agent-strace skills`](docs/skills.md) | Skill adoption: available → loaded → followed → outcome (no score) |

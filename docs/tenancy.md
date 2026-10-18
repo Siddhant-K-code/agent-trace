@@ -138,6 +138,15 @@ retention. Set an explicit operational retention/rotation schedule for
 backup policy. Incomplete files under `.tenant-journal/` must not be deleted
 until recovery succeeds or an operator has reconciled the recorded intent.
 
+Tenant administration stops with "unrecognized or incomplete session
+directory" when a store holds session directories with events but no
+`meta.json`, which older stores may have from Copilot CLI subagents captured
+before the subagent capture fix. `agent-strace backfill-meta --apply` writes
+their metadata with the tenant ID taken from the events. It never recreates a
+session covered by an erasure tombstone or a pending tenant journal, ignores
+`AGENT_STRACE_TENANT_ID`, and skips event streams with more than one tenant ID.
+See [`backfill-meta`](commands.md#backfill-meta).
+
 ## Isolation and hosted collectors
 
 Tenant tags scope agent-strace queries; they do not replace operating-system

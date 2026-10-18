@@ -197,6 +197,13 @@ This command cannot measure:
 Malformed events and unreadable sessions are skipped and counted in
 `events_skipped_malformed` and `sessions_skipped_unreadable`.
 
+**Older stores:** stores captured before the subagent capture fix can hold
+many Copilot CLI subagent sessions with `events.ndjson` but no `meta.json`.
+This command skips those sessions, so skill loads inside subagents are not
+counted. Run `agent-strace backfill-meta` to preview, then
+`agent-strace backfill-meta --apply` to write their metadata. See
+[`backfill-meta`](commands.md#backfill-meta).
+
 **Why there is no score:** a composite score hides these limits. A score that
 favours fewer tool calls or lower cost ranks a session that skipped its tests
 above one that ran them.
