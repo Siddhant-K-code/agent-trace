@@ -919,7 +919,12 @@ class TraceStore:
                     "tagging session would create a cross-tenant child link"
                 )
 
-    def create_session(self, meta: SessionMeta) -> Path:
+    def create_session(self, meta: SessionMeta, *, if_missing: bool = False) -> Path | None:
+        """Write session metadata and an empty event stream.
+
+        With ``if_missing=True`` an existing ``meta.json`` is left untouched and
+        ``None`` is returned; the existence check and the write share one lock.
+        """
         # Stamp workspace_id onto meta so it's visible in exports/reports
         with _store_write_lock(self.base_dir, self.storage_root):
             _validate_meta_ids(meta, strict_session=True)
@@ -938,6 +943,8 @@ class TraceStore:
                 meta.session_id, "meta.json", "session metadata"
             )
             if existing_meta_path.exists():
+                if if_missing:
+                    return None
                 existing = SessionMeta.from_json(existing_meta_path.read_text())
                 if existing.tenant_id and not meta.tenant_id:
                     meta.tenant_id = existing.tenant_id

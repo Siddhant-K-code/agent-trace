@@ -186,6 +186,89 @@ class TestCopilotHooks(unittest.TestCase):
         self.assertEqual(len(starts), 2)
         self.assertEqual(starts[-1].data["source"], "resume")
 
+    def _dispatch(self, event, payload):
+        with patch.object(sys, "stdin", io.StringIO(json.dumps(payload))):
+            hook_main(["--provider", "copilot", event])
+
+    def test_subagent_hooks_without_session_start_create_listable_session(self):
+        # Copilot CLI subagents fire prompt/tool/stop hooks under their own
+        # sessionId but never fire sessionStart.
+        sid = "subagent-0000-1111-2222"
+        self._dispatch("userPromptSubmitted", {
+            "sessionId": sid,
+            "prompt": "Draft release notes for the latest tag",
+        })
+        self._dispatch("preToolUse", {
+            "sessionId": sid,
+            "toolName": "skill",
+            "toolArgs": {"skill": "release-notes"},
+        })
+        self._dispatch("postToolUse", {
+            "sessionId": sid,
+            "toolName": "skill",
+            "toolArgs": {"skill": "release-notes"},
+            "toolResult": {"resultType": "success", "textResultForLlm": "loaded"},
+        })
+        self._dispatch("postToolUseFailure", {
+            "sessionId": sid,
+            "toolName": "bash",
+            "toolArgs": {"command": "false"},
+            "error": "exit 1",
+        })
+        self._dispatch("agentStop", {"sessionId": sid, "stopReason": "end_turn"})
+
+        store = TraceStore(self.tmpdir)
+        local_id = sid[:16]
+        listed = {meta.session_id: meta for meta in store.list_sessions()}
+        self.assertIn(local_id, listed)
+        meta = listed[local_id]
+        self.assertEqual(meta.agent_name, "github-copilot")
+        self.assertEqual(meta.command, "github-copilot (no session-start)")
+        self.assertEqual(meta.tool_calls, 1)
+        self.assertEqual(meta.errors, 1)
+
+        events = store.load_events(local_id)
+        types = [event.event_type for event in events]
+        self.assertNotIn(EventType.SESSION_START, types)
+        self.assertEqual(types[0], EventType.USER_PROMPT)
+        call = next(e for e in events if e.event_type == EventType.TOOL_CALL)
+        result = next(e for e in events if e.event_type == EventType.TOOL_RESULT)
+        self.assertEqual(result.parent_id, call.event_id)
+        self.assertIsNotNone(result.duration_ms)
+        self.assertIn(EventType.ASSISTANT_RESPONSE, types)
+
+        self.assertFalse((Path(self.tmpdir) / ".active-session").exists())
+        self.assertIsNone(_read_active_session(provider="copilot"))
+
+    def test_late_session_start_replaces_implicit_metadata(self):
+        sid = "latestart-0000-1111"
+        self._dispatch("userPromptSubmitted", {"sessionId": sid, "prompt": "hi"})
+        self._dispatch("sessionStart", {"sessionId": sid, "source": "new"})
+
+        store = TraceStore(self.tmpdir)
+        meta = store.load_meta(sid[:16])
+        events = store.load_events(sid[:16])
+
+        self.assertEqual(meta.command, "github-copilot (new)")
+        self.assertEqual(
+            [event.event_type for event in events],
+            [EventType.USER_PROMPT, EventType.SESSION_START],
+        )
+        self.assertEqual(_read_active_session(provider="copilot"), sid[:16])
+
+    def test_hooks_after_session_start_keep_existing_metadata(self):
+        sid = "keepmeta-0000-1111"
+        self._dispatch("sessionStart", {"sessionId": sid, "source": "startup"})
+        self._dispatch("preToolUse", {
+            "sessionId": sid,
+            "toolName": "bash",
+            "toolArgs": {"command": "true"},
+        })
+
+        meta = TraceStore(self.tmpdir).load_meta(sid[:16])
+        self.assertEqual(meta.command, "github-copilot (startup)")
+        self.assertEqual(meta.tool_calls, 1)
+
 
 class TestHookPayloadStoreDirectory(unittest.TestCase):
     def setUp(self):
