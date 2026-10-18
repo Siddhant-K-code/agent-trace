@@ -48,10 +48,10 @@ python -m unittest discover -s tests -p 'test_watch.py' -v
 
 ## Version bumping
 
-Current version: `0.93.1` in `src/agent_trace/__init__.py`.
+The version lives in `src/agent_trace/__init__.py`. A release must also sync `plugin.json` and both versions in `.github/plugin/marketplace.json` (`metadata.version` and `plugins[0].version`).
 
-- New feature (new command, new flag, new integration): bump minor (`0.93.1` → `0.94.0`)
-- Bug fix or small improvement: bump patch (`0.93.1` → `0.93.2`)
+- New feature (new command, new flag, new integration): bump minor (`X.Y.Z` → `X.(Y+1).0`)
+- Bug fix or small improvement: bump patch (`X.Y.Z` → `X.Y.(Z+1)`)
 - Breaking change to CLI or storage format: bump major — check with maintainer first
 
 ## docs/ structure
