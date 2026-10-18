@@ -23,6 +23,7 @@ import time
 from pathlib import Path
 
 from . import __version__
+from .setup_verify import verify_codex_setup
 from .hooks import hook_main
 from .http_proxy import HTTPProxyServer
 from .a2a import cmd_a2a_tree
@@ -893,9 +894,27 @@ def _write_copilot_hooks_config(args: argparse.Namespace) -> Path:
     return hooks_path
 
 
-def cmd_setup(args: argparse.Namespace) -> None:
-    """Generate hooks configuration for supported agent CLIs."""
+def cmd_setup(args: argparse.Namespace) -> int | None:
+    """Generate hooks configuration, or verify Codex setup read-only."""
     cli = getattr(args, "cli", "claude") or "claude"
+    if getattr(args, "verify", False):
+        if cli != "codex":
+            sys.stderr.write("Setup verification currently supports only --cli codex.\n")
+            return 2
+        hooks_path = _codex_config_dir() / "hooks.json"
+        ok, messages = verify_codex_setup(
+            hooks_path, _codex_hooks_config(args), __version__
+        )
+        if ok:
+            sys.stdout.write(
+                f"Codex static hook setup verified: {hooks_path}.\n"
+                "This does not prove Codex enabled/trusted hooks or captured an event; "
+                "run a local session and inspect its trace to check actual capture.\n"
+            )
+            return 0
+        for message in messages:
+            sys.stderr.write(f"Setup verification failed: {message}\n")
+        return 1
 
     configs: list[tuple[str, str, dict]] = []
     if cli in ("claude", "all"):
@@ -1133,6 +1152,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_setup.add_argument("--cli", choices=["claude", "codex", "gemini", "cursor", "copilot", "all"], default="claude",
                          help="agent CLI to configure (default: claude)")
+    p_setup.add_argument("--verify", action="store_true",
+                         help="verify installed Codex user-level hooks without changing files (requires --cli codex)")
 
     # anonymous product telemetry controls
     p_telemetry = sub.add_parser(
@@ -2357,6 +2378,12 @@ def main() -> None:
     if not args.command:
         parser.print_help()
         sys.exit(1)
+
+    # Explicit read-only verification must not create telemetry state or send
+    # an anonymous product event. It only reads Codex config and probes
+    # the local AgentTrace executable with --version.
+    if args.command == "setup" and getattr(args, "verify", False):
+        sys.exit(cmd_setup(args))
 
     # hook subcommand is handled separately (reads stdin)
     if args.command == "hook":

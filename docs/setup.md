@@ -14,6 +14,8 @@ agent-strace setup
 
 # Install OpenAI Codex user-level hooks
 agent-strace setup --cli codex
+# Check installed Codex config and executable (read-only; no trace is created)
+agent-strace setup --cli codex --verify
 
 # Install Gemini CLI extension hooks
 agent-strace setup --cli gemini
@@ -69,6 +71,22 @@ cp ~/.codex/hooks.json.agent-strace.bak ~/.codex/hooks.json
 ```
 
 When using `CODEX_CONFIG_DIR`, run `cp "$CODEX_CONFIG_DIR/hooks.json.agent-strace.bak" "$CODEX_CONFIG_DIR/hooks.json"` instead. If no config existed before setup, no backup is created; remove the generated file with `rm ~/.codex/hooks.json` (or `rm "$CODEX_CONFIG_DIR/hooks.json"`).
+
+To diagnose the installed **Codex user-level** configuration without changing
+files, run `agent-strace setup --cli codex --verify`. It checks that
+`$CODEX_CONFIG_DIR/hooks.json` (or `~/.codex/hooks.json`) is valid and
+contains the generated commands expected by this AgentTrace version. Unrelated
+user hooks are allowed. It also verifies that `agent-strace` is on `PATH`
+and that its `--version` output matches this installation, and returns non-zero
+for missing/stale config, missing executable or version mismatch. A Codex
+project-specific hooks file is **not** checked by this command.
+
+**A passing check does not mean Codex has enabled or trusted these hooks, that
+a provider process ran, or that events were captured.** Reload Codex, review
+the command hooks in its Hooks UI, run a local test session, and use
+`agent-strace list` / `agent-strace inspect SESSION_ID` to inspect
+actually observed evidence. Verification invokes only the local AgentTrace
+executable with `--version`; it does not execute hooks or write config.
 
 ```json
 {
