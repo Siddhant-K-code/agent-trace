@@ -1,3 +1,3 @@
 """agent-trace: strace for AI agents."""
 
-__version__ = "0.96.1"
+__version__ = "0.97.0"
