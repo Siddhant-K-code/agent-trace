@@ -48,6 +48,10 @@ from .cost import PRICING, cmd_cost
 from .cognitive_debt import cmd_cognitive_debt
 from .context_score import cmd_context_score
 from .skills import cmd_skills
+from .skills_eval import DEFAULT_RUNS as _SKILLS_EVAL_DEFAULT_RUNS
+from .skills_eval import DEFAULT_TIMEOUT as _SKILLS_EVAL_DEFAULT_TIMEOUT
+from .skills_eval import PRESETS as _SKILLS_EVAL_PRESETS
+from .skills_eval import cmd_skills_eval
 from .curve import cmd_curve
 from .dashboard import cmd_dashboard
 from .shadow_ai import cmd_audit_tools
@@ -1438,6 +1442,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_skills = sub.add_parser(
         "skills",
         help="report skill availability, loads, follow signals, and post-load facts (no scores)",
+        epilog=(
+            "To test whether a skill loads when it should (experimental), run "
+            "'agent-strace skills eval CASES_FILE'. See docs/skills-eval.md."
+        ),
     )
     p_skills.add_argument("session_id", nargs="?",
                           help="session ID or prefix (default: aggregate across sessions)")
@@ -1452,6 +1460,48 @@ def build_parser() -> argparse.ArgumentParser:
                           help="minimum sessions for never-loaded and comparison output (default: 5)")
     p_skills.add_argument("--format", choices=["text", "json"], default="text",
                           help="output format (default: text)")
+
+    # skills eval (routed from `skills eval` by _normalise_skills_argv)
+    p_skills_eval = sub.add_parser(
+        "skills-eval",
+        prog="agent-strace skills eval",
+        help="(experimental) same as 'skills eval': count skill loads over should/should-not trigger cases",
+        description=(
+            "Experimental. Run each case's prompt through a headless agent several times, "
+            "capture each run with agent-strace hooks, and count the runs in which the model "
+            "loaded the case's skill. Reports counts only. See docs/skills-eval.md."
+        ),
+    )
+    p_skills_eval.add_argument("cases_file", metavar="CASES_FILE",
+                               help="JSON list of {id, skill, prompt, should_trigger[, fixture_dir, runs, note]}")
+    eval_source = p_skills_eval.add_mutually_exclusive_group(required=True)
+    eval_source.add_argument("--agent", choices=sorted(_SKILLS_EVAL_PRESETS),
+                             help="run a preset headless agent command")
+    eval_source.add_argument("--agent-cmd", default="", metavar="TEMPLATE",
+                             help="custom agent command; placeholders: {prompt} (required), {workspace}, "
+                                  "{trace_dir}, {hooks_plugin_dir}, {claude_settings}")
+    eval_source.add_argument("--from-traces", default="", metavar="DIR",
+                             help="score recorded runs in DIR/<case_id>/<run>/ instead of running an agent")
+    p_skills_eval.add_argument("--runs", type=int, default=None,
+                               help=f"runs per case without its own 'runs' (default: {_SKILLS_EVAL_DEFAULT_RUNS})")
+    p_skills_eval.add_argument("--timeout", type=float, default=None, metavar="SECONDS",
+                               help=f"per-run timeout (default: {_SKILLS_EVAL_DEFAULT_TIMEOUT:g})")
+    p_skills_eval.add_argument("--case", action="append", default=[], dest="case_ids", metavar="ID",
+                               help="run only this case id (repeatable)")
+    p_skills_eval.add_argument("--workspace", default="", metavar="PATH",
+                               help="with --from-traces: repo root for skill discovery when a run has no recorded cwd")
+    p_skills_eval.add_argument("--skills-dir", action="append", default=[], dest="skills_dirs",
+                               metavar="DIR", help="extra skill directory to scan (repeatable)")
+    p_skills_eval.add_argument("--save-traces", default=None, metavar="DIR",
+                               help="copy each run's trace store to DIR/<case_id>/run-<n>/ (new or empty dir)")
+    p_skills_eval.add_argument("--keep-workspaces", action="store_true",
+                               help="keep each run's temp workspace, traces, and agent logs")
+    p_skills_eval.add_argument("--format", choices=["text", "json"], default="text",
+                               help="output format (default: text)")
+    p_skills_eval.add_argument("--fail-on-miss", action="store_true",
+                               help="exit 1 if any should-trigger run missed or was unscored")
+    p_skills_eval.add_argument("--fail-on-false-trigger", action="store_true",
+                               help="exit 1 if any should-not-trigger run loaded the skill or was unscored")
 
     # compaction
     p_compaction = sub.add_parser(
@@ -2378,9 +2428,22 @@ def _normalise_eval_argv(argv: list[str]) -> list[str]:
     return normalised
 
 
+def _normalise_skills_argv(argv: list[str]) -> list[str]:
+    """Route ``skills eval ...`` to the ``skills-eval`` subparser.
+
+    ``skills`` takes an optional positional session id, so ``eval`` cannot be
+    a nested subparser without breaking ``skills <session-id>``.
+    """
+    normalised = list(argv)
+    command_index = _command_index(normalised)
+    if normalised[command_index:command_index + 2] == ["skills", "eval"]:
+        normalised[command_index:command_index + 2] = ["skills-eval"]
+    return normalised
+
+
 def main() -> None:
     parser = build_parser()
-    argv = _normalise_policy_argv(sys.argv[1:])
+    argv = _normalise_skills_argv(_normalise_policy_argv(sys.argv[1:]))
     args = parser.parse_args(_normalise_eval_argv(argv))
 
     if not args.command:
@@ -2416,6 +2479,7 @@ def main() -> None:
         "cognitive-debt": cmd_cognitive_debt,
         "context-score": cmd_context_score,
         "skills": cmd_skills,
+        "skills-eval": cmd_skills_eval,
         "compaction": cmd_compaction,
         "diff": cmd_diff,
         "why": cmd_why,

@@ -745,7 +745,7 @@ Read with care:
 agent-strace skills [SESSION_ID] [--since DATE] [--workspace PATH]
                     [--skills-dir DIR ...] [--min-sessions N] [--format text|json]
 ```
-Skill adoption from recorded behavior: available → loaded → followed → outcome. Counts and signals only, no score. Omit `SESSION_ID` to aggregate per skill. See [skills.md](skills.md).
+Skill adoption from recorded behavior: available → loaded → followed → outcome. Counts and signals only, no score. Omit `SESSION_ID` to aggregate per skill. To test whether a skill loads when it should, use [`skills eval`](#skills-eval). See [skills.md](skills.md).
 
 | Flag | Description |
 |---|---|
@@ -755,6 +755,33 @@ Skill adoption from recorded behavior: available → loaded → followed → out
 | `--skills-dir DIR` | Extra skill directory to scan (plugin or app-bundled skills). Repeatable |
 | `--min-sessions N` | Minimum sessions for the never-loaded list and for each group in the loaded vs not-loaded comparison; default is `5` |
 | `--format text\|json` | Output format |
+
+### `skills eval`
+```
+agent-strace skills eval CASES_FILE (--agent claude|copilot | --agent-cmd TEMPLATE | --from-traces DIR)
+                         [--runs N] [--timeout SECONDS] [--case ID ...]
+                         [--workspace PATH] [--skills-dir DIR ...]
+                         [--save-traces DIR] [--keep-workspaces] [--format text|json]
+                         [--fail-on-miss] [--fail-on-false-trigger]
+```
+Experimental skill trigger eval. Runs each case's prompt through a headless agent N times in a temp workspace, captures each run with agent-strace hooks, and counts the runs in which the model loaded the skill. Counts only, no score. See [skills-eval.md](skills-eval.md).
+
+| Flag | Description |
+|---|---|
+| `CASES_FILE` | JSON list of `{id, skill, prompt, should_trigger}` with optional `fixture_dir`, `runs`, `note` |
+| `--agent claude\|copilot` | Run a preset headless command. Presets never approve every tool |
+| `--agent-cmd TEMPLATE` | Custom agent command. Placeholders: `{prompt}` (required), `{workspace}`, `{trace_dir}`, `{hooks_plugin_dir}`, `{claude_settings}` |
+| `--from-traces DIR` | Score recorded runs in `DIR/<case_id>/<run>/` instead of running an agent |
+| `--runs N` | Runs per case without its own `runs`; default is `3` |
+| `--timeout SECONDS` | Per-run timeout; default is `300` |
+| `--case ID` | Only this case. Repeatable |
+| `--workspace PATH` | With `--from-traces`: repository root for skill discovery when a run has no recorded cwd |
+| `--skills-dir DIR` | Extra skill directory to scan. Repeatable |
+| `--save-traces DIR` | Copy each run's trace store to `DIR/<case_id>/run-<n>/` with `run.json`. Must be new or empty |
+| `--keep-workspaces` | Keep each run's temp workspace, traces, and agent logs |
+| `--format text\|json` | Output format |
+| `--fail-on-miss` | Exit 1 if a should-trigger run missed or was unscored |
+| `--fail-on-false-trigger` | Exit 1 if a should-not-trigger run loaded the skill or was unscored |
 
 ### `standup`
 ```

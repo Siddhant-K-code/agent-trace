@@ -112,7 +112,8 @@ unless a separate compatibility policy says otherwise:
   `compliance-report`, `audit-readiness`;
 - behavioral analytics and optimization: `drift`, `baseline`, `fingerprint`,
   `freeze`, `lint`, `eval`, `cognitive-debt`, `context-score`, `skills`,
-  `standup`, `freshness`, `oncall`, `curve`, `inflation`, `optimize`;
+  `skills eval`, `standup`, `freshness`, `oncall`, `curve`, `inflation`,
+  `optimize`;
 - hosted / orchestration surfaces: `server`, `auth`, `workspace`,
   `retention`, `auto`, `a2a-tree`, `pr-comment`, and `score`.
 
