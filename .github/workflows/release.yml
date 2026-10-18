@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   release:
@@ -61,3 +62,13 @@ jobs:
             --title "$TAG" \
             --notes-file /tmp/changelog.txt \
             --target "${{ github.sha }}"
+
+      # Releases created with GITHUB_TOKEN don't fire `release: published`,
+      # but GITHUB_TOKEN can trigger workflow_dispatch.
+      - name: Dispatch PyPI publish
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.check.outputs.tag }}"
+          gh workflow run publish.yml --ref main -f tag="$TAG"
