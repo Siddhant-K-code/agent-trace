@@ -730,6 +730,22 @@ Score AGENTS.md, CLAUDE.md, or GEMINI.md from actual session outcomes. The comma
 | `--min-sessions N` | Minimum sessions per version before scoring; default is `5` |
 | `--format text|json` | Output format |
 
+### `skills`
+```
+agent-strace skills [SESSION_ID] [--since DATE] [--workspace PATH]
+                    [--skills-dir DIR ...] [--min-sessions N] [--format text|json]
+```
+Skill adoption from recorded behavior: available → loaded → followed → outcome. Counts and signals only, no score. Omit `SESSION_ID` to aggregate per skill. See [skills.md](skills.md).
+
+| Flag | Description |
+|---|---|
+| `SESSION_ID` | Session ID or prefix. Omit for aggregate mode |
+| `--since DATE` | Aggregate window. Accepts ISO dates or durations like `30d`; default is `30d` |
+| `--workspace PATH` | Repository root for skill discovery when a session has no `session_start` cwd; default is the current directory |
+| `--skills-dir DIR` | Extra skill directory to scan (plugin or app-bundled skills). Repeatable |
+| `--min-sessions N` | Minimum sessions for the never-loaded list and for each group in the loaded vs not-loaded comparison; default is `5` |
+| `--format text\|json` | Output format |
+
 ### `standup`
 ```
 agent-strace standup [--session SESSION_ID]

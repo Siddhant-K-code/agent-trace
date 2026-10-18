@@ -83,7 +83,8 @@ def _tool_command(event: TraceEvent) -> str:
     return command if isinstance(command, str) else ""
 
 
-def _is_test_command(command: str) -> bool:
+def is_test_command(command: str) -> bool:
+    """Return True when a single shell command invokes a known test runner."""
     tokens = command.strip().lower().split()
     if not tokens:
         return False
@@ -112,7 +113,7 @@ def _explicit_categories(event: TraceEvent) -> set[ReviewCategory]:
     data = event.data
     tool_name = str(data.get("tool_name") or data.get("tool") or "").lower()
     command = _tool_command(event)
-    if data.get("is_test") is True or data.get("category") == "test" or _is_test_command(command):
+    if data.get("is_test") is True or data.get("category") == "test" or is_test_command(command):
         categories.add("tests")
     if data.get("is_command") is True or data.get("category") == "command" or command or (
         event.event_type == EventType.TOOL_CALL and tool_name in _COMMAND_TOOLS
