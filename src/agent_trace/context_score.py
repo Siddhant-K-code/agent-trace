@@ -1,4 +1,8 @@
-"""Score AGENTS.md / CLAUDE.md quality from session outcomes."""
+"""Compare efficiency stats across AGENTS.md / CLAUDE.md versions.
+
+Dimensions are efficiency proxies (cost, tool calls, lint, scope), not
+outcomes such as tests passing or task success.
+"""
 
 from __future__ import annotations
 
@@ -24,6 +28,18 @@ from .store import TraceStore
 
 
 _CONTEXT_FILES = ("AGENTS.md", "CLAUDE.md", "GEMINI.md")
+
+TEXT_CAVEAT = "50 = no change vs baseline. Efficiency proxies, not outcomes. Not causal."
+
+CAVEATS = (
+    "Efficiency proxies (cost, tool calls, lint, scope), not outcomes such as tests or task success.",
+    "50 = no change vs baseline, which grades F.",
+    "Lower cost or fewer tool calls scores higher, even if the agent skipped work.",
+    "Before/after only: no task-mix control, no confidence intervals.",
+    "Baseline is the oldest version, or the previous version with --compare.",
+    "Cost is estimated from event size (chars/4), not recorded token usage.",
+    "Ignores skills and whether the agent read the context file.",
+)
 
 
 @dataclass
@@ -407,7 +423,8 @@ def format_context_score_text(report: ContextScoreReport, out: TextIO = sys.stdo
             w(f"{dimension.name:<20}  {score:>6}  {_fmt_change(dimension.change_pct):>12}\n")
         w("-" * 44 + "\n")
         overall = "n/a" if report.overall_score is None else f"{report.overall_score:.0f}"
-        w(f"Overall score: {overall} ({report.grade})\n\n")
+        w(f"Overall score: {overall} ({report.grade})\n")
+        w(f"{TEXT_CAVEAT}\n\n")
 
     w("Current version stats:\n")
     w(f"  sessions: {current.session_count}\n")
@@ -474,6 +491,7 @@ def format_context_score_json(report: ContextScoreReport) -> str:
             for dimension in report.dimensions
         ],
         "suggestions": report.suggestions,
+        "caveats": list(CAVEATS),
     }, indent=2)
 
 

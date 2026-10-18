@@ -1,3 +1,5 @@
+import argparse
+import io
 import json
 import os
 import sys
@@ -10,7 +12,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from agent_trace.cli import build_parser
 from agent_trace.config_watch import ConfigSnapshot, FileSnapshot
-from agent_trace.context_score import build_context_score_report
+from agent_trace.context_score import (
+    CAVEATS,
+    TEXT_CAVEAT,
+    build_context_score_report,
+    format_context_score_json,
+    format_context_score_text,
+)
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
 
@@ -166,6 +174,88 @@ class TestContextScore(unittest.TestCase):
         self.assertEqual(args.file, "CLAUDE.md")
         self.assertEqual(args.history, 14)
         self.assertTrue(args.compare)
+
+    def _two_version_report(self, baseline_calls=3, current_calls=1):
+        now = time.time()
+        _write_snapshots(self.tmpdir, [
+            _snapshot("old111", now - 1000, "oldsha", "old"),
+            _snapshot("new222", now - 500, "newsha", "new"),
+        ])
+        for i in range(5):
+            _session(self.store, now - 900 + i, i, [
+                *[_tool("Read", file_path=f"src/a{n}.py") for n in range(baseline_calls)],
+                _end(),
+            ])
+        for i in range(5, 10):
+            _session(self.store, now - 400 + i, i, [
+                *[_tool("Read", file_path=f"src/a{n}.py") for n in range(current_calls)],
+                _end(),
+            ])
+        return build_context_score_report(
+            self.store,
+            self.tmpdir,
+            context_file="AGENTS.md",
+            history_days=1,
+            compare=True,
+            min_sessions=5,
+        )
+
+    def test_no_change_scores_50_and_grades_f(self):
+        report = self._two_version_report(baseline_calls=2, current_calls=2)
+        self.assertEqual(report.overall_score, 50.0)
+        self.assertEqual(report.grade, "F")
+
+    def test_text_output_has_caveat_under_overall_score(self):
+        report = self._two_version_report()
+        buf = io.StringIO()
+        format_context_score_text(report, buf)
+        lines = buf.getvalue().splitlines()
+        overall = next(i for i, line in enumerate(lines) if line.startswith("Overall score:"))
+        self.assertEqual(
+            lines[overall + 1],
+            "50 = no change vs baseline. Efficiency proxies, not outcomes. Not causal.",
+        )
+        self.assertEqual(lines[overall + 1], TEXT_CAVEAT)
+
+    def test_json_output_adds_caveats_and_keeps_fields(self):
+        report = self._two_version_report()
+        data = json.loads(format_context_score_json(report))
+        self.assertEqual(data["caveats"], list(CAVEATS))
+        self.assertTrue(all(isinstance(c, str) and c for c in data["caveats"]))
+        joined = " ".join(data["caveats"])
+        self.assertIn("not outcomes", joined)
+        self.assertIn("50 = no change", joined)
+        for key in (
+            "context_file", "window_start", "window_end", "min_sessions",
+            "insufficient_data", "no_history", "overall_score", "grade",
+            "current", "baseline", "versions", "dimensions", "suggestions",
+        ):
+            self.assertIn(key, data)
+        self.assertEqual(
+            [d["name"] for d in data["dimensions"]],
+            ["Cost efficiency", "Tool efficiency", "Lint violations", "Scope adherence"],
+        )
+
+    def test_json_output_has_caveats_without_sessions(self):
+        report = build_context_score_report(
+            self.store,
+            self.tmpdir,
+            context_file="AGENTS.md",
+            history_days=1,
+        )
+        data = json.loads(format_context_score_json(report))
+        self.assertIsNone(data["current"])
+        self.assertEqual(data["caveats"], list(CAVEATS))
+
+    def test_help_does_not_claim_outcomes(self):
+        parser = build_parser()
+        sub_action = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+        choice = next(c for c in sub_action._choices_actions if c.dest == "context-score")
+        self.assertNotIn("outcomes", choice.help)
+        self.assertIn("not an outcome score", choice.help)
+        description = sub_action.choices["context-score"].description
+        self.assertIn("Not an outcome score", description)
+        self.assertIn("50 = no change vs baseline", description)
 
 
 if __name__ == "__main__":
