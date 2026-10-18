@@ -1,14 +1,20 @@
 """Tests for trace storage."""
 
+import io
+import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from agent_trace.models import EventType, SessionMeta, TraceEvent
-from agent_trace.store import TraceStore
+from agent_trace.store import TraceStore, ensure_trace_dir_gitignore
 
 
 class TestTraceStore(unittest.TestCase):
@@ -222,6 +228,201 @@ class TestTraceStore(unittest.TestCase):
         loaded = self.store.load_meta(meta.session_id)
         self.assertTrue(loaded.redacted)
         self.assertNotIn("sk-abc123", loaded.command)
+
+
+_GITIGNORE_BYTES = (
+    b"# Created by agent-strace: traces may contain prompts and tool output.\n"
+    b"*\n"
+)
+
+
+class TestTraceDirGitignore(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.trace_dir = self.root / "traces"
+        self._saved_env = {
+            key: os.environ.pop(key, None)
+            for key in ("AGENT_STRACE_WORKSPACE", "AGENT_TRACE_DIR",
+                        "AGENT_TRACE_CLAUDE_SESSION_ID")
+        }
+
+    def tearDown(self):
+        for key, value in self._saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        self._tmp.cleanup()
+
+    def _new_session(self, store):
+        meta = SessionMeta(agent_name="test-agent")
+        store.create_session(meta)
+        store.append_event(meta.session_id, TraceEvent(
+            event_type=EventType.TOOL_CALL,
+            session_id=meta.session_id,
+            data={"tool_name": "read_file"},
+        ))
+        return meta.session_id
+
+    def test_new_directory_gets_gitignore_without_premature_creation(self):
+        store = TraceStore(self.trace_dir)
+        self.assertFalse(self.trace_dir.exists())
+
+        self._new_session(store)
+
+        gitignore = self.trace_dir / ".gitignore"
+        self.assertEqual(gitignore.read_bytes(), _GITIGNORE_BYTES)
+        self.assertIn("*", gitignore.read_text().splitlines())
+
+    def test_existing_directory_without_gitignore_gets_one(self):
+        self.trace_dir.mkdir()
+        TraceStore(self.trace_dir)
+        self.assertEqual(
+            (self.trace_dir / ".gitignore").read_bytes(), _GITIGNORE_BYTES
+        )
+
+    def test_helper_never_creates_missing_directory(self):
+        ensure_trace_dir_gitignore(self.trace_dir)
+        self.assertFalse(self.trace_dir.exists())
+
+    def test_existing_gitignore_is_left_byte_for_byte_unchanged(self):
+        self.trace_dir.mkdir()
+        original = b"# mine\r\n!keep-me.ndjson\nno-trailing-newline"
+        (self.trace_dir / ".gitignore").write_bytes(original)
+
+        store = TraceStore(self.trace_dir)
+        self._new_session(store)
+
+        self.assertEqual((self.trace_dir / ".gitignore").read_bytes(), original)
+
+    def test_symlinked_gitignore_is_not_followed_or_replaced(self):
+        self.trace_dir.mkdir()
+        outside = self.root / "outside.txt"
+        outside.write_text("untouched")
+        (self.trace_dir / ".gitignore").symlink_to(outside)
+
+        self._new_session(TraceStore(self.trace_dir))
+
+        self.assertTrue((self.trace_dir / ".gitignore").is_symlink())
+        self.assertEqual(outside.read_text(), "untouched")
+
+    def test_open_failure_does_not_raise(self):
+        self.trace_dir.mkdir()
+        with patch("agent_trace.store.os.open", side_effect=PermissionError("ro")):
+            store = TraceStore(self.trace_dir)
+        self.assertFalse((self.trace_dir / ".gitignore").exists())
+        self.assertEqual(store.list_sessions(), [])
+
+    def test_write_failure_does_not_raise_or_leave_empty_file(self):
+        self.trace_dir.mkdir()
+        with patch("agent_trace.store.os.fdopen", side_effect=OSError("disk full")):
+            TraceStore(self.trace_dir)
+        self.assertFalse((self.trace_dir / ".gitignore").exists())
+
+    @unittest.skipIf(
+        os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+        "directory permissions are not enforced for this user/platform",
+    )
+    def test_read_only_store_does_not_raise(self):
+        self.trace_dir.mkdir()
+        os.chmod(self.trace_dir, 0o555)
+        try:
+            store = TraceStore(self.trace_dir)
+            self.assertEqual(store.list_sessions(), [])
+            self.assertFalse((self.trace_dir / ".gitignore").exists())
+        finally:
+            os.chmod(self.trace_dir, 0o755)
+
+    def test_session_listing_ignores_gitignore(self):
+        store = TraceStore(self.trace_dir)
+        first = self._new_session(store)
+        second = self._new_session(store)
+        self.assertTrue((self.trace_dir / ".gitignore").is_file())
+
+        listed = {meta.session_id for meta in store.list_sessions()}
+        strict = {meta.session_id for meta in store.list_sessions_strict()}
+        self.assertEqual(listed, {first, second})
+        self.assertEqual(strict, {first, second})
+        self.assertIn(store.get_latest_session_id(), {first, second})
+        self.assertEqual(store.find_session(first[:8]), first)
+
+    def test_workspace_store_ignores_from_storage_root(self):
+        from agent_trace.workspace import create_workspace, list_workspaces
+
+        store = TraceStore(self.trace_dir, workspace_id="team-a")
+        session_id = self._new_session(store)
+
+        self.assertTrue((self.trace_dir / ".gitignore").is_file())
+        self.assertFalse((store.base_dir / ".gitignore").exists())
+        self.assertEqual(
+            [meta.session_id for meta in store.list_sessions()], [session_id]
+        )
+
+        other_root = self.root / "other-traces"
+        create_workspace("team-b", str(other_root))
+        self.assertTrue((other_root / ".gitignore").is_file())
+        self.assertEqual(list_workspaces(str(other_root)), ["team-b"])
+
+    def test_repository_root_or_working_directory_is_never_ignored(self):
+        repo_like = self.root / "repo"
+        (repo_like / ".git").mkdir(parents=True)
+        TraceStore(repo_like)
+        self.assertFalse((repo_like / ".gitignore").exists())
+
+        working = self.root / "work"
+        (working / "nested").mkdir(parents=True)
+        original_cwd = os.getcwd()
+        os.chdir(working / "nested")
+        try:
+            TraceStore(working)
+            TraceStore(working / "nested")
+        finally:
+            os.chdir(original_cwd)
+        self.assertFalse((working / ".gitignore").exists())
+        self.assertFalse((working / "nested" / ".gitignore").exists())
+
+    def test_hook_capture_path_writes_gitignore(self):
+        from agent_trace.hooks import hook_main
+
+        project = self.root / "project"
+        project.mkdir()
+        payload = {"session_id": "hook-gitignore-01", "cwd": str(project),
+                   "source": "startup"}
+        with patch.object(sys, "stdin", io.StringIO(json.dumps(payload))):
+            hook_main(["session-start"])
+
+        trace_dir = project / ".agent-traces"
+        self.assertEqual((trace_dir / ".gitignore").read_bytes(), _GITIGNORE_BYTES)
+        self.assertEqual(
+            [meta.session_id for meta in TraceStore(trace_dir).list_sessions()],
+            ["hook-gitignore-0"],
+        )
+
+    @unittest.skipUnless(shutil.which("git"), "git binary not available")
+    def test_git_check_ignore_confirms_trace_files_are_ignored(self):
+        repo = self.root / "repo"
+        repo.mkdir()
+        env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+
+        def git(*args):
+            return subprocess.run(
+                ["git", "-C", str(repo), *args],
+                env=env, capture_output=True, text=True,
+            )
+
+        self.assertEqual(git("init", "-q").returncode, 0)
+        (repo / "notes.txt").write_text("tracked")
+        session_id = self._new_session(TraceStore(repo / ".agent-traces"))
+        trace_file = f".agent-traces/{session_id}/events.ndjson"
+
+        self.assertEqual(git("check-ignore", "-q", trace_file).returncode, 0)
+        self.assertEqual(git("check-ignore", "-q", "notes.txt").returncode, 1)
+        status = git("status", "--porcelain", "--untracked-files=all").stdout
+        self.assertEqual(status.splitlines(), ["?? notes.txt"])
+        self.assertEqual(git("add", "-f", trace_file).returncode, 0)
+        staged = git("diff", "--cached", "--name-only").stdout.splitlines()
+        self.assertEqual(staged, [trace_file])
 
 
 if __name__ == "__main__":
