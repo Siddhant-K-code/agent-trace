@@ -150,6 +150,45 @@ def _write_session_meta(meta: SessionMeta) -> None:
     send_session_meta_to_endpoint(meta, endpoint)
 
 
+IMPLICIT_SESSION_SOURCE = "no session-start"
+
+
+def _ensure_session_meta(store: TraceStore, session_id: str, provider: str) -> None:
+    """Create metadata for a session whose first hook was not SessionStart.
+
+    GitHub Copilot CLI subagents (the ``task`` tool) fire prompt, tool and stop
+    hooks under their own session ID but never fire ``sessionStart``.  Without
+    ``meta.json`` those sessions are skipped by ``list``, ``skills`` and every
+    other reader.  No ``session_start`` event and no active-session marker are
+    written; a later real SessionStart replaces this metadata.
+    """
+    if not session_id:
+        return
+    try:
+        if store.session_exists(session_id):
+            return
+        agent_name = _PROVIDER_AGENT.get(provider, "agent-cli")
+        meta = SessionMeta(
+            session_id=session_id,
+            agent_name=agent_name,
+            command=f"{agent_name} ({IMPLICIT_SESSION_SOURCE})",
+            attribution=collect_attribution().to_dict(),
+        )
+        if store.create_session(meta, if_missing=True) is not None:
+            _write_session_meta(meta)
+    except (OSError, ValueError):
+        # Invalid or erased sessions keep the previous behaviour: the event
+        # write below decides whether the hook can record anything.
+        return
+
+
+def _load_meta_or_none(store: TraceStore, session_id: str) -> SessionMeta | None:
+    try:
+        return store.load_meta(session_id)
+    except FileNotFoundError:
+        return None
+
+
 def _provider_env(provider: str = "claude") -> str:
     return _PROVIDER_ENV.get(provider, _CLAUDE_SESSION_ID_ENV)
 
@@ -426,7 +465,7 @@ def handle_session_end(input_data: dict, provider: str = "claude") -> None:
     if not session_id:
         return
 
-    meta = store.load_meta(session_id)
+    meta = _load_meta_or_none(store, session_id)
     if meta:
         meta.ended_at = time.time()
         meta.total_duration_ms = (meta.ended_at - meta.started_at) * 1000
@@ -485,10 +524,11 @@ def handle_pre_tool(input_data: dict, provider: str = "claude") -> None:
         session_id=session_id,
         data=event_data,
     )
+    _ensure_session_meta(store, session_id, provider)
     _write_event(store, session_id, event)
 
     # Update meta
-    meta = store.load_meta(session_id)
+    meta = _load_meta_or_none(store, session_id)
     if meta:
         meta.tool_calls += 1
         store.update_meta(meta)
@@ -522,6 +562,7 @@ def handle_user_prompt(input_data: dict, provider: str = "claude") -> None:
     if redact:
         event_data = redact_data(event_data)
 
+    _ensure_session_meta(store, session_id, provider)
     _write_event(store, 
         session_id,
         TraceEvent(
@@ -565,6 +606,7 @@ def handle_stop(input_data: dict, provider: str = "claude") -> None:
     if redact:
         event_data = redact_data(event_data)
 
+    _ensure_session_meta(store, session_id, provider)
     _write_event(store, 
         session_id,
         TraceEvent(
@@ -592,6 +634,7 @@ def handle_file_write(input_data: dict, provider: str = "claude") -> None:
     if redact:
         data = redact_data(data)
 
+    _ensure_session_meta(store, session_id, provider)
     _write_event(
         store,
         session_id,
@@ -673,11 +716,12 @@ def handle_post_tool(input_data: dict, failed: bool = False, provider: str = "cl
         event.duration_ms = (event.timestamp - call_info["timestamp"]) * 1000
         _write_pending_calls(pending, provider=provider)
 
+    _ensure_session_meta(store, session_id, provider)
     _write_event(store, session_id, event)
 
     # Update meta on errors
     if failed:
-        meta = store.load_meta(session_id)
+        meta = _load_meta_or_none(store, session_id)
         if meta:
             meta.errors += 1
             store.update_meta(meta)

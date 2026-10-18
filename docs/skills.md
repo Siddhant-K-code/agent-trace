@@ -153,13 +153,15 @@ flowchart TD
     W["Sessions in window<br/>--since, default 30d"] --> P["Per skill<br/>available · loaded<br/>load rate · user/model<br/>median time to load<br/>pre-edit · follow<br/>tests after load"]:::fact
     P --> N["Never loaded<br/>available: N+ sessions<br/>loaded: 0"]:::none
     P --> C["Loaded vs not loaded<br/>tests, errors,<br/>session_end<br/>N+ in both groups"]:::signal
-    N -. "lead, not verdict" .-> E["Trigger eval<br/>relevant tasks:<br/>does it load?"]
+    N -. "lead, not verdict" .-> E["Trigger eval<br/>relevant tasks:<br/>does it load?<br/>skills eval"]
     classDef fact fill:#dbeafe,stroke:#1d4ed8,color:#0b1f44
     classDef signal fill:#fef3c7,stroke:#b45309,color:#451a03
     classDef none fill:#fee2e2,stroke:#b91c1c,color:#450a0a
 ```
 
-N is `--min-sessions` (default 5).
+N is `--min-sessions` (default 5). A never-loaded skill is a lead: test it with
+[`agent-strace skills eval`](skills-eval.md), which runs tasks that should and
+should not load it.
 
 | Field | Denominator (n) |
 |---|---|
@@ -184,7 +186,8 @@ task, so the groups differ in task mix.
 This command cannot measure:
 
 - what the skill set looked like when an old session ran;
-- whether a task should have triggered a skill;
+- whether a task should have triggered a skill (see
+  [skills eval](skills-eval.md));
 - whether auto-injected context files were used;
 - skills injected without a tool call, file read, or prompt mention;
 - whether non-command guidance (tone, ordering, "prefer X over Y") was followed;

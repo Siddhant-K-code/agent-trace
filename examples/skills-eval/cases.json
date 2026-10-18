@@ -1,0 +1,50 @@
+[
+  {
+    "id": "draft-notes",
+    "skill": "release-notes",
+    "prompt": "Draft the release notes for the next version.",
+    "should_trigger": true,
+    "fixture_dir": "fixture",
+    "note": "direct request"
+  },
+  {
+    "id": "whats-new-post",
+    "skill": "release-notes",
+    "prompt": "Write a short \"what's new\" section for the upcoming release announcement.",
+    "should_trigger": true,
+    "fixture_dir": "fixture",
+    "note": "paraphrase without the words 'release notes'"
+  },
+  {
+    "id": "upgrade-summary",
+    "skill": "release-notes",
+    "prompt": "Users are about to upgrade. Summarise what changed for them since the last release.",
+    "should_trigger": true,
+    "fixture_dir": "fixture",
+    "note": "indirect request"
+  },
+  {
+    "id": "changelog-format",
+    "skill": "release-notes",
+    "prompt": "Which changelog convention does CHANGELOG.md follow, and what is the latest released version?",
+    "should_trigger": false,
+    "fixture_dir": "fixture",
+    "note": "near miss: about the changelog, not release notes"
+  },
+  {
+    "id": "count-fixes",
+    "skill": "release-notes",
+    "prompt": "How many bug fixes are listed for version 1.2.0 in CHANGELOG.md?",
+    "should_trigger": false,
+    "fixture_dir": "fixture",
+    "note": "near miss: a lookup in a released version"
+  },
+  {
+    "id": "retention-setting",
+    "skill": "release-notes",
+    "prompt": "What does the retention.days setting do?",
+    "should_trigger": false,
+    "fixture_dir": "fixture",
+    "note": "near miss: answer is in the unreleased section"
+  }
+]
