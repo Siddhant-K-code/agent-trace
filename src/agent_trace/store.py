@@ -2,6 +2,7 @@
 
 Traces are stored as directories:
   .agent-traces/
+    .gitignore        # "*": keeps the whole store out of git
     <session-id>/
       meta.json       # session metadata
       events.ndjson   # newline-delimited JSON events
@@ -138,10 +139,59 @@ def _unlock_file(file_obj) -> None:
         pass
 
 
+_GITIGNORE_NAME = ".gitignore"
+_GITIGNORE_CONTENT = (
+    "# Created by agent-strace: traces may contain prompts and tool output.\n"
+    "*\n"
+)
+
+
+def ensure_trace_dir_gitignore(directory: str | Path) -> None:
+    """Make an existing trace directory ignore itself in git.
+
+    Writes ``<directory>/.gitignore`` containing ``*`` (the same approach as
+    ``.pytest_cache``) unless a ``.gitignore`` already exists. The directory
+    is never created, an existing file is never modified, and filesystem
+    errors are swallowed so read-only stores keep working.
+    """
+    path = Path(directory)
+    target = path / _GITIGNORE_NAME
+    try:
+        if os.path.lexists(target):
+            return
+        if path.is_symlink() or not path.is_dir():
+            return
+        # A misconfigured trace dir that is a repository root, or the working
+        # directory or one of its parents, must not have its tree ignored.
+        if os.path.lexists(path / ".git"):
+            return
+        resolved = path.resolve()
+        cwd = Path.cwd().resolve()
+        if resolved == cwd or resolved in cwd.parents:
+            return
+        descriptor = os.open(
+            target,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o644,
+        )
+    except OSError:
+        return
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as gitignore:
+            gitignore.write(_GITIGNORE_CONTENT)
+    except OSError:
+        # Do not leave an empty file that would block a later retry.
+        try:
+            target.unlink()
+        except OSError:
+            pass
+
+
 @contextlib.contextmanager
-def _store_write_lock(base_dir: Path):
+def _store_write_lock(base_dir: Path, storage_root: Path | None = None):
     """Serialise event append and atomic session retag operations."""
     base_dir.mkdir(parents=True, exist_ok=True)
+    ensure_trace_dir_gitignore(base_dir if storage_root is None else storage_root)
     lock_path = base_dir / ".store.lock"
     if lock_path.is_symlink() or (lock_path.exists() and not lock_path.is_file()):
         raise ValueError("unsafe trace store lock path")
@@ -246,6 +296,7 @@ class TraceStore:
         self.redact = redaction_enabled() if redact is None else redact
         self._erasure_audit_mtime_ns = -1
         self._erased_session_hashes: set[str] = set()
+        ensure_trace_dir_gitignore(self.storage_root)
         self._recover_tag_journals()
         self._recover_delete_journals()
 
@@ -417,7 +468,7 @@ class TraceStore:
 
     def write_lock(self):
         """Return the store-wide write lock context manager."""
-        return _store_write_lock(self.base_dir)
+        return _store_write_lock(self.base_dir, self.storage_root)
 
     def _session_was_erased(self, session_id: str) -> bool:
         """Return True when a tenant-erasure tombstone covers session_id."""
@@ -547,7 +598,7 @@ class TraceStore:
         journal_dir = self._journal_dir()
         if not journal_dir.exists() or journal_dir.is_symlink():
             return
-        with _store_write_lock(self.base_dir):
+        with _store_write_lock(self.base_dir, self.storage_root):
             for journal_path in sorted(journal_dir.glob("tag-*.json")):
                 if journal_path.is_symlink():
                     continue
@@ -810,7 +861,7 @@ class TraceStore:
         journal_dir = self._journal_dir()
         if not journal_dir.exists() or journal_dir.is_symlink():
             return
-        with _store_write_lock(self.base_dir):
+        with _store_write_lock(self.base_dir, self.storage_root):
             for journal_path in sorted(journal_dir.glob("delete-*.json")):
                 if journal_path.is_symlink():
                     continue
@@ -870,7 +921,7 @@ class TraceStore:
 
     def create_session(self, meta: SessionMeta) -> Path:
         # Stamp workspace_id onto meta so it's visible in exports/reports
-        with _store_write_lock(self.base_dir):
+        with _store_write_lock(self.base_dir, self.storage_root):
             _validate_meta_ids(meta, strict_session=True)
             if self._session_was_erased(meta.session_id):
                 raise ValueError(f"session {meta.session_id} was erased and cannot be recreated")
@@ -927,7 +978,7 @@ class TraceStore:
             if not existing.tenant_id:
                 self.tag_session(session_id, event.tenant_id)
         f = self._session_file(session_id, "events.ndjson", "event stream")
-        with _store_write_lock(self.base_dir):
+        with _store_write_lock(self.base_dir, self.storage_root):
             if self._session_was_erased(session_id):
                 raise ValueError(f"session {session_id} was erased and cannot accept events")
             # Session metadata is authoritative.  This prevents a changed
@@ -962,7 +1013,7 @@ class TraceStore:
 
     def update_meta(self, meta: SessionMeta) -> None:
         _validate_meta_ids(meta)
-        with _store_write_lock(self.base_dir):
+        with _store_write_lock(self.base_dir, self.storage_root):
             f = self._session_file(
                 meta.session_id, "meta.json", "session metadata"
             )
@@ -1157,7 +1208,7 @@ class TraceStore:
         tenant_id = validate_tenant_id(tenant_id)
         path = self._session_file(session_id, "events.ndjson", "event stream")
         meta_path = self._session_file(session_id, "meta.json", "session metadata")
-        with _store_write_lock(self.base_dir):
+        with _store_write_lock(self.base_dir, self.storage_root):
             meta = self.load_meta(session_id)
             self._store_file("tenant-audit.ndjson", "tenant audit")
             if meta.tenant_id and meta.tenant_id != tenant_id:

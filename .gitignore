@@ -14,3 +14,4 @@ build/
 .coverage
 htmlcov/
 *.traces/
+.agent-traces/

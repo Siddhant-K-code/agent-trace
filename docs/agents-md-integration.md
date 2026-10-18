@@ -122,7 +122,7 @@ Add this to your project's `AGENTS.md` to tell agents how to work with agent-str
 This project uses [agent-strace](https://github.com/Siddhant-K-code/agent-trace) to
 capture and analyse agent sessions.
 
-- Traces are stored in `.agent-traces/` (gitignored)
+- Traces are stored in `.agent-traces/`, which git-ignores itself via `.agent-traces/.gitignore`
 - Run `agent-strace replay` after a session to review what happened
 - Run `agent-strace drift` to check for behavioral regression
 - Run `agent-strace retention clean --max-age-days 30` periodically to free disk space

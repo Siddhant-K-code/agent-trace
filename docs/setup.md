@@ -52,6 +52,8 @@ agent-strace setup --no-redact
 
 Then use Claude Code normally. Sessions appear in `.agent-traces/`.
 
+Traces can contain prompts and tool output, so `.agent-traces/` writes its own `.gitignore` and stays out of git by default. To commit a trace deliberately, use `git add -f`.
+
 ```bash
 agent-strace list     # list sessions
 agent-strace replay   # replay the latest

@@ -35,7 +35,12 @@ import shutil
 import sys
 from pathlib import Path
 
-from .store import DEFAULT_TRACE_DIR, _WORKSPACE_ENV, _workspace_base
+from .store import (
+    DEFAULT_TRACE_DIR,
+    _WORKSPACE_ENV,
+    _workspace_base,
+    ensure_trace_dir_gitignore,
+)
 
 
 def _workspaces_root(trace_dir: str) -> Path:
@@ -55,6 +60,7 @@ def create_workspace(workspace_id: str,
     """Create a workspace directory. Idempotent."""
     path = _workspace_base(trace_dir, workspace_id)
     path.mkdir(parents=True, exist_ok=True)
+    ensure_trace_dir_gitignore(trace_dir)
     return path
 
 
