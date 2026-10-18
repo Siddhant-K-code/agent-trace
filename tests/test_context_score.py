@@ -225,6 +225,11 @@ class TestContextScore(unittest.TestCase):
         joined = " ".join(data["caveats"])
         self.assertIn("not outcomes", joined)
         self.assertIn("50 = no change", joined)
+        self.assertIn(
+            "Sessions that start before the first config-watch snapshot count as the current version.",
+            data["caveats"],
+        )
+        self.assertEqual(len(data["caveats"]), 8)
         for key in (
             "context_file", "window_start", "window_end", "min_sessions",
             "insufficient_data", "no_history", "overall_score", "grade",

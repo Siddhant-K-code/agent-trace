@@ -728,6 +728,7 @@ Read with care:
 - Lower cost or fewer tool calls scores higher, even if the agent skipped work.
 - Before/after only: no task-mix control, no confidence intervals, default minimum 5 sessions per version.
 - Baseline is the oldest version, or the previous version with `--compare`.
+- Sessions that start before the first `config-watch` snapshot count as the current version.
 - Cost is estimated from event size (chars/4) at default model pricing, not recorded token usage.
 - Ignores skills and whether the agent read the context file. For adoption, see [skills.md](skills.md).
 
