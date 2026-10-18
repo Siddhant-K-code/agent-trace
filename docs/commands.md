@@ -735,7 +735,7 @@ Score AGENTS.md, CLAUDE.md, or GEMINI.md from actual session outcomes. The comma
 agent-strace skills [SESSION_ID] [--since DATE] [--workspace PATH]
                     [--skills-dir DIR ...] [--min-sessions N] [--format text|json]
 ```
-Report skill adoption from recorded behavior: which skills were available, which were loaded (and how), whether follow signals appeared afterwards, and outcome facts after the load. It reports facts and signals with counts. There is no score, grade, or verdict. With a session ID it reports one session; without one it aggregates per skill and lists skills that were available but never loaded. See [skills.md](skills.md) for detection rules and limits.
+Skill adoption from recorded behavior: available → loaded → followed → outcome. Counts and signals only, no score. Omit `SESSION_ID` to aggregate per skill. See [skills.md](skills.md).
 
 | Flag | Description |
 |---|---|
