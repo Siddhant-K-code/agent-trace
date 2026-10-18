@@ -1413,7 +1413,16 @@ def build_parser() -> argparse.ArgumentParser:
                         help="GitHub token for optional PR review/comment enrichment")
 
     # context-score
-    p_context_score = sub.add_parser("context-score", help="score AGENTS.md / CLAUDE.md from session outcomes")
+    p_context_score = sub.add_parser(
+        "context-score",
+        help="compare efficiency stats across AGENTS.md / CLAUDE.md versions (not an outcome score)",
+        description=(
+            "Compare efficiency stats (cost, tool calls, lint, scope) across AGENTS.md / CLAUDE.md "
+            "versions. Not an outcome score: 50 = no change vs baseline, lower cost or fewer "
+            "tool calls scores higher, and differences are not causal. For skill adoption, "
+            "see 'agent-strace skills'."
+        ),
+    )
     p_context_score.add_argument("--file", default="",
                                  help="context file to score (default: AGENTS.md, CLAUDE.md, or GEMINI.md)")
     p_context_score.add_argument("--history", type=int, default=30,

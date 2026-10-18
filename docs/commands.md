@@ -720,7 +720,17 @@ Measure unreviewed agent-written code from trace file-write events and local git
 agent-strace context-score [--file AGENTS.md] [--history N] [--compare]
                            [--min-sessions N] [--format text|json]
 ```
-Score AGENTS.md, CLAUDE.md, or GEMINI.md from actual session outcomes. The command groups sessions by context-file hashes recorded by `config-watch`, then compares cost efficiency, tool efficiency, lint findings, and scope adherence between versions. If no version history exists, it reports current-version stats only.
+Compare efficiency stats across AGENTS.md, CLAUDE.md, or GEMINI.md versions. Sessions are grouped by context-file hashes from `config-watch`. Each dimension (cost, tool calls, lint findings, scope violations per session) scores `50 + 100 × (baseline − current) / baseline`, clipped to 0–100; the overall score is their mean. With no version history it reports current-version stats only.
+
+Read with care:
+- Efficiency proxies, not outcomes. Tests, task success, merges, and reverts are not measured.
+- 50 means no change vs baseline, which grades F (A ≥ 90 … F < 60).
+- Lower cost or fewer tool calls scores higher, even if the agent skipped work.
+- Before/after only: no task-mix control, no confidence intervals, default minimum 5 sessions per version.
+- Baseline is the oldest version, or the previous version with `--compare`.
+- Sessions that start before the first `config-watch` snapshot count as the current version.
+- Cost is estimated from event size (chars/4) at default model pricing, not recorded token usage.
+- Ignores skills and whether the agent read the context file. For adoption, see [skills.md](skills.md).
 
 | Flag | Description |
 |---|---|

@@ -156,7 +156,7 @@ Full setup guide: [docs/setup.md](docs/setup.md)
 | [`agent-strace cost --breakdown provider`](docs/commands.md#cost) | Offline spend by provider and model |
 | [`agent-strace tenant report`](docs/tenancy.md) | Per-customer cost, export, and erasure workflows |
 | [`agent-strace cognitive-debt`](docs/commands.md#cognitive-debt) | Unreviewed agent-written code by session |
-| [`agent-strace context-score`](docs/commands.md#context-score) | Score AGENTS.md and CLAUDE.md from session outcomes |
+| [`agent-strace context-score`](docs/commands.md#context-score) | Compare efficiency stats (cost, tool calls, lint, scope) across AGENTS.md/CLAUDE.md versions. Not an outcome score |
 | [`agent-strace skills`](docs/skills.md) | Skill adoption: available → loaded → followed → outcome (no score) |
 | [`agent-strace lint <id>`](docs/commands.md#lint) | Flag bad behaviour patterns (loops, spirals, waste) |
 | [`agent-strace drift`](docs/commands.md#drift) | Detect behavioural drift over time |
