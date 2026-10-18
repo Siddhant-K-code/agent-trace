@@ -55,8 +55,8 @@ flowchart LR
     c2["Claude Code<br/>tool Skill"] --> T
     c3["Gemini CLI<br/>tool activate_skill"] --> T
     c4["Codex, Cursor, others<br/>read of .../SKILL.md"] --> R["file_read"]:::model
-    c5["Claude Code<br/>prompt starts /name"] --> P["user_prompt"]:::user
-    c6["Codex<br/>prompt mentions $name"] --> P
+    c5["Any provider<br/>prompt starts /name"] --> P["user_prompt"]:::user
+    c6["Any provider<br/>prompt mentions $name"] --> P
     classDef model fill:#e0e7ff,stroke:#4338ca,color:#1e1b4b
     classDef user fill:#dcfce7,stroke:#15803d,color:#052e16
 ```
