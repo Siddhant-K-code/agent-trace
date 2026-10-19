@@ -23,6 +23,7 @@ import time
 from pathlib import Path
 
 from . import __version__
+from .setup_verify import verify_codex_setup
 from .hooks import hook_main
 from .http_proxy import HTTPProxyServer
 from .a2a import cmd_a2a_tree
@@ -824,7 +825,12 @@ def _gemini_config_dir() -> Path:
 
 
 def _codex_config_dir() -> Path:
-    return Path(os.environ.get("CODEX_CONFIG_DIR", "~/.codex")).expanduser()
+    configured = (
+        os.environ.get("CODEX_CONFIG_DIR")
+        or os.environ.get("CODEX_HOME")
+        or "~/.codex"
+    )
+    return Path(configured).expanduser()
 
 
 def _write_codex_hooks_config(args: argparse.Namespace) -> tuple[Path, Path | None, bool]:
@@ -899,9 +905,32 @@ def _write_copilot_hooks_config(args: argparse.Namespace) -> Path:
     return hooks_path
 
 
-def cmd_setup(args: argparse.Namespace) -> None:
-    """Generate hooks configuration for supported agent CLIs."""
+def cmd_setup(args: argparse.Namespace) -> int | None:
+    """Generate hooks configuration, or verify Codex setup read-only."""
     cli = getattr(args, "cli", "claude") or "claude"
+    if getattr(args, "verify", False):
+        if cli != "codex":
+            sys.stderr.write("Setup verification currently supports only --cli codex.\n")
+            return 2
+        hooks_path = _codex_config_dir() / "hooks.json"
+        details: dict = {}
+        ok, messages = verify_codex_setup(
+            hooks_path, _codex_hooks_config(args), __version__, details=details
+        )
+        if ok:
+            sys.stdout.write(
+                "Codex static hook setup verified.\n"
+                f"hooks:      {hooks_path} "
+                f"({details['event_count']}/{details['event_total']} events, "
+                f"redaction: {details['redaction']})\n"
+                f"executable: {details['executable']} ({details['version']})\n"
+                "This does not prove Codex enabled/trusted hooks or captured an event; "
+                "run a local session and inspect its trace to check actual capture.\n"
+            )
+            return 0
+        for message in messages:
+            sys.stderr.write(f"Setup verification failed: {message}\n")
+        return 1
 
     configs: list[tuple[str, str, dict]] = []
     if cli in ("claude", "all"):
@@ -955,9 +984,9 @@ def cmd_setup(args: argparse.Namespace) -> None:
         )
         sys.stderr.write(
             "\nCodex hook checklist:\n"
-            "- Put the JSON at ~/.codex/hooks.json or <repo>/.codex/hooks.json, not ~/.codex/hooks/hooks.json.\n"
+            f"- Put the JSON at {codex_hooks_path} or <repo>/.codex/hooks.json, not {codex_hooks_path.parent / 'hooks' / 'hooks.json'}.\n"
             f"- Restore the pre-AgentTrace config, when backed up, with: {restore_command}\n"
-            "- In ~/.codex/config.toml, remove [features].hooks = false if present.\n"
+            f"- In {codex_hooks_path.with_name('config.toml')}, remove [features].hooks = false if present.\n"
             "- Reload Codex, then review and trust command hooks in the Hooks UI or /hooks.\n"
         )
 
@@ -1139,6 +1168,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_setup.add_argument("--cli", choices=["claude", "codex", "gemini", "cursor", "copilot", "all"], default="claude",
                          help="agent CLI to configure (default: claude)")
+    p_setup.add_argument("--verify", action="store_true",
+                         help="verify installed Codex user-level hooks without changing files (requires --cli codex)")
 
     # anonymous product telemetry controls
     p_telemetry = sub.add_parser(
@@ -2311,6 +2342,8 @@ def _telemetry_command_properties(args: argparse.Namespace) -> dict:
 
     if args.command == "setup":
         properties["integration"] = getattr(args, "cli", "claude") or "claude"
+        if getattr(args, "verify", False):
+            properties["subcommand"] = "verify"
     elif args.command == "auto":
         framework = getattr(args, "framework", "") or (
             "detect" if getattr(args, "detect", False) else ""

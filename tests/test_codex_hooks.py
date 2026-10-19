@@ -195,9 +195,9 @@ class TestCodexSetup(unittest.TestCase):
         self.assertFalse((Path(self.tmpdir) / "hooks.json.agent-strace.bak").exists())
         self.assertIn("No existing OpenAI Codex hooks config to back up", err_text)
         self.assertIn("Wrote OpenAI Codex hooks config", err_text)
-        self.assertIn("~/.codex/hooks.json", err_text)
+        self.assertIn(str(Path(self.tmpdir) / "hooks.json"), err_text)
         self.assertIn("Codex hook checklist", err_text)
-        self.assertIn("~/.codex/hooks/hooks.json", err_text)
+        self.assertIn(str(Path(self.tmpdir) / "hooks" / "hooks.json"), err_text)
         self.assertIn("[features].hooks = false", err_text)
         self.assertIn("SessionStart", config["hooks"])
         self.assertEqual(
@@ -208,6 +208,24 @@ class TestCodexSetup(unittest.TestCase):
             config["hooks"]["PostToolUse"][0]["hooks"][0]["command"],
             "agent-strace hook --provider codex post-tool",
         )
+
+    def test_setup_cli_codex_checklist_respects_codex_home(self):
+        with tempfile.TemporaryDirectory() as home:
+            args = argparse.Namespace(
+                redact=False, no_redact=False, global_config=False, cli="codex"
+            )
+            out = io.StringIO()
+            err = io.StringIO()
+            with patch.dict(os.environ, {"CODEX_CONFIG_DIR": "", "CODEX_HOME": home}):
+                with patch.object(sys, "stdout", out), patch.object(sys, "stderr", err):
+                    cmd_setup(args)
+            text = err.getvalue()
+            hooks_path = Path(home) / "hooks.json"
+            self.assertTrue(hooks_path.exists())
+            self.assertIn(f"Put the JSON at {hooks_path}", text)
+            self.assertIn(str(Path(home) / "hooks" / "hooks.json"), text)
+            self.assertIn(str(Path(home) / "config.toml"), text)
+            self.assertNotIn("~/.codex", text)
 
     def test_setup_cli_codex_backs_up_existing_file_bytes(self):
         hooks_path = Path(self.tmpdir) / "hooks.json"
@@ -300,7 +318,7 @@ class TestCodexSetup(unittest.TestCase):
         self.assertTrue((Path(self.tmpdir) / "hooks.json").exists())
         self.assertTrue((Path(self.copilot_home) / "hooks" / "agent-strace.json").exists())
         self.assertIn("~/.claude/settings.json", err.getvalue())
-        self.assertIn("~/.codex/hooks.json", err.getvalue())
+        self.assertIn(str(Path(self.tmpdir) / "hooks.json"), err.getvalue())
         self.assertIn("GitHub Copilot hooks config", err.getvalue())
         self.assertIn("Codex hook checklist", err.getvalue())
 

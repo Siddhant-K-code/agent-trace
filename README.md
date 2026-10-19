@@ -59,6 +59,7 @@ the v1 compatibility promise.
 ```bash
 agent-strace setup             # Claude Code hooks for ~/.claude/settings.json
 agent-strace setup --cli codex # OpenAI Codex hooks in ~/.codex/hooks.json
+agent-strace setup --cli codex --verify # check Codex user hooks + CLI, not live capture
 agent-strace setup --cli gemini # Gemini CLI extension under ~/.gemini/extensions
 agent-strace setup --cli cursor # Cursor project hooks in .cursor/hooks.json
 agent-strace setup --cli copilot # GitHub Copilot CLI hooks in ~/.copilot/hooks

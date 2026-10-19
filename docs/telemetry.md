@@ -135,10 +135,10 @@ Create these insights:
    `agent_strace_cli_command_completed`.
 2. **Command adoption:** event count grouped by `command`, filtered to successful
    events.
-3. **Integration adoption:** successful `setup` events grouped by `integration`.
+3. **Integration adoption:** successful `setup` events grouped by `integration`, excluding `subcommand = verify`.
 4. **Reliability:** failed command events divided by all command events, grouped
    by command and agent-strace version.
-5. **Activation funnel:** successful `setup` command →
+5. **Activation funnel:** successful `setup` command (excluding `subcommand = verify`) →
    `agent_strace_session_completed` → successful `replay`, `inspect`, `explain`,
    or `export` command.
 6. **Retention:** users whose first `agent_strace_session_completed` event is
