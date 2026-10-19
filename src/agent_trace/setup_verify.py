@@ -24,11 +24,12 @@ def _command_and_mode(command: str) -> tuple[str, str]:
 
 
 def _matcher_matches(event: str, actual: object, expected: object) -> bool:
-    if event in _IGNORED_MATCHER_EVENTS:
+    if event in _IGNORED_MATCHER_EVENTS or actual in _MATCH_ALL:
         return True
-    if expected == ".*":
-        return actual in _MATCH_ALL
-    return actual == expected
+    if not isinstance(actual, str) or not isinstance(expected, str):
+        return False
+    # Codex SessionStart accepts additional sources beyond those we require.
+    return set(expected.split("|")) <= set(actual.split("|"))
 
 
 def verify_codex_setup(
@@ -74,7 +75,6 @@ def verify_codex_setup(
         expected_by_event[event] = commands
 
     seen: set[tuple[str, str]] = set()
-    satisfied: set[tuple[str, str]] = set()
     modes: set[str] = set()
     for event, groups in hooks.items():
         if not isinstance(groups, list):
@@ -127,12 +127,11 @@ def verify_codex_setup(
                     )
                     valid = False
                 if valid:
-                    satisfied.add(key)
                     modes.add(mode)
 
     for event, commands in expected_by_event.items():
         for command in commands:
-            if (event, command) not in satisfied:
+            if (event, command) not in seen:
                 problems.append(
                     f"{event}: missing {json.dumps({'type': commands[command]['type'], 'command': command})}."
                 )

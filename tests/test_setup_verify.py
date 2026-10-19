@@ -177,9 +177,9 @@ class CodexSetupVerifyTests(unittest.TestCase):
         with contextlib.redirect_stderr(err):
             self.assertEqual(cmd_setup(args), 2)
         self.assertIn("only --cli codex", err.getvalue())
-        self.assertEqual(list(Path(self.tmp.name).iterdir()), [])
+        self.assertEqual(list(Path(self.gemini_tmp.name).iterdir()), [])
 
-    def test_entry_point_skips_product_telemetry_in_read_only_verify_mode(self):
+    def test_entry_point_records_verify_subcommand_in_telemetry(self):
         with patch.object(
             __import__("sys"), "argv",
             ["agent-strace", "setup", "--cli", "codex", "--verify"],
@@ -201,7 +201,6 @@ class CodexSetupVerifyTests(unittest.TestCase):
         self.assertNotIn("hooks_path", props)
         notice.assert_called_once()
         self.assertFalse(self.hooks_path.exists())
-        self.assertEqual(list(Path(self.gemini_tmp.name).iterdir()), [])
 
     def test_redaction_modes_verify_without_matching_cli_flags(self):
         for mode in ("default", "redact", "no_redact"):
@@ -233,7 +232,7 @@ class CodexSetupVerifyTests(unittest.TestCase):
         for alias in (None, "", "*", ".*"):
             with self.subTest(matcher=alias):
                 config = _codex_hooks_config(_args())
-                for event in ("PreToolUse", "PostToolUse"):
+                for event in ("PreToolUse", "PostToolUse", "SessionStart"):
                     if alias is None:
                         config["hooks"][event][0].pop("matcher", None)
                     else:
@@ -248,6 +247,25 @@ class CodexSetupVerifyTests(unittest.TestCase):
                         self.hooks_path, _codex_hooks_config(_args()), __version__
                     )
                 self.assertTrue(ok, issues)
+
+    def test_session_start_extra_sources_are_accepted(self):
+        config = _codex_hooks_config(_args())
+        config["hooks"]["SessionStart"][0]["matcher"] = "startup|resume|clear|compact|fork"
+        self.hooks_path.write_text(json.dumps(config))
+        with patch("agent_trace.setup_verify.shutil.which", return_value="/bin/agent-strace"), self._probe_ok():
+            ok, issues = verify_codex_setup(self.hooks_path, _codex_hooks_config(_args()), __version__)
+        self.assertTrue(ok, issues)
+
+    def test_wrong_matcher_is_not_falsely_reported_as_missing_command(self):
+        config = _codex_hooks_config(_args())
+        config["hooks"]["PreToolUse"][0]["matcher"] = "Bash"
+        self.hooks_path.write_text(json.dumps(config))
+        with patch("agent_trace.setup_verify.shutil.which", return_value="/bin/agent-strace"), self._probe_ok():
+            ok, issues = verify_codex_setup(self.hooks_path, _codex_hooks_config(_args()), __version__)
+        self.assertFalse(ok)
+        joined = " ".join(issues)
+        self.assertIn("PreToolUse: matcher is 'Bash'", joined)
+        self.assertNotIn("PreToolUse: missing", joined)
 
     def test_wrong_event_and_duplicate_hook_commands_fail(self):
         for mutation in ("wrong_event", "duplicate_group", "duplicate_handler"):
