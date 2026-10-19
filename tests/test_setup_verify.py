@@ -300,6 +300,7 @@ class CodexSetupVerifyTests(unittest.TestCase):
         self.assertIn("5/5 events, redaction: default", output.getvalue())
         self.assertIn("/bin/agent-strace (agent-strace", output.getvalue())
         self.assertIn("\n"+"hooks:      ", output.getvalue())
+        self.assertEqual(output.getvalue().count(str(self.hooks_path)), 1)
         self.assertIn("\n"+"executable: ", output.getvalue())
 
     def test_cli_parser_accepts_verify_with_codex(self):

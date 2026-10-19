@@ -913,7 +913,7 @@ def cmd_setup(args: argparse.Namespace) -> int | None:
         )
         if ok:
             sys.stdout.write(
-                f"Codex static hook setup verified: {hooks_path}.\n"
+                "Codex static hook setup verified.\n"
                 f"hooks:      {hooks_path} "
                 f"({details['event_count']}/{details['event_total']} events, "
                 f"redaction: {details['redaction']})\n"
@@ -978,9 +978,9 @@ def cmd_setup(args: argparse.Namespace) -> int | None:
         )
         sys.stderr.write(
             "\nCodex hook checklist:\n"
-            "- Put the JSON at ~/.codex/hooks.json or <repo>/.codex/hooks.json, not ~/.codex/hooks/hooks.json.\n"
+            f"- Put the JSON at {codex_hooks_path} or <repo>/.codex/hooks.json, not {codex_hooks_path.parent / 'hooks' / 'hooks.json'}.\n"
             f"- Restore the pre-AgentTrace config, when backed up, with: {restore_command}\n"
-            "- In ~/.codex/config.toml, remove [features].hooks = false if present.\n"
+            f"- In {codex_hooks_path.with_name('config.toml')}, remove [features].hooks = false if present.\n"
             "- Reload Codex, then review and trust command hooks in the Hooks UI or /hooks.\n"
         )
 
