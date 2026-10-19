@@ -35,7 +35,12 @@ class CodexSetupVerifyTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.hooks_path = Path(self.tmp.name) / "hooks.json"
-        self.env = patch.dict(os.environ, {"CODEX_CONFIG_DIR": self.tmp.name})
+        self.gemini_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.gemini_tmp.cleanup)
+        self.env = patch.dict(os.environ, {
+            "CODEX_CONFIG_DIR": self.tmp.name,
+            "GEMINI_CONFIG_DIR": self.gemini_tmp.name,
+        })
         self.env.start()
         self.addCleanup(self.env.stop)
 
@@ -186,9 +191,116 @@ class CodexSetupVerifyTests(unittest.TestCase):
                 with self.assertRaises(SystemExit) as result:
                     main()
         self.assertEqual(result.exception.code, 1)  # no config
-        capture.assert_not_called()
-        notice.assert_not_called()
+        capture.assert_called_once()
+        props = capture.call_args.args[1]
+        self.assertEqual(props["command"], "setup")
+        self.assertEqual(props["integration"], "codex")
+        self.assertEqual(props["subcommand"], "verify")
+        self.assertFalse(props["success"])
+        self.assertEqual(props["exit_code"], 1)
+        self.assertNotIn("hooks_path", props)
+        notice.assert_called_once()
         self.assertFalse(self.hooks_path.exists())
+        self.assertEqual(list(Path(self.gemini_tmp.name).iterdir()), [])
+
+    def test_redaction_modes_verify_without_matching_cli_flags(self):
+        for mode in ("default", "redact", "no_redact"):
+            with self.subTest(mode=mode):
+                args = _args(verify=False, redact=mode == "redact", no_redact=mode == "no_redact")
+                self.hooks_path.write_text(json.dumps(_codex_hooks_config(args)))
+                details = {}
+                with patch("agent_trace.setup_verify.shutil.which", return_value="/bin/agent-strace"), self._probe_ok():
+                    ok, issues = verify_codex_setup(
+                        self.hooks_path, _codex_hooks_config(_args()), __version__, details=details
+                    )
+                self.assertTrue(ok, issues)
+                self.assertEqual(details["redaction"], mode.replace("_", "-"))
+                self.assertEqual(details["event_count"], 5)
+                self.assertEqual(details["executable"], "/bin/agent-strace")
+
+    def test_mixed_modes_are_rejected(self):
+        config = _codex_hooks_config(_args())
+        config["hooks"]["Stop"][0]["hooks"][0]["command"] = (
+            "AGENT_TRACE_REDACT=1 " + config["hooks"]["Stop"][0]["hooks"][0]["command"]
+        )
+        self.hooks_path.write_text(json.dumps(config))
+        with patch("agent_trace.setup_verify.shutil.which", return_value="/bin/agent-strace"), self._probe_ok():
+            ok, issues = verify_codex_setup(self.hooks_path, _codex_hooks_config(_args()), __version__)
+        self.assertFalse(ok)
+        self.assertIn("inconsistent redaction", " ".join(issues))
+
+    def test_documented_handler_fields_and_match_all_aliases_are_accepted(self):
+        for alias in (None, "", "*", ".*"):
+            with self.subTest(matcher=alias):
+                config = _codex_hooks_config(_args())
+                for event in ("PreToolUse", "PostToolUse"):
+                    if alias is None:
+                        config["hooks"][event][0].pop("matcher", None)
+                    else:
+                        config["hooks"][event][0]["matcher"] = alias
+                for event in ("Stop", "UserPromptSubmit"):
+                    config["hooks"][event][0]["matcher"] = "*"
+                    config["hooks"][event][0]["hooks"][0]["timeout"] = 30
+                    config["hooks"][event][0]["hooks"][0]["statusMessage"] = "running"
+                self.hooks_path.write_text(json.dumps(config))
+                with patch("agent_trace.setup_verify.shutil.which", return_value="/bin/agent-strace"), self._probe_ok():
+                    ok, issues = verify_codex_setup(
+                        self.hooks_path, _codex_hooks_config(_args()), __version__
+                    )
+                self.assertTrue(ok, issues)
+
+    def test_wrong_event_and_duplicate_hook_commands_fail(self):
+        for mutation in ("wrong_event", "duplicate_group", "duplicate_handler"):
+            with self.subTest(mutation=mutation):
+                config = _codex_hooks_config(_args())
+                stop = config["hooks"]["Stop"][0]
+                if mutation == "wrong_event":
+                    config["hooks"].setdefault("SessionEnd", []).append(json.loads(json.dumps(stop)))
+                elif mutation == "duplicate_group":
+                    config["hooks"]["Stop"].append(json.loads(json.dumps(stop)))
+                else:
+                    stop["hooks"].append(json.loads(json.dumps(stop["hooks"][0])))
+                self.hooks_path.write_text(json.dumps(config))
+                with patch("agent_trace.setup_verify.shutil.which", return_value="/bin/agent-strace"), self._probe_ok():
+                    ok, problems = verify_codex_setup(
+                        self.hooks_path, _codex_hooks_config(_args()), __version__
+                    )
+                self.assertFalse(ok)
+                self.assertIn("wrong event" if mutation == "wrong_event" else "duplicate", " ".join(problems))
+                self.assertIn("agent-strace hook --provider codex stop", " ".join(problems))
+
+    def test_missing_command_has_actionable_diagnostics_without_unsafe_overwrite_advice(self):
+        config = _codex_hooks_config(_args())
+        config["hooks"]["Stop"][0]["hooks"] = [
+            {"type": "command", "command": "my-own-hook --keep"}
+        ]
+        self.hooks_path.write_text(json.dumps(config))
+        with patch("agent_trace.setup_verify.shutil.which", return_value="/bin/agent-strace"), self._probe_ok():
+            ok, issues = verify_codex_setup(
+                self.hooks_path, _codex_hooks_config(_args()), __version__
+            )
+        self.assertFalse(ok)
+        joined = " ".join(issues)
+        self.assertIn("Stop: missing", joined)
+        self.assertIn("agent-strace hook --provider codex stop", joined)
+        self.assertNotIn("Re-run setup", joined)
+
+    def test_codex_config_environment_precedence_and_executable_summary(self):
+        from agent_trace.cli import _codex_config_dir
+        with tempfile.TemporaryDirectory() as alternate:
+            with patch.dict(os.environ, {"CODEX_CONFIG_DIR": "", "CODEX_HOME": alternate}):
+                self.assertEqual(_codex_config_dir(), Path(alternate))
+            with patch.dict(os.environ, {"CODEX_CONFIG_DIR": self.tmp.name, "CODEX_HOME": alternate}):
+                self.assertEqual(_codex_config_dir(), Path(self.tmp.name))
+        self._write_config()
+        output = io.StringIO()
+        with patch("agent_trace.setup_verify.shutil.which", return_value="/bin/agent-strace"), self._probe_ok():
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(cmd_setup(_args()), 0)
+        self.assertIn("5/5 events, redaction: default", output.getvalue())
+        self.assertIn("/bin/agent-strace (agent-strace", output.getvalue())
+        self.assertIn("\n"+"hooks:      ", output.getvalue())
+        self.assertIn("\n"+"executable: ", output.getvalue())
 
     def test_cli_parser_accepts_verify_with_codex(self):
         parsed = build_parser().parse_args(["setup", "--cli", "codex", "--verify"])

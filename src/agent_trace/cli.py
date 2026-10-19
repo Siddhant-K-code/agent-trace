@@ -819,7 +819,12 @@ def _gemini_config_dir() -> Path:
 
 
 def _codex_config_dir() -> Path:
-    return Path(os.environ.get("CODEX_CONFIG_DIR", "~/.codex")).expanduser()
+    configured = (
+        os.environ.get("CODEX_CONFIG_DIR")
+        or os.environ.get("CODEX_HOME")
+        or "~/.codex"
+    )
+    return Path(configured).expanduser()
 
 
 def _write_codex_hooks_config(args: argparse.Namespace) -> tuple[Path, Path | None, bool]:
@@ -902,12 +907,17 @@ def cmd_setup(args: argparse.Namespace) -> int | None:
             sys.stderr.write("Setup verification currently supports only --cli codex.\n")
             return 2
         hooks_path = _codex_config_dir() / "hooks.json"
+        details: dict = {}
         ok, messages = verify_codex_setup(
-            hooks_path, _codex_hooks_config(args), __version__
+            hooks_path, _codex_hooks_config(args), __version__, details=details
         )
         if ok:
             sys.stdout.write(
                 f"Codex static hook setup verified: {hooks_path}.\n"
+                f"hooks:      {hooks_path} "
+                f"({details['event_count']}/{details['event_total']} events, "
+                f"redaction: {details['redaction']})\n"
+                f"executable: {details['executable']} ({details['version']})\n"
                 "This does not prove Codex enabled/trusted hooks or captured an event; "
                 "run a local session and inspect its trace to check actual capture.\n"
             )
@@ -2239,6 +2249,8 @@ def _telemetry_command_properties(args: argparse.Namespace) -> dict:
 
     if args.command == "setup":
         properties["integration"] = getattr(args, "cli", "claude") or "claude"
+        if getattr(args, "verify", False):
+            properties["subcommand"] = "verify"
     elif args.command == "auto":
         framework = getattr(args, "framework", "") or (
             "detect" if getattr(args, "detect", False) else ""
@@ -2378,12 +2390,6 @@ def main() -> None:
     if not args.command:
         parser.print_help()
         sys.exit(1)
-
-    # Explicit read-only verification must not create telemetry state or send
-    # an anonymous product event. It only reads Codex config and probes
-    # the local AgentTrace executable with --version.
-    if args.command == "setup" and getattr(args, "verify", False):
-        sys.exit(cmd_setup(args))
 
     # hook subcommand is handled separately (reads stdin)
     if args.command == "hook":

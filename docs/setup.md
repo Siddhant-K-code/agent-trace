@@ -62,31 +62,16 @@ agent-strace explain  # plain-English summary
 
 ### OpenAI Codex hooks
 
-`agent-strace setup --cli codex` writes user-level hooks to `$CODEX_CONFIG_DIR/hooks.json` or `~/.codex/hooks.json`, and also prints the JSON:
+`agent-strace setup --cli codex` writes user-level hooks to `$CODEX_CONFIG_DIR/hooks.json` when set, otherwise `$CODEX_HOME/hooks.json` when set, or `~/.codex/hooks.json` by default, and also prints the JSON:
 
-Before replacing an existing file, setup copies its original bytes once to `$CODEX_CONFIG_DIR/hooks.json.agent-strace.bak` (or `~/.codex/hooks.json.agent-strace.bak`). Repeated setup runs preserve that first backup. To restore the pre-AgentTrace config at the default location:
+Before replacing an existing file, setup copies its original bytes once to a `hooks.json.agent-strace.bak` file in the active directory (`$CODEX_CONFIG_DIR`, then `$CODEX_HOME`, then `~/.codex`). Repeated setup runs preserve that first backup. To restore the pre-AgentTrace config at the default location:
 
 ```bash
 cp ~/.codex/hooks.json.agent-strace.bak ~/.codex/hooks.json
 ```
 
-When using `CODEX_CONFIG_DIR`, run `cp "$CODEX_CONFIG_DIR/hooks.json.agent-strace.bak" "$CODEX_CONFIG_DIR/hooks.json"` instead. If no config existed before setup, no backup is created; remove the generated file with `rm ~/.codex/hooks.json` (or `rm "$CODEX_CONFIG_DIR/hooks.json"`).
+For an override, use `cp "$CODEX_CONFIG_DIR/hooks.json.agent-strace.bak" "$CODEX_CONFIG_DIR/hooks.json"` (or substitute `CODEX_HOME` if that is the active directory). If no config existed before setup, no backup is created; remove the generated `hooks.json` from the active directory. **Setup replaces the entire hooks file**; if you added other tools after a prior backup, inspect and merge hooks manually instead of blindly re-running setup.
 
-To diagnose the installed **Codex user-level** configuration without changing
-files, run `agent-strace setup --cli codex --verify`. It checks that
-`$CODEX_CONFIG_DIR/hooks.json` (or `~/.codex/hooks.json`) is valid and
-contains the generated commands expected by this AgentTrace version. Unrelated
-user hooks are allowed. It also verifies that `agent-strace` is on `PATH`
-and that its `--version` output matches this installation, and returns non-zero
-for missing/stale config, missing executable or version mismatch. A Codex
-project-specific hooks file is **not** checked by this command.
-
-**A passing check does not mean Codex has enabled or trusted these hooks, that
-a provider process ran, or that events were captured.** Reload Codex, review
-the command hooks in its Hooks UI, run a local test session, and use
-`agent-strace list` / `agent-strace inspect SESSION_ID` to inspect
-actually observed evidence. Verification invokes only the local AgentTrace
-executable with `--version`; it does not execute hooks or write config.
 
 ```json
 {
@@ -107,6 +92,29 @@ If Codex does not list the hooks after you create the file:
 - Use the root `~/.codex/hooks.json` file for user-level hooks, or `<repo>/.codex/hooks.json` for project-level hooks. `~/.codex/hooks/hooks.json` is for plugin-bundled hooks and is not the normal user config path.
 - Check `~/.codex/config.toml` and remove `[features].hooks = false` if present. Hooks are enabled by default unless a user, system, or admin config layer disables them.
 - Reload Codex or press refresh in the Hooks view. Non-managed command hooks must be reviewed and trusted before they run.
+
+To diagnose the installed **Codex user-level** configuration without changing
+files, run `agent-strace setup --cli codex --verify`. It checks that
+`$CODEX_CONFIG_DIR/hooks.json`, `$CODEX_HOME/hooks.json`, or
+`~/.codex/hooks.json` (in that priority order) is valid and
+contains the generated commands expected by this AgentTrace version. Unrelated
+user hooks are allowed. It also verifies that `agent-strace` is on `PATH`
+and that its `--version` output matches this installation, and returns non-zero
+for missing/stale config, missing executable or version mismatch. A Codex
+project-specific hooks file is **not** checked by this command.
+
+**A passing check does not mean Codex has enabled or trusted these hooks, that
+a provider process ran, or that events were captured.** Reload Codex, review
+the command hooks in its Hooks UI, run a local test session, and use
+`agent-strace list` / `agent-strace inspect SESSION_ID` to inspect
+actually observed evidence. Verification invokes only the local AgentTrace
+executable with `--version`; it does not execute hooks or write config.
+
+A successful verification prints the installed hooks path, matching event count,
+actual redaction mode, and resolved executable path and version. It accepts
+consistent default, `--redact` and `--no-redact` installations regardless
+of flags passed to `--verify`. On mismatches, inspect and edit the reported
+hook entry; re-running setup can overwrite non-AgentTrace user hooks.
 
 ### Gemini CLI hooks
 
