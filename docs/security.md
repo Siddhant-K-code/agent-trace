@@ -131,7 +131,8 @@ Use the purpose-built derived formats when raw trace content is not required:
 
 These formats have narrower disclosure boundaries than ordinary
 `agent-strace share` output, which can include replay data such as prompts,
-tool results, commands, and paths.
+tool results, commands, and paths. Run `agent-strace share <session-id> --dry-run`
+to see counts of that content, without values, before writing the HTML.
 
 ---
 

@@ -1259,6 +1259,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--assignment", action="store_true",
         help="create a privacy-minimized deterministic assignment ZIP instead of ordinary HTML",
     )
+    p_share.add_argument(
+        "--dry-run", action="store_true", dest="dry_run",
+        help="print a value-free disclosure preview (category counts only) instead of writing HTML",
+    )
+    p_share.add_argument(
+        "--format", choices=["text", "json"], default=None,
+        help="format for the --dry-run preview (default: text)",
+    )
 
     # score (assignment bundles; separate from session eval)
     p_score = sub.add_parser(

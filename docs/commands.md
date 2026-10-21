@@ -854,14 +854,41 @@ and event-level line hashes for `agent-strace verify --from-export`.
 
 ### `share`
 ```
-agent-strace share <session-id> [-o FILE]
+agent-strace share [session-id] [-o FILE | --stdout] [--open] [--postmortem]
+agent-strace share [session-id] --dry-run [--format text|json]
 agent-strace share --assignment [session-id] --output submission.zip
 ```
-Generate a self-contained HTML report. No server needed.
+Generate a self-contained HTML report. No server needed. The HTML embeds every
+event payload and lists every annotation, so treat it as sensitive.
+
+| Flag | Description |
+|---|---|
+| `session-id` | Session ID or prefix (default: latest session) |
+| `-o`, `--output FILE` | Output path (default: `session-<id>.html`) |
+| `--stdout` | Write the HTML to stdout instead of a file |
+| `--open` | Open the written HTML in the default browser |
+| `--postmortem` | Include postmortem analysis (shown for failed sessions) |
+| `--dry-run` | Print a value-free disclosure preview instead of writing HTML |
+| `--format text\|json` | Preview format (default: `text`); requires `--dry-run` |
+| `--assignment` | Write a privacy-minimized assignment ZIP instead of HTML |
+
+`--dry-run` reports what the HTML would disclose as category counts: events,
+prompts, responses, tool inputs, tool results, command-bearing and path-bearing
+events, annotations, content-rich events, redacted events, and unredacted
+content-rich events. It never prints prompt, response, command, path, result, or
+annotation text. The mode is `include_content` because ordinary share output
+embeds full event data. No HTML is written, printed, or opened: `--output`,
+`--stdout`, and `--open` are ignored with a note on stderr, so you can append
+`--dry-run` to the command you plan to run. `--postmortem` is accepted and does
+not change the counts, because that section restates the same events.
+`--format json` prints one object with `session_id` plus the
+[disclosure preview](share-disclosure-preview.md) fields. Redaction is
+heuristic, so review the session itself before sharing the HTML.
 
 `--assignment` instead creates a deterministic, privacy-minimized ZIP with a
 sanitized trace, offline replay, derived stats/cost/lint reports, and a versioned
-manifest. It cannot be combined with `--stdout`, `--open`, or `--postmortem`.
+manifest. It cannot be combined with `--stdout`, `--open`, `--postmortem`, or
+`--dry-run`; the preview describes ordinary share HTML, not the ZIP contents.
 The output name must have a lowercase `.zip` suffix and is atomically written
 with owner-only permissions. See the [assignment review guide](hiring.md) for
 the privacy boundary and interpretation limits.

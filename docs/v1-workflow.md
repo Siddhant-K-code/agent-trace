@@ -64,8 +64,13 @@ from optional or experimental surfaces.
    The dedicated review projection/UI is tracked in #242.
 
 7. **Review disclosure before sharing or exporting.**
-   Treat trace data as sensitive. The current safe preview for anonymized export
-   is:
+   Treat trace data as sensitive. Preview what an HTML share would disclose, as
+   category counts with no values, before writing the HTML:
+   ```bash
+   agent-strace share <session-id> --dry-run
+   ```
+   The preview reports mode `include_content` because ordinary `share` output
+   embeds full event data. For anonymized export, preview the replacements:
    ```bash
    agent-strace export <session-id> --anonymize --dry-run
    ```

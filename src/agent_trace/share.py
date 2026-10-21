@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import TextIO
 
 from .cost import estimate_cost
+from .disclosure import DisclosurePreview, build_disclosure_preview
 from .explain import explain_session
 from .models import EventType, TraceEvent, SessionMeta
 from .store import TraceStore
@@ -688,11 +689,77 @@ def render_html(
 
 
 # ---------------------------------------------------------------------------
+# Disclosure preview (--dry-run)
+# ---------------------------------------------------------------------------
+
+_DISCLOSURE_TEXT_ROWS = (
+    ("events", "event_count"),
+    ("prompts", "prompt_count"),
+    ("responses", "response_count"),
+    ("tool inputs", "tool_input_count"),
+    ("tool results", "tool_result_count"),
+    ("command-bearing events", "command_count"),
+    ("path-bearing events", "path_count"),
+    ("annotations", "annotation_count"),
+    ("content-rich events", "content_rich_event_count"),
+    ("redacted events", "redacted_event_count"),
+    ("unredacted content-rich events", "unredacted_content_rich_event_count"),
+)
+
+
+def build_share_disclosure_preview(store: TraceStore, session_id: str) -> DisclosurePreview:
+    """Count what ordinary share HTML for *session_id* would disclose.
+
+    The HTML embeds every event payload and lists every annotation, so the
+    preview counts all events and annotations in ``include_content`` mode.
+    """
+    return build_disclosure_preview(
+        store.load_events(session_id),
+        annotation_count=len(load_annotations(store, session_id)),
+        include_content=True,
+    )
+
+
+def format_disclosure_preview(session_id: str, preview: DisclosurePreview) -> str:
+    """Render a disclosure preview as text. Prints counts, never values."""
+    counts = preview.to_dict()
+    width = max(len(label) for label, _ in _DISCLOSURE_TEXT_ROWS) + 1
+    lines = [
+        "Share disclosure preview (dry run): no HTML written or opened.",
+        f"Session: {session_id}",
+        f"Mode: {preview.mode} (share HTML embeds full event data and annotation text)",
+        "",
+    ]
+    lines.extend(
+        f"  {label + ':':<{width}}  {counts[key]}" for label, key in _DISCLOSURE_TEXT_ROWS
+    )
+    lines.extend([
+        "",
+        "Counts only. No prompt, response, command, path, result, or annotation text is shown.",
+        "Redaction is heuristic; review the session before sharing the HTML.",
+        "Re-run without --dry-run to write the HTML report.",
+    ])
+    return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
 # CLI handler
 # ---------------------------------------------------------------------------
 
 def cmd_share(args: argparse.Namespace) -> int:
+    dry_run = getattr(args, "dry_run", False)
+    preview_format = getattr(args, "format", None)
+    if preview_format is not None and not dry_run:
+        sys.stderr.write("Error: --format requires --dry-run\n")
+        return 1
+
     if getattr(args, "assignment", False):
+        if dry_run:
+            sys.stderr.write(
+                "Error: --dry-run previews ordinary share HTML and cannot be combined "
+                "with --assignment\n"
+            )
+            return 1
         from .assignment import cmd_share_assignment
         return cmd_share_assignment(args)
 
@@ -708,6 +775,24 @@ def cmd_share(args: argparse.Namespace) -> int:
     if not full_id:
         sys.stderr.write(f"Session not found: {session_id}\n")
         return 1
+
+    if dry_run:
+        preview = build_share_disclosure_preview(store, full_id)
+        if preview_format == "json":
+            payload = {"session_id": full_id, **preview.to_dict()}
+            sys.stdout.write(json.dumps(payload, indent=2) + "\n")
+        else:
+            sys.stdout.write(format_disclosure_preview(full_id, preview))
+        ignored = [
+            flag
+            for flag, attr in (("--output", "output"), ("--stdout", "stdout"), ("--open", "open"))
+            if getattr(args, attr, None)
+        ]
+        if ignored:
+            sys.stderr.write(
+                f"Note: --dry-run ignores {', '.join(ignored)}; no HTML was written or opened.\n"
+            )
+        return 0
 
     postmortem_html = ""
     if getattr(args, "postmortem", False):
