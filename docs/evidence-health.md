@@ -19,7 +19,7 @@ Every non-healthy result includes machine-readable reason codes and human explan
 
 The first version checks:
 
-- session start/end boundaries;
+- session start/end boundaries, allowing [continuation starts](#session-boundaries);
 - events before start or after end;
 - duplicate event IDs;
 - mixed session IDs;
@@ -35,6 +35,39 @@ For an active session (`session_finalized=False`), a tool call or LLM request
 without a terminal outcome is treated as in flight rather than as missing
 evidence. Orphan, duplicate, invalid, and out-of-order outcomes are still
 reported immediately.
+
+## Session boundaries
+
+Boundaries are checked in event order. The first `session_start` opens the
+session and a `session_end` closes it.
+
+A later `session_start` continues the same session when its `source` is
+`resume` or `compact` (`CONTINUATION_START_SOURCES`). Claude Code and Codex keep
+the session ID when a session is resumed or compacted, and Gemini CLI and GitHub
+Copilot CLI keep it on resume, so the hooks record these starts in the existing
+trace. A continuation start:
+
+- is not a `duplicate_session_start`;
+- re-opens a session that a `session_end` closed, so the next `session_end`
+  is not a `duplicate_session_end` and the events after the continuation start
+  are not `events_after_session_end`.
+
+These stay `invalid`:
+
+- a later start with any other source is `duplicate_session_start`. This
+  includes `startup`, `clear`, `fork`, `new`, a hook event name such as
+  `SessionStart`, and a missing source. Only `resume` and `compact` are known
+  to keep the session ID, so any other repeated start contradicts the trace;
+- a `session_end` with no continuation start since the previous end is
+  `duplicate_session_end`;
+- any other event after a `session_end` with no continuation start is
+  `events_after_session_end`, reported once per closed span on the first such
+  event.
+
+Source matching is exact and case-sensitive. When a continued session has no
+end after its last continuation start, it reports `session_active` or
+`missing_session_end` like any other open session. `observed_end` still reports
+whether any end marker was captured.
 
 ## Provider limitations
 
