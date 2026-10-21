@@ -8,7 +8,7 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-siddhant-khare
     strategy:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
@@ -31,7 +31,7 @@ jobs:
           PYTHONPATH: src
 
   vscode-extension:
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-siddhant-khare
     defaults:
       run:
         working-directory: vscode-extension

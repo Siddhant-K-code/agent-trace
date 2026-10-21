@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-siddhant-khare
 
     steps:
       - uses: actions/checkout@v4
