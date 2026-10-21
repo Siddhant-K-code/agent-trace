@@ -38,7 +38,7 @@ Print or install hooks config for supported agent CLIs. `--cli claude` prints Cl
 | Flag | Default | Description |
 |---|---|---|
 | `--cli PROVIDER` | `claude` | Configure `claude`, `codex`, `gemini`, `cursor`, `copilot`, or `all` |
-| `--verify` | off | Read-only check of **Codex user-level** hooks and AgentTrace CLI version; requires `--cli codex`, returns non-zero if incomplete, does not capture events (see [setup.md](setup.md)) |
+| `--verify` | off | Read-only check of **Codex user-level** hooks, the `config.toml` `[features]` hooks flag, and AgentTrace CLI version; requires `--cli codex`; returns non-zero if incomplete or hooks are disabled; skips Codex profiles, `-c` overrides, and project, system, or managed config layers; does not capture events (see [setup.md](setup.md)) |
 | `--redact` | on | Explicitly enable secret redaction in generated hook commands |
 | `--no-redact` | off | Disable automatic secret redaction in generated hook commands |
 | `--global` | off | Compatibility flag; Claude setup already targets the user-level settings file |
