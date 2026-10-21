@@ -826,16 +826,37 @@ def _gemini_config_dir() -> Path:
 
 
 def _codex_config_dir() -> Path:
-    configured = (
-        os.environ.get("CODEX_CONFIG_DIR")
-        or os.environ.get("CODEX_HOME")
-        or "~/.codex"
-    )
-    return Path(configured).expanduser()
+    """Return the directory Codex reads, as find_codex_home() in openai/codex does.
+
+    Codex uses a non-empty CODEX_HOME verbatim (no "~" expansion), else
+    ~/.codex. It never reads CODEX_CONFIG_DIR.
+    """
+    codex_home = os.environ.get("CODEX_HOME")
+    return Path(codex_home) if codex_home else Path.home() / ".codex"
+
+
+def _codex_dir_problem(config_dir: Path) -> str | None:
+    """Note an ignored CODEX_CONFIG_DIR; return why Codex would reject CODEX_HOME."""
+    legacy = os.environ.get("CODEX_CONFIG_DIR")
+    if legacy:
+        legacy_dir = Path(legacy).expanduser()
+        if os.path.realpath(legacy_dir) != os.path.realpath(config_dir):
+            sys.stderr.write(
+                f"Note: ignoring CODEX_CONFIG_DIR={legacy}. Codex does not read it; "
+                "it reads CODEX_HOME, else ~/.codex. Older agent-strace versions may "
+                f"have written {legacy_dir / 'hooks.json'}, which Codex does not load.\n"
+            )
+    if os.environ.get("CODEX_HOME") and not os.path.isdir(config_dir):
+        return (
+            f"CODEX_HOME is set to {config_dir}, which is not an existing directory. "
+            "Codex rejects that value. Point CODEX_HOME at an existing directory or unset it."
+        )
+    return None
 
 
 def _write_codex_hooks_config(args: argparse.Namespace) -> tuple[Path, Path | None, bool]:
     config_dir = _codex_config_dir()
+    # cmd_setup rejects a missing CODEX_HOME first, so this only creates ~/.codex.
     config_dir.mkdir(parents=True, exist_ok=True)
     hooks_path = config_dir / "hooks.json"
     backup_path = hooks_path.with_name(f"{hooks_path.name}.agent-strace.bak")
@@ -914,6 +935,10 @@ def cmd_setup(args: argparse.Namespace) -> int | None:
             sys.stderr.write("Setup verification currently supports only --cli codex.\n")
             return 2
         config_dir = _codex_config_dir()
+        problem = _codex_dir_problem(config_dir)
+        if problem:
+            sys.stderr.write(f"Setup verification failed: {problem}\n")
+            return 1
         hooks_path = config_dir / "hooks.json"
         config_path = config_dir / "config.toml"
         details: dict = {}
@@ -946,6 +971,10 @@ def cmd_setup(args: argparse.Namespace) -> int | None:
     if cli in ("claude", "all"):
         configs.append(("Claude Code", "~/.claude/settings.json", _claude_hooks_config(args)))
     if cli in ("codex", "all"):
+        problem = _codex_dir_problem(_codex_config_dir())
+        if problem:
+            sys.stderr.write(f"Setup failed: {problem}\n")
+            return 1
         hooks_path, backup_path, backup_created = _write_codex_hooks_config(args)
         if backup_created:
             sys.stderr.write(

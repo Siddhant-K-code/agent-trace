@@ -20,9 +20,9 @@ The machine-readable source is [`src/agent_trace/capture_matrix.json`](../src/ag
 
 ## OpenAI Codex
 
-- Config: `~/.codex/hooks.json`
-- Backup: before overwriting an existing config, setup preserves its original bytes once at `~/.codex/hooks.json.agent-strace.bak`. Repeated setup runs do not overwrite that pre-AgentTrace snapshot.
-- Rollback: run `cp ~/.codex/hooks.json.agent-strace.bak ~/.codex/hooks.json`. If no config existed before setup, no backup is created; run `rm ~/.codex/hooks.json` instead.
+- Config: `$CODEX_HOME/hooks.json (default ~/.codex/hooks.json)`
+- Backup: before overwriting an existing config, setup preserves its original bytes once at `hooks.json.agent-strace.bak` in the same directory. Repeated setup runs do not overwrite that pre-AgentTrace snapshot.
+- Rollback: run `cp ~/.codex/hooks.json.agent-strace.bak ~/.codex/hooks.json`, replacing `~/.codex` with `"$CODEX_HOME"` when it is set. If no config existed before setup, no backup is created; remove the generated `hooks.json` instead.
 - Coverage: session start, user prompts, assistant responses, `PreToolUse`/`PostToolUse` tool activity, and `Stop` (captured as a stop event, **not** as session end).
 - Verified with `codex-cli 0.163.0-alpha.11` on 2026-10-22: a tool call, a failing shell command and a spawned subagent, run with `codex exec` in a throwaway workspace, an isolated `CODEX_HOME`, a read-only sandbox and no approval-bypass flags. The standalone `codex-cli 0.143.0` available on the same machine could not complete a turn, so it was not verified.
 - Hook trust: Codex runs the generated command hooks only after they are reviewed and trusted in `/hooks`. `codex exec` skips untrusted hooks without a warning, so an untrusted install records nothing.

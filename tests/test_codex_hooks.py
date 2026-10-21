@@ -4,13 +4,15 @@ import argparse
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agent_trace.cli import cmd_setup
+from agent_trace import __version__
+from agent_trace.cli import _codex_config_dir, _codex_hooks_config, cmd_setup
 from agent_trace.hooks import (
     _read_active_session,
     handle_post_tool,
@@ -161,19 +163,18 @@ class TestCodexHooks(unittest.TestCase):
 class TestCodexSetup(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
-        os.environ["CODEX_CONFIG_DIR"] = self.tmpdir
         self.gemini_dir = tempfile.mkdtemp()
-        os.environ["GEMINI_CONFIG_DIR"] = self.gemini_dir
         self.cursor_dir = tempfile.mkdtemp()
-        os.environ["CURSOR_CONFIG_DIR"] = self.cursor_dir
         self.copilot_home = tempfile.mkdtemp()
-        os.environ["COPILOT_HOME"] = self.copilot_home
-
-    def tearDown(self):
+        env = patch.dict(os.environ, {
+            "CODEX_HOME": self.tmpdir,
+            "GEMINI_CONFIG_DIR": self.gemini_dir,
+            "CURSOR_CONFIG_DIR": self.cursor_dir,
+            "COPILOT_HOME": self.copilot_home,
+        })
+        env.start()
+        self.addCleanup(env.stop)
         os.environ.pop("CODEX_CONFIG_DIR", None)
-        os.environ.pop("GEMINI_CONFIG_DIR", None)
-        os.environ.pop("CURSOR_CONFIG_DIR", None)
-        os.environ.pop("COPILOT_HOME", None)
 
     def test_setup_cli_codex_outputs_hooks_json(self):
         args = argparse.Namespace(
@@ -321,6 +322,184 @@ class TestCodexSetup(unittest.TestCase):
         self.assertIn(str(Path(self.tmpdir) / "hooks.json"), err.getvalue())
         self.assertIn("GitHub Copilot hooks config", err.getvalue())
         self.assertIn("Codex hook checklist", err.getvalue())
+
+
+class TestCodexHomeResolution(unittest.TestCase):
+    """Setup and --verify use the directory Codex reads: CODEX_HOME, else ~/.codex."""
+
+    _ARGS = {"redact": False, "no_redact": False, "global_config": False}
+    _BAD_HOME = (
+        "CODEX_HOME is set to {}, which is not an existing directory. Codex rejects "
+        "that value. Point CODEX_HOME at an existing directory or unset it.\n"
+    )
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.home = self.root / "home"
+        self.default_dir = self.home / ".codex"
+        self.codex_home = self.root / "codex-home"
+        self.legacy_dir = self.root / "legacy"
+        self.other_dirs = [self.root / name for name in ("gemini", "cursor", "copilot")]
+        for path in (self.home, self.codex_home, self.legacy_dir, *self.other_dirs):
+            path.mkdir()
+        env = patch.dict(os.environ, {
+            "HOME": str(self.home),
+            "GEMINI_CONFIG_DIR": str(self.other_dirs[0]),
+            "CURSOR_CONFIG_DIR": str(self.other_dirs[1]),
+            "COPILOT_HOME": str(self.other_dirs[2]),
+        })
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("CODEX_HOME", None)
+        os.environ.pop("CODEX_CONFIG_DIR", None)
+
+    def _run(self, env, cli="codex", verify=False):
+        args = argparse.Namespace(cli=cli, verify=verify, **self._ARGS)
+        out, err = io.StringIO(), io.StringIO()
+        with patch.dict(os.environ, env), patch.object(sys, "stdout", out), patch.object(
+            sys, "stderr", err
+        ):
+            status = cmd_setup(args)
+        return status, out.getvalue(), err.getvalue()
+
+    def _verify(self, env):
+        probe = subprocess.CompletedProcess(
+            args=["/bin/agent-strace", "--version"],
+            returncode=0,
+            stdout=f"agent-strace {__version__}\n",
+            stderr="",
+        )
+        with patch(
+            "agent_trace.setup_verify.shutil.which", return_value="/bin/agent-strace"
+        ), patch("agent_trace.setup_verify.subprocess.run", return_value=probe):
+            return self._run(env, verify=True)
+
+    def _hooks_json(self):
+        return json.dumps(_codex_hooks_config(argparse.Namespace(**self._ARGS)))
+
+    def test_resolution_matches_codex(self):
+        legacy, codex_home = str(self.legacy_dir), str(self.codex_home)
+        cases = [
+            ({}, self.default_dir),
+            ({"CODEX_HOME": ""}, self.default_dir),
+            ({"CODEX_HOME": codex_home}, self.codex_home),
+            ({"CODEX_CONFIG_DIR": legacy}, self.default_dir),
+            ({"CODEX_CONFIG_DIR": legacy, "CODEX_HOME": ""}, self.default_dir),
+            ({"CODEX_CONFIG_DIR": legacy, "CODEX_HOME": codex_home}, self.codex_home),
+            ({"CODEX_HOME": "~/codex"}, Path("~/codex")),  # Codex does not expand "~".
+        ]
+        for env, expected in cases:
+            with self.subTest(env=env), patch.dict(os.environ, env):
+                self.assertEqual(_codex_config_dir(), expected)
+
+    def test_setup_ignores_codex_config_dir_set_alone(self):
+        status, out, err = self._run({"CODEX_CONFIG_DIR": str(self.legacy_dir)})
+
+        self.assertIsNone(status)
+        written = json.loads((self.default_dir / "hooks.json").read_text())
+        self.assertEqual(written, json.loads(out))
+        self.assertEqual(list(self.legacy_dir.iterdir()), [])
+        self.assertEqual(err.count("CODEX_CONFIG_DIR"), 1)
+        self.assertIn(
+            f"Note: ignoring CODEX_CONFIG_DIR={self.legacy_dir}. Codex does not read it",
+            err,
+        )
+        self.assertIn(
+            f"may have written {self.legacy_dir / 'hooks.json'}, which Codex does not load",
+            err,
+        )
+        self.assertIn(f"Put the JSON at {self.default_dir / 'hooks.json'}", err)
+
+    def test_setup_prefers_codex_home_when_both_are_set(self):
+        status, _, err = self._run({
+            "CODEX_CONFIG_DIR": str(self.legacy_dir),
+            "CODEX_HOME": str(self.codex_home),
+        })
+
+        self.assertIsNone(status)
+        self.assertTrue((self.codex_home / "hooks.json").is_file())
+        self.assertEqual(list(self.legacy_dir.iterdir()), [])
+        self.assertFalse(self.default_dir.exists())
+        self.assertEqual(err.count("Note: ignoring CODEX_CONFIG_DIR"), 1)
+        self.assertIn(
+            f"Wrote OpenAI Codex hooks config: {self.codex_home / 'hooks.json'}", err
+        )
+        self.assertIn(f"In {self.codex_home / 'config.toml'}", err)
+
+    def test_empty_codex_home_uses_and_creates_default_dir(self):
+        self.assertFalse(self.default_dir.exists())
+
+        status, _, err = self._run({"CODEX_HOME": ""})
+
+        self.assertIsNone(status)
+        self.assertTrue((self.default_dir / "hooks.json").is_file())
+        self.assertIn(
+            f"Wrote OpenAI Codex hooks config: {self.default_dir / 'hooks.json'}", err
+        )
+        self.assertNotIn("CODEX_CONFIG_DIR", err)
+
+    def test_no_note_when_codex_config_dir_is_the_codex_dir(self):
+        for env in (
+            {"CODEX_CONFIG_DIR": f"{self.codex_home}/", "CODEX_HOME": str(self.codex_home)},
+            {"CODEX_CONFIG_DIR": "~/.codex"},
+        ):
+            with self.subTest(env=env):
+                status, _, err = self._run(env)
+                self.assertIsNone(status)
+                self.assertNotIn("CODEX_CONFIG_DIR", err)
+
+    def test_setup_rejects_codex_home_that_is_not_a_directory_without_writing(self):
+        missing = self.root / "missing"
+        not_a_dir = self.root / "file"
+        not_a_dir.write_text("x")
+        for value in (missing, not_a_dir):
+            for cli in ("codex", "all"):
+                with self.subTest(value=value.name, cli=cli):
+                    status, out, err = self._run({"CODEX_HOME": str(value)}, cli=cli)
+
+                    self.assertEqual(status, 1)
+                    self.assertEqual(out, "")
+                    self.assertEqual(err, "Setup failed: " + self._BAD_HOME.format(value))
+                    self.assertFalse(missing.exists())
+                    self.assertEqual(not_a_dir.read_text(), "x")
+                    self.assertFalse(self.default_dir.exists())
+                    for path in self.other_dirs:
+                        self.assertEqual(list(path.iterdir()), [])
+
+    def test_verify_checks_codex_home_not_codex_config_dir(self):
+        # Older versions verified this file although Codex never loads it.
+        (self.legacy_dir / "hooks.json").write_text(self._hooks_json())
+
+        status, out, err = self._verify({"CODEX_CONFIG_DIR": str(self.legacy_dir)})
+
+        self.assertEqual(status, 1)
+        self.assertEqual(out, "")
+        self.assertIn(f"Missing Codex hooks config: {self.default_dir / 'hooks.json'}", err)
+        self.assertEqual(err.count("Note: ignoring CODEX_CONFIG_DIR"), 1)
+        self.assertFalse(self.default_dir.exists())
+
+        (self.codex_home / "hooks.json").write_text(self._hooks_json())
+        status, out, err = self._verify({
+            "CODEX_CONFIG_DIR": str(self.legacy_dir),
+            "CODEX_HOME": str(self.codex_home),
+        })
+
+        self.assertEqual(status, 0)
+        self.assertIn(f"hooks:      {self.codex_home / 'hooks.json'} (", out)
+        self.assertIn(f"config:     {self.codex_home / 'config.toml'} (", out)
+        self.assertEqual(err.count("Note: ignoring CODEX_CONFIG_DIR"), 1)
+
+    def test_verify_rejects_codex_home_that_is_not_a_directory(self):
+        missing = self.root / "missing"
+
+        status, out, err = self._verify({"CODEX_HOME": str(missing)})
+
+        self.assertEqual(status, 1)
+        self.assertEqual(out, "")
+        self.assertEqual(err, "Setup verification failed: " + self._BAD_HOME.format(missing))
+        self.assertFalse(missing.exists())
 
 
 if __name__ == "__main__":
