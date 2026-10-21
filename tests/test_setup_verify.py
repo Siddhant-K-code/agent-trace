@@ -13,9 +13,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agent_trace import __version__
+from agent_trace import __version__, setup_verify
 from agent_trace.cli import _codex_hooks_config, build_parser, cmd_setup, main
-from agent_trace.setup_verify import verify_codex_setup
+from agent_trace.setup_verify import check_codex_hooks_feature, verify_codex_setup
+
+# Every config.toml case runs under tomllib (3.11+) and the 3.10 fallback reader.
+_PARSERS = ("fallback",) if setup_verify._tomllib is None else ("tomllib", "fallback")
+_NOT_SET = "hooks not set; enabled by default"
 
 
 def _args(**updates):
@@ -321,10 +325,269 @@ class CodexSetupVerifyTests(unittest.TestCase):
         self.assertEqual(output.getvalue().count(str(self.hooks_path)), 1)
         self.assertIn("\n"+"executable: ", output.getvalue())
 
+    def test_hooks_disabled_in_config_toml_fails_without_writes(self):
+        self._write_config()
+        config_toml = Path(self.tmp.name) / "config.toml"
+        config_toml.write_text("[features]\nhooks = false\n", encoding="utf-8")
+        before = (config_toml.read_bytes(), self.hooks_path.read_bytes())
+        err, out = io.StringIO(), io.StringIO()
+        with patch("agent_trace.setup_verify.shutil.which", return_value="/bin/agent-strace"), self._probe_ok():
+            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+                self.assertEqual(cmd_setup(_args()), 1)
+        self.assertEqual(out.getvalue(), "")
+        self.assertEqual(
+            err.getvalue(),
+            f"Setup verification failed: Codex hooks are disabled in {config_toml}: "
+            "[features].hooks = false. Remove that setting or set [features].hooks = true, "
+            "then restart Codex.\n",
+        )
+        self.assertEqual((config_toml.read_bytes(), self.hooks_path.read_bytes()), before)
+        self.assertEqual(sorted(p.name for p in Path(self.tmp.name).iterdir()), ["config.toml", "hooks.json"])
+
+    def test_config_toml_is_read_from_the_resolved_codex_dir(self):
+        with tempfile.TemporaryDirectory() as codex_home:
+            Path(codex_home, "hooks.json").write_text(json.dumps(_codex_hooks_config(_args())))
+            Path(codex_home, "config.toml").write_text("features.codex_hooks = false\n")
+            err = io.StringIO()
+            with patch.dict(os.environ, {"CODEX_CONFIG_DIR": "", "CODEX_HOME": codex_home}), patch(
+                "agent_trace.setup_verify.shutil.which", return_value="/bin/agent-strace"
+            ), self._probe_ok(), contextlib.redirect_stderr(err):
+                self.assertEqual(cmd_setup(_args()), 1)
+            self.assertIn(
+                f"disabled in {Path(codex_home, 'config.toml')}: [features].codex_hooks = false",
+                err.getvalue(),
+            )
+
+    def test_config_toml_problem_is_reported_with_hooks_json_problems(self):
+        config_toml = Path(self.tmp.name) / "config.toml"
+        config_toml.write_text("[features]\ncodex_hooks = false\n", encoding="utf-8")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(cmd_setup(_args()), 1)
+        self.assertIn("[features].codex_hooks = false", err.getvalue())
+        self.assertIn("Missing Codex hooks config", err.getvalue())
+        self.assertEqual([p.name for p in Path(self.tmp.name).iterdir()], ["config.toml"])
+
+    def test_verified_summary_reports_config_toml_state_and_unchecked_layers(self):
+        self._write_config()
+        config_toml = Path(self.tmp.name) / "config.toml"
+        for content, state in (
+            (None, "not found; hooks enabled by default"),
+            ("[features]\nhooks = true\n", "[features].hooks = true"),
+            ('model = "o3"\n[profiles.fast.features]\nhooks = false\n', _NOT_SET),
+        ):
+            with self.subTest(state=state):
+                if content is not None:
+                    config_toml.write_text(content, encoding="utf-8")
+                out = io.StringIO()
+                with patch("agent_trace.setup_verify.shutil.which", return_value="/bin/agent-strace"), self._probe_ok():
+                    with contextlib.redirect_stdout(out):
+                        self.assertEqual(cmd_setup(_args()), 0)
+                self.assertIn(f"\nconfig:     {config_toml} ({state})\n", out.getvalue())
+                self.assertIn(
+                    "Not checked: Codex profiles, -c overrides, and project, system, "
+                    "or managed config layers.", out.getvalue()
+                )
+                self.assertIn("does not prove", out.getvalue())
+
     def test_cli_parser_accepts_verify_with_codex(self):
         parsed = build_parser().parse_args(["setup", "--cli", "codex", "--verify"])
         self.assertEqual(parsed.cli, "codex")
         self.assertTrue(parsed.verify)
+
+
+_REALISTIC_CONFIG = '''\
+# Codex user config with look-alike settings that must not count.
+model = "gpt-5-codex"
+model_reasoning_effort = 'high'
+notify = ["python3", "/Users/me/.codex/notify.py"]
+instructions = """
+Prefer small diffs.
+[features]
+hooks = false
+"""
+banner = \'\'\'
+codex_hooks = false\'\'\'
+quoted = "say \\"hooks = false\\" # not a comment"
+
+[shell_environment_policy]
+inherit = "core"
+set = { PATH = "/usr/bin", "DOTTED.KEY" = 'x' }
+
+[mcp_servers.docs]
+command = "npx"
+args = [
+  "-y",  # hooks = false
+  "@acme/docs-mcp",
+  { nested = [1, 2.5, 1979-05-27T07:32:00Z] },
+]
+env = { "API_KEY" = "redacted" }
+startup_timeout_sec = 10.5
+
+[profiles.fast]
+model = "o4-mini"
+features.hooks = false
+
+[profiles.slow.features]
+codex_hooks = false
+
+[[skills.config]]
+path = "/tmp/a"
+features.hooks = false
+'''
+
+
+class CodexHooksFeatureTests(unittest.TestCase):
+    """config.toml [features] checks; nothing is written."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.config_path = Path(self.tmp.name) / "config.toml"
+
+    def _check(self, parser, text=None):
+        if text is not None:
+            self.config_path.write_text(text, encoding="utf-8")
+        module = setup_verify._tomllib if parser == "tomllib" else None
+        with patch.object(setup_verify, "_tomllib", module):
+            return check_codex_hooks_feature(self.config_path)
+
+    def test_disabled_hooks_fail_naming_file_key_and_fix(self):
+        cases = {
+            "[features]\nhooks = false\n": ("[features].hooks = false.", "Remove that setting"),
+            "features.hooks = false\n": ("[features].hooks = false.",),
+            "features = { hooks = false }\n": ("[features].hooks = false.",),
+            '[ features ] # c\n"hooks"\t=\tfalse # off\n': ("[features].hooks = false.",),
+            "[features]\ncodex_hooks = false\n": (
+                "[features].codex_hooks = false (codex_hooks is the legacy name of hooks).",
+            ),
+            "[features]\nhooks = false\ncodex_hooks = true\n": ("[features].hooks = false.",),
+            "[features]\ncodex_hooks = false\nhooks = false\n": (
+                "[features].hooks = false and [features].codex_hooks = false",
+                "Remove both settings",
+            ),
+            _REALISTIC_CONFIG + "\n[features]\nhooks = false\n": ("[features].hooks = false.",),
+        }
+        for parser in _PARSERS:
+            for text, fragments in cases.items():
+                with self.subTest(parser=parser, config=text[-60:]):
+                    problems, summary = self._check(parser, text)
+                    self.assertEqual(summary, "")
+                    self.assertEqual(len(problems), 1, problems)
+                    self.assertTrue(problems[0].startswith(
+                        f"Codex hooks are disabled in {self.config_path}: "
+                    ), problems[0])
+                    self.assertIn("set [features].hooks = true, then restart Codex.", problems[0])
+                    for fragment in fragments:
+                        self.assertIn(fragment, problems[0])
+
+    def test_enabled_unset_or_other_tables_pass(self):
+        cases = {
+            "": _NOT_SET,
+            "# hooks = false\n": _NOT_SET,
+            "[features]\nother_feature = false\n": _NOT_SET,
+            "[features]\nhooks = true\n": "[features].hooks = true",
+            "[features]\ncodex_hooks = true\n": "[features].codex_hooks = true",
+            # Codex applies hooks after its legacy alias, regardless of file order.
+            "[features]\nhooks = true\ncodex_hooks = false\n": "[features].hooks = true",
+            "[features]\ncodex_hooks = false\nhooks = true\n": "[features].hooks = true",
+            "[profiles.work.features]\nhooks = false\n": _NOT_SET,
+            "[profiles.work]\nfeatures.hooks = false\n": _NOT_SET,
+            "profiles.work.features.hooks = false\n": _NOT_SET,
+            "[features.sub]\nhooks = false\n": _NOT_SET,
+            "[[agents]]\nfeatures.hooks = false\n": _NOT_SET,
+            _REALISTIC_CONFIG: _NOT_SET,
+            "features.codex_hooks = true\n" + _REALISTIC_CONFIG: "[features].codex_hooks = true",
+        }
+        for parser in _PARSERS:
+            for text, summary in cases.items():
+                with self.subTest(parser=parser, config=text[:60]):
+                    self.assertEqual(self._check(parser, text), ([], summary))
+
+    def test_missing_config_passes_as_codex_default(self):
+        for parser in _PARSERS:
+            with self.subTest(parser=parser):
+                self.assertEqual(self._check(parser), ([], "not found; hooks enabled by default"))
+        self.assertEqual(list(Path(self.tmp.name).iterdir()), [])
+
+    def test_bom_and_crlf_are_accepted(self):
+        self.config_path.write_bytes(b"\xef\xbb\xbf[features]\r\nhooks = false\r\n")
+        for parser in _PARSERS:
+            with self.subTest(parser=parser):
+                problems, _ = self._check(parser)
+                self.assertEqual(len(problems), 1)
+                self.assertIn("[features].hooks = false.", problems[0])
+
+    def test_unparseable_config_fails_naming_the_file(self):
+        cases = (
+            "[features\nhooks = false\n",
+            "[features]\nhooks = \n",
+            "[features]\nhooks = false extra\n",
+            "[features]\nhooks = false\nhooks = true\n",
+            "[features]\nhooks = 'unterminated\n",
+            'note = """never closed\n',
+            "args = [1, 2\n[features]\n",
+        )
+        for parser in _PARSERS:
+            for text in cases:
+                with self.subTest(parser=parser, config=text):
+                    problems, summary = self._check(parser, text)
+                    self.assertEqual(summary, "")
+                    self.assertEqual(len(problems), 1, problems)
+                    self.assertTrue(problems[0].startswith(
+                        f"Cannot parse Codex config {self.config_path} as TOML: "
+                    ), problems[0])
+                    self.assertTrue(problems[0].endswith(
+                        "Codex rejects invalid config files; fix the syntax and run this check again."
+                    ))
+
+    def test_fallback_parse_errors_report_line_numbers(self):
+        problems, _ = self._check("fallback", "model = 'o3'\n\n[features]\nhooks = \n")
+        self.assertIn("expected a value (line 4)", problems[0])
+        problems, _ = self._check("fallback", "[features]\nhooks = false\nhooks = true\n")
+        self.assertIn("duplicate key features.hooks (line 3)", problems[0])
+
+    def test_non_boolean_hook_values_fail(self):
+        cases = {
+            '[features]\nhooks = "false"\n': "hooks",
+            "[features]\ncodex_hooks = 0\n": "codex_hooks",
+            "[features.hooks]\nenabled = false\n": "hooks",
+            "features = { hooks = { enabled = true } }\n": "hooks",
+            "[features]\nhooks = [false]\n": "hooks",
+        }
+        for parser in _PARSERS:
+            for text, key in cases.items():
+                with self.subTest(parser=parser, config=text):
+                    self.assertEqual(self._check(parser, text), (
+                        [f"Invalid Codex config {self.config_path}: [features].{key} must be true or false."],
+                        "",
+                    ))
+
+    def test_unreadable_config_fails(self):
+        self.config_path.write_bytes(b"[features]\nhooks = \xff\n")
+        problems, _ = check_codex_hooks_feature(self.config_path)
+        self.assertTrue(problems[0].startswith(f"Cannot read Codex config {self.config_path}: "))
+        self.config_path.unlink()
+        self.config_path.mkdir()
+        problems, _ = check_codex_hooks_feature(self.config_path)
+        self.assertTrue(problems[0].startswith(f"Cannot read Codex config {self.config_path}: "))
+
+    def test_fallback_matches_tomllib_on_valid_configs(self):
+        if setup_verify._tomllib is None:
+            self.skipTest("tomllib requires Python 3.11+")
+        corpus = [
+            _REALISTIC_CONFIG,
+            _REALISTIC_CONFIG + "\n[features]\nhooks = false\n",
+            _REALISTIC_CONFIG + "\n[features]\ncodex_hooks = false\nhooks = true\n",
+            "features.codex_hooks = false\n" + _REALISTIC_CONFIG,
+            "features = { hooks = true, codex_hooks = false }\n" + _REALISTIC_CONFIG,
+            'x = """a\\"""b"""\ny = """c""""\nz = \'\'\'d\'\'\'\'\'\n[features]\nhooks = false\n',
+        ]
+        for text in corpus:
+            with self.subTest(config=text[:60]):
+                self.config_path.write_text(text, encoding="utf-8")
+                setup_verify._tomllib.loads(text)  # The corpus must be valid TOML.
+                self.assertEqual(self._check("fallback"), self._check("tomllib"))
 
 
 if __name__ == "__main__":

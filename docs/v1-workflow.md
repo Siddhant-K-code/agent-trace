@@ -37,7 +37,13 @@ from optional or experimental surfaces.
 
 3. **Verify that capture works before trusting a session.**
    This stage is a **v1 candidate, not yet a stable top-level CLI contract**.
-   Provider/capture verification is tracked in #239. Until that lands, verify
+   For Codex, check the installed hooks, the `config.toml` hooks feature flag,
+   and the AgentTrace executable:
+   ```bash
+   agent-strace setup --cli codex --verify
+   ```
+   This is a static config check, not proof of capture. Broader
+   provider/capture verification is tracked in #239. Until that lands, verify
    that a real session appears in `agent-strace list` and inspect the recorded
    events instead of treating hook installation alone as proof of coverage.
 

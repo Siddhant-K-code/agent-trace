@@ -92,7 +92,7 @@ Codex sends one JSON object to each command hook on stdin. agent-strace records 
 If Codex does not list the hooks after you create the file:
 
 - Use the root `~/.codex/hooks.json` file for user-level hooks, or `<repo>/.codex/hooks.json` for project-level hooks. `~/.codex/hooks/hooks.json` is for plugin-bundled hooks and is not the normal user config path.
-- Check `~/.codex/config.toml` and remove `[features].hooks = false` if present. Hooks are enabled by default unless a user, system, or admin config layer disables them.
+- Check `~/.codex/config.toml` and remove `[features].hooks = false` (or the legacy `[features].codex_hooks = false`) if present. Hooks are enabled by default unless a user, system, or admin config layer disables them.
 - Reload Codex or press refresh in the Hooks view. Non-managed command hooks must be reviewed and trusted before they run.
 
 To diagnose the installed **Codex user-level** configuration without changing
@@ -102,8 +102,21 @@ files, run `agent-strace setup --cli codex --verify`. It checks that
 contains the generated commands expected by this AgentTrace version. Unrelated
 user hooks are allowed. It also verifies that `agent-strace` is on `PATH`
 and that its `--version` output matches this installation, and returns non-zero
-for missing/stale config, missing executable or version mismatch. A Codex
-project-specific hooks file is **not** checked by this command.
+for missing/stale config, hooks disabled in `config.toml`, missing executable
+or version mismatch. A Codex project-specific hooks file is **not** checked by
+this command.
+
+The check also reads `config.toml` from the same directory and fails when its
+top-level `[features]` table sets `hooks = false` (including the dotted form
+`features.hooks = false`). The legacy key `codex_hooks` counts too; when both
+keys are set, `hooks` wins, as in Codex. A missing `config.toml` or an unset
+key passes because Codex enables hooks by default. Invalid TOML, or a
+non-boolean value for either key, fails with a diagnostic naming the file,
+because Codex rejects such a config. Codex profiles
+(`[profiles.<name>.features]`), `-c` overrides, and project, system, or managed
+config layers are **not** checked. On Python 3.10, which has no `tomllib`, a
+minimal built-in reader looks only for these keys and does not validate the
+rest of the file.
 
 **A passing check does not mean Codex has enabled or trusted these hooks, that
 a provider process ran, or that events were captured.** Reload Codex, review
@@ -113,7 +126,8 @@ actually observed evidence. Verification invokes only the local AgentTrace
 executable with `--version`; it does not execute hooks or write config.
 
 A successful verification prints the installed hooks path, matching event count,
-actual redaction mode, and resolved executable path and version. It accepts
+actual redaction mode, the `config.toml` path and hooks feature state, and
+resolved executable path and version. It accepts
 consistent default, `--redact` and `--no-redact` installations regardless
 of flags passed to `--verify`. On mismatches, inspect and edit the reported
 hook entry; re-running setup can overwrite non-AgentTrace user hooks.

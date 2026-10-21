@@ -912,10 +912,16 @@ def cmd_setup(args: argparse.Namespace) -> int | None:
         if cli != "codex":
             sys.stderr.write("Setup verification currently supports only --cli codex.\n")
             return 2
-        hooks_path = _codex_config_dir() / "hooks.json"
+        config_dir = _codex_config_dir()
+        hooks_path = config_dir / "hooks.json"
+        config_path = config_dir / "config.toml"
         details: dict = {}
         ok, messages = verify_codex_setup(
-            hooks_path, _codex_hooks_config(args), __version__, details=details
+            hooks_path,
+            _codex_hooks_config(args),
+            __version__,
+            config_path=config_path,
+            details=details,
         )
         if ok:
             sys.stdout.write(
@@ -923,7 +929,10 @@ def cmd_setup(args: argparse.Namespace) -> int | None:
                 f"hooks:      {hooks_path} "
                 f"({details['event_count']}/{details['event_total']} events, "
                 f"redaction: {details['redaction']})\n"
+                f"config:     {config_path} ({details['hooks_feature']})\n"
                 f"executable: {details['executable']} ({details['version']})\n"
+                "Not checked: Codex profiles, -c overrides, and project, system, "
+                "or managed config layers.\n"
                 "This does not prove Codex enabled/trusted hooks or captured an event; "
                 "run a local session and inspect its trace to check actual capture.\n"
             )
@@ -1169,7 +1178,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_setup.add_argument("--cli", choices=["claude", "codex", "gemini", "cursor", "copilot", "all"], default="claude",
                          help="agent CLI to configure (default: claude)")
     p_setup.add_argument("--verify", action="store_true",
-                         help="verify installed Codex user-level hooks without changing files (requires --cli codex)")
+                         help="verify installed Codex user-level hooks and the config.toml hooks "
+                              "feature flag without changing files (requires --cli codex)")
 
     # anonymous product telemetry controls
     p_telemetry = sub.add_parser(
