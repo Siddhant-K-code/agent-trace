@@ -89,6 +89,7 @@ from .lint import cmd_lint
 from .mcp_scan import cmd_mcp_scan
 from .retention import cmd_retention
 from .backfill import cmd_backfill_meta
+from .health import cmd_health
 from .sample import cmd_sample
 from .server import cmd_server
 from .watch import cmd_watch
@@ -1247,6 +1248,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_verify.add_argument("--from-export", dest="from_export", metavar="FILE",
                           help="verify hash chain from an EU AI Act export")
     p_verify.add_argument("--format", choices=["text", "json"], default="text")
+
+    # health
+    p_health = sub.add_parser(
+        "health",
+        help="assess evidence health of a session against the capture matrix",
+    )
+    p_health.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
+    p_health.add_argument("--format", choices=["text", "json"], default="text")
 
     # share
     p_share = sub.add_parser("share", help="generate a self-contained HTML replay of a session")
@@ -2532,6 +2541,7 @@ def main() -> None:
         "why": cmd_why,
         "audit": cmd_audit,
         "verify": cmd_verify,
+        "health": cmd_health,
         "share": cmd_share,
         "score": cmd_score,
         "pr-comment": cmd_pr_comment,

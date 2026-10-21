@@ -50,10 +50,17 @@ from optional or experimental surfaces.
    The local trace is the evidence source of truth for the rest of this path.
 
 5. **Inspect evidence health.**
-   A deterministic evidence-health core is being developed in #240. Until its
-   CLI integration is released, do not equate a clean-looking replay with
-   complete capture. Provider blind spots and missing boundaries must remain
-   visible.
+   ```bash
+   agent-strace health <session-id>
+   ```
+   The status is `healthy`, `partial`, `unknown` or `invalid`. Observed
+   reasons come from the recorded events. Provider limitations come from the
+   capture matrix packaged with agent-strace, which has entries for Claude Code
+   and Codex. Other sessions get a note that no provider limitations were
+   assessed. The command exits 0 for `healthy` and `partial` and 1 otherwise;
+   `--format json` gives the same result for scripts. A clean-looking replay is
+   still not proof of complete capture. See
+   [`health`](commands.md#health).
 
 6. **Review the ordered session locally.**
    The stable review entry point today is:

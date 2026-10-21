@@ -119,6 +119,7 @@ Full setup guide: [docs/setup.md](docs/setup.md)
 |---|---|
 | [`agent-strace replay <id>`](docs/commands.md#replay) | Replay a session in the terminal or as HTML |
 | [`agent-strace replay <id-a> --diff <id-b>`](docs/commands.md#replay) | Side-by-side session comparison with tool args and output delta |
+| [`agent-strace health <id>`](docs/commands.md#health) | Evidence health with observed gaps and capture-matrix provider limitations |
 | [`agent-strace explain <id>`](docs/commands.md#explain) | Plain-English phase summary, no LLM required |
 | [`agent-strace timeline <id>`](docs/commands.md#timeline) | Phase-by-phase view with costs and retries |
 | [`agent-strace why <id> <event>`](docs/commands.md#why) | Causal chain for a specific decision |
