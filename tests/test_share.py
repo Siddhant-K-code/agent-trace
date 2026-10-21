@@ -1,12 +1,31 @@
 """Tests for HTML share generation and postmortem analysis."""
 
+import contextlib
+import dataclasses
 import io
+import json
+import os
+import re
+import socket
+import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
+from unittest import mock
 
+from agent_trace.annotate import Annotation, add_annotation
+from agent_trace.cli import _telemetry_command_properties, build_parser, main
+from agent_trace.disclosure import DisclosurePreview, build_disclosure_preview
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
-from agent_trace.share import render_html, _event_summary, _esc
+from agent_trace.share import (
+    _DISCLOSURE_TEXT_ROWS,
+    cmd_share,
+    render_html,
+    _event_summary,
+    _esc,
+)
 from agent_trace.postmortem import (
     analyze_session,
     format_postmortem,
@@ -163,6 +182,287 @@ class TestRenderHtml(unittest.TestCase):
     def test_postmortem_html_included_when_provided(self):
         html = render_html(self.store, "html1", postmortem_html="<div>POSTMORTEM</div>")
         self.assertIn("POSTMORTEM", html)
+
+
+_SENTINELS = (
+    "sentinel-prompt-41f7",
+    "sentinel-command-8c2e",
+    "/sentinel/dir-5d90/file.py",
+    "sentinel-result-b3a1",
+    "sentinel-response-06cd",
+    "sentinel-label-7e44",
+    "sentinel-note-2f58",
+)
+
+
+def _sentinel_events(session_id: str) -> list[TraceEvent]:
+    return [
+        _make_event(EventType.SESSION_START, 0.0, session_id),
+        _make_event(EventType.USER_PROMPT, 1.0, session_id, prompt="sentinel-prompt-41f7"),
+        _make_event(EventType.TOOL_CALL, 2.0, session_id,
+                    tool_name="Bash", arguments={"command": "sentinel-command-8c2e"}),
+        _make_event(EventType.TOOL_RESULT, 3.0, session_id, result="sentinel-result-b3a1"),
+        _make_event(EventType.FILE_READ, 4.0, session_id, path="/sentinel/dir-5d90/file.py"),
+        _make_event(EventType.ASSISTANT_RESPONSE, 5.0, session_id, text="sentinel-response-06cd"),
+        _make_event(EventType.SESSION_END, 6.0, session_id, exit_code=0),
+    ]
+
+
+def _tree_snapshot(root: Path) -> dict[str, tuple[int, bytes] | None]:
+    """Map every path under *root* to its file mtime and bytes (None for directories)."""
+    return {
+        str(path.relative_to(root)): (
+            (path.stat().st_mtime_ns, path.read_bytes()) if path.is_file() else None
+        )
+        for path in root.rglob("*")
+    }
+
+
+@contextlib.contextmanager
+def _deny_network():
+    def fail(*args, **kwargs):
+        raise AssertionError("share --dry-run must not use the network")
+
+    with mock.patch.object(socket.socket, "connect", fail), \
+            mock.patch.object(socket.socket, "connect_ex", fail), \
+            mock.patch("socket.create_connection", fail), \
+            mock.patch("urllib.request.urlopen", fail):
+        yield
+
+
+class TestShareDryRun(unittest.TestCase):
+    session_id = "dryrun0123456789"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.trace_dir = str(self.root / "traces")
+        self.workdir = self.root / "work"
+        self.workdir.mkdir()
+
+        self.store = TraceStore(self.trace_dir)
+        meta = SessionMeta(session_id=self.session_id, started_at=0.0, total_duration_ms=6000)
+        self.store.create_session(meta)
+        for event in _sentinel_events(self.session_id):
+            self.store.append_event(self.session_id, event)
+        self.store.update_meta(meta)
+        add_annotation(self.store, self.session_id,
+                       Annotation(label="sentinel-label-7e44", note="sentinel-note-2f58"))
+        add_annotation(self.store, self.session_id, Annotation(label="decision"))
+
+        # Default share output lands in the working directory, which is inside the snapshot root.
+        old_cwd = os.getcwd()
+        os.chdir(self.workdir)
+        self.addCleanup(os.chdir, old_cwd)
+
+    def _run(self, *argv: str) -> tuple[int, str, str]:
+        args = build_parser().parse_args(["--trace-dir", self.trace_dir, "share", *argv])
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = cmd_share(args)
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_parser_flags(self):
+        args = build_parser().parse_args(["share"])
+        self.assertFalse(args.dry_run)
+        self.assertIsNone(args.format)
+        args = build_parser().parse_args(["share", "abc", "--dry-run", "--format", "json"])
+        self.assertTrue(args.dry_run)
+        self.assertEqual(args.format, "json")
+
+    def test_text_preview_reports_include_content_counts(self):
+        code, out, err = self._run(self.session_id[:8], "--dry-run")
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        self.assertIn("no HTML written or opened", out)
+        self.assertIn(f"Session: {self.session_id}\n", out)
+        self.assertIn("Mode: include_content", out)
+        expected = {
+            "events": 7,
+            "prompts": 1,
+            "responses": 1,
+            "tool inputs": 1,
+            "tool results": 1,
+            "command-bearing events": 1,
+            "path-bearing events": 1,
+            "annotations": 2,
+            "content-rich events": 5,
+            "redacted events": 0,
+            "unredacted content-rich events": 5,
+        }
+        for label, count in expected.items():
+            self.assertRegex(out, rf"(?m)^  {re.escape(label)}:\s+{count}$")
+
+    def test_json_preview_matches_disclosure_core(self):
+        code, out, err = self._run(self.session_id, "--dry-run", "--format", "json")
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        expected = build_disclosure_preview(
+            self.store.load_events(self.session_id), annotation_count=2, include_content=True
+        ).to_dict()
+        payload = json.loads(out)
+        self.assertEqual(payload, {"session_id": self.session_id, **expected})
+        self.assertEqual(payload["mode"], "include_content")
+
+    def test_text_rows_cover_every_count_field(self):
+        keys = [key for _label, key in _DISCLOSURE_TEXT_ROWS]
+        labels = [label for label, _key in _DISCLOSURE_TEXT_ROWS]
+        fields = {field.name for field in dataclasses.fields(DisclosurePreview)}
+        self.assertEqual(set(keys), fields - {"schema_version", "mode"})
+        self.assertEqual(len(keys), len(set(keys)))
+        self.assertEqual(len(labels), len(set(labels)))
+
+    def test_mcp_proxy_launch_command_is_counted(self):
+        session_id = "mcpproxy01234567"
+        self.store.create_session(SessionMeta(session_id=session_id, started_at=0.0))
+        # Same shape as the MCP stdio proxy's session_start event (proxy.py).
+        self.store.append_event(session_id, _make_event(
+            EventType.SESSION_START, 0.0, session_id,
+            command=["npx", "-y", "server-fs", "/sentinel/mcp-repo-9a1c",
+                     "--token=sentinel-token-3d7b"],
+        ))
+        self.store.append_event(session_id, _make_event(
+            EventType.TOOL_CALL, 1.0, session_id, tool_name="list_files", arguments={"limit": 5},
+        ))
+        secrets = ("sentinel-token-3d7b", "/sentinel/mcp-repo-9a1c")
+        html = render_html(self.store, session_id)
+        for value in secrets:
+            self.assertIn(value, html)
+
+        code, out, err = self._run(session_id, "--dry-run", "--format", "json")
+        self.assertEqual((code, err), (0, ""))
+        payload = json.loads(out)
+        self.assertEqual(payload["command_count"], 1)
+        self.assertEqual(payload["tool_input_count"], 1)
+        self.assertEqual(payload["path_count"], 0)
+        code, text, err = self._run(session_id, "--dry-run")
+        self.assertEqual((code, err), (0, ""))
+        self.assertRegex(text, r"(?m)^  command-bearing events:\s+1$")
+        for value in secrets:
+            self.assertNotIn(value, out)
+            self.assertNotIn(value, text)
+
+    def test_entry_point_tags_dry_run_in_telemetry(self):
+        argv = ["agent-strace", "--trace-dir", self.trace_dir, "share", self.session_id, "--dry-run"]
+        before = _tree_snapshot(self.root)
+        out = io.StringIO()
+        with mock.patch.object(sys, "argv", argv), \
+                mock.patch("agent_trace.cli._product_telemetry.capture") as capture, \
+                mock.patch("agent_trace.cli._product_telemetry.maybe_show_telemetry_notice") as notice, \
+                redirect_stdout(out), redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as result:
+                main()
+        self.assertEqual(result.exception.code, 0)
+        capture.assert_called_once()
+        props = capture.call_args.args[1]
+        self.assertEqual(props["command"], "share")
+        self.assertEqual(props["subcommand"], "dry_run")
+        self.assertTrue(props["success"])
+        self.assertEqual(props["exit_code"], 0)
+        self.assertNotIn(self.session_id, json.dumps(props))
+        notice.assert_called_once()
+        self.assertIn("Mode: include_content", out.getvalue())
+        self.assertEqual(_tree_snapshot(self.root), before)
+
+    def test_only_dry_run_is_tagged_in_telemetry(self):
+        cases = (
+            (("share", "--dry-run"), "dry_run"),
+            (("share", "abc", "--dry-run", "--format", "json", "-o", "x.html"), "dry_run"),
+            (("share",), None),
+            (("share", "abc", "-o", "x.html", "--open", "--postmortem"), None),
+            (("share", "--assignment", "-o", "x.zip"), None),
+        )
+        for argv, subcommand in cases:
+            with self.subTest(argv=argv):
+                props = _telemetry_command_properties(build_parser().parse_args(argv))
+                self.assertEqual(props["command"], "share")
+                self.assertEqual(props.get("subcommand"), subcommand)
+
+    def test_latest_session_is_previewed_by_default(self):
+        code, out, _ = self._run("--dry-run", "--format", "json")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["session_id"], self.session_id)
+
+    def test_preview_never_prints_values(self):
+        html = render_html(self.store, self.session_id)
+        for value in _SENTINELS:
+            self.assertIn(value, html)
+        for argv in (("--dry-run",), ("--dry-run", "--format", "json")):
+            code, out, err = self._run(self.session_id, *argv)
+            self.assertEqual(code, 0)
+            for value in _SENTINELS:
+                self.assertNotIn(value, out)
+                self.assertNotIn(value, err)
+
+    def test_dry_run_writes_opens_and_sends_nothing(self):
+        target = self.root / "out.html"
+        before = _tree_snapshot(self.root)
+        with mock.patch("agent_trace.share.subprocess.run") as run, \
+                mock.patch("agent_trace.share.os.startfile", create=True) as startfile, \
+                mock.patch("agent_trace.share.render_html") as render, \
+                _deny_network():
+            code, out, err = self._run(
+                self.session_id, "--dry-run", "-o", str(target), "--stdout", "--open"
+            )
+        self.assertEqual(code, 0)
+        run.assert_not_called()
+        startfile.assert_not_called()
+        render.assert_not_called()
+        self.assertFalse(target.exists())
+        self.assertEqual(_tree_snapshot(self.root), before)
+        self.assertNotIn("<html", out)
+        self.assertIn("Mode: include_content", out)
+        self.assertIn("ignores --output, --stdout, --open; no HTML was written or opened", err)
+
+    def test_dry_run_without_output_flags_writes_nothing(self):
+        before = _tree_snapshot(self.root)
+        code, _, err = self._run(self.session_id, "--dry-run")
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        self.assertEqual(_tree_snapshot(self.root), before)
+
+    def test_assignment_with_dry_run_is_rejected_without_writing(self):
+        before = _tree_snapshot(self.root)
+        code, out, err = self._run(self.session_id, "--assignment", "--dry-run", "-o", "bundle.zip")
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn("cannot be combined with --assignment", err)
+        self.assertFalse((self.workdir / "bundle.zip").exists())
+        self.assertEqual(_tree_snapshot(self.root), before)
+
+    def test_format_requires_dry_run(self):
+        before = _tree_snapshot(self.root)
+        for extra in ((), ("--assignment",)):
+            code, out, err = self._run(self.session_id, "--format", "json", *extra)
+            self.assertEqual(code, 1)
+            self.assertEqual(out, "")
+            self.assertIn("--format requires --dry-run", err)
+        self.assertEqual(_tree_snapshot(self.root), before)
+
+    def test_postmortem_does_not_change_counts(self):
+        _, plain, _ = self._run(self.session_id, "--dry-run", "--format", "json")
+        code, with_postmortem, err = self._run(
+            self.session_id, "--dry-run", "--postmortem", "--format", "json"
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        self.assertEqual(json.loads(with_postmortem), json.loads(plain))
+
+    def test_unknown_session_is_an_error(self):
+        code, out, err = self._run("nosuchsession", "--dry-run")
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn("Session not found: nosuchsession", err)
+
+    def test_default_share_still_writes_html(self):
+        code, out, err = self._run(self.session_id)
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "")
+        self.assertIn("Created:", err)
+        html = (self.workdir / f"session-{self.session_id[:12]}.html").read_text(encoding="utf-8")
+        self.assertIn("<!DOCTYPE html>", html)
+        self.assertIn("sentinel-prompt-41f7", html)
 
 
 # ---------------------------------------------------------------------------

@@ -89,7 +89,9 @@ def build_disclosure_preview(
         arguments = event.data.get("arguments")
         if event.event_type == EventType.TOOL_CALL and isinstance(arguments, Mapping):
             keys.update(str(key).lower() for key in arguments)
-        if event.event_type == EventType.TOOL_CALL and keys & _COMMAND_KEYS:
+        # Like path keys, command keys count on every event type: share output embeds
+        # all event data, and the MCP proxy records its launch command on session_start.
+        if keys & _COMMAND_KEYS:
             command_count += 1
         if event.event_type in {EventType.FILE_READ, EventType.FILE_WRITE} or keys & _PATH_KEYS:
             path_count += 1

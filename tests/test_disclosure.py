@@ -77,6 +77,41 @@ class TestDisclosurePreview(unittest.TestCase):
         self.assertNotIn("SECRET-EXECUTION", serialized)
         self.assertNotIn("/private/hook-file", serialized)
 
+    def test_mcp_proxy_launch_command_counts_without_exposing_values(self):
+        # proxy.py records the MCP server launch command on session_start, and share
+        # HTML prints it in the event summary and the JSON detail.
+        events = [
+            TraceEvent(
+                event_type=EventType.SESSION_START,
+                data={"command": [
+                    "npx", "-y", "server-fs", "/private/mcp-repo", "--token=SECRET-TOKEN",
+                ]},
+            ),
+            TraceEvent(
+                event_type=EventType.TOOL_CALL,
+                data={"tool_name": "list_files", "arguments": {"limit": 5}},
+            ),
+        ]
+
+        preview = build_disclosure_preview(events, include_content=True)
+        self.assertEqual(preview.command_count, 1)
+        self.assertEqual(preview.tool_input_count, 1)
+        # Values are never inspected, so a path inside a command line is covered by
+        # the command-bearing count rather than the path count.
+        self.assertEqual(preview.path_count, 0)
+        serialized = json.dumps(preview.to_dict())
+        self.assertNotIn("SECRET-TOKEN", serialized)
+        self.assertNotIn("/private/mcp-repo", serialized)
+
+    def test_command_keys_count_on_every_event_type(self):
+        for event_type in EventType:
+            for key in ("command", "cmd", "argv"):
+                with self.subTest(event_type=event_type.value, key=key):
+                    event = TraceEvent(event_type=event_type, data={key: "SECRET-COMMAND"})
+                    preview = build_disclosure_preview([event])
+                    self.assertEqual(preview.command_count, 1)
+                    self.assertNotIn("SECRET-COMMAND", json.dumps(preview.to_dict()))
+
     def test_include_content_changes_mode_not_preview_values(self):
         event = TraceEvent(
             event_type=EventType.USER_PROMPT,
