@@ -21,6 +21,21 @@ from .models import EventType, TraceEvent
 
 EVIDENCE_HEALTH_SCHEMA_VERSION = 1
 
+# ``session_start`` events carry the provider's start ``source``. A later start
+# with one of these sources continues the session already recorded under the
+# same session ID instead of starting another one: Claude Code and Codex keep
+# the session ID on ``resume`` and ``compact``, and Gemini CLI and GitHub
+# Copilot CLI keep it on ``resume``. Sources that begin a new session ID
+# (``startup``, ``clear``, ``fork``, ``new``), a missing source and hook
+# event-name fallbacks such as ``SessionStart`` are deliberately absent, so a
+# repeated start of that kind stays a duplicate. Matching is exact.
+CONTINUATION_START_SOURCES = frozenset({"resume", "compact"})
+
+
+def is_continuation_source(source: object) -> bool:
+    """Return whether a session-start ``source`` continues an existing session."""
+    return isinstance(source, str) and source in CONTINUATION_START_SOURCES
+
 
 class EvidenceHealthStatus(str, Enum):
     """Reviewability state for one captured session."""
@@ -237,45 +252,96 @@ def _orphan_error_reasons(events: Sequence[TraceEvent]) -> list[EvidenceHealthRe
     return reasons
 
 
-def _structural_reasons(
+def _start_source(event: TraceEvent) -> object:
+    return event.data.get("source") if isinstance(event.data, dict) else None
+
+
+def _boundary_reasons(
     events: Sequence[TraceEvent],
     *,
     session_finalized: bool | None,
 ) -> tuple[list[EvidenceHealthReason], bool]:
-    reasons: list[EvidenceHealthReason] = []
-    invalid = False
+    """Check session start and end markers in event order.
 
-    starts = [event for event in events if event.event_type == EventType.SESSION_START]
-    ends = [event for event in events if event.event_type == EventType.SESSION_END]
+    The first start opens the session and an end closes it. A later start whose
+    source is in :data:`CONTINUATION_START_SOURCES` continues the same session
+    and re-opens it if it was closed; any other later start is a duplicate.
+    While the session is closed, another end is a duplicate and any other event
+    was recorded after the session end.
+    """
+    first_start: TraceEvent | None = None
+    closing_end: TraceEvent | None = None
+    reopened = False
+    after_end_reported = False
+    duplicate_starts: list[EvidenceHealthReason] = []
+    duplicate_ends: list[EvidenceHealthReason] = []
+    after_end: list[EvidenceHealthReason] = []
 
-    if not starts:
-        reasons.append(_reason("missing_session_start", "session start marker was not captured"))
-    elif len(starts) > 1:
-        reasons.append(
-            _reason(
-                "duplicate_session_start",
-                f"captured {len(starts)} session start markers",
-                event=starts[1],
+    for event in events:
+        if event.event_type == EventType.SESSION_START:
+            source = _start_source(event)
+            continuation = is_continuation_source(source)
+            if first_start is None:
+                first_start = event
+            elif not continuation:
+                described = "no source" if source in (None, "") else f"source {source!r}"
+                allowed = " and ".join(sorted(CONTINUATION_START_SOURCES))
+                duplicate_starts.append(
+                    _reason(
+                        "duplicate_session_start",
+                        f"captured another session start with {described}; "
+                        f"only {allowed} starts continue a session",
+                        event=event,
+                    )
+                )
+            if continuation and closing_end is not None:
+                closing_end = None
+                reopened = True
+        elif event.event_type == EventType.SESSION_END:
+            if closing_end is None:
+                closing_end = event
+                after_end_reported = False
+            else:
+                duplicate_ends.append(
+                    _reason(
+                        "duplicate_session_end",
+                        "captured another session end with no continuation start "
+                        f"since session end {closing_end.event_id!r}",
+                        event=event,
+                    )
+                )
+        elif closing_end is not None and not after_end_reported:
+            after_end.append(
+                _reason(
+                    "events_after_session_end",
+                    f"events were recorded after session end {closing_end.event_id!r} "
+                    "with no continuation start",
+                    event=event,
+                )
             )
-        )
-        invalid = True
+            after_end_reported = True
 
-    if not ends:
+    reasons: list[EvidenceHealthReason] = []
+    if first_start is None:
+        reasons.append(_reason("missing_session_start", "session start marker was not captured"))
+    reasons.extend(duplicate_starts)
+
+    if closing_end is None:
         if session_finalized is False:
             reasons.append(_reason("session_active", "session is still active; no end marker expected yet"))
+        elif reopened:
+            reasons.append(
+                _reason(
+                    "missing_session_end",
+                    "session end marker was not captured after the session was continued",
+                )
+            )
         else:
             reasons.append(_reason("missing_session_end", "session end marker was not captured"))
-    elif len(ends) > 1:
-        reasons.append(
-            _reason(
-                "duplicate_session_end",
-                f"captured {len(ends)} session end markers",
-                event=ends[1],
-            )
-        )
-        invalid = True
+    reasons.extend(duplicate_ends)
 
-    if starts and events[0] is not starts[0]:
+    events_before_start = first_start is not None and events[0] is not first_start
+    if events_before_start:
         reasons.append(
             _reason(
                 "events_before_session_start",
@@ -283,17 +349,18 @@ def _structural_reasons(
                 event=events[0],
             )
         )
-        invalid = True
+    reasons.extend(after_end)
 
-    if ends and events[-1] is not ends[-1]:
-        reasons.append(
-            _reason(
-                "events_after_session_end",
-                "events were recorded after the last session end marker",
-                event=events[-1],
-            )
-        )
-        invalid = True
+    invalid = bool(duplicate_starts or duplicate_ends or after_end or events_before_start)
+    return reasons, invalid
+
+
+def _structural_reasons(
+    events: Sequence[TraceEvent],
+    *,
+    session_finalized: bool | None,
+) -> tuple[list[EvidenceHealthReason], bool]:
+    reasons, invalid = _boundary_reasons(events, session_finalized=session_finalized)
 
     session_ids = {event.session_id for event in events if event.session_id}
     if len(session_ids) > 1:

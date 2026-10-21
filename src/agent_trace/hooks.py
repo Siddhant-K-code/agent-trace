@@ -49,6 +49,7 @@ from pathlib import Path
 
 from .models import EventType, SessionMeta, TraceEvent
 from .attribution import collect_attribution
+from .evidence_health import is_continuation_source
 from .redact import redact_data, redact_data_with_status, redaction_enabled
 from .store import TraceStore
 from . import telemetry as _product_telemetry
@@ -160,7 +161,8 @@ def _ensure_session_meta(store: TraceStore, session_id: str, provider: str) -> N
     hooks under their own session ID but never fire ``sessionStart``.  Without
     ``meta.json`` those sessions are skipped by ``list``, ``skills`` and every
     other reader.  No ``session_start`` event and no active-session marker are
-    written; a later real SessionStart replaces this metadata.
+    written; a later SessionStart that begins a session replaces this metadata,
+    while a resume or compact start keeps it.
     """
     if not session_id:
         return
@@ -417,7 +419,9 @@ def handle_session_start(input_data: dict, provider: str = "claude") -> None:
         meta.session_id = session_id[:16]
 
     source = input_data.get("source", "startup")
-    if source == "resume" and session_id:
+    # resume and compact continue the session already recorded under this ID:
+    # keep its metadata (started_at, counters) instead of overwriting it.
+    if is_continuation_source(source) and session_id:
         try:
             existing_meta = store.load_meta(meta.session_id)
         except FileNotFoundError:

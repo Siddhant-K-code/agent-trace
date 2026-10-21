@@ -1,10 +1,12 @@
 import unittest
 
 from agent_trace.evidence_health import (
+    CONTINUATION_START_SOURCES,
     EVIDENCE_HEALTH_SCHEMA_VERSION,
     EvidenceHealthReasonKind,
     EvidenceHealthStatus,
     assess_evidence_health,
+    is_continuation_source,
 )
 from agent_trace.models import EventType, TraceEvent
 
@@ -19,6 +21,7 @@ def event(
     *,
     parent_id: str = "",
     session_id: str = SESSION_ID,
+    data: dict | None = None,
 ) -> TraceEvent:
     return TraceEvent(
         event_type=event_type,
@@ -26,7 +29,13 @@ def event(
         event_id=event_id,
         session_id=session_id,
         parent_id=parent_id,
+        data=data if data is not None else {},
     )
+
+
+def start(timestamp: float, event_id: str, source=None) -> TraceEvent:
+    data = {} if source is None else {"source": source}
+    return event(EventType.SESSION_START, timestamp, event_id, data=data)
 
 
 class TestEvidenceHealth(unittest.TestCase):
@@ -344,6 +353,214 @@ class TestEvidenceHealth(unittest.TestCase):
         self.assertEqual(payload["schema_version"], EVIDENCE_HEALTH_SCHEMA_VERSION)
         self.assertEqual(payload["status"], "healthy")
         self.assertEqual(payload["reasons"], ())
+
+
+class TestSessionContinuation(unittest.TestCase):
+    """resume and compact starts continue a session instead of duplicating it."""
+
+    @staticmethod
+    def assess(events, *, session_finalized=True):
+        return assess_evidence_health(events, session_finalized=session_finalized)
+
+    @staticmethod
+    def located(result):
+        return [(reason.code, reason.event_id) for reason in result.reasons]
+
+    def test_continuation_sources_are_exactly_resume_and_compact(self):
+        self.assertEqual(CONTINUATION_START_SOURCES, frozenset({"resume", "compact"}))
+        self.assertTrue(is_continuation_source("resume"))
+        self.assertTrue(is_continuation_source("compact"))
+        for source in (
+            None, "", "startup", "clear", "fork", "new", "SessionStart", "sessionStart",
+            "Resume", "COMPACT", " resume", 1, ["resume"], {"compact": True},
+        ):
+            with self.subTest(source=source):
+                self.assertFalse(is_continuation_source(source))
+
+    def test_compact_start_continues_an_open_session(self):
+        result = self.assess([
+            start(1.0, "start", "startup"),
+            event(EventType.USER_PROMPT, 2.0, "prompt"),
+            start(3.0, "compact", "compact"),
+            event(EventType.USER_PROMPT, 4.0, "prompt-2"),
+            event(EventType.SESSION_END, 5.0, "end"),
+        ])
+
+        self.assertEqual(result.status, EvidenceHealthStatus.HEALTHY)
+        self.assertEqual(result.reasons, ())
+
+    def test_resume_start_reopens_an_ended_session(self):
+        result = self.assess([
+            start(1.0, "start", "startup"),
+            event(EventType.USER_PROMPT, 2.0, "prompt"),
+            event(EventType.SESSION_END, 3.0, "end"),
+            start(4.0, "resume", "resume"),
+            event(EventType.USER_PROMPT, 5.0, "prompt-2"),
+            event(EventType.SESSION_END, 6.0, "end-2"),
+        ])
+
+        self.assertEqual(result.status, EvidenceHealthStatus.HEALTHY)
+        self.assertEqual(result.reasons, ())
+        self.assertTrue(result.observed_start)
+        self.assertTrue(result.observed_end)
+
+    def test_resume_then_compact_continue_the_same_session(self):
+        result = self.assess([
+            start(1.0, "start", "startup"),
+            event(EventType.SESSION_END, 2.0, "end"),
+            start(3.0, "resume", "resume"),
+            start(4.0, "compact", "compact"),
+            event(EventType.USER_PROMPT, 5.0, "prompt"),
+            event(EventType.SESSION_END, 6.0, "end-2"),
+        ])
+
+        self.assertEqual(result.status, EvidenceHealthStatus.HEALTHY)
+        self.assertEqual(result.reasons, ())
+
+    def test_continuation_start_without_an_earlier_end_is_valid(self):
+        # Codex has no end hook, and a crashed Claude Code session resumes
+        # without one.
+        result = self.assess([
+            start(1.0, "start", "startup"),
+            event(EventType.USER_PROMPT, 2.0, "prompt"),
+            start(3.0, "resume", "resume"),
+            start(4.0, "compact", "compact"),
+            event(EventType.SESSION_END, 5.0, "end"),
+        ])
+
+        self.assertEqual(result.status, EvidenceHealthStatus.HEALTHY)
+        self.assertEqual(result.reasons, ())
+
+    def test_first_start_may_be_a_continuation_start(self):
+        result = self.assess([
+            start(1.0, "resume", "resume"),
+            event(EventType.USER_PROMPT, 2.0, "prompt"),
+            event(EventType.SESSION_END, 3.0, "end"),
+        ])
+
+        self.assertEqual(result.status, EvidenceHealthStatus.HEALTHY)
+        self.assertEqual(result.reasons, ())
+
+    def test_repeated_start_without_a_continuation_source_is_a_duplicate(self):
+        for source in (
+            None, "", "startup", "clear", "fork", "new", "SessionStart", "sessionStart",
+            "Resume", "COMPACT", 1, ["resume"],
+        ):
+            with self.subTest(source=source):
+                result = self.assess([
+                    start(1.0, "start", "startup"),
+                    start(2.0, "again", source),
+                    event(EventType.SESSION_END, 3.0, "end"),
+                ])
+
+                self.assertEqual(result.status, EvidenceHealthStatus.INVALID)
+                self.assertEqual(self.located(result), [("duplicate_session_start", "again")])
+
+    def test_start_with_non_mapping_data_is_not_a_continuation(self):
+        result = self.assess([
+            start(1.0, "start", "startup"),
+            TraceEvent(
+                event_type=EventType.SESSION_START,
+                timestamp=2.0,
+                event_id="again",
+                session_id=SESSION_ID,
+                data=["resume"],
+            ),
+            event(EventType.SESSION_END, 3.0, "end"),
+        ])
+
+        self.assertEqual(self.located(result), [("duplicate_session_start", "again")])
+
+    def test_startup_after_end_stays_invalid(self):
+        result = self.assess([
+            start(1.0, "start", "startup"),
+            event(EventType.SESSION_END, 2.0, "end"),
+            start(3.0, "restart", "startup"),
+            event(EventType.USER_PROMPT, 4.0, "prompt"),
+            event(EventType.SESSION_END, 5.0, "end-2"),
+        ])
+
+        self.assertEqual(result.status, EvidenceHealthStatus.INVALID)
+        self.assertEqual(
+            self.located(result),
+            [
+                ("duplicate_session_start", "restart"),
+                ("duplicate_session_end", "end-2"),
+                ("events_after_session_end", "prompt"),
+            ],
+        )
+
+    def test_two_ends_without_a_continuation_start_are_duplicates(self):
+        result = self.assess([
+            start(1.0, "start", "startup"),
+            event(EventType.USER_PROMPT, 2.0, "prompt"),
+            event(EventType.SESSION_END, 3.0, "end"),
+            event(EventType.SESSION_END, 4.0, "end-2"),
+        ])
+
+        self.assertEqual(result.status, EvidenceHealthStatus.INVALID)
+        self.assertEqual(self.located(result), [("duplicate_session_end", "end-2")])
+        self.assertIn("'end'", result.reasons[0].message)
+
+    def test_events_after_end_before_a_continuation_start_are_invalid(self):
+        result = self.assess([
+            start(1.0, "start", "startup"),
+            event(EventType.SESSION_END, 2.0, "end"),
+            event(EventType.USER_PROMPT, 3.0, "late"),
+            event(EventType.USER_PROMPT, 4.0, "later"),
+            start(5.0, "resume", "resume"),
+            event(EventType.USER_PROMPT, 6.0, "prompt"),
+            event(EventType.SESSION_END, 7.0, "end-2"),
+        ])
+
+        self.assertEqual(result.status, EvidenceHealthStatus.INVALID)
+        self.assertEqual(self.located(result), [("events_after_session_end", "late")])
+
+    def test_events_after_end_are_reported_once_per_closed_span(self):
+        result = self.assess([
+            start(1.0, "start", "startup"),
+            event(EventType.SESSION_END, 2.0, "end"),
+            event(EventType.USER_PROMPT, 3.0, "late"),
+            start(4.0, "resume", "resume"),
+            event(EventType.SESSION_END, 5.0, "end-2"),
+            event(EventType.USER_PROMPT, 6.0, "late-2"),
+            event(EventType.USER_PROMPT, 7.0, "late-3"),
+        ])
+
+        self.assertEqual(
+            self.located(result),
+            [("events_after_session_end", "late"), ("events_after_session_end", "late-2")],
+        )
+
+    def test_active_continued_session_reports_session_active(self):
+        result = self.assess(
+            [
+                start(1.0, "start", "startup"),
+                event(EventType.SESSION_END, 2.0, "end"),
+                start(3.0, "resume", "resume"),
+                event(EventType.USER_PROMPT, 4.0, "prompt"),
+            ],
+            session_finalized=False,
+        )
+
+        self.assertEqual(result.status, EvidenceHealthStatus.UNKNOWN)
+        self.assertEqual(self.located(result), [("session_active", "")])
+        self.assertTrue(result.observed_end)
+
+    def test_continued_session_without_a_final_end_is_missing_its_end(self):
+        result = self.assess(
+            [
+                start(1.0, "start", "startup"),
+                event(EventType.SESSION_END, 2.0, "end"),
+                start(3.0, "resume", "resume"),
+                event(EventType.USER_PROMPT, 4.0, "prompt"),
+            ],
+            session_finalized=None,
+        )
+
+        self.assertEqual(result.status, EvidenceHealthStatus.PARTIAL)
+        self.assertEqual(self.located(result), [("missing_session_end", "")])
+        self.assertIn("continued", result.reasons[0].message)
 
 
 if __name__ == "__main__":

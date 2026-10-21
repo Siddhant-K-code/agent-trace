@@ -32,6 +32,7 @@ from agent_trace.hooks import (
     handle_session_start,
     handle_stop,
     handle_user_prompt,
+    hook_main,
 )
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
@@ -97,20 +98,20 @@ def write_session(trace_dir, session_id, events, *, agent_name="", command="",
     return store
 
 
-def hook_session(session_id, provider, *, end=True):
+def hook_session(session_id, provider, *, end=True, source="startup", tool_use_id="tool-1"):
     """Drive the real hook handlers through one tool call."""
-    handle_session_start({"session_id": session_id, "source": "startup"}, provider=provider)
+    handle_session_start({"session_id": session_id, "source": source}, provider=provider)
     handle_user_prompt({"session_id": session_id, "prompt": "list files"}, provider=provider)
     handle_pre_tool({
         "session_id": session_id,
         "tool_name": "Bash",
-        "tool_use_id": "tool-1",
+        "tool_use_id": tool_use_id,
         "tool_input": {"command": "ls"},
     }, provider=provider)
     handle_post_tool({
         "session_id": session_id,
         "tool_name": "Bash",
-        "tool_use_id": "tool-1",
+        "tool_use_id": tool_use_id,
         "tool_response": {"output": "ok"},
     }, provider=provider)
     handle_stop({"session_id": session_id, "last_assistant_message": "done"}, provider=provider)
@@ -261,6 +262,116 @@ class TestHookSessions(_HealthBase):
         self.assertEqual(payload["provider_source"], "hook_metadata")
         self.assertEqual(payload["capture_matrix"]["entry"]["id"], "codex")
         self.assertFalse(payload["observed_start"])
+
+
+class TestResumedAndCompactedSessions(_HealthBase):
+    """Real hook handlers: resume and compact continue one recorded session."""
+
+    def assert_one_session(self, session_id):
+        code, payload = self.health_json(session_id)
+        gaps = raw_entry("claude")["known_gaps"]
+        self.assertEqual(self.codes(payload, "observed"), [])
+        self.assertEqual(payload["status"], "partial" if gaps else "healthy")
+        self.assertEqual(code, 0)
+        return payload
+
+    def start_sources(self, session_id):
+        return [
+            item.data.get("source")
+            for item in TraceStore(self.trace_dir).load_events(session_id)
+            if item.event_type == EventType.SESSION_START
+        ]
+
+    def test_plain_session(self):
+        hook_session("claudeplain00001", "claude")
+
+        payload = self.assert_one_session("claudeplain00001")
+        self.assertIs(payload["session_finalized"], True)
+
+    def test_compacted_session(self):
+        hook_session("claudecompact001", "claude", end=False)
+        started = TraceStore(self.trace_dir).load_meta("claudecompact001")
+        hook_session("claudecompact001", "claude", source="compact", tool_use_id="tool-2")
+
+        self.assert_one_session("claudecompact001")
+        meta = TraceStore(self.trace_dir).load_meta("claudecompact001")
+        self.assertEqual(meta.started_at, started.started_at)
+        self.assertEqual(meta.command, "claude-code (startup)")
+        self.assertEqual(self.start_sources("claudecompact001"), ["startup", "compact"])
+
+    def test_resumed_session(self):
+        hook_session("clauderesume0001", "claude")
+        hook_session("clauderesume0001", "claude", source="resume", tool_use_id="tool-2")
+
+        payload = self.assert_one_session("clauderesume0001")
+        self.assertIs(payload["session_finalized"], True)
+        self.assertEqual(self.start_sources("clauderesume0001"), ["startup", "resume"])
+
+    def test_resumed_then_compacted_session(self):
+        hook_session("clauderescomp001", "claude")
+        hook_session("clauderescomp001", "claude", source="resume", end=False, tool_use_id="tool-2")
+        hook_session("clauderescomp001", "claude", source="compact", tool_use_id="tool-3")
+
+        self.assert_one_session("clauderescomp001")
+        self.assertEqual(
+            self.start_sources("clauderescomp001"),
+            ["startup", "resume", "compact"],
+        )
+
+    def test_active_resumed_session_is_reported_active(self):
+        hook_session("claudereslive001", "claude")
+        hook_session("claudereslive001", "claude", source="resume", end=False, tool_use_id="tool-2")
+
+        code, payload = self.health_json("claudereslive001")
+
+        self.assertIs(payload["session_finalized"], False)
+        self.assertEqual(self.codes(payload, "observed"), ["session_active"])
+        self.assertEqual(payload["status"], "partial")
+        self.assertEqual(code, 0)
+
+    def test_codex_resume_then_compact_without_session_end(self):
+        hook_session("codexrescomp0001", "codex", end=False)
+        hook_session("codexrescomp0001", "codex", source="resume", end=False, tool_use_id="tool-2")
+        hook_session("codexrescomp0001", "codex", source="compact", end=False, tool_use_id="tool-3")
+
+        code, payload = self.health_json("codexrescomp0001")
+
+        self.assertIsNone(payload["session_finalized"])
+        self.assertEqual(
+            self.start_sources("codexrescomp0001"),
+            ["startup", "resume", "compact"],
+        )
+        self.assertEqual(self.codes(payload, "observed"), ["missing_session_end"])
+        self.assertEqual(payload["status"], "partial")
+        self.assertEqual(code, 0)
+
+    def test_repeated_startup_start_stays_invalid(self):
+        hook_session("claudedupstart01", "claude")
+        hook_session("claudedupstart01", "claude", tool_use_id="tool-2")
+
+        code, payload = self.health_json("claudedupstart01")
+
+        self.assertEqual(payload["status"], "invalid")
+        self.assertIn("duplicate_session_start", self.codes(payload, "observed"))
+        self.assertEqual(code, 1)
+
+    def test_event_name_fallback_source_is_not_a_continuation(self):
+        # Cursor sends no source, so the hooks record the hook event name.
+        for provider, session_id, event_name in (
+            ("cursor", "cursorfallback01", "sessionStart"),
+            ("gemini", "geminifallback01", "SessionStart"),
+        ):
+            with self.subTest(provider=provider):
+                payload = json.dumps({"session_id": session_id, "hook_event_name": event_name})
+                for _ in range(2):
+                    with patch.object(sys, "stdin", io.StringIO(payload)):
+                        hook_main(["--provider", provider, "session-start"])
+
+                self.assertEqual(self.start_sources(session_id), [event_name, event_name])
+                code, result = self.health_json(session_id)
+                self.assertEqual(result["status"], "invalid")
+                self.assertIn("duplicate_session_start", self.codes(result, "observed"))
+                self.assertEqual(code, 1)
 
 
 class TestUnknownProvider(_HealthBase):

@@ -5,7 +5,9 @@ import os
 import sys
 import tempfile
 import unittest
+from dataclasses import asdict
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -78,6 +80,101 @@ class TestHooksSessionLifecycle(unittest.TestCase):
     def test_session_end_without_start_is_noop(self):
         _clear_active_session()
         handle_session_end({})  # should not raise
+
+
+class TestHooksSessionContinuation(unittest.TestCase):
+    """resume and compact SessionStart hooks continue the recorded session."""
+
+    SID = "contsession00001"
+    STARTED_AT = 1_700_000_000.0
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        env = patch.dict(os.environ, {"AGENT_TRACE_DIR": tmp.name})
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("AGENT_TRACE_REDACT", None)
+        self.store = TraceStore(tmp.name)
+
+    def start(self, source, session_id=SID):
+        handle_session_start({
+            "session_id": session_id,
+            "source": source,
+            "model": "claude-sonnet-4-6",
+        })
+
+    def seed_meta(self, session_id=SID):
+        meta = self.store.load_meta(session_id)
+        meta.started_at = self.STARTED_AT
+        meta.tool_calls = 3
+        meta.errors = 1
+        self.store.update_meta(meta)
+
+    def start_sources(self, session_id=SID):
+        return [
+            event.data.get("source")
+            for event in self.store.load_events(session_id)
+            if event.event_type == EventType.SESSION_START
+        ]
+
+    def test_compact_keeps_existing_metadata(self):
+        self.start("startup")
+        self.seed_meta()
+        before = asdict(self.store.load_meta(self.SID))
+
+        self.start("compact")
+
+        self.assertEqual(asdict(self.store.load_meta(self.SID)), before)
+        self.assertEqual(self.start_sources(), ["startup", "compact"])
+        self.assertEqual(_read_active_session(), self.SID)
+
+    def test_resume_then_compact_keeps_metadata_and_reopens_session(self):
+        self.start("startup")
+        self.seed_meta()
+        handle_session_end({"session_id": self.SID})
+        ended = asdict(self.store.load_meta(self.SID))
+        self.assertIsNotNone(ended["ended_at"])
+
+        self.start("resume")
+        self.start("compact")
+
+        self.assertEqual(asdict(self.store.load_meta(self.SID)), dict(ended, ended_at=None))
+        self.assertEqual(self.start_sources(), ["startup", "resume", "compact"])
+        self.assertEqual(_read_active_session(), self.SID)
+
+        handle_session_end({"session_id": self.SID})
+        meta = self.store.load_meta(self.SID)
+        self.assertEqual(meta.started_at, self.STARTED_AT)
+        self.assertAlmostEqual(
+            meta.total_duration_ms,
+            (meta.ended_at - self.STARTED_AT) * 1000,
+        )
+
+    def test_compact_for_an_unrecorded_session_creates_it(self):
+        self.start("compact", session_id="contsession00002")
+
+        meta = self.store.load_meta("contsession00002")
+        self.assertEqual(meta.command, "claude-code (compact)")
+        self.assertIsNone(meta.ended_at)
+        self.assertEqual(self.start_sources("contsession00002"), ["compact"])
+
+    def test_sources_that_begin_a_session_replace_metadata(self):
+        for source, session_id in (
+            ("startup", "replacestartup01"),
+            ("clear", "replaceclear0001"),
+            ("fork", "replacefork00001"),
+        ):
+            with self.subTest(source=source):
+                self.start("startup", session_id=session_id)
+                self.seed_meta(session_id)
+
+                self.start(source, session_id=session_id)
+
+                meta = self.store.load_meta(session_id)
+                self.assertNotEqual(meta.started_at, self.STARTED_AT)
+                self.assertEqual(meta.tool_calls, 0)
+                self.assertEqual(meta.command, f"claude-code ({source})")
 
 
 class TestHooksToolCapture(unittest.TestCase):

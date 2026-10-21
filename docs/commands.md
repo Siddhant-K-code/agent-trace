@@ -53,7 +53,7 @@ normalized event to the active session. `--provider` defaults to `claude`.
 
 | Event | Recorded data |
 |---|---|
-| `session-start` | Start or resume the provider-scoped session |
+| `session-start` | Start the provider-scoped session, or continue it on `resume` or `compact` and keep its metadata |
 | `user-prompt` | User prompt text and available provider metadata |
 | `pre-tool` | Tool name and input before execution |
 | `post-tool` | Successful tool result and duration when it can be linked to the call |
@@ -178,9 +178,8 @@ Whether the session has finished:
 - Otherwise not known, and a missing end marker is reported as observed. Codex
   sessions are always in this state.
 
-When a provider fires SessionStart again for the same session ID (Claude Code
-does after `resume` and `compact`), the hooks append a second `session_start`
-to the same trace, which reads as `invalid` (`duplicate_session_start`).
+A resumed or compacted session is assessed as one session. See
+[session boundaries](evidence-health.md#session-boundaries).
 
 `--format json` prints the evidence-health result and the inputs supplied to it:
 
