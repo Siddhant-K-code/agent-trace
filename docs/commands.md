@@ -130,6 +130,76 @@ agent-strace stats [session-id] [--include-subagents]
 ```
 Tool call frequency and timing. `--include-subagents` rolls up across the full subagent tree.
 
+### `health`
+```
+agent-strace health [session-id] [--format text|json]
+```
+Assess the [evidence health](evidence-health.md) of a session (default: the
+latest). Text output starts with the status, then lists observed reasons and
+provider limitations separately, then names the capture-matrix entry that was
+applied and its `verification_status`.
+
+| Status | Exit code |
+|---|---|
+| `healthy`, `partial` | 0 |
+| `unknown`, `invalid` | 1 |
+
+A missing session, an empty store or an unreadable session also exits 1.
+`partial` passes because some providers can never be `healthy`: Codex has no
+session-end hook and declares known gaps, so its sessions are at least
+`partial`.
+
+Each reason has a `kind`:
+
+- `observed`: found in the recorded events, such as `missing_session_end`,
+  `unpaired_tool_call` or `session_active`.
+- `provider_limitation`: declared for the provider in the packaged
+  [capture matrix](capture-matrix.md), never inferred from the trace. Every
+  `known_gaps` entry is listed verbatim, followed by one line for each
+  `coverage` capability marked `unavailable`. `provider_defined` coverage adds
+  no line.
+
+The provider comes only from hook-written evidence: the `session_start` and
+stop events the hooks record, or the metadata the hooks write when a session's
+first hook was not SessionStart. Names set with `record --name`, the SDK or an
+importer are not used. When no matrix entry applies, no provider limitations
+are assessed and a note says why. This covers sessions recorded by the MCP
+proxy, exec wrapper or SDK, imported sessions, providers without an entry
+(Gemini CLI, Cursor, Copilot CLI) and sessions whose events name more than one
+provider.
+
+Whether the session has finished:
+
+- Finished when its metadata records an end time.
+- Active when the matrix marks `session_end` as captured for the provider and a
+  hook active-session marker still names the session. Active sessions report
+  `session_active` instead of `missing_session_end`. A crashed session can
+  leave its marker behind and keep reading as active.
+- Otherwise not known, and a missing end marker is reported as observed. Codex
+  sessions are always in this state.
+
+When a provider fires SessionStart again for the same session ID (Claude Code
+does after `resume` and `compact`), the hooks append a second `session_start`
+to the same trace, which reads as `invalid` (`duplicate_session_start`).
+
+`--format json` prints the evidence-health result and the inputs supplied to it:
+
+| Key | Contents |
+|---|---|
+| `status`, `reasons`, `provider`, `capture_method`, `capture_matrix_version`, `observed_start`, `observed_end`, `event_count`, `schema_version` | The evidence-health result. Each reason has `code`, `message`, `kind` and `event_id` |
+| `session_id` | The resolved session |
+| `session_finalized` | `true`, `false` (active) or `null` (not known) |
+| `provider_source` | `hook_events`, `hook_metadata` or `null` |
+| `capture_matrix` | `schema_version`, `version` (SHA-256 of the packaged matrix), the `entry` applied or `null`, its `blind_spots` (`source`, `text`, and `capability` for coverage lines) and a `note` when no entry was applied |
+
+`capture_matrix_version` is empty when no entry was applied, while
+`capture_matrix.version` always names the matrix that was consulted. To list
+only the gaps found in the trace:
+
+```bash
+agent-strace health <session-id> --format json | jq '.reasons[] | select(.kind == "observed")'
+```
+
 ---
 
 ## Understanding sessions

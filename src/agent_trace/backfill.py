@@ -119,10 +119,18 @@ class BackfillReport:
 def infer_agent_name(events: list[TraceEvent]) -> str:
     """Return the hook agent name recorded in the events, or ``""``.
 
+    Conflicting providers return ``""``.
+    """
+    names = hook_agent_names(events)
+    return next(iter(names)) if len(names) == 1 else ""
+
+
+def hook_agent_names(events: list[TraceEvent]) -> set[str]:
+    """Return every hook agent name recorded in the events.
+
     Only hook-written ``session_start`` and ``assistant_response`` (stop)
     events carry the hook provider.  Other events may name an LLM provider,
-    which must not be mistaken for the capturing agent.  Conflicting
-    providers return ``""``.
+    which must not be mistaken for the capturing agent.
     """
     names: set[str] = set()
     for event in events:
@@ -141,7 +149,7 @@ def infer_agent_name(events: list[TraceEvent]) -> str:
         provider = data.get("provider")
         if isinstance(provider, str) and provider in _PROVIDER_AGENT:
             names.add(_PROVIDER_AGENT[provider])
-    return next(iter(names)) if len(names) == 1 else ""
+    return names
 
 
 def derive_meta(

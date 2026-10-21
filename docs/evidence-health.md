@@ -61,4 +61,6 @@ A declared blind spot makes the result `partial` even when the observed event st
 
 The core assessment module intentionally does not read configuration files, provider matrices, session metadata, or UI state. Those surfaces should adapt their existing data into the same function so CLI, JSON/API, replay, and the local dashboard can expose one consistent result.
 
+[`agent-strace health`](commands.md#health) is the CLI adapter. It reads session metadata, hook active-session markers, and the [capture matrix](capture-matrix.md) packaged with agent-strace, then passes them to this function.
+
 This keeps the health rules independently testable and gives later integration work one stable source of reason codes rather than several slightly different implementations.

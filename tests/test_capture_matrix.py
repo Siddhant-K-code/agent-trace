@@ -1,10 +1,13 @@
+import hashlib
 import json
 import unittest
 from pathlib import Path
 
+from agent_trace.health import load_capture_matrix
+
 
 ROOT = Path(__file__).resolve().parents[1]
-MATRIX_PATH = ROOT / "docs" / "capture-matrix.json"
+MATRIX_PATH = ROOT / "src" / "agent_trace" / "capture_matrix.json"
 DOC_PATH = ROOT / "docs" / "capture-matrix.md"
 REQUIRED_COVERAGE = {
     "session_start",
@@ -104,6 +107,16 @@ class TestCaptureMatrix(unittest.TestCase):
                 self.assertIn(provider["name"], self.docs)
                 self.assertIn(provider["setup_command"], self.docs)
                 self.assertIn(provider["config_location"], self.docs)
+
+    def test_packaged_loader_reads_the_single_matrix_source(self):
+        loaded = load_capture_matrix()
+        raw = MATRIX_PATH.read_bytes()
+
+        self.assertEqual(loaded.schema_version, self.matrix["schema_version"])
+        self.assertEqual(list(loaded.providers), self.matrix["providers"])
+        self.assertEqual(loaded.version, "sha256:" + hashlib.sha256(raw).hexdigest())
+        self.assertFalse((ROOT / "docs" / "capture-matrix.json").exists())
+        self.assertIn("../src/agent_trace/capture_matrix.json", self.docs)
 
 
 if __name__ == "__main__":

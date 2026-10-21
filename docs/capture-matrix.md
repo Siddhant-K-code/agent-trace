@@ -2,7 +2,7 @@
 
 AgentTrace can only report events exposed by a provider's hook surface. This matrix keeps those boundaries explicit instead of treating every adapter as equivalent.
 
-The machine-readable source is [`capture-matrix.json`](capture-matrix.json). An entry marked **unverified** is documentation of the current adapter contract, not proof that a specific provider release was exercised in a clean environment.
+The machine-readable source is [`src/agent_trace/capture_matrix.json`](../src/agent_trace/capture_matrix.json). It ships inside the package so [`agent-strace health`](commands.md#health) can read the same entries this page describes. An entry marked **unverified** is documentation of the current adapter contract, not proof that a specific provider release was exercised in a clean environment.
 
 | Provider | Setup | Session | Prompt/response | Tools | File/command/error | Verification |
 |---|---|---|---|---|---|---|
@@ -27,7 +27,7 @@ The machine-readable source is [`capture-matrix.json`](capture-matrix.json). An 
 
 ## Machine-readable coverage values
 
-The values below are copied from `capture-matrix.json`. The fixture test
+The values below are copied from `src/agent_trace/capture_matrix.json`. The fixture test
 checks every provider/capability pair so these examples cannot drift from the
 published matrix.
 
