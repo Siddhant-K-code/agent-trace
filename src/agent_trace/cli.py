@@ -2363,6 +2363,8 @@ def _telemetry_command_properties(args: argparse.Namespace) -> dict:
         backend = getattr(args, "backend", "") or ""
         if backend:
             properties["backend"] = backend
+    elif args.command == "share" and getattr(args, "dry_run", False):
+        properties["subcommand"] = "dry_run"
     return properties
 
 

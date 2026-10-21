@@ -1,11 +1,13 @@
 """Tests for HTML share generation and postmortem analysis."""
 
 import contextlib
+import dataclasses
 import io
 import json
 import os
 import re
 import socket
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -13,11 +15,17 @@ from pathlib import Path
 from unittest import mock
 
 from agent_trace.annotate import Annotation, add_annotation
-from agent_trace.cli import build_parser
-from agent_trace.disclosure import build_disclosure_preview
+from agent_trace.cli import _telemetry_command_properties, build_parser, main
+from agent_trace.disclosure import DisclosurePreview, build_disclosure_preview
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
-from agent_trace.share import cmd_share, render_html, _event_summary, _esc
+from agent_trace.share import (
+    _DISCLOSURE_TEXT_ROWS,
+    cmd_share,
+    render_html,
+    _event_summary,
+    _esc,
+)
 from agent_trace.postmortem import (
     analyze_session,
     format_postmortem,
@@ -296,6 +304,80 @@ class TestShareDryRun(unittest.TestCase):
         payload = json.loads(out)
         self.assertEqual(payload, {"session_id": self.session_id, **expected})
         self.assertEqual(payload["mode"], "include_content")
+
+    def test_text_rows_cover_every_count_field(self):
+        keys = [key for _label, key in _DISCLOSURE_TEXT_ROWS]
+        labels = [label for label, _key in _DISCLOSURE_TEXT_ROWS]
+        fields = {field.name for field in dataclasses.fields(DisclosurePreview)}
+        self.assertEqual(set(keys), fields - {"schema_version", "mode"})
+        self.assertEqual(len(keys), len(set(keys)))
+        self.assertEqual(len(labels), len(set(labels)))
+
+    def test_mcp_proxy_launch_command_is_counted(self):
+        session_id = "mcpproxy01234567"
+        self.store.create_session(SessionMeta(session_id=session_id, started_at=0.0))
+        # Same shape as the MCP stdio proxy's session_start event (proxy.py).
+        self.store.append_event(session_id, _make_event(
+            EventType.SESSION_START, 0.0, session_id,
+            command=["npx", "-y", "server-fs", "/sentinel/mcp-repo-9a1c",
+                     "--token=sentinel-token-3d7b"],
+        ))
+        self.store.append_event(session_id, _make_event(
+            EventType.TOOL_CALL, 1.0, session_id, tool_name="list_files", arguments={"limit": 5},
+        ))
+        secrets = ("sentinel-token-3d7b", "/sentinel/mcp-repo-9a1c")
+        html = render_html(self.store, session_id)
+        for value in secrets:
+            self.assertIn(value, html)
+
+        code, out, err = self._run(session_id, "--dry-run", "--format", "json")
+        self.assertEqual((code, err), (0, ""))
+        payload = json.loads(out)
+        self.assertEqual(payload["command_count"], 1)
+        self.assertEqual(payload["tool_input_count"], 1)
+        self.assertEqual(payload["path_count"], 0)
+        code, text, err = self._run(session_id, "--dry-run")
+        self.assertEqual((code, err), (0, ""))
+        self.assertRegex(text, r"(?m)^  command-bearing events:\s+1$")
+        for value in secrets:
+            self.assertNotIn(value, out)
+            self.assertNotIn(value, text)
+
+    def test_entry_point_tags_dry_run_in_telemetry(self):
+        argv = ["agent-strace", "--trace-dir", self.trace_dir, "share", self.session_id, "--dry-run"]
+        before = _tree_snapshot(self.root)
+        out = io.StringIO()
+        with mock.patch.object(sys, "argv", argv), \
+                mock.patch("agent_trace.cli._product_telemetry.capture") as capture, \
+                mock.patch("agent_trace.cli._product_telemetry.maybe_show_telemetry_notice") as notice, \
+                redirect_stdout(out), redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as result:
+                main()
+        self.assertEqual(result.exception.code, 0)
+        capture.assert_called_once()
+        props = capture.call_args.args[1]
+        self.assertEqual(props["command"], "share")
+        self.assertEqual(props["subcommand"], "dry_run")
+        self.assertTrue(props["success"])
+        self.assertEqual(props["exit_code"], 0)
+        self.assertNotIn(self.session_id, json.dumps(props))
+        notice.assert_called_once()
+        self.assertIn("Mode: include_content", out.getvalue())
+        self.assertEqual(_tree_snapshot(self.root), before)
+
+    def test_only_dry_run_is_tagged_in_telemetry(self):
+        cases = (
+            (("share", "--dry-run"), "dry_run"),
+            (("share", "abc", "--dry-run", "--format", "json", "-o", "x.html"), "dry_run"),
+            (("share",), None),
+            (("share", "abc", "-o", "x.html", "--open", "--postmortem"), None),
+            (("share", "--assignment", "-o", "x.zip"), None),
+        )
+        for argv, subcommand in cases:
+            with self.subTest(argv=argv):
+                props = _telemetry_command_properties(build_parser().parse_args(argv))
+                self.assertEqual(props["command"], "share")
+                self.assertEqual(props.get("subcommand"), subcommand)
 
     def test_latest_session_is_previewed_by_default(self):
         code, out, _ = self._run("--dry-run", "--format", "json")

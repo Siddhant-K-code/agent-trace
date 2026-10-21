@@ -882,8 +882,9 @@ embeds full event data. No HTML is written, printed, or opened: `--output`,
 `--dry-run` to the command you plan to run. `--postmortem` is accepted and does
 not change the counts, because that section restates the same events.
 `--format json` prints one object with `session_id` plus the
-[disclosure preview](share-disclosure-preview.md) fields. Redaction is
-heuristic, so review the session itself before sharing the HTML.
+[disclosure preview](share-disclosure-preview.md) fields; that page also
+explains how each category is counted. Redaction is heuristic, so review the
+session itself before sharing the HTML.
 
 `--assignment` instead creates a deterministic, privacy-minimized ZIP with a
 sanitized trace, offline replay, derived stats/cost/lint reports, and a versioned
