@@ -46,6 +46,11 @@ class DisclosurePreview:
         return asdict(self)
 
 
+def count_redacted_events(events: Iterable[TraceEvent]) -> int:
+    """Count events whose ``redacted`` flag says redaction changed them before write."""
+    return sum(1 for event in events if event.redacted)
+
+
 def build_disclosure_preview(
     events: Iterable[TraceEvent],
     *,
@@ -70,7 +75,6 @@ def build_disclosure_preview(
     command_count = 0
     path_count = 0
     content_rich_event_count = 0
-    redacted_event_count = 0
     unredacted_content_rich_event_count = 0
 
     for event in event_list:
@@ -96,8 +100,6 @@ def build_disclosure_preview(
         if event.event_type in {EventType.FILE_READ, EventType.FILE_WRITE} or keys & _PATH_KEYS:
             path_count += 1
 
-        if event.redacted:
-            redacted_event_count += 1
         if event.event_type in _CONTENT_EVENT_TYPES:
             content_rich_event_count += 1
             if not event.redacted:
@@ -116,6 +118,6 @@ def build_disclosure_preview(
         path_count=path_count,
         annotation_count=annotation_count,
         content_rich_event_count=content_rich_event_count,
-        redacted_event_count=redacted_event_count,
+        redacted_event_count=count_redacted_events(event_list),
         unredacted_content_rich_event_count=unredacted_content_rich_event_count,
     )

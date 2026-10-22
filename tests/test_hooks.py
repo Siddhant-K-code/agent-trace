@@ -478,6 +478,54 @@ class TestHooksRedaction(unittest.TestCase):
         self.assertNotIn("sk-abc123", cmd)
 
 
+class TestHooksRedactionMode(unittest.TestCase):
+    """session_start records the redaction mode the hook process wrote with."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        env = patch.dict(os.environ, {"AGENT_TRACE_DIR": self.tmpdir})
+        env.start()
+        self.addCleanup(env.stop)
+        for name in (
+            "AGENT_TRACE_REDACT",
+            "AGENT_TRACE_NO_REDACT",
+            "AGENT_STRACE_NO_REDACT",
+            "AGENT_STRACE_ENDPOINT",
+        ):
+            os.environ.pop(name, None)
+
+    def test_local_session_start_records_the_effective_mode(self):
+        for index, (env, expected) in enumerate((
+            ({}, "on"),
+            ({"AGENT_TRACE_REDACT": "1"}, "on"),
+            ({"AGENT_TRACE_NO_REDACT": "1"}, "off"),
+            ({"AGENT_STRACE_NO_REDACT": "true"}, "off"),
+            ({"AGENT_TRACE_REDACT": "1", "AGENT_TRACE_NO_REDACT": "1"}, "off"),
+        )):
+            session_id = f"redactmode{index:06d}"
+            with self.subTest(env=env), patch.dict(os.environ, env):
+                handle_session_start({"session_id": session_id, "source": "startup"})
+                events = TraceStore(self.tmpdir, redact=False).load_events(session_id)
+                self.assertEqual(events[0].event_type, EventType.SESSION_START)
+                self.assertEqual(events[0].data["redaction"], expected)
+
+    def test_remote_session_start_records_the_mode_it_sends_with(self):
+        for index, (env, expected) in enumerate((({}, "on"), ({"AGENT_TRACE_NO_REDACT": "1"}, "off"))):
+            with self.subTest(env=env), patch.dict(os.environ, {
+                "AGENT_STRACE_ENDPOINT": "https://collector.invalid",
+                **env,
+            }), patch(
+                "agent_trace.server.send_session_meta_to_endpoint", return_value=True
+            ), patch(
+                "agent_trace.server.send_event_to_endpoint", return_value=True
+            ) as send_event:
+                handle_session_start({"session_id": f"remotemode{index:06d}", "source": "startup"})
+
+                sent = send_event.call_args.args[0]
+                self.assertEqual(sent.event_type, EventType.SESSION_START)
+                self.assertEqual(sent.data["redaction"], expected)
+
+
 class TestPendingCalls(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()

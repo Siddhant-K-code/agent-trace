@@ -142,6 +142,23 @@ def _write_event(store: TraceStore, session_id: str, event: TraceEvent) -> None:
         store.append_event(session_id, event)
 
 
+# Additive ``session_start`` data field: the secret-redaction mode this hook
+# process applied to its writes. Traces written before it existed lack it.
+REDACTION_MODE_KEY = "redaction"
+REDACTION_ON = "on"
+REDACTION_OFF = "off"
+
+
+def _redaction_mode(store: TraceStore) -> str:
+    """Return whether :func:`_write_event` redacts in this process.
+
+    Default hook commands redact in the store, not through ``_should_redact``,
+    so the store setting (or, for a remote endpoint, the environment) decides.
+    """
+    enabled = redaction_enabled() if _get_remote_endpoint() else store.redact
+    return REDACTION_ON if enabled else REDACTION_OFF
+
+
 def _write_session_meta(meta: SessionMeta) -> None:
     """Best-effort metadata propagation to a configured remote collector."""
     endpoint = _get_remote_endpoint()
@@ -449,6 +466,7 @@ def handle_session_start(input_data: dict, provider: str = "claude") -> None:
     for key in ("cwd", "transcript_path", "permission_mode"):
         if input_data.get(key) not in (None, ""):
             event_data[key] = input_data.get(key)
+    event_data[REDACTION_MODE_KEY] = _redaction_mode(store)
     if redact:
         event_data = redact_data(event_data)
 

@@ -50,6 +50,8 @@ Detected patterns:
 
 Redacted values become typed markers such as `[REDACTED:openai-key]`, `[REDACTED:bearer-token]`, or `[REDACTED:sensitive]`. Events with redaction are marked with `"redacted": true`. See [ADR-0007](../ADRs/0007-heuristic-redaction.md) for design rationale.
 
+Hook sessions also record the redaction mode on each `session_start` event, as `"redaction": "on"` or `"off"`. [`agent-strace health`](commands.md#health) reports that mode and the number of redacted events. Older traces and other capture paths do not record the mode, and health reports it as not recorded. The `redacted` flag is set only when redaction changed something, so zero redacted events does not prove that redaction was on.
+
 ---
 
 ## PII masking
