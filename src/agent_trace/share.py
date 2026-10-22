@@ -16,7 +16,12 @@ from datetime import datetime, timezone
 from typing import TextIO
 
 from .cost import estimate_cost
-from .disclosure import DisclosurePreview, build_disclosure_preview
+from .disclosure import (
+    DisclosurePreview,
+    NonObjectEventDataError,
+    build_disclosure_preview,
+    require_object_event_data,
+)
 from .explain import explain_session
 from .models import EventType, TraceEvent, SessionMeta
 from .store import TraceStore
@@ -535,6 +540,8 @@ def render_html(
 ) -> str:
     meta = store.load_meta(session_id)
     events = store.load_events(session_id)
+    # Phase building and the event renderer read every event's data as an object.
+    require_object_event_data(events)
     explain = explain_session(store, session_id)
 
     try:
@@ -780,6 +787,14 @@ def cmd_share(args: argparse.Namespace) -> int:
     full_id = store.find_session(session_id)
     if not full_id:
         sys.stderr.write(f"Session not found: {session_id}\n")
+        return 1
+
+    # One check before any mode runs, so --dry-run refuses exactly the sessions
+    # that share refuses, and nothing is written, printed, or opened.
+    try:
+        require_object_event_data(store.load_events(full_id))
+    except NonObjectEventDataError as exc:
+        sys.stderr.write(f"Error: {exc}\n")
         return 1
 
     if dry_run:

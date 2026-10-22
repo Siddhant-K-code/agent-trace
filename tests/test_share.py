@@ -16,11 +16,16 @@ from unittest import mock
 
 from agent_trace.annotate import Annotation, add_annotation
 from agent_trace.cli import _telemetry_command_properties, build_parser, main
-from agent_trace.disclosure import DisclosurePreview, build_disclosure_preview
+from agent_trace.disclosure import (
+    DisclosurePreview,
+    NonObjectEventDataError,
+    build_disclosure_preview,
+)
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
 from agent_trace.share import (
     _DISCLOSURE_TEXT_ROWS,
+    build_share_disclosure_preview,
     cmd_share,
     render_html,
     _event_summary,
@@ -463,6 +468,194 @@ class TestShareDryRun(unittest.TestCase):
         html = (self.workdir / f"session-{self.session_id[:12]}.html").read_text(encoding="utf-8")
         self.assertIn("<!DOCTYPE html>", html)
         self.assertIn("sentinel-prompt-41f7", html)
+
+
+# ---------------------------------------------------------------------------
+# Sessions with non-object event data
+# ---------------------------------------------------------------------------
+
+_NON_OBJECT_DATA = (
+    ("array", ["sentinel-array-6b1f", {"command": "sentinel-array-command-0c3e"}]),
+    ("string", "sentinel-string-93ad"),
+    ("null", None),
+    ("number", 42),
+    ("boolean", True),
+)
+
+# Every ordinary share mode, plus --dry-run with the flags it ignores.
+_SHARE_MODES = (
+    ("--dry-run",),
+    ("--dry-run", "--format", "json"),
+    ("--dry-run", "--postmortem", "-o", "out.html", "--stdout", "--open"),
+    (),
+    ("-o", "out.html"),
+    ("--stdout",),
+    ("--open",),
+    ("-o", "out.html", "--open"),
+    ("--postmortem",),
+    ("--postmortem", "--stdout"),
+)
+
+
+def _append_raw_event(trace_dir: str, session_id: str, event_type: str, ts: float, data) -> None:
+    """Append one events.ndjson line directly, as a foreign writer or hand edit would."""
+    line = json.dumps(
+        {"event_type": event_type, "timestamp": ts, "session_id": session_id, "data": data}
+    )
+    with open(Path(trace_dir) / session_id / "events.ndjson", "a", encoding="utf-8") as fh:
+        fh.write(line + "\n")
+
+
+class TestShareRejectsNonObjectEventData(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.trace_dir = str(self.root / "traces")
+        self.workdir = self.root / "work"
+        self.workdir.mkdir()
+        # A refused share must leave an existing --output file as it was.
+        (self.workdir / "out.html").write_text("keep me\n", encoding="utf-8")
+        self.store = TraceStore(self.trace_dir)
+        old_cwd = os.getcwd()
+        os.chdir(self.workdir)
+        self.addCleanup(os.chdir, old_cwd)
+
+    def _make_session(self, session_id: str, data) -> None:
+        """Seven valid sentinel events and an annotation, then one tool_call with *data*."""
+        meta = SessionMeta(session_id=session_id, started_at=0.0, total_duration_ms=6000)
+        self.store.create_session(meta)
+        for event in _sentinel_events(session_id):
+            self.store.append_event(session_id, event)
+        self.store.update_meta(meta)
+        add_annotation(self.store, session_id,
+                       Annotation(label="sentinel-label-7e44", note="sentinel-note-2f58"))
+        _append_raw_event(self.trace_dir, session_id, "tool_call", 7.0, data)
+
+    def _run(self, *argv: str) -> tuple[int, str, str]:
+        args = build_parser().parse_args(["--trace-dir", self.trace_dir, "share", *argv])
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = cmd_share(args)
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_every_mode_refuses_with_the_same_clean_error(self):
+        for json_type, data in _NON_OBJECT_DATA:
+            session_id = f"nonobject-{json_type}"
+            self._make_session(session_id, data)
+            expected = (
+                1,
+                "",
+                "Error: session event data must be an object: "
+                f"event 8 of 8 (tool_call) has {json_type} data\n",
+            )
+            results = {}
+            for mode in _SHARE_MODES:
+                with self.subTest(json_type=json_type, mode=mode):
+                    before = _tree_snapshot(self.root)
+                    with mock.patch("agent_trace.share.subprocess.run") as run, \
+                            mock.patch("agent_trace.share.os.startfile", create=True) as startfile, \
+                            _deny_network():
+                        results[mode] = self._run(session_id, *mode)
+                    # One stderr line, no traceback, no data values, nothing on stdout.
+                    self.assertEqual(results[mode], expected)
+                    run.assert_not_called()
+                    startfile.assert_not_called()
+                    self.assertEqual(_tree_snapshot(self.root), before)
+            # The preview refuses exactly what share refuses.
+            self.assertEqual(set(results.values()), {expected})
+        self.assertEqual([path.name for path in self.workdir.iterdir()], ["out.html"])
+        self.assertEqual((self.workdir / "out.html").read_text(encoding="utf-8"), "keep me\n")
+
+    def test_error_names_first_offending_event_and_counts_the_rest(self):
+        session_id = "nonobject-middle"
+        meta = SessionMeta(session_id=session_id, started_at=0.0, total_duration_ms=6000)
+        self.store.create_session(meta)
+        events = _sentinel_events(session_id)
+        for event in events[:3]:
+            self.store.append_event(session_id, event)
+        _append_raw_event(self.trace_dir, session_id, "tool_result", 3.5, "sentinel-string-93ad")
+        for event in events[3:5]:
+            self.store.append_event(session_id, event)
+        _append_raw_event(self.trace_dir, session_id, "error", 5.5, ["sentinel-array-6b1f"])
+        for event in events[5:]:
+            self.store.append_event(session_id, event)
+        self.store.update_meta(meta)
+        expected = (
+            1,
+            "",
+            "Error: session event data must be an object: event 4 of 9 (tool_result) "
+            "has string data; 1 more event has non-object data\n",
+        )
+        for mode in (("--dry-run",), ("--dry-run", "--format", "json"), ("--stdout",), ()):
+            with self.subTest(mode=mode):
+                self.assertEqual(self._run(session_id, *mode), expected)
+        self.assertEqual([path.name for path in self.workdir.iterdir()], ["out.html"])
+
+    def test_latest_session_default_is_checked(self):
+        self._make_session("nonobject-latest", ["sentinel-array-6b1f"])
+        expected = (
+            1,
+            "",
+            "Error: session event data must be an object: "
+            "event 8 of 8 (tool_call) has array data\n",
+        )
+        for mode in (("--dry-run",), ()):
+            with self.subTest(mode=mode):
+                self.assertEqual(self._run(*mode), expected)
+        self.assertEqual([path.name for path in self.workdir.iterdir()], ["out.html"])
+
+    def test_assignment_mode_also_refuses(self):
+        self._make_session("nonobject-assign", ["sentinel-array-6b1f"])
+        before = _tree_snapshot(self.root)
+        code, out, err = self._run("nonobject-assign", "--assignment", "-o", "bundle.zip")
+        self.assertEqual((code, out), (1, ""))
+        self.assertEqual(err, "Error: session event data must be an object\n")
+        self.assertEqual(_tree_snapshot(self.root), before)
+
+    def test_entry_point_exits_1_without_an_exception(self):
+        self._make_session("nonobject-entry", "sentinel-string-93ad")
+        for mode in (("--dry-run",), ("--dry-run", "--format", "json"), (), ("--stdout",)):
+            with self.subTest(mode=mode):
+                argv = [
+                    "agent-strace", "--trace-dir", self.trace_dir,
+                    "share", "nonobject-entry", *mode,
+                ]
+                before = _tree_snapshot(self.root)
+                out, err = io.StringIO(), io.StringIO()
+                with mock.patch.object(sys, "argv", argv), \
+                        mock.patch("agent_trace.cli._product_telemetry.capture") as capture, \
+                        mock.patch("agent_trace.cli._product_telemetry.maybe_show_telemetry_notice"), \
+                        redirect_stdout(out), redirect_stderr(err):
+                    with self.assertRaises(SystemExit) as result:
+                        main()
+                self.assertEqual(result.exception.code, 1)
+                self.assertEqual(out.getvalue(), "")
+                self.assertEqual(
+                    err.getvalue(),
+                    "Error: session event data must be an object: "
+                    "event 8 of 8 (tool_call) has string data\n",
+                )
+                props = capture.call_args.args[1]
+                self.assertEqual((props["success"], props["exit_code"]), (False, 1))
+                # The wrapper records error_type only when an exception escapes.
+                self.assertNotIn("error_type", props)
+                self.assertEqual(_tree_snapshot(self.root), before)
+
+    def test_render_and_preview_functions_raise_value_error(self):
+        for json_type, data in _NON_OBJECT_DATA:
+            with self.subTest(json_type=json_type):
+                session_id = f"nonobject-api-{json_type}"
+                self._make_session(session_id, data)
+                expected = (
+                    "session event data must be an object: "
+                    f"event 8 of 8 (tool_call) has {json_type} data"
+                )
+                for build in (render_html, build_share_disclosure_preview):
+                    with self.assertRaises(NonObjectEventDataError) as caught:
+                        build(self.store, session_id)
+                    self.assertIsInstance(caught.exception, ValueError)
+                    self.assertEqual(str(caught.exception), expected)
 
 
 # ---------------------------------------------------------------------------

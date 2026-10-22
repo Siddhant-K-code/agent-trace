@@ -1001,6 +1001,17 @@ The output name must have a lowercase `.zip` suffix and is atomically written
 with owner-only permissions. See the [assignment review guide](hiring.md) for
 the privacy boundary and interpretation limits.
 
+Every event's `data` must be a JSON object. If any event's `data` is an array,
+string, number, boolean, or null (for example after a hand edit or from another
+writer), share exits 1 before it writes, prints, or opens anything. This applies
+to ordinary share, `--dry-run`, and `--assignment`, so the preview never succeeds
+for a session that share refuses. Ordinary share and `--dry-run` name the first
+such event by position and event type and count the rest, for example
+`Error: session event data must be an object: event 4 of 9 (tool_result) has
+string data; 1 more event has non-object data`. The message never includes data
+values. The preview refuses these sessions instead of counting them, because key
+names cannot be read from a non-object payload.
+
 ### `score`
 ```
 agent-strace score SUBMISSION.zip --rubric FILE [--format text|json]
