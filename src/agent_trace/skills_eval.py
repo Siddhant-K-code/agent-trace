@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .models import EventType, TraceEvent
-from .skills import USER_SKILL_DIRS, _prompt_loads, analyze_session
+from .skills import USER_SKILL_DIRS, _prompt_loads, analyze_session, discover_skills
 
 SCHEMA_VERSION = 1
 DEFAULT_RUNS = 3
@@ -516,11 +516,39 @@ def classify_run(result: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def summarize_case(case: EvalCase, runs: list[dict[str, Any]]) -> dict[str, Any]:
+def case_invocation(
+    case: EvalCase,
+    *,
+    workspace: str = "",
+    extra_dirs: Iterable[str] = (),
+    user_dirs: Iterable[str] = USER_SKILL_DIRS,
+) -> dict[str, bool | None]:
+    """Read the case skill's invocation settings from its SKILL.md, as on disk now.
+
+    Skills are discovered in the case's ``fixture_dir`` (or ``workspace``),
+    ``extra_dirs``, and the user skill directories.  Both values are ``None``
+    when no definition is found.
+    """
+    catalog = discover_skills(case.fixture_dir or workspace or None, list(extra_dirs), user_dirs=list(user_dirs))
+    definition = catalog.skills.get(case.skill)
+    if definition is None:
+        matches = [name for name in sorted(catalog.skills) if skill_matches(name, case.skill)]
+        definition = catalog.skills[matches[0]] if matches else None
+    if definition is None:
+        return {"model_invocable": None, "user_invocable": None}
+    return {"model_invocable": definition.model_invocable, "user_invocable": definition.user_invocable}
+
+
+def summarize_case(
+    case: EvalCase,
+    runs: list[dict[str, Any]],
+    invocation: dict[str, bool | None] | None = None,
+) -> dict[str, Any]:
     loaded = sum(1 for run in runs if run["status"] == "loaded")
     not_loaded = sum(1 for run in runs if run["status"] == "not_loaded")
     unscored = sum(1 for run in runs if run["status"] == "unscored")
     scored = loaded + not_loaded
+    invocation = invocation or {}
     return {
         "id": case.id,
         "skill": case.skill,
@@ -528,6 +556,8 @@ def summarize_case(case: EvalCase, runs: list[dict[str, Any]]) -> dict[str, Any]
         "prompt": case.prompt,
         "note": case.note,
         "explicit_invocation": case.explicit_invocation(),
+        "model_invocable": invocation.get("model_invocable"),
+        "user_invocable": invocation.get("user_invocable"),
         "runs": len(runs),
         "scored": scored,
         "loaded": loaded,
@@ -556,17 +586,18 @@ def gate_failures(report: dict[str, Any], *, fail_on_miss: bool, fail_on_false_t
     """Return case-level reasons for a non-zero exit. Unscored runs fail an enabled gate."""
     failures: list[str] = []
     for case in report["cases"]:
+        user_only = " (user-only skill: disable-model-invocation: true)" if case.get("model_invocable") is False else ""
         if case["should_trigger"] and fail_on_miss:
             if case["not_loaded"] or case["unscored"] or not case["runs"]:
                 failures.append(
                     f"{case['id']}: should trigger; {case['not_loaded']} missed, "
-                    f"{case['unscored']} unscored of {case['runs']} runs"
+                    f"{case['unscored']} unscored of {case['runs']} runs{user_only}"
                 )
         if not case["should_trigger"] and fail_on_false_trigger:
             if case["loaded"] or case["unscored"] or not case["runs"]:
                 failures.append(
                     f"{case['id']}: should not trigger; {case['loaded']} loaded, "
-                    f"{case['unscored']} unscored of {case['runs']} runs"
+                    f"{case['unscored']} unscored of {case['runs']} runs{user_only}"
                 )
     return failures
 
@@ -771,6 +802,8 @@ def format_text(report: dict[str, Any]) -> str:
             extra.append(f"{case['unscored']} unscored")
         if case["user_invoked_runs"]:
             extra.append(f"{case['user_invoked_runs']} user-invoked")
+        if case.get("model_invocable") is False:
+            extra.append("user-only skill")
         rows.append((
             case["id"],
             case["skill"],
@@ -806,6 +839,11 @@ def format_text(report: dict[str, Any]) -> str:
     for case in report["cases"]:
         if case["explicit_invocation"]:
             notes.append(f"{case['id']}: prompt names the skill ({case['explicit_invocation']}); not a trigger test")
+        if case.get("model_invocable") is False:
+            notes.append(
+                f"{case['id']}: {case['skill']} has disable-model-invocation: true; the model cannot invoke it, "
+                "so a not-loaded run is not a trigger miss"
+            )
         for run in case["run_results"]:
             label = f"{case['id']} {run['run']}"
             if run["status"] == "unscored":
@@ -879,9 +917,13 @@ def cmd_skills_eval(args: argparse.Namespace) -> int:
                 if child.is_dir() and not child.name.startswith(".") and child.name not in known and not getattr(args, "case_ids", None):
                     warnings.append(f"{child.name}: recorded runs with no matching case; ignored")
             case_reports = [
-                summarize_case(case, score_recorded_case(
-                    case, root, workspace=args.workspace or "", extra_dirs=extra_dirs, warnings=warnings,
-                ))
+                summarize_case(
+                    case,
+                    score_recorded_case(
+                        case, root, workspace=args.workspace or "", extra_dirs=extra_dirs, warnings=warnings,
+                    ),
+                    case_invocation(case, workspace=args.workspace or "", extra_dirs=extra_dirs),
+                )
                 for case in cases
             ]
             report = build_report(
@@ -924,7 +966,7 @@ def cmd_skills_eval(args: argparse.Namespace) -> int:
                     reason = f" ({result['unscored_reason']})" if result["status"] == "unscored" else ""
                     sys.stderr.write(f"{result['status']}{reason} {result['duration_s']}s\n")
                     runs.append(result)
-                case_reports.append(summarize_case(case, runs))
+                case_reports.append(summarize_case(case, runs, case_invocation(case, extra_dirs=extra_dirs)))
             report = build_report(
                 case_reports, mode="live", cases_file=str(args.cases_file),
                 agent=spec, default_runs=default_runs, warnings=warnings,
@@ -965,6 +1007,7 @@ __all__ = [
     "agent_env",
     "approve_all_flags",
     "build_report",
+    "case_invocation",
     "classify_run",
     "cmd_skills_eval",
     "compute_totals",

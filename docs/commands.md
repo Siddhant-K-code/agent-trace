@@ -853,7 +853,7 @@ Read with care:
 agent-strace skills [SESSION_ID] [--since DATE] [--workspace PATH]
                     [--skills-dir DIR ...] [--min-sessions N] [--format text|json]
 ```
-Skill adoption from recorded behavior: available → loaded → followed → outcome. Counts and signals only, no score. Omit `SESSION_ID` to aggregate per skill. To test whether a skill loads when it should, use [`skills eval`](#skills-eval). See [skills.md](skills.md).
+Skill adoption from recorded behavior: available → loaded → followed → outcome. Counts and signals only, no score. Omit `SESSION_ID` to aggregate per skill. Skills with `disable-model-invocation: true` are listed as user-only instead of never loaded, and alias or forwarder skills get hints. To test whether a skill loads when it should, use [`skills eval`](#skills-eval). See [skills.md](skills.md).
 
 | Flag | Description |
 |---|---|
@@ -861,7 +861,7 @@ Skill adoption from recorded behavior: available → loaded → followed → out
 | `--since DATE` | Aggregate window. Accepts ISO dates or durations like `30d`; default is `30d` |
 | `--workspace PATH` | Repository root for skill discovery when a session has no `session_start` cwd; default is the current directory |
 | `--skills-dir DIR` | Extra skill directory to scan (plugin or app-bundled skills). Repeatable |
-| `--min-sessions N` | Minimum sessions for the never-loaded list and for each group in the loaded vs not-loaded comparison; default is `5` |
+| `--min-sessions N` | Minimum sessions for the never-loaded and user-only lists and for each group in the loaded vs not-loaded comparison; default is `5` |
 | `--format text\|json` | Output format |
 
 ### `skills eval`
@@ -872,7 +872,7 @@ agent-strace skills eval CASES_FILE (--agent claude|copilot | --agent-cmd TEMPLA
                          [--save-traces DIR] [--keep-workspaces] [--format text|json]
                          [--fail-on-miss] [--fail-on-false-trigger]
 ```
-Experimental skill trigger eval. Runs each case's prompt through a headless agent N times in a temp workspace, captures each run with agent-strace hooks, and counts the runs in which the model loaded the skill. Counts only, no score. See [skills-eval.md](skills-eval.md).
+Experimental skill trigger eval. Runs each case's prompt through a headless agent N times in a temp workspace, captures each run with agent-strace hooks, and counts the runs in which the model loaded the skill. Counts only, no score. Cases whose skill sets `disable-model-invocation: true` are marked user-only. See [skills-eval.md](skills-eval.md).
 
 | Flag | Description |
 |---|---|

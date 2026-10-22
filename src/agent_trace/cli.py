@@ -1613,7 +1613,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_skills.add_argument("--skills-dir", action="append", default=[], dest="skills_dirs",
                           metavar="DIR", help="extra skill directory to scan (repeatable)")
     p_skills.add_argument("--min-sessions", type=int, default=5,
-                          help="minimum sessions for never-loaded and comparison output (default: 5)")
+                          help="minimum sessions for never-loaded, user-only, and comparison output (default: 5)")
     p_skills.add_argument("--format", choices=["text", "json"], default="text",
                           help="output format (default: text)")
 

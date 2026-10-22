@@ -43,6 +43,72 @@ flowchart TB
 - **Availability is read from today's filesystem.** Older sessions see skills
   added later. Narrow `--since` to reduce this.
 
+### Who can invoke a skill
+
+Two `SKILL.md` frontmatter keys control who can invoke a skill:
+
+| Key | Meaning | Default |
+|---|---|---|
+| `disable-model-invocation: true` | Only the user can invoke it (`/name`). The model cannot load it | `false` |
+| `user-invocable: false` | Only the model can invoke it. It is hidden from the `/` menu | `true` |
+
+Sources: Claude Code,
+[Control who invokes a skill](https://code.claude.com/docs/en/skills#control-who-invokes-a-skill);
+GitHub Copilot CLI,
+[skill frontmatter fields](https://docs.github.com/en/copilot/reference/cli-command-reference#skill-frontmatter-fields).
+The [Agent Skills specification](https://agentskills.io/specification) defines
+neither key.
+
+- Only top-level frontmatter keys count. The value must be `true` or `false`,
+  in any case, optionally quoted. Any other value (`yes`, `on`, `1`, …) keeps
+  the default.
+- Client settings that override these keys are not read.
+- JSON: `model_invocable` and `user_invocable` on each `available` and
+  `loaded` entry. They are `null` on a load whose definition was not found.
+- Text: the Available list labels a skill `user-only`, `model-only`, or
+  `not invocable`.
+
+### Alias and forwarder hints
+
+A hint marks a skill that the model may skip in favour of another discovered
+skill. Hints are text pattern matches, not scores or judgements. There are two
+kinds:
+
+| Kind | Matches |
+|---|---|
+| `description_alias` | The description **starts** with an alias phrase followed by another skill's exact name: `Shorthand for finder.`, `Alias of /finder.`, `This skill is the same as finder.` |
+| `forwarder` | The body has 1 to 3 lines and at most 40 words after headings, blank lines, rules, and HTML comments are dropped. Every line names the same one other skill: `` Invoke the `interview` skill. ``, `Use /interview.` |
+
+Alias phrases are `shorthand`, `short-hand`, `short form`, `shortcut`,
+`alias`, `abbreviation` or `synonym`, followed by `for`, `of` or `to`; or
+`same as`. Each may be preceded by `This skill is`, `This is`, `It is` or `Is`,
+and by `a`, `an` or `the`. Matching is case-insensitive.
+
+A forwarder line names a skill as a backtick span (`` `interview` ``,
+`` `/interview` ``, `` `$interview` ``), a quoted name, `/interview`,
+`$interview`, `interview skill`, or `Skill(interview)`.
+
+To avoid false positives:
+
+- A name must match a discovered skill exactly, including case, and must not
+  continue into a longer word (`finder` does not match `finders`,
+  `finder-v2`, or `finder.md`).
+- A skill never hints at itself. When names overlap, the longest wins.
+- A body with a code fence, more than 3 lines, more than 40 words, or lines
+  that name different skills (or none) is not a forwarder.
+- An alias phrase later in the description does not count.
+
+Each hint has `kind`, `target`, and `target_loaded`: whether the target was
+loaded in this session (session mode) or in any session in the window
+(aggregate mode). Hints appear in JSON on `available` entries, aggregate
+`skills` entries, and `never_loaded` and `user_only_not_invoked` entries. Text
+output prints them under the skill, for example:
+
+```text
+  f (available in 5 sessions)
+    hint (description_alias): description says it is an alias of finder; finder was not loaded in the window
+```
+
 Context files (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`,
 `.github/copilot-instructions.md`) are reported as present or absent with
 `load_observable: false`. Agents inject them without a trace event.
@@ -152,11 +218,13 @@ Outcome facts sit next to the load. They do not mean the skill caused them.
 flowchart TD
     W["Sessions in window<br/>--since, default 30d"] --> P["Per skill<br/>available · loaded<br/>load rate · user/model<br/>median time to load<br/>pre-edit · follow<br/>tests after load"]:::fact
     P --> N["Never loaded<br/>available: N+ sessions<br/>loaded: 0"]:::none
+    P --> UO["User-only, never invoked<br/>disable-model-invocation: true<br/>available: N+ · invoked: 0"]:::nm
     P --> C["Loaded vs not loaded<br/>tests, errors,<br/>session_end<br/>N+ in both groups"]:::signal
     N -. "lead, not verdict" .-> E["Trigger eval<br/>relevant tasks:<br/>does it load?<br/>skills eval"]
     classDef fact fill:#dbeafe,stroke:#1d4ed8,color:#0b1f44
     classDef signal fill:#fef3c7,stroke:#b45309,color:#451a03
     classDef none fill:#fee2e2,stroke:#b91c1c,color:#450a0a
+    classDef nm fill:#f1f5f9,stroke:#64748b,color:#0f172a
 ```
 
 N is `--min-sessions` (default 5). A never-loaded skill is a lead: test it with
@@ -170,13 +238,31 @@ should not load it.
 | `follow_signals`, `follow_signal_kinds` | Loaded sessions with a measurable definition |
 | `tests_after_load` | Loaded sessions |
 
-**Never loaded** has two caveats. They appear in JSON as `caveats.never_loaded`
-and as one line in the text output:
+**Never loaded** lists skills that the model can invoke, were available in N or
+more sessions, and were loaded in none. It has four caveats. They appear in JSON
+as `caveats.never_loaded` and as one line in the text output:
 
 - **Availability is not relevance.** No task in the window may have needed the
   skill.
 - **Availability reflects today's filesystem.** Sessions from before a skill
   was installed are over-counted.
+- **User-only skills are listed separately.** See below.
+- **Hints are pattern matches.** A skill with an alias or forwarder hint may
+  be unloaded because the model loads its target instead.
+
+**User-only, never invoked** (`user_only_not_invoked` in JSON) lists skills
+with `disable-model-invocation: true` that were available in N or more sessions
+and invoked in none. The model cannot load them, so they are not trigger
+misses. Each entry has `name`, `sessions_available`, `user_invocable`, and
+`hints`. The text section is printed only when it is not empty, and notes
+skills that also set `user-invocable: false`, which nobody can invoke.
+
+In aggregate mode a skill's `model_invocable` and `user_invocable` are `true`
+if any session's definition allows it, `false` if every found definition
+forbids it, and `null` if no definition was found. A skill counts as user-only
+only when every found definition sets `disable-model-invocation: true`. Every
+other count is unchanged. Hinted skills that are in neither list are printed
+under "Other skills with alias or forwarder hints".
 
 **Loaded vs not loaded** is correlational: agents load skills because of the
 task, so the groups differ in task mix.
@@ -188,6 +274,9 @@ This command cannot measure:
 - what the skill set looked like when an old session ran;
 - whether a task should have triggered a skill (see
   [skills eval](skills-eval.md));
+- client settings that change who can invoke a skill;
+- whether two skills overlap in meaning, beyond the explicit alias and
+  forwarder text above;
 - whether auto-injected context files were used;
 - skills injected without a tool call, file read, or prompt mention;
 - whether non-command guidance (tone, ordering, "prefer X over Y") was followed;

@@ -22,6 +22,7 @@ from agent_trace.skills_eval import (
     EvalInputError,
     agent_env,
     approve_all_flags,
+    case_invocation,
     classify_run,
     cmd_skills_eval,
     find_session_dirs,
@@ -71,10 +72,11 @@ def _plain_session(cwd: str) -> list[TraceEvent]:
     ]
 
 
-def _write_skill(repo: Path, name: str = SKILL) -> Path:
+def _write_skill(repo: Path, name: str = SKILL, *, disable_model_invocation: bool = False) -> Path:
     skill_dir = repo / ".github" / "skills" / name
     skill_dir.mkdir(parents=True, exist_ok=True)
-    (skill_dir / "SKILL.md").write_text(f"---\nname: {name}\ndescription: test skill\n---\n# {name}\n")
+    flag = "disable-model-invocation: true\n" if disable_model_invocation else ""
+    (skill_dir / "SKILL.md").write_text(f"---\nname: {name}\ndescription: test skill\n{flag}---\n# {name}\n")
     return skill_dir / "SKILL.md"
 
 
@@ -416,6 +418,90 @@ class FromTracesTests(_TempDirTest):
         code, out, _ = self.run_eval("--runs", "5", "--format", "json")
         self.assertEqual(code, 0)
         self.assertIn("--runs is ignored with --from-traces", json.loads(out)["warnings"])
+
+
+class UserOnlySkillTests(_TempDirTest):
+    def setUp(self):
+        super().setUp()
+        self.repo = self.root / "repo"
+        _write_skill(self.repo)
+        _write_skill(self.repo, "interview-me", disable_model_invocation=True)
+        self.recorded = self.root / "recorded"
+        cwd = str(self.repo)
+        for run in ("run-1", "run-2"):
+            _write_session(self.recorded / "interview" / run, f"i-{run}", _plain_session(cwd))
+            _write_session(self.recorded / "quiet" / run, f"q-{run}", _plain_session(cwd))
+        _write_session(self.recorded / "draft-notes" / "run-1", "d1", _skill_tool_session(cwd))
+        self.cases = self.write_cases([
+            {"id": "interview", "skill": "interview-me", "prompt": "Interview me about this plan", "should_trigger": True},
+            {"id": "quiet", "skill": "interview-me", "prompt": "Fix the typo", "should_trigger": False},
+            {"id": "draft-notes", "skill": SKILL, "prompt": "Draft release notes", "should_trigger": True},
+        ])
+        self._home = mock.patch.dict(os.environ, {"HOME": str(self.root / "home")})
+        self._home.start()
+
+    def tearDown(self):
+        self._home.stop()
+        super().tearDown()
+
+    def run_eval(self, *extra):
+        return _run_cli(["skills", "eval", str(self.cases), "--from-traces", str(self.recorded),
+                         "--workspace", str(self.repo), *extra])
+
+    def test_case_invocation_lookup(self):
+        fixture_case = EvalCase(id="a", skill="interview-me", prompt="x", should_trigger=True,
+                                fixture_dir=str(self.repo))
+        plugin_case = EvalCase(id="b", skill="plugin:interview-me", prompt="x", should_trigger=True)
+        missing_case = EvalCase(id="c", skill="nope", prompt="x", should_trigger=True)
+
+        self.assertEqual(case_invocation(fixture_case, user_dirs=()),
+                         {"model_invocable": False, "user_invocable": True})
+        self.assertEqual(case_invocation(plugin_case, workspace=str(self.repo), user_dirs=()),
+                         {"model_invocable": False, "user_invocable": True})
+        self.assertEqual(case_invocation(missing_case, workspace=str(self.repo), user_dirs=()),
+                         {"model_invocable": None, "user_invocable": None})
+        self.assertEqual(case_invocation(plugin_case, extra_dirs=[str(self.repo / ".github" / "skills")],
+                                         user_dirs=())["model_invocable"], False)
+
+    def test_json_marks_user_only_cases_without_changing_counts(self):
+        code, out, err = self.run_eval("--format", "json")
+        report = json.loads(out)
+        cases = {case["id"]: case for case in report["cases"]}
+
+        self.assertEqual(code, 0, err)
+        self.assertEqual(report["schema_version"], 1)
+        self.assertEqual((cases["interview"]["model_invocable"], cases["interview"]["user_invocable"]), (False, True))
+        self.assertEqual((cases["interview"]["loaded"], cases["interview"]["not_loaded"]), (0, 2))
+        self.assertEqual(cases["interview"]["trigger_rate"], 0.0)
+        self.assertIs(cases["draft-notes"]["model_invocable"], True)
+        self.assertEqual(report["totals"], {
+            "should_trigger": {"cases": 2, "runs": 3, "loaded": 1, "missed": 2, "unscored": 0},
+            "should_not_trigger": {"cases": 1, "runs": 2, "loaded": 0, "clean": 2, "unscored": 0},
+        })
+        self.assertNotIn("score", report)
+
+    def test_text_notes_and_gate_message(self):
+        code, out, _ = self.run_eval()
+
+        self.assertEqual(code, 0)
+        self.assertIn("user-only skill", out)
+        self.assertIn("interview: interview-me has disable-model-invocation: true; the model cannot invoke it, "
+                      "so a not-loaded run is not a trigger miss", out)
+        self.assertNotIn("draft-notes: " + SKILL + " has disable-model-invocation", out)
+        self.assertNotRegex(out.lower(), r"\bscore\b")
+        code, _, err = self.run_eval("--fail-on-miss")
+        self.assertEqual(code, 1)
+        self.assertIn("interview: should trigger; 2 missed, 0 unscored of 2 runs "
+                      "(user-only skill: disable-model-invocation: true)", err)
+
+    def test_unknown_definition_is_null(self):
+        code, out, _ = _run_cli(["skills", "eval", str(self.cases), "--from-traces", str(self.recorded),
+                                 "--format", "json"])
+        cases = {case["id"]: case for case in json.loads(out)["cases"]}
+
+        self.assertEqual(code, 0)
+        self.assertIsNone(cases["interview"]["model_invocable"])
+        self.assertIsNone(cases["interview"]["user_invocable"])
 
 
 class CliRoutingTests(unittest.TestCase):
