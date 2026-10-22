@@ -670,6 +670,12 @@ class ClaudeSetupVerifyTests(unittest.TestCase):
     def _snapshot(self):
         return {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
 
+    def _chdir_project(self):
+        old = os.getcwd()
+        os.chdir(self.project)
+        self.addCleanup(os.chdir, old)
+        return Path(os.getcwd())
+
     def test_clean_settings_verify_read_only_with_summary(self):
         self._install(model="opus")
         before = self._snapshot()
@@ -968,13 +974,69 @@ class ClaudeSetupVerifyTests(unittest.TestCase):
         self.assertIn(f"settings:   {user_dir / 'settings.json'} (7/7 events", out)
         self.assertIn(f"project:    {self.project_path} (same file as user settings)", out)
 
-    def test_claude_config_dir_defaults_to_home_and_honors_override(self):
+    def test_claude_config_dir_resolves_like_claude_code(self):
         home = self.root / "home"
-        with patch.dict(os.environ, {"HOME": str(home), "USERPROFILE": str(home), "CLAUDE_CONFIG_DIR": ""}):
-            self.assertEqual(_claude_config_dir(), home / ".claude")
+        cwd = self._chdir_project()
+        with patch.dict(os.environ, {"HOME": str(home), "USERPROFILE": str(home)}):
             os.environ.pop("CLAUDE_CONFIG_DIR")
             self.assertEqual(_claude_config_dir(), home / ".claude")
-        self.assertEqual(_claude_config_dir(), self.config_dir)
+            for value, expected in (
+                ("", cwd),
+                ("~/ccx", cwd / "~" / "ccx"),
+                ("cfg/../alt", cwd / "alt"),
+                (str(self.config_dir), self.config_dir),
+            ):
+                with self.subTest(value=value), patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": value}):
+                    self.assertEqual(_claude_config_dir(), expected)
+
+    def test_tilde_and_empty_config_dirs_do_not_fall_back_to_home(self):
+        home = self.root / "home"
+        cwd = self._chdir_project()
+        for value, claude_dir, home_dir in (
+            ("~/ccx", cwd / "~" / "ccx", home / "ccx"),
+            ("", cwd, home / ".claude"),
+        ):
+            env = {"HOME": str(home), "USERPROFILE": str(home), "CLAUDE_CONFIG_DIR": value}
+            with self.subTest(value=value), patch.dict(os.environ, env):
+                self._write(home_dir / "settings.json", self._hooks())
+                status, _, err = self._verify()
+                self.assertEqual(status, 1)
+                self.assertIn(f"Missing Claude Code user settings: {claude_dir / 'settings.json'}.", err)
+                self._write(claude_dir / "settings.json", self._hooks())
+                status, out, _ = self._verify()
+                self.assertEqual(status, 0)
+                self.assertIn(f"settings:   {claude_dir / 'settings.json'} (7/7 events", out)
+
+    def test_setup_names_the_settings_file_that_verify_reads(self):
+        home = self.root / "home"
+        cwd = self._chdir_project()
+        codex_home = self.root / "codex"
+        codex_home.mkdir()
+        env = {name: str(self.root / name) for name in ("CURSOR_CONFIG_DIR", "COPILOT_HOME", "GEMINI_CONFIG_DIR")}
+        env.update(CODEX_HOME=str(codex_home), HOME=str(home), USERPROFILE=str(home))
+        with patch.dict(os.environ, env):
+            os.environ.pop("CODEX_CONFIG_DIR", None)
+            for value, named in (
+                (str(self.config_dir), str(self.settings_path)),
+                ("~/ccx", str(cwd / "~" / "ccx" / "settings.json")),
+                ("", str(cwd / "settings.json")),
+                (None, "~/.claude/settings.json"),
+            ):
+                with self.subTest(value=value), patch.dict(os.environ):
+                    if value is None:
+                        os.environ.pop("CLAUDE_CONFIG_DIR")
+                    else:
+                        os.environ["CLAUDE_CONFIG_DIR"] = value
+                    for cli in ("claude", "all"):
+                        err = io.StringIO()
+                        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                            cmd_setup(_args(cli=cli, verify=False))
+                        self.assertIn(f"Add this to {named} for Claude Code:", err.getvalue())
+                    target = Path(named).expanduser()
+                    self._write(target, self._hooks())
+                    status, out, _ = self._verify()
+                    self.assertEqual(status, 0)
+                    self.assertIn(f"settings:   {target} (7/7 events", out)
 
     def test_managed_settings_dir_follows_the_platform(self):
         for platform, expected in (

@@ -38,7 +38,7 @@ agent-strace setup --global
 agent-strace setup --no-redact
 ```
 
-`agent-strace setup` prints the hooks JSON. Add it to `~/.claude/settings.json` (user-level, applies to all projects):
+`agent-strace setup` prints the hooks JSON and the file to add it to: `~/.claude/settings.json` (user-level, applies to all projects), or `$CLAUDE_CONFIG_DIR/settings.json` when that variable is set:
 
 ```json
 {
@@ -69,8 +69,10 @@ agent-strace explain  # plain-English summary
 `agent-strace setup --cli claude --verify` checks the Claude Code hooks without
 changing any file. It reads the user settings file:
 `$CLAUDE_CONFIG_DIR/settings.json` when that variable is set in your shell,
-otherwise `~/.claude/settings.json`. That file must be valid JSON and contain
-each of the 7 generated hooks exactly once, as a `command` handler. The
+otherwise `~/.claude/settings.json`. As in Claude Code, a set value is used as
+is: `~` is not expanded, a relative path starts from the current directory, and
+an empty value means the current directory. That file must be valid JSON and
+contain each of the 7 generated hooks exactly once, as a `command` handler. The
 `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `SessionStart` and
 `SessionEnd` hooks need a match-all matcher (`""`, `"*"` or omitted).
 Unrelated hooks and extra fields such as `timeout` are allowed. Stale

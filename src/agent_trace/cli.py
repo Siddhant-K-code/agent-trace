@@ -626,7 +626,23 @@ def _claude_hooks_config(args: argparse.Namespace) -> dict:
 
 
 def _claude_config_dir() -> Path:
-    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude").expanduser()
+    """Return the directory Claude Code reads user settings from.
+
+    Like Claude Code's path.resolve(CLAUDE_CONFIG_DIR ?? ~/.claude), a set value
+    is used as is, even when empty: no "~" expansion, and a relative value
+    starts from the current directory.
+    """
+    value = os.environ.get("CLAUDE_CONFIG_DIR")
+    if value is None:
+        return Path("~/.claude").expanduser()
+    return Path(os.path.abspath(value))
+
+
+def _claude_settings_target() -> str:
+    """Name the user settings file for setup output: the file --verify reads."""
+    if os.environ.get("CLAUDE_CONFIG_DIR") is None:
+        return "~/.claude/settings.json"
+    return str(_claude_config_dir() / "settings.json")
 
 
 def _claude_managed_settings_dir() -> Path:
@@ -1019,7 +1035,7 @@ def cmd_setup(args: argparse.Namespace) -> int | None:
 
     configs: list[tuple[str, str, dict]] = []
     if cli in ("claude", "all"):
-        configs.append(("Claude Code", "~/.claude/settings.json", _claude_hooks_config(args)))
+        configs.append(("Claude Code", _claude_settings_target(), _claude_hooks_config(args)))
     if cli in ("codex", "all"):
         problem = _codex_dir_problem(_codex_config_dir())
         if problem:
@@ -1253,7 +1269,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--global",
         dest="global_config",
         action="store_true",
-        help="compatibility flag; Claude setup already targets ~/.claude/settings.json",
+        help="compatibility flag; Claude setup already targets ~/.claude/settings.json, "
+             "or $CLAUDE_CONFIG_DIR/settings.json when that is set",
     )
     p_setup.add_argument("--cli", choices=["claude", "codex", "gemini", "cursor", "copilot", "all"], default="claude",
                          help="agent CLI to configure (default: claude)")
