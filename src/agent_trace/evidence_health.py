@@ -260,6 +260,7 @@ def _boundary_reasons(
     events: Sequence[TraceEvent],
     *,
     session_finalized: bool | None,
+    allowed_pre_start: frozenset[EventType] = frozenset(),
 ) -> tuple[list[EvidenceHealthReason], bool]:
     """Check session start and end markers in event order.
 
@@ -267,9 +268,11 @@ def _boundary_reasons(
     source is in :data:`CONTINUATION_START_SOURCES` continues the same session
     and re-opens it if it was closed; any other later start is a duplicate.
     While the session is closed, another end is a duplicate and any other event
-    was recorded after the session end.
+    was recorded after the session end. Events before the first start are
+    invalid unless every one of them has a type in ``allowed_pre_start``.
     """
     first_start: TraceEvent | None = None
+    first_start_index = 0
     closing_end: TraceEvent | None = None
     reopened = False
     after_end_reported = False
@@ -277,12 +280,13 @@ def _boundary_reasons(
     duplicate_ends: list[EvidenceHealthReason] = []
     after_end: list[EvidenceHealthReason] = []
 
-    for event in events:
+    for index, event in enumerate(events):
         if event.event_type == EventType.SESSION_START:
             source = _start_source(event)
             continuation = is_continuation_source(source)
             if first_start is None:
                 first_start = event
+                first_start_index = index
             elif not continuation:
                 described = "no source" if source in (None, "") else f"source {source!r}"
                 allowed = " and ".join(sorted(CONTINUATION_START_SOURCES))
@@ -342,13 +346,27 @@ def _boundary_reasons(
 
     events_before_start = first_start is not None and events[0] is not first_start
     if events_before_start:
-        reasons.append(
-            _reason(
-                "events_before_session_start",
-                "events were recorded before the first session start marker",
-                event=events[0],
+        pre_start_types = {event.event_type for event in events[:first_start_index]}
+        if pre_start_types <= allowed_pre_start:
+            events_before_start = False
+            described = ", ".join(sorted(t.value for t in pre_start_types))
+            reasons.append(
+                _reason(
+                    "declared_events_before_session_start",
+                    f"{described} events were recorded before the first session start "
+                    "marker, an order the provider's capture metadata declares",
+                    kind=EvidenceHealthReasonKind.PROVIDER_LIMITATION,
+                    event=events[0],
+                )
             )
-        )
+        else:
+            reasons.append(
+                _reason(
+                    "events_before_session_start",
+                    "events were recorded before the first session start marker",
+                    event=events[0],
+                )
+            )
     reasons.extend(after_end)
 
     invalid = bool(duplicate_starts or duplicate_ends or after_end or events_before_start)
@@ -359,8 +377,13 @@ def _structural_reasons(
     events: Sequence[TraceEvent],
     *,
     session_finalized: bool | None,
+    allowed_pre_start: frozenset[EventType] = frozenset(),
 ) -> tuple[list[EvidenceHealthReason], bool]:
-    reasons, invalid = _boundary_reasons(events, session_finalized=session_finalized)
+    reasons, invalid = _boundary_reasons(
+        events,
+        session_finalized=session_finalized,
+        allowed_pre_start=allowed_pre_start,
+    )
 
     session_ids = {event.session_id for event in events if event.session_id}
     if len(session_ids) > 1:
@@ -434,6 +457,7 @@ def assess_evidence_health(
     provider_blind_spots: Iterable[str] = (),
     session_finalized: bool | None = None,
     export_failures: Iterable[str] = (),
+    allowed_pre_start_event_types: Iterable[EventType | str] = (),
 ) -> EvidenceHealthResult:
     """Assess whether a captured session is structurally reviewable.
 
@@ -444,7 +468,13 @@ def assess_evidence_health(
 
     ``session_finalized=False`` distinguishes an active session from a completed
     session whose end marker is unexpectedly absent.
+
+    ``allowed_pre_start_event_types`` must also come from declared provider
+    metadata. When every event before the first session start has one of these
+    types, the order is reported as ``declared_events_before_session_start``
+    instead of the invalid ``events_before_session_start``.
     """
+    allowed_pre_start = frozenset(EventType(t) for t in allowed_pre_start_event_types)
     event_list = list(events)
     no_events = not event_list
     if no_events:
@@ -454,6 +484,7 @@ def assess_evidence_health(
         reasons, invalid = _structural_reasons(
             event_list,
             session_finalized=session_finalized,
+            allowed_pre_start=allowed_pre_start,
         )
 
     for failure in export_failures:

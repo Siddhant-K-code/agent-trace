@@ -61,11 +61,11 @@ from optional or experimental surfaces.
    ```
    The status is `healthy`, `partial`, `unknown` or `invalid`. Observed
    reasons come from the recorded events. Provider limitations come from the
-   capture matrix packaged with agent-strace, which has entries for Claude Code
-   and Codex. Other sessions get a note that no provider limitations were
-   assessed. The command exits 0 for `healthy` and `partial` and 1 otherwise;
-   `--format json` gives the same result for scripts. A clean-looking replay is
-   still not proof of complete capture. See
+   capture matrix packaged with agent-strace, which has entries for Claude Code,
+   Codex and GitHub Copilot CLI. Other sessions get a note that no provider
+   limitations were assessed. The command exits 0 for `healthy` and `partial`
+   and 1 otherwise; `--format json` gives the same result for scripts. A
+   clean-looking replay is still not proof of complete capture. See
    [`health`](commands.md#health).
 
 6. **Review the ordered session locally.**

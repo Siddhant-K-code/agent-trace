@@ -145,9 +145,9 @@ applied and its `verification_status`.
 | `unknown`, `invalid` | 1 |
 
 A missing session, an empty store or an unreadable session also exits 1.
-`partial` passes because some providers can never be `healthy`: Codex has no
-session-end hook and declares known gaps, so its sessions are at least
-`partial`.
+`partial` passes because some providers can never be `healthy`: every entry
+declares known gaps, and Codex sessions have no session-end event, so their
+sessions are at least `partial`.
 
 Each reason has a `kind`:
 
@@ -157,7 +157,11 @@ Each reason has a `kind`:
   [capture matrix](capture-matrix.md), never inferred from the trace. Every
   `known_gaps` entry is listed verbatim, followed by one line for each
   `coverage` capability marked `unavailable`. `provider_defined` coverage adds
-  no line.
+  no line. When the entry lists `events_before_start` and only those event
+  types precede the first session start, `declared_events_before_session_start`
+  replaces the observed `events_before_session_start`. GitHub Copilot CLI
+  declares `user_prompt`, because it sends the first prompt before its session
+  start.
 
 The provider comes only from hook-written evidence: the `session_start` and
 stop events the hooks record, or the metadata the hooks write when a session's
@@ -165,8 +169,7 @@ first hook was not SessionStart. Names set with `record --name`, the SDK or an
 importer are not used. When no matrix entry applies, no provider limitations
 are assessed and a note says why. This covers sessions recorded by the MCP
 proxy, exec wrapper or SDK, imported sessions, providers without an entry
-(Gemini CLI, Cursor, Copilot CLI) and sessions whose events name more than one
-provider.
+(Gemini CLI, Cursor) and sessions whose events name more than one provider.
 
 Whether the session has finished:
 

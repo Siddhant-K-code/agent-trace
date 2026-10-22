@@ -264,6 +264,127 @@ class TestHookSessions(_HealthBase):
         self.assertFalse(payload["observed_start"])
 
 
+class TestCopilotSessions(_HealthBase):
+    """GitHub Copilot CLI hook payloads, in the order Copilot sends them."""
+
+    SID = "c0ffee00-0000-4000-8000-000000000001"
+    CHILD = "c0ffee01-0000-4000-8000-000000000002"
+
+    def setUp(self):
+        super().setUp()
+        os.environ["DO_NOT_TRACK"] = "1"
+
+    def hook(self, subcommand, payload):
+        err = io.StringIO()
+        with patch.object(sys, "stdin", io.StringIO(json.dumps(payload))), redirect_stderr(err):
+            hook_main(["--provider", "copilot", subcommand])
+        self.assertEqual(err.getvalue(), "")
+
+    def main_session(self):
+        self.hook("user-prompt", {"sessionId": self.SID, "prompt": "list files"})
+        self.hook("session-start", {"sessionId": self.SID, "source": "new", "initialPrompt": "list files"})
+        self.hook("pre-tool", {"sessionId": self.SID, "toolName": "view", "toolArgs": {"path": "a"}})
+        self.hook("post-tool", {
+            "sessionId": self.SID,
+            "toolName": "view",
+            "toolArgs": {"path": "a"},
+            "toolResult": {"resultType": "success", "textResultForLlm": "ok"},
+        })
+        self.hook("stop", {"sessionId": self.SID, "stopReason": "end_turn", "stop_hook_active": False})
+        self.hook("session-end", {"sessionId": self.SID, "reason": "complete"})
+        return self.SID[:16]
+
+    def test_main_session_maps_to_the_copilot_entry(self):
+        session_id = self.main_session()
+
+        code, payload = self.health_json(session_id)
+
+        gaps = [g.strip() for g in raw_entry("copilot")["known_gaps"]]
+        missing = unavailable("copilot")
+        self.assertEqual(missing, ["response"])
+        self.assertEqual(payload["provider"], "copilot")
+        self.assertEqual(payload["provider_source"], "hook_events")
+        self.assertEqual(payload["capture_method"], "cli_hooks")
+        self.assertEqual(payload["capture_matrix"]["entry"]["id"], "copilot")
+        self.assertEqual(payload["capture_matrix"]["entry"]["verification_status"], "verified")
+        self.assertIsNone(payload["capture_matrix"]["note"])
+        self.assertIs(payload["session_finalized"], True)
+        self.assertEqual(self.codes(payload, "observed"), [])
+        self.assertEqual(
+            self.codes(payload, "provider_limitation"),
+            ["declared_events_before_session_start"]
+            + ["provider_blind_spot"] * (len(gaps) + len(missing)),
+        )
+        self.assertEqual(self.messages(payload, "provider_limitation")[1:len(gaps) + 1], gaps)
+        self.assertEqual(payload["status"], "partial")
+        self.assertEqual(code, 0)
+
+    def test_subagent_session_without_session_start_maps_from_hook_metadata(self):
+        self.hook("user-prompt", {"sessionId": self.CHILD, "prompt": "report a line"})
+        self.hook("pre-tool", {"sessionId": self.CHILD, "toolName": "view", "toolArgs": {"path": "a"}})
+        self.hook("post-tool", {
+            "sessionId": self.CHILD,
+            "toolName": "view",
+            "toolArgs": {"path": "a"},
+            "toolResult": {"resultType": "success", "textResultForLlm": "ok"},
+        })
+        session_id = self.CHILD[:16]
+        meta = TraceStore(self.trace_dir).load_meta(session_id)
+        self.assertEqual(meta.command, "github-copilot (no session-start)")
+
+        code, payload = self.health_json(session_id)
+
+        self.assertEqual(payload["provider"], "copilot")
+        self.assertEqual(payload["provider_source"], "hook_metadata")
+        self.assertEqual(payload["capture_matrix"]["entry"]["id"], "copilot")
+        self.assertFalse(payload["observed_start"])
+        self.assertIsNone(payload["session_finalized"])
+        self.assertEqual(
+            self.codes(payload, "observed"),
+            ["missing_session_start", "missing_session_end"],
+        )
+        self.assertEqual(payload["status"], "partial")
+        self.assertEqual(code, 0)
+
+    def test_subagent_session_with_a_stop_maps_from_hook_events(self):
+        self.hook("user-prompt", {"sessionId": self.CHILD, "prompt": "report a line"})
+        self.hook("stop", {"sessionId": self.CHILD, "stopReason": "end_turn", "stop_hook_active": False})
+
+        code, payload = self.health_json(self.CHILD[:16])
+
+        self.assertEqual(payload["provider"], "copilot")
+        self.assertEqual(payload["provider_source"], "hook_events")
+        self.assertEqual(payload["status"], "partial")
+        self.assertEqual(code, 0)
+
+    def test_backfilled_subagent_session_maps_from_its_stop_event(self):
+        write_session(self.trace_dir, "backfilledchild1", [
+            event(EventType.USER_PROMPT, 1, {"prompt": "report a line"}),
+            event(EventType.ASSISTANT_RESPONSE, 2,
+                  {"text": "", "hook_event": "stop", "provider": "copilot"}),
+        ], agent_name="github-copilot", command="github-copilot (backfilled)", ended=False)
+
+        code, payload = self.health_json("backfilledchild1")
+
+        self.assertEqual(payload["provider"], "copilot")
+        self.assertEqual(payload["provider_source"], "hook_events")
+        self.assertEqual(payload["status"], "partial")
+        self.assertEqual(code, 0)
+
+    def test_prompt_before_start_stays_invalid_for_providers_that_do_not_declare_it(self):
+        handle_user_prompt({"session_id": "claudeearly00001", "prompt": "hi"}, provider="claude")
+        handle_session_start({"session_id": "claudeearly00001", "source": "startup"}, provider="claude")
+        handle_session_end({"session_id": "claudeearly00001"}, provider="claude")
+        self.assertNotIn("events_before_start", raw_entry("claude"))
+
+        code, payload = self.health_json("claudeearly00001")
+
+        self.assertEqual(payload["provider"], "claude")
+        self.assertIn("events_before_session_start", self.codes(payload, "observed"))
+        self.assertEqual(payload["status"], "invalid")
+        self.assertEqual(code, 1)
+
+
 class TestResumedAndCompactedSessions(_HealthBase):
     """Real hook handlers: resume and compact continue one recorded session."""
 
@@ -453,9 +574,12 @@ class TestDetectProvider(unittest.TestCase):
     def test_only_implicit_hook_metadata_is_trusted(self):
         found = self.detect(agent_name="openai-codex", command="openai-codex (no session-start)")
         self.assertEqual((found.provider, found.source), ("codex", "hook_metadata"))
+        found = self.detect(agent_name="github-copilot", command="github-copilot (no session-start)")
+        self.assertEqual((found.provider, found.source), ("copilot", "hook_metadata"))
         for agent_name, command in (
             ("claude-code", "imported from session.jsonl"),
             ("claude-code", "claude-code (backfilled)"),
+            ("github-copilot", "github-copilot (backfilled)"),
             ("claude-code", "python agent.py"),
             ("my-agent", "my-agent (no session-start)"),
         ):
@@ -537,9 +661,22 @@ class TestCaptureMatrixLoader(unittest.TestCase):
             b'{"schema_version": 1, "providers": [{"id": "x"}]}',
             b'{"schema_version": 1, "providers": [{"id": "x", "capture_method": "m",'
             b' "coverage": {}, "known_gaps": [1]}]}',
+            b'{"schema_version": 1, "providers": [{"id": "x", "capture_method": "m",'
+            b' "coverage": {}, "known_gaps": [], "events_before_start": "user_prompt"}]}',
+            b'{"schema_version": 1, "providers": [{"id": "x", "capture_method": "m",'
+            b' "coverage": {}, "known_gaps": [], "events_before_start": ["not_an_event"]}]}',
         ):
             with self.subTest(raw=raw), self.assertRaises(ValueError):
                 self.load(raw)
+
+    def test_events_before_start_is_optional(self):
+        matrix = self.load(
+            b'{"schema_version": 1, "providers": [{"id": "x", "capture_method": "m",'
+            b' "coverage": {}, "known_gaps": [], "events_before_start": ["user_prompt"]},'
+            b' {"id": "y", "capture_method": "m", "coverage": {}, "known_gaps": []}]}'
+        )
+        self.assertEqual(matrix.entry("x")["events_before_start"], ["user_prompt"])
+        self.assertNotIn("events_before_start", matrix.entry("y"))
 
 
 class TestSessionFinalized(_HealthBase):

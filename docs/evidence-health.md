@@ -69,6 +69,15 @@ end after its last continuation start, it reports `session_active` or
 `missing_session_end` like any other open session. `observed_end` still reports
 whether any end marker was captured.
 
+Some providers send events before their session start hook. A caller can
+declare those event types with `allowed_pre_start_event_types`. When every
+event before the first `session_start` has a declared type, the result reports
+one `declared_events_before_session_start` provider limitation instead of the
+invalid `events_before_session_start`. Any undeclared event type before the
+start is still invalid, and a session with no start is still
+`missing_session_start`. `agent-strace health` takes the declared types from
+the capture matrix's `events_before_start`.
+
 ## Provider limitations
 
 A missing event alone is not enough to conclude that capture failed: some providers never expose certain categories of activity. Callers should therefore pass known blind spots from a versioned provider/capture matrix:
