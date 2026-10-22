@@ -51,7 +51,7 @@ from .models import EventType, SessionMeta, TraceEvent
 from .attribution import collect_attribution
 from .evidence_health import is_continuation_source
 from .redact import redact_data, redact_data_with_status, redaction_enabled
-from .store import TraceStore
+from .store import TraceStore, _write_atomic, validate_session_id
 from . import telemetry as _product_telemetry
 
 # Pending tool calls are tracked in a file so separate hook processes
@@ -178,8 +178,9 @@ def _ensure_session_meta(store: TraceStore, session_id: str, provider: str) -> N
     hooks under their own session ID but never fire ``sessionStart``.  Without
     ``meta.json`` those sessions are skipped by ``list``, ``skills`` and every
     other reader.  No ``session_start`` event and no active-session marker are
-    written; a later SessionStart that begins a session replaces this metadata,
-    while a resume or compact start keeps it.
+    written; a later SessionStart that begins a session replaces this metadata
+    (keeping any parent link recorded by the parent's subagent hooks), while a
+    resume or compact start keeps it.
     """
     if not session_id:
         return
@@ -406,6 +407,11 @@ def _normalise_payload(input_data: dict, provider: str, event: str) -> dict:
         if event == "stop":
             data.setdefault("last_assistant_message", data.get("prompt_response", ""))
 
+    if event in {"subagent-start", "subagent-stop"}:
+        data.setdefault("agent_id", data.get("agentId") or "")
+        data.setdefault("agent_type", data.get("agentType") or "")
+        data.setdefault("agent_name", data.get("agentName") or "")
+
     if event == "stop" and data.get("last_assistant_message") is None:
         data["last_assistant_message"] = (
             data.get("assistant_message")
@@ -446,9 +452,11 @@ def handle_session_start(input_data: dict, provider: str = "claude") -> None:
         else:
             existing_meta.ended_at = None
             meta = existing_meta
-            store.update_meta(meta)
+            store.update_meta(meta, preserve_parent_link=True)
     else:
-        store.create_session(meta)
+        # A subagent's metadata may already carry the link recorded by its
+        # parent's subagent hooks; a real SessionStart must not drop it.
+        store.create_session(meta, preserve_parent_link=True)
     _write_session_meta(meta)
 
     if session_id:
@@ -505,7 +513,7 @@ def handle_session_end(input_data: dict, provider: str = "claude") -> None:
                 data=event_data,
             ),
         )
-        store.update_meta(meta)
+        store.update_meta(meta, preserve_parent_link=True)
         _write_session_meta(meta)
         _product_telemetry.capture(
             _product_telemetry.SESSION_COMPLETED,
@@ -553,7 +561,7 @@ def handle_pre_tool(input_data: dict, provider: str = "claude") -> None:
     meta = _load_meta_or_none(store, session_id)
     if meta:
         meta.tool_calls += 1
-        store.update_meta(meta)
+        store.update_meta(meta, preserve_parent_link=True)
 
     # Track pending call for latency measurement.
     # Keyed by event_id (not tool_name) so concurrent calls to the same
@@ -634,6 +642,239 @@ def handle_stop(input_data: dict, provider: str = "claude") -> None:
         TraceEvent(
             event_type=EventType.ASSISTANT_RESPONSE,
             session_id=session_id,
+            data=event_data,
+        ),
+    )
+
+
+# Providers whose subagent hooks name the child by the child's own hook
+# session ID. Verified for GitHub Copilot CLI (``subagentStop.agentId`` and,
+# since 1.0.103-0, ``subagentStart.agentId``).
+_SUBAGENT_SESSION_PROVIDERS = frozenset({"copilot"})
+_SUBAGENT_TOOL_NAMES = frozenset({"task"})
+_MAX_LINK_ANCESTRY = 64
+
+
+def _subagent_child_session_id(input_data: dict, session_id: str, provider: str) -> str:
+    """Return the child's local session ID when the payload names one."""
+    if provider not in _SUBAGENT_SESSION_PROVIDERS:
+        return ""
+    raw = input_data.get("agent_id")
+    if not isinstance(raw, str) or not raw:
+        return ""
+    child_id = raw[:16]
+    try:
+        validate_session_id(child_id)
+    except ValueError:
+        return ""
+    return "" if child_id == session_id else child_id
+
+
+def _events_containing(store: TraceStore, session_id: str, marker: str):
+    """Yield the session's events whose JSON line contains marker, newest first.
+
+    Filtering on the raw line keeps the scan cheap on long sessions; nothing
+    is written.
+    """
+    try:
+        path = store._session_file(session_id, "events.ndjson", "event stream")
+        text = path.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return
+    for line in reversed(text.splitlines()):
+        if marker not in line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict):
+            yield record
+
+
+def _pending_subagent_call(
+    store: TraceStore, session_id: str, input_data: dict, provider: str
+) -> str:
+    """Return the task tool_call that started this subagent, if unambiguous.
+
+    Tool hooks carry no call ID, so the call is identified only when exactly
+    one task call is pending (called, no result yet), it is recorded as a
+    ``tool_call`` in this session's trace, and its ``agent_type`` argument
+    does not contradict the payload.
+    """
+    pending = _read_pending_calls(provider=provider)
+    calls = [
+        event_id
+        for event_id, info in pending.items()
+        if isinstance(info, dict)
+        and str(info.get("tool_name", "")).lower() in _SUBAGENT_TOOL_NAMES
+    ]
+    if len(calls) != 1:
+        return ""
+    call_id = calls[0]
+    agent_type = input_data.get("agent_type")
+    for record in _events_containing(store, session_id, f'"event_id":"{call_id}"'):
+        if record.get("event_id") != call_id:
+            continue
+        if record.get("event_type") != EventType.TOOL_CALL.value:
+            return ""
+        data = record.get("data")
+        arguments = data.get("arguments") if isinstance(data, dict) else None
+        expected = arguments.get("agent_type") if isinstance(arguments, dict) else None
+        if agent_type and expected and expected != agent_type:
+            return ""
+        return call_id
+    return ""
+
+
+def _subagent_start_call(store: TraceStore, session_id: str, child_id: str) -> str:
+    """Return the task call recorded by this child's subagent_start event."""
+    for record in _events_containing(
+        store, session_id, f'"{EventType.SUBAGENT_START.value}"'
+    ):
+        data = record.get("data")
+        if (
+            record.get("event_type") == EventType.SUBAGENT_START.value
+            and isinstance(data, dict)
+            and data.get("child_session_id") == child_id
+        ):
+            parent_id = record.get("parent_id")
+            return parent_id if isinstance(parent_id, str) else ""
+    return ""
+
+
+def _is_ancestor(store: TraceStore, candidate: str, meta: SessionMeta) -> bool:
+    current = meta
+    for _ in range(_MAX_LINK_ANCESTRY):
+        if not current.parent_session_id:
+            return False
+        if current.parent_session_id == candidate:
+            return True
+        try:
+            current = store.load_meta(current.parent_session_id)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return False
+    return True
+
+
+def _link_subagent_session(
+    store: TraceStore, parent_id: str, child_id: str, parent_event_id: str
+) -> str:
+    """Record ``parent_id`` as the parent of ``child_id`` in the child's meta.
+
+    Only ``meta.json`` is changed, atomically and under the store write lock;
+    the child's hash-chained ``events.ndjson`` is never touched, and a missing
+    child is never created. Erased, pending-deletion, pending-tag and
+    cross-tenant sessions are refused with the same checks as
+    ``backfill-meta``, and an existing link to a different parent is kept.
+    Returns ``"linked"``, ``"already_linked"`` or the reason nothing changed.
+    """
+    # backfill imports hooks at module level; import lazily to avoid a cycle.
+    from .backfill import _Skip, _check_erasure_audit, _pending_journal_sessions
+
+    linked: SessionMeta | None = None
+    try:
+        with store.write_lock():
+            try:
+                child_path = store._session_file(child_id, "meta.json", "session metadata")
+            except ValueError:
+                return "invalid_child"
+            if not child_path.exists():
+                return "missing_child"
+            _check_erasure_audit(store)
+            deleting, tagging = _pending_journal_sessions(store)
+            for session_id in (child_id, parent_id):
+                if store._session_was_erased(session_id):
+                    return "erased"
+                if session_id in deleting:
+                    return "pending_erasure"
+                if session_id in tagging:
+                    return "pending_tag"
+            try:
+                child = store.load_meta(child_id)
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                return "unreadable_child"
+            try:
+                parent = store.load_meta(parent_id)
+            except FileNotFoundError:
+                return "missing_parent"
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                return "unreadable_parent"
+            if child.tenant_id != parent.tenant_id:
+                return "tenant_mismatch"
+            if child.parent_session_id and child.parent_session_id != parent_id:
+                return "different_parent"
+            if _is_ancestor(store, child_id, parent):
+                return "cycle"
+
+            depth = parent.depth + 1
+            already = child.parent_session_id == parent_id
+            changed = not already or child.depth != depth
+            child.parent_session_id = parent_id
+            child.depth = depth
+            if parent_event_id and not child.parent_event_id:
+                child.parent_event_id = parent_event_id
+                changed = True
+            if not changed:
+                return "already_linked"
+            _write_atomic(child_path, child.to_json())
+            linked = child
+    except _Skip as exc:
+        return exc.reason
+    except (OSError, ValueError):
+        return "link_failed"
+    if linked is not None:
+        _write_session_meta(linked)
+    return "already_linked" if already else "linked"
+
+
+def handle_subagent(input_data: dict, phase: str, provider: str = "claude") -> None:
+    """Handle subagentStart / subagentStop hooks fired in the parent session.
+
+    Records a ``subagent_start`` or ``subagent_stop`` event in the parent's
+    trace. When the payload names the child session, the event carries
+    ``child_session_id`` and the child's metadata is linked to the parent.
+    """
+    store = _get_store()
+    session_id = _resolve_session_id(input_data, provider=provider)
+    if not session_id:
+        return
+
+    redact = _should_redact()
+    child_id = _subagent_child_session_id(input_data, session_id, provider)
+    _ensure_session_meta(store, session_id, provider)
+
+    parent_event_id = ""
+    if provider in _SUBAGENT_SESSION_PROVIDERS:
+        if phase == "stop" and child_id:
+            parent_event_id = _subagent_start_call(store, session_id, child_id)
+        if not parent_event_id:
+            parent_event_id = _pending_subagent_call(store, session_id, input_data, provider)
+
+    event_data = {"hook_event": f"subagent_{phase}", "provider": provider}
+    if child_id:
+        event_data["child_session_id"] = child_id
+    keys = ["agent_type", "agent_name", "turn_id"]
+    if phase == "stop":
+        keys.append("stop_reason")
+    for key in keys:
+        if input_data.get(key) not in (None, ""):
+            event_data[key] = input_data.get(key)
+    if child_id:
+        event_data["child_link"] = _link_subagent_session(
+            store, session_id, child_id, parent_event_id
+        )
+    if redact:
+        event_data = redact_data(event_data)
+
+    event_type = EventType.SUBAGENT_START if phase == "start" else EventType.SUBAGENT_STOP
+    _write_event(
+        store,
+        session_id,
+        TraceEvent(
+            event_type=event_type,
+            session_id=session_id,
+            parent_id=parent_event_id,
             data=event_data,
         ),
     )
@@ -746,7 +987,7 @@ def handle_post_tool(input_data: dict, failed: bool = False, provider: str = "cl
         meta = _load_meta_or_none(store, session_id)
         if meta:
             meta.errors += 1
-            store.update_meta(meta)
+            store.update_meta(meta, preserve_parent_link=True)
 
 
 def hook_main(args: list[str]) -> None:
@@ -762,7 +1003,7 @@ def hook_main(args: list[str]) -> None:
 
     if not args:
         sys.stderr.write("Usage: agent-strace hook <event>\n")
-        sys.stderr.write("Events: session-start, session-end, pre-tool, post-tool, post-tool-failure, user-prompt, stop\n")
+        sys.stderr.write("Events: session-start, session-end, pre-tool, post-tool, post-tool-failure, user-prompt, stop, subagent-start, subagent-stop\n")
         sys.exit(1)
 
     if provider not in _PROVIDER_AGENT:
@@ -803,6 +1044,10 @@ def hook_main(args: list[str]) -> None:
         "AgentStop": "stop",
         "Stop": "stop",
         "agent-stop": "stop",
+        "subagentStart": "subagent-start",
+        "SubagentStart": "subagent-start",
+        "subagentStop": "subagent-stop",
+        "SubagentStop": "subagent-stop",
     }
     event = aliases.get(rest[0], rest[0])
     input_data = _normalise_payload(_read_stdin(), provider, event)
@@ -816,6 +1061,8 @@ def hook_main(args: list[str]) -> None:
         "user-prompt": lambda d: handle_user_prompt(d, provider=provider),
         "file-write": lambda d: handle_file_write(d, provider=provider),
         "stop": lambda d: handle_stop(d, provider=provider),
+        "subagent-start": lambda d: handle_subagent(d, "start", provider=provider),
+        "subagent-stop": lambda d: handle_subagent(d, "stop", provider=provider),
     }
 
     handler = handlers.get(event)

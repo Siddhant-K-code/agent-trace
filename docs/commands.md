@@ -102,14 +102,14 @@ agent-strace replay [session-id] [--format terminal|html] [--live] [--speed N]
 | `--speed N` | Speed multiplier for `--live` (default: 1.0) |
 | `--filter TYPES` | Comma-separated event types to show |
 | `--limit N` | Cap at N events |
-| `--expand-subagents` | Inline subagent sessions under parent tool_call |
+| `--expand-subagents` | Inline subagent sessions under the parent tool_call that started them (the child's `parent_event_id`) |
 | `--tree` | Show session hierarchy without full replay |
 
 ### `tree`
 ```
 agent-strace tree [session-id] [--format text|json]
 ```
-Show the parent/child session hierarchy for a root session, including per-node cost, tool calls, status, and duration. Parent links come from `record --parent`, `AGENT_STRACE_PARENT_SESSION`, A2A trace propagation, or imported trace metadata.
+Show the parent/child session hierarchy for a root session, including per-node cost, tool calls, status, and duration. Parent links come from `record --parent`, `AGENT_STRACE_PARENT_SESSION`, A2A trace propagation, imported trace metadata, or GitHub Copilot CLI's `subagentStart`/`subagentStop` hooks, which link `task` subagent sessions to their parent. Copilot sessions captured before those hooks were registered stay unlinked; see the [capture matrix](capture-matrix.md#github-copilot-cli).
 
 ### `list`
 ```
@@ -1163,6 +1163,9 @@ stop hooks but never `sessionStart`. `list`, `skills` and the other readers
 that list sessions skip those directories, and `tenant report`, `tenant export`,
 `tenant delete` and `org-report` stop with "unrecognized or incomplete session
 directory" while any of them exist.
+
+`backfill-meta` does not link those sessions to their parent; only the
+Copilot `subagentStart`/`subagentStop` hooks do, as sessions are captured.
 
 The command scans the flat store and every `workspaces/<id>/` store. It is a
 dry run unless `--apply` is given.

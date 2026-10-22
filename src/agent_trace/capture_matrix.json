@@ -70,8 +70,8 @@
       "config_location": "~/.copilot/hooks/agent-strace.json",
       "rollback": "Setup writes a dedicated file and leaves other Copilot hook files unchanged. Remove it with rm ~/.copilot/hooks/agent-strace.json, using $COPILOT_HOME/hooks/agent-strace.json when COPILOT_HOME is set. If you installed the agent-strace Copilot CLI plugin instead, run copilot plugin uninstall agent-strace.",
       "verification_status": "verified",
-      "tested_version": "1.0.94-3",
-      "last_verified": "2026-10-21",
+      "tested_version": "1.0.103-0",
+      "last_verified": "2026-10-22",
       "fixture_test_reference": "tests/test_capture_matrix_fixtures.py",
       "events_before_start": [
         "user_prompt"
@@ -89,8 +89,8 @@
       },
       "privacy": "Events pass through AgentTrace's normal redaction path; hook visibility is limited to fields emitted by the provider.",
       "known_gaps": [
-        "Copilot fires userPromptSubmitted before sessionStart, so a main session's trace begins with its first user_prompt event.",
-        "Subagents started with the task tool record prompt, tool and stop events under their own session id with no session_start, no session_end and no parent session link; only the parent's subagentStop hook names the child, and setup does not register it.",
+        "Copilot can fire userPromptSubmitted before sessionStart, so a main session's trace may begin with its first user_prompt event. 1.0.94-3 always did; 1.0.103-0 did in some runs and fired sessionStart first in others.",
+        "Subagents started with the task tool record prompt, tool and stop events under their own session id with no session_start and no session_end. The parent's subagentStop hook (and, in some 1.0.103-0 runs, subagentStart) names the child, so the parent records subagent_start and subagent_stop events and the child's meta.json is linked to the parent. The link to the parent's task tool_call is set only when exactly one task call is pending. Sessions captured before these hooks were registered stay unlinked; re-run agent-strace setup --cli copilot or update the plugin to register them.",
         "agentStop carries a stop reason and transcript path but no response text, so stop events have empty text.",
         "Hook payloads carry no model name or token usage.",
         "Tool hooks carry no call id, so tool results are paired with calls by tool name.",

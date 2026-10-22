@@ -43,6 +43,20 @@
         "timeoutSec": 10
       }
     ],
+    "subagentStart": [
+      {
+        "type": "command",
+        "command": "agent-strace hook --provider copilot subagent-start",
+        "timeoutSec": 10
+      }
+    ],
+    "subagentStop": [
+      {
+        "type": "command",
+        "command": "agent-strace hook --provider copilot subagent-stop",
+        "timeoutSec": 10
+      }
+    ],
     "sessionEnd": [
       {
         "type": "command",

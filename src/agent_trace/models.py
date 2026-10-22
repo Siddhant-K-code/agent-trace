@@ -17,6 +17,8 @@ Event types:
   - session_end: trace session ended
   - user_prompt: user submitted a prompt to the agent
   - assistant_response: agent produced a text response
+  - subagent_start: the agent started a subagent (recorded in the parent)
+  - subagent_stop: a subagent finished (recorded in the parent)
 """
 
 from __future__ import annotations
@@ -43,6 +45,8 @@ class EventType(str, Enum):
     ERROR = "error"
     USER_PROMPT = "user_prompt"
     ASSISTANT_RESPONSE = "assistant_response"
+    SUBAGENT_START = "subagent_start"
+    SUBAGENT_STOP = "subagent_stop"
 
 
 @dataclass

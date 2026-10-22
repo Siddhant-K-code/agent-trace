@@ -44,6 +44,8 @@ EVENT_COLORS = {
     EventType.ERROR: C.RED,
     EventType.USER_PROMPT: C.GREEN,
     EventType.ASSISTANT_RESPONSE: C.MAGENTA,
+    EventType.SUBAGENT_START: C.CYAN,
+    EventType.SUBAGENT_STOP: C.CYAN,
 }
 
 EVENT_ICONS = {
@@ -59,6 +61,8 @@ EVENT_ICONS = {
     EventType.ERROR: "✗",
     EventType.USER_PROMPT: "👤",
     EventType.ASSISTANT_RESPONSE: "🤖",
+    EventType.SUBAGENT_START: "⤷",
+    EventType.SUBAGENT_STOP: "⤶",
 }
 
 
@@ -289,6 +293,18 @@ def format_event(event: TraceEvent, base_ts: float | None = None) -> str:
         parts.append(f"{color}{C.BOLD}assistant_response{C.RESET}")
         if preview:
             parts.append(f"\n{C.GRAY}{'':>14}  \"{preview}\"{C.RESET}")
+
+    elif event.event_type in (EventType.SUBAGENT_START, EventType.SUBAGENT_STOP):
+        parts.append(f"{color}{C.BOLD}{event.event_type.value}{C.RESET}")
+        agent = event.data.get("agent_type") or event.data.get("agent_name") or ""
+        if agent:
+            parts.append(f"{C.WHITE}{agent}{C.RESET}")
+        child = event.data.get("child_session_id", "")
+        if child:
+            parts.append(f"{C.DIM}child={child}{C.RESET}")
+        stop_reason = event.data.get("stop_reason", "")
+        if stop_reason:
+            parts.append(f"{C.DIM}({stop_reason}){C.RESET}")
 
     return " ".join(parts)
 

@@ -1,0 +1,451 @@
+{
+  "provider": "copilot",
+  "cli": "GitHub Copilot CLI",
+  "tested_version": "1.0.103-0",
+  "recorded": "2026-10-22",
+  "sanitized": "Hook payloads recorded from real headless runs and then sanitized: session ids, paths, prompts, tool output, model names and timestamps are synthetic. Hook names, event order, payload keys and value types are as observed.",
+  "scenarios": {
+    "tool": {
+      "description": "Main -p session: one prompt, one successful read tool call.",
+      "hooks": [
+        {
+          "event": "sessionStart",
+          "payload": {
+            "sessionId": "c0000001-0000-4000-8000-000000000001",
+            "timestamp": 1700000000000,
+            "cwd": "/workspace/project",
+            "source": "new",
+            "initialPrompt": "Synthetic prompt for the tool scenario."
+          }
+        },
+        {
+          "event": "userPromptSubmitted",
+          "payload": {
+            "sessionId": "c0000001-0000-4000-8000-000000000001",
+            "timestamp": 1700000000019,
+            "cwd": "/workspace/project",
+            "prompt": "Synthetic prompt for the tool scenario."
+          }
+        },
+        {
+          "event": "preToolUse",
+          "payload": {
+            "sessionId": "c0000001-0000-4000-8000-000000000001",
+            "timestamp": 1700000002142,
+            "cwd": "/workspace/project",
+            "toolName": "view",
+            "toolArgs": {
+              "path": "/workspace/project/notes.txt"
+            }
+          }
+        },
+        {
+          "event": "postToolUse",
+          "payload": {
+            "sessionId": "c0000001-0000-4000-8000-000000000001",
+            "timestamp": 1700000002167,
+            "cwd": "/workspace/project",
+            "toolName": "view",
+            "toolArgs": {
+              "path": "/workspace/project/notes.txt"
+            },
+            "toolResult": {
+              "resultType": "success",
+              "textResultForLlm": "line-1\nline-2\nline-3\n"
+            }
+          }
+        },
+        {
+          "event": "agentStop",
+          "payload": {
+            "sessionId": "c0000001-0000-4000-8000-000000000001",
+            "timestamp": 1700000003425,
+            "cwd": "/workspace/project",
+            "transcriptPath": "/copilot-home/session-state/c0000001-0000-4000-8000-000000000001/events.jsonl",
+            "stopReason": "end_turn",
+            "stop_hook_active": false
+          }
+        },
+        {
+          "event": "sessionEnd",
+          "payload": {
+            "sessionId": "c0000001-0000-4000-8000-000000000001",
+            "timestamp": 1700000003459,
+            "cwd": "/workspace/project",
+            "reason": "complete"
+          }
+        }
+      ]
+    },
+    "tool_failure": {
+      "description": "Main -p session: a read tool call that fails (postToolUseFailure).",
+      "hooks": [
+        {
+          "event": "sessionStart",
+          "payload": {
+            "sessionId": "c0000002-0000-4000-8000-000000000002",
+            "timestamp": 1700000100000,
+            "cwd": "/workspace/project",
+            "source": "new",
+            "initialPrompt": "Synthetic prompt for the tool_failure scenario."
+          }
+        },
+        {
+          "event": "userPromptSubmitted",
+          "payload": {
+            "sessionId": "c0000002-0000-4000-8000-000000000002",
+            "timestamp": 1700000100017,
+            "cwd": "/workspace/project",
+            "prompt": "Synthetic prompt for the tool_failure scenario."
+          }
+        },
+        {
+          "event": "preToolUse",
+          "payload": {
+            "sessionId": "c0000002-0000-4000-8000-000000000002",
+            "timestamp": 1700000101967,
+            "cwd": "/workspace/project",
+            "toolName": "view",
+            "toolArgs": {
+              "path": "/workspace/project/missing.txt"
+            }
+          }
+        },
+        {
+          "event": "postToolUseFailure",
+          "payload": {
+            "sessionId": "c0000002-0000-4000-8000-000000000002",
+            "timestamp": 1700000101995,
+            "cwd": "/workspace/project",
+            "toolName": "view",
+            "toolArgs": {
+              "path": "/workspace/project/missing.txt"
+            },
+            "error": "Path does not exist"
+          }
+        },
+        {
+          "event": "agentStop",
+          "payload": {
+            "sessionId": "c0000002-0000-4000-8000-000000000002",
+            "timestamp": 1700000103733,
+            "cwd": "/workspace/project",
+            "transcriptPath": "/copilot-home/session-state/c0000002-0000-4000-8000-000000000002/events.jsonl",
+            "stopReason": "end_turn",
+            "stop_hook_active": false
+          }
+        },
+        {
+          "event": "sessionEnd",
+          "payload": {
+            "sessionId": "c0000002-0000-4000-8000-000000000002",
+            "timestamp": 1700000103767,
+            "cwd": "/workspace/project",
+            "reason": "complete"
+          }
+        }
+      ]
+    },
+    "permission_denied": {
+      "description": "Main -p session: a write tool that needs approval; -p without allow flags denies it, and the model retries once.",
+      "hooks": [
+        {
+          "event": "sessionStart",
+          "payload": {
+            "sessionId": "c0000003-0000-4000-8000-000000000003",
+            "timestamp": 1700000200000,
+            "cwd": "/workspace/project",
+            "source": "new",
+            "initialPrompt": "Synthetic prompt for the permission_denied scenario."
+          }
+        },
+        {
+          "event": "userPromptSubmitted",
+          "payload": {
+            "sessionId": "c0000003-0000-4000-8000-000000000003",
+            "timestamp": 1700000200018,
+            "cwd": "/workspace/project",
+            "prompt": "Synthetic prompt for the permission_denied scenario."
+          }
+        },
+        {
+          "event": "preToolUse",
+          "payload": {
+            "sessionId": "c0000003-0000-4000-8000-000000000003",
+            "timestamp": 1700000202195,
+            "cwd": "/workspace/project",
+            "toolName": "create",
+            "toolArgs": {
+              "path": "/workspace/project/out.txt",
+              "file_text": "synthetic"
+            }
+          }
+        },
+        {
+          "event": "permissionRequest",
+          "payload": {
+            "hookName": "permissionRequest",
+            "sessionId": "c0000003-0000-4000-8000-000000000003",
+            "timestamp": 1700000202227,
+            "cwd": "/workspace/project",
+            "toolName": "edit",
+            "toolInput": {
+              "file_path": "/workspace/project/out.txt",
+              "diff": "Synthetic diff."
+            },
+            "permissionSuggestions": []
+          }
+        },
+        {
+          "event": "notification",
+          "payload": {
+            "sessionId": "c0000003-0000-4000-8000-000000000003",
+            "timestamp": 1700000202252,
+            "cwd": "/workspace/project",
+            "message": "Edit file: /workspace/project/out.txt",
+            "title": "Permission needed",
+            "hook_event_name": "Notification",
+            "notification_type": "permission_prompt"
+          }
+        },
+        {
+          "event": "preToolUse",
+          "payload": {
+            "sessionId": "c0000003-0000-4000-8000-000000000003",
+            "timestamp": 1700000204932,
+            "cwd": "/workspace/project",
+            "toolName": "create",
+            "toolArgs": {
+              "file_text": "synthetic",
+              "path": "/workspace/project/out.txt"
+            }
+          }
+        },
+        {
+          "event": "permissionRequest",
+          "payload": {
+            "hookName": "permissionRequest",
+            "sessionId": "c0000003-0000-4000-8000-000000000003",
+            "timestamp": 1700000204962,
+            "cwd": "/workspace/project",
+            "toolName": "edit",
+            "toolInput": {
+              "file_path": "/workspace/project/out.txt",
+              "diff": "Synthetic diff."
+            },
+            "permissionSuggestions": []
+          }
+        },
+        {
+          "event": "notification",
+          "payload": {
+            "sessionId": "c0000003-0000-4000-8000-000000000003",
+            "timestamp": 1700000204986,
+            "cwd": "/workspace/project",
+            "message": "Edit file: /workspace/project/out.txt",
+            "title": "Permission needed",
+            "hook_event_name": "Notification",
+            "notification_type": "permission_prompt"
+          }
+        },
+        {
+          "event": "agentStop",
+          "payload": {
+            "sessionId": "c0000003-0000-4000-8000-000000000003",
+            "timestamp": 1700000207001,
+            "cwd": "/workspace/project",
+            "transcriptPath": "/copilot-home/session-state/c0000003-0000-4000-8000-000000000003/events.jsonl",
+            "stopReason": "end_turn",
+            "stop_hook_active": false
+          }
+        },
+        {
+          "event": "sessionEnd",
+          "payload": {
+            "sessionId": "c0000003-0000-4000-8000-000000000003",
+            "timestamp": 1700000207031,
+            "cwd": "/workspace/project",
+            "reason": "complete"
+          }
+        }
+      ]
+    },
+    "subagent": {
+      "description": "Main -p session that starts one subagent with the task tool; parent and child hooks interleave, and both subagent hooks name the child.",
+      "hooks": [
+        {
+          "event": "sessionStart",
+          "payload": {
+            "sessionId": "c0000004-0000-4000-8000-000000000004",
+            "timestamp": 1700000300000,
+            "cwd": "/workspace/project",
+            "source": "new",
+            "initialPrompt": "Synthetic prompt for the subagent scenario."
+          }
+        },
+        {
+          "event": "userPromptSubmitted",
+          "payload": {
+            "sessionId": "c0000004-0000-4000-8000-000000000004",
+            "timestamp": 1700000300017,
+            "cwd": "/workspace/project",
+            "prompt": "Synthetic prompt for the subagent scenario."
+          }
+        },
+        {
+          "event": "preToolUse",
+          "payload": {
+            "sessionId": "c0000004-0000-4000-8000-000000000004",
+            "timestamp": 1700000302786,
+            "cwd": "/workspace/project",
+            "toolName": "task",
+            "toolArgs": {
+              "agent_type": "explore",
+              "name": "synthetic-task",
+              "description": "Synthetic subagent task",
+              "prompt": "Synthetic subagent prompt: report the first line of notes.txt.",
+              "mode": "sync"
+            }
+          }
+        },
+        {
+          "event": "subagentStart",
+          "payload": {
+            "sessionId": "c0000004-0000-4000-8000-000000000004",
+            "timestamp": 1700000302838,
+            "cwd": "/workspace/project",
+            "transcriptPath": "/copilot-home/session-state/c0000004-0000-4000-8000-000000000004/events.jsonl",
+            "agentName": "explore",
+            "agentId": "c0000005-0000-4000-8000-000000000005",
+            "agentType": "explore",
+            "parentAgentId": "c0000004-0000-4000-8000-000000000004"
+          }
+        },
+        {
+          "event": "userPromptSubmitted",
+          "payload": {
+            "sessionId": "c0000005-0000-4000-8000-000000000005",
+            "timestamp": 1700000302866,
+            "cwd": "/workspace/project",
+            "prompt": "Synthetic subagent prompt: report the first line of notes.txt.",
+            "agentId": "c0000005-0000-4000-8000-000000000005",
+            "agentType": "explore",
+            "parentAgentId": "c0000004-0000-4000-8000-000000000004"
+          }
+        },
+        {
+          "event": "preToolUse",
+          "payload": {
+            "sessionId": "c0000005-0000-4000-8000-000000000005",
+            "timestamp": 1700000305809,
+            "cwd": "/workspace/project",
+            "toolName": "view",
+            "toolArgs": {
+              "path": "/workspace/project/notes.txt",
+              "view_range": [
+                1,
+                1
+              ]
+            },
+            "agentId": "c0000005-0000-4000-8000-000000000005",
+            "agentType": "explore",
+            "parentAgentId": "c0000004-0000-4000-8000-000000000004"
+          }
+        },
+        {
+          "event": "postToolUse",
+          "payload": {
+            "sessionId": "c0000005-0000-4000-8000-000000000005",
+            "timestamp": 1700000305848,
+            "cwd": "/workspace/project",
+            "toolName": "view",
+            "toolArgs": {
+              "path": "/workspace/project/notes.txt",
+              "view_range": [
+                1,
+                1
+              ]
+            },
+            "toolResult": {
+              "resultType": "success",
+              "textResultForLlm": "line-1"
+            },
+            "agentId": "c0000005-0000-4000-8000-000000000005",
+            "agentType": "explore",
+            "parentAgentId": "c0000004-0000-4000-8000-000000000004"
+          }
+        },
+        {
+          "event": "agentStop",
+          "payload": {
+            "sessionId": "c0000005-0000-4000-8000-000000000005",
+            "timestamp": 1700000307072,
+            "cwd": "/workspace/project",
+            "transcriptPath": "/copilot-home/session-state/c0000004-0000-4000-8000-000000000004/events.jsonl",
+            "stopReason": "end_turn",
+            "stop_hook_active": false,
+            "agentId": "c0000005-0000-4000-8000-000000000005",
+            "agentType": "explore",
+            "parentAgentId": "c0000004-0000-4000-8000-000000000004"
+          }
+        },
+        {
+          "event": "subagentStop",
+          "payload": {
+            "sessionId": "c0000004-0000-4000-8000-000000000004",
+            "timestamp": 1700000307104,
+            "cwd": "/workspace/project",
+            "transcriptPath": "/copilot-home/session-state/c0000004-0000-4000-8000-000000000004/events.jsonl",
+            "agentId": "c0000005-0000-4000-8000-000000000005",
+            "agentType": "explore",
+            "agentName": "explore",
+            "response": "line-1",
+            "stopReason": "end_turn",
+            "stop_hook_active": false,
+            "parentAgentId": "c0000004-0000-4000-8000-000000000004"
+          }
+        },
+        {
+          "event": "postToolUse",
+          "payload": {
+            "sessionId": "c0000004-0000-4000-8000-000000000004",
+            "timestamp": 1700000307129,
+            "cwd": "/workspace/project",
+            "toolName": "task",
+            "toolArgs": {
+              "agent_type": "explore",
+              "name": "synthetic-task",
+              "description": "Synthetic subagent task",
+              "prompt": "Synthetic subagent prompt: report the first line of notes.txt.",
+              "mode": "sync"
+            },
+            "toolResult": {
+              "resultType": "success",
+              "textResultForLlm": "line-1"
+            }
+          }
+        },
+        {
+          "event": "agentStop",
+          "payload": {
+            "sessionId": "c0000004-0000-4000-8000-000000000004",
+            "timestamp": 1700000309558,
+            "cwd": "/workspace/project",
+            "transcriptPath": "/copilot-home/session-state/c0000004-0000-4000-8000-000000000004/events.jsonl",
+            "stopReason": "end_turn",
+            "stop_hook_active": false
+          }
+        },
+        {
+          "event": "sessionEnd",
+          "payload": {
+            "sessionId": "c0000004-0000-4000-8000-000000000004",
+            "timestamp": 1700000309592,
+            "cwd": "/workspace/project",
+            "reason": "complete"
+          }
+        }
+      ]
+    }
+  }
+}

@@ -763,6 +763,16 @@ def _copilot_hooks_config(args: argparse.Namespace) -> dict:
                 "command": f"{cmd_prefix} stop",
                 "timeoutSec": 10,
             }],
+            "subagentStart": [{
+                "type": "command",
+                "command": f"{cmd_prefix} subagent-start",
+                "timeoutSec": 10,
+            }],
+            "subagentStop": [{
+                "type": "command",
+                "command": f"{cmd_prefix} subagent-stop",
+                "timeoutSec": 10,
+            }],
             "sessionEnd": [{
                 "type": "command",
                 "command": f"{cmd_prefix} session-end",
