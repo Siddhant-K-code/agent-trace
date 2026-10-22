@@ -49,6 +49,8 @@ _EVENT_BADGE_CLASS = {
     EventType.ERROR: "badge-red",
     EventType.USER_PROMPT: "badge-green",
     EventType.ASSISTANT_RESPONSE: "badge-purple",
+    EventType.SUBAGENT_START: "badge-cyan",
+    EventType.SUBAGENT_STOP: "badge-cyan",
 }
 
 
@@ -102,6 +104,10 @@ def _event_summary(event: TraceEvent) -> str:
         return " ".join(cmd) if isinstance(cmd, list) else str(cmd)
     if et == EventType.SESSION_END:
         return f"exit={d.get('exit_code', '?')}"
+    if et in (EventType.SUBAGENT_START, EventType.SUBAGENT_STOP):
+        agent = str(d.get("agent_type") or d.get("agent_name") or "subagent")
+        child = d.get("child_session_id", "")
+        return f"{agent} child={child}" if child else agent
     return ""
 
 

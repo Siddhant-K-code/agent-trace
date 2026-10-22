@@ -398,6 +398,14 @@ class TestCopilotSetup(unittest.TestCase):
             hooks["hooks"]["agentStop"][0]["command"],
             "agent-strace hook --provider copilot stop",
         )
+        self.assertEqual(
+            hooks["hooks"]["subagentStart"][0]["command"],
+            "agent-strace hook --provider copilot subagent-start",
+        )
+        self.assertEqual(
+            hooks["hooks"]["subagentStop"][0]["command"],
+            "agent-strace hook --provider copilot subagent-stop",
+        )
         self.assertIn("GitHub Copilot hooks config", err.getvalue())
 
 

@@ -58,7 +58,7 @@ Use setup-generated hooks when the agent CLI has its own lifecycle hook system.
 | OpenAI Codex | `agent-strace setup --cli codex` | Session start, user prompts, assistant responses, `PreToolUse`/`PostToolUse` tools |
 | Gemini CLI | `agent-strace setup --cli gemini` | Session start/end, prompts, assistant responses, `BeforeTool`/`AfterTool` tools |
 | Cursor | `agent-strace setup --cli cursor` | Session start/end, prompts, shell execution, file edits, assistant responses when emitted by Cursor hooks |
-| GitHub Copilot CLI | `agent-strace setup --cli copilot` | Session start/end, prompts, hook-visible tool calls/results and failures, and stop markers (no response text). See the [capture matrix](capture-matrix.md#github-copilot-cli) |
+| GitHub Copilot CLI | `agent-strace setup --cli copilot` | Session start/end, prompts, hook-visible tool calls/results and failures, stop markers (no response text), and `task` subagent starts/stops, with subagent sessions linked to their parent. Re-run setup after upgrading to register new hooks. See the [capture matrix](capture-matrix.md#github-copilot-cli) |
 | GitHub Copilot Desktop | Wrap each local MCP server with `agent-strace record -- ...` | MCP initialize/tool call/tool result traffic for wrapped servers only; full chat transcripts and non-MCP activity are not exposed |
 
 All paths write the same event stream under `.agent-traces/`, so replay, timeline, explain, why, watch, export, and audit commands work the same way after capture.

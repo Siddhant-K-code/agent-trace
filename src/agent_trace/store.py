@@ -122,6 +122,31 @@ def _validate_meta_ids(meta: SessionMeta, *, strict_session: bool = False) -> No
         )
 
 
+def _carry_parent_link(meta: SessionMeta, existing: SessionMeta) -> bool:
+    """Copy ``existing``'s parent link onto ``meta`` where ``meta`` lacks it.
+
+    Returns True when ``meta`` changed. A different parent already on ``meta``
+    is left alone so the caller's own checks still reject it.
+    """
+    if not existing.parent_session_id:
+        return False
+    if not meta.parent_session_id:
+        meta.parent_session_id = existing.parent_session_id
+        meta.parent_event_id = existing.parent_event_id
+        meta.depth = existing.depth
+        return True
+    if meta.parent_session_id != existing.parent_session_id:
+        return False
+    changed = False
+    if not meta.parent_event_id and existing.parent_event_id:
+        meta.parent_event_id = existing.parent_event_id
+        changed = True
+    if not meta.depth and existing.depth:
+        meta.depth = existing.depth
+        changed = True
+    return changed
+
+
 def _lock_file(file_obj) -> None:
     """Best-effort exclusive lock shared by event append and tenant tagging."""
     try:
@@ -919,11 +944,19 @@ class TraceStore:
                     "tagging session would create a cross-tenant child link"
                 )
 
-    def create_session(self, meta: SessionMeta, *, if_missing: bool = False) -> Path | None:
+    def create_session(
+        self,
+        meta: SessionMeta,
+        *,
+        if_missing: bool = False,
+        preserve_parent_link: bool = False,
+    ) -> Path | None:
         """Write session metadata and an empty event stream.
 
         With ``if_missing=True`` an existing ``meta.json`` is left untouched and
         ``None`` is returned; the existence check and the write share one lock.
+        With ``preserve_parent_link=True`` a parent link already stored for the
+        session is kept when ``meta`` carries none.
         """
         # Stamp workspace_id onto meta so it's visible in exports/reports
         with _store_write_lock(self.base_dir, self.storage_root):
@@ -952,6 +985,8 @@ class TraceStore:
                     raise ValueError(
                         f"session {meta.session_id} tenant cannot be changed during creation"
                     )
+                if preserve_parent_link and _carry_parent_link(meta, existing):
+                    self._enforce_parent_tenant(meta, inherit=False)
                 if existing.parent_session_id != meta.parent_session_id:
                     raise ValueError("use update_meta to change a session parent")
             d.mkdir(parents=True, exist_ok=True)
@@ -1018,7 +1053,14 @@ class TraceStore:
                 fh.write(event.to_json() + "\n")
                 fh.flush()
 
-    def update_meta(self, meta: SessionMeta) -> None:
+    def update_meta(
+        self, meta: SessionMeta, *, preserve_parent_link: bool = False
+    ) -> None:
+        """Atomically replace ``meta.json`` for an existing session.
+
+        With ``preserve_parent_link=True`` a parent link stored by another
+        writer since ``meta`` was loaded is kept rather than dropped.
+        """
         _validate_meta_ids(meta)
         with _store_write_lock(self.base_dir, self.storage_root):
             f = self._session_file(
@@ -1035,6 +1077,8 @@ class TraceStore:
                 raise ValueError("session tenant cannot be cleared or changed")
             if meta.tenant_id:
                 meta.tenant_id = validate_tenant_id(meta.tenant_id)
+            if preserve_parent_link:
+                _carry_parent_link(meta, existing)
             self._enforce_parent_tenant(meta, inherit=False)
             self._redact_meta(meta)
             _write_atomic(f, meta.to_json())

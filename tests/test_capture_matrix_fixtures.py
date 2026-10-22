@@ -8,7 +8,8 @@ paths, prompts, tool output, model names and timestamps are synthetic.
 Only the hooks that ``agent-strace setup`` registers are replayed through
 ``hook_main``. The rest show what the provider exposes that agent-strace does
 not record. A verified capture-matrix entry names this file as its
-``fixture_test_reference``.
+``fixture_test_reference``. Older recordings stay as legacy fixtures so the
+hooks keep handling payloads from earlier CLI releases.
 """
 
 import argparse
@@ -28,19 +29,21 @@ from agent_trace.health import assess_session, load_capture_matrix
 from agent_trace.hooks import _PROVIDER_ENV, IMPLICIT_SESSION_SOURCE, hook_main
 from agent_trace.models import EventType
 from agent_trace.store import TraceStore
+from agent_trace.subagent import build_tree
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_DIR = ROOT / "tests" / "fixtures" / "capture_matrix"
 REFERENCE = "tests/test_capture_matrix_fixtures.py"
 FIXTURES = {
-    "copilot": "copilot-1.0.94-3.json",
+    "copilot": "copilot-1.0.103-0.json",
     "codex": "codex-0.163.0-alpha.11.json",
 }
+LEGACY_COPILOT_FIXTURE = "copilot-1.0.94-3.json"
 SYNTHETIC_ID = re.compile(r"^[cd]\d{7}-0000-4000-8000-\d{12}$")
 
 
-def load_fixture(provider):
-    return json.loads((FIXTURE_DIR / FIXTURES[provider]).read_text(encoding="utf-8"))
+def load_fixture(name):
+    return json.loads((FIXTURE_DIR / name).read_text(encoding="utf-8"))
 
 
 def registered_hooks(provider):
@@ -95,10 +98,12 @@ class _ReplayChecks:
     """Checks shared by every provider fixture; mixed into a TestCase."""
 
     provider = ""
+    fixture_name = ""
 
     @classmethod
     def setUpClass(cls):
-        cls.fixture = load_fixture(cls.provider)
+        cls.fixture_name = cls.fixture_name or FIXTURES[cls.provider]
+        cls.fixture = load_fixture(cls.fixture_name)
         cls.matrix = load_capture_matrix()
         cls.entry = cls.matrix.entry(cls.provider)
 
@@ -159,13 +164,16 @@ class _ReplayChecks:
         self.assertEqual(self.fixture["provider"], self.provider)
 
     def test_fixture_values_are_synthetic(self):
-        raw = (FIXTURE_DIR / FIXTURES[self.provider]).read_text(encoding="utf-8")
+        raw = (FIXTURE_DIR / self.fixture_name).read_text(encoding="utf-8")
         for marker in ("/Users/", "/home/", "/private/", "/var/folders/", "/tmp/", "\\Users\\"):
             self.assertNotIn(marker, raw)
         for scenario in self.fixture["scenarios"].values():
             for hook in scenario["hooks"]:
                 payload = hook["payload"]
-                for key in ("sessionId", "session_id", "agentId", "agent_id"):
+                for key in (
+                    "sessionId", "session_id", "agentId", "agent_id",
+                    "parentAgentId", "parent_agent_id",
+                ):
                     if key in payload:
                         self.assertRegex(payload[key], SYNTHETIC_ID)
                 self.assertEqual(payload.get("cwd"), "/workspace/project")
@@ -212,7 +220,10 @@ class TestCopilotFixture(_ReplayChecks, unittest.TestCase):
         child = [m for m in sessions.values() if IMPLICIT_SESSION_SOURCE in m.command]
         return main, child
 
-    def test_prompt_precedes_session_start_and_health_accepts_the_declared_order(self):
+    def test_session_start_precedes_prompt_in_this_recording(self):
+        # Copilot does not fire the two in a fixed order: 1.0.94-3 always sent
+        # userPromptSubmitted first, 1.0.103-0 did so in some runs, so the
+        # entry still declares it (see TestCopilotLegacyFixture).
         self.assertEqual(self.entry["events_before_start"], ["user_prompt"])
         for scenario in ("tool", "tool_failure", "permission_denied", "subagent"):
             store, _ = self.replay(scenario)
@@ -221,14 +232,14 @@ class TestCopilotFixture(_ReplayChecks, unittest.TestCase):
             with self.subTest(scenario=scenario):
                 self.assertEqual(
                     [e.event_type for e in events[:2]],
-                    [EventType.USER_PROMPT, EventType.SESSION_START],
+                    [EventType.SESSION_START, EventType.USER_PROMPT],
                 )
                 self.assertEqual(events[-1].event_type, EventType.SESSION_END)
                 self.assertEqual(main.agent_name, "github-copilot")
                 self.assertIsNotNone(main.ended_at)
                 report = self.health(store, main.session_id)
                 self.assertNotIn("events_before_session_start", self.codes(report, "observed"))
-                self.assertIn(
+                self.assertNotIn(
                     "declared_events_before_session_start",
                     self.codes(report, "provider_limitation"),
                 )
@@ -265,28 +276,49 @@ class TestCopilotFixture(_ReplayChecks, unittest.TestCase):
         self.assertEqual(main.total_tokens, 0)
 
     def test_denied_tool_leaves_an_unpaired_call(self):
+        # In this recording the model retried the denied tool once.
         store, skipped = self.replay("permission_denied")
-        self.assertEqual(skipped, ["permissionRequest", "notification"])
+        self.assertEqual(
+            skipped,
+            ["permissionRequest", "notification", "permissionRequest", "notification"],
+        )
         (main,), _ = self.main_and_child(store)
         kinds = [e.event_type for e in store.load_events(main.session_id)]
-        self.assertEqual(kinds.count(EventType.TOOL_CALL), 1)
+        self.assertEqual(kinds.count(EventType.TOOL_CALL), 2)
         self.assertNotIn(EventType.TOOL_RESULT, kinds)
         self.assertNotIn(EventType.ERROR, kinds)
         self.assertIn("unpaired_tool_call", self.codes(self.health(store, main.session_id), "observed"))
 
-    def test_subagent_is_a_separate_unlinked_session(self):
+    def test_subagent_hooks_link_the_child_to_the_parent(self):
         store, skipped = self.replay("subagent")
-        self.assertEqual(skipped, ["subagentStart", "subagentStop"])
+        self.assertEqual(skipped, [])
         (main,), (child,) = self.main_and_child(store)
 
-        stop = next(
-            h["payload"] for h in self.fixture["scenarios"]["subagent"]["hooks"]
-            if h["event"] == "subagentStop"
-        )
-        self.assertTrue(stop["agentId"].startswith(child.session_id))
+        hooks = self.fixture["scenarios"]["subagent"]["hooks"]
+        for event in ("subagentStart", "subagentStop"):
+            payload = next(h["payload"] for h in hooks if h["event"] == event)
+            self.assertTrue(payload["agentId"].startswith(child.session_id))
+            self.assertTrue(payload["sessionId"].startswith(main.session_id))
+
+        main_events = store.load_events(main.session_id)
+        (task_call,) = [e for e in main_events if e.event_type == EventType.TOOL_CALL]
+        self.assertEqual(task_call.data["tool_name"], "task")
+        (start,) = [e for e in main_events if e.event_type == EventType.SUBAGENT_START]
+        (stop,) = [e for e in main_events if e.event_type == EventType.SUBAGENT_STOP]
+        for event in (start, stop):
+            self.assertEqual(event.data["child_session_id"], child.session_id)
+            self.assertEqual(event.data["agent_type"], "explore")
+            self.assertEqual(event.parent_id, task_call.event_id)
+            self.assertNotIn("response", event.data)
+        # The child has no metadata yet when subagentStart fires.
+        self.assertEqual(start.data["child_link"], "missing_child")
+        self.assertEqual(stop.data["child_link"], "linked")
+        self.assertEqual(stop.data["stop_reason"], "end_turn")
 
         self.assertEqual(child.command, f"github-copilot ({IMPLICIT_SESSION_SOURCE})")
-        self.assertEqual(child.parent_session_id, "")
+        self.assertEqual(child.parent_session_id, main.session_id)
+        self.assertEqual(child.parent_event_id, task_call.event_id)
+        self.assertEqual(child.depth, 1)
         self.assertIsNone(child.ended_at)
         kinds = [e.event_type for e in store.load_events(child.session_id)]
         self.assertNotIn(EventType.SESSION_START, kinds)
@@ -294,11 +326,8 @@ class TestCopilotFixture(_ReplayChecks, unittest.TestCase):
         self.assertIn(EventType.USER_PROMPT, kinds)
         self.assertIn(EventType.TOOL_CALL, kinds)
 
-        main_tools = [
-            e.data["tool_name"] for e in store.load_events(main.session_id)
-            if e.event_type == EventType.TOOL_CALL
-        ]
-        self.assertEqual(main_tools, ["task"])
+        tree = build_tree(store, main.session_id)
+        self.assertEqual([c.meta.session_id for c in tree.children], [child.session_id])
 
         report = self.health(store, child.session_id)
         self.assertEqual(report.provider.source, "hook_events")
@@ -307,6 +336,65 @@ class TestCopilotFixture(_ReplayChecks, unittest.TestCase):
             self.codes(report, "observed"),
             ["missing_session_start", "missing_session_end"],
         )
+
+
+class TestCopilotLegacyFixture(TestCopilotFixture):
+    """Copilot CLI 1.0.94-3: prompt before sessionStart, and a subagentStart
+    payload that does not name the child. Some 1.0.103-0 runs still send this
+    shape, so the hooks must keep handling it."""
+
+    fixture_name = LEGACY_COPILOT_FIXTURE
+
+    def test_entry_is_verified_by_this_fixture(self):
+        self.assertEqual(self.fixture["provider"], self.provider)
+        self.assertEqual(self.fixture["tested_version"], "1.0.94-3")
+        self.assertNotEqual(self.entry["tested_version"], self.fixture["tested_version"])
+
+    def test_session_start_precedes_prompt_in_this_recording(self):
+        self.skipTest("1.0.94-3 fired the prompt first; see the declared-order test")
+
+    def test_prompt_precedes_session_start_and_health_accepts_the_declared_order(self):
+        for scenario in ("tool", "tool_failure", "permission_denied", "subagent"):
+            store, _ = self.replay(scenario)
+            (main,), _ = self.main_and_child(store)
+            events = store.load_events(main.session_id)
+            with self.subTest(scenario=scenario):
+                self.assertEqual(
+                    [e.event_type for e in events[:2]],
+                    [EventType.USER_PROMPT, EventType.SESSION_START],
+                )
+                report = self.health(store, main.session_id)
+                self.assertNotIn("events_before_session_start", self.codes(report, "observed"))
+                self.assertIn(
+                    "declared_events_before_session_start",
+                    self.codes(report, "provider_limitation"),
+                )
+
+    def test_denied_tool_leaves_an_unpaired_call(self):
+        store, skipped = self.replay("permission_denied")
+        self.assertEqual(skipped, ["permissionRequest", "notification"])
+        (main,), _ = self.main_and_child(store)
+        kinds = [e.event_type for e in store.load_events(main.session_id)]
+        self.assertEqual(kinds.count(EventType.TOOL_CALL), 1)
+        self.assertIn("unpaired_tool_call", self.codes(self.health(store, main.session_id), "observed"))
+
+    def test_subagent_hooks_link_the_child_to_the_parent(self):
+        store, skipped = self.replay("subagent")
+        self.assertEqual(skipped, [])
+        (main,), (child,) = self.main_and_child(store)
+        main_events = store.load_events(main.session_id)
+        (task_call,) = [e for e in main_events if e.event_type == EventType.TOOL_CALL]
+        (start,) = [e for e in main_events if e.event_type == EventType.SUBAGENT_START]
+        (stop,) = [e for e in main_events if e.event_type == EventType.SUBAGENT_STOP]
+        self.assertNotIn("child_session_id", start.data)
+        self.assertNotIn("child_link", start.data)
+        self.assertEqual(start.parent_id, task_call.event_id)
+        self.assertEqual(stop.data["child_session_id"], child.session_id)
+        self.assertEqual(stop.data["child_link"], "linked")
+        self.assertEqual(stop.parent_id, task_call.event_id)
+        self.assertEqual(child.parent_session_id, main.session_id)
+        self.assertEqual(child.parent_event_id, task_call.event_id)
+        self.assertEqual(child.depth, 1)
 
 
 class TestCodexFixture(_ReplayChecks, unittest.TestCase):

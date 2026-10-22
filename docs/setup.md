@@ -280,14 +280,16 @@ Set `COPILOT_HOME` to install into a different Copilot config directory. The gen
     "postToolUse": [{ "type": "command", "command": "agent-strace hook --provider copilot post-tool", "timeoutSec": 10 }],
     "postToolUseFailure": [{ "type": "command", "command": "agent-strace hook --provider copilot post-tool-failure", "timeoutSec": 10 }],
     "agentStop": [{ "type": "command", "command": "agent-strace hook --provider copilot stop", "timeoutSec": 10 }],
+    "subagentStart": [{ "type": "command", "command": "agent-strace hook --provider copilot subagent-start", "timeoutSec": 10 }],
+    "subagentStop": [{ "type": "command", "command": "agent-strace hook --provider copilot subagent-stop", "timeoutSec": 10 }],
     "sessionEnd": [{ "type": "command", "command": "agent-strace hook --provider copilot session-end", "timeoutSec": 10 }]
   }
 }
 ```
 
-Copilot sends hook payloads on stdin. agent-strace records session starts, user prompts, hook-visible tool calls/results, failed tools, stop markers, and session ends. Copilot's stop hook provides `transcriptPath` and `stopReason` but no response text, so assistant responses are not captured.
+Copilot sends hook payloads on stdin. agent-strace records session starts, user prompts, hook-visible tool calls/results, failed tools, stop markers, subagent starts and stops, and session ends. Copilot's stop hook provides `transcriptPath` and `stopReason` but no response text, so assistant responses are not captured.
 
-Copilot fires the first `userPromptSubmitted` before `sessionStart`, and a subagent started with the `task` tool is recorded as its own session with no start, no end and no link to its parent. See the [capture matrix](capture-matrix.md#github-copilot-cli) for the verified Copilot CLI version and known gaps.
+Copilot can fire the first `userPromptSubmitted` before `sessionStart`. A subagent started with the `task` tool is recorded as its own session with no start and no end; the parent's `subagentStart` and `subagentStop` hooks link it to the parent, so `agent-strace tree` shows it. If you set up Copilot hooks before this release, re-run `agent-strace setup --cli copilot` (or update the plugin) to register the subagent hooks; sessions captured earlier stay unlinked. See the [capture matrix](capture-matrix.md#github-copilot-cli) for the verified Copilot CLI version and known gaps.
 
 Stop and session-end coverage is provider-defined. agent-strace records these hooks when the agent CLI emits them, including empty stop payloads, but it cannot force an agent to emit a stop hook for every UI action such as deleting a conversation or interrupting a run.
 

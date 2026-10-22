@@ -203,7 +203,7 @@ def format_tree(
                 detail = f"  $ {cmd[:80]}{'...' if len(cmd) > 80 else ''}"
             elif tool_name.lower() in ("read", "write", "edit"):
                 detail = f"  {args.get('file_path', '')}"
-            elif tool_name.lower() == "agent":
+            elif tool_name.lower() in ("agent", "task"):
                 prompt = str(args.get("prompt", ""))
                 detail = f"  \"{prompt[:60]}{'...' if len(prompt) > 60 else ''}\""
 
@@ -240,6 +240,14 @@ def format_tree(
         elif event.event_type == EventType.ASSISTANT_RESPONSE:
             text = event.data.get("text", "")[:80]
             w(f"{indent}{ts_str}  🤖 \"{text}\"\n")
+
+        elif event.event_type in (EventType.SUBAGENT_START, EventType.SUBAGENT_STOP):
+            agent = event.data.get("agent_type") or event.data.get("agent_name") or ""
+            child = str(event.data.get("child_session_id", ""))[:12]
+            icon = "⤷" if event.event_type == EventType.SUBAGENT_START else "⤶"
+            w(f"{indent}{ts_str}  {icon} {event.event_type.value}"
+              f"{'  ' + agent if agent else ''}"
+              f"{'  child=' + child if child else ''}\n")
 
         elif event.event_type == EventType.SESSION_END:
             w(f"{indent}{ts_str}  ■ session_end\n")

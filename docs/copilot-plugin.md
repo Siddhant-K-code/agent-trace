@@ -48,8 +48,17 @@ agent-strace lint
 ```
 
 The hooks capture session starts and ends, prompts, successful and failed tool
-calls, and agent-stop events exposed by Copilot CLI. Secret redaction remains
-enabled by default.
+calls, agent-stop events, and subagent starts and stops exposed by Copilot CLI.
+Subagents started with the `task` tool are linked to their parent session, so
+`agent-strace tree` shows them. Secret redaction remains enabled by default.
+
+Plugins installed before the subagent hooks were added do not register them.
+Upgrade agent-strace, run `copilot plugin marketplace update agent-trace` and
+`copilot plugin update agent-strace`, then restart Copilot CLI. An older
+agent-strace rejects the new hook names with "Unknown hook event"; in a test
+`copilot -p` run, Copilot CLI 1.0.103-0 ignored the failed hooks and finished
+normally. Sessions
+captured before the update stay unlinked.
 
 ## Develop locally
 
