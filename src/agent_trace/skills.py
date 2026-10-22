@@ -26,7 +26,7 @@ import re
 import shlex
 import statistics
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable, TextIO
@@ -46,14 +46,55 @@ REPO_SKILL_DIRS = (
     ".codex/skills",
     ".cursor/skills",
 )
-USER_SKILL_DIRS = (
-    "~/.copilot/skills",
-    "~/.claude/skills",
-    "~/.agents/skills",
-    "~/.gemini/skills",
-    "~/.codex/skills",
-    "~/.cursor/skills",
-)
+
+
+def _codex_skill_root() -> str:
+    """Return the Codex user skill directory for the current environment.
+
+    Codex reads user skills from ``$CODEX_HOME/skills``.  It uses a non-empty
+    ``CODEX_HOME`` as given, without expanding ``~``, else ``~/.codex``.  This
+    mirrors ``cli._codex_config_dir``, which cannot be imported here because
+    cli.py imports this module.  A relative value is joined to the current
+    directory, so ``discover_skills`` never expands a leading ``~`` in it.
+    """
+    codex_home = os.environ.get("CODEX_HOME")
+    if not codex_home:
+        return "~/.codex/skills"
+    root = Path(codex_home, "skills")
+    return str(root if root.is_absolute() else Path.cwd() / root)
+
+
+class _UserSkillDirs(Sequence[str]):
+    """User skill directories, resolved again on every read.
+
+    Functions bind ``USER_SKILL_DIRS`` as a default argument at import time,
+    so a plain tuple would freeze ``CODEX_HOME`` at that moment.
+    """
+
+    def _dirs(self) -> tuple[str, ...]:
+        return (
+            "~/.copilot/skills",
+            "~/.claude/skills",
+            "~/.agents/skills",
+            "~/.gemini/skills",
+            _codex_skill_root(),
+            "~/.cursor/skills",
+        )
+
+    def __getitem__(self, index):
+        return self._dirs()[index]
+
+    def __len__(self) -> int:
+        return len(self._dirs())
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._dirs())
+
+    def __repr__(self) -> str:
+        return repr(self._dirs())
+
+
+USER_SKILL_DIRS: Sequence[str] = _UserSkillDirs()
 CONTEXT_FILES = (
     "AGENTS.md",
     "CLAUDE.md",

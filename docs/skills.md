@@ -29,7 +29,7 @@ Flags: [commands.md](commands.md#skills).
 ```mermaid
 flowchart TB
     R["1 · Repository (session cwd)<br/>.github/skills<br/>.claude/skills<br/>.agents/skills<br/>.gemini/skills<br/>.codex/skills<br/>.cursor/skills"]:::src
-    U["2 · User<br/>~/.copilot/skills<br/>~/.claude/skills<br/>~/.agents/skills<br/>~/.gemini/skills<br/>~/.codex/skills<br/>~/.cursor/skills"]:::src
+    U["2 · User<br/>~/.copilot/skills<br/>~/.claude/skills<br/>~/.agents/skills<br/>~/.gemini/skills<br/>$CODEX_HOME/skills<br/>(default ~/.codex/skills)<br/>~/.cursor/skills"]:::src
     X["3 · --skills-dir DIR<br/>plugin and<br/>app-bundled skills"]:::src
     R & U & X --> S["Available skills<br/>DIR/name/SKILL.md<br/>duplicate names:<br/>first source wins"]:::fact
     classDef src fill:#f1f5f9,stroke:#64748b,color:#0f172a
@@ -40,6 +40,11 @@ flowchart TB
   scanned. The name is frontmatter `name:`, else the directory name.
 - The session cwd is `session_start.data.cwd`, else `--workspace`, else the
   current directory. Every directory applies to every session and provider.
+- The Codex user directory is `$CODEX_HOME/skills` when `CODEX_HOME` is set
+  and non-empty, else `~/.codex/skills`. As in Codex, `~` in the value is not
+  expanded, and a relative value resolves against the current directory. The
+  value comes from this command's environment, so run it with the
+  `CODEX_HOME` that Codex sees. Reports show the resolved directory.
 - **Availability is read from today's filesystem.** Older sessions see skills
   added later. Narrow `--since` to reduce this.
 
@@ -298,5 +303,6 @@ favours fewer tool calls or lower cost ranks a session that skipped its tests
 above one that ran them.
 
 **Privacy:** the report never prints `SKILL.md` bodies, prompt text, command
-text, or absolute skill paths. It prints skill names, `~`-relative
-directories, two-word signatures, skill-relative paths, event ids, and counts.
+text, or absolute skill paths. It prints skill names, scanned directories
+(`~`-relative under your home), two-word signatures, skill-relative paths,
+event ids, and counts.
