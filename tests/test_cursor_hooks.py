@@ -206,12 +206,13 @@ class TestCursorSetup(unittest.TestCase):
         env = patch.dict(os.environ, {
             "CURSOR_CONFIG_DIR": self.tmpdir,
             "CODEX_HOME": self.codex_dir,
-            "GEMINI_CONFIG_DIR": self.gemini_dir,
+            "GEMINI_CLI_HOME": self.gemini_dir,
             "COPILOT_HOME": self.copilot_home,
         })
         env.start()
         self.addCleanup(env.stop)
         os.environ.pop("CODEX_CONFIG_DIR", None)
+        os.environ.pop("GEMINI_CONFIG_DIR", None)
 
     def test_setup_cli_cursor_writes_hooks_json(self):
         args = argparse.Namespace(

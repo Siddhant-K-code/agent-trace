@@ -55,11 +55,12 @@ class CodexSetupVerifyTests(unittest.TestCase):
         self.addCleanup(self.gemini_tmp.cleanup)
         self.env = patch.dict(os.environ, {
             "CODEX_HOME": self.tmp.name,
-            "GEMINI_CONFIG_DIR": self.gemini_tmp.name,
+            "GEMINI_CLI_HOME": self.gemini_tmp.name,
         })
         self.env.start()
         self.addCleanup(self.env.stop)
         os.environ.pop("CODEX_CONFIG_DIR", None)
+        os.environ.pop("GEMINI_CONFIG_DIR", None)
 
     def _write_config(self):
         self.hooks_path.write_text(
@@ -1012,10 +1013,11 @@ class ClaudeSetupVerifyTests(unittest.TestCase):
         cwd = self._chdir_project()
         codex_home = self.root / "codex"
         codex_home.mkdir()
-        env = {name: str(self.root / name) for name in ("CURSOR_CONFIG_DIR", "COPILOT_HOME", "GEMINI_CONFIG_DIR")}
+        env = {name: str(self.root / name) for name in ("CURSOR_CONFIG_DIR", "COPILOT_HOME", "GEMINI_CLI_HOME")}
         env.update(CODEX_HOME=str(codex_home), HOME=str(home), USERPROFILE=str(home))
         with patch.dict(os.environ, env):
             os.environ.pop("CODEX_CONFIG_DIR", None)
+            os.environ.pop("GEMINI_CONFIG_DIR", None)
             for value, named in (
                 (str(self.config_dir), str(self.settings_path)),
                 ("~/ccx", str(cwd / "~" / "ccx" / "settings.json")),
@@ -1081,7 +1083,7 @@ class ClaudeSetupVerifyTests(unittest.TestCase):
         self.assertEqual((args.cli, args.verify), ("claude", True))
 
     def test_other_providers_and_all_are_rejected_without_writes(self):
-        env = {name: str(self.root / name) for name in ("CURSOR_CONFIG_DIR", "COPILOT_HOME", "GEMINI_CONFIG_DIR", "CODEX_HOME")}
+        env = {name: str(self.root / name) for name in ("CURSOR_CONFIG_DIR", "COPILOT_HOME", "GEMINI_CLI_HOME", "CODEX_HOME")}
         with patch.dict(os.environ, env):
             for cli in ("all", "cursor", "copilot", "gemini"):
                 with self.subTest(cli=cli):

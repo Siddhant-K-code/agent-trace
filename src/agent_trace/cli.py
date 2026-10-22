@@ -894,7 +894,32 @@ def _gemini_extension_manifest() -> dict:
 
 
 def _gemini_config_dir() -> Path:
-    return Path(os.environ.get("GEMINI_CONFIG_DIR", "~/.gemini")).expanduser()
+    """Return the .gemini directory that Gemini CLI loads user extensions from.
+
+    Like homedir() in gemini-cli, a non-empty GEMINI_CLI_HOME is used as is:
+    no "~" expansion, and a relative value starts from the current directory.
+    Otherwise the OS home directory is used. Gemini CLI never reads
+    GEMINI_CONFIG_DIR.
+    """
+    cli_home = os.environ.get("GEMINI_CLI_HOME")
+    home = Path(os.path.abspath(cli_home)) if cli_home else Path.home()
+    return home / ".gemini"
+
+
+def _note_ignored_gemini_config_dir(config_dir: Path) -> None:
+    """Note a GEMINI_CONFIG_DIR that older agent-strace versions installed under."""
+    legacy = os.environ.get("GEMINI_CONFIG_DIR")
+    if not legacy:
+        return
+    # GEMINI_CONFIG_DIR named the .gemini directory itself, not its parent.
+    legacy_dir = Path(legacy).expanduser()
+    if os.path.realpath(legacy_dir) != os.path.realpath(config_dir):
+        sys.stderr.write(
+            f"Note: ignoring GEMINI_CONFIG_DIR={legacy}. Gemini CLI does not read it; "
+            "it reads GEMINI_CLI_HOME, else your home directory. Older agent-strace "
+            "versions may have installed the extension under "
+            f"{legacy_dir / 'extensions' / 'agent-strace'}, which Gemini CLI does not load.\n"
+        )
 
 
 def _codex_config_dir() -> Path:
@@ -966,6 +991,7 @@ def _write_codex_hooks_config(args: argparse.Namespace) -> tuple[Path, Path | No
 def _write_gemini_extension(args: argparse.Namespace) -> tuple[Path, Path]:
     extension_dir = _gemini_config_dir() / "extensions" / "agent-strace"
     hooks_dir = extension_dir / "hooks"
+    # Like Gemini CLI, create a missing GEMINI_CLI_HOME and .gemini directory.
     hooks_dir.mkdir(parents=True, exist_ok=True)
 
     manifest_path = extension_dir / "gemini-extension.json"
@@ -1067,6 +1093,7 @@ def cmd_setup(args: argparse.Namespace) -> int | None:
         sys.stderr.write(f"Wrote OpenAI Codex hooks config: {hooks_path}\n")
         configs.append(("OpenAI Codex", str(hooks_path), _codex_hooks_config(args)))
     if cli in ("gemini", "all"):
+        _note_ignored_gemini_config_dir(_gemini_config_dir())
         manifest_path, hooks_path = _write_gemini_extension(args)
         sys.stderr.write(
             f"Wrote Gemini CLI extension manifest: {manifest_path}\n"

@@ -168,7 +168,7 @@ class TestCodexSetup(unittest.TestCase):
         self.copilot_home = tempfile.mkdtemp()
         env = patch.dict(os.environ, {
             "CODEX_HOME": self.tmpdir,
-            "GEMINI_CONFIG_DIR": self.gemini_dir,
+            "GEMINI_CLI_HOME": self.gemini_dir,
             "CURSOR_CONFIG_DIR": self.cursor_dir,
             "COPILOT_HOME": self.copilot_home,
         })
@@ -176,6 +176,7 @@ class TestCodexSetup(unittest.TestCase):
         self.addCleanup(env.stop)
         os.environ.pop("CODEX_CONFIG_DIR", None)
         os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        os.environ.pop("GEMINI_CONFIG_DIR", None)
 
     def test_setup_cli_codex_outputs_hooks_json(self):
         args = argparse.Namespace(
@@ -347,7 +348,7 @@ class TestCodexHomeResolution(unittest.TestCase):
             path.mkdir()
         env = patch.dict(os.environ, {
             "HOME": str(self.home),
-            "GEMINI_CONFIG_DIR": str(self.other_dirs[0]),
+            "GEMINI_CLI_HOME": str(self.other_dirs[0]),
             "CURSOR_CONFIG_DIR": str(self.other_dirs[1]),
             "COPILOT_HOME": str(self.other_dirs[2]),
         })
@@ -355,6 +356,7 @@ class TestCodexHomeResolution(unittest.TestCase):
         self.addCleanup(env.stop)
         os.environ.pop("CODEX_HOME", None)
         os.environ.pop("CODEX_CONFIG_DIR", None)
+        os.environ.pop("GEMINI_CONFIG_DIR", None)
 
     def _run(self, env, cli="codex", verify=False):
         args = argparse.Namespace(cli=cli, verify=verify, **self._ARGS)

@@ -196,7 +196,7 @@ hook entry; re-running setup can overwrite non-AgentTrace user hooks.
 
 ### Gemini CLI hooks
 
-`agent-strace setup --cli gemini` writes a Gemini CLI extension:
+`agent-strace setup --cli gemini` writes a Gemini CLI extension to the user extensions directory that Gemini CLI loads:
 
 ```
 ~/.gemini/extensions/agent-strace/
@@ -205,7 +205,11 @@ hook entry; re-running setup can overwrite non-AgentTrace user hooks.
     └── hooks.json
 ```
 
-Set `GEMINI_CONFIG_DIR` to install into a different Gemini config directory. The generated `hooks.json` registers `SessionStart`, `BeforeAgent`, `BeforeTool`, `AfterTool`, `AfterAgent`, and `SessionEnd` command hooks:
+When `GEMINI_CLI_HOME` is set and not empty, setup writes to `$GEMINI_CLI_HOME/.gemini/extensions/agent-strace` instead, as Gemini CLI does. The value is used as is: `~` is not expanded, and a relative value starts from the current directory. Run setup with the same `GEMINI_CLI_HOME` that Gemini CLI sees, and prefer an absolute path: a relative one only matches when both start in the same directory. Setup creates missing directories, as Gemini CLI does, and prints the paths it wrote.
+
+Gemini CLI does not read `GEMINI_CONFIG_DIR`, so setup ignores it and prints a note when it names a different directory. In that case an older agent-strace version may have installed the extension under `$GEMINI_CONFIG_DIR/extensions/agent-strace`, which Gemini CLI does not load. You can delete that copy.
+
+The generated `hooks.json` registers `SessionStart`, `BeforeAgent`, `BeforeTool`, `AfterTool`, `AfterAgent`, and `SessionEnd` command hooks:
 
 ```json
 {
