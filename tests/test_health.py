@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from agent_trace import health
 from agent_trace.cli import _telemetry_command_properties, build_parser, main
+from agent_trace.disclosure import build_disclosure_preview
 from agent_trace.evidence_health import EvidenceHealthStatus
 from agent_trace.health import (
     CaptureMatrix,
@@ -22,6 +23,7 @@ from agent_trace.health import (
     detect_provider,
     format_health_text,
     load_capture_matrix,
+    redaction_state_for,
     session_finalized_for,
 )
 from agent_trace.hooks import (
@@ -54,8 +56,14 @@ TOP_LEVEL_KEYS = {
     "event_count",
     "session_finalized",
     "provider_source",
+    "event_types",
+    "redaction",
     "capture_matrix",
 }
+REDACTION_KEYS = {"mode", "session_start_modes", "redacted_event_count", "metadata_redacted"}
+SECRET = "sk-abc123def456ghi789jkl012mno345pqr678"
+HOOK_START = {"mode": "claude-code-hooks", "provider": "claude", "source": "startup"}
+NOT_RECORDED_TEXT = "Redaction: not recorded (this trace does not show whether redaction was on)\n"
 ENTRY_KEYS = {
     "id",
     "name",
@@ -98,10 +106,11 @@ def write_session(trace_dir, session_id, events, *, agent_name="", command="",
     return store
 
 
-def hook_session(session_id, provider, *, end=True, source="startup", tool_use_id="tool-1"):
+def hook_session(session_id, provider, *, end=True, source="startup", tool_use_id="tool-1",
+                 prompt="list files"):
     """Drive the real hook handlers through one tool call."""
     handle_session_start({"session_id": session_id, "source": source}, provider=provider)
-    handle_user_prompt({"session_id": session_id, "prompt": "list files"}, provider=provider)
+    handle_user_prompt({"session_id": session_id, "prompt": prompt}, provider=provider)
     handle_pre_tool({
         "session_id": session_id,
         "tool_name": "Bash",
@@ -130,6 +139,8 @@ class _HealthBase(unittest.TestCase):
         for name in (
             *_PROVIDER_ENV.values(),
             "AGENT_TRACE_REDACT",
+            "AGENT_TRACE_NO_REDACT",
+            "AGENT_STRACE_NO_REDACT",
             "AGENT_STRACE_TENANT_ID",
             "AGENT_STRACE_WORKSPACE",
             "AGENT_STRACE_ENDPOINT",
@@ -356,6 +367,17 @@ class TestCopilotSessions(_HealthBase):
         self.assertEqual(payload["provider_source"], "hook_events")
         self.assertEqual(payload["status"], "partial")
         self.assertEqual(code, 0)
+
+    def test_redaction_mode_comes_from_the_start_after_the_first_prompt(self):
+        main = self.main_session()
+        self.hook("user-prompt", {"sessionId": self.CHILD, "prompt": "report a line"})
+
+        _, payload = self.health_json(main)
+        self.assertEqual(payload["redaction"]["mode"], "on")
+        self.assertEqual(payload["redaction"]["session_start_modes"], ["on"])
+        _, payload = self.health_json(self.CHILD[:16])
+        self.assertEqual(payload["redaction"]["mode"], "not_recorded")
+        self.assertEqual(payload["redaction"]["session_start_modes"], ["not_recorded"])
 
     def test_backfilled_subagent_session_maps_from_its_stop_event(self):
         write_session(self.trace_dir, "backfilledchild1", [
@@ -770,6 +792,312 @@ class TestStatusAndExitCodes(_HealthBase):
         self.assertIn("verification_status verified", out.getvalue())
 
 
+class TestEventTypesAndRedaction(_HealthBase):
+    """Real hook handlers: health names the event types and the redaction state."""
+
+    def test_default_hook_session_records_redaction_on(self):
+        hook_session("claudered0000001", "claude")
+
+        _, payload = self.health_json("claudered0000001")
+
+        self.assertEqual(list(payload["event_types"].items()), [
+            ("session_start", 1),
+            ("session_end", 1),
+            ("tool_call", 1),
+            ("tool_result", 1),
+            ("user_prompt", 1),
+            ("assistant_response", 1),
+        ])
+        self.assertEqual(payload["redaction"], {
+            "mode": "on",
+            "session_start_modes": ["on"],
+            "redacted_event_count": 0,
+            "metadata_redacted": False,
+        })
+        _, out, _ = self.run_health("claudered0000001")
+        self.assertIn(
+            "Events:    6\n"
+            "Types:     session_start 1, session_end 1, tool_call 1, tool_result 1, "
+            "user_prompt 1, assistant_response 1\n"
+            "Redaction: on (recorded by the session start hook)\n"
+            "Redacted:  0 of 6 events\n",
+            out,
+        )
+
+    def test_secret_in_prompt_is_counted_like_share_dry_run(self):
+        with redirect_stderr(io.StringIO()):
+            hook_session("claudered0000002", "claude", prompt=f"use key {SECRET}")
+        events = TraceStore(self.trace_dir, redact=False).load_events("claudered0000002")
+        self.assertNotIn(SECRET, json.dumps([item.data for item in events]))
+
+        _, payload = self.health_json("claudered0000002")
+
+        self.assertEqual(payload["redaction"]["mode"], "on")
+        self.assertEqual(payload["redaction"]["redacted_event_count"], 1)
+        self.assertEqual(
+            payload["redaction"]["redacted_event_count"],
+            build_disclosure_preview(events).redacted_event_count,
+        )
+        _, out, _ = self.run_health("claudered0000002")
+        self.assertIn("Redacted:  1 of 6 events\n", out)
+
+    def test_no_redact_hook_session_records_redaction_off(self):
+        with patch.dict(os.environ, {"AGENT_TRACE_NO_REDACT": "1"}):
+            hook_session("claudered0000003", "claude", prompt=f"use key {SECRET}")
+        events = TraceStore(self.trace_dir, redact=False).load_events("claudered0000003")
+        self.assertIn(SECRET, json.dumps([item.data for item in events]))
+
+        # Read without the opt-out: the mode comes from the trace, not the reader.
+        _, payload = self.health_json("claudered0000003")
+
+        self.assertEqual(payload["redaction"], {
+            "mode": "off",
+            "session_start_modes": ["off"],
+            "redacted_event_count": 0,
+            "metadata_redacted": False,
+        })
+        _, out, _ = self.run_health("claudered0000003")
+        self.assertIn(
+            "Redaction: off (recorded by the session start hook)\nRedacted:  0 of 6 events\n",
+            out,
+        )
+
+    def test_redaction_facts_do_not_change_status_reasons_or_exit_code(self):
+        with redirect_stderr(io.StringIO()):
+            hook_session("claudered0000004", "claude", prompt=f"use key {SECRET}")
+        with patch.dict(os.environ, {"AGENT_TRACE_NO_REDACT": "1"}):
+            hook_session("claudered0000005", "claude", prompt=f"use key {SECRET}")
+        hook_session("claudered0000006", "claude")
+        call = event(EventType.TOOL_CALL, 2, {"tool_name": "Bash", "tool_use_id": "tool-1"})
+        result = event(EventType.TOOL_RESULT, 3, {"tool_name": "Bash", "tool_use_id": "tool-1"})
+        result.parent_id = call.event_id
+        write_session(self.trace_dir, "claudered0000007", [
+            event(EventType.SESSION_START, 0, HOOK_START),
+            event(EventType.USER_PROMPT, 1, {"prompt": "list files"}),
+            call,
+            result,
+            event(EventType.ASSISTANT_RESPONSE, 4, {"hook_event": "stop", "provider": "claude"}),
+            event(EventType.SESSION_END, 5),
+        ], agent_name="claude-code", command="claude-code (startup)")
+
+        outcomes, modes = [], []
+        for number in range(4, 8):
+            code, payload = self.health_json(f"claudered000000{number}")
+            reasons = [(r["code"], r["kind"], r["message"]) for r in payload["reasons"]]
+            outcomes.append((code, payload["status"], reasons))
+            modes.append((payload["redaction"]["mode"], payload["redaction"]["redacted_event_count"]))
+
+        self.assertEqual(modes, [("on", 1), ("off", 0), ("on", 0), ("not_recorded", 0)])
+        self.assertEqual(outcomes, [outcomes[0]] * 4)
+
+    def test_traces_without_a_hook_recorded_mode_read_as_not_recorded(self):
+        # A hook session start written before the field existed.
+        write_session(self.trace_dir, "a2b2c3d4e5f60718", [
+            event(EventType.SESSION_START, 0, HOOK_START),
+            event(EventType.SESSION_END, 10),
+        ], agent_name="claude-code")
+        # A session start that no hook wrote cannot vouch for the mode.
+        write_session(self.trace_dir, "a3b2c3d4e5f60718", [
+            event(EventType.SESSION_START, 0, {"agent_name": "my-agent", "redaction": "on"}),
+            event(EventType.SESSION_END, 10),
+        ], agent_name="my-agent", command="python agent.py")
+        # The first hook was not SessionStart, so the implicit start recorded no mode.
+        handle_pre_tool({
+            "session_id": "claudeimplicit01",
+            "tool_name": "Bash",
+            "tool_use_id": "tool-1",
+            "tool_input": {"command": "ls"},
+        }, provider="claude")
+
+        for session_id, starts in (
+            ("a2b2c3d4e5f60718", ["not_recorded"]),
+            ("a3b2c3d4e5f60718", ["not_recorded"]),
+            ("claudeimplicit01", ["not_recorded"]),
+        ):
+            with self.subTest(session_id=session_id):
+                _, payload = self.health_json(session_id)
+                self.assertEqual(payload["redaction"]["mode"], "not_recorded")
+                self.assertEqual(payload["redaction"]["session_start_modes"], starts)
+                _, out, _ = self.run_health(session_id)
+                self.assertIn(NOT_RECORDED_TEXT, out)
+
+    def test_session_starts_that_disagree_read_as_mixed(self):
+        hook_session("claudemixed00001", "claude", end=False)
+        with patch.dict(os.environ, {"AGENT_TRACE_NO_REDACT": "1"}):
+            hook_session("claudemixed00001", "claude", source="resume", tool_use_id="tool-2")
+
+        _, payload = self.health_json("claudemixed00001")
+
+        self.assertEqual(payload["redaction"]["mode"], "mixed")
+        self.assertEqual(payload["redaction"]["session_start_modes"], ["on", "off"])
+        _, out, _ = self.run_health("claudemixed00001")
+        self.assertIn("Redaction: mixed (session starts: on, off)\n", out)
+
+    def test_resume_after_upgrade_reads_as_mixed(self):
+        write_session(self.trace_dir, "claudelegacy0001", [
+            event(EventType.SESSION_START, 0, HOOK_START),
+        ], agent_name="claude-code", command="claude-code (startup)", ended=False)
+        handle_session_start({"session_id": "claudelegacy0001", "source": "resume"}, provider="claude")
+
+        _, payload = self.health_json("claudelegacy0001")
+
+        self.assertEqual(payload["redaction"]["mode"], "mixed")
+        self.assertEqual(payload["redaction"]["session_start_modes"], ["not_recorded", "on"])
+        _, out, _ = self.run_health("claudelegacy0001")
+        self.assertIn("Redaction: mixed (session starts: not recorded, on)\n", out)
+
+    def test_implicit_start_then_compact_reads_as_mixed(self):
+        handle_pre_tool({
+            "session_id": "claudeimplicit02",
+            "tool_name": "Bash",
+            "tool_use_id": "tool-1",
+            "tool_input": {"command": "ls"},
+        }, provider="claude")
+        handle_session_start({"session_id": "claudeimplicit02", "source": "compact"}, provider="claude")
+
+        _, payload = self.health_json("claudeimplicit02")
+
+        self.assertEqual(payload["redaction"]["mode"], "mixed")
+        self.assertEqual(payload["redaction"]["session_start_modes"], ["not_recorded", "on"])
+        self.assertEqual(payload["provider_source"], "hook_events")
+        _, out, _ = self.run_health("claudeimplicit02")
+        self.assertIn("Redaction: mixed (session starts: not recorded, on)\n", out)
+
+    def test_redacted_session_metadata_is_reported(self):
+        with redirect_stderr(io.StringIO()):
+            write_session(self.trace_dir, "a4b2c3d4e5f60718", [
+                event(EventType.SESSION_START, 0),
+                event(EventType.SESSION_END, 10),
+            ], command=f"python agent.py --api-key {SECRET}")
+        self.assertTrue(TraceStore(self.trace_dir).load_meta("a4b2c3d4e5f60718").redacted)
+
+        _, payload = self.health_json("a4b2c3d4e5f60718")
+
+        self.assertIs(payload["redaction"]["metadata_redacted"], True)
+        self.assertEqual(payload["redaction"]["redacted_event_count"], 0)
+        _, out, _ = self.run_health("a4b2c3d4e5f60718")
+        self.assertIn("Redacted:  0 of 2 events, plus session metadata\n", out)
+
+    def test_event_types_are_counted_in_declaration_order(self):
+        write_session(self.trace_dir, "a5b2c3d4e5f60718", [
+            event(EventType.SESSION_START, 0),
+            event(EventType.USER_PROMPT, 1, {"prompt": "hi"}),
+            event(EventType.TOOL_CALL, 2, {"tool_name": "Bash"}),
+            event(EventType.ERROR, 3, {"message": "boom"}),
+            event(EventType.TOOL_CALL, 4, {"tool_name": "Bash"}),
+            event(EventType.SESSION_END, 5),
+        ])
+
+        _, payload = self.health_json("a5b2c3d4e5f60718")
+
+        self.assertEqual(list(payload["event_types"].items()), [
+            ("session_start", 1),
+            ("session_end", 1),
+            ("tool_call", 2),
+            ("error", 1),
+            ("user_prompt", 1),
+        ])
+        _, out, _ = self.run_health("a5b2c3d4e5f60718")
+        self.assertIn(
+            "Types:     session_start 1, session_end 1, tool_call 2, error 1, user_prompt 1\n",
+            out,
+        )
+
+    def test_empty_session_names_no_types(self):
+        write_session(self.trace_dir, "e2e2e3d4e5f60718", [], ended=False)
+
+        code, payload = self.health_json("e2e2e3d4e5f60718")
+
+        self.assertEqual(payload["status"], "unknown")
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["event_types"], {})
+        self.assertEqual(payload["redaction"], {
+            "mode": "not_recorded",
+            "session_start_modes": [],
+            "redacted_event_count": 0,
+            "metadata_redacted": False,
+        })
+        _, out, _ = self.run_health("e2e2e3d4e5f60718")
+        self.assertIn(
+            "Types:     none\n" + NOT_RECORDED_TEXT + "Redacted:  0 of 0 events\n",
+            out,
+        )
+
+
+class TestRedactionState(unittest.TestCase):
+    def modes(self, *start_data):
+        events = [event(EventType.SESSION_START, i, data) for i, data in enumerate(start_data)]
+        state = redaction_state_for(SessionMeta(), events)
+        return state.mode, state.session_start_modes
+
+    def test_session_start_modes_summarize(self):
+        on = {**HOOK_START, "redaction": "on"}
+        off = {**HOOK_START, "redaction": "off"}
+        codex_off = {"mode": "openai-codex-hooks", "provider": "codex", "redaction": "off"}
+        for starts, expected in (
+            ((), ("not_recorded", ())),
+            ((HOOK_START,), ("not_recorded", ("not_recorded",))),
+            ((on,), ("on", ("on",))),
+            ((off,), ("off", ("off",))),
+            ((codex_off,), ("off", ("off",))),
+            ((on, on), ("on", ("on", "on"))),
+            ((on, off), ("mixed", ("on", "off"))),
+            ((HOOK_START, on), ("mixed", ("not_recorded", "on"))),
+            ((off, HOOK_START), ("mixed", ("off", "not_recorded"))),
+        ):
+            with self.subTest(starts=starts):
+                self.assertEqual(self.modes(*starts), expected)
+
+    def test_only_on_or_off_from_a_hook_session_start_counts(self):
+        for data in (
+            {"agent_name": "my-agent", "redaction": "on"},
+            {"mode": "record", "redaction": "off"},
+            {**HOOK_START, "redaction": "ON"},
+            {**HOOK_START, "redaction": True},
+            {**HOOK_START, "redaction": ["on"]},
+            {**HOOK_START, "redaction": {"on": True}},
+            {**HOOK_START, "redaction": None},
+        ):
+            with self.subTest(data=data):
+                self.assertEqual(self.modes(data), ("not_recorded", ("not_recorded",)))
+
+    def test_malformed_event_data_is_not_recorded(self):
+        start = event(EventType.SESSION_START, 0)
+        start.data = ["redaction", "on"]
+        result = event(EventType.TOOL_RESULT, 1)
+        result.data = "output"
+        result.redacted = True
+
+        state = redaction_state_for(SessionMeta(), [start, result])
+
+        self.assertEqual(state.mode, "not_recorded")
+        self.assertEqual(state.redacted_event_count, 1)
+
+    def test_implicit_hook_metadata_adds_an_unrecorded_start(self):
+        on = event(EventType.SESSION_START, 1, {**HOOK_START, "redaction": "on"})
+        implicit = SessionMeta(agent_name="claude-code", command="claude-code (no session-start)")
+        lookalike = SessionMeta(agent_name="my-agent", command="my-agent (no session-start)")
+        for meta, events, expected in (
+            (implicit, [], ("not_recorded", ("not_recorded",))),
+            (implicit, [on], ("mixed", ("not_recorded", "on"))),
+            (lookalike, [on], ("on", ("on",))),
+        ):
+            with self.subTest(meta=meta.command, events=len(events)):
+                state = redaction_state_for(meta, events)
+                self.assertEqual((state.mode, state.session_start_modes), expected)
+
+    def test_counts_redacted_events_and_metadata(self):
+        redacted = event(EventType.USER_PROMPT, 0, {"prompt": "[REDACTED:openai-key]"})
+        redacted.redacted = True
+        events = [redacted, event(EventType.TOOL_CALL, 1)]
+
+        state = redaction_state_for(SessionMeta(redacted=True), events)
+
+        self.assertEqual(state.redacted_event_count, 1)
+        self.assertIs(state.metadata_redacted, True)
+        self.assertIs(redaction_state_for(SessionMeta(), events).metadata_redacted, False)
+
+
 class TestOutput(_HealthBase):
     def test_json_shape(self):
         hook_session("codexsession0002", "codex", end=False)
@@ -778,6 +1106,12 @@ class TestOutput(_HealthBase):
 
         self.assertEqual(set(payload), TOP_LEVEL_KEYS)
         self.assertEqual(payload["session_id"], "codexsession0002")
+        keys = list(payload)
+        self.assertEqual(
+            keys[keys.index("provider_source") + 1:keys.index("capture_matrix")],
+            ["event_types", "redaction"],
+        )
+        self.assertEqual(set(payload["redaction"]), REDACTION_KEYS)
         self.assertEqual(
             set(payload["capture_matrix"]),
             {"schema_version", "version", "entry", "blind_spots", "note"},
@@ -799,7 +1133,8 @@ class TestOutput(_HealthBase):
         self.assertEqual(out.splitlines()[0], "Evidence health: partial")
         positions = [
             out.index(marker)
-            for marker in ("Observed (1):", "Provider limitations (", "Capture matrix: OpenAI Codex (codex)",
+            for marker in ("Events:    ", "Types:     ", "Redaction: ", "Redacted:  ",
+                           "Observed (1):", "Provider limitations (", "Capture matrix: OpenAI Codex (codex)",
                            "Matrix version: sha256:")
         ]
         self.assertEqual(positions, sorted(positions))

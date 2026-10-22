@@ -11,23 +11,40 @@ import argparse
 import hashlib
 import json
 import sys
+from collections import Counter
 from dataclasses import dataclass
 from importlib import resources
 from typing import Any, Sequence, TextIO
 
 from .backfill import hook_agent_names
+from .disclosure import count_redacted_events
 from .evidence_health import (
     EvidenceHealthReasonKind,
     EvidenceHealthResult,
     EvidenceHealthStatus,
     assess_evidence_health,
 )
-from .hooks import IMPLICIT_SESSION_SOURCE, _PROVIDER_AGENT
+from .hooks import (
+    IMPLICIT_SESSION_SOURCE,
+    REDACTION_MODE_KEY,
+    REDACTION_OFF,
+    REDACTION_ON,
+    _PROVIDER_AGENT,
+)
 from .models import EventType, SessionMeta, TraceEvent
 from .store import TraceStore
 
 CAPTURE_MATRIX_RESOURCE = "capture_matrix.json"
 CAPTURE_MATRIX_SCHEMA_VERSION = 1
+
+REDACTION_MIXED = "mixed"
+REDACTION_NOT_RECORDED = "not_recorded"
+_RECORDED_REDACTION_MODES = (REDACTION_ON, REDACTION_OFF)
+_REDACTION_LABELS = {
+    REDACTION_ON: "on (recorded by the session start hook)",
+    REDACTION_OFF: "off (recorded by the session start hook)",
+    REDACTION_NOT_RECORDED: "not recorded (this trace does not show whether redaction was on)",
+}
 
 _AGENT_PROVIDER = {agent: provider for provider, agent in _PROVIDER_AGENT.items()}
 _PASSING_STATUSES = frozenset({EvidenceHealthStatus.HEALTHY, EvidenceHealthStatus.PARTIAL})
@@ -163,10 +180,15 @@ def detect_provider(meta: SessionMeta, events: Sequence[TraceEvent]) -> Provider
         return ProviderEvidence(conflicting=tuple(providers))
     if providers:
         return ProviderEvidence(providers[0], "hook_events")
-    implicit_command = f"{meta.agent_name} ({IMPLICIT_SESSION_SOURCE})"
-    if meta.agent_name in _AGENT_PROVIDER and meta.command == implicit_command:
+    if _implicit_hook_session(meta):
         return ProviderEvidence(_AGENT_PROVIDER[meta.agent_name], "hook_metadata")
     return ProviderEvidence()
+
+
+def _implicit_hook_session(meta: SessionMeta) -> bool:
+    """Return True for metadata the hooks wrote because the first hook was not SessionStart."""
+    implicit_command = f"{meta.agent_name} ({IMPLICIT_SESSION_SOURCE})"
+    return meta.agent_name in _AGENT_PROVIDER and meta.command == implicit_command
 
 
 def _has_active_marker(store: TraceStore, session_id: str) -> bool:
@@ -228,6 +250,76 @@ def _matrix_note(provider: ProviderEvidence, entry: dict[str, Any] | None) -> st
     )
 
 
+def event_type_counts(events: Sequence[TraceEvent]) -> dict[str, int]:
+    """Count the observed event types, in ``EventType`` declaration order."""
+    counts = Counter(event.event_type for event in events)
+    return {kind.value: counts[kind] for kind in EventType if counts[kind]}
+
+
+@dataclass(frozen=True)
+class RedactionState:
+    """Secret-redaction facts read from a trace. They never affect status.
+
+    ``mode`` is what the session starts recorded: ``on`` or ``off`` when all
+    of them recorded the same value, ``mixed`` when they differ or only some
+    recorded one, and ``not_recorded`` when none did. ``session_start_modes``
+    has one value per start, in order: an implicit start first when the first
+    hook was not SessionStart, then each ``session_start`` event.
+    """
+
+    mode: str
+    session_start_modes: tuple[str, ...]
+    redacted_event_count: int
+    metadata_redacted: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "session_start_modes": list(self.session_start_modes),
+            "redacted_event_count": self.redacted_event_count,
+            "metadata_redacted": self.metadata_redacted,
+        }
+
+
+def _session_start_redaction(event: TraceEvent) -> str:
+    data = event.data if isinstance(event.data, dict) else {}
+    mode = data.get(REDACTION_MODE_KEY)
+    if mode in _RECORDED_REDACTION_MODES and hook_agent_names([event]):
+        return mode
+    return REDACTION_NOT_RECORDED
+
+
+def redaction_state_for(meta: SessionMeta, events: Sequence[TraceEvent]) -> RedactionState:
+    """Report redaction from what the trace records, without guessing the mode.
+
+    Only hooks record the mode, on each ``session_start`` they write. Older
+    traces and other capture paths read as ``not_recorded``. When the first
+    hook was not SessionStart and resume or compact kept that metadata, the
+    implicit start counts as ``not_recorded``. Zero redacted events does not
+    prove that redaction was on.
+    """
+    starts = tuple(
+        _session_start_redaction(event)
+        for event in events
+        if event.event_type == EventType.SESSION_START
+    )
+    if _implicit_hook_session(meta):
+        starts = (REDACTION_NOT_RECORDED, *starts)
+    recorded = set(starts) - {REDACTION_NOT_RECORDED}
+    if not recorded:
+        mode = REDACTION_NOT_RECORDED
+    elif len(recorded) == 1 and REDACTION_NOT_RECORDED not in starts:
+        mode = starts[0]
+    else:
+        mode = REDACTION_MIXED
+    return RedactionState(
+        mode=mode,
+        session_start_modes=starts,
+        redacted_event_count=count_redacted_events(events),
+        metadata_redacted=bool(meta.redacted),
+    )
+
+
 @dataclass(frozen=True)
 class HealthReport:
     """An evidence-health result plus the inputs the CLI supplied to the core."""
@@ -240,6 +332,8 @@ class HealthReport:
     entry: dict[str, Any] | None
     blind_spots: tuple[BlindSpot, ...]
     note: str
+    event_types: dict[str, int]
+    redaction: RedactionState
 
     @property
     def exit_code(self) -> int:
@@ -250,6 +344,8 @@ class HealthReport:
         payload.update(self.result.to_dict())
         payload["session_finalized"] = self.session_finalized
         payload["provider_source"] = self.provider.source or None
+        payload["event_types"] = dict(self.event_types)
+        payload["redaction"] = self.redaction.to_dict()
         payload["capture_matrix"] = {
             "schema_version": self.matrix.schema_version,
             "version": self.matrix.version,
@@ -296,7 +392,16 @@ def assess_session(
         entry=entry,
         blind_spots=blind_spots,
         note=_matrix_note(provider, entry),
+        event_types=event_type_counts(events),
+        redaction=redaction_state_for(meta, events),
     )
+
+
+def _redaction_text(redaction: RedactionState) -> str:
+    if redaction.mode == REDACTION_MIXED:
+        starts = ", ".join(mode.replace("_", " ") for mode in redaction.session_start_modes)
+        return f"mixed (session starts: {starts})"
+    return _REDACTION_LABELS[redaction.mode]
 
 
 def format_health_text(report: HealthReport, out: TextIO) -> None:
@@ -310,6 +415,14 @@ def format_health_text(report: HealthReport, out: TextIO) -> None:
     w(f"Provider:  {provider}\n")
     w(f"Finalized: {_FINALIZED_LABELS[report.session_finalized]}\n")
     w(f"Events:    {result.event_count}\n")
+    types = ", ".join(f"{kind} {count}" for kind, count in report.event_types.items())
+    w(f"Types:     {types or 'none'}\n")
+    redaction = report.redaction
+    w(f"Redaction: {_redaction_text(redaction)}\n")
+    redacted = f"{redaction.redacted_event_count} of {result.event_count} events"
+    if redaction.metadata_redacted:
+        redacted += ", plus session metadata"
+    w(f"Redacted:  {redacted}\n")
 
     observed = [r for r in result.reasons if r.kind == EvidenceHealthReasonKind.OBSERVED]
     limitations = [

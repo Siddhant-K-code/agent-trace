@@ -53,7 +53,7 @@ normalized event to the active session. `--provider` defaults to `claude`.
 
 | Event | Recorded data |
 |---|---|
-| `session-start` | Start the provider-scoped session, or continue it on `resume` or `compact` and keep its metadata |
+| `session-start` | Start the provider-scoped session, or continue it on `resume` or `compact` and keep its metadata. Records `redaction`: `on` or `off`, the secret-redaction mode the hook wrote with |
 | `user-prompt` | User prompt text and available provider metadata |
 | `pre-tool` | Tool name and input before execution |
 | `post-tool` | Successful tool result and duration when it can be linked to the call |
@@ -135,9 +135,21 @@ Tool call frequency and timing. `--include-subagents` rolls up across the full s
 agent-strace health [session-id] [--format text|json]
 ```
 Assess the [evidence health](evidence-health.md) of a session (default: the
-latest). Text output starts with the status, then lists observed reasons and
-provider limitations separately, then names the capture-matrix entry that was
-applied and its `verification_status`.
+latest). Text output starts with the status, the session, the provider and the
+event count. Then it names the observed event types and the redaction state.
+Then it lists observed reasons and provider limitations separately, and names
+the capture-matrix entry that was applied and its `verification_status`.
+
+```
+Evidence health: partial
+Session:   abc123def456ghij
+Provider:  claude (from hook events)
+Finalized: yes
+Events:    6
+Types:     session_start 1, session_end 1, tool_call 1, tool_result 1, user_prompt 1, assistant_response 1
+Redaction: on (recorded by the session start hook)
+Redacted:  1 of 6 events
+```
 
 | Status | Exit code |
 |---|---|
@@ -184,6 +196,27 @@ Whether the session has finished:
 A resumed or compacted session is assessed as one session. See
 [session boundaries](evidence-health.md#session-boundaries).
 
+Event types and redaction are reported as facts. They never change the status,
+the reasons or the exit code.
+
+- Event types are counted per type, in a fixed order. Only types present in
+  the trace are listed.
+- The redaction mode comes from the hook-written `session_start` events. Each
+  one records `redaction` as `on` or `off`, including resume and compact
+  starts. The mode is `on` or `off` when every session start recorded the same
+  value, `mixed` when they differ or only some recorded it, and `not_recorded`
+  when none did. Sessions recorded before hooks wrote the field and sessions
+  captured by the MCP proxy, exec wrapper, SDK or an importer read as
+  `not_recorded`. When a session's first hook was not SessionStart, that
+  implicit start counts as `not_recorded`, so a later resume or compact start
+  makes the session `mixed`. A startup session start replaces that metadata,
+  as GitHub Copilot CLI does after its first prompt. The mode is not recorded
+  for each event.
+- The redacted count is the number of events whose `redacted` flag is set,
+  counted as `share --dry-run` counts them. Redaction sets the flag only when it
+  changed something, so zero redacted events does not prove that redaction was
+  on. Redacted session metadata is reported separately.
+
 `--format json` prints the evidence-health result and the inputs supplied to it:
 
 | Key | Contents |
@@ -192,6 +225,8 @@ A resumed or compacted session is assessed as one session. See
 | `session_id` | The resolved session |
 | `session_finalized` | `true`, `false` (active) or `null` (not known) |
 | `provider_source` | `hook_events`, `hook_metadata` or `null` |
+| `event_types` | Count of each observed event type, such as `{"session_start": 1, "tool_call": 2}`. Empty when the session has no events |
+| `redaction` | `mode` (`on`, `off`, `mixed` or `not_recorded`), `session_start_modes` (`on`, `off` or `not_recorded` for each session start in order: the implicit start first when the first hook was not SessionStart, then each `session_start` event), `redacted_event_count` and `metadata_redacted` |
 | `capture_matrix` | `schema_version`, `version` (SHA-256 of the packaged matrix), the `entry` applied or `null`, its `blind_spots` (`source`, `text`, and `capability` for coverage lines) and a `note` when no entry was applied |
 
 `capture_matrix_version` is empty when no entry was applied, while
