@@ -11,6 +11,8 @@ Captures the lifecycle events exposed by each CLI: user prompts, assistant respo
 ```bash
 # Generate Claude Code hooks config
 agent-strace setup
+# Check the hooks you added to Claude Code settings (read-only; no trace is created)
+agent-strace setup --cli claude --verify
 
 # Install OpenAI Codex user-level hooks
 agent-strace setup --cli codex
@@ -61,6 +63,59 @@ agent-strace list     # list sessions
 agent-strace replay   # replay the latest
 agent-strace explain  # plain-English summary
 ```
+
+### Claude Code hook verification
+
+`agent-strace setup --cli claude --verify` checks the Claude Code hooks without
+changing any file. It reads the user settings file:
+`$CLAUDE_CONFIG_DIR/settings.json` when that variable is set in your shell,
+otherwise `~/.claude/settings.json`. That file must be valid JSON and contain
+each of the 7 generated hooks exactly once, as a `command` handler. The
+`PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `SessionStart` and
+`SessionEnd` hooks need a match-all matcher (`""`, `"*"` or omitted).
+Unrelated hooks and extra fields such as `timeout` are allowed. Stale
+AgentTrace hooks, hooks under the wrong event, an `if` or `args` field on an
+AgentTrace hook, and mixed redaction modes fail. Any consistent redaction mode
+passes, whatever flags you pass to `--verify`. The check also runs
+`agent-strace --version` from `PATH` and fails if it is missing or reports
+another version.
+
+It also reads the other settings layers that can stop these hooks:
+
+- `.claude/settings.json` and `.claude/settings.local.json` in the current
+  directory. Run the check from the directory where you start Claude Code.
+- Managed settings: `managed-settings.json` and the `managed-settings.d/*.json`
+  drop-ins in `/Library/Application Support/ClaudeCode` (macOS),
+  `/etc/claude-code` (Linux and WSL) or `C:\Program Files\ClaudeCode`
+  (Windows).
+
+The check fails when:
+
+- `disableAllHooks` is `true` in the highest layer that sets it (managed, then
+  local, then project, then user). An invalid managed value is ignored, as
+  Claude Code does. In other files it must be `true` or `false`.
+- `disableAllHooks` is `true` in user settings and only a project or local file
+  sets it back to `false`. Other projects then run no hooks.
+- Managed settings set `allowManagedHooksOnly` to anything but `false`. Claude
+  Code reads an invalid value as `true`, and then runs only managed hooks.
+- A settings file it reads is not valid JSON or cannot be read. A missing
+  project, local or managed file is fine. Claude Code skips a managed file that
+  the OS will not let it read, so the check skips it too.
+- A project, local or managed file has AgentTrace hooks that are not exact
+  copies of the user settings hooks. Claude Code merges hooks from all layers
+  and runs an identical handler once, so exact copies pass. Other copies can
+  record events twice or with another redaction mode.
+
+**A passing check does not mean Claude Code trusted this folder, ran the hooks
+or captured events.** In an interactive session, Claude Code runs no hooks
+until you accept the workspace trust dialog. Run a local session and inspect it
+with `agent-strace list` and `agent-strace inspect SESSION_ID`.
+
+Not checked: other settings values (run `claude doctor`), the `--settings`,
+`--setting-sources`, `--bare` and `--safe-mode` flags, MDM and server-managed
+policy, plugin and skill hooks, and `settings.local.json` at the repository
+root when you start Claude Code in a subdirectory or worktree. A
+`CLAUDE_CONFIG_DIR` set only in a settings `env` block is not followed.
 
 ### OpenAI Codex hooks
 
