@@ -78,7 +78,16 @@ NEVER_LOADED_CAVEATS = (
     "match any task in the window.",
     "Availability reflects today's filesystem, so sessions from before a skill was "
     "installed are over-counted as available.",
+    "Skills whose SKILL.md sets disable-model-invocation: true can only be invoked by "
+    "the user, so they are listed under user_only_not_invoked instead of never_loaded. "
+    "Invocation settings are read from SKILL.md frontmatter now; client settings that "
+    "override them are not read.",
+    "A hint marks a skill whose description says it is an alias of another skill, or "
+    "whose short body only points to another skill. The model may load the other skill "
+    "instead. Hints are text pattern matches, not judgements.",
 )
+
+HINT_KINDS = ("description_alias", "forwarder")
 
 _SKILL_FILE = "SKILL.md"
 _MAX_RESOURCE_FILES = 500
@@ -128,6 +137,21 @@ _HEREDOC = re.compile(r"(?<!<)<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 _INTERPRETER_VERSION = re.compile(r"^(python|ruby|perl|node)[0-9.]*$")
 _FENCE = re.compile(r"^\s*(`{3,}|~{3,})\s*([A-Za-z0-9_+-]*)")
 _FENCE_CLOSE = re.compile(r"\s*(`{3,}|~{3,})\s*")
+_FRONTMATTER_BOOL = re.compile(r"""(['"]?)(true|false)\1(?:\s+#.*)?""", re.IGNORECASE)
+_HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+_MARKDOWN_HEADING = re.compile(r"^\s{0,3}#{1,6}(?:\s|$)")
+_MARKDOWN_RULE = re.compile(r"^\s{0,3}([-*_])(?:\s*\1){2,}\s*$")
+# A forwarder body is at most this many substantive lines and words.  Fixed
+# limits that define "short"; they are not a similarity threshold.
+_MAX_FORWARD_LINES = 3
+_MAX_FORWARD_WORDS = 40
+_ALIAS_LEAD = re.compile(
+    r"\s*(?:(?:this\s+skill|this|it)\s+is\s+|is\s+)?(?:(?:an?|the)\s+)?"
+    r"(?:(?:shorthand|short-hand|short\s+form|shortcut|alias|abbreviation|synonym)\s+(?:for|of|to)"
+    r"|same\s+as)\s+(?:the\s+)?[`'\"]?[/$]?",
+    re.IGNORECASE,
+)
+_NAME_CONTINUES = re.compile(r"[\w-]|[.:/]\w")
 
 
 # --------------------------------------------------------------------------- #
@@ -146,6 +170,11 @@ class SkillDefinition:
     source_dir: str
     commands: tuple[str, ...]
     resources: tuple[str, ...]
+    model_invocable: bool = True
+    user_invocable: bool = True
+    # Used only to compute hints; never emitted.
+    description: str = field(default="", repr=False, compare=False)
+    forward_lines: tuple[str, ...] = field(default=(), repr=False, compare=False)
 
     def summary(self) -> dict[str, object]:
         return {
@@ -154,6 +183,8 @@ class SkillDefinition:
             "dir": self.source_dir,
             "definition_commands": len(self.commands),
             "definition_resources": len(self.resources),
+            "model_invocable": self.model_invocable,
+            "user_invocable": self.user_invocable,
         }
 
 
@@ -170,9 +201,18 @@ class SkillCatalog:
     skills: dict[str, SkillDefinition] = field(default_factory=dict)
     also_in: dict[str, list[str]] = field(default_factory=dict)
     scanned: list[ScannedDir] = field(default_factory=list)
+    _hints: dict[str, tuple[tuple[str, str], ...]] | None = field(
+        default=None, init=False, repr=False, compare=False,
+    )
 
     def by_file(self) -> dict[str, SkillDefinition]:
         return {_real(defn.skill_file): defn for defn in self.skills.values()}
+
+    def hints(self) -> dict[str, tuple[tuple[str, str], ...]]:
+        """Return ``name -> ((kind, target), ...)``; computed once per catalog."""
+        if self._hints is None:
+            self._hints = skill_hints(self.skills)
+        return self._hints
 
 
 @dataclass(frozen=True)
@@ -266,6 +306,153 @@ def _frontmatter_name(text: str) -> str:
     return ""
 
 
+def _split_frontmatter(text: str) -> tuple[list[str], list[str]]:
+    """Return ``(frontmatter lines, body lines)``, scanning like ``_frontmatter_name``.
+
+    Frontmatter without a closing ``---`` runs to the end, leaving no body.
+    """
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return [], lines
+    for index in range(1, len(lines)):
+        if lines[index].strip() == "---":
+            return lines[1:index], lines[index + 1:]
+    return lines[1:], []
+
+
+def _frontmatter_bool(lines: list[str], key: str, default: bool) -> bool:
+    """Read a top-level ``key: true|false``.  The first occurrence wins.
+
+    Accepts true/false in any case, quoted or not, with an optional trailing
+    comment.  Anything else (including YAML's yes/no/on/off) keeps the default.
+    """
+    pattern = re.compile(rf"^{re.escape(key)}\s*:(.*)$")
+    for line in lines:
+        match = pattern.match(line)
+        if match:
+            value = _FRONTMATTER_BOOL.fullmatch(match.group(1).strip())
+            return value.group(2).lower() == "true" if value else default
+    return default
+
+
+def _frontmatter_description(lines: list[str]) -> str:
+    """Read the top-level ``description``: plain, quoted, folded or literal."""
+    for index, line in enumerate(lines):
+        match = re.match(r"^description\s*:(.*)$", line)
+        if not match:
+            continue
+        value = match.group(1).strip()
+        continuation = []
+        for follow in lines[index + 1:]:
+            if follow.strip() and not follow[:1].isspace():
+                break
+            continuation.append(follow.strip())
+        parts = continuation if value[:1] in ("|", ">") else [value, *continuation]
+        text = " ".join(" ".join(parts).split())
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
+            text = text[1:-1].strip()
+        return text
+    return ""
+
+
+def _short_body_lines(body: list[str]) -> tuple[str, ...]:
+    """Return the substantive lines of a short body without code, else ``()``.
+
+    Blank lines, headings, horizontal rules and HTML comments are not
+    substantive.  "Short" is at most ``_MAX_FORWARD_LINES`` lines and
+    ``_MAX_FORWARD_WORDS`` words.
+    """
+    lines: list[str] = []
+    for line in _HTML_COMMENT.sub("", "\n".join(body)).splitlines():
+        if _FENCE.match(line):
+            return ()
+        if not line.strip() or _MARKDOWN_HEADING.match(line) or _MARKDOWN_RULE.match(line):
+            continue
+        lines.append(line.strip())
+    if not lines or len(lines) > _MAX_FORWARD_LINES:
+        return ()
+    if sum(len(line.split()) for line in lines) > _MAX_FORWARD_WORDS:
+        return ()
+    return tuple(lines)
+
+
+def _reference_pattern(name: str) -> re.Pattern[str]:
+    """Match a formatted reference to skill ``name``, never a bare word.
+
+    Accepted forms: a backtick span holding ``name``, ``/name`` or ``$name``;
+    ``"name"``; ``'name'``; ``/name``; ``$name``; ``name skill``; ``Skill(name)``.
+    """
+    n = re.escape(name)
+    end = r"(?![\w-]|[.:/]\w)"
+    return re.compile(
+        rf"(?<!`)`[/$]?{n}`(?!`)"
+        rf"|(?P<quote>[\"']){n}(?P=quote)"
+        rf"|(?<![\w./~-])/{n}{end}"
+        rf"|(?<![\w$])\${n}{end}"
+        rf"|(?<![\w./$-]){n}\s+(?i:skills?)\b"
+        rf"|\bSkill\([`'\"]?{n}[`'\"]?\)"
+    )
+
+
+def _description_alias(description: str, own: str, names: Iterable[str]) -> str:
+    """Return the skill a description says this one is shorthand for, else ``""``."""
+    match = _ALIAS_LEAD.match(description)
+    if not match:
+        return ""
+    start = match.end()
+    best = ""
+    for name in names:
+        if name == own or len(name) <= len(best) or not description.startswith(name, start):
+            continue
+        if not _NAME_CONTINUES.match(description, start + len(name)):
+            best = name
+    return best
+
+
+def _forward_target(lines: tuple[str, ...], own: str, patterns: Mapping[str, re.Pattern[str]]) -> str:
+    """Return the one skill every line references, else ``""``."""
+    target = ""
+    for line in lines:
+        refs = {name for name, pattern in patterns.items() if name != own and pattern.search(line)}
+        if len(refs) != 1:
+            return ""
+        (ref,) = refs
+        if target and ref != target:
+            return ""
+        target = ref
+    return target
+
+
+def skill_hints(skills: Mapping[str, SkillDefinition]) -> dict[str, tuple[tuple[str, str], ...]]:
+    """Return alias and forwarder hints as ``name -> ((kind, target), ...)``.
+
+    * ``description_alias``: the description starts by saying the skill is
+      shorthand for, an alias of, or the same as another discovered skill.
+    * ``forwarder``: the body is short, has no code block, and every
+      substantive line references the same single other discovered skill.
+
+    Names match exactly (case-sensitive).  No similarity scoring.
+    """
+    names = sorted(skills)
+    patterns: dict[str, re.Pattern[str]] | None = None
+    hints: dict[str, tuple[tuple[str, str], ...]] = {}
+    for name in names:
+        definition = skills[name]
+        found: list[tuple[str, str]] = []
+        alias = _description_alias(definition.description, name, names)
+        if alias:
+            found.append(("description_alias", alias))
+        if definition.forward_lines:
+            if patterns is None:
+                patterns = {other: _reference_pattern(other) for other in names}
+            target = _forward_target(definition.forward_lines, name, patterns)
+            if target:
+                found.append(("forwarder", target))
+        if found:
+            hints[name] = tuple(found)
+    return hints
+
+
 def extract_skill_commands(text: str) -> tuple[str, ...]:
     """Return sorted unique command signatures from fenced shell blocks."""
     signatures: set[str] = set()
@@ -332,6 +519,7 @@ def _load_definition(skill_file: Path, source: str, source_dir: str) -> SkillDef
         return None
     skill_dir = skill_file.parent
     name = _frontmatter_name(text) or skill_dir.name
+    frontmatter, body = _split_frontmatter(text)
     return SkillDefinition(
         name=name,
         skill_dir=_real(skill_dir),
@@ -340,6 +528,10 @@ def _load_definition(skill_file: Path, source: str, source_dir: str) -> SkillDef
         source_dir=source_dir,
         commands=extract_skill_commands(text),
         resources=_skill_resources(skill_dir, skill_file),
+        model_invocable=not _frontmatter_bool(frontmatter, "disable-model-invocation", False),
+        user_invocable=_frontmatter_bool(frontmatter, "user-invocable", True),
+        description=_frontmatter_description(frontmatter),
+        forward_lines=_short_body_lines(body),
     )
 
 
@@ -1103,15 +1295,22 @@ def analyze_session(
             "definition_found": definition is not None,
             "source": definition.source if definition else None,
             "dir": definition.source_dir if definition else None,
+            "model_invocable": definition.model_invocable if definition else None,
+            "user_invocable": definition.user_invocable if definition else None,
             "loads": [load.to_dict() for load in grouped[name]],
             "follow": _follow_signals(definition, first_event[name], after),
             "outcome_after_load": _outcome(after, linked),
         })
 
+    hints = catalog.hints()
     available = []
     for name in sorted(catalog.skills):
         entry = catalog.skills[name].summary()
         entry["also_in"] = list(catalog.also_in.get(name, []))
+        entry["hints"] = [
+            {"kind": kind, "target": target, "target_loaded": target in grouped}
+            for kind, target in hints.get(name, ())
+        ]
         available.append(entry)
 
     return {
@@ -1145,6 +1344,12 @@ def _ratio(numerator: int, denominator: int) -> dict[str, object]:
     return {"count": numerator, "n": denominator}
 
 
+def _any_known(values: Iterable[object]) -> bool | None:
+    """True if any session says true, False if all say false, None if none say."""
+    known = [value for value in values if isinstance(value, bool)]
+    return any(known) if known else None
+
+
 def aggregate_reports(
     reports: list[dict[str, Any]],
     *,
@@ -1157,8 +1362,13 @@ def aggregate_reports(
         names.update(entry["name"] for entry in report["loaded"])
 
     skills = []
+    hint_keys: dict[str, list[tuple[str, str]]] = {}
     for name in sorted(names):
         available_sessions = [r for r in reports if any(e["name"] == name for e in r["available"])]
+        definitions = [e for r in available_sessions for e in r["available"] if e["name"] == name]
+        hint_keys[name] = sorted({
+            (str(hint["kind"]), str(hint["target"])) for entry in definitions for hint in entry.get("hints", ())
+        })
         loaded_entries = []
         for report in reports:
             for entry in report["loaded"]:
@@ -1218,14 +1428,42 @@ def aggregate_reports(
             "follow_signal_kinds": {kind: _ratio(count, follow_n) for kind, count in kinds.items()},
             "tests_after_load": _ratio(tests_after, len(loaded_entries)),
             "definition_found": any(entry["definition_found"] for _, entry in loaded_entries) or bool(available_sessions),
+            "model_invocable": _any_known(entry.get("model_invocable") for entry in definitions),
+            "user_invocable": _any_known(entry.get("user_invocable") for entry in definitions),
+            "hints": [],
             "comparison": comparison,
         })
 
-    never_loaded = [
-        {"name": skill["name"], "sessions_available": skill["sessions_available"]}
-        for skill in skills
+    loaded_names = {skill["name"] for skill in skills if skill["sessions_loaded"]}
+    for skill in skills:
+        skill["hints"] = [
+            {"kind": kind, "target": target, "target_loaded": target in loaded_names}
+            for kind, target in hint_keys[skill["name"]]
+        ]
+
+    eligible = [
+        skill for skill in skills
         if skill["sessions_available"] >= min_sessions and skill["sessions_loaded"] == 0
     ]
+    never_loaded = [
+        {"name": skill["name"], "sessions_available": skill["sessions_available"], "hints": skill["hints"]}
+        for skill in eligible
+        if skill["model_invocable"] is not False
+    ]
+    user_only = [
+        {
+            "name": skill["name"],
+            "sessions_available": skill["sessions_available"],
+            "user_invocable": skill["user_invocable"],
+            "hints": skill["hints"],
+        }
+        for skill in eligible
+        if skill["model_invocable"] is False
+    ]
+
+    def _order(item: Mapping[str, Any]) -> tuple[int, str]:
+        return (-item["sessions_available"], item["name"])
+
     return {
         "schema_version": SCHEMA_VERSION,
         "mode": "aggregate",
@@ -1233,7 +1471,8 @@ def aggregate_reports(
         "min_sessions": min_sessions,
         "availability_basis": "filesystem_now",
         "skills": skills,
-        "never_loaded": sorted(never_loaded, key=lambda item: (-item["sessions_available"], item["name"])),
+        "never_loaded": sorted(never_loaded, key=_order),
+        "user_only_not_invoked": sorted(user_only, key=_order),
         "caveats": {"never_loaded": list(NEVER_LOADED_CAVEATS)},
         "not_measurable": list(NOT_MEASURABLE),
     }
@@ -1339,6 +1578,29 @@ def _yes_no(value: bool | None, unknown: str = "n/a") -> str:
     return unknown if value is None else ("yes" if value else "no")
 
 
+_HINT_PHRASES = {
+    "description_alias": "description says it is an alias of",
+    "forwarder": "body only points to",
+}
+
+
+def _invocation_label(model_invocable: object, user_invocable: object) -> str:
+    if model_invocable is False and user_invocable is False:
+        return "not invocable (disable-model-invocation: true, user-invocable: false)"
+    if model_invocable is False:
+        return "user-only (disable-model-invocation: true)"
+    if user_invocable is False:
+        return "model-only (user-invocable: false)"
+    return ""
+
+
+def _write_hints(out: TextIO, hints: Iterable[Mapping[str, Any]], indent: str, scope: str) -> None:
+    for hint in hints:
+        phrase = _HINT_PHRASES.get(str(hint["kind"]), str(hint["kind"]))
+        loaded = "was loaded" if hint["target_loaded"] else "was not loaded"
+        out.write(f"{indent}hint ({hint['kind']}): {phrase} {hint['target']}; {hint['target']} {loaded} {scope}\n")
+
+
 def format_session_text(report: Mapping[str, Any], out: TextIO | None = None) -> None:
     out = out or sys.stdout
     w = out.write
@@ -1356,7 +1618,9 @@ def format_session_text(report: Mapping[str, Any], out: TextIO | None = None) ->
 
     w(f"\nAvailable skills ({len(report['available'])}):\n")
     for entry in report["available"]:
-        w(f"  {entry['name']:<28} {entry['dir']}\n")
+        label = _invocation_label(entry.get("model_invocable"), entry.get("user_invocable"))
+        w(f"  {entry['name']:<28} {entry['dir']}{'  [' + label + ']' if label else ''}\n")
+        _write_hints(out, entry.get("hints", ()), "    ", "in this session")
     if not report["available"]:
         w("  (none found)\n")
 
@@ -1453,8 +1717,27 @@ def format_aggregate_text(report: Mapping[str, Any], out: TextIO | None = None) 
           "eval on tasks where the skill applies.\n")
         for item in report["never_loaded"]:
             w(f"  {item['name']} (available in {item['sessions_available']} sessions)\n")
+            _write_hints(out, item.get("hints", ()), "    ", "in the window")
     else:
         w("  (none)\n")
+
+    user_only = report.get("user_only_not_invoked") or []
+    if user_only:
+        w(f"\nUser-only, never invoked (available in >= {report['min_sessions']} sessions, invoked in 0; "
+          "disable-model-invocation: true):\n")
+        w("  The model cannot load these skills, so they are not trigger misses. Only the user can invoke them.\n")
+        for item in user_only:
+            extra = "; user-invocable: false, so nobody can invoke it" if item.get("user_invocable") is False else ""
+            w(f"  {item['name']} (available in {item['sessions_available']} sessions{extra})\n")
+            _write_hints(out, item.get("hints", ()), "    ", "in the window")
+
+    listed = {item["name"] for item in report["never_loaded"]} | {item["name"] for item in user_only}
+    hinted = [skill for skill in report["skills"] if skill.get("hints") and skill["name"] not in listed]
+    if hinted:
+        w("\nOther skills with alias or forwarder hints:\n")
+        for skill in hinted:
+            w(f"  {skill['name']} (available in {skill['sessions_available']}, loaded in {skill['sessions_loaded']})\n")
+            _write_hints(out, skill["hints"], "    ", "in the window")
 
     compared = [skill for skill in report["skills"] if not skill["comparison"]["suppressed"]]
     w("\nLoaded vs available-but-not-loaded (correlational; session-level facts; task mix not controlled):\n")
@@ -1528,6 +1811,7 @@ def cmd_skills(args: argparse.Namespace) -> int:
 
 __all__ = [
     "CONTEXT_FILES",
+    "HINT_KINDS",
     "NOT_MEASURABLE",
     "REPO_SKILL_DIRS",
     "USER_SKILL_DIRS",
@@ -1542,4 +1826,5 @@ __all__ = [
     "discover_skills",
     "event_arguments",
     "extract_skill_commands",
+    "skill_hints",
 ]

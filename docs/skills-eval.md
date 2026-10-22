@@ -150,6 +150,26 @@ Totals split by expectation:
 There is no composite score or threshold. Two runs out of three is a count, not
 a grade.
 
+### User-only skills
+
+A skill whose `SKILL.md` sets `disable-model-invocation: true` can only be
+invoked by the user (see [skills.md](skills.md#who-can-invoke-a-skill)). The
+model cannot load it, so 0/N for such a case is not a trigger miss. The eval
+marks these cases and changes no counts:
+
+- JSON: `model_invocable: false` on the case.
+- Text: `user-only skill` in the last column, and a note:
+  `ask-user: interview-me has disable-model-invocation: true; the model cannot
+  invoke it, so a not-loaded run is not a trigger miss`.
+- Gates still apply. A `--fail-on-miss` or `--fail-on-false-trigger` message
+  for the case ends with `(user-only skill: disable-model-invocation: true)`.
+
+The setting is read from the `SKILL.md` on disk when the eval runs, not from
+the recorded session. Skills are looked up in the case's `fixture_dir` (else
+`--workspace` with `--from-traces`), `--skills-dir`, and user skill
+directories. If no definition is found, `model_invocable` and `user_invocable`
+are `null`.
+
 ```
 Skill trigger eval (experimental)
   agent: copilot GitHub Copilot CLI 1.0.94-3   default runs: 1   timeout: 240s
@@ -195,8 +215,10 @@ and tool output from the run. Review it before sharing.
 (`live` or `from_traces`), `cases_file`, `agent` (live: name, command,
 version, timeout), `totals`, `warnings`, `caveats`, and `cases`. Each case has
 `id`, `skill`, `should_trigger`, `prompt`, `note`, `explicit_invocation`,
-`runs`, `scored`, `loaded`, `not_loaded`, `unscored`, `trigger_rate` (null when
-nothing was scored), `user_invoked_runs`, and `run_results`. Each run result has
+`model_invocable` and `user_invocable` (from the skill's frontmatter; null when
+no definition is found), `runs`, `scored`, `loaded`, `not_loaded`, `unscored`,
+`trigger_rate` (null when nothing was scored), `user_invoked_runs`, and
+`run_results`. Each run result has
 `run`, `status`, `unscored_reason`, `exit_code`, `timed_out`, `duration_s`,
 `error`, `loaded`, `methods`, `user_invoked`, `sessions`,
 `sessions_without_meta`, `sessions_without_session_start`, `load_sessions`, and

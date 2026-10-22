@@ -522,7 +522,8 @@ class TestAggregate(SkillsTestBase):
         report = aggregate_reports(self._reports(2, 5), min_sessions=5)
         deploy = self._skill(report, "deploy-check")
 
-        self.assertEqual(report["never_loaded"], [{"name": "never-used", "sessions_available": 5}])
+        self.assertEqual(report["never_loaded"], [{"name": "never-used", "sessions_available": 5, "hints": []}])
+        self.assertEqual(report["user_only_not_invoked"], [])
         self.assertEqual(deploy["sessions_available"], 5)
         self.assertEqual(deploy["sessions_loaded"], 2)
         self.assertEqual(deploy["load_rate"], {"count": 2, "n": 5})
@@ -542,9 +543,11 @@ class TestAggregate(SkillsTestBase):
         report = aggregate_reports(self._reports(2, 5), min_sessions=5)
         caveats = report["caveats"]["never_loaded"]
 
-        self.assertEqual(len(caveats), 2)
+        self.assertEqual(len(caveats), 4)
         self.assertIn("not relevance", caveats[0])
         self.assertIn("over-counted", caveats[1])
+        self.assertIn("disable-model-invocation", caveats[2])
+        self.assertIn("hint", caveats[3])
         out = io.StringIO()
         format_aggregate_text(report, out)
         section = out.getvalue().split("Never loaded", 1)[1].splitlines()
@@ -578,6 +581,318 @@ class TestAggregate(SkillsTestBase):
             "loaded": {"count": 3, "n": 3},
             "available_not_loaded": {"count": 0, "n": 3},
         })
+
+
+def _write_raw_skill(base: Path, name: str, text: str) -> Path:
+    skill_dir = base / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(text)
+    return skill_dir
+
+
+def _skill_text(name: str, *, description: str = "test", extra: str = "", body: str = "") -> str:
+    return f"---\nname: {name}\ndescription: {description}\n{extra}---\n{body}"
+
+
+class TestInvocationFrontmatter(SkillsTestBase):
+    def _definition(self, text, name="interview-me"):
+        _write_raw_skill(self.skills_root, name, text)
+        return discover_skills(self.repo, user_dirs=()).skills[name]
+
+    def test_disable_model_invocation_values(self):
+        cases = {
+            "true": False, "TRUE": False, "True": False, '"true"': False, "'TrUe'": False,
+            "true   # user only": False, "false": True, "FALSE": True, "'false'": True,
+            "yes": True, "on": True, "1": True, "": True, "truthy": True, '"true': True,
+        }
+        for value, model_invocable in cases.items():
+            with self.subTest(value=value):
+                definition = self._definition(_skill_text("interview-me", extra=f"disable-model-invocation: {value}\n"))
+                self.assertIs(definition.model_invocable, model_invocable)
+                self.assertTrue(definition.user_invocable)
+
+    def test_user_invocable_values(self):
+        for value, user_invocable in {"false": False, "'False'": False, "true": True, "no": True, "0": True}.items():
+            with self.subTest(value=value):
+                definition = self._definition(_skill_text("helper", extra=f"user-invocable: {value}\n"), "helper")
+                self.assertIs(definition.user_invocable, user_invocable)
+                self.assertTrue(definition.model_invocable)
+
+    def test_only_first_top_level_frontmatter_key_counts(self):
+        nested = _skill_text("a", extra="metadata:\n  disable-model-invocation: true\n")
+        first_wins = _skill_text("b", extra="disable-model-invocation: false\ndisable-model-invocation: true\n")
+        in_body = _skill_text("c", body="disable-model-invocation: true\nuser-invocable: false\n")
+        no_frontmatter = "disable-model-invocation: true\n---\n"
+        for name, text in {"a": nested, "b": first_wins, "c": in_body, "d": no_frontmatter}.items():
+            with self.subTest(name=name):
+                definition = self._definition(text, name)
+                self.assertTrue(definition.model_invocable)
+                self.assertTrue(definition.user_invocable)
+
+    def test_defaults_and_summary_fields(self):
+        catalog = discover_skills(self.repo, user_dirs=())
+        summary = catalog.skills["deploy-check"].summary()
+
+        self.assertIs(summary["model_invocable"], True)
+        self.assertIs(summary["user_invocable"], True)
+        self.assertNotIn("description", summary)
+        self.assertNotIn("forward_lines", summary)
+
+
+class TestHints(SkillsTestBase):
+    def _hints(self, skills):
+        for name, text in skills.items():
+            _write_raw_skill(self.skills_root, name, text)
+        return discover_skills(self.repo, user_dirs=()).hints()
+
+    def test_description_alias_forms(self):
+        descriptions = [
+            "Shorthand for finder. Find files by pattern.",
+            "shorthand for finder",
+            "An alias of `finder`.",
+            "Alias for /finder: find files.",
+            "Same as finder.",
+            "The same as $finder",
+            "This skill is a shortcut to the finder skill.",
+            "It is an abbreviation of 'finder'.",
+            '"Shorthand for finder."',
+            ">-\n  Shorthand for\n  finder. Find files.",
+        ]
+        for description in descriptions:
+            with self.subTest(description=description):
+                shutil.rmtree(self.skills_root)
+                hints = self._hints({
+                    "finder": _skill_text("finder", description="Find files by pattern."),
+                    "f": _skill_text("f", description=description),
+                })
+                self.assertEqual(hints, {"f": (("description_alias", "finder"),)})
+
+    def test_description_alias_false_positives(self):
+        descriptions = [
+            "Shorthand for finders.",
+            "Shorthand for finder.py and friends.",
+            "Shorthand for finder-v2.",
+            "Shorthand for Finder.",
+            "Shorthand for searching with finder.",
+            "Find files fast; shorthand for finder.",
+            "Use finder for large repos.",
+            "A shorthand way to search files.",
+        ]
+        for description in descriptions:
+            with self.subTest(description=description):
+                shutil.rmtree(self.skills_root)
+                hints = self._hints({
+                    "finder": _skill_text("finder", description="Find files by pattern."),
+                    "f": _skill_text("f", description=description),
+                })
+                self.assertEqual(hints, {})
+
+    def test_description_alias_prefers_exact_longest_name_and_ignores_self(self):
+        hints = self._hints({
+            "find": _skill_text("find", description="Shorthand for find."),
+            "finder": _skill_text("finder", description="Find files."),
+            "f": _skill_text("f", description="Shorthand for finder. Find files."),
+            "g": _skill_text("g", description="Same as find, but quieter."),
+        })
+        self.assertEqual(hints, {
+            "f": (("description_alias", "finder"),),
+            "g": (("description_alias", "find"),),
+        })
+
+    def test_forwarder_forms(self):
+        bodies = [
+            "# interview-me\n\nInvoke the `interview` skill with the user's arguments.\n",
+            "Run /interview.\n",
+            "Use the interview skill.\n",
+            "Call Skill(interview) now.\n",
+            "Use `$interview`.\n<!-- forwards to the other skill -->\n",
+            "Load \"interview\".\n\n---\n\nPass the arguments to 'interview' unchanged.\n",
+            "Use the `interview` skill " + "and keep going " * 12 + "\n",  # exactly 40 words
+        ]
+        for body in bodies:
+            with self.subTest(body=body):
+                shutil.rmtree(self.skills_root)
+                hints = self._hints({
+                    "interview": _skill_text("interview", body="Ask one question at a time.\n"),
+                    "interview-me": _skill_text("interview-me", extra="disable-model-invocation: true\n", body=body),
+                })
+                self.assertEqual(hints, {"interview-me": (("forwarder", "interview"),)})
+
+    def test_forwarder_false_positives(self):
+        long_body = "Use the `interview` skill for the opening questions.\n" + "".join(
+            f"Step {n}: check the draft against the plan and note gaps.\n" for n in range(8)
+        )
+        bodies = {
+            "long body mentions another skill": long_body,
+            "line without the target": "Use the `interview` skill.\nThen summarize the answers.\n",
+            "code fence": "Use the `interview` skill.\n```sh\nmake interview\n```\n",
+            "bare word": "Run an interview with the user.\n",
+            "bare word at start": "interview the user about the plan.\n",
+            "path not a reference": "See docs/interview/notes.md.\n",
+            "file name not a reference": "Read `interview.md` first.\n",
+            "name inside another name": "Use the `interview-prep` skill.\n",
+            "two skills": "Use `interview` or `finder`.\n",
+            "too many words": "Use the `interview` skill " + "and keep going " * 13 + "\n",
+            "empty body": "",
+        }
+        for label, body in bodies.items():
+            with self.subTest(label=label):
+                shutil.rmtree(self.skills_root)
+                hints = self._hints({
+                    "interview": _skill_text("interview"),
+                    "finder": _skill_text("finder"),
+                    "helper": _skill_text("helper", body=body),
+                })
+                self.assertEqual(hints, {})
+
+    def test_name_that_is_a_substring_of_another_name(self):
+        hints = self._hints({
+            "f": _skill_text("f", body="Use the `finder` skill.\n"),
+            "find": _skill_text("find", body="Use the finder skill.\n"),
+            "finder": _skill_text("finder", body="Run /find-all for big repos.\n"),
+            "find-all": _skill_text("find-all"),
+        })
+        self.assertEqual(hints, {
+            "f": (("forwarder", "finder"),),
+            "find": (("forwarder", "finder"),),
+            "finder": (("forwarder", "find-all"),),
+        })
+
+    def test_session_report_fields_and_text(self):
+        _write_raw_skill(self.skills_root, "interview", _skill_text("interview", body="Ask questions.\n"))
+        _write_raw_skill(self.skills_root, "interview-me", _skill_text(
+            "interview-me", description=f"Shorthand for interview. {BODY_SENTINEL}",
+            extra="disable-model-invocation: true\n", body=f"Use the `interview` skill. {BODY_SENTINEL}\n",
+        ))
+        _write_raw_skill(self.skills_root, "auto-only", _skill_text("auto-only", extra="user-invocable: false\n"))
+        ev = _Events(str(self.repo))
+        ev.tool("skill", {"skill": "interview"})
+        ev.tool("skill", {"skill": "ghost"})
+        report = self.analyze(ev.events)
+        available = {entry["name"]: entry for entry in report["available"]}
+
+        self.assertEqual((available["interview-me"]["model_invocable"], available["interview-me"]["user_invocable"]),
+                         (False, True))
+        self.assertEqual(available["interview-me"]["hints"], [
+            {"kind": "description_alias", "target": "interview", "target_loaded": True},
+            {"kind": "forwarder", "target": "interview", "target_loaded": True},
+        ])
+        self.assertEqual(available["auto-only"]["user_invocable"], False)
+        self.assertEqual(available["deploy-check"]["hints"], [])
+        self.assertEqual(self.loaded(report, "interview")["model_invocable"], True)
+        self.assertIsNone(self.loaded(report, "ghost")["model_invocable"])
+        self.assertIsNone(self.loaded(report, "ghost")["user_invocable"])
+        self.assertIn("interview-me", report["available_not_loaded"])
+
+        out = io.StringIO()
+        format_session_text(report, out)
+        text = out.getvalue()
+        self.assertIn("user-only (disable-model-invocation: true)", text)
+        self.assertIn("model-only (user-invocable: false)", text)
+        self.assertIn("hint (forwarder): body only points to interview; interview was loaded in this session", text)
+        self.assertNotIn(BODY_SENTINEL, text + json.dumps(report))
+        self.assertNotRegex(text + json.dumps(report), r"\bscore\b")
+
+
+class TestUserOnlyAggregate(SkillsTestBase):
+    def setUp(self):
+        super().setUp()
+        _write_raw_skill(self.skills_root, "interview", _skill_text("interview", body="Ask questions.\n"))
+        _write_raw_skill(self.skills_root, "interview-me", _skill_text(
+            "interview-me", extra="disable-model-invocation: true\n", body="Invoke the `interview` skill.\n",
+        ))
+        _write_raw_skill(self.skills_root, "locked", _skill_text(
+            "locked", extra="disable-model-invocation: true\nuser-invocable: false\n",
+        ))
+        _write_raw_skill(self.skills_root, "finder", _skill_text("finder", description="Find files."))
+        _write_raw_skill(self.skills_root, "f", _skill_text("f", description="Shorthand for finder. Find files."))
+
+    def _reports(self, total=5, *, interview_sessions=2, user_invoked=0):
+        reports = []
+        for index in range(total):
+            ev = _Events(str(self.repo))
+            if index < interview_sessions:
+                ev.tool("skill", {"skill": "interview"})
+            if index < user_invoked:
+                ev.prompt("/interview-me about the release plan")
+            reports.append(analyze_session(ev.events, session_id=f"s{index}", user_dirs=()))
+        return reports
+
+    def _skill(self, report, name):
+        return next(skill for skill in report["skills"] if skill["name"] == name)
+
+    def test_user_only_skills_move_out_of_never_loaded(self):
+        report = aggregate_reports(self._reports(), min_sessions=5)
+        eligible = sorted(s["name"] for s in report["skills"] if s["sessions_available"] >= 5 and not s["sessions_loaded"])
+
+        self.assertEqual([item["name"] for item in report["never_loaded"]], ["deploy-check", "f", "finder"])
+        self.assertEqual(report["user_only_not_invoked"], [
+            {"name": "interview-me", "sessions_available": 5, "user_invocable": True,
+             "hints": [{"kind": "forwarder", "target": "interview", "target_loaded": True}]},
+            {"name": "locked", "sessions_available": 5, "user_invocable": False, "hints": []},
+        ])
+        self.assertEqual(
+            sorted(item["name"] for item in report["never_loaded"] + report["user_only_not_invoked"]), eligible,
+        )
+        f_entry = next(item for item in report["never_loaded"] if item["name"] == "f")
+        self.assertEqual(f_entry["hints"], [{"kind": "description_alias", "target": "finder", "target_loaded": False}])
+        interview_me = self._skill(report, "interview-me")
+        self.assertEqual((interview_me["model_invocable"], interview_me["user_invocable"]), (False, True))
+        self.assertEqual((interview_me["sessions_available"], interview_me["sessions_loaded"]), (5, 0))
+        self.assertEqual(interview_me["load_rate"], {"count": 0, "n": 5})
+        self.assertEqual(self._skill(report, "interview")["sessions_loaded"], 2)
+
+    def test_user_invoked_user_only_skill_is_in_neither_group(self):
+        report = aggregate_reports(self._reports(user_invoked=1), min_sessions=5)
+        interview_me = self._skill(report, "interview-me")
+
+        self.assertEqual(interview_me["sessions_loaded"], 1)
+        self.assertEqual(interview_me["invocations"], {"user": 1, "model": 0})
+        self.assertNotIn("interview-me", [item["name"] for item in report["user_only_not_invoked"]])
+        self.assertNotIn("interview-me", [item["name"] for item in report["never_loaded"]])
+
+    def test_invocation_combines_across_sessions(self):
+        other = self.tmp / "other"
+        _write_raw_skill(other / ".github" / "skills", "interview-me", _skill_text("interview-me"))
+        mixed = self._reports(3) + [
+            analyze_session(_Events(str(other)).events, session_id=f"o{index}", user_dirs=()) for index in range(2)
+        ]
+        ghost = _Events(str(self.repo))
+        ghost.tool("skill", {"skill": "ghost"})
+        report = aggregate_reports(mixed + [analyze_session(ghost.events, session_id="g", user_dirs=())],
+                                   min_sessions=5)
+
+        self.assertIs(self._skill(report, "interview-me")["model_invocable"], True)
+        self.assertIn("interview-me", [item["name"] for item in report["never_loaded"]])
+        self.assertIs(self._skill(report, "locked")["model_invocable"], False)
+        self.assertIsNone(self._skill(report, "ghost")["model_invocable"])
+        self.assertIsNone(self._skill(report, "ghost")["user_invocable"])
+        self.assertEqual(self._skill(report, "ghost")["hints"], [])
+
+    def test_text_output(self):
+        out = io.StringIO()
+        format_aggregate_text(aggregate_reports(self._reports(), min_sessions=5), out)
+        text = out.getvalue()
+        never, user_only = text.split("Never loaded", 1)[1].split("User-only, never invoked", 1)
+
+        self.assertNotIn("interview-me", never)
+        self.assertIn("f (available in 5 sessions)\n    hint (description_alias): description says it is an "
+                      "alias of finder; finder was not loaded in the window", never)
+        self.assertIn("not trigger misses", user_only)
+        self.assertIn("interview-me (available in 5 sessions)\n    hint (forwarder): body only points to "
+                      "interview; interview was loaded in the window", user_only)
+        self.assertIn("locked (available in 5 sessions; user-invocable: false, so nobody can invoke it)", user_only)
+        self.assertNotIn("Other skills with alias or forwarder hints", text)
+
+    def test_text_lists_other_hinted_skills(self):
+        out = io.StringIO()
+        format_aggregate_text(aggregate_reports(self._reports(), min_sessions=10), out)
+        text = out.getvalue()
+
+        self.assertNotIn("User-only, never invoked", text)
+        other = text.split("Other skills with alias or forwarder hints:", 1)[1]
+        self.assertIn("f (available in 5, loaded in 0)", other)
+        self.assertIn("interview-me (available in 5, loaded in 0)", other)
 
 
 class TestCli(SkillsTestBase):
