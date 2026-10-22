@@ -36,10 +36,10 @@
       "setup_command": "agent-strace setup --cli codex",
       "config_location": "~/.codex/hooks.json",
       "rollback": "Setup preserves the original bytes once at ~/.codex/hooks.json.agent-strace.bak before overwriting an existing file. Restore them with cp ~/.codex/hooks.json.agent-strace.bak ~/.codex/hooks.json. If no file existed before setup, remove the generated config with rm ~/.codex/hooks.json.",
-      "verification_status": "unverified",
-      "tested_version": null,
-      "last_verified": null,
-      "fixture_test_reference": "tests/test_codex_hooks.py",
+      "verification_status": "verified",
+      "tested_version": "0.163.0-alpha.11",
+      "last_verified": "2026-10-22",
+      "fixture_test_reference": "tests/test_capture_matrix_fixtures.py",
       "coverage": {
         "session_start": "captured",
         "session_end": "unavailable",
@@ -54,9 +54,49 @@
       "privacy": "Events pass through AgentTrace's normal redaction path; hook visibility is limited to fields emitted by the provider.",
       "known_gaps": [
         "The setup command replaces hooks.json rather than merging; repeated runs retain the first hooks.json.agent-strace.bak snapshot.",
-        "The current integration documentation does not claim a Codex session-end hook.",
-        "File, command, and error coverage depends on PreToolUse/PostToolUse payloads.",
-        "This entry is intentionally marked unverified until a clean-environment versioned verification run is recorded."
+        "Codex runs command hooks only after they are reviewed and trusted in /hooks; codex exec skips untrusted hooks without a warning.",
+        "Codex emits SessionEnd, but setup does not register it, so traces have no session_end event.",
+        "Subagent hooks arrive under the parent session_id with an agent_id, so subagent tool calls are recorded in the parent trace; SubagentStart and SubagentStop are not registered.",
+        "A failed shell command arrives as a normal PostToolUse with the error text in tool_response, so it is recorded as a tool_result rather than an error.",
+        "Hook payloads carry the model name, recorded on the session_start event, but no token usage.",
+        "File and command detail depends on PreToolUse/PostToolUse payloads; shell calls arrive as tool_name Bash with tool_input.command."
+      ]
+    },
+    {
+      "id": "copilot",
+      "name": "GitHub Copilot CLI",
+      "capture_method": "cli_hooks",
+      "setup_command": "agent-strace setup --cli copilot",
+      "config_location": "~/.copilot/hooks/agent-strace.json",
+      "rollback": "Setup writes a dedicated file and leaves other Copilot hook files unchanged. Remove it with rm ~/.copilot/hooks/agent-strace.json, using $COPILOT_HOME/hooks/agent-strace.json when COPILOT_HOME is set. If you installed the agent-strace Copilot CLI plugin instead, run copilot plugin uninstall agent-strace.",
+      "verification_status": "verified",
+      "tested_version": "1.0.94-3",
+      "last_verified": "2026-10-21",
+      "fixture_test_reference": "tests/test_capture_matrix_fixtures.py",
+      "events_before_start": [
+        "user_prompt"
+      ],
+      "coverage": {
+        "session_start": "captured",
+        "session_end": "captured",
+        "prompt": "captured",
+        "response": "unavailable",
+        "tool": "captured",
+        "file": "provider_defined",
+        "command": "provider_defined",
+        "error": "captured",
+        "stop": "captured"
+      },
+      "privacy": "Events pass through AgentTrace's normal redaction path; hook visibility is limited to fields emitted by the provider.",
+      "known_gaps": [
+        "Copilot fires userPromptSubmitted before sessionStart, so a main session's trace begins with its first user_prompt event.",
+        "Subagents started with the task tool record prompt, tool and stop events under their own session id with no session_start, no session_end and no parent session link; only the parent's subagentStop hook names the child, and setup does not register it.",
+        "agentStop carries a stop reason and transcript path but no response text, so stop events have empty text.",
+        "Hook payloads carry no model name or token usage.",
+        "Tool hooks carry no call id, so tool results are paired with calls by tool name.",
+        "A tool denied at the permission prompt leaves its tool_call without a result or error; the permissionRequest and notification hooks that report it are not registered.",
+        "File and command activity is visible only in tool arguments and results; no file_write events are recorded.",
+        "Stores written before agent-strace 0.97.0 have no meta.json for subagent sessions; run agent-strace backfill-meta --apply to make them visible."
       ]
     }
   ]

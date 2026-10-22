@@ -93,7 +93,7 @@ If Codex does not list the hooks after you create the file:
 
 - Use the root `~/.codex/hooks.json` file for user-level hooks, or `<repo>/.codex/hooks.json` for project-level hooks. `~/.codex/hooks/hooks.json` is for plugin-bundled hooks and is not the normal user config path.
 - Check `~/.codex/config.toml` and remove `[features].hooks = false` (or the legacy `[features].codex_hooks = false`) if present. Hooks are enabled by default unless a user, system, or admin config layer disables them.
-- Reload Codex or press refresh in the Hooks view. Non-managed command hooks must be reviewed and trusted before they run.
+- Reload Codex or press refresh in the Hooks view. Non-managed command hooks must be reviewed and trusted before they run. `codex exec` skips untrusted hooks without a warning, so trust them in an interactive session's `/hooks` view before relying on headless runs.
 
 To diagnose the installed **Codex user-level** configuration without changing
 files, run `agent-strace setup --cli codex --verify`. It checks that
@@ -223,7 +223,9 @@ Set `COPILOT_HOME` to install into a different Copilot config directory. The gen
 }
 ```
 
-Copilot sends hook payloads on stdin. agent-strace records session starts, user prompts, hook-visible tool calls/results, stop markers, and session ends. Assistant text capture depends on the fields Copilot includes; stop hooks often provide `transcript_path` and `stop_reason` rather than response text.
+Copilot sends hook payloads on stdin. agent-strace records session starts, user prompts, hook-visible tool calls/results, failed tools, stop markers, and session ends. Copilot's stop hook provides `transcriptPath` and `stopReason` but no response text, so assistant responses are not captured.
+
+Copilot fires the first `userPromptSubmitted` before `sessionStart`, and a subagent started with the `task` tool is recorded as its own session with no start, no end and no link to its parent. See the [capture matrix](capture-matrix.md#github-copilot-cli) for the verified Copilot CLI version and known gaps.
 
 Stop and session-end coverage is provider-defined. agent-strace records these hooks when the agent CLI emits them, including empty stop payloads, but it cannot force an agent to emit a stop hook for every UI action such as deleting a conversation or interrupting a run.
 

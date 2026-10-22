@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from agent_trace.health import load_capture_matrix
+from agent_trace.models import EventType
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,6 +63,24 @@ class TestCaptureMatrix(unittest.TestCase):
                 self.assertTrue(provider["tested_version"])
                 self.assertTrue(provider["last_verified"])
                 self.assertTrue(provider["fixture_test_reference"])
+
+    def test_fixture_test_references_exist(self):
+        for provider in self.matrix["providers"]:
+            reference = provider.get("fixture_test_reference")
+            if reference:
+                with self.subTest(provider=provider["id"]):
+                    self.assertTrue((ROOT / reference).is_file())
+
+    def test_events_before_start_names_known_event_types(self):
+        known = {event_type.value for event_type in EventType}
+        for provider in self.matrix["providers"]:
+            if "events_before_start" not in provider:
+                continue
+            with self.subTest(provider=provider["id"]):
+                self.assertIsInstance(provider["events_before_start"], list)
+                self.assertTrue(set(provider["events_before_start"]) <= known)
+                self.assertNotIn("session_start", provider["events_before_start"])
+                self.assertIn(f'`events_before_start`', self.docs)
 
     def test_human_coverage_table_matches_json(self):
         rows = {}

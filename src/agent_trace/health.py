@@ -23,7 +23,7 @@ from .evidence_health import (
     assess_evidence_health,
 )
 from .hooks import IMPLICIT_SESSION_SOURCE, _PROVIDER_AGENT
-from .models import SessionMeta, TraceEvent
+from .models import EventType, SessionMeta, TraceEvent
 from .store import TraceStore
 
 CAPTURE_MATRIX_RESOURCE = "capture_matrix.json"
@@ -84,6 +84,7 @@ def load_capture_matrix() -> CaptureMatrix:
             and isinstance(entry.get("coverage"), dict)
             and isinstance(entry.get("known_gaps"), list)
             and all(isinstance(gap, str) for gap in entry["known_gaps"])
+            and _valid_event_types(entry.get("events_before_start", []))
         ):
             raise ValueError("capture matrix provider entry is malformed")
     return CaptureMatrix(
@@ -91,6 +92,13 @@ def load_capture_matrix() -> CaptureMatrix:
         version="sha256:" + hashlib.sha256(raw).hexdigest(),
         providers=tuple(providers),
     )
+
+
+def _valid_event_types(value: object) -> bool:
+    if not isinstance(value, list):
+        return False
+    known = {event_type.value for event_type in EventType}
+    return all(isinstance(item, str) and item in known for item in value)
 
 
 @dataclass(frozen=True)
@@ -275,6 +283,9 @@ def assess_session(
         capture_matrix_version=matrix.version if entry is not None else "",
         provider_blind_spots=[spot.text for spot in blind_spots],
         session_finalized=finalized,
+        allowed_pre_start_event_types=(
+            entry.get("events_before_start", []) if entry is not None else ()
+        ),
     )
     return HealthReport(
         session_id=session_id,

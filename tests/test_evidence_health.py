@@ -563,5 +563,81 @@ class TestSessionContinuation(unittest.TestCase):
         self.assertIn("continued", result.reasons[0].message)
 
 
+class TestDeclaredEventsBeforeStart(unittest.TestCase):
+    """Provider metadata may declare event types that arrive before the start."""
+
+    PROMPT_FIRST = (
+        event(EventType.USER_PROMPT, 1.0, "prompt"),
+        event(EventType.SESSION_START, 2.0, "start"),
+        event(EventType.SESSION_END, 3.0, "end"),
+    )
+
+    @staticmethod
+    def assess(events, allowed=()):
+        return assess_evidence_health(
+            events,
+            session_finalized=True,
+            allowed_pre_start_event_types=allowed,
+        )
+
+    @staticmethod
+    def located(result):
+        return [(reason.code, reason.kind, reason.event_id) for reason in result.reasons]
+
+    def test_undeclared_events_before_start_are_invalid(self):
+        result = self.assess(self.PROMPT_FIRST)
+
+        self.assertEqual(result.status, EvidenceHealthStatus.INVALID)
+        self.assertEqual(
+            self.located(result),
+            [("events_before_session_start", EvidenceHealthReasonKind.OBSERVED, "prompt")],
+        )
+
+    def test_declared_event_types_before_start_are_a_provider_limitation(self):
+        for allowed in (["user_prompt"], [EventType.USER_PROMPT]):
+            with self.subTest(allowed=allowed):
+                result = self.assess(self.PROMPT_FIRST, allowed)
+
+                self.assertEqual(result.status, EvidenceHealthStatus.PARTIAL)
+                self.assertEqual(
+                    self.located(result),
+                    [(
+                        "declared_events_before_session_start",
+                        EvidenceHealthReasonKind.PROVIDER_LIMITATION,
+                        "prompt",
+                    )],
+                )
+                self.assertIn("user_prompt", result.reasons[0].message)
+
+    def test_any_undeclared_type_before_start_stays_invalid(self):
+        events = [
+            event(EventType.USER_PROMPT, 1.0, "prompt"),
+            event(EventType.TOOL_CALL, 1.5, "call"),
+            event(EventType.SESSION_START, 2.0, "start"),
+            event(EventType.TOOL_RESULT, 2.5, "result", parent_id="call"),
+            event(EventType.SESSION_END, 3.0, "end"),
+        ]
+
+        result = self.assess(events, ["user_prompt"])
+
+        self.assertEqual(result.status, EvidenceHealthStatus.INVALID)
+        self.assertIn("events_before_session_start", [r.code for r in result.reasons])
+        self.assertNotIn("declared_events_before_session_start", [r.code for r in result.reasons])
+
+    def test_declaration_does_not_apply_without_a_start(self):
+        events = [event(EventType.USER_PROMPT, 1.0, "prompt")]
+
+        result = self.assess(events, ["user_prompt"])
+
+        self.assertEqual(
+            [r.code for r in result.reasons],
+            ["missing_session_start", "missing_session_end"],
+        )
+
+    def test_unknown_declared_event_type_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.assess(self.PROMPT_FIRST, ["not_an_event_type"])
+
+
 if __name__ == "__main__":
     unittest.main()
