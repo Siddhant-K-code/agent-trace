@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from typing import Iterable, Literal
 
@@ -51,6 +51,56 @@ def count_redacted_events(events: Iterable[TraceEvent]) -> int:
     return sum(1 for event in events if event.redacted)
 
 
+class NonObjectEventDataError(ValueError):
+    """An event's ``data`` is not a JSON object."""
+
+
+def _json_type_name(value: object) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, (list, tuple)):
+        return "array"
+    return type(value).__name__
+
+
+def require_object_event_data(events: Sequence[TraceEvent]) -> None:
+    """Raise :class:`NonObjectEventDataError` unless every event's ``data`` is an object.
+
+    Key names cannot be read from an array, string, number, boolean, or null
+    payload, so such an event cannot be classified without under-counting. The
+    message names the first such event by 1-based position and type only. It
+    never includes data values.
+    """
+    offending = [
+        (position, event)
+        for position, event in enumerate(events, start=1)
+        if not isinstance(event.data, Mapping)
+    ]
+    if not offending:
+        return
+    position, event = offending[0]
+    try:
+        event_type = EventType(event.event_type).value
+    except (TypeError, ValueError):
+        event_type = "unknown type"
+    message = (
+        f"session event data must be an object: event {position} of {len(events)} "
+        f"({event_type}) has {_json_type_name(event.data)} data"
+    )
+    others = len(offending) - 1
+    if others == 1:
+        message += "; 1 more event has non-object data"
+    elif others:
+        message += f"; {others} more events have non-object data"
+    raise NonObjectEventDataError(message)
+
+
 def build_disclosure_preview(
     events: Iterable[TraceEvent],
     *,
@@ -61,13 +111,15 @@ def build_disclosure_preview(
 
     This function deliberately works from event metadata and key names only. It never
     stores prompt text, tool payloads, command strings, paths, or annotation text in
-    the returned preview.
+    the returned preview. Every event's ``data`` must be an object; otherwise
+    :class:`NonObjectEventDataError` (a ``ValueError``) is raised.
     """
 
     if annotation_count < 0:
         raise ValueError("annotation_count must be non-negative")
 
     event_list = list(events)
+    require_object_event_data(event_list)
     prompt_count = 0
     response_count = 0
     tool_input_count = 0
