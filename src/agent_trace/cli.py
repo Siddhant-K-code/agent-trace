@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 from . import __version__
-from .setup_verify import verify_codex_setup
+from .setup_verify import verify_claude_setup, verify_codex_setup
 from .hooks import hook_main
 from .http_proxy import HTTPProxyServer
 from .a2a import cmd_a2a_tree
@@ -625,6 +625,68 @@ def _claude_hooks_config(args: argparse.Namespace) -> dict:
     return config
 
 
+def _claude_config_dir() -> Path:
+    """Return the directory Claude Code reads user settings from.
+
+    Like Claude Code's path.resolve(CLAUDE_CONFIG_DIR ?? ~/.claude), a set value
+    is used as is, even when empty: no "~" expansion, and a relative value
+    starts from the current directory.
+    """
+    value = os.environ.get("CLAUDE_CONFIG_DIR")
+    if value is None:
+        return Path("~/.claude").expanduser()
+    return Path(os.path.abspath(value))
+
+
+def _claude_settings_target() -> str:
+    """Name the user settings file for setup output: the file --verify reads."""
+    if os.environ.get("CLAUDE_CONFIG_DIR") is None:
+        return "~/.claude/settings.json"
+    return str(_claude_config_dir() / "settings.json")
+
+
+def _claude_managed_settings_dir() -> Path:
+    if sys.platform == "darwin":
+        return Path("/Library/Application Support/ClaudeCode")
+    if sys.platform == "win32":
+        return Path(r"C:\Program Files\ClaudeCode")
+    return Path("/etc/claude-code")
+
+
+def _verify_claude_setup(args: argparse.Namespace) -> int:
+    settings_path = _claude_config_dir() / "settings.json"
+    details: dict = {}
+    ok, messages = verify_claude_setup(
+        settings_path,
+        _claude_hooks_config(args),
+        __version__,
+        project_dir=Path.cwd(),
+        managed_dir=_claude_managed_settings_dir(),
+        details=details,
+    )
+    if not ok:
+        for message in messages:
+            sys.stderr.write(f"Setup verification failed: {message}\n")
+        return 1
+    lines = [
+        "Claude Code static hook setup verified.",
+        f"settings:   {settings_path} ({details['event_count']}/{details['event_total']} events, "
+        f"redaction: {details['redaction']})",
+    ]
+    lines += [f"{scope + ':':<12}{path} ({state})" for scope, path, state in details["layers"]]
+    lines += [
+        f"executable: {details['executable']} ({details['version']})",
+        "Not checked: other settings values (run claude doctor), the --settings, "
+        "--setting-sources, --bare and --safe-mode flags, MDM and server-managed policy, "
+        "plugin and skill hooks, and settings.local.json at the repository root when run "
+        "from a subdirectory or worktree.",
+        "This does not prove Claude Code trusted this folder, ran the hooks or captured an "
+        "event; run a local session and inspect its trace to check actual capture.",
+    ]
+    sys.stdout.write("\n".join(lines) + "\n")
+    return 0
+
+
 def _codex_hooks_config(args: argparse.Namespace) -> dict:
     cmd_prefix = _hook_command_prefix(args, provider="codex")
     return {
@@ -928,11 +990,15 @@ def _write_copilot_hooks_config(args: argparse.Namespace) -> Path:
 
 
 def cmd_setup(args: argparse.Namespace) -> int | None:
-    """Generate hooks configuration, or verify Codex setup read-only."""
+    """Generate hooks configuration, or verify Codex or Claude Code setup read-only."""
     cli = getattr(args, "cli", "claude") or "claude"
     if getattr(args, "verify", False):
+        if cli == "claude":
+            return _verify_claude_setup(args)
         if cli != "codex":
-            sys.stderr.write("Setup verification currently supports only --cli codex.\n")
+            sys.stderr.write(
+                "Setup verification supports only --cli codex or --cli claude, one provider per run.\n"
+            )
             return 2
         config_dir = _codex_config_dir()
         problem = _codex_dir_problem(config_dir)
@@ -969,7 +1035,7 @@ def cmd_setup(args: argparse.Namespace) -> int | None:
 
     configs: list[tuple[str, str, dict]] = []
     if cli in ("claude", "all"):
-        configs.append(("Claude Code", "~/.claude/settings.json", _claude_hooks_config(args)))
+        configs.append(("Claude Code", _claude_settings_target(), _claude_hooks_config(args)))
     if cli in ("codex", "all"):
         problem = _codex_dir_problem(_codex_config_dir())
         if problem:
@@ -1203,13 +1269,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--global",
         dest="global_config",
         action="store_true",
-        help="compatibility flag; Claude setup already targets ~/.claude/settings.json",
+        help="compatibility flag; Claude setup already targets ~/.claude/settings.json, "
+             "or $CLAUDE_CONFIG_DIR/settings.json when that is set",
     )
     p_setup.add_argument("--cli", choices=["claude", "codex", "gemini", "cursor", "copilot", "all"], default="claude",
                          help="agent CLI to configure (default: claude)")
     p_setup.add_argument("--verify", action="store_true",
-                         help="verify installed Codex user-level hooks and the config.toml hooks "
-                              "feature flag without changing files (requires --cli codex)")
+                         help="verify installed hooks without changing files: Codex user-level "
+                              "hooks and the config.toml hooks feature flag, or Claude Code "
+                              "settings files (requires --cli codex or --cli claude)")
 
     # anonymous product telemetry controls
     p_telemetry = sub.add_parser(

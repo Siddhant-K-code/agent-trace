@@ -1,4 +1,4 @@
-"""Read-only verification of installed Codex hooks (not runtime capture)."""
+"""Read-only verification of installed Codex and Claude Code hooks (not runtime capture)."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import json
 import re
 import shutil
 import subprocess
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 try:
@@ -18,7 +19,11 @@ _REDACTION_PREFIXES = {
     "AGENT_TRACE_NO_REDACT=1 ": "no-redact",
 }
 _MATCH_ALL = (None, "", "*", ".*")
+# Codex and Claude Code ignore matchers on these events.
 _IGNORED_MATCHER_EVENTS = ("Stop", "UserPromptSubmit")
+_AGENTTRACE_COMMAND = "agent-strace hook "
+_CLAUDE_TOOL_EVENTS = ("PreToolUse", "PostToolUse", "PostToolUseFailure")
+_CLAUDE_SETUP_HINT = "Run agent-strace setup --cli claude and add the printed hooks to that file."
 # Codex applies [features] keys in sorted order, so "hooks" wins over its
 # legacy alias "codex_hooks" when both are set.
 _HOOKS_FEATURE_KEYS = ("hooks", "codex_hooks")
@@ -259,6 +264,151 @@ def _matcher_matches(event: str, actual: object, expected: object) -> bool:
     return set(expected.split("|")) <= set(actual.split("|"))
 
 
+def _expected_commands(expected: dict) -> dict[str, dict[str, dict]]:
+    """Map each expected event to its AgentTrace commands, without redaction flags."""
+    # Verification flags must not change the expected mode: installation with
+    # --redact or --no-redact must verify with default CLI arguments.
+    by_event: dict[str, dict[str, dict]] = {}
+    for event, groups in expected["hooks"].items():
+        commands = {}
+        for group in groups:
+            for handler in group["hooks"]:
+                command, _ = _command_and_mode(handler["command"])
+                commands[command] = {"type": handler["type"], "matcher": group.get("matcher")}
+        by_event[event] = commands
+    return by_event
+
+
+def _agenttrace_handlers(groups: list) -> Iterator[tuple[object, dict, str]]:
+    """Yield (matcher, handler, command) for each AgentTrace handler of one event."""
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        entries = group.get("hooks")
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            command = entry.get("command")
+            if not isinstance(command, str):
+                continue
+            # Other commands are unrelated user hooks: allowed without modification.
+            if _AGENTTRACE_COMMAND in _command_and_mode(command)[0]:
+                yield group.get("matcher"), entry, command
+
+
+def _describe_matcher(matcher: object) -> str:
+    if matcher in (None, ""):
+        return 'a match-all matcher ("", "*" or omitted)'
+    return repr(matcher)
+
+
+def _check_agenttrace_hooks(
+    hooks: dict,
+    expected: dict,
+    provider: str,
+    handler_problem: Callable[[str, dict], str | None] | None = None,
+) -> tuple[list[str], set[str]]:
+    """Check that each expected AgentTrace hook is installed once with the right fields.
+
+    Returns (problems, redaction modes of the valid hooks). handler_problem
+    reports provider-specific handler fields that stop a hook from running.
+    """
+    expected_by_event = _expected_commands(expected)
+    all_expected_commands = {
+        command for commands in expected_by_event.values() for command in commands
+    }
+    problems: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    modes: set[str] = set()
+    for event, groups in hooks.items():
+        if not isinstance(groups, list):
+            if event in expected_by_event:
+                problems.append(f"{event}: hooks must be a list.")
+            continue
+        for matcher, entry, command in _agenttrace_handlers(groups):
+            canonical, mode = _command_and_mode(command)
+            key = (event, canonical)
+            if key in seen:
+                problems.append(f"{event}: duplicate AgentTrace hook command {command!r}.")
+                continue
+            seen.add(key)
+            required = expected_by_event.get(event, {}).get(canonical)
+            if required is None:
+                if canonical in all_expected_commands:
+                    problems.append(
+                        f"{event}: AgentTrace hook {command!r} is assigned to the wrong event."
+                    )
+                else:
+                    problems.append(
+                        f"{event}: stale or unexpected AgentTrace hook command {command!r}."
+                    )
+                continue
+
+            valid = True
+            if entry.get("type") != required["type"]:
+                problems.append(
+                    f"{event}: {command!r} has handler type {entry.get('type')!r}, "
+                    f"expected {required['type']!r}."
+                )
+                valid = False
+            if not _matcher_matches(event, matcher, required["matcher"]):
+                problems.append(
+                    f"{event}: matcher is {matcher!r}, "
+                    f"expected {_describe_matcher(required['matcher'])} for {command!r}."
+                )
+                valid = False
+            problem = handler_problem(event, entry) if handler_problem else None
+            if problem:
+                problems.append(f"{event}: {command!r} {problem}")
+                valid = False
+            if valid:
+                modes.add(mode)
+
+    for event, commands in expected_by_event.items():
+        for command in commands:
+            if (event, command) not in seen:
+                problems.append(
+                    f"{event}: missing {json.dumps({'type': commands[command]['type'], 'command': command})}."
+                )
+
+    if len(modes) > 1:
+        problems.append(
+            f"{provider} AgentTrace hooks use inconsistent redaction modes: "
+            + ", ".join(sorted(modes))
+            + ". Install one mode consistently."
+        )
+    return problems, modes
+
+
+def _check_executable(version: str, provider: str) -> tuple[list[str], str | None]:
+    """Check that the agent-strace on PATH reports this version."""
+    executable = shutil.which("agent-strace")
+    if executable is None:
+        return [
+            "The agent-strace executable is not on PATH. Install this "
+            f"AgentTrace release into the same environment used by {provider}."
+        ], None
+    try:
+        probe = subprocess.run(
+            [executable, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return [f"Cannot run {executable} --version: {exc}"], executable
+    expected_version = f"agent-strace {version}"
+    if probe.returncode != 0 or probe.stdout.strip() != expected_version:
+        return [
+            f"AgentTrace CLI version mismatch: expected {expected_version!r}; "
+            f"got {probe.stdout.strip()!r} (exit {probe.returncode})."
+        ], executable
+    return [], executable
+
+
 def verify_codex_setup(
     hooks_path: Path,
     expected: dict,
@@ -295,121 +445,326 @@ def verify_codex_setup(
         problems.append(f"Invalid Codex hooks structure in {hooks_path}: missing hooks object.")
         return False, problems
 
-    # Verification flags must not change the expected mode: installation with
-    # --redact or --no-redact must verify with default CLI arguments.
-    expected_by_event: dict[str, dict[str, dict]] = {}
-    all_expected_commands: set[str] = set()
-    for event, groups in expected["hooks"].items():
-        commands = {}
-        for group in groups:
-            for handler in group["hooks"]:
-                command, _ = _command_and_mode(handler["command"])
-                commands[command] = {"type": handler["type"], "matcher": group.get("matcher")}
-                all_expected_commands.add(command)
-        expected_by_event[event] = commands
-
-    seen: set[tuple[str, str]] = set()
-    modes: set[str] = set()
-    for event, groups in hooks.items():
-        if not isinstance(groups, list):
-            if event in expected_by_event:
-                problems.append(f"{event}: hooks must be a list.")
-            continue
-        for group in groups:
-            if not isinstance(group, dict):
-                continue
-            entries = group.get("hooks")
-            if not isinstance(entries, list):
-                continue
-            for entry in entries:
-                if not isinstance(entry, dict):
-                    continue
-                command = entry.get("command")
-                if not isinstance(command, str):
-                    continue
-                canonical, mode = _command_and_mode(command)
-                if "agent-strace hook " not in canonical:
-                    continue  # Unrelated user hook: allowed without modification.
-                key = (event, canonical)
-                if key in seen:
-                    problems.append(f"{event}: duplicate AgentTrace hook command {command!r}.")
-                    continue
-                seen.add(key)
-                required = expected_by_event.get(event, {}).get(canonical)
-                if required is None:
-                    if canonical in all_expected_commands:
-                        problems.append(
-                            f"{event}: AgentTrace hook {command!r} is assigned to the wrong event."
-                        )
-                    else:
-                        problems.append(
-                            f"{event}: stale or unexpected AgentTrace hook command {command!r}."
-                        )
-                    continue
-
-                valid = True
-                if entry.get("type") != required["type"]:
-                    problems.append(
-                        f"{event}: {command!r} has handler type {entry.get('type')!r}, "
-                        f"expected {required['type']!r}."
-                    )
-                    valid = False
-                if not _matcher_matches(event, group.get("matcher"), required["matcher"]):
-                    problems.append(
-                        f"{event}: matcher is {group.get('matcher')!r}, "
-                        f"expected {required['matcher']!r} for {command!r}."
-                    )
-                    valid = False
-                if valid:
-                    modes.add(mode)
-
-    for event, commands in expected_by_event.items():
-        for command in commands:
-            if (event, command) not in seen:
-                problems.append(
-                    f"{event}: missing {json.dumps({'type': commands[command]['type'], 'command': command})}."
-                )
-
-    if len(modes) > 1:
-        problems.append(
-            "Codex AgentTrace hooks use inconsistent redaction modes: "
-            + ", ".join(sorted(modes))
-            + ". Install one mode consistently."
-        )
-
-    executable = shutil.which("agent-strace")
-    if executable is None:
-        problems.append(
-            "The agent-strace executable is not on PATH. Install this "
-            "AgentTrace release into the same environment used by Codex."
-        )
-    else:
-        try:
-            probe = subprocess.run(
-                [executable, "--version"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            problems.append(f"Cannot run {executable} --version: {exc}")
-        else:
-            expected_version = f"agent-strace {version}"
-            if probe.returncode != 0 or probe.stdout.strip() != expected_version:
-                problems.append(
-                    f"AgentTrace CLI version mismatch: expected {expected_version!r}; "
-                    f"got {probe.stdout.strip()!r} (exit {probe.returncode})."
-                )
+    hook_problems, modes = _check_agenttrace_hooks(hooks, expected, "Codex")
+    executable_problems, executable = _check_executable(version, "Codex")
+    problems += hook_problems + executable_problems
 
     if not problems and details is not None:
         details.update(
-            event_count=len(expected_by_event),
-            event_total=len(expected_by_event),
+            event_count=len(expected["hooks"]),
+            event_total=len(expected["hooks"]),
             redaction=next(iter(modes), "default"),
             executable=executable,
             version=f"agent-strace {version}",
         )
         if feature_summary is not None:
             details["hooks_feature"] = feature_summary
+    return not problems, problems
+
+
+def _claude_handler_problem(event: str, entry: dict) -> str | None:
+    """Report Claude Code handler fields that stop an AgentTrace hook from running."""
+    if "if" in entry:
+        if event in _CLAUDE_TOOL_EVENTS:
+            return 'has an "if" condition, so Claude Code runs it only for matching tool calls. Remove "if".'
+        return (
+            'has an "if" condition, which Claude Code evaluates only on tool events, '
+            'so this hook never runs. Remove "if".'
+        )
+    if "args" in entry:
+        return (
+            'has "args", so Claude Code starts the whole command as one executable name, '
+            'which fails. Remove "args".'
+        )
+    return None
+
+
+def _read_claude_settings(path: Path, scope: str) -> tuple[dict | None, str | None]:
+    """Return (settings, problem) for one settings file; settings is None if absent.
+
+    A whitespace-only file reads as {}. For a managed file the OS denies,
+    PermissionError propagates, since Claude Code then starts without it.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (FileNotFoundError, NotADirectoryError):
+        return None, None
+    except (OSError, UnicodeError) as exc:
+        if scope == "managed" and isinstance(exc, PermissionError):
+            raise
+        return None, f"Cannot read Claude Code {scope} settings {path}: {exc}"
+    try:
+        settings = json.loads(text) if text.strip() else {}
+    except ValueError as exc:
+        effect = (
+            "Claude Code refuses to start until it is fixed."
+            if scope == "managed"
+            else "Claude Code reports a settings error and does not apply the file until it is fixed."
+        )
+        return None, f"Cannot read valid Claude Code {scope} settings JSON at {path}: {exc}. {effect}"
+    if not isinstance(settings, dict):
+        return None, f"Invalid Claude Code {scope} settings {path}: the top level must be a JSON object."
+    if "hooks" in settings and not isinstance(settings["hooks"], dict):
+        return None, f"Invalid Claude Code {scope} settings {path}: hooks must be an object."
+    return settings, None
+
+
+def _read_claude_managed(managed_dir: Path) -> tuple[list[tuple[Path, dict]], int, list[str]]:
+    """Read managed-settings.json, then managed-settings.d/*.json in name order.
+
+    Returns (files read, count of files the OS denied, problems).
+    """
+    paths = [managed_dir / "managed-settings.json"]
+    drop_ins = managed_dir / "managed-settings.d"
+    denied = 0
+    problems: list[str] = []
+    try:
+        paths += sorted(
+            (p for p in drop_ins.iterdir() if p.suffix == ".json" and not p.name.startswith(".")),
+            key=lambda p: p.name,
+        )
+    except (FileNotFoundError, NotADirectoryError):
+        pass
+    except PermissionError:
+        denied += 1
+    except OSError as exc:
+        problems.append(f"Cannot read Claude Code managed settings directory {drop_ins}: {exc}")
+    read: list[tuple[Path, dict]] = []
+    for path in paths:
+        try:
+            settings, problem = _read_claude_settings(path, "managed")
+        except PermissionError:
+            denied += 1
+            continue
+        if problem:
+            problems.append(problem)
+        elif settings is not None:
+            read.append((path, settings))
+    return read, denied, problems
+
+
+def _managed_bool(value: object) -> bool | None:
+    """Read a managed Boolean lock as Claude Code does; None when invalid."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value in ("true", "false"):
+        return value == "true"
+    return None
+
+
+def _agenttrace_handlers_by_event(hooks: dict) -> dict[str, list[dict]]:
+    found: dict[str, list[dict]] = {}
+    for event, groups in hooks.items():
+        if isinstance(groups, list):
+            handlers = [entry for _, entry, _ in _agenttrace_handlers(groups)]
+            if handlers:
+                found[event] = handlers
+    return found
+
+
+def _claude_extra_hooks(
+    path: Path, scope: str, settings: dict, user_handlers: dict[str, list[dict]]
+) -> tuple[int, str | None]:
+    """Return (AgentTrace handler count, problem) for a file other than user settings.
+
+    Claude Code runs a handler defined in several settings files once, so
+    only exact copies of the user settings handlers are safe.
+    """
+    handlers = _agenttrace_handlers_by_event(settings.get("hooks", {}))
+    differing = sorted(
+        event
+        for event, entries in handlers.items()
+        if any(entry not in user_handlers.get(event, []) for entry in entries)
+    )
+    count = sum(len(entries) for entries in handlers.values())
+    if not differing:
+        return count, None
+    fix = (
+        "Ask your administrator to remove them, or make your user settings hooks identical."
+        if scope == "managed"
+        else "Remove them, or make them identical to the user settings hooks."
+    )
+    return count, (
+        f"Claude Code {scope} settings {path} have AgentTrace hooks for "
+        f"{', '.join(differing)} that are not exact copies of the user settings hooks. "
+        "Claude Code merges hooks from all settings files and runs only identical "
+        f"handlers once, so these can record events twice or with another redaction mode. {fix}"
+    )
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    try:
+        return a.samefile(b)
+    except OSError:
+        return False
+
+
+def verify_claude_setup(
+    settings_path: Path,
+    expected: dict,
+    version: str,
+    *,
+    project_dir: Path | None = None,
+    managed_dir: Path | None = None,
+    details: dict | None = None,
+) -> tuple[bool, list[str]]:
+    """Verify the AgentTrace hooks in Claude Code user settings, without writes.
+
+    settings_path is the user settings file that setup targets, and each
+    expected hook must appear there once. Project and local settings in
+    project_dir and the managed settings files in managed_dir are read too,
+    because they can turn hooks off or add AgentTrace hooks that also run.
+    Unrelated user hooks are allowed.
+    """
+    problems: list[str] = []
+    modes: set[str] = set()
+    user_handlers: dict[str, list[dict]] = {}
+    user, problem = _read_claude_settings(settings_path, "user")
+    if problem:
+        problems.append(problem)
+    elif user is None:
+        problems.append(f"Missing Claude Code user settings: {settings_path}. {_CLAUDE_SETUP_HINT}")
+    else:
+        user_handlers = _agenttrace_handlers_by_event(user.get("hooks", {}))
+        if not user_handlers:
+            problems.append(
+                f"No AgentTrace hooks in Claude Code user settings {settings_path}. {_CLAUDE_SETUP_HINT}"
+            )
+        else:
+            hook_problems, modes = _check_agenttrace_hooks(
+                user["hooks"], expected, "Claude Code", _claude_handler_problem
+            )
+            problems += hook_problems
+
+    # Settings files that can set disableAllHooks, lowest precedence first.
+    files: list[tuple[str, Path, dict]] = [("user", settings_path, user)] if user is not None else []
+    layers: list[tuple[str, Path, list[str]]] = []
+    if project_dir is not None:
+        for scope, name in (("project", "settings.json"), ("local", "settings.local.json")):
+            path = project_dir / ".claude" / name
+            notes: list[str] = []
+            layers.append((scope, path, notes))
+            if _same_file(path, settings_path):
+                notes.append("same file as user settings")
+                continue
+            settings, problem = _read_claude_settings(path, scope)
+            if problem:
+                problems.append(problem)
+                continue
+            if settings is None:
+                notes.append("not found")
+                continue
+            files.append((scope, path, settings))
+            notes.append("found")
+            count, problem = _claude_extra_hooks(path, scope, settings, user_handlers)
+            if problem:
+                problems.append(problem)
+            elif count:
+                notes.append(f"{count} AgentTrace hooks identical to user settings")
+
+    managed: dict[str, tuple[object, Path]] = {}
+    managed_notes: list[str] = []
+    if managed_dir is not None:
+        read, denied, managed_problems = _read_claude_managed(managed_dir)
+        problems += managed_problems
+        layers.append(("managed", managed_dir, managed_notes))
+        if read:
+            managed_notes.append(f"{len(read)} file{'s' if len(read) != 1 else ''} read")
+        if denied:
+            managed_notes.append(
+                f"{denied} not readable, so Claude Code skips {'it' if denied == 1 else 'them'}"
+            )
+        if not read and not denied:
+            managed_notes.append("no managed settings files")
+        copies = 0
+        for path, settings in read:
+            count, problem = _claude_extra_hooks(path, "managed", settings, user_handlers)
+            copies += count
+            if problem:
+                problems.append(problem)
+            # A later file replaces a single value. A null leaves an earlier value in place.
+            for key in ("allowManagedHooksOnly", "disableAllHooks"):
+                if settings.get(key) is not None:
+                    managed[key] = (settings[key], path)
+        if copies:
+            managed_notes.append(f"{copies} AgentTrace hooks identical to user settings")
+
+    if "allowManagedHooksOnly" in managed:
+        value, source = managed["allowManagedHooksOnly"]
+        flag = _managed_bool(value)
+        if flag is False:
+            managed_notes.append("allowManagedHooksOnly = false")
+        else:
+            invalid = "" if flag else ", which Claude Code reads as true because it is invalid"
+            problems.append(
+                f"Claude Code managed settings {source} set allowManagedHooksOnly to "
+                f"{json.dumps(value)}{invalid}. Only managed hooks run, so the AgentTrace hooks "
+                f"in {settings_path} are blocked. Ask your administrator to remove that setting."
+            )
+
+    for scope, path, settings in files:
+        if "disableAllHooks" in settings and not isinstance(settings["disableAllHooks"], bool):
+            problems.append(
+                f"Invalid Claude Code {scope} settings {path}: disableAllHooks must be true or false."
+            )
+    winner = None
+    if "disableAllHooks" in managed:
+        value, source = managed["disableAllHooks"]
+        if not isinstance(value, bool):
+            managed_notes.append(
+                f"disableAllHooks = {json.dumps(value)}, ignored because it is not true or false"
+            )
+        else:
+            # Managed settings take precedence over every other settings file.
+            winner = "managed"
+            if value:
+                problems.append(
+                    f"Claude Code hooks are disabled by managed settings {source}: "
+                    "disableAllHooks = true. Ask your administrator to remove that setting."
+                )
+            else:
+                managed_notes.append("disableAllHooks = false")
+    if winner is None:
+        setters = [
+            (scope, path, settings["disableAllHooks"])
+            for scope, path, settings in files
+            if isinstance(settings.get("disableAllHooks"), bool)
+        ]
+        if setters:
+            winner, path, value = setters[-1]
+            if value:
+                fix = "Remove it or set it to false."
+                if winner == "project":
+                    local = project_dir / ".claude" / "settings.local.json"
+                    fix = f"Remove it, or set disableAllHooks to false in {local} for this project only."
+                problems.append(
+                    f"Claude Code hooks are disabled in {path}: disableAllHooks = true. {fix}"
+                )
+            elif user is not None and user.get("disableAllHooks") is True:
+                problems.append(
+                    f"Claude Code hooks are disabled in {settings_path}: disableAllHooks = true. "
+                    f"{winner.capitalize()} settings {path} turn them back on only in this project, "
+                    "so other projects run no hooks. Remove it or set it to false."
+                )
+    for scope, path, notes in layers:
+        settings = next((s for sc, _, s in files if sc == scope), None)
+        if settings is not None and isinstance(settings.get("disableAllHooks"), bool):
+            value = settings["disableAllHooks"]
+            note = f"disableAllHooks = {json.dumps(value)}"
+            if value and winner != scope:
+                note += f", overridden by {winner} settings"
+            notes.append(note)
+
+    executable_problems, executable = _check_executable(version, "Claude Code")
+    problems += executable_problems
+
+    if not problems and details is not None:
+        details.update(
+            event_count=len(expected["hooks"]),
+            event_total=len(expected["hooks"]),
+            redaction=next(iter(modes), "default"),
+            executable=executable,
+            version=f"agent-strace {version}",
+            layers=[(scope, path, "; ".join(notes)) for scope, path, notes in layers],
+        )
     return not problems, problems

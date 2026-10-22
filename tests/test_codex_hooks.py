@@ -175,6 +175,7 @@ class TestCodexSetup(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         os.environ.pop("CODEX_CONFIG_DIR", None)
+        os.environ.pop("CLAUDE_CONFIG_DIR", None)
 
     def test_setup_cli_codex_outputs_hooks_json(self):
         args = argparse.Namespace(

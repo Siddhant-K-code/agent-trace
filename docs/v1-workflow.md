@@ -38,11 +38,13 @@ from optional or experimental surfaces.
 3. **Verify that capture works before trusting a session.**
    This stage is a **v1 candidate, not yet a stable top-level CLI contract**.
    For Codex, check the installed hooks, the `config.toml` hooks feature flag,
-   and the AgentTrace executable:
+   and the AgentTrace executable. For Claude Code, check the hooks you added to
+   its settings, the settings that can turn them off, and the executable:
    ```bash
    agent-strace setup --cli codex --verify
+   agent-strace setup --cli claude --verify
    ```
-   This is a static config check, not proof of capture. Broader
+   These are static config checks, not proof of capture. Broader
    provider/capture verification is tracked in #239. Until that lands, verify
    that a real session appears in `agent-strace list` and inspect the recorded
    events instead of treating hook installation alone as proof of coverage.

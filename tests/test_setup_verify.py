@@ -1,4 +1,4 @@
-"""Offline Codex setup verification tests; no actual provider configuration touched."""
+"""Offline Codex and Claude Code setup verification tests; no actual provider configuration touched."""
 
 from __future__ import annotations
 
@@ -14,8 +14,20 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_trace import __version__, setup_verify
-from agent_trace.cli import _codex_hooks_config, build_parser, cmd_setup, main
-from agent_trace.setup_verify import check_codex_hooks_feature, verify_codex_setup
+from agent_trace.cli import (
+    _claude_config_dir,
+    _claude_hooks_config,
+    _claude_managed_settings_dir,
+    _codex_hooks_config,
+    build_parser,
+    cmd_setup,
+    main,
+)
+from agent_trace.setup_verify import (
+    check_codex_hooks_feature,
+    verify_claude_setup,
+    verify_codex_setup,
+)
 
 # Every config.toml case runs under tomllib (3.11+) and the 3.10 fallback reader.
 _PARSERS = ("fallback",) if setup_verify._tomllib is None else ("tomllib", "fallback")
@@ -589,6 +601,495 @@ class CodexHooksFeatureTests(unittest.TestCase):
                 self.config_path.write_text(text, encoding="utf-8")
                 setup_verify._tomllib.loads(text)  # The corpus must be valid TOML.
                 self.assertEqual(self._check("fallback"), self._check("tomllib"))
+
+
+
+class ClaudeSetupVerifyTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.config_dir = self.root / "config"
+        self.project = self.root / "project"
+        self.managed = self.root / "managed"
+        for directory in (self.config_dir, self.project, self.managed):
+            directory.mkdir()
+        self.settings_path = self.config_dir / "settings.json"
+        self.project_path = self.project / ".claude" / "settings.json"
+        self.local_path = self.project / ".claude" / "settings.local.json"
+        self.managed_path = self.managed / "managed-settings.json"
+        self.which = patch("agent_trace.setup_verify.shutil.which", return_value="/bin/agent-strace")
+        self.run = patch(
+            "agent_trace.setup_verify.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=["/bin/agent-strace", "--version"],
+                returncode=0,
+                stdout=f"agent-strace {__version__}\n",
+                stderr="",
+            ),
+        )
+        for active in (
+            patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.config_dir)}),
+            patch("agent_trace.cli._claude_managed_settings_dir", return_value=self.managed),
+            patch("agent_trace.cli.Path.cwd", return_value=self.project),
+            self.which,
+            self.run,
+        ):
+            active.start()
+            self.addCleanup(active.stop)
+
+    def _hooks(self, **flags):
+        return _claude_hooks_config(_args(cli="claude", **flags))
+
+    def _write(self, path, data):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(data if isinstance(data, str) else json.dumps(data), encoding="utf-8")
+
+    def _install(self, **extra):
+        self._write(self.settings_path, {**self._hooks(), **extra})
+
+    def _verify(self):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            status = cmd_setup(_args(cli="claude"))
+        return status, out.getvalue(), err.getvalue()
+
+    def _problems(self, settings=None):
+        if settings is not None:
+            self._write(self.settings_path, settings)
+        ok, problems = verify_claude_setup(
+            self.settings_path,
+            self._hooks(),
+            __version__,
+            project_dir=self.project,
+            managed_dir=self.managed,
+        )
+        self.assertEqual(ok, not problems)
+        return " ".join(problems)
+
+    def _snapshot(self):
+        return {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+
+    def _chdir_project(self):
+        old = os.getcwd()
+        os.chdir(self.project)
+        self.addCleanup(os.chdir, old)
+        return Path(os.getcwd())
+
+    def test_clean_settings_verify_read_only_with_summary(self):
+        self._install(model="opus")
+        before = self._snapshot()
+        status, out, err = self._verify()
+        self.assertEqual((status, err), (0, ""))
+        self.assertEqual(self._snapshot(), before)
+        for expected in (
+            "Claude Code static hook setup verified.\n",
+            f"settings:   {self.settings_path} (7/7 events, redaction: default)\n",
+            f"project:    {self.project_path} (not found)\n",
+            f"local:      {self.local_path} (not found)\n",
+            f"managed:    {self.managed} (no managed settings files)\n",
+            f"executable: /bin/agent-strace (agent-strace {__version__})\n",
+            "Not checked: other settings values (run claude doctor)",
+            "MDM and server-managed policy",
+            "This does not prove Claude Code trusted this folder, ran the hooks or captured an event",
+        ):
+            self.assertIn(expected, out)
+
+    def test_redaction_modes_verify_without_matching_cli_flags(self):
+        for flag, mode in (("redact", "redact"), ("no_redact", "no-redact")):
+            with self.subTest(mode=mode):
+                self._write(self.settings_path, self._hooks(**{flag: True}))
+                status, out, _ = self._verify()
+                self.assertEqual(status, 0)
+                self.assertIn(f"redaction: {mode})", out)
+
+    def test_missing_user_settings_fail_without_creating_files(self):
+        status, out, err = self._verify()
+        self.assertEqual((status, out), (1, ""))
+        self.assertIn(
+            f"Setup verification failed: Missing Claude Code user settings: {self.settings_path}. "
+            "Run agent-strace setup --cli claude and add the printed hooks to that file.",
+            err,
+        )
+        self.assertEqual(self._snapshot(), {})
+
+    def test_invalid_or_empty_user_settings_fail(self):
+        unrelated = {"hooks": {"PreToolUse": [{"matcher": "", "hooks": [
+            {"type": "command", "command": "other-tool pre"}]}]}}
+        for settings, expected in (
+            ("{", "Cannot read valid Claude Code user settings JSON at"),
+            ("[]", "the top level must be a JSON object"),
+            ({"hooks": []}, "hooks must be an object"),
+            ("", "No AgentTrace hooks in Claude Code user settings"),
+            ({"model": "opus"}, "No AgentTrace hooks in Claude Code user settings"),
+            (unrelated, "No AgentTrace hooks in Claude Code user settings"),
+        ):
+            with self.subTest(settings=settings):
+                self.assertIn(expected, self._problems(settings))
+
+    def test_missing_stale_misplaced_duplicate_or_mistyped_hooks_fail(self):
+        def edited(change):
+            settings = self._hooks()
+            change(settings["hooks"])
+            return settings
+
+        stale = {"hooks": [{"type": "command", "command": "agent-strace hook notification"}]}
+        for change, expected in (
+            (lambda h: h.pop("SessionEnd"), "SessionEnd: missing"),
+            (lambda h: h.setdefault("Notification", []).append(stale), "stale or unexpected"),
+            (lambda h: h["PostToolUse"].append(h["PreToolUse"][0]), "assigned to the wrong event"),
+            (lambda h: h["Stop"].append(h["Stop"][0]), "duplicate AgentTrace hook command"),
+            (lambda h: h["Stop"][0]["hooks"][0].update(type="http"), "has handler type 'http'"),
+            (lambda h: h.update(Stop={}), "Stop: hooks must be a list."),
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, self._problems(edited(change)))
+
+    def test_narrowed_matchers_fail_and_match_all_forms_pass(self):
+        for event, matcher in (("PreToolUse", "Bash"), ("SessionStart", "startup"), ("SessionEnd", "clear")):
+            with self.subTest(event=event):
+                settings = self._hooks()
+                settings["hooks"][event][0]["matcher"] = matcher
+                problems = self._problems(settings)
+                self.assertIn(f"{event}: matcher is {matcher!r}, expected a match-all matcher", problems)
+
+        settings = self._hooks()
+        settings["hooks"]["PreToolUse"][0]["matcher"] = "*"
+        settings["hooks"]["PostToolUse"][0]["matcher"] = ".*"
+        del settings["hooks"]["PostToolUseFailure"][0]["matcher"]
+        settings["hooks"]["SessionStart"][0]["matcher"] = ""
+        settings["hooks"]["UserPromptSubmit"][0]["matcher"] = "ignored"
+        self.assertEqual(self._problems(settings), "")
+
+    def test_unrelated_hooks_and_extra_handler_fields_are_allowed(self):
+        settings = self._hooks()
+        mine = {"type": "command", "command": "~/bin/lint.sh"}
+        settings["hooks"]["PreToolUse"].append({"matcher": "Bash", "hooks": [mine]})
+        settings["hooks"]["PostToolUse"][0]["hooks"].append(mine)
+        settings["hooks"]["Notification"] = [{"hooks": [mine]}]
+        settings["hooks"]["Stop"][0]["hooks"][0].update(timeout=30, statusMessage="trace")
+        settings["hooks"]["SessionEnd"][0]["hooks"][0]["async"] = True
+        self._write(self.settings_path, settings)
+        before = self.settings_path.read_bytes()
+        status, _, err = self._verify()
+        self.assertEqual((status, err), (0, ""))
+        self.assertEqual(self.settings_path.read_bytes(), before)
+
+    def test_if_and_args_handler_fields_fail(self):
+        for event, field, value, expected in (
+            ("PreToolUse", "if", "Bash(git *)", "runs it only for matching tool calls"),
+            ("Stop", "if", "Bash(*)", "so this hook never runs"),
+            ("SessionStart", "args", [], 'has "args"'),
+        ):
+            with self.subTest(event=event, field=field):
+                settings = self._hooks()
+                settings["hooks"][event][0]["hooks"][0][field] = value
+                problems = self._problems(settings)
+                self.assertIn(f"{event}: 'agent-strace hook ", problems)
+                self.assertIn(expected, problems)
+
+    def test_mixed_redaction_modes_fail(self):
+        settings = self._hooks()
+        settings["hooks"]["Stop"] = self._hooks(redact=True)["hooks"]["Stop"]
+        self.assertIn(
+            "Claude Code AgentTrace hooks use inconsistent redaction modes: default, redact.",
+            self._problems(settings),
+        )
+
+    def test_disable_all_hooks_follows_settings_precedence(self):
+        local_fix = f"set disableAllHooks to false in {self.local_path} for this project only"
+        for user, project, local, expected in (
+            (True, None, None, f"Claude Code hooks are disabled in {self.settings_path}: disableAllHooks = true."),
+            (None, True, None, local_fix),
+            (None, None, True, f"Claude Code hooks are disabled in {self.local_path}"),
+            (True, False, None, "turn them back on only in this project, so other projects run no hooks"),
+            (False, True, False, ""),
+            (False, False, None, ""),
+            ("yes", None, None, f"Invalid Claude Code user settings {self.settings_path}: disableAllHooks must be true or false."),
+            (None, "null", None, f"Invalid Claude Code project settings {self.project_path}: disableAllHooks"),
+        ):
+            with self.subTest(user=user, project=project, local=local):
+                for path, value in ((self.project_path, project), (self.local_path, local)):
+                    path.unlink(missing_ok=True)
+                    if value is not None:
+                        self._write(path, '{"disableAllHooks": null}' if value == "null" else {"disableAllHooks": value})
+                extra = {} if user is None else {"disableAllHooks": user}
+                problems = self._problems({**self._hooks(), **extra})
+                if expected:
+                    self.assertIn(expected, problems)
+                else:
+                    self.assertEqual(problems, "")
+
+    def test_overridden_disable_all_hooks_is_reported_in_the_summary(self):
+        self._install()
+        self._write(self.project_path, {"disableAllHooks": True})
+        self._write(self.local_path, {"disableAllHooks": False})
+        status, out, _ = self._verify()
+        self.assertEqual(status, 0)
+        self.assertIn(
+            f"project:    {self.project_path} (found; disableAllHooks = true, overridden by local settings)",
+            out,
+        )
+        self.assertIn(f"local:      {self.local_path} (found; disableAllHooks = false)", out)
+
+    def test_managed_disable_all_hooks_wins_and_invalid_values_are_ignored(self):
+        for managed, user, expected in (
+            (True, None, f"Claude Code hooks are disabled by managed settings {self.managed_path}"),
+            (False, True, ""),
+            ("true", None, ""),
+            (None, None, ""),
+        ):
+            with self.subTest(managed=managed, user=user):
+                self._write(self.managed_path, {"disableAllHooks": managed})
+                extra = {} if user is None else {"disableAllHooks": user}
+                problems = self._problems({**self._hooks(), **extra})
+                if expected:
+                    self.assertIn(expected, problems)
+                    self.assertIn("Ask your administrator", problems)
+                else:
+                    self.assertEqual(problems, "")
+        self._write(self.managed_path, {"disableAllHooks": "true"})
+        status, out, _ = self._verify()
+        self.assertEqual(status, 0)
+        self.assertIn('disableAllHooks = "true", ignored because it is not true or false', out)
+
+    def test_allow_managed_hooks_only_blocks_user_hooks_and_fails_closed(self):
+        for value, expected in (
+            (True, "set allowManagedHooksOnly to true. Only managed hooks run"),
+            ("true", 'set allowManagedHooksOnly to "true". Only managed hooks run'),
+            (1, "set allowManagedHooksOnly to 1, which Claude Code reads as true because it is invalid"),
+            ([], "set allowManagedHooksOnly to [], which Claude Code reads as true because it is invalid"),
+            (False, ""),
+            ("false", ""),
+            (None, ""),
+        ):
+            with self.subTest(value=value):
+                self._write(self.managed_path, {"allowManagedHooksOnly": value})
+                problems = self._problems(self._hooks())
+                if expected:
+                    self.assertIn(f"Claude Code managed settings {self.managed_path} {expected}", problems)
+                    self.assertIn(f"the AgentTrace hooks in {self.settings_path} are blocked", problems)
+                else:
+                    self.assertEqual(problems, "")
+
+    def test_managed_drop_ins_merge_in_name_order(self):
+        self._install()
+        drop_ins = self.managed / "managed-settings.d"
+        self._write(self.managed_path, {"allowManagedHooksOnly": True})
+        self._write(drop_ins / "20-hooks.json", {"allowManagedHooksOnly": False})
+        self._write(drop_ins / ".hidden.json", {"allowManagedHooksOnly": True})
+        self._write(drop_ins / "30-notes.txt", {"allowManagedHooksOnly": True})
+        self._write(drop_ins / "10-base.json", {"allowManagedHooksOnly": True})
+        status, out, _ = self._verify()
+        self.assertEqual(status, 0)
+        self.assertIn(f"managed:    {self.managed} (3 files read; allowManagedHooksOnly = false)", out)
+
+        self._write(drop_ins / "20-hooks.json", {"allowManagedHooksOnly": None})
+        self.assertIn(f"Claude Code managed settings {drop_ins / '10-base.json'} set", self._problems())
+        self._write(drop_ins / "05-first.json", {"allowManagedHooksOnly": False})
+        self._write(self.managed_path, "")
+        self.assertIn(str(drop_ins / "10-base.json"), self._problems())
+
+    def test_unparseable_or_unreadable_managed_settings(self):
+        self._install()
+        self._write(self.managed_path, "{")
+        problems = self._problems()
+        self.assertIn(f"Cannot read valid Claude Code managed settings JSON at {self.managed_path}", problems)
+        self.assertIn("Claude Code refuses to start until it is fixed.", problems)
+        self._write(self.managed_path, "[1]")
+        self.assertIn("the top level must be a JSON object", self._problems())
+
+        self._write(self.managed_path, {"allowManagedHooksOnly": True})
+        real_read_text = Path.read_text
+
+        def read_text(path, *args, **kwargs):
+            if path == self.managed_path:
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_read_text(path, *args, **kwargs)
+
+        with patch.object(Path, "read_text", autospec=True, side_effect=read_text):
+            status, out, err = self._verify()
+        self.assertEqual((status, err), (0, ""))
+        self.assertIn("(1 not readable, so Claude Code skips it)", out)
+
+    def test_unreadable_user_settings_fail(self):
+        self._install()
+        real_read_text = Path.read_text
+
+        def read_text(path, *args, **kwargs):
+            if path == self.settings_path:
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_read_text(path, *args, **kwargs)
+
+        with patch.object(Path, "read_text", autospec=True, side_effect=read_text):
+            self.assertIn(f"Cannot read Claude Code user settings {self.settings_path}", self._problems())
+
+    def test_exact_copies_in_other_settings_files_pass_and_different_ones_fail(self):
+        self._install()
+        self._write(self.project_path, self._hooks())
+        status, out, _ = self._verify()
+        self.assertEqual(status, 0)
+        self.assertIn(f"project:    {self.project_path} (found; 7 AgentTrace hooks identical to user settings)", out)
+
+        self._write(self.local_path, self._hooks(redact=True))
+        problems = self._problems()
+        self.assertIn(
+            f"Claude Code local settings {self.local_path} have AgentTrace hooks for PostToolUse, "
+            "PostToolUseFailure, PreToolUse, SessionEnd, SessionStart, Stop, UserPromptSubmit "
+            "that are not exact copies of the user settings hooks.",
+            problems,
+        )
+        self.assertIn("Remove them, or make them identical to the user settings hooks.", problems)
+        self.local_path.unlink()
+
+        changed = self._hooks()
+        changed["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"] = 5
+        self._write(self.project_path, changed)
+        self.assertIn("have AgentTrace hooks for PreToolUse that are not exact copies", self._problems())
+        self._write(self.project_path, "{")
+        self.assertIn(f"Cannot read valid Claude Code project settings JSON at {self.project_path}", self._problems())
+        self.project_path.unlink()
+
+        self._write(self.managed_path, self._hooks(no_redact=True))
+        self.assertIn("Ask your administrator to remove them", self._problems())
+        self._write(self.managed_path, self._hooks())
+        status, out, _ = self._verify()
+        self.assertEqual(status, 0)
+        self.assertIn("(1 file read; 7 AgentTrace hooks identical to user settings)", out)
+
+    def test_project_only_hooks_fail_and_point_to_user_settings(self):
+        self._write(self.settings_path, {})
+        self._write(self.project_path, self._hooks())
+        problems = self._problems()
+        self.assertIn(f"No AgentTrace hooks in Claude Code user settings {self.settings_path}", problems)
+        self.assertIn(f"Claude Code project settings {self.project_path} have AgentTrace hooks", problems)
+
+    def test_project_settings_that_are_the_user_settings_are_not_read_twice(self):
+        user_dir = self.project / ".claude"
+        user_dir.mkdir()
+        self._write(user_dir / "settings.json", {**self._hooks(), "disableAllHooks": False})
+        with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(user_dir)}):
+            status, out, _ = self._verify()
+        self.assertEqual(status, 0)
+        self.assertIn(f"settings:   {user_dir / 'settings.json'} (7/7 events", out)
+        self.assertIn(f"project:    {self.project_path} (same file as user settings)", out)
+
+    def test_claude_config_dir_resolves_like_claude_code(self):
+        home = self.root / "home"
+        cwd = self._chdir_project()
+        with patch.dict(os.environ, {"HOME": str(home), "USERPROFILE": str(home)}):
+            os.environ.pop("CLAUDE_CONFIG_DIR")
+            self.assertEqual(_claude_config_dir(), home / ".claude")
+            for value, expected in (
+                ("", cwd),
+                ("~/ccx", cwd / "~" / "ccx"),
+                ("cfg/../alt", cwd / "alt"),
+                (str(self.config_dir), self.config_dir),
+            ):
+                with self.subTest(value=value), patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": value}):
+                    self.assertEqual(_claude_config_dir(), expected)
+
+    def test_tilde_and_empty_config_dirs_do_not_fall_back_to_home(self):
+        home = self.root / "home"
+        cwd = self._chdir_project()
+        for value, claude_dir, home_dir in (
+            ("~/ccx", cwd / "~" / "ccx", home / "ccx"),
+            ("", cwd, home / ".claude"),
+        ):
+            env = {"HOME": str(home), "USERPROFILE": str(home), "CLAUDE_CONFIG_DIR": value}
+            with self.subTest(value=value), patch.dict(os.environ, env):
+                self._write(home_dir / "settings.json", self._hooks())
+                status, _, err = self._verify()
+                self.assertEqual(status, 1)
+                self.assertIn(f"Missing Claude Code user settings: {claude_dir / 'settings.json'}.", err)
+                self._write(claude_dir / "settings.json", self._hooks())
+                status, out, _ = self._verify()
+                self.assertEqual(status, 0)
+                self.assertIn(f"settings:   {claude_dir / 'settings.json'} (7/7 events", out)
+
+    def test_setup_names_the_settings_file_that_verify_reads(self):
+        home = self.root / "home"
+        cwd = self._chdir_project()
+        codex_home = self.root / "codex"
+        codex_home.mkdir()
+        env = {name: str(self.root / name) for name in ("CURSOR_CONFIG_DIR", "COPILOT_HOME", "GEMINI_CONFIG_DIR")}
+        env.update(CODEX_HOME=str(codex_home), HOME=str(home), USERPROFILE=str(home))
+        with patch.dict(os.environ, env):
+            os.environ.pop("CODEX_CONFIG_DIR", None)
+            for value, named in (
+                (str(self.config_dir), str(self.settings_path)),
+                ("~/ccx", str(cwd / "~" / "ccx" / "settings.json")),
+                ("", str(cwd / "settings.json")),
+                (None, "~/.claude/settings.json"),
+            ):
+                with self.subTest(value=value), patch.dict(os.environ):
+                    if value is None:
+                        os.environ.pop("CLAUDE_CONFIG_DIR")
+                    else:
+                        os.environ["CLAUDE_CONFIG_DIR"] = value
+                    for cli in ("claude", "all"):
+                        err = io.StringIO()
+                        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                            cmd_setup(_args(cli=cli, verify=False))
+                        self.assertIn(f"Add this to {named} for Claude Code:", err.getvalue())
+                    target = Path(named).expanduser()
+                    self._write(target, self._hooks())
+                    status, out, _ = self._verify()
+                    self.assertEqual(status, 0)
+                    self.assertIn(f"settings:   {target} (7/7 events", out)
+
+    def test_managed_settings_dir_follows_the_platform(self):
+        for platform, expected in (
+            ("darwin", Path("/Library/Application Support/ClaudeCode")),
+            ("win32", Path(r"C:\Program Files\ClaudeCode")),
+            ("linux", Path("/etc/claude-code")),
+        ):
+            with self.subTest(platform=platform), patch("agent_trace.cli.sys.platform", platform):
+                self.assertEqual(_claude_managed_settings_dir(), expected)
+
+    def test_missing_executable_and_mismatched_version_fail(self):
+        self._install()
+        with patch("agent_trace.setup_verify.shutil.which", return_value=None):
+            self.assertIn(
+                "The agent-strace executable is not on PATH. Install this AgentTrace release "
+                "into the same environment used by Claude Code.",
+                self._problems(),
+            )
+        with patch(
+            "agent_trace.setup_verify.subprocess.run",
+            return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout="agent-strace 0.1.0\n", stderr=""),
+        ):
+            self.assertIn("AgentTrace CLI version mismatch", self._problems())
+
+    def test_entry_point_records_claude_verify_in_telemetry(self):
+        with patch.object(
+            __import__("sys"), "argv", ["agent-strace", "setup", "--cli", "claude", "--verify"],
+        ), patch("agent_trace.cli._product_telemetry.capture") as capture, patch(
+            "agent_trace.cli._product_telemetry.maybe_show_telemetry_notice"
+        ):
+            with contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as result:
+                    main()
+        self.assertEqual(result.exception.code, 1)  # no settings
+        props = capture.call_args.args[1]
+        self.assertEqual((props["command"], props["integration"], props["subcommand"]), ("setup", "claude", "verify"))
+        self.assertEqual(props["exit_code"], 1)
+        self.assertEqual(self._snapshot(), {})
+
+    def test_cli_parser_accepts_verify_with_claude(self):
+        args = build_parser().parse_args(["setup", "--cli", "claude", "--verify"])
+        self.assertEqual((args.cli, args.verify), ("claude", True))
+
+    def test_other_providers_and_all_are_rejected_without_writes(self):
+        env = {name: str(self.root / name) for name in ("CURSOR_CONFIG_DIR", "COPILOT_HOME", "GEMINI_CONFIG_DIR", "CODEX_HOME")}
+        with patch.dict(os.environ, env):
+            for cli in ("all", "cursor", "copilot", "gemini"):
+                with self.subTest(cli=cli):
+                    err = io.StringIO()
+                    with contextlib.redirect_stderr(err):
+                        self.assertEqual(cmd_setup(_args(cli=cli)), 2)
+                    self.assertIn("supports only --cli codex or --cli claude, one provider per run", err.getvalue())
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()), ["config", "managed", "project"])
 
 
 if __name__ == "__main__":
