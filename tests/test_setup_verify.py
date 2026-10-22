@@ -42,11 +42,12 @@ class CodexSetupVerifyTests(unittest.TestCase):
         self.gemini_tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.gemini_tmp.cleanup)
         self.env = patch.dict(os.environ, {
-            "CODEX_CONFIG_DIR": self.tmp.name,
+            "CODEX_HOME": self.tmp.name,
             "GEMINI_CONFIG_DIR": self.gemini_tmp.name,
         })
         self.env.start()
         self.addCleanup(self.env.stop)
+        os.environ.pop("CODEX_CONFIG_DIR", None)
 
     def _write_config(self):
         self.hooks_path.write_text(
@@ -313,7 +314,7 @@ class CodexSetupVerifyTests(unittest.TestCase):
             with patch.dict(os.environ, {"CODEX_CONFIG_DIR": "", "CODEX_HOME": alternate}):
                 self.assertEqual(_codex_config_dir(), Path(alternate))
             with patch.dict(os.environ, {"CODEX_CONFIG_DIR": self.tmp.name, "CODEX_HOME": alternate}):
-                self.assertEqual(_codex_config_dir(), Path(self.tmp.name))
+                self.assertEqual(_codex_config_dir(), Path(alternate))
         self._write_config()
         output = io.StringIO()
         with patch("agent_trace.setup_verify.shutil.which", return_value="/bin/agent-strace"), self._probe_ok():

@@ -64,15 +64,17 @@ agent-strace explain  # plain-English summary
 
 ### OpenAI Codex hooks
 
-`agent-strace setup --cli codex` writes user-level hooks to `$CODEX_CONFIG_DIR/hooks.json` when set, otherwise `$CODEX_HOME/hooks.json` when set, or `~/.codex/hooks.json` by default, and also prints the JSON:
+`agent-strace setup --cli codex` writes user-level hooks to `$CODEX_HOME/hooks.json`, or to `~/.codex/hooks.json` when `CODEX_HOME` is unset or empty, and also prints the JSON shown below. This is the directory Codex reads.
 
-Before replacing an existing file, setup copies its original bytes once to a `hooks.json.agent-strace.bak` file in the active directory (`$CODEX_CONFIG_DIR`, then `$CODEX_HOME`, then `~/.codex`). Repeated setup runs preserve that first backup. To restore the pre-AgentTrace config at the default location:
+As in Codex, a set `CODEX_HOME` must name an existing directory, and `~` in its value is not expanded. Otherwise setup fails and writes nothing. Setup creates `~/.codex` when it is missing. Codex does not read `CODEX_CONFIG_DIR`, so setup ignores it and prints a note when it names another directory. Older agent-strace versions wrote `hooks.json` there, where Codex never loads it. You can delete that stale file.
+
+Before replacing an existing file, setup copies its original bytes once to `hooks.json.agent-strace.bak` in the same directory. Repeated setup runs preserve that first backup. To restore the pre-AgentTrace config:
 
 ```bash
 cp ~/.codex/hooks.json.agent-strace.bak ~/.codex/hooks.json
 ```
 
-For an override, use `cp "$CODEX_CONFIG_DIR/hooks.json.agent-strace.bak" "$CODEX_CONFIG_DIR/hooks.json"` (or substitute `CODEX_HOME` if that is the active directory). If no config existed before setup, no backup is created; remove the generated `hooks.json` from the active directory. **Setup replaces the entire hooks file**; if you added other tools after a prior backup, inspect and merge hooks manually instead of blindly re-running setup.
+When `CODEX_HOME` is set, use `cp "$CODEX_HOME/hooks.json.agent-strace.bak" "$CODEX_HOME/hooks.json"` instead. If no config existed before setup, no backup is created; remove the generated `hooks.json` from that directory. **Setup replaces the entire hooks file**; if you added other tools after a prior backup, inspect and merge hooks manually instead of blindly re-running setup.
 
 
 ```json
@@ -91,19 +93,22 @@ Codex sends one JSON object to each command hook on stdin. agent-strace records 
 
 If Codex does not list the hooks after you create the file:
 
-- Use the root `~/.codex/hooks.json` file for user-level hooks, or `<repo>/.codex/hooks.json` for project-level hooks. `~/.codex/hooks/hooks.json` is for plugin-bundled hooks and is not the normal user config path.
-- Check `~/.codex/config.toml` and remove `[features].hooks = false` (or the legacy `[features].codex_hooks = false`) if present. Hooks are enabled by default unless a user, system, or admin config layer disables them.
+- Use the root `$CODEX_HOME/hooks.json` file (default `~/.codex/hooks.json`) for user-level hooks, or `<repo>/.codex/hooks.json` for project-level hooks. `$CODEX_HOME/hooks/hooks.json` is for plugin-bundled hooks and is not the normal user config path.
+- Run setup with the same `CODEX_HOME` that Codex sees. Setup resolves the directory from its own environment.
+- Check `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`) and remove `[features].hooks = false` (or the legacy `[features].codex_hooks = false`) if present. Hooks are enabled by default unless a user, system, or admin config layer disables them.
 - Reload Codex or press refresh in the Hooks view. Non-managed command hooks must be reviewed and trusted before they run. `codex exec` skips untrusted hooks without a warning, so trust them in an interactive session's `/hooks` view before relying on headless runs.
 
 To diagnose the installed **Codex user-level** configuration without changing
 files, run `agent-strace setup --cli codex --verify`. It checks that
-`$CODEX_CONFIG_DIR/hooks.json`, `$CODEX_HOME/hooks.json`, or
-`~/.codex/hooks.json` (in that priority order) is valid and
+`hooks.json` in the directory Codex reads (`$CODEX_HOME`, or `~/.codex` when
+`CODEX_HOME` is unset or empty) is valid and
 contains the generated commands expected by this AgentTrace version. Unrelated
 user hooks are allowed. It also verifies that `agent-strace` is on `PATH`
 and that its `--version` output matches this installation, and returns non-zero
-for missing/stale config, hooks disabled in `config.toml`, missing executable
-or version mismatch. A Codex project-specific hooks file is **not** checked by
+for missing/stale config, hooks disabled in `config.toml`, a set `CODEX_HOME`
+that is not an existing directory, missing executable or version mismatch.
+Like setup, it ignores `CODEX_CONFIG_DIR` and prints a note when it names
+another directory. A Codex project-specific hooks file is **not** checked by
 this command.
 
 The check also reads `config.toml` from the same directory and fails when its
