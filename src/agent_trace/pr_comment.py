@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .cost import estimate_cost
+from .event_data import NonObjectEventDataError, require_object_event_data
 from .explain import explain_session
 from .lint import lint_session
 from .models import EventType, SessionMeta, TraceEvent
@@ -903,6 +904,11 @@ def cmd_pr_comment(args: argparse.Namespace) -> int:
 
     try:
         session_ids = select_sessions(store, requested, branch=branch)
+        # summarize_session reads the data of every event.
+        for session_id in session_ids:
+            require_object_event_data(
+                store.load_events(session_id), session_id=session_id
+            )
         summaries = [summarize_session(store, session_id) for session_id in session_ids]
         share_url = (
             getattr(args, "share_url", "")
@@ -936,6 +942,8 @@ def cmd_pr_comment(args: argparse.Namespace) -> int:
         action = post_or_update_comment(
             target, body, token, token_header=token_header
         )
+    except NonObjectEventDataError:
+        raise
     except (PRCommentError, OSError, ValueError, json.JSONDecodeError) as exc:
         sys.stderr.write(f"pr-comment: {exc}\n")
         return 1

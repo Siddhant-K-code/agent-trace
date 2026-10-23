@@ -33,6 +33,7 @@ from typing import Any, Literal, TextIO
 from . import __version__
 from .audit import verify_chain
 from .cost import _dollars, _event_tokens
+from .event_data import require_object_event_data
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -283,14 +284,22 @@ def _hipaa_report(session_id: str, meta, events: list[TraceEvent]) -> dict:
 # Public API
 # ---------------------------------------------------------------------------
 
+# Every framework report reads the data of every event of these types.
+COMPLIANCE_DATA_EVENT_TYPES = frozenset({EventType.TOOL_CALL, EventType.ERROR})
+
+
 def export_compliance(
     store: TraceStore,
     session_id: str,
     framework: Framework = "all",
+    *,
+    name_session: bool = False,
 ) -> dict:
     """Build a compliance report for one session.
 
-    Returns a dict with one key per framework requested.
+    Returns a dict with one key per framework requested. Raises
+    NonObjectEventDataError when a tool_call or error event's data is not an
+    object; ``name_session`` adds the session ID to that error.
     """
     try:
         meta = store.load_meta(session_id)
@@ -300,6 +309,11 @@ def export_compliance(
         events = store.load_events(session_id)
     except Exception:
         events = []
+    require_object_event_data(
+        events,
+        event_types=COMPLIANCE_DATA_EVENT_TYPES,
+        session_id=session_id if name_session else None,
+    )
 
     frameworks = _FRAMEWORKS if framework == "all" else [framework]
     report: dict = {
@@ -329,7 +343,7 @@ def export_compliance_bulk(
     for meta in store.list_sessions():
         if not meta.ended_at or meta.started_at < cutoff:
             continue
-        reports.append(export_compliance(store, meta.session_id, framework))
+        reports.append(export_compliance(store, meta.session_id, framework, name_session=True))
     return reports
 
 
@@ -337,9 +351,16 @@ def export_compliance_bulk(
 # EU AI Act Article 12/13 export
 # ---------------------------------------------------------------------------
 
-def _eu_ai_act_session_record(store: TraceStore, session_id: str) -> dict:
+def _eu_ai_act_session_record(
+    store: TraceStore,
+    session_id: str,
+    *,
+    name_session: bool = False,
+) -> dict:
     meta = store.load_meta(session_id)
     events = store.load_events(session_id)
+    # The record reads the tool name from the data of every event.
+    require_object_event_data(events, session_id=session_id if name_session else None)
     lines = _load_event_lines(store, session_id)
     hashes = _line_hashes(lines)
     chain = verify_chain(store, session_id)
@@ -445,9 +466,18 @@ def select_sessions(
 def export_eu_ai_act(
     store: TraceStore,
     session_ids: list[str],
+    *,
+    name_sessions: bool = False,
 ) -> dict:
-    """Build an EU AI Act Article 12/13 JSON export for one or more sessions."""
-    sessions = [_eu_ai_act_session_record(store, session_id) for session_id in session_ids]
+    """Build an EU AI Act Article 12/13 JSON export for one or more sessions.
+
+    Raises NonObjectEventDataError when any event's data is not an object;
+    ``name_sessions`` adds the session ID to that error.
+    """
+    sessions = [
+        _eu_ai_act_session_record(store, session_id, name_session=name_sessions)
+        for session_id in session_ids
+    ]
     article_12_sessions = [
         {
             "session_id": session["session_id"],
@@ -502,7 +532,9 @@ def cmd_export_eu_ai_act(args: argparse.Namespace) -> int:
             return 1
         session_ids = [full_id]
 
-    report = export_eu_ai_act(store, session_ids)
+    report = export_eu_ai_act(
+        store, session_ids, name_sessions=bool(getattr(args, "all", False))
+    )
     result = json.dumps(report, indent=2)
     output = getattr(args, "output", "") or ""
     if output:

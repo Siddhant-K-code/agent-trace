@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
 
+from .event_data import require_object_event_data
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -115,9 +116,20 @@ def _extract_url_host(cmd: str) -> list[str]:
     return hosts
 
 
+# observe_session reads the data of every event of these types.
+POLICY_DATA_EVENT_TYPES = frozenset({EventType.TOOL_CALL})
+
+
 def observe_session(store: TraceStore, session_id: str) -> dict:
-    """Return raw observations from a single session."""
+    """Return raw observations from a single session.
+
+    Raises NonObjectEventDataError, naming the session, when a tool_call
+    event's data is not an object.
+    """
     events = store.load_events(session_id)
+    require_object_event_data(
+        events, event_types=POLICY_DATA_EVENT_TYPES, session_id=session_id
+    )
     files_read: list[str] = []
     files_written: list[str] = []
     commands: list[str] = []

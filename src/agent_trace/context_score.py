@@ -20,6 +20,7 @@ from typing import TextIO
 
 from .config_watch import ConfigSnapshot, _load_snapshots
 from .cost import estimate_cost
+from .event_data import require_object_event_data
 from .freshness import _parse_scope_from_agents_md
 from .lint import lint_session
 from .models import EventType, SessionMeta, TraceEvent
@@ -242,6 +243,19 @@ def _session_lint(store: TraceStore, session_id: str) -> tuple[int, int, int]:
     return len(report.findings), redundant, saturation
 
 
+def _metrics_data_event_types(
+    scope_globs: list[str],
+    instruction_lines: list[str],
+) -> frozenset[EventType]:
+    """Return the event types whose data _session_metrics reads."""
+    types: set[EventType] = set()
+    if scope_globs:
+        types.update({EventType.FILE_READ, EventType.FILE_WRITE, EventType.TOOL_CALL})
+    if instruction_lines:
+        types.add(EventType.TOOL_CALL)
+    return frozenset(types)
+
+
 def _session_metrics(
     store: TraceStore,
     meta: SessionMeta,
@@ -254,6 +268,11 @@ def _session_metrics(
         events = store.load_events(meta.session_id)
     except Exception:
         events = []
+    require_object_event_data(
+        events,
+        event_types=_metrics_data_event_types(scope_globs, instruction_lines),
+        session_id=meta.session_id,
+    )
     lint_count, redundant_reads, context_saturation = _session_lint(store, meta.session_id)
     return SessionContextMetrics(
         session_id=meta.session_id,

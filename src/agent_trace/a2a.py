@@ -26,6 +26,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, TextIO
 
+from .event_data import require_object_event_data
 from .models import EventType, SessionMeta, TraceEvent
 from .store import TraceStore
 
@@ -221,7 +222,11 @@ def _extract_a2a_calls(events: list[TraceEvent]) -> list[A2ACallEvent]:
 
 
 def build_a2a_tree(store: TraceStore, root_session_id: str) -> A2ATreeReport:
-    """Build the full agent call graph rooted at root_session_id."""
+    """Build the full agent call graph rooted at root_session_id.
+
+    Raises NonObjectEventDataError, naming the session, when an event in a
+    session of the tree has data that is not an object.
+    """
     visited: set[str] = set()
 
     def _build_node(sid: str, depth: int) -> AgentNode:
@@ -237,6 +242,8 @@ def build_a2a_tree(store: TraceStore, root_session_id: str) -> A2ATreeReport:
             return AgentNode(session_id=sid, agent_id="[not found]", depth=depth,
                              cost_usd=0, duration_ms=0, tool_calls=0)
 
+        # _extract_a2a_calls reads the data of every event.
+        require_object_event_data(events, session_id=sid)
         a2a_calls = _extract_a2a_calls(events)
 
         try:

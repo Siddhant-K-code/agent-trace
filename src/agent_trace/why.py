@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TextIO
 
+from .event_data import require_object_event_data
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -44,10 +46,25 @@ class CausalChain:
 # Causal link detection
 # ---------------------------------------------------------------------------
 
+class _NonObjectData(Exception):
+    """The causal walk read an event whose data is not an object."""
+
+    def __init__(self, event: TraceEvent) -> None:
+        super().__init__()
+        self.event = event
+
+
+def _data(event: TraceEvent) -> Mapping:
+    """Return the data of an event the causal walk reads."""
+    if not isinstance(event.data, Mapping):
+        raise _NonObjectData(event)
+    return event.data
+
+
 def _event_paths(event: TraceEvent) -> set[str]:
     """Extract file paths referenced in an event's data."""
     paths: set[str] = set()
-    data = event.data
+    data = _data(event)
     for key in ("file_path", "uri", "path"):
         val = data.get(key, "")
         if val:
@@ -61,16 +78,20 @@ def _event_paths(event: TraceEvent) -> set[str]:
     return paths
 
 
-def _result_text(event: TraceEvent) -> str:
+def _result_text(data: Mapping) -> str:
     return str(
-        event.data.get("result", "")
-        or event.data.get("content_preview", "")
-        or event.data.get("text", "")
+        data.get("result", "")
+        or data.get("content_preview", "")
+        or data.get("text", "")
     )
 
 
 def build_causal_chain(events: list[TraceEvent], target_index: int) -> CausalChain:
-    """Trace backwards from events[target_index] to find the causal chain."""
+    """Trace backwards from events[target_index] to find the causal chain.
+
+    Raises NonObjectEventDataError when the walk reaches an event whose data
+    it reads and that data is not an object.
+    """
     if not events or target_index < 0 or target_index >= len(events):
         return CausalChain(target_index=target_index, links=[])
 
@@ -116,8 +137,8 @@ def build_causal_chain(events: list[TraceEvent], target_index: int) -> CausalCha
                 while causing_idx >= 0 and events[causing_idx].event_type == EventType.TOOL_RESULT:
                     causing_idx -= 1
                 if causing_idx >= 0 and events[causing_idx].event_type == EventType.TOOL_CALL:
-                    causing = events[causing_idx].data
-                    target = event.data
+                    causing = _data(events[causing_idx])
+                    target = _data(event)
                     same_tool = causing.get("tool_name", "") == target.get("tool_name", "")
                     # For Bash, also require the same command string
                     causing_args = causing.get("arguments", {}) or {}
@@ -133,7 +154,7 @@ def build_causal_chain(events: list[TraceEvent], target_index: int) -> CausalCha
 
             # tool_result containing a path that this tool_call references
             if (prev.event_type == EventType.TOOL_RESULT and target_paths):
-                result_text = _result_text(prev)
+                result_text = _result_text(_data(prev))
                 if any(p in result_text for p in target_paths):
                     _walk(prev_idx, f"result at #{prev_idx + 1} referenced path")
                     return
@@ -149,7 +170,7 @@ def build_causal_chain(events: list[TraceEvent], target_index: int) -> CausalCha
             # Write tool calls (Write/Edit) via tool_call event type
             if (prev.event_type in (EventType.TOOL_CALL, EventType.FILE_READ)
                     and event.event_type == EventType.TOOL_CALL):
-                tool = event.data.get("tool_name", "").lower()
+                tool = _data(event).get("tool_name", "").lower()
                 if tool in ("write", "edit", "create"):
                     prev_paths = _event_paths(prev)
                     if target_paths & prev_paths:
@@ -164,7 +185,12 @@ def build_causal_chain(events: list[TraceEvent], target_index: int) -> CausalCha
         # Fallback: link to session_start or first event
         _walk(0, "session start")
 
-    _walk(target_index, "target event")
+    try:
+        _walk(target_index, "target event")
+    except _NonObjectData as exc:
+        position = next(i for i, event in enumerate(events) if event is exc.event)
+        require_object_event_data(events, indexes=[position])
+        raise
 
     # Reverse so chain reads root → target
     chain.reverse()
@@ -191,7 +217,7 @@ def _event_summary(event: TraceEvent, index: int) -> str:
         return f"#{index + 1:>3}  tool_call: {name}{detail}"
 
     if event.event_type == EventType.TOOL_RESULT:
-        preview = _result_text(event)[:60]
+        preview = _result_text(data)[:60]
         return f"#{index + 1:>3}  tool_result: {preview}"
 
     if event.event_type == EventType.ERROR:
@@ -213,11 +239,43 @@ def _event_summary(event: TraceEvent, index: int) -> str:
     return f"#{index + 1:>3}  {etype}"
 
 
+# _event_summary reads the data of events of these types.
+SUMMARY_DATA_EVENT_TYPES = frozenset({
+    EventType.TOOL_CALL,
+    EventType.TOOL_RESULT,
+    EventType.ERROR,
+    EventType.USER_PROMPT,
+    EventType.ASSISTANT_RESPONSE,
+    EventType.FILE_READ,
+    EventType.FILE_WRITE,
+})
+
+
+def _summarized_indexes(chain: CausalChain) -> list[int]:
+    """Return the indexes of the events format_why summarizes."""
+    if not chain.links:
+        return []
+    indexes = {chain.target_index}
+    if len(chain.links) > 1:
+        indexes.update(link.event_index for link in chain.links)
+    return sorted(indexes)
+
+
 def format_why(
     chain: CausalChain,
     events: list[TraceEvent],
     out: TextIO = sys.stdout,
 ) -> None:
+    """Write the causal chain.
+
+    Raises NonObjectEventDataError before writing anything when a summarized
+    event's data is not an object.
+    """
+    require_object_event_data(
+        events,
+        event_types=SUMMARY_DATA_EVENT_TYPES,
+        indexes=_summarized_indexes(chain),
+    )
     w = out.write
 
     if not chain.links:

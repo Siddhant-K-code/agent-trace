@@ -1010,7 +1010,9 @@ such event by position and event type and count the rest, for example
 `Error: session event data must be an object: event 4 of 9 (tool_result) has
 string data; 1 more event has non-object data`. The message never includes data
 values. The preview refuses these sessions instead of counting them, because key
-names cannot be read from a non-object payload.
+names cannot be read from a non-object payload. Other commands that read event
+data refuse the same way; see
+[Sessions with non-object event data](#sessions-with-non-object-event-data).
 
 ### `score`
 ```
@@ -1222,6 +1224,52 @@ apply to them as soon as they are visible. Run `agent-strace retention status`
 after `--apply` and before the next `retention clean`.
 
 Exit status is 1 when a store cannot be scanned or a write fails, otherwise 0.
+
+---
+
+## Sessions with non-object event data
+
+Hook capture records every event's `data` as a JSON object. `agent-strace server`
+stores array, string, number, and boolean `data` as it arrives, and a hand edit
+can store any JSON value. A command that reads keys from `data` checks the
+session first. If an event it reads has non-object data, the command writes one
+line to stderr and exits 1 before it prints, writes, sends, or opens anything:
+
+```
+Error: session event data must be an object: event 6 of 25 (tool_call) has string data; 5 more events have non-object data
+```
+
+The message names the first such event by position and event type, gives the
+JSON type of its data, and counts every other event in the session with
+non-object data. It never includes data values or event IDs. Commands that read
+more than one session name the session, for example `Error: session
+c3d4e5f6a7b80003 event data must be an object: event 3 of 7 (tool_call) has
+array data`.
+
+These commands refuse such sessions: `a2a-tree`, `audit`, `budget-report`,
+`cognitive-debt`, `compaction`, `compare`, `compliance export`,
+`context-score --file`, `cost`, `dashboard --trend`, `diff`, `explain`,
+`export` with `--format otlp`, `otlp-genai`, or `eu-ai-act` or with `--backend`,
+`inflation`, `mcp-scan --session`, `oncall`, `optimize`, `policy generate`,
+`postmortem`, `pr-comment`, `replay`, `sample`, `share`, `standup`, `stats`,
+`team-report`, `tenant report`, `timeline`, `token-budget`, and `why`. A command
+refuses only when it reads an event whose data is not an object, so the same
+session keeps working with commands that never read that event. `freeze`,
+`regression`, `compliance-report`, `org-report`, and `compare` for events other
+than decisions already stopped on these sessions with their own error message
+and exit code 1, and they keep it.
+
+`list`, `inspect`, `tree`, `verify`, and `export --format json`, `ndjson`, or `csv`
+keep working on these sessions. The export formats include the data exactly as
+stored.
+
+`watch` keeps running when a live event that one of its checks reads has
+non-object data. It skips the checks for that event, prints one line such as
+`[watch] Skipped checks for one tool_call event because its data is a string,
+not an object.` to stderr, and still counts the event. `watch
+--compaction-checkpoint` refuses at startup when the session already has an
+event with non-object data. `mcp-scan --watch` refuses at startup in the same
+way and skips live events with non-object data with an `[mcp-scan]` line.
 
 ---
 

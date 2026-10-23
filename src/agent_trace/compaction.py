@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Mapping, TextIO
 
 from .cost import get_model_pricing
+from .event_data import NonObjectEventDataError, require_object_event_data
 from .models import EventType, TraceEvent
 from .store import TraceStore
 from .token_budget import DEFAULT_CONTEXT_LIMIT, _resolve_limit
@@ -314,13 +315,17 @@ def _request_samples(events: list[TraceEvent]) -> list[_RequestSample]:
     return samples
 
 
+def _require_valid_threshold(threshold: float) -> None:
+    if not 0 < threshold < 1:
+        raise ValueError("compaction threshold must be between 0 and 1")
+
+
 def detect_compactions(
     events: list[TraceEvent],
     threshold: float = DEFAULT_COMPACTION_THRESHOLD,
 ) -> list[CompactionEvent]:
     """Return compactions inferred from consecutive logical LLM requests."""
-    if not 0 < threshold < 1:
-        raise ValueError("compaction threshold must be between 0 and 1")
+    _require_valid_threshold(threshold)
 
     samples = _request_samples(events)
     base_timestamp = events[0].timestamp if events else 0.0
@@ -741,9 +746,16 @@ def analyse_compaction_session(
     threshold: float = DEFAULT_COMPACTION_THRESHOLD,
     behavior_window: int = DEFAULT_BEHAVIOR_WINDOW,
 ) -> CompactionReport:
-    return analyze_compactions(
-        store.load_events(session_id), session_id, threshold, behavior_window,
-    )
+    """Build a compaction report for a stored session.
+
+    Raises NonObjectEventDataError when any event's data is not an object,
+    because the analysis reads the data of every event. An invalid threshold
+    is still reported first.
+    """
+    events = store.load_events(session_id)
+    _require_valid_threshold(threshold)
+    require_object_event_data(events)
+    return analyze_compactions(events, session_id, threshold, behavior_window)
 
 
 def _format_offset(seconds: float) -> str:
@@ -962,6 +974,8 @@ class CompactionCheckpointWatcher:
             raise ValueError("compaction threshold must be between 0 and 1")
         if not self.events:
             self.events = self.store.load_events(self.session_id)
+        # _request_samples and the stream bookkeeping below read every event.
+        require_object_event_data(self.events)
         samples = _request_samples(self.events)
         if samples:
             self._last_tokens = samples[-1].input_tokens
@@ -1112,6 +1126,8 @@ def cmd_compaction(args: argparse.Namespace) -> int:
     )
     try:
         report = analyse_compaction_session(store, session_id, threshold)
+    except NonObjectEventDataError:
+        raise
     except ValueError as exc:
         sys.stderr.write(f"compaction: {exc}\n")
         return 2
