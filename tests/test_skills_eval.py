@@ -318,6 +318,24 @@ class ScoreTraceDirTests(_TempDirTest):
         self.assertEqual(empty["status"], "unscored")
         self.assertIn("no trace events", empty["unscored_reason"])
 
+    def test_default_user_dirs_follow_codex_home(self):
+        codex_home = self.root / "codex-home"
+        skill_dir = codex_home / "skills" / "codex-only"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("---\nname: codex-only\n---\n# codex-only\n")
+        (self.root / "home").mkdir()
+        _write_session(self.store, "s1", [
+            _event(EventType.SESSION_START, 0, cwd=str(self.repo)),
+            _event(EventType.USER_PROMPT, 1, prompt="/codex-only for v2"),
+        ])
+
+        # A /name prompt is a load only when the skill is available.
+        with mock.patch.dict(os.environ, {"HOME": str(self.root / "home")}):
+            os.environ.pop("CODEX_HOME", None)
+            self.assertFalse(score_trace_dir(self.store, "codex-only", workspace=str(self.repo))["user_invoked"])
+            os.environ["CODEX_HOME"] = str(codex_home)
+            self.assertTrue(score_trace_dir(self.store, "codex-only", workspace=str(self.repo))["user_invoked"])
+
 
 class FromTracesTests(_TempDirTest):
     def setUp(self):

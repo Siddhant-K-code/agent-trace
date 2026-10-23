@@ -12,10 +12,12 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from agent_trace.cli import build_parser
+from agent_trace.cli import _codex_config_dir, build_parser
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.review import is_test_command
 from agent_trace.skills import (
+    USER_SKILL_DIRS,
+    _codex_skill_root,
     aggregate_reports,
     analyze_session,
     cmd_skills,
@@ -208,6 +210,133 @@ class TestDiscovery(SkillsTestBase):
 
         self.assertIn("deploy-check", catalog.skills)
         self.assertNotIn("locked", catalog.skills)
+
+
+class TestCodexHomeSkillRoot(SkillsTestBase):
+    """Codex reads user skills from $CODEX_HOME/skills, else ~/.codex/skills."""
+
+    def setUp(self):
+        super().setUp()
+        base = Path(os.path.realpath(self.tmp))
+        self.home = base / "home"
+        self.cwd = base / "cwd"
+        self.codex_home = base / "codex-home"
+        self.trace_dir = base / ".agent-traces"
+        for path in (self.home, self.cwd, self.codex_home):
+            path.mkdir()
+        env = mock.patch.dict(os.environ, {"HOME": str(self.home), "AGENT_STRACE_TELEMETRY": "0"})
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("CODEX_HOME", None)
+        previous_cwd = os.getcwd()
+        os.chdir(self.cwd)
+        self.addCleanup(os.chdir, previous_cwd)
+        _write_skill(self.home / ".codex" / "skills", "codex-default", "body\n")
+        _write_skill(self.codex_home / "skills", "codex-custom", "body\n")
+
+    def user_dirs(self, catalog):
+        return [item.display for item in catalog.scanned if item.source == "user"]
+
+    def test_unset_or_empty_uses_home_codex(self):
+        for env in ({}, {"CODEX_HOME": ""}):
+            with self.subTest(env=env), mock.patch.dict(os.environ, env):
+                catalog = discover_skills(None)
+
+                self.assertEqual(catalog.skills["codex-default"].source_dir, "~/.codex/skills")
+                self.assertNotIn("codex-custom", catalog.skills)
+                self.assertIn("~/.codex/skills", self.user_dirs(catalog))
+
+    def test_absolute_codex_home_replaces_default(self):
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(self.codex_home)}):
+            catalog = discover_skills(None)
+
+        expected = str(self.codex_home / "skills")
+        self.assertEqual(catalog.skills["codex-custom"].source_dir, expected)
+        self.assertNotIn("codex-default", catalog.skills)
+        self.assertIn(expected, self.user_dirs(catalog))
+        self.assertNotIn("~/.codex/skills", self.user_dirs(catalog))
+
+    def test_codex_home_under_home_is_shown_with_tilde(self):
+        _write_skill(self.home / "alt-codex" / "skills", "codex-alt", "body\n")
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(self.home / "alt-codex")}):
+            catalog = discover_skills(None)
+
+        self.assertEqual(catalog.skills["codex-alt"].source_dir, "~/alt-codex/skills")
+
+    def test_tilde_in_codex_home_is_not_expanded(self):
+        _write_skill(self.cwd / "~" / "x" / "skills", "literal-tilde", "body\n")
+        _write_skill(self.home / "x" / "skills", "expanded-tilde", "body\n")
+        with mock.patch.dict(os.environ, {"CODEX_HOME": "~/x"}):
+            catalog = discover_skills(None)
+
+        expected = str(self.cwd / "~" / "x" / "skills")
+        self.assertEqual(catalog.skills["literal-tilde"].source_dir, expected)
+        self.assertNotIn("expanded-tilde", catalog.skills)
+        self.assertIn(expected, self.user_dirs(catalog))
+
+    def test_missing_codex_home_is_reported_without_fallback(self):
+        missing = self.cwd / "missing"
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(missing)}):
+            catalog = discover_skills(None)
+
+        scanned = {item.display: item.exists for item in catalog.scanned}
+        self.assertIs(scanned[str(missing / "skills")], False)
+        self.assertNotIn("codex-default", catalog.skills)
+
+    def test_explicit_user_dirs_ignore_codex_home(self):
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(self.codex_home)}):
+            empty = discover_skills(None, user_dirs=())
+            literal = discover_skills(None, user_dirs=("~/.codex/skills",))
+
+        self.assertEqual((empty.skills, empty.scanned), ({}, []))
+        self.assertEqual(list(literal.skills), ["codex-default"])
+        self.assertEqual(self.user_dirs(literal), ["~/.codex/skills"])
+
+    def test_codex_home_is_read_at_call_time(self):
+        self.assertIn("~/.codex/skills", USER_SKILL_DIRS)
+        self.assertIn("codex-default", discover_skills(None).skills)
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(self.codex_home)}):
+            self.assertIn(str(self.codex_home / "skills"), USER_SKILL_DIRS)
+            self.assertNotIn("~/.codex/skills", USER_SKILL_DIRS)
+            self.assertIn("codex-custom", discover_skills(None).skills)
+        self.assertIn("codex-default", discover_skills(None).skills)
+
+    def test_matches_cli_codex_config_dir(self):
+        for value in (None, "", str(self.codex_home), "~/x", "relative/codex"):
+            env = {} if value is None else {"CODEX_HOME": value}
+            with self.subTest(value=value), mock.patch.dict(os.environ, env):
+                self.assertEqual(
+                    os.path.expanduser(_codex_skill_root()),
+                    str(Path.cwd() / _codex_config_dir() / "skills"),
+                )
+
+    def test_reports_show_resolved_codex_dir(self):
+        store = TraceStore(self.trace_dir)
+        meta = SessionMeta(agent_name="codex")
+        meta.session_id = "codex001"
+        meta.started_at = time.time()
+        store.create_session(meta)
+        ev = _Events(str(self.repo))
+        ev.prompt("use $codex-custom here")
+        for event in ev.events:
+            store.append_event(meta.session_id, event)
+
+        outputs = {}
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(self.codex_home)}):
+            for fmt in ("json", "text"):
+                args = build_parser().parse_args(
+                    ["--trace-dir", str(self.trace_dir), "skills", meta.session_id, "--format", fmt]
+                )
+                out = io.StringIO()
+                with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                    self.assertEqual(cmd_skills(args), 0)
+                outputs[fmt] = out.getvalue()
+
+        expected = str(self.codex_home / "skills")
+        report = json.loads(outputs["json"])
+        self.assertIn(expected, [item["dir"] for item in report["scanned_dirs"]])
+        self.assertEqual(self.loaded(report, "codex-custom")["dir"], expected)
+        self.assertIn(expected, outputs["text"])
 
 
 class TestLoads(SkillsTestBase):
