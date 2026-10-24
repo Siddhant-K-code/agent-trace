@@ -834,6 +834,10 @@ def handle_subagent(input_data: dict, phase: str, provider: str = "claude") -> N
     Records a ``subagent_start`` or ``subagent_stop`` event in the parent's
     trace. When the payload names the child session, the event carries
     ``child_session_id`` and the child's metadata is linked to the parent.
+
+    Other providers' subagents are not separate sessions: Codex fires a
+    subagent's hooks under the parent's ``session_id``. Their ``agent_id`` is
+    recorded as-is, and no child session is looked up, linked or created.
     """
     store = _get_store()
     session_id = _resolve_session_id(input_data, provider=provider)
@@ -855,6 +859,8 @@ def handle_subagent(input_data: dict, phase: str, provider: str = "claude") -> N
     if child_id:
         event_data["child_session_id"] = child_id
     keys = ["agent_type", "agent_name", "turn_id"]
+    if provider not in _SUBAGENT_SESSION_PROVIDERS:
+        keys.insert(0, "agent_id")
     if phase == "stop":
         keys.append("stop_reason")
     for key in keys:

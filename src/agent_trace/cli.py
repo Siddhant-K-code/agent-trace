@@ -724,6 +724,27 @@ def _codex_hooks_config(args: argparse.Namespace) -> dict:
                     "command": f"{cmd_prefix} stop",
                 }],
             }],
+            "SubagentStart": [{
+                "hooks": [{
+                    "type": "command",
+                    "command": f"{cmd_prefix} subagent-start",
+                }],
+            }],
+            "SubagentStop": [{
+                "hooks": [{
+                    "type": "command",
+                    "command": f"{cmd_prefix} subagent-stop",
+                }],
+            }],
+            # Codex gives SessionEnd hooks 1 second by default and allows at
+            # most 3; use the maximum so a slow start-up still records the end.
+            "SessionEnd": [{
+                "hooks": [{
+                    "type": "command",
+                    "command": f"{cmd_prefix} session-end",
+                    "timeout": 3,
+                }],
+            }],
         }
     }
 
@@ -1129,7 +1150,8 @@ def cmd_setup(args: argparse.Namespace) -> int | None:
             f"- Put the JSON at {codex_hooks_path} or <repo>/.codex/hooks.json, not {codex_hooks_path.parent / 'hooks' / 'hooks.json'}.\n"
             f"- Restore the pre-AgentTrace config, when backed up, with: {restore_command}\n"
             f"- In {codex_hooks_path.with_name('config.toml')}, remove [features].hooks = false if present.\n"
-            "- Reload Codex, then review and trust command hooks in the Hooks UI or /hooks.\n"
+            "- Reload Codex, then review and trust command hooks in the Hooks UI or /hooks. "
+            "Hooks added by a newer agent-strace need trusting again; codex exec skips untrusted hooks.\n"
         )
 
     if cli == "gemini":

@@ -38,11 +38,11 @@
       "rollback": "Setup preserves the original bytes once at hooks.json.agent-strace.bak next to $CODEX_HOME/hooks.json (default ~/.codex/hooks.json) before overwriting an existing file. Restore them with cp ~/.codex/hooks.json.agent-strace.bak ~/.codex/hooks.json, replacing ~/.codex with \"$CODEX_HOME\" when it is set. If no file existed before setup, remove the generated hooks.json from that directory instead.",
       "verification_status": "verified",
       "tested_version": "0.163.0-alpha.11",
-      "last_verified": "2026-10-22",
+      "last_verified": "2026-10-24",
       "fixture_test_reference": "tests/test_capture_matrix_fixtures.py",
       "coverage": {
         "session_start": "captured",
-        "session_end": "unavailable",
+        "session_end": "captured",
         "prompt": "captured",
         "response": "captured",
         "tool": "captured",
@@ -54,9 +54,9 @@
       "privacy": "Events pass through AgentTrace's normal redaction path; hook visibility is limited to fields emitted by the provider.",
       "known_gaps": [
         "The setup command replaces hooks.json rather than merging; repeated runs retain the first hooks.json.agent-strace.bak snapshot.",
-        "Codex runs command hooks only after they are reviewed and trusted in /hooks; codex exec skips untrusted hooks without a warning.",
-        "Codex emits SessionEnd, but setup does not register it, so traces have no session_end event.",
-        "Subagent hooks arrive under the parent session_id with an agent_id, so subagent tool calls are recorded in the parent trace; SubagentStart and SubagentStop are not registered.",
+        "Codex runs command hooks only after they are reviewed and trusted in /hooks; codex exec skips untrusted hooks without a warning. Hooks added by a later setup run must be trusted again.",
+        "SessionEnd always reports reason \"other\", so the session_end event does not say why the session ended.",
+        "Subagents are not separate sessions: their hooks arrive under the parent session_id with an agent_id. SubagentStart and SubagentStop are recorded as subagent_start and subagent_stop events in the parent trace with agent_id and agent_type, but the subagent's tool calls are recorded without its agent_id, no event links a subagent to the spawn_agent call that started it, and the subagent's final message is not recorded.",
         "A failed shell command arrives as a normal PostToolUse with the error text in tool_response, so it is recorded as a tool_result rather than an error.",
         "Hook payloads carry the model name, recorded on the session_start event, but no token usage.",
         "File and command detail depends on PreToolUse/PostToolUse payloads; shell calls arrive as tool_name Bash with tool_input.command."

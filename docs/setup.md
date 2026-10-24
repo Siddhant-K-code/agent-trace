@@ -141,12 +141,17 @@ When `CODEX_HOME` is set, use `cp "$CODEX_HOME/hooks.json.agent-strace.bak" "$CO
     "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "agent-strace hook --provider codex user-prompt" }] }],
     "PreToolUse": [{ "matcher": ".*", "hooks": [{ "type": "command", "command": "agent-strace hook --provider codex pre-tool" }] }],
     "PostToolUse": [{ "matcher": ".*", "hooks": [{ "type": "command", "command": "agent-strace hook --provider codex post-tool" }] }],
-    "Stop": [{ "hooks": [{ "type": "command", "command": "agent-strace hook --provider codex stop" }] }]
+    "Stop": [{ "hooks": [{ "type": "command", "command": "agent-strace hook --provider codex stop" }] }],
+    "SubagentStart": [{ "hooks": [{ "type": "command", "command": "agent-strace hook --provider codex subagent-start" }] }],
+    "SubagentStop": [{ "hooks": [{ "type": "command", "command": "agent-strace hook --provider codex subagent-stop" }] }],
+    "SessionEnd": [{ "hooks": [{ "type": "command", "command": "agent-strace hook --provider codex session-end", "timeout": 3 }] }]
   }
 }
 ```
 
-Codex sends one JSON object to each command hook on stdin. agent-strace records the common Codex fields (`session_id`, `turn_id`, `tool_use_id`, `tool_name`, `tool_input`, `tool_response`, `prompt`, and `last_assistant_message`) into the same `.agent-traces/` session store used by Claude Code.
+Codex sends one JSON object to each command hook on stdin. agent-strace records the common Codex fields (`session_id`, `turn_id`, `tool_use_id`, `tool_name`, `tool_input`, `tool_response`, `prompt`, `last_assistant_message`, and for subagent hooks `agent_id` and `agent_type`) into the same `.agent-traces/` session store used by Claude Code. `SessionEnd` records a `session_end` event; its `timeout` of 3 seconds is the most Codex allows for that hook. A Codex subagent is not a separate session: `SubagentStart` and `SubagentStop` are recorded as `subagent_start` and `subagent_stop` events in the parent's trace, and the subagent's tool calls are recorded there too. See the [capture matrix](capture-matrix.md#openai-codex) for details.
+
+**Upgrading from an earlier agent-strace:** installs made before `SessionEnd`, `SubagentStart` and `SubagentStop` were added do not have those hooks, so Codex traces have no `session_end` or subagent events. Re-run `agent-strace setup --cli codex`, then trust the new hooks in `/hooks`; Codex treats them as new hooks, and `codex exec` skips them until they are trusted. `agent-strace setup --cli codex --verify` reports them as missing until setup is re-run.
 
 If Codex does not list the hooks after you create the file:
 

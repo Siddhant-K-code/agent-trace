@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -196,25 +197,54 @@ class TestHookSessions(_HealthBase):
         self.assertEqual(payload["capture_matrix"]["entry"]["id"], "claude")
         self.assertIsNone(payload["capture_matrix"]["note"])
 
-    def test_codex_session_is_partial_with_known_gaps_and_unavailable_coverage(self):
-        hook_session("codexsession0001", "codex", end=False)
-        self.assertTrue(self.markers_naming("codexsession0001"))
+    def test_ended_codex_session_is_partial_with_known_gaps(self):
+        hook_session("codexsession0001", "codex")
 
         code, payload = self.health_json("codexsession0001")
 
         gaps = [g.strip() for g in raw_entry("codex")["known_gaps"]]
-        missing = unavailable("codex")
-        self.assertIn("session_end", missing)
+        self.assertTrue(gaps)
+        self.assertEqual(unavailable("codex"), [])
+        self.assertEqual(self.messages(payload, "provider_limitation"), gaps)
+        self.assertIs(payload["session_finalized"], True)
+        self.assertEqual(self.codes(payload, "observed"), [])
+        self.assertEqual(payload["status"], "partial")
+        self.assertEqual(code, 0)
+
+    def test_active_codex_session_is_reported_active(self):
+        hook_session("codexlive0000001", "codex", end=False)
+        self.assertTrue(self.markers_naming("codexlive0000001"))
+
+        code, payload = self.health_json("codexlive0000001")
+
+        self.assertIs(payload["session_finalized"], False)
+        self.assertEqual(self.codes(payload, "observed"), ["session_active"])
+        self.assertEqual(payload["status"], "partial")
+        self.assertEqual(code, 0)
+
+    def test_provider_without_session_end_coverage_lists_it_and_ignores_markers(self):
+        matrix = load_capture_matrix()
+        entry = json.loads(json.dumps(matrix.entry("codex")))
+        entry["coverage"]["session_end"] = "unavailable"
+        patched = replace(matrix, providers=tuple(
+            entry if item["id"] == "codex" else item for item in matrix.providers
+        ))
+        hook_session("codexnoend000001", "codex", end=False)
+        self.assertTrue(self.markers_naming("codexnoend000001"))
+
+        with patch.object(health, "load_capture_matrix", return_value=patched):
+            code, payload = self.health_json("codexnoend000001")
+
+        gaps = [g.strip() for g in entry["known_gaps"]]
         limitations = self.messages(payload, "provider_limitation")
         self.assertEqual(limitations[: len(gaps)], gaps)
-        self.assertEqual(len(limitations), len(gaps) + len(missing))
-        for capability, message in zip(missing, limitations[len(gaps):]):
-            self.assertIn(capability, message)
+        self.assertEqual(len(limitations), len(gaps) + 1)
+        self.assertIn("session_end", limitations[-1])
         spots = payload["capture_matrix"]["blind_spots"]
         self.assertEqual([s["text"] for s in spots], limitations)
-        self.assertEqual([s.get("capability") for s in spots if s["source"] == "coverage"], missing)
+        self.assertEqual([s.get("capability") for s in spots if s["source"] == "coverage"], ["session_end"])
 
-        # Codex declares no session-end hook, so its marker never proves activity.
+        # Without a declared session-end hook, a marker never proves activity.
         self.assertIsNone(payload["session_finalized"])
         self.assertEqual(self.codes(payload, "observed"), ["missing_session_end"])
         self.assertEqual(payload["status"], "partial")
@@ -472,19 +502,20 @@ class TestResumedAndCompactedSessions(_HealthBase):
         self.assertEqual(payload["status"], "partial")
         self.assertEqual(code, 0)
 
-    def test_codex_resume_then_compact_without_session_end(self):
-        hook_session("codexrescomp0001", "codex", end=False)
+    def test_codex_resume_then_compact_session(self):
+        # Codex ends every exec run with SessionEnd, including a resumed one.
+        hook_session("codexrescomp0001", "codex")
         hook_session("codexrescomp0001", "codex", source="resume", end=False, tool_use_id="tool-2")
-        hook_session("codexrescomp0001", "codex", source="compact", end=False, tool_use_id="tool-3")
+        hook_session("codexrescomp0001", "codex", source="compact", tool_use_id="tool-3")
 
         code, payload = self.health_json("codexrescomp0001")
 
-        self.assertIsNone(payload["session_finalized"])
+        self.assertIs(payload["session_finalized"], True)
         self.assertEqual(
             self.start_sources("codexrescomp0001"),
             ["startup", "resume", "compact"],
         )
-        self.assertEqual(self.codes(payload, "observed"), ["missing_session_end"])
+        self.assertEqual(self.codes(payload, "observed"), [])
         self.assertEqual(payload["status"], "partial")
         self.assertEqual(code, 0)
 
@@ -1139,8 +1170,8 @@ class TestOutput(_HealthBase):
         ]
         self.assertEqual(positions, sorted(positions))
         self.assertIn("Provider:  codex (from hook events)\n", out)
-        self.assertIn("Finalized: unknown\n", out)
-        self.assertIn("  - missing_session_end: ", out)
+        self.assertIn("Finalized: no (active-session marker present)\n", out)
+        self.assertIn("  - session_active: ", out)
         self.assertIn(f"verification_status {raw_entry('codex')['verification_status']}", out)
 
 

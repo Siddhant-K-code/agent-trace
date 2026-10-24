@@ -13,7 +13,9 @@ from unittest.mock import patch
 
 from agent_trace import __version__
 from agent_trace.cli import _codex_config_dir, _codex_hooks_config, cmd_setup
+from agent_trace.health import assess_session, load_capture_matrix
 from agent_trace.hooks import (
+    _PROVIDER_ENV,
     _read_active_session,
     handle_post_tool,
     handle_pre_tool,
@@ -503,6 +505,212 @@ class TestCodexHomeResolution(unittest.TestCase):
         self.assertEqual(out, "")
         self.assertEqual(err, "Setup verification failed: " + self._BAD_HOME.format(missing))
         self.assertFalse(missing.exists())
+
+
+class TestCodexSessionEndAndSubagentHooks(unittest.TestCase):
+    """SessionEnd, SubagentStart and SubagentStop as Codex 0.163.0-alpha.11 sends them."""
+
+    PARENT = "d0000101-0000-4000-8000-000000000101"
+    AGENT = "d0000102-0000-4000-8000-000000000102"
+    CHILD_TURN = "d0000103-0000-4000-8000-000000000103"
+    CWD = "/workspace/project"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name) / ".agent-traces"
+        env = patch.dict(
+            os.environ, {"AGENT_TRACE_DIR": str(self.root), "DO_NOT_TRACK": "1"}, clear=False
+        )
+        env.start()
+        self.addCleanup(env.stop)
+        for name in (*_PROVIDER_ENV.values(), "AGENT_TRACE_REDACT"):
+            os.environ.pop(name, None)
+
+    def dispatch(self, event, **payload):
+        payload = {
+            "session_id": self.PARENT,
+            "cwd": self.CWD,
+            "hook_event_name": event,
+            **payload,
+        }
+        err = io.StringIO()
+        with patch.object(sys, "stdin", io.StringIO(json.dumps(payload))), patch.object(
+            sys, "stderr", err
+        ):
+            hook_main(["--provider", "codex", event])
+        self.assertEqual(err.getvalue(), "", event)
+
+    def start(self, source="startup"):
+        self.dispatch("SessionStart", source=source, model="synthetic-model")
+
+    def subagent(self, event, **extra):
+        self.dispatch(
+            event,
+            agent_id=self.AGENT,
+            agent_type="default",
+            turn_id=self.CHILD_TURN,
+            model="synthetic-model",
+            permission_mode="bypassPermissions",
+            transcript_path="/codex-home/sessions/rollout-child.jsonl",
+            **extra,
+        )
+
+    def end(self):
+        self.dispatch(
+            "SessionEnd",
+            reason="other",
+            transcript_path="/codex-home/sessions/rollout-parent.jsonl",
+        )
+
+    def store(self):
+        return TraceStore(str(self.root))
+
+    def events(self, event_type=None):
+        events = self.store().load_events(self.PARENT[:16])
+        if event_type is None:
+            return events
+        return [e for e in events if e.event_type == event_type]
+
+    def health(self):
+        store = self.store()
+        session_id = self.PARENT[:16]
+        return assess_session(
+            store,
+            session_id,
+            store.load_meta(session_id),
+            store.load_events(session_id),
+            load_capture_matrix(),
+        )
+
+    def test_setup_registers_session_end_and_subagent_hooks(self):
+        hooks = _codex_hooks_config(
+            argparse.Namespace(redact=False, no_redact=False, global_config=False)
+        )["hooks"]
+        self.assertEqual(
+            list(hooks),
+            [
+                "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop",
+                "SubagentStart", "SubagentStop", "SessionEnd",
+            ],
+        )
+        for event, subcommand in (
+            ("SubagentStart", "subagent-start"),
+            ("SubagentStop", "subagent-stop"),
+            ("SessionEnd", "session-end"),
+        ):
+            with self.subTest(event=event):
+                (group,) = hooks[event]
+                self.assertNotIn("matcher", group)
+                (handler,) = group["hooks"]
+                self.assertEqual(handler["type"], "command")
+                self.assertEqual(
+                    handler["command"], f"agent-strace hook --provider codex {subcommand}"
+                )
+        self.assertEqual(hooks["SessionEnd"][0]["hooks"][0]["timeout"], 3)
+        self.assertNotIn("timeout", hooks["SubagentStart"][0]["hooks"][0])
+
+    def test_subagent_hooks_are_recorded_in_the_parent_trace(self):
+        self.start()
+        self.subagent("SubagentStart")
+        self.subagent(
+            "SubagentStop",
+            agent_transcript_path="/codex-home/sessions/rollout-child.jsonl",
+            last_assistant_message="Synthetic subagent answer.",
+            stop_hook_active=False,
+        )
+
+        (start,) = self.events(EventType.SUBAGENT_START)
+        (stop,) = self.events(EventType.SUBAGENT_STOP)
+        for event in (start, stop):
+            self.assertEqual(event.data["agent_id"], self.AGENT)
+            self.assertEqual(event.data["agent_type"], "default")
+            self.assertEqual(event.data["turn_id"], self.CHILD_TURN)
+            self.assertEqual(event.data["provider"], "codex")
+            self.assertNotIn("child_session_id", event.data)
+            self.assertNotIn("child_link", event.data)
+            self.assertEqual(event.parent_id, "")
+        self.assertNotIn("last_assistant_message", stop.data)
+        self.assertEqual(
+            [m.session_id for m in self.store().list_sessions()], [self.PARENT[:16]]
+        )
+        self.assertEqual(self.store().load_meta(self.PARENT[:16]).parent_session_id, "")
+
+    def test_subagent_hooks_never_link_a_session_named_by_agent_id(self):
+        child = self.AGENT[:16]
+        self.dispatch("SessionStart", session_id=self.AGENT, source="startup")
+        self.end()
+        meta_path = self.root / child / "meta.json"
+        events_path = self.root / child / "events.ndjson"
+        before = (meta_path.read_bytes(), events_path.read_bytes())
+
+        self.start()
+        self.subagent("SubagentStart")
+        self.subagent("SubagentStop")
+
+        self.assertEqual((meta_path.read_bytes(), events_path.read_bytes()), before)
+        (stop,) = self.events(EventType.SUBAGENT_STOP)
+        self.assertNotIn("child_link", stop.data)
+
+    def test_subagent_hooks_without_session_start_do_not_fail(self):
+        self.subagent("SubagentStart")
+        self.subagent("SubagentStop")
+        self.assertEqual(len(self.events(EventType.SUBAGENT_START)), 1)
+        self.assertEqual(len(self.events(EventType.SUBAGENT_STOP)), 1)
+
+    def test_session_end_finishes_the_session(self):
+        self.start()
+        report = self.health()
+        self.assertIs(report.session_finalized, False)
+        self.assertIn("session_active", [r.code for r in report.result.reasons])
+
+        self.end()
+
+        (end,) = self.events(EventType.SESSION_END)
+        self.assertEqual(end.data["reason"], "other")
+        self.assertEqual(end.data["hook_event_name"], "SessionEnd")
+        self.assertIsNotNone(self.store().load_meta(self.PARENT[:16]).ended_at)
+        self.assertIsNone(_read_active_session(provider="codex"))
+        report = self.health()
+        self.assertIs(report.session_finalized, True)
+        self.assertEqual([r.code for r in report.result.reasons if r.kind.value == "observed"], [])
+
+    def test_hooks_after_session_end_are_recorded_and_reported(self):
+        self.start()
+        self.end()
+        self.dispatch("Stop", last_assistant_message="Late synthetic response.")
+
+        kinds = [e.event_type for e in self.events()]
+        self.assertEqual(kinds[-2:], [EventType.SESSION_END, EventType.ASSISTANT_RESPONSE])
+        self.assertEqual(len(self.store().list_sessions()), 1)
+        report = self.health()
+        self.assertIn(
+            "events_after_session_end",
+            [r.code for r in report.result.reasons if r.kind.value == "observed"],
+        )
+
+    def test_resume_after_session_end_continues_the_session(self):
+        self.start()
+        self.end()
+        self.start(source="resume")
+        self.dispatch("UserPromptSubmit", prompt="Synthetic follow-up prompt.")
+        self.end()
+
+        kinds = [e.event_type for e in self.events()]
+        self.assertEqual(
+            kinds,
+            [
+                EventType.SESSION_START,
+                EventType.SESSION_END,
+                EventType.SESSION_START,
+                EventType.USER_PROMPT,
+                EventType.SESSION_END,
+            ],
+        )
+        self.assertEqual(len(self.store().list_sessions()), 1)
+        self.assertIsNotNone(self.store().load_meta(self.PARENT[:16]).ended_at)
+        report = self.health()
+        self.assertEqual([r.code for r in report.result.reasons if r.kind.value == "observed"], [])
 
 
 if __name__ == "__main__":
