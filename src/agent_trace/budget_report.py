@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import TextIO
 
 from .cost import estimate_cost, DEFAULT_MODEL
+from .event_data import require_object_event_data
 from .models import EventType, SessionMeta
 from .store import TraceStore
 
@@ -114,11 +115,18 @@ _TOOL_COST_FRACTION = 0.30  # rough: ~30% of session cost attributable to tool c
 
 
 def _tool_breakdown(store: TraceStore, session_id: str, total_cost: float) -> dict[str, float]:
-    """Estimate cost share per tool based on event count."""
+    """Estimate cost share per tool based on event count.
+
+    Raises NonObjectEventDataError, naming the session, when a tool_call
+    event's data is not an object.
+    """
     try:
         events = store.load_events(session_id)
     except Exception:
         return {}
+    require_object_event_data(
+        events, event_types={EventType.TOOL_CALL}, session_id=session_id
+    )
 
     tool_counts: dict[str, int] = {}
     for ev in events:

@@ -16,7 +16,8 @@ import sys
 from dataclasses import dataclass, field
 from typing import TextIO
 
-from .explain import Phase, build_phases, explain_session
+from .event_data import require_object_event_data
+from .explain import PHASE_DATA_EVENT_TYPES, Phase, build_phases, explain_session
 from .models import EventType
 from .store import TraceStore
 
@@ -698,6 +699,14 @@ def cmd_diff(args: argparse.Namespace) -> int:
     if not id_b:
         sys.stderr.write(f"Session not found: {args.session_b}\n")
         return 1
+
+    # Every diff mode builds explain phases for both sessions.
+    for full_id in (id_a, id_b):
+        require_object_event_data(
+            store.load_events(full_id),
+            event_types=PHASE_DATA_EVENT_TYPES,
+            session_id=full_id,
+        )
 
     if getattr(args, "compare", False):
         report = compare_sessions(store, id_a, id_b)

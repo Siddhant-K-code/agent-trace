@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .event_data import require_object_event_data
 from .models import EventType, SessionMeta, TraceEvent
 from .store import TraceStore
 
@@ -136,6 +137,25 @@ def _session_to_langfuse_trace(
         "tags": ["agent-strace"],
         **({"duration": duration_s} if duration_s else {}),
     }
+
+
+def langfuse_data_indexes(events: list[TraceEvent]) -> list[int]:
+    """Return the positions of the events whose data the Langfuse export reads.
+
+    Every tool result and LLM response is read. A tool call or LLM request is
+    read only when a later result or response names it as its parent.
+    """
+    indexes = []
+    pending: dict[str, int] = {}
+    for index, event in enumerate(events):
+        if event.event_type in (EventType.TOOL_CALL, EventType.LLM_REQUEST):
+            pending[event.event_id] = index
+        elif event.event_type in (EventType.TOOL_RESULT, EventType.LLM_RESPONSE):
+            indexes.append(index)
+            parent = pending.pop(event.parent_id, None)
+            if parent is not None:
+                indexes.append(parent)
+    return indexes
 
 
 def _events_to_langfuse_observations(
@@ -280,6 +300,10 @@ def _otlp_gauge(
     }
 
 
+# _session_metrics reads the data of every event of these types.
+METRICS_DATA_EVENT_TYPES = frozenset({EventType.TOOL_CALL, EventType.FILE_WRITE})
+
+
 def _session_metrics(
     store: TraceStore,
     meta: SessionMeta,
@@ -411,6 +435,17 @@ def _iso(ts: float) -> str:
 # CLI handler
 # ---------------------------------------------------------------------------
 
+def _loadable_events(store: TraceStore, session_ids: list[str]):
+    """Yield (session_id, events) for each session the export can load."""
+    for sid in session_ids:
+        try:
+            store.load_meta(sid)
+            events = store.load_events(sid)
+        except Exception:
+            continue
+        yield sid, events
+
+
 def cmd_export_scores(args) -> int:
     """Handle: agent-strace export --scores --backend langfuse|otlp"""
     import os
@@ -439,6 +474,7 @@ def cmd_export_scores(args) -> int:
     if not session_ids:
         sys.stderr.write("No sessions found.\n")
         return 1
+    multi = not session_arg and bool(since_raw)
 
     if backend == "langfuse":
         config = LangfuseConfig(
@@ -463,6 +499,12 @@ def cmd_export_scores(args) -> int:
             )
             return 1
 
+        for sid, events in _loadable_events(store, session_ids):
+            require_object_event_data(
+                events,
+                indexes=langfuse_data_indexes(events),
+                session_id=sid if multi else None,
+            )
         success = 0
         for sid in session_ids:
             if export_session_to_langfuse(store, sid, config, include_scores=include_scores):
@@ -493,6 +535,12 @@ def cmd_export_scores(args) -> int:
                     k, _, v = pair.partition("=")
                     headers[k.strip()] = v.strip()
 
+        for sid, events in _loadable_events(store, session_ids):
+            require_object_event_data(
+                events,
+                event_types=METRICS_DATA_EVENT_TYPES,
+                session_id=sid if multi else None,
+            )
         config_otlp = OtlpMetricsConfig(endpoint=endpoint, headers=headers)
         ok = export_metrics_to_otlp(
             store, session_ids, config_otlp, include_scores=include_scores

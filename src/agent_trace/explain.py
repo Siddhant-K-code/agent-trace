@@ -12,6 +12,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, TextIO
 
+from .event_data import require_object_event_data
 from .models import EventType, SessionMeta, TraceEvent
 from .store import TraceStore
 
@@ -90,6 +91,10 @@ def _phase_label(events: list[TraceEvent], index: int) -> str:
         dominant = max(set(tool_names), key=tool_names.count)
         return dominant.capitalize()
     return f"Phase {index}"
+
+
+# build_phases reads the data of every tool_call and user_prompt event.
+PHASE_DATA_EVENT_TYPES = frozenset({EventType.TOOL_CALL, EventType.USER_PROMPT})
 
 
 def build_phases(events: list[TraceEvent], base_ts: float) -> list[Phase]:
@@ -286,6 +291,9 @@ def cmd_explain(args: argparse.Namespace) -> int:
         sys.stderr.write(f"Session not found: {session_id}\n")
         return 1
 
+    require_object_event_data(
+        store.load_events(full_id), event_types=PHASE_DATA_EVENT_TYPES
+    )
     result = explain_session(store, full_id)
     format_explain(result)
     return 0

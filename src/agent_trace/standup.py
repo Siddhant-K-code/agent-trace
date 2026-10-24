@@ -18,6 +18,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import TextIO
 
+from .event_data import require_object_event_data
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -227,6 +228,15 @@ def _count_context_resets(events: list[TraceEvent]) -> int:
     return resets
 
 
+# analyse_standup reads the data of every event of these types.
+STANDUP_DATA_EVENT_TYPES = frozenset({
+    EventType.TOOL_CALL,
+    EventType.TOOL_RESULT,
+    EventType.FILE_READ,
+    EventType.FILE_WRITE,
+})
+
+
 def analyse_standup(store: TraceStore, session_id: str) -> StandupReport:
     """Build a standup report from a session's trace data."""
     from .cost import estimate_cost
@@ -378,6 +388,9 @@ def cmd_standup(args: argparse.Namespace) -> int:
         sys.stderr.write(f"Session not found: {session_id}\n")
         return 1
 
+    require_object_event_data(
+        store.load_events(full_id), event_types=STANDUP_DATA_EVENT_TYPES
+    )
     report = analyse_standup(store, full_id)
     format_standup(report)
     return 0

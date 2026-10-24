@@ -21,6 +21,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TextIO
 
+from .event_data import require_object_event_data
 from .models import EventType, SessionMeta, TraceEvent
 from .store import TraceStore
 
@@ -54,6 +55,12 @@ def _estimate_cost(events: list[TraceEvent]) -> float:
             out = int(tokens * 0.2)
             total += (inp / 1_000_000) * 3.0 + (out / 1_000_000) * 15.0
     return total
+
+
+# _score_session reads the data of every event of these types.
+SCORE_DATA_EVENT_TYPES = frozenset({
+    EventType.TOOL_CALL, EventType.FILE_WRITE, EventType.LLM_RESPONSE,
+})
 
 
 def _score_session(
@@ -224,6 +231,46 @@ def _session_to_jsonl_record(
     }
 
 
+def _tool_sequence_key(events: list[TraceEvent]) -> str:
+    """Fingerprint a session by the sorted (tool_name, command) pairs of its tool calls."""
+    seq = tuple(sorted(
+        (ev.data.get("tool_name", ""), str(ev.data.get("arguments", {}).get("command", "")))
+        for ev in events
+        if ev.event_type == EventType.TOOL_CALL
+    ))
+    return str(seq)
+
+
+def _require_sampled_event_data(
+    store: TraceStore,
+    sessions: list[SessionMeta],
+    deduplicate: bool,
+) -> None:
+    """Raise NonObjectEventDataError before run_sample prints anything.
+
+    This mirrors the scoring loop: a session that fails to load is skipped,
+    and with deduplicate a repeated tool sequence is not scored, so only its
+    tool_call data is read.
+    """
+    seen_tool_sequences: set[str] = set()
+    for meta in sessions:
+        try:
+            events = store.load_events(meta.session_id)
+        except Exception:
+            continue
+        if deduplicate:
+            require_object_event_data(
+                events, event_types={EventType.TOOL_CALL}, session_id=meta.session_id
+            )
+            key = _tool_sequence_key(events)
+            if key in seen_tool_sequences:
+                continue
+            seen_tool_sequences.add(key)
+        require_object_event_data(
+            events, event_types=SCORE_DATA_EVENT_TYPES, session_id=meta.session_id
+        )
+
+
 def run_sample(
     store: TraceStore,
     strategy: str,
@@ -239,6 +286,8 @@ def run_sample(
         out.write("No sessions found.\n")
         return 1
 
+    _require_sampled_event_data(store, sessions, deduplicate)
+
     out.write(f"Sampling {n} sessions by strategy '{strategy}'...\n")
     out.write(f"Scoring {len(sessions)} session(s)...\n")
 
@@ -252,13 +301,7 @@ def run_sample(
             continue
 
         if deduplicate:
-            # Fingerprint: sorted tuple of (tool_name, command) pairs
-            seq = tuple(sorted(
-                (ev.data.get("tool_name", ""), str(ev.data.get("arguments", {}).get("command", "")))
-                for ev in events
-                if ev.event_type == EventType.TOOL_CALL
-            ))
-            key = str(seq)
+            key = _tool_sequence_key(events)
             if key in seen_tool_sequences:
                 continue
             seen_tool_sequences.add(key)

@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import sys
 import time
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TextIO
 
+from .event_data import require_object_event_data
 from .models import EventType, TraceEvent, SessionMeta
 from .store import TraceStore
 
@@ -362,6 +364,7 @@ def replay_session(
     """
     meta = store.load_meta(session_id)
     events = store.load_events(session_id)
+    session_events = events
 
     if not events:
         out.write(f"No events found for session {session_id}\n")
@@ -379,6 +382,14 @@ def replay_session(
         truncated = total_before_limit - limit
     else:
         truncated = 0
+
+    # format_event reads the data of every event it shows. Refuse before any
+    # output; positions count from the start of the session.
+    shown = {id(event) for event in events}
+    require_object_event_data(
+        session_events,
+        indexes=[i for i, event in enumerate(session_events) if id(event) in shown],
+    )
 
     base_ts = events[0].timestamp if events else None
 
@@ -649,6 +660,19 @@ scheduleNext();
 """
 
 
+def _dict_rejected_indexes(events: list[TraceEvent]) -> list[int]:
+    """Return the indexes of events whose data dict() cannot convert."""
+    indexes = []
+    for index, event in enumerate(events):
+        if isinstance(event.data, Mapping):
+            continue
+        try:
+            dict(event.data)
+        except (TypeError, ValueError):
+            indexes.append(index)
+    return indexes
+
+
 def replay_to_html(
     store: TraceStore,
     session_id: str,
@@ -666,6 +690,10 @@ def replay_to_html(
 
     if not events:
         return "<html><body>No events found.</body></html>"
+
+    # The loop below copies each event's data with dict(), which accepts an
+    # empty array or an array of pairs, so only refuse what dict() rejects.
+    require_object_event_data(events, indexes=_dict_rejected_indexes(events))
 
     base_ts = events[0].timestamp
     duration_s = events[-1].timestamp - base_ts
@@ -810,6 +838,9 @@ def replay_to_html_diff(
 
     events_a = store.load_events(session_a)
     events_b = store.load_events(session_b)
+    # _event_key reads the data of every event in both sessions.
+    require_object_event_data(events_a, session_id=session_a)
+    require_object_event_data(events_b, session_id=session_b)
 
     def _build_event_data(events: list) -> list[dict]:
         base_ts = events[0].timestamp if events else 0.0

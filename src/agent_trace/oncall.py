@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TextIO
 
+from .event_data import require_object_event_data
 from .models import EventType
 from .store import TraceStore
 
@@ -106,6 +107,10 @@ def _reading_minutes(lines: int) -> float:
 # Analysis
 # ---------------------------------------------------------------------------
 
+# analyse_oncall reads the data of every event of these types.
+ONCALL_DATA_EVENT_TYPES = frozenset({EventType.TOOL_CALL, EventType.FILE_WRITE})
+
+
 def analyse_oncall(
     store: TraceStore,
     rotation_start: str,
@@ -135,6 +140,9 @@ def analyse_oncall(
             events = store.load_events(meta.session_id)
         except Exception:
             continue
+        require_object_event_data(
+            events, event_types=ONCALL_DATA_EVENT_TYPES, session_id=meta.session_id
+        )
         for event in events:
             if event.event_type not in (EventType.TOOL_CALL, EventType.FILE_WRITE):
                 continue

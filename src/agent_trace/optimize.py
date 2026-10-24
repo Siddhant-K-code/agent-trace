@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
 
+from .event_data import require_object_event_data
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -35,6 +36,10 @@ class FailurePattern:
     session_ids: list[str]
     example_events: list[str]   # short human-readable descriptions
     proposed_instruction: str   # the text to add to the target file
+
+
+# _extract_patterns_heuristic reads the data of every event of these types.
+HEURISTIC_DATA_EVENT_TYPES = frozenset({EventType.TOOL_CALL, EventType.FILE_WRITE})
 
 
 def _extract_patterns_heuristic(
@@ -153,6 +158,16 @@ def _extract_patterns_heuristic(
 # ---------------------------------------------------------------------------
 # LLM-assisted clustering and proposal
 # ---------------------------------------------------------------------------
+
+def _llm_prompt_data_indexes(events: list[TraceEvent]) -> list[int]:
+    """Return the positions of the events whose data _build_llm_prompt reads.
+
+    It reads every tool call and the first two errors of a session.
+    """
+    calls = [i for i, e in enumerate(events) if e.event_type == EventType.TOOL_CALL]
+    errors = [i for i, e in enumerate(events) if e.event_type == EventType.ERROR]
+    return calls + errors[:2]
+
 
 def _build_llm_prompt(
     sessions: dict[str, list[TraceEvent]],
@@ -322,8 +337,15 @@ def run_optimize(
     llm_base_url: str = "",
     llm_model: str = "gpt-4o-mini",
     llm_api_key: str = "",
+    *,
+    name_sessions: bool = False,
 ) -> OptimizeProposal:
-    """Analyze sessions and return a proposal for the target file."""
+    """Analyze sessions and return a proposal for the target file.
+
+    Raises NonObjectEventDataError before the LLM call or the heuristics when
+    they would read event data that is not an object. ``name_sessions`` adds
+    the session ID to that error.
+    """
     sessions: dict[str, list[TraceEvent]] = {}
     for sid in session_ids:
         try:
@@ -338,6 +360,12 @@ def run_optimize(
 
     # Try LLM first if configured
     if llm_base_url and llm_api_key and sessions:
+        for sid, events in list(sessions.items())[:10]:
+            require_object_event_data(
+                events,
+                indexes=_llm_prompt_data_indexes(events),
+                session_id=sid if name_sessions else None,
+            )
         prompt = _build_llm_prompt(sessions, target_file, existing_content)
         response = _call_llm(prompt, llm_base_url, llm_model, llm_api_key)
         if response:
@@ -345,6 +373,12 @@ def run_optimize(
 
     # Fall back to heuristics (also used to supplement LLM results)
     if not patterns:
+        for sid, events in sessions.items():
+            require_object_event_data(
+                events,
+                event_types=HEURISTIC_DATA_EVENT_TYPES,
+                session_id=sid if name_sessions else None,
+            )
         patterns = _extract_patterns_heuristic(sessions)
 
     return OptimizeProposal(
@@ -444,6 +478,7 @@ def cmd_optimize(args: argparse.Namespace) -> int:
         llm_base_url=base_url,
         llm_model=model,
         llm_api_key=api_key,
+        name_sessions=bool(getattr(args, "dataset", None)),
     )
 
     if not proposal.patterns:

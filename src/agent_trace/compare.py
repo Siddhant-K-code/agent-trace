@@ -17,6 +17,7 @@ from dataclasses import asdict
 from typing import TextIO
 
 from .diff import compare_sessions, format_compare, CompareReport
+from .event_data import require_object_event_data
 from .models import EventType, SessionMeta
 from .store import TraceStore
 
@@ -24,6 +25,10 @@ from .store import TraceStore
 # ---------------------------------------------------------------------------
 # Decision divergence (edit distance on decision text)
 # ---------------------------------------------------------------------------
+
+# _decision_texts reads the data of every event of these types.
+DECISION_DATA_EVENT_TYPES = frozenset({EventType.DECISION})
+
 
 def _decision_texts(store: TraceStore, session_id: str) -> list[str]:
     """Extract decision event text from a session."""
@@ -124,6 +129,14 @@ def _sessions_by_tag(store: TraceStore, tag: str, last: int = 2) -> list[str]:
 # --rerun support
 # ---------------------------------------------------------------------------
 
+def _first_user_prompt_indexes(events) -> list[int]:
+    """Return the index of the user_prompt event that _get_user_prompt reads."""
+    for index, event in enumerate(events):
+        if event.event_type == EventType.USER_PROMPT:
+            return [index]
+    return []
+
+
 def _get_user_prompt(store: TraceStore, session_id: str) -> str | None:
     """Extract the original user prompt from a session's events."""
     try:
@@ -186,6 +199,13 @@ def cmd_compare(args: argparse.Namespace) -> int:
 
         if rerun:
             # --rerun: re-execute the original prompt and compare live
+            try:
+                events = store.load_events(session_a)
+            except Exception:
+                events = []
+            require_object_event_data(
+                events, indexes=_first_user_prompt_indexes(events)
+            )
             prompt = _get_user_prompt(store, session_a)
             if not prompt:
                 sys.stderr.write(
@@ -217,6 +237,14 @@ def cmd_compare(args: argparse.Namespace) -> int:
         sys.stderr.write(f"[compare] Failed: {exc}\n")
         return 1
 
+    for session_id in (session_a, session_b):
+        try:
+            events = store.load_events(session_id)
+        except Exception:
+            continue
+        require_object_event_data(
+            events, event_types=DECISION_DATA_EVENT_TYPES, session_id=session_id
+        )
     divergence = decision_divergence(store, session_a, session_b)
 
     if fmt == "json":

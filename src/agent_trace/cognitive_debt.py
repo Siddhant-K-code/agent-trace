@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any, TextIO
 
 from .budget_report import _parse_date
+from .event_data import require_object_event_data
 from .models import EventType, SessionMeta, TraceEvent
 from .store import TraceStore
 
@@ -207,6 +208,10 @@ def _event_line_count(event: TraceEvent) -> int:
     return max(1, total)
 
 
+# modified_file_lines reads the data of every event of these types.
+MODIFIED_FILE_DATA_EVENT_TYPES = frozenset({EventType.FILE_WRITE, EventType.TOOL_CALL})
+
+
 def modified_file_lines(events: list[TraceEvent]) -> dict[str, int]:
     files: dict[str, int] = {}
     for event in events:
@@ -334,7 +339,18 @@ def _github_review_for_file(
         return 0, []
 
 
-def analyze_session_debt(store: TraceStore, meta: SessionMeta, github_token: str = "") -> SessionDebt:
+def analyze_session_debt(
+    store: TraceStore,
+    meta: SessionMeta,
+    github_token: str = "",
+    *,
+    name_session: bool = False,
+) -> SessionDebt:
+    """Measure one session's cognitive debt.
+
+    Raises NonObjectEventDataError when a file_write or tool_call event's
+    data is not an object; ``name_session`` adds the session ID to that error.
+    """
     cwd = _working_dir(meta)
     branch = _branch(meta, cwd)
     author = _author(meta, cwd)
@@ -343,6 +359,11 @@ def analyze_session_debt(store: TraceStore, meta: SessionMeta, github_token: str
         events = store.load_events(meta.session_id)
     except Exception:
         events = []
+    require_object_event_data(
+        events,
+        event_types=MODIFIED_FILE_DATA_EVENT_TYPES,
+        session_id=meta.session_id if name_session else None,
+    )
 
     files = []
     total_written = 0
@@ -400,7 +421,12 @@ def build_cognitive_debt_report(
             if window_start <= meta.started_at < window_end
         ]
 
-    sessions = [analyze_session_debt(store, meta, github_token=github_token) for meta in metas]
+    sessions = [
+        analyze_session_debt(
+            store, meta, github_token=github_token, name_session=not session_id
+        )
+        for meta in metas
+    ]
     rows: dict[str, dict] = {}
     for session in sessions:
         key = _row_key(group_by, session)

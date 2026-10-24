@@ -32,12 +32,14 @@ import threading
 import time
 import urllib.request
 from collections import Counter, deque
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
 
 from .cost import _dollars, _event_tokens
 from .compaction import CompactionCheckpointWatcher
+from .event_data import NonObjectEventDataError, skipped_event_warning
 from .models import EventType, TraceEvent
 from .postmortem import clear_heartbeat, write_heartbeat
 from .project_budget import (
@@ -1046,6 +1048,45 @@ def check_event(
     return violations
 
 
+# check_event reads the data of these event types as soon as they arrive.
+_LIVE_DATA_EVENT_TYPES = frozenset({
+    EventType.TOOL_CALL,
+    EventType.TOOL_RESULT,
+    EventType.FILE_WRITE,
+})
+# CompactionCheckpointWatcher.update reads the data of these event types.
+_CHECKPOINT_DATA_EVENT_TYPES = frozenset({
+    EventType.LLM_REQUEST,
+    EventType.LLM_RESPONSE,
+    EventType.ASSISTANT_RESPONSE,
+})
+
+
+def _live_checks_read_data(
+    event: TraceEvent,
+    state: WatchState,
+    checkpoint_mode: bool = False,
+) -> bool:
+    """Return True if checking *event* now would read its data as an object."""
+    if event.event_type in _LIVE_DATA_EVENT_TYPES:
+        return True
+    if checkpoint_mode and event.event_type in _CHECKPOINT_DATA_EVENT_TYPES:
+        return True
+    if event.event_type == EventType.LLM_REQUEST:
+        watcher = state.token_budget_watcher
+        if watcher is None:
+            # check_event creates the watcher, which reads the model name.
+            return True
+        if watcher:
+            # The watcher skips the data only once it knows the model and
+            # that model has no known context limit.
+            return (
+                not getattr(watcher, "model", "")
+                or getattr(watcher, "context_limit", None) is not None
+            )
+    return False
+
+
 # ---------------------------------------------------------------------------
 # File tailer
 # ---------------------------------------------------------------------------
@@ -1118,6 +1159,11 @@ def watch_session(
 
     stream_config: when set, events are pushed in real-time to the configured
     URL as they arrive (push-based streaming).
+
+    An event whose data is not a JSON object is still counted and streamed.
+    When a check would read that data, watch writes one warning to *out* and
+    skips the checks for that event. Compaction checkpoints leave such events
+    out.
     """
     events_file = store._session_file(session_id, "events.ndjson", "event stream")
     if not events_file.exists():
@@ -1203,7 +1249,17 @@ def watch_session(
             event_count += 1
             last_event_time = time.time()
 
-            if checkpoint_watcher:
+            if not isinstance(event.data, Mapping) and _live_checks_read_data(
+                event, state, checkpoint_mode=checkpoint_watcher is not None,
+            ):
+                out.write(skipped_event_warning("watch", event))
+                out.flush()
+                if streamer:
+                    streamer.enqueue(event)
+                continue
+
+            # A checkpoint reads the data of every event it keeps.
+            if checkpoint_watcher and isinstance(event.data, Mapping):
                 try:
                     checkpoint_path = checkpoint_watcher.update(event)
                     if checkpoint_path:
@@ -1384,6 +1440,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 full_id,
                 checkpoint_at=float(getattr(args, "checkpoint_at", 0.80)),
             )
+        except NonObjectEventDataError:
+            raise
         except ValueError as exc:
             sys.stderr.write(f"[watch] invalid checkpoint threshold: {exc}\n")
             return 1

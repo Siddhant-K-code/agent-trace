@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import TextIO
 
 from .cost import DEFAULT_MODEL, estimate_cost
+from .event_data import require_object_event_data
+from .explain import PHASE_DATA_EVENT_TYPES
 from .store import TraceStore, _write_atomic, validate_stored_id, validate_tenant_id
 
 
@@ -127,6 +129,15 @@ def build_tenant_report(
                 continue
             values = grouped.setdefault(meta.tenant_id, [0, 0.0])
             values[0] = int(values[0]) + 1
+            try:
+                events = scoped_store.load_events(meta.session_id)
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+            # Checked outside the try below, which would otherwise count the
+            # session with no cost.
+            require_object_event_data(
+                events, event_types=PHASE_DATA_EVENT_TYPES, session_id=meta.session_id
+            )
             try:
                 result = estimate_cost(scoped_store, meta.session_id, model=model)
                 values[1] = float(values[1]) + result.total_cost

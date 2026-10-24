@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import TextIO
 
 from .cost import _estimate_tokens
+from .event_data import require_object_event_data
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -99,14 +100,35 @@ class TokenBudgetReport:
 # Analysis
 # ---------------------------------------------------------------------------
 
+def token_budget_data_indexes(events: list[TraceEvent]) -> list[int]:
+    """Return the positions of the events whose data analyse_token_budget reads.
+
+    It reads every llm_request and every llm_response after the first request.
+    """
+    indexes = []
+    seen_request = False
+    for index, event in enumerate(events):
+        if event.event_type == EventType.LLM_REQUEST:
+            seen_request = True
+            indexes.append(index)
+        elif event.event_type == EventType.LLM_RESPONSE and seen_request:
+            indexes.append(index)
+    return indexes
+
+
 def analyse_token_budget(
     store: TraceStore,
     session_id: str,
     warning_threshold: float = 0.9,
 ) -> TokenBudgetReport:
-    """Build a TokenBudgetReport for *session_id*."""
+    """Build a TokenBudgetReport for *session_id*.
+
+    Raises NonObjectEventDataError when it would read event data that is not
+    an object.
+    """
     meta = store.load_meta(session_id)
     events = store.load_events(session_id)
+    require_object_event_data(events, indexes=token_budget_data_indexes(events))
 
     base_ts = events[0].timestamp if events else meta.started_at
     model = ""

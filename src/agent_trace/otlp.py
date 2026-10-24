@@ -98,6 +98,21 @@ def _make_event(name: str, timestamp: float, data: dict) -> dict:
     }
 
 
+# session_to_otlp reads the data of every event of these types.
+OTLP_DATA_EVENT_TYPES = frozenset({
+    EventType.USER_PROMPT,
+    EventType.ASSISTANT_RESPONSE,
+    EventType.DECISION,
+    EventType.TOOL_CALL,
+    EventType.TOOL_RESULT,
+    EventType.ERROR,
+    EventType.LLM_REQUEST,
+    EventType.LLM_RESPONSE,
+})
+# session_to_otlp_genai reads the same types except decision.
+OTLP_GENAI_DATA_EVENT_TYPES = OTLP_DATA_EVENT_TYPES - {EventType.DECISION}
+
+
 def session_to_otlp(
     meta: SessionMeta,
     events: list[TraceEvent],
