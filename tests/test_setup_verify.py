@@ -125,6 +125,19 @@ class CodexSetupVerifyTests(unittest.TestCase):
             self.assertTrue(any("Stop:" in p for p in problems))
             self.assertEqual(contents, self.hooks_path.read_bytes())
 
+    def test_config_without_session_end_or_subagent_hooks_fails(self):
+        config = _codex_hooks_config(_args())
+        for event in ("SessionEnd", "SubagentStart", "SubagentStop"):
+            del config["hooks"][event]
+        self.hooks_path.write_text(json.dumps(config))
+        with patch("agent_trace.setup_verify.shutil.which", return_value="/bin/agent-strace"), self._probe_ok():
+            ok, problems = verify_codex_setup(
+                self.hooks_path, _codex_hooks_config(_args()), __version__
+            )
+        self.assertFalse(ok)
+        for event in ("SessionEnd", "SubagentStart", "SubagentStop"):
+            self.assertTrue(any(p.startswith(f"{event}: missing") for p in problems), event)
+
     def test_wrong_event_matcher_or_hook_type_cannot_appear_verified(self):
         for mutation in ("matcher", "type"):
             with self.subTest(mutation=mutation):
@@ -232,7 +245,7 @@ class CodexSetupVerifyTests(unittest.TestCase):
                     )
                 self.assertTrue(ok, issues)
                 self.assertEqual(details["redaction"], mode.replace("_", "-"))
-                self.assertEqual(details["event_count"], 5)
+                self.assertEqual(details["event_count"], 8)
                 self.assertEqual(details["executable"], "/bin/agent-strace")
 
     def test_mixed_modes_are_rejected(self):
@@ -333,7 +346,7 @@ class CodexSetupVerifyTests(unittest.TestCase):
         with patch("agent_trace.setup_verify.shutil.which", return_value="/bin/agent-strace"), self._probe_ok():
             with contextlib.redirect_stdout(output):
                 self.assertEqual(cmd_setup(_args()), 0)
-        self.assertIn("5/5 events, redaction: default", output.getvalue())
+        self.assertIn("8/8 events, redaction: default", output.getvalue())
         self.assertIn("/bin/agent-strace (agent-strace", output.getvalue())
         self.assertIn("\n"+"hooks:      ", output.getvalue())
         self.assertEqual(output.getvalue().count(str(self.hooks_path)), 1)

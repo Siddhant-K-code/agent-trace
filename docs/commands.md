@@ -60,6 +60,8 @@ normalized event to the active session. `--provider` defaults to `claude`.
 | `post-tool-failure` | Failed tool result as an error event |
 | `file-write` | Provider-reported file edit |
 | `stop` | Assistant response or provider stop metadata |
+| `subagent-start` | Subagent start in the parent session: agent type and name, plus the child session ID for GitHub Copilot CLI or the agent ID for Codex |
+| `subagent-stop` | Subagent stop in the parent session, with the same fields and the stop reason when the provider sends one |
 | `session-end` | Finish the active session and clear its hook state |
 
 Provider-specific aliases in generated configurations are normalized to these
@@ -158,8 +160,7 @@ Redacted:  1 of 6 events
 
 A missing session, an empty store or an unreadable session also exits 1.
 `partial` passes because some providers can never be `healthy`: every entry
-declares known gaps, and Codex sessions have no session-end event, so their
-sessions are at least `partial`.
+declares known gaps, so their sessions are at least `partial`.
 
 Each reason has a `kind`:
 
@@ -190,8 +191,11 @@ Whether the session has finished:
   hook active-session marker still names the session. Active sessions report
   `session_active` instead of `missing_session_end`. A crashed session can
   leave its marker behind and keep reading as active.
-- Otherwise not known, and a missing end marker is reported as observed. Codex
-  sessions are always in this state.
+- Otherwise not known, and a missing end marker is reported as observed.
+
+Codex installs made before setup registered its `SessionEnd` hook never end a
+session, so those sessions keep their markers and read as active. Re-run
+`agent-strace setup --cli codex` and trust the new hooks in `/hooks`.
 
 A resumed or compacted session is assessed as one session. See
 [session boundaries](evidence-health.md#session-boundaries).

@@ -7,7 +7,7 @@ The machine-readable source is [`src/agent_trace/capture_matrix.json`](../src/ag
 | Provider | Setup | Session | Prompt/response | Tools | File/command/error | Verification |
 |---|---|---|---|---|---|---|
 | Claude Code | `agent-strace setup --cli claude` | start + end | captured | captured | provider-defined | unverified |
-| OpenAI Codex | `agent-strace setup --cli codex` | start only | captured | captured | provider-defined | verified, 0.163.0-alpha.11 |
+| OpenAI Codex | `agent-strace setup --cli codex` | start + end | captured | captured | provider-defined | verified, 0.163.0-alpha.11 |
 | GitHub Copilot CLI | `agent-strace setup --cli copilot` | start + end, first prompt can arrive before start | prompt only | captured | provider-defined; errors captured | verified, 1.0.103-0 |
 
 ## Claude Code
@@ -23,12 +23,19 @@ The machine-readable source is [`src/agent_trace/capture_matrix.json`](../src/ag
 - Config: `$CODEX_HOME/hooks.json (default ~/.codex/hooks.json)`
 - Backup: before overwriting an existing config, setup preserves its original bytes once at `hooks.json.agent-strace.bak` in the same directory. Repeated setup runs do not overwrite that pre-AgentTrace snapshot.
 - Rollback: run `cp ~/.codex/hooks.json.agent-strace.bak ~/.codex/hooks.json`, replacing `~/.codex` with `"$CODEX_HOME"` when it is set. If no config existed before setup, no backup is created; remove the generated `hooks.json` instead.
-- Coverage: session start, user prompts, assistant responses, `PreToolUse`/`PostToolUse` tool activity, and `Stop` (captured as a stop event, **not** as session end).
-- Verified with `codex-cli 0.163.0-alpha.11` on 2026-10-22: a tool call, a failing shell command and a spawned subagent, run with `codex exec` in a throwaway workspace, an isolated `CODEX_HOME`, a read-only sandbox and no approval-bypass flags. The standalone `codex-cli 0.143.0` available on the same machine could not complete a turn, so it was not verified.
-- Hook trust: Codex runs the generated command hooks only after they are reviewed and trusted in `/hooks`. `codex exec` skips untrusted hooks without a warning, so an untrusted install records nothing.
+- Coverage: session start and end, user prompts, assistant responses, `PreToolUse`/`PostToolUse` tool activity, `Stop` (recorded as a stop event) and `SubagentStart`/`SubagentStop` (recorded as `subagent_start`/`subagent_stop` events in the parent trace).
+- Verified with `codex-cli 0.163.0-alpha.11`: a tool call, a failing shell command and a spawned subagent on 2026-10-22, and `SessionEnd`, `SubagentStart` and `SubagentStop` with a spawned subagent on 2026-10-24. Each run used `codex exec` in a throwaway workspace, an isolated `CODEX_HOME`, a read-only sandbox and no approval-bypass flags. The standalone `codex-cli 0.143.0` available on the same machine could not complete a turn, so it was not verified.
+- Hook trust: Codex runs the generated command hooks only after they are reviewed and trusted in `/hooks`. `codex exec` skips untrusted hooks without a warning, so an untrusted install records nothing. Codex trusts each hook separately, so hooks added by a newer setup start untrusted.
+- Upgrading: installs made before agent-strace registered `SessionEnd`, `SubagentStart` and `SubagentStop` do not have them. Re-run `agent-strace setup --cli codex`, then trust the new hooks in `/hooks`. Until then, `setup --cli codex --verify` reports them as missing. Sessions recorded without `SessionEnd` keep their active-session markers, so `health` reports them as `session_active`.
+- Session end: `SessionEnd` fires once after the last `Stop` of a `codex exec` run and records a `session_end` event, so `health` can tell a finished session from an active one. A resumed run (`codex exec resume`) records a `session_start` with source `resume` and continues the same trace. Codex gives `SessionEnd` hooks a 1 second timeout by default and caps it at 3 seconds; setup sets 3.
+- Subagents: a subagent is not a separate session. Its hooks arrive under the parent `session_id`, so everything is recorded in the parent trace:
+  - `SubagentStart` and `SubagentStop` are recorded as `subagent_start` and `subagent_stop` events with `agent_id`, `agent_type` and `turn_id`. No child session is created or linked, and these events have no `child_session_id` or `child_link`.
+  - The subagent's tool calls are recorded as ordinary `tool_call`/`tool_result` events in the parent trace.
+  - Event order observed: the parent's `spawn_agent` tool call and result, `SubagentStart`, the parent's `wait_agent` tool call, the subagent's tool calls, `SubagentStop`, the `wait_agent` result, `Stop`, then `SessionEnd`. In one recording `SubagentStart` fired after the `wait_agent` call instead, so do not rely on that position.
+  - Payload fields observed. `SubagentStart`: `session_id` (parent), `agent_id`, `agent_type`, `turn_id` (the subagent's turn), `transcript_path`, `cwd`, `model`, `permission_mode`. `SubagentStop`: the same plus `agent_transcript_path`, `last_assistant_message` and `stop_hook_active`. `SessionEnd`: `session_id`, `reason`, `transcript_path`, `cwd`. Subagent `PreToolUse`/`PostToolUse` payloads also carry `agent_id` and `agent_type`.
 - Known gaps:
-  - Codex emits `SessionEnd`, but setup does not register it, so traces have no `session_end` event and `health` never knows whether a Codex session has finished.
-  - Subagent hooks arrive under the parent `session_id` with an `agent_id`, so subagent tool calls are recorded in the parent trace. `SubagentStart` and `SubagentStop` are not registered.
+  - `SessionEnd` always reports reason `other`, so the `session_end` event does not say why the session ended.
+  - The subagent's tool calls are recorded without its `agent_id`, no event links a subagent to the `spawn_agent` call that started it (that result names only the task), and the subagent's final message (`last_assistant_message`) is not recorded.
   - A failed shell command arrives as a normal `PostToolUse` with the error text in `tool_response`, so it is recorded as a `tool_result`, not an `error`.
   - Hook payloads carry the model name, recorded on the `session_start` event, but no token usage.
   - Shell calls arrive as tool `Bash` with `tool_input.command`; file and command detail depends on those payloads.
@@ -64,7 +71,7 @@ published matrix.
 | Provider | session_start | session_end | prompt | response | tool | file | command | error | stop | verification_status |
 |---|---|---|---|---|---|---|---|---|---|---|
 | claude | captured | captured | captured | captured | captured | provider_defined | provider_defined | provider_defined | captured | unverified |
-| codex | captured | unavailable | captured | captured | captured | provider_defined | provider_defined | provider_defined | captured | verified |
+| codex | captured | captured | captured | captured | captured | provider_defined | provider_defined | provider_defined | captured | verified |
 | copilot | captured | captured | captured | unavailable | captured | provider_defined | provider_defined | captured | captured | verified |
 
 An entry may also list `events_before_start`: event types the provider is known to send before its session start hook. `agent-strace health` reports events of those types before the first `session_start` as the provider limitation `declared_events_before_session_start`. Any other event before the start is still the observed `events_before_session_start`, which makes the session `invalid`.

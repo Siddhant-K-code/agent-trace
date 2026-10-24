@@ -404,20 +404,26 @@ class TestCodexFixture(_ReplayChecks, unittest.TestCase):
         (meta,) = self.sessions(store).values()
         return meta
 
-    def test_session_end_is_emitted_but_not_registered(self):
+    def test_session_end_finishes_every_session(self):
         for scenario in self.fixture["scenarios"]:
             store, skipped = self.replay(scenario)
             meta = self.only_session(store)
+            events = store.load_events(meta.session_id)
             with self.subTest(scenario=scenario):
-                self.assertEqual(skipped[-1], "SessionEnd")
-                self.assertIsNone(meta.ended_at)
+                self.assertEqual(skipped, [])
+                self.assertEqual(events[-1].event_type, EventType.SESSION_END)
+                self.assertEqual(events[-1].data["reason"], "other")
+                self.assertEqual(
+                    [e.event_type for e in events].count(EventType.SESSION_END), 1
+                )
+                self.assertIsNotNone(meta.ended_at)
                 report = self.health(store, meta.session_id)
-                self.assertIsNone(report.session_finalized)
-                self.assertEqual(self.codes(report, "observed"), ["missing_session_end"])
+                self.assertIs(report.session_finalized, True)
+                self.assertEqual(self.codes(report, "observed"), [])
 
     def test_tool_session_records_model_but_no_tokens(self):
         store, skipped = self.replay("tool")
-        self.assertEqual(skipped, ["SessionEnd"])
+        self.assertEqual(skipped, [])
         meta = self.only_session(store)
         events = store.load_events(meta.session_id)
         self.assertEqual(
@@ -428,12 +434,13 @@ class TestCodexFixture(_ReplayChecks, unittest.TestCase):
                 EventType.TOOL_CALL,
                 EventType.TOOL_RESULT,
                 EventType.ASSISTANT_RESPONSE,
+                EventType.SESSION_END,
             ],
         )
         self.assertEqual(events[0].data["model"], "synthetic-model")
         self.assertEqual(events[2].data["tool_name"], "Bash")
         self.assertIn("command", events[2].data["arguments"])
-        self.assertTrue(events[-1].data["text"])
+        self.assertTrue(events[-2].data["text"])
         self.assertEqual(meta.total_tokens, 0)
 
     def test_failed_command_is_a_tool_result_not_an_error(self):
@@ -444,23 +451,61 @@ class TestCodexFixture(_ReplayChecks, unittest.TestCase):
         self.assertEqual(kinds.count(EventType.TOOL_RESULT), 1)
         self.assertEqual(meta.errors, 0)
 
-    def test_subagent_tools_are_recorded_in_the_parent_session(self):
-        store, skipped = self.replay("subagent")
-        self.assertEqual(skipped, ["SubagentStart", "SubagentStop", "SessionEnd"])
-        meta = self.only_session(store)
-        hooks = self.fixture["scenarios"]["subagent"]["hooks"]
-        child_calls = [
-            h["payload"] for h in hooks
-            if h["event"] == "PreToolUse" and "agent_id" in h["payload"]
-        ]
-        self.assertTrue(child_calls)
-        self.assertTrue(all(p["session_id"].startswith(meta.session_id) for p in child_calls))
-        tools = [
-            e.data["tool_name"] for e in store.load_events(meta.session_id)
-            if e.event_type == EventType.TOOL_CALL
-        ]
-        self.assertEqual(len(tools), 3)
-        self.assertIn("Bash", tools)
+    def test_subagent_events_are_recorded_in_the_parent_session(self):
+        for scenario in ("subagent", "subagent_start_before_wait"):
+            with self.subTest(scenario=scenario):
+                store, skipped = self.replay(scenario)
+                self.assertEqual(skipped, [])
+                meta = self.only_session(store)
+                hooks = self.fixture["scenarios"][scenario]["hooks"]
+                (agent_id,) = {
+                    h["payload"]["agent_id"] for h in hooks if "agent_id" in h["payload"]
+                }
+                self.assertTrue(
+                    all(h["payload"]["session_id"].startswith(meta.session_id) for h in hooks)
+                )
+                events = store.load_events(meta.session_id)
+                tools = [e.data["tool_name"] for e in events if e.event_type == EventType.TOOL_CALL]
+                self.assertEqual(len(tools), 3)
+                self.assertIn("Bash", tools)
+
+                kinds = [e.event_type for e in events]
+                start = kinds.index(EventType.SUBAGENT_START)
+                stop = kinds.index(EventType.SUBAGENT_STOP)
+                self.assertEqual(kinds.count(EventType.SUBAGENT_START), 1)
+                self.assertEqual(kinds.count(EventType.SUBAGENT_STOP), 1)
+                bash = next(
+                    i for i, e in enumerate(events)
+                    if e.event_type == EventType.TOOL_CALL and e.data["tool_name"] == "Bash"
+                )
+                self.assertLess(start, bash)
+                self.assertLess(bash, stop)
+                for event in (events[start], events[stop]):
+                    self.assertEqual(event.data["agent_id"], agent_id)
+                    self.assertEqual(event.data["agent_type"], "default")
+                    self.assertEqual(event.data["provider"], "codex")
+                    self.assertNotIn("child_session_id", event.data)
+                    self.assertNotIn("child_link", event.data)
+                    self.assertEqual(event.parent_id, "")
+                self.assertNotIn("last_assistant_message", events[stop].data)
+                self.assertEqual(meta.parent_session_id, "")
+
+    def test_subagent_start_order_differs_between_recordings(self):
+        def order(scenario):
+            return [
+                (h["event"], h["payload"].get("tool_name", ""))
+                for h in self.fixture["scenarios"][scenario]["hooks"]
+            ]
+
+        spawn = ("PostToolUse", "collaborationspawn_agent")
+        wait = ("PreToolUse", "collaborationwait_agent")
+        start = ("SubagentStart", "")
+        first, second = order("subagent"), order("subagent_start_before_wait")
+        self.assertEqual(first.index(spawn) + 1, first.index(wait))
+        self.assertEqual(first.index(wait) + 1, first.index(start))
+        self.assertEqual(second.index(spawn) + 1, second.index(start))
+        self.assertEqual(second.index(start) + 1, second.index(wait))
+        self.assertEqual(sorted(first), sorted(second))
 
 
 if __name__ == "__main__":
