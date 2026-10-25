@@ -17,7 +17,8 @@ from datetime import datetime, timezone
 from typing import Any, TextIO
 
 from .cost import DEFAULT_MODEL, PRICING, _dollars, _estimate_tokens, _event_tokens
-from .explain import ExplainResult, Phase, explain_session
+from .event_data import require_object_event_data
+from .explain import PHASE_DATA_EVENT_TYPES, ExplainResult, Phase, explain_session
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -123,6 +124,19 @@ def _phase_cost(phase: Phase, model: str) -> float:
         inp += i
         out += o
     return _dollars(inp, out, model)
+
+
+# build_timeline reads the data of every event of these types.
+TIMELINE_DATA_EVENT_TYPES = PHASE_DATA_EVENT_TYPES | frozenset({
+    EventType.TOOL_RESULT,
+    EventType.LLM_REQUEST,
+    EventType.LLM_RESPONSE,
+    EventType.FILE_READ,
+    EventType.FILE_WRITE,
+    EventType.ERROR,
+    EventType.DECISION,
+    EventType.ASSISTANT_RESPONSE,
+})
 
 
 def _build_entries(phase: Phase, base_ts: float, model: str) -> list[TimelineEntry]:
@@ -439,6 +453,9 @@ def cmd_timeline(args: argparse.Namespace) -> int:
     model = getattr(args, "model", DEFAULT_MODEL) or DEFAULT_MODEL
     fmt = getattr(args, "format", "text") or "text"
 
+    require_object_event_data(
+        store.load_events(full_id), event_types=TIMELINE_DATA_EVENT_TYPES
+    )
     result = build_timeline(store, full_id, model=model)
 
     if fmt == "json":

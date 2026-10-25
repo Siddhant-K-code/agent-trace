@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, TextIO
 
+from .event_data import require_object_event_data
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -348,6 +349,10 @@ def _audit_event(
 # Public API
 # ---------------------------------------------------------------------------
 
+# audit_session reads the data of every event of these types.
+AUDIT_DATA_EVENT_TYPES = frozenset({EventType.TOOL_CALL})
+
+
 def audit_session(
     store: TraceStore,
     session_id: str,
@@ -505,11 +510,18 @@ def cmd_audit(args: argparse.Namespace) -> int:
         return 1
 
     # --verify-chain: check hash chain integrity before policy audit
+    chain_result = None
     if getattr(args, "verify_chain", False):
         chain_result = verify_chain(store, full_id)
-        chain_result.format()
         if not chain_result.ok:
+            chain_result.format()
             return 1
+
+    require_object_event_data(
+        store.load_events(full_id), event_types=AUDIT_DATA_EVENT_TYPES
+    )
+    if chain_result is not None:
+        chain_result.format()
 
     policy_path = getattr(args, "policy", ".agent-scope.json")
     report = audit_session(store, full_id, policy_path=policy_path)

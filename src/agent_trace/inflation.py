@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import TextIO
 
 from .cost import _estimate_tokens, PRICING
+from .event_data import require_object_event_data
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -86,6 +87,15 @@ def _resolve_price(model: str) -> float:
         if m.startswith(key) or key.startswith(m):
             return price
     return DEFAULT_INPUT_PRICE
+
+
+# _extract_tokens_by_type reads the data of every event of these types.
+INFLATION_DATA_EVENT_TYPES = frozenset({
+    EventType.LLM_REQUEST,
+    EventType.USER_PROMPT,
+    EventType.ASSISTANT_RESPONSE,
+    EventType.LLM_RESPONSE,
+})
 
 
 def _extract_tokens_by_type(event: TraceEvent) -> dict[str, int]:
@@ -229,6 +239,9 @@ def analyse_inflation(
             events = store.load_events(sid)
         except Exception:
             continue
+        require_object_event_data(
+            events, event_types=INFLATION_DATA_EVENT_TYPES, session_id=sid
+        )
 
         session_raw = 0
         for event in events:

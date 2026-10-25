@@ -22,6 +22,7 @@ from typing import TextIO
 
 from .budget_report import _parse_date
 from .cost import estimate_cost
+from .event_data import require_object_event_data
 from .models import EventType, SessionMeta, TraceEvent
 from .store import TraceStore
 
@@ -168,6 +169,10 @@ def _pr_from_branch(branch: str) -> str:
     return branch
 
 
+# _modified_files reads the data of every event of these types.
+MODIFIED_FILES_DATA_EVENT_TYPES = frozenset({EventType.FILE_WRITE, EventType.TOOL_CALL})
+
+
 def _modified_files(events: list[TraceEvent]) -> list[str]:
     files: list[str] = []
     seen: set[str] = set()
@@ -250,6 +255,11 @@ def build_team_report(
             events = store.load_events(meta.session_id)
         except Exception:
             events = []
+        require_object_event_data(
+            events,
+            event_types=MODIFIED_FILES_DATA_EVENT_TYPES,
+            session_id=meta.session_id,
+        )
         files = _modified_files(events)
         shares = _author_shares(meta, files)
         cost = _session_cost(store, meta.session_id)

@@ -14,11 +14,13 @@ import json
 import re
 import sys
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TextIO
 
+from .event_data import require_object_event_data, skipped_event_warning
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -196,17 +198,21 @@ def scan_description_patterns(
     return findings
 
 
-def _previous_descriptions(
-    store: TraceStore,
-    current_session_id: str,
-) -> dict[str, ToolDescription]:
+def _previous_sessions(store: TraceStore, current_session_id: str) -> list:
     current_meta = store.load_meta(current_session_id)
-    previous: dict[str, ToolDescription] = {}
     sessions = [
         meta for meta in store.list_sessions()
         if meta.session_id != current_session_id and meta.started_at < current_meta.started_at
     ]
-    for meta in sorted(sessions, key=lambda m: m.started_at):
+    return sorted(sessions, key=lambda m: m.started_at)
+
+
+def _previous_descriptions(
+    store: TraceStore,
+    current_session_id: str,
+) -> dict[str, ToolDescription]:
+    previous: dict[str, ToolDescription] = {}
+    for meta in _previous_sessions(store, current_session_id):
         try:
             events = store.load_events(meta.session_id)
         except Exception:
@@ -433,6 +439,30 @@ def scan_live_event(
     return findings
 
 
+def require_scannable_session(store: TraceStore, session_id: str) -> None:
+    """Refuse a session whose event data scan_session cannot read.
+
+    scan_session reads the data of every event in the session and the
+    session_start data of every earlier session. extract_tool_descriptions
+    treats empty session_start data as an empty object, so an earlier session
+    is refused only for non-empty, non-object session_start data.
+    """
+    require_object_event_data(store.load_events(session_id), session_id=session_id)
+    for meta in _previous_sessions(store, session_id):
+        try:
+            events = store.load_events(meta.session_id)
+        except Exception:
+            continue
+        require_object_event_data(
+            events,
+            indexes=[
+                index for index, event in enumerate(events)
+                if event.event_type == EventType.SESSION_START and event.data
+            ],
+            session_id=meta.session_id,
+        )
+
+
 def scan_session(
     store: TraceStore,
     session_id: str,
@@ -545,6 +575,7 @@ def _watch_session(
     if not events_file.exists():
         out.write(f"events file not found: {events_file}\n")
         return 1
+    require_scannable_session(store, session_id)
     out.write(f"Watching session {session_id[:12]} for MCP poisoning indicators...\n")
     out.flush()
 
@@ -570,6 +601,12 @@ def _watch_session(
             except Exception:
                 continue
             seen += 1
+            if not isinstance(event.data, Mapping):
+                sys.stderr.write(skipped_event_warning("mcp-scan", event))
+                if event.event_type == EventType.SESSION_END:
+                    out.write(f"Session ended after {seen} watched events.\n")
+                    return 0
+                continue
             history.append(event)
             history = history[-80:]
             findings = scan_live_event(
@@ -618,6 +655,7 @@ def cmd_mcp_scan(args: argparse.Namespace) -> int:
         if not session_id:
             sys.stderr.write(f"Session not found: {args.session}\n")
             return 1
+        require_scannable_session(store, session_id)
         report = scan_session(store, session_id, patterns=patterns, project_root=project_root)
     else:
         report = scan_store(

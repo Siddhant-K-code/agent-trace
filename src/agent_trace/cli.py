@@ -95,6 +95,7 @@ from .sample import cmd_sample
 from .server import cmd_server
 from .watch import cmd_watch
 from .why import cmd_why
+from .event_data import NonObjectEventDataError, require_object_event_data
 from .models import EventType, SessionMeta, TraceEvent
 from .proxy import MCPProxy
 from .replay import format_event, format_summary, list_sessions, replay_session
@@ -406,10 +407,22 @@ def cmd_export(args: argparse.Namespace) -> int:
             sys.stdout.write(e.to_json() + "\n")
 
     elif args.format in ("otlp", "otlp-genai", "temporal"):
-        from .otlp import export_otlp, session_to_otlp, session_to_otlp_genai
+        from .otlp import (
+            export_otlp,
+            otlp_data_indexes,
+            otlp_genai_data_indexes,
+            session_to_otlp,
+            session_to_otlp_genai,
+        )
 
         use_genai = args.format == "otlp-genai"
         use_temporal = args.format == "temporal"
+        # session_to_temporal_otlp checks the data after it validates the
+        # session's Temporal context, so a session without one keeps its message.
+        if use_genai:
+            require_object_event_data(events, indexes=otlp_genai_data_indexes(events))
+        elif not use_temporal:
+            require_object_event_data(events, indexes=otlp_data_indexes(events))
         endpoint = args.endpoint
 
         # When --endpoint is set and format is plain otlp, default to otlp-genai
@@ -429,6 +442,8 @@ def cmd_export(args: argparse.Namespace) -> int:
                     payload = session_to_otlp_genai(meta, events, service_name=args.service_name)
                 else:
                     payload = session_to_otlp(meta, events, service_name=args.service_name)
+            except NonObjectEventDataError:
+                raise
             except ValueError as exc:
                 sys.stderr.write(f"Temporal export failed: {exc}\n")
                 return 1
@@ -519,6 +534,10 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 
+# cmd_stats reads the data of every event of these types.
+STATS_DATA_EVENT_TYPES = frozenset({EventType.TOOL_CALL, EventType.ERROR})
+
+
 def cmd_stats(args: argparse.Namespace) -> int:
     """Show statistics for a session."""
     if getattr(args, "include_subagents", False):
@@ -542,6 +561,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
             return 1
 
     events = store.load_events(session_id)
+    require_object_event_data(events, event_types=STATS_DATA_EVENT_TYPES)
     meta = store.load_meta(session_id)
 
     # tool call frequency
@@ -2557,12 +2577,25 @@ def _normalise_exit_code(value) -> int:
     return 1
 
 
+def _run_handler(args: argparse.Namespace, handler):
+    """Run a CLI handler, turning non-object event data into a one-line refusal.
+
+    Commands check event data before they print or write anything, so the
+    refusal matches ``share``: one ``Error:`` line on stderr and exit code 1.
+    """
+    try:
+        return handler(args)
+    except NonObjectEventDataError as exc:
+        sys.stderr.write(f"Error: {exc}\n")
+        return 1
+
+
 def _run_with_product_telemetry(args: argparse.Namespace, handler):
     """Run a CLI handler and emit one best-effort completion event."""
     started_at = time.monotonic()
     base = _telemetry_command_properties(args)
     try:
-        result = handler(args)
+        result = _run_handler(args, handler)
     except SystemExit as exc:
         exit_code = _normalise_exit_code(exc.code)
         _product_telemetry.capture(

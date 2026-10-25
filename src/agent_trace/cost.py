@@ -16,7 +16,8 @@ import time as _time
 from dataclasses import dataclass, field
 from typing import Any, Mapping, TextIO
 
-from .explain import ExplainResult, Phase, explain_session
+from .event_data import require_object_event_data
+from .explain import PHASE_DATA_EVENT_TYPES, ExplainResult, Phase, explain_session
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -456,6 +457,14 @@ class _UsageSample:
     has_output: bool = False
 
 
+# _session_model_usage reads the data of every event of these types.
+MODEL_USAGE_EVENT_TYPES = frozenset({
+    EventType.LLM_REQUEST,
+    EventType.LLM_RESPONSE,
+    EventType.ASSISTANT_RESPONSE,
+})
+
+
 def _session_model_usage(events: list[TraceEvent]) -> dict[str, tuple[int, int]]:
     """Aggregate usage by model while avoiding request/response double counts."""
     samples: list[_UsageSample] = []
@@ -549,6 +558,9 @@ def build_provider_cost_report(
             events = store.load_events(meta.session_id)
         except (OSError, ValueError, json.JSONDecodeError):
             continue
+        require_object_event_data(
+            events, event_types=MODEL_USAGE_EVENT_TYPES, session_id=meta.session_id
+        )
         for model, (input_tokens, output_tokens) in _session_model_usage(events).items():
             price = get_model_pricing(model, pricing_table=pricing_table)
             cost = 0.0
@@ -645,6 +657,13 @@ def build_tenant_cost_report(
     for meta in store.list_sessions(tenant_id=tenant_id):
         if meta.started_at < cutoff or meta.started_at > generated_at:
             continue
+        try:
+            events = store.load_events(meta.session_id)
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+        require_object_event_data(
+            events, event_types=PHASE_DATA_EVENT_TYPES, session_id=meta.session_id
+        )
         try:
             result = estimate_cost(
                 store,
@@ -853,6 +872,9 @@ def cmd_cost(args: argparse.Namespace) -> int:
         )
         return 1
 
+    require_object_event_data(
+        store.load_events(full_id), event_types=PHASE_DATA_EVENT_TYPES
+    )
     result = estimate_cost(
         store, full_id,
         model=model,

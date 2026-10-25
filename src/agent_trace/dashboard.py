@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TextIO
 
+from .event_data import require_object_event_data
 from .models import EventType, SessionMeta, TraceEvent
 from .store import TraceStore
 
@@ -161,6 +162,9 @@ def _extract_trend_point(
         events: list[TraceEvent] = store.load_events(meta.session_id)
     except Exception:
         events = []
+    require_object_event_data(
+        events, event_types={EventType.TOOL_CALL}, session_id=meta.session_id
+    )
 
     tool_calls = 0
     errors = 0

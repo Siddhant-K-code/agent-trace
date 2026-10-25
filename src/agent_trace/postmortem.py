@@ -11,11 +11,13 @@ import html
 import json
 import sys
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
 
 from .cost import estimate_cost
+from .event_data import require_object_event_data
 from .explain import explain_session
 from .models import EventType, TraceEvent
 from .store import TraceStore
@@ -140,6 +142,9 @@ def _detect_agents_md_violations(
 # Root cause detection
 # ---------------------------------------------------------------------------
 
+_TOOL_FAILURE_SIGNALS = ("exit code", "error:", "failed", "traceback")
+
+
 def _find_root_cause(events: list[TraceEvent], base_ts: float) -> tuple[int, str, float]:
     """Return (event_index, description, offset_seconds) of the root cause.
 
@@ -158,7 +163,7 @@ def _find_root_cause(events: list[TraceEvent], base_ts: float) -> tuple[int, str
     for i, event in enumerate(events):
         if event.event_type == EventType.TOOL_RESULT:
             result = str(event.data.get("result", ""))
-            if any(sig in result.lower() for sig in ("exit code", "error:", "failed", "traceback")):
+            if any(sig in result.lower() for sig in _TOOL_FAILURE_SIGNALS):
                 offset = event.timestamp - base_ts
                 return i, f"Tool failure: {result[:80]}", offset
 
@@ -283,14 +288,25 @@ def detect_crash(
     session_id: str,
     stale_after_seconds: float = DEFAULT_STALE_SECONDS,
     now: float | None = None,
+    *,
+    name_session: bool = False,
 ) -> CrashInfo | None:
-    """Detect a crashed or stale session without mutating the store."""
+    """Detect a crashed or stale session without mutating the store.
+
+    Raises NonObjectEventDataError when the last session_end event's data is
+    not an object; ``name_session`` adds the session ID to that error.
+    """
     current_time = time.time() if now is None else now
     try:
         meta = store.load_meta(session_id)
         events = store.load_events(session_id)
     except Exception:
         return None
+    require_object_event_data(
+        events,
+        indexes=crash_data_indexes(events),
+        session_id=session_id if name_session else None,
+    )
 
     exit_code = _session_exit_code(events)
     if exit_code not in (None, 0):
@@ -337,6 +353,7 @@ def find_crashed_sessions(
             meta.session_id,
             stale_after_seconds=stale_after_seconds,
             now=now,
+            name_session=True,
         )
         if crash:
             crashes.append(crash)
@@ -535,6 +552,81 @@ def write_crash_postmortem(
         lines.append(f"- {rec}")
     path.write_text("\n".join(lines) + "\n")
     return path
+
+
+# ---------------------------------------------------------------------------
+# Event data checks
+# ---------------------------------------------------------------------------
+
+# analyze_session reads the data of every event of these types.
+POSTMORTEM_DATA_EVENT_TYPES = frozenset({
+    EventType.TOOL_CALL,
+    EventType.USER_PROMPT,
+    EventType.ERROR,
+    EventType.FILE_READ,
+})
+_DESCRIBED_EVENT_TYPES = frozenset({
+    EventType.TOOL_CALL,
+    EventType.LLM_REQUEST,
+    EventType.USER_PROMPT,
+    EventType.ERROR,
+})
+
+
+def _last_index(events: list[TraceEvent], event_types) -> int | None:
+    for index in range(len(events) - 1, -1, -1):
+        if events[index].event_type in event_types:
+            return index
+    return None
+
+
+def crash_data_indexes(events: list[TraceEvent]) -> list[int]:
+    """Return the indexes of the events whose data detect_crash reads."""
+    index = _last_index(events, (EventType.SESSION_END,))
+    return [] if index is None else [index]
+
+
+def postmortem_data_indexes(events: list[TraceEvent], crashed: bool) -> list[int]:
+    """Return the indexes of the events whose data analyze_session reads.
+
+    *crashed* is whether detect_crash found a crash. Mirror any change to
+    analyze_session's reads here. tests/test_non_object_event_data_mirrors.py
+    stores non-object data in one event at a time and checks that postmortem
+    refuses exactly when analyze_session would fail on it.
+    """
+    indexes = {
+        index for index, event in enumerate(events)
+        if event.event_type in POSTMORTEM_DATA_EVENT_TYPES
+    }
+    indexes.update(crash_data_indexes(events))
+    has_error = any(event.event_type == EventType.ERROR for event in events)
+    if not has_error:
+        # _find_root_cause scans tool results until the first failure signal.
+        for index, event in enumerate(events):
+            if event.event_type != EventType.TOOL_RESULT:
+                continue
+            indexes.add(index)
+            if not isinstance(event.data, Mapping):
+                break
+            result = str(event.data.get("result", "")).lower()
+            if any(sig in result for sig in _TOOL_FAILURE_SIGNALS):
+                break
+    if crashed or has_error:
+        # _build_recovery_context runs only for failed sessions.
+        indexes.update(
+            index for index, event in enumerate(events)
+            if event.event_type == EventType.FILE_WRITE
+        )
+        last_prompt = _last_index(events, (EventType.USER_PROMPT, EventType.LLM_REQUEST))
+        if last_prompt is not None:
+            indexes.add(last_prompt)
+        last_action = _last_index(
+            events,
+            frozenset(EventType) - {EventType.SESSION_START, EventType.SESSION_END},
+        )
+        if last_action is not None and events[last_action].event_type in _DESCRIBED_EVENT_TYPES:
+            indexes.add(last_action)
+    return sorted(indexes)
 
 
 # ---------------------------------------------------------------------------
@@ -809,6 +901,12 @@ def cmd_postmortem(args: argparse.Namespace) -> int:
     if not full_id:
         sys.stderr.write(f"Session not found: {session_id}\n")
         return 1
+
+    events = store.load_events(full_id)
+    crash = detect_crash(store, full_id, stale_after_seconds=stale_after)
+    require_object_event_data(
+        events, indexes=postmortem_data_indexes(events, crashed=crash is not None)
+    )
 
     agents_md = getattr(args, "agents_md", "AGENTS.md")
     report = analyze_session(
