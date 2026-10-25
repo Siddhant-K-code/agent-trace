@@ -39,9 +39,11 @@ current session without colliding with another workspace.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 from contextvars import ContextVar
@@ -63,7 +65,8 @@ from . import telemetry as _product_telemetry
 # Pending tool calls are tracked in a file so separate hook processes
 # can link PostToolUse back to PreToolUse for latency measurement.
 # The file is keyed by event_id (not tool name) so concurrent calls to
-# the same tool don't overwrite each other.
+# the same tool don't overwrite each other. It only exists while calls are
+# in flight and is removed when its session ends.
 _PENDING_FILE = ".pending-calls.json"
 
 # Each Claude Code session gets its own state files, derived from the
@@ -244,10 +247,10 @@ def _canonical_active_session_path() -> Path:
     return _get_state_dir() / ".active-session"
 
 
-def _pending_calls_path(provider: str = "claude") -> Path:
+def _pending_calls_path(provider: str = "claude", state_dir: Path | None = None) -> Path:
     suffix = _state_suffix(provider)
     name = _PENDING_FILE.replace(".json", f"{suffix}.json")
-    return _get_state_dir() / name
+    return (_get_state_dir() if state_dir is None else state_dir) / name
 
 
 def _read_active_session(provider: str = "claude") -> str | None:
@@ -318,20 +321,95 @@ def _clear_active_session(provider: str = "claude") -> None:
         canonical.unlink()
 
 
-def _read_pending_calls(provider: str = "claude") -> dict:
-    path = _pending_calls_path(provider)
+def _read_pending_calls(provider: str = "claude", path: Path | None = None) -> dict:
+    if path is None:
+        path = _pending_calls_path(provider)
     if path.exists():
         try:
-            return json.loads(path.read_text())
+            calls = json.loads(path.read_text())
         except (json.JSONDecodeError, OSError):
             return {}
+        return calls if isinstance(calls, dict) else {}
     return {}
 
 
-def _write_pending_calls(calls: dict, provider: str = "claude") -> None:
-    path = _pending_calls_path(provider)
+def _write_pending_calls(calls: dict, provider: str = "claude", path: Path | None = None) -> None:
+    if path is None:
+        path = _pending_calls_path(provider)
+    if not calls:
+        # A missing file reads as no pending calls; do not leave "{}" behind.
+        path.unlink(missing_ok=True)
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(calls))
+
+
+# Code holding the store write lock must not construct a TraceStore (startup
+# journal recovery takes the same lock) or append events/metadata: flock is
+# not re-entrant across file descriptors, so either would deadlock. Pending
+# paths are therefore resolved from the caller's store before locking.
+@contextlib.contextmanager
+def _update_pending_calls(store: TraceStore, provider: str = "claude"):
+    """Yield this session's pending calls and save changes under the store lock.
+
+    Parallel tool hooks of one session read-modify-write the same file; the
+    lock keeps them from losing each other's entries or racing an unlink.
+    """
+    path = _pending_calls_path(provider, store.base_dir)
+    with store.write_lock():
+        pending = _read_pending_calls(provider, path=path)
+        original = dict(pending)
+        yield pending
+        if pending != original or not pending:
+            _write_pending_calls(pending, provider, path=path)
+
+
+def _clear_pending_calls(store: TraceStore, session_id: str, provider: str = "claude") -> None:
+    """Remove the ending session's pending calls.
+
+    Calls still pending are dropped: each entry only indexes a ``tool_call``
+    event already in ``events.ndjson``, where unpaired calls stay visible, and
+    the next SessionStart for this session would reset the map anyway.
+
+    The session's provider-scoped file is deleted. A SessionEnd payload
+    without a provider session ID was resolved through the canonical marker,
+    so this provider's scoped files for the same local session are deleted
+    instead. The unscoped legacy file can be shared, so only entries recorded
+    for this session are removed from it. Other sessions' and other
+    providers' files are never touched.
+    """
+    state_dir = store.base_dir
+    shared = state_dir / _PENDING_FILE
+    own: list[Path] = []
+    scoped = None
+    if _state_suffix(provider):
+        own.append(_pending_calls_path(provider, state_dir))
+    elif session_id:
+        provider_key = provider if provider in _PROVIDER_ENV else "claude"
+        local_hex = session_id.encode("utf-8").hex()
+        stem = _PENDING_FILE[: -len(".json")]
+        scoped = (
+            f"{stem}.v2.{provider_key}.{local_hex}.*.json",
+            re.compile(
+                rf"{re.escape(stem)}\.v2\.{re.escape(provider_key)}\.{local_hex}"
+                r"\.[0-9a-f]{64}\.json"
+            ),
+        )
+    with store.write_lock():
+        if scoped is not None:
+            pattern, name = scoped
+            own.extend(path for path in state_dir.glob(pattern) if name.fullmatch(path.name))
+        for path in own:
+            path.unlink(missing_ok=True)
+        if session_id and shared.exists():
+            pending = _read_pending_calls(provider, path=shared)
+            kept = {
+                event_id: info
+                for event_id, info in pending.items()
+                if not (isinstance(info, dict) and info.get("session_id") == session_id)
+            }
+            if kept != pending or not kept:
+                _write_pending_calls(kept, provider, path=shared)
 
 
 def _read_stdin() -> dict:
@@ -470,7 +548,9 @@ def handle_session_start(input_data: dict, provider: str = "claude") -> None:
         os.environ[_provider_env(provider)] = session_id
 
     _write_active_session(meta.session_id, provider=provider)
-    _write_pending_calls({}, provider=provider)
+    pending_path = _pending_calls_path(provider, store.base_dir)
+    with store.write_lock():
+        _write_pending_calls({}, provider, path=pending_path)
 
     event_data = {
         "mode": f"{agent_name}-hooks",
@@ -533,6 +613,7 @@ def handle_session_end(input_data: dict, provider: str = "claude") -> None:
         )
 
     _clear_active_session(provider=provider)
+    _clear_pending_calls(store, session_id, provider=provider)
 
 
 def handle_pre_tool(input_data: dict, provider: str = "claude") -> None:
@@ -573,13 +654,13 @@ def handle_pre_tool(input_data: dict, provider: str = "claude") -> None:
     # Track pending call for latency measurement.
     # Keyed by event_id (not tool_name) so concurrent calls to the same
     # tool don't overwrite each other.
-    pending = _read_pending_calls(provider=provider)
-    pending[event.event_id] = {
-        "tool_name": tool_name,
-        "tool_use_id": input_data.get("tool_use_id", ""),
-        "timestamp": event.timestamp,
-    }
-    _write_pending_calls(pending, provider=provider)
+    with _update_pending_calls(store, provider=provider) as pending:
+        pending[event.event_id] = {
+            "session_id": session_id,
+            "tool_name": tool_name,
+            "tool_use_id": input_data.get("tool_use_id", ""),
+            "timestamp": event.timestamp,
+        }
 
 
 def handle_user_prompt(input_data: dict, provider: str = "claude") -> None:
@@ -709,7 +790,9 @@ def _pending_subagent_call(
     ``tool_call`` in this session's trace, and its ``agent_type`` argument
     does not contradict the payload.
     """
-    pending = _read_pending_calls(provider=provider)
+    pending_path = _pending_calls_path(provider, store.base_dir)
+    with store.write_lock():
+        pending = _read_pending_calls(provider=provider, path=pending_path)
     calls = [
         event_id
         for event_id, info in pending.items()
@@ -975,22 +1058,21 @@ def handle_post_tool(input_data: dict, failed: bool = False, provider: str = "cl
     # Link to the earliest pending call for this tool name, then remove it.
     # Pending entries are keyed by event_id so concurrent same-tool calls
     # don't collide; we match by tool_name in the value and pick the oldest.
-    pending = _read_pending_calls(provider=provider)
-    match_id = None
-    match_ts = float("inf")
-    tool_use_id = input_data.get("tool_use_id", "")
-    for eid, info in pending.items():
-        if tool_use_id and info.get("tool_use_id") == tool_use_id:
-            match_id = eid
-            break
-        if not tool_use_id and info.get("tool_name") == tool_name and info["timestamp"] < match_ts:
-            match_id = eid
-            match_ts = info["timestamp"]
-    if match_id:
-        call_info = pending.pop(match_id)
-        event.parent_id = match_id
-        event.duration_ms = (event.timestamp - call_info["timestamp"]) * 1000
-        _write_pending_calls(pending, provider=provider)
+    with _update_pending_calls(store, provider=provider) as pending:
+        match_id = None
+        match_ts = float("inf")
+        tool_use_id = input_data.get("tool_use_id", "")
+        for eid, info in pending.items():
+            if tool_use_id and info.get("tool_use_id") == tool_use_id:
+                match_id = eid
+                break
+            if not tool_use_id and info.get("tool_name") == tool_name and info["timestamp"] < match_ts:
+                match_id = eid
+                match_ts = info["timestamp"]
+        if match_id:
+            call_info = pending.pop(match_id)
+            event.parent_id = match_id
+            event.duration_ms = (event.timestamp - call_info["timestamp"]) * 1000
 
     _ensure_session_meta(store, session_id, provider)
     _write_event(store, session_id, event)

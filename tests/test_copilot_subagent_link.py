@@ -7,11 +7,13 @@ import json
 import os
 import sys
 import tempfile
+import traceback
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+import agent_trace.store as store_module
 from agent_trace.cli import _copilot_hooks_config
 from agent_trace.hooks import _PROVIDER_ENV, IMPLICIT_SESSION_SOURCE, hook_main
 from agent_trace.models import EventType, SessionMeta
@@ -244,6 +246,63 @@ class TestCopilotSubagentLink(_SubagentHookTest):
         self.subagent_stop()
         self.assertEqual(self.last_stop().data["child_link"], "already_linked")
         self.assertEqual(self.meta_bytes(CHILD), before)
+
+    def pending_files(self):
+        return sorted(path.name for path in self.root.glob(".pending-calls*.json"))
+
+    def test_subagent_flow_leaves_no_pending_calls_state(self):
+        self.start_parent()
+        self.subagent_start()
+        self.child_runs()
+        (parent_file,) = self.pending_files()
+        self.assertTrue(
+            parent_file.startswith(f".pending-calls.v2.copilot.{local(PARENT).encode().hex()}.")
+        )
+        before = (self.root / parent_file).read_bytes()
+        # Ending the child must not drop the parent's pending task call.
+        self.dispatch("sessionEnd", {"sessionId": CHILD, "reason": "complete"})
+        self.assertEqual((self.root / parent_file).read_bytes(), before)
+
+        self.subagent_stop()
+        self.assertEqual(self.last_stop().parent_id, self.task_call().event_id)
+        self.assertEqual(
+            self.store().load_meta(local(CHILD)).parent_event_id, self.task_call().event_id
+        )
+        self.finish_parent()
+        self.assertEqual(self.pending_files(), [])
+
+    def test_subagent_hooks_never_nest_the_store_lock(self):
+        violations = []
+        depth = [0]
+        real_lock = store_module._store_write_lock
+        real_init = store_module.TraceStore.__init__
+
+        @contextmanager
+        def guarded_lock(*args, **kwargs):
+            if depth[0]:
+                violations.append("".join(traceback.format_stack(limit=8)))
+                yield
+                return
+            depth[0] += 1
+            try:
+                with real_lock(*args, **kwargs):
+                    yield
+            finally:
+                depth[0] -= 1
+
+        def guarded_init(store, *args, **kwargs):
+            if depth[0]:
+                violations.append("".join(traceback.format_stack(limit=8)))
+            real_init(store, *args, **kwargs)
+
+        with patch.object(store_module, "_store_write_lock", guarded_lock), \
+                patch.object(store_module.TraceStore, "__init__", guarded_init):
+            self.run_subagent()
+        self.assertEqual(violations, [])
+        self.assertEqual(
+            self.store().load_meta(local(CHILD)).parent_event_id, self.task_call().event_id
+        )
+        self.assertEqual(self.pending_files(), [])
 
     def test_tree_shows_the_copilot_child(self):
         self.run_subagent()
