@@ -23,6 +23,7 @@ import time
 from pathlib import Path
 
 from . import __version__
+from .store import default_trace_dir
 from .setup_verify import verify_claude_setup, verify_codex_setup
 from .hooks import hook_main
 from .http_proxy import HTTPProxyServer
@@ -1178,8 +1179,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"agent-strace {__version__}")
     parser.add_argument(
         "--trace-dir",
-        default=".agent-traces",
-        help="directory to store traces (default: .agent-traces)",
+        default=default_trace_dir(),
+        help=(
+            "trace store directory to read and write "
+            "(default: $AGENT_TRACE_DIR if set and non-empty, else .agent-traces)"
+        ),
     )
 
     sub = parser.add_subparsers(dest="command")

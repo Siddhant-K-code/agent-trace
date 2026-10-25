@@ -56,6 +56,8 @@ agent-strace setup --no-redact
 
 Then use Claude Code normally. Sessions appear in `.agent-traces/`.
 
+To keep traces somewhere else, set `AGENT_TRACE_DIR` (a relative path resolves against the working directory). Hooks write there, and `list`, `replay`, `health` and the other commands read from there unless you pass `--trace-dir`. An empty value is treated as unset. See [global options](commands.md#global-options).
+
 Traces can contain prompts and tool output, so `.agent-traces/` writes its own `.gitignore` and stays out of git by default. To commit a trace deliberately, use `git add -f`.
 
 ```bash

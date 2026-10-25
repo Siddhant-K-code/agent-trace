@@ -51,7 +51,13 @@ from .models import EventType, SessionMeta, TraceEvent
 from .attribution import collect_attribution
 from .evidence_health import is_continuation_source
 from .redact import redact_data, redact_data_with_status, redaction_enabled
-from .store import TraceStore, _write_atomic, validate_session_id
+from .store import (
+    DEFAULT_TRACE_DIR,
+    TRACE_DIR_ENV,
+    TraceStore,
+    _write_atomic,
+    validate_session_id,
+)
 from . import telemetry as _product_telemetry
 
 # Pending tool calls are tracked in a file so separate hook processes
@@ -91,9 +97,10 @@ _PROVIDER_AGENT = {
 
 
 def _get_store_dir() -> str:
-    if "AGENT_TRACE_DIR" in os.environ:
-        return os.environ["AGENT_TRACE_DIR"]
-    return _HOOK_STORE_DIR.get() or ".agent-traces"
+    env_dir = os.environ.get(TRACE_DIR_ENV)
+    if env_dir:
+        return env_dir
+    return _HOOK_STORE_DIR.get() or DEFAULT_TRACE_DIR
 
 
 def _payload_store_dir(input_data: dict) -> str | None:

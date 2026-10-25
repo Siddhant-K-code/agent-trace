@@ -39,6 +39,19 @@ from .models import EventType, SessionMeta, TraceEvent
 from .redact import redact_data_with_status, redaction_enabled
 
 DEFAULT_TRACE_DIR = ".agent-traces"
+TRACE_DIR_ENV = "AGENT_TRACE_DIR"
+
+
+def default_trace_dir() -> str:
+    """Return the trace store used when no directory is given explicitly.
+
+    ``$AGENT_TRACE_DIR`` wins when it is set to a non-empty value; an empty
+    value is treated as unset. Relative values are returned unchanged, so
+    they resolve against the current working directory. Read on every call
+    so hook writers and CLI readers agree on the same store.
+    """
+    return os.environ.get(TRACE_DIR_ENV) or DEFAULT_TRACE_DIR
+
 
 # Env var for workspace isolation — sessions are stored under
 # .agent-traces/workspaces/<workspace-id>/ when this is set.
