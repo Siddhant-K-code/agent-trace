@@ -4,6 +4,26 @@ Full flag reference for every `agent-strace` command.
 
 ---
 
+## Global options
+
+```
+agent-strace [--trace-dir DIR] <command> ...
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--trace-dir DIR` | `$AGENT_TRACE_DIR`, else `.agent-traces` | Trace store that commands read and write |
+
+The store is chosen in this order:
+
+1. `--trace-dir DIR`, when given.
+2. `$AGENT_TRACE_DIR`, when set to a non-empty value. Hooks and auto-instrumentation write to the same directory, so `list`, `replay`, `health`, `mcp` and the other commands see their sessions.
+3. `.agent-traces`.
+
+An empty `AGENT_TRACE_DIR` is treated as unset. Relative paths resolve against the current working directory.
+
+---
+
 ## Session capture
 
 ### `record`

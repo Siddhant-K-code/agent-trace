@@ -7,11 +7,11 @@ import time
 from typing import Any
 
 from ..models import EventType, SessionMeta, TraceEvent
-from ..store import TraceStore, DEFAULT_TRACE_DIR
+from ..store import TraceStore, default_trace_dir
 
 
 def _get_store() -> TraceStore:
-    return TraceStore(os.environ.get("AGENT_TRACE_DIR", DEFAULT_TRACE_DIR))
+    return TraceStore(default_trace_dir())
 
 
 def _get_or_create_session(store: TraceStore, name: str) -> str:
