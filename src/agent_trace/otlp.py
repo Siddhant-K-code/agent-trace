@@ -98,17 +98,42 @@ def _make_event(name: str, timestamp: float, data: dict) -> dict:
     }
 
 
-# session_to_otlp reads the data of every event of these types.
+# session_to_otlp reads the data of every event of these types. It reads a
+# tool_call only when otlp_data_indexes says so.
 OTLP_DATA_EVENT_TYPES = frozenset({
     EventType.USER_PROMPT,
     EventType.ASSISTANT_RESPONSE,
     EventType.DECISION,
-    EventType.TOOL_CALL,
     EventType.TOOL_RESULT,
     EventType.ERROR,
     EventType.LLM_REQUEST,
     EventType.LLM_RESPONSE,
 })
+
+
+def otlp_data_indexes(events: list[TraceEvent]) -> list[int]:
+    """Return the 0-based indexes of the events whose data session_to_otlp reads.
+
+    It pairs events by ID exactly as the converter does. A tool_call is read
+    when a tool_result or an error pairs with it or when it is still unpaired
+    at the end, but not when a later tool_call with the same ID replaces it
+    before that.
+    """
+    read: set[int] = set()
+    pending_calls: dict[str, int] = {}
+    for index, event in enumerate(events):
+        if event.event_type == EventType.TOOL_CALL:
+            pending_calls[event.event_id] = index
+        elif event.event_type in OTLP_DATA_EVENT_TYPES:
+            read.add(index)
+            if (
+                event.event_type in (EventType.TOOL_RESULT, EventType.ERROR)
+                and event.parent_id
+                and event.parent_id in pending_calls
+            ):
+                read.add(pending_calls.pop(event.parent_id))
+    read.update(pending_calls.values())
+    return sorted(read)
 
 
 def otlp_genai_data_indexes(events: list[TraceEvent]) -> list[int]:

@@ -407,8 +407,8 @@ def cmd_export(args: argparse.Namespace) -> int:
 
     elif args.format in ("otlp", "otlp-genai", "temporal"):
         from .otlp import (
-            OTLP_DATA_EVENT_TYPES,
             export_otlp,
+            otlp_data_indexes,
             otlp_genai_data_indexes,
             session_to_otlp,
             session_to_otlp_genai,
@@ -421,7 +421,7 @@ def cmd_export(args: argparse.Namespace) -> int:
         if use_genai:
             require_object_event_data(events, indexes=otlp_genai_data_indexes(events))
         elif not use_temporal:
-            require_object_event_data(events, event_types=OTLP_DATA_EVENT_TYPES)
+            require_object_event_data(events, indexes=otlp_data_indexes(events))
         endpoint = args.endpoint
 
         # When --endpoint is set and format is plain otlp, default to otlp-genai

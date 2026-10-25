@@ -116,7 +116,10 @@ EXPORT_ROWS = [
     ("tool_result", _result("Edit", "updated src/app.py"), "", "call-edit"),  # 26
     ("file_write", {"path": "src/app.py"}),                                  # 27
     ("assistant_response", {"text": "Fixed the failing test."}),             # 28
-    ("session_end", _END),                                                   # 29
+    ("tool_call", {"tool_name": "Bash", "arguments": {"command": "ls"}}, "call-dup"),  # 29 replaced by 30
+    ("tool_call", {"tool_name": "Bash", "arguments": {"command": "ls -la"}}, "call-dup"),  # 30
+    ("tool_result", _result("Bash", "src"), "", "call-dup"),                 # 31
+    ("session_end", _END),                                                   # 32
 ]
 
 POSTMORTEM_OK_ROWS = [
@@ -635,11 +638,14 @@ class MirroredCheckTest(unittest.TestCase):
         for label in ("export otlp-genai -o", "export temporal -o"):
             self.assertEqual(
                 sweep.positions(label, M1),
-                {2, 3, 4, 5, 6, 8, 10, 11, 12, 13, 14, 16, 17, 18, 19, 21, 22, 25, 26, 28},
+                {2, 3, 4, 5, 6, 8, 10, 11, 12, 13, 14, 16, 17, 18, 19, 21, 22, 25, 26, 28, 30, 31},
                 label,
             )
-        # Plain otlp also reads the tool_call an error pairs with.
+        # Plain otlp also reads the tool_call an error pairs with, but not a
+        # tool_call that a later one with the same ID replaces.
         self.assertIn(15, sweep.positions("export otlp -o", M1))
+        self.assertNotIn(29, sweep.positions("export otlp -o", M1))
+        self.assertIn(30, sweep.positions("export otlp -o", M1))
         # replay --format html copies the data with dict(), which accepts an
         # empty array or string.
         self.assertEqual(sweep.positions("replay html", M1, []), set())
