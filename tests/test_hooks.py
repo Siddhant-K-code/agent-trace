@@ -1,17 +1,31 @@
 """Tests for Claude Code hooks integration."""
 
+import contextlib
+import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
+import time
+import traceback
 import unittest
+from contextlib import redirect_stderr
 from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX platforms
+    fcntl = None
+
+import agent_trace.store as store_module
+from agent_trace.evidence_health import assess_evidence_health
 from agent_trace.hooks import (
+    _PROVIDER_ENV,
     _active_session_path,
     _read_active_session,
     _write_active_session,
@@ -25,6 +39,7 @@ from agent_trace.hooks import (
     handle_post_tool,
     handle_user_prompt,
     handle_stop,
+    hook_main,
 )
 from agent_trace.models import EventType
 from agent_trace.store import TraceStore
@@ -680,6 +695,313 @@ class TestConcurrentAgentIsolation(unittest.TestCase):
         third = _state_suffix("cursor")
 
         self.assertEqual(len({first, second, third}), 3)
+
+
+_HOOK_EVENTS = {
+    "claude": {"start": "SessionStart", "pre": "PreToolUse", "post": "PostToolUse", "end": "SessionEnd"},
+    "codex": {"start": "SessionStart", "pre": "PreToolUse", "post": "PostToolUse", "end": "SessionEnd"},
+    "copilot": {"start": "sessionStart", "pre": "preToolUse", "post": "postToolUse", "end": "sessionEnd"},
+}
+_SESSION_KEY = {"claude": "session_id", "codex": "session_id", "copilot": "sessionId"}
+_OTHER_PROVIDER = {"claude": "codex", "codex": "copilot", "copilot": "claude"}
+_SRC = Path(__file__).resolve().parents[1] / "src"
+
+
+def _raw_session_id(provider, n):
+    return f"{provider[:4]}{n:04d}-0000-4000-8000-{n:012d}"
+
+
+class _PendingCallsHookTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name) / ".agent-traces"
+        env = patch.dict(os.environ, {"AGENT_TRACE_DIR": str(self.root), "DO_NOT_TRACK": "1"})
+        env.start()
+        self.addCleanup(env.stop)
+        for name in (
+            *_PROVIDER_ENV.values(),
+            "AGENT_TRACE_REDACT",
+            "AGENT_STRACE_TENANT_ID",
+            "AGENT_STRACE_WORKSPACE",
+            "AGENT_STRACE_ENDPOINT",
+            "AGENT_STRACE_PARENT_SESSION",
+        ):
+            os.environ.pop(name, None)
+
+    def hook(self, provider, phase, payload):
+        err = io.StringIO()
+        with patch.object(sys, "stdin", io.StringIO(json.dumps(payload))), redirect_stderr(err):
+            hook_main(["--provider", provider, _HOOK_EVENTS[provider][phase]])
+        self.assertEqual(err.getvalue(), "", f"{provider} {phase}")
+
+    def run_hook(self, provider, phase, raw_sid, use_id="t1", **extra):
+        payload = {_SESSION_KEY[provider]: raw_sid, **extra}
+        if phase in ("pre", "post"):
+            if provider == "copilot":
+                payload.update({"toolName": "bash", "toolArgs": {"command": use_id}})
+                if phase == "post":
+                    payload["toolResult"] = {"resultType": "success", "textResultForLlm": "ok"}
+            else:
+                payload.update(
+                    {"tool_name": "Bash", "tool_input": {"command": use_id}, "tool_use_id": use_id}
+                )
+                if phase == "post":
+                    payload["tool_response"] = "ok"
+        elif phase == "start":
+            payload.setdefault("source", "startup")
+        self.hook(provider, phase, payload)
+
+    def pending_files(self):
+        return sorted(path.name for path in self.root.glob(".pending-calls*.json"))
+
+    def pending_file(self, provider, raw_sid):
+        (name,) = [
+            name
+            for name in self.pending_files()
+            if name.startswith(f".pending-calls.v2.{provider}.{raw_sid[:16].encode().hex()}.")
+        ]
+        return self.root / name
+
+    def events(self, raw_sid, event_type):
+        return [
+            event
+            for event in TraceStore(self.root).load_events(raw_sid[:16])
+            if event.event_type == event_type
+        ]
+
+
+class TestPendingCallsCleanup(_PendingCallsHookTest):
+    """Session end must not leave pending-calls state behind."""
+
+    def test_lifecycle_leaves_no_pending_file(self):
+        for provider in _HOOK_EVENTS:
+            with self.subTest(provider=provider):
+                sid = _raw_session_id(provider, 1)
+                self.run_hook(provider, "start", sid)
+                self.assertEqual(self.pending_files(), [])
+
+                self.run_hook(provider, "pre", sid)
+                pending = json.loads(self.pending_file(provider, sid).read_text())
+                (call,) = self.events(sid, EventType.TOOL_CALL)
+                self.assertEqual(list(pending), [call.event_id])
+                self.assertEqual(pending[call.event_id]["session_id"], sid[:16])
+
+                self.run_hook(provider, "post", sid)
+                self.assertEqual(self.pending_files(), [])
+                (result,) = self.events(sid, EventType.TOOL_RESULT)
+                self.assertEqual(result.parent_id, call.event_id)
+
+                self.run_hook(provider, "end", sid, reason="exit")
+                self.assertEqual(self.pending_files(), [])
+                self.assertTrue(self.events(sid, EventType.SESSION_END))
+
+    def test_session_end_keeps_other_sessions_and_providers_files(self):
+        for provider in _HOOK_EVENTS:
+            with self.subTest(provider=provider):
+                other = _OTHER_PROVIDER[provider]
+                ending = _raw_session_id(provider, 2)
+                sibling = _raw_session_id(provider, 3)
+                foreign = _raw_session_id(other, 4)
+                for p, sid in ((provider, sibling), (other, foreign), (provider, ending)):
+                    self.run_hook(p, "start", sid)
+                    self.run_hook(p, "pre", sid)
+                kept = [self.pending_file(provider, sibling), self.pending_file(other, foreign)]
+                before = {path: path.read_bytes() for path in kept}
+                ending_file = self.pending_file(provider, ending)
+
+                self.run_hook(provider, "post", ending)
+                self.assertFalse(ending_file.exists())
+                self.run_hook(provider, "end", ending, reason="exit")
+
+                self.assertEqual({path: path.read_bytes() for path in kept}, before)
+                self.assertEqual(sorted(path.name for path in kept), self.pending_files())
+                for p, sid in ((provider, sibling), (other, foreign)):
+                    self.run_hook(p, "post", sid)
+                    self.run_hook(p, "end", sid, reason="exit")
+                self.assertEqual(self.pending_files(), [])
+
+    def test_unmatched_calls_are_dropped_but_stay_in_events(self):
+        for provider in _HOOK_EVENTS:
+            with self.subTest(provider=provider):
+                sid = _raw_session_id(provider, 5)
+                self.run_hook(provider, "start", sid)
+                self.run_hook(provider, "pre", sid)
+                self.assertTrue(self.pending_file(provider, sid).exists())
+
+                self.run_hook(provider, "end", sid, reason="exit")
+                self.assertEqual(self.pending_files(), [])
+                (call,) = self.events(sid, EventType.TOOL_CALL)
+                self.assertEqual(self.events(sid, EventType.TOOL_RESULT), [])
+                events = TraceStore(self.root).load_events(sid[:16])
+                health = assess_evidence_health(events, session_finalized=True)
+                self.assertIn(
+                    ("unpaired_tool_call", call.event_id),
+                    {(reason.code, reason.event_id) for reason in health.reasons},
+                )
+
+                # A result arriving after the end is still recorded, unlinked,
+                # and does not recreate the state file.
+                self.run_hook(provider, "post", sid)
+                self.assertEqual(self.pending_files(), [])
+                (result,) = self.events(sid, EventType.TOOL_RESULT)
+                self.assertEqual(result.parent_id, "")
+
+    def test_session_end_without_provider_id_clears_only_this_session(self):
+        for provider in _HOOK_EVENTS:
+            with self.subTest(provider=provider):
+                other = _OTHER_PROVIDER[provider]
+                sibling = _raw_session_id(provider, 6)
+                ending = _raw_session_id(provider, 7)
+                local = ending[:16]
+                self.run_hook(provider, "start", sibling)
+                self.run_hook(provider, "pre", sibling)
+                self.run_hook(provider, "start", ending)
+                self.run_hook(provider, "pre", ending)
+                ending_file = self.pending_file(provider, ending)
+
+                same_local_other_provider = (
+                    self.root / f".pending-calls.v2.{other}.{local.encode().hex()}.{'0' * 64}.json"
+                )
+                same_local_other_provider.write_text('{"x": {"tool_name": "Bash", "timestamp": 1}}')
+                shared = self.root / ".pending-calls.json"
+                shared.write_text(json.dumps({
+                    "mine": {"session_id": local, "tool_name": "Bash", "timestamp": 1},
+                    "theirs": {"session_id": "someone-else", "tool_name": "Bash", "timestamp": 1},
+                }))
+                kept = [self.pending_file(provider, sibling), same_local_other_provider]
+                before = {path: path.read_bytes() for path in kept}
+
+                # A new hook process: no provider session ID in env or payload.
+                os.environ.pop(_PROVIDER_ENV[provider], None)
+                self.hook(provider, "end", {})
+
+                self.assertFalse(ending_file.exists())
+                self.assertIsNotNone(TraceStore(self.root).load_meta(local).ended_at)
+                self.assertEqual({path: path.read_bytes() for path in kept}, before)
+                self.assertEqual(list(json.loads(shared.read_text())), ["theirs"])
+
+                for path in (*kept, shared):
+                    path.unlink()
+
+    def test_hook_paths_never_nest_the_store_lock(self):
+        """Pending-calls locking must not run inside another store-lock holder.
+
+        flock is not re-entrant across file descriptors, so a nested
+        acquisition, or a TraceStore built (journal recovery locks) while the
+        lock is held, would deadlock a real hook process.
+        """
+        violations = []
+        depth = [0]
+        acquired = [0]
+        real_lock = store_module._store_write_lock
+        real_init = store_module.TraceStore.__init__
+
+        @contextlib.contextmanager
+        def guarded_lock(*args, **kwargs):
+            if depth[0]:
+                # Record instead of blocking forever on the real flock.
+                violations.append("nested lock:\n" + "".join(traceback.format_stack(limit=8)))
+                yield
+                return
+            depth[0] += 1
+            acquired[0] += 1
+            try:
+                with real_lock(*args, **kwargs):
+                    yield
+            finally:
+                depth[0] -= 1
+
+        def guarded_init(self, *args, **kwargs):
+            if depth[0]:
+                violations.append("store built under lock:\n" + "".join(traceback.format_stack(limit=8)))
+            real_init(self, *args, **kwargs)
+
+        with patch.object(store_module, "_store_write_lock", guarded_lock), \
+                patch.object(store_module.TraceStore, "__init__", guarded_init):
+            self.test_lifecycle_leaves_no_pending_file()
+            self.test_session_end_keeps_other_sessions_and_providers_files()
+            self.test_unmatched_calls_are_dropped_but_stay_in_events()
+            self.test_session_end_without_provider_id_clears_only_this_session()
+        self.assertGreater(acquired[0], 0)
+        self.assertEqual(violations, [])
+
+
+@unittest.skipIf(fcntl is None, "store lock needs fcntl.flock")
+class TestPendingCallsConcurrency(_PendingCallsHookTest):
+    """Parallel hook processes of one session must not lose pending calls."""
+
+    PROCESSES = 8
+    TIMEOUT = 60
+
+    def run_parallel(self, provider, phase, payloads):
+        code = (
+            "import io, sys\n"
+            "from agent_trace.hooks import hook_main\n"
+            "sys.stdin = io.StringIO(sys.argv[1])\n"
+            "hook_main(sys.argv[2:])\n"
+        )
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(_SRC), env.get("PYTHONPATH")]))
+        event = _HOOK_EVENTS[provider][phase]
+        procs = [
+            subprocess.Popen(
+                [sys.executable, "-c", code, json.dumps(payload), "--provider", provider, event],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+                text=True,
+            )
+            for payload in payloads
+        ]
+        deadline = time.monotonic() + self.TIMEOUT
+        try:
+            outputs = [
+                proc.communicate(timeout=max(0.1, deadline - time.monotonic())) for proc in procs
+            ]
+        except subprocess.TimeoutExpired:
+            for proc in procs:
+                proc.kill()
+                proc.communicate()
+            self.fail(f"{phase} hooks did not finish within {self.TIMEOUT}s (lock deadlock?)")
+        for proc, (_, stderr) in zip(procs, outputs):
+            self.assertEqual((proc.returncode, stderr), (0, ""), phase)
+
+    def test_parallel_tool_hooks_keep_every_pending_call(self):
+        provider = "claude"
+        sid = _raw_session_id(provider, 8)
+        use_ids = [f"call-{i}" for i in range(self.PROCESSES)]
+
+        def payload(use_id, **extra):
+            return {
+                "session_id": sid,
+                "tool_name": "Bash",
+                "tool_input": {"command": use_id},
+                "tool_use_id": use_id,
+                **extra,
+            }
+
+        self.run_parallel(provider, "start", [{"session_id": sid, "source": "startup"}])
+        self.run_parallel(provider, "pre", [payload(use_id) for use_id in use_ids])
+
+        calls = {event.data["tool_use_id"]: event.event_id for event in self.events(sid, EventType.TOOL_CALL)}
+        self.assertEqual(sorted(calls), sorted(use_ids))
+        pending = json.loads(self.pending_file(provider, sid).read_text())
+        self.assertEqual(sorted(pending), sorted(calls.values()))
+
+        self.run_parallel(
+            provider, "post", [payload(use_id, tool_response="ok") for use_id in use_ids]
+        )
+        self.assertEqual(self.pending_files(), [])
+        results = {
+            event.data["tool_use_id"]: event.parent_id
+            for event in self.events(sid, EventType.TOOL_RESULT)
+        }
+        self.assertEqual(results, calls)
+
+        self.run_parallel(provider, "end", [{"session_id": sid, "reason": "exit"}])
+        self.assertEqual(self.pending_files(), [])
 
 
 if __name__ == "__main__":
