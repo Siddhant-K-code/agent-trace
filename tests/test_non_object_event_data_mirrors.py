@@ -99,7 +99,7 @@ EXPORT_ROWS = [
     ("llm_request", _LLM_REQUEST, "llm-b"),                                  # 9 reuses the ID of 6
     ("llm_request", _LLM_REQUEST, "llm-c"),                                  # 10 replaces 7 and keeps its place
     ("llm_response", _LLM_RESPONSE),                                         # 11 pairs with 10
-    ("llm_request", _LLM_REQUEST, "llm-b"),                                  # 12 replaces 9
+    ("llm_request", _LLM_REQUEST, "llm-b"),                                  # 12 replaces 9, 38 replaces it
     ("tool_call", _PYTEST, "call-1"),                                        # 13
     ("tool_result", _result("Bash", "1 failed"), "", "call-1"),              # 14
     ("tool_call", _PYTEST, "call-2"),                                        # 15 an error pairs with it, 34 reuses its ID
@@ -122,7 +122,11 @@ EXPORT_ROWS = [
     ("tool_call", _PYTEST, "call-4"),                                        # 32 an error pairs with it, nothing reuses its ID
     ("error", {"tool_name": "Bash", "message": "pytest timed out"}, "", "call-4"),  # 33
     ("tool_call", _PYTEST, "call-2"),                                        # 34 reuses the ID of 15 after the error at 16
-    ("session_end", _END),                                                   # 35
+    ("tool_call", _PYTEST, "call-1"),                                        # 35 reuses the ID of 13 after the tool_result at 14
+    ("llm_request", _LLM_REQUEST, "llm-m"),                                  # 36
+    ("llm_response", _LLM_RESPONSE, "", "llm-m"),                            # 37 pairs with 36 by parent while 12 is older
+    ("llm_request", _LLM_REQUEST, "llm-b"),                                  # 38
+    ("session_end", _END),                                                   # 39
 ]
 
 POSTMORTEM_OK_ROWS = [
@@ -636,13 +640,15 @@ class MirroredCheckTest(unittest.TestCase):
 
         # otlp-genai and temporal read a tool_call when a tool_result pairs
         # with it or nothing does, but not when an error pairs with it, whether
-        # or not a later tool_call reuses its ID. A parentless llm_response
-        # pairs with the oldest open request, and a request replaced by one
-        # with the same ID before it pairs is not read.
+        # or not a later tool_call reuses its ID. An llm_response pairs with
+        # the request it names, and a parentless one pairs with the oldest
+        # open request. A request replaced by one with the same ID before it
+        # pairs is not read.
         for label in ("export otlp-genai -o", "export temporal -o"):
             self.assertEqual(
                 sweep.positions(label, M1),
-                {2, 3, 4, 5, 6, 8, 10, 11, 12, 13, 14, 16, 17, 18, 19, 21, 22, 25, 26, 28, 30, 31, 33, 34},
+                {2, 3, 4, 5, 6, 8, 10, 11, 13, 14, 16, 17, 18, 19, 21, 22, 25, 26, 28, 30, 31, 33, 34,
+                 35, 36, 37, 38},
                 label,
             )
         # Plain otlp also reads the tool_call an error pairs with, even when a
