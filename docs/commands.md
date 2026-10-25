@@ -1233,7 +1233,9 @@ Hook capture records every event's `data` as a JSON object. `agent-strace server
 stores array, string, number, and boolean `data` as it arrives, and a hand edit
 can store any JSON value. A command that reads keys from `data` checks the
 session first. If an event it reads has non-object data, the command writes one
-line to stderr and exits 1 before it prints, writes, sends, or opens anything:
+line to stderr and exits 1 before it prints, writes, sends, or opens anything.
+`optimize` with an LLM configured is the one exception, described below. The
+line looks like this:
 
 ```
 Error: session event data must be an object: event 6 of 25 (tool_call) has string data; 5 more events have non-object data
@@ -1249,15 +1251,22 @@ array data`.
 These commands refuse such sessions: `a2a-tree`, `audit`, `budget-report`,
 `cognitive-debt`, `compaction`, `compare`, `compliance export`,
 `context-score --file`, `cost`, `dashboard --trend`, `diff`, `explain`,
-`export` with `--format otlp`, `otlp-genai`, or `eu-ai-act` or with `--backend`,
-`inflation`, `mcp-scan --session`, `oncall`, `optimize`, `policy generate`,
-`postmortem`, `pr-comment`, `replay`, `sample`, `share`, `standup`, `stats`,
-`team-report`, `tenant report`, `timeline`, `token-budget`, and `why`. A command
-refuses only when it reads an event whose data is not an object, so the same
-session keeps working with commands that never read that event. `freeze`,
-`regression`, `compliance-report`, `org-report`, and `compare` for events other
-than decisions already stopped on these sessions with their own error message
-and exit code 1, and they keep it.
+`export` with `--format otlp`, `otlp-genai`, `temporal`, or `eu-ai-act` or with
+`--backend`, `inflation`, `mcp-scan --session`, `oncall`, `optimize`,
+`policy generate`, `postmortem`, `pr-comment`, `replay`, `sample`, `share`,
+`standup`, `stats`, `team-report`, `tenant report`, `timeline`, `token-budget`,
+and `why`. A command refuses only when it reads an event whose data is not an
+object, so the same session keeps working with commands that never read that
+event. For example, `export --format otlp-genai` and `temporal` pair events by
+ID and do not read a tool_call that an error event pairs with.
+`export --format temporal` checks the session's Temporal trace context first, so
+a session without one keeps its `Temporal export failed` message. `optimize`
+with `--base-url` and `--api-key` checks the events in its prompt before it sends
+the request. When the LLM returns no patterns, `optimize` falls back to its
+heuristics, which read more events, so it can refuse after it sent the request.
+`freeze`, `regression`, `compliance-report`, `org-report`, and `compare` for
+events other than decisions already stopped on these sessions with their own
+error message and exit code 1, and they keep it.
 
 `list`, `inspect`, `tree`, `verify`, and `export --format json`, `ndjson`, or `csv`
 keep working on these sessions. The export formats include the data exactly as

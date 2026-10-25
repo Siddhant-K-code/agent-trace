@@ -590,7 +590,9 @@ def postmortem_data_indexes(events: list[TraceEvent], crashed: bool) -> list[int
     """Return the indexes of the events whose data analyze_session reads.
 
     *crashed* is whether detect_crash found a crash. Mirror any change to
-    analyze_session's reads here; tests poison one event at a time to check.
+    analyze_session's reads here. tests/test_non_object_event_data_mirrors.py
+    stores non-object data in one event at a time and checks that postmortem
+    refuses exactly when analyze_session would fail on it.
     """
     indexes = {
         index for index, event in enumerate(events)

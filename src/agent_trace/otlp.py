@@ -109,8 +109,43 @@ OTLP_DATA_EVENT_TYPES = frozenset({
     EventType.LLM_REQUEST,
     EventType.LLM_RESPONSE,
 })
-# session_to_otlp_genai reads the same types except decision.
-OTLP_GENAI_DATA_EVENT_TYPES = OTLP_DATA_EVENT_TYPES - {EventType.DECISION}
+
+
+def otlp_genai_data_indexes(events: list[TraceEvent]) -> list[int]:
+    """Return the 0-based indexes of the events whose data session_to_otlp_genai reads.
+
+    It pairs events by ID exactly as the converter does. A tool_call is read
+    when a tool_result pairs with it or when it is still unpaired at the end,
+    but not when an error pairs with it. An llm_request is read when an
+    llm_response pairs with it or when it is still unpaired at the end.
+    """
+    read: set[int] = set()
+    pending_llm: dict[str, int] = {}
+    pending_calls: dict[str, int] = {}
+    for index, event in enumerate(events):
+        if event.event_type in (EventType.USER_PROMPT, EventType.ASSISTANT_RESPONSE):
+            read.add(index)
+        elif event.event_type == EventType.LLM_REQUEST:
+            pending_llm[event.event_id] = index
+        elif event.event_type == EventType.LLM_RESPONSE:
+            read.add(index)
+            if event.parent_id and event.parent_id in pending_llm:
+                read.add(pending_llm.pop(event.parent_id))
+            elif pending_llm:
+                read.add(pending_llm.pop(next(iter(pending_llm))))
+        elif event.event_type == EventType.TOOL_CALL:
+            pending_calls[event.event_id] = index
+        elif event.event_type == EventType.TOOL_RESULT:
+            read.add(index)
+            if event.parent_id and event.parent_id in pending_calls:
+                read.add(pending_calls.pop(event.parent_id))
+        elif event.event_type == EventType.ERROR:
+            read.add(index)
+            if event.parent_id and event.parent_id in pending_calls:
+                pending_calls.pop(event.parent_id)
+    read.update(pending_llm.values())
+    read.update(pending_calls.values())
+    return sorted(read)
 
 
 def session_to_otlp(

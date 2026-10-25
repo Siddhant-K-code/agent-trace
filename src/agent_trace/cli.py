@@ -408,19 +408,20 @@ def cmd_export(args: argparse.Namespace) -> int:
     elif args.format in ("otlp", "otlp-genai", "temporal"):
         from .otlp import (
             OTLP_DATA_EVENT_TYPES,
-            OTLP_GENAI_DATA_EVENT_TYPES,
             export_otlp,
+            otlp_genai_data_indexes,
             session_to_otlp,
             session_to_otlp_genai,
         )
 
         use_genai = args.format == "otlp-genai"
         use_temporal = args.format == "temporal"
-        if not use_temporal:
-            require_object_event_data(
-                events,
-                event_types=OTLP_GENAI_DATA_EVENT_TYPES if use_genai else OTLP_DATA_EVENT_TYPES,
-            )
+        # session_to_temporal_otlp checks the data after it validates the
+        # session's Temporal context, so a session without one keeps its message.
+        if use_genai:
+            require_object_event_data(events, indexes=otlp_genai_data_indexes(events))
+        elif not use_temporal:
+            require_object_event_data(events, event_types=OTLP_DATA_EVENT_TYPES)
         endpoint = args.endpoint
 
         # When --endpoint is set and format is plain otlp, default to otlp-genai
@@ -440,6 +441,8 @@ def cmd_export(args: argparse.Namespace) -> int:
                     payload = session_to_otlp_genai(meta, events, service_name=args.service_name)
                 else:
                     payload = session_to_otlp(meta, events, service_name=args.service_name)
+            except NonObjectEventDataError:
+                raise
             except ValueError as exc:
                 sys.stderr.write(f"Temporal export failed: {exc}\n")
                 return 1

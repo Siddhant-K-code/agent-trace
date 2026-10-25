@@ -18,8 +18,9 @@ import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from .event_data import NonObjectEventDataError, require_object_event_data
 from .models import SessionMeta, TraceEvent
-from .otlp import export_otlp_payload, session_to_otlp_genai
+from .otlp import export_otlp_payload, otlp_genai_data_indexes, session_to_otlp_genai
 from .propagation import extract_traceparent
 from .store import TraceStore
 
@@ -115,7 +116,12 @@ def session_to_temporal_otlp(
     events: list[TraceEvent],
     service_name: str = "agent-trace",
 ) -> dict:
-    """Convert a session into OTLP JSON parented to a Temporal activity."""
+    """Convert a session into OTLP JSON parented to a Temporal activity.
+
+    Raises ValueError when the session has no usable Temporal trace context,
+    and then NonObjectEventDataError when an event whose data the conversion
+    reads is not an object.
+    """
     trace_id = meta.trace_id.lower()
     parent_span_id = meta.parent_span_id.lower()
     trace_flags = (meta.trace_flags or "01").lower()
@@ -125,6 +131,7 @@ def session_to_temporal_otlp(
             f"{TEMPORAL_TRACE_PARENT_ENV} set"
         )
     _validate_ids(trace_id, parent_span_id, trace_flags)
+    require_object_event_data(events, indexes=otlp_genai_data_indexes(events))
 
     payload = session_to_otlp_genai(
         meta,
@@ -159,6 +166,8 @@ def export_temporal_otlp(
         return False
     try:
         payload = session_to_temporal_otlp(meta, events, service_name=service_name)
+    except NonObjectEventDataError:
+        raise
     except ValueError as exc:
         sys.stderr.write(f"Temporal export failed: {exc}\n")
         return False
