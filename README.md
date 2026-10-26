@@ -110,6 +110,8 @@ def search_codebase(query: str) -> str:
 end_session()
 ```
 
+Sessions go to `$AGENT_TRACE_DIR` when set, else `.agent-traces`; an explicit `start_session(trace_dir=...)` wins.
+
 Full setup guide: [docs/setup.md](docs/setup.md)
 
 ## What you can do

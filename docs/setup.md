@@ -460,6 +460,8 @@ meta = end_session()
 print(f"Replay with: agent-strace replay {meta.session_id}")
 ```
 
+`start_session()` writes to `$AGENT_TRACE_DIR` when it is set and non-empty, else `.agent-traces`, so the CLI reads the same store. An explicit `start_session(trace_dir=...)` wins.
+
 ---
 
 ## Security-sensitive repos

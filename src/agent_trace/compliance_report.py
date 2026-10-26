@@ -31,7 +31,7 @@ from .approval import ApprovalRequest
 from .audit import Policy, _audit_event, _extract_urls, _is_sensitive
 from .models import EventType, SessionMeta, TraceEvent
 from .redact import contains_redaction_marker, redact_data
-from .store import DEFAULT_TRACE_DIR, TraceStore
+from .store import TraceStore, resolve_trace_dir
 from .team_report import session_engineer_attribution
 from .tenancy import enumerate_trace_stores
 
@@ -2062,7 +2062,7 @@ def cmd_compliance_report(args: argparse.Namespace) -> int:
         output = getattr(args, "output", None)
         if output_format == "pdf" and not output:
             raise ComplianceReportError("PDF output requires --output FILE")
-        stores = enumerate_trace_stores(getattr(args, "trace_dir", DEFAULT_TRACE_DIR))
+        stores = enumerate_trace_stores(resolve_trace_dir(getattr(args, "trace_dir", None)))
         report = build_compliance_report(
             stores,
             getattr(args, "framework"),

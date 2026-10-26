@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import EventType, SessionMeta, TraceEvent
-from .store import TraceStore
+from .store import TraceStore, resolve_trace_dir
 
 
 def cmd_import(args: argparse.Namespace) -> int:
@@ -160,7 +160,7 @@ def _is_compaction_summary(raw: dict[str, Any], text: str, pending: bool) -> boo
 def import_jsonl(
     path: str | Path,
     store: TraceStore | None = None,
-    trace_dir: str = ".agent-traces",
+    trace_dir: str | None = None,
 ) -> str:
     """Import a Claude Code JSONL session log into agent-trace format.
 
@@ -170,8 +170,9 @@ def import_jsonl(
         Path to the .jsonl session file.
     store : TraceStore, optional
         Existing store to import into. Creates one if not provided.
-    trace_dir : str
-        Directory for trace storage (used if store is None).
+    trace_dir : str, optional
+        Directory for trace storage (used if store is None). Defaults to
+        ``$AGENT_TRACE_DIR`` when set and non-empty, else ``.agent-traces``.
 
     Returns
     -------
@@ -183,7 +184,7 @@ def import_jsonl(
         raise FileNotFoundError(f"Session log not found: {path}")
 
     if store is None:
-        store = TraceStore(trace_dir)
+        store = TraceStore(resolve_trace_dir(trace_dir))
 
     # First pass: extract metadata from first entry
     session_id = ""
