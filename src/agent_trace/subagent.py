@@ -13,7 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import TextIO
 
 from .event_data import require_object_event_data
@@ -136,6 +136,101 @@ def aggregate_stats(node: SessionNode) -> AggregatedStats:
 
 
 # ---------------------------------------------------------------------------
+# In-session subagents
+# ---------------------------------------------------------------------------
+# Codex runs a subagent inside the parent session: its tool events and its
+# subagent_start/subagent_stop events carry the subagent's ``agent_id`` and
+# ``agent_type`` instead of belonging to a child session.
+
+_IN_SESSION_SUBAGENT_EVENT_TYPES = frozenset({
+    EventType.TOOL_CALL,
+    EventType.ERROR,
+    EventType.SUBAGENT_START,
+    EventType.SUBAGENT_STOP,
+})
+
+
+@dataclass
+class InSessionSubagent:
+    agent_id: str
+    agent_type: str = ""
+    tool_calls: int = 0
+    errors: int = 0
+
+
+def _event_agent_id(data: object) -> str:
+    if not isinstance(data, dict):
+        return ""
+    agent_id = data.get("agent_id")
+    return agent_id if isinstance(agent_id, str) else ""
+
+
+def short_agent_id(agent_id: str) -> str:
+    """Return the last 8 characters of *agent_id*.
+
+    Codex agent IDs are UUIDv7, whose leading characters encode the creation
+    time and repeat across subagents started close together; the trailing
+    characters are random.
+    """
+    return agent_id[-8:]
+
+
+def subagent_label(data: object) -> str:
+    """Return ``"<agent_type> <short id>"`` for an attributed event, else ``""``."""
+    agent_id = _event_agent_id(data)
+    if not agent_id:
+        return ""
+    agent_type = data.get("agent_type")  # type: ignore[union-attr]
+    short = short_agent_id(agent_id)
+    return f"{agent_type} {short}" if isinstance(agent_type, str) and agent_type else short
+
+
+def in_session_subagents(events: list[TraceEvent]) -> list[InSessionSubagent]:
+    """Group a session's attributed events by ``agent_id``, in first-seen order.
+
+    Events whose data is not a JSON object are skipped.
+    """
+    by_id: dict[str, InSessionSubagent] = {}
+    for event in events:
+        if event.event_type not in _IN_SESSION_SUBAGENT_EVENT_TYPES:
+            continue
+        agent_id = _event_agent_id(event.data)
+        if not agent_id:
+            continue
+        entry = by_id.setdefault(agent_id, InSessionSubagent(agent_id=agent_id))
+        agent_type = event.data.get("agent_type")
+        if not entry.agent_type and isinstance(agent_type, str):
+            entry.agent_type = agent_type
+        if event.event_type == EventType.TOOL_CALL:
+            entry.tool_calls += 1
+        elif event.event_type == EventType.ERROR:
+            entry.errors += 1
+    return list(by_id.values())
+
+
+def describe_subagent(sub: InSessionSubagent) -> str:
+    """Return ``"<agent_type> <short id>  N tools[  ✗ N errors]"``."""
+    kind = f"{sub.agent_type} " if sub.agent_type else ""
+    errors = f"  ✗ {sub.errors} errors" if sub.errors else ""
+    return f"{kind}{short_agent_id(sub.agent_id)}  {sub.tool_calls} tools{errors}"
+
+
+def _subagent_summary_line(sub: InSessionSubagent) -> str:
+    return f"subagent {describe_subagent(sub)}"
+
+
+def _returned_preview(event: TraceEvent, limit: int = 80) -> str:
+    """Return a one-line preview of what a subagent returned, else ``""``."""
+    if event.event_type != EventType.SUBAGENT_STOP or not isinstance(event.data, dict):
+        return ""
+    text = event.data.get("text")
+    if not isinstance(text, str):
+        return ""
+    text = " ".join(text.split())
+    return text[:limit] + "..." if len(text) > limit else text
+
+
+# ---------------------------------------------------------------------------
 # Tree-aware replay formatting
 # ---------------------------------------------------------------------------
 
@@ -246,6 +341,9 @@ def format_tree(
                 subagent_tag = "  [sidechain]"
             if event.data.get("subagent_type"):
                 subagent_tag += f"  [{event.data['subagent_type']}]"
+            label = subagent_label(event.data)
+            if label:
+                subagent_tag += f"  [subagent {label}]"
 
             w(f"{indent}{ts_str}  → tool_call  {tool_name}{subagent_tag}{detail}\n")
 
@@ -259,13 +357,17 @@ def format_tree(
         elif event.event_type == EventType.TOOL_RESULT:
             preview = (event.data.get("result", "") or
                        event.data.get("content_preview", ""))[:80]
+            label = subagent_label(event.data)
             w(f"{indent}{ts_str}  ← tool_result"
+              f"{'  [subagent ' + label + ']' if label else ''}"
               f"{'  ' + preview if preview else ''}\n")
 
         elif event.event_type == EventType.ERROR:
             msg = (event.data.get("message", "") or
                    event.data.get("error", ""))[:80]
-            w(f"{indent}{ts_str}  ✗ error  {msg}\n")
+            label = subagent_label(event.data)
+            w(f"{indent}{ts_str}  ✗ error"
+              f"{'  [subagent ' + label + ']' if label else ''}  {msg}\n")
 
         elif event.event_type == EventType.USER_PROMPT:
             prompt = event.data.get("prompt", "")[:80]
@@ -278,10 +380,15 @@ def format_tree(
         elif event.event_type in (EventType.SUBAGENT_START, EventType.SUBAGENT_STOP):
             agent = event.data.get("agent_type") or event.data.get("agent_name") or ""
             child = str(event.data.get("child_session_id", ""))[:12]
+            agent_id = _event_agent_id(event.data)
             icon = "⤷" if event.event_type == EventType.SUBAGENT_START else "⤶"
             w(f"{indent}{ts_str}  {icon} {event.event_type.value}"
               f"{'  ' + agent if agent else ''}"
-              f"{'  child=' + child if child else ''}\n")
+              f"{'  child=' + child if child else ''}"
+              f"{'  agent=' + short_agent_id(agent_id) if agent_id else ''}\n")
+            returned = _returned_preview(event)
+            if returned:
+                w(f"{indent}{' ' * len(ts_str)}    returned: \"{returned}\"\n")
 
         elif event.event_type == EventType.SESSION_END:
             w(f"{indent}{ts_str}  ■ session_end\n")
@@ -305,8 +412,17 @@ def format_tree_summary(
       f"  {node.meta.total_tokens:,} tokens"
       f"{'  ✗ ' + str(node.meta.errors) + ' errors' if node.meta.errors else ''}\n")
 
+    _write_subagent_lines(node, out)
     for i, child in enumerate(node.children):
         format_tree_summary(child, out=out, last_child=(i == len(node.children) - 1))
+
+
+def _write_subagent_lines(node: SessionNode, out: TextIO) -> None:
+    """Write one line per in-session subagent, before any child sessions."""
+    subagents = in_session_subagents(node.events)
+    for i, sub in enumerate(subagents):
+        last = i == len(subagents) - 1 and not node.children
+        out.write(f"{_indent(node.depth + 1, last_child=last)}{_subagent_summary_line(sub)}\n")
 
 
 def _status(meta: SessionMeta) -> str:
@@ -343,7 +459,7 @@ def tree_to_dict(
     costs: dict[str, float] | None = None,
 ) -> dict:
     costs = costs or {}
-    return {
+    data = {
         "session_id": node.meta.session_id,
         "agent": node.meta.agent_name or node.meta.command or "",
         "depth": node.depth,
@@ -357,6 +473,10 @@ def tree_to_dict(
         "duration_s": round(_duration_seconds(node.meta), 3),
         "children": [tree_to_dict(child, costs) for child in node.children],
     }
+    subagents = in_session_subagents(node.events)
+    if subagents:
+        data["subagents"] = [asdict(sub) for sub in subagents]
+    return data
 
 
 def format_session_tree(
@@ -383,6 +503,7 @@ def format_session_tree(
         out.write(f"  {node.meta.errors} errors")
     out.write("\n")
 
+    _write_subagent_lines(node, out)
     for i, child in enumerate(node.children):
         format_session_tree(
             child,

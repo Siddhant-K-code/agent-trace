@@ -15,6 +15,7 @@ from typing import Any, TextIO
 from .event_data import require_object_event_data
 from .models import EventType, SessionMeta, TraceEvent
 from .store import TraceStore
+from .subagent import describe_subagent, in_session_subagents
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +228,9 @@ def format_explain(result: ExplainResult, out: TextIO = sys.stdout) -> None:
 
         if len(phase.commands) > 8:
             w(f"  ... and {len(phase.commands) - 8} more commands\n")
+
+        for sub in in_session_subagents(phase.events):
+            w(f"  Subagent: {describe_subagent(sub)}\n")
 
         w("\n")
 

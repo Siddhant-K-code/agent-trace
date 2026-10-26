@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from agent_trace import __version__
 from agent_trace.cli import _codex_config_dir, _codex_hooks_config, cmd_setup
+from agent_trace.compaction import build_checkpoint_markdown
 from agent_trace.health import assess_session, load_capture_matrix
 from agent_trace.hooks import (
     _PROVIDER_ENV,
@@ -25,7 +26,9 @@ from agent_trace.hooks import (
     hook_main,
 )
 from agent_trace.models import EventType
+from agent_trace.otlp import session_to_otlp, session_to_otlp_genai
 from agent_trace.store import TraceStore
+from agent_trace.timeline import build_timeline, format_timeline
 
 
 class TestCodexHooks(unittest.TestCase):
@@ -527,7 +530,7 @@ class TestCodexSessionEndAndSubagentHooks(unittest.TestCase):
         for name in (*_PROVIDER_ENV.values(), "AGENT_TRACE_REDACT"):
             os.environ.pop(name, None)
 
-    def dispatch(self, event, **payload):
+    def dispatch(self, event, *, expect_stderr="", **payload):
         payload = {
             "session_id": self.PARENT,
             "cwd": self.CWD,
@@ -539,7 +542,7 @@ class TestCodexSessionEndAndSubagentHooks(unittest.TestCase):
             sys, "stderr", err
         ):
             hook_main(["--provider", "codex", event])
-        self.assertEqual(err.getvalue(), "", event)
+        self.assertEqual(err.getvalue(), expect_stderr, event)
 
     def start(self, source="startup"):
         self.dispatch("SessionStart", source=source, model="synthetic-model")
@@ -630,11 +633,189 @@ class TestCodexSessionEndAndSubagentHooks(unittest.TestCase):
             self.assertNotIn("child_session_id", event.data)
             self.assertNotIn("child_link", event.data)
             self.assertEqual(event.parent_id, "")
+        self.assertNotIn("text", start.data)
+        self.assertNotIn("agent_transcript_path", start.data)
+        self.assertEqual(stop.data["text"], "Synthetic subagent answer.")
+        self.assertEqual(
+            stop.data["agent_transcript_path"], "/codex-home/sessions/rollout-child.jsonl"
+        )
         self.assertNotIn("last_assistant_message", stop.data)
         self.assertEqual(
             [m.session_id for m in self.store().list_sessions()], [self.PARENT[:16]]
         )
         self.assertEqual(self.store().load_meta(self.PARENT[:16]).parent_session_id, "")
+
+    def tool(self, phase, tool_use_id="", subagent=True, **extra):
+        payload = {"tool_name": "Bash", "tool_input": {"command": "echo synthetic"}, **extra}
+        if tool_use_id:
+            payload["tool_use_id"] = tool_use_id
+        if subagent:
+            payload.update(agent_id=self.AGENT, agent_type="default", turn_id=self.CHILD_TURN)
+        self.dispatch(phase, **payload)
+
+    def test_subagent_stop_is_recorded_while_stop_hook_active(self):
+        self.start()
+        self.subagent(
+            "SubagentStop",
+            last_assistant_message="Synthetic answer.",
+            stop_hook_active=True,
+        )
+
+        (stop,) = self.events(EventType.SUBAGENT_STOP)
+        self.assertEqual(stop.data["text"], "Synthetic answer.")
+        self.assertNotIn("stop_hook_active", stop.data)
+
+    def test_subagent_stop_without_message_records_no_text(self):
+        self.start()
+        self.subagent("SubagentStop", last_assistant_message="", agent_transcript_path="")
+
+        (stop,) = self.events(EventType.SUBAGENT_STOP)
+        self.assertNotIn("text", stop.data)
+        self.assertNotIn("agent_transcript_path", stop.data)
+
+    def test_subagent_stop_fields_are_redacted(self):
+        secret = "ghp_" + "A" * 36
+        path_secret = "token-" + "b" * 20
+        self.start()
+        self.subagent(
+            "SubagentStop",
+            expect_stderr="agent-strace: redacted secrets from trace event\n",
+            last_assistant_message=f"Synthetic answer with {secret}.",
+            agent_transcript_path=f"/codex-home/sessions/{path_secret}.jsonl",
+        )
+
+        (stop,) = self.events(EventType.SUBAGENT_STOP)
+        self.assertTrue(stop.redacted)
+        self.assertNotIn(secret, stop.data["text"])
+        self.assertIn("Synthetic answer with", stop.data["text"])
+        self.assertNotIn(path_secret, stop.data["agent_transcript_path"])
+
+    def test_subagent_stop_fields_are_redacted_by_the_hook_when_requested(self):
+        secret = "ghp_" + "C" * 36
+        self.start()
+        with patch.dict(os.environ, {"AGENT_TRACE_REDACT": "1"}):
+            self.subagent(
+                "SubagentStop",
+                expect_stderr="agent-strace: redacted secrets from trace event\n",
+                last_assistant_message=f"Synthetic answer with {secret}.",
+                agent_transcript_path=f"/codex-home/sessions/{secret}.jsonl",
+            )
+
+        (stop,) = self.events(EventType.SUBAGENT_STOP)
+        self.assertEqual(stop.data["text"], "Synthetic answer with [REDACTED:github-token].")
+        self.assertEqual(
+            stop.data["agent_transcript_path"],
+            "/codex-home/sessions/[REDACTED:github-token].jsonl",
+        )
+
+    def test_subagent_tool_events_carry_agent_id_and_type(self):
+        self.start()
+        self.tool("PreToolUse", tool_use_id="call-parent", subagent=False)
+        self.tool("PostToolUse", tool_use_id="call-parent", subagent=False,
+                  tool_response={"output": "parent", "exit_code": 0})
+        self.tool("PreToolUse", tool_use_id="call-child")
+        self.tool("PostToolUse", tool_use_id="call-child",
+                  tool_response={"output": "child", "exit_code": 0})
+
+        parent_call, child_call = self.events(EventType.TOOL_CALL)
+        parent_result, child_result = self.events(EventType.TOOL_RESULT)
+        for event in (parent_call, parent_result):
+            self.assertNotIn("agent_id", event.data)
+            self.assertNotIn("agent_type", event.data)
+        for event in (child_call, child_result):
+            self.assertEqual(event.data["agent_id"], self.AGENT)
+            self.assertEqual(event.data["agent_type"], "default")
+            self.assertEqual(event.data["turn_id"], self.CHILD_TURN)
+        self.assertEqual(parent_result.parent_id, parent_call.event_id)
+        self.assertEqual(child_result.parent_id, child_call.event_id)
+
+    def test_failed_subagent_tool_records_agent_id_on_the_error(self):
+        self.start()
+        self.tool("PreToolUse", tool_use_id="call-child")
+        self.tool("PostToolUse", tool_use_id="call-child",
+                  tool_response={"output": "synthetic failure", "exit_code": 1})
+
+        (call,) = self.events(EventType.TOOL_CALL)
+        (error,) = self.events(EventType.ERROR)
+        self.assertEqual(error.data["agent_id"], self.AGENT)
+        self.assertEqual(error.data["agent_type"], "default")
+        self.assertEqual(error.parent_id, call.event_id)
+
+    def test_agent_type_without_agent_id_is_not_recorded(self):
+        self.start()
+        self.dispatch("PreToolUse", tool_name="Bash", tool_input={"command": "true"},
+                      agent_type="default")
+        self.dispatch("PreToolUse", tool_name="Bash", tool_input={"command": "true"},
+                      agent_id="", agent_type="default")
+
+        for call in self.events(EventType.TOOL_CALL):
+            self.assertNotIn("agent_id", call.data)
+            self.assertNotIn("agent_type", call.data)
+
+    def test_interleaved_calls_pair_by_tool_use_id(self):
+        self.start()
+        self.tool("PreToolUse", tool_use_id="call-parent", subagent=False)
+        self.tool("PreToolUse", tool_use_id="call-child")
+        self.tool("PostToolUse", tool_use_id="call-child", tool_response="child")
+        self.tool("PostToolUse", tool_use_id="call-parent", subagent=False,
+                  tool_response="parent")
+
+        parent_call, child_call = self.events(EventType.TOOL_CALL)
+        child_result, parent_result = self.events(EventType.TOOL_RESULT)
+        self.assertEqual(child_result.parent_id, child_call.event_id)
+        self.assertEqual(parent_result.parent_id, parent_call.event_id)
+
+    def test_interleaved_calls_without_tool_use_id_pair_with_the_same_agent(self):
+        self.start()
+        self.tool("PreToolUse", subagent=False)
+        self.tool("PreToolUse")
+        self.tool("PostToolUse", tool_response="child")
+        self.tool("PostToolUse", subagent=False, tool_response="parent")
+
+        parent_call, child_call = self.events(EventType.TOOL_CALL)
+        child_result, parent_result = self.events(EventType.TOOL_RESULT)
+        self.assertEqual(child_result.parent_id, child_call.event_id)
+        self.assertEqual(parent_result.parent_id, parent_call.event_id)
+
+    def test_result_without_a_same_agent_call_pairs_with_the_oldest_call(self):
+        self.start()
+        self.tool("PreToolUse", subagent=False)
+        self.tool("PostToolUse", tool_response="child")
+
+        (call,) = self.events(EventType.TOOL_CALL)
+        (result,) = self.events(EventType.TOOL_RESULT)
+        self.assertEqual(result.parent_id, call.event_id)
+
+    def test_final_answer_is_unchanged_by_a_later_subagent_stop(self):
+        self.start()
+        self.dispatch("UserPromptSubmit", prompt="Synthetic task.")
+        self.dispatch("Stop", last_assistant_message="Synthetic final answer.")
+        self.subagent("SubagentStop", last_assistant_message="Synthetic subagent answer.")
+
+        session_id = self.PARENT[:16]
+        events = self.store().load_events(session_id)
+        meta = self.store().load_meta(session_id)
+        self.assertEqual(events[-1].event_type, EventType.SUBAGENT_STOP)
+        self.assertEqual(events[-1].data["text"], "Synthetic subagent answer.")
+
+        checkpoint = build_checkpoint_markdown(events, session_id)
+        self.assertIn("Latest agent state: Synthetic final answer.", checkpoint)
+        self.assertNotIn("Synthetic subagent answer.", checkpoint)
+
+        for payload in (session_to_otlp(meta, events), session_to_otlp_genai(meta, events)):
+            attributes = [
+                attr["value"].get("stringValue", "")
+                for span in payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
+                for span_event in span.get("events", [])
+                for attr in span_event.get("attributes", [])
+            ]
+            self.assertIn("Synthetic final answer.", attributes)
+            self.assertNotIn("Synthetic subagent answer.", attributes)
+
+        out = io.StringIO()
+        format_timeline(build_timeline(self.store(), session_id), out=out)
+        self.assertIn("Synthetic final answer.", out.getvalue())
+        self.assertNotIn("Synthetic subagent answer.", out.getvalue())
 
     def test_subagent_hooks_never_link_a_session_named_by_agent_id(self):
         child = self.AGENT[:16]

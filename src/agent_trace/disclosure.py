@@ -55,6 +55,11 @@ def count_redacted_events(events: Iterable[TraceEvent]) -> int:
     return sum(1 for event in events if event.redacted)
 
 
+def _is_subagent_response(event: TraceEvent) -> bool:
+    text = event.data.get("text")
+    return event.event_type == EventType.SUBAGENT_STOP and isinstance(text, str) and bool(text)
+
+
 def build_disclosure_preview(
     events: Iterable[TraceEvent],
     *,
@@ -84,9 +89,14 @@ def build_disclosure_preview(
     unredacted_content_rich_event_count = 0
 
     for event in event_list:
+        # A subagent_stop can carry the subagent's final message as ``text``.
+        subagent_response = _is_subagent_response(event)
         if event.event_type in {EventType.USER_PROMPT, EventType.LLM_REQUEST}:
             prompt_count += 1
-        if event.event_type in {EventType.ASSISTANT_RESPONSE, EventType.LLM_RESPONSE}:
+        if (
+            event.event_type in {EventType.ASSISTANT_RESPONSE, EventType.LLM_RESPONSE}
+            or subagent_response
+        ):
             response_count += 1
         if event.event_type == EventType.TOOL_CALL:
             tool_input_count += 1
@@ -106,7 +116,7 @@ def build_disclosure_preview(
         if event.event_type in {EventType.FILE_READ, EventType.FILE_WRITE} or keys & _PATH_KEYS:
             path_count += 1
 
-        if event.event_type in _CONTENT_EVENT_TYPES:
+        if event.event_type in _CONTENT_EVENT_TYPES or subagent_response:
             content_rich_event_count += 1
             if not event.redacted:
                 unredacted_content_rich_event_count += 1

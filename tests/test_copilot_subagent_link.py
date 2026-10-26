@@ -205,6 +205,30 @@ class TestCopilotSubagentLink(_SubagentHookTest):
         self.assertEqual(kinds.count(EventType.TOOL_RESULT), 1)
         self.assertLess(kinds.index(EventType.SUBAGENT_START), kinds.index(EventType.SUBAGENT_STOP))
 
+    def test_copilot_events_carry_no_in_session_subagent_attribution(self):
+        self.start_parent()
+        self.subagent_start()
+        self.child_runs()
+        self.subagent_stop(
+            last_assistant_message="Synthetic subagent response.",
+            agentTranscriptPath="/copilot-home/session-state/child/events.jsonl",
+            agent_transcript_path="/copilot-home/session-state/child/events.jsonl",
+        )
+        self.finish_parent()
+
+        for session_id in (PARENT, CHILD):
+            for event in self.events(session_id):
+                if event.event_type in (
+                    EventType.TOOL_CALL, EventType.TOOL_RESULT, EventType.ERROR
+                ):
+                    with self.subTest(session=session_id, event=event.event_type.value):
+                        self.assertNotIn("agent_id", event.data)
+                        self.assertNotIn("agent_type", event.data)
+        (stop,) = self.events(PARENT, EventType.SUBAGENT_STOP)
+        self.assertNotIn("text", stop.data)
+        self.assertNotIn("agent_transcript_path", stop.data)
+        self.assertNotIn("agent_id", stop.data)
+
     def test_child_meta_is_linked_to_parent_and_task_call(self):
         self.run_subagent()
         child = self.store().load_meta(local(CHILD))

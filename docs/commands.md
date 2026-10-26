@@ -75,13 +75,13 @@ normalized event to the active session. `--provider` defaults to `claude`.
 |---|---|
 | `session-start` | Start the provider-scoped session, or continue it on `resume` or `compact` and keep its metadata. Records `redaction`: `on` or `off`, the secret-redaction mode the hook wrote with |
 | `user-prompt` | User prompt text and available provider metadata |
-| `pre-tool` | Tool name and input before execution |
-| `post-tool` | Successful tool result and duration when it can be linked to the call |
+| `pre-tool` | Tool name and input before execution, plus `agent_id` and `agent_type` when a Codex subagent made the call |
+| `post-tool` | Successful tool result and duration when it can be linked to the call, plus `agent_id` and `agent_type` when a Codex subagent made the call |
 | `post-tool-failure` | Failed tool result as an error event |
 | `file-write` | Provider-reported file edit |
 | `stop` | Assistant response or provider stop metadata |
 | `subagent-start` | Subagent start in the parent session: agent type and name, plus the child session ID for GitHub Copilot CLI or the agent ID for Codex |
-| `subagent-stop` | Subagent stop in the parent session, with the same fields and the stop reason when the provider sends one |
+| `subagent-stop` | Subagent stop in the parent session, with the same fields and the stop reason when the provider sends one. For Codex, also the subagent's final message as `text` and its `agent_transcript_path`, both redacted |
 | `session-end` | Finish the active session and clear its hook state |
 
 Provider-specific aliases in generated configurations are normalized to these
@@ -127,11 +127,18 @@ agent-strace replay [session-id] [--format terminal|html] [--live] [--speed N]
 | `--expand-subagents` | Inline subagent sessions under the parent tool_call that started them (the child's `parent_event_id`) |
 | `--tree` | Show session hierarchy without full replay |
 
+Codex runs subagents inside the parent session. Replay tags each of their
+tool events with `[subagent <agent_type> <last 8 characters of agent_id>]`,
+shows the full `agent=<agent_id>` on `subagent_start`/`subagent_stop`, and
+shows what the subagent returned under `subagent_stop`. `--tree` and
+`--expand-subagents` use the same tags and list each in-session subagent with
+its tool count under the session.
+
 ### `tree`
 ```
 agent-strace tree [session-id] [--format text|json]
 ```
-Show the parent/child session hierarchy for a root session, including per-node cost, tool calls, status, and duration. Parent links come from `record --parent`, `AGENT_STRACE_PARENT_SESSION`, A2A trace propagation, imported trace metadata, or GitHub Copilot CLI's `subagentStart`/`subagentStop` hooks, which link `task` subagent sessions to their parent. Copilot sessions captured before those hooks were registered stay unlinked; see the [capture matrix](capture-matrix.md#github-copilot-cli).
+Show the parent/child session hierarchy for a root session, including per-node cost, tool calls, status, and duration. Parent links come from `record --parent`, `AGENT_STRACE_PARENT_SESSION`, A2A trace propagation, imported trace metadata, or GitHub Copilot CLI's `subagentStart`/`subagentStop` hooks, which link `task` subagent sessions to their parent. Copilot sessions captured before those hooks were registered stay unlinked; see the [capture matrix](capture-matrix.md#github-copilot-cli). Codex subagents run inside the parent session, so they are listed under it as `subagent <agent_type> <short agent_id>  N tools` lines, and `--format json` adds a `subagents` list to that node.
 
 ### `list`
 ```
@@ -150,7 +157,7 @@ Dump full session as JSON (meta + events).
 ```
 agent-strace stats [session-id] [--include-subagents]
 ```
-Tool call frequency and timing. `--include-subagents` rolls up across the full subagent tree.
+Tool call frequency and timing. When a Codex subagent made tool calls in the session, a Subagent Tool Calls section counts them per subagent. `--include-subagents` rolls up across the full subagent tree.
 
 ### `health`
 ```
@@ -269,7 +276,7 @@ agent-strace health <session-id> --format json | jq '.reasons[] | select(.kind =
 ```
 agent-strace explain [session-id]
 ```
-Plain-English phase breakdown: what the agent did, files touched, retries, wasted time. No LLM required.
+Plain-English phase breakdown: what the agent did, files touched, retries, wasted time. Each phase lists the Codex subagents that ran in it with their tool counts. No LLM required.
 
 ### `timeline`
 ```
