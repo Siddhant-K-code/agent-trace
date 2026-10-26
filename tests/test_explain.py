@@ -192,5 +192,39 @@ class TestFormatExplain(unittest.TestCase):
         self.assertIn("3", output)
 
 
+class TestExplainSubagents(unittest.TestCase):
+    AGENT = "d0000011-0000-4000-8000-000000000011"
+
+    def render(self, events):
+        result = ExplainResult(
+            session_id="s1", total_duration=3.0, total_events=len(events),
+            phases=build_phases(events, base_ts=0.0), total_retries=0, wasted_seconds=0,
+        )
+        buf = io.StringIO()
+        format_explain(result, out=buf)
+        return buf.getvalue()
+
+    def events(self, attributed):
+        sub = {"agent_id": self.AGENT, "agent_type": "default"} if attributed else {}
+        return [
+            _make_event(EventType.USER_PROMPT, 0.0, prompt="Spawn one subagent."),
+            _make_event(EventType.SUBAGENT_START, 0.5, **sub),
+            _make_event(EventType.TOOL_CALL, 1.0, tool_name="Bash",
+                        arguments={"command": "echo synthetic"}, **sub),
+            _make_event(EventType.TOOL_RESULT, 1.5, tool_name="Bash", **sub),
+            _make_event(EventType.SUBAGENT_STOP, 2.0, text="Synthetic answer.", **sub),
+        ]
+
+    def test_phase_lists_its_in_session_subagents(self):
+        output = self.render(self.events(attributed=True))
+        self.assertIn("  Ran: echo synthetic\n  Subagent: default 00000011  1 tools\n", output)
+
+    def test_unattributed_phase_has_no_subagent_line(self):
+        attributed = self.render(self.events(attributed=True))
+        plain = self.render(self.events(attributed=False))
+        self.assertNotIn("Subagent:", plain)
+        self.assertEqual(attributed.replace("  Subagent: default 00000011  1 tools\n", ""), plain)
+
+
 if __name__ == "__main__":
     unittest.main()

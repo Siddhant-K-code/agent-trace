@@ -100,7 +100,13 @@ from .models import EventType, SessionMeta, TraceEvent
 from .proxy import MCPProxy
 from .replay import format_event, format_summary, list_sessions, replay_session
 from .store import TraceStore
-from .subagent import cmd_replay_tree, cmd_stats_tree, cmd_tree
+from .subagent import (
+    cmd_replay_tree,
+    cmd_stats_tree,
+    cmd_tree,
+    in_session_subagents,
+    short_agent_id,
+)
 from .why import cmd_why
 
 
@@ -590,6 +596,14 @@ def cmd_stats(args: argparse.Namespace) -> int:
                 avg = sum(durations) / len(durations)
                 avg_ms = f"  avg: {avg:.0f}ms"
             print(f"    {name:<30} {count:>4}x{avg_ms}")
+
+    subagents = [sub for sub in in_session_subagents(events) if sub.tool_calls or sub.errors]
+    if subagents:
+        print(f"\n  Subagent Tool Calls:")
+        for sub in subagents:
+            label = f"{sub.agent_type} {short_agent_id(sub.agent_id)}".strip()
+            errors_str = f"  {sub.errors} errors" if sub.errors else ""
+            print(f"    {label:<30} {sub.tool_calls:>4}x{errors_str}")
 
     # error summary
     errors = [e for e in events if e.event_type == EventType.ERROR]

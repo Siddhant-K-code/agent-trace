@@ -56,7 +56,7 @@
         "The setup command replaces hooks.json rather than merging; repeated runs retain the first hooks.json.agent-strace.bak snapshot.",
         "Codex runs command hooks only after they are reviewed and trusted in /hooks; codex exec skips untrusted hooks without a warning. Hooks added by a later setup run must be trusted again.",
         "SessionEnd always reports reason \"other\", so the session_end event does not say why the session ended.",
-        "Subagents are not separate sessions: their hooks arrive under the parent session_id with an agent_id. SubagentStart and SubagentStop are recorded as subagent_start and subagent_stop events in the parent trace with agent_id and agent_type, but the subagent's tool calls are recorded without its agent_id, no event links a subagent to the spawn_agent call that started it, and the subagent's final message is not recorded.",
+        "Subagents are not separate sessions: their hooks arrive under the parent session_id with an agent_id. SubagentStart and SubagentStop are recorded as subagent_start and subagent_stop events in the parent trace, and the subagent's tool events carry its agent_id and agent_type, but no event links a subagent to the spawn_agent call that started it.",
         "A failed shell command arrives as a normal PostToolUse with the error text in tool_response, so it is recorded as a tool_result rather than an error.",
         "Hook payloads carry the model name, recorded on the session_start event, but no token usage.",
         "File and command detail depends on PreToolUse/PostToolUse payloads; shell calls arrive as tool_name Bash with tool_input.command."

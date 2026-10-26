@@ -16,6 +16,7 @@ from typing import TextIO
 from .event_data import require_object_event_data
 from .models import EventType, TraceEvent, SessionMeta
 from .store import TraceStore
+from .subagent import _returned_preview, _event_agent_id, subagent_label
 
 
 # ANSI colors
@@ -194,6 +195,7 @@ def format_event(event: TraceEvent, base_ts: float | None = None) -> str:
         name = event.data.get("tool_name", "?")
         args = event.data.get("arguments", {})
         parts.append(f"{color}{C.BOLD}tool_call{C.RESET} {C.WHITE}{name}{C.RESET}")
+        _append_subagent_tag(parts, event)
         # Show the most useful argument value inline
         detail = _tool_call_detail(name, args)
         if detail:
@@ -208,6 +210,7 @@ def format_event(event: TraceEvent, base_ts: float | None = None) -> str:
         parts.append(f"{color}tool_result{C.RESET}")
         if name:
             parts.append(f"{C.DIM}{name}{C.RESET}")
+        _append_subagent_tag(parts, event)
         if type_str:
             parts.append(f"{C.DIM}[{type_str}]{C.RESET}")
         parts.append(f"{duration}")
@@ -250,6 +253,7 @@ def format_event(event: TraceEvent, base_ts: float | None = None) -> str:
         parts.append(f"{color}{C.BOLD}error{C.RESET}")
         if name:
             parts.append(f"{C.RED}{name}{C.RESET}")
+        _append_subagent_tag(parts, event)
         if code:
             parts.append(f"{C.DIM}(code: {code}){C.RESET}")
         if msg:
@@ -304,11 +308,24 @@ def format_event(event: TraceEvent, base_ts: float | None = None) -> str:
         child = event.data.get("child_session_id", "")
         if child:
             parts.append(f"{C.DIM}child={child}{C.RESET}")
+        agent_id = _event_agent_id(event.data)
+        if agent_id:
+            parts.append(f"{C.DIM}agent={agent_id}{C.RESET}")
         stop_reason = event.data.get("stop_reason", "")
         if stop_reason:
             parts.append(f"{C.DIM}({stop_reason}){C.RESET}")
+        returned = _returned_preview(event, limit=200)
+        if returned:
+            parts.append(f"\n{C.GRAY}{'':>14}  returned: \"{returned}\"{C.RESET}")
 
     return " ".join(parts)
+
+
+def _append_subagent_tag(parts: list[str], event: TraceEvent) -> None:
+    """Tag an event recorded inside an in-session subagent."""
+    label = subagent_label(event.data)
+    if label:
+        parts.append(f"{C.MAGENTA}[subagent {label}]{C.RESET}")
 
 
 def format_summary(meta: SessionMeta) -> str:

@@ -7,7 +7,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from agent_trace.models import EventType, TraceEvent
-from agent_trace.replay import _strip_markdown, _tool_call_detail, format_event
+from agent_trace.replay import C, _strip_markdown, _tool_call_detail, format_event
 
 
 class TestStripMarkdown(unittest.TestCase):
@@ -184,6 +184,83 @@ class TestFormatEvent(unittest.TestCase):
         )
         output = format_event(event, base_ts=event.timestamp)
         self.assertIn("Fix the login bug", output)
+
+
+class TestSubagentAttribution(unittest.TestCase):
+    AGENT = "d0000011-0000-4000-8000-000000000011"
+    TAG = "[subagent default 00000011]"
+
+    def event(self, event_type, attributed=True, **data):
+        if attributed:
+            data.update(agent_id=self.AGENT, agent_type="default")
+        return TraceEvent(event_type=event_type, session_id="test", timestamp=0.0, data=data)
+
+    def render(self, event):
+        return format_event(event, base_ts=0.0)
+
+    def tool_events(self, attributed):
+        return [
+            self.event(EventType.TOOL_CALL, attributed, tool_name="Bash",
+                       arguments={"command": "echo synthetic"}),
+            self.event(EventType.TOOL_RESULT, attributed, tool_name="Bash", result="synthetic"),
+            self.event(EventType.ERROR, attributed, tool_name="Bash", error="exit code 1"),
+        ]
+
+    def test_tool_events_carry_the_subagent_tag(self):
+        for event in self.tool_events(attributed=True):
+            with self.subTest(event=event.event_type.value):
+                self.assertIn(f"Bash{C.RESET} {C.MAGENTA}{self.TAG}{C.RESET}", self.render(event))
+
+    def test_tag_without_agent_type_uses_the_short_id(self):
+        event = self.event(EventType.TOOL_CALL, attributed=False, tool_name="Bash",
+                           arguments={"command": "true"}, agent_id=self.AGENT)
+        self.assertIn("[subagent 00000011]", self.render(event))
+
+    def test_unattributed_tool_events_render_as_before(self):
+        for attributed, plain in zip(
+            self.tool_events(attributed=True), self.tool_events(attributed=False)
+        ):
+            with self.subTest(event=plain.event_type.value):
+                tagged = self.render(attributed)
+                self.assertNotIn("[subagent", self.render(plain))
+                self.assertEqual(
+                    tagged.replace(f" {C.MAGENTA}{self.TAG}{C.RESET}", ""), self.render(plain)
+                )
+
+    def test_subagent_start_and_stop_show_the_agent_id(self):
+        for event_type in (EventType.SUBAGENT_START, EventType.SUBAGENT_STOP):
+            with self.subTest(event=event_type.value):
+                output = self.render(self.event(event_type))
+                self.assertIn(f"agent={self.AGENT}", output)
+                self.assertNotIn("returned:", output)
+
+    def test_subagent_stop_shows_what_the_subagent_returned(self):
+        output = self.render(self.event(
+            EventType.SUBAGENT_STOP, text="Synthetic   subagent\nanswer.", stop_reason="done"
+        ))
+        first, second = output.split("\n")
+        self.assertIn(f"agent={self.AGENT}", first)
+        self.assertIn("(done)", first)
+        self.assertIn('returned: "Synthetic subagent answer."', second)
+
+    def test_returned_preview_is_truncated(self):
+        output = self.render(self.event(EventType.SUBAGENT_STOP, text="x" * 250))
+        self.assertIn('returned: "' + "x" * 200 + '..."', output)
+
+    def test_unattributed_subagent_events_render_as_before(self):
+        for event_type in (EventType.SUBAGENT_START, EventType.SUBAGENT_STOP):
+            with self.subTest(event=event_type.value):
+                output = self.render(self.event(
+                    event_type, attributed=False, agent_type="explore",
+                    child_session_id="child", stop_reason="end_turn",
+                ))
+                self.assertTrue(output.endswith(
+                    f"{C.WHITE}explore{C.RESET} {C.DIM}child=child{C.RESET} "
+                    f"{C.DIM}(end_turn){C.RESET}"
+                ))
+                self.assertNotIn("agent=", output)
+                self.assertNotIn("returned:", output)
+                self.assertNotIn("\n", output)
 
 
 if __name__ == "__main__":

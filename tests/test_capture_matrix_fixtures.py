@@ -488,7 +488,29 @@ class TestCodexFixture(_ReplayChecks, unittest.TestCase):
                     self.assertNotIn("child_link", event.data)
                     self.assertEqual(event.parent_id, "")
                 self.assertNotIn("last_assistant_message", events[stop].data)
+                self.assertEqual(events[stop].data["text"], "line-1")
+                self.assertEqual(
+                    events[stop].data["agent_transcript_path"],
+                    f"/codex-home/sessions/rollout-{agent_id}.jsonl",
+                )
+                self.assertNotIn("text", events[start].data)
                 self.assertEqual(meta.parent_session_id, "")
+
+                (bash_result,) = [
+                    e for e in events
+                    if e.event_type == EventType.TOOL_RESULT and e.data["tool_name"] == "Bash"
+                ]
+                self.assertEqual(bash_result.parent_id, events[bash].event_id)
+                for event in (events[bash], bash_result):
+                    self.assertEqual(event.data["agent_id"], agent_id)
+                    self.assertEqual(event.data["agent_type"], "default")
+                for event in events:
+                    if (
+                        event.event_type in (EventType.TOOL_CALL, EventType.TOOL_RESULT)
+                        and event.data["tool_name"] != "Bash"
+                    ):
+                        self.assertNotIn("agent_id", event.data)
+                        self.assertNotIn("agent_type", event.data)
 
     def test_subagent_start_order_differs_between_recordings(self):
         def order(scenario):

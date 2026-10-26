@@ -126,6 +126,22 @@ class TestDisclosurePreview(unittest.TestCase):
                     self.assertEqual(preview.command_count, 1)
                     self.assertNotIn("SECRET-COMMAND", json.dumps(preview.to_dict()))
 
+    def test_subagent_stop_text_counts_as_a_response(self):
+        events = [
+            TraceEvent(event_type=EventType.SUBAGENT_STOP,
+                       data={"agent_id": "a", "text": "SECRET-SUBAGENT-ANSWER"}),
+            TraceEvent(event_type=EventType.SUBAGENT_STOP,
+                       data={"agent_id": "b", "text": "SECRET-REDACTED"}, redacted=True),
+            TraceEvent(event_type=EventType.SUBAGENT_STOP, data={"agent_id": "c"}),
+            TraceEvent(event_type=EventType.SUBAGENT_STOP, data={"agent_id": "d", "text": ""}),
+            TraceEvent(event_type=EventType.SUBAGENT_START, data={"text": "not a response"}),
+        ]
+        preview = build_disclosure_preview(events)
+        self.assertEqual(preview.response_count, 2)
+        self.assertEqual(preview.content_rich_event_count, 2)
+        self.assertEqual(preview.unredacted_content_rich_event_count, 1)
+        self.assertNotIn("SECRET", json.dumps(preview.to_dict()))
+
     def test_include_content_changes_mode_not_preview_values(self):
         event = TraceEvent(
             event_type=EventType.USER_PROMPT,

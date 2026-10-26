@@ -634,6 +634,8 @@ def handle_pre_tool(input_data: dict, provider: str = "claude") -> None:
     for key in ("tool_use_id", "turn_id", "permission_mode"):
         if input_data.get(key) not in (None, ""):
             event_data[key] = input_data.get(key)
+    attribution = _subagent_attribution(input_data, provider)
+    event_data.update(attribution)
     if redact:
         event_data = redact_data(event_data)
 
@@ -661,6 +663,8 @@ def handle_pre_tool(input_data: dict, provider: str = "claude") -> None:
             "tool_use_id": input_data.get("tool_use_id", ""),
             "timestamp": event.timestamp,
         }
+        if attribution.get("agent_id"):
+            pending[event.event_id]["agent_id"] = attribution["agent_id"]
 
 
 def handle_user_prompt(input_data: dict, provider: str = "claude") -> None:
@@ -741,6 +745,27 @@ def handle_stop(input_data: dict, provider: str = "claude") -> None:
 _SUBAGENT_SESSION_PROVIDERS = frozenset({"copilot"})
 _SUBAGENT_TOOL_NAMES = frozenset({"task"})
 _MAX_LINK_ANCESTRY = 64
+
+
+def _subagent_attribution(input_data: dict, provider: str) -> dict:
+    """Return the ``agent_id``/``agent_type`` of an in-session subagent.
+
+    Codex fires a subagent's tool hooks under the parent's ``session_id`` and
+    names the subagent with ``agent_id`` and ``agent_type``. Nothing is
+    returned without an ``agent_id``. Providers in
+    ``_SUBAGENT_SESSION_PROVIDERS`` record subagents as child sessions
+    instead, so their events are left unchanged.
+    """
+    if provider in _SUBAGENT_SESSION_PROVIDERS:
+        return {}
+    agent_id = input_data.get("agent_id")
+    if not isinstance(agent_id, str) or not agent_id:
+        return {}
+    attribution = {"agent_id": agent_id}
+    agent_type = input_data.get("agent_type")
+    if isinstance(agent_type, str) and agent_type:
+        attribution["agent_type"] = agent_type
+    return attribution
 
 
 def _subagent_child_session_id(input_data: dict, session_id: str, provider: str) -> str:
@@ -956,6 +981,13 @@ def handle_subagent(input_data: dict, phase: str, provider: str = "claude") -> N
     for key in keys:
         if input_data.get(key) not in (None, ""):
             event_data[key] = input_data.get(key)
+    if phase == "stop" and provider not in _SUBAGENT_SESSION_PROVIDERS:
+        # What the subagent returned, recorded like the Stop hook's response.
+        # Unlike Stop, ``stop_hook_active`` does not suppress the event.
+        if input_data.get("last_assistant_message") not in (None, ""):
+            event_data["text"] = input_data.get("last_assistant_message")
+        if input_data.get("agent_transcript_path") not in (None, ""):
+            event_data["agent_transcript_path"] = input_data.get("agent_transcript_path")
     if child_id:
         event_data["child_link"] = _link_subagent_session(
             store, session_id, child_id, parent_event_id
@@ -1045,6 +1077,8 @@ def handle_post_tool(input_data: dict, failed: bool = False, provider: str = "cl
     for key in ("tool_use_id", "turn_id", "permission_mode"):
         if input_data.get(key) not in (None, ""):
             event_data[key] = input_data.get(key)
+    attribution = _subagent_attribution(input_data, provider)
+    event_data.update(attribution)
 
     if redact:
         event_data = redact_data(event_data)
@@ -1058,17 +1092,26 @@ def handle_post_tool(input_data: dict, failed: bool = False, provider: str = "cl
     # Link to the earliest pending call for this tool name, then remove it.
     # Pending entries are keyed by event_id so concurrent same-tool calls
     # don't collide; we match by tool_name in the value and pick the oldest.
+    # Without a tool_use_id, a pending call from the same agent (parent or
+    # subagent) is preferred, so a subagent's result does not pair with the
+    # parent's call to the same tool while its own call is pending.
     with _update_pending_calls(store, provider=provider) as pending:
         match_id = None
         match_ts = float("inf")
+        match_same_agent = False
         tool_use_id = input_data.get("tool_use_id", "")
+        agent_id = attribution.get("agent_id", "")
         for eid, info in pending.items():
             if tool_use_id and info.get("tool_use_id") == tool_use_id:
                 match_id = eid
                 break
-            if not tool_use_id and info.get("tool_name") == tool_name and info["timestamp"] < match_ts:
+            if tool_use_id or info.get("tool_name") != tool_name:
+                continue
+            same_agent = info.get("agent_id", "") == agent_id
+            if (same_agent, -info["timestamp"]) > (match_same_agent, -match_ts):
                 match_id = eid
                 match_ts = info["timestamp"]
+                match_same_agent = same_agent
         if match_id:
             call_info = pending.pop(match_id)
             event.parent_id = match_id

@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from agent_trace.cli import (
     build_parser,
+    cmd_stats,
     _parent_depth,
     _parent_session_id,
     _resolve_parent_session_id,
@@ -24,6 +25,7 @@ from agent_trace.subagent import (
     format_tree,
     format_session_tree,
     format_tree_summary,
+    in_session_subagents,
     tree_to_dict,
 )
 
@@ -427,6 +429,134 @@ class TestBuildTreeEdgeCases(unittest.TestCase):
         # Node at MAX_DEPTH should have no children (truncated)
         self.assertEqual(len(node.children), 0)
         tmp.cleanup()
+
+
+class TestInSessionSubagentAttribution(unittest.TestCase):
+    AGENT = "d0000011-0000-4000-8000-000000000011"
+    OTHER = "d0000012-0000-4000-8000-000000000012"
+    SID = "s1attr"
+
+    def events(self, attributed=True):
+        sub = {"agent_id": self.AGENT, "agent_type": "default"} if attributed else {}
+        stop = {"text": "Synthetic   subagent\nanswer."} if attributed else {}
+
+        def ev(event_type, ts, event_id, parent_id="", **data):
+            return TraceEvent(event_type=event_type, timestamp=ts, session_id=self.SID,
+                              event_id=event_id, parent_id=parent_id, data=data)
+
+        return [
+            ev(EventType.SESSION_START, 0.0, "e0", agent_name="codex"),
+            ev(EventType.USER_PROMPT, 0.1, "e1", prompt="Spawn one subagent."),
+            ev(EventType.TOOL_CALL, 1.0, "c1", tool_name="spawn_agent",
+               arguments={"message": "run it"}),
+            ev(EventType.TOOL_RESULT, 1.2, "r1", "c1", tool_name="spawn_agent", result="ok"),
+            ev(EventType.SUBAGENT_START, 1.3, "e2", provider="codex", **sub),
+            ev(EventType.TOOL_CALL, 2.0, "c2", tool_name="Bash",
+               arguments={"command": "echo synthetic"}, **sub),
+            ev(EventType.TOOL_RESULT, 2.5, "r2", "c2", tool_name="Bash", result="synthetic", **sub),
+            ev(EventType.TOOL_CALL, 2.6, "c3", tool_name="Bash", arguments={"command": "false"},
+               **sub),
+            ev(EventType.ERROR, 2.7, "r3", "c3", tool_name="Bash", error="exit code 1", **sub),
+            ev(EventType.SUBAGENT_STOP, 3.0, "e3", provider="codex", **sub, **stop),
+            ev(EventType.ASSISTANT_RESPONSE, 4.0, "e4", text="Synthetic final answer."),
+            ev(EventType.SESSION_END, 5.0, "e5"),
+        ]
+
+    def node(self, attributed=True, children=None):
+        meta = SessionMeta(session_id=self.SID, agent_name="codex", started_at=0.0, tool_calls=3)
+        return SessionNode(meta=meta, events=self.events(attributed), children=children or [])
+
+    def render(self, formatter, node):
+        buf = io.StringIO()
+        formatter(node, out=buf)
+        return buf.getvalue()
+
+    def test_in_session_subagents_groups_by_agent_id(self):
+        events = self.events() + [
+            _make_event(EventType.TOOL_CALL, 6.0, self.SID, tool_name="Read",
+                        agent_id=self.OTHER),
+            _make_event(EventType.TOOL_RESULT, 6.1, self.SID, tool_name="Read",
+                        agent_id=self.OTHER),
+            _make_event(EventType.TOOL_CALL, 6.2, self.SID, tool_name="Read", agent_id=""),
+        ]
+        first, second = in_session_subagents(events)
+        self.assertEqual(
+            (first.agent_id, first.agent_type, first.tool_calls, first.errors),
+            (self.AGENT, "default", 2, 1),
+        )
+        self.assertEqual(
+            (second.agent_id, second.agent_type, second.tool_calls, second.errors),
+            (self.OTHER, "", 1, 0),
+        )
+        self.assertEqual(in_session_subagents(self.events(attributed=False)), [])
+
+    def test_format_tree_marks_subagent_events(self):
+        lines = self.render(format_tree, self.node()).splitlines()
+        tag = "[subagent default 00000011]"
+        self.assertIn(f"Bash  {tag}  $ echo synthetic", lines[5])
+        self.assertIn(f"tool_result  {tag}  synthetic", lines[6])
+        self.assertIn(f"error  {tag}  exit code 1", lines[8])
+        self.assertIn("subagent_start  default  agent=00000011", lines[4])
+        self.assertIn("subagent_stop  default  agent=00000011", lines[9])
+        self.assertEqual(lines[10].strip(), 'returned: "Synthetic subagent answer."')
+        self.assertNotIn("[subagent", lines[2] + lines[3])
+
+    def test_format_tree_without_attribution_has_no_marks(self):
+        lines = self.render(format_tree, self.node(attributed=False)).splitlines()
+        self.assertEqual(lines[4].strip(), "+ 1.30s  ⤷ subagent_start")
+        self.assertEqual(lines[9].strip(), "+ 3.00s  ⤶ subagent_stop")
+        body = "\n".join(lines[1:])
+        for marker in ("[subagent", "agent=", "returned:"):
+            self.assertNotIn(marker, body)
+
+    def test_summaries_list_in_session_subagents(self):
+        for formatter in (format_tree_summary, format_session_tree):
+            with self.subTest(formatter=formatter.__name__):
+                lines = self.render(formatter, self.node()).splitlines()
+                self.assertEqual(lines[1], "└─ subagent default 00000011  2 tools  ✗ 1 errors")
+                plain = self.render(formatter, self.node(attributed=False))
+                self.assertNotIn("subagent", plain)
+                self.assertEqual(len(plain.splitlines()), 1)
+
+    def test_summary_subagent_line_precedes_child_sessions(self):
+        child = SessionNode(
+            meta=SessionMeta(session_id="child0001", started_at=1.0, depth=1), events=[]
+        )
+        lines = self.render(format_tree_summary, self.node(children=[child])).splitlines()
+        self.assertEqual(lines[1], "├─ subagent default 00000011  2 tools  ✗ 1 errors")
+        self.assertIn("child0001", lines[2])
+
+    def test_tree_to_dict_lists_subagents_only_when_attributed(self):
+        data = tree_to_dict(self.node())
+        self.assertEqual(data["subagents"], [{
+            "agent_id": self.AGENT, "agent_type": "default", "tool_calls": 2, "errors": 1,
+        }])
+        self.assertNotIn("subagents", tree_to_dict(self.node(attributed=False)))
+
+    def run_stats(self, attributed):
+        meta = SessionMeta(session_id=self.SID, agent_name="codex", started_at=0.0)
+        store, tmp = _make_store_with_sessions([(meta, self.events(attributed))])
+        self.addCleanup(tmp.cleanup)
+        out = io.StringIO()
+        args = argparse.Namespace(
+            trace_dir=store.base_dir, session_id=self.SID, include_subagents=False
+        )
+        with patch("sys.stdout", out):
+            self.assertEqual(cmd_stats(args), 0)
+        return out.getvalue()
+
+    def test_stats_lists_subagent_tool_calls(self):
+        output = self.run_stats(attributed=True)
+        self.assertIn("Subagent Tool Calls:", output)
+        self.assertIn(f"    {'default 00000011':<30} {2:>4}x  1 errors", output)
+
+    def test_stats_without_attribution_has_no_subagent_section(self):
+        attributed = self.run_stats(attributed=True)
+        plain = self.run_stats(attributed=False)
+        self.assertNotIn("Subagent", plain)
+        start = attributed.index("\n  Subagent Tool Calls:")
+        end = attributed.index("\n  Errors (")
+        self.assertEqual(attributed[:start] + attributed[end:], plain)
 
 
 if __name__ == "__main__":
