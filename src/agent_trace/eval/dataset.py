@@ -241,12 +241,12 @@ def cmd_dataset(args: argparse.Namespace) -> int:
         return 0
 
     if dataset_command == "auto":
-        from ..store import TraceStore
+        from ..store import TraceStore, resolve_trace_dir
         filter_spec = getattr(args, "filter", "has-errors") or "has-errors"
         since_raw = getattr(args, "since", "7d") or "7d"
         since_days = float(since_raw.rstrip("d"))
         label = getattr(args, "label", "") or filter_spec
-        trace_dir = getattr(args, "trace_dir", ".agent-traces")
+        trace_dir = resolve_trace_dir(getattr(args, "trace_dir", None))
         store = TraceStore(trace_dir)
         added = auto_populate(store, dataset_path, filter_spec, since_days=since_days, label=label)
         sys.stdout.write(f"Added {added} session(s) to {dataset_path} (filter: {filter_spec})\n")

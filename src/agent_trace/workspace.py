@@ -36,10 +36,10 @@ import sys
 from pathlib import Path
 
 from .store import (
-    DEFAULT_TRACE_DIR,
     _WORKSPACE_ENV,
     _workspace_base,
     ensure_trace_dir_gitignore,
+    resolve_trace_dir,
 )
 
 
@@ -47,17 +47,18 @@ def _workspaces_root(trace_dir: str) -> Path:
     return Path(trace_dir) / "workspaces"
 
 
-def list_workspaces(trace_dir: str = DEFAULT_TRACE_DIR) -> list[str]:
+def list_workspaces(trace_dir: str | None = None) -> list[str]:
     """Return sorted list of workspace IDs."""
-    root = _workspaces_root(trace_dir)
+    root = _workspaces_root(resolve_trace_dir(trace_dir))
     if not root.exists():
         return []
     return sorted(d.name for d in root.iterdir() if d.is_dir())
 
 
 def create_workspace(workspace_id: str,
-                     trace_dir: str = DEFAULT_TRACE_DIR) -> Path:
+                     trace_dir: str | None = None) -> Path:
     """Create a workspace directory. Idempotent."""
+    trace_dir = resolve_trace_dir(trace_dir)
     path = _workspace_base(trace_dir, workspace_id)
     path.mkdir(parents=True, exist_ok=True)
     ensure_trace_dir_gitignore(trace_dir)
@@ -65,9 +66,9 @@ def create_workspace(workspace_id: str,
 
 
 def delete_workspace(workspace_id: str,
-                     trace_dir: str = DEFAULT_TRACE_DIR) -> bool:
+                     trace_dir: str | None = None) -> bool:
     """Delete a workspace and all its sessions. Returns True if it existed."""
-    path = _workspace_base(trace_dir, workspace_id)
+    path = _workspace_base(resolve_trace_dir(trace_dir), workspace_id)
     if not path.exists():
         return False
     shutil.rmtree(path)
@@ -75,9 +76,9 @@ def delete_workspace(workspace_id: str,
 
 
 def workspace_session_count(workspace_id: str,
-                             trace_dir: str = DEFAULT_TRACE_DIR) -> int:
+                             trace_dir: str | None = None) -> int:
     """Return the number of sessions in a workspace."""
-    path = _workspace_base(trace_dir, workspace_id)
+    path = _workspace_base(resolve_trace_dir(trace_dir), workspace_id)
     if not path.exists():
         return 0
     return sum(1 for d in path.iterdir() if d.is_dir() and (d / "meta.json").exists())

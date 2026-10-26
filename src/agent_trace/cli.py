@@ -2034,7 +2034,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_apply.add_argument("--dry-run", action="store_true", dest="dry_run",
                          help="show planned changes without applying")
     p_apply.add_argument("--dir", metavar="DIR", default=None,
-                         help="trace store directory (default: .agent-traces)")
+                         help="trace store directory (default: the global --trace-dir)")
 
     # config-diff (IaC — show drift between config file and local store)
     p_cdiff = sub.add_parser("config-diff",
@@ -2042,7 +2042,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_cdiff.add_argument("--config", metavar="FILE", default=".agent-strace.yaml",
                          help="config file (default: .agent-strace.yaml)")
     p_cdiff.add_argument("--dir", metavar="DIR", default=None,
-                         help="trace store directory (default: .agent-traces)")
+                         help="trace store directory (default: the global --trace-dir)")
 
     # compliance (compliance export)
     p_comp = sub.add_parser("compliance", help="export compliance reports (EU AI Act, SOC 2, HIPAA)")

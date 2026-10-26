@@ -53,6 +53,15 @@ def default_trace_dir() -> str:
     return os.environ.get(TRACE_DIR_ENV) or DEFAULT_TRACE_DIR
 
 
+def resolve_trace_dir(trace_dir: str | Path | None) -> str | Path:
+    """Return ``trace_dir`` when given, else :func:`default_trace_dir`.
+
+    Only ``None`` means "not given": any explicit value, including ``""``,
+    wins over ``$AGENT_TRACE_DIR``. The env is read at call time, not import.
+    """
+    return default_trace_dir() if trace_dir is None else trace_dir
+
+
 # Env var for workspace isolation — sessions are stored under
 # .agent-traces/workspaces/<workspace-id>/ when this is set.
 _WORKSPACE_ENV = "AGENT_STRACE_WORKSPACE"

@@ -25,7 +25,7 @@ from typing import Any, Callable
 
 from .models import EventType, SessionMeta, TraceEvent
 from .redact import redact_data
-from .store import TraceStore
+from .store import TraceStore, resolve_trace_dir
 
 # Thread-local session state so concurrent agents in the same process
 # don't overwrite each other's active session.
@@ -46,11 +46,15 @@ def _get_active_redact() -> bool:
 
 def start_session(
     name: str = "",
-    trace_dir: str = ".agent-traces",
+    trace_dir: str | None = None,
     redact: bool | None = None,
 ) -> str:
-    """Start a new trace session. Returns the session ID."""
-    _local.store = TraceStore(trace_dir, redact=redact)
+    """Start a new trace session. Returns the session ID.
+
+    Without ``trace_dir`` the session goes to ``$AGENT_TRACE_DIR`` when it is
+    set and non-empty, else ``.agent-traces``. An explicit ``trace_dir`` wins.
+    """
+    _local.store = TraceStore(resolve_trace_dir(trace_dir), redact=redact)
     _local.session = SessionMeta(agent_name=name)
     _local.redact = _local.store.redact
     _local.store.create_session(_local.session)

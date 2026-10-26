@@ -568,6 +568,8 @@ Supported actions are `read_sessions`, `run_agent`, `annotate`,
 `export_compliance`, `manage_rbac`, `manage_billing`, and `manage_sso`.
 Unknown actions require the effective `owner` role.
 
+Assignments are stored in `rbac.json` in the global trace store (`--trace-dir`, else `$AGENT_TRACE_DIR`, else `.agent-traces`).
+
 ### `auth`
 ```
 agent-strace auth login --host URL [--client-id ID] [--issuer URL]
@@ -580,13 +582,13 @@ Authenticate with a hosted collector via OIDC. Stores the token in `~/.agent-str
 ```
 agent-strace apply [--config FILE] [--host URL] [--dry-run]
 ```
-Apply `.agent-strace.yaml` to the local store or a hosted collector. Use `--dry-run` to preview changes without writing.
+Apply `.agent-strace.yaml` to the local store or a hosted collector. Use `--dry-run` to preview changes without writing. The local store is `--dir DIR` when given, else the global trace store (`--trace-dir`, else `$AGENT_TRACE_DIR`, else `.agent-traces`).
 
 ### `config-diff`
 ```
 agent-strace config-diff [--config FILE] [--host URL]
 ```
-Show the diff between the local `.agent-strace.yaml` and the live config on a hosted collector.
+Show the diff between the local `.agent-strace.yaml` and the live config on a hosted collector. Local diffs read `--dir DIR` when given, else the global trace store.
 
 ### `workspace`
 ```

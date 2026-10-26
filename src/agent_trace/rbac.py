@@ -34,7 +34,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from .store import DEFAULT_TRACE_DIR
+from .store import DEFAULT_TRACE_DIR, resolve_trace_dir
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -231,7 +231,7 @@ def can(
 # ---------------------------------------------------------------------------
 
 def cmd_rbac(args: argparse.Namespace) -> int:
-    base_dir = getattr(args, "dir", None) or DEFAULT_TRACE_DIR
+    base_dir = getattr(args, "dir", None) or resolve_trace_dir(getattr(args, "trace_dir", None))
     store = RBACStore(base_dir)
     sub = getattr(args, "rbac_cmd", None)
 

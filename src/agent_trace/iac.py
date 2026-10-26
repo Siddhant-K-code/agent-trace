@@ -54,7 +54,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from .store import DEFAULT_TRACE_DIR
+from .store import resolve_trace_dir
 from .workspace import create_workspace, list_workspaces
 from .rbac import RBACStore
 
@@ -204,7 +204,7 @@ def _apply_rbac(cfg: dict, base_dir: str, dry_run: bool) -> list[str]:
 
 
 def _apply_identities(cfg: dict, base_dir: str, dry_run: bool) -> list[str]:
-    """Write identity entries to .agent-traces/identities.json."""
+    """Write identity entries to <base_dir>/identities.json."""
     changes = []
     identities_path = Path(base_dir) / "identities.json"
     existing: dict = {}
@@ -233,7 +233,7 @@ def _apply_identities(cfg: dict, base_dir: str, dry_run: bool) -> list[str]:
 
 
 def _apply_team_budgets(cfg: dict, base_dir: str, dry_run: bool) -> list[str]:
-    """Write team budget entries to .agent-traces/team_budgets.json."""
+    """Write team budget entries to <base_dir>/team_budgets.json."""
     changes = []
     budgets_path = Path(base_dir) / "team_budgets.json"
     existing: dict = {}
@@ -386,7 +386,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
     dry_run = getattr(args, "dry_run", False)
     server = getattr(args, "server", "") or ""
     auth_key = getattr(args, "auth_key", "") or ""
-    base_dir = getattr(args, "dir", None) or DEFAULT_TRACE_DIR
+    base_dir = getattr(args, "dir", None) or resolve_trace_dir(getattr(args, "trace_dir", None))
 
     cfg = load_config(config_path)
     if not cfg:
@@ -421,7 +421,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
 
 def cmd_config_diff(args: argparse.Namespace) -> int:
     config_path = getattr(args, "config", DEFAULT_CONFIG) or DEFAULT_CONFIG
-    base_dir = getattr(args, "dir", None) or DEFAULT_TRACE_DIR
+    base_dir = getattr(args, "dir", None) or resolve_trace_dir(getattr(args, "trace_dir", None))
 
     cfg = load_config(config_path)
     if not cfg:
