@@ -561,7 +561,11 @@ def _normalise_payload(input_data: dict, provider: str, event: str) -> dict:
         data.get("sessionId") or data.get("conversation_id") or "",
     )
     data.setdefault("turn_id", data.get("turnId") or "")
-    data.setdefault("tool_use_id", data.get("toolUseId") or "")
+    # GitHub Copilot CLI sends toolCallId on tool hooks from 1.0.107.
+    data.setdefault(
+        "tool_use_id",
+        data.get("toolUseId") or data.get("toolCallId") or "",
+    )
     data.setdefault("stop_reason", data.get("stopReason") or "")
     data.setdefault("transcript_path", data.get("transcriptPath") or "")
 
@@ -1017,8 +1021,8 @@ def _pending_subagent_call(
 ) -> str:
     """Return the task tool_call that started this subagent, if unambiguous.
 
-    Tool hooks carry no call ID, so the call is identified only when exactly
-    one task call is pending (called, no result yet), it is recorded as a
+    Subagent hooks carry no tool call ID, so the call is identified only when
+    exactly one task call is pending (called, no result yet), it is recorded as a
     ``tool_call`` in this session's trace, and its ``agent_type`` argument
     does not contradict the payload.
     """

@@ -36,11 +36,14 @@ ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_DIR = ROOT / "tests" / "fixtures" / "capture_matrix"
 REFERENCE = "tests/test_capture_matrix_fixtures.py"
 FIXTURES = {
-    "copilot": "copilot-1.0.103-0.json",
+    "copilot": "copilot-1.0.107.json",
     "codex": "codex-0.167.0-alpha.3.2.json",
 }
+COPILOT_1_0_103_FIXTURE = "copilot-1.0.103-0.json"
 LEGACY_COPILOT_FIXTURE = "copilot-1.0.94-3.json"
 LEGACY_CODEX_FIXTURE = "codex-0.163.0-alpha.11.json"
+# Copilot hooks that fired in the 1.0.107 recording but that setup does not register.
+UNREGISTERED_COPILOT_HOOKS = {"userPromptTransformed", "permissionRequest", "notification"}
 # Codex hooks that fired in the recording but that setup does not register.
 UNREGISTERED_CODEX_HOOKS = {"PreModelRequest"}
 # Codex hooks that releases before 0.164.0 do not have.
@@ -229,7 +232,7 @@ class _ReplayChecks:
                     self.assertEqual(report.result.capture_matrix_version, self.matrix.version)
 
 
-class TestCopilotFixture(_ReplayChecks, unittest.TestCase):
+class _CopilotChecks(_ReplayChecks):
     provider = "copilot"
 
     def main_and_child(self, store):
@@ -238,12 +241,8 @@ class TestCopilotFixture(_ReplayChecks, unittest.TestCase):
         child = [m for m in sessions.values() if IMPLICIT_SESSION_SOURCE in m.command]
         return main, child
 
-    def test_session_start_precedes_prompt_in_this_recording(self):
-        # Copilot does not fire the two in a fixed order: 1.0.94-3 always sent
-        # userPromptSubmitted first, 1.0.103-0 did so in some runs, so the
-        # entry still declares it (see TestCopilotLegacyFixture).
-        self.assertEqual(self.entry["events_before_start"], ["user_prompt"])
-        for scenario in ("tool", "tool_failure", "permission_denied", "subagent"):
+    def assert_main_session_boundaries(self, scenarios):
+        for scenario in scenarios:
             store, _ = self.replay(scenario)
             (main,), _ = self.main_and_child(store)
             events = store.load_events(main.session_id)
@@ -265,6 +264,210 @@ class TestCopilotFixture(_ReplayChecks, unittest.TestCase):
                 validation = self.validate(store, main.session_id)
                 self.assertNotEqual(validation.status, "invalid")
                 self.assertNotIn("declared_events_before_session_start", validation.labels)
+
+
+class TestCopilotFixture(_CopilotChecks, unittest.TestCase):
+    """Copilot CLI 1.0.107: tool hooks carry toolCallId, so results pair by
+    call ID. The rest of the hook shape matches 1.0.103-0."""
+
+    def hook_payloads(self, scenario, event):
+        return [
+            h["payload"] for h in self.fixture["scenarios"][scenario]["hooks"]
+            if h["event"] == event
+        ]
+
+    def test_session_start_precedes_prompt_in_this_recording(self):
+        self.assertEqual(self.entry["events_before_start"], ["user_prompt"])
+        self.assert_main_session_boundaries(self.fixture["scenarios"])
+
+    def test_prompt_hook_starts_before_the_session_start_hook_can_finish(self):
+        # Every 1.0.107 payload put sessionStart first, but userPromptSubmitted
+        # followed within tens of milliseconds and Copilot did not wait for the
+        # sessionStart hook to exit. The two hook processes race, so a live
+        # trace can still begin with user_prompt; the entry keeps declaring it.
+        for scenario in self.fixture["scenarios"]:
+            (start,) = self.hook_payloads(scenario, "sessionStart")
+            prompt = self.hook_payloads(scenario, "userPromptSubmitted")[0]
+            with self.subTest(scenario=scenario):
+                self.assertEqual(prompt["sessionId"], start["sessionId"])
+                self.assertLess(prompt["timestamp"] - start["timestamp"], 100)
+
+    def test_tool_results_pair_by_call_id(self):
+        store, skipped = self.replay("tool")
+        self.assertEqual(skipped, ["userPromptTransformed", "permissionRequest", "permissionRequest"])
+        (main,), child = self.main_and_child(store)
+        self.assertEqual(child, [])
+        events = store.load_events(main.session_id)
+        calls = [e for e in events if e.event_type == EventType.TOOL_CALL]
+        results = [e for e in events if e.event_type == EventType.TOOL_RESULT]
+        self.assertEqual([c.data["tool_name"] for c in calls], ["view", "bash", "edit"])
+        self.assertEqual(len(results), 3)
+        by_id = {c.data["tool_use_id"]: c for c in calls}
+        self.assertEqual(len(by_id), 3)
+        for result in results:
+            with self.subTest(tool=result.data["tool_name"]):
+                call = by_id[result.data["tool_use_id"]]
+                self.assertEqual(result.parent_id, call.event_id)
+                self.assertEqual(result.data["tool_name"], call.data["tool_name"])
+        self.assertEqual(self.codes(self.health(store, main.session_id), "observed"), [])
+
+    def test_failed_tool_is_an_error_and_a_failed_command_is_a_result(self):
+        store, skipped = self.replay("tool_failure")
+        self.assertEqual(skipped, ["userPromptTransformed", "permissionRequest"])
+        (main,), _ = self.main_and_child(store)
+        events = store.load_events(main.session_id)
+        calls = {
+            e.data["tool_name"]: e for e in events if e.event_type == EventType.TOOL_CALL
+        }
+        (error,) = [e for e in events if e.event_type == EventType.ERROR]
+        (result,) = [e for e in events if e.event_type == EventType.TOOL_RESULT]
+        self.assertEqual(main.errors, 1)
+        self.assertEqual(error.data["tool_name"], "view")
+        self.assertEqual(error.parent_id, calls["view"].event_id)
+        # The shell command exits 1, but postToolUse reports resultType
+        # success; the exit code is only in the result text.
+        self.assertEqual(result.data["tool_name"], "bash")
+        self.assertEqual(result.parent_id, calls["bash"].event_id)
+        self.assertIn("exit code 1", result.data["result"])
+
+    def test_stop_has_no_response_text_model_or_tokens(self):
+        for scenario in ("plain", "tool"):
+            store, _ = self.replay(scenario)
+            (main,), _ = self.main_and_child(store)
+            events = store.load_events(main.session_id)
+            stops = [e for e in events if e.event_type == EventType.ASSISTANT_RESPONSE]
+            start = next(e for e in events if e.event_type == EventType.SESSION_START)
+            with self.subTest(scenario=scenario):
+                self.assertEqual([s.data["text"] for s in stops], [""])
+                self.assertEqual(stops[0].data["stop_reason"], "end_turn")
+                self.assertEqual(start.data["model"], "")
+                self.assertEqual(main.total_tokens, 0)
+
+    def test_plain_prompt_records_no_tool_events(self):
+        store, skipped = self.replay("plain")
+        self.assertEqual(skipped, ["userPromptTransformed"])
+        (main,), child = self.main_and_child(store)
+        self.assertEqual(child, [])
+        self.assertEqual(
+            [e.event_type for e in store.load_events(main.session_id)],
+            [
+                EventType.SESSION_START,
+                EventType.USER_PROMPT,
+                EventType.ASSISTANT_RESPONSE,
+                EventType.SESSION_END,
+            ],
+        )
+
+    def test_session_end_reason(self):
+        expected = {scenario: "complete" for scenario in self.fixture["scenarios"]}
+        expected["interactive"] = "user_exit"
+        for scenario, reason in expected.items():
+            store, _ = self.replay(scenario)
+            (main,), _ = self.main_and_child(store)
+            (end,) = [
+                e for e in store.load_events(main.session_id)
+                if e.event_type == EventType.SESSION_END
+            ]
+            with self.subTest(scenario=scenario):
+                self.assertEqual(end.data["reason"], reason)
+
+    def test_denied_tool_leaves_an_unpaired_call(self):
+        store, skipped = self.replay("permission_denied")
+        self.assertEqual(skipped, ["userPromptTransformed", "permissionRequest", "notification"])
+        (main,), _ = self.main_and_child(store)
+        events = store.load_events(main.session_id)
+        kinds = [e.event_type for e in events]
+        (call,) = [e for e in events if e.event_type == EventType.TOOL_CALL]
+        self.assertEqual(call.data["tool_name"], "create")
+        self.assertTrue(call.data["tool_use_id"])
+        self.assertNotIn(EventType.TOOL_RESULT, kinds)
+        self.assertNotIn(EventType.ERROR, kinds)
+        self.assertIn("unpaired_tool_call", self.codes(self.health(store, main.session_id), "observed"))
+
+    def test_unregistered_hooks(self):
+        registered = set(registered_hooks(self.provider))
+        fired = {
+            hook["event"]
+            for scenario in self.fixture["scenarios"].values()
+            for hook in scenario["hooks"]
+        }
+        self.assertEqual(fired - registered, UNREGISTERED_COPILOT_HOOKS)
+        # userPromptTransformed follows every userPromptSubmitted, parent and
+        # child, with the prompt and the text sent to the model.
+        for scenario in self.fixture["scenarios"]:
+            submitted = self.hook_payloads(scenario, "userPromptSubmitted")
+            transformed = self.hook_payloads(scenario, "userPromptTransformed")
+            with self.subTest(scenario=scenario):
+                self.assertEqual(
+                    [(p["sessionId"], p["prompt"]) for p in transformed],
+                    [(p["sessionId"], p["prompt"]) for p in submitted],
+                )
+                for payload in transformed:
+                    self.assertTrue(payload["transformedPrompt"].endswith(payload["prompt"]))
+
+    def test_subagent_hooks_link_the_child_to_the_parent(self):
+        store, skipped = self.replay("subagent")
+        self.assertEqual(skipped, ["userPromptTransformed", "userPromptTransformed"])
+        (main,), (child,) = self.main_and_child(store)
+
+        for event in ("subagentStart", "subagentStop"):
+            (payload,) = self.hook_payloads("subagent", event)
+            self.assertTrue(payload["agentId"].startswith(child.session_id))
+            self.assertTrue(payload["sessionId"].startswith(main.session_id))
+            self.assertNotIn("toolCallId", payload)
+
+        main_events = store.load_events(main.session_id)
+        (task_call,) = [e for e in main_events if e.event_type == EventType.TOOL_CALL]
+        (task_result,) = [e for e in main_events if e.event_type == EventType.TOOL_RESULT]
+        self.assertEqual(task_call.data["tool_name"], "task")
+        self.assertEqual(task_result.parent_id, task_call.event_id)
+        (start,) = [e for e in main_events if e.event_type == EventType.SUBAGENT_START]
+        (stop,) = [e for e in main_events if e.event_type == EventType.SUBAGENT_STOP]
+        for event in (start, stop):
+            self.assertEqual(event.data["child_session_id"], child.session_id)
+            self.assertEqual(event.data["agent_type"], "explore")
+            self.assertEqual(event.parent_id, task_call.event_id)
+            self.assertNotIn("response", event.data)
+        self.assertEqual(start.data["child_link"], "missing_child")
+        self.assertEqual(stop.data["child_link"], "linked")
+
+        self.assertEqual(child.parent_session_id, main.session_id)
+        self.assertEqual(child.parent_event_id, task_call.event_id)
+        self.assertEqual(child.depth, 1)
+        self.assertIsNone(child.ended_at)
+        child_events = store.load_events(child.session_id)
+        (child_call,) = [e for e in child_events if e.event_type == EventType.TOOL_CALL]
+        (child_result,) = [e for e in child_events if e.event_type == EventType.TOOL_RESULT]
+        self.assertEqual(child_result.parent_id, child_call.event_id)
+        self.assertEqual(child_result.data["tool_use_id"], child_call.data["tool_use_id"])
+        self.assertNotEqual(child_call.data["tool_use_id"], task_call.data["tool_use_id"])
+
+        report = self.health(store, child.session_id)
+        self.assertEqual(
+            self.codes(report, "observed"),
+            ["missing_session_start", "missing_session_end"],
+        )
+
+
+class TestCopilot103Fixture(_CopilotChecks, unittest.TestCase):
+    """Copilot CLI 1.0.103-0: tool hooks carry no call ID, so results pair by
+    tool name. Kept so the hooks keep handling payloads without toolCallId."""
+
+    fixture_name = COPILOT_1_0_103_FIXTURE
+
+    def test_entry_is_verified_by_this_fixture(self):
+        self.assertEqual(self.fixture["provider"], self.provider)
+        self.assertEqual(self.fixture["tested_version"], "1.0.103-0")
+        self.assertNotEqual(self.entry["tested_version"], self.fixture["tested_version"])
+
+    def test_session_start_precedes_prompt_in_this_recording(self):
+        # Copilot does not fire the two in a fixed order: 1.0.94-3 always sent
+        # userPromptSubmitted first, 1.0.103-0 did so in some runs, so the
+        # entry still declares it (see TestCopilotLegacyFixture).
+        self.assertEqual(self.entry["events_before_start"], ["user_prompt"])
+        self.assert_main_session_boundaries(
+            ("tool", "tool_failure", "permission_denied", "subagent")
+        )
 
     def test_tool_result_pairs_by_name_without_a_call_id(self):
         store, skipped = self.replay("tool")
@@ -359,7 +562,7 @@ class TestCopilotFixture(_ReplayChecks, unittest.TestCase):
         )
 
 
-class TestCopilotLegacyFixture(TestCopilotFixture):
+class TestCopilotLegacyFixture(TestCopilot103Fixture):
     """Copilot CLI 1.0.94-3: prompt before sessionStart, and a subagentStart
     payload that does not name the child. Some 1.0.103-0 runs still send this
     shape, so the hooks must keep handling it."""
