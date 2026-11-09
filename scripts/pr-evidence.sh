@@ -12,6 +12,8 @@
 #   PR_EVIDENCE_DIR          output directory (default $RUNNER_TEMP/agent-trace-pr-evidence)
 #   REVIEW_FAIL_ON           --fail-on value, empty uses config
 #   REVIEW_MIN_CONFIDENCE    --min-confidence value, empty uses config
+#   REVIEW_COMMITS           --commits range for external trailers (check)
+#   REVIEW_OTEL_LOGS         --otel-logs Claude Code OTel export (check)
 #   COGNITIVE_DEBT_MODE      false, report, or check
 #   ARTIFACT_URL             https URL of the uploaded evidence artifact (check)
 #   REVIEW_POST_COMMENT      true to post or update the PR comment (check)
@@ -136,6 +138,12 @@ check() {
   fi
   if [ -n "${REVIEW_MIN_CONFIDENCE:-}" ]; then
     args+=(--min-confidence "$REVIEW_MIN_CONFIDENCE")
+  fi
+  if [ -n "${REVIEW_COMMITS:-}" ]; then
+    args+=(--commits "$REVIEW_COMMITS")
+  fi
+  if [ -n "${REVIEW_OTEL_LOGS:-}" ]; then
+    args+=(--otel-logs "$REVIEW_OTEL_LOGS")
   fi
   args+=(--evidence-packet "$packet")
   if [ "$cognitive_mode" != "false" ]; then

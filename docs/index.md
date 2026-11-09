@@ -19,7 +19,9 @@ canonical flag reference.
 - [Claude Code session replay](claude-code-session-replay.md)
 - [OpenAI Codex trace viewer](codex-trace-viewer.md)
 - [GitHub Copilot CLI observability](github-copilot-cli-observability.md)
-- [Evidence health](evidence-health.md)
+- [Evidence health](evidence-health.md): what a trace could not prove, and
+  [external evidence](evidence-health.md#external-evidence) from Entire,
+  Copilot `Agent-Logs-Url` trailers, and Claude Code OpenTelemetry.
 - [Session evidence review](session-review-projection.md): shared dashboard and
   VS Code review schema, filters, relationships, and local actions.
 - [VS Code evidence review](vscode.md#evidence-review)
