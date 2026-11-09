@@ -15,30 +15,42 @@ nothing written, sent, opened or printed. The one exception is ``optimize``
 with an LLM configured: when the LLM returns no patterns, it can send the
 request and then refuse, as test_optimize shows. Without the check it sends
 the same request and then raises.
+
+DashboardRouteTest requests the dashboard's compare and OTLP routes the same
+way through a real HTTP server. Without the check, a route that reads
+non-object data raises in the handler and the server drops the connection.
+The shipped route must answer 400 with the refusal exactly where the
+unchecked route drops it, and give the same response everywhere else.
 """
 
 from __future__ import annotations
 
 import contextlib
 import errno
+import http.client
 import importlib
+import io
 import json
 import os
 import shutil
 import socket
 import sys
 import tempfile
+import threading
 import traceback
 import unittest
 import urllib.error
 import webbrowser
 from dataclasses import dataclass, field
+from http.server import HTTPServer
 from pathlib import Path
 from unittest import mock
 
 import agent_trace
 from agent_trace import event_data
 from agent_trace.cli import main
+from agent_trace.server import _make_handler
+from agent_trace.store import TraceStore
 from agent_trace.temporal import TEMPORAL_TRACE_PARENT_ENV
 
 try:
@@ -801,6 +813,173 @@ class MirroredCheckTest(unittest.TestCase):
             calls_at_refusal("optimize llm none"), {3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 9: 1},
         )
         self.assertEqual(sweep.positions("optimize heuristics", O1), {3, 5, 7, 9})
+
+
+# ---------------------------------------------------------------------------
+# Dashboard routes
+# ---------------------------------------------------------------------------
+
+SESSION_IDS = {"GOOD": base.GOOD, "BAD": base.BAD, "CHILD": base.CHILD}
+# Each route lists the sessions it reads in argument order.
+DASHBOARD_ROUTES = (
+    "otlp BAD",
+    "otlp CHILD",
+    "compare GOOD BAD",
+    "compare BAD GOOD",
+    "compare BAD CHILD",
+    "compare CHILD BAD",
+)
+# The event types whose data each route reads in the shared fixture. Every
+# tool_call there has a result or an error, so the OTLP route reads them all.
+ROUTE_READS = {
+    "otlp": {
+        "user_prompt", "llm_request", "llm_response", "tool_call", "tool_result", "error",
+        "decision", "assistant_response",
+    },
+    "compare": {"user_prompt", "tool_call", "decision"},
+}
+SAME = "200, as without the check"
+
+
+def _route_path(route: str) -> str:
+    kind, *names = route.split()
+    ids = [SESSION_IDS[name] for name in names]
+    if kind == "otlp":
+        return f"/api/sessions/{ids[0]}/otlp"
+    return f"/api/sessions/{ids[0]}/compare?other={ids[1]}"
+
+
+@contextlib.contextmanager
+def _dashboard(traces: Path):
+    """Serve the dashboard for *traces* and yield its port."""
+    store = TraceStore(str(traces), use_workspace_env=False)
+    handler = _make_handler(store, threading.Lock(), auth_key="", dashboard=True)
+    server = HTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server.server_address[1]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def _get(port: int, path: str) -> tuple[int | None, str]:
+    """Return the status and body, or None when the server drops the connection."""
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+    try:
+        # The handler logs each request to stderr, and the server prints the
+        # traceback of a request that raises.
+        with contextlib.redirect_stderr(io.StringIO()):
+            connection.request("GET", path)
+            try:
+                response = connection.getresponse()
+            except ConnectionResetError:  # http.client.RemoteDisconnected
+                return None, ""
+            return response.status, response.read().decode("utf-8")
+    finally:
+        connection.close()
+
+
+def _route_outcome(shipped: tuple, unchecked: tuple) -> str:
+    """Return the refusal the shipped route sent, SAME, or what went wrong."""
+    status, body = shipped
+    if status == 400 and REFUSAL in body:
+        if unchecked[0] is not None:
+            return f"refused, but without the check it answers {unchecked[0]}"
+        return json.loads(body)["error"]
+    if status is None:
+        return "dropped the connection"
+    if shipped != unchecked:
+        return f"answered {status}, and {unchecked[0]} or another body without the check"
+    if status != 200:
+        return f"answered {status} {body[:300]!r}"
+    return SAME
+
+
+class DashboardRouteTest(unittest.TestCase):
+    """Request the compare and OTLP routes with and without the check."""
+
+    def traces(self) -> Path:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        traces = Path(tmp.name).resolve() / ".agent-traces"
+        traces.mkdir()
+        return traces
+
+    def test_compare_and_otlp_refuse_only_where_they_dropped_the_connection(self):
+        cases = [(None, None, "object", None)]
+        for event_type in base.BAD_LAYOUT:
+            cases += [(event_type, None, name, value) for name, value in base.NON_OBJECT_VALUES]
+        for event_type in base.CHILD_LAYOUT:
+            cases += [(None, event_type, name, value) for name, value in base.NON_OBJECT_VALUES]
+        # With non-object data in both sessions, compare names the first one.
+        cases.append(("tool_call", "tool_call", "number", 42))
+
+        traces = self.traces()
+        problems = []
+        with _dashboard(traces) as port:
+            for bad_type, child_type, json_type, value in cases:
+                shutil.rmtree(traces)
+                traces.mkdir()
+                base.build_store(traces, bad_type=bad_type, child_type=child_type, value=value)
+                shipped = {route: _get(port, _route_path(route)) for route in DASHBOARD_ROUTES}
+                with _unchecked():
+                    unchecked = {route: _get(port, _route_path(route)) for route in DASHBOARD_ROUTES}
+                poisoned = {"BAD": bad_type, "CHILD": child_type}
+                stored = ", ".join(f"{name} {kind}" for name, kind in poisoned.items() if kind)
+                for route in DASHBOARD_ROUTES:
+                    kind, *names = route.split()
+                    want = SAME
+                    for name in names:
+                        if poisoned.get(name) in ROUTE_READS[kind]:
+                            error = base.expected_error(
+                                SESSION_IDS[name], poisoned[name], json_type, named=True,
+                            )
+                            want = error.removeprefix("Error: ").removesuffix("\n")
+                            break
+                    got = _route_outcome(shipped[route], unchecked[route])
+                    if got != want:
+                        problems.append(
+                            f"{route} with {json_type} data in {stored or 'no event'}: "
+                            f"got {got!r}, want {want!r}"
+                        )
+        self.assertEqual(problems, [])
+
+    def test_otlp_reads_the_tool_calls_the_export_reads(self):
+        traces = self.traces()
+        events = _events(M1, NOW - 600, EXPORT_ROWS)
+        base._write_session(traces, M1, NOW - 600, events)
+        path = traces / M1 / "events.ndjson"
+        route = f"/api/sessions/{M1}/otlp"
+        refused, problems = set(), []
+        with _dashboard(traces) as port:
+            self.assertEqual(_get(port, route)[0], 200)
+            for position, event in enumerate(events, 1):
+                with _poisoned(path, position, 42):
+                    shipped = _get(port, route)
+                    with _unchecked():
+                        unchecked = _get(port, route)
+                got = _route_outcome(shipped, unchecked)
+                if got == SAME:
+                    continue
+                want = (
+                    f"session {M1} {REFUSAL}: event {position} of {len(events)} "
+                    f"({event['event_type']}) has number data"
+                )
+                if got == want:
+                    refused.add(position)
+                else:
+                    problems.append(f"#{position} {event['event_type']}: got {got!r}, want {want!r}")
+        self.assertEqual(problems, [])
+        # As in export --format otlp, the route reads the tool_call an error
+        # pairs with, but not one that a later tool_call with the same ID
+        # replaces before anything pairs with it.
+        self.assertIn(15, refused)
+        self.assertNotIn(29, refused)
+        self.assertIn(30, refused)
+        self.assertNotIn(24, refused)
 
 
 if __name__ == "__main__":
