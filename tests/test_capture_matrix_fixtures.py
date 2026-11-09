@@ -527,9 +527,12 @@ class TestCodexFixture(_ReplayChecks, unittest.TestCase):
                     Path(store.base_dir).resolve() / meta.session_id
                 )
                 self.assertEqual(validation.summary["state"], "consistent")
-                self.assertNotIn(
-                    "summary_contradiction",
-                    {f.code for f in validation.findings},
+                self.assertEqual(validation.status, "valid")
+                self.assertIn("declared_results_without_requests", validation.labels)
+                self.assertNotIn("orphan_parent", validation.labels)
+                self.assertEqual(
+                    [(f.code, f.severity) for f in validation.findings],
+                    [("declared_results_without_requests", "info")],
                 )
 
                 report = self.health(store, meta.session_id)

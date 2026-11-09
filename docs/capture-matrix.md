@@ -114,7 +114,7 @@ published matrix.
 
 An entry may also list `events_before_start`: event types the provider is known to send before its session start hook. `agent-strace health` reports events of those types before the first `session_start` as the provider limitation `declared_events_before_session_start`. Any other event before the start is still the observed `events_before_session_start`, which makes the session `invalid`.
 
-An entry may also list `results_without_requests`: result event types the provider records with no request event. `agent-strace health` and the dashboard's evidence review report result events of those types with no `parent_id` once, as the provider limitation `declared_results_without_requests`, instead of one orphan each. A result that names a missing request is still an orphan. Codex lists `llm_response`. `agent-strace validate` does not read the capture matrix, so it still reports one `orphan_llm_response` warning per Codex model request.
+An entry may also list `results_without_requests`: result event types the provider records with no request event. `agent-strace health` and the dashboard's evidence review report result events of those types with no `parent_id` once, as the provider limitation `declared_results_without_requests`, instead of one orphan each. A result that names a missing request is still an orphan. Codex lists `llm_response`. `agent-strace validate` reads only this field, for the provider named by hook-written events: it reports one `info` finding and the `declared_results_without_requests` label, which leave a Codex trace `valid`. It does not read `events_before_start` or the known gaps.
 
 ## Verification policy
 

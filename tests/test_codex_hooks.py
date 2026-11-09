@@ -25,10 +25,11 @@ from agent_trace.hooks import (
     handle_user_prompt,
     hook_main,
 )
-from agent_trace.models import EventType
+from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.otlp import session_to_otlp, session_to_otlp_genai
 from agent_trace.store import TraceStore
 from agent_trace.timeline import build_timeline, format_timeline
+from agent_trace.validation import validate_trace_directory
 
 
 class TestCodexHooks(unittest.TestCase):
@@ -1125,6 +1126,89 @@ class TestCodexPostModelRequest(unittest.TestCase):
         self.assertIn("4 llm_response events", declared.message)
         self.assertEqual(
             [r.code for r in report.result.reasons if r.kind.value == "observed"], []
+        )
+
+    def validate(self):
+        # Resolve the temp dir: validate refuses symlinked components such as
+        # macOS's /var.
+        return validate_trace_directory(self.root.resolve() / self.SESSION[:16])
+
+    def test_validate_accepts_declared_responses_without_requests(self):
+        self.dispatch("SessionStart", source="startup", model="synthetic-model")
+        for _ in range(3):
+            self.model_request()
+        self.model_request(agent_id=self.AGENT, agent_type="explorer")
+        self.dispatch("SessionEnd", reason="other")
+
+        report = self.validate()
+        self.assertEqual(report.status, "valid")
+        self.assertEqual(report.exit_code, 0)
+        self.assertIn("declared_results_without_requests", report.labels)
+        self.assertNotIn("orphan_parent", report.labels)
+        self.assertEqual(
+            [(f.code, f.severity) for f in report.findings],
+            [("declared_results_without_requests", "info")],
+        )
+        self.assertIn("4 llm_response events", report.findings[0].message)
+        self.assertNotEqual(report.summary["state"], "contradictory")
+
+    def test_validate_keeps_a_response_naming_a_missing_parent_an_orphan(self):
+        self.dispatch("SessionStart", source="startup", model="synthetic-model")
+        self.model_request()
+        session_id = self.SESSION[:16]
+        self.store().append_event(
+            session_id,
+            TraceEvent(
+                event_type=EventType.LLM_RESPONSE,
+                session_id=session_id,
+                parent_id="000000000000",
+                data={"total_tokens": 1},
+            ),
+        )
+        self.dispatch("SessionEnd", reason="other")
+
+        report = self.validate()
+        self.assertEqual(report.status, "partial")
+        self.assertIn("orphan_parent", report.labels)
+        self.assertIn("declared_results_without_requests", report.labels)
+        findings = [(f.code, f.severity) for f in report.findings]
+        self.assertEqual(
+            sorted(findings),
+            [
+                ("declared_results_without_requests", "info"),
+                ("orphan_llm_response", "warning"),
+            ],
+        )
+
+    def test_validate_without_hook_provider_reports_each_orphan(self):
+        store = self.store()
+        session_id = "sdk-session-0001"
+        store.create_session(SessionMeta(session_id=session_id, agent_name="sdk"))
+        store.append_event(
+            session_id,
+            TraceEvent(event_type=EventType.SESSION_START, session_id=session_id),
+        )
+        for _ in range(2):
+            store.append_event(
+                session_id,
+                TraceEvent(
+                    event_type=EventType.LLM_RESPONSE,
+                    session_id=session_id,
+                    data={"total_tokens": 1},
+                ),
+            )
+        store.append_event(
+            session_id,
+            TraceEvent(event_type=EventType.SESSION_END, session_id=session_id),
+        )
+
+        report = validate_trace_directory(self.root.resolve() / session_id)
+        self.assertEqual(report.status, "partial")
+        self.assertIn("orphan_parent", report.labels)
+        self.assertNotIn("declared_results_without_requests", report.labels)
+        self.assertEqual(
+            [(f.code, f.severity) for f in report.findings],
+            [("orphan_llm_response", "warning")] * 2,
         )
 
     def test_subagent_requests_do_not_look_like_a_parent_compaction(self):

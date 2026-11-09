@@ -33,6 +33,7 @@ from .compliance_report import (
 )
 from .evidence_health import EvidenceHealthStatus, assess_evidence_health
 from .freeze import RegressionFixture, compare_fixtures, extract_steps
+from .health import detect_provider, load_capture_matrix
 from .models import EventType, SessionMeta, TraceEvent
 from .store import validate_workspace_id
 
@@ -69,6 +70,11 @@ _INVALID_EVIDENCE_CODES = {
 _OUTCOME_CODES = {
     "unpaired_tool_call",
     "unpaired_llm_request",
+}
+# Gaps the detected provider's capture matrix entry declares. They are reported
+# as info findings, which do not change the status.
+_DECLARED_LIMITATION_CODES = {
+    "declared_results_without_requests",
 }
 _ORPHAN_CODES = {
     "orphan_tool_result",
@@ -372,8 +378,34 @@ def _semantic_error_code(message: str) -> str:
 
 
 def _finding_for_reason(code: str, message: str, event_id: str) -> ValidationFinding:
-    severity = "error" if code in _INVALID_EVIDENCE_CODES else "warning"
+    if code in _INVALID_EVIDENCE_CODES:
+        severity = "error"
+    elif code in _DECLARED_LIMITATION_CODES:
+        severity = "info"
+    else:
+        severity = "warning"
     return ValidationFinding(code, severity, message, event_id=event_id)
+
+
+def _declared_unrequested_result_types(
+    meta: SessionMeta,
+    events: Sequence[TraceEvent],
+) -> tuple[str, ...]:
+    """Return the result types the hook provider records without requests.
+
+    The provider comes from hook-written evidence only, as in ``health``.
+    Only ``results_without_requests`` is read from its capture matrix entry.
+    """
+    provider = detect_provider(meta, events).provider
+    if not provider:
+        return ()
+    try:
+        entry = load_capture_matrix().entry(provider)
+    except (OSError, ValueError):
+        return ()
+    if entry is None:
+        return ()
+    return tuple(entry.get("results_without_requests", []))
 
 
 def _parent_findings(events: Sequence[TraceEvent]) -> list[ValidationFinding]:
@@ -633,6 +665,9 @@ def validate_trace_directory(
     health = assess_evidence_health(
         events,
         session_finalized=False if allow_active else True,
+        allowed_unrequested_result_types=_declared_unrequested_result_types(
+            meta, events
+        ),
     )
     for reason in health.reasons:
         findings.append(
@@ -683,6 +718,7 @@ def validate_trace_directory(
         labels.add("terminal_absent")
     if reason_codes.intersection(_ORPHAN_CODES):
         labels.add("orphan_parent")
+    labels.update(reason_codes.intersection(_DECLARED_LIMITATION_CODES))
     if "duplicate_tool_outcome" in reason_codes or "duplicate_llm_outcome" in reason_codes:
         labels.add("duplicate_outcomes")
     if chain_state == "broken" or not chain.ok:
