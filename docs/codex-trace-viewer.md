@@ -10,22 +10,26 @@ the Codex version and date last exercised with a real provider run. A
 `verified` entry applies to that tested release and fixture, not every Codex
 release.
 
-`agent-strace setup --cli codex --verify` performs a different check. It
-validates the user-level hooks file, the Codex hooks feature setting, and the
-local AgentTrace executable. It does not prove that Codex trusted the hooks,
-ran them, or captured a session.
+`agent-strace setup --cli codex --verify` performs a static installation check.
+It validates the user-level hooks file, the Codex hooks feature setting, and
+the local AgentTrace executable. After one harmless local run,
+`--verify --live` adds a check of the newest matching recorded session. It does
+not start Codex or make a model request.
 
 ## Install and check hooks
 
 ```bash
 agent-strace setup --cli codex
 agent-strace setup --cli codex --verify
+agent-strace setup --cli codex --verify --live
 ```
 
 Codex must trust each generated command hook in its Hooks UI. Headless
 `codex exec` can skip untrusted hooks without a warning. Re-run setup after
 upgrading from an older AgentTrace configuration so newer session-end and
-subagent hooks are present.
+subagent hooks are present. Live verification reports observed event types,
+boundaries, redaction, evidence health, and packaged capture-matrix gaps. It
+returns non-zero when matching reviewable evidence is unavailable.
 
 ## View a trace
 

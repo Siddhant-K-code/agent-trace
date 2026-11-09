@@ -13,8 +13,9 @@ prove that every action was captured.
 
 Claude Code hook coverage is currently marked unverified in the
 [capture matrix](capture-matrix.md#claude-code). Hook setup verification checks
-configuration, not whether Claude Code trusted the workspace, ran the hooks, or
-produced a trace.
+configuration. After recording one harmless local session, live verification
+can inspect the newest matching trace. Neither mode starts Claude Code or makes
+a model request.
 
 ## Capture new sessions with hooks
 
@@ -24,11 +25,15 @@ settings file, then run Claude Code normally:
 ```bash
 agent-strace setup --cli claude
 agent-strace setup --cli claude --verify
+agent-strace setup --cli claude --verify --live
 ```
 
 `setup --cli claude` prints JSON. It does not edit the settings file. The
 [setup guide](setup.md#claude-code-hook-verification) lists the settings layers
-that verification checks and the layers it cannot check.
+that static verification checks and the layers it cannot check. The live form
+first runs that static check, then reports event types, boundaries, redaction,
+evidence health, and capture-matrix gaps from a matching recorded session.
+Workspace trust and the provider run remain the user's responsibility.
 
 ## Import an existing Claude Code log
 
