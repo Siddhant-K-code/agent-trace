@@ -21,6 +21,7 @@ from agent_trace.langfuse_export import (
     _session_to_langfuse_trace,
     export_metrics_to_otlp,
     export_session_to_langfuse,
+    langfuse_data_indexes,
 )
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
@@ -207,6 +208,45 @@ class TestEventsToLangfuseObservations(unittest.TestCase):
         self.assertEqual(obs[0]["type"], "GENERATION")
         self.assertEqual(obs[0]["usage"]["input"], 100)
         self.assertEqual(obs[0]["usage"]["output"], 50)
+
+    def test_parentless_llm_response_pairs_with_newest_open_request(self):
+        # Matches the pairing.py LLM fallback, as OTLP and cost do.
+        events = [
+            _llm_req(ts=0.0, event_id="failed"),
+            _llm_req(ts=2.0, event_id="ok"),
+            _llm_resp(ts=3.0, parent_id=""),
+        ]
+        obs = _events_to_langfuse_observations("sess1", events)
+        self.assertEqual(len(obs), 1)
+        self.assertEqual(obs[0]["startTime"], _iso(2.0))
+        self.assertEqual(obs[0]["model"], "claude-3")
+        self.assertEqual(obs[0]["usage"]["input"], 100)
+        self.assertEqual(sorted(langfuse_data_indexes(events)), [1, 2])
+
+    def test_parentless_tool_result_stays_unpaired(self):
+        events = [_tool_call("Bash", ts=0.0, event_id="tc1"), _tool_result("Bash", ts=1.0, parent_id="")]
+        obs = _events_to_langfuse_observations("sess1", events)
+        self.assertEqual(obs[0]["startTime"], _iso(1.0))
+        self.assertIsNone(obs[0]["input"])
+
+    def test_error_ends_its_tool_call(self):
+        error = _error_ev(ts=1.0)
+        error.parent_id = "tc1"
+        events = [
+            _tool_call("Bash", ts=0.0, event_id="tc1"),
+            error,
+            _tool_result("Bash", ts=2.0, parent_id="tc1"),
+        ]
+        obs = _events_to_langfuse_observations("sess1", events)
+        self.assertEqual(obs[0]["startTime"], _iso(2.0))
+        self.assertIsNone(obs[0]["input"])
+        self.assertEqual(langfuse_data_indexes(events), [2])
+
+    def test_tool_result_does_not_pair_with_llm_request(self):
+        events = [_llm_req(ts=0.0, event_id="lr1"), _tool_result("Bash", ts=1.0, parent_id="lr1")]
+        obs = _events_to_langfuse_observations("sess1", events)
+        self.assertIsNone(obs[0]["input"])
+        self.assertEqual(langfuse_data_indexes(events), [1])
 
     def test_unmatched_tool_call_produces_no_observation(self):
         events = [_tool_call("Bash", ts=0.0, event_id="tc_orphan")]

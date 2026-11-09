@@ -299,6 +299,23 @@ agent-strace export --metrics --backend otlp --since 30d
 | event_id | span ID |
 | parent_id | parent span ID |
 
+### How requests and responses are paired
+
+The OTLP, OTLP GenAI, Temporal and Langfuse exports and `cost` pair events with
+the same rules, defined in `src/agent_trace/pairing.py`:
+
+1. A response pairs with the pending request its `parent_id` names.
+2. If there is no such request, a `tool_result` or `error` stays unpaired. An
+   `llm_response` pairs with the most recent pending `llm_request` whose model
+   matches, or either side names no model. This covers SDK integrations that
+   record responses without a `parent_id`. The most recent request wins
+   because a failed call leaves its request without a response.
+3. A response whose `parent_id` names a request that already paired stays
+   unpaired. It never takes another request's place.
+
+Requests still pending at the end are exported as unfinished spans in OTLP and
+are not exported to Langfuse.
+
 ---
 
 ## Inspect the OTLP payload

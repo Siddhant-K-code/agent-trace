@@ -8,7 +8,7 @@ import time
 import unittest
 
 from agent_trace.models import EventType, SessionMeta, TraceEvent
-from agent_trace.otlp import session_to_otlp, session_to_otlp_genai
+from agent_trace.otlp import _to_span_id, _ts_to_nanos, session_to_otlp, session_to_otlp_genai
 from agent_trace.store import TraceStore
 
 
@@ -152,6 +152,52 @@ class TestGenAILLMSpan(unittest.TestCase):
         payload = session_to_otlp_genai(meta, [req, resp])
         llm_span = _get_spans(payload)[1]
         self.assertEqual(_get_attr(llm_span, "gen_ai.system"), "openai")
+
+
+class TestGenAILLMPairingFallback(unittest.TestCase):
+    """Parentless responses follow the pairing.py LLM fallback."""
+
+    def _req(self, event_id, ts, model="gpt-4o"):
+        return TraceEvent(
+            event_type=EventType.LLM_REQUEST, event_id=event_id, timestamp=ts,
+            data={"model": model, "input_tokens": 1},
+        )
+
+    def _resp(self, ts, parent_id="", model="gpt-4o"):
+        return TraceEvent(
+            event_type=EventType.LLM_RESPONSE, parent_id=parent_id, timestamp=ts,
+            data={"model": model, "output_tokens": 1},
+        )
+
+    def _span_starts(self, events):
+        spans = _get_spans(session_to_otlp_genai(_make_meta(), events))[1:]
+        return {s["spanId"]: (s["startTimeUnixNano"], s["status"]["code"]) for s in spans}
+
+    def test_parentless_response_pairs_with_newest_open_request(self):
+        events = [self._req("failed", 1.0), self._req("ok", 2.0), self._resp(3.0)]
+        spans = self._span_starts(events)
+        self.assertEqual(spans[_to_span_id("ok")], (_ts_to_nanos(2.0), 1))
+        self.assertEqual(spans[_to_span_id("failed")], (_ts_to_nanos(1.0), 0))
+
+    def test_parentless_response_skips_requests_for_other_models(self):
+        events = [
+            self._req("gpt", 1.0, "gpt-4o"),
+            self._req("claude", 2.0, "claude-opus-4-6"),
+            self._resp(3.0, model="gpt-4o"),
+        ]
+        spans = self._span_starts(events)
+        self.assertEqual(spans[_to_span_id("gpt")], (_ts_to_nanos(1.0), 1))
+        self.assertEqual(spans[_to_span_id("claude")], (_ts_to_nanos(2.0), 0))
+
+    def test_duplicate_response_does_not_take_another_request(self):
+        events = [
+            self._req("a", 1.0),
+            self._req("b", 2.0),
+            self._resp(3.0, parent_id="a"),
+            self._resp(4.0, parent_id="a"),
+        ]
+        spans = self._span_starts(events)
+        self.assertEqual(spans[_to_span_id("b")], (_ts_to_nanos(2.0), 0))
 
 
 # ---------------------------------------------------------------------------
