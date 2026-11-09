@@ -72,6 +72,20 @@ Full config and JSON: [docs/setup.md](docs/setup.md)
 
 Provider coverage and known gaps: [docs/capture-matrix.md](docs/capture-matrix.md)
 
+### Claude Code plugin
+
+After installing `agent-strace`, install the repository as a native Claude Code
+plugin to enable tracing hooks plus the shared trace analyst agent and skill:
+
+```bash
+claude plugin marketplace add Siddhant-K-code/agent-trace
+claude plugin install agent-strace@agent-trace
+```
+
+See the [Claude Code plugin guide](docs/claude-code-plugin.md) for verification,
+updates, uninstall steps, privacy boundaries, provider gaps, and release
+publication.
+
 ### GitHub Copilot CLI plugin
 
 After installing `agent-strace`, install the repository as a Copilot CLI plugin to enable tracing hooks plus the trace analyst agent and skill:

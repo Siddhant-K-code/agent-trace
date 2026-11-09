@@ -20,6 +20,9 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@v4
 
+      - name: Validate plugin package metadata
+        run: uv run python -m unittest tests.test_plugin tests.test_claude_plugin -v
+
       - name: Read current version
         id: version
         run: |

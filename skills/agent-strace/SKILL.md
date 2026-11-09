@@ -1,6 +1,6 @@
 ---
 name: agent-strace
-description: Trace and investigate GitHub Copilot CLI sessions with agent-strace. Use when the user wants to capture a Copilot session, replay agent activity, explain a decision, diagnose repeated tool calls or failures, inspect cost, or audit a recorded session.
+description: Trace and investigate Claude Code or GitHub Copilot CLI sessions with agent-strace. Use when the user wants to capture an agent session, replay activity, explain a decision, diagnose repeated tool calls or failures, inspect cost, or audit a recorded session.
 ---
 
 # agent-strace
@@ -21,9 +21,9 @@ Do not silently substitute another tracing tool.
 
 ## Capture
 
-Installed plugin hooks automatically record new Copilot CLI sessions to
-`.agent-traces/`. Do not also run `agent-strace setup --cli copilot`; that would
-register duplicate hooks.
+Installed plugin hooks automatically record new Claude Code or Copilot CLI
+sessions to `.agent-traces/`. Do not also install provider-specific manual
+hooks with a different redaction mode because both handlers can run.
 
 ## Investigate
 

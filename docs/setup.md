@@ -8,6 +8,11 @@ Three ways to capture agent sessions. Pick the one that matches your agent.
 
 Captures the lifecycle events exposed by each CLI: user prompts, assistant responses, and hook-visible tool calls or edits. Claude Code exposes broad tool coverage; Cursor coverage depends on the native events Cursor emits.
 
+Claude Code users can install the
+[native AgentTrace plugin](claude-code-plugin.md) instead of copying hook
+configuration into settings files. The plugin also loads the trace analyst
+agent and AgentTrace skill.
+
 ```bash
 # Generate Claude Code hooks config
 agent-strace setup

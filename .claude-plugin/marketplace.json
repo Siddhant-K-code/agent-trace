@@ -1,0 +1,16 @@
+{
+  "name": "agent-trace",
+  "description": "AgentTrace plugins for agent observability.",
+  "owner": {
+    "name": "Siddhant Khare",
+    "email": "siddhantkhare2694@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "agent-strace",
+      "source": "./",
+      "description": "Capture and investigate Claude Code agent sessions with local AgentTrace hooks.",
+      "version": "0.104.0"
+    }
+  ]
+}
