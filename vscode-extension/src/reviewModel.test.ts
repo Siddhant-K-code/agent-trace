@@ -13,7 +13,7 @@ import { SessionMeta, TraceEvent } from "./traceStore";
 
 const fixtureDir = path.resolve(
   __dirname,
-  "../../tests/fixtures/representative_session",
+  "../../src/agent_trace/corpus/v1/fixture-review-001",
 );
 
 function fixtureEvents(): TraceEvent[] {
@@ -90,8 +90,8 @@ test("representative fixture projects review evidence", () => {
   assert.ok(byId.get("tool-test-1")?.categories.includes("tests"));
   assert.ok(byId.get("tool-test-2")?.categories.includes("retry"));
   assert.ok(byId.get("result-test-2")?.categories.includes("recovery"));
-  assert.ok(byId.get("ev-error")?.categories.includes("corrections"));
-  assert.equal(byId.get("ev-error")?.annotations[0].correction, true);
+  assert.ok(byId.get("ev-decision")?.categories.includes("corrections"));
+  assert.equal(byId.get("ev-decision")?.annotations[0].correction, true);
 });
 
 test("minimized extension share allowlists capture and annotation metadata", () => {
@@ -108,7 +108,9 @@ test("minimized extension share allowlists capture and annotation metadata", () 
     provider: "untrusted-provider",
     capture_method: "customer-capture-name",
   });
-  review.items[4].annotations[0].label = "customer-secret-label";
+  const annotated = review.items.find((item) => item.annotations.length > 0);
+  assert.ok(annotated);
+  annotated.annotations[0].label = "customer-secret-label";
 
   const html = renderMinimizedReviewHtml(review);
 

@@ -2,7 +2,7 @@
 
 `agent_trace.review` supplies the conservative event projection. `agent_trace.review_surface` composes that projection with session identity, evidence health, annotations, privacy state, and local actions for user interfaces.
 
-The local dashboard and VS Code extension consume schema version 1. The pending CLI `review` command can use the same module after its branch is rebased. It should not create a second projection.
+The local dashboard and VS Code extension consume schema version 1. The `agent-strace review` command checks pull-request reviewability across linked sessions and remains a separate workflow from this per-session evidence surface.
 
 ## Evidence order and relationships
 
@@ -52,4 +52,4 @@ The browser accepts `?event=<event-id>` and updates the URL as the reviewer move
 
 ## Representative fixture
 
-`tests/fixtures/representative_session/` covers a redacted prompt, file access, a failed test, retry, recovery, correction annotation, and an orphaned tool result. Python tests validate the shared payload and browser API. Extension tests validate the matching TypeScript projection and minimized share.
+`src/agent_trace/corpus/v1/fixture-review-001/` covers a redacted prompt, file access, a failed test, retry, recovery, correction annotation, and an orphaned tool result. Python tests validate the shared payload and browser API. Extension tests validate the matching TypeScript projection and minimized share.

@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import agent_trace
 from agent_trace.annotate import Annotation, add_annotation
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.review_surface import (
@@ -15,7 +16,12 @@ from agent_trace.review_surface import (
 from agent_trace.store import TraceStore
 
 
-FIXTURE_DIR = Path(__file__).parent / "fixtures" / "representative_session"
+FIXTURE_DIR = (
+    Path(agent_trace.__file__).parent
+    / "corpus"
+    / "v1"
+    / "fixture-review-001"
+)
 
 
 class ReviewSurfaceTests(unittest.TestCase):
@@ -67,10 +73,12 @@ class ReviewSurfaceTests(unittest.TestCase):
         self.assertIn("gaps", by_id["ev-orphan"]["categories"])
 
         failure = by_id["ev-error"]
-        self.assertIn("annotations", failure["categories"])
-        self.assertIn("corrections", failure["categories"])
-        self.assertTrue(failure["annotations"][0]["correction"])
-        self.assertIn("Human correction:", failure["annotations"][0]["note"])
+        self.assertIn("failures", failure["categories"])
+        annotated = next(item for item in review["items"] if item["annotations"])
+        self.assertIn("annotations", annotated["categories"])
+        self.assertIn("corrections", annotated["categories"])
+        self.assertTrue(annotated["annotations"][0]["correction"])
+        self.assertIn("Human correction:", annotated["annotations"][0]["note"])
 
         counts = {entry["id"]: entry["count"] for entry in review["filters"]}
         self.assertEqual(counts["tests"], 2)
