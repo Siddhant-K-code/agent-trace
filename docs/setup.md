@@ -351,6 +351,10 @@ Copilot sends hook payloads on stdin. agent-strace records session starts, user 
 
 Copilot can fire the first `userPromptSubmitted` before `sessionStart`. A subagent started with the `task` tool is recorded as its own session with no start and no end; the parent's `subagentStart` and `subagentStop` hooks link it to the parent, so `agent-strace tree` shows it. If you set up Copilot hooks before this release, re-run `agent-strace setup --cli copilot` (or update the plugin) to register the subagent hooks; sessions captured earlier stay unlinked. See the [capture matrix](capture-matrix.md#github-copilot-cli) for the verified Copilot CLI version and known gaps.
 
+#### Copilot cloud agent
+
+Copilot cloud agent does not run user-level hooks or plugins. `agent-strace setup --cli copilot-cloud` writes `.github/hooks/agent-strace.json` and `.github/hooks/agent-strace-cloud.sh` at the repository root. Merge them to the default branch, then set the `AGENT_STRACE_ENDPOINT` and `AGENT_STRACE_AUTH_KEY` Agents secrets for an [`agent-strace server`](server.md) collector that the cloud agent firewall allows. Without a collector, events are lost when the sandbox ends. Coverage is partial and not verified in a live job; see [Copilot cloud agent capture](copilot-cloud-agent.md).
+
 Stop and session-end coverage is provider-defined. agent-strace records these hooks when the agent CLI emits them, including empty stop payloads, but it cannot force an agent to emit a stop hook for every UI action such as deleting a conversation or interrupting a run.
 
 ### Import existing sessions

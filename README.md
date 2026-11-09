@@ -25,7 +25,7 @@ agent-strace health                # what the capture missed
 agent-strace review                # reviewability of this branch
 ```
 
-Works with Claude Code, Codex, Copilot CLI, Gemini CLI, Cursor, and any MCP server. Python 3.10+ standard library only. Secret redaction is on by default. Start with the [docs index](docs/index.md), [provider guides](docs/capture-matrix.md), and [PR evidence workflow](docs/ai-agent-pr-evidence.md).
+Works with Claude Code, Codex, Copilot CLI, Gemini CLI, Cursor, and any MCP server, plus partial [Copilot cloud agent capture](docs/copilot-cloud-agent.md). Python 3.10+ standard library only. Secret redaction is on by default. Start with the [docs index](docs/index.md), [provider guides](docs/capture-matrix.md), and [PR evidence workflow](docs/ai-agent-pr-evidence.md).
 
 ![demo](assets/demo.svg)
 

@@ -130,6 +130,28 @@ class TestCaptureMatrix(unittest.TestCase):
                 if provider["verification_status"] == "unverified":
                     self.assertIsNotNone(provider.get("coverage"))
 
+    def test_partial_entries_list_captured_and_missing_signals(self):
+        partial = [p for p in self.matrix["providers"] if "coverage_status" in p]
+        self.assertIn("copilot-cloud", {p["id"] for p in partial})
+        for provider in partial:
+            with self.subTest(provider=provider["id"]):
+                self.assertEqual(provider["coverage_status"], "partial")
+                for key in ("captured_signals", "not_captured_signals"):
+                    signals = provider[key]
+                    self.assertTrue(signals)
+                    self.assertTrue(all(isinstance(item, str) and item for item in signals))
+                    for signal in signals:
+                        self.assertIn(signal, self.docs)
+
+    def test_copilot_cloud_is_partial_and_unverified(self):
+        entry = next(p for p in self.matrix["providers"] if p["id"] == "copilot-cloud")
+        self.assertEqual(entry["verification_status"], "unverified")
+        self.assertEqual(entry["coverage"]["response"], "unavailable")
+        self.assertTrue(any("live cloud agent job" in gap for gap in entry["known_gaps"]))
+        self.assertTrue(
+            any("artifact or pull request attachment" in s for s in entry["not_captured_signals"])
+        )
+
     def test_human_docs_cover_each_machine_readable_provider(self):
         for provider in self.matrix["providers"]:
             with self.subTest(provider=provider["id"]):
