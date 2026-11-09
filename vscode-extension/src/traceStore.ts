@@ -12,6 +12,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
+import { NdjsonTail } from "./eventTail";
 
 // ---------------------------------------------------------------------------
 // Types mirroring agent-trace's Python models
@@ -110,10 +111,11 @@ export class TraceWatcher extends vscode.Disposable {
   private activeSessionFile: string;
   private currentSessionId: string | null = null;
   private currentState: SessionState | null = null;
-  private eventsFileOffset = 0;
+  private eventsTail: NdjsonTail | null = null;
 
   private activeSessionWatcher: fs.FSWatcher | null = null;
   private eventsWatcher: fs.FSWatcher | null = null;
+  private eventsPollTimer: ReturnType<typeof setInterval> | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(workspaceRoot: string, traceDir: string) {
@@ -185,8 +187,11 @@ export class TraceWatcher extends vscode.Disposable {
   // -------------------------------------------------------------------------
 
   private _startSession(sessionId: string): void {
+    this._stopTailing();
     this.currentSessionId = sessionId;
-    this.eventsFileOffset = 0;
+    this.eventsTail = new NdjsonTail(
+      path.join(this.traceDir, sessionId, "events.ndjson")
+    );
 
     const meta = this._loadMeta(sessionId);
     this.currentState = {
@@ -213,8 +218,12 @@ export class TraceWatcher extends vscode.Disposable {
 
   private _endSession(): void {
     if (!this.currentState) { return; }
-    this.eventsWatcher?.close();
-    this.eventsWatcher = null;
+    // Pick up anything appended since the last poll, including a final
+    // line written without a trailing newline.
+    this._readNewEvents();
+    const last = this.eventsTail?.flush();
+    if (last) { this._applyLine(last); }
+    this._stopTailing();
     this.currentSessionId = null;
     this._onSessionEnd.fire(this.currentState);
     this.currentState = null;
@@ -224,18 +233,22 @@ export class TraceWatcher extends vscode.Disposable {
   // Events file watcher
   // -------------------------------------------------------------------------
 
+  private _stopTailing(): void {
+    if (this.eventsPollTimer) {
+      clearInterval(this.eventsPollTimer);
+      this.eventsPollTimer = null;
+    }
+    this.eventsWatcher?.close();
+    this.eventsWatcher = null;
+    this.eventsTail = null;
+  }
+
   private _watchEventsFile(sessionId: string): void {
     const eventsFile = path.join(this.traceDir, sessionId, "events.ndjson");
 
     // Always poll — fs.watch silently fails on network/FUSE filesystems.
     // 300ms gives snappy updates without hammering the FS.
-    const timer = setInterval(() => {
-      if (this.currentSessionId !== sessionId) {
-        clearInterval(timer);
-        return;
-      }
-      this._readNewEvents();
-    }, 300);
+    this.eventsPollTimer = setInterval(() => this._readNewEvents(), 300);
 
     // Also try fs.watch as a faster secondary trigger (best-effort)
     if (fs.existsSync(eventsFile)) {
@@ -250,32 +263,38 @@ export class TraceWatcher extends vscode.Disposable {
   }
 
   private _readNewEvents(): void {
-    if (!this.currentSessionId || !this.currentState) { return; }
+    if (!this.currentState || !this.eventsTail) { return; }
 
-    const eventsFile = path.join(
-      this.traceDir,
-      this.currentSessionId,
-      "events.ndjson"
-    );
-
-    let content: string;
-    try {
-      const buf = fs.readFileSync(eventsFile, "utf8");
-      content = buf.slice(this.eventsFileOffset);
-      this.eventsFileOffset = buf.length;
-    } catch {
-      return;
+    const { lines, reset } = this.eventsTail.read();
+    if (reset) {
+      // events.ndjson shrank or was replaced: rebuild from the new content.
+      this._clearDerivedState(this.currentState);
+      this._onStateChange.fire(this.currentState);
     }
-
-    const lines = content.split("\n").filter((l) => l.trim());
     for (const line of lines) {
-      try {
-        const event: TraceEvent = JSON.parse(line);
-        this._applyEvent(event);
-      } catch {
-        // malformed line — skip
-      }
+      this._applyLine(line);
     }
+  }
+
+  private _applyLine(line: string): void {
+    let event: TraceEvent;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      return; // malformed complete line: skip
+    }
+    this._applyEvent(event);
+  }
+
+  /** Reset counters derived from events. Keeps the object identity and pause flag. */
+  private _clearDerivedState(s: SessionState): void {
+    s.meta = this._loadMeta(s.sessionId);
+    s.fileAccess.clear();
+    s.toolCallCount = 0;
+    s.errorCount = 0;
+    s.estimatedCostUsd = 0;
+    s.activeTool = null;
+    s.events.length = 0;
   }
 
   // -------------------------------------------------------------------------
@@ -388,8 +407,12 @@ export class TraceWatcher extends vscode.Disposable {
 
   override dispose(): void {
     this.activeSessionWatcher?.close();
-    this.eventsWatcher?.close();
-    if (this.pollTimer) { clearInterval(this.pollTimer); }
+    this.activeSessionWatcher = null;
+    this._stopTailing();
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
     this._onSessionStart.dispose();
     this._onSessionEnd.dispose();
     this._onEvent.dispose();
