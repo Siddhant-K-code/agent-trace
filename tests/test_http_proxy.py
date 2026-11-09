@@ -12,7 +12,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from agent_trace.http_proxy import HTTPProxyServer, _ProxyHandler
+from agent_trace.http_proxy import HTTPProxyServer, _ProxyHTTPServer
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
 
@@ -32,9 +32,13 @@ class FakeMCPHandler(BaseHTTPRequestHandler):
 
         # respond to tool calls with a result
         if msg.get("method") == "tools/call":
+            resp_id = msg.get("id")
+            # simulate a server that answers with an id nobody asked for
+            if msg.get("params", {}).get("name") == "mismatched_id":
+                resp_id = f"other-{resp_id}"
             response = {
                 "jsonrpc": "2.0",
-                "id": msg.get("id"),
+                "id": resp_id,
                 "result": {
                     "content": [{"type": "text", "text": "tool output"}],
                 },
@@ -124,24 +128,14 @@ class TestHTTPProxy(unittest.TestCase):
             on_event=lambda e: self.events.append(e),
         )
 
-        # configure handler and start proxy in background
-        # Use staticmethod to prevent Python from treating the lambda as an
-        # unbound method (which would inject `self` as first arg).
-        events_list = self.events
-        _ProxyHandler.remote_url = self.proxy.remote_url
-        _ProxyHandler.store = self.store
-        _ProxyHandler.meta = self.meta
-        _ProxyHandler.on_event = staticmethod(lambda e: events_list.append(e))
-        _ProxyHandler.redact = False
-        _ProxyHandler.pending_calls = {}
-
-        self.proxy_server = HTTPServer(("127.0.0.1", self.proxy_port), _ProxyHandler)
+        self.proxy_server = self.proxy.make_server()
         self.proxy_thread = threading.Thread(target=self.proxy_server.serve_forever, daemon=True)
         self.proxy_thread.start()
         time.sleep(0.05)  # let server start
 
     def tearDown(self):
         self.proxy_server.shutdown()
+        self.proxy_server.server_close()
 
     def test_tool_call_traced(self):
         """POST a tools/call and verify both call and result are traced."""
@@ -300,14 +294,14 @@ class TestHTTPProxyRedaction(unittest.TestCase):
 
         proxy_port = _find_free_port()
 
-        _ProxyHandler.remote_url = f"http://127.0.0.1:{self.fake_port}"
-        _ProxyHandler.store = store
-        _ProxyHandler.meta = meta
-        _ProxyHandler.on_event = staticmethod(lambda e: events.append(e))
-        _ProxyHandler.redact = True
-        _ProxyHandler.pending_calls = {}
-
-        proxy_server = HTTPServer(("127.0.0.1", proxy_port), _ProxyHandler)
+        proxy_server = _ProxyHTTPServer(
+            ("127.0.0.1", proxy_port),
+            remote_url=f"http://127.0.0.1:{self.fake_port}",
+            store=store,
+            meta=meta,
+            on_event=events.append,
+            redact=True,
+        )
         proxy_thread = threading.Thread(target=proxy_server.serve_forever, daemon=True)
         proxy_thread.start()
         time.sleep(0.05)
@@ -342,6 +336,194 @@ class TestHTTPProxyRedaction(unittest.TestCase):
             self.assertNotIn("sk-abc", str(args))
         finally:
             proxy_server.shutdown()
+            proxy_server.server_close()
+
+
+def _post_tool_call(port, req_id, name="read_file"):
+    conn = http.client.HTTPConnection("127.0.0.1", port)
+    body = json.dumps({
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": {}},
+    })
+    conn.request("POST", "/message", body=body, headers={
+        "Content-Type": "application/json",
+        "Content-Length": str(len(body)),
+    })
+    resp = conn.getresponse()
+    resp.read()
+    conn.close()
+    return resp.status
+
+
+class TestHTTPProxyPendingCalls(unittest.TestCase):
+    """Tool call/result correlation state is per server, bounded, and cleared."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.fake_port = _find_free_port()
+        cls.fake_server = HTTPServer(("127.0.0.1", cls.fake_port), FakeMCPHandler)
+        cls.fake_thread = threading.Thread(target=cls.fake_server.serve_forever, daemon=True)
+        cls.fake_thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.fake_server.shutdown()
+        cls.fake_server.server_close()
+
+    def _start_proxy(self):
+        store = TraceStore(tempfile.mkdtemp())
+        meta = SessionMeta(command="test", agent_name="test-agent")
+        store.create_session(meta)
+        events = []
+        proxy = HTTPProxyServer(
+            remote_url=f"http://127.0.0.1:{self.fake_port}",
+            local_port=_find_free_port(),
+            store=store,
+            session_meta=meta,
+            on_event=events.append,
+        )
+        server = proxy.make_server()
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        def stop():
+            server.shutdown()
+            server.server_close()
+
+        self.addCleanup(stop)
+        return server, events
+
+    def _make_server(self, **kwargs):
+        server = _ProxyHTTPServer(
+            ("127.0.0.1", 0),
+            remote_url="http://127.0.0.1:1",
+            **kwargs,
+        )
+        self.addCleanup(server.server_close)
+        return server
+
+    def test_two_servers_keep_independent_pending_maps(self):
+        a = self._make_server()
+        b = self._make_server()
+        self.assertIsNot(a.pending_calls, b.pending_calls)
+
+        call_a = TraceEvent(event_type=EventType.TOOL_CALL, data={"request_id": 1})
+        a.track_call(call_a)
+        self.assertIn(1, a.pending_calls)
+        self.assertNotIn(1, b.pending_calls)
+
+        # a result with the same id on server b must not steal a's call
+        result_b = TraceEvent(event_type=EventType.TOOL_RESULT, data={"request_id": 1})
+        b.match_result(result_b)
+        self.assertFalse(result_b.parent_id)
+        self.assertIn(1, a.pending_calls)
+
+        result_a = TraceEvent(event_type=EventType.TOOL_RESULT, data={"request_id": 1})
+        a.match_result(result_a)
+        self.assertEqual(result_a.parent_id, call_a.event_id)
+        self.assertEqual(a.pending_calls, {})
+
+    def test_two_live_proxies_link_results_to_their_own_calls(self):
+        server_a, events_a = self._start_proxy()
+        server_b, events_b = self._start_proxy()
+
+        # same JSON-RPC id on both proxies
+        self.assertEqual(_post_tool_call(server_a.server_address[1], 7, "tool_a"), 200)
+        self.assertEqual(_post_tool_call(server_b.server_address[1], 7, "tool_b"), 200)
+
+        for events in (events_a, events_b):
+            calls = [e for e in events if e.event_type == EventType.TOOL_CALL]
+            results = [e for e in events if e.event_type == EventType.TOOL_RESULT]
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0].parent_id, calls[0].event_id)
+            self.assertEqual(
+                results[0].duration_ms,
+                (results[0].timestamp - calls[0].timestamp) * 1000,
+            )
+            self.assertGreaterEqual(results[0].duration_ms, 0)
+
+        self.assertEqual(server_a.pending_calls, {})
+        self.assertEqual(server_b.pending_calls, {})
+
+    def test_result_links_to_matching_call_among_several(self):
+        server = self._make_server()
+        call_1 = TraceEvent(event_type=EventType.TOOL_CALL, timestamp=100.0, data={"request_id": 1})
+        call_2 = TraceEvent(event_type=EventType.TOOL_CALL, timestamp=101.0, data={"request_id": 2})
+        server.track_call(call_1)
+        server.track_call(call_2)
+
+        result = TraceEvent(event_type=EventType.TOOL_RESULT, timestamp=101.5, data={"request_id": 2})
+        server.match_result(result)
+
+        self.assertEqual(result.parent_id, call_2.event_id)
+        self.assertAlmostEqual(result.duration_ms, 500.0)
+        self.assertEqual(list(server.pending_calls), [1])
+
+    def test_unmatched_result_recorded_without_crash(self):
+        server, events = self._start_proxy()
+        status = _post_tool_call(server.server_address[1], 3, "mismatched_id")
+        self.assertEqual(status, 200)
+
+        calls = [e for e in events if e.event_type == EventType.TOOL_CALL]
+        results = [e for e in events if e.event_type == EventType.TOOL_RESULT]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(results), 1)
+        self.assertFalse(results[0].parent_id)
+        self.assertEqual(results[0].data["request_id"], "other-3")
+        # the call is still waiting for its real result
+        self.assertIn(3, server.pending_calls)
+
+        stored = server.store.load_events(server.meta.session_id)
+        self.assertIn(EventType.TOOL_RESULT, [e.event_type for e in stored])
+
+    def test_pending_calls_are_bounded(self):
+        server = self._make_server(max_pending_calls=3)
+        for i in range(5):
+            server.track_call(TraceEvent(event_type=EventType.TOOL_CALL, data={"request_id": i}))
+        self.assertEqual(list(server.pending_calls), [2, 3, 4])
+
+    def test_clear_pending_drops_unmatched_calls(self):
+        server = self._make_server()
+        server.track_call(TraceEvent(event_type=EventType.TOOL_CALL, data={"request_id": "x"}))
+        self.assertEqual(server.clear_pending(), 1)
+        self.assertEqual(server.pending_calls, {})
+
+    def test_run_clears_pending_calls_at_session_end(self):
+        store = TraceStore(tempfile.mkdtemp())
+        meta = SessionMeta(command="test", agent_name="test-agent")
+        store.create_session(meta)
+        proxy = HTTPProxyServer(
+            remote_url=f"http://127.0.0.1:{self.fake_port}",
+            local_port=_find_free_port(),
+            store=store,
+            session_meta=meta,
+        )
+        created = []
+        real_make_server = proxy.make_server
+
+        def make_server():
+            server = real_make_server()
+            server.track_call(TraceEvent(event_type=EventType.TOOL_CALL, data={"request_id": 1}))
+            created.append(server)
+            return server
+
+        proxy.make_server = make_server
+        thread = threading.Thread(target=proxy.run, daemon=True)
+        thread.start()
+        for _ in range(100):
+            if created:
+                break
+            time.sleep(0.01)
+        created[0].shutdown()
+        thread.join(timeout=5)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(created[0].pending_calls, {})
+        event_types = [e.event_type for e in store.load_events(meta.session_id)]
+        self.assertEqual(event_types[-1], EventType.SESSION_END)
 
 
 if __name__ == "__main__":
