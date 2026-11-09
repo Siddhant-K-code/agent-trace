@@ -21,6 +21,7 @@ from .skills import (
     CONTEXT_FILES,
     USER_SKILL_DIRS,
     _is_edit,
+    _sanitize_events,
     analyze_session,
     discover_skills,
     event_arguments,
@@ -32,9 +33,9 @@ ACTION_KINDS = ("file_read", "file_write", "tool_call", "test")
 
 LIMITATIONS = (
     "This is evidence about recorded actions, not an outcome or developer score.",
-    "An inferred instruction load means the file was available to a client that commonly injects repository instructions, but no read event was recorded.",
+    "An inferred instruction entry means only that the file was available while no read event was recorded. It does not claim that a client loaded or injected the file.",
     "A missing action means the bounded trace did not contain the expected observable event. It does not prove that prose guidance was ignored.",
-    "Post-load validation facts are associated by event order only. They are not causal.",
+    "Post-load validation facts are associated by event order only. Ambiguous result correlations are unavailable, not selected silently.",
     "Availability is read from the benchmark workspace at analysis time.",
 )
 
@@ -130,23 +131,58 @@ def _matches_action(event: TraceEvent, expectation: ActionExpectation, workspace
     return False
 
 
-def _linked_results(events: Iterable[TraceEvent]) -> dict[str, TraceEvent]:
-    return {
-        event.parent_id: event
-        for event in events
-        if event.parent_id and event.event_type in (EventType.TOOL_RESULT, EventType.ERROR)
-    }
-
-
-def _result_fact(event: TraceEvent | None) -> dict[str, object] | None:
-    if event is None:
-        return None
+def _result_fact(event: TraceEvent) -> dict[str, object]:
     data = event.data if isinstance(event.data, dict) else {}
     fact: dict[str, object] = {"event_type": event.event_type.value}
     for key in ("exit_code", "success"):
         if key in data and isinstance(data[key], (bool, int)):
             fact[key] = data[key]
     return fact
+
+
+def _result_correlation(call: TraceEvent, events: list[TraceEvent]) -> dict[str, object]:
+    duplicate_calls = sum(
+        1
+        for event in events
+        if event.event_type == EventType.TOOL_CALL and event.event_id == call.event_id
+    )
+    results = [
+        event
+        for event in events
+        if event.parent_id == call.event_id
+        and event.event_type in (EventType.TOOL_RESULT, EventType.ERROR)
+    ]
+    if duplicate_calls > 1:
+        return {
+            "evidence": "unavailable",
+            "reason": "duplicate_call_id",
+            "linked_results": len(results),
+        }
+    if len(results) > 1:
+        return {
+            "evidence": "unavailable",
+            "reason": "multiple_linked_results",
+            "linked_results": len(results),
+        }
+    if not results:
+        return {
+            "evidence": "unavailable",
+            "reason": "missing_linked_result",
+            "linked_results": 0,
+        }
+    result = results[0]
+    if result.timestamp <= call.timestamp:
+        return {
+            "evidence": "unavailable",
+            "reason": "result_before_call",
+            "linked_results": 1,
+        }
+    return {
+        "evidence": "observed",
+        "reason": None,
+        "linked_results": 1,
+        **_result_fact(result),
+    }
 
 
 def _validation_facts(events: list[TraceEvent], after_timestamp: float | None) -> dict[str, object]:
@@ -156,22 +192,40 @@ def _validation_facts(events: list[TraceEvent], after_timestamp: float | None) -
             "last_test": None,
             "errors": 0,
             "session_end_recorded": False,
+            "ambiguous_result_correlation": False,
+            "ambiguous_result_reasons": [],
+            "result_correlations": {"observed": 0, "unavailable": 0},
         }
     after = [event for event in events if event.timestamp > after_timestamp]
     tests = [event for event in after if _is_test_event(event)]
-    linked = _linked_results(after)
+    correlations = [(test, _result_correlation(test, after)) for test in tests]
+    ambiguous_reasons = sorted({
+        str(correlation["reason"])
+        for _, correlation in correlations
+        if correlation.get("reason") in {
+            "duplicate_call_id",
+            "multiple_linked_results",
+            "result_before_call",
+        }
+    })
     last_test = None
-    if tests:
-        last = tests[-1]
+    if correlations:
+        last, correlation = correlations[-1]
         last_test = {
             "event_id": last.event_id,
-            "result": _result_fact(linked.get(last.event_id)),
+            "result": correlation,
         }
     return {
         "tests_run": len(tests),
         "last_test": last_test,
         "errors": sum(1 for event in after if event.event_type == EventType.ERROR),
         "session_end_recorded": any(event.event_type == EventType.SESSION_END for event in after),
+        "ambiguous_result_correlation": bool(ambiguous_reasons),
+        "ambiguous_result_reasons": ambiguous_reasons,
+        "result_correlations": {
+            "observed": sum(1 for _, item in correlations if item["evidence"] == "observed"),
+            "unavailable": sum(1 for _, item in correlations if item["evidence"] == "unavailable"),
+        },
     }
 
 
@@ -191,6 +245,7 @@ def _skill_load_evidence(
     should_trigger: bool,
     available: bool,
     has_events: bool,
+    analysis_unavailable: bool,
 ) -> tuple[dict[str, object], list[float]]:
     model_loads: list[dict[str, object]] = []
     user_loads = 0
@@ -205,7 +260,7 @@ def _skill_load_evidence(
                     user_loads += 1
 
     expected = "loaded" if should_trigger else "not_loaded"
-    if not has_events or not available:
+    if not has_events or not available or (analysis_unavailable and not model_loads):
         state = "unavailable"
         actual = "unavailable"
         met = None
@@ -243,6 +298,7 @@ def _skill_follow_evidence(
     skill: str,
     should_trigger: bool,
     has_events: bool,
+    analysis_unavailable: bool,
 ) -> dict[str, object] | None:
     if not should_trigger:
         return None
@@ -266,6 +322,10 @@ def _skill_follow_evidence(
         actual = "signals_observed"
         evidence = "observed"
         met: bool | None = True
+    elif analysis_unavailable:
+        actual = "analysis_unavailable"
+        evidence = "unavailable"
+        met = None
     elif "no_signal" in statuses:
         actual = "no_signal"
         evidence = "missing"
@@ -314,7 +374,7 @@ def _instruction_load_evidence(
         evidence = "unavailable"
         met = None
     elif instruction in CONTEXT_FILES:
-        actual = "possibly_loaded"
+        actual = "available_load_unobserved"
         evidence = "inferred"
         met = None
     elif events:
@@ -353,6 +413,7 @@ def _action_evidence(
     observed_anchor: float | None,
     inferred_anchor: bool,
     load_available: bool,
+    analysis_unavailable: bool,
 ) -> dict[str, object]:
     matches = [event for event in events if _matches_action(event, expectation, workspace)]
     after = [event for event in matches if observed_anchor is None or event.timestamp > observed_anchor]
@@ -361,6 +422,9 @@ def _action_evidence(
         met: bool | None = True
     elif observed_anchor is None and inferred_anchor and matches:
         evidence = "inferred"
+        met = None
+    elif analysis_unavailable:
+        evidence = "unavailable"
         met = None
     elif not events or not load_available:
         evidence = "unavailable"
@@ -402,26 +466,57 @@ def analyze_compliance_run(
     extra = list(extra_dirs)
     users = list(user_dirs)
     reports = []
+    analysis_failures = []
+    clean_session_events = []
     for session_id, session in session_events:
+        normalized = sum(
+            1
+            for event in session
+            if not isinstance(event.data, Mapping)
+            or not isinstance(event.event_id, str)
+            or not isinstance(event.parent_id, str)
+        )
+        if normalized:
+            analysis_failures.append({
+                "session": session_id,
+                "error_type": "MalformedEventsNormalized",
+                "events_unavailable": normalized,
+            })
+        clean, skipped = _sanitize_events(session)
+        clean_session_events.append((session_id, clean))
+        if skipped:
+            analysis_failures.append({
+                "session": session_id,
+                "error_type": "MalformedEventsSkipped",
+                "events_skipped": skipped,
+            })
         try:
             reports.append(analyze_session(
-                session,
+                clean,
                 session_id=session_id,
                 workspace=str(root),
                 extra_dirs=extra,
                 user_dirs=users,
             ))
-        except (ValueError, TypeError, KeyError, OSError):
-            continue
+        except (ValueError, TypeError, KeyError, OSError) as exc:
+            analysis_failures.append({
+                "session": session_id,
+                "error_type": type(exc).__name__,
+            })
     events = sorted(
-        [event for _, session in session_events for event in session],
+        [event for _, session in clean_session_events for event in session],
         key=lambda event: (event.timestamp, event.event_id),
     )
     has_events = bool(events)
 
     skill_available = _skill_availability(root, skill, extra, users)
     skill_item, skill_anchors = _skill_load_evidence(
-        reports, skill, should_trigger, skill_available, has_events,
+        reports,
+        skill,
+        should_trigger,
+        skill_available,
+        has_events,
+        bool(analysis_failures),
     )
     load_items = [skill_item]
     instruction_anchors: list[float] = []
@@ -433,7 +528,7 @@ def analyze_compliance_run(
     anchors = skill_anchors + instruction_anchors
     observed_anchor = min(anchors) if anchors else None
     inferred_anchor = any(item["evidence"] == "inferred" for item in load_items)
-    load_available = any(item["actual"] in ("loaded", "possibly_loaded") for item in load_items)
+    load_available = any(item["actual"] in ("loaded", "available_load_unobserved") for item in load_items)
     actions = [
         _action_evidence(
             expectation,
@@ -442,10 +537,17 @@ def analyze_compliance_run(
             observed_anchor,
             inferred_anchor,
             load_available,
+            bool(analysis_failures),
         )
         for expectation in expected_actions
     ]
-    skill_follow = _skill_follow_evidence(reports, skill, should_trigger, has_events)
+    skill_follow = _skill_follow_evidence(
+        reports,
+        skill,
+        should_trigger,
+        has_events,
+        bool(analysis_failures),
+    )
     follow_items = ([skill_follow] if skill_follow is not None else []) + actions
 
     if observed_anchor is not None:
@@ -454,6 +556,14 @@ def analyze_compliance_run(
         validation_evidence = "inferred"
     else:
         validation_evidence = "unavailable"
+    validation_facts = _validation_facts(
+        events,
+        observed_anchor if observed_anchor is not None else (
+            min((event.timestamp for event in events), default=None) if inferred_anchor else None
+        ),
+    )
+    if validation_facts["ambiguous_result_correlation"] or analysis_failures:
+        validation_evidence = "unavailable"
     validation = {
         "evidence": validation_evidence,
         "anchor": (
@@ -461,10 +571,29 @@ def analyze_compliance_run(
             if observed_anchor is not None
             else ("inferred_instruction_load" if inferred_anchor and has_events else "none")
         ),
-        **_validation_facts(events, observed_anchor if observed_anchor is not None else (min(
-            (event.timestamp for event in events), default=None
-        ) if inferred_anchor else None)),
+        **validation_facts,
     }
+    warnings = []
+    for failure in analysis_failures:
+        if failure["error_type"] == "MalformedEventsSkipped":
+            warnings.append(
+                f"{failure['session']}: compliance evidence unavailable for "
+                f"{failure['events_skipped']} malformed event(s)"
+            )
+        elif failure["error_type"] == "MalformedEventsNormalized":
+            warnings.append(
+                f"{failure['session']}: compliance evidence unavailable for "
+                f"{failure['events_unavailable']} malformed event field set(s)"
+            )
+        else:
+            warnings.append(
+                f"{failure['session']}: skill analysis unavailable ({failure['error_type']})"
+            )
+    if validation_facts["ambiguous_result_correlation"]:
+        warnings.append(
+            "validation result correlation is unavailable "
+            f"({', '.join(validation_facts['ambiguous_result_reasons'])})"
+        )
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -475,6 +604,12 @@ def analyze_compliance_run(
             "instruction_actions": actions,
         },
         "validation": validation,
+        "analysis": {
+            "sessions": len(session_events),
+            "sessions_analyzed": len(reports),
+            "sessions_unavailable": analysis_failures,
+        },
+        "warnings": warnings,
         "evidence_counts": {
             "loads": evidence_counts(load_items),
             "follow": evidence_counts(follow_items),
@@ -485,6 +620,7 @@ def analyze_compliance_run(
 
 
 def summarize_compliance_runs(runs: Iterable[Mapping[str, object]]) -> dict[str, object]:
+    runs = list(runs)
     compliance = [
         run["compliance"]
         for run in runs
@@ -515,6 +651,12 @@ def summarize_compliance_runs(runs: Iterable[Mapping[str, object]]) -> dict[str,
         "loads": evidence_counts(load_items),
         "follow": evidence_counts(follow_items),
         "validation": evidence_counts(validation_items),
+        "warnings": [
+            f"{run.get('run', 'run')}: {warning}"
+            for run in runs
+            if isinstance(run.get("compliance"), Mapping)
+            for warning in run["compliance"].get("warnings", ())
+        ],
     }
 
 

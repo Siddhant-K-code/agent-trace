@@ -34,8 +34,8 @@ The corpus includes:
 
 - a should-trigger release task with observed instruction and skill loads;
 - a should-not-trigger near miss with no skill load;
-- a should-trigger task whose instruction load is inferred because no file
-  read was recorded.
+- a should-trigger task with an availability-only inference because no
+  instruction file read was recorded.
 
 The fixture uses fixed events and timestamps so JSON and Markdown artifacts
 are deterministic for the same command arguments.
@@ -88,12 +88,13 @@ Every load and expected action uses one evidence state.
 | State | Meaning |
 |---|---|
 | `observed` | A matching trace event or bounded absence was directly recorded |
-| `inferred` | The file was available and the client commonly injects repository instructions, but no read event was recorded |
+| `inferred` | The file was available, but no read event established whether it loaded |
 | `missing` | Positive evidence was expected and the bounded trace did not contain it |
 | `unavailable` | The file, load anchor, or trace evidence needed to evaluate the claim was unavailable |
 
-An inferred instruction load has `expectation_met: null`. The report does not
-turn a client convention into an observed fact.
+An inferred instruction entry has `actual: available_load_unobserved` and
+`expectation_met: null`. It does not claim that a client loaded or injected
+the file.
 
 ## Report shape
 
@@ -106,13 +107,20 @@ Each run contains:
 - `compliance.follow.skill` for existing skill follow signals;
 - `compliance.follow.instruction_actions` for expected observable actions;
 - `compliance.validation` for tests, the last linked test result, errors, and
-  session completion after the earliest observed load;
+  session completion after the earliest observed load. It also reports
+  observed and unavailable result-correlation counts;
+- `compliance.analysis` and `compliance.warnings` when malformed or unreadable
+  session evidence prevents a bounded conclusion;
 - `compliance.evidence_counts` using observed, inferred, missing, and
   unavailable buckets.
 
 Each case and the top-level report contain aggregated load, follow, and
 validation evidence counts. No composite percentage, grade, or verdict is
 produced.
+
+Unreadable or malformed session evidence is never converted into a missing
+skill load or follow signal. Affected evidence is `unavailable`, and the
+warning names only the session and error type or skipped event count.
 
 Text and Markdown use compact counts in this order:
 
@@ -146,11 +154,12 @@ trigger and follow expectations against controlled fixtures.
 ## Metric limitations
 
 - The workflow measures recorded evidence, not task quality or correctness.
-- Inferred instruction loads are not direct observations.
+- Availability-only instruction inferences are not load observations.
 - Observable actions can support an instruction-follow hypothesis, but prose
   style, judgement, and reasoning are not visible in tool traces.
 - Post-load validation facts are associated by event order only. They are not
-  causal.
+  causal. Duplicate, multiple, or result-before-call correlations are reported
+  as unavailable, even when a later test has one clean result.
 - A should-not-trigger case is only evidence for its exact prompt and fixture.
 - Availability is read from the benchmark workspace at analysis time.
 - Live runs remain non-deterministic. Public fixtures should use

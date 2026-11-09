@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -13,7 +14,7 @@ from agent_trace.cli import _normalise_skills_argv, build_parser
 from agent_trace.context_score import context_file_load_events
 from agent_trace.instruction_compliance import ActionExpectation, analyze_compliance_run
 from agent_trace.models import EventType, TraceEvent
-from agent_trace.skills_eval import cmd_skills_eval, format_markdown, load_cases
+from agent_trace.skills_eval import build_report, cmd_skills_eval, format_markdown, load_cases
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -75,13 +76,16 @@ class ComplianceCorpusTests(unittest.TestCase):
             "missing": 0,
             "unavailable": 0,
         })
-        inferred = next(case for case in report["cases"] if case["id"] == "inferred-instruction-load")
+        inferred = next(case for case in report["cases"] if case["id"] == "availability-only-inference")
         instruction = next(
             item
             for item in inferred["run_results"][0]["compliance"]["loads"]
             if item["kind"] == "instruction"
         )
-        self.assertEqual((instruction["actual"], instruction["evidence"]), ("possibly_loaded", "inferred"))
+        self.assertEqual(
+            (instruction["actual"], instruction["evidence"]),
+            ("available_load_unobserved", "inferred"),
+        )
         self.assertIsNone(instruction["expectation_met"])
 
     def test_markdown_is_concise_and_score_free(self):
@@ -111,6 +115,38 @@ class ComplianceCorpusTests(unittest.TestCase):
 
         self.assertNotIn("## Warnings", output)
         self.assertTrue(output.endswith("\n"))
+
+    def test_compliance_warnings_reach_top_level_report(self):
+        counts = {
+            "observed": 0,
+            "inferred": 0,
+            "missing": 0,
+            "unavailable": 1,
+        }
+        case = {
+            "id": "broken",
+            "skill": "release-notes",
+            "should_trigger": True,
+            "runs": 1,
+            "loaded": 0,
+            "not_loaded": 0,
+            "unscored": 1,
+            "compliance": {
+                "loads": counts,
+                "follow": counts,
+                "validation": counts,
+                "warnings": ["run-1: broken-session: skill analysis unavailable (ValueError)"],
+            },
+        }
+
+        report = build_report([case], mode="from_traces", cases_file="cases.json")
+
+        self.assertEqual(report["warnings"], [
+            "broken: run-1: broken-session: skill analysis unavailable (ValueError)",
+        ])
+        self.assertEqual(report["compliance"]["warnings"], [
+            "run-1: broken-session: skill analysis unavailable (ValueError)",
+        ])
 
 
 class ComplianceEvidenceTests(unittest.TestCase):
@@ -249,6 +285,264 @@ class ComplianceEvidenceTests(unittest.TestCase):
         loads = context_file_load_events(events, self.root, "AGENTS.md")
 
         self.assertEqual([event.event_id for event in loads], ["read"])
+
+    def test_analysis_failure_marks_skill_evidence_unavailable(self):
+        events = [
+            _event(EventType.SESSION_START, 0, "start"),
+            _event(EventType.USER_PROMPT, 1, "prompt", prompt="Draft notes"),
+            _event(EventType.SESSION_END, 2, "end"),
+        ]
+        with mock.patch(
+            "agent_trace.instruction_compliance.analyze_session",
+            side_effect=ValueError("trace detail must not be emitted"),
+        ):
+            report = analyze_compliance_run(
+                [("broken-session", events)],
+                workspace=str(self.root),
+                skill="release-notes",
+                should_trigger=True,
+                instructions=(),
+                expected_actions=(
+                    ActionExpectation("write-notes", "file_write", path="RELEASE_NOTES.md"),
+                ),
+                user_dirs=(),
+            )
+
+        skill = next(item for item in report["loads"] if item["kind"] == "skill")
+        self.assertEqual((skill["actual"], skill["evidence"]), ("unavailable", "unavailable"))
+        self.assertIsNone(skill["expectation_met"])
+        self.assertEqual(report["follow"]["skill"]["actual"], "analysis_unavailable")
+        self.assertEqual(report["follow"]["skill"]["evidence"], "unavailable")
+        self.assertEqual(report["follow"]["instruction_actions"][0]["evidence"], "unavailable")
+        self.assertEqual(report["validation"]["evidence"], "unavailable")
+        self.assertEqual(report["analysis"]["sessions_analyzed"], 0)
+        self.assertEqual(report["analysis"]["sessions_unavailable"], [{
+            "session": "broken-session",
+            "error_type": "ValueError",
+        }])
+        self.assertEqual(report["warnings"], [
+            "broken-session: skill analysis unavailable (ValueError)",
+        ])
+        self.assertNotIn("trace detail", json.dumps(report))
+
+    def test_malformed_event_gap_is_unavailable_not_missing(self):
+        malformed = TraceEvent(
+            event_type=EventType.FILE_WRITE,
+            timestamp="not-a-timestamp",
+            event_id="malformed",
+            data={"path": "RELEASE_NOTES.md"},
+        )
+        report = analyze_compliance_run(
+            [("broken-session", [
+                _event(EventType.SESSION_START, 0, "start"),
+                malformed,
+                _event(EventType.SESSION_END, 2, "end"),
+            ])],
+            workspace=str(self.root),
+            skill="release-notes",
+            should_trigger=True,
+            instructions=(),
+            expected_actions=(
+                ActionExpectation("write-notes", "file_write", path="RELEASE_NOTES.md"),
+            ),
+            user_dirs=(),
+        )
+
+        skill = next(item for item in report["loads"] if item["kind"] == "skill")
+        self.assertEqual(skill["evidence"], "unavailable")
+        self.assertEqual(report["follow"]["skill"]["evidence"], "unavailable")
+        self.assertEqual(report["follow"]["instruction_actions"][0]["evidence"], "unavailable")
+        self.assertEqual(report["validation"]["evidence"], "unavailable")
+        self.assertEqual(report["analysis"]["sessions_unavailable"], [{
+            "session": "broken-session",
+            "error_type": "MalformedEventsSkipped",
+            "events_skipped": 1,
+        }])
+        self.assertEqual(report["warnings"], [
+            "broken-session: compliance evidence unavailable for 1 malformed event(s)",
+        ])
+
+    def test_non_object_event_data_is_an_unavailable_gap(self):
+        malformed = TraceEvent(
+            event_type=EventType.TOOL_CALL,
+            timestamp=T0 + 1,
+            event_id="malformed",
+            data=["not", "an", "object"],
+        )
+        report = analyze_compliance_run(
+            [("broken-session", [
+                _event(EventType.SESSION_START, 0, "start"),
+                malformed,
+                _event(EventType.SESSION_END, 2, "end"),
+            ])],
+            workspace=str(self.root),
+            skill="release-notes",
+            should_trigger=True,
+            instructions=(),
+            expected_actions=(),
+            user_dirs=(),
+        )
+
+        skill = next(item for item in report["loads"] if item["kind"] == "skill")
+        self.assertEqual(skill["evidence"], "unavailable")
+        self.assertEqual(report["follow"]["skill"]["evidence"], "unavailable")
+        self.assertEqual(report["validation"]["evidence"], "unavailable")
+        self.assertEqual(report["analysis"]["sessions_unavailable"], [{
+            "session": "broken-session",
+            "error_type": "MalformedEventsNormalized",
+            "events_unavailable": 1,
+        }])
+        self.assertEqual(report["warnings"], [
+            "broken-session: compliance evidence unavailable for 1 malformed event field set(s)",
+        ])
+
+    def test_ambiguous_validation_results_are_unavailable(self):
+        base = [
+            _event(EventType.SESSION_START, 0, "start"),
+            _event(
+                EventType.TOOL_CALL,
+                1,
+                "skill",
+                tool_name="skill",
+                arguments={"skill": "release-notes"},
+            ),
+            _event(
+                EventType.TOOL_CALL,
+                3,
+                "test",
+                tool_name="bash",
+                arguments={"command": "pytest -q"},
+                is_test=True,
+            ),
+        ]
+        cases = {
+            "multiple_linked_results": [
+                TraceEvent(
+                    event_type=EventType.TOOL_RESULT,
+                    timestamp=T0 + 4,
+                    event_id="result-1",
+                    parent_id="test",
+                    data={"exit_code": 0},
+                ),
+                TraceEvent(
+                    event_type=EventType.ERROR,
+                    timestamp=T0 + 5,
+                    event_id="result-2",
+                    parent_id="test",
+                    data={"message": "late error"},
+                ),
+            ],
+            "result_before_call": [
+                TraceEvent(
+                    event_type=EventType.TOOL_RESULT,
+                    timestamp=T0 + 2,
+                    event_id="result-before",
+                    parent_id="test",
+                    data={"exit_code": 0},
+                ),
+            ],
+            "duplicate_call_id": [
+                _event(
+                    EventType.TOOL_CALL,
+                    4,
+                    "test",
+                    tool_name="bash",
+                    arguments={"command": "pytest -q"},
+                    is_test=True,
+                ),
+                TraceEvent(
+                    event_type=EventType.TOOL_RESULT,
+                    timestamp=T0 + 5,
+                    event_id="result",
+                    parent_id="test",
+                    data={"exit_code": 0},
+                ),
+            ],
+        }
+        for reason, extra in cases.items():
+            with self.subTest(reason=reason):
+                report = analyze_compliance_run(
+                    [("session", [*base, *extra, _event(EventType.SESSION_END, 6, "end")])],
+                    workspace=str(self.root),
+                    skill="release-notes",
+                    should_trigger=True,
+                    instructions=(),
+                    expected_actions=(),
+                    user_dirs=(),
+                )
+
+                self.assertEqual(report["validation"]["evidence"], "unavailable")
+                self.assertTrue(report["validation"]["ambiguous_result_correlation"])
+                self.assertEqual(report["validation"]["last_test"]["result"]["reason"], reason)
+                self.assertIn(reason, report["warnings"][0])
+
+    def test_earlier_ambiguous_test_makes_validation_unavailable(self):
+        events = [
+            _event(EventType.SESSION_START, 0, "start"),
+            _event(
+                EventType.TOOL_CALL,
+                1,
+                "skill",
+                tool_name="skill",
+                arguments={"skill": "release-notes"},
+            ),
+            _event(
+                EventType.TOOL_CALL,
+                2,
+                "test-1",
+                tool_name="bash",
+                arguments={"command": "pytest -q"},
+                is_test=True,
+            ),
+            TraceEvent(
+                event_type=EventType.TOOL_RESULT,
+                timestamp=T0 + 3,
+                event_id="result-1a",
+                parent_id="test-1",
+                data={"exit_code": 0},
+            ),
+            TraceEvent(
+                event_type=EventType.ERROR,
+                timestamp=T0 + 4,
+                event_id="result-1b",
+                parent_id="test-1",
+                data={"message": "duplicate outcome"},
+            ),
+            _event(
+                EventType.TOOL_CALL,
+                5,
+                "test-2",
+                tool_name="bash",
+                arguments={"command": "pytest -q"},
+                is_test=True,
+            ),
+            TraceEvent(
+                event_type=EventType.TOOL_RESULT,
+                timestamp=T0 + 6,
+                event_id="result-2",
+                parent_id="test-2",
+                data={"exit_code": 0},
+            ),
+            _event(EventType.SESSION_END, 7, "end"),
+        ]
+
+        report = analyze_compliance_run(
+            [("session", events)],
+            workspace=str(self.root),
+            skill="release-notes",
+            should_trigger=True,
+            instructions=(),
+            expected_actions=(),
+            user_dirs=(),
+        )
+
+        self.assertEqual(report["validation"]["evidence"], "unavailable")
+        self.assertEqual(report["validation"]["ambiguous_result_reasons"], ["multiple_linked_results"])
+        self.assertEqual(report["validation"]["result_correlations"], {
+            "observed": 1,
+            "unavailable": 1,
+        })
+        self.assertEqual(report["validation"]["last_test"]["result"]["evidence"], "observed")
 
 
 class ComplianceCaseValidationTests(unittest.TestCase):

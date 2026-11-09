@@ -40,7 +40,7 @@
     "note": "Near miss that should use repository instructions but not load the release skill."
   },
   {
-    "id": "inferred-instruction-load",
+    "id": "availability-only-inference",
     "skill": "release-notes",
     "prompt": "Prepare validated release notes.",
     "should_trigger": true,
@@ -59,6 +59,6 @@
         "kind": "test"
       }
     ],
-    "note": "The instruction file is available but its automatic load is not directly observable."
+    "note": "The instruction file is available, but no read event establishes whether it loaded."
   }
 ]

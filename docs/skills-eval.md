@@ -232,6 +232,10 @@ no definition is found), `runs`, `scored`, `loaded`, `not_loaded`, `unscored`,
 
 Cases with `instructions` or `expected_actions` also include `compliance`.
 Evidence is grouped as `observed`, `inferred`, `missing`, or `unavailable`.
+Instruction inference only records that a file was available without an
+observed read. It does not claim client injection or loading.
+Unreadable or malformed session evidence is reported as `unavailable` with a
+bounded warning instead of being counted as missing compliance.
 The top-level report and each case include deterministic evidence counts. Use
 `--format markdown` for a concise CI artifact. See
 [instruction-compliance.md](instruction-compliance.md) for the schema and the

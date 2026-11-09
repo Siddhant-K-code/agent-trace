@@ -914,6 +914,10 @@ def build_report(
             for group in counts:
                 for state in EVIDENCE_STATES:
                     counts[group][state] += int(case["compliance"][group][state])
+            report["warnings"].extend(
+                f"{case['id']}: {warning}"
+                for warning in case["compliance"].get("warnings", ())
+            )
         report["compliance"] = {
             "schema_version": 1,
             "not_a_score": True,
@@ -921,6 +925,11 @@ def build_report(
             "evidence_counts": counts,
             "evidence_states": list(EVIDENCE_STATES),
             "limitations": list(COMPLIANCE_LIMITATIONS),
+            "warnings": [
+                warning
+                for case in compliance_cases
+                for warning in case["compliance"].get("warnings", ())
+            ],
         }
     return report
 
