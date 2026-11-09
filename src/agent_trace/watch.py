@@ -153,6 +153,47 @@ def _resume_process(pid: int) -> None:
         pass
 
 
+def validate_agent_pid(pid: int) -> str | None:
+    """Return why *pid* cannot be used as the agent PID, or None if it can.
+
+    The check sends signal 0, which tests for the process without affecting it.
+    """
+    if not hasattr(signal, "SIGSTOP"):
+        return "--agent-pid is not supported on this platform (no SIGSTOP)"
+    if pid <= 1:
+        return f"--agent-pid must be greater than 1, got {pid}"
+    if pid == os.getpid():
+        return f"--agent-pid {pid} is this watch process"
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return f"no process with PID {pid}"
+    except PermissionError:
+        return f"not allowed to signal PID {pid}"
+    except OSError as exc:
+        return f"cannot check PID {pid}: {exc}"
+    return None
+
+
+NO_AGENT_PID_HINT = (
+    "no agent PID is known. Restart watch with --agent-pid PID "
+    "to let it pause, resume and kill the agent. This warning is shown once."
+)
+
+
+def _warn_no_agent_pid(state: "WatchState", what: str, out: TextIO | None = None) -> None:
+    """Say once that watch wanted to signal the agent but has no PID."""
+    if state.warned_no_agent_pid:
+        return
+    state.warned_no_agent_pid = True
+    msg = f"Cannot {what}: {NO_AGENT_PID_HINT}"
+    if out is None:
+        _alert_terminal(msg)
+    else:
+        out.write(f"[watch] {msg}\n")
+        out.flush()
+
+
 # ---------------------------------------------------------------------------
 # Nanny rules (--rules rules.yaml)
 # ---------------------------------------------------------------------------
@@ -568,8 +609,10 @@ class WatchState:
     recent_events: deque = field(default_factory=lambda: deque(maxlen=500))
     # Violations already fired (to avoid duplicate alerts)
     fired: set = field(default_factory=set)
-    # Agent PID (from session meta, if available)
+    # Agent PID from --agent-pid. Without it watch can alert but not signal.
     agent_pid: int | None = None
+    # True once watch has said it cannot signal because no PID is known
+    warned_no_agent_pid: bool = False
     # Token budget watcher (lazy-initialised on first LLM_REQUEST)
     token_budget_watcher: object | None = None
     # Nanny rule metrics
@@ -701,6 +744,8 @@ def _dispatch_alert(
         # before the SIGSTOP and leave the agent stopped.
         if state.agent_pid and not state.paused:
             _pause_process(state.agent_pid)
+        elif not state.agent_pid:
+            _warn_no_agent_pid(state, f"pause the agent for approval rule '{rule_name}'")
         req = None
         sid = session_id or state.session_id
         if store and sid:
@@ -757,11 +802,13 @@ def _dispatch_alert(
         _alert_terminal(f"[dry-run] would {action} agent process")
         return
 
-    if action == "pause" and state.agent_pid and not state.paused:
+    if action in ("pause", "kill") and not state.agent_pid:
+        _warn_no_agent_pid(state, f"{action} the agent")
+    elif action == "pause" and not state.paused:
         _alert_terminal(f"Pausing agent process {state.agent_pid} (SIGSTOP)")
         _pause_process(state.agent_pid)
         state.pause_owner = PAUSE_RULE
-    elif action == "kill" and state.agent_pid:
+    elif action == "kill":
         _alert_terminal(f"Killing agent process {state.agent_pid}")
         # Write watchdog post-mortem JSON before killing
         pm_path: Path | None = None
@@ -1209,7 +1256,11 @@ def _check_pause_file(store: "TraceStore", state: "WatchState", out: "TextIO") -
     _check_approval_decision(store, state, out)
     _check_agent_alive(state, out)
     wants_pause = _editor_wants_pause(store, state.session_id)
-    if wants_pause is None or not state.agent_pid:
+    if wants_pause is None:
+        return
+    if not state.agent_pid:
+        if wants_pause:
+            _warn_no_agent_pid(state, "pause the agent for the editor", out)
         return
 
     if wants_pause:
@@ -1268,8 +1319,12 @@ def watch_session(
     stream_config: StreamConfig | None = None,
     project_budget_config: ProjectBudgetConfig | None = None,
     checkpoint_watcher: CompactionCheckpointWatcher | None = None,
+    agent_pid: int | None = None,
 ) -> None:
     """Watch a session's event stream and fire alerts on violations.
+
+    agent_pid: process that pause, kill and approval actions signal. Without
+    it watch still alerts but warns once instead of signalling.
 
     stream_config: when set, events are pushed in real-time to the configured
     URL as they arrive (push-based streaming).
@@ -1300,10 +1355,12 @@ def watch_session(
             f"{temporal_context.parent_span_id}\n"
         )
 
-    state = WatchState(start_time=time.time(), session_id=session_id)
+    state = WatchState(start_time=time.time(), session_id=session_id, agent_pid=agent_pid)
 
     mode = " [dry-run]" if dry_run else ""
     out.write(f"[watch] Monitoring session {session_id[:12]}...{mode}\n")
+    if agent_pid:
+        out.write(f"[watch] Agent pid {agent_pid}: pause, kill and approval actions will signal it\n")
     if nanny_rules:
         out.write(f"[watch] {len(nanny_rules)} nanny rule(s) active\n")
     if stream_config and stream_config.url:
@@ -1345,7 +1402,7 @@ def watch_session(
         for item in _tail_events(events_file, poll_interval=poll_interval):
             now = time.time()
             if now - last_heartbeat_time >= 5.0:
-                write_heartbeat(store, session_id)
+                write_heartbeat(store, session_id, agent_pid=agent_pid)
                 last_heartbeat_time = now
 
             # Idle timeout: checked on every poll cycle (including when no
@@ -1524,6 +1581,13 @@ def cmd_watch(args: argparse.Namespace) -> int:
 
     dry_run = getattr(args, "dry_run", False)
 
+    agent_pid = getattr(args, "agent_pid", None)
+    if agent_pid is not None:
+        error = validate_agent_pid(agent_pid)
+        if error:
+            sys.stderr.write(f"[watch] {error}\n")
+            return 1
+
     session_id = getattr(args, "session_id", None)
     if not session_id:
         session_id = store.get_latest_session_id()
@@ -1585,6 +1649,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
         stream_config=stream_cfg,
         project_budget_config=project_budget_config,
         checkpoint_watcher=checkpoint_watcher,
+        agent_pid=agent_pid,
     )
     return 0
 

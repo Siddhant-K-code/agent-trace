@@ -29,11 +29,16 @@ function session(id: string, paused = false): SessionState {
   return { sessionId: id, paused } as SessionState;
 }
 
-function heartbeat(dir: string, id: string, ageMs = 0): void {
+function heartbeat(
+  dir: string,
+  id: string,
+  ageMs = 0,
+  extra: Record<string, unknown> = { agent_pid: 4242 },
+): void {
   fs.mkdirSync(path.join(dir, id), { recursive: true });
   fs.writeFileSync(
     path.join(dir, id, ".heartbeat"),
-    JSON.stringify({ session_id: id, updated_at: (NOW - ageMs) / 1000 }),
+    JSON.stringify({ session_id: id, updated_at: (NOW - ageMs) / 1000, ...extra }),
   );
 }
 
@@ -45,6 +50,25 @@ test("pause without a running watcher fails and leaves state unpaused", () => {
   assert.equal(result.ok, false);
   assert.equal(state.paused, false);
   assert.equal(fs.existsSync(marker), false);
+});
+
+test("pause fails when the watcher has no agent PID", () => {
+  const { dir, manager, marker } = setup();
+  heartbeat(dir, "s1", 0, { agent_pid: null });
+  const state = session("s1");
+  const result = manager.pause(state);
+  assert.equal(result.ok, false);
+  assert.match(result.message ?? "", /--agent-pid/);
+  assert.equal(state.paused, false);
+  assert.equal(fs.existsSync(marker), false);
+});
+
+test("pause still works with an older watcher that omits agent_pid", () => {
+  const { dir, manager, marker } = setup();
+  heartbeat(dir, "s1", 0, {});
+  const state = session("s1");
+  assert.equal(manager.pause(state).ok, true);
+  assert.equal(fs.readFileSync(marker, "utf8"), "s1");
 });
 
 test("pause writes the session ID and resume removes it", () => {
