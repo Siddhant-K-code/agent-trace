@@ -1169,6 +1169,9 @@ agent-strace pr-comment [SESSION_ID] [--dry-run] [--platform github|gitlab]
                            [--review] [--fail-on STATUSES]
                            [--min-confidence low|medium|high]
                            [--findings NAMES] [--config FILE]
+                           [--evidence-packet FILE] [--cognitive-debt FILE]
+                           [--cognitive-debt-mode report|check]
+                           [--artifact-url URL]
 ```
 Post a structured session summary to the current branch's open pull request or
 merge request. The comment includes duration, cost, model, status, tool calls,
@@ -1189,6 +1192,10 @@ An embedded marker makes repeated runs update the existing comment.
 | `--min-confidence low\|medium\|high` | With `--review`: lowest confidence that can fail |
 | `--findings NAMES` | With `--review`: findings the threshold applies to |
 | `--config FILE` | With `--review`: config file with a `review` block |
+| `--evidence-packet FILE` | With `--review`: list the evidence packet. See [`review`](#review). |
+| `--cognitive-debt FILE` | With `--review`: add the cognitive debt result from a schema v1 JSON report |
+| `--cognitive-debt-mode report\|check` | With `--review`: `check` fails unless the cognitive debt result is a pass |
+| `--artifact-url URL` | With `--review`: https URL of the uploaded artifact |
 
 With `--review`, the comment is still posted or updated when the check fails.
 The exit code then follows the threshold.
@@ -1204,6 +1211,9 @@ agent-strace review [SESSION_ID ...] [--format text|json|markdown]
                     [--branch NAME] [--fail-on STATUSES]
                     [--min-confidence low|medium|high]
                     [--findings NAMES] [--config FILE]
+                    [--evidence-packet FILE] [--cognitive-debt FILE]
+                    [--cognitive-debt-mode report|check]
+                    [--artifact-url URL]
 ```
 Report what the linked sessions can show a PR reviewer: rationale, scope,
 validation, stewardship, and evidence health. Each finding has a status
@@ -1220,9 +1230,13 @@ never printed. See [review.md](review.md).
 | `--min-confidence low\|medium\|high` | Lowest confidence that can fail the check (default: `medium`) |
 | `--findings NAMES` | Comma-separated findings the threshold applies to: `rationale`, `scope`, `validation`, `stewardship`, `evidence` (default: all) |
 | `--config FILE` | Config file with a `review` block (default: `.agent-strace.yaml`, `.yml`, or `.json` if present) |
+| `--evidence-packet FILE` | Evidence packet HTML from `share`. Shown as uploaded, local and not uploaded, or not generated. |
+| `--cognitive-debt FILE` | JSON from `cognitive-debt --format json`. Reads `schema_version` 1 and `status`. `unknown` is unavailable, never a pass. |
+| `--cognitive-debt-mode report\|check` | `report` adds the result. `check` also fails unless the result is a pass (default: `report`). |
+| `--artifact-url URL` | https URL of the uploaded artifact. Without it, files are shown as not uploaded. |
 
-Flags override the config file. Exit codes: `0` pass, `1` threshold failed,
-`2` bad config or unknown session.
+Flags override the config file. Exit codes: `0` pass, `1` threshold or
+cognitive debt check failed, `2` bad config or unknown session.
 
 ### `sample`
 ```
@@ -1482,13 +1496,27 @@ steps:
 | `review` | `false` | Run `agent-strace review` and fail the step per the threshold. With `post-pr-comment`, the table is added to the single PR comment. |
 | `review-fail-on` | none | Statuses that fail the check. Empty uses the config file, then `missing`. |
 | `review-min-confidence` | none | Lowest confidence that can fail. Empty uses the config file, then `medium`. |
+| `cognitive-debt` | `report` | With `review`: `false` skips the report, `report` adds it, `check` also fails unless the result is a pass. `unknown` is never a pass. |
 
 | Output | Description |
 |---|---|
 | `passed` | `true` if all scorers passed |
 | `summary-path` | Path to the written eval summary markdown |
 | `review-passed` | `true` or `false` when `review` ran; empty otherwise |
+| `review-result` | `pass`, `fail`, or `error` when `review` ran |
+| `review-markdown-path` | Path to `review.md` on the runner |
+| `review-json-path` | Path to `review.json` on the runner |
+| `evidence-packet-path` | Path to the metadata-only evidence packet; empty if not generated |
+| `cognitive-debt-json-path` | Path to the schema v1 cognitive debt JSON; empty if not generated |
+| `cognitive-debt-badge-path` | Path to the Shields endpoint JSON; empty if not generated |
+| `cognitive-debt-status` | `clean`, `partial`, `above_threshold`, `unknown`, or empty |
+| `cognitive-debt-result` | `pass`, `fail`, or `unavailable` |
+| `artifacts-dir` | Directory with the PR evidence files |
+| `evidence-artifact-url` | URL of the `agent-trace-pr-evidence` artifact; empty if not uploaded |
 
 Trace artifacts are uploaded automatically under the `agent-traces` artifact name.
+With `review`, the evidence packet and cognitive debt files are uploaded as
+`agent-trace-pr-evidence`, and `review.json` and `review.md` as
+`agent-trace-pr-review`. See [review.md](review.md#github-action).
 
 [Marketplace listing](https://github.com/marketplace/actions/agent-trace-eval)

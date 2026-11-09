@@ -213,6 +213,112 @@ class LinkedSession:
 
 
 @dataclass(frozen=True)
+class CognitiveDebtEvidence:
+    """The result read from a schema v1 ``cognitive-debt --format json`` report.
+
+    ``result`` is ``pass`` (clean or partial), ``fail`` (above_threshold), or
+    ``unavailable``. Status ``unknown``, a missing file, and an unsupported
+    report are all unavailable. Unavailable is never a pass.
+    """
+
+    result: str
+    status: str | None
+    reason: str
+    path: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "result": self.result,
+            "status": self.status,
+            "reason": self.reason,
+            "file": Path(self.path).name,
+        }
+
+
+_COGNITIVE_RESULTS = {
+    "clean": "pass",
+    "partial": "pass",
+    "above_threshold": "fail",
+    "unknown": "unavailable",
+}
+
+
+def read_cognitive_debt(path: str | Path) -> CognitiveDebtEvidence:
+    """Read the status of a cognitive debt JSON report. Never raises."""
+
+    text_path = str(path)
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return CognitiveDebtEvidence("unavailable", None, "report not generated", text_path)
+    except (OSError, ValueError):
+        return CognitiveDebtEvidence("unavailable", None, "report is not valid JSON", text_path)
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != 1
+        or payload.get("metric") != "cognitive_debt"
+    ):
+        return CognitiveDebtEvidence(
+            "unavailable", None, "not a schema v1 cognitive debt report", text_path
+        )
+    status = payload.get("status")
+    if status not in _COGNITIVE_RESULTS:
+        return CognitiveDebtEvidence("unavailable", None, "status not recognized", text_path)
+    result = _COGNITIVE_RESULTS[status]
+    reason = {
+        "pass": "review coverage within threshold",
+        "fail": "unreviewed coverage above threshold",
+        "unavailable": "review coverage unknown",
+    }[result]
+    return CognitiveDebtEvidence(result, status, reason, text_path)
+
+
+@dataclass(frozen=True)
+class Artifacts:
+    """Files produced next to the review, and where they were uploaded.
+
+    ``url`` is set only when the caller confirms an upload. Without it the
+    report says a file is local and not uploaded.
+    """
+
+    evidence_packet: str = ""
+    cognitive_debt: CognitiveDebtEvidence | None = None
+    cognitive_debt_mode: str = "report"
+    url: str = ""
+
+    @property
+    def packet_state(self) -> str:
+        if not self.evidence_packet:
+            return "not_requested"
+        path = Path(self.evidence_packet)
+        if not path.is_file() or path.stat().st_size == 0:
+            return "not_generated"
+        return "uploaded" if self.url else "local"
+
+    @property
+    def cognitive_debt_fails(self) -> bool:
+        return (
+            self.cognitive_debt_mode == "check"
+            and (self.cognitive_debt is None or self.cognitive_debt.result != "pass")
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        packet: dict[str, Any] = {"state": self.packet_state}
+        if self.evidence_packet:
+            packet["file"] = Path(self.evidence_packet).name
+        payload: dict[str, Any] = {"url": self.url or None, "evidence_packet": packet}
+        if self.cognitive_debt is not None or self.cognitive_debt_mode == "check":
+            cognitive: dict[str, Any] = {"mode": self.cognitive_debt_mode}
+            if self.cognitive_debt is not None:
+                cognitive.update(self.cognitive_debt.to_dict())
+            else:
+                cognitive.update(result="unavailable", status=None, reason="report not given")
+            cognitive["fails_check"] = self.cognitive_debt_fails
+            payload["cognitive_debt"] = cognitive
+        return payload
+
+
+@dataclass(frozen=True)
 class ReviewReport:
     """The reviewability report for the sessions linked to a branch."""
 
@@ -220,23 +326,32 @@ class ReviewReport:
     sessions: tuple[LinkedSession, ...]
     findings: tuple[Finding, ...]
     threshold: Threshold
+    artifacts: Artifacts | None = None
 
     @property
     def failing(self) -> tuple[Finding, ...]:
         return tuple(finding for finding in self.findings if self.threshold.fails(finding))
 
     @property
-    def passed(self) -> bool:
+    def review_passed(self) -> bool:
         return not self.failing
+
+    @property
+    def passed(self) -> bool:
+        """True when the findings pass and a cognitive debt check, if set, passes."""
+        if self.artifacts is not None and self.artifacts.cognitive_debt_fails:
+            return False
+        return self.review_passed
 
     @property
     def exit_code(self) -> int:
         return 0 if self.passed else 1
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "schema_version": SCHEMA_VERSION,
             "result": "pass" if self.passed else "fail",
+            "review_result": "pass" if self.review_passed else "fail",
             "branch": self.branch or None,
             "sessions": [
                 {"session_id": linked.session_id, "link": linked.link} for linked in self.sessions
@@ -245,6 +360,9 @@ class ReviewReport:
             "failing": [finding.name for finding in self.failing],
             "findings": [finding.to_dict() for finding in self.findings],
         }
+        if self.artifacts is not None:
+            payload["artifacts"] = self.artifacts.to_dict()
+        return payload
 
 
 # ---------------------------------------------------------------------------
@@ -1092,6 +1210,7 @@ def build_report(
     *,
     branch: str = "",
     matrix: CaptureMatrix | None = None,
+    artifacts: Artifacts | None = None,
 ) -> ReviewReport:
     matrix = matrix or load_capture_matrix()
     sessions = _load_sessions(store, linked, matrix)
@@ -1102,7 +1221,7 @@ def build_report(
         assess_stewardship(sessions, store),
         assess_evidence(sessions, store, matrix),
     )
-    return ReviewReport(branch, tuple(linked), findings, threshold)
+    return ReviewReport(branch, tuple(linked), findings, threshold, artifacts)
 
 
 # ---------------------------------------------------------------------------
@@ -1134,7 +1253,48 @@ def format_text(report: ReviewReport, out: TextIO) -> None:
             more = f" (+{len(paths) - len(shown)} more)" if len(paths) > len(shown) else ""
             w(f"  Not named or read: {', '.join(shown)}{more}\n")
         w(f"  Source: {finding.source}\n")
+    if report.artifacts is not None:
+        w("\n")
+        for label, value in _artifact_lines(report.artifacts, markdown=False):
+            w(f"{label + ':':<16} {value}\n")
     w("\nCaptured evidence only. CI results are not read. See docs/review.md.\n")
+
+
+def _artifact_lines(artifacts: Artifacts, *, markdown: bool) -> list[tuple[str, str]]:
+    def code(text: str) -> str:
+        return f"`{_safe_code_text(text)}`" if markdown else text
+
+    lines: list[tuple[str, str]] = []
+    state = artifacts.packet_state
+    if state != "not_requested":
+        name = code(Path(artifacts.evidence_packet).name)
+        if state == "uploaded":
+            where = (
+                f"[workflow artifact]({artifacts.url})" if markdown
+                else f"workflow artifact {artifacts.url}"
+            )
+            lines.append(("Evidence packet", f"{name} in the {where}. Metadata only."))
+        elif state == "local":
+            lines.append(("Evidence packet", f"{name} (local file, not uploaded). Metadata only."))
+        else:
+            lines.append(("Evidence packet", "not generated."))
+    cognitive = artifacts.cognitive_debt
+    if cognitive is not None or artifacts.cognitive_debt_mode == "check":
+        mode = "check" if artifacts.cognitive_debt_mode == "check" else "report only"
+        if cognitive is None:
+            value = "not generated. Unavailable, not a pass."
+        elif cognitive.result == "unavailable":
+            status = code(cognitive.status) + ", " if cognitive.status else ""
+            value = f"{status}{cognitive.reason}. Unavailable, not a pass."
+        else:
+            value = f"{code(str(cognitive.status))}, {cognitive.reason}."
+        if artifacts.cognitive_debt_fails:
+            value += " Fails the check." if not markdown else " **Fails the check.**"
+        lines.append(("Cognitive debt", f"{value} ({mode})"))
+    if artifacts.url and state != "uploaded":
+        link = f"[workflow artifact]({artifacts.url})" if markdown else artifacts.url
+        lines.append(("Uploaded", link))
+    return lines
 
 
 def render_markdown(report: ReviewReport, *, heading: str = "### Reviewability") -> str:
@@ -1157,6 +1317,12 @@ def render_markdown(report: ReviewReport, *, heading: str = "### Reviewability")
         lines.append(
             f"| {finding.label} | {status} | {finding.confidence} | {detail} | "
             f"{_table_text(finding.source)} |"
+        )
+    if report.artifacts is not None:
+        lines.extend(["", "**Artifacts**", ""])
+        lines.extend(
+            f"- {label}: {value}"
+            for label, value in _artifact_lines(report.artifacts, markdown=True)
         )
     result = "pass" if report.passed else "fail"
     lines.extend([
@@ -1198,6 +1364,42 @@ def add_threshold_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_artifact_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add the artifact flags shared by ``review`` and ``pr-comment --review``."""
+    parser.add_argument(
+        "--evidence-packet", dest="evidence_packet", default="", metavar="FILE",
+        help="evidence packet HTML from share; reported as local, uploaded, or not generated",
+    )
+    parser.add_argument(
+        "--cognitive-debt", dest="cognitive_debt", default="", metavar="FILE",
+        help="schema v1 JSON from cognitive-debt --format json; status unknown is unavailable",
+    )
+    parser.add_argument(
+        "--cognitive-debt-mode", dest="cognitive_debt_mode", default="report",
+        choices=("report", "check"),
+        help="check fails unless the cognitive debt result is a pass (default: report)",
+    )
+    parser.add_argument(
+        "--artifact-url", dest="artifact_url", default="", metavar="URL",
+        help="https URL of the uploaded artifact; without it files are shown as not uploaded",
+    )
+
+
+def artifacts_from_args(args: argparse.Namespace) -> Artifacts | None:
+    packet = getattr(args, "evidence_packet", "") or ""
+    debt_path = getattr(args, "cognitive_debt", "") or ""
+    mode = getattr(args, "cognitive_debt_mode", "report") or "report"
+    url = (getattr(args, "artifact_url", "") or "").strip()
+    if mode not in ("report", "check"):
+        raise ReviewConfigError("cognitive debt mode must be report or check")
+    if url and (not url.startswith("https://") or any(ch in url for ch in " \t\n<>()[]`")):
+        raise ReviewConfigError("artifact URL must be a plain https URL")
+    if not (packet or debt_path or url or mode == "check"):
+        return None
+    cognitive = read_cognitive_debt(debt_path) if debt_path else None
+    return Artifacts(packet, cognitive, mode, url)
+
+
 def threshold_from_args(args: argparse.Namespace) -> Threshold:
     return load_threshold(
         getattr(args, "config", None),
@@ -1211,6 +1413,7 @@ def cmd_review(args: argparse.Namespace) -> int:
     """CLI handler for ``agent-strace review``."""
     try:
         threshold = threshold_from_args(args)
+        artifacts = artifacts_from_args(args)
     except ReviewConfigError as exc:
         sys.stderr.write(f"review: {exc}\n")
         return 2
@@ -1219,7 +1422,7 @@ def cmd_review(args: argparse.Namespace) -> int:
     branch = getattr(args, "branch", "") or current_branch()
     try:
         linked = link_sessions(store, getattr(args, "session_id", None) or (), branch=branch)
-        report = build_report(store, linked, threshold, branch=branch)
+        report = build_report(store, linked, threshold, branch=branch, artifacts=artifacts)
     except NonObjectEventDataError:
         raise
     except (PRCommentError, OSError, ValueError) as exc:
@@ -1237,7 +1440,9 @@ def cmd_review(args: argparse.Namespace) -> int:
 
 
 __all__ = [
+    "Artifacts",
     "CONFIDENCES",
+    "CognitiveDebtEvidence",
     "FINDINGS",
     "STATUSES",
     "Finding",
@@ -1245,12 +1450,15 @@ __all__ = [
     "ReviewConfigError",
     "ReviewReport",
     "Threshold",
+    "add_artifact_arguments",
     "add_threshold_arguments",
+    "artifacts_from_args",
     "build_report",
     "classify_validation",
     "cmd_review",
     "link_sessions",
     "load_threshold",
+    "read_cognitive_debt",
     "render_markdown",
     "threshold_from_args",
 ]

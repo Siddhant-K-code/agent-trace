@@ -68,6 +68,13 @@ https://img.shields.io/endpoint?url=URL_ENCODED_RAW_JSON_URL
 
 Use the versioned report for automation. Use the badge only for presentation.
 
+## PR check
+
+The GitHub Action can add the cognitive debt result for the linked review
+session to the [reviewability check](review.md#cognitive-debt). Set the
+`cognitive-debt` input to `false`, `report`, or `check`. The check reads
+`schema_version` and `status`. `unknown` is unavailable and never a pass.
+
 ## CI and release assets
 
 A release job can generate immutable evidence and upload both files:

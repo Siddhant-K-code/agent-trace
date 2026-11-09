@@ -990,10 +990,11 @@ def cmd_pr_comment(args: argparse.Namespace) -> int:
     review_exit = 0
 
     if review:
-        from .reviewability import ReviewConfigError, threshold_from_args
+        from .reviewability import ReviewConfigError, artifacts_from_args, threshold_from_args
 
         try:
             threshold = threshold_from_args(args)
+            artifacts = artifacts_from_args(args)
         except ReviewConfigError as exc:
             sys.stderr.write(f"pr-comment: {exc}\n")
             return 2
@@ -1019,6 +1020,7 @@ def cmd_pr_comment(args: argparse.Namespace) -> int:
                 [LinkedSession(session_id, link) for session_id in session_ids],
                 threshold,
                 branch=branch,
+                artifacts=artifacts,
             )
             review_section = render_markdown(report)
             review_exit = report.exit_code

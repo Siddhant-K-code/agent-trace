@@ -5,6 +5,9 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -23,15 +26,18 @@ from agent_trace.pr_comment import (
 )
 from agent_trace.reviewability import (
     FINDINGS,
+    Artifacts,
     LinkedSession,
     ReviewConfigError,
     Threshold,
     Finding,
+    artifacts_from_args,
     build_report,
     classify_validation,
     cmd_review,
     link_sessions,
     load_threshold,
+    read_cognitive_debt,
     render_markdown,
 )
 from agent_trace.store import TraceStore
@@ -688,19 +694,320 @@ class TestCommands(_StoreCase):
         self.assertIn("### Reviewability", posted["body"])
 
 
+class TestArtifacts(_StoreCase):
+    def _write(self, name: str, payload) -> str:
+        path = Path(self.tmp.name) / name
+        path.write_text(payload if isinstance(payload, str) else json.dumps(payload))
+        return str(path)
+
+    def test_read_cognitive_debt_uses_schema_fields(self):
+        good = {"schema_version": 1, "metric": "cognitive_debt"}
+        cases = {
+            "clean": ({**good, "status": "clean"}, "pass"),
+            "partial": ({**good, "status": "partial"}, "pass"),
+            "above": ({**good, "status": "above_threshold"}, "fail"),
+            "unknown": ({**good, "status": "unknown", "color": "brightgreen"}, "unavailable"),
+            "v2": ({**good, "schema_version": 2, "status": "clean"}, "unavailable"),
+            "metric": ({"schema_version": 1, "metric": "other", "status": "clean"}, "unavailable"),
+            "badge": ({"schemaVersion": 1, "color": "green", "message": "0%"}, "unavailable"),
+            "odd": ({**good, "status": "great"}, "unavailable"),
+            "list": ([], "unavailable"),
+            "broken": ("{not json", "unavailable"),
+        }
+        for name, (payload, result) in cases.items():
+            with self.subTest(name=name):
+                evidence = read_cognitive_debt(self._write(f"{name}.json", payload))
+                self.assertEqual(evidence.result, result)
+        missing = read_cognitive_debt(Path(self.tmp.name) / "absent.json")
+        self.assertEqual((missing.result, missing.reason), ("unavailable", "report not generated"))
+
+    def test_artifact_flags(self):
+        parser = build_parser()
+        args = parser.parse_args(["review", "--artifact-url", "http://x"])
+        with self.assertRaises(ReviewConfigError):
+            artifacts_from_args(args)
+        args = parser.parse_args(["review", "--artifact-url", "https://x/a)b"])
+        with self.assertRaises(ReviewConfigError):
+            artifacts_from_args(args)
+        self.assertIsNone(artifacts_from_args(parser.parse_args(["review"])))
+        args = parser.parse_args(["review", "--cognitive-debt-mode", "check"])
+        artifacts = artifacts_from_args(args)
+        self.assertTrue(artifacts.cognitive_debt_fails)
+
+    def test_markdown_never_claims_an_upload(self):
+        _good_session(self.store)
+        packet = self._write("evidence-packet.html", "<html></html>")
+        url = "https://github.com/o/r/actions/runs/1/artifacts/2"
+        states = {
+            Artifacts(packet): "`evidence-packet.html` (local file, not uploaded)",
+            Artifacts(packet, url=url): f"`evidence-packet.html` in the [workflow artifact]({url})",
+            Artifacts(str(Path(self.tmp.name) / "none.html"), url=url): "Evidence packet: not generated.",
+            Artifacts(self._write("empty.html", "")): "Evidence packet: not generated.",
+        }
+        for artifacts, expected in states.items():
+            with self.subTest(expected=expected):
+                report = build_report(self.store, [LinkedSession("good0001aaaa", "branch")],
+                                      Threshold(), artifacts=artifacts)
+                markdown = render_markdown(report)
+                self.assertIn(expected, markdown)
+                self.assertNotIn(self.tmp.name, markdown)
+                if "not uploaded" in expected or "not generated" in expected:
+                    self.assertNotIn("in the [workflow artifact]", markdown)
+
+    def test_cognitive_check_changes_result_not_findings(self):
+        _good_session(self.store)
+        unknown = read_cognitive_debt(self._write(
+            "debt.json", {"schema_version": 1, "metric": "cognitive_debt", "status": "unknown"}))
+        linked = [LinkedSession("good0001aaaa", "branch")]
+        report = build_report(self.store, linked, Threshold(fail_on=()),
+                              artifacts=Artifacts(cognitive_debt=unknown))
+        self.assertTrue(report.passed)
+        report = build_report(self.store, linked, Threshold(fail_on=()),
+                              artifacts=Artifacts(cognitive_debt=unknown, cognitive_debt_mode="check"))
+        self.assertFalse(report.passed)
+        self.assertTrue(report.review_passed)
+        self.assertEqual(report.to_dict()["result"], "fail")
+        self.assertEqual(report.to_dict()["review_result"], "pass")
+        self.assertIn("**Fails the check.**", render_markdown(report))
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "scripts" / "pr-evidence.sh"
+
+_SHIM = """#!{python}
+import json, os, sys
+sys.path.insert(0, {src!r})
+args = sys.argv[1:]
+with open(os.environ["SHIM_LOG"], "a", encoding="utf-8") as log:
+    log.write(json.dumps(args) + "\\n")
+command = next((a for a in args if a in ("share", "cognitive-debt", "pr-comment", "review")), "")
+if command == "share" and os.environ.get("SHIM_FAIL_SHARE"):
+    sys.exit(1)
+if command == "cognitive-debt" and os.environ.get("SHIM_COGNITIVE_STATUS"):
+    out = args[args.index("--output") + 1]
+    if args[args.index("--format") + 1] == "json":
+        payload = {{"schema_version": 1, "metric": "cognitive_debt",
+                   "status": os.environ["SHIM_COGNITIVE_STATUS"]}}
+    else:
+        payload = {{"schemaVersion": 1, "label": "cognitive debt", "message": "x", "color": "green"}}
+    open(out, "w", encoding="utf-8").write(json.dumps(payload))
+    sys.exit(0)
+if command == "pr-comment":
+    sys.exit(int(os.environ.get("SHIM_COMMENT_EXIT", "0")))
+from agent_trace.cli import main
+sys.argv = ["agent-strace"] + args
+main()
+"""
+
+
 class TestAction(unittest.TestCase):
-    def test_composite_action_registers_review_step(self):
-        action = (Path(__file__).parents[1] / "action.yml").read_text()
-        for name in ("run-eval", "review", "review-fail-on", "review-min-confidence"):
+    def test_composite_action_wires_evidence_steps(self):
+        action = (ROOT / "action.yml").read_text()
+        for name in ("run-eval", "review", "review-fail-on", "review-min-confidence",
+                     "cognitive-debt"):
             self.assertIn(f"  {name}:\n", action)
-        self.assertIn("  review-passed:\n", action)
+        for name in ("passed", "summary-path", "review-passed", "review-result",
+                     "review-markdown-path", "review-json-path", "evidence-packet-path",
+                     "cognitive-debt-json-path", "cognitive-debt-badge-path",
+                     "cognitive-debt-status", "cognitive-debt-result", "artifacts-dir",
+                     "evidence-artifact-url"):
+            self.assertIn(f"  {name}:\n", action)
         self.assertIn("if: ${{ inputs.run-eval == 'true' }}", action)
         self.assertIn("inputs.post-pr-comment == 'true' && inputs.review != 'true'", action)
-        self.assertIn("if: ${{ always() && inputs.review == 'true' }}", action)
-        self.assertIn('pr-comment --review "${ARGS[@]}" || status=$?', action)
-        self.assertIn('review --format markdown "${ARGS[@]}" >> "$GITHUB_STEP_SUMMARY"', action)
-        self.assertIn('exit "$status"', action)
+        self.assertEqual(action.count("if: ${{ always() && inputs.review == 'true' }}"), 2)
+        self.assertEqual(action.count("always() && inputs.review == 'true' && "), 2)
+        self.assertIn('bash "$GITHUB_ACTION_PATH/scripts/pr-evidence.sh" prepare', action)
+        self.assertIn('bash "$GITHUB_ACTION_PATH/scripts/pr-evidence.sh" check', action)
+        self.assertIn("name: agent-trace-pr-evidence", action)
+        self.assertIn("name: agent-trace-pr-review", action)
+        self.assertIn("ARTIFACT_URL: ${{ steps.upload-evidence.outputs.artifact-url }}", action)
+        self.assertEqual(action.count("continue-on-error: true"), 2)
+        self.assertNotIn("--include-content", action)
         self.assertNotIn("\u2014", action)
+        # Inputs reach the shell only through env, never inline in run blocks.
+        for block in action.split("run: ")[1:]:
+            body = block.split("\n    - name:")[0]
+            self.assertNotIn("${{ inputs.review-fail-on }}", body.split("env:")[0])
+        script = SCRIPT.read_text()
+        self.assertNotIn("eval ", script)
+        self.assertNotIn("\u2014", script)
+
+
+@unittest.skipUnless(shutil.which("bash"), "bash is required")
+class TestActionScript(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.work = root / "work dir"
+        self.work.mkdir()
+        self.trace_dir = self.work / "agent traces"
+        self.store = TraceStore(str(self.trace_dir))
+        self.out_dir = root / "runner temp" / "agent-trace-pr-evidence"
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        shim = bin_dir / "agent-strace"
+        shim.write_text(_SHIM.format(python=sys.executable, src=str(ROOT / "src")))
+        shim.chmod(0o755)
+        self.log = root / "calls.log"
+        self.output = root / "github_output"
+        self.summary = root / "summary.md"
+        self.env = {
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+            "HOME": self.tmp.name,
+            "TMPDIR": self.tmp.name,
+            "SHIM_LOG": str(self.log),
+            "GITHUB_OUTPUT": str(self.output),
+            "GITHUB_STEP_SUMMARY": str(self.summary),
+            "GITHUB_HEAD_REF": BRANCH,
+            "AGENT_TRACE_DIR": str(self.trace_dir),
+            "PR_EVIDENCE_DIR": str(self.out_dir),
+        }
+
+    def run_script(self, mode: str, **env) -> subprocess.CompletedProcess:
+        self.output.write_text("")
+        merged = dict(self.env)
+        merged.update(env)
+        return subprocess.run(
+            ["bash", str(SCRIPT), mode], cwd=self.work, env=merged,
+            capture_output=True, text=True, timeout=120,
+        )
+
+    def outputs(self) -> dict[str, str]:
+        pairs = [line.split("=", 1) for line in self.output.read_text().splitlines() if line]
+        return dict(pairs)
+
+    def calls(self, command: str) -> list[list[str]]:
+        if not self.log.exists():
+            return []
+        rows = [json.loads(line) for line in self.log.read_text().splitlines()]
+        return [row for row in rows if command in row]
+
+    def test_full_flow_with_spaces_and_unknown_cognitive_status(self):
+        _good_session(self.store)
+        prepared = self.run_script("prepare")
+        self.assertEqual(prepared.returncode, 0, prepared.stderr + prepared.stdout)
+        out = self.outputs()
+        self.assertEqual(out["session-id"], "good0001aaaa")
+        packet = Path(out["evidence-packet-path"])
+        self.assertEqual(packet, self.out_dir / "evidence-packet.html")
+        self.assertTrue(packet.is_file())
+        self.assertNotIn("zebra-quartz-77", packet.read_text())
+        self.assertNotIn("--include-content", json.dumps(self.calls("share")))
+        self.assertEqual(Path(out["cognitive-debt-json-path"]).name, "cognitive-debt.json")
+        self.assertEqual(Path(out["cognitive-debt-badge-path"]).name, "cognitive-debt-badge.json")
+        self.assertEqual(out["artifacts-dir"], str(self.out_dir))
+
+        checked = self.run_script("check")
+        self.assertEqual(checked.returncode, 0, checked.stderr + checked.stdout)
+        out = self.outputs()
+        self.assertEqual(out["review-result"], "pass")
+        self.assertEqual(out["passed"], "true")
+        self.assertEqual(out["cognitive-debt-status"], "unknown")
+        self.assertEqual(out["cognitive-debt-result"], "unavailable")
+        report = json.loads(Path(out["review-json-path"]).read_text())
+        self.assertEqual(report["artifacts"]["evidence_packet"]["state"], "local")
+        self.assertIsNone(report["artifacts"]["url"])
+        markdown = Path(out["review-markdown-path"]).read_text()
+        self.assertIn("`evidence-packet.html` (local file, not uploaded)", markdown)
+        self.assertIn("Unavailable, not a pass. (report only)", markdown)
+        self.assertNotIn("zebra-quartz-77", markdown)
+        self.assertEqual(self.summary.read_text(), markdown)
+        self.assertEqual(self.calls("pr-comment"), [])
+
+        url = "https://github.com/o/r/actions/runs/1/artifacts/2"
+        self.run_script("check", ARTIFACT_URL=url)
+        markdown = Path(self.outputs()["review-markdown-path"]).read_text()
+        self.assertIn(f"`evidence-packet.html` in the [workflow artifact]({url})", markdown)
+        self.run_script("check", ARTIFACT_URL="javascript:alert(1)")
+        self.assertNotIn("javascript", Path(self.outputs()["review-markdown-path"]).read_text())
+
+    def test_unknown_cognitive_status_fails_check_mode(self):
+        _good_session(self.store)
+        for status, code, result in (("unknown", 1, "unavailable"), ("above_threshold", 1, "fail"),
+                                     ("partial", 0, "pass"), ("clean", 0, "pass")):
+            with self.subTest(status=status):
+                env = {"SHIM_COGNITIVE_STATUS": status, "COGNITIVE_DEBT_MODE": "check"}
+                self.assertEqual(self.run_script("prepare", **env).returncode, 0)
+                checked = self.run_script("check", **env)
+                self.assertEqual(checked.returncode, code, checked.stderr)
+                out = self.outputs()
+                self.assertEqual(out["review-result"], "pass" if code == 0 else "fail")
+                self.assertEqual(out["cognitive-debt-status"], status)
+                self.assertEqual(out["cognitive-debt-result"], result)
+                report = json.loads(Path(out["review-json-path"]).read_text())
+                self.assertEqual(report["review_result"], "pass")
+                self.assertEqual(report["artifacts"]["cognitive_debt"]["fails_check"], code == 1)
+
+    def test_badge_color_is_not_read(self):
+        _good_session(self.store)
+        env = {"SHIM_COGNITIVE_STATUS": "unknown", "COGNITIVE_DEBT_MODE": "check"}
+        self.run_script("prepare", **env)
+        badge = self.out_dir / "cognitive-debt-badge.json"
+        self.assertEqual(json.loads(badge.read_text())["color"], "green")
+        self.assertEqual(self.run_script("check", **env).returncode, 1)
+
+    def test_packet_generation_failure(self):
+        _good_session(self.store)
+        prepared = self.run_script("prepare", SHIM_FAIL_SHARE="1")
+        self.assertEqual(prepared.returncode, 0)
+        self.assertIn("Evidence packet was not generated", prepared.stdout)
+        self.assertNotIn("evidence-packet-path", self.outputs())
+        self.assertFalse((self.out_dir / "evidence-packet.html").exists())
+        checked = self.run_script("check", ARTIFACT_URL="https://example.test/a")
+        self.assertEqual(checked.returncode, 0)
+        markdown = Path(self.outputs()["review-markdown-path"]).read_text()
+        self.assertIn("Evidence packet: not generated.", markdown)
+        self.assertNotIn("in the [workflow artifact]", markdown)
+
+    def test_cognitive_debt_false_skips_reports(self):
+        _good_session(self.store)
+        self.run_script("prepare", COGNITIVE_DEBT_MODE="false")
+        self.assertEqual(self.calls("cognitive-debt"), [])
+        self.assertNotIn("cognitive-debt-json-path", self.outputs())
+        self.run_script("check", COGNITIVE_DEBT_MODE="false")
+        out = self.outputs()
+        self.assertNotIn("cognitive-debt-result", out)
+        self.assertNotIn("cognitive_debt", Path(out["review-json-path"]).read_text())
+        bad = self.run_script("prepare", COGNITIVE_DEBT_MODE="maybe")
+        self.assertEqual(bad.returncode, 2)
+
+    def test_shell_values_are_not_executed(self):
+        _good_session(self.store)
+        marker = Path(self.tmp.name) / "pwned"
+        payload = f"$(touch {marker}); `touch {marker}`"
+        checked = self.run_script("check", REVIEW_FAIL_ON=payload, REVIEW_MIN_CONFIDENCE=payload)
+        self.assertEqual(checked.returncode, 2)
+        self.assertFalse(marker.exists())
+        self.assertEqual(self.outputs()["review-result"], "error")
+        self.assertEqual(self.outputs()["passed"], "false")
+        self.assertTrue(all(row.count(payload) == 2 for row in self.calls("review")))
+
+    def test_comment_posts_once_and_skips_forks(self):
+        _good_session(self.store)
+        base = {"REVIEW_POST_COMMENT": "true", "PR_BASE_REPOSITORY": "o/r"}
+        forked = self.run_script("check", PR_HEAD_REPOSITORY="fork/r", **base)
+        self.assertIn("Skipping PR comment for a fork", forked.stdout)
+        self.assertEqual(self.calls("pr-comment"), [])
+        self.assertEqual(self.run_script("check", PR_HEAD_REPOSITORY="o/r", **base).returncode, 0)
+        posted = self.calls("pr-comment")
+        self.assertEqual(len(posted), 1)
+        self.assertIn("--review", posted[0])
+        self.assertNotIn("--dry-run", posted[0])
+        failed = self.run_script("check", PR_HEAD_REPOSITORY="o/r", SHIM_COMMENT_EXIT="1", **base)
+        self.assertEqual(failed.returncode, 1)
+        self.assertIn("PR comment was not posted", failed.stdout)
+
+    def test_no_sessions(self):
+        prepared = self.run_script("prepare")
+        self.assertEqual(prepared.returncode, 0)
+        self.assertEqual(self.outputs()["session-id"], "")
+        checked = self.run_script("check", REVIEW_FAIL_ON="none")
+        self.assertEqual(checked.returncode, 0)
+        out = self.outputs()
+        self.assertEqual(out["cognitive-debt-result"], "unavailable")
+        self.assertIn("Evidence packet: not generated.",
+                      Path(out["review-markdown-path"]).read_text())
 
 
 if __name__ == "__main__":
