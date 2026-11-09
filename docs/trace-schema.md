@@ -47,7 +47,7 @@ The validator uses the packaged JSON Schemas for record shape, then reuses the b
 | Parent links | Tool and LLM outcomes use the existing evidence-health request relationships; other parent links must name an earlier event. LLM results with no `parent_id` are a declared gap, not orphans, when the hook provider's [capture matrix](capture-matrix.md) entry lists them in `results_without_requests` |
 | Ordering | Timestamps do not decrease, and outcomes or children do not precede their parent |
 | Terminal outcomes | Finalized tool and LLM requests have one recorded result or terminal error |
-| Session boundaries | A finalized trace has valid start and end boundaries |
+| Session boundaries | A finalized trace has valid start and end boundaries. Events before the first start are invalid unless the hook provider's [capture matrix](capture-matrix.md) entry lists every one of their types in `events_before_start` |
 | Hash chain | The existing byte-level `prev_hash` rule is checked without changing legacy records |
 | Metadata summaries | Explicit tool-call, LLM-request, and error counts must equal observed events |
 | Usage presence | Missing `total_tokens` means unreported; explicit `0` means reported zero |
@@ -71,8 +71,8 @@ JSON key order and whitespace affect line hashes. A producer that intentionally 
 
 `valid` means the trace conforms to the independent rules. `partial` means the records are parseable but evidence is incomplete or has a non-fatal relationship gap. `invalid` means shape, identity, uniqueness, ordering, integrity, summary, or replay checks failed.
 
-Findings have severity `error`, `warning` or `info`. Any `error` makes the report `invalid`, and any `warning` makes it `partial`. An `info` finding records a gap the provider's capture metadata declares, such as `declared_results_without_requests`, and does not change the status.
+Findings have severity `error`, `warning` or `info`. Any `error` makes the report `invalid`, and any `warning` makes it `partial`. An `info` finding records a gap the provider's capture metadata declares, such as `declared_events_before_session_start` or `declared_results_without_requests`, and does not change the status.
 
-Labels are stable machine-readable facts used by the conformance corpus. Examples include `legacy`, `current`, `missing_outcome`, `terminal_absent`, `tampered`, `redacted`, `recovered`, `summary_contradiction`, `usage_missing`, `usage_zero`, `declared_results_without_requests`, and `replay_drift`.
+Labels are stable machine-readable facts used by the conformance corpus. Examples include `legacy`, `current`, `missing_outcome`, `terminal_absent`, `tampered`, `redacted`, `recovered`, `summary_contradiction`, `usage_missing`, `usage_zero`, `declared_events_before_session_start`, `declared_results_without_requests`, and `replay_drift`.
 
 The validator reports evidence consistency. It does not prove that the agent completed the user task, that a provider exposed every action, or that an unsigned trace is authentic.

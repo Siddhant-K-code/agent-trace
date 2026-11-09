@@ -6,7 +6,7 @@ import json
 import os
 import tempfile
 import unittest
-from dataclasses import fields
+from dataclasses import fields, replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -15,7 +15,9 @@ import agent_trace
 from agent_trace.assignment import MAX_JSON_BYTES
 from agent_trace.cli import build_parser
 from agent_trace.freeze import RegressionFixture, extract_steps
+from agent_trace.health import load_capture_matrix
 from agent_trace.models import EventType, SessionMeta, TraceEvent
+from agent_trace.store import TraceStore
 from agent_trace.validation import (
     CORPUS_SCHEMA,
     TRACE_SCHEMA_VERSION,
@@ -229,6 +231,118 @@ class TestAgentEvidenceCorpus(unittest.TestCase):
             report = validate_trace_directory(case, replay_baseline=baseline)
         self.assertEqual(report.status, "invalid")
         self.assertIn("replay_baseline_invalid", report.labels)
+
+
+class TestDeclaredEventsBeforeStart(unittest.TestCase):
+    """validate reads ``events_before_start`` for the hook provider, as health does."""
+
+    SESSION = "pre-start-0001"
+
+    def validate(self, pre_start, *, provider="copilot", agent_name="github-copilot"):
+        """Write ``pre_start`` events, a session start, then an end; validate it."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        # Resolve the temp dir: validate refuses symlinked components such as
+        # macOS's /var.
+        root = Path(tmp.name).resolve()
+        store = TraceStore(root, use_workspace_env=False, redact=False)
+        store.create_session(SessionMeta(session_id=self.SESSION, agent_name=agent_name))
+        start_data = (
+            {"mode": f"{agent_name}-hooks", "provider": provider, "source": "new"}
+            if provider
+            else {}
+        )
+        for event_type in pre_start:
+            store.append_event(
+                self.SESSION,
+                TraceEvent(event_type=event_type, session_id=self.SESSION),
+            )
+        for event_type, data in (
+            (EventType.SESSION_START, start_data),
+            (EventType.SESSION_END, {}),
+        ):
+            store.append_event(
+                self.SESSION,
+                TraceEvent(event_type=event_type, session_id=self.SESSION, data=data),
+            )
+        return validate_trace_directory(root / self.SESSION)
+
+    @staticmethod
+    def findings(report):
+        return [(finding.code, finding.severity) for finding in report.findings]
+
+    def assert_undeclared(self, report):
+        self.assertEqual(report.status, "invalid")
+        self.assertEqual(report.exit_code, 1)
+        self.assertEqual(self.findings(report), [("events_before_session_start", "error")])
+        self.assertNotIn("declared_events_before_session_start", report.labels)
+
+    def test_declared_pre_start_type_is_an_info_finding(self):
+        self.assertEqual(
+            load_capture_matrix().entry("copilot")["events_before_start"], ["user_prompt"]
+        )
+        report = self.validate([EventType.USER_PROMPT])
+
+        self.assertEqual(report.status, "valid")
+        self.assertEqual(report.exit_code, 0)
+        self.assertEqual(
+            self.findings(report), [("declared_events_before_session_start", "info")]
+        )
+        self.assertIn("user_prompt events were recorded", report.findings[0].message)
+        self.assertIn("declared_events_before_session_start", report.labels)
+        self.assertIn("conformant", report.labels)
+        self.assertIn("complete", report.labels)
+        self.assertNotEqual(report.evidence_health["status"], "invalid")
+
+    def test_undeclared_pre_start_type_stays_invalid(self):
+        for pre_start in (
+            [EventType.FILE_READ],
+            [EventType.USER_PROMPT, EventType.FILE_READ],
+        ):
+            with self.subTest(pre_start=[t.value for t in pre_start]):
+                self.assert_undeclared(self.validate(pre_start))
+
+    def test_provider_without_the_declaration_stays_invalid(self):
+        self.assertNotIn("events_before_start", load_capture_matrix().entry("claude"))
+        self.assert_undeclared(
+            self.validate([EventType.USER_PROMPT], provider="claude", agent_name="claude-code")
+        )
+
+    def test_any_provider_entry_can_declare_the_order(self):
+        matrix = load_capture_matrix()
+        declared = replace(
+            matrix,
+            providers=tuple(
+                {**entry, "events_before_start": ["user_prompt"]}
+                if entry["id"] == "claude"
+                else entry
+                for entry in matrix.providers
+            ),
+        )
+        with patch("agent_trace.validation.load_capture_matrix", return_value=declared):
+            report = self.validate(
+                [EventType.USER_PROMPT], provider="claude", agent_name="claude-code"
+            )
+
+        self.assertEqual(report.status, "valid")
+        self.assertEqual(
+            self.findings(report), [("declared_events_before_session_start", "info")]
+        )
+
+    def test_trace_without_hook_provider_is_unchanged(self):
+        # The agent name alone, as set by record --name, the SDK or an
+        # importer, does not identify a hook provider.
+        for agent_name in ("sdk", "github-copilot"):
+            with self.subTest(agent_name=agent_name):
+                self.assert_undeclared(
+                    self.validate([EventType.USER_PROMPT], provider="", agent_name=agent_name)
+                )
+
+    def test_matrix_load_failure_declares_nothing(self):
+        for error in (OSError("unreadable"), ValueError("malformed")):
+            with self.subTest(error=type(error).__name__):
+                with patch("agent_trace.validation.load_capture_matrix", side_effect=error):
+                    self.assert_undeclared(self.validate([EventType.USER_PROMPT]))
 
 
 class TestValidationCli(unittest.TestCase):
