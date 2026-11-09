@@ -1,5 +1,6 @@
 """Tests for HTTP/SSE MCP proxy."""
 
+import hashlib
 import http.client
 import json
 import os
@@ -8,7 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -524,6 +525,212 @@ class TestHTTPProxyPendingCalls(unittest.TestCase):
         self.assertEqual(created[0].pending_calls, {})
         event_types = [e.event_type for e in store.load_events(meta.session_id)]
         self.assertEqual(event_types[-1], EventType.SESSION_END)
+
+
+class StreamingMCPHandler(FakeMCPHandler):
+    """Fake MCP server whose SSE stream stays open until released."""
+
+    release = threading.Event()
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        notification = json.dumps({
+            "jsonrpc": "2.0",
+            "method": "notifications/message",
+            "params": {"message": "stream open"},
+        })
+        self.wfile.write(f"data: {notification}\n\n".encode("utf-8"))
+        self.wfile.flush()
+        self.release.wait(10)
+
+
+class _ThreadingFakeServer(ThreadingHTTPServer):
+    daemon_threads = True
+    request_queue_size = 128
+
+
+def _open_sse(port):
+    """Open GET /sse through the proxy and read up to the first data line."""
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", "/sse", headers={"Accept": "text/event-stream"})
+    resp = conn.getresponse()
+    while True:
+        line = resp.readline()
+        if not line or line.startswith(b"data: "):
+            break
+    return conn, resp, line
+
+
+class TestHTTPProxyConcurrency(unittest.TestCase):
+    """An open SSE stream must not block POSTs or shutdown."""
+
+    @classmethod
+    def setUpClass(cls):
+        StreamingMCPHandler.release.clear()
+        cls.fake_server = _ThreadingFakeServer(("127.0.0.1", 0), StreamingMCPHandler)
+        cls.fake_port = cls.fake_server.server_address[1]
+        threading.Thread(target=cls.fake_server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        StreamingMCPHandler.release.set()
+        cls.fake_server.shutdown()
+        cls.fake_server.server_close()
+
+    def _make_proxy(self):
+        store = TraceStore(tempfile.mkdtemp())
+        meta = SessionMeta(command="test", agent_name="test-agent")
+        store.create_session(meta)
+        events = []
+        proxy = HTTPProxyServer(
+            remote_url=f"http://127.0.0.1:{self.fake_port}",
+            local_port=_find_free_port(),
+            store=store,
+            session_meta=meta,
+            on_event=events.append,
+        )
+        return proxy, events
+
+    def _start_proxy(self):
+        proxy, events = self._make_proxy()
+        server = proxy.make_server()
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        def stop():
+            server.shutdown()
+            server.server_close()
+
+        self.addCleanup(stop)
+        return server, events
+
+    def test_post_completes_while_sse_stream_open(self):
+        server, events = self._start_proxy()
+        port = server.server_address[1]
+        conn, _resp, line = _open_sse(port)
+        self.addCleanup(conn.close)
+        self.assertTrue(line.startswith(b"data: "))
+
+        result = {}
+
+        def post():
+            result["status"] = _post_tool_call(port, 42, "while_streaming")
+
+        poster = threading.Thread(target=post, daemon=True)
+        poster.start()
+        poster.join(timeout=5)
+
+        self.assertFalse(poster.is_alive(), "POST blocked by open SSE stream")
+        self.assertEqual(result.get("status"), 200)
+        calls = [e for e in events if e.event_type == EventType.TOOL_CALL]
+        results = [e for e in events if e.event_type == EventType.TOOL_RESULT]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].parent_id, calls[0].event_id)
+        # the stream is still being served
+        self.assertEqual(server._active_requests, 1)
+
+    def test_server_close_ends_open_stream(self):
+        server, events = self._start_proxy()
+        conn, resp, line = _open_sse(server.server_address[1])
+        self.addCleanup(conn.close)
+        self.assertTrue(line.startswith(b"data: "))
+
+        start = time.monotonic()
+        server.shutdown()
+        server.server_close()
+        elapsed = time.monotonic() - start
+
+        # the fake upstream holds the stream for 10s; close must not wait for it
+        self.assertLess(elapsed, 3)
+        self.assertTrue(server.close_streams(timeout=0))
+        # the proxy closed the stream: read returns at EOF instead of timing out
+        self.assertEqual(resp.read().strip(), b"")
+        self.assertEqual(
+            [e for e in events if e.event_type == EventType.ERROR], []
+        )
+
+    def test_run_records_session_end_last_with_open_stream(self):
+        proxy, _events = self._make_proxy()
+        created = []
+        real_make_server = proxy.make_server
+
+        def make_server():
+            server = real_make_server()
+            created.append(server)
+            return server
+
+        proxy.make_server = make_server
+        thread = threading.Thread(target=proxy.run, daemon=True)
+        thread.start()
+        for _ in range(100):
+            if created:
+                break
+            time.sleep(0.01)
+        conn, _resp, line = _open_sse(proxy.local_port)
+        self.addCleanup(conn.close)
+        self.assertTrue(line.startswith(b"data: "))
+
+        created[0].shutdown()
+        thread.join(timeout=5)
+
+        self.assertFalse(thread.is_alive())
+        event_types = [e.event_type for e in proxy.store.load_events(proxy.meta.session_id)]
+        self.assertEqual(event_types[0], EventType.SESSION_START)
+        self.assertEqual(event_types[-1], EventType.SESSION_END)
+        self.assertEqual(event_types.count(EventType.SESSION_END), 1)
+        self.assertNotIn(EventType.ERROR, event_types)
+
+    def test_concurrent_posts_keep_store_and_counts_consistent(self):
+        server, events = self._start_proxy()
+        port = server.server_address[1]
+        statuses = []
+        workers = [
+            threading.Thread(
+                target=lambda i=i: statuses.append(_post_tool_call(port, i, f"tool_{i}")),
+                daemon=True,
+            )
+            for i in range(20)
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=10)
+
+        self.assertEqual(statuses, [200] * 20)
+        self.assertEqual(server.meta.tool_calls, 20)
+        self.assertEqual(len(events), 40)
+        self.assertEqual(server.pending_calls, {})
+
+        results = [e for e in events if e.event_type == EventType.TOOL_RESULT]
+        calls = {e.event_id: e for e in events if e.event_type == EventType.TOOL_CALL}
+        for result in results:
+            self.assertEqual(
+                calls[result.parent_id].data["request_id"], result.data["request_id"]
+            )
+
+        path = os.path.join(
+            server.store.base_dir, server.meta.session_id, "events.ndjson"
+        )
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+        self.assertEqual(len(lines), 40)
+        for previous, line in zip(lines, lines[1:]):
+            self.assertEqual(
+                json.loads(line)["prev_hash"],
+                hashlib.sha256(previous.encode()).hexdigest(),
+            )
+
+    def test_events_after_close_are_dropped(self):
+        server, events = self._start_proxy()
+        server.shutdown()
+        server.server_close()
+        server.emit(TraceEvent(event_type=EventType.TOOL_CALL, data={"request_id": 1}))
+        self.assertEqual(events, [])
+        self.assertEqual(server.meta.tool_calls, 0)
+        self.assertEqual(server.store.load_events(server.meta.session_id), [])
 
 
 if __name__ == "__main__":
