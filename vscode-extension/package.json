@@ -157,7 +157,7 @@
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
-    "test": "npm run compile && node --test out/telemetryCore.test.js",
+    "test": "npm run compile && node --test out/telemetryCore.test.js out/eventTail.test.js",
     "watch": "tsc -watch -p ./",
     "lint": "eslint src --ext ts"
   },
