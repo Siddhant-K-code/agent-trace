@@ -1,8 +1,9 @@
-"""docs/commands.md must only document flags that the CLI parser accepts."""
+"""CLI docs must only document flags that the CLI parser accepts."""
 
 from __future__ import annotations
 
 import argparse
+import ast
 import re
 import unittest
 from pathlib import Path
@@ -15,7 +16,14 @@ from agent_trace.cli import (
     build_parser,
 )
 
-COMMANDS_MD = Path(__file__).resolve().parent.parent / "docs" / "commands.md"
+REPO_ROOT = Path(__file__).resolve().parent.parent
+COMMANDS_MD = REPO_ROOT / "docs" / "commands.md"
+OTHER_DOCS = (
+    "docs/agents-md-integration.md",
+    "docs/security.md",
+    "docs/server.md",
+)
+DOCSTRING_MODULES = ("a2a.py", "iac.py", "mcp_server.py", "standup.py")
 
 _HEADING = re.compile(r"^###\s+`([^`]+)`")
 _FLAG = re.compile(r"(?<![\w-])(--?[A-Za-z][\w-]*)")
@@ -138,11 +146,34 @@ def find_mismatches(markdown: str) -> tuple[list[str], int]:
     return problems, checked
 
 
+def _docstring_usage(path: Path) -> str:
+    """Return the ``agent-strace`` lines of a module docstring as a code block."""
+    doc = ast.get_docstring(ast.parse(path.read_text(encoding="utf-8"))) or ""
+    lines = [line for line in doc.splitlines() if "agent-strace " in line]
+    return "\n".join(["```", *lines, "```"])
+
+
 class CommandsDocFlagsTest(unittest.TestCase):
     def test_commands_md_flags_exist_in_parser(self):
         problems, checked = find_mismatches(COMMANDS_MD.read_text(encoding="utf-8"))
         self.assertGreater(checked, 200)
         self.assertEqual(problems, [], "\n" + "\n".join(problems))
+
+    def test_other_docs_flags_exist_in_parser(self):
+        for name in OTHER_DOCS:
+            with self.subTest(doc=name):
+                text = (REPO_ROOT / name).read_text(encoding="utf-8")
+                problems, checked = find_mismatches(text)
+                self.assertGreater(checked, 0)
+                self.assertEqual(problems, [], "\n" + "\n".join(problems))
+
+    def test_module_docstring_flags_exist_in_parser(self):
+        for name in DOCSTRING_MODULES:
+            with self.subTest(module=name):
+                usage = _docstring_usage(REPO_ROOT / "src" / "agent_trace" / name)
+                self.assertIn("agent-strace ", usage)
+                problems, _ = find_mismatches(usage)
+                self.assertEqual(problems, [], "\n" + "\n".join(problems))
 
     def test_checker_reports_unknown_flags_and_choices(self):
         markdown = "\n".join([

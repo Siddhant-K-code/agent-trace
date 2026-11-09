@@ -5,17 +5,18 @@ configuration to a local store or a hosted collector via HTTP.
 
 Supported config sections:
     workspaces:   list of workspace IDs to create
-    policies:     named policy files to register (path on disk)
     identities:   agent identities (name, team, workspace)
     team_budgets: team spending limits
     rbac:         role assignments
 
 CLI:
-    agent-strace apply [--config .agent-strace.yaml] [--server URL] [--dry-run]
-    agent-strace config-diff [--config .agent-strace.yaml] [--server URL]
+    agent-strace apply [--config FILE] [--server URL] [--auth-key KEY] [--dry-run] [--dir DIR]
+    agent-strace config-diff [--config FILE] [--dir DIR]
 
 When ``--server`` is omitted the config is applied to the local store only
-(workspaces and RBAC are written to disk; policies are validated).
+(workspaces, RBAC, identities and team budgets are written to disk). With
+``--server`` only workspaces and RBAC are pushed to the collector.
+``config-diff`` compares workspaces and RBAC against the local store.
 
 Example ``.agent-strace.yaml``:
 

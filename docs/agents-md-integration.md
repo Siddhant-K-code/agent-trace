@@ -10,64 +10,99 @@ See the [AGENTS.md specification](https://docs.anthropic.com/en/docs/claude-code
 
 ## How agent-strace reads AGENTS.md
 
-agent-strace uses `AGENTS.md` as a **behavioral baseline anchor**. When a session starts, it records the current `AGENTS.md` hash alongside the session metadata. This lets it detect when agent behavior changes after an `AGENTS.md` edit — distinguishing intentional config changes from unexpected drift.
+agent-strace does not record an `AGENTS.md` hash when a session starts. It reads `AGENTS.md` only when you run one of these commands:
 
-Specifically, agent-strace reads:
-
-| Field | How it's used |
+| Command | What it does with `AGENTS.md` |
 |---|---|
-| Tool permissions (`allowed_tools`, `disallowed_tools`) | Checked against actual tool calls in `agent-strace audit` |
-| File path constraints (`read_only_paths`, `write_paths`) | Checked in `agent-strace audit --policy` |
-| Model hints (`model`) | Compared against `LLM_REQUEST` events in drift detection |
-| Any free-text constraints | Indexed for `agent-strace optimize` suggestions |
+| `agent-strace config-watch snapshot` | Records SHA-256 hashes of `AGENTS.md` and the other tracked config files. `config-watch check` exits 1 if any of them changed since the last snapshot; `config-watch affected` lists sessions that ran after a change |
+| `agent-strace context-score` | Groups sessions by `AGENTS.md` version (from `config-watch` snapshots) and compares cost, tool calls, lint findings and scope violations per version |
+| `agent-strace postmortem --agents-md AGENTS.md` | Flags shell commands that contradict a "use X, not Y", "never use Y" or "do not use Y" line |
+| `agent-strace optimize --target AGENTS.md` | Proposes additions to `AGENTS.md` from trace failures |
+| `agent-strace freshness` | Reads file globs listed under a scope heading (a line ending in `:` that mentions scope, files, include or watch) in `CLAUDE.md` or `AGENTS.md` |
+
+agent-strace does not parse tool permissions, path constraints or model hints from `AGENTS.md`. To enforce tool and path rules, write a JSON scope policy and check sessions with `agent-strace audit` (see [Checking sessions against rules](#checking-sessions-against-rules)).
 
 ---
 
 ## Change detection
 
-`agent-strace drift` computes a behavioral fingerprint for each session (tool mix, error rate, retry rate, blast radius) and compares it against a saved baseline. When `AGENTS.md` changes, the baseline should be updated so drift is measured from the new intended behavior, not the old one.
+`config-watch` tells you when `AGENTS.md` changed. Nothing takes a snapshot automatically, so take one after each edit:
 
 ```bash
-# Check for behavioral drift since the last baseline
-agent-strace drift
+# Hash AGENTS.md and the other tracked config files
+agent-strace config-watch snapshot
 
-# Check drift specifically after an AGENTS.md edit
-agent-strace drift --baseline .agent-strace/baseline.json
+# Exit 1 if a tracked file changed since the last snapshot
+agent-strace config-watch check
+
+# List sessions that ran after a config change
+agent-strace config-watch affected --since 7d
 ```
 
-The drift report shows which dimensions changed and by how much:
+`agent-strace drift` measures whether behavior changed. It computes a behavioral fingerprint for a set of sessions (tool mix, error rate, retry rate, tool calls, cost, blast radius, session duration, decision depth) and compares two sets. It does not read `AGENTS.md`.
+
+Pass `--since Nd` or `--current START:END`; without either, `drift` exits 1. With `--since`, drift takes the sessions from the last N days and splits them in half: the newer half is compared against the older half, or against `--baseline FILE` when given.
+
+```bash
+# Compare the newer half of the last 14 days with the older half
+agent-strace drift --since 14d
+
+# Compare the newer half of the last 7 days with a saved baseline
+agent-strace drift --since 7d --baseline .agent-strace/baseline.json
+```
+
+The drift report shows an overall score and a score for each dimension (trimmed):
 
 ```
 Behavioral drift report
-=======================
-Baseline: .agent-strace/baseline.json (saved 2026-05-01)
-Sessions compared: 12
+Baseline: 2026-10-30 to 2026-11-01 (6 sessions)
+Current:  2026-11-06 to 2026-11-07 (6 sessions)
+──────────────────────────────────────────────────────────────────────
+Overall drift score: 0.40  ❌  HIGH  (threshold: 0.20)
 
-  error_rate     0.04 → 0.12  ▲ +200%  ⚠ DRIFT
-  retry_rate     0.08 → 0.09  ▲  +12%  OK
-  blast_radius   3.2  → 3.1   ▼   -3%  OK
-  tool_mix       0.91 similarity        OK
+  Dimension               Score  Status
+──────────────────────────────────────────────────────────────────────
+  tool_mix                0.462  ❌  high
+  error_rate              1.000  ❌  high
+  retry_rate              0.650  ❌  high
+  tool_calls              0.286  ❌  high
+  cost_usd                0.274  ❌  high
+  blast_radius            0.000  ✅  stable
+  session_duration_s      0.438  ❌  high
+  decision_depth          0.000  ✅  stable
 
-Verdict: DRIFT DETECTED — error_rate increased significantly.
-Run `agent-strace explain` on recent sessions to investigate.
+High-drift dimensions:
+
+  tool_mix (0.46):
+    Baseline: Read=40%, Grep=20%, Edit=20%
+    Current:  Bash=86%, Edit=14%
+
+  error_rate (1.00):
+    Baseline: mean=0.00 p50=0.00 p95=0.00
+    Current:  mean=0.29 p50=0.29 p95=0.29
+  ...
 ```
+
+`drift` exits 1 when the overall score is at or above `--threshold` (default 0.20).
 
 ---
 
 ## Baseline anchoring
 
-After updating `AGENTS.md`, save a new baseline so future drift is measured from the new intended behavior:
+After updating `AGENTS.md` and running a few sessions with it, save a new baseline so future drift is measured from the new intended behavior:
 
 ```bash
 # Save a baseline after an AGENTS.md update
-agent-strace drift --save-baseline .agent-strace/baseline.json
+agent-strace drift --since 7d --save-baseline .agent-strace/baseline.json
 
 # Tag it for traceability
 git add .agent-strace/baseline.json
 git commit -m "chore: update behavioral baseline after AGENTS.md change"
 ```
 
-The baseline file is a small JSON document (< 1 KB) that records the statistical distribution of behavioral metrics across recent sessions. It is safe to commit.
+`--save-baseline` writes the fingerprint of the current window and exits 0 without comparing. With `--since`, that is the newer half of the sessions in the window, so pick N so that the newer half covers only sessions run after the edit.
+
+The baseline file is a small JSON document with per-dimension statistics (tool mix, means and percentiles) and no event content. It is safe to commit.
 
 ---
 
@@ -94,21 +129,28 @@ jobs:
       - name: Install agent-strace
         run: pip install agent-strace
 
+      # .agent-traces/ is not committed. Restore the recorded sessions here
+      # (for example from an artifact) before the checks below.
+
       - name: Check behavioral drift
         run: |
           agent-strace drift \
-            --baseline .agent-strace/baseline.json \
-            --save-baseline /tmp/new-baseline.json
-          # Fails with exit code 1 if drift exceeds threshold
+            --since 7d \
+            --baseline .agent-strace/baseline.json
+          # Fails with exit code 1 if the drift score reaches the threshold
 
       - name: Run eval CI gate
         run: |
           agent-strace eval ci \
             --baseline .agent-strace/eval-baseline.json \
-            --tolerance 1
+            --tolerance 0.05
 ```
 
-The `drift` command exits non-zero when any dimension exceeds its threshold, making it suitable as a CI gate.
+`drift` exits 1 when the overall drift score is at or above `--threshold` (default 0.20). Do not add `--save-baseline` to the gate: it saves and exits 0 without comparing.
+
+`eval ci` scores the latest session with the scorers in `.agent-evals.yaml` and exits 1 if any scorer fails or any score drops more than `--tolerance` below the baseline. Scores run from 0 to 1, so `--tolerance 0.05` allows a 0.05 drop. Create the baseline with `agent-strace eval ci --save-baseline .agent-strace/eval-baseline.json`.
+
+Both steps need the recorded sessions. `.agent-traces/` git-ignores itself, so a fresh checkout has none: with a baseline file and no sessions in the window, `drift` reports high drift, and `eval ci` exits 1 with "No sessions found." Restore the store before these steps, or pass the global `--trace-dir` (before the subcommand) to point at it.
 
 ---
 
@@ -124,7 +166,7 @@ capture and analyse agent sessions.
 
 - Traces are stored in `.agent-traces/`, which git-ignores itself via `.agent-traces/.gitignore`
 - Run `agent-strace replay` after a session to review what happened
-- Run `agent-strace drift` to check for behavioral regression
+- Run `agent-strace drift --since 7d` to check for behavioral regression
 - Run `agent-strace retention clean --max-age-days 30` periodically to free disk space
 
 Do not delete `.agent-traces/` manually — use `agent-strace retention clean`.
@@ -132,16 +174,25 @@ Do not delete `.agent-traces/` manually — use `agent-strace retention clean`.
 
 ---
 
-## Detecting AGENTS.md drift
+## Checking sessions against rules
 
-`agent-strace drift` also detects when the agent's behavior diverges from what `AGENTS.md` specifies — for example, if the agent starts writing to paths that `AGENTS.md` marks as read-only, or calling tools that are listed as disallowed.
+`drift` does not compare sessions with `AGENTS.md`. Two commands check what an agent did against rules:
+
+- `postmortem --agents-md` reads `AGENTS.md` and flags shell commands that contradict a "use X, not Y", "never use Y" or "do not use Y" line. It is a heuristic for one session and only reports matches, under "AGENTS.md violations".
+- `audit` checks one session against a JSON scope policy (file read and write, command and network allow/deny lists), not against `AGENTS.md`. It exits 1 if any tool call is denied.
 
 ```bash
-# Audit the latest session against the current AGENTS.md policy
-agent-strace audit --policy AGENTS.md
+# Flag commands in the latest session that contradict AGENTS.md
+agent-strace postmortem --agents-md AGENTS.md
 
-# Check all sessions from the last 7 days
-agent-strace audit --policy AGENTS.md --since 7d
+# Generate a JSON policy from observed sessions, then edit it
+agent-strace policy generate --output .agent-scope.json
+
+# Audit the latest session against the policy (exit 1 on violations)
+agent-strace audit --policy .agent-scope.json
+
+# Report what the policy would block across the last 7 days
+agent-strace policy backtest --policy .agent-scope.json --days 7
 ```
 
 ---
@@ -150,10 +201,11 @@ agent-strace audit --policy AGENTS.md --since 7d
 
 ```
 1. Edit AGENTS.md
-2. Run a few test sessions with the agent
-3. agent-strace drift --save-baseline .agent-strace/baseline.json
-4. git commit -m "chore: update baseline after AGENTS.md change"
-5. CI gates on future drift automatically
+2. agent-strace config-watch snapshot
+3. Run a few test sessions with the agent
+4. agent-strace drift --since 7d --save-baseline .agent-strace/baseline.json
+5. git commit -m "chore: update baseline after AGENTS.md change"
+6. CI compares later sessions against the baseline (see CI integration)
 ```
 
-This closes the loop between "I updated the agent's instructions" and "I know the agent is actually following them."
+This links an instruction change to measured behavior: `config-watch` shows when `AGENTS.md` changed, `drift` shows whether behavior moved, and `postmortem --agents-md` flags commands that contradict it.

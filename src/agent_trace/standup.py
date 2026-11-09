@@ -7,7 +7,7 @@ later to generate a narrative summary.
 
 Usage:
     agent-strace standup
-    agent-strace standup --session <id>
+    agent-strace standup <session-id>
     agent-strace standup --no-llm
 """
 

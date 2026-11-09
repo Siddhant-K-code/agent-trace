@@ -4,7 +4,7 @@ Extends agent-trace to capture agent-to-agent calls as first-class events,
 with cross-agent trace correlation. Intercepts A2A HTTP calls via the
 existing proxy infrastructure and links sub-sessions via parent_session_id.
 
-New event type: a2a_call
+A2A calls are stored as tool_call events with ``event_subtype: a2a_call``:
   - agent_id: identifier of the called agent
   - task: the task description sent to the sub-agent
   - response: the sub-agent's response payload
@@ -13,7 +13,6 @@ New event type: a2a_call
   - cost_usd: estimated cost of the sub-agent call
 
 Usage:
-    agent-strace replay --session <id>   # renders A2A calls as nested sub-trees
     agent-strace a2a-tree <session-id>   # show the full agent call graph
 """
 

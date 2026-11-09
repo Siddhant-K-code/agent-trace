@@ -14,7 +14,7 @@ Tools exposed:
 
 Usage:
   agent-strace mcp                  # stdio transport (default)
-  agent-strace mcp --trace-dir DIR  # custom trace directory
+  agent-strace --trace-dir DIR mcp  # custom trace directory
 
 Client setup for Claude Code, Copilot CLI, Codex, and Gemini CLI: docs/mcp.md
 """

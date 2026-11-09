@@ -288,14 +288,14 @@ Each workspace is a separate directory under `<trace-dir>/workspaces/`. Commands
 
 ## Shadow AI detection
 
-Detect undeclared agent activity and Shadow MCP servers in any repo. No network calls, no API keys.
+Detect undeclared agent activity in any repo. No network calls, no API keys.
 
 ```bash
 agent-strace audit-tools
-agent-strace audit-tools --repo . --since "90 days ago" --approved cursor,copilot
+agent-strace audit-tools --repo . --since "90 days ago" --approved "Cursor,GitHub Copilot"
 ```
 
-Detected tools: Claude Code, Cursor, GitHub Copilot, Codex/ChatGPT, Windsurf, Aider, Gemini CLI. Identified via file signals (`.cursorrules`, `CLAUDE.md`, `.github/copilot-instructions.md`, etc.) and commit message patterns.
+Detected tools: Claude Code, Cursor, GitHub Copilot, Codex / ChatGPT, Windsurf, Aider. Identified via file signals (`.cursorrules`, `CLAUDE.md`, `.github/copilot-instructions.md`, etc.) and commit message patterns. `--approved` names must match these names (case-insensitive); any other detected tool is reported as unapproved.
 
 ---
 
