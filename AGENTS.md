@@ -52,7 +52,7 @@ The version lives in `src/agent_trace/__init__.py`. A release must also sync `pl
 
 The repo root is a legacy Copilot plugin (`plugin.json` with explicit `agents`, `skills`, `hooks`) and the Claude Code plugin (`.claude-plugin/`, `hooks/hooks.json`). `plugins/agent-strace/` is the Agent Plugins 1.0 copy for marketplaces that require it; its `skills/`, `com.github.copilot/agents/`, and `com.github.copilot/hooks/hooks.json` must match the root `skills/`, `agents/`, and `hooks.json` (tests compare them). Do not add `mcp.json`, `.mcp.json`, or `gemini-extension.json` at the root: see `docs/copilot-plugin.md`.
 
-After the PyPI publish for a release, publish the same version to the MCP Registry from the repo root: `mcp-publisher login github` (one-time device auth) then `mcp-publisher publish`. Only publish a version whose PyPI package already exists.
+MCP Registry publishing is automatic. The `mcp-registry` job in `.github/workflows/publish.yml` runs after the PyPI upload succeeds, waits until PyPI serves the version, logs in with `mcp-publisher login github-oidc`, and runs `mcp-publisher publish` from the release tag. It fails if `server.json` does not match the tag version and skips if the Registry already has that version. Manual fallback, from the repo root at the release tag: `mcp-publisher login github` (device auth) then `mcp-publisher publish`. Only publish a version whose PyPI package already exists.
 
 - New feature (new command, new flag, new integration): bump minor (`X.Y.Z` → `X.(Y+1).0`)
 - Bug fix or small improvement: bump patch (`X.Y.Z` → `X.Y.(Z+1)`)

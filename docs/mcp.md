@@ -2,7 +2,7 @@
 
 `agent-strace mcp` runs a local MCP server over stdio. It lets an agent query the sessions agent-strace has already recorded. It makes no network calls and does not write to the trace store: it opens the store read-only, so it does not create `.agent-traces/` or its `.gitignore`, and it leaves interrupted tag or delete journals for the next writing command to recover.
 
-Registry name: `io.github.Siddhant-K-code/agent-trace` (PyPI package `agent-strace`).
+Registry name: `io.github.Siddhant-K-code/agent-trace` (PyPI package `agent-strace`). See [MCP Registry publishing](#mcp-registry-publishing).
 
 ## Tools
 
@@ -86,4 +86,23 @@ gemini mcp add -s user agent-trace agent-strace mcp
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"health","arguments":{}}}' \
   | agent-strace mcp
+```
+
+## MCP Registry publishing
+
+Each core release publishes `server.json` to the [MCP Registry](https://registry.modelcontextprotocol.io) automatically. The `mcp-registry` job in `.github/workflows/publish.yml` runs after the PyPI upload succeeds and:
+
+1. Checks out the release tag and fails if `server.json` `version` or `packages[0].version` differs from the tag version.
+2. Skips the remaining steps if the Registry already lists that version, so reruns are safe.
+3. Waits up to 10 minutes for `https://pypi.org/pypi/agent-strace/<version>/json` to return 200.
+4. Installs a pinned `mcp-publisher` release and verifies its SHA-256.
+5. Runs `mcp-publisher login github-oidc`, then `mcp-publisher publish`.
+
+The Registry also checks that the PyPI README contains `<!-- mcp-name: io.github.Siddhant-K-code/agent-trace -->`.
+
+To retry, rerun the failed job or run `Publish to PyPI` manually with the existing `vX.Y.Z` tag. Manual fallback, from the repo root with the release tag checked out:
+
+```bash
+mcp-publisher login github
+mcp-publisher publish
 ```
