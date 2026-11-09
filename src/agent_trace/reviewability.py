@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence, TextIO
 
 from .approval import list_requests
+from .correlation import correlate_tool_events
 from .event_data import NonObjectEventDataError, require_object_event_data
 from .health import CaptureMatrix, assess_session, detect_provider, load_capture_matrix
 from .models import EventType, SessionMeta, TraceEvent
@@ -34,7 +35,6 @@ from .pr_comment import (
     current_branch,
     select_sessions_with_link,
 )
-from .project_budget import _parse_simple_yaml
 from .store import TraceStore
 
 SCHEMA_VERSION = 1
@@ -65,7 +65,9 @@ _SHELL_TOOLS = frozenset({
     "terminal", "run_command", "run_in_terminal", "powershell",
 })
 _EXIT_CODE_RE = re.compile(r"exit(?:ed with)?[ _]code['\"]?\s*[:=]?\s*(-?\d+)", re.IGNORECASE)
-_SEGMENT_SPLIT_RE = re.compile(r"&&|\|\||;|\|")
+_SEGMENT_SPLIT_RE = re.compile(r"&&|\|\||;|\||&")
+_SHELL_OPERATOR_CHARS = frozenset("();<>|&")
+_SUBSTITUTION_RE = re.compile(r"\$\(|`|<\(|>\(")
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _PERMISSION_MODE_RE = re.compile(r"^[A-Za-z][A-Za-z_-]{0,31}$")
 _PATH_PREVIEW = 5
@@ -249,19 +251,41 @@ class ReviewReport:
 # Threshold configuration
 # ---------------------------------------------------------------------------
 
-def _split_values(value: Any) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, (list, tuple)):
-        items = [str(item) for item in value]
+_NULL_SCALARS = frozenset({"", "null", "~"})
+_YAML_COMMENT_RE = re.compile(r"(^|\s)#.*$")
+_YAML_KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*)\s*:(.*)$")
+
+
+def _values(name: str, value: Any, *, allow_none: bool) -> list[str] | None:
+    """Return the items of a list setting, or None for the literal ``none``.
+
+    Accepts a comma-separated string or a list of strings. Null, empty, and
+    non-string values are rejected so a typo never disables the check.
+    """
+    if isinstance(value, str):
+        text = value.strip()
+        if allow_none and text.lower() == "none":
+            return None
+        items = [item.strip() for item in text.split(",")]
+    elif isinstance(value, (list, tuple)):
+        if not all(isinstance(item, str) for item in value):
+            raise ReviewConfigError(f"{name} list items must be strings")
+        items = [item.strip() for item in value]
+    elif value is None:
+        raise ReviewConfigError(f"{name} is empty; give a value" + (" or none" if allow_none else ""))
     else:
-        items = str(value).strip().strip("[]").split(",")
-    return [item.strip().strip("'\"").lower() for item in items if item.strip()]
+        raise ReviewConfigError(f"{name} must be a string or a list of strings")
+    if not items or any(not item for item in items):
+        raise ReviewConfigError(f"{name} has an empty value")
+    lowered = [item.lower() for item in items]
+    if "none" in lowered:
+        raise ReviewConfigError(f"{name}: none must be used alone, as a plain value")
+    return lowered
 
 
 def _parse_fail_on(value: Any) -> tuple[str, ...]:
-    values = _split_values(value)
-    if values == ["none"]:
+    values = _values("fail_on", value, allow_none=True)
+    if values is None:
         return ()
     for item in values:
         if item not in STATUSES or item == "present":
@@ -272,14 +296,14 @@ def _parse_fail_on(value: Any) -> tuple[str, ...]:
 
 
 def _parse_confidence(value: Any) -> str:
-    text = str(value).strip().lower()
+    text = value.strip().lower() if isinstance(value, str) else None
     if text not in CONFIDENCES:
         raise ReviewConfigError(f"invalid min_confidence {value!r}; use low, medium, or high")
     return text
 
 
 def _parse_findings(value: Any) -> tuple[str, ...]:
-    values = _split_values(value)
+    values = _values("findings", value, allow_none=False) or []
     for item in values:
         if item not in FINDINGS:
             raise ReviewConfigError(
@@ -288,20 +312,100 @@ def _parse_findings(value: Any) -> tuple[str, ...]:
     return tuple(name for name in FINDINGS if name in values)
 
 
+def _yaml_scalar(raw: str, where: str) -> Any:
+    text = raw.strip()
+    if text.lower() in _NULL_SCALARS:
+        return None
+    if text.startswith("[") or text.endswith("]"):
+        if not (text.startswith("[") and text.endswith("]")):
+            raise ReviewConfigError(f"{where}: unbalanced list")
+        inner = text[1:-1].strip()
+        if not inner:
+            return []
+        return [_yaml_scalar(item, where) for item in inner.split(",")]
+    if text[0] in "{&*!|>":
+        raise ReviewConfigError(f"{where}: unsupported YAML value {text!r}")
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
+        return text[1:-1]
+    if any(char in text for char in "[]{}\"'"):
+        raise ReviewConfigError(f"{where}: unsupported YAML value {text!r}")
+    return text
+
+
+def _parse_review_yaml(text: str, path: Path) -> dict[str, Any]:
+    """Parse the top-level ``review:`` block of a YAML file.
+
+    Supports ``key: value``, ``key: [a, b]``, and block lists of ``- item``.
+    Anything else inside the block raises, so the check fails closed.
+    """
+    lines = [
+        (number, _YAML_COMMENT_RE.sub("", raw).rstrip())
+        for number, raw in enumerate(text.splitlines(), start=1)
+    ]
+    block: list[tuple[int, str]] = []
+    inside = False
+    for number, line in lines:
+        if not line.strip():
+            continue
+        if not line[0].isspace():
+            if inside:
+                break
+            match = _YAML_KEY_RE.match(line)
+            if match and match.group(1) == "review":
+                if match.group(2).strip():
+                    raise ReviewConfigError(f"{path}:{number}: 'review' must be a block mapping")
+                inside = True
+            continue
+        if inside:
+            block.append((number, line))
+    if not inside:
+        return {}
+
+    result: dict[str, Any] = {}
+    key_indent: int | None = None
+    open_key: str | None = None
+    for number, line in block:
+        where = f"{path}:{number}"
+        indent = len(line) - len(line.lstrip())
+        body = line.strip()
+        if key_indent is None:
+            key_indent = indent
+        if indent == key_indent:
+            match = _YAML_KEY_RE.match(body)
+            if not match:
+                raise ReviewConfigError(f"{where}: expected 'key: value' in the review block")
+            key, raw = match.group(1), match.group(2)
+            if key in result:
+                raise ReviewConfigError(f"{where}: duplicate review setting {key!r}")
+            result[key] = _yaml_scalar(raw, where)
+            open_key = key if not raw.strip() else None
+        elif indent > key_indent and open_key and body.startswith("- "):
+            item = _yaml_scalar(body[2:], where)
+            if not isinstance(item, str):
+                raise ReviewConfigError(f"{where}: list items must be plain strings")
+            current = result[open_key]
+            result[open_key] = (current or []) + [item]
+        else:
+            raise ReviewConfigError(f"{where}: unsupported structure in the review block")
+    return result
+
+
 def _read_review_block(path: Path) -> dict[str, Any]:
     text = path.read_text(encoding="utf-8")
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        data = _parse_simple_yaml(text)
-    if not isinstance(data, dict):
-        return {}
-    block = data.get("review")
-    if block is None:
-        return {}
-    if not isinstance(block, dict):
-        raise ReviewConfigError(f"{path}: 'review' must be a mapping")
-    return block
+    if path.suffix.lower() == ".json":
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ReviewConfigError(f"{path}: invalid JSON: {exc.msg}") from exc
+        if not isinstance(data, dict):
+            raise ReviewConfigError(f"{path}: top level must be an object")
+        block = data.get("review")
+        if block is None and "review" not in data:
+            return {}
+        if not isinstance(block, dict):
+            raise ReviewConfigError(f"{path}: 'review' must be an object")
+        return dict(block)
+    return _parse_review_yaml(text, path)
 
 
 def load_threshold(
@@ -442,11 +546,8 @@ def _is_shell_call(event: TraceEvent) -> bool:
     return tool in _SHELL_TOOLS or bool(_command_text(event))
 
 
-def _tokens(segment: str) -> list[str]:
-    try:
-        tokens = shlex.split(segment)
-    except ValueError:
-        tokens = segment.split()
+def _strip_prefixes(tokens: Sequence[str]) -> list[str]:
+    tokens = list(tokens)
     while tokens and _ENV_ASSIGN_RE.match(tokens[0]):
         tokens.pop(0)
     changed = True
@@ -460,53 +561,154 @@ def _tokens(segment: str) -> list[str]:
     return tokens
 
 
-def classify_validation(command: str) -> list[tuple[str, str]]:
-    """Return ``(label, kind)`` for each known test or check in a command."""
-    found: list[tuple[str, str]] = []
-    for segment in _SEGMENT_SPLIT_RE.split(command):
-        tokens = [token.lower() for token in _tokens(segment)]
-        if not tokens:
-            continue
-        if "/" in tokens[0] and not tokens[0].startswith("./"):
-            tokens[0] = tokens[0].rsplit("/", 1)[-1]
-        for prefix, label, kind in _VALIDATION_PREFIXES:
-            if tuple(tokens[: len(prefix)]) == prefix:
-                if (label, kind) not in found:
-                    found.append((label, kind))
-                break
-    return found
+@dataclass(frozen=True)
+class _ShellShape:
+    """Quote-aware command segments and the operators between them."""
+
+    segments: tuple[tuple[str, ...], ...]
+    operators: tuple[str, ...]
+    exact: bool
+
+    @property
+    def single(self) -> bool:
+        return self.exact and len(self.segments) == 1 and not self.operators
+
+    @property
+    def and_chain(self) -> bool:
+        return (
+            self.exact
+            and len(self.segments) == len(self.operators) + 1
+            and all(op == "&&" for op in self.operators)
+        )
 
 
-def _exit_code(event: TraceEvent) -> int | None:
-    value = event.data.get("exit_code")
-    if isinstance(value, bool):
+def _shell_shape(command: str) -> _ShellShape:
+    text = command.strip()
+    if not text:
+        return _ShellShape((), (), True)
+    lexer = shlex.shlex(text, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        segments = tuple(
+            tuple(part.split()) for part in _SEGMENT_SPLIT_RE.split(text) if part.strip()
+        )
+        return _ShellShape(segments, ("?",), False)
+    segments: list[tuple[str, ...]] = []
+    operators: list[str] = []
+    current: list[str] = []
+    for token in tokens:
+        if token and all(char in _SHELL_OPERATOR_CHARS for char in token):
+            operators.append(token)
+            if current:
+                segments.append(tuple(current))
+                current = []
+        else:
+            current.append(token)
+    if current:
+        segments.append(tuple(current))
+    exact = "\n" not in text and "\r" not in text and not _SUBSTITUTION_RE.search(text)
+    return _ShellShape(tuple(segments), tuple(operators), exact)
+
+
+def _segment_label(segment: Sequence[str]) -> tuple[str, str] | None:
+    tokens = [token.lower() for token in _strip_prefixes(segment)]
+    if not tokens:
         return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str) and re.fullmatch(r"-?\d+", value.strip()):
-        return int(value.strip())
-    for key in ("result", "error"):
-        text = event.data.get(key)
-        if isinstance(text, str):
-            match = _EXIT_CODE_RE.search(text)
-            if match:
-                return int(match.group(1))
+    if "/" in tokens[0] and not tokens[0].startswith("./"):
+        tokens[0] = tokens[0].rsplit("/", 1)[-1]
+    for prefix, label, kind in _VALIDATION_PREFIXES:
+        if tuple(tokens[: len(prefix)]) == prefix:
+            return label, kind
     return None
 
 
-def _outcome(call: TraceEvent, results: dict[str, list[TraceEvent]]) -> tuple[str, int | None]:
-    linked = results.get(call.event_id, [])
-    if not linked:
-        return "no result recorded", None
-    result = linked[-1]
-    code = _exit_code(result)
-    if result.event_type == EventType.ERROR:
-        return "failed", code
-    if code is not None:
-        return ("passed" if code == 0 else "failed"), code
-    if result.data.get("success") is False:
-        return "failed", None
-    return "succeeded", None
+def classify_validation(command: str) -> list[tuple[str, str]]:
+    """Return ``(label, kind)`` for each known test or check in a command."""
+    found: list[tuple[str, str]] = []
+    for segment in _shell_shape(command).segments:
+        label = _segment_label(segment)
+        if label and label not in found:
+            found.append(label)
+    return found
+
+
+def _result_status(event: TraceEvent) -> tuple[str, int | None, str]:
+    """Read one terminal outcome. Return ``(outcome, exit_code, reason)``.
+
+    Only explicit signals count: an exit code, a boolean ``success`` or ``ok``,
+    or an ERROR event. No signal, or signals that disagree, is ``unknown``.
+    """
+    data = event.data
+    codes: set[int] = set()
+    value = data.get("exit_code")
+    if isinstance(value, int) and not isinstance(value, bool):
+        codes.add(value)
+    elif isinstance(value, str) and re.fullmatch(r"-?\d+", value.strip()):
+        codes.add(int(value.strip()))
+    for key in ("result", "error"):
+        text = data.get(key)
+        if isinstance(text, str):
+            codes.update(int(match) for match in _EXIT_CODE_RE.findall(text))
+    passed = any(code == 0 for code in codes)
+    failed = any(code != 0 for code in codes) or event.event_type == EventType.ERROR
+    for key in ("success", "ok"):
+        flag = data.get(key)
+        if flag is True:
+            passed = True
+        elif flag is False:
+            failed = True
+    if len(codes) > 1 or (passed and failed):
+        return "unknown", None, "conflicting status"
+    code = next(iter(codes)) if codes else None
+    if failed:
+        return "failed", code, ""
+    if passed:
+        return "passed", code, ""
+    return "unknown", None, "no exit status"
+
+
+_CORRELATION_REASONS = {
+    "result_unobserved": "no valid result recorded",
+    "ambiguous_result": "more than one result",
+}
+
+
+def _call_outcomes(events: Sequence[TraceEvent]) -> dict[int, tuple[str, int | None, str]]:
+    """Map each tool call index to its single correlated terminal outcome."""
+    correlation = correlate_tool_events(events)
+    result_for_call = {call: result for result, call in correlation.outcome_calls.items()}
+    outcomes: dict[int, tuple[str, int | None, str]] = {}
+    for call_index, state in correlation.call_outcomes.items():
+        result_index = result_for_call.get(call_index)
+        if state in ("recorded_result", "recorded_error") and result_index is not None:
+            outcomes[call_index] = _result_status(events[result_index])
+        else:
+            outcomes[call_index] = (
+                "unknown", None, _CORRELATION_REASONS.get(state, "no single valid result"),
+            )
+    return outcomes
+
+
+def _attribute(
+    shape: _ShellShape, outcome: tuple[str, int | None, str],
+) -> tuple[str, int | None, str]:
+    """Apply a whole-invocation outcome to one validation segment.
+
+    A single command owns its exit status. In a pure ``&&`` chain a zero exit
+    means every part exited zero, so a pass carries over. A failure there, and
+    any other compound shape, cannot be pinned on one part.
+    """
+    status, code, reason = outcome
+    if status == "unknown" or shape.single:
+        return outcome
+    if shape.and_chain:
+        if status == "passed":
+            return outcome
+        return "unknown", None, "chained command failed; failing part not known"
+    return "unknown", None, "compound shell command"
 
 
 # ---------------------------------------------------------------------------
@@ -617,48 +819,60 @@ def assess_scope(sessions: Sequence[_Session]) -> Finding:
     return Finding("scope", status, "medium", source, detail, facts)
 
 
+def _ordered(sessions: Sequence[_Session]) -> list[_Session]:
+    return sorted(sessions, key=lambda item: (float(item.meta.started_at or 0.0), item.session_id))
+
+
+def _is_write(event: TraceEvent) -> bool:
+    if event.event_type == EventType.FILE_WRITE:
+        return True
+    return (
+        event.event_type == EventType.TOOL_CALL
+        and bool(_path_from_event(event))
+        and bool(_file_activity([event])[1])
+    )
+
+
 def assess_validation(sessions: Sequence[_Session]) -> Finding:
     if not sessions:
         return _inconclusive("validation", "No session is linked, so no test runs were found.")
     runs: list[dict[str, Any]] = []
+    writes: list[tuple[tuple[float, int, int], str]] = []
     shell_calls = 0
     tool_calls = 0
-    writes_after_last = 0
-    for session in sessions:
-        results: dict[str, list[TraceEvent]] = {}
-        for event in session.events:
-            if event.parent_id and event.event_type in (EventType.TOOL_RESULT, EventType.ERROR):
-                results.setdefault(event.parent_id, []).append(event)
-        last_validation_ts: float | None = None
-        write_times: list[float] = []
-        for event in session.events:
+    for rank, session in enumerate(_ordered(sessions)):
+        outcomes = _call_outcomes(session.events)
+        for index, event in enumerate(session.events):
+            key = (float(event.timestamp), rank, index)
             if event.event_type == EventType.TOOL_CALL:
                 tool_calls += 1
-            if event.event_type == EventType.FILE_WRITE or (
-                event.event_type == EventType.TOOL_CALL
-                and _path_from_event(event)
-                and _file_activity([event])[1]
-            ):
-                write_times.append(event.timestamp)
+            if _is_write(event):
+                writes.append((key, _path_from_event(event)))
             if not _is_shell_call(event):
                 continue
             shell_calls += 1
-            labels = classify_validation(_command_text(event))
+            command = _command_text(event)
+            shape = _shell_shape(command)
+            labels = [label for label in map(_segment_label, shape.segments) if label]
             if not labels:
                 continue
-            outcome, code = _outcome(event, results)
+            outcome, code, reason = _attribute(shape, outcomes.get(
+                index, ("unknown", None, "no valid result recorded"),
+            ))
+            seen: set[tuple[str, str]] = set()
             for label, kind in labels:
+                if (label, kind) in seen:
+                    continue
+                seen.add((label, kind))
                 runs.append({
                     "label": label,
                     "kind": kind,
                     "outcome": outcome,
                     "exit_code": code,
+                    "reason": reason,
                     "session_id": session.session_id,
-                    "timestamp": event.timestamp,
+                    "key": key,
                 })
-            last_validation_ts = event.timestamp
-        if last_validation_ts is not None:
-            writes_after_last += sum(1 for ts in write_times if ts > last_validation_ts)
 
     source = "shell tool calls and linked results inside the session (not CI)"
     if not runs:
@@ -672,32 +886,40 @@ def assess_validation(sessions: Sequence[_Session]) -> Finding:
         detail = "No tool calls captured, so test runs cannot be assessed."
         return Finding("validation", "inconclusive", "low", source, detail, facts)
 
+    runs.sort(key=lambda item: item["key"])
     latest: dict[str, dict[str, Any]] = {}
-    for run in sorted(runs, key=lambda item: item["timestamp"]):
+    for run in runs:
         latest[run["label"]] = run
     final = [latest[label] for label in sorted(latest)]
+    for run in final:
+        run["changed_after"] = len({path or str(key) for key, path in writes if key > run["key"]})
+    last_key = runs[-1]["key"]
     facts = {
         "runs": [
             {key: run[key] for key in ("label", "kind", "outcome", "exit_code", "session_id")}
             for run in runs
         ],
         "latest": [
-            {key: run[key] for key in ("label", "kind", "outcome", "exit_code")} for run in final
+            {key: run[key] for key in ("label", "kind", "outcome", "exit_code", "changed_after")}
+            for run in final
         ],
         "shell_commands": shell_calls,
-        "writes_after_last_run": writes_after_last,
+        "writes_after_last_run": sum(1 for key, _ in writes if key > last_key),
     }
 
     def describe(run: dict[str, Any]) -> str:
+        if run["outcome"] == "unknown":
+            return f"{run['label']} outcome unknown ({run['reason']})"
         code = "" if run["exit_code"] is None else f", exit {run['exit_code']}"
         return f"{run['label']} {run['outcome']}{code}"
 
-    parts = [describe(run) for run in final]
-    detail = "Last run: " + "; ".join(parts) + "."
-    if writes_after_last:
-        detail += f" {_plural(writes_after_last, 'file write')} after the last run."
-    ok = all(run["outcome"] in ("passed", "succeeded") for run in final)
-    if ok and not writes_after_last:
+    detail = "Last run: " + "; ".join(describe(run) for run in final) + "."
+    stale = [run for run in final if run["changed_after"]]
+    if stale:
+        detail += " Files changed after the last run of: " + ", ".join(
+            f"{run['label']} ({_plural(run['changed_after'], 'file')})" for run in stale
+        ) + "."
+    if all(run["outcome"] == "passed" for run in final) and not stale:
         exact = all(run["exit_code"] is not None for run in final)
         return Finding("validation", "present", "high" if exact else "medium", source, detail, facts)
     return Finding("validation", "partial", "medium", source, detail, facts)

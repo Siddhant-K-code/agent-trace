@@ -14,7 +14,13 @@ from unittest.mock import patch
 from agent_trace.approval import ApprovalRequest, save_request
 from agent_trace.cli import build_parser
 from agent_trace.models import EventType, SessionMeta, TraceEvent
-from agent_trace.pr_comment import COMMENT_MARKER, cmd_pr_comment
+from agent_trace.pr_comment import (
+    COMMENT_MARKER,
+    cmd_pr_comment,
+    head_commit_timestamp,
+    pull_request_head_sha,
+    select_sessions_with_link,
+)
 from agent_trace.reviewability import (
     FINDINGS,
     LinkedSession,
@@ -210,8 +216,10 @@ class TestFindings(_StoreCase):
         self.assertEqual(
             validation.facts["latest"],
             [
-                {"label": "pytest", "kind": "test", "outcome": "passed", "exit_code": 0},
-                {"label": "ruff", "kind": "check", "outcome": "passed", "exit_code": 0},
+                {"label": "pytest", "kind": "test", "outcome": "passed", "exit_code": 0,
+                 "changed_after": 0},
+                {"label": "ruff", "kind": "check", "outcome": "passed", "exit_code": 0,
+                 "changed_after": 0},
             ],
         )
         stewardship = self.finding(report, "stewardship")
@@ -249,13 +257,21 @@ class TestFindings(_StoreCase):
         self.assertEqual(validation.status, "partial")
         self.assertEqual(validation.facts["writes_after_last_run"], 1)
 
-    def test_success_without_exit_code_is_medium(self):
+    def test_status_less_result_is_unknown_and_success_flag_is_medium(self):
         b = _Builder(self.store, "nocode000001")
         b.prompt()
         b.tool("Bash", result="all good", command="pytest")
         validation = self.finding(self.report(b.save()), "validation")
+        self.assertEqual((validation.status, validation.confidence), ("partial", "medium"))
+        self.assertEqual(validation.facts["latest"][0]["outcome"], "unknown")
+        self.assertIn("pytest outcome unknown (no exit status)", validation.detail)
+
+        b = _Builder(self.store, "flag00000001", start=5000)
+        b.prompt()
+        call = b.add(EventType.TOOL_CALL, tool_name="Bash", arguments={"command": "pytest"})
+        b.add(EventType.TOOL_RESULT, parent=call.event_id, result="ok", success=True)
+        validation = self.finding(self.report(b.save()), "validation")
         self.assertEqual((validation.status, validation.confidence), ("present", "medium"))
-        self.assertEqual(validation.facts["latest"][0]["outcome"], "succeeded")
 
     def test_scope_lists_ungrounded_paths(self):
         b = _Builder(self.store, "scope0000001")
@@ -334,6 +350,253 @@ class TestFindings(_StoreCase):
         self.assertNotIn("zebra-quartz-77", rendered)
         self.assertNotIn("python -m pytest", rendered)
         self.assertNotIn("\u2014", rendered)
+
+
+class TestValidationOutcomes(_StoreCase):
+    def _validate(self, sid: str, command: str, *results: dict, failed: bool = False,
+                 before: bool = False):
+        b = _Builder(self.store, sid)
+        b.prompt()
+        call = TraceEvent(event_type=EventType.TOOL_CALL, timestamp=b.ts + 5, session_id=sid,
+                          data={"tool_name": "Bash", "arguments": {"command": command}})
+        if not before:
+            b.events.append(call)
+        for data in results:
+            b.add(EventType.ERROR if failed else EventType.TOOL_RESULT,
+                  parent=call.event_id, tool_name="Bash", **data)
+            b.events[-1].timestamp = call.timestamp + 1
+        if before:
+            b.events.append(call)
+        validation = self.finding(self.report(b.save()), "validation")
+        return validation, validation.facts["latest"][0]
+
+    def test_single_command_owns_exit_code(self):
+        validation, run = self._validate("single000001", "pytest -k 'a && b'", {"result": "exit_code: 0"})
+        self.assertEqual((validation.status, run["outcome"], run["exit_code"]), ("present", "passed", 0))
+        _, run = self._validate("single000002", "pytest", {"result": "exit code 1"})
+        self.assertEqual((run["outcome"], run["exit_code"]), ("failed", 1))
+        _, run = self._validate("single000003", "pytest", {"error": "boom"}, failed=True)
+        self.assertEqual(run["outcome"], "failed")
+
+    def test_compound_shell_shapes_are_unknown(self):
+        for index, command in enumerate((
+            "pytest || true", "pytest | tee log.txt", "pytest > log.txt", "pytest &",
+            "pytest; echo done", "pytest $(cat args)", "pytest\necho done",
+        )):
+            with self.subTest(command=command):
+                validation, run = self._validate(f"compound{index:04d}", command,
+                                                {"result": "exit_code: 0"})
+                self.assertEqual(run["outcome"], "unknown")
+                self.assertIsNone(run["exit_code"])
+                self.assertEqual(validation.status, "partial")
+
+    def test_and_chain_carries_only_a_pass(self):
+        validation, run = self._validate("chain0000001", "cd repo && pytest", {"result": "exit_code: 0"})
+        self.assertEqual((validation.status, run["outcome"]), ("present", "passed"))
+        _, run = self._validate("chain0000002", "cd repo && pytest", {"result": "exit_code: 2"})
+        self.assertEqual(run["outcome"], "unknown")
+        self.assertIn("failing part not known", self.finding(self.report("chain0000002"), "validation").detail)
+
+    def test_result_must_be_single_valid_and_later(self):
+        cases = {
+            "none00000001": ((), False, "no valid result recorded"),
+            "dupe00000001": (({"result": "exit_code: 0"}, {"result": "exit_code: 0"}), False,
+                             "more than one result"),
+            "before000001": (({"result": "exit_code: 0"},), True, "no valid result recorded"),
+            "conflict0001": (({"result": "exit_code: 0", "success": False},), False,
+                             "conflicting status"),
+            "codes0000001": (({"result": "exit code 0 then exit code 3"},), False,
+                             "conflicting status"),
+            "errzero00001": (({"error": "exit_code: 0"},), False, "conflicting status"),
+        }
+        for sid, (results, before, reason) in cases.items():
+            with self.subTest(sid=sid):
+                failed = sid.startswith("errzero")
+                validation, run = self._validate(sid, "pytest", *results, failed=failed, before=before)
+                self.assertEqual(run["outcome"], "unknown")
+                self.assertEqual(validation.status, "partial")
+                self.assertIn(reason, validation.detail)
+
+    def test_freshness_is_global_across_sessions(self):
+        a = _Builder(self.store, "aaaa00000001", start=1000)
+        a.prompt()
+        a.tool("Bash", result="exit_code: 0", command="pytest")
+        a.save()
+        b = _Builder(self.store, "bbbb00000001", start=2000)
+        b.prompt()
+        b.tool("Edit", file_path=f"{CWD}/src/auth.py")
+        b.save()
+        for order in (("aaaa00000001", "bbbb00000001"), ("bbbb00000001", "aaaa00000001")):
+            with self.subTest(order=order):
+                report = self.report(*order)
+                validation = self.finding(report, "validation")
+                self.assertEqual(validation.status, "partial")
+                self.assertEqual(validation.facts["latest"][0]["changed_after"], 1)
+                self.assertEqual(validation.facts["writes_after_last_run"], 1)
+                self.assertIn("Files changed after the last run of: pytest (1 file)", validation.detail)
+        first = self.finding(self.report("aaaa00000001", "bbbb00000001"), "validation")
+        second = self.finding(self.report("bbbb00000001", "aaaa00000001"), "validation")
+        self.assertEqual(first.to_dict(), second.to_dict())
+
+    def test_validation_in_later_session_clears_staleness(self):
+        a = _Builder(self.store, "cccc00000001", start=1000)
+        a.prompt()
+        a.tool("Edit", file_path=f"{CWD}/src/auth.py")
+        a.save()
+        b = _Builder(self.store, "dddd00000001", start=2000)
+        b.prompt()
+        b.tool("Bash", result="exit_code: 0", command="pytest")
+        b.save()
+        validation = self.finding(self.report("cccc00000001", "dddd00000001"), "validation")
+        self.assertEqual((validation.status, validation.confidence), ("present", "high"))
+
+
+class TestConfigFailsClosed(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        cwd = os.getcwd()
+        os.chdir(self.tmp.name)
+        self.addCleanup(os.chdir, cwd)
+
+    def _yaml(self, text: str) -> Threshold:
+        Path(".agent-strace.yaml").write_text(text)
+        return load_threshold()
+
+    def test_block_and_flow_lists(self):
+        threshold = self._yaml(
+            "budget:\n  weekly: 3\nreview:\n  fail_on:\n    - missing\n    - partial  # strict\n"
+            "  findings: [validation, 'scope']\nother: 1\n"
+        )
+        self.assertEqual(threshold.fail_on, ("partial", "missing"))
+        self.assertEqual(threshold.findings, ("scope", "validation"))
+
+    def test_only_literal_none_disables(self):
+        self.assertEqual(self._yaml("review:\n  fail_on: none\n").fail_on, ())
+        self.assertEqual(self._yaml("review:\n  fail_on: \"none\"\n").fail_on, ())
+        bad = (
+            "review:\n  fail_on:\n",
+            "review:\n  fail_on: null\n",
+            "review:\n  fail_on: ~\n",
+            "review:\n  fail_on: []\n",
+            "review:\n  fail_on: [none]\n",
+            "review:\n  fail_on:\n    - none\n",
+            "review:\n  fail_on: missing, none\n",
+            "review:\n  fail_on: missing,,partial\n",
+            "review:\n  findings:\n",
+            "review:\n  findings: []\n",
+            "review:\n  min_confidence:\n",
+        )
+        for text in bad:
+            with self.subTest(text=text), self.assertRaises(ReviewConfigError):
+                self._yaml(text)
+
+    def test_unsupported_structures_fail(self):
+        bad = (
+            "review: {fail_on: missing}\n",
+            "review:\n  fail_on: {missing: true}\n",
+            "review:\n  fail_on:\n    missing: 1\n",
+            "review:\n  fail_on: [missing\n",
+            "review:\n  fail_on: &anchor missing\n",
+            "review:\n  fail_on: missing\n  fail_on: partial\n",
+            "review:\n  - missing\n",
+            "review:\n  fail_on: missing\n      deeper: 1\n",
+        )
+        for text in bad:
+            with self.subTest(text=text), self.assertRaises(ReviewConfigError):
+                self._yaml(text)
+
+    def test_json_types(self):
+        Path("cfg.json").write_text(json.dumps({"review": {"fail_on": ["missing", "partial"]}}))
+        self.assertEqual(load_threshold("cfg.json").fail_on, ("partial", "missing"))
+        for block in ({"fail_on": None}, {"fail_on": []}, {"fail_on": [1]}, {"fail_on": True},
+                      {"min_confidence": None}, {"findings": None}, None, "missing"):
+            with self.subTest(block=block), self.assertRaises(ReviewConfigError):
+                Path("cfg.json").write_text(json.dumps({"review": block}))
+                load_threshold("cfg.json")
+        Path("cfg.json").write_text("{not json")
+        with self.assertRaises(ReviewConfigError):
+            load_threshold("cfg.json")
+
+    def test_empty_flag_does_not_disable(self):
+        for value in ("", " ", ","):
+            with self.subTest(value=value), self.assertRaises(ReviewConfigError):
+                load_threshold(fail_on=value)
+
+
+class TestPullRequestHead(_StoreCase):
+    SHA = "a" * 40
+
+    def _env(self, **values):
+        keys = ("GITHUB_EVENT_PATH", "GITHUB_HEAD_REF", "CI_MERGE_REQUEST_IID",
+                "CI_MERGE_REQUEST_SOURCE_BRANCH_SHA", "CI_COMMIT_SHA")
+        env = {key: "" for key in keys}
+        env.update(values)
+        return patch.dict(os.environ, env)
+
+    def _event(self, payload) -> str:
+        path = Path(self.tmp.name) / "event.json"
+        path.write_text(json.dumps(payload))
+        return str(path)
+
+    def test_github_pull_request_uses_event_head_sha(self):
+        calls = []
+
+        def fake_git(_cwd, *args):
+            calls.append(args)
+            return "195"
+
+        event = self._event({"pull_request": {"head": {"sha": self.SHA}}})
+        with self._env(GITHUB_EVENT_PATH=event, GITHUB_HEAD_REF="feature"), \
+                patch("agent_trace.pr_comment._git", side_effect=fake_git):
+            self.assertEqual(pull_request_head_sha(), (True, self.SHA))
+            self.assertEqual(head_commit_timestamp(), 195.0)
+        self.assertEqual(calls, [("show", "-s", "--format=%ct", f"{self.SHA}^{{commit}}")])
+
+    def test_pull_request_without_resolvable_head_skips_commit_time(self):
+        _Builder(self.store, "far000000001", branch="", start=100).save()
+        _Builder(self.store, "near00000001", branch="", start=195).save()
+        cases = (
+            {"GITHUB_EVENT_PATH": self._event({"pull_request": {"head": {}}})},
+            {"GITHUB_EVENT_PATH": self._event({"pull_request": {"head": {"sha": "--bad"}}})},
+            {"GITHUB_HEAD_REF": "feature"},
+        )
+        for env in cases:
+            with self.subTest(env=env), self._env(**env), \
+                    patch("agent_trace.pr_comment._git", return_value="200") as git:
+                self.assertIsNone(head_commit_timestamp())
+                git.assert_not_called()
+                ids, link = select_sessions_with_link(self.store, branch="missing")
+                self.assertEqual(link, "latest")
+        event = self._event({"pull_request": {"head": {"sha": self.SHA}}})
+        with self._env(GITHUB_EVENT_PATH=event), \
+                patch("agent_trace.pr_comment._git", return_value=""):
+            self.assertIsNone(head_commit_timestamp())
+            self.assertEqual(select_sessions_with_link(self.store, branch="missing")[1], "latest")
+        with self._env(GITHUB_EVENT_PATH=event), \
+                patch("agent_trace.pr_comment._git", return_value="200"):
+            self.assertEqual(
+                select_sessions_with_link(self.store, branch="missing"),
+                (["near00000001"], "commit_time"),
+            )
+
+    def test_local_and_push_use_head(self):
+        push = self._event({"ref": "refs/heads/main"})
+        for env in ({}, {"GITHUB_EVENT_PATH": push}):
+            with self.subTest(env=env), self._env(**env), \
+                    patch("agent_trace.pr_comment._git", return_value="200") as git:
+                self.assertEqual(head_commit_timestamp(), 200.0)
+                git.assert_called_once_with(".", "log", "-1", "--format=%ct")
+
+    def test_gitlab_merge_request_prefers_source_branch_sha(self):
+        other = "b" * 40
+        with self._env(CI_MERGE_REQUEST_IID="5", CI_MERGE_REQUEST_SOURCE_BRANCH_SHA=self.SHA,
+                       CI_COMMIT_SHA=other):
+            self.assertEqual(pull_request_head_sha(), (True, self.SHA))
+        with self._env(CI_MERGE_REQUEST_IID="5", CI_COMMIT_SHA=other):
+            self.assertEqual(pull_request_head_sha(), (True, other))
+        with self._env(CI_MERGE_REQUEST_IID="5"):
+            self.assertEqual(pull_request_head_sha(), (True, ""))
 
 
 class TestCommands(_StoreCase):
