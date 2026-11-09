@@ -24,7 +24,7 @@ Strips API keys, tokens, and credentials before they hit disk. The original data
 ```bash
 # Default: redact before writing traces
 agent-strace record -- npx -y @modelcontextprotocol/server-filesystem /tmp
-agent-strace record-http https://mcp.example.com
+agent-strace record-http --url https://mcp.example.com
 
 # Trusted local traces only
 agent-strace record --no-redact -- npx -y @modelcontextprotocol/server-filesystem /tmp
@@ -56,21 +56,16 @@ Hook sessions also record the redaction mode on each `session_start` event, as `
 
 ## PII masking
 
-Masks personally identifiable information before it hits disk. Separate from secret redaction — use both for maximum coverage.
+Masks personally identifiable information. Separate from secret redaction. There is no CLI flag for it, and `record` and `record-http` do not mask PII by default.
 
-```bash
-agent-strace record --mask -- npx -y @modelcontextprotocol/server-filesystem /tmp
-agent-strace record-http https://mcp.example.com --mask
-```
-
-Masked by default: email addresses, phone numbers, credit card numbers, US Social Security Numbers, AWS ARNs.
-
-Call `mask_event_data()` directly to sanitise events from an existing session before sharing or exporting:
+Call `mask_event_data()` directly to sanitise event data from an existing session before sharing or exporting:
 
 ```python
 from agent_trace.masking import mask_event_data
-sanitised = mask_event_data(event)
+sanitised = mask_event_data(event.data)
 ```
+
+Masked by default: email addresses, phone numbers, credit card numbers, US Social Security Numbers, AWS ARNs.
 
 ---
 
@@ -172,13 +167,13 @@ Glob patterns support `**` as a recursive wildcard. File read policy applies to 
 
 ```bash
 # Dry-run: print the suggested policy
-agent-strace policy
+agent-strace policy --dry-run
 
 # Write it to disk
 agent-strace policy --output .agent-scope.json
 
 # Observe a specific set of sessions
-agent-strace policy --last 20 --output .agent-scope.json
+agent-strace policy SESSION_ID [SESSION_ID ...] --output .agent-scope.json
 ```
 
 ---
@@ -232,17 +227,17 @@ Workspaces provide separate session stores. Use them to isolate production trace
 # Create a workspace
 agent-strace workspace new prod
 
-# Switch to it (sets AGENT_STRACE_STORAGE)
+# Switch to it (sets AGENT_STRACE_WORKSPACE)
 eval $(agent-strace workspace use prod)
 
 # List workspaces
 agent-strace workspace list
 
 # Delete a workspace and all its sessions
-agent-strace workspace rm staging
+agent-strace workspace rm staging --force
 ```
 
-Each workspace is a separate directory under the base storage path. RBAC assignments can be scoped per workspace.
+Each workspace is a separate directory under `<trace-dir>/workspaces/`. Commands run in a shell where `AGENT_STRACE_WORKSPACE` is set read and write that workspace. RBAC assignments can be scoped per workspace.
 
 ---
 
