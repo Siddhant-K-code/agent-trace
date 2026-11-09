@@ -31,6 +31,7 @@ MAX_JSON_DEPTH = 64
 _META_STRING_FIELDS = {
     "agent_name", "command", "parent_session_id", "parent_event_id", "team",
     "workspace_id", "trace_id", "parent_span_id", "trace_flags", "tenant_id",
+    "conversation_id",
 }
 _META_COUNT_FIELDS = {
     "tool_calls", "llm_requests", "errors", "total_tokens", "depth",

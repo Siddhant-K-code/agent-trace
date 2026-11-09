@@ -75,6 +75,12 @@
                   }
                 },
                 {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "0b7c8f8e-2f4d-4c55-9a1e-5d0f3c2a9b71"
+                  }
+                },
+                {
                   "key": "agent.session_id",
                   "value": {
                     "stringValue": "otlp-genai-conformance-001"
@@ -268,6 +274,12 @@
                   "key": "session.id",
                   "value": {
                     "stringValue": "otlp-genai-conformance-001"
+                  }
+                },
+                {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "0b7c8f8e-2f4d-4c55-9a1e-5d0f3c2a9b71"
                   }
                 },
                 {
@@ -489,6 +501,12 @@
                   }
                 },
                 {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "0b7c8f8e-2f4d-4c55-9a1e-5d0f3c2a9b71"
+                  }
+                },
+                {
                   "key": "tool.name",
                   "value": {
                     "stringValue": "Read"
@@ -632,6 +650,12 @@
                   "key": "session.id",
                   "value": {
                     "stringValue": "otlp-genai-conformance-001"
+                  }
+                },
+                {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "0b7c8f8e-2f4d-4c55-9a1e-5d0f3c2a9b71"
                   }
                 },
                 {
@@ -817,6 +841,12 @@
                   "key": "session.id",
                   "value": {
                     "stringValue": "otlp-genai-conformance-001"
+                  }
+                },
+                {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "0b7c8f8e-2f4d-4c55-9a1e-5d0f3c2a9b71"
                   }
                 },
                 {

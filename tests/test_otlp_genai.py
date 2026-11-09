@@ -338,6 +338,79 @@ class TestGenAIMessageEvents(unittest.TestCase):
 # Backwards compatibility: --format otlp unchanged
 # ---------------------------------------------------------------------------
 
+class TestConversationId(unittest.TestCase):
+    """gen_ai.conversation.id carries the agent's own session ID when known."""
+
+    NATIVE_ID = "1f0c2b9e-7d3a-4e6b-9c1d-2a3b4c5d6e7f"
+
+    def _events(self) -> list[TraceEvent]:
+        req = TraceEvent(event_type=EventType.LLM_REQUEST, data={"model": "claude-3-5-sonnet"})
+        resp = TraceEvent(
+            event_type=EventType.LLM_RESPONSE,
+            parent_id=req.event_id,
+            data={"model": "claude-3-5-sonnet", "output_tokens": 5},
+        )
+        call = TraceEvent(event_type=EventType.TOOL_CALL, data={"tool_name": "Read"})
+        result = TraceEvent(
+            event_type=EventType.TOOL_RESULT,
+            parent_id=call.event_id,
+            data={"tool_name": "Read", "result": "ok"},
+        )
+        failing = TraceEvent(event_type=EventType.TOOL_CALL, data={"tool_name": "Bash"})
+        error = TraceEvent(
+            event_type=EventType.ERROR,
+            parent_id=failing.event_id,
+            data={"tool_name": "Bash", "error": "exit 1"},
+        )
+        open_req = TraceEvent(event_type=EventType.LLM_REQUEST, data={"model": "gpt-4o"})
+        open_call = TraceEvent(event_type=EventType.TOOL_CALL, data={"tool_name": "Grep"})
+        return [req, resp, call, result, failing, error, open_req, open_call]
+
+    def test_genai_spans_carry_native_conversation_id(self):
+        meta = _make_meta()
+        meta.conversation_id = self.NATIVE_ID
+        spans = _get_spans(session_to_otlp_genai(meta, self._events()))
+        # root, paired LLM, paired tool, error, unmatched LLM, unmatched tool
+        self.assertEqual(len(spans), 6)
+        for span in spans:
+            with self.subTest(span=span["name"]):
+                self.assertEqual(_get_attr(span, "gen_ai.conversation.id"), self.NATIVE_ID)
+        # The local session ID stays on gen_ai.agent.id and session.id.
+        self.assertEqual(_get_attr(spans[0], "gen_ai.agent.id"), meta.session_id)
+        self.assertEqual(_get_attr(spans[0], "session.id"), meta.session_id)
+
+    def test_genai_omits_conversation_id_without_native_id(self):
+        meta = _make_meta()
+        spans = _get_spans(session_to_otlp_genai(meta, self._events()))
+        for span in spans:
+            with self.subTest(span=span["name"]):
+                self.assertIsNone(_get_attr(span, "gen_ai.conversation.id"))
+
+    def test_plain_otlp_root_carries_conversation_id(self):
+        meta = _make_meta()
+        meta.conversation_id = self.NATIVE_ID
+        spans = _get_spans(session_to_otlp(meta, self._events()))
+        self.assertEqual(_get_attr(spans[0], "gen_ai.conversation.id"), self.NATIVE_ID)
+        for span in spans[1:]:
+            self.assertIsNone(_get_attr(span, "gen_ai.conversation.id"))
+
+    def test_plain_otlp_omits_conversation_id_without_native_id(self):
+        spans = _get_spans(session_to_otlp(_make_meta(), self._events()))
+        for span in spans:
+            self.assertIsNone(_get_attr(span, "gen_ai.conversation.id"))
+
+    def test_meta_round_trip_keeps_conversation_id(self):
+        meta = _make_meta()
+        meta.conversation_id = self.NATIVE_ID
+        loaded = SessionMeta.from_json(meta.to_json())
+        self.assertEqual(loaded.conversation_id, self.NATIVE_ID)
+
+    def test_meta_without_conversation_id_omits_key(self):
+        meta = _make_meta()
+        self.assertNotIn("conversation_id", json.loads(meta.to_json()))
+        self.assertEqual(SessionMeta.from_json(meta.to_json()).conversation_id, "")
+
+
 class TestOTLPBackwardsCompat(unittest.TestCase):
     def test_legacy_otlp_unchanged(self):
         """session_to_otlp() output must not change."""

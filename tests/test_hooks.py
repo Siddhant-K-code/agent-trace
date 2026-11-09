@@ -30,6 +30,7 @@ from agent_trace.hooks import (
     _read_active_session,
     _write_active_session,
     _clear_active_session,
+    _native_conversation_id,
     _read_pending_calls,
     _write_pending_calls,
     _state_suffix,
@@ -191,6 +192,63 @@ class TestHooksSessionContinuation(unittest.TestCase):
                 self.assertNotEqual(meta.started_at, self.STARTED_AT)
                 self.assertEqual(meta.tool_calls, 0)
                 self.assertEqual(meta.command, f"claude-code ({source})")
+
+
+class TestHooksConversationId(unittest.TestCase):
+    """Hooks store the agent's full session ID for gen_ai.conversation.id."""
+
+    NATIVE_ID = "1f0c2b9e-7d3a-4e6b-9c1d-2a3b4c5d6e7f"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        env = patch.dict(os.environ, {"AGENT_TRACE_DIR": tmp.name})
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("AGENT_TRACE_REDACT", None)
+        self.store = TraceStore(tmp.name)
+        self.local_id = self.NATIVE_ID[:16]
+
+    def test_session_start_stores_full_native_id(self):
+        handle_session_start({"session_id": self.NATIVE_ID, "source": "startup"})
+        meta = self.store.load_meta(self.local_id)
+        self.assertEqual(meta.session_id, self.local_id)
+        self.assertEqual(meta.conversation_id, self.NATIVE_ID)
+
+    def test_resume_backfills_session_recorded_without_it(self):
+        handle_session_start({"session_id": self.NATIVE_ID, "source": "startup"})
+        meta = self.store.load_meta(self.local_id)
+        meta.conversation_id = ""
+        meta.tool_calls = 4
+        self.store.update_meta(meta)
+
+        handle_session_start({"session_id": self.NATIVE_ID, "source": "resume"})
+
+        meta = self.store.load_meta(self.local_id)
+        self.assertEqual(meta.conversation_id, self.NATIVE_ID)
+        self.assertEqual(meta.tool_calls, 4)
+
+    def test_hook_without_session_start_stores_native_id(self):
+        handle_user_prompt({"session_id": self.NATIVE_ID, "prompt": "hi"})
+        meta = self.store.load_meta(self.local_id)
+        self.assertEqual(meta.conversation_id, self.NATIVE_ID)
+
+    def test_native_id_is_validated(self):
+        local = self.local_id
+        self.assertEqual(_native_conversation_id({"session_id": self.NATIVE_ID}, local), self.NATIVE_ID)
+        rejected = {
+            "missing": {},
+            "not a string": {"session_id": 12345},
+            "empty": {"session_id": ""},
+            "prefix mismatch": {"session_id": "ffffffffffffffff-other"},
+            "too long": {"session_id": local + "x" * 300},
+            "control character": {"session_id": local + "\n"},
+        }
+        for label, payload in rejected.items():
+            with self.subTest(label):
+                self.assertEqual(_native_conversation_id(payload, local), "")
+        self.assertEqual(_native_conversation_id(None, local), "")
+        self.assertEqual(_native_conversation_id({"session_id": self.NATIVE_ID}, ""), "")
 
 
 class TestHooksToolCapture(unittest.TestCase):

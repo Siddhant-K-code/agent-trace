@@ -121,6 +121,10 @@ class SessionMeta:
     tenant_id: str = field(
         default_factory=lambda: os.environ.get("AGENT_STRACE_TENANT_ID", "").strip()
     )
+    # The agent's own session ID in full (Claude Code ``session_id``, Copilot
+    # CLI ``sessionId``). Empty when the agent did not supply one. Exported as
+    # ``gen_ai.conversation.id`` (ADR-0011).
+    conversation_id: str = ""
 
     def to_json(self) -> str:
         d = asdict(self)

@@ -409,5 +409,36 @@ class TestCopilotSetup(unittest.TestCase):
         self.assertIn("GitHub Copilot hooks config", err.getvalue())
 
 
+class TestCopilotConversationId(unittest.TestCase):
+    """Copilot CLI's sessionId is its gen_ai.conversation.id."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        env = patch.dict(os.environ, {"AGENT_TRACE_DIR": tmp.name})
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("AGENT_TRACE_COPILOT_SESSION_ID", None)
+        os.environ.pop("AGENT_TRACE_REDACT", None)
+        self.store = TraceStore(tmp.name)
+
+    def _dispatch(self, event, payload):
+        with patch.object(sys, "stdin", io.StringIO(json.dumps(payload))):
+            hook_main(["--provider", "copilot", event])
+
+    def test_session_start_stores_camel_case_session_id(self):
+        sid = "8d6f3a52-41c7-4b0e-a9d2-7e1f0c3b5a64"
+        self._dispatch("sessionStart", {"sessionId": sid, "source": "new"})
+        meta = self.store.load_meta(sid[:16])
+        self.assertEqual(meta.conversation_id, sid)
+
+    def test_subagent_without_session_start_stores_session_id(self):
+        sid = "subagent-0000-1111-2222"
+        self._dispatch("userPromptSubmitted", {"sessionId": sid, "prompt": "go"})
+        meta = self.store.load_meta(sid[:16])
+        self.assertEqual(meta.command, "github-copilot (no session-start)")
+        self.assertEqual(meta.conversation_id, sid)
+
+
 if __name__ == "__main__":
     unittest.main()

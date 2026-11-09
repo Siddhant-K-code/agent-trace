@@ -312,7 +312,11 @@ class TestTenantModelAndStore(TenantTestCase):
 
     def test_positional_dataclass_fields_remain_backward_compatible(self):
         self.assertEqual(fields(TraceEvent)[-1].name, "tenant_id")
-        self.assertEqual(fields(SessionMeta)[-1].name, "tenant_id")
+        # Fields added after tenant_id are appended, never inserted before it.
+        self.assertEqual(
+            [f.name for f in fields(SessionMeta)][-2:],
+            ["tenant_id", "conversation_id"],
+        )
         event = TraceEvent(
             EventType.USER_PROMPT, 1.0, "event1", "session1", "", None,
             {"prompt": "hi"}, "previous", True,

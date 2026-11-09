@@ -38,8 +38,27 @@ agent-strace export <session-id> --format otlp-genai \
 | Tool calls | `tool/<name>` spans | `gen_ai.tool.call/<name>` spans |
 | Root span | `agent.name` attribute | `gen_ai.agent.id` + `gen_ai.agent.name` |
 | Errors | Custom error span | OTel `exception` event format |
+| `gen_ai.conversation.id` | Root span | Root, LLM and tool spans |
 
 `--format otlp` is unchanged for backwards compatibility. See [ADR-0011](../ADRs/0011-otlp-genai-semantic-conventions.md) for design rationale.
+
+### Joining with native agent telemetry
+
+Both formats emit `gen_ai.conversation.id` when the agent supplied its own
+session ID: hook sessions whose payload carries `session_id` (Claude Code,
+GitHub Copilot CLI, Codex, Gemini CLI, Cursor), and `import` of Claude Code
+JSONL transcripts. The value is the agent's full
+session ID, not the agent-strace session ID. Sessions without one (`record`,
+proxy, SDK integrations, and sessions recorded before this field existed)
+omit the attribute.
+
+| Native source | Join on |
+|---|---|
+| GitHub Copilot CLI OTel (`gen_ai.conversation.id`) | `gen_ai.conversation.id` = `gen_ai.conversation.id` |
+| Claude Code OTel (`session.id`) | `gen_ai.conversation.id` = `session.id` |
+
+Do not join on `session.id` from agent-strace: it is the local agent-strace
+session ID, which is truncated to 16 characters for hook sessions.
 
 ### OpenInference compatibility
 

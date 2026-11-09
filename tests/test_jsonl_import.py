@@ -304,6 +304,25 @@ class TestJSONLImport(unittest.TestCase):
 
         self.assertNotIn(EventType.SESSION_START, types)
 
+    def test_import_stores_claude_session_id_as_conversation_id(self):
+        native = "5e2d8c1a-93b4-4f7e-8a6d-0c1b2a3f4e5d"
+        path = self._write_jsonl([
+            {"type": "user", "sessionId": native, "timestamp": "2025-01-01T00:00:00Z",
+             "message": {"role": "user", "content": "Hi"}, "uuid": "u1"},
+        ])
+        session_id = import_jsonl(path, store=self.store)
+        meta = self.store.load_meta(session_id)
+        self.assertEqual(meta.conversation_id, native)
+
+    def test_import_without_session_id_has_no_conversation_id(self):
+        path = self._write_jsonl([
+            {"type": "user", "timestamp": "2025-01-01T00:00:00Z",
+             "message": {"role": "user", "content": "Hi"}, "uuid": "u1"},
+        ])
+        session_id = import_jsonl(path, store=self.store)
+        self.assertEqual(session_id, "session")
+        self.assertEqual(self.store.load_meta(session_id).conversation_id, "")
+
 
 if __name__ == "__main__":
     unittest.main()

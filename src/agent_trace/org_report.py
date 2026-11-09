@@ -209,6 +209,7 @@ def _validate_report_meta(meta) -> None:  # noqa: ANN001
     for field in (
         "agent_name", "command", "parent_session_id", "parent_event_id", "team",
         "workspace_id", "trace_id", "parent_span_id", "trace_flags", "tenant_id",
+        "conversation_id",
     ):
         if not isinstance(getattr(meta, field, None), str):
             raise ValueError(f"{field} must be a string")
