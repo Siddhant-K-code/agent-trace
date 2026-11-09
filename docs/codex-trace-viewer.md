@@ -8,7 +8,7 @@ replays them in the terminal or a self-contained HTML viewer.
 The [capture matrix](capture-matrix.md#openai-codex) is the source of truth for
 the Codex version and date last exercised with a real provider run. A
 `verified` entry applies to that tested release and fixture, not every Codex
-release.
+release. The current matrix verifies `codex-cli 0.167.0-alpha.3.2`.
 
 `agent-strace setup --cli codex --verify` performs a static installation check.
 It validates the user-level hooks file, the Codex hooks feature setting, and
@@ -48,7 +48,8 @@ Replay and statistics label them by the provider-supplied agent identity.
 ## Known capture gaps
 
 - Hidden reasoning is not available.
-- Token usage is not present in the observed hook payloads.
+- The observed `PostModelRequest` hook carries token usage, but AgentTrace
+  setup does not register that hook, so token usage is not recorded.
 - A failed shell command can arrive as a normal tool result rather than an
   error event.
 - No recorded event directly links a subagent identity to the `spawn_agent`

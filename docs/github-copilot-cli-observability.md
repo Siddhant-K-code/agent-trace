@@ -61,9 +61,14 @@ Run `health` to see both observed trace defects and declared provider
 limitations. A partial trace can still be reviewable, but it is not complete
 evidence.
 
+For reviewer-facing inspection, the shipped
+[session evidence review](session-review-projection.md) is available in the
+local dashboard and [VS Code extension](vscode.md#evidence-review).
+
 ## Related documentation
 
 - [Copilot CLI plugin](copilot-plugin.md)
 - [Copilot setup](setup.md#github-copilot-cli-hooks)
 - [Capture matrix](capture-matrix.md#github-copilot-cli)
 - [Evidence health](evidence-health.md)
+- [VS Code evidence review](vscode.md#evidence-review)

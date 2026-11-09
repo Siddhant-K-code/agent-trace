@@ -8,7 +8,7 @@ import shlex
 import unittest
 from pathlib import Path
 
-from agent_trace.cli import build_parser
+from agent_trace.cli import _normalise_skills_argv, build_parser
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -34,6 +34,21 @@ def _subcommands(parser: argparse.ArgumentParser) -> set[str]:
     return set()
 
 
+def _agent_strace_commands(text: str):
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        command = lines[index].strip()
+        lineno = index + 1
+        index += 1
+        if not command.startswith("agent-strace "):
+            continue
+        while command.endswith("\\") and index < len(lines):
+            command = command[:-1].rstrip() + " " + lines[index].strip()
+            index += 1
+        yield lineno, command
+
+
 class FeatureLandingDocsTest(unittest.TestCase):
     def test_local_links_resolve(self):
         problems = []
@@ -53,12 +68,9 @@ class FeatureLandingDocsTest(unittest.TestCase):
         checked = 0
         for name in LANDING_DOCS:
             text = (DOCS / name).read_text(encoding="utf-8")
-            for lineno, line in enumerate(text.splitlines(), 1):
-                command = line.strip()
-                if not command.startswith("agent-strace "):
-                    continue
+            for lineno, command in _agent_strace_commands(text):
                 checked += 1
-                argv = shlex.split(command)[1:]
+                argv = _normalise_skills_argv(shlex.split(command)[1:])
                 if argv == ["--version"]:
                     continue
                 if not argv or argv[0] not in commands:

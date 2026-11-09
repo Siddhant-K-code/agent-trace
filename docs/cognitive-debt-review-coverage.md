@@ -17,6 +17,10 @@ Shields-compatible static JSON. `--output` writes the complete result
 atomically. The command writes no partial report when validation or output
 handling fails.
 
+The PR Evidence Action can generate both files for the linked review session,
+upload them with the minimized Evidence Packet, and treat `unknown` as
+unavailable rather than passing. See [PR reviewability](review.md#cognitive-debt).
+
 ## Reviewed, unreviewed, and unknown
 
 The report keeps three coverage states separate:

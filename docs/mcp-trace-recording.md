@@ -33,8 +33,15 @@ agent-strace mcp
 
 The trace-reader server uses MCP over stdio and exposes tools for listing
 sessions, reading stored events, searching events, summarizing a session, and
-diffing two sessions. Configure an MCP client to launch `agent-strace mcp` as a
-local command.
+diffing two sessions. It also exposes evidence health and skill adoption
+reports. The server opens the trace store read-only and makes no network calls.
+Configure an MCP client to launch `agent-strace mcp` as a local command.
+
+The published MCP server metadata is [`server.json`](../server.json), with
+registry name `io.github.Siddhant-K-code/agent-trace` and the PyPI package
+`agent-strace`. The release workflow checks its version against the core
+package. See [MCP server setup](mcp.md) for Claude Code, Copilot CLI, Codex, and
+Gemini CLI configuration.
 
 ## Boundaries and risks
 
@@ -57,5 +64,7 @@ review.
 - [MCP recording setup](setup.md#option-2-mcp-proxy)
 - [Command reference](commands.md#session-capture)
 - [Trace-reader command](commands.md#mcp)
+- [MCP client setup and tool reference](mcp.md)
+- [Registry metadata](../server.json)
 - [Evidence health](evidence-health.md)
 - [Collector server](server.md)

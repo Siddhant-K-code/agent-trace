@@ -17,6 +17,11 @@ configuration. After recording one harmless local session, live verification
 can inspect the newest matching trace. Neither mode starts Claude Code or makes
 a model request.
 
+The shipped [Claude Code plugin](claude-code-plugin.md) packages the capture
+hooks, shared AgentTrace skill, and trace analyst agent. The Python CLI remains
+a separate prerequisite. Static `setup --verify` checks settings-file hooks,
+not plugin hooks.
+
 ## Capture new sessions with hooks
 
 Generate the hook configuration, merge it into the reported Claude Code
@@ -61,7 +66,9 @@ can include sensitive event payloads.
 
 ## Related documentation
 
+- [Claude Code plugin](claude-code-plugin.md)
 - [Setup](setup.md)
+- [Live capture verification](setup.md#live-capture-verification)
 - [Capture matrix](capture-matrix.md)
 - [Evidence health](evidence-health.md)
 - [Replay command reference](commands.md#replay)
