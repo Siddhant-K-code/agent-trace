@@ -34,6 +34,8 @@ claude mcp add agent-trace -e AGENT_TRACE_DIR=/abs/path/.agent-traces -- agent-s
 
 **GitHub Copilot CLI**
 
+The [Copilot CLI plugin](copilot-plugin.md) already includes the server (via its `mcp.json`, on Copilot CLI versions that support Agent Plugins). Without the plugin:
+
 ```bash
 copilot mcp add agent-trace -- agent-strace mcp
 ```

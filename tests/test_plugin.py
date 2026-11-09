@@ -10,16 +10,54 @@ from agent_trace.cli import _copilot_hooks_config, _gemini_extension_manifest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+COPILOT_DIR = ROOT / "com.github.copilot"
+AGENT_PLUGINS_FIELDS = {
+    "$schema", "name", "version", "description", "author", "homepage",
+    "repository", "license", "keywords", "extensions",
+}
 
 
 class TestCopilotPlugin(unittest.TestCase):
-    def test_manifest_references_existing_components(self):
+    def test_manifest_is_agent_plugins_1_0(self):
         manifest = json.loads((ROOT / "plugin.json").read_text())
 
+        self.assertEqual(
+            manifest["$schema"],
+            "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+        )
         self.assertEqual(manifest["name"], "agent-strace")
         self.assertEqual(manifest["version"], __version__)
-        for field in ("agents", "skills", "hooks"):
-            self.assertTrue((ROOT / manifest[field]).exists())
+        self.assertLessEqual(set(manifest), AGENT_PLUGINS_FIELDS)
+        self.assertTrue((ROOT / "skills" / "agent-strace" / "SKILL.md").is_file())
+
+    def test_plugin_mcp_config_runs_agent_strace_mcp(self):
+        config = json.loads((ROOT / "mcp.json").read_text())
+
+        self.assertEqual(
+            config["$schema"],
+            "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+        )
+        self.assertEqual(set(config), {"$schema", "mcpServers"})
+        self.assertEqual(
+            config["mcpServers"],
+            {"agent-trace": {"type": "stdio", "command": "agent-strace", "args": ["mcp"]}},
+        )
+
+    def test_copilot_components_match_legacy_copies(self):
+        # Agent Plugins clients read com.github.copilot/; older Copilot CLIs
+        # load the same plugin as legacy and read agents/ and hooks.json.
+        self.assertEqual(
+            (COPILOT_DIR / "hooks" / "hooks.json").read_text(),
+            (ROOT / "hooks.json").read_text(),
+        )
+        self.assertEqual(
+            sorted(p.name for p in (COPILOT_DIR / "agents").iterdir()),
+            sorted(p.name for p in (ROOT / "agents").iterdir()),
+        )
+        for agent in (ROOT / "agents").iterdir():
+            self.assertEqual(
+                (COPILOT_DIR / "agents" / agent.name).read_text(), agent.read_text()
+            )
 
     def test_marketplace_references_root_plugin(self):
         marketplace = json.loads(

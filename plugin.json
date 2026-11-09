@@ -1,4 +1,5 @@
 {
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "agent-strace",
   "description": "Capture, replay, and analyze GitHub Copilot CLI agent sessions.",
   "version": "0.104.0",
@@ -14,8 +15,5 @@
     "copilot-cli",
     "observability",
     "tracing"
-  ],
-  "agents": "agents/",
-  "skills": "skills/",
-  "hooks": "hooks.json"
+  ]
 }

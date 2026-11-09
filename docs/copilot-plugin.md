@@ -1,7 +1,7 @@
 # GitHub Copilot CLI plugin
 
 The `agent-strace` Copilot CLI plugin records lifecycle events and adds a trace
-analyst agent and skill for investigating sessions.
+analyst agent, a skill, and the [MCP server](mcp.md) for investigating sessions.
 
 ## Install
 
@@ -69,6 +69,17 @@ pip install -e .
 copilot plugin marketplace add "$PWD"
 copilot plugin install agent-strace@agent-trace
 ```
+
+The manifest follows [Agent Plugins 1.0](https://github.com/agentplugins/agent-plugins-spec/blob/main/spec/1.0.0.md):
+
+| Component | Agent Plugins path | Legacy path (older Copilot CLIs) |
+|---|---|---|
+| Skill | `skills/agent-strace/` | same |
+| MCP server | `mcp.json` | not loaded |
+| Agent | `com.github.copilot/agents/` | `agents/` |
+| Hooks | `com.github.copilot/hooks/hooks.json` | `hooks.json` |
+
+Keep the agent and hooks copies identical; `tests/test_plugin.py` checks them.
 
 Copilot caches installed plugin components. Run
 `copilot plugin marketplace update agent-trace` followed by

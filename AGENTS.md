@@ -50,6 +50,8 @@ python -m unittest discover -s tests -p 'test_watch.py' -v
 
 The version lives in `src/agent_trace/__init__.py`. A release must also sync `plugin.json`, `gemini-extension.json`, both versions in `.github/plugin/marketplace.json` (`metadata.version` and `plugins[0].version`), and both versions in `server.json` (`version` and `packages[0].version`). `tests/test_plugin.py` fails until they match.
 
+The Copilot plugin uses the Agent Plugins 1.0 layout (`plugin.json`, `skills/`, `mcp.json`, `com.github.copilot/`). Root `agents/` and `hooks.json` are legacy copies for older Copilot CLIs; edit both copies together (tests compare them).
+
 After the PyPI publish for a release, publish the same version to the MCP Registry from the repo root: `mcp-publisher login github` (one-time device auth) then `mcp-publisher publish`.
 
 - New feature (new command, new flag, new integration): bump minor (`X.Y.Z` → `X.(Y+1).0`)
