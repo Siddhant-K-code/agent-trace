@@ -47,6 +47,50 @@ class TestReleaseWorkflows(unittest.TestCase):
             workflow,
         )
 
+    def test_mcp_registry_publish_follows_pypi_with_oidc(self):
+        workflow = (WORKFLOWS / "publish.yml").read_text()
+        header, _, jobs = workflow.partition("\njobs:\n")
+        pypi_job, _, registry_job = jobs.partition("\n  mcp-registry:\n")
+
+        self.assertNotIn("id-token", header)
+        self.assertIn("id-token: write", pypi_job)
+        self.assertTrue(registry_job)
+        self.assertIn("needs: publish", registry_job)
+        self.assertIn("id-token: write", registry_job)
+        self.assertNotIn("contents: write", registry_job)
+        self.assertIn("ref: ${{ env.PUBLISH_TAG }}", registry_job)
+        self.assertIn("persist-credentials: false", registry_job)
+        self.assertRegex(registry_job, r"MCP_PUBLISHER_VERSION: v\d+\.\d+\.\d+\n")
+        self.assertRegex(
+            registry_job, r"MCP_PUBLISHER_SHA256_LINUX_AMD64: [0-9a-f]{64}\n"
+        )
+        self.assertRegex(
+            registry_job, r"MCP_PUBLISHER_SHA256_LINUX_ARM64: [0-9a-f]{64}\n"
+        )
+        self.assertIn("sha256sum -c", registry_job)
+        self.assertIn('["packages"][0]["version"]', registry_job)
+        self.assertIn("https://pypi.org/pypi/agent-strace/${VERSION}/json", registry_job)
+        self.assertIn("seq 1 30", registry_job)
+        self.assertIn("registry.modelcontextprotocol.io/v0/servers/", registry_job)
+        self.assertNotIn("continue-on-error", registry_job)
+        self.assertLess(
+            registry_job.index("mcp-publisher login github-oidc"),
+            registry_job.index("mcp-publisher publish"),
+        )
+        for step in (
+            "Wait for PyPI to serve this version",
+            "Install mcp-publisher",
+            "Log in to MCP Registry",
+            "Publish to MCP Registry",
+        ):
+            with self.subTest(step=step):
+                block = registry_job.split(f"- name: {step}\n", 1)[1]
+                self.assertTrue(
+                    block.lstrip().startswith(
+                        "if: steps.registry.outputs.published != 'true'"
+                    )
+                )
+
     def test_extension_publish_is_deterministic_and_reports_failures(self):
         workflow = (WORKFLOWS / "publish-vscode.yml").read_text()
 

@@ -12,7 +12,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 concurrency:
   group: publish-pypi-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
@@ -25,6 +24,9 @@ jobs:
       (startsWith(github.event.release.tag_name, 'v') &&
       !startsWith(github.event.release.tag_name, 'vscode-v'))
     runs-on: namespace-profile-siddhant-khare
+    permissions:
+      contents: read
+      id-token: write
     env:
       PUBLISH_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
     environment:
@@ -54,3 +56,107 @@ jobs:
 
       - name: Publish to PyPI
         run: uv publish --check-url https://pypi.org/simple/agent-strace/
+
+  mcp-registry:
+    needs: publish
+    runs-on: namespace-profile-siddhant-khare
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      PUBLISH_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
+      MCP_PUBLISHER_VERSION: v1.8.8
+      MCP_PUBLISHER_SHA256_LINUX_AMD64: 09f1fa70ee146b640584274a1a6b2b8a0310b05d4321fa9224e6df6a016d67f4
+      MCP_PUBLISHER_SHA256_LINUX_ARM64: 7a8effbfc574f141a07c3c027bf5cb5764a7aa3adb335cd1c0e1757c4c88d9dc
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.PUBLISH_TAG }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Verify Registry publish target
+        id: target
+        run: |
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "${PUBLISH_TAG}^{commit}")"
+          VERSION="${PUBLISH_TAG#v}"
+          SERVER_VERSION=$(python -c 'import json; print(json.load(open("server.json"))["version"])')
+          PACKAGE_VERSION=$(python -c 'import json; print(json.load(open("server.json"))["packages"][0]["version"])')
+          if [ "$SERVER_VERSION" != "$VERSION" ] || [ "$PACKAGE_VERSION" != "$VERSION" ]; then
+            echo "::error file=server.json::server.json version ($SERVER_VERSION) and packages[0].version ($PACKAGE_VERSION) must both equal $VERSION from tag $PUBLISH_TAG"
+            exit 1
+          fi
+          SERVER_NAME=$(python -c 'import json; print(json.load(open("server.json"))["name"])')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "name=$SERVER_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Check MCP Registry for this version
+        id: registry
+        env:
+          SERVER_NAME: ${{ steps.target.outputs.name }}
+          VERSION: ${{ steps.target.outputs.version }}
+        run: |
+          ENCODED_NAME=$(python -c 'import os, urllib.parse; print(urllib.parse.quote(os.environ["SERVER_NAME"], safe=""))')
+          URL="https://registry.modelcontextprotocol.io/v0/servers/${ENCODED_NAME}/versions/${VERSION}"
+          STATUS=$(curl -sS --retry 3 --retry-all-errors -o /dev/null -w '%{http_code}' "$URL")
+          case "$STATUS" in
+            200)
+              echo "$SERVER_NAME $VERSION is already in the MCP Registry. Skipping."
+              echo "published=true" >> "$GITHUB_OUTPUT"
+              ;;
+            404)
+              echo "published=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::MCP Registry lookup returned HTTP $STATUS for $URL"
+              exit 1
+              ;;
+          esac
+
+      - name: Wait for PyPI to serve this version
+        if: steps.registry.outputs.published != 'true'
+        env:
+          VERSION: ${{ steps.target.outputs.version }}
+        run: |
+          URL="https://pypi.org/pypi/agent-strace/${VERSION}/json"
+          for attempt in $(seq 1 30); do
+            STATUS=$(curl -sS -o /dev/null -w '%{http_code}' "$URL" || true)
+            if [ "$STATUS" = "200" ]; then
+              echo "PyPI serves agent-strace $VERSION."
+              exit 0
+            fi
+            echo "Attempt $attempt/30: $URL returned HTTP $STATUS. Retrying in 20s."
+            sleep 20
+          done
+          echo "::error::PyPI did not serve agent-strace $VERSION within 10 minutes"
+          exit 1
+
+      - name: Install mcp-publisher
+        if: steps.registry.outputs.published != 'true'
+        run: |
+          case "$(uname -m)" in
+            x86_64) ARCH=amd64; SHA256="$MCP_PUBLISHER_SHA256_LINUX_AMD64" ;;
+            aarch64|arm64) ARCH=arm64; SHA256="$MCP_PUBLISHER_SHA256_LINUX_ARM64" ;;
+            *) echo "::error::Unsupported runner architecture $(uname -m)"; exit 1 ;;
+          esac
+          ARCHIVE="mcp-publisher_linux_${ARCH}.tar.gz"
+          INSTALL_DIR="$RUNNER_TEMP/mcp-publisher"
+          mkdir -p "$INSTALL_DIR"
+          curl -sSfL --retry 3 -o "$INSTALL_DIR/$ARCHIVE" \
+            "https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}/${ARCHIVE}"
+          echo "$SHA256  $INSTALL_DIR/$ARCHIVE" | sha256sum -c -
+          tar -xzf "$INSTALL_DIR/$ARCHIVE" -C "$INSTALL_DIR" mcp-publisher
+          echo "$INSTALL_DIR" >> "$GITHUB_PATH"
+
+      - name: Log in to MCP Registry
+        if: steps.registry.outputs.published != 'true'
+        run: mcp-publisher login github-oidc
+
+      - name: Publish to MCP Registry
+        if: steps.registry.outputs.published != 'true'
+        run: mcp-publisher publish

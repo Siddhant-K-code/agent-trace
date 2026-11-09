@@ -15,6 +15,7 @@ Do not make one line wait for, inherit, or publish the other line.
 |---|---|
 | GitHub core release | The `Release` workflow needs `contents: write` and `actions: write` for `GITHUB_TOKEN`. |
 | PyPI | The `pypi` GitHub environment must be a trusted publisher for the `agent-strace` project. No long-lived PyPI token is used. |
+| MCP Registry | None. The `mcp-registry` job uses GitHub OIDC (`id-token: write`) for the `io.github.Siddhant-K-code` namespace. |
 | VS Code Marketplace | Add a repository secret named `VSCE_PAT` with publish permission for publisher `Siddhant-K-code`. |
 | Open VSX | Create the `Siddhant-K-code` namespace once, then add a repository secret named `OVSX_PAT` with publish access. |
 
@@ -53,7 +54,10 @@ checked during release validation.
    does not start a `release: published` workflow.
 6. Confirm the GitHub release includes the interoperability schema and Agent
    Evidence Corpus ZIP.
-7. Confirm the GitHub release and PyPI both report the intended version.
+7. After the PyPI upload, the `mcp-registry` job publishes `server.json` to
+   the MCP Registry. See [MCP Registry publishing](mcp.md#mcp-registry-publishing).
+8. Confirm the GitHub release, PyPI, and the MCP Registry all report the
+   intended version.
 
 `Publish to PyPI` also retains its release trigger for core releases created
 outside the automated workflow and a manual dispatch with a required core tag.
@@ -69,6 +73,9 @@ Extension release tags are explicitly ignored.
   existing `vX.Y.Z` tag.
 - PyPI recovery is duplicate-safe because the publisher checks for an existing
   distribution.
+- If only the `mcp-registry` job fails, rerun that job. It skips a version the
+  Registry already lists. Manual fallback from the repo root at the release
+  tag: `mcp-publisher login github` then `mcp-publisher publish`.
 
 ## VS Code extension releases
 
