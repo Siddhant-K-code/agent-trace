@@ -1026,12 +1026,17 @@ and event-level line hashes for `agent-strace verify --from-export`.
 
 ### `share`
 ```
-agent-strace share [session-id] [-o FILE | --stdout] [--open] [--postmortem]
-agent-strace share [session-id] --dry-run [--format text|json]
+agent-strace share [session-id] [-o FILE | --stdout] [--open]
+agent-strace share [session-id] --include-content [--postmortem] [-o FILE | --stdout] [--open]
+agent-strace share [session-id] [--include-content] --dry-run [--format text|json]
 agent-strace share --assignment [session-id] --output submission.zip
 ```
-Generate a self-contained HTML report. No server needed. The HTML embeds every
-event payload and lists every annotation, so treat it as sensitive.
+Generate a self-contained HTML evidence packet. No server is needed. The default
+packet is privacy-minimized. It preserves event order and timing, tool names and
+effect categories, provider and capture provenance, evidence health and known
+gaps, failures, retries, recovery, redaction state, and annotations explicitly
+marked shareable. It omits prompts, responses, commands, paths, tool input and
+result values, and other content-rich values.
 
 | Flag | Description |
 |---|---|
@@ -1039,32 +1044,44 @@ event payload and lists every annotation, so treat it as sensitive.
 | `-o`, `--output FILE` | Output path (default: `session-<id>.html`) |
 | `--stdout` | Write the HTML to stdout instead of a file |
 | `--open` | Open the written HTML in the default browser |
-| `--postmortem` | Include postmortem analysis (shown for failed sessions) |
+| `--include-content` | Include full prompts, responses, commands, paths, tool inputs, tool results, and other content-rich values |
+| `--postmortem` | Include postmortem analysis; requires `--include-content` |
 | `--dry-run` | Print a value-free disclosure preview instead of writing HTML |
 | `--format text\|json` | Preview format (default: `text`); requires `--dry-run` |
 | `--assignment` | Write a privacy-minimized assignment ZIP instead of HTML |
 
-`--dry-run` reports what the HTML would disclose as category counts: events,
-prompts, responses, tool inputs, tool results, command-bearing and path-bearing
-events, annotations, content-rich events, redacted events, and unredacted
-content-rich events. It never prints prompt, response, command, path, result, or
-annotation text. The mode is `include_content` because ordinary share output
-embeds full event data. No HTML is written, printed, or opened: `--output`,
-`--stdout`, and `--open` are ignored with a note on stderr, so you can append
-`--dry-run` to the command you plan to run. `--postmortem` is accepted and does
-not change the counts, because that section restates the same events.
-`--format json` prints one object with `session_id` plus the
-[disclosure preview](share-disclosure-preview.md) fields; that page also
-explains how each category is counted. Redaction is heuristic, so review the
-session itself before sharing the HTML.
+Use `--include-content` only when a full replay is required. This is the
+migration path for users who previously relied on ordinary `share` output
+containing full event payloads and every annotation. The generated file displays
+a full-content warning. `--postmortem` now returns an actionable error unless
+`--include-content` is also present.
+
+Every packet embeds a versioned disclosure manifest with the packet schema,
+agent-strace version, selected mode, evidence-health result, provider and
+capture provenance, redaction and anonymization state, limitations, behavior
+counts, and deterministic SHA-256 integrity references. Source traces and
+annotation sidecars are read-only inputs and are not changed.
+
+`--dry-run` matches the selected output mode. Without `--include-content`, it
+reports `minimized`. With `--include-content`, it reports `include_content`.
+The preview includes category counts, included and omitted annotation counts,
+redaction and anonymization actions, sensitive-field warnings, evidence-health
+status, known-gap count, provider and capture provenance, included categories,
+omitted categories, and limitations. It never prints prompt, response, command,
+path, result, or annotation text. No HTML is written, printed, or opened.
+`--output`, `--stdout`, and `--open` are ignored with a note on stderr, so the
+flag can be appended to the command being reviewed. `--format json` prints one
+object with `session_id` plus the
+[disclosure preview](share-disclosure-preview.md) fields.
 
 `--assignment` instead creates a deterministic, privacy-minimized ZIP with a
 sanitized trace, offline replay, derived stats/cost/lint reports, and a versioned
 manifest. It cannot be combined with `--stdout`, `--open`, `--postmortem`, or
-`--dry-run`; the preview describes ordinary share HTML, not the ZIP contents.
-The output name must have a lowercase `.zip` suffix and is atomically written
-with owner-only permissions. See the [assignment review guide](hiring.md) for
-the privacy boundary and interpretation limits.
+`--dry-run`. It also cannot be combined with `--include-content`. Assignment
+bundles keep their separate privacy format and are not evidence packets. The
+output name must have a lowercase `.zip` suffix and is atomically written with
+owner-only permissions. See the [assignment review guide](hiring.md) for the
+privacy boundary and interpretation limits.
 
 Every event's `data` must be a JSON object. If any event's `data` is an array,
 string, number, boolean, or null (for example after a hand edit or from another
@@ -1185,11 +1202,14 @@ Use machine identity to prove which machine produced a session — useful for co
 ### `annotate`
 ```
 agent-strace annotate <session-id> [--event ID] [--at OFFSET] [--note TEXT] [--label LABEL]
-                      [--author NAME] [--list] [--delete ANNOTATION_ID]
+                      [--author NAME] [--shareable] [--list] [--delete ANNOTATION_ID]
                       [--filter-label LABEL] [--filter-author AUTHOR] [--since Nd]
                       [--export-format json]
 ```
-Add notes, labels, and bookmarks to session events. Annotations appear in shared HTML reports.
+Add notes, labels, and bookmarks to session events. Annotations are private to
+the local trace by default. Use `--shareable` to allow an annotation to appear
+in a privacy-minimized evidence packet. Full-content packets include all
+annotations.
 
 | Flag | Description |
 |---|---|
@@ -1198,6 +1218,7 @@ Add notes, labels, and bookmarks to session events. Annotations appear in shared
 | `--note TEXT` | Text note to attach |
 | `--label LABEL` | Label chip (`root-cause`, `decision`, `retry`, `fix`, `question`) |
 | `--author NAME` | Author name or email |
+| `--shareable` | Allow the annotation to appear in privacy-minimized evidence packets |
 | `--list` | List all annotations for the session |
 | `--delete ID` | Delete an annotation by ID |
 | `--filter-label LABEL` | Filter `--list` by label |

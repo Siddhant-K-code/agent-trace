@@ -126,10 +126,28 @@ Use the purpose-built derived formats when raw trace content is not required:
 - organization reports support `--anonymize` for external sharing; see
   [Organization reporting](org-report.md#output-and-privacy)
 
-These formats have narrower disclosure boundaries than ordinary
-`agent-strace share` output, which can include replay data such as prompts,
-tool results, commands, and paths. Run `agent-strace share <session-id> --dry-run`
-to see counts of that content, without values, before writing the HTML.
+Ordinary `agent-strace share` output is also privacy-minimized. It omits prompts,
+responses, commands, paths, tool input and result values, and other
+content-rich values while retaining ordered evidence, provenance, health,
+known gaps, failures, retries, recovery, and explicitly shareable annotations.
+Run `agent-strace share <session-id> --dry-run` to review the selected
+disclosure boundary without values.
+
+Minimized packets replace event, parent, and annotation identifiers with
+packet-local references. Annotation labels and notes marked `--shareable` are
+included verbatim and should be reviewed before sharing.
+
+Full replay content requires `--include-content`:
+
+```bash
+agent-strace share SESSION_ID --include-content --output full-replay.html
+```
+
+Full-content packets can contain secrets, personal data, commands, paths, and
+proprietary material. Heuristic redaction can miss sensitive values. Review the
+packet before sharing it. The embedded disclosure manifest records the mode,
+redaction and anonymization state, evidence limitations, and deterministic
+integrity references. Source traces remain unchanged.
 
 ---
 

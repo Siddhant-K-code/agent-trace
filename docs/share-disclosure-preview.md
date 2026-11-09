@@ -1,15 +1,83 @@
-# Share disclosure preview core
+# Share disclosure preview and manifest
 
-`agent_trace.disclosure.build_disclosure_preview()` provides a value-free summary of the content-rich categories present in a trace. `agent-strace share SESSION --dry-run` uses it to preview ordinary share HTML before the HTML is written; see [`share`](commands.md#share).
+`agent_trace.disclosure.build_disclosure_preview()` provides a value-free
+summary of the categories present in a trace. `agent-strace share SESSION
+--dry-run` uses it before any HTML is written. See [`share`](commands.md#share).
 
-The preview reports counts for prompts, responses, tool inputs/results, command-bearing events, path-bearing events, annotations, redacted events, and unredacted content-rich events. It never copies prompt text, tool payload values, command strings, filesystem paths, result text, or annotation text into the preview object.
+The preview schema is version 2. It reports:
 
-Command-bearing and path-bearing events are matched by key name, on every event type and inside a tool call's `arguments`. A `command`, `cmd`, or `argv` key marks a command, including the server launch command that the MCP proxy records on `session_start`. A `path`, `file`, `file_path`, `cwd`, or `workdir` key marks a path, and file reads and writes always count as path-bearing. Values are never inspected, so a path or token inside a command line is covered by the command-bearing count, not the path count.
+- the exact selected mode, `minimized` or `include_content`
+- counts for prompts, responses, tool inputs, tool results, command-bearing
+  events, path-bearing events, source annotations, included annotations,
+  omitted annotations, content-rich events, redacted events, and unredacted
+  content-rich events
+- content minimization, anonymization action, and sensitive-field warning counts
+- evidence-health status and known-gap count
+- provider, capture method, and capture-matrix version
+- redaction and anonymization state
+- included and omitted field categories
+- fixed limitations and warnings without trace values
 
-Every event's `data` must be an object. If any event's `data` is an array, string, number, boolean, or null, `build_disclosure_preview()` raises `NonObjectEventDataError`, a `ValueError`. Key names cannot be read from such a payload, so counting the event as one without commands or paths would under-count. The message names the first such event by position and event type and never includes data values. `share` runs the same check before every mode, so the preview and the HTML refuse the same sessions.
+The preview never copies prompt text, tool payload values, command strings,
+filesystem paths, result text, or annotation text into the preview object.
 
-Two modes are represented: `minimized` (the safe default) and `include_content` (an explicit content-sharing choice). The mode flag changes the disclosure contract only; the preview itself remains value-free in both modes.
+Command-bearing and path-bearing events are matched by key name, on every event
+type and inside a tool call's `arguments`. A `command`, `cmd`, or `argv` key
+marks a command, including a server launch command recorded on `session_start`.
+A `path`, `file`, `file_path`, `cwd`, or `workdir` key marks a path. File reads
+and writes always count as path-bearing. Values are never inspected, so a path
+or token inside a command line is covered by the command-bearing count, not the
+path count.
 
-## Scope
+Every event's `data` must be an object. If any event's `data` is an array,
+string, number, boolean, or null, `build_disclosure_preview()` raises
+`NonObjectEventDataError`, a `ValueError`. Key names cannot be read from such a
+payload, so counting the event without commands or paths would under-count. The
+message names the first event by position and event type and never includes data
+values. `share` runs the same check before every mode, so the preview and HTML
+refuse the same sessions.
 
-`share --dry-run` reports mode `include_content`, because ordinary share HTML embeds full event data, and counts every annotation, because the HTML lists them all. `--format json` prints `session_id` plus the fields above. Default `agent-strace share` output is unchanged, and the preview does not claim that heuristic redaction finds every sensitive value. Making share minimized by default is tracked in #252; this module lets that work reuse one disclosure calculation instead of duplicating category logic.
+## Evidence packet manifest
+
+Every share HTML file embeds an `agent-strace.evidence-packet` manifest. The
+manifest records:
+
+- packet schema and agent-strace version
+- selected disclosure mode
+- provider and capture provenance
+- evidence health, known gaps, and redaction state
+- anonymization state and replacement count
+- value-free failure, retry, and recovery counts
+- orphan, ambiguous, duplicate-ID, and unobserved outcome counts
+- source-trace, selected-event, included-annotation, and manifest SHA-256
+  integrity references
+- explicit limitations
+
+The manifest is deterministic for the same source snapshot, selected mode, and
+capture state. The HTML generation timestamp is not part of the manifest.
+Local SHA-256 values are integrity references, not signatures or independent
+timestamps.
+
+Tool outcomes are correlated only through an explicit unique `parent_id` or a
+unique `tool_use_id` present on both events. Missing identifiers, duplicate call
+IDs, conflicting identifiers, multiple outcomes, and outcomes recorded before
+their calls remain unresolved. The packet does not infer a relationship from
+event proximity.
+
+## Modes and annotations
+
+Default `share --dry-run` reports `minimized`. The matching HTML omits
+content-rich values and includes only annotations created with
+`agent-strace annotate --shareable`. Event, parent, and annotation identifiers
+are replaced with packet-local references. Shareable annotation labels and
+notes are included verbatim, so mark them shareable only after reviewing their
+content.
+
+`share --include-content --dry-run` reports `include_content`. The matching HTML
+contains full event payloads and all annotations. It can contain sensitive
+values even when capture-time redaction was enabled. Heuristic redaction does
+not detect every secret or personal identifier.
+
+`--format json` prints `session_id` plus the complete preview object. Assignment
+ZIP files use a separate privacy format and are not described by this preview
+or manifest.

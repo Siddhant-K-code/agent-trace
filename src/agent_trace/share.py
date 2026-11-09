@@ -1,4 +1,4 @@
-"""Shareable HTML replay generator.
+"""Portable HTML evidence packet generator.
 
 Produces a self-contained HTML file from a session trace.
 No external dependencies. No CDN links. All CSS and JS inlined.
@@ -19,22 +19,14 @@ from .cost import estimate_cost
 from .disclosure import (
     DisclosurePreview,
     NonObjectEventDataError,
-    build_disclosure_preview,
     require_object_event_data,
 )
-from .explain import explain_session
+from .evidence_packet import EvidencePacket, build_evidence_packet
+from .explain import ExplainResult, build_phases
 from .models import EventType, TraceEvent, SessionMeta
 from .store import TraceStore
 from .subagent import build_tree, aggregate_stats, SessionNode
-try:
-    from .annotate import load_annotations, Annotation, LABEL_COLOURS, DEFAULT_LABEL_COLOUR
-    _ANNOTATE_AVAILABLE = True
-except ImportError:
-    _ANNOTATE_AVAILABLE = False
-    def load_annotations(store, session_id):  # type: ignore[misc]
-        return []
-    LABEL_COLOURS: dict = {}
-    DEFAULT_LABEL_COLOUR = "#8b949e"
+from .annotate import LABEL_COLOURS, DEFAULT_LABEL_COLOUR
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +68,15 @@ def _event_summary(event: TraceEvent) -> str:
     et = event.event_type
     if et == EventType.TOOL_CALL:
         name = d.get("tool_name", "?")
+        if d.get("content_omitted"):
+            effect = d.get("effect", "tool")
+            attempt = d.get("attempt", 1)
+            suffix = ""
+            if d.get("recovery_attempt"):
+                suffix = f" recovery attempt {attempt}"
+            elif d.get("retry"):
+                suffix = f" retry {attempt}"
+            return f"{name}: {effect} input omitted{suffix}"
         args = d.get("arguments", {}) or {}
         if name.lower() == "bash":
             cmd = str(args.get("command", ""))[:120]
@@ -85,13 +86,23 @@ def _event_summary(event: TraceEvent) -> str:
             return f"{name}: {path}"
         return name
     if et == EventType.TOOL_RESULT:
+        if d.get("content_omitted"):
+            outcome = d.get("outcome", "recorded")
+            suffix = " and recovered" if d.get("recovered") else ""
+            return f"tool result {outcome}{suffix}; value omitted"
         result = str(d.get("result", d.get("content_preview", "")))[:100]
         return result or "(empty)"
     if et == EventType.USER_PROMPT:
+        if d.get("content_omitted"):
+            return "prompt omitted"
         return str(d.get("prompt", ""))[:120]
     if et == EventType.ASSISTANT_RESPONSE:
+        if d.get("content_omitted"):
+            return "response omitted"
         return str(d.get("text", ""))[:120]
     if et == EventType.ERROR:
+        if d.get("content_omitted"):
+            return "failure recorded; details omitted"
         return str(d.get("message", d.get("error", "error")))[:120]
     if et == EventType.LLM_REQUEST:
         model = d.get("model", "")
@@ -101,8 +112,12 @@ def _event_summary(event: TraceEvent) -> str:
         tokens = d.get("total_tokens", 0)
         return f"{tokens} tokens" if tokens else ""
     if et == EventType.FILE_READ:
+        if d.get("content_omitted"):
+            return f"file read; {d.get('path_kind', 'path')} value omitted"
         return str(d.get("uri", ""))
     if et == EventType.FILE_WRITE:
+        if d.get("content_omitted"):
+            return f"file write; {d.get('path_kind', 'path')} value omitted"
         return str(d.get("uri", ""))
     if et == EventType.SESSION_START:
         cmd = d.get("command", [])
@@ -110,6 +125,9 @@ def _event_summary(event: TraceEvent) -> str:
     if et == EventType.SESSION_END:
         return f"exit={d.get('exit_code', '?')}"
     if et in (EventType.SUBAGENT_START, EventType.SUBAGENT_STOP):
+        if d.get("content_omitted"):
+            agent = str(d.get("agent_type") or "subagent")
+            return f"{agent}; content omitted"
         agent = str(d.get("agent_type") or d.get("agent_name") or "subagent")
         child = d.get("child_session_id", "")
         return f"{agent} child={child}" if child else agent
@@ -126,7 +144,7 @@ def _render_event(event: TraceEvent, base_ts: float, is_error: bool = False) -> 
     expanded = " open" if is_error else ""
 
     return f"""
-    <details class="event{error_cls}"{expanded} data-type="{et_label}">
+    <details id="ev-{_esc(event.event_id)}" class="event{error_cls}"{expanded} data-type="{et_label}">
       <summary>
         <span class="ts">{_esc(ts_str)}</span>
         <span class="badge {badge_cls}">{et_label}</span>
@@ -138,7 +156,7 @@ def _render_event(event: TraceEvent, base_ts: float, is_error: bool = False) -> 
 
 def _render_phase(phase, base_ts: float, phase_cost: float | None = None) -> str:
     status_cls = " phase-failed" if phase.failed else ""
-    status_label = " — FAILED" if phase.failed else ""
+    status_label = " - FAILED" if phase.failed else ""
     cost_str = f"  ${phase_cost:.4f}" if phase_cost is not None else ""
     events_html = ""
     for event in phase.events:
@@ -533,16 +551,100 @@ def _render_subagent_tree_html(tree: "SessionNode", stats: object) -> str:
 </style>"""
 
 
+def _packet_explain(packet: EvidencePacket) -> ExplainResult:
+    events = list(packet.events)
+    base_ts = events[0].timestamp if events else packet.meta.started_at
+    phases = build_phases(events, base_ts)
+    for phase in phases:
+        if not phase.name:
+            phase.name = f"Phase {phase.index}"
+    duration = packet.meta.total_duration_ms / 1000 if packet.meta.total_duration_ms else 0.0
+    return ExplainResult(
+        session_id=packet.meta.session_id,
+        total_duration=duration,
+        total_events=len(events),
+        phases=phases,
+        total_retries=packet.behavior.retry_count,
+        wasted_seconds=sum(phase.duration for phase in phases if phase.failed),
+    )
+
+
+def _render_packet_summary(packet: EvidencePacket) -> str:
+    behavior = packet.behavior
+    health = packet.manifest["evidence_health"]
+    reasons = "".join(
+        (
+            f"<li><strong>{_esc(reason['code'])}</strong>"
+            f"{': ' + _esc(reason['message']) if reason.get('message') else ''}</li>"
+        )
+        for reason in health["reasons"]
+    )
+    if not reasons:
+        reasons = "<li>No evidence gaps or structural issues were detected.</li>"
+    behavior_rows = (
+        ("Failure events", behavior.failure_event_count),
+        ("Failed operations", behavior.failed_operation_count),
+        ("Retries", behavior.retry_count),
+        ("Recovery attempts", behavior.recovery_attempt_count),
+        ("Recovered operations", behavior.recovered_operation_count),
+        ("Unresolved failed operations", behavior.unresolved_failed_operation_count),
+        ("Orphan outcomes", behavior.orphan_outcome_count),
+        ("Ambiguous outcomes", behavior.ambiguous_outcome_count),
+        ("Duplicate call ID events", behavior.duplicate_call_id_event_count),
+        ("Operations without outcomes", behavior.unobserved_operation_count),
+    )
+    behavior_html = "".join(
+        f"<tr><td>{_esc(label)}</td><td>{value}</td></tr>"
+        for label, value in behavior_rows
+    )
+    privacy = packet.manifest["privacy"]
+    content_mode = privacy["content"]
+    annotation_mode = privacy["annotations"]
+    redaction = privacy["redaction"]
+    anonymization = privacy["anonymization"]
+    return f"""
+<h2>Evidence Health</h2>
+<div class="phase-meta">
+  Status: <strong>{_esc(health["status"])}</strong>
+  | Provider: {_esc(packet.manifest["provenance"]["provider"])}
+  | Capture: {_esc(packet.manifest["provenance"]["capture_method"])}
+</div>
+<ul style="margin:8px 0 16px 20px">{reasons}</ul>
+
+<h2>Failure, Retry, and Recovery</h2>
+<table class="cost-table">
+  <tbody>{behavior_html}</tbody>
+</table>
+
+<h2>Disclosure</h2>
+<div class="phase-meta">
+  Content: {_esc(content_mode)}
+  | Annotations: {_esc(annotation_mode)}
+  | Redaction: {_esc(redaction["mode"])}
+  | Anonymization: {_esc(anonymization["mode"])}
+</div>"""
+
+
 def render_html(
     store: TraceStore,
     session_id: str,
     postmortem_html: str = "",
+    *,
+    include_content: bool = False,
+    packet: EvidencePacket | None = None,
 ) -> str:
-    meta = store.load_meta(session_id)
-    events = store.load_events(session_id)
-    # Phase building and the event renderer read every event's data as an object.
+    packet = packet or build_evidence_packet(
+        store,
+        session_id,
+        include_content=include_content,
+    )
+    content_included = packet.preview.mode == "include_content"
+    if postmortem_html and not content_included:
+        raise ValueError("postmortem HTML requires include_content mode")
+    meta = packet.meta
+    events = list(packet.events)
     require_object_event_data(events)
-    explain = explain_session(store, session_id)
+    explain = _packet_explain(packet)
 
     try:
         cost_result = estimate_cost(store, session_id)
@@ -564,6 +666,7 @@ def render_html(
     # Header meta items
     meta_items = [
         ("Session", meta.session_id),
+        ("Mode", packet.preview.mode),
         ("Started", started.strftime("%Y-%m-%d %H:%M:%S UTC")),
         ("Duration", f"{duration:.1f}s"),
         ("Events", str(len(events))),
@@ -572,8 +675,12 @@ def render_html(
         ("Errors", str(meta.errors)),
         ("Est. cost", total_cost_str),
         ("Status", status),
+        ("Evidence health", packet.health.result.status.value),
+        ("Provider", packet.health.result.provider or "unknown"),
+        ("Capture", packet.health.result.capture_method or "unknown"),
+        ("Redaction", packet.health.redaction.mode),
     ]
-    if meta.agent_name:
+    if content_included and meta.agent_name:
         meta_items.insert(1, ("Agent", meta.agent_name))
 
     meta_html = ""
@@ -598,10 +705,13 @@ def render_html(
         rows = ""
         for pc in cost_result.phase_costs:
             wasted_cls = ' class="cost-wasted"' if pc.failed else ""
+            phase_name = pc.phase_name
+            if not content_included and 0 < pc.phase_index <= len(explain.phases):
+                phase_name = explain.phases[pc.phase_index - 1].name
             rows += f"""
         <tr{wasted_cls}>
           <td>Phase {pc.phase_index}</td>
-          <td>{_esc(pc.phase_name[:40])}</td>
+          <td>{_esc(phase_name[:40])}</td>
           <td>{pc.input_tokens:,}</td>
           <td>{pc.output_tokens:,}</td>
           <td>${pc.cost_dollars:.4f}{"  ← wasted" if pc.failed else ""}</td>
@@ -620,20 +730,17 @@ def render_html(
 
     # Subagent tree section
     tree_html = ""
-    try:
-        tree = build_tree(store, session_id)
-        if tree.children:
-            stats = aggregate_stats(tree)
-            tree_html = _render_subagent_tree_html(tree, stats)
-    except Exception:
-        pass
+    if content_included:
+        try:
+            tree = build_tree(store, session_id)
+            if tree.children:
+                stats = aggregate_stats(tree)
+                tree_html = _render_subagent_tree_html(tree, stats)
+        except Exception:
+            pass
 
     # Annotations
-    annotations = load_annotations(store, session_id)
-    annotations_by_event: dict[str, list[Annotation]] = {}
-    for ann in annotations:
-        if ann.event_id:
-            annotations_by_event.setdefault(ann.event_id, []).append(ann)
+    annotations = packet.annotations
 
     # Bookmark sidebar
     bookmarks_html = ""
@@ -654,6 +761,26 @@ def render_html(
 </div>"""
 
     generated = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    packet_summary_html = _render_packet_summary(packet)
+    manifest_json = json.dumps(
+        packet.manifest,
+        indent=2,
+        sort_keys=True,
+        ensure_ascii=False,
+    ).replace("</", "<\\/")
+    if content_included:
+        warning_html = """
+<div style="background:#3a0d0d;border:1px solid #f85149;border-radius:6px;padding:12px;margin-bottom:16px">
+  <strong>Full-content packet.</strong>
+  This file may contain prompts, responses, commands, paths, tool inputs, tool results,
+  secrets, personal data, and proprietary material.
+</div>"""
+    else:
+        warning_html = """
+<div style="background:#0d2d3a;border:1px solid #39c5cf;border-radius:6px;padding:12px;margin-bottom:16px">
+  <strong>Privacy-minimized packet.</strong>
+  Content-rich values are omitted. Only annotations explicitly marked shareable are included.
+</div>"""
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -664,8 +791,9 @@ def render_html(
 <style>{_CSS}</style>
 </head>
 <body>
+{warning_html}
 <div class="header">
-  <h1>agent-trace session replay</h1>
+  <h1>agent-strace evidence packet</h1>
   <div class="meta-grid">{meta_html}
   </div>
 </div>
@@ -674,6 +802,8 @@ def render_html(
 {postmortem_html}
 
 {tree_html}
+
+{packet_summary_html}
 
 <div class="search-bar" id="filter-bar">
   <input
@@ -693,8 +823,18 @@ def render_html(
 
 {cost_html}
 
+<h2>Disclosure Manifest</h2>
+<details class="phase">
+  <summary class="phase-header">
+    Schema {_esc(packet.manifest["schema"])} v{packet.manifest["schema_version"]}
+  </summary>
+  <pre class="event-detail">{_esc(manifest_json)}</pre>
+</details>
+<script type="application/json" id="agent-evidence-manifest">{manifest_json}</script>
+
 <div class="footer">
-  Generated by agent-strace · {generated} · {len(events)} events
+  Generated by agent-strace {_esc(packet.manifest["tool"]["version"])}
+  | {generated} | {len(events)} events
 </div>
 <script>{_JS}</script>
 </body>
@@ -713,24 +853,31 @@ _DISCLOSURE_TEXT_ROWS = (
     ("tool results", "tool_result_count"),
     ("command-bearing events", "command_count"),
     ("path-bearing events", "path_count"),
-    ("annotations", "annotation_count"),
+    ("included annotations", "annotation_count"),
+    ("source annotations", "source_annotation_count"),
+    ("omitted annotations", "omitted_annotation_count"),
     ("content-rich events", "content_rich_event_count"),
+    ("minimized content-rich events", "minimized_content_rich_event_count"),
     ("redacted events", "redacted_event_count"),
     ("unredacted content-rich events", "unredacted_content_rich_event_count"),
+    ("sensitive-field warnings", "unresolved_sensitive_field_warning_count"),
+    ("anonymization actions", "anonymization_action_count"),
+    ("known evidence gaps", "known_gap_count"),
 )
 
 
-def build_share_disclosure_preview(store: TraceStore, session_id: str) -> DisclosurePreview:
-    """Count what ordinary share HTML for *session_id* would disclose.
-
-    The HTML embeds every event payload and lists every annotation, so the
-    preview counts all events and annotations in ``include_content`` mode.
-    """
-    return build_disclosure_preview(
-        store.load_events(session_id),
-        annotation_count=len(load_annotations(store, session_id)),
-        include_content=True,
-    )
+def build_share_disclosure_preview(
+    store: TraceStore,
+    session_id: str,
+    *,
+    include_content: bool = False,
+) -> DisclosurePreview:
+    """Count what the selected share mode would disclose."""
+    return build_evidence_packet(
+        store,
+        session_id,
+        include_content=include_content,
+    ).preview
 
 
 def format_disclosure_preview(session_id: str, preview: DisclosurePreview) -> str:
@@ -740,7 +887,13 @@ def format_disclosure_preview(session_id: str, preview: DisclosurePreview) -> st
     lines = [
         "Share disclosure preview (dry run): no HTML written or opened.",
         f"Session: {session_id}",
-        f"Mode: {preview.mode} (share HTML embeds full event data and annotation text)",
+        f"Mode: {preview.mode}",
+        f"Evidence health: {preview.evidence_health_status}",
+        f"Provider: {preview.provider}",
+        f"Capture method: {preview.capture_method}",
+        f"Capture matrix: {preview.capture_matrix_version}",
+        f"Redaction: {preview.redaction_mode}",
+        f"Anonymization: {preview.anonymization_mode}",
         "",
     ]
     lines.extend(
@@ -748,9 +901,21 @@ def format_disclosure_preview(session_id: str, preview: DisclosurePreview) -> st
     )
     lines.extend([
         "",
+        "Included field categories:",
+        *(f"  - {category}" for category in preview.included_field_categories),
+        "",
+        "Omitted field categories:",
+        *(
+            (f"  - {category}" for category in preview.omitted_field_categories)
+            if preview.omitted_field_categories
+            else ("  - none",)
+        ),
+        "",
+        "Warnings:",
+        *(f"  - {warning}" for warning in preview.warnings),
+        "",
         "Counts only. No prompt, response, command, path, result, or annotation text is shown.",
-        "Redaction is heuristic; review the session before sharing the HTML.",
-        "Re-run without --dry-run to write the HTML report.",
+        "Re-run without --dry-run to write the selected evidence packet.",
     ])
     return "\n".join(lines) + "\n"
 
@@ -762,17 +927,36 @@ def format_disclosure_preview(session_id: str, preview: DisclosurePreview) -> st
 def cmd_share(args: argparse.Namespace) -> int:
     dry_run = getattr(args, "dry_run", False)
     preview_format = getattr(args, "format", None)
+    include_content = bool(getattr(args, "include_content", False))
     if preview_format is not None and not dry_run:
         sys.stderr.write("Error: --format requires --dry-run\n")
         return 1
 
     if getattr(args, "assignment", False):
+        if include_content:
+            sys.stderr.write(
+                "Error: --include-content cannot be combined with --assignment; "
+                "assignment bundles use their own privacy format\n"
+            )
+            return 1
         if dry_run:
             sys.stderr.write(
                 "Error: --dry-run previews ordinary share HTML and cannot be combined "
                 "with --assignment\n"
             )
             return 1
+        assignment_store = TraceStore(args.trace_dir)
+        assignment_session_id = args.session_id or assignment_store.get_latest_session_id()
+        if assignment_session_id:
+            assignment_full_id = assignment_store.find_session(assignment_session_id)
+            if assignment_full_id:
+                try:
+                    require_object_event_data(
+                        assignment_store.load_events(assignment_full_id)
+                    )
+                except NonObjectEventDataError:
+                    sys.stderr.write("Error: session event data must be an object\n")
+                    return 1
         from .assignment import cmd_share_assignment
         return cmd_share_assignment(args)
 
@@ -797,8 +981,26 @@ def cmd_share(args: argparse.Namespace) -> int:
         sys.stderr.write(f"Error: {exc}\n")
         return 1
 
+    if getattr(args, "postmortem", False) and not include_content:
+        sys.stderr.write(
+            "Error: --postmortem includes content-rich values and now requires "
+            "--include-content. The default packet already preserves value-free "
+            "failure, retry, and recovery signals.\n"
+        )
+        return 1
+
+    try:
+        packet = build_evidence_packet(
+            store,
+            full_id,
+            include_content=include_content,
+        )
+    except (TypeError, ValueError) as exc:
+        sys.stderr.write(f"Error: could not build evidence packet: {exc}\n")
+        return 1
+
     if dry_run:
-        preview = build_share_disclosure_preview(store, full_id)
+        preview = packet.preview
         if preview_format == "json":
             payload = {"session_id": full_id, **preview.to_dict()}
             sys.stdout.write(json.dumps(payload, indent=2) + "\n")
@@ -821,9 +1023,25 @@ def cmd_share(args: argparse.Namespace) -> int:
         report = analyze_session(store, full_id)
         postmortem_html = render_postmortem_html(report)
 
-    content = render_html(store, full_id, postmortem_html=postmortem_html)
+    content = render_html(
+        store,
+        full_id,
+        postmortem_html=postmortem_html,
+        include_content=include_content,
+        packet=packet,
+    )
 
     if getattr(args, "stdout", False):
+        if include_content:
+            sys.stderr.write(
+                "Warning: writing a full-content evidence packet to stdout; "
+                "review it for sensitive values before sharing.\n"
+            )
+        else:
+            sys.stderr.write(
+                "Writing a privacy-minimized evidence packet. Use --include-content "
+                "only when a full replay is required.\n"
+            )
         sys.stdout.write(content)
         return 0
 
@@ -832,7 +1050,16 @@ def cmd_share(args: argparse.Namespace) -> int:
         f.write(content)
 
     size_kb = len(content.encode()) // 1024
-    sys.stderr.write(f"Created: {out_path} ({size_kb}KB)\n")
+    mode_label = "full-content" if include_content else "privacy-minimized"
+    sys.stderr.write(f"Created {mode_label} evidence packet: {out_path} ({size_kb}KB)\n")
+    if include_content:
+        sys.stderr.write(
+            "Warning: this packet may contain sensitive values. Review it before sharing.\n"
+        )
+    else:
+        sys.stderr.write(
+            "For the legacy full replay, re-run with --include-content.\n"
+        )
 
     if getattr(args, "open", False):
         try:

@@ -19,7 +19,6 @@ from agent_trace.cli import _telemetry_command_properties, build_parser, main
 from agent_trace.disclosure import (
     DisclosurePreview,
     NonObjectEventDataError,
-    build_disclosure_preview,
 )
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
@@ -185,7 +184,12 @@ class TestRenderHtml(unittest.TestCase):
             tmp2.cleanup()
 
     def test_postmortem_html_included_when_provided(self):
-        html = render_html(self.store, "html1", postmortem_html="<div>POSTMORTEM</div>")
+        html = render_html(
+            self.store,
+            "html1",
+            postmortem_html="<div>POSTMORTEM</div>",
+            include_content=True,
+        )
         self.assertIn("POSTMORTEM", html)
 
 
@@ -253,7 +257,11 @@ class TestShareDryRun(unittest.TestCase):
             self.store.append_event(self.session_id, event)
         self.store.update_meta(meta)
         add_annotation(self.store, self.session_id,
-                       Annotation(label="sentinel-label-7e44", note="sentinel-note-2f58"))
+                       Annotation(
+                           label="sentinel-label-7e44",
+                           note="sentinel-note-2f58",
+                           shareable=True,
+                       ))
         add_annotation(self.store, self.session_id, Annotation(label="decision"))
 
         # Default share output lands in the working directory, which is inside the snapshot root.
@@ -272,17 +280,20 @@ class TestShareDryRun(unittest.TestCase):
         args = build_parser().parse_args(["share"])
         self.assertFalse(args.dry_run)
         self.assertIsNone(args.format)
+        self.assertFalse(args.include_content)
         args = build_parser().parse_args(["share", "abc", "--dry-run", "--format", "json"])
         self.assertTrue(args.dry_run)
         self.assertEqual(args.format, "json")
+        args = build_parser().parse_args(["share", "abc", "--include-content"])
+        self.assertTrue(args.include_content)
 
-    def test_text_preview_reports_include_content_counts(self):
+    def test_text_preview_reports_minimized_counts(self):
         code, out, err = self._run(self.session_id[:8], "--dry-run")
         self.assertEqual(code, 0)
         self.assertEqual(err, "")
         self.assertIn("no HTML written or opened", out)
         self.assertIn(f"Session: {self.session_id}\n", out)
-        self.assertIn("Mode: include_content", out)
+        self.assertIn("Mode: minimized", out)
         expected = {
             "events": 7,
             "prompts": 1,
@@ -291,10 +302,15 @@ class TestShareDryRun(unittest.TestCase):
             "tool results": 1,
             "command-bearing events": 1,
             "path-bearing events": 1,
-            "annotations": 2,
+            "included annotations": 1,
+            "source annotations": 2,
+            "omitted annotations": 1,
             "content-rich events": 5,
+            "minimized content-rich events": 5,
             "redacted events": 0,
             "unredacted content-rich events": 5,
+            "sensitive-field warnings": 1,
+            "anonymization actions": 0,
         }
         for label, count in expected.items():
             self.assertRegex(out, rf"(?m)^  {re.escape(label)}:\s+{count}$")
@@ -303,18 +319,23 @@ class TestShareDryRun(unittest.TestCase):
         code, out, err = self._run(self.session_id, "--dry-run", "--format", "json")
         self.assertEqual(code, 0)
         self.assertEqual(err, "")
-        expected = build_disclosure_preview(
-            self.store.load_events(self.session_id), annotation_count=2, include_content=True
+        expected = build_share_disclosure_preview(
+            self.store,
+            self.session_id,
         ).to_dict()
         payload = json.loads(out)
         self.assertEqual(payload, {"session_id": self.session_id, **expected})
-        self.assertEqual(payload["mode"], "include_content")
+        self.assertEqual(payload["mode"], "minimized")
 
     def test_text_rows_cover_every_count_field(self):
         keys = [key for _label, key in _DISCLOSURE_TEXT_ROWS]
         labels = [label for label, _key in _DISCLOSURE_TEXT_ROWS]
-        fields = {field.name for field in dataclasses.fields(DisclosurePreview)}
-        self.assertEqual(set(keys), fields - {"schema_version", "mode"})
+        fields = {
+            field.name
+            for field in dataclasses.fields(DisclosurePreview)
+            if field.type in (int, "int")
+        }
+        self.assertEqual(set(keys), fields - {"schema_version"})
         self.assertEqual(len(keys), len(set(keys)))
         self.assertEqual(len(labels), len(set(labels)))
 
@@ -333,7 +354,10 @@ class TestShareDryRun(unittest.TestCase):
         secrets = ("sentinel-token-3d7b", "/sentinel/mcp-repo-9a1c")
         html = render_html(self.store, session_id)
         for value in secrets:
-            self.assertIn(value, html)
+            self.assertNotIn(value, html)
+        full_html = render_html(self.store, session_id, include_content=True)
+        for value in secrets:
+            self.assertIn(value, full_html)
 
         code, out, err = self._run(session_id, "--dry-run", "--format", "json")
         self.assertEqual((code, err), (0, ""))
@@ -367,13 +391,14 @@ class TestShareDryRun(unittest.TestCase):
         self.assertEqual(props["exit_code"], 0)
         self.assertNotIn(self.session_id, json.dumps(props))
         notice.assert_called_once()
-        self.assertIn("Mode: include_content", out.getvalue())
+        self.assertIn("Mode: minimized", out.getvalue())
         self.assertEqual(_tree_snapshot(self.root), before)
 
     def test_only_dry_run_is_tagged_in_telemetry(self):
         cases = (
             (("share", "--dry-run"), "dry_run"),
             (("share", "abc", "--dry-run", "--format", "json", "-o", "x.html"), "dry_run"),
+            (("share", "abc", "--include-content", "--dry-run"), "dry_run"),
             (("share",), None),
             (("share", "abc", "-o", "x.html", "--open", "--postmortem"), None),
             (("share", "--assignment", "-o", "x.zip"), None),
@@ -391,8 +416,13 @@ class TestShareDryRun(unittest.TestCase):
 
     def test_preview_never_prints_values(self):
         html = render_html(self.store, self.session_id)
-        for value in _SENTINELS:
+        for value in _SENTINELS[:5]:
+            self.assertNotIn(value, html)
+        for value in _SENTINELS[5:]:
             self.assertIn(value, html)
+        full_html = render_html(self.store, self.session_id, include_content=True)
+        for value in _SENTINELS:
+            self.assertIn(value, full_html)
         for argv in (("--dry-run",), ("--dry-run", "--format", "json")):
             code, out, err = self._run(self.session_id, *argv)
             self.assertEqual(code, 0)
@@ -417,7 +447,7 @@ class TestShareDryRun(unittest.TestCase):
         self.assertFalse(target.exists())
         self.assertEqual(_tree_snapshot(self.root), before)
         self.assertNotIn("<html", out)
-        self.assertIn("Mode: include_content", out)
+        self.assertIn("Mode: minimized", out)
         self.assertIn("ignores --output, --stdout, --open; no HTML was written or opened", err)
 
     def test_dry_run_without_output_flags_writes_nothing(self):
@@ -446,9 +476,20 @@ class TestShareDryRun(unittest.TestCase):
         self.assertEqual(_tree_snapshot(self.root), before)
 
     def test_postmortem_does_not_change_counts(self):
-        _, plain, _ = self._run(self.session_id, "--dry-run", "--format", "json")
+        _, plain, _ = self._run(
+            self.session_id,
+            "--include-content",
+            "--dry-run",
+            "--format",
+            "json",
+        )
         code, with_postmortem, err = self._run(
-            self.session_id, "--dry-run", "--postmortem", "--format", "json"
+            self.session_id,
+            "--include-content",
+            "--dry-run",
+            "--postmortem",
+            "--format",
+            "json",
         )
         self.assertEqual(code, 0)
         self.assertEqual(err, "")
@@ -460,14 +501,38 @@ class TestShareDryRun(unittest.TestCase):
         self.assertEqual(out, "")
         self.assertIn("Session not found: nosuchsession", err)
 
-    def test_default_share_still_writes_html(self):
+    def test_default_share_writes_minimized_html(self):
         code, out, err = self._run(self.session_id)
         self.assertEqual(code, 0)
         self.assertEqual(out, "")
-        self.assertIn("Created:", err)
+        self.assertIn("Created privacy-minimized evidence packet:", err)
+        self.assertIn("--include-content", err)
         html = (self.workdir / f"session-{self.session_id[:12]}.html").read_text(encoding="utf-8")
         self.assertIn("<!DOCTYPE html>", html)
-        self.assertIn("sentinel-prompt-41f7", html)
+        self.assertNotIn("sentinel-prompt-41f7", html)
+        self.assertNotIn("sentinel-command-8c2e", html)
+        self.assertNotIn("sentinel-result-b3a1", html)
+        self.assertNotIn("sentinel-response-06cd", html)
+        self.assertNotIn("/sentinel/dir-5d90/file.py", html)
+        self.assertIn("sentinel-note-2f58", html)
+        self.assertNotIn("[decision]", html)
+        self.assertIn('"mode": "minimized"', html)
+
+    def test_include_content_restores_full_replay(self):
+        code, out, err = self._run(self.session_id, "--include-content")
+        self.assertEqual((code, out), (0, ""))
+        self.assertIn("Created full-content evidence packet:", err)
+        self.assertIn("may contain sensitive values", err)
+        html = (self.workdir / f"session-{self.session_id[:12]}.html").read_text(encoding="utf-8")
+        for value in _SENTINELS:
+            self.assertIn(value, html)
+        self.assertIn('"mode": "include_content"', html)
+
+    def test_postmortem_requires_include_content(self):
+        code, out, err = self._run(self.session_id, "--postmortem")
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("--postmortem", err)
+        self.assertIn("--include-content", err)
 
 
 # ---------------------------------------------------------------------------

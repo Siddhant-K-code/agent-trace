@@ -1511,12 +1511,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_health.add_argument("--format", choices=["text", "json"], default="text")
 
     # share
-    p_share = sub.add_parser("share", help="generate a self-contained HTML replay of a session")
+    p_share = sub.add_parser(
+        "share",
+        help="generate a self-contained privacy-minimized HTML evidence packet",
+    )
     p_share.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
     p_share.add_argument("--output", "-o", help="output file path (default: session-<id>.html)")
     p_share.add_argument("--stdout", action="store_true", help="write HTML to stdout instead of a file")
     p_share.add_argument("--open", action="store_true", help="open the HTML file in the browser after creation")
-    p_share.add_argument("--postmortem", action="store_true", help="include postmortem analysis in the HTML")
+    p_share.add_argument(
+        "--postmortem",
+        action="store_true",
+        help="include postmortem analysis in full-content HTML (requires --include-content)",
+    )
+    p_share.add_argument(
+        "--include-content",
+        action="store_true",
+        dest="include_content",
+        help="include full prompts, responses, commands, paths, tool inputs, and results",
+    )
     p_share.add_argument(
         "--assignment", action="store_true",
         help="create a privacy-minimized deterministic assignment ZIP instead of ordinary HTML",
@@ -1935,6 +1948,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_ann.add_argument("--note", help="text note to attach")
     p_ann.add_argument("--label", help="label chip (e.g. root-cause, decision, retry)")
     p_ann.add_argument("--author", help="author name or email")
+    p_ann.add_argument(
+        "--shareable",
+        action="store_true",
+        help="allow this annotation to appear in privacy-minimized share packets",
+    )
     p_ann.add_argument("--list", action="store_true", help="list all annotations for the session")
     p_ann.add_argument("--delete", metavar="ANNOTATION_ID", help="delete an annotation by ID")
     p_ann.add_argument("--filter-label", dest="filter_label", metavar="LABEL",

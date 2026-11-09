@@ -52,6 +52,7 @@ class Annotation:
     note: str = ""
     author: str = ""
     created_at: float = field(default_factory=time.time)
+    shareable: bool = False
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), separators=(",", ":"))
@@ -215,7 +216,9 @@ def format_annotations(
         if a.note:
             w(f"    {a.note}\n")
         if a.author:
-            w(f"    — {a.author}\n")
+            w(f"    {a.author}\n")
+        if a.shareable:
+            w("    shareable\n")
         w("\n")
 
 
@@ -282,6 +285,7 @@ def cmd_annotate(args: argparse.Namespace) -> int:
     event_id = getattr(args, "event", "") or ""
     at_str = getattr(args, "at", "") or ""
     author = getattr(args, "author", "") or ""
+    shareable = bool(getattr(args, "shareable", False))
 
     if not note and not label:
         sys.stderr.write("Provide --note and/or --label.\n")
@@ -303,6 +307,7 @@ def cmd_annotate(args: argparse.Namespace) -> int:
         label=label,
         note=note,
         author=author,
+        shareable=shareable,
     )
     add_annotation(store, full_id, annotation)
     sys.stdout.write(f"Annotation {annotation.annotation_id} added to {full_id[:12]}\n")
