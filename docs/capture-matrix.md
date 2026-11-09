@@ -30,6 +30,7 @@ versioned, reproducible provider fixture for the adapter contract.
 | Claude Code | `agent-strace setup --cli claude` | start + end | captured | captured | provider-defined | unverified |
 | OpenAI Codex | `agent-strace setup --cli codex` | start + end | captured | captured | provider-defined | verified, 0.167.0-alpha.3.2 |
 | GitHub Copilot CLI | `agent-strace setup --cli copilot` | start + end, first prompt can arrive before start | prompt only | captured | provider-defined; errors captured | verified, 1.0.103-0 |
+| GitHub Copilot cloud agent | `agent-strace setup --cli copilot-cloud` | **partial**: start + end per job, only when streamed to a collector | prompt only | captured | provider-defined; errors captured | unverified |
 
 ## Claude Code
 
@@ -100,6 +101,35 @@ versioned, reproducible provider fixture for the adapter contract.
   - File and command activity is visible only in tool arguments and results; no `file_write` events are recorded.
   - Stores written before agent-strace 0.97.0 have no metadata for subagent sessions. Run `agent-strace backfill-meta --apply` to make them visible.
 
+## GitHub Copilot cloud agent
+
+Coverage is **partial**, and the entry is **unverified**: no live cloud agent job has been recorded. See [Copilot cloud agent capture](copilot-cloud-agent.md) for setup and the GitHub documentation it relies on.
+
+- Config: `.github/hooks/agent-strace.json` plus `.github/hooks/agent-strace-cloud.sh`, on the repository's default branch. The cloud agent loads only `.github/hooks/*.json` from the cloned repository; local Copilot plugins and `~/.copilot` hooks do not run there.
+- Rollback: delete both files from the default branch, then remove the `AGENT_STRACE_ENDPOINT` and `AGENT_STRACE_AUTH_KEY` Agents secrets and the collector firewall allow rule.
+- Transport: the sandbox filesystem is discarded when the job ends. Events survive only when each hook streams them to an [`agent-strace server`](server.md) collector named by the `AGENT_STRACE_ENDPOINT` Agents secret and allowed by the cloud agent firewall.
+- Privacy: by default events are redacted before they leave the sandbox. Agents secrets are readable by the agent, so the collector key must guard nothing else.
+- Captured, when events reach the collector (`captured_signals`):
+  - Session start, once per job (sessionStart)
+  - The job prompt, at most once per job (userPromptSubmitted)
+  - Tool calls with tool name and arguments (preToolUse)
+  - Tool results (postToolUse)
+  - Failed tool calls (postToolUseFailure)
+  - Agent stop reason (agentStop)
+  - Subagent start and stop (subagentStart, subagentStop)
+  - Session end with reason complete, error, or timeout (sessionEnd)
+- Not captured (`not_captured_signals`):
+  - Assistant response text and reasoning
+  - Model name and token usage
+  - errorOccurred, userPromptTransformed, and preCompact events, which fire in cloud agent but are not registered
+  - permissionRequest and notification events, which do not fire in cloud agent
+  - Setup steps, firewall blocks, and other job log output that does not pass through a hook
+  - Any event recorded while AGENT_STRACE_ENDPOINT is unset or the collector is unreachable; it is discarded with the sandbox
+  - Every event of a job in which agent-strace is not on PATH and the one-time install fails
+  - Links between sessions of separate jobs on the same pull request; each job is recorded as its own session
+  - Workflow artifact or pull request attachment upload
+- Known gaps: the Copilot CLI gaps for `agentStop` text, model and token usage, tool call IDs, and file and command activity also apply. Recorded sessions name the `github-copilot` agent, so `health` and evidence reports apply the GitHub Copilot CLI entry rather than this one.
+
 ## Machine-readable coverage values
 
 The values below are copied from `src/agent_trace/capture_matrix.json`. The fixture test
@@ -111,6 +141,9 @@ published matrix.
 | claude | captured | captured | captured | captured | captured | provider_defined | provider_defined | provider_defined | captured | unverified |
 | codex | captured | captured | captured | captured | captured | provider_defined | provider_defined | provider_defined | captured | verified |
 | copilot | captured | captured | captured | unavailable | captured | provider_defined | provider_defined | captured | captured | verified |
+| copilot-cloud | captured | captured | captured | unavailable | captured | provider_defined | provider_defined | captured | captured | unverified |
+
+An entry with incomplete coverage may also set `coverage_status` to `partial` and list `captured_signals` and `not_captured_signals`: plain-language lists of what the template records and what it cannot. They are documentation for readers and are not read by `health` or `validate`. `copilot-cloud` is the only partial entry.
 
 An entry may also list `events_before_start`: event types the provider is known to send before its session start hook. `agent-strace health` reports events of those types before the first `session_start` as the provider limitation `declared_events_before_session_start`. Any other event before the start is still the observed `events_before_session_start`, which makes the session `invalid`.
 

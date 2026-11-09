@@ -1173,6 +1173,56 @@ def _write_copilot_hooks_config(args: argparse.Namespace) -> Path:
     return hooks_path
 
 
+def _copilot_cloud_redact_env(args: argparse.Namespace) -> dict[str, str]:
+    if getattr(args, "no_redact", False):
+        return {"AGENT_TRACE_NO_REDACT": "1"}
+    if getattr(args, "redact", False):
+        return {"AGENT_TRACE_REDACT": "1"}
+    return {}
+
+
+def _setup_copilot_cloud(args: argparse.Namespace) -> int:
+    from .copilot_cloud import (
+        SETUP_STEPS_RELATIVE_PATH,
+        find_repo_root,
+        hooks_config,
+        setup_steps_workflow,
+        write_repository_files,
+    )
+
+    repo_root = find_repo_root(Path.cwd())
+    if not (repo_root / ".git").exists():
+        sys.stderr.write(
+            f"No git repository found; writing under {repo_root}. Copilot cloud agent reads "
+            ".github/hooks/*.json only from the repository's default branch.\n"
+        )
+    redact_env = _copilot_cloud_redact_env(args)
+    hooks_path, script_path = write_repository_files(repo_root, redact_env)
+    sys.stderr.write(
+        f"Wrote GitHub Copilot cloud agent hooks config: {hooks_path}\n"
+        f"Wrote GitHub Copilot cloud agent hook script: {script_path}\n"
+    )
+    sys.stdout.write(json.dumps(hooks_config(redact_env), indent=2) + "\n")
+    sys.stderr.write(
+        "\nCopilot cloud agent checklist:\n"
+        "- Commit both files and merge them to the default branch; the cloud agent ignores hooks on other branches.\n"
+        "- The sandbox filesystem is discarded when the job ends. To keep events, run "
+        "`agent-strace server` on a host the agent can reach, then add Agents secrets "
+        "AGENT_STRACE_ENDPOINT (collector URL) and AGENT_STRACE_AUTH_KEY (collector key).\n"
+        "- Add the collector host to the Copilot cloud agent firewall allowlist.\n"
+        "- The agent can read Agents secrets; use a collector key that guards nothing else.\n"
+        "- Workflow artifact and pull request attachment upload are not supported.\n"
+        f"- Optional, for sessions on GitHub Actions only: {SETUP_STEPS_RELATIVE_PATH.as_posix()} "
+        "that preinstalls agent-strace. Merge the step into an existing file instead of replacing it:\n\n"
+    )
+    sys.stderr.write(setup_steps_workflow())
+    sys.stderr.write(
+        "\nCoverage is partial and not verified in a live cloud agent job. "
+        "See docs/copilot-cloud-agent.md.\n"
+    )
+    return 0
+
+
 def cmd_setup(args: argparse.Namespace) -> int | None:
     """Generate hooks configuration, or verify Codex or Claude Code setup read-only."""
     cli = getattr(args, "cli", "claude") or "claude"
@@ -1236,6 +1286,9 @@ def cmd_setup(args: argparse.Namespace) -> int | None:
                 "it without a warning.\n"
             )
         return 1
+
+    if cli == "copilot-cloud":
+        return _setup_copilot_cloud(args)
 
     configs: list[tuple[str, str, dict]] = []
     codex_needing_trust: list[str] | None = None
@@ -1498,8 +1551,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="compatibility flag; Claude setup already targets ~/.claude/settings.json, "
              "or $CLAUDE_CONFIG_DIR/settings.json when that is set",
     )
-    p_setup.add_argument("--cli", choices=["claude", "codex", "gemini", "cursor", "copilot", "all"], default="claude",
-                         help="agent CLI to configure (default: claude)")
+    p_setup.add_argument("--cli", choices=["claude", "codex", "gemini", "cursor", "copilot", "copilot-cloud", "all"],
+                         default="claude",
+                         help="agent CLI to configure (default: claude); copilot-cloud writes "
+                              "repository hooks for Copilot cloud agent and is not part of all")
     p_setup.add_argument("--verify", action="store_true",
                          help="verify installed hooks without changing files: Codex user-level "
                               "hooks and the config.toml hooks feature flag, or Claude Code "

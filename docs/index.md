@@ -33,6 +33,8 @@ canonical flag reference.
 - [OpenAI Codex trace viewer and verified capture](codex-trace-viewer.md)
 - [GitHub Copilot CLI observability](github-copilot-cli-observability.md)
 - [Copilot CLI plugin](copilot-plugin.md)
+- [Copilot cloud agent capture](copilot-cloud-agent.md): partial, unverified
+  repository hooks that stream events to a collector.
 - [Setup](setup.md): Gemini CLI and Cursor are also covered here.
 - [Live capture verification](setup.md#live-capture-verification): local
   recorded-evidence verification for Claude Code and Codex.

@@ -94,4 +94,5 @@ copilot plugin uninstall agent-strace
 ```
 
 Locally installed plugins run only in Copilot CLI. Copilot cloud agent does not
-load plugins installed on a developer machine.
+load plugins installed on a developer machine. For partial cloud agent capture
+through repository hooks, see [Copilot cloud agent capture](copilot-cloud-agent.md).

@@ -55,7 +55,9 @@ remain unlinked.
 - Tool hooks have no call ID, so results are paired by tool name.
 - File and command activity is visible only when tool arguments or results
   contain it.
-- Local Copilot plugins do not run in Copilot cloud agent.
+- Local Copilot plugins do not run in Copilot cloud agent. Repository hooks
+  from `agent-strace setup --cli copilot-cloud` give partial, unverified
+  coverage; see [Copilot cloud agent capture](copilot-cloud-agent.md).
 
 Run `health` to see both observed trace defects and declared provider
 limitations. A partial trace can still be reviewable, but it is not complete
@@ -68,6 +70,7 @@ local dashboard and [VS Code extension](vscode.md#evidence-review).
 ## Related documentation
 
 - [Copilot CLI plugin](copilot-plugin.md)
+- [Copilot cloud agent capture](copilot-cloud-agent.md)
 - [Copilot setup](setup.md#github-copilot-cli-hooks)
 - [Capture matrix](capture-matrix.md#github-copilot-cli)
 - [Evidence health](evidence-health.md)
