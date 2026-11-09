@@ -75,17 +75,19 @@ event before the first `session_start` has a declared type, the result reports
 one `declared_events_before_session_start` provider limitation instead of the
 invalid `events_before_session_start`. Any undeclared event type before the
 start is still invalid, and a session with no start is still
-`missing_session_start`. `agent-strace health` and `agent-strace validate` take
-the declared types from the capture matrix's `events_before_start`.
+`missing_session_start`. `agent-strace health`, `agent-strace validate` and the
+`agent.strace.evidence.*` attributes of `--format otlp-genai` take the declared
+types from the capture matrix's `events_before_start`.
 
 Some providers record results with no request event. A caller can declare
 those result types with `allowed_unrequested_result_types`. Result events of a
 declared type with no `parent_id` are then reported once as the provider
 limitation `declared_results_without_requests`, instead of one
 `orphan_<type>` each. A result that names a request missing from the trace is
-still an orphan. `agent-strace health` and `agent-strace validate` take the
-declared types from the capture matrix's `results_without_requests`; Codex
-declares `llm_response`, because AgentTrace records its model requests from
+still an orphan. `agent-strace health`, `agent-strace validate` and the
+`agent.strace.evidence.*` attributes of `--format otlp-genai` take the declared
+types from the capture matrix's `results_without_requests`; Codex declares
+`llm_response`, because AgentTrace records its model requests from
 `PostModelRequest` alone.
 
 ## Provider limitations

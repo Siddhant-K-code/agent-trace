@@ -33,7 +33,7 @@ from .compliance_report import (
 )
 from .evidence_health import EvidenceHealthStatus, assess_evidence_health
 from .freeze import RegressionFixture, compare_fixtures, extract_steps
-from .health import detect_provider, load_capture_matrix
+from .health import declared_capture
 from .models import EventType, SessionMeta, TraceEvent
 from .store import validate_workspace_id
 
@@ -388,39 +388,6 @@ def _finding_for_reason(code: str, message: str, event_id: str) -> ValidationFin
     return ValidationFinding(code, severity, message, event_id=event_id)
 
 
-@dataclass(frozen=True)
-class _DeclaredCapture:
-    """Capture-matrix declarations that validate passes to evidence health."""
-
-    events_before_start: tuple[str, ...] = ()
-    results_without_requests: tuple[str, ...] = ()
-
-
-def _declared_capture(
-    meta: SessionMeta,
-    events: Sequence[TraceEvent],
-) -> _DeclaredCapture:
-    """Return what the hook provider's capture matrix entry declares.
-
-    The provider comes from hook-written evidence only, as in ``health``.
-    Only ``events_before_start`` and ``results_without_requests`` are read
-    from its entry. A matrix that cannot be loaded declares nothing.
-    """
-    provider = detect_provider(meta, events).provider
-    if not provider:
-        return _DeclaredCapture()
-    try:
-        entry = load_capture_matrix().entry(provider)
-    except (OSError, ValueError):
-        return _DeclaredCapture()
-    if entry is None:
-        return _DeclaredCapture()
-    return _DeclaredCapture(
-        events_before_start=tuple(entry.get("events_before_start", [])),
-        results_without_requests=tuple(entry.get("results_without_requests", [])),
-    )
-
-
 def _parent_findings(events: Sequence[TraceEvent]) -> list[ValidationFinding]:
     positions = {event.event_id: index for index, event in enumerate(events)}
     findings: list[ValidationFinding] = []
@@ -675,7 +642,7 @@ def validate_trace_directory(
             )
         )
 
-    declared = _declared_capture(meta, events)
+    declared = declared_capture(meta, events)
     health = assess_evidence_health(
         events,
         session_finalized=False if allow_active else True,

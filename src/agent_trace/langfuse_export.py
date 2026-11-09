@@ -31,6 +31,7 @@ from .pairing import (
     LLM_REQUEST_TYPES,
     TOOL_REQUEST_TYPES,
     Pairer,
+    event_model,
     llm_pairer,
     tool_pairer,
 )
@@ -215,9 +216,15 @@ def _events_to_langfuse_observations(
         elif ev.event_type == EventType.LLM_RESPONSE:
             req_ev = requests.match(ev)
             start_ts = req_ev.timestamp if req_ev else ev.timestamp
-            input_tokens = (number_field(req_ev.data, "input_tokens", 0) if req_ev else 0) or 0
             output_tokens = number_field(ev.data, "output_tokens", 0) or 0
-            model = (req_ev.data.get("model", "") if req_ev else "") or ""
+            if req_ev:
+                input_tokens = number_field(req_ev.data, "input_tokens", 0) or 0
+                model = req_ev.data.get("model", "") or ""
+            else:
+                # A response with no request (Codex records each model
+                # request this way) carries its own model and input count.
+                input_tokens = number_field(ev.data, "input_tokens", 0) or 0
+                model = event_model(ev.data)
             observations.append({
                 "id": ev.event_id,
                 "traceId": session_id,

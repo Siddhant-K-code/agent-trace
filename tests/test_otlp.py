@@ -243,5 +243,44 @@ class TestSessionToOTLP(unittest.TestCase):
         self.assertEqual(len(spans), 1)
 
 
+class TestUnrequestedLLMResponse(unittest.TestCase):
+    """Codex records each model request only as an llm_response."""
+
+    @staticmethod
+    def _response_attrs(events):
+        payload = session_to_otlp(SessionMeta(agent_name="openai-codex"), events)
+        root = payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+        return [
+            {a["key"]: a["value"] for a in e["attributes"]}
+            for e in root["events"] if e["name"] == "gen_ai.assistant.message"
+        ]
+
+    def test_unrequested_response_carries_its_model_and_input(self):
+        events = [
+            TraceEvent(event_type=EventType.LLM_RESPONSE, data={
+                "model": "gpt-5-codex", "input_tokens": 1200, "output_tokens": 10,
+            }),
+            TraceEvent(event_type=EventType.LLM_RESPONSE, data={
+                "input_tokens": 2500, "output_tokens": 30,
+            }),
+        ]
+        attrs = self._response_attrs(events)
+        self.assertEqual(attrs[0]["gen_ai.request.model"], {"stringValue": "gpt-5-codex"})
+        self.assertEqual(attrs[0]["gen_ai.usage.input_tokens"], {"intValue": "1200"})
+        self.assertEqual(attrs[0]["gen_ai.usage.output_tokens"], {"intValue": "10"})
+        self.assertNotIn("gen_ai.request.model", attrs[1])
+        self.assertEqual(attrs[1]["gen_ai.usage.input_tokens"], {"intValue": "2500"})
+
+    def test_paired_response_is_unchanged(self):
+        request = TraceEvent(event_type=EventType.LLM_REQUEST, data={
+            "model": "gpt-4o", "input_tokens": 100,
+        })
+        response = TraceEvent(event_type=EventType.LLM_RESPONSE, parent_id=request.event_id, data={
+            "model": "gpt-4o", "input_tokens": 100, "output_tokens": 5,
+        })
+        attrs = self._response_attrs([request, response])
+        self.assertEqual(sorted(attrs[0]), ["gen_ai.operation.name", "gen_ai.usage.output_tokens"])
+
+
 if __name__ == "__main__":
     unittest.main()

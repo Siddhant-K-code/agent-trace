@@ -21,6 +21,8 @@ from agent_trace.health import (
     assess_session,
     blind_spots_for,
     cmd_health,
+    DeclaredCapture,
+    declared_capture,
     detect_provider,
     format_health_text,
     load_capture_matrix,
@@ -638,6 +640,57 @@ class TestDetectProvider(unittest.TestCase):
         ):
             with self.subTest(command=command):
                 self.assertEqual(self.detect(agent_name=agent_name, command=command).provider, "")
+
+
+class TestDeclaredCapture(unittest.TestCase):
+    def declared(self, events=(), agent_name=""):
+        return declared_capture(SessionMeta(agent_name=agent_name), list(events))
+
+    def test_codex_declares_llm_responses(self):
+        start = event(EventType.SESSION_START, 0, {"mode": "openai-codex-hooks"})
+        self.assertEqual(
+            self.declared([start]),
+            DeclaredCapture(events_before_start=(), results_without_requests=("llm_response",)),
+        )
+
+    def test_copilot_declares_prompts_before_start(self):
+        start = event(EventType.SESSION_START, 0, {"mode": "github-copilot-hooks"})
+        self.assertEqual(
+            self.declared([start]),
+            DeclaredCapture(events_before_start=("user_prompt",), results_without_requests=()),
+        )
+
+    def test_sessions_without_hook_evidence_declare_nothing(self):
+        self.assertEqual(self.declared(agent_name="openai-codex"), DeclaredCapture())
+        self.assertEqual(
+            self.declared([event(EventType.LLM_RESPONSE, 0, {"provider": "codex"})]),
+            DeclaredCapture(),
+        )
+
+    def test_other_hook_providers_declare_nothing(self):
+        start = event(EventType.SESSION_START, 0, {"mode": "claude-code-hooks"})
+        self.assertEqual(self.declared([start]), DeclaredCapture())
+
+    def test_data_that_is_not_an_object_is_ignored(self):
+        start = TraceEvent(event_type=EventType.SESSION_START, timestamp=0, data=["openai-codex-hooks"])
+        self.assertEqual(self.declared([start]), DeclaredCapture())
+
+    def test_matrix_load_failure_declares_nothing(self):
+        start = event(EventType.SESSION_START, 0, {"mode": "openai-codex-hooks"})
+        for error in (OSError("unreadable"), ValueError("malformed")):
+            with self.subTest(error=type(error).__name__):
+                with patch("agent_trace.health.load_capture_matrix", side_effect=error):
+                    self.assertEqual(self.declared([start]), DeclaredCapture())
+
+    def test_provider_without_an_entry_declares_nothing(self):
+        matrix = load_capture_matrix()
+        without_codex = replace(
+            matrix,
+            providers=tuple(entry for entry in matrix.providers if entry["id"] != "codex"),
+        )
+        start = event(EventType.SESSION_START, 0, {"mode": "openai-codex-hooks"})
+        with patch("agent_trace.health.load_capture_matrix", return_value=without_codex):
+            self.assertEqual(self.declared([start]), DeclaredCapture())
 
 
 class TestBlindSpots(unittest.TestCase):

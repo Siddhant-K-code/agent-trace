@@ -200,6 +200,80 @@ class TestGenAILLMPairingFallback(unittest.TestCase):
         self.assertEqual(spans[_to_span_id("b")], (_ts_to_nanos(2.0), 0))
 
 
+class TestGenAIUnrequestedResponses(unittest.TestCase):
+    """Codex records each model request only as an llm_response."""
+
+    def _events(self, mode="openai-codex-hooks"):
+        return [
+            TraceEvent(event_type=EventType.SESSION_START, timestamp=1.0, data={"mode": mode}),
+            TraceEvent(event_type=EventType.LLM_RESPONSE, timestamp=2.0, data={
+                "provider": "codex", "model": "gpt-5-codex",
+                "input_tokens": 1200, "output_tokens": 10,
+            }),
+            TraceEvent(event_type=EventType.LLM_RESPONSE, timestamp=3.0, data={
+                "provider": "codex", "status": "failed", "token_usage": None,
+            }),
+            TraceEvent(event_type=EventType.SESSION_END, timestamp=4.0, data={}),
+        ]
+
+    def test_response_span_carries_its_own_usage(self):
+        spans = _get_spans(session_to_otlp_genai(_make_meta("openai-codex"), self._events()))
+        llm = spans[1]
+        self.assertEqual(_get_attr(llm, "gen_ai.request.model"), "gpt-5-codex")
+        self.assertEqual(_get_attr(llm, "gen_ai.usage.input_tokens"), "1200")
+        self.assertEqual(_get_attr(llm, "gen_ai.usage.output_tokens"), "10")
+
+    def test_declared_responses_are_a_provider_limitation_not_orphans(self):
+        root = _get_spans(session_to_otlp_genai(_make_meta("openai-codex"), self._events()))[0]
+        self.assertEqual(
+            json.loads(_get_attr(root, "agent.strace.evidence.gap_codes")),
+            ["declared_results_without_requests"],
+        )
+        gaps = json.loads(_get_attr(root, "agent.strace.evidence.gaps"))
+        self.assertEqual(gaps[0]["kind"], "provider_limitation")
+
+    def test_undeclared_responses_stay_orphans(self):
+        events = self._events(mode="sdk")
+        root = _get_spans(session_to_otlp_genai(_make_meta("my-agent"), events))[0]
+        self.assertEqual(
+            json.loads(_get_attr(root, "agent.strace.evidence.gap_codes")),
+            ["orphan_llm_response", "orphan_llm_response"],
+        )
+
+
+class TestGenAIEventsBeforeStart(unittest.TestCase):
+    """Copilot can send its first user_prompt before sessionStart."""
+
+    def _gap_codes(self, pre_start, mode="github-copilot-hooks", agent="github-copilot"):
+        events = [
+            TraceEvent(event_type=event_type, timestamp=1.0, data={})
+            for event_type in pre_start
+        ] + [
+            TraceEvent(event_type=EventType.SESSION_START, timestamp=2.0, data={"mode": mode}),
+            TraceEvent(event_type=EventType.SESSION_END, timestamp=3.0, data={}),
+        ]
+        root = _get_spans(session_to_otlp_genai(_make_meta(agent), events))[0]
+        return json.loads(_get_attr(root, "agent.strace.evidence.gap_codes"))
+
+    def test_declared_order_is_a_provider_limitation(self):
+        self.assertEqual(
+            self._gap_codes([EventType.USER_PROMPT]),
+            ["declared_events_before_session_start"],
+        )
+
+    def test_undeclared_type_before_start_is_still_a_gap(self):
+        self.assertEqual(
+            self._gap_codes([EventType.USER_PROMPT, EventType.FILE_READ]),
+            ["events_before_session_start"],
+        )
+
+    def test_trace_without_hook_provider_is_unchanged(self):
+        self.assertEqual(
+            self._gap_codes([EventType.USER_PROMPT], mode="sdk", agent="my-agent"),
+            ["events_before_session_start"],
+        )
+
+
 # ---------------------------------------------------------------------------
 # Tool call/result → gen_ai.tool.call/<name> child span
 # ---------------------------------------------------------------------------

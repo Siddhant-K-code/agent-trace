@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
 
-from .cost import _dollars, _event_tokens
+from .cost import TokenCounter, _dollars
 from .compaction import CompactionCheckpointWatcher
 from .event_data import (
     NonObjectEventDataError,
@@ -608,6 +608,7 @@ class WatchState:
     command_counts: Counter = field(default_factory=Counter)
     # Cost accumulation
     estimated_cost: float = 0.0
+    token_counter: TokenCounter = field(default_factory=TokenCounter)
     # Session start time
     start_time: float = field(default_factory=time.time)
     # Recent event sequence for loop detection (circular buffer)
@@ -938,7 +939,7 @@ def check_event(
     violations: list[str] = []
 
     # --- Cost accumulation ---
-    inp, out = _event_tokens(event)
+    inp, out = state.token_counter.count(event)
     state.estimated_cost += _dollars(inp, out, "sonnet")
 
     # --- Track files modified (for nanny rules) ---

@@ -223,6 +223,42 @@ class TestEventsToLangfuseObservations(unittest.TestCase):
         self.assertEqual(obs[0]["usage"]["input"], 100)
         self.assertEqual(sorted(langfuse_data_indexes(events)), [1, 2])
 
+    def test_unrequested_llm_response_exports_its_own_model_and_usage(self):
+        # Codex records each model request only as an llm_response.
+        events = [
+            TraceEvent(
+                event_type=EventType.LLM_RESPONSE,
+                timestamp=1.0,
+                data={"model": "gpt-5-codex", "status": "completed",
+                      "input_tokens": 1200, "output_tokens": 10, "total_tokens": 1210},
+            ),
+            TraceEvent(
+                event_type=EventType.LLM_RESPONSE,
+                timestamp=2.0,
+                data={"status": "completed", "input_tokens": 2500, "output_tokens": 30},
+            ),
+        ]
+        obs = _events_to_langfuse_observations("sess1", events)
+        self.assertEqual(
+            [(o["model"], o["usage"]) for o in obs],
+            [
+                ("gpt-5-codex", {"input": 1200, "output": 10, "total": 1210}),
+                (None, {"input": 2500, "output": 30, "total": 2530}),
+            ],
+        )
+
+    def test_paired_response_keeps_request_model_and_input(self):
+        req = _llm_req(ts=0.0, event_id="lr1")
+        resp = TraceEvent(
+            event_type=EventType.LLM_RESPONSE,
+            timestamp=1.0,
+            parent_id="lr1",
+            data={"model": "other", "input_tokens": 999, "output_tokens": 50},
+        )
+        obs = _events_to_langfuse_observations("sess1", [req, resp])
+        self.assertEqual(obs[0]["model"], "claude-3")
+        self.assertEqual(obs[0]["usage"], {"input": 100, "output": 50, "total": 150})
+
     def test_parentless_tool_result_stays_unpaired(self):
         events = [_tool_call("Bash", ts=0.0, event_id="tc1"), _tool_result("Bash", ts=1.0, parent_id="")]
         obs = _events_to_langfuse_observations("sess1", events)
