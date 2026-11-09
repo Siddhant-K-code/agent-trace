@@ -128,6 +128,33 @@ class PairerTest(unittest.TestCase):
         self.assertEqual(pairer.match(_resp("x", model="claude-opus-4-6")), "none")
         self.assertEqual(pairer.match(_resp("y")), "gpt")
 
+    def test_same_model_beats_newer_request_without_model(self):
+        pairer = llm_pairer()
+        pairer.add(_req("r1", "gpt-4o"), "gpt")
+        pairer.add(_req("r2"), "task")
+        self.assertEqual(pairer.match(_resp("x", model="gpt-4o")), "gpt")
+        self.assertEqual(pairer.unmatched(), ["task"])
+
+    def test_response_without_model_prefers_request_without_model(self):
+        pairer = llm_pairer()
+        pairer.add(_req("r1"), "task")
+        pairer.add(_req("r2", "gpt-4o"), "failed-gpt")
+        self.assertEqual(pairer.match(_resp("x")), "task")
+        self.assertEqual(pairer.unmatched(), ["failed-gpt"])
+
+    def test_request_without_model_is_a_last_resort(self):
+        pairer = llm_pairer()
+        pairer.add(_req("r1"), "task")
+        pairer.add(_req("r2", "claude-opus-4-6"), "claude")
+        self.assertEqual(pairer.match(_resp("x", model="gpt-4o")), "task")
+        self.assertEqual(pairer.unmatched(), ["claude"])
+
+    def test_different_models_never_pair(self):
+        pairer = llm_pairer()
+        pairer.add(_req("r1", "gpt-4o"), "gpt")
+        self.assertIsNone(pairer.match(_resp("x", model="claude-opus-4-6")))
+        self.assertEqual(pairer.unmatched(), ["gpt"])
+
     def test_unknown_parent_id_uses_fallback(self):
         pairer = llm_pairer()
         pairer.add(_req("r1"), "first")
@@ -389,6 +416,37 @@ class ExportersAgreeOnFallbackTest(unittest.TestCase):
 
     def test_cost(self):
         self.assertEqual(_session_model_usage(self.events), {"gpt-4o": (10 + 30, 5)})
+
+
+class ExportersAgreeOnModelPrecedenceTest(unittest.TestCase):
+    """A newer request without a model does not take a same-model response."""
+
+    def setUp(self):
+        self.events = [
+            _event(EventType.LLM_REQUEST, "gpt", "", 1.0, model="gpt-4o", input_tokens=10, prompt="a"),
+            _event(EventType.LLM_REQUEST, "task", "", 2.0, prompt="b"),
+            _event(EventType.LLM_RESPONSE, "resp", "", 3.0, model="gpt-4o", output_tokens=5, input_tokens=30),
+        ]
+
+    def test_pair_llm_events(self):
+        pairing = pair_llm_events(self.events)
+        self.assertEqual(pairing.pairs, {2: 0})
+        self.assertEqual(pairing.unmatched_requests, [1])
+
+    def test_otlp_genai(self):
+        spans = {s["spanId"]: s for s in _spans(session_to_otlp_genai(_META, self.events))[1:]}
+        self.assertEqual(spans[_to_span_id("gpt")]["startTimeUnixNano"], _ts_to_nanos(1.0))
+        self.assertEqual(spans[_to_span_id("gpt")]["endTimeUnixNano"], _ts_to_nanos(3.0))
+        self.assertEqual(spans[_to_span_id("task")]["status"], {"code": 0})
+
+    def test_langfuse(self):
+        (observation,) = _events_to_langfuse_observations("s", self.events)
+        self.assertEqual(observation["startTime"], _iso(1.0))
+        self.assertEqual(observation["input"], "a")
+        self.assertEqual(sorted(langfuse_data_indexes(self.events)), [0, 2])
+
+    def test_cost(self):
+        self.assertEqual(_session_model_usage(self.events), {"gpt-4o": (30, 5)})
 
 
 if __name__ == "__main__":

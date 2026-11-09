@@ -251,6 +251,17 @@ class TestModelUsagePairing(unittest.TestCase):
             {"gpt-4o": (35, 3), "claude-opus-4-6": (40, 0)},
         )
 
+    def test_newer_request_without_model_does_not_take_same_model_response(self):
+        # The response used to pair with "task", so it counted on its own and
+        # the input tokens of "gpt" were counted a second time.
+        events = [
+            self._event(EventType.LLM_REQUEST, "gpt", model="gpt-4o", input_tokens=10),
+            self._event(EventType.LLM_REQUEST, "task"),
+            self._event(EventType.LLM_RESPONSE, "r1", model="gpt-4o",
+                        input_tokens=30, output_tokens=5),
+        ]
+        self.assertEqual(_session_model_usage(events), {"gpt-4o": (30, 5)})
+
     def test_duplicate_response_counts_on_its_own(self):
         events = [
             self._event(EventType.LLM_REQUEST, "a", model="gpt-4o", input_tokens=10),

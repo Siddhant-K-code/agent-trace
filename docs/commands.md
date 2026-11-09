@@ -607,7 +607,9 @@ Human-in-the-loop approval queue. A policy rule with
 `action=require_approval` pauses the agent while it waits for a decision.
 `watch` can only pause the agent when it was started with `--agent-pid`.
 Approving resumes the agent with `SIGCONT` by default; denying terminates it
-with `SIGTERM` by default.
+with `SIGTERM` by default. A request created by a `watch` without
+`--agent-pid` has no agent PID: `approve` and `deny` still record the decision
+and exit 0, but signal nothing and say so.
 
 A request is decided once. If two reviewers approve or deny the same request
 at the same time, exactly one succeeds and the other exits non-zero with

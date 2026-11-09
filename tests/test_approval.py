@@ -174,6 +174,80 @@ class TestDenyRequest(unittest.TestCase):
         self.assertFalse(ok)
 
 
+class TestDecisionWithoutAgentPid(unittest.TestCase):
+    """A request from watch without --agent-pid records the decision only."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.store = TraceStore(self.tmpdir)
+
+    def _decide(self, decide, pid):
+        req = ApprovalRequest(agent_pid=pid)
+        save_request(self.store, req)
+        with patch("os.kill") as mock_kill:
+            ok, msg = decide(self.store, req.request_id)
+        mock_kill.assert_not_called()
+        return ok, msg, load_request(self.store, req.request_id)
+
+    def test_approve_and_deny_record_without_signalling(self):
+        for decide, state in ((approve_request, APPROVED), (deny_request, DENIED)):
+            for pid in (0, None, -1, "1234", True):
+                with self.subTest(decide=decide.__name__, pid=pid):
+                    ok, msg, updated = self._decide(decide, pid)
+                    self.assertTrue(ok)
+                    self.assertEqual(updated.state, state)
+                    self.assertIn("no agent was signalled", msg)
+                    self.assertIn("--agent-pid", msg)
+                    self.assertNotIn("agent 0", msg)
+                    self.assertNotIn("resumed", msg)
+                    self.assertNotIn("terminated", msg)
+
+    def test_cli_exits_zero_and_explains(self):
+        import argparse
+        import io
+        for sub, state in (("approve", APPROVED), ("deny", DENIED)):
+            with self.subTest(sub=sub):
+                req = create_approval_request(self.store, "s1", "rule", agent_pid=0)
+                args = argparse.Namespace(
+                    trace_dir=self.tmpdir, approval_cmd=sub,
+                    request_id=req.request_id,
+                )
+                out = io.StringIO()
+                with patch("os.kill") as mock_kill, patch("sys.stdout", out):
+                    code = approval_mod.cmd_approval(args)
+                self.assertEqual(code, 0)
+                mock_kill.assert_not_called()
+                self.assertIn("no agent was signalled", out.getvalue())
+                self.assertNotIn("agent 0", out.getvalue())
+                self.assertEqual(load_request(self.store, req.request_id).state, state)
+
+    def test_opt_out_flags_are_reported(self):
+        req = create_approval_request(self.store, "s1", "rule", agent_pid=99999)
+        with patch("os.kill") as mock_kill:
+            ok, msg = approve_request(self.store, req.request_id, resume_agent=False)
+        mock_kill.assert_not_called()
+        self.assertTrue(ok)
+        self.assertIn("agent 99999 not signalled (--no-resume)", msg)
+        req = create_approval_request(self.store, "s1", "rule", agent_pid=99999)
+        with patch("os.kill") as mock_kill:
+            ok, msg = deny_request(self.store, req.request_id, kill_agent=False)
+        mock_kill.assert_not_called()
+        self.assertIn("agent 99999 not signalled (--no-kill)", msg)
+
+    def test_signal_success_and_failure_messages(self):
+        req = create_approval_request(self.store, "s1", "rule", agent_pid=99999)
+        with patch("os.kill"):
+            ok, msg = approve_request(self.store, req.request_id)
+        self.assertTrue(ok)
+        self.assertTrue(msg.endswith("agent 99999 resumed"))
+        req = create_approval_request(self.store, "s1", "rule", agent_pid=99999)
+        with patch("os.kill", side_effect=ProcessLookupError):
+            ok, msg = deny_request(self.store, req.request_id)
+        self.assertTrue(ok)
+        self.assertIn("agent 99999 was not signalled: no such process", msg)
+        self.assertEqual(load_request(self.store, req.request_id).state, DENIED)
+
+
 class TestPollForDecision(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
