@@ -10,7 +10,7 @@
       "name": "agent-strace",
       "source": "./",
       "description": "Capture and investigate Claude Code agent sessions with local AgentTrace hooks.",
-      "version": "0.104.0"
+      "version": "0.105.0"
     }
   ]
 }
