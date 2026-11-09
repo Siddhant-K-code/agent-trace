@@ -289,6 +289,13 @@ Supported: OpenAI Agents SDK, LangChain, LangGraph, CrewAI, LiteLLM, Anthropic S
 python -m unittest discover -s tests -v
 ```
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development and pull request
+requirements. Report vulnerabilities through [SECURITY.md](SECURITY.md).
+Maintainers use the [release runbook](docs/releases.md) for coordinated
+publishing and recovery.
+
 ## License
 
 MIT. Use it however you want.
