@@ -39,10 +39,15 @@ _INPUT_TOKEN_KEYS = (
     "promptTokenCount",
     "prompt_token_count",
 )
+# Anthropic reports cache reads and writes beside input_tokens.
 _CACHE_TOKEN_KEYS = (
     "cache_creation_input_tokens",
     "cache_read_input_tokens",
+)
+# OpenAI and Codex report them as parts of input_tokens, so they are not added.
+_INCLUDED_CACHE_TOKEN_KEYS = (
     "cached_input_tokens",
+    "cache_write_input_tokens",
 )
 _USAGE_KEYS = ("usage", "usage_metadata", "usageMetadata", "token_usage")
 _CONTEXT_LIMIT_KEYS = (
@@ -180,8 +185,15 @@ class _RequestSample:
 
 
 def _event_stream(event: TraceEvent) -> str:
-    value = event.data.get("context_stream", "main")
-    return str(value) if value else "main"
+    value = event.data.get("context_stream")
+    if value:
+        return str(value)
+    # Codex reports an in-session subagent's model requests under the parent
+    # session with its agent_id. The subagent has its own context window.
+    agent_id = event.data.get("agent_id")
+    if isinstance(agent_id, str) and agent_id:
+        return f"subagent:{agent_id}"
+    return "main"
 
 
 def _positive_int(value: Any) -> int | None:
@@ -236,7 +248,12 @@ def _model_name(data: Mapping[str, Any]) -> str:
 
 
 def _estimate_request_tokens(data: Mapping[str, Any]) -> int:
-    ignored = set(_INPUT_TOKEN_KEYS) | set(_CACHE_TOKEN_KEYS) | set(_USAGE_KEYS)
+    ignored = (
+        set(_INPUT_TOKEN_KEYS)
+        | set(_CACHE_TOKEN_KEYS)
+        | set(_INCLUDED_CACHE_TOKEN_KEYS)
+        | set(_USAGE_KEYS)
+    )
     payload = {key: value for key, value in data.items() if key not in ignored}
     return max(1, len(json.dumps(payload, sort_keys=True, default=str)) // 4)
 
@@ -379,7 +396,12 @@ def _flatten_strings(value: Any) -> list[str]:
     if isinstance(value, Mapping):
         strings: list[str] = []
         for key, nested in value.items():
-            if key in _USAGE_KEYS or key in _INPUT_TOKEN_KEYS or key in _CACHE_TOKEN_KEYS:
+            if (
+                key in _USAGE_KEYS
+                or key in _INPUT_TOKEN_KEYS
+                or key in _CACHE_TOKEN_KEYS
+                or key in _INCLUDED_CACHE_TOKEN_KEYS
+            ):
                 continue
             strings.extend(_flatten_strings(nested))
         return strings

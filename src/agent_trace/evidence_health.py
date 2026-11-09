@@ -142,6 +142,7 @@ def _relationship_reasons(
     spec: _RelationshipSpec,
     *,
     require_terminal_outcome: bool,
+    allowed_unrequested_results: frozenset[EventType] = frozenset(),
 ) -> list[EvidenceHealthReason]:
     request_positions = {
         event.event_id: index
@@ -155,6 +156,7 @@ def _relationship_reasons(
     }
     outcomes_by_request: dict[str, list[tuple[int, TraceEvent]]] = {}
     reasons: list[EvidenceHealthReason] = []
+    declared_unrequested: list[TraceEvent] = []
 
     for index, event in enumerate(events):
         is_result = event.event_type == spec.result_type
@@ -171,6 +173,10 @@ def _relationship_reasons(
             outcomes_by_request.setdefault(parent_id, []).append((index, event))
             continue
 
+        if is_result and not parent_id and spec.result_type in allowed_unrequested_results:
+            declared_unrequested.append(event)
+            continue
+
         if is_result:
             detail = (
                 f" references unknown parent {parent_id!r}"
@@ -184,6 +190,19 @@ def _relationship_reasons(
                     event=event,
                 )
             )
+
+    if declared_unrequested:
+        count = len(declared_unrequested)
+        noun = "event has" if count == 1 else "events have"
+        reasons.append(
+            _reason(
+                "declared_results_without_requests",
+                f"{count} {spec.result_type.value} {noun} no request event, "
+                "which the provider's capture metadata declares",
+                kind=EvidenceHealthReasonKind.PROVIDER_LIMITATION,
+                event=declared_unrequested[0],
+            )
+        )
 
     for request_id, request in requests.items():
         outcomes = outcomes_by_request.get(request_id, [])
@@ -378,6 +397,7 @@ def _structural_reasons(
     *,
     session_finalized: bool | None,
     allowed_pre_start: frozenset[EventType] = frozenset(),
+    allowed_unrequested_results: frozenset[EventType] = frozenset(),
 ) -> tuple[list[EvidenceHealthReason], bool]:
     reasons, invalid = _boundary_reasons(
         events,
@@ -441,6 +461,7 @@ def _structural_reasons(
                 events,
                 spec,
                 require_terminal_outcome=session_finalized is not False,
+                allowed_unrequested_results=allowed_unrequested_results,
             )
         )
     reasons.extend(_orphan_error_reasons(events))
@@ -458,6 +479,7 @@ def assess_evidence_health(
     session_finalized: bool | None = None,
     export_failures: Iterable[str] = (),
     allowed_pre_start_event_types: Iterable[EventType | str] = (),
+    allowed_unrequested_result_types: Iterable[EventType | str] = (),
 ) -> EvidenceHealthResult:
     """Assess whether a captured session is structurally reviewable.
 
@@ -473,8 +495,14 @@ def assess_evidence_health(
     metadata. When every event before the first session start has one of these
     types, the order is reported as ``declared_events_before_session_start``
     instead of the invalid ``events_before_session_start``.
+
+    ``allowed_unrequested_result_types`` must also come from declared provider
+    metadata. Result events of these types with no ``parent_id`` are reported
+    once as ``declared_results_without_requests`` instead of one orphan each.
+    A result that names a missing parent is still an orphan.
     """
     allowed_pre_start = frozenset(EventType(t) for t in allowed_pre_start_event_types)
+    allowed_unrequested = frozenset(EventType(t) for t in allowed_unrequested_result_types)
     event_list = list(events)
     no_events = not event_list
     if no_events:
@@ -485,6 +513,7 @@ def assess_evidence_health(
             event_list,
             session_finalized=session_finalized,
             allowed_pre_start=allowed_pre_start,
+            allowed_unrequested_results=allowed_unrequested,
         )
 
     for failure in export_failures:

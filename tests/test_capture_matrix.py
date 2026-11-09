@@ -82,6 +82,16 @@ class TestCaptureMatrix(unittest.TestCase):
                 self.assertNotIn("session_start", provider["events_before_start"])
                 self.assertIn(f'`events_before_start`', self.docs)
 
+    def test_results_without_requests_names_result_event_types(self):
+        results = {EventType.TOOL_RESULT.value, EventType.LLM_RESPONSE.value}
+        for provider in self.matrix["providers"]:
+            if "results_without_requests" not in provider:
+                continue
+            with self.subTest(provider=provider["id"]):
+                self.assertIsInstance(provider["results_without_requests"], list)
+                self.assertTrue(set(provider["results_without_requests"]) <= results)
+                self.assertIn("`results_without_requests`", self.docs)
+
     def test_human_coverage_table_matches_json(self):
         rows = {}
         for line in self.docs.splitlines():

@@ -739,6 +739,73 @@ def handle_stop(input_data: dict, provider: str = "claude") -> None:
     )
 
 
+# Counters copied from a model request's ``token_usage`` to the event's top
+# level, where replay, share and the evidence packet read them.
+_TOKEN_USAGE_MIRRORS = ("input_tokens", "output_tokens", "total_tokens")
+
+
+def _token_count(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def handle_post_model_request(input_data: dict, provider: str = "claude") -> None:
+    """Handle Codex PostModelRequest: one ``llm_response`` per model request.
+
+    The payload names no request event to pair with, so the response has no
+    ``parent_id``. ``token_usage`` is kept as the provider sent it; Codex counts
+    cached input inside ``input_tokens`` and reasoning inside
+    ``output_tokens``, and ``total_tokens`` is their sum. It is null when the
+    request failed or was cancelled.
+    """
+    store = _get_store()
+    session_id = _resolve_session_id(input_data, provider=provider)
+    if not session_id:
+        return
+
+    redact = _should_redact()
+    event_data: dict = {"hook_event": "post_model_request", "provider": provider}
+    for key in ("model", "status", "turn_id"):
+        if input_data.get(key) not in (None, ""):
+            event_data[key] = input_data.get(key)
+    if input_data.get("error") not in (None, ""):
+        event_data["error"] = input_data.get("error")
+    usage = input_data.get("token_usage")
+    total = None
+    if isinstance(usage, dict):
+        event_data["token_usage"] = dict(usage)
+        for key in _TOKEN_USAGE_MIRRORS:
+            count = _token_count(usage.get(key))
+            if count is not None:
+                event_data[key] = count
+        total = _token_count(usage.get("total_tokens"))
+    elif "token_usage" in input_data and usage is None:
+        event_data["token_usage"] = None
+    event_data.update(_subagent_attribution(input_data, provider))
+    if redact:
+        event_data = redact_data(event_data)
+
+    _ensure_session_meta(store, session_id, provider)
+    _write_event(
+        store,
+        session_id,
+        TraceEvent(
+            event_type=EventType.LLM_RESPONSE,
+            session_id=session_id,
+            data=event_data,
+        ),
+    )
+
+    # ``llm_requests`` counts ``llm_request`` events (validate and backfill
+    # rely on that), and this hook records none, so only tokens are added.
+    if total:
+        meta = _load_meta_or_none(store, session_id)
+        if meta:
+            meta.total_tokens += total
+            store.update_meta(meta, preserve_parent_link=True)
+
+
 # Providers whose subagent hooks name the child by the child's own hook
 # session ID. Verified for GitHub Copilot CLI (``subagentStop.agentId`` and,
 # since 1.0.103-0, ``subagentStart.agentId``).
@@ -1151,7 +1218,7 @@ def hook_main(args: list[str]) -> None:
 
     if not args:
         sys.stderr.write("Usage: agent-strace hook <event>\n")
-        sys.stderr.write("Events: session-start, session-end, pre-tool, post-tool, post-tool-failure, user-prompt, stop, subagent-start, subagent-stop\n")
+        sys.stderr.write("Events: session-start, session-end, pre-tool, post-tool, post-tool-failure, user-prompt, stop, subagent-start, subagent-stop, post-model-request\n")
         sys.exit(1)
 
     if provider not in _PROVIDER_AGENT:
@@ -1196,6 +1263,7 @@ def hook_main(args: list[str]) -> None:
         "SubagentStart": "subagent-start",
         "subagentStop": "subagent-stop",
         "SubagentStop": "subagent-stop",
+        "PostModelRequest": "post-model-request",
     }
     event = aliases.get(rest[0], rest[0])
     input_data = _normalise_payload(_read_stdin(), provider, event)
@@ -1211,6 +1279,7 @@ def hook_main(args: list[str]) -> None:
         "stop": lambda d: handle_stop(d, provider=provider),
         "subagent-start": lambda d: handle_subagent(d, "start", provider=provider),
         "subagent-stop": lambda d: handle_subagent(d, "stop", provider=provider),
+        "post-model-request": lambda d: handle_post_model_request(d, provider=provider),
     }
 
     handler = handlers.get(event)

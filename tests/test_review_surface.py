@@ -142,6 +142,61 @@ class ReviewSurfaceTests(unittest.TestCase):
         self.assertEqual(minimized["session"]["provider"], "claude")
         self.assertEqual(minimized["session"]["capture_method"], "cli_hooks")
 
+    def _parentless_response_session(self, session_id: str, provider: str) -> dict:
+        self.store.create_session(SessionMeta(
+            session_id=session_id,
+            started_at=100,
+            ended_at=103,
+            agent_name="synthetic",
+            command="synthetic",
+        ))
+        for event in (
+            TraceEvent(
+                EventType.SESSION_START,
+                timestamp=100,
+                session_id=session_id,
+                event_id=f"{provider}-start",
+                data={"provider": provider, "source": "startup"},
+            ),
+            TraceEvent(
+                EventType.LLM_RESPONSE,
+                timestamp=101,
+                session_id=session_id,
+                event_id=f"{provider}-model-request",
+                data={
+                    "provider": provider,
+                    "hook_event": "post_model_request",
+                    "status": "completed",
+                    "token_usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
+                },
+            ),
+            TraceEvent(
+                EventType.SESSION_END,
+                timestamp=103,
+                session_id=session_id,
+                event_id=f"{provider}-end",
+                data={"reason": "other"},
+            ),
+        ):
+            self.store.append_event(session_id, event)
+        review = build_session_review(self.store, session_id)
+        return {item["event_id"]: item for item in review["items"]}[
+            f"{provider}-model-request"
+        ]
+
+    def test_declared_parentless_response_is_not_orphaned(self) -> None:
+        item = self._parentless_response_session("codex-review", "codex")
+
+        self.assertNotEqual(item["relationship"], "orphaned")
+        self.assertNotIn("gaps", item["categories"])
+
+    def test_undeclared_parentless_response_is_orphaned(self) -> None:
+        item = self._parentless_response_session("claude-review", "claude")
+
+        self.assertEqual(item["relationship"], "orphaned")
+        self.assertEqual(item["relationship_issue"], "missing_parent")
+        self.assertIn("gaps", item["categories"])
+
     def test_minimized_share_allowlists_capture_and_annotation_metadata(self) -> None:
         review = build_session_review(self.store, self.session_id)
         annotated = next(item for item in review["items"] if item["annotations"])

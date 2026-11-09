@@ -30,6 +30,7 @@ from agent_trace.hooks import _PROVIDER_ENV, IMPLICIT_SESSION_SOURCE, hook_main
 from agent_trace.models import EventType
 from agent_trace.store import TraceStore
 from agent_trace.subagent import build_tree
+from agent_trace.validation import validate_trace_directory
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_DIR = ROOT / "tests" / "fixtures" / "capture_matrix"
@@ -41,7 +42,9 @@ FIXTURES = {
 LEGACY_COPILOT_FIXTURE = "copilot-1.0.94-3.json"
 LEGACY_CODEX_FIXTURE = "codex-0.163.0-alpha.11.json"
 # Codex hooks that fired in the recording but that setup does not register.
-UNREGISTERED_CODEX_HOOKS = {"PreModelRequest", "PostModelRequest"}
+UNREGISTERED_CODEX_HOOKS = {"PreModelRequest"}
+# Codex hooks that releases before 0.164.0 do not have.
+MODEL_REQUEST_CODEX_HOOKS = {"PostModelRequest"}
 TOKEN_USAGE_KEYS = {
     "input_tokens",
     "cached_input_tokens",
@@ -440,7 +443,13 @@ class TestCodexFixture(_ReplayChecks, unittest.TestCase):
                 self.assertIs(report.session_finalized, True)
                 self.assertEqual(self.codes(report, "observed"), [])
 
-    def test_tool_session_records_model_but_no_tokens(self):
+    def model_requests(self, scenario):
+        return [
+            h["payload"] for h in self.fixture["scenarios"][scenario]["hooks"]
+            if h["event"] == "PostModelRequest"
+        ]
+
+    def test_tool_session_records_each_model_request(self):
         store, skipped = self.replay("tool")
         self.assert_only_unregistered_skipped(skipped)
         meta = self.only_session(store)
@@ -450,17 +459,94 @@ class TestCodexFixture(_ReplayChecks, unittest.TestCase):
             [
                 EventType.SESSION_START,
                 EventType.USER_PROMPT,
+                EventType.LLM_RESPONSE,
                 EventType.TOOL_CALL,
                 EventType.TOOL_RESULT,
+                EventType.LLM_RESPONSE,
                 EventType.ASSISTANT_RESPONSE,
                 EventType.SESSION_END,
             ],
         )
         self.assertEqual(events[0].data["model"], "synthetic-model")
-        self.assertEqual(events[2].data["tool_name"], "Bash")
-        self.assertIn("command", events[2].data["arguments"])
+        self.assertEqual(events[3].data["tool_name"], "Bash")
+        self.assertIn("command", events[3].data["arguments"])
         self.assertTrue(events[-2].data["text"])
-        self.assertEqual(meta.total_tokens, 0)
+        usage = [p["token_usage"] for p in self.model_requests("tool")]
+        self.assertEqual(meta.llm_requests, 0)
+        self.assertEqual(meta.total_tokens, sum(u["total_tokens"] for u in usage))
+
+    def test_post_model_request_records_token_usage(self):
+        for scenario in self.fixture["scenarios"]:
+            payloads = self.model_requests(scenario)
+            store, skipped = self.replay(scenario)
+            meta = self.only_session(store)
+            events = store.load_events(meta.session_id)
+            responses = [e for e in events if e.event_type == EventType.LLM_RESPONSE]
+            with self.subTest(scenario=scenario):
+                self.assertTrue(payloads)
+                self.assertNotIn("PostModelRequest", skipped)
+                self.assertEqual(len(responses), len(payloads))
+                for payload, event in zip(payloads, responses):
+                    usage = payload["token_usage"]
+                    self.assertEqual(payload["status"], "completed")
+                    self.assertIsNone(payload["error"])
+                    self.assertEqual(set(usage), TOKEN_USAGE_KEYS)
+                    self.assertTrue(all(isinstance(v, int) for v in usage.values()))
+                    # Codex semantics: cache counts are part of input_tokens,
+                    # reasoning is part of output_tokens.
+                    self.assertEqual(
+                        usage["total_tokens"], usage["input_tokens"] + usage["output_tokens"]
+                    )
+                    self.assertLessEqual(
+                        usage["cached_input_tokens"] + usage["cache_write_input_tokens"],
+                        usage["input_tokens"],
+                    )
+                    self.assertLessEqual(
+                        usage["reasoning_output_tokens"], usage["output_tokens"]
+                    )
+
+                    self.assertEqual(event.parent_id, "")
+                    self.assertEqual(event.data["hook_event"], "post_model_request")
+                    self.assertEqual(event.data["token_usage"], usage)
+                    for key in ("input_tokens", "output_tokens", "total_tokens"):
+                        self.assertEqual(event.data[key], usage[key])
+                    self.assertEqual(event.data["model"], payload["model"])
+                    self.assertEqual(event.data["turn_id"], payload["turn_id"])
+                    self.assertEqual(event.data["status"], "completed")
+                    self.assertNotIn("error", event.data)
+                    self.assertEqual(event.data.get("agent_id"), payload.get("agent_id"))
+                    self.assertEqual(event.data.get("agent_type"), payload.get("agent_type"))
+                self.assertEqual(meta.llm_requests, 0)
+                self.assertEqual(
+                    meta.total_tokens,
+                    sum(p["token_usage"]["total_tokens"] for p in payloads),
+                )
+                self.assertNotIn(EventType.LLM_REQUEST, {e.event_type for e in events})
+
+                validation = validate_trace_directory(
+                    Path(store.base_dir).resolve() / meta.session_id
+                )
+                self.assertEqual(validation.summary["state"], "consistent")
+                self.assertNotIn(
+                    "summary_contradiction",
+                    {f.code for f in validation.findings},
+                )
+
+                report = self.health(store, meta.session_id)
+                self.assertEqual(self.codes(report, "observed"), [])
+                self.assertEqual(
+                    self.codes(report, "provider_limitation").count(
+                        "declared_results_without_requests"
+                    ),
+                    1,
+                )
+        subagent = [
+            p for p in self.model_requests("subagent") if "agent_id" in p
+        ]
+        self.assertTrue(subagent)
+
+    def test_entry_declares_responses_without_requests(self):
+        self.assertEqual(self.entry["results_without_requests"], ["llm_response"])
 
     def test_failed_command_is_a_tool_result_not_an_error(self):
         store, _ = self.replay("tool_failure")
@@ -532,10 +618,12 @@ class TestCodexFixture(_ReplayChecks, unittest.TestCase):
                         self.assertNotIn("agent_type", event.data)
 
     def registered_order(self, scenario):
+        """Registered tool and lifecycle hooks in order, without model requests."""
+        skipped = UNREGISTERED_CODEX_HOOKS | MODEL_REQUEST_CODEX_HOOKS
         return [
             (h["event"], h["payload"].get("tool_name", ""))
             for h in self.fixture["scenarios"][scenario]["hooks"]
-            if h["event"] not in UNREGISTERED_CODEX_HOOKS
+            if h["event"] not in skipped
         ]
 
     def test_subagent_start_precedes_wait_in_this_recording(self):
@@ -558,34 +646,6 @@ class TestCodexFixture(_ReplayChecks, unittest.TestCase):
                 self.assertNotIn("agent_id", spawn)
                 self.assertEqual(set(json.loads(spawn["tool_response"])), {"task_name"})
 
-    def test_post_model_request_exposes_token_usage_that_is_not_recorded(self):
-        for scenario, recording in self.fixture["scenarios"].items():
-            usage = [
-                h["payload"] for h in recording["hooks"] if h["event"] == "PostModelRequest"
-            ]
-            store, skipped = self.replay(scenario)
-            meta = self.only_session(store)
-            with self.subTest(scenario=scenario):
-                self.assertTrue(usage)
-                self.assertEqual(skipped.count("PostModelRequest"), len(usage))
-                for payload in usage:
-                    self.assertEqual(payload["status"], "completed")
-                    self.assertIsNone(payload["error"])
-                    self.assertEqual(set(payload["token_usage"]), TOKEN_USAGE_KEYS)
-                    self.assertTrue(
-                        all(isinstance(v, int) for v in payload["token_usage"].values())
-                    )
-                self.assertEqual(meta.total_tokens, 0)
-                kinds = {e.event_type for e in store.load_events(meta.session_id)}
-                self.assertNotIn(EventType.LLM_REQUEST, kinds)
-                self.assertNotIn(EventType.LLM_RESPONSE, kinds)
-        subagent_usage = [
-            h["payload"] for h in self.fixture["scenarios"]["subagent"]["hooks"]
-            if h["event"] == "PostModelRequest" and "agent_id" in h["payload"]
-        ]
-        self.assertTrue(subagent_usage)
-
-
 class TestCodexLegacyFixture(TestCodexFixture):
     """codex-cli 0.163.0-alpha.11: two subagent runs whose SubagentStart and
     wait_agent PreToolUse arrived in different orders, and no recording of the
@@ -600,8 +660,31 @@ class TestCodexLegacyFixture(TestCodexFixture):
         self.assertEqual(self.fixture["tested_version"], "0.163.0-alpha.11")
         self.assertNotEqual(self.entry["tested_version"], self.fixture["tested_version"])
 
-    def test_post_model_request_exposes_token_usage_that_is_not_recorded(self):
-        self.skipTest("the 0.163.0-alpha.11 runs did not record model-request hooks")
+    def test_every_registered_hook_fired_in_the_recording(self):
+        fired = {
+            hook["event"]
+            for scenario in self.fixture["scenarios"].values()
+            for hook in scenario["hooks"]
+        }
+        registered = set(registered_hooks(self.provider))
+        self.assertLessEqual(registered - MODEL_REQUEST_CODEX_HOOKS, fired)
+        self.assertFalse(MODEL_REQUEST_CODEX_HOOKS & fired)
+
+    def test_tool_session_records_each_model_request(self):
+        self.skipTest("0.163.0-alpha.11 has no model-request hooks")
+
+    def test_post_model_request_records_token_usage(self):
+        self.skipTest("0.163.0-alpha.11 has no model-request hooks")
+
+    def test_sessions_without_model_requests_record_no_tokens(self):
+        for scenario in self.fixture["scenarios"]:
+            store, _ = self.replay(scenario)
+            meta = self.only_session(store)
+            kinds = {e.event_type for e in store.load_events(meta.session_id)}
+            with self.subTest(scenario=scenario):
+                self.assertNotIn(EventType.LLM_RESPONSE, kinds)
+                self.assertEqual(meta.total_tokens, 0)
+                self.assertEqual(meta.llm_requests, 0)
 
     def test_subagent_start_order_differs_between_recordings(self):
         spawn = ("PostToolUse", "collaborationspawn_agent")

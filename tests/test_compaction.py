@@ -200,6 +200,52 @@ class CompactionDetectionTests(unittest.TestCase):
         self.assertEqual(len(compactions), 1)
         self.assertEqual(compactions[0].stream_id, "sidechain:review")
 
+    def test_does_not_add_cache_counts_that_are_part_of_input_tokens(self):
+        # OpenAI and Codex count cached input inside input_tokens.
+        events = [
+            _event(
+                EventType.LLM_RESPONSE,
+                1,
+                model="synthetic-model",
+                token_usage={
+                    "input_tokens": 20_000,
+                    "cached_input_tokens": 19_000,
+                    "cache_write_input_tokens": 500,
+                },
+            ),
+            _event(
+                EventType.LLM_RESPONSE,
+                2,
+                model="synthetic-model",
+                token_usage={"input_tokens": 12_000, "cached_input_tokens": 0},
+            ),
+        ]
+
+        self.assertEqual(detect_compactions(events), [])
+
+    def test_codex_subagent_requests_are_their_own_context_stream(self):
+        def response(timestamp, tokens, **data):
+            return _event(
+                EventType.LLM_RESPONSE,
+                timestamp,
+                model="synthetic-model",
+                token_usage={"input_tokens": tokens},
+                **data,
+            )
+
+        events = [
+            response(1, 180_000),
+            response(2, 10_000, agent_id="child-1", agent_type="default"),
+            response(3, 185_000),
+        ]
+
+        self.assertEqual(detect_compactions(events), [])
+
+        events.append(response(4, 12_000))
+        compactions = detect_compactions(events)
+        self.assertEqual(len(compactions), 1)
+        self.assertEqual(compactions[0].stream_id, "main")
+
 
 class ImportedCompactionTests(unittest.TestCase):
     def test_imported_usage_and_compaction_summary_drive_the_report(self):

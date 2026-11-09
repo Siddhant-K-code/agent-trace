@@ -263,5 +263,46 @@ class TestSubagentAttribution(unittest.TestCase):
                 self.assertNotIn("\n", output)
 
 
+
+class TestLlmResponseStatus(unittest.TestCase):
+    def render(self, **data):
+        event = TraceEvent(
+            event_type=EventType.LLM_RESPONSE, session_id="test", timestamp=0.0, data=data
+        )
+        return format_event(event, base_ts=0.0)
+
+    def test_completed_response_renders_as_before(self):
+        self.assertEqual(
+            self.render(total_tokens=5, status="completed"),
+            self.render(total_tokens=5),
+        )
+
+    def test_failed_response_shows_status_and_error(self):
+        output = self.render(status="failed", error="synthetic\n  upstream   error")
+        self.assertIn(f"{C.RED}failed{C.RESET}", output)
+        self.assertIn(f"{C.DIM}synthetic upstream error{C.RESET}", output)
+
+    def test_error_is_truncated(self):
+        output = self.render(status="failed", error="x" * 200)
+        self.assertIn(f"{C.DIM}{'x' * 80}{C.RESET}", output)
+        self.assertNotIn("x" * 81, output)
+
+    def test_cancelled_response_without_error(self):
+        output = self.render(status="cancelled", error=None)
+        self.assertIn(f"{C.RED}cancelled{C.RESET}", output)
+        self.assertNotIn("None", output)
+
+    def test_subagent_response_carries_the_tag(self):
+        output = self.render(
+            total_tokens=5,
+            agent_id="d0000011-0000-4000-8000-000000000011",
+            agent_type="default",
+        )
+        self.assertIn(
+            f"{C.DIM}(5 tokens){C.RESET} {C.MAGENTA}[subagent default 00000011]{C.RESET}",
+            output,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

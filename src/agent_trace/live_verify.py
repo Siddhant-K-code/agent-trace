@@ -207,6 +207,12 @@ def format_live_capture_text(result: LiveCaptureVerification, out: TextIO) -> No
     out.write(f"Redaction: {report.redaction.mode.replace('_', ' ')}\n")
     out.write(f"Redacted events: {report.redaction.redacted_event_count}\n")
     out.write(f"Capture matrix: {entry['name']} ({report.matrix.version})\n")
+    if report.provider.provider == "codex" and not report.event_types.get("llm_response"):
+        out.write(
+            "Model requests: none recorded. PostModelRequest runs only on Codex 0.164.0 "
+            "or later, and only after it is trusted in /hooks; codex exec skips untrusted "
+            "hooks without a warning.\n"
+        )
 
     observed = [
         reason
