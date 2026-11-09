@@ -8,13 +8,13 @@
     "source": "github"
   },
   "websiteUrl": "https://github.com/Siddhant-K-code/agent-trace/blob/main/docs/mcp.md",
-  "version": "0.103.0",
+  "version": "0.104.0",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "agent-strace",
-      "version": "0.103.0",
+      "version": "0.104.0",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"

@@ -1,6 +1,6 @@
 {
   "name": "agent-strace",
-  "version": "0.103.0",
+  "version": "0.104.0",
   "description": "Capture and replay Gemini CLI sessions with agent-strace",
   "mcpServers": {
     "agent-strace": {
