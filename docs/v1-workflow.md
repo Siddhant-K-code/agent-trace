@@ -35,29 +35,39 @@ from optional or experimental surfaces.
    For Codex, back up an existing `~/.codex/hooks.json` before running
    setup because the command overwrites that file.
 
-3. **Verify that capture works before trusting a session.**
-   This stage is a **v1 candidate, not yet a stable top-level CLI contract**.
-   For Codex, check the installed hooks, the `config.toml` hooks feature flag,
-   and the AgentTrace executable. For Claude Code, check the hooks you added to
-   its settings, the settings that can turn them off, and the executable:
+3. **Check the installed capture adapter.**
+   Before recording, verify the provider config and AgentTrace executable:
    ```bash
    agent-strace setup --cli codex --verify
    agent-strace setup --cli claude --verify
    ```
-   These are static config checks, not proof of capture. Broader
-   provider/capture verification is tracked in #239. Until that lands, verify
-   that a real session appears in `agent-strace list` and inspect the recorded
-   events instead of treating hook installation alone as proof of coverage.
+   These static checks do not prove that the provider trusted or ran the hooks.
 
 4. **Record a local session.**
-   Hook-based adapters record normal agent activity after setup. For an MCP
-   server, use:
+   For Claude Code, accept workspace trust. For Codex, review and trust every
+   AgentTrace command in `/hooks`. Run one small local session and exit it
+   cleanly. Hook-based adapters record normal agent activity after setup. For
+   an MCP server, use:
    ```bash
    agent-strace record -- <server-command> [args...]
    ```
    The local trace is the evidence source of truth for the rest of this path.
 
-5. **Inspect evidence health.**
+5. **Verify installed configuration and observed evidence together.**
+   ```bash
+   agent-strace setup --cli codex --verify --live
+   agent-strace setup --cli claude --verify --live
+   ```
+   The command resolves the provider config and AgentTrace executable, selects
+   the newest matching recorded session, and reports the session ID, provider,
+   capture method, observed event types, start and end markers, redaction,
+   evidence health, and packaged capture-matrix gaps. Use
+   `--session SESSION_ID` to select another trace. It exits non-zero for
+   missing or stale setup, unsupported providers, no matching session, empty or
+   unreadable evidence, provider mismatch, or `unknown` or `invalid` evidence.
+   It never starts a provider or model request.
+
+6. **Inspect evidence health.**
    ```bash
    agent-strace health <session-id>
    ```
@@ -70,7 +80,7 @@ from optional or experimental surfaces.
    clean-looking replay is still not proof of complete capture. See
    [`health`](commands.md#health).
 
-6. **Review the ordered session locally.**
+7. **Review the ordered session locally.**
    The stable review entry point today is:
    ```bash
    agent-strace replay <session-id>
@@ -78,7 +88,7 @@ from optional or experimental surfaces.
    `timeline`, `explain`, `why`, and `diff` are useful secondary views.
    The dedicated review projection/UI is tracked in #242.
 
-7. **Review disclosure before sharing or exporting.**
+8. **Review disclosure before sharing or exporting.**
    Treat trace data as sensitive. Preview what an HTML share would disclose, as
    category counts with no values, before writing the HTML:
    ```bash
@@ -92,7 +102,7 @@ from optional or experimental surfaces.
    A privacy-minimized share-by-default workflow is tracked in #252. Until that
    is released, do not assume ordinary `share` output is minimized.
 
-8. **Optionally compare or export.**
+9. **Optionally compare or export.**
    Comparison is local:
    ```bash
    agent-strace diff <session-a> <session-b>
@@ -163,7 +173,7 @@ v1 contract.
 
 Before calling the workflow v1-complete, a clean environment must pass:
 
-`install → configure → verify → capture → health → review → disclosure preview → safe share/export`
+`install → configure → static verify → capture → live verify → health → review → disclosure preview → safe share/export`
 
 against the representative fixture, with provider limitations visible. A v1
 release candidate should run that path before v1.0 is cut.
