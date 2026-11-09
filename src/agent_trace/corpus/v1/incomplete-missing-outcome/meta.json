@@ -1,0 +1,7 @@
+{
+  "session_id": "incomplete-missing-outcome",
+  "started_at": 1700000100.0,
+  "ended_at": 1700000102.0,
+  "agent_name": "synthetic-corpus",
+  "tool_calls": 1
+}

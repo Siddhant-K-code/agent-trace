@@ -99,6 +99,7 @@ from .backfill import cmd_backfill_meta
 from .health import cmd_health
 from .sample import cmd_sample
 from .server import cmd_server
+from .validation import cmd_validate
 from .watch import cmd_watch
 from .why import cmd_why
 from .event_data import NonObjectEventDataError, require_object_event_data
@@ -1502,6 +1503,38 @@ def build_parser() -> argparse.ArgumentParser:
                           help="verify hash chain from an EU AI Act export")
     p_verify.add_argument("--format", choices=["text", "json"], default="text")
 
+    # validate
+    p_validate = sub.add_parser(
+        "validate",
+        help="validate a trace against the public schema and conformance rules",
+    )
+    p_validate.add_argument(
+        "target",
+        nargs="?",
+        help="session ID, session prefix, or trace directory (default: latest)",
+    )
+    p_validate.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
+    p_validate.add_argument(
+        "--allow-active",
+        action="store_true",
+        help="treat missing terminal outcomes as in-flight rather than incomplete",
+    )
+    p_validate.add_argument(
+        "--replay-baseline",
+        metavar="FILE",
+        help="compare tool-call behavior with an existing regression fixture",
+    )
+    p_validate.add_argument(
+        "--corpus",
+        action="store_true",
+        help="validate every packaged Agent Evidence Corpus case",
+    )
+
     # health
     p_health = sub.add_parser(
         "health",
@@ -2842,6 +2875,7 @@ def main() -> None:
         "why": cmd_why,
         "audit": cmd_audit,
         "verify": cmd_verify,
+        "validate": cmd_validate,
         "health": cmd_health,
         "share": cmd_share,
         "score": cmd_score,

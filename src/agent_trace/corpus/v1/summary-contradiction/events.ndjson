@@ -1,0 +1,4 @@
+{"event_type":"session_start","timestamp":1700001100.0,"event_id":"start","data":{"provider":"synthetic"}}
+{"event_type":"tool_call","timestamp":1700001101.0,"event_id":"call","data":{"tool_name":"read","arguments":{"path":"synthetic.txt"}}}
+{"event_type":"tool_result","timestamp":1700001102.0,"event_id":"result","parent_id":"call","data":{"result":"synthetic"}}
+{"event_type":"session_end","timestamp":1700001103.0,"event_id":"end","data":{"status":"completed"}}

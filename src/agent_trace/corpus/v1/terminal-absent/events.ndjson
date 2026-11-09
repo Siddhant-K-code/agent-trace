@@ -1,0 +1,2 @@
+{"event_type":"session_start","timestamp":1700000200.0,"event_id":"start","data":{"provider":"synthetic"}}
+{"event_type":"user_prompt","timestamp":1700000201.0,"event_id":"prompt","data":{"prompt":"synthetic unfinished request"}}

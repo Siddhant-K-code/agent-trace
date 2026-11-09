@@ -1,0 +1,8 @@
+{
+  "session_id": "fixture-review-001",
+  "started_at": 1789300800.0,
+  "ended_at": 1789300811.0,
+  "agent_name": "synthetic-review-fixture",
+  "tool_calls": 2,
+  "errors": 1
+}

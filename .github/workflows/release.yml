@@ -39,7 +39,7 @@ jobs:
           TAG="v${VERSION}"
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Release $TAG already exists — skipping."
+            echo "Release $TAG already exists - skipping."
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
@@ -55,6 +55,41 @@ jobs:
             git log "${LAST_TAG}..HEAD" --pretty=format:"- %s" > /tmp/changelog.txt
           fi
 
+      - name: Build interoperability release asset
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
+
+          root = Path.cwd()
+          output = root / "dist" / "agent-strace-interoperability-v1.zip"
+          output.parent.mkdir(parents=True, exist_ok=True)
+          sources = [
+              (root / "src/agent_trace/schemas/trace/v1", Path("schemas/trace/v1")),
+              (root / "src/agent_trace/corpus/v1", Path("corpus/v1")),
+          ]
+          documents = [
+              root / "docs/trace-schema.md",
+              root / "docs/agent-evidence-corpus.md",
+              root / "LICENSE",
+          ]
+          with ZipFile(output, "w", compression=ZIP_DEFLATED) as archive:
+              for source, prefix in sources:
+                  for path in sorted(item for item in source.rglob("*") if item.is_file()):
+                      info = ZipInfo((prefix / path.relative_to(source)).as_posix())
+                      info.date_time = (1980, 1, 1, 0, 0, 0)
+                      info.compress_type = ZIP_DEFLATED
+                      info.external_attr = 0o644 << 16
+                      archive.writestr(info, path.read_bytes())
+              for path in documents:
+                  info = ZipInfo(path.relative_to(root).as_posix())
+                  info.date_time = (1980, 1, 1, 0, 0, 0)
+                  info.compress_type = ZIP_DEFLATED
+                  info.external_attr = 0o644 << 16
+                  archive.writestr(info, path.read_bytes())
+          PY
+
       - name: Create GitHub Release
         if: steps.check.outputs.exists == 'false'
         env:
@@ -64,7 +99,8 @@ jobs:
           gh release create "$TAG" \
             --title "$TAG" \
             --notes-file /tmp/changelog.txt \
-            --target "${{ github.sha }}"
+            --target "${{ github.sha }}" \
+            "dist/agent-strace-interoperability-v1.zip#AgentTrace interoperability schemas and Agent Evidence Corpus"
 
       # Releases created with GITHUB_TOKEN don't fire `release: published`,
       # but GITHUB_TOKEN can trigger workflow_dispatch.
