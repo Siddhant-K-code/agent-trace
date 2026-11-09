@@ -11,6 +11,10 @@ Approval requests are stored as JSON files:
 
 States: pending → approved | denied
 
+The allowed states and transitions are defined once in ``APPROVAL_STATES``
+and ``_TRANSITIONS``. Decisions are applied under the store write lock, so
+exactly one of several concurrent approve/deny calls wins.
+
 Usage:
     # List pending approval requests
     agent-strace approval list
@@ -37,11 +41,32 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from .store import TraceStore
+from .store import TraceStore, _write_atomic
 
 ApprovalState = Literal["pending", "approved", "denied"]
 
+PENDING: ApprovalState = "pending"
+APPROVED: ApprovalState = "approved"
+DENIED: ApprovalState = "denied"
+
+APPROVAL_STATES: frozenset[str] = frozenset({PENDING, APPROVED, DENIED})
+DECIDED_STATES: frozenset[str] = frozenset({APPROVED, DENIED})
+
+# Allowed state transitions. Decided states are terminal.
+_TRANSITIONS: dict[str, frozenset[str]] = {
+    PENDING: frozenset({APPROVED, DENIED}),
+    APPROVED: frozenset(),
+    DENIED: frozenset(),
+}
+
+PollOutcome = Literal["approved", "denied", "timeout", "not_found", "invalid"]
+
 _APPROVALS_DIR = ".approvals"
+
+
+def can_transition(current: str, target: str) -> bool:
+    """Return True when ``current`` -> ``target`` is an allowed transition."""
+    return target in _TRANSITIONS.get(current, frozenset())
 
 
 # ---------------------------------------------------------------------------
@@ -57,7 +82,7 @@ class ApprovalRequest:
     tool_input: dict = field(default_factory=dict)
     event_id: str = ""
     agent_pid: int = 0
-    state: ApprovalState = "pending"
+    state: ApprovalState = PENDING
     created_at: float = field(default_factory=time.time)
     decided_at: float | None = None
     decided_by: str = ""
@@ -68,8 +93,38 @@ class ApprovalRequest:
 
     @classmethod
     def from_json(cls, text: str) -> "ApprovalRequest":
+        """Parse a stored request. Raises ``ValueError`` on an unknown state."""
         d = json.loads(text)
+        if not isinstance(d, dict):
+            raise ValueError("approval record must be a JSON object")
+        state = d.get("state", PENDING)
+        if not isinstance(state, str) or state not in APPROVAL_STATES:
+            raise ValueError(f"invalid approval state: {state!r}")
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass(frozen=True)
+class PollResult:
+    """Result of :func:`wait_for_decision`.
+
+    ``outcome`` is one of:
+      - ``approved`` / ``denied``: a decision was recorded
+      - ``timeout``: the request was still pending when the timeout expired
+      - ``not_found``: no request file exists for the ID
+      - ``invalid``: the request file exists but cannot be parsed or has an
+        unknown state
+    """
+
+    outcome: PollOutcome
+    request: ApprovalRequest | None = None
+
+    @property
+    def decided(self) -> bool:
+        return self.outcome in DECIDED_STATES
+
+    @property
+    def timed_out(self) -> bool:
+        return self.outcome == "timeout"
 
 
 # ---------------------------------------------------------------------------
@@ -85,10 +140,11 @@ def _request_path(store: TraceStore, request_id: str) -> Path:
 
 
 def save_request(store: TraceStore, req: ApprovalRequest) -> Path:
-    d = _approvals_dir(store)
-    d.mkdir(parents=True, exist_ok=True)
+    """Persist a request atomically so concurrent readers never see a partial file."""
+    if req.state not in APPROVAL_STATES:
+        raise ValueError(f"invalid approval state: {req.state!r}")
     path = _request_path(store, req.request_id)
-    path.write_text(req.to_json())
+    _write_atomic(path, req.to_json())
     return path
 
 
@@ -158,6 +214,66 @@ def create_approval_request(
     return req
 
 
+def _find_request_path(
+    store: TraceStore, request_id: str,
+) -> tuple[Path | None, ApprovalRequest | None, str]:
+    """Resolve an ID or prefix to (path, request, error) for an update.
+
+    An exact ID match is preferred over prefix matches. ``error`` is set when
+    matching files exist but none of them is a valid record.
+    """
+    d = _approvals_dir(store)
+    if not request_id or not d.is_dir():
+        return None, None, ""
+    candidates = sorted(
+        p for p in d.glob(f"{request_id}*.json")
+        if p.parent == d and not p.is_symlink()
+    )
+    exact = _request_path(store, request_id)
+    if exact in candidates:
+        candidates.remove(exact)
+        candidates.insert(0, exact)
+    error = ""
+    for path in candidates:
+        try:
+            return path, ApprovalRequest.from_json(path.read_text()), ""
+        except (OSError, ValueError) as exc:
+            error = error or str(exc)
+    return None, None, error
+
+
+def _decide(
+    store: TraceStore,
+    request_id: str,
+    target: ApprovalState,
+    decided_by: str,
+    reason: str | None = None,
+) -> tuple[ApprovalRequest | None, str]:
+    """Apply ``pending -> target`` atomically under the store write lock.
+
+    Returns (request, "") on success or (None, error message) otherwise. The
+    load, state check, and write happen under one lock, so when several
+    deciders race exactly one succeeds and the rest see the recorded state.
+    """
+    if not _approvals_dir(store).is_dir():
+        return None, f"Request not found: {request_id}"
+    with store.write_lock():
+        path, req, error = _find_request_path(store, request_id)
+        if req is None or path is None:
+            if error:
+                return None, f"Request {request_id} has an invalid record: {error}"
+            return None, f"Request not found: {request_id}"
+        if not can_transition(req.state, target):
+            return None, f"Request already {req.state}"
+        req.state = target
+        req.decided_at = time.time()
+        req.decided_by = decided_by or os.environ.get("USER", "")
+        if reason is not None:
+            req.reason = reason
+        _write_atomic(path, req.to_json())
+    return req, ""
+
+
 def approve_request(
     store: TraceStore,
     request_id: str,
@@ -166,18 +282,12 @@ def approve_request(
 ) -> tuple[bool, str]:
     """Approve a pending request. Optionally resumes the agent via SIGCONT.
 
-    Returns (ok, message).
+    Returns (ok, message). If the request was already decided, including by
+    a concurrent call, returns (False, "Request already <state>").
     """
-    req = find_request(store, request_id)
-    if not req:
-        return False, f"Request not found: {request_id}"
-    if req.state != "pending":
-        return False, f"Request already {req.state}"
-
-    req.state = "approved"
-    req.decided_at = time.time()
-    req.decided_by = decided_by or os.environ.get("USER", "")
-    save_request(store, req)
+    req, error = _decide(store, request_id, APPROVED, decided_by)
+    if req is None:
+        return False, error
 
     if resume_agent and req.agent_pid:
         try:
@@ -198,19 +308,12 @@ def deny_request(
 ) -> tuple[bool, str]:
     """Deny a pending request. Optionally kills the agent.
 
-    Returns (ok, message).
+    Returns (ok, message). If the request was already decided, including by
+    a concurrent call, returns (False, "Request already <state>").
     """
-    req = find_request(store, request_id)
-    if not req:
-        return False, f"Request not found: {request_id}"
-    if req.state != "pending":
-        return False, f"Request already {req.state}"
-
-    req.state = "denied"
-    req.decided_at = time.time()
-    req.decided_by = decided_by or os.environ.get("USER", "")
-    req.reason = reason
-    save_request(store, req)
+    req, error = _decide(store, request_id, DENIED, decided_by, reason=reason)
+    if req is None:
+        return False, error
 
     if kill_agent and req.agent_pid:
         try:
@@ -222,6 +325,50 @@ def deny_request(
     return True, f"Denied — agent {req.agent_pid} terminated"
 
 
+def _check_decision(store: TraceStore, request_id: str) -> PollResult | None:
+    """Return a final PollResult, or None while the request is still pending."""
+    path = _request_path(store, request_id)
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        return PollResult("not_found")
+    except OSError:
+        return PollResult("invalid")
+    try:
+        req = ApprovalRequest.from_json(text)
+    except ValueError:
+        return PollResult("invalid")
+    if req.state == PENDING:
+        return None
+    return PollResult(req.state, req)
+
+
+def wait_for_decision(
+    store: TraceStore,
+    request_id: str,
+    timeout: float = 300.0,
+    poll_interval: float = 1.0,
+) -> PollResult:
+    """Block until the request is decided, missing, invalid, or the timeout expires.
+
+    Unlike :func:`poll_for_decision`, every outcome is distinct: a decision
+    (``approved``/``denied``), ``timeout`` (still pending at the deadline),
+    ``not_found`` (no request file), or ``invalid`` (unreadable record or
+    unknown state). ``not_found`` and ``invalid`` are returned immediately
+    instead of waiting for the timeout. The request is always checked at
+    least once, and once more at the deadline.
+    """
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        result = _check_decision(store, request_id)
+        if result is not None:
+            return result
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return PollResult("timeout", load_request(store, request_id))
+        time.sleep(max(0.0, min(poll_interval, remaining)))
+
+
 def poll_for_decision(
     store: TraceStore,
     request_id: str,
@@ -230,15 +377,22 @@ def poll_for_decision(
 ) -> ApprovalState:
     """Block until a decision is made or timeout expires.
 
-    Returns the final state: 'approved', 'denied', or 'pending' (timeout).
+    Returns 'approved' or 'denied' when decided. Returns 'pending' only when
+    the timeout expired with the request still undecided.
+
+    Raises ``LookupError`` if the request file does not exist and
+    ``ValueError`` if it cannot be parsed or has an unknown state, rather
+    than reporting 'pending'. Use :func:`wait_for_decision` to get these
+    outcomes as values.
     """
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        req = load_request(store, request_id)
-        if req and req.state != "pending":
-            return req.state
-        time.sleep(poll_interval)
-    return "pending"
+    result = wait_for_decision(store, request_id, timeout, poll_interval)
+    if result.outcome == "not_found":
+        raise LookupError(f"approval request not found: {request_id}")
+    if result.outcome == "invalid":
+        raise ValueError(f"approval request has an invalid record: {request_id}")
+    if result.outcome == "timeout":
+        return PENDING
+    return result.outcome  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------

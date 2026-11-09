@@ -27,7 +27,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, Iterable, TextIO
 
-from .approval import ApprovalRequest
+from .approval import APPROVAL_STATES, DECIDED_STATES, PENDING, ApprovalRequest
 from .audit import Policy, _audit_event, _extract_urls, _is_sensitive
 from .models import EventType, SessionMeta, TraceEvent
 from .redact import contains_redaction_marker, redact_data
@@ -696,13 +696,13 @@ def _load_approvals(
             if not required.issubset(payload):
                 raise ComplianceReportError("approval record is missing required fields")
             state = payload.get("state")
-            if state in {"approved", "denied"} and payload.get("decided_at") is None:
+            if not isinstance(state, str) or state not in APPROVAL_STATES:
+                raise ComplianceReportError("approval record state is invalid")
+            if state in DECIDED_STATES and payload.get("decided_at") is None:
                 raise ComplianceReportError("decided approval record is missing decided_at")
-            if state == "pending" and payload.get("decided_at") is not None:
+            if state == PENDING and payload.get("decided_at") is not None:
                 raise ComplianceReportError("pending approval record cannot have decided_at")
             request = ApprovalRequest.from_json(json.dumps(payload))
-            if request.state not in {"pending", "approved", "denied"}:
-                raise ComplianceReportError("approval record state is invalid")
             for value in (
                 request.request_id, request.session_id, request.event_id,
                 request.rule_name, request.tool_name,
@@ -858,7 +858,7 @@ def _authorization(
         decided = float(approval.decided_at) if approval.decided_at is not None else None
         if created < float(event.timestamp):
             return "ambiguous_approval", "ambiguous", False, "request_before_call", None
-        if approval.state == "pending":
+        if approval.state == PENDING:
             if decided is not None:
                 return "ambiguous_approval", "ambiguous", False, "invalid_pending_order", None
             return "recorded_approval", "pending", False, "call_before_request", None

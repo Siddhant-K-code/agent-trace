@@ -30,7 +30,7 @@ from .http_proxy import HTTPProxyServer
 from .a2a import cmd_a2a_tree
 from .mcp_server import cmd_mcp
 from .annotate import cmd_annotate
-from .approval import cmd_approval
+from .approval import APPROVAL_STATES, cmd_approval
 from .rbac import cmd_rbac
 from .iac import cmd_apply, cmd_config_diff
 from .sso import cmd_auth
@@ -1970,7 +1970,7 @@ def build_parser() -> argparse.ArgumentParser:
     appr_sub = p_appr.add_subparsers(dest="approval_cmd")
 
     p_appr_list = appr_sub.add_parser("list", help="list approval requests")
-    p_appr_list.add_argument("--state", choices=["pending", "approved", "denied"],
+    p_appr_list.add_argument("--state", choices=sorted(APPROVAL_STATES),
                              help="filter by state (default: all)")
 
     p_appr_show = appr_sub.add_parser("show", help="show details of a request")
