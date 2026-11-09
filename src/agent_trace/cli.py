@@ -2055,7 +2055,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_ds_export = dataset_sub.add_parser("export", help="export dataset to JSONL")
     p_ds_export.add_argument("--dataset", default=".agent-traces/datasets/default.jsonl")
     p_ds_auto = dataset_sub.add_parser("auto", help="auto-populate dataset from sessions by signal filter")
-    p_ds_auto.add_argument("--name", default="default", help="dataset name (default: default)")
+    p_ds_auto.add_argument("--name", default="default",
+                           help="dataset name, written to datasets/NAME.jsonl in the trace "
+                                "store (default: default)")
     p_ds_auto.add_argument("--dataset", default="", help="explicit dataset path (overrides --name)")
     p_ds_auto.add_argument("--filter", default="has-errors",
                            help="filter: has-errors, high-retry, cost-above:N, wide-blast, "
@@ -2629,7 +2631,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_drift = sub.add_parser("drift", help="detect behavioral drift across sessions")
     p_drift.add_argument("--since", metavar="Nd", help="analyse sessions from the last N days (e.g. 30d)")
     p_drift.add_argument("--baseline", metavar="FILE",
-                         help="path to a saved behavioral fingerprint JSON, or a date range YYYY-MM-DD:YYYY-MM-DD")
+                         help="path to a saved behavioral fingerprint JSON "
+                              "(use --baseline-range for a date range)")
     p_drift.add_argument("--current", metavar="RANGE",
                          help="current window as YYYY-MM-DD:YYYY-MM-DD")
     p_drift.add_argument("--baseline-range", metavar="RANGE", dest="baseline_range",

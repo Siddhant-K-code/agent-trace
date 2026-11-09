@@ -309,6 +309,53 @@ class TestDriftEndToEnd(unittest.TestCase):
         self.assertIn("drift", output.lower())
         self.assertIn("overall", output.lower())
 
+    def test_suggested_next_steps_parse_and_run(self):
+        import contextlib
+        import shlex
+
+        from agent_trace.cli import (
+            _normalise_eval_argv,
+            _normalise_policy_argv,
+            _normalise_skills_argv,
+        )
+        from agent_trace.eval import cmd_eval
+        from agent_trace.optimize import _resolve_sessions
+
+        now = time.time()
+        baseline_ids = self._populate("base4", 3, "Bash", now - 200)
+        _add_session(self.store, "curr4_err", [_error(now - 50)], started_at=now - 50)
+        current_ids = self._populate("curr4", 3, "Write", now - 100) + ["curr4_err"]
+        report = compute_drift(
+            compute_fingerprint(self.store, baseline_ids),
+            compute_fingerprint(self.store, current_ids),
+        )
+        self.assertTrue(report.exceeded)
+        buf = io.StringIO()
+        print_report(report, out=buf)
+        lines = buf.getvalue().split("Suggested next step:\n", 1)[1].splitlines()
+        commands = [line.strip() for line in lines if line.strip().startswith("agent-strace ")]
+        self.assertEqual(len(commands), 2)
+
+        parser = build_parser()
+        parsed = []
+        for command in commands:
+            argv = ["--trace-dir", self.tmp, *shlex.split(command)[1:]]
+            argv = _normalise_eval_argv(_normalise_skills_argv(_normalise_policy_argv(argv)))
+            with self.subTest(command=command), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                try:
+                    parsed.append(parser.parse_args(argv))
+                except SystemExit:
+                    self.fail(f"suggested command does not parse: {command}")
+
+        collect, follow_up = parsed
+        self.assertEqual((collect.command, collect.eval_command, collect.dataset_command),
+                         ("eval", "dataset", "auto"))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cmd_eval(collect), 0)
+        self.assertEqual(follow_up.command, "optimize")
+        self.assertEqual(_resolve_sessions(self.store, follow_up), ["curr4_err"])
+
     def test_fingerprint_save_and_load(self):
         now = time.time()
         ids = self._populate("fp_test", 3, "Bash", now - 100)

@@ -424,7 +424,7 @@ checkpoint setup.
 
 ### `watch`
 ```
-agent-strace watch [session-id] [--agent-pid PID] [--timeout DURATION] [--budget $N]
+agent-strace watch [session-id] [--agent-pid PID] [--timeout DURATION] [--budget DOLLARS]
                    [--on-violation ACTION]
                    [--on-death CMD] [--policy FILE] [--rules FILE_OR_BUILTINS] [--stream-to URL]
                    [--stream-batch-size N] [--stream-flush-interval S]
@@ -438,7 +438,7 @@ Live session monitor with kill-switch rules.
 |---|---|
 | `--agent-pid PID` | Agent process that pause, kill and approval actions signal. Watch exits with an error if the PID does not exist or cannot be signalled. Not supported on Windows |
 | `--timeout DURATION` | Kill after duration (e.g. `30m`, `2h`) |
-| `--budget $N` | Kill when spend exceeds N dollars |
+| `--budget DOLLARS` | Kill when spend exceeds this many dollars. Pass a plain number such as `5`, not `$5` |
 | `--loop-threshold N` | Alert when the same tool call and arguments repeat N times; default is 3 |
 | `--loop-window N` | Number of recent events to scan for repeated identical tool calls; default is 10 |
 | `--on-violation terminal\|file\|kill` | Action when a rule fires |
@@ -446,7 +446,7 @@ Live session monitor with kill-switch rules.
 | `--compaction-checkpoint` | Write a recovery checkpoint before context saturation |
 | `--checkpoint-at RATIO` | Context fill ratio that triggers a checkpoint (default: `0.80`) |
 | `--policy FILE` | Scope policy file to enforce (default: `.agent-scope.json`) |
-| `--rules FILE_OR_BUILTINS` | JSON/YAML rules file, or comma-separated built-ins such as `mcp-poisoning,loop:3/10,budget:$5,timeout:30m,cognitive-debt:0.8` |
+| `--rules FILE_OR_BUILTINS` | JSON/YAML rules file, or comma-separated built-ins such as `mcp-poisoning,loop:3/10,budget:5,timeout:30m,cognitive-debt:0.8` |
 | `--stream-to URL` | Stream events to HTTP endpoint in real-time |
 | `--dry-run` | Evaluate rules without acting |
 | `--tenant-id ID` | Tag the session and all events; defaults to `AGENT_STRACE_TENANT_ID` |
@@ -608,9 +608,16 @@ never enforces a policy or contacts a remote service.
 
 ### `audit-tools`
 ```
-agent-strace audit-tools [--repo .] [--since DATE] [--approved TOOLS]
+agent-strace audit-tools [--repo PATH] [--since DATE] [--approved TOOLS]
 ```
-Detect Shadow MCP servers and undeclared agent activity. No network calls, no API keys.
+Detect which AI coding tools are used in a repository: Claude Code, Cursor,
+GitHub Copilot, Codex / ChatGPT, Windsurf, and Aider. Detection uses config
+file signals and, for some tools, commit message patterns. The report also
+flags unrecognized LLM endpoints in committed `.env` files and PII-like
+patterns in recent commits. Reads local files and git history only: no network
+calls, no API keys. `--since` takes a git date (default: `90 days ago`).
+`--approved` is a comma-separated list of the tool names above
+(case-insensitive); any other detected tool is reported as unapproved.
 
 ### `postmortem`
 ```
@@ -797,10 +804,16 @@ agent-strace dashboard annotate --date 2026-05-10 --note "Added retry policy"
 
 ### `drift`
 ```
-agent-strace drift [--since DURATION] [--baseline FILE] [--save-baseline FILE]
-                   [--threshold N] [--format table|json]
+agent-strace drift (--since Nd | --current YYYY-MM-DD:YYYY-MM-DD)
+                   [--baseline FILE] [--baseline-range YYYY-MM-DD:YYYY-MM-DD]
+                   [--save-baseline FILE] [--threshold N] [--format table|json]
 ```
-Detect behavioral drift across sessions. Exits non-zero when drift score exceeds `--threshold` (default: 0.20).
+Detect behavioral drift across sessions. Pass `--since` or `--current`;
+without either, `drift` exits 1. With `--since Nd`, the newer half of the
+sessions in that window is the current set, and the older half is the baseline
+unless `--baseline FILE` or `--baseline-range` supplies one. `--current`
+always needs `--baseline FILE` or `--baseline-range`. Exits 1 when the drift
+score exceeds `--threshold` (default: 0.20).
 
 ### `baseline`
 ```
@@ -860,11 +873,19 @@ agent-strace eval [session-id] [--config FILE] [--baseline FILE]
 agent-strace eval run [session-id]
 agent-strace eval compare <session-a> <session-b>
 agent-strace eval ci
+agent-strace eval dataset auto [--name NAME] [--filter FILTER] [--since Nd] [--label TEXT]
 ```
 Gate the latest or selected session against named, raw-value criteria. The direct
 command exits `1` when a criterion fails or a score regresses beyond the allowed
 tolerance, making it suitable for CI. The `run`, `compare`, and `ci` subcommands
 remain available for legacy normalized scorers.
+
+`eval dataset auto` adds sessions from the last `--since` days (default: `7d`)
+that match `--filter` (default: `has-errors`) to
+`<trace-dir>/datasets/NAME.jsonl`, or to
+`<trace-dir>/workspaces/<id>/datasets/NAME.jsonl` when `AGENT_STRACE_WORKSPACE`
+is set. `--dataset FILE` writes to a different path.
+`agent-strace optimize --dataset NAME` reads the same file.
 
 Configure named criteria in `.agent-evals.yaml`:
 ```yaml

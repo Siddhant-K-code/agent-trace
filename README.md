@@ -148,7 +148,7 @@ Full setup guide: [docs/setup.md](docs/setup.md). Machine-wide install for platf
 | Command | What it does |
 |---|---|
 | [`agent-strace watch`](docs/commands.md#watch) | Live monitor with kill-switch rules |
-| [`agent-strace watch --timeout 30m --budget $5`](docs/commands.md#watch) | Watchdog mode: kills on limit and heartbeats sessions for postmortems |
+| [`agent-strace watch --timeout 30m --budget 5`](docs/commands.md#watch) | Watchdog mode: kills on limit and heartbeats sessions for postmortems |
 | [`agent-strace mcp-scan`](docs/commands.md#mcp-scan) | Scan runtime MCP poisoning indicators |
 | [`agent-strace audit <id>`](docs/commands.md#audit) | Audit tool calls against a policy file |
 | [`agent-strace policy backtest`](docs/commands.md#policy) | Test policy impact against historical sessions |
@@ -183,7 +183,7 @@ Full setup guide: [docs/setup.md](docs/setup.md). Machine-wide install for platf
 | [`agent-strace fingerprint`](docs/commands.md#fingerprint) | Baseline an agent's behavioural profile |
 | [`agent-strace tree`](docs/commands.md#tree) | Show parent/child session hierarchy |
 | [`agent-strace freeze`](docs/commands.md#freeze) | Freeze a tool-call sequence for regression checks |
-| [`agent-strace standup`](docs/commands.md#standup) | Plain-English summary of yesterday's sessions |
+| [`agent-strace standup`](docs/commands.md#standup) | Plain-English summary of one session (latest by default) |
 | [`agent-strace eval <id>`](docs/commands.md#eval) | Gate a session on named quality criteria and baselines |
 | [`agent-strace eval ci`](docs/commands.md#eval) | Run the legacy normalized-score CI workflow |
 
@@ -247,7 +247,7 @@ Per-backend setup (Datadog, Honeycomb, Grafana, New Relic, Splunk, Langfuse): [d
 
 ```bash
 agent-strace server --port 4317 --storage ./traces
-AGENT_STRACE_ENDPOINT=http://collector:4317 python my_agent.py
+export AGENT_STRACE_ENDPOINT=http://collector:4317   # read by hook commands and Python integrations
 ```
 
 Full guide: [docs/server.md](docs/server.md)

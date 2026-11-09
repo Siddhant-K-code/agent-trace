@@ -309,7 +309,7 @@ Detected tools: Claude Code, Cursor, GitHub Copilot, Codex / ChatGPT, Windsurf, 
 agent-strace mcp-scan
 agent-strace mcp-scan --session abc123
 agent-strace mcp-scan --watch
-agent-strace watch --rules mcp-poisoning,budget:$5,timeout:30m
+agent-strace watch --rules mcp-poisoning,budget:5,timeout:30m
 ```
 
 The scanner checks:

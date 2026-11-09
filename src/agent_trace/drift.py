@@ -519,6 +519,11 @@ def _parse_date_range(s: str) -> tuple[float, float]:
 
 ICON = {"stable": "✅", "moderate": "⚠️ ", "high": "❌"}
 
+SUGGESTED_NEXT_STEPS = (
+    "agent-strace eval dataset auto --name drift-failures --since 14d --filter has-errors",
+    "agent-strace optimize --dataset drift-failures --dry-run",
+)
+
 
 def print_report(report: DriftReport, out: TextIO = sys.stdout) -> None:
     w = out.write
@@ -548,8 +553,8 @@ def print_report(report: DriftReport, out: TextIO = sys.stdout) -> None:
 
     if report.exceeded:
         w("Suggested next step:\n")
-        w("  agent-strace dataset auto --name drift-failures --since 14d --filter has-errors\n")
-        w("  agent-strace eval --dataset drift-failures\n")
+        for command in SUGGESTED_NEXT_STEPS:
+            w(f"  {command}\n")
     w("\n")
 
 
