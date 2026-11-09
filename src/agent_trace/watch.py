@@ -1153,8 +1153,11 @@ def _editor_wants_pause(store: "TraceStore", session_id: str) -> bool | None:
 def _check_approval_decision(store: "TraceStore", state: "WatchState", out: "TextIO") -> None:
     """Release an approval-owned pause once the request has been decided.
 
-    ``approval approve`` sends SIGCONT and ``approval deny`` sends SIGTERM
-    from another process, so watch only clears its own pause state here.
+    ``approval approve`` sends SIGCONT from another process, so watch only
+    clears its own pause state. ``approval deny`` sends SIGTERM (unless
+    ``--no-kill``), but an agent that handles SIGTERM stays stopped until it
+    gets SIGCONT. Watch cannot tell which deny was used, so a denied pause
+    stays in place as a rule pause that a human can release.
     """
     if state.pause_owner != PAUSE_APPROVAL or not state.approval_request_id:
         return
@@ -1166,10 +1169,32 @@ def _check_approval_decision(store: "TraceStore", state: "WatchState", out: "Tex
     # A missing or half-written file reads as None; keep waiting.
     if req is None or req.state == "pending":
         return
-    out.write(f"[watch] Approval {req.request_id} {req.state}; pause released\n")
-    out.flush()
-    state.pause_owner = None
     state.approval_request_id = None
+    if req.state == "denied":
+        out.write(
+            f"[watch] Approval {req.request_id} denied; agent stays stopped. "
+            f"Run 'kill -CONT {state.agent_pid}' or Pause then Resume in the editor to release it\n"
+        )
+        state.pause_owner = PAUSE_RULE
+    else:
+        out.write(f"[watch] Approval {req.request_id} {req.state}; pause released\n")
+        state.pause_owner = None
+    out.flush()
+
+
+def _check_agent_alive(state: "WatchState", out: "TextIO") -> None:
+    """Drop pause state once the paused agent process has exited."""
+    if not state.paused or not state.agent_pid:
+        return
+    try:
+        os.kill(state.agent_pid, 0)
+    except ProcessLookupError:
+        out.write(f"[watch] Agent pid {state.agent_pid} exited; pause cleared\n")
+        out.flush()
+        state.pause_owner = None
+        state.approval_request_id = None
+    except OSError:
+        pass
 
 
 def _check_pause_file(store: "TraceStore", state: "WatchState", out: "TextIO") -> None:
@@ -1182,6 +1207,7 @@ def _check_pause_file(store: "TraceStore", state: "WatchState", out: "TextIO") -
     released by the marker; only the approval decision ends it.
     """
     _check_approval_decision(store, state, out)
+    _check_agent_alive(state, out)
     wants_pause = _editor_wants_pause(store, state.session_id)
     if wants_pause is None or not state.agent_pid:
         return

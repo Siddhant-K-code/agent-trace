@@ -167,15 +167,40 @@ class TestApprovalPause(PauseTestCase):
         self.assertEqual(self.mocks["pause"].call_count, 2)
         self.assertEqual(self.state.pause_owner, PAUSE_RULE)
 
-    def test_denial_releases_pause_state(self):
+    def test_denial_keeps_agent_stopped_but_releasable(self):
         request_id = self.require_approval()
         deny_request(self.store, request_id, kill_agent=False)
         self.tick()
-        self.assertIsNone(self.state.pause_owner)
+        self.assertEqual(self.state.pause_owner, PAUSE_RULE)
+        self.assertIsNone(self.state.approval_request_id)
+        self.mocks["resume"].assert_not_called()
 
+        # A later approval rule still gates the agent with a new request.
         second = self.require_approval()
         self.assertNotEqual(second, request_id)
         self.assertEqual(self.state.pause_owner, PAUSE_APPROVAL)
+
+    def test_editor_can_release_after_denial(self):
+        request_id = self.require_approval()
+        deny_request(self.store, request_id, kill_agent=False)
+        self.tick()
+        self.marker.write_text(SESSION)
+        self.tick()
+        self.marker.unlink()
+        self.tick()
+        self.mocks["resume"].assert_called_once_with(PID)
+        self.assertFalse(self.state.paused)
+
+    def test_exited_agent_clears_pause(self):
+        request_id = self.require_approval()
+        deny_request(self.store, request_id, kill_agent=False)
+
+        def fake_kill(pid, sig):
+            if sig == 0:
+                raise ProcessLookupError
+        self.mocks["os_kill"].side_effect = fake_kill
+        self.tick()
+        self.assertIsNone(self.state.pause_owner)
 
     def test_editor_marker_reapplies_after_approval(self):
         self.marker.write_text(SESSION)

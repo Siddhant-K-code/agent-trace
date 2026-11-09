@@ -424,10 +424,13 @@ uses the watchdog cost guard and kills only the over-budget session.
 
 A `pause` rule keeps the agent stopped until a human resumes it: send
 `SIGCONT`, or run Pause Agent and then Resume Agent in VS Code. A
-`require_approval` rule keeps it stopped until the request is approved or
-denied; the VS Code Resume command does not release it. While watch holds a
-pause, the idle timeout does not count. `--dry-run` reports a
-`require_approval` rule without pausing or creating a request.
+`require_approval` rule keeps it stopped until the request is decided; the
+VS Code Resume command does not release it. Approving releases the pause.
+Denying leaves the agent stopped like a `pause` rule, because an agent that
+handles `SIGTERM` only acts on it after `SIGCONT`. While watch holds a pause,
+the idle timeout does not count; the pause is dropped if the agent process
+exits. `--dry-run` reports a `require_approval` rule without pausing or
+creating a request.
 
 Built-in `loop` rule config:
 ```yaml
