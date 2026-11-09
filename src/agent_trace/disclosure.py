@@ -196,8 +196,9 @@ def build_disclosure_preview(
         warnings = (
             "The packet reflects captured evidence only.",
             "Heuristic redaction can miss secrets and personal data in the source trace.",
+            "Explicitly shareable annotations are included verbatim.",
         )
-        warning_count = 0
+        warning_count = annotation_count
     return DisclosurePreview(
         schema_version=2,
         mode=mode,

@@ -63,7 +63,7 @@ class TestDisclosurePreview(unittest.TestCase):
         self.assertEqual(preview.minimized_content_rich_event_count, 5)
         self.assertEqual(preview.redacted_event_count, 1)
         self.assertEqual(preview.unredacted_content_rich_event_count, 4)
-        self.assertEqual(preview.unresolved_sensitive_field_warning_count, 0)
+        self.assertEqual(preview.unresolved_sensitive_field_warning_count, 2)
         self.assertEqual(preview.anonymization_action_count, 0)
         self.assertEqual(preview.evidence_health_status, "not_assessed")
         self.assertIn("commands and paths", preview.omitted_field_categories)

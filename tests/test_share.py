@@ -309,7 +309,7 @@ class TestShareDryRun(unittest.TestCase):
             "minimized content-rich events": 5,
             "redacted events": 0,
             "unredacted content-rich events": 5,
-            "sensitive-field warnings": 0,
+            "sensitive-field warnings": 1,
             "anonymization actions": 0,
         }
         for label, count in expected.items():

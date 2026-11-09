@@ -61,7 +61,10 @@ timestamps.
 
 Default `share --dry-run` reports `minimized`. The matching HTML omits
 content-rich values and includes only annotations created with
-`agent-strace annotate --shareable`.
+`agent-strace annotate --shareable`. Event, parent, and annotation identifiers
+are replaced with packet-local references. Shareable annotation labels and
+notes are included verbatim, so mark them shareable only after reviewing their
+content.
 
 `share --include-content --dry-run` reports `include_content`. The matching HTML
 contains full event payloads and all annotations. It can contain sensitive

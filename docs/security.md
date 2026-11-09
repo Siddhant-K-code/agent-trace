@@ -133,6 +133,10 @@ known gaps, failures, retries, recovery, and explicitly shareable annotations.
 Run `agent-strace share <session-id> --dry-run` to review the selected
 disclosure boundary without values.
 
+Minimized packets replace event, parent, and annotation identifiers with
+packet-local references. Annotation labels and notes marked `--shareable` are
+included verbatim and should be reviewed before sharing.
+
 Full replay content requires `--include-content`:
 
 ```bash

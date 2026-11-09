@@ -74,7 +74,7 @@ class TestEvidencePacket(unittest.TestCase):
                 EventType.TOOL_CALL,
                 102.0,
                 self.session_id,
-                event_id="call-1",
+                event_id="SECRET-CALL-ID",
                 tool_name="Bash",
                 arguments={
                     "command": "curl -H 'Authorization: SECRET-TOKEN' https://example.test",
@@ -86,7 +86,7 @@ class TestEvidencePacket(unittest.TestCase):
                 103.0,
                 self.session_id,
                 event_id="error-1",
-                parent_id="call-1",
+                parent_id="SECRET-CALL-ID",
                 message="SECRET-FAILURE at /Users/alice/private/repo",
             ),
             _event(
@@ -142,6 +142,7 @@ class TestEvidencePacket(unittest.TestCase):
                 event_id="error-1",
                 label="root-cause",
                 note="SHAREABLE-NOTE",
+                author="alice@example.com",
                 shareable=True,
             ),
         )
@@ -183,6 +184,7 @@ class TestEvidencePacket(unittest.TestCase):
             "/Users/alice/private/repo",
             "PRIVATE-AGENT-NAME",
             "PRIVATE-ANNOTATION",
+            "SECRET-CALL-ID",
         ):
             self.assertNotIn(secret, payload)
 
@@ -210,6 +212,9 @@ class TestEvidencePacket(unittest.TestCase):
         self.assertEqual(packet.behavior.retry_count, 1)
         self.assertEqual(packet.behavior.recovered_operation_count, 1)
         self.assertEqual([annotation.note for annotation in packet.annotations], ["SHAREABLE-NOTE"])
+        self.assertEqual(packet.annotations[0].annotation_id, "annotation-000001")
+        self.assertEqual(packet.annotations[0].event_id, "event-000004")
+        self.assertEqual(packet.annotations[0].author, "")
 
     def test_manifest_is_versioned_deterministic_and_links_source_and_packet(self):
         first = build_evidence_packet(self.store, self.session_id)
@@ -234,6 +239,10 @@ class TestEvidencePacket(unittest.TestCase):
             "manifest_sha256",
         ):
             self.assertRegex(manifest["integrity"][key], r"^sha256:[0-9a-f]{64}$")
+        self.assertIn(
+            "decoded ordered source events",
+            manifest["integrity"]["source_trace_digest_scope"],
+        )
 
     def test_include_content_is_explicit_and_includes_all_annotations(self):
         minimized = build_evidence_packet(self.store, self.session_id)

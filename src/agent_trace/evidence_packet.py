@@ -407,15 +407,38 @@ def _minimized_data(
 def _minimize_events(
     events: Sequence[TraceEvent],
     behavior: _BehaviorAnalysis,
-) -> tuple[TraceEvent, ...]:
+) -> tuple[tuple[TraceEvent, ...], dict[str, str]]:
+    event_refs = {
+        event.event_id: f"event-{index + 1:06d}"
+        for index, event in enumerate(events)
+        if event.event_id
+    }
     minimized: list[TraceEvent] = []
     for index, event in enumerate(events):
         selected = copy.copy(event)
         selected.data = _minimized_data(event, index, behavior)
+        selected.event_id = event_refs.get(event.event_id, f"event-{index + 1:06d}")
+        selected.parent_id = event_refs.get(event.parent_id, "")
         selected.prev_hash = ""
         selected.tenant_id = ""
         minimized.append(selected)
-    return tuple(minimized)
+    return tuple(minimized), event_refs
+
+
+def _minimize_annotations(
+    annotations: Sequence[Annotation],
+    event_refs: Mapping[str, str],
+) -> tuple[Annotation, ...]:
+    selected: list[Annotation] = []
+    for annotation in annotations:
+        if not annotation.shareable:
+            continue
+        minimized = copy.copy(annotation)
+        minimized.annotation_id = f"annotation-{len(selected) + 1:06d}"
+        minimized.event_id = event_refs.get(annotation.event_id, "")
+        minimized.author = ""
+        selected.append(minimized)
+    return tuple(selected)
 
 
 def _limitations(include_content: bool) -> list[str]:
@@ -490,12 +513,19 @@ def _build_manifest(
         },
         "integrity": {
             "algorithm": "sha256",
+            "source_trace_digest_scope": (
+                "canonical session metadata and decoded ordered source events"
+            ),
             "source_trace_sha256": _digest({
                 "meta": json.loads(meta.to_json()),
                 "events": [_event_dict(event) for event in source_events],
             }),
+            "packet_events_digest_scope": "canonical selected packet events",
             "packet_events_sha256": _digest(
                 [_event_dict(event) for event in selected_events]
+            ),
+            "included_annotations_digest_scope": (
+                "canonical annotations included in the selected packet mode"
             ),
             "included_annotations_sha256": _digest(
                 [_annotation_dict(annotation) for annotation in selected_annotations]
@@ -520,16 +550,12 @@ def build_evidence_packet(
     require_object_event_data(source_events)
     source_annotations = tuple(load_annotations(store, session_id))
     behavior = _behavior_analysis(source_events)
-    selected_events = (
-        tuple(copy.copy(event) for event in source_events)
-        if include_content
-        else _minimize_events(source_events, behavior)
-    )
-    selected_annotations = (
-        source_annotations
-        if include_content
-        else tuple(annotation for annotation in source_annotations if annotation.shareable)
-    )
+    if include_content:
+        selected_events = tuple(copy.copy(event) for event in source_events)
+        selected_annotations = source_annotations
+    else:
+        selected_events, event_refs = _minimize_events(source_events, behavior)
+        selected_annotations = _minimize_annotations(source_annotations, event_refs)
     health = assess_session(
         store,
         session_id,
