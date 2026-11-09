@@ -66,6 +66,7 @@ export function activate(context: vscode.ExtensionContext): void {
       "agentTrace.sessionActive",
       true,
     );
+    pauseManager.syncState(state);
     statusBar.update(state);
     watchdogBar.onSessionStart(traceDir, state);
     decorations.update(state);
@@ -83,7 +84,7 @@ export function activate(context: vscode.ExtensionContext): void {
     watchdogBar.onSessionEnd();
     decorations.update(null);
     panel.onSessionEnd(state);
-    pauseManager.cleanup();
+    pauseManager.cleanup(state.sessionId);
   });
 
   watcher.onStateChange((state) => {
@@ -113,9 +114,13 @@ export function activate(context: vscode.ExtensionContext): void {
           );
           return;
         }
-        pauseManager.pause(state);
+        const result = pauseManager.pause(state);
         statusBar.update(state);
-        vscode.window.setStatusBarMessage("agent-trace: agent paused.", 3000);
+        if (!result.ok) {
+          vscode.window.showWarningMessage(`agent-trace: ${result.message}`);
+          return;
+        }
+        vscode.window.setStatusBarMessage("agent-trace: pause requested.", 3000);
       }),
     ),
   );
@@ -128,9 +133,17 @@ export function activate(context: vscode.ExtensionContext): void {
         if (!state) {
           return;
         }
-        pauseManager.resume(state);
+        const result = pauseManager.resume(state);
         statusBar.update(state);
-        vscode.window.setStatusBarMessage("agent-trace: agent resumed.", 3000);
+        if (!result.ok) {
+          vscode.window.showErrorMessage(`agent-trace: ${result.message}`);
+          return;
+        }
+        if (result.message) {
+          vscode.window.showWarningMessage(`agent-trace: ${result.message}`);
+          return;
+        }
+        vscode.window.setStatusBarMessage("agent-trace: resume requested.", 3000);
       }),
     ),
   );
@@ -269,6 +282,6 @@ export function activate(context: vscode.ExtensionContext): void {
 
 export function deactivate(): void {
   // Disposables registered via context.subscriptions are cleaned up
-  // automatically. PauseManager.cleanup() is called in onSessionEnd,
-  // but call it here too in case the window closes mid-session.
+  // automatically. The pause marker is left in place on purpose so a paused
+  // agent stays paused across window reloads; onSessionStart re-reads it.
 }

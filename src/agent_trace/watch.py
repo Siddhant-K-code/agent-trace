@@ -550,6 +550,11 @@ class EventStreamer:
                 sys.stderr.write(f"[stream] OTLP POST to {url} failed: {exc}\n")
 
 
+PAUSE_EDITOR = "editor"      # .pause-request marker; released when it is removed
+PAUSE_RULE = "rule"          # rule action "pause"; released by a human
+PAUSE_APPROVAL = "approval"  # rule action "require_approval"; released by the decision
+
+
 @dataclass
 class WatchState:
     """Mutable state accumulated across events."""
@@ -572,8 +577,17 @@ class WatchState:
     files_modified_set: set = field(default_factory=set)
     consecutive_test_failures: int = 0
     duration_minutes: float = 0.0
-    paused: bool = False             # True when agent is SIGSTOP'd
+    # Who holds the current SIGSTOP: None, PAUSE_EDITOR, PAUSE_RULE or
+    # PAUSE_APPROVAL. Only the owner's release path may resume the agent.
+    pause_owner: str | None = None
+    approval_request_id: str | None = None
+    session_id: str = ""
     mcp_scan_events: list[TraceEvent] = field(default_factory=list)
+
+    @property
+    def paused(self) -> bool:
+        """True when watch has SIGSTOP'd the agent and not yet released it."""
+        return self.pause_owner is not None
 
     def nanny_metrics(self) -> dict:
         """Return current metric snapshot for nanny rule evaluation."""
@@ -671,27 +685,48 @@ def _dispatch_alert(
     # the process sees every alert; file/webhook are additive channels
     _alert_terminal(message)
     if action == "require_approval":
-        # Pause the agent and create an approval request
+        rule_name = notify or "watch-rule"
+        if dry_run:
+            _alert_terminal(
+                f"[dry-run] would pause agent and require approval for rule '{rule_name}'"
+            )
+            return
+        if state.pause_owner == PAUSE_APPROVAL:
+            _alert_terminal(
+                f"[HITL] Approval {state.approval_request_id} is already pending; "
+                "not creating another request"
+            )
+            return
+        # Pause before creating the request so an approval cannot land
+        # before the SIGSTOP and leave the agent stopped.
         if state.agent_pid and not state.paused:
             _pause_process(state.agent_pid)
-            state.paused = True
-        if store and state.session_id:
+        req = None
+        sid = session_id or state.session_id
+        if store and sid:
             try:
-                from .approval import create_approval_request, poll_for_decision
+                from .approval import create_approval_request
                 req = create_approval_request(
                     store,
-                    session_id=state.session_id,
-                    rule_name=notify or "watch-rule",
+                    session_id=sid,
+                    rule_name=rule_name,
                     tool_name="",
                     agent_pid=state.agent_pid or 0,
                 )
                 _alert_terminal(
-                    f"[HITL] Approval required for rule '{notify or 'watch-rule'}'. "
+                    f"[HITL] Approval required for rule '{rule_name}'. "
                     f"Request ID: {req.request_id}\n"
                     f"  Run: agent-strace approval approve {req.request_id}"
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                _alert_terminal(f"[HITL] Could not create approval request: {exc}")
+        if state.agent_pid:
+            if req is not None:
+                state.pause_owner = PAUSE_APPROVAL
+                state.approval_request_id = req.request_id
+            elif state.pause_owner is None:
+                # No request to decide on, so leave it releasable by a human.
+                state.pause_owner = PAUSE_RULE
         return
 
     if action in ("file", "kill", "pause"):
@@ -725,7 +760,7 @@ def _dispatch_alert(
     if action == "pause" and state.agent_pid and not state.paused:
         _alert_terminal(f"Pausing agent process {state.agent_pid} (SIGSTOP)")
         _pause_process(state.agent_pid)
-        state.paused = True
+        state.pause_owner = PAUSE_RULE
     elif action == "kill" and state.agent_pid:
         _alert_terminal(f"Killing agent process {state.agent_pid}")
         # Write watchdog post-mortem JSON before killing
@@ -819,7 +854,12 @@ def _dispatch_nanny_rule(
 ) -> None:
     """Fire a nanny rule: alert, pause, or kill."""
     msg = f"NannyRule '{rule.name}': {rule.condition} → {rule.action}"
-    _dispatch_alert(msg, config, state, action=rule.action, notify=rule.notify, dry_run=dry_run)
+    # The approval path needs the store; kill post-mortems are written below.
+    approval_store = store if rule.action == "require_approval" else None
+    _dispatch_alert(
+        msg, config, state, action=rule.action, notify=rule.notify,
+        dry_run=dry_run, store=approval_store, session_id=session_id,
+    )
 
     # Auto-generate postmortem on kill
     if rule.action == "kill" and not dry_run:
@@ -1094,25 +1134,73 @@ def _live_checks_read_data(
 _IDLE_SENTINEL = object()  # yielded when poll_interval elapses with no new event
 
 
-def _check_pause_file(store: "TraceStore", state: "WatchState", out: "TextIO") -> None:
-    """Honour a .pause-request file written by the VS Code extension.
+def _editor_wants_pause(store: "TraceStore", session_id: str) -> bool | None:
+    """Read the .pause-request marker written by the VS Code extension.
 
-    Presence of the file → SIGSTOP the agent (if a PID is known).
-    Absence after a pause → SIGCONT to resume.
+    Returns True when the marker asks to pause *session_id*, False when it is
+    absent or names another session, and None when it cannot be read.
+    An empty marker (for example from ``touch``) applies to any session.
     """
-    pause_file = store.base_dir / ".pause-request"
-    wants_pause = pause_file.exists()
+    try:
+        content = (store.base_dir / ".pause-request").read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+    return not content or not session_id or content == session_id
 
-    if wants_pause and not state.paused and state.agent_pid:
-        out.write(f"[watch] Pause requested by editor — SIGSTOP pid {state.agent_pid}\n")
-        out.flush()
-        _pause_process(state.agent_pid)
-        state.paused = True
-    elif not wants_pause and state.paused and state.agent_pid:
-        out.write(f"[watch] Resume requested by editor — SIGCONT pid {state.agent_pid}\n")
+
+def _check_approval_decision(store: "TraceStore", state: "WatchState", out: "TextIO") -> None:
+    """Release an approval-owned pause once the request has been decided.
+
+    ``approval approve`` sends SIGCONT and ``approval deny`` sends SIGTERM
+    from another process, so watch only clears its own pause state here.
+    """
+    if state.pause_owner != PAUSE_APPROVAL or not state.approval_request_id:
+        return
+    try:
+        from .approval import load_request
+        req = load_request(store, state.approval_request_id)
+    except Exception:
+        return
+    # A missing or half-written file reads as None; keep waiting.
+    if req is None or req.state == "pending":
+        return
+    out.write(f"[watch] Approval {req.request_id} {req.state}; pause released\n")
+    out.flush()
+    state.pause_owner = None
+    state.approval_request_id = None
+
+
+def _check_pause_file(store: "TraceStore", state: "WatchState", out: "TextIO") -> None:
+    """Apply approval decisions and the editor's .pause-request marker.
+
+    Marker present → SIGSTOP the agent and record the editor as pause owner.
+    Marker removed → SIGCONT, but only if the editor owns the pause. A rule
+    pause is handed to the editor when the marker appears, so pausing and
+    then resuming from the editor releases it. An approval pause is never
+    released by the marker; only the approval decision ends it.
+    """
+    _check_approval_decision(store, state, out)
+    wants_pause = _editor_wants_pause(store, state.session_id)
+    if wants_pause is None or not state.agent_pid:
+        return
+
+    if wants_pause:
+        if state.pause_owner is None:
+            out.write(f"[watch] Pause requested by editor - SIGSTOP pid {state.agent_pid}\n")
+            out.flush()
+            _pause_process(state.agent_pid)
+            state.pause_owner = PAUSE_EDITOR
+        elif state.pause_owner == PAUSE_RULE:
+            out.write("[watch] Editor took over the rule pause; resume from the editor to continue\n")
+            out.flush()
+            state.pause_owner = PAUSE_EDITOR
+    elif state.pause_owner == PAUSE_EDITOR:
+        out.write(f"[watch] Resume requested by editor - SIGCONT pid {state.agent_pid}\n")
         out.flush()
         _resume_process(state.agent_pid)
-        state.paused = False
+        state.pause_owner = None
 
 
 def _tail_events(events_file: Path, poll_interval: float = 0.5):
@@ -1186,7 +1274,7 @@ def watch_session(
             f"{temporal_context.parent_span_id}\n"
         )
 
-    state = WatchState(start_time=time.time())
+    state = WatchState(start_time=time.time(), session_id=session_id)
 
     mode = " [dry-run]" if dry_run else ""
     out.write(f"[watch] Monitoring session {session_id[:12]}...{mode}\n")
@@ -1236,18 +1324,23 @@ def watch_session(
 
             # Idle timeout: checked on every poll cycle (including when no
             # event arrived), so it fires reliably after max_idle_seconds.
-            if now - last_event_time > max_idle_seconds:
+            # A paused agent writes no events, so the clock stops while
+            # watch holds a pause and restarts when it is released.
+            if state.paused:
+                last_event_time = now
+            elif now - last_event_time > max_idle_seconds:
                 out.write(f"[watch] No events for {max_idle_seconds:.0f}s - stopping\n")
                 break
 
             if item is _IDLE_SENTINEL:
-                # Check for pause-request signal file written by the VS Code extension
+                # Approval decisions and the VS Code .pause-request marker
                 _check_pause_file(store, state, out)
                 continue
 
             event: TraceEvent = item  # type: ignore[assignment]
             event_count += 1
             last_event_time = time.time()
+            _check_approval_decision(store, state, out)
 
             if not isinstance(event.data, Mapping) and _live_checks_read_data(
                 event, state, checkpoint_mode=checkpoint_watcher is not None,
