@@ -23,6 +23,13 @@ from typing import Any, Iterable, Sequence, TextIO
 from .approval import list_requests
 from .correlation import correlate_tool_events
 from .event_data import NonObjectEventDataError, require_object_event_data
+from .external_evidence import (
+    NOT_GRADED,
+    ExternalEvidence,
+    ExternalEvidenceError,
+    external_from_args,
+    signal_lines,
+)
 from .health import CaptureMatrix, assess_session, detect_provider, load_capture_matrix
 from .models import EventType, SessionMeta, TraceEvent
 from .pr_comment import (
@@ -327,6 +334,7 @@ class ReviewReport:
     findings: tuple[Finding, ...]
     threshold: Threshold
     artifacts: Artifacts | None = None
+    external: ExternalEvidence | None = None
 
     @property
     def failing(self) -> tuple[Finding, ...]:
@@ -1102,7 +1110,32 @@ def assess_stewardship(sessions: Sequence[_Session], store: TraceStore) -> Findi
     return Finding("stewardship", "partial", "medium", source, detail, facts)
 
 
+def _with_external(finding: Finding, external: ExternalEvidence | None) -> Finding:
+    """Attach external signals as facts. The status and confidence stay as they are."""
+    if external is None:
+        return finding
+    facts = dict(finding.facts)
+    facts["external"] = external.to_dict()
+    return Finding(
+        finding.name, finding.status, finding.confidence, finding.source, finding.detail, facts
+    )
+
+
+def _external_of(finding: Finding) -> list[dict[str, Any]]:
+    external = finding.facts.get("external")
+    return list(external.get("signals") or []) if isinstance(external, dict) else []
+
+
 def assess_evidence(
+    sessions: Sequence[_Session],
+    store: TraceStore,
+    matrix: CaptureMatrix,
+    external: ExternalEvidence | None = None,
+) -> Finding:
+    return _with_external(_assess_evidence(sessions, store, matrix), external)
+
+
+def _assess_evidence(
     sessions: Sequence[_Session],
     store: TraceStore,
     matrix: CaptureMatrix,
@@ -1211,6 +1244,7 @@ def build_report(
     branch: str = "",
     matrix: CaptureMatrix | None = None,
     artifacts: Artifacts | None = None,
+    external: ExternalEvidence | None = None,
 ) -> ReviewReport:
     matrix = matrix or load_capture_matrix()
     sessions = _load_sessions(store, linked, matrix)
@@ -1219,9 +1253,9 @@ def build_report(
         assess_scope(sessions),
         assess_validation(sessions),
         assess_stewardship(sessions, store),
-        assess_evidence(sessions, store, matrix),
+        assess_evidence(sessions, store, matrix, external),
     )
-    return ReviewReport(branch, tuple(linked), findings, threshold, artifacts)
+    return ReviewReport(branch, tuple(linked), findings, threshold, artifacts, external)
 
 
 # ---------------------------------------------------------------------------
@@ -1253,6 +1287,11 @@ def format_text(report: ReviewReport, out: TextIO) -> None:
             more = f" (+{len(paths) - len(shown)} more)" if len(paths) > len(shown) else ""
             w(f"  Not named or read: {', '.join(shown)}{more}\n")
         w(f"  Source: {finding.source}\n")
+    if report.external is not None:
+        w(f"\nExternal evidence ({report.external.inputs()}):\n")
+        for line in signal_lines(report.external):
+            w(f"  - {line}\n")
+        w(f"  {NOT_GRADED}\n")
     if report.artifacts is not None:
         w("\n")
         for label, value in _artifact_lines(report.artifacts, markdown=False):
@@ -1297,6 +1336,10 @@ def _artifact_lines(artifacts: Artifacts, *, markdown: bool) -> list[tuple[str, 
     return lines
 
 
+def _markdown_line(text: str) -> str:
+    return text.replace("\n", " ").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def render_markdown(report: ReviewReport, *, heading: str = "### Reviewability") -> str:
     """Render a compact Markdown section for a PR comment or step summary."""
     lines = [heading, ""]
@@ -1317,6 +1360,13 @@ def render_markdown(report: ReviewReport, *, heading: str = "### Reviewability")
         lines.append(
             f"| {finding.label} | {status} | {finding.confidence} | {detail} | "
             f"{_table_text(finding.source)} |"
+        )
+    if report.external is not None:
+        code = lambda text: f"`{_safe_code_text(text)}`"  # noqa: E731
+        inputs = report.external.inputs(code)
+        lines.extend(["", f"**External evidence** ({inputs}). {NOT_GRADED}", ""])
+        lines.extend(
+            f"- {_markdown_line(line)}" for line in signal_lines(report.external, code=code)
         )
     if report.artifacts is not None:
         lines.extend(["", "**Artifacts**", ""])
@@ -1414,7 +1464,8 @@ def cmd_review(args: argparse.Namespace) -> int:
     try:
         threshold = threshold_from_args(args)
         artifacts = artifacts_from_args(args)
-    except ReviewConfigError as exc:
+        external = external_from_args(args)
+    except (ReviewConfigError, ExternalEvidenceError) as exc:
         sys.stderr.write(f"review: {exc}\n")
         return 2
 
@@ -1422,7 +1473,9 @@ def cmd_review(args: argparse.Namespace) -> int:
     branch = getattr(args, "branch", "") or current_branch()
     try:
         linked = link_sessions(store, getattr(args, "session_id", None) or (), branch=branch)
-        report = build_report(store, linked, threshold, branch=branch, artifacts=artifacts)
+        report = build_report(
+            store, linked, threshold, branch=branch, artifacts=artifacts, external=external
+        )
     except NonObjectEventDataError:
         raise
     except (PRCommentError, OSError, ValueError) as exc:

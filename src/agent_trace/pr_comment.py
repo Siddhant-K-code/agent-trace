@@ -990,12 +990,14 @@ def cmd_pr_comment(args: argparse.Namespace) -> int:
     review_exit = 0
 
     if review:
+        from .external_evidence import ExternalEvidenceError, external_from_args
         from .reviewability import ReviewConfigError, artifacts_from_args, threshold_from_args
 
         try:
             threshold = threshold_from_args(args)
             artifacts = artifacts_from_args(args)
-        except ReviewConfigError as exc:
+            external = external_from_args(args)
+        except (ReviewConfigError, ExternalEvidenceError) as exc:
             sys.stderr.write(f"pr-comment: {exc}\n")
             return 2
 
@@ -1021,6 +1023,7 @@ def cmd_pr_comment(args: argparse.Namespace) -> int:
                 threshold,
                 branch=branch,
                 artifacts=artifacts,
+                external=external,
             )
             review_section = render_markdown(report)
             review_exit = report.exit_code

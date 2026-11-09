@@ -130,6 +130,16 @@ Coverage is **partial**, and the entry is **unverified**: no live cloud agent jo
   - Workflow artifact or pull request attachment upload
 - Known gaps: the Copilot CLI gaps for `agentStop` text, model and token usage, tool call IDs, and file and command activity also apply. Recorded sessions name the `github-copilot` agent, so `health` and evidence reports apply the GitHub Copilot CLI entry rather than this one.
 
+## Evidence from other tools
+
+The matrix covers what agent-strace hooks capture. Evidence other tools
+recorded is read separately and reported as
+[external evidence](evidence-health.md#external-evidence), never as capture
+coverage: Entire checkpoints and their push state, Copilot cloud agent
+`Agent-Logs-Url` trailers, and Claude Code OpenTelemetry `safety_event`
+records. Pass `--commits RANGE` or `--otel-logs FILE` to `health` or
+`review`.
+
 ## Machine-readable coverage values
 
 The values below are copied from `src/agent_trace/capture_matrix.json`. The fixture test

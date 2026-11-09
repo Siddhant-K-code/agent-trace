@@ -12,7 +12,7 @@ import hashlib
 import json
 import sys
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib import resources
 from typing import Any, Sequence, TextIO
 
@@ -23,6 +23,13 @@ from .evidence_health import (
     EvidenceHealthResult,
     EvidenceHealthStatus,
     assess_evidence_health,
+)
+from .external_evidence import (
+    NOT_GRADED,
+    ExternalEvidence,
+    ExternalEvidenceError,
+    external_from_args,
+    signal_lines,
 )
 from .hooks import (
     IMPLICIT_SESSION_SOURCE,
@@ -335,6 +342,7 @@ class HealthReport:
     note: str
     event_types: dict[str, int]
     redaction: RedactionState
+    external: ExternalEvidence | None = None
 
     @property
     def exit_code(self) -> int:
@@ -358,6 +366,8 @@ class HealthReport:
             "blind_spots": [spot.to_dict() for spot in self.blind_spots],
             "note": self.note or None,
         }
+        if self.external is not None:
+            payload["external"] = self.external.to_dict()
         return payload
 
 
@@ -457,6 +467,16 @@ def format_health_text(report: HealthReport, out: TextIO) -> None:
         w("Capture matrix: no entry applied\n")
         w(f"Note: {report.note}\n")
     w(f"Matrix version: {report.matrix.version}\n")
+    if report.external is not None:
+        format_external_text(report.external, out)
+
+
+def format_external_text(external: ExternalEvidence, out: TextIO) -> None:
+    w = out.write
+    w(f"\nExternal evidence ({external.inputs()}):\n")
+    for line in signal_lines(external):
+        w(f"  - {line}\n")
+    w(f"  {NOT_GRADED}\n")
 
 
 def _resolve_session(store: TraceStore, requested: str | None) -> str | None:
@@ -496,6 +516,13 @@ def cmd_health(args: argparse.Namespace) -> int:
         return 1
 
     report = assess_session(store, session_id, meta, events, matrix)
+    try:
+        external = external_from_args(args)
+    except ExternalEvidenceError as exc:
+        sys.stderr.write(f"health: {exc}\n")
+        return 2
+    if external is not None:
+        report = replace(report, external=external)
     if getattr(args, "format", "text") == "json":
         sys.stdout.write(json.dumps(report.to_dict(), indent=2) + "\n")
     else:

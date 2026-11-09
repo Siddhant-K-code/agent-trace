@@ -188,6 +188,7 @@ Tool call frequency and timing. When a Codex subagent made tool calls in the ses
 ### `health`
 ```
 agent-strace health [session-id] [--format text|json]
+                    [--commits RANGE] [--otel-logs FILE]
 ```
 Assess the [evidence health](evidence-health.md) of a session (default: the
 latest). Text output starts with the status, the session, the provider and the
@@ -214,6 +215,26 @@ Redacted:  1 of 6 events
 A missing session, an empty store or an unreadable session also exits 1.
 `partial` passes because some providers can never be `healthy`: every entry
 declares known gaps, so their sessions are at least `partial`.
+
+| Flag | Description |
+|---|---|
+| `--format text\|json` | Output format (default: `text`) |
+| `--commits RANGE` | Git revision range, such as `origin/main..HEAD`, to read `Entire-Checkpoint` and `Agent-Logs-Url` trailers from |
+| `--otel-logs FILE` | Claude Code OpenTelemetry logs export (OTLP JSON or JSON Lines) to read `safety_event` from |
+
+`--commits` and `--otel-logs` add [external evidence](evidence-health.md#external-evidence)
+signals after the health result. Each signal has a source, a status
+(`present`, `missing`, `unpushed` or `inconclusive`) and a confidence. They are
+reported, not graded: they never change the status, the reasons or the exit
+code. A range git cannot read is reported as an inconclusive signal. A range
+that is not a revision expression exits 2.
+
+```
+External evidence (commits origin/main..HEAD):
+  - Entire checkpoint 01JD4S7Y2V9Q8M3K5N6P7R8T0W: unpushed (high). Trailer present in 1 commit, not pushed: the checkpoint ref is local and waiting in Entire's push queue.
+  - Copilot agent logs: missing (high). No Agent-Logs-Url trailer; 3 commits read.
+  Reported, not graded: never changes a status or the exit code.
+```
 
 Each reason has a `kind`:
 
@@ -288,6 +309,7 @@ the reasons or the exit code.
 | `event_types` | Count of each observed event type, such as `{"session_start": 1, "tool_call": 2}`. Empty when the session has no events |
 | `redaction` | `mode` (`on`, `off`, `mixed` or `not_recorded`), `session_start_modes` (`on`, `off` or `not_recorded` for each session start in order: the implicit start first when the first hook was not SessionStart, then each `session_start` event), `redacted_event_count` and `metadata_redacted` |
 | `capture_matrix` | `schema_version`, `version` (SHA-256 of the packaged matrix), the `entry` applied or `null`, its `blind_spots` (`source`, `text`, and `capability` for coverage lines) and a `note` when no entry was applied |
+| `external` | Only with `--commits` or `--otel-logs`: `commits`, `otel_logs` (file name), `graded` (always `false`) and `signals`, each with `source` (`entire_checkpoint`, `copilot_agent_logs`, `claude_code_otel` or `commit_trailers`), `subject`, `status`, `confidence`, `detail` and `facts` |
 
 `capture_matrix_version` is empty when no entry was applied, while
 `capture_matrix.version` always names the matrix that was consulted. To list
@@ -1206,6 +1228,7 @@ agent-strace pr-comment [SESSION_ID] [--dry-run] [--platform github|gitlab]
                            [--evidence-packet FILE] [--cognitive-debt FILE]
                            [--cognitive-debt-mode report|check]
                            [--artifact-url URL]
+                           [--commits RANGE] [--otel-logs FILE]
 ```
 Post a structured session summary to the current branch's open pull request or
 merge request. The comment includes duration, cost, model, status, tool calls,
@@ -1230,6 +1253,8 @@ An embedded marker makes repeated runs update the existing comment.
 | `--cognitive-debt FILE` | With `--review`: add the cognitive debt result from a schema v1 JSON report |
 | `--cognitive-debt-mode report\|check` | With `--review`: `check` fails unless the cognitive debt result is a pass |
 | `--artifact-url URL` | With `--review`: https URL of the uploaded artifact |
+| `--commits RANGE` | With `--review`: add external evidence from commit trailers. See [`review`](#review). Ignored without `--review`. |
+| `--otel-logs FILE` | With `--review`: add external evidence from a Claude Code OpenTelemetry export. Ignored without `--review`. |
 
 With `--review`, the comment is still posted or updated when the check fails.
 The exit code then follows the threshold.
@@ -1248,6 +1273,7 @@ agent-strace review [SESSION_ID ...] [--format text|json|markdown]
                     [--evidence-packet FILE] [--cognitive-debt FILE]
                     [--cognitive-debt-mode report|check]
                     [--artifact-url URL]
+                    [--commits RANGE] [--otel-logs FILE]
 ```
 Report what the linked sessions can show a PR reviewer: rationale, scope,
 validation, stewardship, and evidence health. Each finding has a status
@@ -1268,9 +1294,18 @@ never printed. See [review.md](review.md).
 | `--cognitive-debt FILE` | JSON from `cognitive-debt --format json`. Reads `schema_version` 1 and `status`. `unknown` is unavailable, never a pass. |
 | `--cognitive-debt-mode report\|check` | `report` adds the result. `check` also fails unless the result is a pass (default: `report`). |
 | `--artifact-url URL` | https URL of the uploaded artifact. Without it, files are shown as not uploaded. |
+| `--commits RANGE` | Git revision range to read `Entire-Checkpoint` and `Agent-Logs-Url` trailers from |
+| `--otel-logs FILE` | Claude Code OpenTelemetry logs export to read `safety_event` from |
+
+`--commits` and `--otel-logs` add [external evidence](evidence-health.md#external-evidence)
+signals to the evidence health finding: in text and markdown after the
+findings, and in JSON as `facts.external` on the `evidence` finding, in the
+same shape as `health --format json`. They never change a finding's status,
+the threshold or the exit code.
 
 Flags override the config file. Exit codes: `0` pass, `1` threshold or
-cognitive debt check failed, `2` bad config or unknown session.
+cognitive debt check failed, `2` bad config, unknown session, or a
+`--commits` value that is not a revision range.
 
 ### `sample`
 ```

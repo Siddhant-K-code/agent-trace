@@ -106,6 +106,7 @@ from .mcp_scan import cmd_mcp_scan
 from .retention import cmd_retention
 from .backfill import cmd_backfill_meta
 from .health import cmd_health
+from .external_evidence import add_external_arguments
 from .sample import cmd_sample
 from .server import cmd_server
 from .validation import cmd_validate
@@ -1882,6 +1883,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_health.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
     p_health.add_argument("--format", choices=["text", "json"], default="text")
+    add_external_arguments(p_health)
 
     # share
     p_share = sub.add_parser(
@@ -1969,6 +1971,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_review_threshold_arguments(p_pr_comment)
     add_review_artifact_arguments(p_pr_comment)
+    add_external_arguments(p_pr_comment)
 
     # review
     p_review = sub.add_parser(
@@ -1989,6 +1992,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_review_threshold_arguments(p_review)
     add_review_artifact_arguments(p_review)
+    add_external_arguments(p_review)
 
     # postmortem
     p_postmortem = sub.add_parser("postmortem", help="generate a structured postmortem for a failed session")

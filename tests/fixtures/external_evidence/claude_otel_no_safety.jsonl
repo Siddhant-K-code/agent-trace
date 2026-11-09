@@ -1,0 +1,4 @@
+{"event.name": "claude_code.user_prompt", "session.id": "cc-a", "app.version": "2.1.310", "prompt": "SECRET-PROMPT zebra-quartz-77 do not print"}
+{"event.name": "claude_code.tool_decision", "session.id": "cc-a", "app.version": "2.1.310", "tool_name": "Bash", "decision": "reject", "source": "config", "tool_use_id": "toolu_09"}
+{not json
+{"attributes": {"event.name": "tool_result", "session.id": "cc-b", "app.version": "2.1.310", "tool_name": "Read", "success": "true"}}
