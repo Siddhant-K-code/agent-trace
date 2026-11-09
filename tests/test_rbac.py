@@ -17,6 +17,11 @@ from agent_trace.rbac import (
     cmd_rbac,
 )
 
+try:
+    from _concurrency import run_concurrently
+except ImportError:
+    from tests._concurrency import run_concurrently
+
 
 def _run_cmd(argv: list[str], tmp_dir: str) -> tuple[int, str]:
     parser = argparse.ArgumentParser()
@@ -175,6 +180,24 @@ class TestRBACStore(unittest.TestCase):
         store.assign("alice@example.com", "user", "admin")
         store.assign("alice@example.com", "user", "workspace:viewer", workspace_id="prod")
         self.assertEqual(store.effective_role("alice@example.com", "prod"), "workspace:viewer")
+
+
+_ASSIGN_SCRIPT = """
+from agent_trace.rbac import RBACStore
+store = RBACStore(sys.argv[2])
+wait_for_start()
+for principal in sys.argv[3:]:
+    store.assign(principal, "user", "viewer")
+"""
+
+
+class TestRBACStoreConcurrency(unittest.TestCase):
+    def test_concurrent_assignments_are_not_lost(self):
+        tmp = tempfile.mkdtemp()
+        groups = [[f"user{i}-{n}@example.com" for n in range(10)] for i in range(5)]
+        run_concurrently(_ASSIGN_SCRIPT, [[tmp, *group] for group in groups])
+        principals = {a.principal for a in RBACStore(tmp).list_assignments()}
+        self.assertEqual(principals, {p for group in groups for p in group})
 
 
 class TestCan(unittest.TestCase):

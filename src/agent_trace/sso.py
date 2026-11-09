@@ -42,11 +42,14 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any
 
+from .fileutil import file_lock, write_atomic
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 _AUTH_FILE = Path.home() / ".agent-strace" / "auth.json"
+_AUTH_LOCK_TIMEOUT = 10.0
 _SESSION_COOKIE = "at_session"
 _SESSION_TTL = 3600  # 1 hour
 
@@ -273,18 +276,30 @@ def login_page_html(auth_url: str) -> str:
 # CLI token storage
 # ---------------------------------------------------------------------------
 
+def _read_auth_file() -> dict:
+    try:
+        data = json.loads(_AUTH_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_auth_file(data: dict) -> None:
+    """Atomically replace the auth file with mode 0600. Hold the lock first."""
+    write_atomic(_AUTH_FILE, json.dumps(data, indent=2), mode=0o600, allow_symlinks=True)
+
+
+def _auth_file_lock():
+    _AUTH_FILE.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return file_lock(_AUTH_FILE, timeout=_AUTH_LOCK_TIMEOUT)
+
+
 def save_auth_token(server: str, token: str, expires_at: float) -> None:
     """Persist a CLI auth token to ~/.agent-strace/auth.json."""
-    _AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
-    data: dict = {}
-    if _AUTH_FILE.exists():
-        try:
-            data = json.loads(_AUTH_FILE.read_text())
-        except Exception:
-            data = {}
-    data[server] = {"token": token, "expires_at": expires_at}
-    _AUTH_FILE.write_text(json.dumps(data, indent=2))
-    _AUTH_FILE.chmod(0o600)
+    with _auth_file_lock():
+        data = _read_auth_file()
+        data[server] = {"token": token, "expires_at": expires_at}
+        _write_auth_file(data)
 
 
 def load_auth_token(server: str) -> str | None:
@@ -307,15 +322,13 @@ def clear_auth_token(server: str) -> bool:
     """Remove the stored token for *server*. Returns True if something was removed."""
     if not _AUTH_FILE.exists():
         return False
-    try:
-        data = json.loads(_AUTH_FILE.read_text())
-        if server in data:
-            del data[server]
-            _AUTH_FILE.write_text(json.dumps(data, indent=2))
-            return True
-    except Exception:
-        pass
-    return False
+    with _auth_file_lock():
+        data = _read_auth_file()
+        if server not in data:
+            return False
+        del data[server]
+        _write_auth_file(data)
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -359,7 +372,11 @@ def cmd_auth(args: argparse.Namespace) -> int:
             return 1
 
         expires_at = time.time() + _SESSION_TTL
-        save_auth_token(server, token, expires_at)
+        try:
+            save_auth_token(server, token, expires_at)
+        except (OSError, ValueError) as exc:
+            sys.stderr.write(f"error: could not store token in {_AUTH_FILE}: {exc}\n")
+            return 1
         sys.stdout.write(f"Logged in to {server}. Token stored in {_AUTH_FILE}\n")
         return 0
 
@@ -368,7 +385,11 @@ def cmd_auth(args: argparse.Namespace) -> int:
         if not server:
             sys.stderr.write("error: --server required\n")
             return 1
-        removed = clear_auth_token(server)
+        try:
+            removed = clear_auth_token(server)
+        except (OSError, ValueError) as exc:
+            sys.stderr.write(f"error: could not update {_AUTH_FILE}: {exc}\n")
+            return 1
         if removed:
             sys.stdout.write(f"Logged out from {server}\n")
         else:

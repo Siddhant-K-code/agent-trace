@@ -24,7 +24,8 @@ AGENT_STRACE_TELEMETRY=1 agent-strace list
 ```
 
 An unset preference means telemetry is enabled. A random installation ID is
-created on the first event and stored in `~/.agent-strace/telemetry.json`.
+created on the first event and stored in `~/.agent-strace/telemetry.json`
+(mode `0600`; updates are locked and atomic, see [Security](security.md#local-config-and-credential-files)).
 `agent-strace telemetry disable` persists the opt-out and deletes the
 identifier. `DO_NOT_TRACK=1` and `AGENT_STRACE_TELEMETRY=0` disable telemetry
 without changing the stored preference. CI is disabled by default;

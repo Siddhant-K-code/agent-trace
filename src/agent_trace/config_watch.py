@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
 
+from .fileutil import file_lock, write_atomic
 from .store import TraceStore
 
 
@@ -184,8 +185,7 @@ def _load_snapshots(workspace_root: Path) -> list[ConfigSnapshot]:
 
 def _save_snapshots(workspace_root: Path, snapshots: list[ConfigSnapshot]) -> None:
     p = _snapshot_path(workspace_root)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps([s.to_dict() for s in snapshots], indent=2))
+    write_atomic(p, json.dumps([s.to_dict() for s in snapshots], indent=2), allow_symlinks=True)
 
 
 # ---------------------------------------------------------------------------
@@ -238,9 +238,10 @@ def take_snapshot(
         label=label,
         files=files,
     )
-    existing = _load_snapshots(workspace_root)
-    existing.append(snapshot)
-    _save_snapshots(workspace_root, existing)
+    with file_lock(_snapshot_path(workspace_root)):
+        existing = _load_snapshots(workspace_root)
+        existing.append(snapshot)
+        _save_snapshots(workspace_root, existing)
     return snapshot
 
 

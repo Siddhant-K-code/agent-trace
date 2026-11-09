@@ -17,6 +17,11 @@ from agent_trace.cli import (
 )
 from agent_trace.hooks import handle_session_end, handle_session_start
 
+try:
+    from _concurrency import run_concurrently
+except ImportError:
+    from tests._concurrency import run_concurrently
+
 
 class _Response:
     status = 200
@@ -140,6 +145,74 @@ class TestTelemetryPreference(TelemetryTestCase):
         second_output = _TTY()
         self.assertFalse(telemetry.maybe_show_telemetry_notice(second_output))
         self.assertEqual(second_output.getvalue(), "")
+
+
+_ANONYMOUS_ID_SCRIPT = """
+import os
+from agent_trace import telemetry
+os.environ["AGENT_STRACE_TELEMETRY_CONFIG"] = sys.argv[2]
+wait_for_start()
+print(telemetry._anonymous_id())
+"""
+
+
+class TestTelemetryConfigLocking(TelemetryTestCase):
+    def test_concurrent_processes_agree_on_one_anonymous_id(self):
+        env = {"AGENT_STRACE_TELEMETRY": "1"}
+        for name in self._ENV_NAMES:
+            env.setdefault(name, "")
+        with patch.dict(os.environ, env):
+            outputs = run_concurrently(
+                _ANONYMOUS_ID_SCRIPT, [[str(self.config_path)] for _ in range(8)]
+            )
+        ids = {out.strip() for out in outputs}
+        stored = json.loads(self.config_path.read_text())["anonymous_id"]
+        self.assertEqual(ids, {stored})
+
+    def test_notice_does_not_overwrite_a_concurrent_opt_out(self):
+        class _RacingTTY(_TTY):
+            def write(self, text):
+                # Another process opts out while the notice is printed.
+                telemetry.set_telemetry_enabled(False)
+                return super().write(text)
+
+        with patch.object(telemetry, "telemetry_configured", return_value=True):
+            self.assertTrue(telemetry.maybe_show_telemetry_notice(_RacingTTY()))
+        data = json.loads(self.config_path.read_text())
+        self.assertIs(data["enabled"], False)
+        self.assertIs(data["notice_shown"], True)
+
+    def test_writes_do_not_use_a_fixed_temp_name(self):
+        # A leftover or concurrent fixed temp path must not block writes.
+        Path(str(self.config_path) + ".tmp").mkdir()
+        self.assertTrue(telemetry.set_telemetry_enabled(True))
+        self.assertEqual(telemetry.consent_state(), "enabled")
+        leftovers = [
+            p.name for p in self.config_path.parent.iterdir()
+            if p.name.startswith(".telemetry.json.")
+        ]
+        self.assertEqual(leftovers, [])
+
+    @unittest.skipIf(os.name == "nt", "POSIX file modes")
+    def test_config_file_is_private(self):
+        self.assertTrue(telemetry.set_telemetry_enabled(True))
+        self.assertEqual(self.config_path.stat().st_mode & 0o777, 0o600)
+
+    def test_lock_failure_is_silent(self):
+        os.environ["AGENT_STRACE_TELEMETRY"] = "1"
+        with patch.object(telemetry, "file_lock", side_effect=TimeoutError("busy")):
+            self.assertFalse(telemetry.set_telemetry_enabled(True))
+            self.assertEqual(telemetry._anonymous_id(), "")
+            with patch.object(telemetry, "telemetry_configured", return_value=True):
+                self.assertFalse(telemetry.capture(telemetry.TELEMETRY_ENABLED, {}))
+        self.assertFalse(self.config_path.exists())
+
+    def test_on_disk_format_is_unchanged(self):
+        self.assertTrue(telemetry.set_telemetry_enabled(True))
+        text = self.config_path.read_text()
+        data = json.loads(text)
+        self.assertEqual(text, json.dumps(data, indent=2, sort_keys=True) + "\n")
+        self.assertEqual(set(data), {"anonymous_id", "enabled", "updated_at"})
 
 
 class TestTelemetryPayload(TelemetryTestCase):

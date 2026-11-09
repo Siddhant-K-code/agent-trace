@@ -237,6 +237,33 @@ stored locally in `.agent-traces/rbac.json` by default.
 
 ---
 
+## Local config and credential files
+
+agent-strace keeps a few small JSON files that several processes can update
+at once, for example a hook and a CLI command:
+
+| File | Contents |
+|---|---|
+| `~/.agent-strace/auth.json` | Per-server CLI tokens from `agent-strace auth login` |
+| `~/.agent-strace/telemetry.json` | Telemetry preference and anonymous ID (path can be set with `AGENT_STRACE_TELEMETRY_CONFIG`) |
+| `.agent-traces/rbac.json` | RBAC assignments |
+| `.agent-traces/identities.json`, `.agent-traces/team_budgets.json` | Entries written by `agent-strace apply` |
+| `.agent-traces/.config-snapshots.json` | `config-watch` snapshots |
+
+Every read-modify-write of these files holds an exclusive cross-process lock
+on a sibling `<file>.lock` file, then writes the new contents to a uniquely
+named temporary file in the same directory and renames it over the original.
+Readers never see a partial file, and concurrent writers do not lose each
+other's changes. The lock files are left in place on purpose.
+
+`auth.json` and `telemetry.json` are always written with mode `0600`, and a
+missing `~/.agent-strace` directory is created with mode `0700`. If `auth.json`
+cannot be locked within 10 seconds, `auth login` and `auth logout` exit with
+an error instead of writing. Telemetry waits at most 2 seconds and then skips
+the update silently, so it never blocks or fails a command or hook.
+
+---
+
 ## Workspace isolation
 
 Workspaces provide separate session stores. Use them to isolate production traces from development, or to separate sessions by team.
