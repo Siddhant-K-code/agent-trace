@@ -277,6 +277,33 @@ class TestJSONLImport(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             import_jsonl("/nonexistent/path.jsonl", store=self.store)
 
+    def test_import_records_cwd_in_session_start(self):
+        path = self._write_jsonl([
+            {"type": "user", "sessionId": "cwd1", "timestamp": "2025-01-01T00:00:00Z",
+             "message": {"role": "user", "content": "hi"}, "uuid": "u1"},
+            {"type": "user", "sessionId": "cwd1", "cwd": "/work/repo", "timestamp": "2025-01-01T00:00:01Z",
+             "message": {"role": "user", "content": "again"}, "uuid": "u2"},
+        ])
+
+        session_id = import_jsonl(path, store=self.store)
+        events = self.store.load_events(session_id)
+
+        self.assertEqual(events[0].event_type, EventType.SESSION_START)
+        self.assertEqual(events[0].data["cwd"], "/work/repo")
+        self.assertEqual(events[0].data["provider"], "claude")
+        self.assertEqual(sum(e.event_type == EventType.SESSION_START for e in events), 1)
+
+    def test_import_without_cwd_has_no_session_start(self):
+        path = self._write_jsonl([
+            {"type": "user", "sessionId": "nocwd", "timestamp": "2025-01-01T00:00:00Z",
+             "message": {"role": "user", "content": "hi"}, "uuid": "u1"},
+        ])
+
+        session_id = import_jsonl(path, store=self.store)
+        types = [e.event_type for e in self.store.load_events(session_id)]
+
+        self.assertNotIn(EventType.SESSION_START, types)
+
 
 if __name__ == "__main__":
     unittest.main()

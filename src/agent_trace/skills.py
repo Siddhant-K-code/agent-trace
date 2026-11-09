@@ -1008,9 +1008,17 @@ def _match_skill_name(raw: str, known: Iterable[str]) -> str:
     return candidate
 
 
+# Claude Code transcripts store "/name args" as <command-name>/name</command-name>.
+_CLAUDE_COMMAND_NAME = re.compile(r"<command-name>\s*(/[^<\s]+)\s*</command-name>")
+
+
 def _prompt_loads(prompt: str, names: Iterable[str]) -> list[tuple[str, str]]:
     found: list[tuple[str, str]] = []
     stripped = prompt.lstrip()
+    if stripped.startswith("<command-"):
+        tagged = _CLAUDE_COMMAND_NAME.search(stripped)
+        if tagged:
+            stripped = tagged.group(1)
     first = re.match(r"^/(?:[A-Za-z0-9_.-]+:)?([A-Za-z0-9_.-]+)(?=\s|$)", stripped)
     for name in sorted(names):
         if first and first.group(1) == name:
@@ -1803,14 +1811,80 @@ def _write_not_measurable(report: Mapping[str, Any], out: TextIO) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def default_claude_dir() -> str:
+    """Claude Code's config directory: ``$CLAUDE_CONFIG_DIR`` when set, else ``~/.claude``."""
+    return os.environ.get("CLAUDE_CONFIG_DIR", "").strip() or "~/.claude"
+
+
+def load_claude_history(claude_dir: str, trace_dir: str) -> tuple[TraceStore, int, int]:
+    """Import every top-level Claude Code transcript under ``claude_dir/projects``.
+
+    Sessions go into ``trace_dir``, which the caller owns and deletes. Events
+    are redacted the same way as ``import`` and hook capture.
+    Returns ``(store, imported, failed)``.
+    """
+    import contextlib
+    import io
+
+    from .jsonl_import import discover_claude_sessions, import_jsonl
+
+    store = TraceStore(trace_dir, use_workspace_env=False)
+    imported = failed = 0
+    for found in discover_claude_sessions(claude_dir):
+        try:
+            # Silences the per-event redaction notices.
+            with contextlib.redirect_stderr(io.StringIO()):
+                import_jsonl(found["path"], store=store)
+            imported += 1
+        # Read and parse errors only. UnicodeDecodeError and JSONDecodeError
+        # are ValueErrors; AttributeError and TypeError come from JSON lines
+        # that are not objects.
+        except (OSError, ValueError, AttributeError, TypeError):
+            failed += 1
+    return store, imported, failed
+
+
+def _write_empty_hint(store: TraceStore, report: Mapping[str, Any], out: TextIO, from_claude: bool) -> None:
+    if report.get("sessions_skipped_unreadable"):
+        out.write(f"Skipped {report['sessions_skipped_unreadable']} unreadable or malformed session(s).\n")
+    if from_claude or store.list_sessions():
+        out.write("No sessions in the window. Widen it with --since, for example --since 90d.\n")
+        return
+    out.write(
+        f"No sessions recorded in {store.base_dir}.\n"
+        "  Claude Code history, no setup: agent-strace skills --from-claude\n"
+        "  Record new sessions: agent-strace setup --cli claude|codex|gemini|cursor|copilot\n"
+        "  Guide: https://github.com/Siddhant-K-code/agent-trace/blob/main/docs/skills.md\n"
+    )
+
+
 def cmd_skills(args: argparse.Namespace) -> int:
-    store = TraceStore(args.trace_dir)
-    workspace = getattr(args, "workspace", "") or ""
-    extra_dirs = list(getattr(args, "skills_dirs", None) or [])
     min_sessions = int(getattr(args, "min_sessions", 5))
     if min_sessions < 1:
         sys.stderr.write("--min-sessions must be at least 1\n")
         return 2
+    if not getattr(args, "from_claude", False):
+        return _run_skills(TraceStore(args.trace_dir), args, min_sessions, from_claude=False)
+
+    import tempfile
+
+    claude_dir = getattr(args, "claude_dir", None) or default_claude_dir()
+    with tempfile.TemporaryDirectory(prefix="agent-strace-skills-") as tmp:
+        store, imported, failed = load_claude_history(claude_dir, tmp)
+        projects = str(Path(claude_dir).expanduser() / "projects")
+        if not imported:
+            sys.stderr.write(f"No Claude Code sessions found in {projects}. Set --claude-dir if Claude Code "
+                             "uses another config directory.\n")
+            return 1
+        note = f"; skipped {failed} unreadable" if failed else ""
+        sys.stderr.write(f"Read {imported} Claude Code session(s) from {projects}{note}. "
+                         "No persistent trace store was written; the temporary directory is deleted on exit.\n")
+        return _run_skills(store, args, min_sessions, from_claude=True)
+
+
+def _run_skills(store: TraceStore, args: argparse.Namespace, min_sessions: int, from_claude: bool) -> int:
+    workspace = getattr(args, "workspace", "") or ""
+    extra_dirs = list(getattr(args, "skills_dirs", None) or [])
     as_json = getattr(args, "format", "text") == "json"
 
     raw_session = getattr(args, "session_id", None)
@@ -1845,6 +1919,10 @@ def cmd_skills(args: argparse.Namespace) -> int:
     )
     if as_json:
         sys.stdout.write(json.dumps(report, indent=2) + "\n")
+        if not report["sessions"]:
+            _write_empty_hint(store, report, sys.stderr, from_claude)
+    elif not report["sessions"]:
+        _write_empty_hint(store, report, sys.stdout, from_claude)
     else:
         format_aggregate_text(report)
     return 0
@@ -1864,8 +1942,10 @@ __all__ = [
     "build_session_report",
     "cmd_skills",
     "command_signatures",
+    "default_claude_dir",
     "discover_skills",
     "event_arguments",
     "extract_skill_commands",
+    "load_claude_history",
     "skill_hints",
 ]

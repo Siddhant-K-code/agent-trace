@@ -27,6 +27,7 @@ from agent_trace.skills import (
     extract_skill_commands,
     format_aggregate_text,
     format_session_text,
+    load_claude_history,
 )
 from agent_trace.store import TraceStore
 
@@ -364,6 +365,19 @@ class TestLoads(SkillsTestBase):
                 load = self.loaded(self.analyze(ev.events), "deploy-check")["loads"][0]
                 self.assertEqual(load["method"], "skill_tool")
                 self.assertIsNone(load["load_succeeded"])
+
+    def test_claude_transcript_command_name_tag_is_user_load(self):
+        ev = _Events(str(self.repo))
+        ev.prompt("<command-name>/deploy-check</command-name>\n<command-message>deploy-check</command-message>\n"
+                  "<command-args>now</command-args>")
+        ev.prompt("<command-message>model</command-message>\n<command-name>/model</command-name>")
+
+        report = self.analyze(ev.events)
+        entry = self.loaded(report, "deploy-check")
+
+        self.assertEqual(len(report["loaded"]), 1)
+        self.assertEqual([(load["method"], load["detail"]) for load in entry["loads"]],
+                         [("user_prompt", "slash_command")])
 
     def test_claude_slash_prompt_is_user_load(self):
         ev = _Events(str(self.repo))
@@ -1120,6 +1134,153 @@ class TestCli(SkillsTestBase):
             self.assertNotIn(PROMPT_SENTINEL, output)
             self.assertNotIn("prose that must never be printed", output)
             self.assertNotIn(str(self.deploy_dir), output)
+
+    def _run_both(self, *argv):
+        args = build_parser().parse_args(["--trace-dir", str(self.trace_dir), "skills", *argv])
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = cmd_skills(args)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_empty_store_prints_setup_hint_instead_of_report(self):
+        code, out, err = self._run_both()
+
+        self.assertEqual(code, 0)
+        self.assertIn("No sessions recorded", out)
+        self.assertIn("agent-strace skills --from-claude", out)
+        self.assertIn("agent-strace setup --cli", out)
+        self.assertNotIn("Skills across", out)
+        self.assertEqual(err, "")
+
+    def test_empty_store_json_keeps_stdout_parseable(self):
+        code, out, err = self._run_both("--format", "json")
+
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["sessions"], 0)
+        self.assertIn("agent-strace skills --from-claude", err)
+
+    def test_sessions_outside_window_suggest_wider_since(self):
+        ev = _Events(str(self.repo))
+        self._session("old00001", ev.events, time.time() - 90 * 86400)
+
+        code, out, _ = self._run_both("--since", "1d")
+
+        self.assertEqual(code, 0)
+        self.assertIn("No sessions in the window", out)
+        self.assertNotIn("No sessions recorded", out)
+
+    def _claude_transcript(self, claude_dir: Path) -> Path:
+        project = claude_dir / "projects" / "-tmp-repo"
+        project.mkdir(parents=True)
+        now = time.time()
+
+        def ts(offset):
+            return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(now - 60 + offset))
+
+        base = {"sessionId": "c1a0de00-0000-4000-8000-000000000001", "cwd": str(self.repo),
+                "version": "2.1.0", "gitBranch": "main"}
+        lines = [
+            {**base, "type": "user", "uuid": "u1", "timestamp": ts(0),
+             "message": {"role": "user", "content": f"<command-name>/deploy-check</command-name>\n"
+                                                    f"<command-args>{PROMPT_SENTINEL}</command-args>"}},
+            {**base, "type": "assistant", "uuid": "a1", "parentUuid": "u1", "timestamp": ts(1),
+             "message": {"role": "assistant", "model": "claude", "content": [
+                 {"type": "tool_use", "id": "t1", "name": "Skill", "input": {"skill": "deploy-check"}}]}},
+            {**base, "type": "assistant", "uuid": "a2", "parentUuid": "a1", "timestamp": ts(2),
+             "message": {"role": "assistant", "model": "claude", "content": [
+                 {"type": "tool_use", "id": "t2", "name": "Bash",
+                  "input": {"command": f"make deploy-check --target {BODY_SENTINEL}"}}]}},
+        ]
+        path = project / f"{base['sessionId']}.jsonl"
+        path.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
+        return path
+
+    def test_from_claude_reads_transcripts_without_writing_store(self):
+        claude_dir = self.tmp / "claude"
+        self._claude_transcript(claude_dir)
+
+        code, out, err = self._run_both("--from-claude", "--claude-dir", str(claude_dir),
+                                        "--min-sessions", "1", "--format", "json")
+
+        self.assertEqual(code, 0)
+        self.assertIn("Read 1 Claude Code session(s)", err)
+        report = json.loads(out)
+        self.assertEqual(report["sessions"], 1)
+        skill = next(item for item in report["skills"] if item["name"] == "deploy-check")
+        self.assertEqual(skill["sessions_available"], 1)
+        self.assertEqual(skill["sessions_loaded"], 1)
+        self.assertEqual(skill["invocations"], {"user": 1, "model": 1})
+        self.assertFalse(self.trace_dir.exists() and any(self.trace_dir.iterdir()))
+        self.assertNotIn(PROMPT_SENTINEL, out + err)
+        self.assertNotIn(BODY_SENTINEL, out + err)
+
+    def test_from_claude_session_mode_uses_transcript_cwd(self):
+        claude_dir = self.tmp / "claude"
+        self._claude_transcript(claude_dir)
+
+        code, out, _ = self._run_both("c1a0de00", "--from-claude", "--claude-dir", str(claude_dir),
+                                      "--format", "json")
+
+        self.assertEqual(code, 0)
+        report = json.loads(out)
+        self.assertEqual(report["workspace_source"], "session_start")
+        entry = report["loaded"][0]
+        self.assertEqual(entry["name"], "deploy-check")
+        self.assertEqual(sorted(load["method"] for load in entry["loads"]), ["skill_tool", "user_prompt"])
+
+    def test_from_claude_defaults_to_claude_config_dir(self):
+        claude_dir = self.tmp / "custom-claude"
+        self._claude_transcript(claude_dir)
+
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(claude_dir)}):
+            code, out, _ = self._run_both("--from-claude", "--min-sessions", "1", "--format", "json")
+
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["sessions"], 1)
+
+    def test_from_claude_redacts_events_in_temporary_store(self):
+        claude_dir = self.tmp / "claude"
+        path = self._claude_transcript(claude_dir)
+        secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl"
+        path.write_text(path.read_text().replace(BODY_SENTINEL, secret))
+
+        with mock.patch.dict(os.environ, {"AGENT_TRACE_NO_REDACT": "", "AGENT_STRACE_NO_REDACT": ""}):
+            store, imported, failed = load_claude_history(str(claude_dir), str(self.tmp / "imported"))
+
+        self.assertEqual((imported, failed), (1, 0))
+        session_id = store.list_sessions()[0].session_id
+        dumped = json.dumps([event.data for event in store.load_events(session_id)])
+        self.assertNotIn(secret, dumped)
+        self.assertIn("[REDACTED:", dumped)
+
+    def test_from_claude_counts_malformed_transcript_as_skipped(self):
+        claude_dir = self.tmp / "claude"
+        self._claude_transcript(claude_dir)
+        (claude_dir / "projects" / "-tmp-repo" / "bad.jsonl").write_bytes(b"[1]\n\xff\xfe\n")
+
+        code, out, err = self._run_both("--from-claude", "--claude-dir", str(claude_dir),
+                                        "--min-sessions", "1", "--format", "json")
+
+        self.assertEqual(code, 0)
+        self.assertIn("Read 1 Claude Code session(s)", err)
+        self.assertIn("skipped 1 unreadable", err)
+        self.assertEqual(json.loads(out)["sessions"], 1)
+
+    def test_from_claude_does_not_swallow_unexpected_errors(self):
+        claude_dir = self.tmp / "claude"
+        self._claude_transcript(claude_dir)
+
+        with mock.patch("agent_trace.jsonl_import.import_jsonl", side_effect=RuntimeError("bug")):
+            with self.assertRaises(RuntimeError):
+                load_claude_history(str(claude_dir), str(self.tmp / "imported"))
+
+    def test_from_claude_missing_dir_fails_with_hint(self):
+        code, out, err = self._run_both("--from-claude", "--claude-dir", str(self.tmp / "nope"))
+
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn("No Claude Code sessions found", err)
+        self.assertIn("--claude-dir", err)
 
     def test_text_formatter_mentions_limits(self):
         ev = _Events(str(self.repo))

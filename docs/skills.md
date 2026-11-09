@@ -1,7 +1,80 @@
 # Skill adoption: `agent-strace skills`
 
-What the trace shows about each skill, in four steps. There is no score, grade,
-or verdict: facts are counts (`count/n`) and inferences are labelled *signals*.
+Find out which of your agent skills never load. For each skill, the report
+shows whether it was available, loaded, and followed, and what happened after
+the load. There is no score, grade, or verdict: facts are counts (`count/n`)
+and inferences are labelled *signals*.
+
+## Quick start
+
+**Claude Code, no setup.** Read the transcripts Claude Code already keeps:
+
+```bash
+uvx agent-strace skills --from-claude              # last 30 days
+uvx agent-strace skills --from-claude --since 90d  # wider window
+```
+
+This imports `~/.claude/projects/*/*.jsonl` (or `$CLAUDE_CONFIG_DIR/projects`,
+or `--claude-dir DIR`) and prints the report. It writes no persistent trace
+store; it uses a temporary directory deleted on exit. Imported events are
+redacted the same way as `import` and hook capture. Claude Code
+deletes transcripts after 30 days by default (`cleanupPeriodDays`), so the
+history may be short.
+
+**Any supported agent.** Record sessions, then report:
+
+```bash
+uv tool install agent-strace       # hooks need agent-strace on PATH
+agent-strace setup --cli copilot   # or claude, codex, gemini, cursor
+# use the agent as usual for a few sessions, then, in the same repository:
+agent-strace skills
+agent-strace skills <session-id>   # one session in detail
+```
+
+Copilot CLI users can install the [plugin](copilot-plugin.md) instead of
+running `setup`. Sessions go to `.agent-traces/` in the repository you opened,
+so run `agent-strace skills` there, or point `--trace-dir` or
+`$AGENT_TRACE_DIR` at the store. With no sessions recorded, the command prints
+these setup steps instead of an empty report.
+
+The never-loaded list needs a skill to be available in at least
+`--min-sessions` sessions (default 5). Lower it for a small store:
+`agent-strace skills --min-sessions 2`.
+
+**Next step.** A never-loaded skill is a lead. To check whether it loads when a
+task needs it, run [`agent-strace skills eval`](skills-eval.md).
+
+### Supported agents
+
+| Agent | Source | Model load seen as |
+|---|---|---|
+| Claude Code | `--from-claude` (existing transcripts) or `setup --cli claude` | `Skill` tool call |
+| GitHub Copilot CLI | `setup --cli copilot` or the plugin | `skill` tool call |
+| Gemini CLI | `setup --cli gemini` | `activate_skill` tool call |
+| OpenAI Codex | `setup --cli codex` | read of a `SKILL.md` |
+| Cursor | `setup --cli cursor` | read of a `SKILL.md` |
+
+For every agent, a recorded prompt that starts with `/name` or mentions
+`$name` counts as a user load.
+
+Other agents traced through the MCP proxy or the Python decorator count when
+they read a `SKILL.md` or call one of the tools above. What each hook records
+differs by agent: see the [capture matrix](capture-matrix.md).
+
+`--from-claude` reads top-level session transcripts only. Subagent transcripts
+are not read. A transcript's first recorded `cwd` is used as the session's
+repository for skill discovery.
+
+### What it cannot tell you
+
+- Whether a task needed the skill. "Never loaded" can mean "never relevant".
+- What skills existed when an old session ran. Availability is read from
+  today's filesystem.
+- Whether the skill caused any outcome.
+
+The full list is under [Limits](#limits).
+
+## How the report works
 
 ```mermaid
 flowchart LR
@@ -140,7 +213,8 @@ Indigo is invoked by the model. Green is invoked by the user.
 - A `SKILL.md` read is a read tool, a `file_read` event, or a shell reader
   (`cat`, `head`, `sed -n`, …). Editing `SKILL.md` is not a load.
 - Prompt loads match only available skill names, so `/tmp` or `$HOME` is not
-  a load.
+  a load. Claude Code transcripts store `/name` as
+  `<command-name>/name</command-name>`, which counts the same way.
 - Each load records its event id, seconds since start, whether it came before
   the first edit, and whether it succeeded (only when a linked `tool_result` or
   `error` exists).

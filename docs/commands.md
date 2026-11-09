@@ -119,7 +119,7 @@ maintainer setup.
 ```
 agent-strace import <path.jsonl> [--discover]
 ```
-Import a Claude Code JSONL session log. `--discover` lists available sessions in `~/.claude/projects/`.
+Import a Claude Code JSONL session log. `--discover` lists available sessions in `~/.claude/projects/`. When the log records a working directory, the imported session starts with a `session_start` event holding that `cwd`.
 
 ---
 
@@ -940,7 +940,8 @@ Read with care:
 ### `skills`
 ```
 agent-strace skills [SESSION_ID] [--since DATE] [--workspace PATH]
-                    [--skills-dir DIR ...] [--min-sessions N] [--format text|json]
+                    [--skills-dir DIR ...] [--min-sessions N]
+                    [--from-claude [--claude-dir DIR]] [--format text|json]
 ```
 Skill adoption from recorded behavior: available → loaded → followed → outcome. Counts and signals only, no score. Omit `SESSION_ID` to aggregate per skill. Skills with `disable-model-invocation: true` are listed as user-only instead of never loaded, and alias or forwarder skills get hints. To test whether a skill loads when it should, use [`skills eval`](#skills-eval). See [skills.md](skills.md).
 
@@ -951,7 +952,11 @@ Skill adoption from recorded behavior: available → loaded → followed → out
 | `--workspace PATH` | Repository root for skill discovery when a session has no `session_start` cwd; default is the current directory |
 | `--skills-dir DIR` | Extra skill directory to scan (plugin or app-bundled skills). Repeatable |
 | `--min-sessions N` | Minimum sessions for the never-loaded and user-only lists and for each group in the loaded vs not-loaded comparison; default is `5` |
+| `--from-claude` | Read existing Claude Code transcripts (`DIR/projects/*/*.jsonl`) instead of the trace store. Writes no persistent trace store; uses a temporary directory deleted on exit. Imported events are redacted as in `import` |
+| `--claude-dir DIR` | Claude Code config directory for `--from-claude`; default is `$CLAUDE_CONFIG_DIR`, else `~/.claude` |
 | `--format text\|json` | Output format |
+
+With no sessions in the trace store, the command prints how to read Claude Code history or set up capture instead of an empty report. In JSON mode the report is still printed and the hint goes to stderr.
 
 ### `skills eval`
 ```
