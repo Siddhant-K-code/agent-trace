@@ -424,7 +424,7 @@ Edit `~/.codeium/windsurf/mcp_config.json`:
 For MCP servers that use HTTP transport:
 
 ```bash
-agent-strace record-http https://mcp.example.com --port 3100
+agent-strace record-http --url https://mcp.example.com --port 3100
 # Your agent connects to http://127.0.0.1:3100
 ```
 

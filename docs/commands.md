@@ -28,7 +28,7 @@ An empty `AGENT_TRACE_DIR` is treated as unset. Relative paths resolve against t
 
 ### `record`
 ```
-agent-strace record [--name NAME] [--parent SESSION] [--no-redact] [--mask] -- <command>
+agent-strace record [--name NAME] [--parent SESSION] [--no-redact] -- <command>
 ```
 Capture an MCP stdio server session. Wraps `<command>` as a transparent proxy.
 
@@ -38,15 +38,14 @@ Capture an MCP stdio server session. Wraps `<command>` as a transparent proxy.
 | `--parent SESSION` | Link this session as a child of a parent session |
 | `--redact` | Strip secrets before writing to disk; kept for compatibility because this is now the default |
 | `--no-redact` | Disable automatic secret redaction |
-| `--mask` | Mask PII (email, phone, CC, SSN) |
 
 `AGENT_STRACE_PARENT_SESSION` can also be set by orchestrators that spawn child agents.
 
 ### `record-http`
 ```
-agent-strace record-http <url> [--port N] [--parent SESSION] [--no-redact] [--mask]
+agent-strace record-http --url URL [--port N] [--name NAME] [--parent SESSION] [--no-redact]
 ```
-Capture an MCP HTTP/SSE server session. Listens on `--port` (default: 3100) and proxies to `<url>`.
+Capture an MCP HTTP/SSE server session. Listens on `--port` (default: 5100) and proxies to `--url`.
 
 ### `setup`
 ```
@@ -345,9 +344,9 @@ Regression report with verdict. `--tag` compares the last two sessions whose nam
 
 ### `token-budget`
 ```
-agent-strace token-budget <session-id> [--model MODEL] [--warn-at PCT]
+agent-strace token-budget [session-id] [--warning-threshold FRACTION]
 ```
-Check token usage against model context limit.
+Check token usage against the model context limit. The model is detected from the session (default: latest). Warns at `--warning-threshold` of the limit (default: `0.9`).
 
 ### `compaction`
 ```
@@ -579,32 +578,32 @@ Assignments are stored in `rbac.json` in the global trace store (`--trace-dir`, 
 
 ### `auth`
 ```
-agent-strace auth login --host URL [--client-id ID] [--issuer URL]
-agent-strace auth logout
-agent-strace auth status
+agent-strace auth login --server URL [--force]
+agent-strace auth logout --server URL
+agent-strace auth status [--server URL]
 ```
-Authenticate with a hosted collector via OIDC. Stores the token in `~/.agent-strace/token.json`. All subsequent commands that contact the collector use the stored token automatically.
+Authenticate with a hosted collector that has SSO enabled. `login` asks you to open `<URL>/auth/login`, complete the IdP login, and paste the token from the success page. The token is stored per server in `~/.agent-strace/auth.json` and expires after one hour. `--force` re-authenticates when a valid token already exists. `status` without `--server` lists every stored server. Other commands do not read the stored token; `apply --server` authenticates with `--auth-key`.
 
 ### `apply`
 ```
-agent-strace apply [--config FILE] [--host URL] [--dry-run]
+agent-strace apply [--config FILE] [--server URL] [--auth-key KEY] [--dry-run] [--dir DIR]
 ```
-Apply `.agent-strace.yaml` to the local store or a hosted collector. Use `--dry-run` to preview changes without writing. The local store is `--dir DIR` when given, else the global trace store (`--trace-dir`, else `$AGENT_TRACE_DIR`, else `.agent-traces`).
+Apply `.agent-strace.yaml` to the local store, or to a hosted collector with `--server URL` (authenticated with `--auth-key KEY`). Use `--dry-run` to preview changes without writing. The local store is `--dir DIR` when given, else the global trace store (`--trace-dir`, else `$AGENT_TRACE_DIR`, else `.agent-traces`).
 
 ### `config-diff`
 ```
-agent-strace config-diff [--config FILE] [--host URL]
+agent-strace config-diff [--config FILE] [--dir DIR]
 ```
-Show the diff between the local `.agent-strace.yaml` and the live config on a hosted collector. Local diffs read `--dir DIR` when given, else the global trace store.
+Show drift between `.agent-strace.yaml` and the local store: `--dir DIR` when given, else the global trace store. It does not contact a hosted collector.
 
 ### `workspace`
 ```
 agent-strace workspace list
 agent-strace workspace new <name>
 agent-strace workspace use <name>
-agent-strace workspace rm <name>
+agent-strace workspace rm <name> [--force]
 ```
-Isolated workspaces — each workspace has its own session store. Use `use` to print the shell export (`AGENT_STRACE_STORAGE`) for a workspace.
+Isolated workspaces — each workspace has its own session store under `<trace-dir>/workspaces/<name>/`. `use` prints `export AGENT_STRACE_WORKSPACE=<name>`; run `eval $(agent-strace workspace use <name>)` so later commands in that shell read and write that workspace. `rm` refuses to delete a workspace that has sessions unless `--force` is given.
 
 ### `compliance`
 ```
@@ -676,7 +675,7 @@ EU AI Act audit package.
 
 ### `dashboard`
 ```
-agent-strace dashboard [--last N] [--since DATE] [--html FILE] [--trend]
+agent-strace dashboard [--limit N] [--since Nd] [--html FILE] [--trend]
 ```
 Multi-session aggregate view. `--trend` shows eval quality and behavioral metrics over time.
 
@@ -688,7 +687,7 @@ agent-strace dashboard annotate --date 2026-05-10 --note "Added retry policy"
 ### `drift`
 ```
 agent-strace drift [--since DURATION] [--baseline FILE] [--save-baseline FILE]
-                   [--threshold N] [--format text|json]
+                   [--threshold N] [--format table|json]
 ```
 Detect behavioral drift across sessions. Exits non-zero when drift score exceeds `--threshold` (default: 0.20).
 
@@ -926,7 +925,7 @@ Experimental skill trigger eval. Runs each case's prompt through a headless agen
 
 ### `standup`
 ```
-agent-strace standup [--session SESSION_ID]
+agent-strace standup [session-id] [--no-llm]
 ```
 Structured standup from a session trace. No LLM required. Covers files touched, approaches tried, dependencies added, TODOs written.
 
@@ -1126,7 +1125,7 @@ Run a command with auto-instrumentation. See [integrations.md](integrations.md).
 
 ### `mcp`
 ```
-agent-strace mcp [--transport stdio|http] [--port N]
+agent-strace mcp [--transport stdio]
 ```
 Start an MCP server that exposes your session store as queryable tools for a debugging agent.
 
