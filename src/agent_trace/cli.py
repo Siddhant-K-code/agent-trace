@@ -37,6 +37,7 @@ from .live_verify import (
     inspect_live_capture,
     live_capture_failure_diagnostic,
 )
+from .entry import HOOK_PROVIDERS
 from .hooks import METADATA_ONLY_FLAG, hook_main
 from .http_proxy import HTTPProxyServer
 from .a2a import cmd_a2a_tree
@@ -106,6 +107,7 @@ from .mcp_scan import cmd_mcp_scan
 from .retention import cmd_retention
 from .backfill import cmd_backfill_meta
 from .health import cmd_health
+from .external_evidence import add_external_arguments
 from .sample import cmd_sample
 from .server import cmd_server
 from .validation import cmd_validate
@@ -1702,7 +1704,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # hook (called by agent CLI hooks systems)
     p_hook = sub.add_parser("hook", help="handle an agent CLI hook event (internal)")
-    p_hook.add_argument("--provider", choices=["claude", "codex", "gemini", "cursor", "copilot"], default="claude",
+    p_hook.add_argument("--provider", choices=list(HOOK_PROVIDERS), default="claude",
                         help="hook provider (default: claude)")
     p_hook.add_argument(
         METADATA_ONLY_FLAG,
@@ -1882,6 +1884,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_health.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
     p_health.add_argument("--format", choices=["text", "json"], default="text")
+    add_external_arguments(p_health)
 
     # share
     p_share = sub.add_parser(
@@ -1969,6 +1972,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_review_threshold_arguments(p_pr_comment)
     add_review_artifact_arguments(p_pr_comment)
+    add_external_arguments(p_pr_comment)
 
     # review
     p_review = sub.add_parser(
@@ -1989,6 +1993,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_review_threshold_arguments(p_review)
     add_review_artifact_arguments(p_review)
+    add_external_arguments(p_review)
 
     # postmortem
     p_postmortem = sub.add_parser("postmortem", help="generate a structured postmortem for a failed session")
@@ -2051,7 +2056,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_ds_export = dataset_sub.add_parser("export", help="export dataset to JSONL")
     p_ds_export.add_argument("--dataset", default=".agent-traces/datasets/default.jsonl")
     p_ds_auto = dataset_sub.add_parser("auto", help="auto-populate dataset from sessions by signal filter")
-    p_ds_auto.add_argument("--name", default="default", help="dataset name (default: default)")
+    p_ds_auto.add_argument("--name", default="default",
+                           help="dataset name, written to datasets/NAME.jsonl in the trace "
+                                "store (default: default)")
     p_ds_auto.add_argument("--dataset", default="", help="explicit dataset path (overrides --name)")
     p_ds_auto.add_argument("--filter", default="has-errors",
                            help="filter: has-errors, high-retry, cost-above:N, wide-blast, "
@@ -2625,7 +2632,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_drift = sub.add_parser("drift", help="detect behavioral drift across sessions")
     p_drift.add_argument("--since", metavar="Nd", help="analyse sessions from the last N days (e.g. 30d)")
     p_drift.add_argument("--baseline", metavar="FILE",
-                         help="path to a saved behavioral fingerprint JSON, or a date range YYYY-MM-DD:YYYY-MM-DD")
+                         help="path to a saved behavioral fingerprint JSON "
+                              "(use --baseline-range for a date range)")
     p_drift.add_argument("--current", metavar="RANGE",
                          help="current window as YYYY-MM-DD:YYYY-MM-DD")
     p_drift.add_argument("--baseline-range", metavar="RANGE", dest="baseline_range",

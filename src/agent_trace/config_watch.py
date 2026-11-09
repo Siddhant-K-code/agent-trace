@@ -1,9 +1,11 @@
-"""AGENTS.md change detector — auto-flag drift after config changes.
+"""AGENTS.md change detector: flag sessions that ran after a config change.
 
-Snapshots a set of config files (AGENTS.md, system prompts, tool configs)
-at session boundaries and detects when those files change between sessions.
-Sessions after a config change are flagged as "potentially affected" so
-teams know to re-evaluate agent behaviour.
+Hashes a set of config files (AGENTS.md, system prompts, tool configs) each
+time ``agent-strace config-watch snapshot`` runs, and detects when those files
+changed between snapshots. Nothing takes snapshots automatically: run
+``snapshot`` yourself, for example after each edit or in CI. Sessions that
+started after a snapshot recorded a change are flagged as "potentially
+affected" so teams know to re-evaluate agent behaviour.
 
 Usage:
     # Snapshot current config state
@@ -18,9 +20,10 @@ Usage:
     # Show which sessions ran after each config change
     agent-strace config-watch affected [--since 7d]
 
-Config files tracked by default:
-    AGENTS.md, .agent-strace-policy.json, .agent-strace-lint.json,
-    .agent-watch.json, system_prompt.txt, system_prompt.md
+Config files tracked by default (``DEFAULT_WATCH_PATHS``):
+    AGENTS.md, CLAUDE.md, .agent-strace-policy.json, .agent-strace-lint.json,
+    .agent-watch.json, system_prompt.txt, system_prompt.md, .cursorrules,
+    .github/copilot-instructions.md
 
 Additional paths can be added via --watch or .agent-strace-watch.json.
 """

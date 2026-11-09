@@ -75,5 +75,60 @@ class TestSessionMeta(unittest.TestCase):
         self.assertEqual(parsed.errors, 1)
 
 
+class TestForwardCompatibleReaders(unittest.TestCase):
+    """Fields added by newer writers must not break older readers."""
+
+    def test_session_meta_ignores_unknown_fields(self):
+        text = json.dumps({
+            "session_id": "fwdcompat0000001",
+            "agent_name": "claude-code",
+            "field_from_a_future_release": {"nested": True},
+        })
+        meta = SessionMeta.from_json(text)
+        self.assertEqual(meta.session_id, "fwdcompat0000001")
+        self.assertFalse(hasattr(meta, "field_from_a_future_release"))
+
+    def test_trace_event_ignores_unknown_fields(self):
+        line = json.dumps({
+            "event_type": "user_prompt",
+            "event_id": "evt1",
+            "data": {"prompt": "hi"},
+            "field_from_a_future_release": "x",
+        })
+        event = TraceEvent.from_json(line)
+        self.assertEqual(event.event_id, "evt1")
+        self.assertEqual(event.data, {"prompt": "hi"})
+
+    def test_rewrite_keeps_unknown_fields(self):
+        # update_meta and tag_session re-serialise loaded records; a reader
+        # that does not know a field must not erase it.
+        meta = SessionMeta.from_json(json.dumps({
+            "session_id": "fwdcompat0000002",
+            "field_from_a_future_release": "kept",
+        }))
+        meta.tool_calls = 3
+        written = json.loads(meta.to_json())
+        self.assertEqual(written["field_from_a_future_release"], "kept")
+        self.assertEqual(written["tool_calls"], 3)
+
+        event = TraceEvent.from_json(json.dumps({
+            "event_type": "user_prompt",
+            "field_from_a_future_release": "kept",
+        }))
+        self.assertEqual(json.loads(event.to_json())["field_from_a_future_release"], "kept")
+
+    def test_records_without_unknown_fields_serialise_unchanged(self):
+        meta = SessionMeta.from_json(json.dumps({"session_id": "fwdcompat0000003"}))
+        self.assertNotIn("_unknown_fields", json.loads(meta.to_json()))
+
+    def test_empty_conversation_id_is_not_written(self):
+        # v0.106.0 and older readers reject the key, so sessions without a
+        # native ID must not carry it.
+        meta = SessionMeta(session_id="fwdcompat0000004", conversation_id="")
+        self.assertNotIn("conversation_id", json.loads(meta.to_json()))
+        meta.conversation_id = "native-session-id"
+        self.assertEqual(json.loads(meta.to_json())["conversation_id"], "native-session-id")
+
+
 if __name__ == "__main__":
     unittest.main()

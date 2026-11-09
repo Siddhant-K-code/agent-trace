@@ -1,0 +1,18 @@
+Add CSV export to the spreadsheet (#42)
+
+* Initial plan
+
+* Add CSV export
+
+Agent-Logs-Url: https://github.com/octo-org/sheet/sessions/7f6a2b1c-1d2e-4f3a-9b8c-0d1e2f3a4b5c
+
+Co-authored-by: Copilot <198982749+Copilot@users.noreply.github.com>
+Co-authored-by: octocat <octocat@users.noreply.github.com>
+
+* Escape quoted cells
+
+Agent-Logs-Url: https://github.com/octo-org/sheet/sessions/7f6a2b1c-1d2e-4f3a-9b8c-0d1e2f3a4b5c
+
+---------
+
+Co-authored-by: Copilot <198982749+Copilot@users.noreply.github.com>

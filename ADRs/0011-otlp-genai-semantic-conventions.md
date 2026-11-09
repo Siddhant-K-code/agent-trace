@@ -30,7 +30,7 @@ is unchanged for backwards compatibility.
 | `user_prompt` | `gen_ai.user.message` event on root span |
 | `assistant_response` | `gen_ai.assistant.message` event on root span |
 | `error` | OTel `exception` event with `exception.type`, `exception.message` |
-| `session_start` / `session_end` | Root span with `gen_ai.agent.id`, `gen_ai.agent.name` |
+| `session_start` / `session_end` | Root span with `gen_ai.agent.id`, `gen_ai.agent.name`, and `gen_ai.conversation.id` when known |
 
 ### Span hierarchy
 
@@ -59,6 +59,48 @@ payload.
 
 No separate exporter or transport is added. The machine-readable mapping and
 its explicit losses live in `examples/otlp/openinference-mapping.json`.
+
+### `gen_ai.conversation.id` (added 2026-11)
+
+The GenAI conventions (now maintained in
+`open-telemetry/semantic-conventions-genai`) define `gen_ai.conversation.id`
+as "the unique identifier for a conversation (session, thread)", with
+Development stability. It is conditionally required on `invoke_agent`,
+inference and `execute_tool` spans when the instrumented library has an ID
+readily available. Instrumentations SHOULD NOT invent one (a new UUID, the
+trace ID, or a content hash).
+
+agent-strace follows that rule:
+
+- The value is the agent's own session ID, stored in full in the new
+  optional `SessionMeta.conversation_id` field. Hooks take it from the
+  payload `session_id` (Copilot CLI `sessionId` is normalised to the same
+  key) only when its first 16 characters equal the local session ID. Claude
+  JSONL import takes it from the transcript `sessionId`, not from the file
+  name fallback.
+- Sessions without a native ID (`record`, proxy, decorator, framework
+  integrations, server-created sessions, `backfill`, and sessions recorded
+  before this change) omit the attribute. agent-strace never puts its own
+  local `session_id` under this name.
+- `--format otlp-genai` puts it on the root span and on every LLM and tool
+  span, including error and unmatched spans. `--format otlp` puts it on the
+  root span only.
+
+Join keys with native agent telemetry:
+
+| Agent | Native attribute | Joins with |
+|---|---|---|
+| GitHub Copilot CLI | `gen_ai.conversation.id` on `invoke_agent` and `chat` spans | `gen_ai.conversation.id` |
+| Claude Code | `session.id` on every span, metric and event (Claude Code does not emit `gen_ai.conversation.id`) | `gen_ai.conversation.id` |
+
+The OpenInference `session.id` that agent-strace emits stays the local
+agent-strace session ID (the first 16 characters for hook sessions), so it is
+not the same value as Claude Code's `session.id`. Use
+`gen_ai.conversation.id` for cross-source joins.
+
+`gen_ai.agent.id` keeps its existing meaning (the local session ID). Copilot
+CLI uses `gen_ai.agent.id` for the agent definition (for example
+`github.copilot.default`), so that attribute is not a join key.
 
 ## Consequences
 

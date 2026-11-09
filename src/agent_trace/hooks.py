@@ -50,8 +50,7 @@ from contextvars import ContextVar
 from pathlib import Path
 
 from .models import EventType, SessionMeta, TraceEvent
-from .attribution import collect_attribution
-from .evidence_health import is_continuation_source
+from .pairing import hook_call_timestamp, link_response, match_hook_tool_call
 from .redact import redact_data, redact_data_with_status, redaction_enabled
 from .store import (
     DEFAULT_TRACE_DIR,
@@ -257,7 +256,36 @@ def _write_session_meta(meta: SessionMeta) -> None:
 IMPLICIT_SESSION_SOURCE = "no session-start"
 
 
-def _ensure_session_meta(store: TraceStore, session_id: str, provider: str) -> None:
+_MAX_CONVERSATION_ID_LEN = 256
+
+
+def _native_conversation_id(input_data: dict | None, session_id: str) -> str:
+    """Return the agent's own session ID from a hook payload, or "".
+
+    The value is only trusted when it is the ID the local session ID was
+    derived from (its first 16 characters), so a payload can never attach
+    another session's ID. agent-trace never invents a fallback: the GenAI
+    semantic conventions say ``gen_ai.conversation.id`` SHOULD NOT be a
+    generated UUID or similar.
+    """
+    raw = (input_data or {}).get("session_id")
+    if not isinstance(raw, str) or not raw or not session_id:
+        return ""
+    if len(raw) > _MAX_CONVERSATION_ID_LEN:
+        return ""
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in raw):
+        return ""
+    if raw[:16] != session_id:
+        return ""
+    return raw
+
+
+def _ensure_session_meta(
+    store: TraceStore,
+    session_id: str,
+    provider: str,
+    input_data: dict | None = None,
+) -> None:
     """Create metadata for a session whose first hook was not SessionStart.
 
     GitHub Copilot CLI subagents (the ``task`` tool) fire prompt, tool and stop
@@ -273,12 +301,15 @@ def _ensure_session_meta(store: TraceStore, session_id: str, provider: str) -> N
     try:
         if store.session_exists(session_id):
             return
+        from .attribution import collect_attribution
+
         agent_name = _PROVIDER_AGENT.get(provider, "agent-cli")
         meta = SessionMeta(
             session_id=session_id,
             agent_name=agent_name,
             command=f"{agent_name} ({IMPLICIT_SESSION_SOURCE})",
             attribution=collect_attribution().to_dict(),
+            conversation_id=_native_conversation_id(input_data, session_id),
         )
         if store.create_session(meta, if_missing=True) is not None:
             _write_session_meta(meta)
@@ -291,6 +322,20 @@ def _ensure_session_meta(store: TraceStore, session_id: str, provider: str) -> N
 def _load_meta_or_none(store: TraceStore, session_id: str) -> SessionMeta | None:
     try:
         return store.load_meta(session_id)
+    except FileNotFoundError:
+        return None
+
+
+def _mutate_meta_or_none(
+    store: TraceStore, session_id: str, mutate
+) -> SessionMeta | None:
+    """Apply ``mutate`` to the session's metadata under the store write lock.
+
+    Parallel tool calls and subagents fire hooks as separate processes, so a
+    load followed by a separate ``update_meta`` loses concurrent increments.
+    """
+    try:
+        return store.mutate_meta(session_id, mutate, preserve_parent_link=True)
     except FileNotFoundError:
         return None
 
@@ -517,7 +562,11 @@ def _normalise_payload(input_data: dict, provider: str, event: str) -> dict:
         data.get("sessionId") or data.get("conversation_id") or "",
     )
     data.setdefault("turn_id", data.get("turnId") or "")
-    data.setdefault("tool_use_id", data.get("toolUseId") or "")
+    # GitHub Copilot CLI sends toolCallId on tool hooks from 1.0.107.
+    data.setdefault(
+        "tool_use_id",
+        data.get("toolUseId") or data.get("toolCallId") or "",
+    )
     data.setdefault("stop_reason", data.get("stopReason") or "")
     data.setdefault("transcript_path", data.get("transcriptPath") or "")
 
@@ -587,6 +636,10 @@ def _normalise_payload(input_data: dict, provider: str, event: str) -> dict:
 
 def handle_session_start(input_data: dict, provider: str = "claude") -> None:
     """Handle SessionStart hook event."""
+    # Imported here: every hook process loads this module, few start sessions.
+    from .attribution import collect_attribution
+    from .evidence_health import is_continuation_source
+
     store = _get_store()
     redact = _should_redact()
 
@@ -601,19 +654,24 @@ def handle_session_start(input_data: dict, provider: str = "claude") -> None:
     # Use Claude Code's session ID as part of our session ID for correlation
     if session_id:
         meta.session_id = session_id[:16]
+    conversation_id = _native_conversation_id(input_data, meta.session_id)
+    meta.conversation_id = conversation_id
 
     source = input_data.get("source", "startup")
     # resume and compact continue the session already recorded under this ID:
     # keep its metadata (started_at, counters) instead of overwriting it.
     if is_continuation_source(source) and session_id:
+        def _resume(existing_meta: SessionMeta) -> None:
+            existing_meta.ended_at = None
+            if conversation_id and not existing_meta.conversation_id:
+                existing_meta.conversation_id = conversation_id
+
         try:
-            existing_meta = store.load_meta(meta.session_id)
+            meta = store.mutate_meta(
+                meta.session_id, _resume, preserve_parent_link=True
+            )
         except FileNotFoundError:
             store.create_session(meta)
-        else:
-            existing_meta.ended_at = None
-            meta = existing_meta
-            store.update_meta(meta, preserve_parent_link=True)
     else:
         # A subagent's metadata may already carry the link recorded by its
         # parent's subagent hooks; a real SessionStart must not drop it.
@@ -660,10 +718,10 @@ def handle_session_end(input_data: dict, provider: str = "claude") -> None:
 
     meta = _load_meta_or_none(store, session_id)
     if meta:
-        meta.ended_at = time.time()
-        meta.total_duration_ms = (meta.ended_at - meta.started_at) * 1000
+        ended_at = time.time()
+        duration_ms = (ended_at - meta.started_at) * 1000
 
-        event_data = {"duration_ms": meta.total_duration_ms}
+        event_data = {"duration_ms": duration_ms}
         for key in ("reason", "stop_reason", "cwd", "transcript_path", "hook_event_name"):
             if input_data.get(key) not in (None, ""):
                 event_data[key] = input_data.get(key)
@@ -676,7 +734,14 @@ def handle_session_end(input_data: dict, provider: str = "claude") -> None:
                 data=event_data,
             ),
         )
-        store.update_meta(meta, preserve_parent_link=True)
+
+        # Reload under the lock so counters written by concurrent hooks since
+        # the load above are kept.
+        def _end(current: SessionMeta) -> None:
+            current.ended_at = ended_at
+            current.total_duration_ms = (ended_at - current.started_at) * 1000
+
+        meta = _mutate_meta_or_none(store, session_id, _end) or meta
         _write_session_meta(meta)
         _product_telemetry.capture(
             _product_telemetry.SESSION_COMPLETED,
@@ -720,14 +785,14 @@ def handle_pre_tool(input_data: dict, provider: str = "claude") -> None:
         session_id=session_id,
         data=event_data,
     )
-    _ensure_session_meta(store, session_id, provider)
+    _ensure_session_meta(store, session_id, provider, input_data)
     _write_event(store, session_id, event)
 
     # Update meta
-    meta = _load_meta_or_none(store, session_id)
-    if meta:
+    def _count_tool_call(meta: SessionMeta) -> None:
         meta.tool_calls += 1
-        store.update_meta(meta, preserve_parent_link=True)
+
+    _mutate_meta_or_none(store, session_id, _count_tool_call)
 
     # Track pending call for latency measurement.
     # Keyed by event_id (not tool_name) so concurrent calls to the same
@@ -760,7 +825,7 @@ def handle_user_prompt(input_data: dict, provider: str = "claude") -> None:
     if redact:
         event_data = redact_data(event_data)
 
-    _ensure_session_meta(store, session_id, provider)
+    _ensure_session_meta(store, session_id, provider, input_data)
     _write_event(store, 
         session_id,
         TraceEvent(
@@ -804,7 +869,7 @@ def handle_stop(input_data: dict, provider: str = "claude") -> None:
     if redact:
         event_data = redact_data(event_data)
 
-    _ensure_session_meta(store, session_id, provider)
+    _ensure_session_meta(store, session_id, provider, input_data)
     _write_event(store, 
         session_id,
         TraceEvent(
@@ -862,7 +927,7 @@ def handle_post_model_request(input_data: dict, provider: str = "claude") -> Non
     if redact:
         event_data = redact_data(event_data)
 
-    _ensure_session_meta(store, session_id, provider)
+    _ensure_session_meta(store, session_id, provider, input_data)
     _write_event(
         store,
         session_id,
@@ -876,10 +941,10 @@ def handle_post_model_request(input_data: dict, provider: str = "claude") -> Non
     # ``llm_requests`` counts ``llm_request`` events (validate and backfill
     # rely on that), and this hook records none, so only tokens are added.
     if total:
-        meta = _load_meta_or_none(store, session_id)
-        if meta:
+        def _add_tokens(meta: SessionMeta) -> None:
             meta.total_tokens += total
-            store.update_meta(meta, preserve_parent_link=True)
+
+        _mutate_meta_or_none(store, session_id, _add_tokens)
 
 
 # Providers whose subagent hooks name the child by the child's own hook
@@ -957,8 +1022,8 @@ def _pending_subagent_call(
 ) -> str:
     """Return the task tool_call that started this subagent, if unambiguous.
 
-    Tool hooks carry no call ID, so the call is identified only when exactly
-    one task call is pending (called, no result yet), it is recorded as a
+    Subagent hooks carry no tool call ID, so the call is identified only when
+    exactly one task call is pending (called, no result yet), it is recorded as a
     ``tool_call`` in this session's trace, and its ``agent_type`` argument
     does not contradict the payload.
     """
@@ -1115,7 +1180,7 @@ def handle_subagent(input_data: dict, phase: str, provider: str = "claude") -> N
 
     redact = _should_redact()
     child_id = _subagent_child_session_id(input_data, session_id, provider)
-    _ensure_session_meta(store, session_id, provider)
+    _ensure_session_meta(store, session_id, provider, input_data)
 
     parent_event_id = ""
     if provider in _SUBAGENT_SESSION_PROVIDERS:
@@ -1178,7 +1243,7 @@ def handle_file_write(input_data: dict, provider: str = "claude") -> None:
     if redact:
         data = redact_data(data)
 
-    _ensure_session_meta(store, session_id, provider)
+    _ensure_session_meta(store, session_id, provider, input_data)
     _write_event(
         store,
         session_id,
@@ -1242,43 +1307,29 @@ def handle_post_tool(input_data: dict, failed: bool = False, provider: str = "cl
         data=event_data,
     )
 
-    # Link to the earliest pending call for this tool name, then remove it.
-    # Pending entries are keyed by event_id so concurrent same-tool calls
-    # don't collide; we match by tool_name in the value and pick the oldest.
-    # Without a tool_use_id, a pending call from the same agent (parent or
-    # subagent) is preferred, so a subagent's result does not pair with the
-    # parent's call to the same tool while its own call is pending.
+    # Link to the pending call this result answers, then remove it. The
+    # matching rule lives in pairing.match_hook_tool_call; the pending file
+    # is read and written here under the store write lock.
     with _update_pending_calls(store, provider=provider) as pending:
-        match_id = None
-        match_ts = float("inf")
-        match_same_agent = False
-        tool_use_id = input_data.get("tool_use_id", "")
-        agent_id = attribution.get("agent_id", "")
-        for eid, info in pending.items():
-            if tool_use_id and info.get("tool_use_id") == tool_use_id:
-                match_id = eid
-                break
-            if tool_use_id or info.get("tool_name") != tool_name:
-                continue
-            same_agent = info.get("agent_id", "") == agent_id
-            if (same_agent, -info["timestamp"]) > (match_same_agent, -match_ts):
-                match_id = eid
-                match_ts = info["timestamp"]
-                match_same_agent = same_agent
+        match_id = match_hook_tool_call(
+            pending,
+            tool_name,
+            tool_use_id=input_data.get("tool_use_id", ""),
+            agent_id=attribution.get("agent_id", ""),
+        )
         if match_id:
             call_info = pending.pop(match_id)
-            event.parent_id = match_id
-            event.duration_ms = (event.timestamp - call_info["timestamp"]) * 1000
+            link_response(event, match_id, hook_call_timestamp(call_info))
 
-    _ensure_session_meta(store, session_id, provider)
+    _ensure_session_meta(store, session_id, provider, input_data)
     _write_event(store, session_id, event)
 
     # Update meta on errors
     if failed:
-        meta = _load_meta_or_none(store, session_id)
-        if meta:
+        def _count_error(meta: SessionMeta) -> None:
             meta.errors += 1
-            store.update_meta(meta, preserve_parent_link=True)
+
+        _mutate_meta_or_none(store, session_id, _count_error)
 
 
 def hook_main(args: list[str]) -> None:

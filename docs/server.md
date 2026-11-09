@@ -16,11 +16,11 @@ Once live, the only change needed is the endpoint:
 
 ```bash
 # Self-hosted (today)
-AGENT_STRACE_ENDPOINT=http://localhost:4317 python my_agent.py
+export AGENT_STRACE_ENDPOINT=http://localhost:4317
 
-# Hosted (when available — no other changes)
-AGENT_STRACE_ENDPOINT=https://collector.agent-strace.dev python my_agent.py
-AGENT_STRACE_AUTH_KEY=ast_<your-key>
+# Hosted (when available, no other changes)
+export AGENT_STRACE_ENDPOINT=https://collector.agent-strace.dev
+export AGENT_STRACE_AUTH_KEY=ast_<your-key>
 ```
 
 The hosted endpoint will implement the same API documented below, with API key auth (see [Authentication](#authentication)) and a free tier for individual developers.
@@ -33,9 +33,16 @@ The hosted endpoint will implement the same API documented below, with API key a
 # Start the collector
 agent-strace server --port 4317 --storage ./traces
 
-# Agents point to it via environment variable — no code changes required
-AGENT_STRACE_ENDPOINT=http://collector:4317 python my_agent.py
+# On each agent machine, before the agent starts
+export AGENT_STRACE_ENDPOINT=http://collector:4317
 ```
+
+Only two producers read `AGENT_STRACE_ENDPOINT`:
+
+- The `agent-strace hook` commands that agent CLI hooks run (Claude Code, Codex, Gemini CLI, Cursor, and GitHub Copilot CLI; see [CLI hooks setup](setup.md#option-1-cli-hooks-recommended)). They send events and session metadata to the collector.
+- The Python framework integrations in `agent_trace.integrations` (see [integrations.md](integrations.md)). They send events only.
+
+Any other process ignores it, including a plain `python my_agent.py`, `agent-strace record`, and `agent-strace watch`. To stream from `watch`, use `--stream-to` (see [Live streaming from watch](#live-streaming-from-watch)).
 
 The server writes traces in the same `.agent-traces/` format as local mode. All existing CLI commands work against its storage directory.
 
@@ -104,6 +111,10 @@ legacy IDs containing spaces, Unicode, or more than 128 characters remain
 readable. POST routes retain the strict 1–128 character ASCII policy for new
 session IDs.
 
+Upgrade the collector before its clients. A v0.106.0 or older collector
+returns 400 for session metadata that contains `conversation_id`. See
+[production.md](production.md#version-skew).
+
 ---
 
 ## Multi-agent correlation
@@ -157,12 +168,11 @@ each session selected after the month/team metadata filters. These N+1 reads
 are bounded but are not a transactionally consistent snapshot; the generated
 report records that limitation. See [Organization reporting](org-report.md).
 
-**Client side** — set `AGENT_STRACE_AUTH_KEY` alongside `AGENT_STRACE_ENDPOINT`. The `agent-strace hook` commands then add the `Authorization: Bearer` header to the events and session metadata they send to the collector:
+**Client side:** set `AGENT_STRACE_AUTH_KEY` alongside `AGENT_STRACE_ENDPOINT` in the environment the agent starts from. The `agent-strace hook` commands and the Python integrations then add the `Authorization: Bearer` header to everything they send to the collector:
 
 ```bash
 export AGENT_STRACE_ENDPOINT=https://collector.example.com
 export AGENT_STRACE_AUTH_KEY=ast_a3f9b2c1d4e5f6a7b8c9d0e1f2a3b4c5
-python my_agent.py
 ```
 
 `agent-strace watch --stream-to` does not send an `Authorization` header and has no flag to add one, so a collector started with `--auth-key` rejects its requests with 401. Stream from `watch` only to a collector that runs without `--auth-key`.

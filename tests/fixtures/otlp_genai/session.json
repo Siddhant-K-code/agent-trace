@@ -1,6 +1,7 @@
 {
   "meta": {
     "session_id": "otlp-genai-conformance-001",
+    "conversation_id": "0b7c8f8e-2f4d-4c55-9a1e-5d0f3c2a9b71",
     "started_at": 1700000000.0,
     "ended_at": 1700000004.0,
     "agent_name": "claude-code",

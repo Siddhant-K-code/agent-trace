@@ -45,6 +45,12 @@ inputs:
   review-min-confidence:
     description: Lowest confidence that can fail the check (low, medium, high). Empty uses config, then medium.
     default: ""
+  review-commits:
+    description: Git revision range to read Entire-Checkpoint and Agent-Logs-Url trailers from, such as origin/main..HEAD. Needs the history in the checkout (fetch-depth 0). Reported, not graded.
+    default: ""
+  review-otel-logs:
+    description: Path to a Claude Code OpenTelemetry logs export (OTLP JSON or JSON Lines) to read safety_event from. Reported, not graded.
+    default: ""
   cognitive-debt:
     description: Cognitive debt report for the review session. false skips it, report adds it to the review, check also fails the check unless the result is a pass. Status unknown is never a pass.
     default: "report"
@@ -196,6 +202,8 @@ runs:
         AGENT_TRACE_DIR: ${{ inputs.trace-dir }}
         REVIEW_FAIL_ON: ${{ inputs.review-fail-on }}
         REVIEW_MIN_CONFIDENCE: ${{ inputs.review-min-confidence }}
+        REVIEW_COMMITS: ${{ inputs.review-commits }}
+        REVIEW_OTEL_LOGS: ${{ inputs.review-otel-logs }}
         REVIEW_POST_COMMENT: ${{ inputs.post-pr-comment }}
         COGNITIVE_DEBT_MODE: ${{ inputs.cognitive-debt }}
         ARTIFACT_URL: ${{ steps.upload-evidence.outputs.artifact-url }}

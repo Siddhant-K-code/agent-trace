@@ -1,0 +1,8 @@
+Squash: two agent changes
+
+Entire-Checkpoint: a1b2c3d4e5f6
+
+The checkpoint line above sits in the body, so Entire 0.13.1 and later do not
+link this commit.
+
+Signed-off-by: Dev <dev@example.com>

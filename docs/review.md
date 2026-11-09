@@ -36,6 +36,12 @@ Each finding has a status, a confidence, and the source of its evidence.
 | Stewardship | Human turns, interventions after the agent started, approval decisions | `user_prompt` events, approval requests, recorded permission modes |
 | Evidence health | Capture gaps, redaction state, provider limits, and how the session was linked | [`health`](evidence-health.md), [capture matrix](capture-matrix.md), session link |
 
+With `--commits RANGE` or `--otel-logs FILE`, the evidence health finding also
+lists [external evidence](evidence-health.md#external-evidence): Entire
+checkpoints, including a trailer present but not pushed, Copilot
+`Agent-Logs-Url` trailers, and Claude Code `safety_event` records. Each signal
+has a source, a status and a confidence. They are reported, not graded.
+
 Statuses:
 
 | Status | Meaning |
@@ -152,6 +158,11 @@ skip the comment because their tokens are read-only, but still run the check.
 The Action reads sessions from `trace-dir` (default `.agent-traces`). Commit
 the sessions, or restore them from an artifact, before this step.
 
+To list external evidence, set `review-commits` to a range such as
+`origin/${{ github.base_ref }}..HEAD`, with `fetch-depth: 0` on the checkout,
+and `review-otel-logs` to a Claude Code OpenTelemetry export in the workspace.
+They pass `--commits` and `--otel-logs` to the check.
+
 ### Artifacts
 
 With `review: "true"`, the Action takes the first linked session and writes:
@@ -215,6 +226,9 @@ Check: **pass**. Threshold fails on `missing` at `medium` or higher confidence (
   show that attaching this evidence changes review outcomes.
 - The check reports captured evidence only. It does not claim complete
   capture. Providers differ; see the [capture matrix](capture-matrix.md).
+- External evidence is read from the clone and the files given. Nothing is
+  fetched, and a trailer alone does not show that the evidence behind it is
+  complete.
 - Validation is in-session only. It does not read CI results. Many hooks do
   not record exit codes, so a run without one is reported as unknown.
 - Scope uses path matching against prompts and reads. A file can be in scope

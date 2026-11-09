@@ -21,6 +21,7 @@ trusted.
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
 import stat
 import tempfile
@@ -144,6 +145,16 @@ def lock_path_for(path: str | Path) -> Path:
     return path.with_name(path.name + ".lock")
 
 
+# msvcrt.locking reports a lock held elsewhere as EACCES (or EDEADLK).
+_WINDOWS_CONTENTION_ERRNOS = frozenset(
+    code for code in (
+        getattr(errno, "EACCES", None),
+        getattr(errno, "EDEADLK", None),
+        getattr(errno, "EDEADLOCK", None),
+    ) if code is not None
+)
+
+
 def _try_lock(fd: int) -> bool:
     """Try once to take the lock. Return False only when another holder has it."""
     if fcntl is not None:
@@ -157,27 +168,43 @@ def _try_lock(fd: int) -> bool:
             pass
         return True
     if msvcrt is not None:
+        # msvcrt locks a byte range starting at the current position, so
+        # always lock byte 0. Locking past end of file is allowed, which
+        # keeps the lock file empty.
         os.lseek(fd, 0, os.SEEK_SET)
         try:
             msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-        except OSError:
-            return False
+        except OSError as exc:
+            if exc.errno in _WINDOWS_CONTENTION_ERRNOS:
+                return False
+            # Same fallback as the POSIX path for files that cannot be locked.
         return True
     return True
 
 
-def _lock_blocking(fd: int) -> None:
-    if fcntl is not None:
+def lock_descriptor(fd: int, *, timeout: float | None = None, description: str = "file") -> None:
+    """Take an exclusive cross-process lock on an open file descriptor.
+
+    Uses ``fcntl.flock`` on POSIX and a one-byte ``msvcrt.locking`` range at
+    offset 0 on Windows.  Blocks until the lock is free, or raises
+    ``TimeoutError`` once *timeout* seconds pass.  Release it with
+    ``unlock_descriptor`` or by closing *fd*.
+    """
+    if timeout is None and fcntl is not None:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
         except OSError:
             pass
         return
+    deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
     while not _try_lock(fd):
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError(f"timed out waiting for lock on {description}")
         time.sleep(_POLL_INTERVAL)
 
 
-def _unlock(fd: int) -> None:
+def unlock_descriptor(fd: int) -> None:
+    """Release a lock taken with ``lock_descriptor``. Errors are ignored."""
     try:
         if fcntl is not None:
             fcntl.flock(fd, fcntl.LOCK_UN)
@@ -202,18 +229,11 @@ def file_lock(path: str | Path, *, timeout: float | None = None) -> Iterator[Non
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(lock_path, flags, 0o600)
     try:
-        if timeout is None:
-            _lock_blocking(fd)
-        else:
-            deadline = time.monotonic() + max(0.0, timeout)
-            while not _try_lock(fd):
-                if time.monotonic() >= deadline:
-                    raise TimeoutError(f"timed out waiting for lock on {lock_path}")
-                time.sleep(_POLL_INTERVAL)
+        lock_descriptor(fd, timeout=timeout, description=str(lock_path))
         try:
             yield
         finally:
-            _unlock(fd)
+            unlock_descriptor(fd)
     finally:
         os.close(fd)
 

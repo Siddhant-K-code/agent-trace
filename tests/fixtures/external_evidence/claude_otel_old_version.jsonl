@@ -1,0 +1,3 @@
+{"event.name": "claude_code.user_prompt", "session.id": "cc-old", "app.version": "2.1.200", "decision": "accept"}
+{"event.name": "claude_code.tool_decision", "session.id": "cc-old", "app.version": "2.1.200", "decision": "accept"}
+{"event.name": "claude_code.tool_result", "session.id": "cc-old", "app.version": "2.1.200", "decision": "accept"}

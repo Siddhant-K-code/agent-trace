@@ -19,12 +19,13 @@ Usage:
     agent-strace server --auth-key ast_<key>            # enforce auth
     AGENT_STRACE_AUTH_KEY=ast_<key> agent-strace server # via env var
 
-Agents point to it via environment variable:
-    AGENT_STRACE_ENDPOINT=http://collector:4317 python my_agent.py
+Agents point to it via environment variable. Only the ``agent-strace hook``
+commands and the Python integrations in ``agent_trace.integrations`` read it:
+    export AGENT_STRACE_ENDPOINT=http://collector:4317
 
     # With auth key on the client side
-    AGENT_STRACE_ENDPOINT=https://collector.example.com
-    AGENT_STRACE_AUTH_KEY=ast_<key>
+    export AGENT_STRACE_ENDPOINT=https://collector.example.com
+    export AGENT_STRACE_AUTH_KEY=ast_<key>
 
 Without --auth-key / AGENT_STRACE_AUTH_KEY the server runs unauthenticated
 (original behaviour, unchanged for local use).

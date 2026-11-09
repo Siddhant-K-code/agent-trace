@@ -107,8 +107,11 @@ fi
 if command -v agent-strace >/dev/null 2>&1; then
   agent-strace hook --provider copilot "$event" || true
 elif [ -f "$install_dir/agent_trace/cli.py" ]; then
+  # agent_trace.entry runs hooks without loading the full CLI; older releases lack it.
+  module=agent_trace.cli
+  [ -f "$install_dir/agent_trace/entry.py" ] && module=agent_trace.entry
   PYTHONPATH="$install_dir${{PYTHONPATH:+:$PYTHONPATH}}" \\
-    python3 -m agent_trace.cli hook --provider copilot "$event" || true
+    python3 -m "$module" hook --provider copilot "$event" || true
 else
   cat >/dev/null
 fi

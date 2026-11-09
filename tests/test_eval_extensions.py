@@ -311,6 +311,24 @@ class TestDatasetAutoPopulate(unittest.TestCase):
         added = auto_populate(self.store, self.ds_path, "nonexistent-filter", since_days=1)
         self.assertEqual(added, 0)
 
+    def test_cli_name_writes_to_trace_dir_datasets(self):
+        import contextlib
+        import io
+
+        from agent_trace.cli import build_parser
+        from agent_trace.eval import cmd_eval
+
+        now = time.time()
+        _add_session(self.store, "s_err", [_error()], started_at=now - 100)
+        args = build_parser().parse_args([
+            "--trace-dir", self.tmp,
+            "eval", "dataset", "auto", "--name", "nightly", "--since", "1d",
+        ])
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cmd_eval(args), 0)
+        entries = list_entries(Path(self.tmp) / "datasets" / "nightly.jsonl")
+        self.assertEqual([e.session_id for e in entries], ["s_err"])
+
 
 # ---------------------------------------------------------------------------
 # eval --ci baseline

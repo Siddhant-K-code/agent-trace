@@ -188,6 +188,7 @@ class TestReleaseWorkflows(unittest.TestCase):
             "publish-vscode.yml",
             "scorecard.yml",
             "capture-matrix-freshness.yml",
+            "test.yml",
         ):
             with self.subTest(workflow=name):
                 workflow = (WORKFLOWS / name).read_text()
@@ -195,6 +196,20 @@ class TestReleaseWorkflows(unittest.TestCase):
                 self.assertTrue(actions)
                 for revision in actions:
                     self.assertRegex(revision, r"^[0-9a-f]{40}$")
+
+    def test_tests_run_on_windows_with_read_only_token(self):
+        workflow = (WORKFLOWS / "test.yml").read_text()
+
+        self.assertIn("\npermissions:\n  contents: read\n", workflow)
+        windows_job = workflow.split("\n  windows:\n", 1)[1].split("\n  vscode-extension:", 1)[0]
+        self.assertIn("runs-on: windows-latest", windows_job)
+        for target in (
+            "tests.test_fileutil",
+            "tests.test_store.TestStoreWriteLock",
+            "tests.test_config_watch",
+        ):
+            self.assertIn(target, windows_job)
+        self.assertIn("persist-credentials: false", windows_job)
 
     def test_repository_trust_files_exist(self):
         paths = (

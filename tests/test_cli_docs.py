@@ -19,16 +19,26 @@ from agent_trace.cli import (
 REPO_ROOT = Path(__file__).resolve().parent.parent
 COMMANDS_MD = REPO_ROOT / "docs" / "commands.md"
 OTHER_DOCS = (
+    "README.md",
     "docs/agents-md-integration.md",
     "docs/security.md",
     "docs/server.md",
 )
-DOCSTRING_MODULES = ("a2a.py", "iac.py", "mcp_server.py", "standup.py")
+DOCSTRING_MODULES = (
+    "a2a.py",
+    "config_watch.py",
+    "iac.py",
+    "mcp_server.py",
+    "server.py",
+    "standup.py",
+)
 
 _HEADING = re.compile(r"^###\s+`([^`]+)`")
 _FLAG = re.compile(r"(?<![\w-])(--?[A-Za-z][\w-]*)")
 _CHOICES = re.compile(r"(?<![\w-])(--?[A-Za-z][\w-]*)[ =]([\w.-]+(?:\\?\|[\w.-]+)+)")
 _SEPARATOR = re.compile(r"(?:^|\s)--(?:\s|$)")
+_INLINE_COMMAND = re.compile(r"`agent-strace ([^`]+)`")
+_POSITIONAL_PARAM = re.compile(r"\$\d")
 
 
 def _subparsers(parser: argparse.ArgumentParser) -> dict:
@@ -71,7 +81,8 @@ def _usage_tokens(text: str) -> list[str]:
 
 
 def find_mismatches(markdown: str) -> tuple[list[str], int]:
-    """Return (mismatches, flags_checked) for usage blocks and flag tables."""
+    """Return (mismatches, flags_checked) for usage blocks, inline
+    `agent-strace ...` spans, and flag tables."""
     root = build_parser()
     tree = _parser_tree(root)
     root_actions = list(root._actions)
@@ -132,6 +143,12 @@ def find_mismatches(markdown: str) -> tuple[list[str], int]:
             check(lineno, label, text, actions_for(usage_path, subtree=False))
             continue
 
+        for text in _INLINE_COMMAND.findall(line):
+            path = _resolve(root, _usage_tokens(text))
+            text = _SEPARATOR.split(text)[0]
+            label = "agent-strace " + " ".join(path)
+            check(lineno, label, text, actions_for(path, subtree=False))
+
         match = _HEADING.match(line)
         if match:
             heading = _resolve(root, _normalise_skills_argv(match.group(1).split()))
@@ -151,6 +168,44 @@ def _docstring_usage(path: Path) -> str:
     doc = ast.get_docstring(ast.parse(path.read_text(encoding="utf-8"))) or ""
     lines = [line for line in doc.splitlines() if "agent-strace " in line]
     return "\n".join(["```", *lines, "```"])
+
+
+def find_positional_params(markdown: str) -> list[str]:
+    """Return ``agent-strace`` commands that use ``$1``-style shell parameters.
+
+    The shell expands an unquoted ``$5`` to an empty string, so a pasted
+    ``--budget $5`` loses its value.
+    """
+    problems = []
+    in_code = False
+    for lineno, line in enumerate(markdown.splitlines(), 1):
+        if line.startswith("```"):
+            in_code = not in_code
+            continue
+        if in_code:
+            index = line.find("agent-strace ")
+            commands = [line[index:]] if index >= 0 else []
+        else:
+            commands = ["agent-strace " + m for m in _INLINE_COMMAND.findall(line)]
+        for command in commands:
+            if _POSITIONAL_PARAM.search(re.sub(r"'[^']*'", "''", command)):
+                problems.append(f"line {lineno}: {command.strip()}")
+    return problems
+
+
+def _markdown_section(text: str, heading: str) -> str:
+    """Return the whitespace-normalised body of the section under *heading*."""
+    lines = text.splitlines()
+    start = lines.index(heading)
+    level = len(heading) - len(heading.lstrip("#"))
+    body, in_code = [], False
+    for line in lines[start + 1:]:
+        if line.startswith("```"):
+            in_code = not in_code
+        elif not in_code and re.match(rf"#{{1,{level}}} ", line):
+            break
+        body.append(line)
+    return " ".join(" ".join(body).split())
 
 
 class CommandsDocFlagsTest(unittest.TestCase):
@@ -205,6 +260,62 @@ class CommandsDocFlagsTest(unittest.TestCase):
         problems, checked = find_mismatches(markdown)
         self.assertEqual(problems, [])
         self.assertEqual(checked, 5)
+
+    def test_checker_reads_inline_command_spans(self):
+        markdown = "\n".join([
+            "| [`agent-strace watch --timeout 30m --budget 5`](docs/commands.md) | ok |",
+            "Run `agent-strace drift --baseline-file old.json` to compare.",
+            "Then `agent-strace record -- python app.py -x`.",
+        ])
+        problems, checked = find_mismatches(markdown)
+        self.assertEqual(checked, 3)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("agent-strace drift: --baseline-file", problems[0])
+
+    def test_docs_do_not_use_positional_shell_parameters(self):
+        for path in (COMMANDS_MD, *(REPO_ROOT / name for name in OTHER_DOCS)):
+            with self.subTest(doc=path.name):
+                problems = find_positional_params(path.read_text(encoding="utf-8"))
+                self.assertEqual(problems, [], "\n" + "\n".join(problems))
+
+    def test_positional_parameter_check(self):
+        markdown = "\n".join([
+            "| [`agent-strace watch --budget $5`](x) | inline |",
+            "```",
+            "agent-strace watch --rules mcp-poisoning,budget:$5",
+            "agent-strace search 'cost: $5'",
+            'agent-strace watch --agent-pid "$(pgrep -n claude)" --budget 5',
+            "```",
+            "Pass `5`, not `$5`.",
+        ])
+        problems = find_positional_params(markdown)
+        self.assertEqual([p.split(":", 1)[0] for p in problems], ["line 1", "line 3"])
+
+
+class AuditToolsDocTest(unittest.TestCase):
+    """Every shadow AI tool signature must be named wherever the tools are listed."""
+
+    def setUp(self):
+        from agent_trace import shadow_ai
+
+        self.tools = list(shadow_ai.FILE_SIGNALS)
+        self.listings = {
+            "docs/commands.md": _markdown_section(
+                COMMANDS_MD.read_text(encoding="utf-8"), "### `audit-tools`"),
+            "docs/security.md": _markdown_section(
+                (REPO_ROOT / "docs" / "security.md").read_text(encoding="utf-8"),
+                "## Shadow AI detection"),
+            "shadow_ai.py": " ".join((shadow_ai.__doc__ or "").split()),
+        }
+
+    def test_detected_tools_are_listed(self):
+        for source, text in self.listings.items():
+            for tool in self.tools:
+                with self.subTest(source=source, tool=tool):
+                    self.assertIn(tool, text)
+
+    def test_audit_tools_does_not_claim_mcp_detection(self):
+        self.assertNotIn("MCP", self.listings["docs/commands.md"])
 
 
 if __name__ == "__main__":

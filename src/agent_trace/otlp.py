@@ -55,6 +55,7 @@ _SEMCONV_OUTPUT_TOKENS = "gen_ai.usage.output_tokens"
 _SEMCONV_TOOL_NAME = "gen_ai.tool.name"
 _SEMCONV_TOOL_CALL_ID = "gen_ai.tool.call.id"
 _SEMCONV_FINISH_REASON = "gen_ai.response.finish_reasons"
+_SEMCONV_CONVERSATION_ID = "gen_ai.conversation.id"
 
 # OpenInference compatibility attributes. These are emitted additively by the
 # GenAI exporter so the same OTLP/HTTP JSON payload remains useful in Phoenix.
@@ -301,6 +302,19 @@ def _event_trace_attributes(event: TraceEvent, role: str) -> dict[str, Any]:
     return attrs
 
 
+def _conversation_attributes(meta: SessionMeta) -> dict[str, str]:
+    """Return gen_ai.conversation.id when the agent supplied its own session ID.
+
+    The GenAI conventions make the attribute conditionally required only when
+    an ID is readily available and say instrumentations SHOULD NOT invent one,
+    so sessions without a native ID omit it instead of reusing session_id.
+    """
+    conversation_id = getattr(meta, "conversation_id", "")
+    if isinstance(conversation_id, str) and conversation_id:
+        return {_SEMCONV_CONVERSATION_ID: conversation_id}
+    return {}
+
+
 def _openinference_metadata(attrs: Mapping[str, Any]) -> dict[str, Any]:
     """Pack agent-strace attributes into OpenInference metadata."""
     return {
@@ -475,6 +489,7 @@ def session_to_otlp(
         # GenAI semantic conventions
         _SEMCONV_SYSTEM: gen_ai_system,
         _SEMCONV_OP: "agent.session",
+        **_conversation_attributes(meta),
     })
 
     # Collect span events (user prompts, assistant responses, decisions)
@@ -735,6 +750,8 @@ def session_to_otlp_genai(
     - LLM request/response pairs become gen_ai.client.operation child spans
       (not just events on the root span)
     - Root span carries gen_ai.agent.id and gen_ai.agent.name
+    - Root, LLM and tool spans carry gen_ai.conversation.id when the agent
+      supplied its own session ID
     - Error events use the OTel exception event format
     - Tool calls carry gen_ai.tool.name and gen_ai.tool.call.id
     - gen_ai.system is derived from the model name when possible
@@ -758,6 +775,7 @@ def session_to_otlp_genai(
         # OpenInference compatibility attributes
         _OI_SPAN_KIND: "AGENT",
         _OI_SESSION_ID: meta.session_id,
+        **_conversation_attributes(meta),
         # Standard resource attributes
         "agent.session_id": meta.session_id,
         "agent.tool_calls": meta.tool_calls,
@@ -838,6 +856,7 @@ def session_to_otlp_genai(
                 _SEMCONV_OP: "chat",
                 _OI_SPAN_KIND: "LLM",
                 _OI_SESSION_ID: meta.session_id,
+                **_conversation_attributes(meta),
                 _OI_LLM_PROVIDER: system if system != "unknown" else raw_llm_provider,
                 "agent.strace.provider": raw_llm_provider,
             }
@@ -913,6 +932,7 @@ def session_to_otlp_genai(
                 ),
                 _OI_SPAN_KIND: "TOOL",
                 _OI_SESSION_ID: meta.session_id,
+                **_conversation_attributes(meta),
                 _OI_TOOL_NAME: tool_name,
             }
             if call_event:
@@ -973,6 +993,7 @@ def session_to_otlp_genai(
                 ),
                 _OI_SPAN_KIND: "TOOL",
                 _OI_SESSION_ID: meta.session_id,
+                **_conversation_attributes(meta),
                 _OI_TOOL_NAME: tool_name,
             }
             if call_event and isinstance(call_event.data, Mapping):
@@ -1018,6 +1039,7 @@ def session_to_otlp_genai(
             _SEMCONV_OP: "chat",
             _OI_SPAN_KIND: "LLM",
             _OI_SESSION_ID: meta.session_id,
+            **_conversation_attributes(meta),
             _OI_LLM_PROVIDER: system if system != "unknown" else raw_llm_provider,
             "agent.strace.provider": raw_llm_provider,
             **_event_trace_attributes(req_event, "request"),
@@ -1058,6 +1080,7 @@ def session_to_otlp_genai(
             _SEMCONV_TOOL_CALL_ID: call_event.event_id,
             _OI_SPAN_KIND: "TOOL",
             _OI_SESSION_ID: meta.session_id,
+            **_conversation_attributes(meta),
             _OI_TOOL_NAME: tool_name,
             **_event_trace_attributes(call_event, "request"),
         }

@@ -152,6 +152,47 @@ class TestCopilotHooks(unittest.TestCase):
 
         self.assertEqual(errors[0].data["error"], "Command exited with status 1")
 
+    def test_copilot_tool_call_id_pairs_results_out_of_order(self):
+        # Copilot CLI 1.0.107 sends toolCallId on pre, post and failure hooks.
+        def send(event, payload):
+            payload = {"sessionId": "copilotcallid1234", **payload}
+            with patch.object(sys, "stdin", io.StringIO(json.dumps(payload))):
+                hook_main(["--provider", "copilot", event])
+
+        send("session-start", {"source": "new"})
+        for call_id, path in (("toolu_first", "a.txt"), ("toolu_second", "b.txt")):
+            send("pre-tool", {
+                "toolCallId": call_id,
+                "toolName": "view",
+                "toolArgs": {"path": path},
+            })
+        send("post-tool-failure", {
+            "toolCallId": "toolu_second",
+            "toolName": "view",
+            "toolArgs": {"path": "b.txt"},
+            "error": "Path does not exist",
+        })
+        send("post-tool", {
+            "toolCallId": "toolu_first",
+            "toolName": "view",
+            "toolArgs": {"path": "a.txt"},
+            "toolResult": {"resultType": "success", "textResultForLlm": "a"},
+        })
+
+        session_id = _read_active_session(provider="copilot")
+        events = TraceStore(self.tmpdir).load_events(session_id)
+        calls = {
+            e.data["tool_use_id"]: e for e in events if e.event_type == EventType.TOOL_CALL
+        }
+        (error,) = [e for e in events if e.event_type == EventType.ERROR]
+        (result,) = [e for e in events if e.event_type == EventType.TOOL_RESULT]
+
+        self.assertEqual(set(calls), {"toolu_first", "toolu_second"})
+        self.assertEqual(error.data["tool_use_id"], "toolu_second")
+        self.assertEqual(error.parent_id, calls["toolu_second"].event_id)
+        self.assertEqual(result.data["tool_use_id"], "toolu_first")
+        self.assertEqual(result.parent_id, calls["toolu_first"].event_id)
+
     def test_copilot_resume_preserves_existing_session_metadata(self):
         session_payload = {
             "sessionId": "copilotresume1234",
@@ -407,6 +448,37 @@ class TestCopilotSetup(unittest.TestCase):
             "agent-strace hook --provider copilot subagent-stop",
         )
         self.assertIn("GitHub Copilot hooks config", err.getvalue())
+
+
+class TestCopilotConversationId(unittest.TestCase):
+    """Copilot CLI's sessionId is its gen_ai.conversation.id."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        env = patch.dict(os.environ, {"AGENT_TRACE_DIR": tmp.name})
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("AGENT_TRACE_COPILOT_SESSION_ID", None)
+        os.environ.pop("AGENT_TRACE_REDACT", None)
+        self.store = TraceStore(tmp.name)
+
+    def _dispatch(self, event, payload):
+        with patch.object(sys, "stdin", io.StringIO(json.dumps(payload))):
+            hook_main(["--provider", "copilot", event])
+
+    def test_session_start_stores_camel_case_session_id(self):
+        sid = "8d6f3a52-41c7-4b0e-a9d2-7e1f0c3b5a64"
+        self._dispatch("sessionStart", {"sessionId": sid, "source": "new"})
+        meta = self.store.load_meta(sid[:16])
+        self.assertEqual(meta.conversation_id, sid)
+
+    def test_subagent_without_session_start_stores_session_id(self):
+        sid = "subagent-0000-1111-2222"
+        self._dispatch("userPromptSubmitted", {"sessionId": sid, "prompt": "go"})
+        meta = self.store.load_meta(sid[:16])
+        self.assertEqual(meta.command, "github-copilot (no session-start)")
+        self.assertEqual(meta.conversation_id, sid)
 
 
 if __name__ == "__main__":

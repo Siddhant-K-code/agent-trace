@@ -53,11 +53,30 @@ The standard channels are:
 A caller may feed more event types to a pairer, for example cost reporting
 also treats ``assistant_response`` as an LLM response because it carries
 usage, but the rules above stay the same.
+
+Recorders pair while the trace is written, so a stored response carries
+the ``parent_id`` and ``duration_ms`` that the rules above then follow:
+
+- Proxies (:class:`KeyedPairer`): the stdio and HTTP MCP proxies see the
+  JSON-RPC ``id`` on both the ``tools/call`` request and its response, so a
+  ``tool_result`` or ``error`` pairs with the pending ``tool_call`` of the
+  same id and nothing else. A request with the same id replaces the pending
+  one. The pending map is bounded; the oldest request is dropped first.
+- Hooks (:func:`match_hook_tool_call`): each tool hook runs in its own
+  process, so pending calls live in a JSON file that the caller reads and
+  writes under the store write lock. A result pairs with the pending call
+  that has its ``tool_use_id``. Without one, it pairs with the oldest pending
+  call of the same tool name, preferring calls from the same agent so a
+  subagent's result does not take its parent's call. The tool name is the
+  only evidence some providers send, and the hook records the pairing as a
+  ``parent_id`` at once, so exporters never need a fallback for it.
 """
 
 from __future__ import annotations
 
-from collections.abc import Collection, Iterable, Mapping
+import math
+import threading
+from collections.abc import Collection, Hashable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Generic, TypeVar
 
@@ -195,8 +214,123 @@ def pair_llm_events(events: Iterable[TraceEvent]) -> Pairing:
     return pair_events(events, LLM_REQUEST_TYPES, LLM_RESPONSE_TYPES, LLM_FALLBACK)
 
 
+def link_response(response: TraceEvent, request_id: str, request_timestamp: float) -> None:
+    """Record on ``response`` that it answers the request ``request_id``."""
+    response.parent_id = request_id
+    response.duration_ms = (response.timestamp - request_timestamp) * 1000
+
+
+class KeyedPairer(Generic[T]):
+    """Pair live responses with pending requests by a correlation key.
+
+    Used where the request and its response carry the same key, such as a
+    JSON-RPC ``id``. A response pairs only with the request of its key; there
+    is no fallback. A ``None`` key is never pending and never pairs. Adding a
+    key that is already pending replaces that request, which becomes the
+    newest. With ``max_pending`` set, the oldest requests are dropped once
+    more than that many are pending, so requests that never get a response
+    do not accumulate.
+
+    Methods are safe to call from several threads. Each instance has its own
+    pending map, so two proxies never pair with each other's requests.
+    """
+
+    def __init__(self, max_pending: int | None = None) -> None:
+        if max_pending is not None and max_pending < 1:
+            raise ValueError("max_pending must be at least 1")
+        self.max_pending = max_pending
+        self._pending: dict[Hashable, T] = {}
+        self._lock = threading.Lock()
+
+    def add(self, key: Hashable | None, item: T) -> None:
+        """Make ``item`` pending under ``key``."""
+        if key is None:
+            return
+        with self._lock:
+            self._pending.pop(key, None)
+            self._pending[key] = item
+            if self.max_pending is not None:
+                while len(self._pending) > self.max_pending:
+                    del self._pending[next(iter(self._pending))]
+
+    def match(self, key: Hashable | None) -> T | None:
+        """Return and stop tracking the item pending under ``key``, if any."""
+        if key is None:
+            return None
+        with self._lock:
+            return self._pending.pop(key, None)
+
+    def clear(self) -> int:
+        """Drop every pending item. Returns how many were dropped."""
+        with self._lock:
+            count = len(self._pending)
+            self._pending.clear()
+        return count
+
+    def pending(self) -> dict[Hashable, T]:
+        """Return a copy of the pending items by key, oldest first."""
+        with self._lock:
+            return dict(self._pending)
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._pending)
+
+
+def _hook_timestamp(info: Mapping[str, Any]) -> float | None:
+    value = info.get("timestamp")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value):
+        return None
+    return float(value)
+
+
+def match_hook_tool_call(
+    pending: Mapping[str, Any],
+    tool_name: Any,
+    tool_use_id: Any = "",
+    agent_id: Any = "",
+) -> str | None:
+    """Return the ID of the pending hook tool call a tool result answers.
+
+    ``pending`` maps a ``tool_call`` event ID to the entry the pre-tool hook
+    stored for it: ``tool_name``, ``tool_use_id``, ``timestamp`` and, for
+    subagents, ``agent_id``. With a ``tool_use_id``, only the entry with that
+    ``tool_use_id`` matches. Without one, the oldest entry for ``tool_name``
+    matches, and an entry from the same ``agent_id`` beats any entry from
+    another agent. Entries that are not objects, or have no numeric
+    ``timestamp``, never match. The caller removes the matched entry.
+    """
+    match_id: str | None = None
+    match_rank: tuple[bool, float] | None = None
+    for event_id, info in pending.items():
+        if not event_id or not isinstance(event_id, str) or not isinstance(info, Mapping):
+            continue
+        timestamp = _hook_timestamp(info)
+        if timestamp is None:
+            continue
+        if tool_use_id:
+            if info.get("tool_use_id") == tool_use_id:
+                return event_id
+            continue
+        if info.get("tool_name") != tool_name:
+            continue
+        rank = (info.get("agent_id", "") == agent_id, -timestamp)
+        if match_rank is None or rank > match_rank:
+            match_id = event_id
+            match_rank = rank
+    return match_id
+
+
+def hook_call_timestamp(info: Any) -> float | None:
+    """Return the timestamp a pending hook entry recorded, if it is valid."""
+    return _hook_timestamp(info) if isinstance(info, Mapping) else None
+
+
 __all__ = [
     "FALLBACK_POLICIES",
+    "KeyedPairer",
     "LLM_FALLBACK",
     "LLM_REQUEST_TYPES",
     "LLM_RESPONSE_TYPES",
@@ -208,7 +342,10 @@ __all__ = [
     "TOOL_REQUEST_TYPES",
     "TOOL_RESPONSE_TYPES",
     "event_model",
+    "hook_call_timestamp",
+    "link_response",
     "llm_pairer",
+    "match_hook_tool_call",
     "pair_events",
     "pair_llm_events",
     "pair_tool_events",

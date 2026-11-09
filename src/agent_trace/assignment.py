@@ -34,7 +34,13 @@ from typing import Any, Iterable
 
 from . import __version__
 from .eval.config import _parse_yaml_value
-from .fileutil import MAX_TRUSTED_SYMLINKS, has_untrusted_symlink, trusted_symlink_target
+from .fileutil import (
+    MAX_TRUSTED_SYMLINKS,
+    has_untrusted_symlink,
+    lock_descriptor,
+    trusted_symlink_target,
+    unlock_descriptor,
+)
 from .models import EventType, SessionMeta, TraceEvent
 from .store import TraceStore, validate_stored_id
 
@@ -456,19 +462,11 @@ def _locked_store_directory(store: TraceStore):
         try:
             if not stat.S_ISREG(os.fstat(lock_fd).st_mode):
                 raise AssignmentError("trace store lock is not a regular file")
-            try:
-                import fcntl
-                fcntl.flock(lock_fd, fcntl.LOCK_EX)
-            except (ImportError, OSError):
-                pass
+            lock_descriptor(lock_fd, description=".store.lock")
             try:
                 yield base_fd
             finally:
-                try:
-                    import fcntl
-                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
-                except (ImportError, OSError):
-                    pass
+                unlock_descriptor(lock_fd)
         finally:
             os.close(lock_fd)
     finally:

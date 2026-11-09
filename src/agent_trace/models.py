@@ -27,9 +27,39 @@ import json
 import os
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
 from typing import Any
+
+
+_UNKNOWN_FIELDS_ATTR = "_unknown_fields"
+
+
+def _from_dict(cls, data: Any):
+    """Build ``cls`` from ``data``, ignoring keys that are not its fields.
+
+    Newer writers may add optional fields. Ignoring them lets an older reader
+    load the record instead of failing with an unexpected keyword argument.
+    The ignored keys are kept on the instance and written back by ``to_json``
+    so rewriting the record (``update_meta``, ``tag_session``) does not erase
+    them.
+    """
+    if not isinstance(data, dict):
+        return cls(**data)
+    names = {f.name for f in fields(cls)}
+    known = {key: value for key, value in data.items() if key in names}
+    unknown = {key: value for key, value in data.items() if key not in names}
+    obj = cls(**known)
+    if unknown:
+        setattr(obj, _UNKNOWN_FIELDS_ATTR, unknown)
+    return obj
+
+
+def _with_unknown_fields(obj: Any, d: dict[str, Any]) -> dict[str, Any]:
+    unknown = getattr(obj, _UNKNOWN_FIELDS_ATTR, None)
+    if isinstance(unknown, dict):
+        d.update({key: value for key, value in unknown.items() if key not in d})
+    return d
 
 
 class EventType(str, Enum):
@@ -74,7 +104,7 @@ class TraceEvent:
             d.pop("redacted", None)
         # drop None values
         d = {k: v for k, v in d.items() if v is not None and v != ""}
-        return json.dumps(d, separators=(",", ":"))
+        return json.dumps(_with_unknown_fields(self, d), separators=(",", ":"))
 
     @classmethod
     def from_json(cls, line: str) -> TraceEvent:
@@ -83,7 +113,7 @@ class TraceEvent:
         # Deserialising a legacy event must not accidentally assign the
         # current process tenant to historical data.
         d.setdefault("tenant_id", "")
-        return cls(**d)
+        return _from_dict(cls, d)
 
 
 @dataclass
@@ -121,11 +151,15 @@ class SessionMeta:
     tenant_id: str = field(
         default_factory=lambda: os.environ.get("AGENT_STRACE_TENANT_ID", "").strip()
     )
+    # The agent's own session ID in full (Claude Code ``session_id``, Copilot
+    # CLI ``sessionId``). Empty when the agent did not supply one. Exported as
+    # ``gen_ai.conversation.id`` (ADR-0011).
+    conversation_id: str = ""
 
     def to_json(self) -> str:
         d = asdict(self)
         d = {k: v for k, v in d.items() if v is not None and v != "" and v != 0}
-        return json.dumps(d, indent=2)
+        return json.dumps(_with_unknown_fields(self, d), indent=2)
 
     @classmethod
     def from_json(cls, text: str) -> SessionMeta:
@@ -133,4 +167,4 @@ class SessionMeta:
         # Keep pre-tenancy metadata untagged even when the reader itself is
         # running with AGENT_STRACE_TENANT_ID set.
         data.setdefault("tenant_id", "")
-        return cls(**data)
+        return _from_dict(cls, data)

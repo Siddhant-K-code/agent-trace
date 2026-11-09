@@ -249,6 +249,10 @@ def cmd_dataset(args: argparse.Namespace) -> int:
         label = getattr(args, "label", "") or filter_spec
         trace_dir = resolve_trace_dir(getattr(args, "trace_dir", None))
         store = TraceStore(trace_dir)
+        if not dataset_path:
+            # Same location `optimize --dataset NAME` reads from.
+            name = getattr(args, "name", "") or "default"
+            dataset_path = store.base_dir / "datasets" / f"{name}.jsonl"
         added = auto_populate(store, dataset_path, filter_spec, since_days=since_days, label=label)
         sys.stdout.write(f"Added {added} session(s) to {dataset_path} (filter: {filter_spec})\n")
         return 0

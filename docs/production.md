@@ -38,8 +38,41 @@ agent-strace export <session-id> --format otlp-genai \
 | Tool calls | `tool/<name>` spans | `gen_ai.tool.call/<name>` spans |
 | Root span | `agent.name` attribute | `gen_ai.agent.id` + `gen_ai.agent.name` |
 | Errors | Custom error span | OTel `exception` event format |
+| `gen_ai.conversation.id` | Root span | Root, LLM and tool spans |
 
 `--format otlp` is unchanged for backwards compatibility. See [ADR-0011](../ADRs/0011-otlp-genai-semantic-conventions.md) for design rationale.
+
+### Joining with native agent telemetry
+
+Both formats emit `gen_ai.conversation.id` when the agent supplied its own
+session ID: hook sessions whose payload carries `session_id` (Claude Code,
+GitHub Copilot CLI, Codex, Gemini CLI, Cursor), and `import` of Claude Code
+JSONL transcripts. The value is the agent's full
+session ID, not the agent-strace session ID. Sessions without one (`record`,
+proxy, SDK integrations, and sessions recorded before this field existed)
+omit the attribute.
+
+| Native source | Join on |
+|---|---|
+| GitHub Copilot CLI OTel (`gen_ai.conversation.id`) | `gen_ai.conversation.id` = `gen_ai.conversation.id` |
+| Claude Code OTel (`session.id`) | `gen_ai.conversation.id` = `session.id` |
+
+Do not join on `session.id` from agent-strace: it is the local agent-strace
+session ID, which is truncated to 16 characters for hook sessions.
+
+#### Version skew
+
+Sessions with a native ID store it as `conversation_id` in `meta.json`.
+Readers and collectors on v0.106.0 or older reject metadata that contains
+this key: `list` and other readers on a shared trace store fail to load the
+session, and the collector returns 400 on `POST /sessions`. Upgrade the
+collector and every reader that shares the trace store before the clients
+that write it. Sessions without a native ID do not write the key and stay
+readable by older versions.
+
+From this release, readers and the collector ignore metadata and event keys
+they do not know and keep them when they rewrite the record, so later
+additive fields do not need this ordering.
 
 ### OpenInference compatibility
 
@@ -326,6 +359,13 @@ the same rules, defined in `src/agent_trace/pairing.py`:
 
 Requests still pending at the end are exported as unfinished spans in OTLP and
 are not exported to Langfuse.
+
+Recorders set `parent_id` while they write the trace, with rules from the same
+module. `record` and `record-http` link a `tool_result` or `error` to the
+pending `tool_call` with the same JSON-RPC id, and keep at most 10,000 calls
+pending per proxy. Hooks link a result to the pending call with its
+`tool_use_id`, or, when the provider sends none, to the oldest pending call of
+the same tool name, preferring calls from the same subagent.
 
 ---
 
