@@ -2415,8 +2415,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_server.add_argument("--port", type=int, default=4317,
                           help="port to listen on (default: 4317)")
-    p_server.add_argument("--host", default="0.0.0.0",
-                          help="host to bind to (default: 0.0.0.0)")
+    p_server.add_argument(
+        "--host",
+        default=None,
+        help=(
+            "host to bind to (default: 127.0.0.1 with --dashboard, "
+            "otherwise 0.0.0.0)"
+        ),
+    )
     p_server.add_argument("--storage", metavar="DIR",
                           help="storage directory for traces "
                                "(default: $AGENT_STRACE_STORAGE or .agent-traces)")

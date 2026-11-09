@@ -219,7 +219,8 @@ trace contents, paths, session IDs, command arguments, or repository data are se
 |---|---|
 | Status bar | Live cost, tool call count, and active tool name. Click to open the event stream. |
 | Gutter annotations | Blue border on files the agent read, amber on files it modified. |
-| Event stream panel | Live feed: every tool call, file op, LLM request, and error. |
+| Evidence review | Ordered events, evidence health, gaps, relationships, annotations, raw fields, and reviewer filters. |
+| Local review actions | Compare sessions, save a privacy-minimized HTML review, or download OTLP JSON without uploading. |
 | Pause button | Stops the agent mid-session via SIGSTOP. |
 
 ```bash

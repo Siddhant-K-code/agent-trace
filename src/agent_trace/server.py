@@ -35,6 +35,7 @@ See ADR-0012 for architecture decisions.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import secrets
@@ -44,8 +45,9 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
+from .event_data import NonObjectEventDataError
 from .models import SessionMeta, TraceEvent
 from .store import (
     TraceStore,
@@ -68,6 +70,37 @@ def _decode_read_session_id(segment: str) -> str:
     return validate_stored_id(
         unquote(segment, encoding="utf-8", errors="strict"), "stored session ID"
     )
+
+
+def _attachment_stem(session_id: str) -> str:
+    """Return a short ASCII filename component for a stored session ID."""
+    value = "".join(
+        character if character.isascii() and character.isalnum() else "-"
+        for character in session_id[:32]
+    ).strip("-")
+    return value or "session"
+
+
+def resolve_server_host(
+    host: str | None,
+    *,
+    dashboard: bool,
+    auth_key: str,
+) -> str:
+    """Choose a safe bind host and enforce dashboard authentication."""
+    resolved = host or ("127.0.0.1" if dashboard else "0.0.0.0")
+    if not dashboard or auth_key or resolved == "localhost":
+        return resolved
+    try:
+        loopback = ipaddress.ip_address(resolved).is_loopback
+    except ValueError:
+        loopback = False
+    if not loopback:
+        raise ValueError(
+            "unauthenticated dashboard access is limited to loopback; "
+            "use --auth-key for a non-loopback --host"
+        )
+    return resolved
 
 
 def generate_api_key() -> str:
@@ -190,11 +223,28 @@ class CollectorHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_attachment(
+        self,
+        status: int,
+        content: str,
+        *,
+        content_type: str,
+        filename: str,
+    ) -> None:
+        body = content.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self) -> None:
         if not self._check_auth():
             self._send_json(401, {"error": "Unauthorized"})
             return
-        path = urlparse(self.path).path.rstrip("/")
+        parsed_url = urlparse(self.path)
+        path = parsed_url.path.rstrip("/")
 
         # ------------------------------------------------------------------
         # Dashboard UI routes (only when --dashboard is enabled)
@@ -246,6 +296,98 @@ class CollectorHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+                return
+            if len(parts) == 5 and parts[1] == "api" and parts[2] == "sessions" and parts[4] == "review":
+                try:
+                    session_id = _decode_read_session_id(parts[3])
+                except (UnicodeDecodeError, ValueError) as exc:
+                    self._send_json(400, {"error": str(exc)})
+                    return
+                try:
+                    result = _wd.api_session_review(self.store, session_id)
+                except NonObjectEventDataError as exc:
+                    self._send_json(400, {"error": str(exc)})
+                    return
+                if result is None:
+                    self._send_json(404, {"error": f"session not found: {parts[3]}"})
+                    return
+                body = result.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if len(parts) == 5 and parts[1] == "api" and parts[2] == "sessions" and parts[4] == "compare":
+                try:
+                    session_id = _decode_read_session_id(parts[3])
+                    other_values = parse_qs(parsed_url.query).get("other", [])
+                    if len(other_values) != 1:
+                        raise ValueError("compare requires one other session ID")
+                    other_id = validate_stored_id(other_values[0], "stored session ID")
+                except (UnicodeDecodeError, ValueError) as exc:
+                    self._send_json(400, {"error": str(exc)})
+                    return
+                try:
+                    result = _wd.api_session_compare(self.store, session_id, other_id)
+                except (OSError, ValueError, TypeError, KeyError) as exc:
+                    self._send_json(400, {"error": f"comparison failed: {exc}"})
+                    return
+                if result is None:
+                    self._send_json(404, {"error": "one or both sessions were not found"})
+                    return
+                body = result.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if len(parts) == 5 and parts[1] == "api" and parts[2] == "sessions" and parts[4] == "share":
+                try:
+                    session_id = _decode_read_session_id(parts[3])
+                except (UnicodeDecodeError, ValueError) as exc:
+                    self._send_json(400, {"error": str(exc)})
+                    return
+                modes = parse_qs(parsed_url.query).get("mode", [])
+                if modes != ["minimized"]:
+                    self._send_json(400, {"error": "only mode=minimized is supported"})
+                    return
+                try:
+                    result = _wd.api_minimized_review_share(self.store, session_id)
+                except NonObjectEventDataError as exc:
+                    self._send_json(400, {"error": str(exc)})
+                    return
+                if result is None:
+                    self._send_json(404, {"error": f"session not found: {parts[3]}"})
+                    return
+                self._send_attachment(
+                    200,
+                    result,
+                    content_type="text/html; charset=utf-8",
+                    filename=f"review-{_attachment_stem(session_id)}-minimized.html",
+                )
+                return
+            if len(parts) == 5 and parts[1] == "api" and parts[2] == "sessions" and parts[4] == "otlp":
+                try:
+                    session_id = _decode_read_session_id(parts[3])
+                except (UnicodeDecodeError, ValueError) as exc:
+                    self._send_json(400, {"error": str(exc)})
+                    return
+                try:
+                    result = _wd.api_session_otlp(self.store, session_id)
+                except (OSError, ValueError, TypeError, KeyError) as exc:
+                    self._send_json(400, {"error": f"OTLP export failed: {exc}"})
+                    return
+                if result is None:
+                    self._send_json(404, {"error": f"session not found: {parts[3]}"})
+                    return
+                self._send_attachment(
+                    200,
+                    result,
+                    content_type="application/json",
+                    filename=f"trace-{_attachment_stem(session_id)}-otlp.json",
+                )
                 return
 
         if path == "/health":
@@ -405,7 +547,7 @@ def _make_handler(
 def run_server(
     port: int,
     storage_dir: str,
-    host: str = "0.0.0.0",
+    host: str | None = None,
     auth_key: str = "",
     dashboard: bool = False,
 ) -> None:
@@ -415,6 +557,7 @@ def run_server(
     ``Authorization: Bearer <auth_key>`` or receive 401.
     When *dashboard* is True, the server also serves a browser-based UI at ``/``.
     """
+    host = resolve_server_host(host, dashboard=dashboard, auth_key=auth_key)
     store = TraceStore(storage_dir)
     lock = threading.Lock()
     handler_class = _make_handler(store, lock, auth_key=auth_key, dashboard=dashboard)
@@ -457,11 +600,26 @@ def cmd_server(args: argparse.Namespace) -> int:
     storage = getattr(args, "storage", None) or os.environ.get(
         "AGENT_STRACE_STORAGE", DEFAULT_TRACE_DIR
     )
-    host = getattr(args, "host", "0.0.0.0")
+    requested_host = getattr(args, "host", None)
     auth_key = (
         getattr(args, "auth_key", None)
         or os.environ.get("AGENT_STRACE_AUTH_KEY", "")
     ).strip()
     dashboard = getattr(args, "dashboard", False)
-    run_server(port=port, storage_dir=storage, host=host, auth_key=auth_key, dashboard=dashboard)
+    try:
+        host = resolve_server_host(
+            requested_host,
+            dashboard=dashboard,
+            auth_key=auth_key,
+        )
+    except ValueError as exc:
+        sys.stderr.write(f"Error: {exc}\n")
+        return 1
+    run_server(
+        port=port,
+        storage_dir=storage,
+        host=host,
+        auth_key=auth_key,
+        dashboard=dashboard,
+    )
     return 0

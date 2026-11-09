@@ -5,7 +5,7 @@
  * then tails events.ndjson for new events. Emits typed events that
  * the rest of the extension subscribes to.
  *
- * Zero polling when no session is active — uses fs.watch on the
+ * Zero polling when no session is active. Uses fs.watch on the
  * .active-session file and the events.ndjson file.
  */
 
@@ -30,7 +30,9 @@ export type EventType =
   | "decision"
   | "error"
   | "user_prompt"
-  | "assistant_response";
+  | "assistant_response"
+  | "subagent_start"
+  | "subagent_stop";
 
 export interface TraceEvent {
   event_type: EventType;
@@ -40,6 +42,7 @@ export interface TraceEvent {
   parent_id?: string;
   duration_ms?: number;
   data: Record<string, unknown>;
+  redacted?: boolean;
 }
 
 export interface SessionMeta {
@@ -144,7 +147,7 @@ export class TraceWatcher extends vscode.Disposable {
   private _watchActiveSessionFile(): void {
     const dir = this.traceDir;
 
-    // Always use polling as primary — fs.watch silently fails on network/FUSE
+    // Always use polling as primary. fs.watch silently fails on network/FUSE
     // filesystems (e.g. Gitpod, WSL, Docker volumes) without throwing.
     this.pollTimer = setInterval(() => this._checkActiveSession(), 500);
 
@@ -246,7 +249,7 @@ export class TraceWatcher extends vscode.Disposable {
   private _watchEventsFile(sessionId: string): void {
     const eventsFile = path.join(this.traceDir, sessionId, "events.ndjson");
 
-    // Always poll — fs.watch silently fails on network/FUSE filesystems.
+    // Always poll. fs.watch silently fails on network/FUSE filesystems.
     // 300ms gives snappy updates without hammering the FS.
     this.eventsPollTimer = setInterval(() => this._readNewEvents(), 300);
 
@@ -381,7 +384,7 @@ export class TraceWatcher extends vscode.Disposable {
   private _resolveFilePath(p: string | undefined): string | null {
     if (!p) { return null; }
     if (path.isAbsolute(p)) { return p; }
-    // Relative paths — resolve against workspace root (parent of traceDir)
+    // Relative paths resolve against workspace root (parent of traceDir)
     const workspaceRoot = path.dirname(this.traceDir);
     return path.resolve(workspaceRoot, p);
   }

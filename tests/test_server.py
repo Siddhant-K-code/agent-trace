@@ -17,6 +17,7 @@ from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.server import (
     CollectorHandler,
     _make_handler,
+    resolve_server_host,
     send_event_to_endpoint,
     send_session_meta_to_endpoint,
 )
@@ -63,6 +64,43 @@ def _post(url: str, body: bytes, content_type: str = "application/json") -> tupl
             return resp.status, resp.read()
     except urllib.error.HTTPError as e:
         return e.code, e.read()
+
+
+class TestDashboardBinding(unittest.TestCase):
+    def test_dashboard_defaults_to_loopback(self):
+        self.assertEqual(
+            resolve_server_host(None, dashboard=True, auth_key=""),
+            "127.0.0.1",
+        )
+
+    def test_collector_without_dashboard_keeps_remote_default(self):
+        self.assertEqual(
+            resolve_server_host(None, dashboard=False, auth_key=""),
+            "0.0.0.0",
+        )
+
+    def test_unauthenticated_remote_dashboard_is_rejected(self):
+        for host in ("0.0.0.0", "::", "192.0.2.10", "dashboard.example"):
+            with self.subTest(host=host):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "unauthenticated dashboard access is limited to loopback",
+                ):
+                    resolve_server_host(host, dashboard=True, auth_key="")
+
+    def test_authenticated_remote_dashboard_is_allowed(self):
+        self.assertEqual(
+            resolve_server_host("0.0.0.0", dashboard=True, auth_key="ast_test"),
+            "0.0.0.0",
+        )
+
+    def test_loopback_dashboard_does_not_require_auth(self):
+        for host in ("127.0.0.1", "127.0.0.2", "::1", "localhost"):
+            with self.subTest(host=host):
+                self.assertEqual(
+                    resolve_server_host(host, dashboard=True, auth_key=""),
+                    host,
+                )
 
 
 # ---------------------------------------------------------------------------
