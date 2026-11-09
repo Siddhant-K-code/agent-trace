@@ -125,12 +125,30 @@ class TestReleaseWorkflows(unittest.TestCase):
         self.assertIn("persist-credentials: false", workflow)
         self.assertNotIn("contents: write", workflow)
 
+    def test_capture_matrix_freshness_runs_only_on_schedule_or_dispatch(self):
+        workflow = (WORKFLOWS / "capture-matrix-freshness.yml").read_text()
+        triggers = workflow.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
+
+        self.assertIn("schedule:", triggers)
+        self.assertIn("workflow_dispatch:", triggers)
+        self.assertNotIn("pull_request", triggers)
+        self.assertNotIn("push:", triggers)
+        self.assertIn("\npermissions:\n  contents: read\n", workflow)
+        self.assertNotIn(": write", workflow)
+        self.assertIn("persist-credentials: false", workflow)
+        self.assertIn(
+            "python scripts/check_capture_matrix_freshness.py --check", workflow
+        )
+        self.assertIn("GITHUB_STEP_SUMMARY", workflow)
+        self.assertIn('exit "$status"', workflow)
+
     def test_release_actions_are_pinned_to_commits(self):
         for name in (
             "release.yml",
             "publish.yml",
             "publish-vscode.yml",
             "scorecard.yml",
+            "capture-matrix-freshness.yml",
         ):
             with self.subTest(workflow=name):
                 workflow = (WORKFLOWS / name).read_text()
