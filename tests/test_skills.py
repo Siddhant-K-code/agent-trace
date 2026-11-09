@@ -1111,7 +1111,7 @@ class TestCli(SkillsTestBase):
         bad = self._session("bad00001", _Events(str(self.repo)).events, time.time() - 30)
         events_file = next(self.trace_dir.rglob(f"*{bad}*/events.ndjson"))
         with events_file.open("a") as handle:
-            handle.write('{"event_type": "tool_call", "unexpected_field": 1}\n')
+            handle.write('{"event_type": "not_an_event_type"}\n')
 
         code, output = self._run("--since", "1d", "--min-sessions", "1", "--format", "json")
 

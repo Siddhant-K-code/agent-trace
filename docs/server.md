@@ -104,6 +104,10 @@ legacy IDs containing spaces, Unicode, or more than 128 characters remain
 readable. POST routes retain the strict 1–128 character ASCII policy for new
 session IDs.
 
+Upgrade the collector before its clients. A v0.106.0 or older collector
+returns 400 for session metadata that contains `conversation_id`. See
+[production.md](production.md#version-skew).
+
 ---
 
 ## Multi-agent correlation

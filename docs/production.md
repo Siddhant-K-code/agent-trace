@@ -60,6 +60,20 @@ omit the attribute.
 Do not join on `session.id` from agent-strace: it is the local agent-strace
 session ID, which is truncated to 16 characters for hook sessions.
 
+#### Version skew
+
+Sessions with a native ID store it as `conversation_id` in `meta.json`.
+Readers and collectors on v0.106.0 or older reject metadata that contains
+this key: `list` and other readers on a shared trace store fail to load the
+session, and the collector returns 400 on `POST /sessions`. Upgrade the
+collector and every reader that shares the trace store before the clients
+that write it. Sessions without a native ID do not write the key and stay
+readable by older versions.
+
+From this release, readers and the collector ignore metadata and event keys
+they do not know and keep them when they rewrite the record, so later
+additive fields do not need this ordering.
+
 ### OpenInference compatibility
 
 The same `otlp-genai` payload includes additive OpenInference attributes for
