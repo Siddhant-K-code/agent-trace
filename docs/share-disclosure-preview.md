@@ -48,6 +48,7 @@ manifest records:
 - evidence health, known gaps, and redaction state
 - anonymization state and replacement count
 - value-free failure, retry, and recovery counts
+- orphan, ambiguous, duplicate-ID, and unobserved outcome counts
 - source-trace, selected-event, included-annotation, and manifest SHA-256
   integrity references
 - explicit limitations
@@ -56,6 +57,12 @@ The manifest is deterministic for the same source snapshot, selected mode, and
 capture state. The HTML generation timestamp is not part of the manifest.
 Local SHA-256 values are integrity references, not signatures or independent
 timestamps.
+
+Tool outcomes are correlated only through an explicit unique `parent_id` or a
+unique `tool_use_id` present on both events. Missing identifiers, duplicate call
+IDs, conflicting identifiers, multiple outcomes, and outcomes recorded before
+their calls remain unresolved. The packet does not infer a relationship from
+event proximity.
 
 ## Modes and annotations
 

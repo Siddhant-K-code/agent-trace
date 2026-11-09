@@ -12,6 +12,7 @@ from typing import Any, Mapping, Sequence
 
 from . import __version__
 from .annotate import Annotation, load_annotations
+from .correlation import correlate_tool_events
 from .disclosure import DisclosurePreview, build_disclosure_preview
 from .event_data import require_object_event_data
 from .health import HealthReport, assess_session, load_capture_matrix
@@ -35,6 +36,10 @@ class BehaviorSummary:
     recovery_attempt_count: int
     recovered_operation_count: int
     unresolved_failed_operation_count: int
+    orphan_outcome_count: int
+    ambiguous_outcome_count: int
+    duplicate_call_id_event_count: int
+    unobserved_operation_count: int
 
     def to_dict(self) -> dict[str, int]:
         return asdict(self)
@@ -166,24 +171,13 @@ def _result_failed(event: TraceEvent) -> bool:
 
 
 def _behavior_analysis(events: Sequence[TraceEvent]) -> _BehaviorAnalysis:
-    calls_by_id: dict[str, int] = {}
-    pending: list[int] = []
     failed_calls: set[int] = set()
     successful_calls: set[int] = set()
     outcomes: dict[int, tuple[int, str]] = {}
+    correlation = correlate_tool_events(events)
 
-    for index, event in enumerate(events):
-        if event.event_type == EventType.TOOL_CALL:
-            calls_by_id[event.event_id] = index
-            pending.append(index)
-            continue
-        if event.event_type not in (EventType.TOOL_RESULT, EventType.ERROR):
-            continue
-        call_index = calls_by_id.get(event.parent_id)
-        if call_index is None and pending:
-            call_index = pending[-1]
-        if call_index is None:
-            continue
+    for index, call_index in correlation.outcome_calls.items():
+        event = events[index]
         outcome = "failed"
         if event.event_type == EventType.TOOL_RESULT and not _result_failed(event):
             outcome = "succeeded"
@@ -191,8 +185,6 @@ def _behavior_analysis(events: Sequence[TraceEvent]) -> _BehaviorAnalysis:
         else:
             failed_calls.add(call_index)
         outcomes[index] = (call_index, outcome)
-        if call_index in pending:
-            pending.remove(call_index)
 
     signatures: dict[bytes, tuple[str, list[int]]] = {}
     call_states: dict[int, _OperationState] = {}
@@ -233,6 +225,18 @@ def _behavior_analysis(events: Sequence[TraceEvent]) -> _BehaviorAnalysis:
         recovery_attempt_count=len(recovery_refs),
         recovered_operation_count=len(recovered_refs),
         unresolved_failed_operation_count=len(failed_refs - recovered_refs),
+        orphan_outcome_count=correlation.quality["orphan_results"],
+        ambiguous_outcome_count=sum(
+            correlation.quality[key]
+            for key in (
+                "ambiguous_results",
+                "ambiguous_tool_use_results",
+                "multiple_results",
+                "before_call_results",
+            )
+        ),
+        duplicate_call_id_event_count=correlation.quality["duplicate_call_ids"],
+        unobserved_operation_count=correlation.quality["missing_results"],
     )
     return _BehaviorAnalysis(summary=summary, calls=call_states, outcomes=outcomes)
 
@@ -408,21 +412,29 @@ def _minimize_events(
     events: Sequence[TraceEvent],
     behavior: _BehaviorAnalysis,
 ) -> tuple[tuple[TraceEvent, ...], dict[str, str]]:
-    event_refs = {
-        event.event_id: f"event-{index + 1:06d}"
-        for index, event in enumerate(events)
-        if event.event_id
+    event_indices: dict[str, list[int]] = {}
+    for index, event in enumerate(events):
+        if event.event_id:
+            event_indices.setdefault(event.event_id, []).append(index)
+    packet_refs = {
+        index: f"event-{index + 1:06d}"
+        for index in range(len(events))
+    }
+    unique_event_refs = {
+        event_id: packet_refs[indices[0]]
+        for event_id, indices in event_indices.items()
+        if len(indices) == 1
     }
     minimized: list[TraceEvent] = []
     for index, event in enumerate(events):
         selected = copy.copy(event)
         selected.data = _minimized_data(event, index, behavior)
-        selected.event_id = event_refs.get(event.event_id, f"event-{index + 1:06d}")
-        selected.parent_id = event_refs.get(event.parent_id, "")
+        selected.event_id = packet_refs[index]
+        selected.parent_id = unique_event_refs.get(event.parent_id, "")
         selected.prev_hash = ""
         selected.tenant_id = ""
         minimized.append(selected)
-    return tuple(minimized), event_refs
+    return tuple(minimized), unique_event_refs
 
 
 def _minimize_annotations(

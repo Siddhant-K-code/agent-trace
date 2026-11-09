@@ -588,6 +588,10 @@ def _render_packet_summary(packet: EvidencePacket) -> str:
         ("Recovery attempts", behavior.recovery_attempt_count),
         ("Recovered operations", behavior.recovered_operation_count),
         ("Unresolved failed operations", behavior.unresolved_failed_operation_count),
+        ("Orphan outcomes", behavior.orphan_outcome_count),
+        ("Ambiguous outcomes", behavior.ambiguous_outcome_count),
+        ("Duplicate call ID events", behavior.duplicate_call_id_event_count),
+        ("Operations without outcomes", behavior.unobserved_operation_count),
     )
     behavior_html = "".join(
         f"<tr><td>{_esc(label)}</td><td>{value}</td></tr>"

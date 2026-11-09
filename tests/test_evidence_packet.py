@@ -311,6 +311,77 @@ class TestEvidencePacket(unittest.TestCase):
         )
         self.assertGreaterEqual(packet.preview.known_gap_count, 1)
 
+    def test_orphan_error_does_not_create_false_recovery(self):
+        session_id = "orphan-recovery"
+        meta = SessionMeta(
+            session_id=session_id,
+            started_at=1.0,
+            ended_at=6.0,
+            total_duration_ms=5000,
+        )
+        self.store.create_session(meta)
+        events = [
+            _event(
+                EventType.SESSION_START,
+                1.0,
+                session_id,
+                event_id="start-orphan",
+            ),
+            _event(
+                EventType.TOOL_CALL,
+                2.0,
+                session_id,
+                event_id="call-orphan-1",
+                tool_name="Bash",
+                arguments={"command": "run tests"},
+            ),
+            _event(
+                EventType.ERROR,
+                3.0,
+                session_id,
+                event_id="orphan-error",
+                message="unlinked failure",
+            ),
+            _event(
+                EventType.TOOL_CALL,
+                4.0,
+                session_id,
+                event_id="call-orphan-2",
+                tool_name="Bash",
+                arguments={"command": "run tests"},
+            ),
+            _event(
+                EventType.TOOL_RESULT,
+                5.0,
+                session_id,
+                event_id="result-orphan-2",
+                parent_id="call-orphan-2",
+                result="ok",
+            ),
+            _event(
+                EventType.SESSION_END,
+                6.0,
+                session_id,
+                event_id="end-orphan",
+                exit_code=0,
+            ),
+        ]
+        for event in events:
+            self.store.append_event(session_id, event)
+        self.store.update_meta(meta)
+
+        packet = build_evidence_packet(self.store, session_id)
+        calls = [
+            event for event in packet.events if event.event_type == EventType.TOOL_CALL
+        ]
+        self.assertEqual(packet.behavior.failure_event_count, 1)
+        self.assertEqual(packet.behavior.failed_operation_count, 0)
+        self.assertEqual(packet.behavior.retry_count, 1)
+        self.assertEqual(packet.behavior.recovery_attempt_count, 0)
+        self.assertEqual(packet.behavior.recovered_operation_count, 0)
+        self.assertEqual(packet.behavior.orphan_outcome_count, 1)
+        self.assertFalse(calls[1].data["recovery_attempt"])
+
 
 if __name__ == "__main__":
     unittest.main()
