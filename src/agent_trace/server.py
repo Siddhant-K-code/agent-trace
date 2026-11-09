@@ -330,6 +330,9 @@ class CollectorHandler(BaseHTTPRequestHandler):
                     return
                 try:
                     result = _wd.api_session_compare(self.store, session_id, other_id)
+                except NonObjectEventDataError as exc:
+                    self._send_json(400, {"error": str(exc)})
+                    return
                 except (OSError, ValueError, TypeError, KeyError) as exc:
                     self._send_json(400, {"error": f"comparison failed: {exc}"})
                     return
@@ -376,6 +379,9 @@ class CollectorHandler(BaseHTTPRequestHandler):
                     return
                 try:
                     result = _wd.api_session_otlp(self.store, session_id)
+                except NonObjectEventDataError as exc:
+                    self._send_json(400, {"error": str(exc)})
+                    return
                 except (OSError, ValueError, TypeError, KeyError) as exc:
                     self._send_json(400, {"error": f"OTLP export failed: {exc}"})
                     return

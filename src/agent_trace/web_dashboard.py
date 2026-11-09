@@ -20,9 +20,11 @@ import json
 from dataclasses import asdict
 from typing import TYPE_CHECKING
 
-from .compare import decision_divergence
+from .compare import DECISION_DATA_EVENT_TYPES, decision_divergence
 from .diff import compare_sessions
-from .otlp import session_to_otlp
+from .event_data import require_object_event_data
+from .explain import PHASE_DATA_EVENT_TYPES
+from .otlp import otlp_data_indexes, session_to_otlp
 from .review_surface import (
     build_minimized_review_payload,
     build_session_review,
@@ -31,6 +33,10 @@ from .review_surface import (
 
 if TYPE_CHECKING:
     from .store import TraceStore
+
+# The compare route builds explain phases and decision divergence for both
+# sessions, so it reads the data of every event of these types in each.
+COMPARE_DATA_EVENT_TYPES = PHASE_DATA_EVENT_TYPES | DECISION_DATA_EVENT_TYPES
 
 # ---------------------------------------------------------------------------
 # Shared page shell
@@ -789,6 +795,11 @@ def api_session_compare(
     other_id = _resolve_session(store, other_session_id)
     if full_id is None or other_id is None:
         return None
+    # compare_sessions loads both sessions before it reads any event data, so
+    # load both before checking either to keep a load error ahead of a refusal.
+    loaded = [(sid, store.load_events(sid)) for sid in (full_id, other_id)]
+    for sid, events in loaded:
+        require_object_event_data(events, event_types=COMPARE_DATA_EVENT_TYPES, session_id=sid)
     report = asdict(compare_sessions(store, full_id, other_id))
     report["decision_divergence"] = decision_divergence(store, full_id, other_id)
     return json.dumps(report)
@@ -810,4 +821,5 @@ def api_session_otlp(store: "TraceStore", session_id: str) -> str | None:
         return None
     meta = store.load_meta(full_id)
     events = store.load_events(full_id)
+    require_object_event_data(events, indexes=otlp_data_indexes(events), session_id=full_id)
     return json.dumps(session_to_otlp(meta, events), indent=2) + "\n"
