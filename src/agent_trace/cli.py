@@ -37,6 +37,7 @@ from .live_verify import (
     inspect_live_capture,
     live_capture_failure_diagnostic,
 )
+from .entry import HOOK_PROVIDERS
 from .hooks import METADATA_ONLY_FLAG, hook_main
 from .http_proxy import HTTPProxyServer
 from .a2a import cmd_a2a_tree
@@ -1703,7 +1704,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # hook (called by agent CLI hooks systems)
     p_hook = sub.add_parser("hook", help="handle an agent CLI hook event (internal)")
-    p_hook.add_argument("--provider", choices=["claude", "codex", "gemini", "cursor", "copilot"], default="claude",
+    p_hook.add_argument("--provider", choices=list(HOOK_PROVIDERS), default="claude",
                         help="hook provider (default: claude)")
     p_hook.add_argument(
         METADATA_ONLY_FLAG,

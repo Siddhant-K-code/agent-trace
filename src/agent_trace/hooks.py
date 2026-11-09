@@ -50,8 +50,6 @@ from contextvars import ContextVar
 from pathlib import Path
 
 from .models import EventType, SessionMeta, TraceEvent
-from .attribution import collect_attribution
-from .evidence_health import is_continuation_source
 from .redact import redact_data, redact_data_with_status, redaction_enabled
 from .store import (
     DEFAULT_TRACE_DIR,
@@ -302,6 +300,8 @@ def _ensure_session_meta(
     try:
         if store.session_exists(session_id):
             return
+        from .attribution import collect_attribution
+
         agent_name = _PROVIDER_AGENT.get(provider, "agent-cli")
         meta = SessionMeta(
             session_id=session_id,
@@ -631,6 +631,10 @@ def _normalise_payload(input_data: dict, provider: str, event: str) -> dict:
 
 def handle_session_start(input_data: dict, provider: str = "claude") -> None:
     """Handle SessionStart hook event."""
+    # Imported here: every hook process loads this module, few start sessions.
+    from .attribution import collect_attribution
+    from .evidence_health import is_continuation_source
+
     store = _get_store()
     redact = _should_redact()
 
