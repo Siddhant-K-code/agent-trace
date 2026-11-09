@@ -81,6 +81,74 @@ _HOOK_STORE_DIR: ContextVar[str | None] = ContextVar(
     "agent_trace_hook_store_dir",
     default=None,
 )
+_HOOK_METADATA_ONLY: ContextVar[bool] = ContextVar(
+    "agent_trace_hook_metadata_only",
+    default=False,
+)
+
+# ``agent-strace hook --metadata-only``: keep event types, timing, IDs and the
+# keys below; replace every other value (prompts, responses, tool arguments
+# and results, errors, paths, diffs) before the event is written. Secret
+# redaction is always on in this mode, whatever the environment says.
+METADATA_ONLY_FLAG = "--metadata-only"
+CAPTURE_MODE_KEY = "capture"
+CAPTURE_METADATA_ONLY = "metadata-only"
+OMITTED = "[OMITTED]"
+_METADATA_KEYS = frozenset({
+    "mode",
+    "provider",
+    "source",
+    "model",
+    "permission_mode",
+    "redaction",
+    CAPTURE_MODE_KEY,
+    "tool_name",
+    "tool_use_id",
+    "turn_id",
+    "hook_event",
+    "hook_event_name",
+    "stop_reason",
+    "reason",
+    "status",
+    "duration_ms",
+    "agent_id",
+    "agent_type",
+    "agent_name",
+    "child_session_id",
+    "child_link",
+    "token_usage",
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+})
+
+
+def metadata_only_data(data: dict) -> tuple[dict, bool]:
+    """Return (data without content values, whether anything was omitted).
+
+    Keys in ``_METADATA_KEYS`` keep their values. A string value becomes
+    ``OMITTED``, an object keeps only its key names, and a list becomes
+    empty. Numbers, Booleans and nulls are kept.
+    """
+    result: dict = {}
+    changed = False
+    for key, value in data.items():
+        if key in _METADATA_KEYS or value is None or isinstance(value, (bool, int, float)):
+            result[key] = value
+        elif isinstance(value, str):
+            result[key] = OMITTED if value else value
+            changed = changed or bool(value)
+        elif isinstance(value, dict):
+            result[key] = {str(name): OMITTED for name in value}
+            changed = changed or bool(value)
+        elif isinstance(value, list):
+            result[key] = []
+            changed = changed or bool(value)
+        else:
+            result[key] = OMITTED
+            changed = True
+    result[CAPTURE_MODE_KEY] = CAPTURE_METADATA_ONLY
+    return result, changed
 
 _PROVIDER_ENV = {
     "claude": _CLAUDE_SESSION_ID_ENV,
@@ -123,7 +191,7 @@ def _payload_store_dir(input_data: dict) -> str | None:
 
 
 def _get_store() -> TraceStore:
-    return TraceStore(_get_store_dir())
+    return TraceStore(_get_store_dir(), redact=True if _HOOK_METADATA_ONLY.get() else None)
 
 
 def _get_state_dir() -> Path:
@@ -138,9 +206,14 @@ def _get_remote_endpoint() -> str:
 
 def _write_event(store: TraceStore, session_id: str, event: TraceEvent) -> None:
     """Write an event to local store or remote collector, depending on env."""
+    metadata_only = _HOOK_METADATA_ONLY.get()
+    if metadata_only:
+        event.data, omitted = metadata_only_data(event.data)
+        if omitted:
+            event.redacted = True
     endpoint = _get_remote_endpoint()
     if endpoint:
-        if redaction_enabled():
+        if redaction_enabled() or metadata_only:
             event.data, changed = redact_data_with_status(event.data)
             if changed:
                 if not event.redacted:
@@ -165,7 +238,10 @@ def _redaction_mode(store: TraceStore) -> str:
     Default hook commands redact in the store, not through ``_should_redact``,
     so the store setting (or, for a remote endpoint, the environment) decides.
     """
-    enabled = redaction_enabled() if _get_remote_endpoint() else store.redact
+    if _get_remote_endpoint():
+        enabled = redaction_enabled() or _HOOK_METADATA_ONLY.get()
+    else:
+        enabled = store.redact
     return REDACTION_ON if enabled else REDACTION_OFF
 
 
@@ -1208,11 +1284,20 @@ def handle_post_tool(input_data: dict, failed: bool = False, provider: str = "cl
 def hook_main(args: list[str]) -> None:
     """Entry point for `agent-strace hook <event>` CLI command."""
     provider = "claude"
+    metadata_only = False
+    provider_given = False
     rest = list(args)
-    if rest[:1] == ["--provider"] and len(rest) >= 2:
-        provider = rest[1]
-        rest = rest[2:]
-    elif rest and rest[0] in _PROVIDER_AGENT and len(rest) >= 2:
+    while rest:
+        if rest[0] == "--provider" and len(rest) >= 2:
+            provider = rest[1]
+            provider_given = True
+            rest = rest[2:]
+        elif rest[0] == METADATA_ONLY_FLAG:
+            metadata_only = True
+            rest = rest[1:]
+        else:
+            break
+    if not provider_given and rest and rest[0] in _PROVIDER_AGENT and len(rest) >= 2:
         provider = rest[0]
         rest = rest[1:]
 
@@ -1226,7 +1311,7 @@ def hook_main(args: list[str]) -> None:
         sys.exit(1)
 
     if not rest:
-        sys.stderr.write("Usage: agent-strace hook [--provider claude|codex|gemini|cursor|copilot] <event>\n")
+        sys.stderr.write("Usage: agent-strace hook [--provider claude|codex|gemini|cursor|copilot] [--metadata-only] <event>\n")
         sys.exit(1)
 
     aliases = {
@@ -1289,6 +1374,7 @@ def hook_main(args: list[str]) -> None:
         sys.exit(1)
 
     store_dir_token = _HOOK_STORE_DIR.set(_payload_store_dir(input_data))
+    metadata_token = _HOOK_METADATA_ONLY.set(metadata_only)
     try:
         handler(input_data)
     except Exception as e:
@@ -1296,4 +1382,5 @@ def hook_main(args: list[str]) -> None:
         sys.stderr.write(f"agent-strace hook error: {e}\n")
         sys.exit(0)
     finally:
+        _HOOK_METADATA_ONLY.reset(metadata_token)
         _HOOK_STORE_DIR.reset(store_dir_token)

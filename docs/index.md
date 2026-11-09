@@ -7,6 +7,8 @@ canonical flag reference.
 ## Setup and releases
 
 - [Setup](setup.md): hook, proxy, and library capture paths.
+- [Platform-team install](platform-install.md): machine-wide, metadata-only
+  capture through Copilot CLI policy hooks and Claude Code managed settings.
 - [Maintainer release runbook](releases.md): independent core and VS Code
   release lines, version parity, publishing, and recovery.
 - [Security](security.md): local data, redaction, authentication, and sharing

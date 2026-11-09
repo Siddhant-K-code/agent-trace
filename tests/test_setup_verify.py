@@ -1130,5 +1130,252 @@ class ClaudeSetupVerifyTests(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in self.root.iterdir()), ["config", "managed", "project"])
 
 
+class ManagedSetupTests(unittest.TestCase):
+    """setup --managed prints machine-wide hooks; --managed --verify checks them."""
+
+    EXE = "/opt/agent-strace/bin/agent-strace"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.policy = self.root / "policy.d"
+        self.managed = self.root / "managed"
+        self.copilot_home = self.root / "copilot"
+        self.claude_home = self.root / "claude"
+        for directory in (self.policy, self.managed, self.copilot_home, self.claude_home):
+            directory.mkdir()
+        self.owner = {}
+        self.run = patch(
+            "agent_trace.setup_verify.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=[self.EXE, "--version"], returncode=0,
+                stdout=f"agent-strace {__version__}\n", stderr="",
+            ),
+        )
+        for active in (
+            patch.dict(os.environ, {
+                "COPILOT_HOME": str(self.copilot_home),
+                "CLAUDE_CONFIG_DIR": str(self.claude_home),
+            }),
+            patch("agent_trace.cli._copilot_policy_dir", return_value=self.policy),
+            patch("agent_trace.cli._claude_managed_settings_dir", return_value=self.managed),
+            patch(
+                "agent_trace.setup_verify.posix_owner_problem",
+                side_effect=lambda path: self.owner.get(Path(path)),
+            ),
+            self.run,
+        ):
+            active.start()
+            self.addCleanup(active.stop)
+
+    def _cmd(self, **updates):
+        values = {"cli": "copilot", "verify": False, "live": False, "session": None,
+                  "managed": True, "executable": self.EXE}
+        values.update(updates)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            status = cmd_setup(_args(**values))
+        return status, out.getvalue(), err.getvalue()
+
+    def _install(self, cli):
+        status, out, _ = self._cmd(cli=cli)
+        self.assertEqual(status, 0)
+        if cli == "copilot":
+            path = self.policy / "agent-strace.json"
+        else:
+            path = self.managed / "managed-settings.d" / "agent-strace.json"
+            path.parent.mkdir(exist_ok=True)
+        path.write_text(out, encoding="utf-8")
+        return path, json.loads(out)
+
+    def test_copilot_print_uses_exec_form_metadata_only_and_writes_nothing(self):
+        status, out, err = self._cmd()
+        self.assertEqual(status, 0)
+        self.assertIn(str(self.policy / "agent-strace.json"), err)
+        self.assertIn("Nothing was written", err)
+        config = json.loads(out)
+        self.assertEqual(config["version"], 1)
+        self.assertEqual(len(config["hooks"]), 9)
+        entry = config["hooks"]["preToolUse"][0]
+        self.assertEqual(entry["exec"], self.EXE)
+        self.assertEqual(entry["args"], ["hook", "--provider", "copilot", "--metadata-only", "pre-tool"])
+        self.assertNotIn("command", entry)
+        self.assertEqual(list(self.policy.iterdir()), [])
+
+    def test_claude_print_targets_drop_in_with_exec_form(self):
+        status, out, err = self._cmd(cli="claude")
+        self.assertEqual(status, 0)
+        self.assertIn(str(self.managed / "managed-settings.d" / "agent-strace.json"), err)
+        config = json.loads(out)
+        self.assertEqual(set(config), {"hooks"})
+        group = config["hooks"]["PreToolUse"][0]
+        self.assertEqual(group["matcher"], "")
+        self.assertEqual(group["hooks"][0], {
+            "type": "command", "command": self.EXE, "args": ["hook", "--metadata-only", "pre-tool"],
+        })
+        self.assertEqual(len(config["hooks"]), 7)
+
+    def test_printed_hooks_record_metadata_only(self):
+        _, config = self._install("copilot")
+        for entries in config["hooks"].values():
+            self.assertIn("--metadata-only", entries[0]["args"])
+
+    def test_rejected_flag_combinations(self):
+        for updates, message in (
+            ({"cli": "codex"}, "supports only --cli copilot or --cli claude"),
+            ({"no_redact": True}, "--no-redact is not allowed"),
+            ({"verify": True, "live": True}, "--live supports only --cli claude"),
+            ({"executable": "agent-strace"}, "absolute path"),
+            ({"managed": False}, "--executable requires --managed"),
+        ):
+            with self.subTest(updates=updates):
+                status, out, err = self._cmd(**updates)
+                self.assertIn(status, (1, 2))
+                self.assertEqual(out, "")
+                self.assertIn(message, err)
+
+    def test_missing_executable_on_path(self):
+        with patch("agent_trace.cli.shutil.which", return_value=None):
+            status, _, err = self._cmd(executable=None)
+        self.assertEqual(status, 1)
+        self.assertIn("--executable", err)
+
+    def test_executable_in_home_warns(self):
+        home_exe = str(Path.home() / ".local" / "bin" / "agent-strace")
+        status, out, err = self._cmd(executable=home_exe)
+        self.assertEqual(status, 0)
+        self.assertIn("a user can replace or remove it", err)
+        self.assertIn(home_exe, out)
+
+    def test_parser_accepts_managed_flags(self):
+        args = build_parser().parse_args(
+            ["setup", "--managed", "--cli", "copilot", "--executable", self.EXE, "--verify"]
+        )
+        self.assertTrue(args.managed)
+        self.assertEqual(args.executable, self.EXE)
+
+    def test_copilot_verify_passes_for_printed_file(self):
+        path, _ = self._install("copilot")
+        status, out, err = self._cmd(verify=True, executable=None)
+        self.assertEqual((status, err), (0, ""))
+        self.assertIn("metadata-only, redaction: on", out)
+        self.assertIn(f"file:       {path}", out)
+        self.assertIn("events:     9/9", out)
+        self.assertIn("Windows Registry", out)
+
+    def test_copilot_verify_fails_without_policy(self):
+        status, out, err = self._cmd(verify=True)
+        self.assertEqual((status, out), (1, ""))
+        self.assertIn("No AgentTrace policy hooks", err)
+
+    def test_copilot_verify_fails_on_ownership(self):
+        path, _ = self._install("copilot")
+        self.owner[path] = f"{path} is not owned by root"
+        status, _, err = self._cmd(verify=True)
+        self.assertEqual(status, 1)
+        self.assertIn("requires policy files to be owned by root", err)
+
+    def test_copilot_verify_fails_on_missing_or_full_capture_hook(self):
+        path, config = self._install("copilot")
+        del config["hooks"]["sessionEnd"]
+        config["hooks"]["preToolUse"][0]["args"].remove("--metadata-only")
+        path.write_text(json.dumps(config), encoding="utf-8")
+        status, _, err = self._cmd(verify=True)
+        self.assertEqual(status, 1)
+        self.assertIn("missing AgentTrace hook for sessionEnd", err)
+        self.assertIn("preToolUse is not the metadata-only handler", err)
+
+    def test_copilot_verify_fails_on_duplicate_hooks(self):
+        _, config = self._install("copilot")
+        (self.policy / "zz-extra.json").write_text(json.dumps(config), encoding="utf-8")
+        status, _, err = self._cmd(verify=True)
+        self.assertEqual(status, 1)
+        self.assertIn("recorded more than once", err)
+
+    def test_copilot_verify_fails_on_version_mismatch(self):
+        self._install("copilot")
+        self.run.stop()
+        with patch("agent_trace.setup_verify.subprocess.run", return_value=subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="agent-strace 0.0.1\n", stderr="",
+        )):
+            status, _, err = self._cmd(verify=True)
+        self.run.start()
+        self.assertEqual(status, 1)
+        self.assertIn("version mismatch", err)
+
+    def test_copilot_verify_warns_on_user_hooks(self):
+        self._install("copilot")
+        hooks_dir = self.copilot_home / "hooks"
+        hooks_dir.mkdir()
+        user = hooks_dir / "agent-strace.json"
+        user.write_text(json.dumps({"version": 1, "hooks": {"sessionStart": [
+            {"type": "command", "command": "agent-strace hook --provider copilot session-start"}
+        ]}}), encoding="utf-8")
+        status, _, err = self._cmd(verify=True)
+        self.assertEqual(status, 0)
+        self.assertIn(f"Warning: User-level AgentTrace hooks in {user}", err)
+
+    def test_claude_verify_passes_and_reports_lock(self):
+        self._install("claude")
+        (self.managed / "managed-settings.json").write_text(
+            json.dumps({"allowManagedHooksOnly": True}), encoding="utf-8"
+        )
+        status, out, err = self._cmd(cli="claude", verify=True)
+        self.assertEqual((status, err), (0, ""))
+        self.assertIn("events:     7/7", out)
+        self.assertIn("allowManagedHooksOnly: true", out)
+        self.assertIn("server-managed settings and MDM", out)
+
+    def test_claude_verify_fails_when_managed_disables_hooks(self):
+        self._install("claude")
+        (self.managed / "managed-settings.json").write_text(
+            json.dumps({"disableAllHooks": True}), encoding="utf-8"
+        )
+        status, _, err = self._cmd(cli="claude", verify=True)
+        self.assertEqual(status, 1)
+        self.assertIn("disableAllHooks = true", err)
+
+    def test_claude_verify_fails_on_writable_drop_in_dir(self):
+        self._install("claude")
+        drop_ins = self.managed / "managed-settings.d"
+        self.owner[drop_ins] = f"{drop_ins} is group- or world-writable"
+        status, _, err = self._cmd(cli="claude", verify=True)
+        self.assertEqual(status, 1)
+        self.assertIn("could remove the drop-in file", err)
+
+    def test_claude_verify_warns_on_user_hooks_unless_locked(self):
+        self._install("claude")
+        (self.claude_home / "settings.json").write_text(
+            json.dumps(_claude_hooks_config(_args(cli="claude"))), encoding="utf-8"
+        )
+        status, _, err = self._cmd(cli="claude", verify=True)
+        self.assertEqual(status, 0)
+        self.assertIn("full content capture", err)
+        (self.managed / "managed-settings.json").write_text(
+            json.dumps({"allowManagedHooksOnly": True}), encoding="utf-8"
+        )
+        status, _, err = self._cmd(cli="claude", verify=True)
+        self.assertEqual((status, err), (0, ""))
+
+    def test_claude_verify_fails_when_nothing_installed(self):
+        status, _, err = self._cmd(cli="claude", verify=True)
+        self.assertEqual(status, 1)
+        self.assertIn("No AgentTrace exec-form hooks", err)
+
+
+class PosixOwnerProblemTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "POSIX ownership")
+    def test_reports_non_root_and_writable(self):
+        from agent_trace.setup_verify import posix_owner_problem
+
+        with tempfile.NamedTemporaryFile() as handle:
+            path = Path(handle.name)
+            problem = posix_owner_problem(path)
+            if os.geteuid() != 0:
+                self.assertIn("not owned by root", problem)
+        self.assertIn("Cannot stat", posix_owner_problem(Path("/nonexistent/agent-strace")))
+
+
 if __name__ == "__main__":
     unittest.main()

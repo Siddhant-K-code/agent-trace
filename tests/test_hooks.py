@@ -593,6 +593,188 @@ class TestHooksRedactionMode(unittest.TestCase):
                 self.assertEqual(sent.data["redaction"], expected)
 
 
+class TestHooksMetadataOnly(unittest.TestCase):
+    """`hook --metadata-only` keeps structure and drops content values."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        env = patch.dict(os.environ, {"AGENT_TRACE_DIR": self.tmpdir})
+        env.start()
+        self.addCleanup(env.stop)
+        for name in (
+            "AGENT_TRACE_REDACT",
+            "AGENT_TRACE_NO_REDACT",
+            "AGENT_STRACE_NO_REDACT",
+            "AGENT_STRACE_ENDPOINT",
+            "AGENT_TRACE_COPILOT_SESSION_ID",
+            "AGENT_TRACE_SESSION_ID",
+        ):
+            os.environ.pop(name, None)
+
+    def _hook(self, args, payload):
+        with patch.object(sys, "stdin", io.StringIO(json.dumps(payload))):
+            hook_main(args)
+
+    def _run_session(self, args_prefix, session="metaonlysession01"):
+        self._hook([*args_prefix, "session-start"], {
+            "session_id": session,
+            "source": "startup",
+            "model": "test-model",
+            "cwd": "/home/dev/secret-project",
+            "transcript_path": "/home/dev/.claude/t.jsonl",
+        })
+        self._hook([*args_prefix, "user-prompt"], {
+            "session_id": session,
+            "prompt": "please read the customer list",
+        })
+        self._hook([*args_prefix, "pre-tool"], {
+            "session_id": session,
+            "tool_name": "Bash",
+            "tool_use_id": "tool_1",
+            "tool_input": {"command": "cat customers.csv", "timeout": 30},
+        })
+        self._hook([*args_prefix, "post-tool"], {
+            "session_id": session,
+            "tool_name": "Bash",
+            "tool_use_id": "tool_1",
+            "tool_response": {"stdout": "alice@example.com"},
+        })
+        self._hook([*args_prefix, "session-end"], {"session_id": session, "reason": "exit"})
+        return TraceStore(self.tmpdir, redact=False).load_events(session[:16])
+
+    def test_content_values_are_not_written(self):
+        events = self._run_session(["--metadata-only"])
+        raw = "".join(json.dumps(event.data) for event in events)
+        for content in (
+            "please read the customer list",
+            "cat customers.csv",
+            "alice@example.com",
+            "/home/dev/secret-project",
+            "t.jsonl",
+        ):
+            self.assertNotIn(content, raw)
+
+        by_type = {event.event_type: event for event in events}
+        start = by_type[EventType.SESSION_START].data
+        self.assertEqual(start["capture"], "metadata-only")
+        self.assertEqual(start["redaction"], "on")
+        self.assertEqual(start["model"], "test-model")
+        self.assertEqual(start["cwd"], "[OMITTED]")
+        self.assertEqual(by_type[EventType.USER_PROMPT].data["prompt"], "[OMITTED]")
+        self.assertTrue(by_type[EventType.USER_PROMPT].redacted)
+        call = by_type[EventType.TOOL_CALL].data
+        self.assertEqual(call["tool_name"], "Bash")
+        self.assertEqual(call["tool_use_id"], "tool_1")
+        self.assertEqual(set(call["arguments"]), {"command", "timeout"})
+        self.assertEqual(call["arguments"]["command"], "[OMITTED]")
+        self.assertEqual(by_type[EventType.SESSION_END].data["reason"], "exit")
+        self.assertIn("duration_ms", by_type[EventType.SESSION_END].data)
+        for event in events:
+            self.assertEqual(event.data["capture"], "metadata-only")
+
+    def test_redaction_is_forced_on_despite_environment(self):
+        with patch.dict(os.environ, {"AGENT_TRACE_NO_REDACT": "1"}):
+            events = self._run_session(["--metadata-only"], session="metaonlynoredact")
+        start = next(e for e in events if e.event_type == EventType.SESSION_START)
+        self.assertEqual(start.data["redaction"], "on")
+
+    def test_flag_order_and_provider_are_accepted(self):
+        for index, prefix in enumerate((
+            ["--provider", "copilot", "--metadata-only"],
+            ["--metadata-only", "--provider", "copilot"],
+            ["--metadata-only", "copilot"],
+        )):
+            session = f"metaonlyorder{index:03d}"
+            with self.subTest(prefix=prefix):
+                self._hook([*prefix, "sessionStart"], {"sessionId": session, "source": "startup"})
+                self._hook([*prefix, "userPromptSubmitted"], {"sessionId": session, "prompt": "hello there"})
+                events = TraceStore(self.tmpdir, redact=False).load_events(session[:16])
+                start = next(e for e in events if e.event_type == EventType.SESSION_START)
+                prompt = next(e for e in events if e.event_type == EventType.USER_PROMPT)
+                self.assertEqual(start.data["provider"], "copilot")
+                self.assertEqual(start.data["capture"], "metadata-only")
+                self.assertEqual(prompt.data["prompt"], "[OMITTED]")
+
+    def test_cli_parser_accepts_metadata_only(self):
+        from agent_trace.cli import main
+
+        for index, argv in enumerate((
+            ["hook", "--provider", "copilot", "--metadata-only", "sessionStart"],
+            ["hook", "--metadata-only", "--provider", "copilot", "sessionStart"],
+            ["hook", "--metadata-only", "session-start"],
+        )):
+            session = f"metaonlycli{index:05d}"
+            payload = json.dumps({"session_id": session, "sessionId": session, "cwd": "/secret"})
+            with self.subTest(argv=argv), patch.object(sys, "argv", ["agent-strace", *argv]), \
+                    patch.object(sys, "stdin", io.StringIO(payload)):
+                with self.assertRaises(SystemExit) as raised:
+                    main()
+                self.assertEqual(raised.exception.code, 0)
+                start = TraceStore(self.tmpdir, redact=False).load_events(session[:16])[0]
+                self.assertEqual(start.data["capture"], "metadata-only")
+                self.assertEqual(start.data["cwd"], "[OMITTED]")
+
+    def test_default_capture_is_unchanged(self):
+        events = self._run_session([], session="fullcapturesess1")
+        prompt = next(e for e in events if e.event_type == EventType.USER_PROMPT)
+        self.assertEqual(prompt.data["prompt"], "please read the customer list")
+        self.assertNotIn("capture", prompt.data)
+
+    def test_remote_endpoint_receives_metadata_only_redacted_events(self):
+        with patch.dict(os.environ, {
+            "AGENT_STRACE_ENDPOINT": "https://collector.invalid",
+            "AGENT_TRACE_NO_REDACT": "1",
+        }), patch(
+            "agent_trace.server.send_session_meta_to_endpoint", return_value=True
+        ), patch(
+            "agent_trace.server.send_event_to_endpoint", return_value=True
+        ) as send_event:
+            self._hook(["--metadata-only", "session-start"], {
+                "session_id": "remotemetaonly01",
+                "source": "startup",
+                "cwd": "/home/dev/secret-project",
+            })
+        sent = send_event.call_args.args[0]
+        self.assertEqual(sent.data["redaction"], "on")
+        self.assertEqual(sent.data["capture"], "metadata-only")
+        self.assertEqual(sent.data["cwd"], "[OMITTED]")
+
+
+class TestMetadataOnlyData(unittest.TestCase):
+    def test_transform_rules(self):
+        from agent_trace.hooks import metadata_only_data
+
+        data, omitted = metadata_only_data({
+            "tool_name": "Edit",
+            "text": "secret",
+            "empty": "",
+            "arguments": {"path": "/a", "content": "b"},
+            "items": [1, 2],
+            "count": 3,
+            "flag": True,
+            "nothing": None,
+        })
+        self.assertTrue(omitted)
+        self.assertEqual(data, {
+            "tool_name": "Edit",
+            "text": "[OMITTED]",
+            "empty": "",
+            "arguments": {"path": "[OMITTED]", "content": "[OMITTED]"},
+            "items": [],
+            "count": 3,
+            "flag": True,
+            "nothing": None,
+            "capture": "metadata-only",
+        })
+
+    def test_nothing_omitted_for_metadata_keys(self):
+        from agent_trace.hooks import metadata_only_data
+
+        data, omitted = metadata_only_data({"tool_name": "Bash", "duration_ms": 5})
+        self.assertFalse(omitted)
+        self.assertEqual(data["capture"], "metadata-only")
+
+
 class TestPendingCalls(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()

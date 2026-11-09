@@ -6,6 +6,9 @@ Three ways to capture agent sessions. Pick the one that matches your agent.
 
 ## Option 1: CLI hooks (recommended)
 
+To install capture once per machine for every developer, with metadata-only
+defaults, see [Platform-team install](platform-install.md).
+
 Captures the lifecycle events exposed by each CLI: user prompts, assistant responses, and hook-visible tool calls or edits. Claude Code exposes broad tool coverage; Cursor coverage depends on the native events Cursor emits.
 
 Claude Code users can install the
@@ -350,6 +353,8 @@ Set `COPILOT_HOME` to install into a different Copilot config directory. The gen
 Copilot sends hook payloads on stdin. agent-strace records session starts, user prompts, hook-visible tool calls/results, failed tools, stop markers, subagent starts and stops, and session ends. Copilot's stop hook provides `transcriptPath` and `stopReason` but no response text, so assistant responses are not captured.
 
 Copilot can fire the first `userPromptSubmitted` before `sessionStart`. A subagent started with the `task` tool is recorded as its own session with no start and no end; the parent's `subagentStart` and `subagentStop` hooks link it to the parent, so `agent-strace tree` shows it. If you set up Copilot hooks before this release, re-run `agent-strace setup --cli copilot` (or update the plugin) to register the subagent hooks; sessions captured earlier stay unlinked. See the [capture matrix](capture-matrix.md#github-copilot-cli) for the verified Copilot CLI version and known gaps.
+
+For a machine-wide install through Copilot CLI policy hooks, see [Platform-team install](platform-install.md).
 
 #### Copilot cloud agent
 
