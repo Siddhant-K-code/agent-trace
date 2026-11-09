@@ -28,6 +28,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from .event_data import object_field, str_field
 from .models import EventType, SessionMeta, TraceEvent
 from .pairing import (
     LLM_REQUEST_TYPES,
@@ -493,7 +494,7 @@ def session_to_otlp(
             ))
 
         elif event.event_type == EventType.ASSISTANT_RESPONSE:
-            text = event.data.get("text", "")
+            text = str_field(event.data, "text", "")
             if len(text) > 500:
                 text = text[:500] + "..."
             root_events.append(_make_event(
@@ -527,7 +528,7 @@ def session_to_otlp(
                 _SEMCONV_TOOL_CALL_ID: (call_event.event_id if call_event else event.event_id),
             }
             if call_event:
-                args = call_event.data.get("arguments", {})
+                args = object_field(call_event.data, "arguments", {})
                 if args:
                     for k, v in args.items():
                         span_attrs[f"tool.input.{k}"] = str(v)[:200]
@@ -560,7 +561,7 @@ def session_to_otlp(
             if error_msg:
                 span_attrs["error.message"] = str(error_msg)[:500]
             if call_event:
-                args = call_event.data.get("arguments", {})
+                args = object_field(call_event.data, "arguments", {})
                 if args:
                     for k, v in args.items():
                         span_attrs[f"tool.input.{k}"] = str(v)[:200]
@@ -613,7 +614,7 @@ def session_to_otlp(
             "endTimeUnixNano": _ts_to_nanos(call_event.timestamp + 0.001),
             "attributes": _make_attributes({
                 "tool.name": tool_name,
-                **{f"tool.input.{k}": str(v)[:200] for k, v in call_event.data.get("arguments", {}).items()},
+                **{f"tool.input.{k}": str(v)[:200] for k, v in object_field(call_event.data, "arguments", {}).items()},
             }),
             "status": {"code": 0},  # STATUS_CODE_UNSET
         })
@@ -789,7 +790,7 @@ def session_to_otlp_genai(
     for event in events:
         if event.event_type == EventType.USER_PROMPT:
             event_attrs = {
-                "gen_ai.prompt": event.data.get("prompt", "")[:1000],
+                "gen_ai.prompt": str_field(event.data, "prompt", "")[:1000],
                 **_event_trace_attributes(event, "event"),
             }
             event_attrs["metadata"] = _openinference_metadata(event_attrs)
@@ -800,7 +801,7 @@ def session_to_otlp_genai(
             ))
 
         elif event.event_type == EventType.ASSISTANT_RESPONSE:
-            text = event.data.get("text", "")
+            text = str_field(event.data, "text", "")
             event_attrs = {
                 "gen_ai.completion": text[:1000],
                 **_event_trace_attributes(event, "event"),

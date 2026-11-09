@@ -92,6 +92,7 @@ def _session_passes_filter(
       long-duration:Ns    — session duration > N seconds
       low-eval-score:N    — eval.json overall score < N
     """
+    from ..event_data import str_field
     from ..models import EventType
 
     try:
@@ -135,7 +136,7 @@ def _session_passes_filter(
         files: set[str] = set()
         for ev in events:
             if ev.event_type == EventType.FILE_WRITE:
-                p = ev.data.get("path") or ev.data.get("file_path") or ""
+                p = str_field(ev.data, "path", "") or str_field(ev.data, "file_path", "")
                 if p:
                     files.add(p)
         return len(files) > 10

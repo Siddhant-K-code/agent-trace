@@ -33,7 +33,7 @@ from typing import Any, Literal, TextIO
 from . import __version__
 from .audit import verify_chain
 from .cost import _dollars, _event_tokens
-from .event_data import require_object_event_data
+from .event_data import require_object_event_data, str_field
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -180,7 +180,9 @@ def _eu_ai_act_report(session_id: str, meta, events: list[TraceEvent]) -> dict:
             "session_end": meta.ended_at,
             "total_tool_calls": len(tool_calls),
             "total_decisions": len(decisions),
-            "tools_used": sorted({e.data.get("tool_name", "") for e in tool_calls if e.data.get("tool_name")}),
+            "tools_used": sorted({
+                str_field(e.data, "tool_name", "") for e in tool_calls if str_field(e.data, "tool_name", "")
+            }),
         },
         "article_9_risk_management": {
             "error_count": len(errors),
@@ -205,8 +207,8 @@ def _soc2_report(session_id: str, meta, events: list[TraceEvent]) -> dict:
 
     # CC6: logical access — what resources were accessed
     resources_accessed = sorted({
-        e.data.get("tool_name", "") for e in tool_calls
-        if e.data.get("tool_name")
+        str_field(e.data, "tool_name", "") for e in tool_calls
+        if str_field(e.data, "tool_name", "")
     })
 
     # CC7: system operations — availability and error evidence

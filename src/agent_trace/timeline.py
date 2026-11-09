@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from typing import Any, TextIO
 
 from .cost import DEFAULT_MODEL, PRICING, _dollars, _estimate_tokens, _event_tokens
-from .event_data import require_object_event_data
+from .event_data import object_field, require_object_event_data, str_field
 from .explain import PHASE_DATA_EVENT_TYPES, ExplainResult, Phase, explain_session
 from .models import EventType, TraceEvent
 from .store import TraceStore
@@ -77,8 +77,8 @@ def _fmt_offset(seconds: float) -> str:
 
 def _tool_label(event: TraceEvent) -> tuple[str, str]:
     """Return (label, detail) for a tool_call event."""
-    name = event.data.get("tool_name", "?")
-    args = event.data.get("arguments", {})
+    name = str_field(event.data, "tool_name", "?")
+    args = object_field(event.data, "arguments", {})
     n = name.lower()
 
     if n == "bash":
@@ -104,10 +104,10 @@ def _tool_label(event: TraceEvent) -> tuple[str, str]:
         return f"Grep /{args.get('pattern', '')}/", str(args.get("path", ""))
 
     if n == "webfetch":
-        return f"Fetch {args.get('url', '')[:80]}", ""
+        return f"Fetch {str_field(args, 'url', '')[:80]}", ""
 
     if n == "websearch":
-        return f"Search \"{args.get('query', '')[:80]}\"", ""
+        return f"Search \"{str_field(args, 'query', '')[:80]}\"", ""
 
     # Generic: show first string arg
     for k, v in args.items():
@@ -237,7 +237,7 @@ def _build_entries(phase: Phase, base_ts: float, model: str) -> list[TimelineEnt
 
         elif event.event_type == EventType.DECISION:
             choice = event.data.get("choice", "")
-            reason = event.data.get("reason", "")
+            reason = str_field(event.data, "reason", "")
             entries.append(TimelineEntry(
                 offset=offset,
                 status="info",
@@ -246,7 +246,7 @@ def _build_entries(phase: Phase, base_ts: float, model: str) -> list[TimelineEnt
             ))
 
         elif event.event_type == EventType.USER_PROMPT:
-            text = event.data.get("prompt", "")
+            text = str_field(event.data, "prompt", "")
             preview = text[:100].replace("\n", " ")
             if len(text) > 100:
                 preview += "..."
@@ -258,7 +258,7 @@ def _build_entries(phase: Phase, base_ts: float, model: str) -> list[TimelineEnt
             ))
 
         elif event.event_type == EventType.ASSISTANT_RESPONSE:
-            text = event.data.get("text", "")
+            text = str_field(event.data, "text", "")
             preview = text[:100].replace("\n", " ")
             if len(text) > 100:
                 preview += "..."

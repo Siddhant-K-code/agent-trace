@@ -1480,6 +1480,27 @@ not an object.` to stderr, and still counts the event. `watch
 event with non-object data. `mcp-scan --watch` refuses at startup in the same
 way and skips live events with non-object data with an `[mcp-scan]` line.
 
+### Fields with the wrong type
+
+When `data` is an object but a field inside it has the wrong type, commands read
+that field as missing. Examples are a number where a tool name belongs, a string
+where an arguments object belongs, and a list where a prompt belongs. The
+command behaves as if the key were absent and keeps going, without a traceback
+or an error message. A number field accepts integers and decimals. `true`,
+`false`, and numeric strings such as `"12"` are not numbers, so they read as
+missing too. `watch`, `mcp`, `compliance-report`, and `audit-readiness` read
+fields the same way. `cognitive-debt` is the exception. It stops with an error
+when a write event's tool name, path, or arguments have the wrong type, and it
+counts the lines of text inside content stored as a list or an object.
+
+Some output still prints the stored value as it is, for example the `share`
+page, `export --format json`, the `otlp` and `otlp-genai` exports, `audit`,
+`postmortem`, and the `compliance export` access log. Cost and token estimates
+still count the stored size of each event.
+`record` and `record-http` link a tool result to its call only when the JSON-RPC
+id is a string or a number. With any other id they forward both messages and
+record both events without the link.
+
 ---
 
 ## GitHub Actions

@@ -21,6 +21,7 @@ from .disclosure import (
     NonObjectEventDataError,
     require_object_event_data,
 )
+from .event_data import object_field, str_field, str_list_field
 from .evidence_packet import EvidencePacket, build_evidence_packet
 from .explain import ExplainResult, build_phases
 from .models import EventType, TraceEvent, SessionMeta
@@ -67,7 +68,7 @@ def _event_summary(event: TraceEvent) -> str:
     d = event.data
     et = event.event_type
     if et == EventType.TOOL_CALL:
-        name = d.get("tool_name", "?")
+        name = str_field(d, "tool_name", "?")
         if d.get("content_omitted"):
             effect = d.get("effect", "tool")
             attempt = d.get("attempt", 1)
@@ -77,7 +78,7 @@ def _event_summary(event: TraceEvent) -> str:
             elif d.get("retry"):
                 suffix = f" retry {attempt}"
             return f"{name}: {effect} input omitted{suffix}"
-        args = d.get("arguments", {}) or {}
+        args = object_field(d, "arguments", {}) or {}
         if name.lower() == "bash":
             cmd = str(args.get("command", ""))[:120]
             return f"{name}: $ {cmd}"
@@ -121,7 +122,9 @@ def _event_summary(event: TraceEvent) -> str:
         return str(d.get("uri", ""))
     if et == EventType.SESSION_START:
         cmd = d.get("command", [])
-        return " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+        if isinstance(cmd, list):
+            return " ".join(str_list_field(d, "command", []))
+        return str(cmd)
     if et == EventType.SESSION_END:
         return f"exit={d.get('exit_code', '?')}"
     if et in (EventType.SUBAGENT_START, EventType.SUBAGENT_STOP):

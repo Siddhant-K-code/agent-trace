@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from ..cost import estimate_cost
+from ..event_data import object_field, str_field
 from ..models import EventType, TraceEvent
 from ..store import TraceStore
 
@@ -423,10 +424,10 @@ def score_files_scoped(
     for event in events:
         if event.event_type != EventType.TOOL_CALL:
             continue
-        name = event.data.get("tool_name", "").lower()
+        name = str_field(event.data, "tool_name", "").lower()
         if name not in ("read", "write", "edit", "view", "create"):
             continue
-        args = event.data.get("arguments", {}) or {}
+        args = object_field(event.data, "arguments", {}) or {}
         path = str(args.get("file_path") or args.get("path") or "")
         if not path:
             continue
@@ -440,8 +441,9 @@ def score_files_scoped(
     total_ops = sum(
         1 for e in events
         if e.event_type == EventType.TOOL_CALL
-        and e.data.get("tool_name", "").lower() in ("read", "write", "edit", "view", "create")
-        and (e.data.get("arguments") or {}).get("file_path") or (e.data.get("arguments") or {}).get("path")
+        and str_field(e.data, "tool_name", "").lower() in ("read", "write", "edit", "view", "create")
+        and object_field(e.data, "arguments", {}).get("file_path")
+        or object_field(e.data, "arguments", {}).get("path")
     )
     score = max(0.0, 1.0 - len(violations) / max(1, total_ops))
     reason = f"{len(violations)} file(s) outside allowed paths: {', '.join(violations[:3])}"

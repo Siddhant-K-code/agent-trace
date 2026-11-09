@@ -29,6 +29,7 @@ from typing import Any
 
 from . import __version__
 from .cost import parse_since
+from .event_data import str_field
 from .explain import explain_session, format_explain
 from .health import assess_session, load_capture_matrix
 from .skills import build_aggregate_report, build_session_report
@@ -395,7 +396,7 @@ def _tool_diff_sessions(store: TraceStore, args: dict) -> str:
         counts: dict[str, int] = {}
         for e in events:
             if e.event_type == EventType.TOOL_CALL:
-                name = e.data.get("tool_name", "unknown")
+                name = str_field(e.data, "tool_name", "unknown")
                 counts[name] = counts.get(name, 0) + 1
         return counts
 
@@ -403,7 +404,7 @@ def _tool_diff_sessions(store: TraceStore, args: dict) -> str:
         paths: set[str] = set()
         for e in events:
             if e.event_type in (EventType.FILE_READ, EventType.FILE_WRITE):
-                p = e.data.get("path", e.data.get("file_path", ""))
+                p = str_field(e.data, "path", str_field(e.data, "file_path", ""))
                 if p:
                     paths.add(p)
         return paths

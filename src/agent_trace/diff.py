@@ -16,7 +16,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import TextIO
 
-from .event_data import require_object_event_data
+from .event_data import object_field, require_object_event_data, str_field
 from .explain import PHASE_DATA_EVENT_TYPES, Phase, build_phases, explain_session
 from .models import EventType
 from .store import TraceStore
@@ -467,8 +467,8 @@ def _count_redundant_reads(events) -> int:
     redundant = 0
     for e in events:
         if e.event_type == EventType.TOOL_CALL:
-            name = e.data.get("tool_name", "").lower()
-            args = e.data.get("arguments", {}) or {}
+            name = str_field(e.data, "tool_name", "").lower()
+            args = object_field(e.data, "arguments", {}) or {}
             if name in ("read", "read_file", "view"):
                 path = str(args.get("file_path") or args.get("path") or "")
                 if path:
@@ -529,22 +529,22 @@ def compare_sessions(
 
     # Files modified
     files_mod_a = len({
-        str((e.data.get("arguments") or {}).get("file_path") or
-            (e.data.get("arguments") or {}).get("path") or "")
+        str(object_field(e.data, "arguments", {}).get("file_path") or
+            object_field(e.data, "arguments", {}).get("path") or "")
         for e in events_a
         if e.event_type == EventType.TOOL_CALL
-        and e.data.get("tool_name", "").lower() in ("write", "edit", "create", "str_replace")
-        and ((e.data.get("arguments") or {}).get("file_path") or
-             (e.data.get("arguments") or {}).get("path"))
+        and str_field(e.data, "tool_name", "").lower() in ("write", "edit", "create", "str_replace")
+        and (object_field(e.data, "arguments", {}).get("file_path") or
+             object_field(e.data, "arguments", {}).get("path"))
     })
     files_mod_b = len({
-        str((e.data.get("arguments") or {}).get("file_path") or
-            (e.data.get("arguments") or {}).get("path") or "")
+        str(object_field(e.data, "arguments", {}).get("file_path") or
+            object_field(e.data, "arguments", {}).get("path") or "")
         for e in events_b
         if e.event_type == EventType.TOOL_CALL
-        and e.data.get("tool_name", "").lower() in ("write", "edit", "create", "str_replace")
-        and ((e.data.get("arguments") or {}).get("file_path") or
-             (e.data.get("arguments") or {}).get("path"))
+        and str_field(e.data, "tool_name", "").lower() in ("write", "edit", "create", "str_replace")
+        and (object_field(e.data, "arguments", {}).get("file_path") or
+             object_field(e.data, "arguments", {}).get("path"))
     })
 
     # Approach divergence: compare phase sequences

@@ -12,7 +12,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, TextIO
 
-from .event_data import require_object_event_data
+from .event_data import object_field, require_object_event_data, str_field
 from .models import EventType, SessionMeta, TraceEvent
 from .store import TraceStore
 from .subagent import describe_subagent, in_session_subagents
@@ -60,8 +60,8 @@ class ExplainResult:
 
 def _tool_command(event: TraceEvent) -> str:
     """Return a normalised command string for a tool_call event."""
-    args = event.data.get("arguments", {})
-    name = event.data.get("tool_name", "").lower()
+    args = object_field(event.data, "arguments", {})
+    name = str_field(event.data, "tool_name", "").lower()
     if name == "bash":
         return str(args.get("command", "")).strip()
     if name in ("read", "write", "edit"):
@@ -77,14 +77,14 @@ def _phase_label(events: list[TraceEvent], index: int) -> str:
     """Derive a short label for a phase from its events."""
     for e in events:
         if e.event_type == EventType.USER_PROMPT:
-            text = e.data.get("prompt", "")
+            text = str_field(e.data, "prompt", "")
             label = text[:50].replace("\n", " ").strip()
             if len(text) > 50:
                 label += "..."
             return label
     # Fall back to dominant tool type
     tool_names = [
-        e.data.get("tool_name", "").lower()
+        str_field(e.data, "tool_name", "").lower()
         for e in events
         if e.event_type == EventType.TOOL_CALL
     ]
@@ -145,8 +145,8 @@ def _annotate_phase(phase: Phase) -> None:
             has_error = True
 
         elif event.event_type == EventType.TOOL_CALL:
-            name = event.data.get("tool_name", "").lower()
-            args = event.data.get("arguments", {})
+            name = str_field(event.data, "tool_name", "").lower()
+            args = object_field(event.data, "arguments", {})
 
             if name == "bash":
                 cmd = str(args.get("command", "")).strip()

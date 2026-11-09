@@ -18,7 +18,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import TextIO
 
-from .event_data import require_object_event_data
+from .event_data import object_field, require_object_event_data, str_field
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -80,8 +80,8 @@ def _extract_new_deps(events: list[TraceEvent]) -> list[str]:
     for e in events:
         if e.event_type != EventType.TOOL_CALL:
             continue
-        tool = e.data.get("tool_name", "").lower()
-        args = e.data.get("arguments", {}) or {}
+        tool = str_field(e.data, "tool_name", "").lower()
+        args = object_field(e.data, "arguments", {}) or {}
         cmd = str(args.get("command") or args.get("cmd") or "")
         if tool in ("bash", "run", "execute", "shell") or "command" in args:
             if any(pm in cmd for pm in ("npm install", "pip install", "yarn add",
@@ -106,10 +106,10 @@ def _extract_uncertainties(events: list[TraceEvent]) -> list[UncertaintySignal]:
     for e in events:
         if e.event_type != EventType.TOOL_CALL:
             continue
-        tool = e.data.get("tool_name", "").lower()
+        tool = str_field(e.data, "tool_name", "").lower()
         if tool not in ("write", "edit", "str_replace", "create"):
             continue
-        args = e.data.get("arguments", {}) or {}
+        args = object_field(e.data, "arguments", {}) or {}
         content = str(args.get("new_str") or args.get("content") or "")
         path = str(args.get("file_path") or args.get("path") or "")
         for line_no, line in enumerate(content.splitlines(), 1):
@@ -184,10 +184,10 @@ def _extract_review_items(
     for e in events:
         if e.event_type != EventType.TOOL_CALL:
             continue
-        tool = e.data.get("tool_name", "").lower()
+        tool = str_field(e.data, "tool_name", "").lower()
         if tool not in ("write", "edit", "str_replace", "create"):
             continue
-        args = e.data.get("arguments", {}) or {}
+        args = object_field(e.data, "arguments", {}) or {}
         content = str(args.get("new_str") or args.get("content") or "")
         path = str(args.get("file_path") or args.get("path") or "")
         if len(content.splitlines()) > 100 and path:
@@ -205,8 +205,8 @@ def _extract_review_items(
         ("migration", "Database migration included"),
     ]
     all_content = " ".join(
-        str(e.data.get("arguments", {}).get("new_str") or
-            e.data.get("arguments", {}).get("content") or "")
+        str(object_field(e.data, "arguments", {}).get("new_str") or
+            object_field(e.data, "arguments", {}).get("content") or "")
         for e in events if e.event_type == EventType.TOOL_CALL
     ).lower()
     for pattern, description in behavior_patterns:
@@ -254,8 +254,8 @@ def analyse_standup(store: TraceStore, session_id: str) -> StandupReport:
     files_modified_set: set[str] = set()
     for e in events:
         if e.event_type == EventType.TOOL_CALL:
-            tool = e.data.get("tool_name", "").lower()
-            args = e.data.get("arguments", {}) or {}
+            tool = str_field(e.data, "tool_name", "").lower()
+            args = object_field(e.data, "arguments", {}) or {}
             path = str(args.get("file_path") or args.get("path") or "")
             if path:
                 if tool in ("read", "read_file", "view"):

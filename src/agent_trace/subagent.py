@@ -16,7 +16,7 @@ import sys
 from dataclasses import asdict, dataclass, field
 from typing import TextIO
 
-from .event_data import require_object_event_data
+from .event_data import object_field, require_object_event_data, str_field
 from .models import EventType, SessionMeta, TraceEvent
 from .store import TraceStore
 
@@ -324,8 +324,8 @@ def format_tree(
         etype = event.event_type.value
 
         if event.event_type == EventType.TOOL_CALL:
-            tool_name = event.data.get("tool_name", "?")
-            args = event.data.get("arguments", {})
+            tool_name = str_field(event.data, "tool_name", "?")
+            args = object_field(event.data, "arguments", {})
             detail = ""
             if tool_name.lower() == "bash":
                 cmd = str(args.get("command", ""))
@@ -355,30 +355,30 @@ def format_tree(
                             last_child=is_last)
 
         elif event.event_type == EventType.TOOL_RESULT:
-            preview = (event.data.get("result", "") or
-                       event.data.get("content_preview", ""))[:80]
+            preview = (str_field(event.data, "result", "") or
+                       str_field(event.data, "content_preview", ""))[:80]
             label = subagent_label(event.data)
             w(f"{indent}{ts_str}  ← tool_result"
               f"{'  [subagent ' + label + ']' if label else ''}"
               f"{'  ' + preview if preview else ''}\n")
 
         elif event.event_type == EventType.ERROR:
-            msg = (event.data.get("message", "") or
-                   event.data.get("error", ""))[:80]
+            msg = (str_field(event.data, "message", "") or
+                   str_field(event.data, "error", ""))[:80]
             label = subagent_label(event.data)
             w(f"{indent}{ts_str}  ✗ error"
               f"{'  [subagent ' + label + ']' if label else ''}  {msg}\n")
 
         elif event.event_type == EventType.USER_PROMPT:
-            prompt = event.data.get("prompt", "")[:80]
+            prompt = str_field(event.data, "prompt", "")[:80]
             w(f"{indent}{ts_str}  👤 \"{prompt}\"\n")
 
         elif event.event_type == EventType.ASSISTANT_RESPONSE:
-            text = event.data.get("text", "")[:80]
+            text = str_field(event.data, "text", "")[:80]
             w(f"{indent}{ts_str}  🤖 \"{text}\"\n")
 
         elif event.event_type in (EventType.SUBAGENT_START, EventType.SUBAGENT_STOP):
-            agent = event.data.get("agent_type") or event.data.get("agent_name") or ""
+            agent = str_field(event.data, "agent_type", "") or str_field(event.data, "agent_name", "")
             child = str(event.data.get("child_session_id", ""))[:12]
             agent_id = _event_agent_id(event.data)
             icon = "⤷" if event.event_type == EventType.SUBAGENT_START else "⤶"

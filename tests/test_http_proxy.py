@@ -173,6 +173,34 @@ class TestHTTPProxy(unittest.TestCase):
         self.assertEqual(tool_results[0].parent_id, tool_calls[0].event_id)
         self.assertGreater(tool_results[0].duration_ms, 0)
 
+    def test_tool_call_with_an_array_or_object_id_is_traced_without_a_link(self):
+        """An id that is not a string or number is forwarded but cannot link the result."""
+        for request_id in ([1], {"k": 1}):
+            with self.subTest(request_id=request_id):
+                del self.events[:]
+                conn = http.client.HTTPConnection("127.0.0.1", self.proxy_port)
+                body = json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": "tools/call",
+                    "params": {"name": "read_file", "arguments": {"path": "/tmp/test.txt"}},
+                })
+                conn.request("POST", "/message", body=body, headers={
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(body)),
+                })
+                resp = conn.getresponse()
+                resp_body = resp.read()
+                conn.close()
+
+                self.assertEqual(resp.status, 200)
+                self.assertEqual(json.loads(resp_body.decode("utf-8"))["id"], request_id)
+                tool_calls = [e for e in self.events if e.event_type == EventType.TOOL_CALL]
+                tool_results = [e for e in self.events if e.event_type == EventType.TOOL_RESULT]
+                self.assertEqual(len(tool_calls), 1)
+                self.assertEqual(len(tool_results), 1)
+                self.assertEqual(tool_results[0].parent_id, "")
+
     def test_initialize_traced(self):
         """POST an initialize request and verify it's traced as LLM_REQUEST."""
         conn = http.client.HTTPConnection("127.0.0.1", self.proxy_port)
@@ -462,6 +490,16 @@ class TestHTTPProxyPendingCalls(unittest.TestCase):
         self.assertEqual(result.parent_id, call_2.event_id)
         self.assertAlmostEqual(result.duration_ms, 500.0)
         self.assertEqual(list(server.pending_calls), [1])
+
+    def test_result_with_an_id_that_is_not_a_string_or_number_leaves_pending_calls_alone(self):
+        for request_id in (True, [1], {"k": 1}):
+            with self.subTest(request_id=request_id):
+                server = self._make_server()
+                server.track_call(TraceEvent(event_type=EventType.TOOL_CALL, data={"request_id": 1}))
+                result = TraceEvent(event_type=EventType.TOOL_RESULT, data={"request_id": request_id})
+                server.match_result(result)
+                self.assertFalse(result.parent_id)
+                self.assertEqual(list(server.pending_calls), [1])
 
     def test_unmatched_result_recorded_without_crash(self):
         server, events = self._start_proxy()

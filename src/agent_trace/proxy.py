@@ -27,6 +27,7 @@ import threading
 import time
 from typing import IO, Any, Callable
 
+from .event_data import number_field, str_field
 from .models import EventType, SessionMeta, TraceEvent
 from .masking import MaskingConfig, mask_event_data
 from .store import TraceStore
@@ -89,6 +90,15 @@ def _write_message(stream: IO[bytes], msg: dict[str, Any], use_content_length: b
     else:
         stream.write(body + b"\n")
     stream.flush()
+
+
+def _rpc_id(data: dict[str, Any]) -> str | int | float | None:
+    """Return the ``request_id`` that links a tool call to its result.
+
+    An id that is not a string or number reads as missing, so the call and
+    its result are recorded without a link.
+    """
+    return str_field(data, "request_id", number_field(data, "request_id", None))
 
 
 def _classify_message(msg: dict[str, Any], direction: str) -> TraceEvent | None:
@@ -252,13 +262,13 @@ class MCPProxy:
             if event:
                 # link tool_result to tool_call
                 if event.event_type == EventType.TOOL_RESULT:
-                    req_id = event.data.get("request_id")
+                    req_id = _rpc_id(event.data)
                     if req_id in self._pending_calls:
                         call_event = self._pending_calls.pop(req_id)
                         event.parent_id = call_event.event_id
                         event.duration_ms = (event.timestamp - call_event.timestamp) * 1000
                 elif event.event_type == EventType.TOOL_CALL:
-                    req_id = event.data.get("request_id")
+                    req_id = _rpc_id(event.data)
                     if req_id is not None:
                         self._pending_calls[req_id] = event
 

@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from typing import TextIO
 
 from .cost import _estimate_tokens, PRICING
-from .event_data import require_object_event_data
+from .event_data import list_field, require_object_event_data
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -118,7 +118,7 @@ def _extract_tokens_by_type(event: TraceEvent) -> dict[str, int]:
             system_text = json.dumps(data["system_prompt"])
         else:
             # OpenAI format: look for role=system inside messages array
-            for msg in data.get("messages", []):
+            for msg in list_field(data, "messages", []):
                 if isinstance(msg, dict) and msg.get("role") == "system":
                     system_text += json.dumps(msg.get("content", ""))
         if system_text:
@@ -135,7 +135,7 @@ def _extract_tokens_by_type(event: TraceEvent) -> dict[str, int]:
 
         # User messages (non-system messages in the messages array)
         user_text = ""
-        for msg in data.get("messages", []):
+        for msg in list_field(data, "messages", []):
             if isinstance(msg, dict) and msg.get("role") != "system":
                 user_text += json.dumps(msg.get("content", ""))
         # Also count any top-level prompt field

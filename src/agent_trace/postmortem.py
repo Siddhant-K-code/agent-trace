@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import TextIO
 
 from .cost import estimate_cost
-from .event_data import require_object_event_data
+from .event_data import object_field, require_object_event_data, str_field
 from .explain import explain_session
 from .models import EventType, TraceEvent
 from .store import TraceStore
@@ -124,7 +124,7 @@ def _detect_agents_md_violations(
     for event in events:
         if event.event_type != EventType.TOOL_CALL:
             continue
-        args = event.data.get("arguments", {}) or {}
+        args = object_field(event.data, "arguments", {}) or {}
         cmd = str(args.get("command", "")).strip().lower()
         if not cmd:
             continue
@@ -237,7 +237,7 @@ def _last_action(events: list[TraceEvent]) -> str:
 def _describe_event(event: TraceEvent) -> str:
     if event.event_type == EventType.TOOL_CALL:
         name = event.data.get("tool_name", "?")
-        args = event.data.get("arguments", {}) or {}
+        args = object_field(event.data, "arguments", {}) or {}
         target = (
             args.get("command")
             or args.get("file_path")
@@ -390,8 +390,8 @@ def _build_timeline(
             entries.append(TimelineEntry(offset, f'User: "{prompt}"'))
 
         elif event.event_type == EventType.TOOL_CALL:
-            name = event.data.get("tool_name", "?")
-            args = event.data.get("arguments", {}) or {}
+            name = str_field(event.data, "tool_name", "?")
+            args = object_field(event.data, "arguments", {}) or {}
             if name.lower() == "bash":
                 cmd = str(args.get("command", "")).strip()
                 is_retry = cmd in seen_commands
@@ -473,7 +473,7 @@ def _file_write_summary(events: list[TraceEvent]) -> list[str]:
             name = str(event.data.get("tool_name", "")).lower()
             if name not in ("write", "edit", "create", "str_replace"):
                 continue
-            args = event.data.get("arguments", {}) or {}
+            args = object_field(event.data, "arguments", {}) or {}
             path = str(args.get("file_path") or args.get("path") or "")
             if path and path not in paths:
                 paths.append(path)

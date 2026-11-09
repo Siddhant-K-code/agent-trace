@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
 
-from .event_data import require_object_event_data
+from .event_data import object_field, require_object_event_data, str_field
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -138,8 +138,8 @@ def observe_session(store: TraceStore, session_id: str) -> dict:
     for event in events:
         if event.event_type != EventType.TOOL_CALL:
             continue
-        name = event.data.get("tool_name", "").lower()
-        args = event.data.get("arguments", {}) or {}
+        name = str_field(event.data, "tool_name", "").lower()
+        args = object_field(event.data, "arguments", {}) or {}
 
         if name in ("read", "view", "grep", "glob"):
             path = str(

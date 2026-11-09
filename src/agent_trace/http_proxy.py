@@ -33,7 +33,7 @@ from typing import Any, Callable
 from urllib.parse import urlparse
 
 from .models import EventType, SessionMeta, TraceEvent
-from .proxy import _classify_message
+from .proxy import _classify_message, _rpc_id
 from .masking import MaskingConfig, mask_event_data
 from .propagation import extract_traceparent, inject_traceparent
 from .store import TraceStore
@@ -190,7 +190,7 @@ class _ProxyHTTPServer(ThreadingHTTPServer):
 
     def track_call(self, event: TraceEvent) -> None:
         """Remember a tool_call so its result can be linked later."""
-        req_id = event.data.get("request_id")
+        req_id = _rpc_id(event.data)
         if req_id is None:
             return
         with self._pending_lock:
@@ -201,7 +201,7 @@ class _ProxyHTTPServer(ThreadingHTTPServer):
 
     def match_result(self, event: TraceEvent) -> None:
         """Link a tool_result to its pending tool_call, if one exists."""
-        req_id = event.data.get("request_id")
+        req_id = _rpc_id(event.data)
         with self._pending_lock:
             call_event = self.pending_calls.pop(req_id, None) if req_id is not None else None
         if call_event is not None:

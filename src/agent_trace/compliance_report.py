@@ -29,6 +29,7 @@ from typing import Any, Iterable, TextIO
 
 from .approval import APPROVAL_STATES, DECIDED_STATES, PENDING, ApprovalRequest
 from .audit import Policy, _audit_event, _extract_urls, _is_sensitive
+from .event_data import str_field
 from .models import EventType, SessionMeta, TraceEvent
 from .correlation import correlate_tool_events
 from .redact import contains_redaction_marker, redact_data
@@ -807,7 +808,7 @@ def _recorded_authorization(event: TraceEvent) -> tuple[str, str, str | None] | 
         return "ambiguous_record", "invalid", None
     if record.get("schema") != "agent-strace-authorization/v1":
         return "ambiguous_record", "invalid", None
-    decision = record.get("decision")
+    decision = str_field(record, "decision")
     if decision not in {"allowed", "denied"} or record.get("mode") != "pre_action":
         return "ambiguous_record", "invalid", None
     evaluated_at = record.get("evaluated_at")

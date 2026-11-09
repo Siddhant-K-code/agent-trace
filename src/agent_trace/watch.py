@@ -39,7 +39,12 @@ from typing import Any, TextIO
 
 from .cost import _dollars, _event_tokens
 from .compaction import CompactionCheckpointWatcher
-from .event_data import NonObjectEventDataError, skipped_event_warning
+from .event_data import (
+    NonObjectEventDataError,
+    object_field,
+    skipped_event_warning,
+    str_field,
+)
 from .models import EventType, TraceEvent
 from .postmortem import clear_heartbeat, write_heartbeat
 from .project_budget import (
@@ -242,7 +247,7 @@ class NannyRule:
         """Return True if this rule's condition is satisfied."""
         if self._metric == "file_path" and self._op == "matches" and event:
             if event.event_type == EventType.TOOL_CALL:
-                args = event.data.get("arguments", {}) or {}
+                args = object_field(event.data, "arguments", {}) or {}
                 path = str(
                     args.get("file_path") or args.get("path") or ""
                 )
@@ -646,8 +651,8 @@ class WatchState:
 def _event_key(event: TraceEvent) -> str:
     """Stable string key for an event (for loop detection)."""
     if event.event_type == EventType.TOOL_CALL:
-        name = event.data.get("tool_name", "?")
-        args = event.data.get("arguments", {}) or {}
+        name = str_field(event.data, "tool_name", "?")
+        args = object_field(event.data, "arguments", {}) or {}
         arg_text = json.dumps(args, sort_keys=True, default=str)
         arg_hash = hashlib.sha256(arg_text.encode("utf-8")).hexdigest()[:12]
         preview = str(
@@ -938,8 +943,8 @@ def check_event(
 
     # --- Track files modified (for nanny rules) ---
     if event.event_type == EventType.TOOL_CALL:
-        _name = event.data.get("tool_name", "").lower()
-        _args = event.data.get("arguments", {}) or {}
+        _name = str_field(event.data, "tool_name", "").lower()
+        _args = object_field(event.data, "arguments", {}) or {}
         if _name in ("write", "edit", "create", "str_replace"):
             _path = str(_args.get("file_path") or _args.get("path") or "")
             if _path and _path not in state.files_modified_set:
@@ -970,8 +975,8 @@ def check_event(
 
     # --- Retry detection (bash commands) ---
     if event.event_type == EventType.TOOL_CALL:
-        name = event.data.get("tool_name", "").lower()
-        args = event.data.get("arguments", {}) or {}
+        name = str_field(event.data, "tool_name", "").lower()
+        args = object_field(event.data, "arguments", {}) or {}
         if name == "bash":
             cmd = str(args.get("command", "")).strip()
             if cmd:
@@ -1085,8 +1090,8 @@ def check_event(
 
     # --- Per-operation enforcement rules ---
     if event.event_type == EventType.TOOL_CALL and config.operation_rules:
-        tool_name = event.data.get("tool_name", "").lower()
-        args = event.data.get("arguments", {}) or {}
+        tool_name = str_field(event.data, "tool_name", "").lower()
+        args = object_field(event.data, "arguments", {}) or {}
         # Derive the target string: command for bash, path for file ops
         if tool_name == "bash":
             target = str(args.get("command", "")).strip()
