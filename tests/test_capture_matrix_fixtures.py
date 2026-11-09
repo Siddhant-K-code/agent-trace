@@ -36,9 +36,20 @@ FIXTURE_DIR = ROOT / "tests" / "fixtures" / "capture_matrix"
 REFERENCE = "tests/test_capture_matrix_fixtures.py"
 FIXTURES = {
     "copilot": "copilot-1.0.103-0.json",
-    "codex": "codex-0.163.0-alpha.11.json",
+    "codex": "codex-0.167.0-alpha.3.2.json",
 }
 LEGACY_COPILOT_FIXTURE = "copilot-1.0.94-3.json"
+LEGACY_CODEX_FIXTURE = "codex-0.163.0-alpha.11.json"
+# Codex hooks that fired in the recording but that setup does not register.
+UNREGISTERED_CODEX_HOOKS = {"PreModelRequest", "PostModelRequest"}
+TOKEN_USAGE_KEYS = {
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+    "total_tokens",
+}
 SYNTHETIC_ID = re.compile(r"^[cd]\d{7}-0000-4000-8000-\d{12}$")
 
 
@@ -399,10 +410,18 @@ class TestCopilotLegacyFixture(TestCopilotFixture):
 
 class TestCodexFixture(_ReplayChecks, unittest.TestCase):
     provider = "codex"
+    subagent_scenarios = ("subagent",)
+    start_before_wait_scenario = "subagent"
 
     def only_session(self, store):
         (meta,) = self.sessions(store).values()
         return meta
+
+    def assert_only_unregistered_skipped(self, skipped):
+        self.assertLessEqual(set(skipped), UNREGISTERED_CODEX_HOOKS)
+
+    def test_unregistered_hooks_are_not_set_up(self):
+        self.assertFalse(UNREGISTERED_CODEX_HOOKS & set(registered_hooks(self.provider)))
 
     def test_session_end_finishes_every_session(self):
         for scenario in self.fixture["scenarios"]:
@@ -410,7 +429,7 @@ class TestCodexFixture(_ReplayChecks, unittest.TestCase):
             meta = self.only_session(store)
             events = store.load_events(meta.session_id)
             with self.subTest(scenario=scenario):
-                self.assertEqual(skipped, [])
+                self.assert_only_unregistered_skipped(skipped)
                 self.assertEqual(events[-1].event_type, EventType.SESSION_END)
                 self.assertEqual(events[-1].data["reason"], "other")
                 self.assertEqual(
@@ -423,7 +442,7 @@ class TestCodexFixture(_ReplayChecks, unittest.TestCase):
 
     def test_tool_session_records_model_but_no_tokens(self):
         store, skipped = self.replay("tool")
-        self.assertEqual(skipped, [])
+        self.assert_only_unregistered_skipped(skipped)
         meta = self.only_session(store)
         events = store.load_events(meta.session_id)
         self.assertEqual(
@@ -452,10 +471,10 @@ class TestCodexFixture(_ReplayChecks, unittest.TestCase):
         self.assertEqual(meta.errors, 0)
 
     def test_subagent_events_are_recorded_in_the_parent_session(self):
-        for scenario in ("subagent", "subagent_start_before_wait"):
+        for scenario in self.subagent_scenarios:
             with self.subTest(scenario=scenario):
                 store, skipped = self.replay(scenario)
-                self.assertEqual(skipped, [])
+                self.assert_only_unregistered_skipped(skipped)
                 meta = self.only_session(store)
                 hooks = self.fixture["scenarios"][scenario]["hooks"]
                 (agent_id,) = {
@@ -512,17 +531,84 @@ class TestCodexFixture(_ReplayChecks, unittest.TestCase):
                         self.assertNotIn("agent_id", event.data)
                         self.assertNotIn("agent_type", event.data)
 
-    def test_subagent_start_order_differs_between_recordings(self):
-        def order(scenario):
-            return [
-                (h["event"], h["payload"].get("tool_name", ""))
-                for h in self.fixture["scenarios"][scenario]["hooks"]
-            ]
+    def registered_order(self, scenario):
+        return [
+            (h["event"], h["payload"].get("tool_name", ""))
+            for h in self.fixture["scenarios"][scenario]["hooks"]
+            if h["event"] not in UNREGISTERED_CODEX_HOOKS
+        ]
 
+    def test_subagent_start_precedes_wait_in_this_recording(self):
+        order = self.registered_order(self.start_before_wait_scenario)
+        spawn = ("PostToolUse", "collaborationspawn_agent")
+        start = ("SubagentStart", "")
+        wait = ("PreToolUse", "collaborationwait_agent")
+        self.assertEqual(order.index(spawn) + 1, order.index(start))
+        self.assertEqual(order.index(start) + 1, order.index(wait))
+
+    def test_spawn_agent_does_not_name_the_child(self):
+        for scenario in self.subagent_scenarios:
+            hooks = self.fixture["scenarios"][scenario]["hooks"]
+            (spawn,) = [
+                h["payload"] for h in hooks
+                if h["event"] == "PostToolUse"
+                and h["payload"]["tool_name"] == "collaborationspawn_agent"
+            ]
+            with self.subTest(scenario=scenario):
+                self.assertNotIn("agent_id", spawn)
+                self.assertEqual(set(json.loads(spawn["tool_response"])), {"task_name"})
+
+    def test_post_model_request_exposes_token_usage_that_is_not_recorded(self):
+        for scenario, recording in self.fixture["scenarios"].items():
+            usage = [
+                h["payload"] for h in recording["hooks"] if h["event"] == "PostModelRequest"
+            ]
+            store, skipped = self.replay(scenario)
+            meta = self.only_session(store)
+            with self.subTest(scenario=scenario):
+                self.assertTrue(usage)
+                self.assertEqual(skipped.count("PostModelRequest"), len(usage))
+                for payload in usage:
+                    self.assertEqual(payload["status"], "completed")
+                    self.assertIsNone(payload["error"])
+                    self.assertEqual(set(payload["token_usage"]), TOKEN_USAGE_KEYS)
+                    self.assertTrue(
+                        all(isinstance(v, int) for v in payload["token_usage"].values())
+                    )
+                self.assertEqual(meta.total_tokens, 0)
+                kinds = {e.event_type for e in store.load_events(meta.session_id)}
+                self.assertNotIn(EventType.LLM_REQUEST, kinds)
+                self.assertNotIn(EventType.LLM_RESPONSE, kinds)
+        subagent_usage = [
+            h["payload"] for h in self.fixture["scenarios"]["subagent"]["hooks"]
+            if h["event"] == "PostModelRequest" and "agent_id" in h["payload"]
+        ]
+        self.assertTrue(subagent_usage)
+
+
+class TestCodexLegacyFixture(TestCodexFixture):
+    """codex-cli 0.163.0-alpha.11: two subagent runs whose SubagentStart and
+    wait_agent PreToolUse arrived in different orders, and no recording of the
+    model-request hooks. The hooks must keep handling these payloads."""
+
+    fixture_name = LEGACY_CODEX_FIXTURE
+    subagent_scenarios = ("subagent", "subagent_start_before_wait")
+    start_before_wait_scenario = "subagent_start_before_wait"
+
+    def test_entry_is_verified_by_this_fixture(self):
+        self.assertEqual(self.fixture["provider"], self.provider)
+        self.assertEqual(self.fixture["tested_version"], "0.163.0-alpha.11")
+        self.assertNotEqual(self.entry["tested_version"], self.fixture["tested_version"])
+
+    def test_post_model_request_exposes_token_usage_that_is_not_recorded(self):
+        self.skipTest("the 0.163.0-alpha.11 runs did not record model-request hooks")
+
+    def test_subagent_start_order_differs_between_recordings(self):
         spawn = ("PostToolUse", "collaborationspawn_agent")
         wait = ("PreToolUse", "collaborationwait_agent")
         start = ("SubagentStart", "")
-        first, second = order("subagent"), order("subagent_start_before_wait")
+        first = self.registered_order("subagent")
+        second = self.registered_order("subagent_start_before_wait")
         self.assertEqual(first.index(spawn) + 1, first.index(wait))
         self.assertEqual(first.index(wait) + 1, first.index(start))
         self.assertEqual(second.index(spawn) + 1, second.index(start))

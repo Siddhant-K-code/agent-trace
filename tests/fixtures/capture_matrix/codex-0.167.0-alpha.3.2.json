@@ -1,0 +1,681 @@
+{
+  "provider": "codex",
+  "cli": "OpenAI Codex CLI",
+  "tested_version": "0.167.0-alpha.3.2",
+  "recorded": "2026-11-09",
+  "sanitized": "Hook payloads recorded from real headless runs and then sanitized: session, turn and agent ids, paths, prompts, model names, token counts and subagent task names and messages are synthetic. Tool commands were chosen for the test and their output is as observed. Hook names, event order, payload keys and value types are as observed. PreModelRequest and PostModelRequest were recorded by extra recorder-only hooks; agent-strace setup does not register them.",
+  "scenarios": {
+    "tool": {
+      "description": "codex exec session: one prompt, one successful shell command.",
+      "hooks": [
+        {
+          "event": "SessionStart",
+          "payload": {
+            "session_id": "d0000001-0000-4000-8000-000000000001",
+            "transcript_path": "/codex-home/sessions/rollout-d0000001-0000-4000-8000-000000000001.jsonl",
+            "cwd": "/workspace/project",
+            "hook_event_name": "SessionStart",
+            "model": "synthetic-model",
+            "permission_mode": "bypassPermissions",
+            "source": "startup"
+          }
+        },
+        {
+          "event": "UserPromptSubmit",
+          "payload": {
+            "session_id": "d0000001-0000-4000-8000-000000000001",
+            "turn_id": "d0000002-0000-4000-8000-000000000002",
+            "transcript_path": "/codex-home/sessions/rollout-d0000001-0000-4000-8000-000000000001.jsonl",
+            "cwd": "/workspace/project",
+            "hook_event_name": "UserPromptSubmit",
+            "model": "synthetic-model",
+            "permission_mode": "bypassPermissions",
+            "prompt": "Synthetic prompt for the tool scenario."
+          }
+        },
+        {
+          "event": "PreModelRequest",
+          "payload": {
+            "session_id": "d0000001-0000-4000-8000-000000000001",
+            "turn_id": "d0000002-0000-4000-8000-000000000002",
+            "cwd": "/workspace/project",
+            "transcript_path": "/codex-home/sessions/rollout-d0000001-0000-4000-8000-000000000001.jsonl",
+            "model": "synthetic-model",
+            "hook_event_name": "PreModelRequest"
+          }
+        },
+        {
+          "event": "PostModelRequest",
+          "payload": {
+            "session_id": "d0000001-0000-4000-8000-000000000001",
+            "turn_id": "d0000002-0000-4000-8000-000000000002",
+            "cwd": "/workspace/project",
+            "transcript_path": "/codex-home/sessions/rollout-d0000001-0000-4000-8000-000000000001.jsonl",
+            "model": "synthetic-model",
+            "hook_event_name": "PostModelRequest",
+            "status": "completed",
+            "error": null,
+            "token_usage": {
+              "input_tokens": 1010,
+              "cached_input_tokens": 512,
+              "cache_write_input_tokens": 0,
+              "output_tokens": 6,
+              "reasoning_output_tokens": 0,
+              "total_tokens": 1016
+            }
+          }
+        },
+        {
+          "event": "PreToolUse",
+          "payload": {
+            "session_id": "d0000001-0000-4000-8000-000000000001",
+            "turn_id": "d0000002-0000-4000-8000-000000000002",
+            "transcript_path": "/codex-home/sessions/rollout-d0000001-0000-4000-8000-000000000001.jsonl",
+            "cwd": "/workspace/project",
+            "hook_event_name": "PreToolUse",
+            "model": "synthetic-model",
+            "permission_mode": "bypassPermissions",
+            "tool_name": "Bash",
+            "tool_input": {
+              "command": "echo hello-agent-strace"
+            },
+            "tool_use_id": "exec-d0000003-0000-4000-8000-000000000003"
+          }
+        },
+        {
+          "event": "PostToolUse",
+          "payload": {
+            "session_id": "d0000001-0000-4000-8000-000000000001",
+            "turn_id": "d0000002-0000-4000-8000-000000000002",
+            "transcript_path": "/codex-home/sessions/rollout-d0000001-0000-4000-8000-000000000001.jsonl",
+            "cwd": "/workspace/project",
+            "hook_event_name": "PostToolUse",
+            "model": "synthetic-model",
+            "permission_mode": "bypassPermissions",
+            "tool_name": "Bash",
+            "tool_input": {
+              "command": "echo hello-agent-strace"
+            },
+            "tool_response": "hello-agent-strace\n",
+            "tool_use_id": "exec-d0000003-0000-4000-8000-000000000003"
+          }
+        },
+        {
+          "event": "PreModelRequest",
+          "payload": {
+            "session_id": "d0000001-0000-4000-8000-000000000001",
+            "turn_id": "d0000002-0000-4000-8000-000000000002",
+            "cwd": "/workspace/project",
+            "transcript_path": "/codex-home/sessions/rollout-d0000001-0000-4000-8000-000000000001.jsonl",
+            "model": "synthetic-model",
+            "hook_event_name": "PreModelRequest"
+          }
+        },
+        {
+          "event": "PostModelRequest",
+          "payload": {
+            "session_id": "d0000001-0000-4000-8000-000000000001",
+            "turn_id": "d0000002-0000-4000-8000-000000000002",
+            "cwd": "/workspace/project",
+            "transcript_path": "/codex-home/sessions/rollout-d0000001-0000-4000-8000-000000000001.jsonl",
+            "model": "synthetic-model",
+            "hook_event_name": "PostModelRequest",
+            "status": "completed",
+            "error": null,
+            "token_usage": {
+              "input_tokens": 1020,
+              "cached_input_tokens": 512,
+              "cache_write_input_tokens": 0,
+              "output_tokens": 7,
+              "reasoning_output_tokens": 0,
+              "total_tokens": 1027
+            }
+          }
+        },
+        {
+          "event": "Stop",
+          "payload": {
+            "session_id": "d0000001-0000-4000-8000-000000000001",
+            "turn_id": "d0000002-0000-4000-8000-000000000002",
+            "transcript_path": "/codex-home/sessions/rollout-d0000001-0000-4000-8000-000000000001.jsonl",
+            "cwd": "/workspace/project",
+            "hook_event_name": "Stop",
+            "model": "synthetic-model",
+            "permission_mode": "bypassPermissions",
+            "stop_hook_active": false,
+            "last_assistant_message": "hello-agent-strace"
+          }
+        },
+        {
+          "event": "SessionEnd",
+          "payload": {
+            "session_id": "d0000001-0000-4000-8000-000000000001",
+            "transcript_path": "/codex-home/sessions/rollout-d0000001-0000-4000-8000-000000000001.jsonl",
+            "cwd": "/workspace/project",
+            "hook_event_name": "SessionEnd",
+            "reason": "other"
+          }
+        }
+      ]
+    },
+    "tool_failure": {
+      "description": "codex exec session: a shell command that exits non-zero. PostToolUse carries the command's error output and no exit code.",
+      "hooks": [
+        {
+          "event": "SessionStart",
+          "payload": {
+            "session_id": "d0000004-0000-4000-8000-000000000004",
+            "transcript_path": "/codex-home/sessions/rollout-d0000004-0000-4000-8000-000000000004.jsonl",
+            "cwd": "/workspace/project",
+            "hook_event_name": "SessionStart",
+            "model": "synthetic-model",
+            "permission_mode": "bypassPermissions",
+            "source": "startup"
+          }
+        },
+        {
+          "event": "UserPromptSubmit",
+          "payload": {
+            "session_id": "d0000004-0000-4000-8000-000000000004",
+            "turn_id": "d0000005-0000-4000-8000-000000000005",
+            "transcript_path": "/codex-home/sessions/rollout-d0000004-0000-4000-8000-000000000004.jsonl",
+            "cwd": "/workspace/project",
+            "hook_event_name": "UserPromptSubmit",
+            "model": "synthetic-model",
+            "permission_mode": "bypassPermissions",
+            "prompt": "Synthetic prompt for the tool_failure scenario."
+          }
+        },
+        {
+          "event": "PreModelRequest",
+          "payload": {
+            "session_id": "d0000004-0000-4000-8000-000000000004",
+            "turn_id": "d0000005-0000-4000-8000-000000000005",
+            "cwd": "/workspace/project",
+            "transcript_path": "/codex-home/sessions/rollout-d0000004-0000-4000-8000-000000000004.jsonl",
+            "model": "synthetic-model",
+            "hook_event_name": "PreModelRequest"
+          }
+        },
+        {
+          "event": "PostModelRequest",
+          "payload": {
+            "session_id": "d0000004-0000-4000-8000-000000000004",
+            "turn_id": "d0000005-0000-4000-8000-000000000005",
+            "cwd": "/workspace/project",
+            "transcript_path": "/codex-home/sessions/rollout-d0000004-0000-4000-8000-000000000004.jsonl",
+            "model": "synthetic-model",
+            "hook_event_name": "PostModelRequest",
+            "status": "completed",
+            "error": null,
+            "token_usage": {
+              "input_tokens": 1030,
+              "cached_input_tokens": 512,
+              "cache_write_input_tokens": 0,
+              "output_tokens": 8,
+              "reasoning_output_tokens": 0,
+              "total_tokens": 1038
+            }
+          }
+        },
+        {
+          "event": "PreToolUse",
+          "payload": {
+            "session_id": "d0000004-0000-4000-8000-000000000004",
+            "turn_id": "d0000005-0000-4000-8000-000000000005",
+            "transcript_path": "/codex-home/sessions/rollout-d0000004-0000-4000-8000-000000000004.jsonl",
+            "cwd": "/workspace/project",
+            "hook_event_name": "PreToolUse",
+            "model": "synthetic-model",
+            "permission_mode": "bypassPermissions",
+            "tool_name": "Bash",
+            "tool_input": {
+              "command": "ls ./missing-dir"
+            },
+            "tool_use_id": "exec-d0000006-0000-4000-8000-000000000006"
+          }
+        },
+        {
+          "event": "PostToolUse",
+          "payload": {
+            "session_id": "d0000004-0000-4000-8000-000000000004",
+            "turn_id": "d0000005-0000-4000-8000-000000000005",
+            "transcript_path": "/codex-home/sessions/rollout-d0000004-0000-4000-8000-000000000004.jsonl",
+            "cwd": "/workspace/project",
+            "hook_event_name": "PostToolUse",
+            "model": "synthetic-model",
+            "permission_mode": "bypassPermissions",
+            "tool_name": "Bash",
+            "tool_input": {
+              "command": "ls ./missing-dir"
+            },
+            "tool_response": "ls: ./missing-dir: No such file or directory\n",
+            "tool_use_id": "exec-d0000006-0000-4000-8000-000000000006"
+          }
+        },
+        {
+          "event": "PreModelRequest",
+          "payload": {
+            "session_id": "d0000004-0000-4000-8000-000000000004",
+            "turn_id": "d0000005-0000-4000-8000-000000000005",
+            "cwd": "/workspace/project",
+            "transcript_path": "/codex-home/sessions/rollout-d0000004-0000-4000-8000-000000000004.jsonl",
+            "model": "synthetic-model",
+            "hook_event_name": "PreModelRequest"
+          }
+        },
+        {
+          "event": "PostModelRequest",
+          "payload": {
+            "session_id": "d0000004-0000-4000-8000-000000000004",
+            "turn_id": "d0000005-0000-4000-8000-000000000005",
+            "cwd": "/workspace/project",
+            "transcript_path": "/codex-home/sessions/rollout-d0000004-0000-4000-8000-000000000004.jsonl",
+            "model": "synthetic-model",
+            "hook_event_name": "PostModelRequest",
+            "status": "completed",
+            "error": null,
+            "token_usage": {
+              "input_tokens": 1040,
+              "cached_input_tokens": 512,
+              "cache_write_input_tokens": 0,
+              "output_tokens": 9,
+              "reasoning_output_tokens": 0,
+              "total_tokens": 1049
+            }
+          }
+        },
+        {
+          "event": "Stop",
+          "payload": {
+            "session_id": "d0000004-0000-4000-8000-000000000004",
+            "turn_id": "d0000005-0000-4000-8000-000000000005",
+            "transcript_path": "/codex-home/sessions/rollout-d0000004-0000-4000-8000-000000000004.jsonl",
+            "cwd": "/workspace/project",
+            "hook_event_name": "Stop",
+            "model": "synthetic-model",
+            "permission_mode": "bypassPermissions",
+            "stop_hook_active": false,
+            "last_assistant_message": "Exit code: 1"
+          }
+        },
+        {
+          "event": "SessionEnd",
+          "payload": {
+            "session_id": "d0000004-0000-4000-8000-000000000004",
+            "transcript_path": "/codex-home/sessions/rollout-d0000004-0000-4000-8000-000000000004.jsonl",
+            "cwd": "/workspace/project",
+            "hook_event_name": "SessionEnd",
+            "reason": "other"
+          }
+        }
+      ]
+    },
+    "subagent": {
+      "description": "codex exec session that spawns one subagent; the child's hooks reuse the parent session_id. SubagentStart fired before the parent's wait_agent PreToolUse, the order of the 0.163.0-alpha.11 subagent_start_before_wait recording.",
+      "hooks": [
+        {
+          "event": "SessionStart",
+          "payload": {
+            "session_id": "d0000007-0000-4000-8000-000000000007",
+            "transcript_path": "/codex-home/sessions/rollout-d0000007-0000-4000-8000-000000000007.jsonl",
+            "cwd": "/workspace/project",
+            "hook_event_name": "SessionStart",
+            "model": "synthetic-model",
+            "permission_mode": "bypassPermissions",
+            "source": "startup"
+          }
+        },
+        {
+          "event": "UserPromptSubmit",
+          "payload": {
+            "session_id": "d0000007-0000-4000-8000-000000000007",
+            "turn_id": "d0000008-0000-4000-8000-000000000008",
+            "transcript_path": "/codex-home/sessions/rollout-d0000007-0000-4000-8000-000000000007.jsonl",
+            "cwd": "/workspace/project",
+            "hook_event_name": "UserPromptSubmit",
+            "model": "synthetic-model",
+            "permission_mode": "bypassPermissions",
+            "prompt": "Synthetic prompt for the subagent scenario."
+          }
+        },
+        {
+          "event": "PreModelRequest",
+          "payload": {
+            "session_id": "d0000007-0000-4000-8000-000000000007",
+            "turn_id": "d0000008-0000-4000-8000-000000000008",
+            "cwd": "/workspace/project",
+            "transcript_path": "/codex-home/sessions/rollout-d0000007-0000-4000-8000-000000000007.jsonl",
+            "model": "synthetic-model",
+            "hook_event_name": "PreModelRequest"
+          }
+        },
+        {
+          "event": "PostModelRequest",
+          "payload": {
+            "session_id": "d0000007-0000-4000-8000-000000000007",
+            "turn_id": "d0000008-0000-4000-8000-000000000008",
+            "cwd": "/workspace/project",
+            "transcript_path": "/codex-home/sessions/rollout-d0000007-0000-4000-8000-000000000007.jsonl",
+            "model": "synthetic-model",
+            "hook_event_name": "PostModelRequest",
+            "status": "completed",
+            "error": null,
+            "token_usage": {
+              "input_tokens": 1050,
+              "cached_input_tokens": 512,
+              "cache_write_input_tokens": 0,
+              "output_tokens": 10,
+              "reasoning_output_tokens": 0,
+              "total_tokens": 1060
+            }
+          }
+        },
+        {
+          "event": "PreToolUse",
+          "payload": {
+            "session_id": "d0000007-0000-4000-8000-000000000007",
+            "turn_id": "d0000008-0000-4000-8000-000000000008",
+            "transcript_path": "/codex-home/sessions/rollout-d0000007-0000-4000-8000-000000000007.jsonl",
+            "cwd": "/workspace/project",
+            "hook_event_name": "PreToolUse",
+            "model": "synthetic-model",
+            "permission_mode": "bypassPermissions",
+            "tool_name": "collaborationspawn_agent",
+            "tool_input": {
+              "task_name": "synthetic_task",
+              "fork_turns": "all",
+              "message": "synthetic-encrypted-subagent-message"
+            },
+            "tool_use_id": "call_00000000000000000000000000000009"
+          }
+        },
+        {
+          "event": "PostToolUse",
+          "payload": {
+            "session_id": "d0000007-0000-4000-8000-000000000007",
+            "turn_id": "d0000008-0000-4000-8000-000000000008",
+            "transcript_path": "/codex-home/sessions/rollout-d0000007-0000-4000-8000-000000000007.jsonl",
+            "cwd": "/workspace/project",
+            "hook_event_name": "PostToolUse",
+            "model": "synthetic-model",
+            "permission_mode": "bypassPermissions",
+            "tool_name": "collaborationspawn_agent",
+            "tool_input": {
+              "task_name": "synthetic_task",
+              "fork_turns": "all",
+              "message": "synthetic-encrypted-subagent-message"
+            },
+            "tool_response": "{\"task_name\":\"/root/synthetic_task\"}",
+            "tool_use_id": "call_00000000000000000000000000000009"
+          }
+        },
+        {
+          "event": "PreModelRequest",
+          "payload": {
+            "session_id": "d0000007-0000-4000-8000-000000000007",
+            "turn_id": "d0000008-0000-4000-8000-000000000008",
+            "cwd": "/workspace/project",
+            "transcript_path": "/codex-home/sessions/rollout-d0000007-0000-4000-8000-000000000007.jsonl",
+            "model": "synthetic-model",
+            "hook_event_name": "PreModelRequest"
+          }
+        },
+        {
+          "event": "SubagentStart",
+          "payload": {
+            "session_id": "d0000007-0000-4000-8000-000000000007",
+            "turn_id": "d0000010-0000-4000-8000-000000000010",
+            "transcript_path": "/codex-home/sessions/rollout-d0000011-0000-4000-8000-000000000011.jsonl",
+            "cwd": "/workspace/project",
+            "hook_event_name": "SubagentStart",
+            "model": "synthetic-model",
+            "permission_mode": "bypassPermissions",
+            "agent_id": "d0000011-0000-4000-8000-000000000011",
+            "agent_type": "default"
+          }
+        },
+        {
+          "event": "PreModelRequest",
+          "payload": {
+            "session_id": "d0000007-0000-4000-8000-000000000007",
+            "turn_id": "d0000010-0000-4000-8000-000000000010",
+            "cwd": "/workspace/project",
+            "transcript_path": "/codex-home/sessions/rollout-d0000011-0000-4000-8000-000000000011.jsonl",
+            "model": "synthetic-model",
+            "agent_id": "d0000011-0000-4000-8000-000000000011",
+            "agent_type": "default",
+            "hook_event_name": "PreModelRequest"
+          }
+        },
+        {
+          "event": "PostModelRequest",
+          "payload": {
+            "session_id": "d0000007-0000-4000-8000-000000000007",
+            "turn_id": "d0000008-0000-4000-8000-000000000008",
+            "cwd": "/workspace/project",
+            "transcript_path": "/codex-home/sessions/rollout-d0000007-0000-4000-8000-000000000007.jsonl",
+            "model": "synthetic-model",
+            "hook_event_name": "PostModelRequest",
+            "status": "completed",
+            "error": null,
+            "token_usage": {
+              "input_tokens": 1060,
+              "cached_input_tokens": 512,
+              "cache_write_input_tokens": 0,
+              "output_tokens": 11,
+              "reasoning_output_tokens": 0,
+              "total_tokens": 1071
+            }
+          }
+        },
+        {
+          "event": "PreToolUse",
+          "payload": {
+            "session_id": "d0000007-0000-4000-8000-000000000007",
+            "turn_id": "d0000008-0000-4000-8000-000000000008",
+            "transcript_path": "/codex-home/sessions/rollout-d0000007-0000-4000-8000-000000000007.jsonl",
+            "cwd": "/workspace/project",
+            "hook_event_name": "PreToolUse",
+            "model": "synthetic-model",
+            "permission_mode": "bypassPermissions",
+            "tool_name": "collaborationwait_agent",
+            "tool_input": {
+              "timeout_ms": 300000
+            },
+            "tool_use_id": "call_00000000000000000000000000000012"
+          }
+        },
+        {
+          "event": "PostModelRequest",
+          "payload": {
+            "session_id": "d0000007-0000-4000-8000-000000000007",
+            "turn_id": "d0000010-0000-4000-8000-000000000010",
+            "cwd": "/workspace/project",
+            "transcript_path": "/codex-home/sessions/rollout-d0000011-0000-4000-8000-000000000011.jsonl",
+            "model": "synthetic-model",
+            "agent_id": "d0000011-0000-4000-8000-000000000011",
+            "agent_type": "default",
+            "hook_event_name": "PostModelRequest",
+            "status": "completed",
+            "error": null,
+            "token_usage": {
+              "input_tokens": 1070,
+              "cached_input_tokens": 512,
+              "cache_write_input_tokens": 0,
+              "output_tokens": 12,
+              "reasoning_output_tokens": 0,
+              "total_tokens": 1082
+            }
+          }
+        },
+        {
+          "event": "PreToolUse",
+          "payload": {
+            "session_id": "d0000007-0000-4000-8000-000000000007",
+            "turn_id": "d0000010-0000-4000-8000-000000000010",
+            "agent_id": "d0000011-0000-4000-8000-000000000011",
+            "agent_type": "default",
+            "transcript_path": "/codex-home/sessions/rollout-d0000011-0000-4000-8000-000000000011.jsonl",
+            "cwd": "/workspace/project",
+            "hook_event_name": "PreToolUse",
+            "model": "synthetic-model",
+            "permission_mode": "bypassPermissions",
+            "tool_name": "Bash",
+            "tool_input": {
+              "command": "printf 'line-1\\n'"
+            },
+            "tool_use_id": "exec-d0000013-0000-4000-8000-000000000013"
+          }
+        },
+        {
+          "event": "PostToolUse",
+          "payload": {
+            "session_id": "d0000007-0000-4000-8000-000000000007",
+            "turn_id": "d0000010-0000-4000-8000-000000000010",
+            "agent_id": "d0000011-0000-4000-8000-000000000011",
+            "agent_type": "default",
+            "transcript_path": "/codex-home/sessions/rollout-d0000011-0000-4000-8000-000000000011.jsonl",
+            "cwd": "/workspace/project",
+            "hook_event_name": "PostToolUse",
+            "model": "synthetic-model",
+            "permission_mode": "bypassPermissions",
+            "tool_name": "Bash",
+            "tool_input": {
+              "command": "printf 'line-1\\n'"
+            },
+            "tool_response": "line-1\n",
+            "tool_use_id": "exec-d0000013-0000-4000-8000-000000000013"
+          }
+        },
+        {
+          "event": "PreModelRequest",
+          "payload": {
+            "session_id": "d0000007-0000-4000-8000-000000000007",
+            "turn_id": "d0000010-0000-4000-8000-000000000010",
+            "cwd": "/workspace/project",
+            "transcript_path": "/codex-home/sessions/rollout-d0000011-0000-4000-8000-000000000011.jsonl",
+            "model": "synthetic-model",
+            "agent_id": "d0000011-0000-4000-8000-000000000011",
+            "agent_type": "default",
+            "hook_event_name": "PreModelRequest"
+          }
+        },
+        {
+          "event": "PostModelRequest",
+          "payload": {
+            "session_id": "d0000007-0000-4000-8000-000000000007",
+            "turn_id": "d0000010-0000-4000-8000-000000000010",
+            "cwd": "/workspace/project",
+            "transcript_path": "/codex-home/sessions/rollout-d0000011-0000-4000-8000-000000000011.jsonl",
+            "model": "synthetic-model",
+            "agent_id": "d0000011-0000-4000-8000-000000000011",
+            "agent_type": "default",
+            "hook_event_name": "PostModelRequest",
+            "status": "completed",
+            "error": null,
+            "token_usage": {
+              "input_tokens": 1080,
+              "cached_input_tokens": 512,
+              "cache_write_input_tokens": 0,
+              "output_tokens": 13,
+              "reasoning_output_tokens": 0,
+              "total_tokens": 1093
+            }
+          }
+        },
+        {
+          "event": "SubagentStop",
+          "payload": {
+            "session_id": "d0000007-0000-4000-8000-000000000007",
+            "turn_id": "d0000010-0000-4000-8000-000000000010",
+            "transcript_path": "/codex-home/sessions/rollout-d0000007-0000-4000-8000-000000000007.jsonl",
+            "agent_transcript_path": "/codex-home/sessions/rollout-d0000011-0000-4000-8000-000000000011.jsonl",
+            "cwd": "/workspace/project",
+            "hook_event_name": "SubagentStop",
+            "model": "synthetic-model",
+            "permission_mode": "bypassPermissions",
+            "stop_hook_active": false,
+            "agent_id": "d0000011-0000-4000-8000-000000000011",
+            "agent_type": "default",
+            "last_assistant_message": "line-1"
+          }
+        },
+        {
+          "event": "PostToolUse",
+          "payload": {
+            "session_id": "d0000007-0000-4000-8000-000000000007",
+            "turn_id": "d0000008-0000-4000-8000-000000000008",
+            "transcript_path": "/codex-home/sessions/rollout-d0000007-0000-4000-8000-000000000007.jsonl",
+            "cwd": "/workspace/project",
+            "hook_event_name": "PostToolUse",
+            "model": "synthetic-model",
+            "permission_mode": "bypassPermissions",
+            "tool_name": "collaborationwait_agent",
+            "tool_input": {
+              "timeout_ms": 300000
+            },
+            "tool_response": "{\"message\":\"Wait completed.\",\"timed_out\":false}",
+            "tool_use_id": "call_00000000000000000000000000000012"
+          }
+        },
+        {
+          "event": "PreModelRequest",
+          "payload": {
+            "session_id": "d0000007-0000-4000-8000-000000000007",
+            "turn_id": "d0000008-0000-4000-8000-000000000008",
+            "cwd": "/workspace/project",
+            "transcript_path": "/codex-home/sessions/rollout-d0000007-0000-4000-8000-000000000007.jsonl",
+            "model": "synthetic-model",
+            "hook_event_name": "PreModelRequest"
+          }
+        },
+        {
+          "event": "PostModelRequest",
+          "payload": {
+            "session_id": "d0000007-0000-4000-8000-000000000007",
+            "turn_id": "d0000008-0000-4000-8000-000000000008",
+            "cwd": "/workspace/project",
+            "transcript_path": "/codex-home/sessions/rollout-d0000007-0000-4000-8000-000000000007.jsonl",
+            "model": "synthetic-model",
+            "hook_event_name": "PostModelRequest",
+            "status": "completed",
+            "error": null,
+            "token_usage": {
+              "input_tokens": 1090,
+              "cached_input_tokens": 512,
+              "cache_write_input_tokens": 0,
+              "output_tokens": 14,
+              "reasoning_output_tokens": 0,
+              "total_tokens": 1104
+            }
+          }
+        },
+        {
+          "event": "Stop",
+          "payload": {
+            "session_id": "d0000007-0000-4000-8000-000000000007",
+            "turn_id": "d0000008-0000-4000-8000-000000000008",
+            "transcript_path": "/codex-home/sessions/rollout-d0000007-0000-4000-8000-000000000007.jsonl",
+            "cwd": "/workspace/project",
+            "hook_event_name": "Stop",
+            "model": "synthetic-model",
+            "permission_mode": "bypassPermissions",
+            "stop_hook_active": false,
+            "last_assistant_message": "line-1"
+          }
+        },
+        {
+          "event": "SessionEnd",
+          "payload": {
+            "session_id": "d0000007-0000-4000-8000-000000000007",
+            "transcript_path": "/codex-home/sessions/rollout-d0000007-0000-4000-8000-000000000007.jsonl",
+            "cwd": "/workspace/project",
+            "hook_event_name": "SessionEnd",
+            "reason": "other"
+          }
+        }
+      ]
+    }
+  }
+}
