@@ -972,10 +972,31 @@ def _cursor_hooks_config(args: argparse.Namespace) -> dict:
 
 
 def _gemini_extension_manifest() -> dict:
+    # Gemini CLI passes declared settings to extension hooks as env vars.
+    # The MCP server gets the same value through ${AGENT_TRACE_DIR:-}, which
+    # Gemini resolves from the extension settings or the shell, and starts in
+    # the workspace so both read the same .agent-traces by default.
     return {
         "name": "agent-strace",
         "version": __version__,
         "description": "Capture and replay Gemini CLI sessions with agent-strace",
+        "settings": [{
+            "name": "Trace directory",
+            "description": (
+                "Where agent-strace stores traces (AGENT_TRACE_DIR). "
+                "Leave empty for .agent-traces in the workspace."
+            ),
+            "envVar": "AGENT_TRACE_DIR",
+            "sensitive": False,
+        }],
+        "mcpServers": {
+            "agent-strace": {
+                "command": "agent-strace",
+                "args": ["mcp"],
+                "cwd": "${workspacePath}",
+                "env": {"AGENT_TRACE_DIR": "${AGENT_TRACE_DIR:-}"},
+            },
+        },
     }
 
 

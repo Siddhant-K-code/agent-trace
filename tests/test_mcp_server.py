@@ -1,17 +1,21 @@
 """Tests for the MCP server (agent-strace mcp)."""
 
 import json
+import shutil
 import tempfile
 import time
 import unittest
+from pathlib import Path
 
 from agent_trace.mcp_server import (
     _handle,
     _tool_diff_sessions,
     _tool_get_session,
     _tool_get_session_summary,
+    _tool_health,
     _tool_list_sessions,
     _tool_search_events,
+    _tool_skills,
 )
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
@@ -89,7 +93,7 @@ class TestMcpLifecycle(unittest.TestCase):
         self.assertEqual(r["result"]["serverInfo"]["name"], "agent-trace")
         self.assertIn("protocolVersion", r["result"])
 
-    def test_tools_list_returns_five_tools(self):
+    def test_tools_list_returns_all_tools(self):
         r = _handle(self.store, _rpc("tools/list", {}))
         names = [t["name"] for t in r["result"]["tools"]]
         self.assertIn("list_sessions", names)
@@ -97,7 +101,9 @@ class TestMcpLifecycle(unittest.TestCase):
         self.assertIn("search_events", names)
         self.assertIn("get_session_summary", names)
         self.assertIn("diff_sessions", names)
-        self.assertEqual(len(names), 5)
+        self.assertIn("health", names)
+        self.assertIn("skills", names)
+        self.assertEqual(len(names), 7)
 
     def test_unknown_method_returns_error(self):
         r = _handle(self.store, _rpc("unknown/method", {}))
@@ -386,3 +392,237 @@ class TestHandleToolsCall(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# health and skills
+# ---------------------------------------------------------------------------
+
+class TestServerVersion(unittest.TestCase):
+    def test_initialize_reports_package_version(self):
+        from agent_trace import __version__
+        r = _handle(_make_store(), _rpc("initialize", {}))
+        self.assertEqual(r["result"]["serverInfo"]["version"], __version__)
+
+
+class TestHealthTool(unittest.TestCase):
+    def setUp(self):
+        self.store = _make_store()
+
+    def test_empty_store_returns_error(self):
+        result = json.loads(_tool_health(self.store, {}))
+        self.assertIn("error", result)
+
+    def test_not_found_returns_error(self):
+        result = json.loads(_tool_health(self.store, {"session_id": "nope"}))
+        self.assertIn("session not found", result["error"])
+
+    def test_reports_named_session(self):
+        _add_session(self.store, "health-1", [_tool_call("bash", 1.0), _tool_result(0, 2.0)])
+        result = json.loads(_tool_health(self.store, {"session_id": "health"}))
+        self.assertEqual(result["session_id"], "health-1")
+        self.assertIn("status", result)
+        self.assertIn("capture_matrix", result)
+        self.assertIn("redaction", result)
+
+    def test_defaults_to_latest_session(self):
+        _add_session(self.store, "only-one", [_tool_call("bash", 1.0)])
+        result = json.loads(_tool_health(self.store, {}))
+        self.assertEqual(result["session_id"], "only-one")
+
+    def test_via_handle(self):
+        _add_session(self.store, "handle-health", [])
+        r = _handle(self.store, _rpc("tools/call", {"name": "health", "arguments": {}}))
+        self.assertFalse(r["result"]["isError"])
+        self.assertEqual(json.loads(r["result"]["content"][0]["text"])["session_id"], "handle-health")
+
+
+class TestSkillsTool(unittest.TestCase):
+    def setUp(self):
+        self.store = _make_store()
+        self.repo = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.repo, True)
+        skill_dir = self.repo / ".github" / "skills" / "deploy-check"
+        skill_dir.mkdir(parents=True)
+        self.skill_file = skill_dir / "SKILL.md"
+        self.skill_file.write_text("---\nname: deploy-check\ndescription: test\n---\nSECRET_BODY\n")
+
+    def _session(self, session_id: str, load: bool) -> None:
+        events = [TraceEvent(event_type=EventType.SESSION_START, timestamp=1.0,
+                             data={"cwd": str(self.repo)})]
+        if load:
+            events.append(_file_read(str(self.skill_file), 2.0))
+        _add_session(self.store, session_id, events)
+
+    def test_session_report_lists_loaded_skill(self):
+        self._session("skills-1", load=True)
+        text = _tool_skills(self.store, {"session_id": "skills-1"})
+        self.assertNotIn("SECRET_BODY", text)
+        result = json.loads(text)
+        self.assertIn("deploy-check", [s["name"] for s in result["loaded"]])
+
+    def test_aggregate_report_lists_never_loaded(self):
+        for i in range(2):
+            self._session(f"agg-{i}", load=False)
+        result = json.loads(_tool_skills(self.store, {"since": "7d", "min_sessions": 1}))
+        self.assertIn("deploy-check", json.dumps(result["never_loaded"]))
+
+    def test_not_found_returns_error(self):
+        result = json.loads(_tool_skills(self.store, {"session_id": "missing"}))
+        self.assertIn("session not found", result["error"])
+
+    def test_bad_since_returns_error(self):
+        result = json.loads(_tool_skills(self.store, {"since": "not-a-date"}))
+        self.assertIn("error", result)
+
+    def test_bad_min_sessions_returns_error(self):
+        result = json.loads(_tool_skills(self.store, {"min_sessions": 0}))
+        self.assertIn("error", result)
+
+    def test_listed_in_tools(self):
+        r = _handle(self.store, _rpc("tools/list", {}))
+        names = [t["name"] for t in r["result"]["tools"]]
+        self.assertIn("health", names)
+        self.assertIn("skills", names)
+
+
+class TestSkillsCommandMatchRedaction(unittest.TestCase):
+    def setUp(self):
+        self.store = _make_store()
+        self.repo = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.repo, True)
+        skill_dir = self.repo / ".github" / "skills" / "deploy-check"
+        skill_dir.mkdir(parents=True)
+        skill_file = skill_dir / "SKILL.md"
+        skill_file.write_text(
+            "---\nname: deploy-check\ndescription: test\n---\n"
+            "```bash\nzzdeployctl rollout --fast\n```\n"
+        )
+        events = [
+            TraceEvent(event_type=EventType.SESSION_START, timestamp=1.0, data={"cwd": str(self.repo)}),
+            _file_read(str(skill_file), 2.0),
+            TraceEvent(event_type=EventType.TOOL_CALL, timestamp=3.0, data={
+                "tool_name": "bash", "arguments": {"command": "zzdeployctl rollout --fast"},
+            }),
+        ]
+        _add_session(self.store, "cmd-1", events)
+
+    def test_library_report_contains_signature(self):
+        from agent_trace.skills import build_session_report
+        report = build_session_report(self.store, "cmd-1")
+        self.assertIn("zzdeployctl rollout", json.dumps(report))
+
+    def test_mcp_session_report_omits_signature(self):
+        text = _tool_skills(self.store, {"session_id": "cmd-1"})
+        self.assertNotIn("zzdeployctl", text)
+        loaded = json.loads(text)["loaded"][0]
+        match = loaded["follow"]["signals"]["command_match"]
+        self.assertEqual(match, {"count": 1, "distinct_signatures": 1})
+
+    def test_mcp_aggregate_report_omits_signature(self):
+        text = _tool_skills(self.store, {"since": "7d", "min_sessions": 1})
+        self.assertNotIn("zzdeployctl", text)
+
+
+class TestJsonRpcValidation(unittest.TestCase):
+    def setUp(self):
+        self.store = _make_store()
+
+    def _code(self, request):
+        r = _handle(self.store, request)
+        return r["error"]["code"]
+
+    def test_non_object_request(self):
+        for request in ([], "x", 3, None):
+            self.assertEqual(self._code(request), -32600)
+
+    def test_wrong_jsonrpc_version(self):
+        self.assertEqual(self._code({"jsonrpc": "1.0", "id": 1, "method": "ping"}), -32600)
+
+    def test_non_string_method(self):
+        self.assertEqual(self._code({"jsonrpc": "2.0", "id": 1, "method": 5}), -32600)
+
+    def test_invalid_id_type(self):
+        r = _handle(self.store, {"jsonrpc": "2.0", "id": {"a": 1}, "method": "ping"})
+        self.assertEqual(r["error"]["code"], -32600)
+        self.assertIsNone(r["id"])
+
+    def test_params_not_object(self):
+        self.assertEqual(self._code({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": [1]}), -32602)
+
+    def test_tool_name_not_string(self):
+        self.assertEqual(self._code(_rpc("tools/call", {"name": 7})), -32602)
+
+    def test_arguments_not_object(self):
+        self.assertEqual(self._code(_rpc("tools/call", {"name": "list_sessions", "arguments": "x"})), -32602)
+
+    def test_unknown_tool_is_invalid_params(self):
+        self.assertEqual(self._code(_rpc("tools/call", {"name": "nope", "arguments": {}})), -32602)
+
+    def test_notification_with_bad_params_gets_no_response(self):
+        self.assertIsNone(_handle(self.store, {"jsonrpc": "2.0", "method": "x", "params": 3}))
+
+    def test_tool_exception_sets_is_error(self):
+        r = _handle(self.store, _rpc("tools/call", {"name": "list_sessions", "arguments": {"limit": "many"}}))
+        self.assertTrue(r["result"]["isError"])
+        self.assertIn("list_sessions failed", r["result"]["content"][0]["text"])
+
+    def test_tool_error_payload_sets_is_error(self):
+        r = _handle(self.store, _rpc("tools/call", {"name": "get_session", "arguments": {"session_id": "nope"}}))
+        self.assertTrue(r["result"]["isError"])
+
+    def test_stdio_survives_bad_requests(self):
+        import io
+        import sys
+        from agent_trace.mcp_server import run_stdio
+        lines = [
+            "not json",
+            "[]",
+            json.dumps([{"jsonrpc": "2.0", "id": 1, "method": "ping"}]),
+            json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "skills", "arguments": []}}),
+            json.dumps({"jsonrpc": "2.0", "id": 3, "method": "ping"}),
+        ]
+        stdin, stdout = sys.stdin, sys.stdout
+        sys.stdin = io.StringIO("\n".join(lines) + "\n")
+        sys.stdout = io.StringIO()
+        try:
+            run_stdio(self.store)
+            out = sys.stdout.getvalue()
+        finally:
+            sys.stdin, sys.stdout = stdin, stdout
+        responses = [json.loads(line) for line in out.splitlines()]
+        self.assertEqual([r.get("error", {}).get("code") for r in responses], [-32700, -32600, -32600, -32602, None])
+        self.assertEqual(responses[-1]["id"], 3)
+
+
+class TestReadOnlyStore(unittest.TestCase):
+    def test_mcp_store_does_not_write(self):
+        import argparse
+        from unittest.mock import patch
+        from agent_trace import mcp_server
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        trace_dir = root / ".agent-traces"
+        seen = {}
+
+        def fake_run(store):
+            seen["read_only"] = store.read_only
+            _handle(store, _rpc("tools/call", {"name": "list_sessions", "arguments": {}}))
+            _handle(store, _rpc("tools/call", {"name": "skills", "arguments": {}}))
+
+        import io
+        with patch.object(mcp_server, "run_stdio", fake_run), patch("sys.stderr", io.StringIO()):
+            mcp_server.cmd_mcp(argparse.Namespace(trace_dir=str(trace_dir)))
+        self.assertTrue(seen["read_only"])
+        self.assertFalse(trace_dir.exists())
+
+    def test_read_only_skips_gitignore_and_blocks_writes(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        TraceStore(root)
+        (root / ".gitignore").unlink()
+        store = TraceStore(root, read_only=True)
+        self.assertFalse((root / ".gitignore").exists())
+        with self.assertRaises(PermissionError):
+            store.create_session(SessionMeta(session_id="ro-1"))
+        self.assertEqual(list(root.iterdir()), [])

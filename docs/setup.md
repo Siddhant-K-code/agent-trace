@@ -252,6 +252,8 @@ hook entry; re-running setup can overwrite non-AgentTrace user hooks.
     └── hooks.json
 ```
 
+The manifest also registers the [MCP server](mcp.md) (`agent-strace mcp`), started in the workspace. It declares one extension setting, `AGENT_TRACE_DIR`. Gemini CLI passes the value to the hooks and the MCP server, so both use the same trace store. Leave it empty to use `.agent-traces/` in the workspace. Change it with `gemini extensions config agent-strace`, or export `AGENT_TRACE_DIR` before starting Gemini CLI.
+
 When `GEMINI_CLI_HOME` is set and not empty, setup writes to `$GEMINI_CLI_HOME/.gemini/extensions/agent-strace` instead, as Gemini CLI does. The value is used as is: `~` is not expanded, and a relative value starts from the current directory. Run setup with the same `GEMINI_CLI_HOME` that Gemini CLI sees, and prefer an absolute path: a relative one only matches when both start in the same directory. Setup creates missing directories, as Gemini CLI does, and prints the paths it wrote.
 
 Gemini CLI does not read `GEMINI_CONFIG_DIR`, so setup ignores it and prints a note when it names a different directory. In that case an older agent-strace version may have installed the extension under `$GEMINI_CONFIG_DIR/extensions/agent-strace`, which Gemini CLI does not load. You can delete that copy.

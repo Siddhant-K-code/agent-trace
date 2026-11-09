@@ -1,28 +1,22 @@
-"""MCP server — expose agent-trace session store as queryable MCP tools.
+"""MCP server: expose the agent-trace session store as queryable MCP tools.
 
 Implements the Model Context Protocol over stdio (JSON-RPC 2.0).
 No external dependencies; uses only stdlib.
 
 Tools exposed:
-  list_sessions     — list captured sessions with metadata
-  get_session       — full event stream for a session
-  search_events     — filter events by tool, file path, exit code, or time range
-  get_session_summary — plain-English phase breakdown (wraps explain_session)
-  diff_sessions     — compare two sessions: what changed between runs
+  list_sessions        list captured sessions with metadata
+  get_session          full event stream for a session
+  search_events        filter events by tool, file path, exit code, or time range
+  get_session_summary  plain-English phase breakdown (wraps explain_session)
+  diff_sessions        compare two sessions: what changed between runs
+  health               evidence health for a session (wraps agent-strace health)
+  skills               skill adoption report (wraps agent-strace skills)
 
 Usage:
   agent-strace mcp                  # stdio transport (default)
   agent-strace mcp --trace-dir DIR  # custom trace directory
 
-Claude Code config (~/.claude/settings.json):
-  {
-    "mcpServers": {
-      "agent-trace": {
-        "command": "agent-strace",
-        "args": ["mcp"]
-      }
-    }
-  }
+Client setup for Claude Code, Copilot CLI, Codex, and Gemini CLI: docs/mcp.md
 """
 
 from __future__ import annotations
@@ -33,7 +27,11 @@ import json
 import sys
 from typing import Any
 
+from . import __version__
+from .cost import parse_since
 from .explain import explain_session, format_explain
+from .health import assess_session, load_capture_matrix
+from .skills import build_aggregate_report, build_session_report
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -171,6 +169,70 @@ _TOOLS: list[dict] = [
                 },
             },
             "required": ["session_a", "session_b"],
+        },
+    },
+    {
+        "name": "health",
+        "description": (
+            "Report evidence health for a session: which agent/provider recorded it, "
+            "whether it was finalized, redaction state, known capture blind spots, "
+            "and structural problems such as orphaned tool results. "
+            "Same data as 'agent-strace health --format json'."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "Session ID or unique prefix. Omit for the latest session.",
+                    "default": "",
+                },
+            },
+        },
+    },
+    {
+        "name": "skills",
+        "description": (
+            "Report agent skill (SKILL.md) adoption: which skills are available, "
+            "which were loaded, follow-up signals after a load, and which never loaded. "
+            "Without session_id, aggregates sessions since 'since'. "
+            "Same data as 'agent-strace skills --format json', except command_match "
+            "reports counts only. Prompt text, SKILL.md bodies, and command "
+            "signatures taken from them are never returned."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "Session ID or prefix for a single-session report. Omit to aggregate.",
+                    "default": "",
+                },
+                "since": {
+                    "type": "string",
+                    "description": "Aggregate window, e.g. 7d, 24h, or 2026-01-01 (default: 30d).",
+                    "default": "30d",
+                },
+                "workspace": {
+                    "type": "string",
+                    "description": (
+                        "Repository path used to discover repo skills when a session has no "
+                        "recorded cwd. Defaults to the server's working directory."
+                    ),
+                    "default": "",
+                },
+                "skills_dirs": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Extra skill directories to scan.",
+                    "default": [],
+                },
+                "min_sessions": {
+                    "type": "integer",
+                    "description": "Minimum sessions before a skill is reported as never loaded (default: 5).",
+                    "default": 5,
+                },
+            },
         },
     },
 ]
@@ -383,6 +445,75 @@ def _tool_diff_sessions(store: TraceStore, args: dict) -> str:
     }, indent=2)
 
 
+def _tool_health(store: TraceStore, args: dict) -> str:
+    requested = str(args.get("session_id") or "")
+    if requested:
+        session_id = store.find_session(requested)
+        if not session_id:
+            return json.dumps({"error": f"session not found: {requested}"})
+    else:
+        session_id = store.get_latest_session_id()
+        if not session_id:
+            return json.dumps({"error": "no sessions found"})
+
+    matrix = load_capture_matrix()
+    meta = store.load_meta(session_id)
+    events = store.load_events(session_id)
+    report = assess_session(store, session_id, meta, events, matrix)
+    return json.dumps(report.to_dict(), indent=2)
+
+
+def _redact_command_matches(value: Any) -> Any:
+    """Replace command_match signature lists with counts.
+
+    Signatures are matched against commands written in SKILL.md bodies, so
+    the MCP tool never returns them.
+    """
+    if isinstance(value, list):
+        return [_redact_command_matches(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    out = {}
+    for key, item in value.items():
+        if key == "command_match" and isinstance(item, dict) and "by_signature" in item:
+            out[key] = {
+                "count": item.get("count", 0),
+                "distinct_signatures": len(item.get("by_signature") or {}),
+            }
+        else:
+            out[key] = _redact_command_matches(item)
+    return out
+
+
+def _tool_skills(store: TraceStore, args: dict) -> str:
+    workspace = str(args.get("workspace") or "")
+    extra_dirs = [str(d) for d in (args.get("skills_dirs") or [])]
+    try:
+        raw_min = args.get("min_sessions")
+        min_sessions = 5 if raw_min is None else int(raw_min)
+    except (TypeError, ValueError):
+        return json.dumps({"error": "min_sessions must be an integer"})
+    if min_sessions < 1:
+        return json.dumps({"error": "min_sessions must be at least 1"})
+
+    requested = str(args.get("session_id") or "")
+    if requested:
+        session_id = store.find_session(requested)
+        if not session_id:
+            return json.dumps({"error": f"session not found: {requested}"})
+        report = build_session_report(store, session_id, workspace=workspace, extra_dirs=extra_dirs)
+        return json.dumps(_redact_command_matches(report), indent=2)
+
+    try:
+        since = parse_since(str(args.get("since") or "30d"))
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)})
+    report = build_aggregate_report(
+        store, since=since, workspace=workspace, extra_dirs=extra_dirs, min_sessions=min_sessions,
+    )
+    return json.dumps(_redact_command_matches(report), indent=2)
+
+
 # ---------------------------------------------------------------------------
 # JSON-RPC 2.0 dispatcher
 # ---------------------------------------------------------------------------
@@ -395,56 +526,91 @@ def _err(req_id: Any, code: int, message: str) -> dict:
     return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
 
 
-def _handle(store: TraceStore, request: dict) -> dict | None:
-    req_id = request.get("id")
-    method = request.get("method", "")
-    params = request.get("params") or {}
+_DISPATCH = {
+    "list_sessions": _tool_list_sessions,
+    "get_session": _tool_get_session,
+    "search_events": _tool_search_events,
+    "get_session_summary": _tool_get_session_summary,
+    "diff_sessions": _tool_diff_sessions,
+    "health": _tool_health,
+    "skills": _tool_skills,
+}
 
-    # Notifications (no id) — no response required
-    if req_id is None and method not in ("initialize",):
+
+def _tool_result(text: str, is_error: bool) -> dict:
+    return {"content": [{"type": "text", "text": text}], "isError": is_error}
+
+
+def _reports_error(text: str) -> bool:
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError):
+        return False
+    return isinstance(payload, dict) and set(payload) == {"error"}
+
+
+def _handle(store: TraceStore, request: Any) -> dict | None:
+    if not isinstance(request, dict):
+        return _err(None, -32600, "invalid request: expected a JSON object")
+
+    is_notification = "id" not in request
+    req_id = request.get("id")
+    if not is_notification and not (
+        req_id is None or isinstance(req_id, str)
+        or (isinstance(req_id, (int, float)) and not isinstance(req_id, bool))
+    ):
+        return _err(None, -32600, "invalid request: id must be a string, number, or null")
+
+    method = request.get("method")
+    if request.get("jsonrpc") != "2.0" or not isinstance(method, str):
+        if is_notification:
+            return None
+        return _err(req_id, -32600, "invalid request: jsonrpc must be \"2.0\" and method a string")
+
+    params = request.get("params", {})
+    if params is None:
+        params = {}
+    if not isinstance(params, dict):
+        if is_notification:
+            return None
+        return _err(req_id, -32602, "invalid params: params must be an object")
+
+    if is_notification:
         return None
 
-    # MCP lifecycle
     if method == "initialize":
         return _ok(req_id, {
             "protocolVersion": "2024-11-05",
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "agent-trace", "version": "0.38.0"},
+            "serverInfo": {"name": "agent-trace", "version": __version__},
         })
 
-    if method == "notifications/initialized":
-        return None
+    if method == "ping":
+        return _ok(req_id, {})
 
     if method == "tools/list":
         return _ok(req_id, {"tools": _TOOLS})
 
     if method == "tools/call":
-        name = params.get("name", "")
-        tool_args = params.get("arguments") or {}
+        name = params.get("name")
+        if not isinstance(name, str):
+            return _err(req_id, -32602, "invalid params: name must be a string")
+        tool_args = params.get("arguments", {})
+        if tool_args is None:
+            tool_args = {}
+        if not isinstance(tool_args, dict):
+            return _err(req_id, -32602, "invalid params: arguments must be an object")
 
-        dispatch = {
-            "list_sessions": _tool_list_sessions,
-            "get_session": _tool_get_session,
-            "search_events": _tool_search_events,
-            "get_session_summary": _tool_get_session_summary,
-            "diff_sessions": _tool_diff_sessions,
-        }
-        fn = dispatch.get(name)
+        fn = _DISPATCH.get(name)
         if fn is None:
-            return _err(req_id, -32601, f"unknown tool: {name}")
+            return _err(req_id, -32602, f"unknown tool: {name}")
 
         try:
             text = fn(store, tool_args)
         except Exception as exc:
-            return _err(req_id, -32603, str(exc))
+            return _ok(req_id, _tool_result(f"{name} failed: {type(exc).__name__}: {exc}", True))
 
-        return _ok(req_id, {
-            "content": [{"type": "text", "text": text}],
-            "isError": False,
-        })
-
-    if method == "ping":
-        return _ok(req_id, {})
+        return _ok(req_id, _tool_result(text, _reports_error(text)))
 
     return _err(req_id, -32601, f"method not found: {method}")
 
@@ -476,7 +642,14 @@ def run_stdio(store: TraceStore) -> None:
             stdout.flush()
             continue
 
-        response = _handle(store, request)
+        if isinstance(request, list):
+            response = _err(None, -32600, "invalid request: batch requests are not supported")
+        else:
+            try:
+                response = _handle(store, request)
+            except Exception as exc:
+                req_id = request.get("id") if isinstance(request, dict) else None
+                response = _err(req_id, -32603, f"internal error: {type(exc).__name__}: {exc}")
         if response is not None:
             stdout.write(json.dumps(response) + "\n")
             stdout.flush()
@@ -487,7 +660,7 @@ def run_stdio(store: TraceStore) -> None:
 # ---------------------------------------------------------------------------
 
 def cmd_mcp(args: argparse.Namespace) -> int:
-    store = TraceStore(args.trace_dir)
+    store = TraceStore(args.trace_dir, read_only=True)
     sys.stderr.write(
         f"agent-trace MCP server started (trace_dir={args.trace_dir})\n"
         "Waiting for JSON-RPC requests on stdin...\n"

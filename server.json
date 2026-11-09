@@ -1,0 +1,38 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.Siddhant-K-code/agent-trace",
+  "title": "agent-strace",
+  "description": "Query recorded AI agent sessions: events, summaries, diffs, evidence health, skill adoption.",
+  "repository": {
+    "url": "https://github.com/Siddhant-K-code/agent-trace",
+    "source": "github"
+  },
+  "websiteUrl": "https://github.com/Siddhant-K-code/agent-trace/blob/main/docs/mcp.md",
+  "version": "0.105.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "agent-strace",
+      "version": "0.105.0",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp"
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "AGENT_TRACE_DIR",
+          "description": "Trace directory to read. Defaults to .agent-traces in the working directory.",
+          "isRequired": false,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}

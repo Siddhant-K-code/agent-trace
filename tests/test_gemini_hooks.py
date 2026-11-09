@@ -203,6 +203,14 @@ class TestGeminiSetup(unittest.TestCase):
         printed_hooks = json.loads(out.getvalue())
 
         self.assertEqual(manifest["name"], "agent-strace")
+        server = manifest["mcpServers"]["agent-strace"]
+        self.assertEqual(server["args"], ["mcp"])
+        # The MCP server and the hooks must resolve the same trace store:
+        # hooks run in the workspace and receive declared settings as env.
+        self.assertEqual(server["cwd"], "${workspacePath}")
+        self.assertEqual(server["env"], {"AGENT_TRACE_DIR": "${AGENT_TRACE_DIR:-}"})
+        self.assertEqual([s["envVar"] for s in manifest["settings"]], ["AGENT_TRACE_DIR"])
+        self.assertFalse(manifest["settings"][0]["sensitive"])
         self.assertIn("BeforeTool", hooks["hooks"])
         self.assertIn("AfterTool", hooks["hooks"])
         self.assertIn("BeforeAgent", hooks["hooks"])

@@ -1252,7 +1252,7 @@ Run a command with auto-instrumentation. See [integrations.md](integrations.md).
 ```
 agent-strace mcp [--transport stdio]
 ```
-Start an MCP server that exposes your session store as queryable tools for a debugging agent.
+Start an MCP server that exposes your session store as queryable tools for a debugging agent: `list_sessions`, `get_session`, `search_events`, `get_session_summary`, `diff_sessions`, `health`, and `skills`. Read-only. Use the global `--trace-dir` (`agent-strace --trace-dir DIR mcp`) or `AGENT_TRACE_DIR` to pick the store. Client setup for Claude Code, Copilot CLI, Codex, and Gemini CLI: [mcp.md](mcp.md).
 
 ### `a2a-tree`
 ```
