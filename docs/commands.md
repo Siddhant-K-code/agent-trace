@@ -869,19 +869,21 @@ security boundary and interpretation details.
 ### `cognitive-debt`
 ```
 agent-strace cognitive-debt [--session ID] [--since DATE] [--until DATE]
-                            [--by author|branch] [--threshold N]
-                            [--format text|json] [--github-token TOKEN]
+                            [--by repository|branch] [--threshold N]
+                            [--format text|json|badge] [--output FILE]
+                            [--github-token TOKEN]
 ```
-Measure unreviewed agent-written code from trace file-write events and local git history. The report works without a GitHub token; when git history is unavailable it still reports agent-written lines and treats review evidence as unknown.
+Measure review coverage for agent-written code from trace file-write events and local git history. The metric is reported at repository and workflow scope. It does not measure code quality, claim causation, or rank individuals. The report works without a GitHub token. When git history is unavailable, affected review state is unknown rather than zero review. See the [cognitive debt badge guide](cognitive-debt.md) for the versioned JSON contract, Shields output, CI upload, and release examples.
 
 | Flag | Description |
 |---|---|
 | `--session ID` | Score one session by ID or prefix |
 | `--since DATE` | Start of reporting window. Accepts ISO dates or durations like `30d`; default is `30d` |
 | `--until DATE` | End of reporting window. Accepts ISO dates or durations like `7d`; default is now |
-| `--by author|branch` | Group summary rows by git author or branch |
-| `--threshold N` | Flag sessions above this debt score; default is `0.7` |
-| `--format text|json` | Output format |
+| `--by repository|branch` | Group summary rows by repository or branch. The legacy `author` value is accepted as an alias for repository and never emits individual rankings |
+| `--threshold N` | Label known unreviewed coverage above this ratio; default is `0.7` |
+| `--format text|json|badge` | Terminal text, versioned machine JSON, or Shields static JSON |
+| `--output FILE`, `-o FILE` | Atomically write the complete output to a file |
 | `--github-token TOKEN` | Optional GitHub token for merged PR review/comment enrichment; local git works without it |
 
 `agent-strace watch --rules cognitive-debt:0.8` enables a live rule that alerts when a session has modified files that have not yet had human review.

@@ -53,7 +53,7 @@ from .freshness import cmd_freshness
 from .standup import cmd_standup
 from .audit import cmd_audit, verify_chain
 from .cost import PRICING, cmd_cost
-from .cognitive_debt import cmd_cognitive_debt
+from .cognitive_debt import CognitiveDebtInputError, cmd_cognitive_debt
 from .context_score import cmd_context_score
 from .skills import cmd_skills
 from .skills_eval import DEFAULT_RUNS as _SKILLS_EVAL_DEFAULT_RUNS
@@ -1702,19 +1702,25 @@ def build_parser() -> argparse.ArgumentParser:
                          help="max seconds between flushes when streaming (default: 2.0)")
 
     # cognitive-debt
-    p_debt = sub.add_parser("cognitive-debt", help="measure unreviewed agent-written code")
+    p_debt = sub.add_parser(
+        "cognitive-debt",
+        help="report review coverage for agent-written code",
+    )
     p_debt.add_argument("--session", metavar="ID", default="",
                         help="session ID or prefix to score (default: recent sessions)")
     p_debt.add_argument("--since", default="30d", metavar="DATE",
                         help="start of reporting window, ISO date or duration (default: 30d)")
     p_debt.add_argument("--until", default="", metavar="DATE",
                         help="end of reporting window, ISO date or duration (default: now)")
-    p_debt.add_argument("--by", choices=["author", "branch"], default="author",
-                        help="group summary rows by author or branch (default: author)")
+    p_debt.add_argument("--by", choices=["repository", "branch", "author"],
+                        default="repository",
+                        help="group rows by repository or branch; author is a repository alias")
     p_debt.add_argument("--threshold", type=float, default=0.7,
-                        help="flag sessions above this debt score (default: 0.7)")
-    p_debt.add_argument("--format", choices=["text", "json"], default="text",
+                        help="label workflows above this unreviewed ratio (default: 0.7)")
+    p_debt.add_argument("--format", choices=["text", "json", "badge"], default="text",
                         help="output format (default: text)")
+    p_debt.add_argument("--output", "-o", default="", metavar="FILE",
+                        help="atomically write output to a file")
     p_debt.add_argument("--github-token", default="",
                         help="GitHub token for optional PR review/comment enrichment")
 
@@ -2641,14 +2647,14 @@ def _normalise_exit_code(value) -> int:
 
 
 def _run_handler(args: argparse.Namespace, handler):
-    """Run a CLI handler, turning non-object event data into a one-line refusal.
+    """Run a CLI handler, turning refused input into a one-line error.
 
     Commands check event data before they print or write anything, so the
     refusal matches ``share``: one ``Error:`` line on stderr and exit code 1.
     """
     try:
         return handler(args)
-    except NonObjectEventDataError as exc:
+    except (NonObjectEventDataError, CognitiveDebtInputError) as exc:
         sys.stderr.write(f"Error: {exc}\n")
         return 1
 
