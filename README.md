@@ -1,10 +1,3 @@
-> [!IMPORTANT]
-> The core idea is not “more autonomous agents.”
-> The core idea is making AI-assisted work inspectable after the fact: what ran, what changed, what failed, and where a human should review.
-
-> [!WARNING]
-> This project is experimental. Do not treat it as a production security boundary without your own threat model, controls, and testing.
-
 # agent-trace
 
 [![PyPI](https://img.shields.io/pypi/v/agent-strace)](https://pypi.org/project/agent-strace/)
@@ -16,45 +9,54 @@
 [![License](https://img.shields.io/github/license/Siddhant-K-code/agent-trace)](LICENSE)
 [![PyPI Downloads](https://static.pepy.tech/personalized-badge/agent-strace?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/agent-strace)
 
-`strace` for AI agents.
+**Local evidence and replay for coding agents.**
+
+`agent-strace` records what a coding agent did in a session (prompts, tool calls, file operations, commands, failures) as local files, then does three jobs:
+
+1. **Replay what happened.** [`replay`](docs/commands.md#replay) shows the session in order. [`explain`](docs/commands.md#explain) summarizes it in phases.
+2. **See what the trace could not prove.** [`health`](docs/evidence-health.md) rates the evidence `healthy`, `partial`, `unknown`, or `invalid`, with observed gaps and known provider capture limits.
+3. **Attach safe evidence to review.** [`review`](docs/review.md) checks a PR's reviewability from its authoring session. [`share`](docs/commands.md#share) writes a privacy-minimized HTML evidence packet; `share --dry-run` previews what it would disclose.
+
+```bash
+uv tool install agent-strace
+agent-strace setup --cli copilot   # or claude, codex, gemini, cursor; then use the agent
+agent-strace replay                # latest session
+agent-strace health                # what the capture missed
+agent-strace review                # reviewability of this branch
+```
+
+Works with Claude Code, Codex, Copilot CLI, Gemini CLI, Cursor, and any MCP server. Python 3.10+ standard library only. Secret redaction is on by default. The canonical path and its support status: [docs/v1-workflow.md](docs/v1-workflow.md).
 
 ![demo](assets/demo.svg)
 
-## Why
+> [!WARNING]
+> Experimental. Do not treat it as a production security boundary without your own threat model, controls, and testing.
 
-A coding agent rewrites 20 files in a background session. You get a pull request. You do not get the story. Which files did it read first? Why did it call the same tool three times? What failed before it found the fix?
-
-Most tools trace LLM calls. That is one layer. The gap is everything around it: tool calls, file operations, decision points, error recovery, the actual commands the agent ran. `agent-strace` captures the full session and lets you replay it later. Export to Datadog, Honeycomb, New Relic, or Splunk for production observability. Set rules to stop the agent: cost ceiling, wrong file touched, too many tool calls. The agent stops. No prompt, no retry, no damage.
-
-## Install
+## Try it without setup: which skills never load
 
 ```bash
-# With uv (recommended)
-uv tool install agent-strace
-
-# Or with pip
-pip install agent-strace
-
-# Or run without installing
-uvx agent-strace replay
+uvx agent-strace skills --from-claude
 ```
 
-**Zero dependencies.** Python 3.10+ standard library only.
+This reads the Claude Code transcripts already on your machine (`~/.claude/projects`), writes no persistent trace store (it uses a temporary directory deleted on exit), and reports each skill as available, loaded, followed, and what happened after the load. It reports counts, not a score, and only for what the sessions recorded. For other agents, record sessions first, then run `agent-strace skills`. A never-loaded skill is a lead, not a verdict: no task may have needed it. Test it with [`skills eval`](docs/skills-eval.md). Guide: [docs/skills.md](docs/skills.md).
 
-## Start here: local review
+Sample output (139 recorded sessions, trimmed):
+```text
+Skills across 139 sessions since 2025-11-09. Availability reflects the filesystem now, not session time.
+skill                   avail loaded load rate user/model median t pre-edit  follow  tests
+------------------------------------------------------------------------------------------
+frontend-design           139      2     2/139    0/3         3.1h      1/2     0/2    0/2
+grilling                  139      0     0/139    0/0            -        -       -      -
+web-design-guidelines     139      0     0/139    0/0            -        -       -      -
 
-The v1 product direction is a focused local evidence-review path: configure one
-capture adapter, record a session, check what evidence was actually captured,
-review it locally, then inspect disclosure before sharing or exporting.
-
-See **[the canonical v1 local review workflow](docs/v1-workflow.md)** for the
-supported/candidate/experimental surface split and the current release gates.
-The larger command inventory below remains available, but it is not all part of
-the v1 compatibility promise.
+Never loaded (available in >= 5 sessions, loaded in 0):
+  grilling (available in 139 sessions)
+  web-design-guidelines (available in 139 sessions)
+```
 
 ## Quick start
 
-**Option 1: CLI hooks** — captures prompts, responses, and hook-visible tool calls
+**Option 1: CLI hooks.** Captures prompts, responses, and hook-visible tool calls
 
 ```bash
 agent-strace setup             # Claude Code hooks for ~/.claude/settings.json
@@ -65,10 +67,7 @@ agent-strace setup --cli gemini # Gemini CLI extension under ~/.gemini/extension
 agent-strace setup --cli cursor # Cursor project hooks in .cursor/hooks.json
 agent-strace setup --cli copilot # GitHub Copilot CLI hooks in ~/.copilot/hooks
 agent-strace list              # list sessions
-agent-strace replay            # replay the latest
 ```
-
-Full config and JSON: [docs/setup.md](docs/setup.md)
 
 Provider coverage and known gaps: [docs/capture-matrix.md](docs/capture-matrix.md)
 
@@ -103,14 +102,14 @@ which would register duplicate hooks.
 See the [Copilot CLI plugin guide](docs/copilot-plugin.md) for verification,
 updates, and usage.
 
-**Option 2: MCP proxy** — wraps any MCP server, works with Cursor, Windsurf, and Copilot Desktop MCP servers
+**Option 2: MCP proxy.** Wraps any MCP server, works with Cursor, Windsurf, and Copilot Desktop MCP servers
 
 ```bash
 agent-strace record -- npx -y @modelcontextprotocol/server-filesystem /tmp
 agent-strace replay
 ```
 
-**Option 3: Python decorator** — no MCP required
+**Option 3: Python decorator.** No MCP required.
 
 ```python
 from agent_trace import trace_tool, start_session, end_session
@@ -149,7 +148,7 @@ Full setup guide: [docs/setup.md](docs/setup.md)
 | Command | What it does |
 |---|---|
 | [`agent-strace watch`](docs/commands.md#watch) | Live monitor with kill-switch rules |
-| [`agent-strace watch --timeout 30m --budget $5`](docs/commands.md#watch) | Watchdog mode — kills on limit and heartbeats sessions for postmortems |
+| [`agent-strace watch --timeout 30m --budget $5`](docs/commands.md#watch) | Watchdog mode: kills on limit and heartbeats sessions for postmortems |
 | [`agent-strace mcp-scan`](docs/commands.md#mcp-scan) | Scan runtime MCP poisoning indicators |
 | [`agent-strace audit <id>`](docs/commands.md#audit) | Audit tool calls against a policy file |
 | [`agent-strace policy backtest`](docs/commands.md#policy) | Test policy impact against historical sessions |
@@ -196,7 +195,7 @@ Full setup guide: [docs/setup.md](docs/setup.md)
 | [`agent-strace export --format temporal`](docs/integrations.md#temporal-workflows) | Nest agent spans under Temporal activities |
 | [`agent-strace export --format eu-ai-act`](docs/commands.md#export) | Generate Article 12/13 audit packages |
 | [`agent-strace export --metrics`](docs/production.md#behavioral-metrics) | Export per-session behavioral metrics as OTLP gauges |
-| [`agent-strace identity show`](docs/commands.md#identity) | Machine identity — sign and verify sessions |
+| [`agent-strace identity show`](docs/commands.md#identity) | Machine identity: sign and verify sessions |
 | [`agent-strace mcp`](docs/mcp.md) | MCP server: query sessions, health, and skill reports from Claude Code, Copilot CLI, Codex, or Gemini CLI |
 | [`agent-strace server`](docs/server.md) | Server-side collector for multi-agent, multi-machine |
 | [`agent-strace share <id>`](docs/commands.md#share) | Generate a shareable HTML replay |
@@ -226,15 +225,15 @@ trace contents, paths, session IDs, command arguments, or repository data are se
 ```bash
 pip install agent-strace   # 1. install
 agent-strace setup         # 2. add hooks to Claude Code; use --cli codex, gemini, cursor, or copilot for other CLIs
-# 3. open project in VS Code — extension activates when .agent-traces/ exists
-# 4. start Claude Code — status bar appears immediately
+# 3. open project in VS Code; extension activates when .agent-traces/ exists
+# 4. start Claude Code; status bar appears immediately
 ```
 
 Full docs: [docs/vscode.md](docs/vscode.md)
 
 ## Production
 
-**OTLP export** — sessions become traces, tool calls become spans:
+**OTLP export**: sessions become traces, tool calls become spans:
 
 ```bash
 agent-strace export <session-id> --format otlp-genai \
@@ -243,7 +242,7 @@ agent-strace export <session-id> --format otlp-genai \
 
 Per-backend setup (Datadog, Honeycomb, Grafana, New Relic, Splunk, Langfuse): [docs/production.md](docs/production.md)
 
-**Server-side collector** — for containers, CI, and multi-machine setups:
+**Server-side collector**: for containers, CI, and multi-machine setups:
 
 ```bash
 agent-strace server --port 4317 --storage ./traces
@@ -252,7 +251,7 @@ AGENT_STRACE_ENDPOINT=http://collector:4317 python my_agent.py
 
 Full guide: [docs/server.md](docs/server.md)
 
-**Auto-instrumentation** — no code changes required:
+**Auto-instrumentation**: no code changes required:
 
 ```python
 from agent_trace.integrations import instrument_langchain
@@ -261,7 +260,7 @@ instrument_langchain()
 
 Supported: OpenAI Agents SDK, LangChain, LangGraph, CrewAI, LiteLLM, Anthropic SDK, OpenAI SDK, AWS Strands. Guide: [docs/integrations.md](docs/integrations.md)
 
-**GitHub Actions** — run evals in CI, post results to the step summary, fail on regression:
+**GitHub Actions**: run evals in CI, post results to the step summary, fail on regression:
 
 ```yaml
 - uses: Siddhant-K-code/agent-trace@v0.93.1
@@ -275,13 +274,13 @@ Supported: OpenAI Agents SDK, LangChain, LangGraph, CrewAI, LiteLLM, Anthropic S
 
 ## How it works
 
-**Claude Code hooks** — Claude Code fires hook events at every stage of its agentic loop. agent-strace registers as a handler, reads JSON from stdin, and writes trace events. Each hook runs as a separate process; session state in `.agent-traces/.active-session` correlates PreToolUse and PostToolUse for latency measurement.
+**Claude Code hooks**: Claude Code fires hook events at every stage of its agentic loop. agent-strace registers as a handler, reads JSON from stdin, and writes trace events. Each hook runs as a separate process; session state in `.agent-traces/.active-session` correlates PreToolUse and PostToolUse for latency measurement.
 
-**MCP stdio proxy** — sits between the agent and the MCP server, reads JSON-RPC messages (Content-Length framed or newline-delimited), classifies each one, and writes a trace event. Messages are forwarded unchanged. The agent and server do not know the proxy exists.
+**MCP stdio proxy**: sits between the agent and the MCP server, reads JSON-RPC messages (Content-Length framed or newline-delimited), classifies each one, and writes a trace event. Messages are forwarded unchanged. The agent and server do not know the proxy exists.
 
-**MCP HTTP/SSE proxy** — same idea, different transport. Listens on a local port, forwards POST and SSE requests to the remote server, captures every JSON-RPC message in both directions.
+**MCP HTTP/SSE proxy**: same idea, different transport. Listens on a local port, forwards POST and SSE requests to the remote server, captures every JSON-RPC message in both directions.
 
-**Python decorator** — `@trace_tool` logs a `tool_call` event before execution and a `tool_result` after. Errors and timing are captured automatically. `@trace_llm_call` does the same for LLM calls.
+**Python decorator**: `@trace_tool` logs a `tool_call` event before execution and a `tool_result` after. Errors and timing are captured automatically. `@trace_llm_call` does the same for LLM calls.
 
 ## Running tests
 

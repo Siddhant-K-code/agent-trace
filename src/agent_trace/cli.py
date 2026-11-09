@@ -1860,6 +1860,13 @@ def build_parser() -> argparse.ArgumentParser:
                           metavar="DIR", help="extra skill directory to scan (repeatable)")
     p_skills.add_argument("--min-sessions", type=int, default=5,
                           help="minimum sessions for never-loaded, user-only, and comparison output (default: 5)")
+    p_skills.add_argument("--from-claude", action="store_true",
+                          help="read existing Claude Code transcripts instead of the trace store; "
+                               "writes no persistent trace store; uses a temporary directory "
+                               "deleted on exit")
+    p_skills.add_argument("--claude-dir", default=None, metavar="DIR",
+                          help="Claude Code config directory for --from-claude "
+                               "(default: $CLAUDE_CONFIG_DIR, else ~/.claude)")
     p_skills.add_argument("--format", choices=["text", "json"], default="text",
                           help="output format (default: text)")
 

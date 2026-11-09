@@ -188,6 +188,7 @@ def import_jsonl(
 
     # First pass: extract metadata from first entry
     session_id = ""
+    cwd = ""
     extra_meta: dict[str, str] = {}
     first_ts = 0.0
     last_ts = 0.0
@@ -215,6 +216,9 @@ def import_jsonl(
             if ts > 0:
                 last_ts = ts
 
+            if not cwd and isinstance(raw.get("cwd"), str):
+                cwd = raw["cwd"]
+
             if not session_id:
                 session_id = raw.get("sessionId", "")
                 extra_meta["git_branch"] = raw.get("gitBranch", "")
@@ -231,6 +235,17 @@ def import_jsonl(
         command=f"imported from {path.name} (branch: {extra_meta.get('git_branch', '')}, v{extra_meta.get('version', '')})",
     )
     store.create_session(meta)
+
+    if cwd:
+        store.append_event(
+            meta.session_id,
+            TraceEvent(
+                event_type=EventType.SESSION_START,
+                timestamp=first_ts,
+                session_id=meta.session_id,
+                data={"mode": "claude-jsonl-import", "provider": "claude", "cwd": cwd},
+            ),
+        )
 
     # UUID ancestry keeps separate Claude sidechains separate even when the
     # source version does not include an explicit agentId on every entry.
