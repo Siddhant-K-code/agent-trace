@@ -106,6 +106,6 @@ arguments, endpoints, usernames, hostnames, or exception messages. See the
 
 The extension watches `.agent-traces/.active-session` for the current session ID, then tails `events.ndjson` for new events using `fs.watch`. No polling when idle and no new processes. Its only outbound network path, other than an explicitly configured live-stream collector, is the documented best-effort anonymous product telemetry above.
 
-Pause works by writing `.agent-traces/.pause-request` — `agent-strace watch` checks for this file on every poll cycle and sends SIGSTOP / SIGCONT to the agent PID.
+Pause works by writing the session ID to `.agent-traces/.pause-request`. `agent-strace watch` checks this file on every poll cycle and sends SIGSTOP / SIGCONT to the agent PID. Pause needs a running `watch` for the session. A pause held by a `require_approval` rule is released only by the approval decision.
 
 The post-mortem viewer reads `watchdog-postmortem.json` from the session directory, written by `agent-strace watch` on kill.

@@ -73,6 +73,10 @@ agent-strace watch
 
 When paused, the agent process receives SIGSTOP and freezes. Resume with the Resume command or SIGCONT.
 
+Pause shows a warning and does nothing if `agent-strace watch` is not running for the session (no heartbeat in the last 15 seconds). The pause request file holds the session ID, so Resume and session end never clear another session's pause.
+
+`watch` tracks who paused the agent. Resume only releases a pause that the editor started. A pause from a `pause` rule is handed to the editor when you run Pause Agent, so Pause then Resume releases it. A pause from a `require_approval` rule stays until the request is decided with `agent-strace approval`; Resume shows the pending request ID instead. After a denial the agent stays stopped and Pause then Resume releases it.
+
 ---
 
 ## Settings
