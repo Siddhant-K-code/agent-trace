@@ -2,7 +2,7 @@
   "name": "agent-strace",
   "displayName": "agent-strace",
   "description": "Local evidence review for agent-strace sessions with live status and file annotations.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "publisher": "Siddhant-K-code",
   "license": "MIT",
   "repository": {
