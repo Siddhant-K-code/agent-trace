@@ -45,7 +45,7 @@ Capture an MCP stdio server session. Wraps `<command>` as a transparent proxy.
 ```
 agent-strace record-http --url URL [--port N] [--name NAME] [--parent SESSION] [--no-redact]
 ```
-Capture an MCP HTTP/SSE server session. Listens on `--port` (default: 5100) and proxies to `--url`.
+Capture an MCP HTTP/SSE server session. Listens on `--port` (default: 5100) and proxies to `--url`. Requests are handled concurrently, so an open `GET /sse` stream does not block `POST /message`. On Ctrl-C the proxy closes open streams, waits up to 5 seconds for in-flight requests, then records the session end.
 
 ### `setup`
 ```

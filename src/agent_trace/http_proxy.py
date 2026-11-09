@@ -13,16 +13,22 @@ The proxy:
 2. Forwards POST /message to the remote server
 3. Forwards GET /sse from the remote server
 4. Captures every JSON-RPC message as a trace event
+
+Requests are served on separate threads, so a long-lived GET /sse stream
+does not block POST /message. Closing the server shuts down open streams
+and waits for in-flight requests before the session end is recorded.
 """
 
 from __future__ import annotations
 
+import contextlib
 import http.client
 import json
+import socket
 import sys
 import threading
 import time
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from typing import Any, Callable
 from urllib.parse import urlparse
 
@@ -37,13 +43,32 @@ from .store import TraceStore
 # (dropped stream, notification-style misuse) would otherwise stay forever.
 MAX_PENDING_CALLS = 10_000
 
+# How long server_close waits for in-flight requests after shutting down
+# their sockets.
+SHUTDOWN_TIMEOUT = 5.0
 
-class _ProxyHTTPServer(HTTPServer):
-    """HTTPServer that owns the proxy config and tool call correlation state.
+
+def _shutdown_socket(sock: socket.socket) -> None:
+    """Wake any thread blocked on sock. Errors mean it is already closed."""
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+
+
+class _ProxyHTTPServer(ThreadingHTTPServer):
+    """Threaded HTTP server that owns the proxy config and shared state.
 
     Each server gets its own pending call map, so two proxies in one process
     (or a restarted proxy) never match results against each other's calls.
+
+    Requests run on daemon threads. ``state_lock`` serialises everything
+    they share: trace store writes, session meta updates and ``on_event``.
     """
+
+    daemon_threads = True
+    # The stdlib default backlog of 5 resets bursts of concurrent clients.
+    request_queue_size = 128
 
     def __init__(
         self,
@@ -67,6 +92,101 @@ class _ProxyHTTPServer(HTTPServer):
         self.max_pending_calls = max_pending_calls
         self.pending_calls: dict[Any, TraceEvent] = {}
         self._pending_lock = threading.Lock()
+        self.state_lock = threading.Lock()
+        # Guards the fields below and signals when requests finish.
+        self._requests_cond = threading.Condition()
+        self._active_requests = 0
+        self._open_sockets: set[socket.socket] = set()
+        self._closing = False
+        # Set under state_lock once close_streams is done; later events are
+        # dropped so nothing lands after the session end.
+        self._closed = False
+
+    @property
+    def closing(self) -> bool:
+        return self._closing
+
+    @contextlib.contextmanager
+    def request_scope(self, client_sock: socket.socket):
+        """Track one request. Yields False if the server is closing."""
+        with self._requests_cond:
+            if self._closing:
+                accepted = False
+            else:
+                accepted = True
+                self._active_requests += 1
+                self._open_sockets.add(client_sock)
+        if not accepted:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            with self._requests_cond:
+                self._open_sockets.discard(client_sock)
+                self._active_requests -= 1
+                self._requests_cond.notify_all()
+
+    def watch_socket(self, sock: socket.socket) -> None:
+        """Register an upstream socket so close_streams can interrupt it."""
+        with self._requests_cond:
+            if not self._closing:
+                self._open_sockets.add(sock)
+                return
+        _shutdown_socket(sock)
+
+    def unwatch_socket(self, sock: socket.socket) -> None:
+        with self._requests_cond:
+            self._open_sockets.discard(sock)
+
+    def close_streams(self, timeout: float = SHUTDOWN_TIMEOUT) -> bool:
+        """Shut down open request sockets and wait for handlers to finish.
+
+        Returns True if every request finished within timeout.
+        """
+        with self._requests_cond:
+            self._closing = True
+            sockets = list(self._open_sockets)
+            self._open_sockets.clear()
+        for sock in sockets:
+            _shutdown_socket(sock)
+        with self._requests_cond:
+            finished = self._requests_cond.wait_for(
+                lambda: self._active_requests == 0, timeout
+            )
+        with self.state_lock:
+            self._closed = True
+        return finished
+
+    def server_close(self) -> None:
+        self.close_streams()
+        super().server_close()
+
+    def emit(self, event: TraceEvent) -> None:
+        """Mask, store and report one event. Safe to call from any thread."""
+        if self.meta:
+            event.session_id = self.meta.session_id
+        if self.redact or self.masking_config:
+            event.data = mask_event_data(
+                event.data,
+                config=self.masking_config,
+                redact_secrets=self.redact,
+            )
+        with self.state_lock:
+            if self._closed:
+                return
+            if self.store and self.meta:
+                self.store.append_event(self.meta.session_id, event)
+
+            if event.event_type == EventType.TOOL_CALL and self.meta:
+                self.meta.tool_calls += 1
+            elif event.event_type == EventType.LLM_REQUEST and self.meta:
+                self.meta.llm_requests += 1
+            elif event.event_type == EventType.ERROR and self.meta:
+                self.meta.errors += 1
+
+            if self.on_event:
+                self.on_event(event)
 
     def track_call(self, event: TraceEvent) -> None:
         """Remember a tool_call so its result can be linked later."""
@@ -129,32 +249,35 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         return self.server.masking_config
 
     def _emit(self, event: TraceEvent) -> None:
-        if self.meta:
-            event.session_id = self.meta.session_id
-        if self.redact or self.masking_config:
-            event.data = mask_event_data(
-                event.data,
-                config=self.masking_config,
-                redact_secrets=self.redact,
-            )
-        if self.store and self.meta:
-            self.store.append_event(self.meta.session_id, event)
-
-        if event.event_type == EventType.TOOL_CALL and self.meta:
-            self.meta.tool_calls += 1
-        elif event.event_type == EventType.LLM_REQUEST and self.meta:
-            self.meta.llm_requests += 1
-        elif event.event_type == EventType.ERROR and self.meta:
-            self.meta.errors += 1
-
-        if self.on_event:
-            self.on_event(event)
+        self.server.emit(event)
 
     def _get_connection(self) -> http.client.HTTPConnection | http.client.HTTPSConnection:
         parsed = urlparse(self.remote_url)
         if parsed.scheme == "https":
             return http.client.HTTPSConnection(parsed.hostname, parsed.port or 443)
         return http.client.HTTPConnection(parsed.hostname, parsed.port or 80)
+
+    def _connect(self, conn: http.client.HTTPConnection) -> socket.socket:
+        """Open the upstream socket and register it for shutdown."""
+        conn.connect()
+        sock = conn.sock
+        self.server.watch_socket(sock)
+        return sock
+
+    def _report_failure(self, label: str, exc: Exception, headers_sent: bool) -> None:
+        # A stream cut by server shutdown is expected, not a proxy error.
+        if self.server.closing:
+            return
+        self._emit(TraceEvent(
+            event_type=EventType.ERROR,
+            data={"message": f"{label}: {exc}"},
+        ))
+        if headers_sent:
+            return
+        try:
+            self.send_error(502, f"{label}: {exc}")
+        except OSError:
+            pass
 
     def _remote_path(self, path: str) -> str:
         parsed = urlparse(self.remote_url)
@@ -163,6 +286,11 @@ class _ProxyHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         """Forward POST requests (agent -> server) and trace them."""
+        with self.server.request_scope(self.connection) as accepted:
+            if accepted:
+                self._forward_post()
+
+    def _forward_post(self):
         content_length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_length) if content_length > 0 else b""
 
@@ -173,8 +301,9 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         # If the upstream agent carries an agent-trace session ID in tracestate,
         # record it as the parent session for cross-agent correlation.
         if inbound_ctx and inbound_ctx.get("at_session_id") and self.meta:
-            if not self.meta.parent_session_id:
-                self.meta.parent_session_id = inbound_ctx["at_session_id"]
+            with self.server.state_lock:
+                if not self.meta.parent_session_id:
+                    self.meta.parent_session_id = inbound_ctx["at_session_id"]
 
         # trace the request
         try:
@@ -206,7 +335,10 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                 trace_id=upstream_trace_id,
             )
 
+        sock = None
+        headers_sent = False
         try:
+            sock = self._connect(conn)
             conn.request("POST", self._remote_path(self.path), body=body, headers=headers)
             resp = conn.getresponse()
             resp_body = resp.read()
@@ -220,12 +352,13 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                 child_sid = resp_ctx["at_session_id"]
                 if child_sid != self.meta.session_id and self.store:
                     from .a2a import link_sub_session
-                    link_sub_session(
-                        self.store,
-                        parent_session_id=self.meta.session_id,
-                        parent_event_id="",
-                        child_session_id=child_sid,
-                    )
+                    with self.server.state_lock:
+                        link_sub_session(
+                            self.store,
+                            parent_session_id=self.meta.session_id,
+                            parent_event_id="",
+                            child_session_id=child_sid,
+                        )
 
             # trace the response
             try:
@@ -244,19 +377,23 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                 if key.lower() not in ("transfer-encoding", "connection"):
                     self.send_header(key, value)
             self.end_headers()
+            headers_sent = True
             self.wfile.write(resp_body)
 
         except Exception as e:
-            self._emit(TraceEvent(
-                event_type=EventType.ERROR,
-                data={"message": f"Proxy error: {e}"},
-            ))
-            self.send_error(502, f"Proxy error: {e}")
+            self._report_failure("Proxy error", e, headers_sent)
         finally:
+            if sock is not None:
+                self.server.unwatch_socket(sock)
             conn.close()
 
     def do_GET(self):
         """Forward GET requests (SSE stream from server -> agent)."""
+        with self.server.request_scope(self.connection) as accepted:
+            if accepted:
+                self._forward_get()
+
+    def _forward_get(self):
         conn = self._get_connection()
         headers = {}
         auth = self.headers.get("Authorization")
@@ -266,7 +403,10 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         if accept:
             headers["Accept"] = accept
 
+        sock = None
+        headers_sent = False
         try:
+            sock = self._connect(conn)
             conn.request("GET", self._remote_path(self.path), headers=headers)
             resp = conn.getresponse()
 
@@ -275,6 +415,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                 if key.lower() not in ("transfer-encoding", "connection"):
                     self.send_header(key, value)
             self.end_headers()
+            headers_sent = True
 
             # stream SSE events
             while True:
@@ -301,12 +442,10 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                 self.wfile.flush()
 
         except Exception as e:
-            self._emit(TraceEvent(
-                event_type=EventType.ERROR,
-                data={"message": f"SSE proxy error: {e}"},
-            ))
-            self.send_error(502, f"SSE proxy error: {e}")
+            self._report_failure("SSE proxy error", e, headers_sent)
         finally:
+            if sock is not None:
+                self.server.unwatch_socket(sock)
             conn.close()
 
     def log_message(self, format, *args):

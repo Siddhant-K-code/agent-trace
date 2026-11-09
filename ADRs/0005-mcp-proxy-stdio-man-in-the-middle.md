@@ -39,4 +39,4 @@ The JSON-RPC `id` field links `tool_call` to `tool_result` events via `parent_id
 - **JSON-RPC `id` linking** is more reliable than the hooks approach (which uses `tool_name`) because request IDs are unique per request.
 - **Server stderr is forwarded unchanged** — server diagnostic output is not traced or inspected.
 - **Thread-based forwarding** adds minimal latency (microseconds) compared to direct stdio.
-- **HTTP/SSE variant** (`http_proxy.py`) uses `http.server` and `http.client` from stdlib, listening only on `127.0.0.1` (loopback) to avoid network exposure. SSE responses are forwarded line-by-line with `wfile.flush()` after each line for real-time delivery.
+- **HTTP/SSE variant** (`http_proxy.py`) uses `http.server` and `http.client` from stdlib, listening only on `127.0.0.1` (loopback) to avoid network exposure. SSE responses are forwarded line-by-line with `wfile.flush()` after each line for real-time delivery. Each request runs on its own thread (`ThreadingHTTPServer`), so a long-lived `GET /sse` stream does not block `POST /message`.
