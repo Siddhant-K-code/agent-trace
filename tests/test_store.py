@@ -16,6 +16,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore, ensure_trace_dir_gitignore
 
+try:
+    from _concurrency import run_concurrently
+except ImportError:
+    from tests._concurrency import run_concurrently
+
 
 class TestTraceStore(unittest.TestCase):
     def setUp(self):
@@ -153,6 +158,50 @@ class TestTraceStore(unittest.TestCase):
         loaded = self.store.load_meta(meta.session_id)
         self.assertEqual(loaded.tool_calls, 10)
         self.assertEqual(loaded.errors, 2)
+
+    def test_mutate_meta_applies_change_and_returns_written_meta(self):
+        meta = SessionMeta(agent_name="test")
+        self.store.create_session(meta)
+
+        def bump(current):
+            current.tool_calls += 2
+            current.total_tokens += 5
+
+        written = self.store.mutate_meta(meta.session_id, bump)
+        loaded = self.store.load_meta(meta.session_id)
+        self.assertEqual((written.tool_calls, written.total_tokens), (2, 5))
+        self.assertEqual(loaded.to_json(), written.to_json())
+
+    def test_mutate_meta_missing_session_raises(self):
+        with self.assertRaises(FileNotFoundError):
+            self.store.mutate_meta("0123456789abcdef", lambda m: None)
+
+    def test_mutate_meta_keeps_update_meta_checks(self):
+        meta = SessionMeta(agent_name="test")
+        self.store.create_session(meta)
+
+        def retag(current):
+            current.tenant_id = "tenant-a"
+
+        with self.assertRaisesRegex(ValueError, "tag_session"):
+            self.store.mutate_meta(meta.session_id, retag)
+        self.assertEqual(self.store.load_meta(meta.session_id).tenant_id, "")
+
+    @unittest.skipIf(sys.platform == "win32", "store lock needs fcntl.flock")
+    def test_mutate_meta_does_not_lose_concurrent_increments(self):
+        meta = SessionMeta(agent_name="test")
+        self.store.create_session(meta)
+        script = (
+            "from agent_trace.store import TraceStore\n"
+            "store = TraceStore(sys.argv[2])\n"
+            "def bump(meta):\n"
+            "    meta.tool_calls += 1\n"
+            "wait_for_start()\n"
+            "for _ in range(25):\n"
+            "    store.mutate_meta(sys.argv[3], bump)\n"
+        )
+        run_concurrently(script, [[self.tmpdir, meta.session_id]] * 8)
+        self.assertEqual(self.store.load_meta(meta.session_id).tool_calls, 200)
 
     def test_empty_events(self):
         meta = SessionMeta()

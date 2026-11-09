@@ -32,6 +32,7 @@ import sys
 import time
 import unicodedata
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
 from .fileutil import fsync_directory as _fsync_directory
@@ -1050,25 +1051,57 @@ class TraceStore:
         """
         _validate_meta_ids(meta)
         with self.write_lock():
-            f = self._session_file(
-                meta.session_id, "meta.json", "session metadata"
+            self._replace_meta_locked(
+                meta, preserve_parent_link=preserve_parent_link
             )
-            if not f.exists():
-                raise FileNotFoundError(f"session not found: {meta.session_id}")
-            existing = SessionMeta.from_json(f.read_text())
-            if existing.session_id != meta.session_id:
-                raise ValueError("metadata session ID does not match its directory")
-            if existing.tenant_id != meta.tenant_id:
-                if not existing.tenant_id and meta.tenant_id:
-                    raise ValueError("use tag_session for the first tenant assignment")
-                raise ValueError("session tenant cannot be cleared or changed")
-            if meta.tenant_id:
-                meta.tenant_id = validate_tenant_id(meta.tenant_id)
-            if preserve_parent_link:
-                _carry_parent_link(meta, existing)
-            self._enforce_parent_tenant(meta, inherit=False)
-            self._redact_meta(meta)
-            _write_atomic(f, meta.to_json())
+
+    def mutate_meta(
+        self,
+        session_id: str,
+        mutate: Callable[[SessionMeta], None],
+        *,
+        preserve_parent_link: bool = False,
+    ) -> SessionMeta:
+        """Load ``meta.json``, apply ``mutate`` and rewrite it under one lock.
+
+        Use this for read-modify-write updates such as counter increments:
+        concurrent hook processes would otherwise load the same metadata and
+        lose each other's changes. ``mutate`` runs while the store write lock
+        is held, so it must not call back into this store. Returns the
+        written metadata. Raises ``FileNotFoundError`` for a missing session.
+        """
+        with self.write_lock():
+            meta = self.load_meta(session_id)
+            mutate(meta)
+            _validate_meta_ids(meta)
+            self._replace_meta_locked(
+                meta, preserve_parent_link=preserve_parent_link
+            )
+        return meta
+
+    def _replace_meta_locked(
+        self, meta: SessionMeta, *, preserve_parent_link: bool
+    ) -> None:
+        """Validate and atomically write ``meta``; the caller holds the lock."""
+        f = self._session_file(
+            meta.session_id, "meta.json", "session metadata"
+        )
+        if not f.exists():
+            raise FileNotFoundError(f"session not found: {meta.session_id}")
+        existing = SessionMeta.from_json(f.read_text())
+        if existing.session_id != meta.session_id:
+            raise ValueError("metadata session ID does not match its directory")
+        if existing.tenant_id != meta.tenant_id:
+            if not existing.tenant_id and meta.tenant_id:
+                raise ValueError("use tag_session for the first tenant assignment")
+            raise ValueError("session tenant cannot be cleared or changed")
+        if meta.tenant_id:
+            meta.tenant_id = validate_tenant_id(meta.tenant_id)
+        if preserve_parent_link:
+            _carry_parent_link(meta, existing)
+        self._enforce_parent_tenant(meta, inherit=False)
+        self._redact_meta(meta)
+        _write_atomic(f, meta.to_json())
 
     def load_meta(self, session_id: str) -> SessionMeta:
         f = self._session_file(session_id, "meta.json", "session metadata")

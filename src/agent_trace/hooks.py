@@ -325,6 +325,20 @@ def _load_meta_or_none(store: TraceStore, session_id: str) -> SessionMeta | None
         return None
 
 
+def _mutate_meta_or_none(
+    store: TraceStore, session_id: str, mutate
+) -> SessionMeta | None:
+    """Apply ``mutate`` to the session's metadata under the store write lock.
+
+    Parallel tool calls and subagents fire hooks as separate processes, so a
+    load followed by a separate ``update_meta`` loses concurrent increments.
+    """
+    try:
+        return store.mutate_meta(session_id, mutate, preserve_parent_link=True)
+    except FileNotFoundError:
+        return None
+
+
 def _provider_env(provider: str = "claude") -> str:
     return _PROVIDER_ENV.get(provider, _CLAUDE_SESSION_ID_ENV)
 
@@ -638,16 +652,17 @@ def handle_session_start(input_data: dict, provider: str = "claude") -> None:
     # resume and compact continue the session already recorded under this ID:
     # keep its metadata (started_at, counters) instead of overwriting it.
     if is_continuation_source(source) and session_id:
-        try:
-            existing_meta = store.load_meta(meta.session_id)
-        except FileNotFoundError:
-            store.create_session(meta)
-        else:
+        def _resume(existing_meta: SessionMeta) -> None:
             existing_meta.ended_at = None
             if conversation_id and not existing_meta.conversation_id:
                 existing_meta.conversation_id = conversation_id
-            meta = existing_meta
-            store.update_meta(meta, preserve_parent_link=True)
+
+        try:
+            meta = store.mutate_meta(
+                meta.session_id, _resume, preserve_parent_link=True
+            )
+        except FileNotFoundError:
+            store.create_session(meta)
     else:
         # A subagent's metadata may already carry the link recorded by its
         # parent's subagent hooks; a real SessionStart must not drop it.
@@ -694,10 +709,10 @@ def handle_session_end(input_data: dict, provider: str = "claude") -> None:
 
     meta = _load_meta_or_none(store, session_id)
     if meta:
-        meta.ended_at = time.time()
-        meta.total_duration_ms = (meta.ended_at - meta.started_at) * 1000
+        ended_at = time.time()
+        duration_ms = (ended_at - meta.started_at) * 1000
 
-        event_data = {"duration_ms": meta.total_duration_ms}
+        event_data = {"duration_ms": duration_ms}
         for key in ("reason", "stop_reason", "cwd", "transcript_path", "hook_event_name"):
             if input_data.get(key) not in (None, ""):
                 event_data[key] = input_data.get(key)
@@ -710,7 +725,14 @@ def handle_session_end(input_data: dict, provider: str = "claude") -> None:
                 data=event_data,
             ),
         )
-        store.update_meta(meta, preserve_parent_link=True)
+
+        # Reload under the lock so counters written by concurrent hooks since
+        # the load above are kept.
+        def _end(current: SessionMeta) -> None:
+            current.ended_at = ended_at
+            current.total_duration_ms = (ended_at - current.started_at) * 1000
+
+        meta = _mutate_meta_or_none(store, session_id, _end) or meta
         _write_session_meta(meta)
         _product_telemetry.capture(
             _product_telemetry.SESSION_COMPLETED,
@@ -758,10 +780,10 @@ def handle_pre_tool(input_data: dict, provider: str = "claude") -> None:
     _write_event(store, session_id, event)
 
     # Update meta
-    meta = _load_meta_or_none(store, session_id)
-    if meta:
+    def _count_tool_call(meta: SessionMeta) -> None:
         meta.tool_calls += 1
-        store.update_meta(meta, preserve_parent_link=True)
+
+    _mutate_meta_or_none(store, session_id, _count_tool_call)
 
     # Track pending call for latency measurement.
     # Keyed by event_id (not tool_name) so concurrent calls to the same
@@ -910,10 +932,10 @@ def handle_post_model_request(input_data: dict, provider: str = "claude") -> Non
     # ``llm_requests`` counts ``llm_request`` events (validate and backfill
     # rely on that), and this hook records none, so only tokens are added.
     if total:
-        meta = _load_meta_or_none(store, session_id)
-        if meta:
+        def _add_tokens(meta: SessionMeta) -> None:
             meta.total_tokens += total
-            store.update_meta(meta, preserve_parent_link=True)
+
+        _mutate_meta_or_none(store, session_id, _add_tokens)
 
 
 # Providers whose subagent hooks name the child by the child's own hook
@@ -1309,10 +1331,10 @@ def handle_post_tool(input_data: dict, failed: bool = False, provider: str = "cl
 
     # Update meta on errors
     if failed:
-        meta = _load_meta_or_none(store, session_id)
-        if meta:
+        def _count_error(meta: SessionMeta) -> None:
             meta.errors += 1
-            store.update_meta(meta, preserve_parent_link=True)
+
+        _mutate_meta_or_none(store, session_id, _count_error)
 
 
 def hook_main(args: list[str]) -> None:

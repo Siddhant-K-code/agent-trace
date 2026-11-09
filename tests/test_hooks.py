@@ -46,6 +46,11 @@ from agent_trace.hooks import (
 from agent_trace.models import EventType
 from agent_trace.store import TraceStore
 
+try:
+    from _concurrency import run_concurrently
+except ImportError:  # pragma: no cover - run as a package module
+    from tests._concurrency import run_concurrently
+
 
 class TestHooksSessionLifecycle(unittest.TestCase):
     def setUp(self):
@@ -1319,6 +1324,57 @@ class TestPendingCallsConcurrency(_PendingCallsHookTest):
 
         self.run_parallel(provider, "end", [{"session_id": sid, "reason": "exit"}])
         self.assertEqual(self.pending_files(), [])
+
+
+@unittest.skipIf(fcntl is None, "store lock needs fcntl.flock")
+class TestMetaCounterConcurrency(_PendingCallsHookTest):
+    """Parallel hook processes of one session must not lose counter updates."""
+
+    PROCESSES = 8
+    HOOKS_PER_PROCESS = 6
+    TOKENS = 7
+    SCRIPT = (
+        "import contextlib, io, json\n"
+        "from agent_trace.hooks import hook_main\n"
+        "provider, payload = sys.argv[2], sys.argv[3]\n"
+        "events = sys.argv[4:]\n"
+        "err = io.StringIO()\n"
+        "wait_for_start()\n"
+        "with contextlib.redirect_stderr(err):\n"
+        "    for event in events:\n"
+        "        sys.stdin = io.StringIO(payload)\n"
+        "        hook_main(['--provider', provider, event])\n"
+        "print(err.getvalue(), end='')\n"
+    )
+
+    def test_parallel_hooks_keep_every_counter_increment(self):
+        provider = "codex"
+        sid = _raw_session_id(provider, 9)
+        local_id = sid[:16]
+        self.run_hook(provider, "start", sid)
+        store = TraceStore(str(self.root))
+        payload = json.dumps({
+            "session_id": sid,
+            "tool_name": "Bash",
+            "tool_input": {"command": "true"},
+            "error": "boom",
+            "token_usage": {"total_tokens": self.TOKENS},
+        })
+        events = ["PreToolUse", "PostToolUseFailure", "PostModelRequest"]
+        args = [[provider, payload, *events * self.HOOKS_PER_PROCESS]] * self.PROCESSES
+        outputs = run_concurrently(self.SCRIPT, args)
+        self.assertEqual(outputs, [""] * self.PROCESSES)
+
+        expected = self.PROCESSES * self.HOOKS_PER_PROCESS
+        meta = store.load_meta(local_id)
+        self.assertEqual(
+            (meta.tool_calls, meta.errors, meta.total_tokens),
+            (expected, expected, expected * self.TOKENS),
+        )
+        recorded = store.load_events(local_id)
+        self.assertEqual(
+            sum(e.event_type == EventType.TOOL_CALL for e in recorded), expected
+        )
 
 
 if __name__ == "__main__":
