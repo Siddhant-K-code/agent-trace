@@ -1,0 +1,10 @@
+{"event_type":"session_start","timestamp":1800000200.0,"event_id":"inf-start","session_id":"session-inferred","data":{"provider":"synthetic"}}
+{"event_type":"user_prompt","timestamp":1800000201.0,"event_id":"inf-prompt","session_id":"session-inferred","data":{"prompt":"Prepare validated release notes."}}
+{"event_type":"tool_call","timestamp":1800000202.0,"event_id":"inf-skill","session_id":"session-inferred","data":{"tool_name":"skill","arguments":{"skill":"release-notes"}}}
+{"event_type":"tool_result","timestamp":1800000202.1,"event_id":"inf-skill-result","session_id":"session-inferred","parent_id":"inf-skill","data":{"tool_name":"skill","success":true}}
+{"event_type":"file_read","timestamp":1800000203.0,"event_id":"inf-format","session_id":"session-inferred","data":{"path":".github/skills/release-notes/references/format.md"}}
+{"event_type":"file_read","timestamp":1800000204.0,"event_id":"inf-changelog","session_id":"session-inferred","data":{"path":"CHANGELOG.md"}}
+{"event_type":"file_write","timestamp":1800000205.0,"event_id":"inf-write","session_id":"session-inferred","data":{"path":"RELEASE_NOTES.md"}}
+{"event_type":"tool_call","timestamp":1800000206.0,"event_id":"inf-test","session_id":"session-inferred","data":{"tool_name":"bash","arguments":{"command":"pytest -q"},"is_test":true}}
+{"event_type":"tool_result","timestamp":1800000207.0,"event_id":"inf-test-result","session_id":"session-inferred","parent_id":"inf-test","data":{"tool_name":"bash","exit_code":0,"success":true}}
+{"event_type":"session_end","timestamp":1800000209.0,"event_id":"inf-end","session_id":"session-inferred","data":{}}

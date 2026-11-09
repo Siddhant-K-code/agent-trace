@@ -1,0 +1,64 @@
+[
+  {
+    "id": "draft-release-notes",
+    "skill": "release-notes",
+    "prompt": "Draft the release notes and validate the repository.",
+    "should_trigger": true,
+    "fixture_dir": "fixture",
+    "instructions": [
+      "AGENTS.md"
+    ],
+    "expected_actions": [
+      {
+        "id": "write-release-notes",
+        "kind": "file_write",
+        "path": "RELEASE_NOTES.md"
+      },
+      {
+        "id": "run-tests",
+        "kind": "test"
+      }
+    ],
+    "note": "Instruction and skill loads are directly observed."
+  },
+  {
+    "id": "count-release-fixes",
+    "skill": "release-notes",
+    "prompt": "How many fixes are listed in the Unreleased section?",
+    "should_trigger": false,
+    "fixture_dir": "fixture",
+    "instructions": [
+      "AGENTS.md"
+    ],
+    "expected_actions": [
+      {
+        "id": "read-changelog",
+        "kind": "file_read",
+        "path": "CHANGELOG.md"
+      }
+    ],
+    "note": "Near miss that should use repository instructions but not load the release skill."
+  },
+  {
+    "id": "availability-only-inference",
+    "skill": "release-notes",
+    "prompt": "Prepare validated release notes.",
+    "should_trigger": true,
+    "fixture_dir": "fixture",
+    "instructions": [
+      "AGENTS.md"
+    ],
+    "expected_actions": [
+      {
+        "id": "write-release-notes",
+        "kind": "file_write",
+        "path": "RELEASE_NOTES.md"
+      },
+      {
+        "id": "run-tests",
+        "kind": "test"
+      }
+    ],
+    "note": "The instruction file is available, but no read event establishes whether it loaded."
+  }
+]

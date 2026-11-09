@@ -40,7 +40,7 @@ CAVEATS = (
     "Baseline is the oldest version, or the previous version with --compare.",
     "Sessions that start before the first config-watch snapshot count as the current version.",
     "Cost is estimated from event size (chars/4), not recorded token usage.",
-    "Ignores skills and whether the agent read the context file.",
+    "Ignores skills and whether the agent read the context file; use skills eval compliance cases for controlled evidence.",
 )
 
 
@@ -207,6 +207,44 @@ def _event_path(event: TraceEvent) -> str:
     if not isinstance(args, dict):
         return ""
     return str(args.get("file_path") or args.get("path") or "")
+
+
+def context_file_load_events(
+    events: list[TraceEvent],
+    workspace_root: Path,
+    context_file: str,
+) -> list[TraceEvent]:
+    """Return recorded reads of one repository context file."""
+    target = workspace_root / context_file
+    try:
+        resolved_target = target.resolve()
+    except OSError:
+        resolved_target = target
+    found = []
+    for event in events:
+        if not isinstance(event.data, dict):
+            continue
+        if event.event_type == EventType.FILE_READ:
+            pass
+        elif event.event_type == EventType.TOOL_CALL:
+            tool_name = str(event.data.get("tool_name") or event.data.get("tool") or "").lower()
+            if tool_name not in {"read", "read_file", "open_file", "view", "get_file_contents"}:
+                continue
+        else:
+            continue
+        raw = _event_path(event)
+        if not raw:
+            continue
+        candidate = Path(os.path.expanduser(raw))
+        if not candidate.is_absolute():
+            candidate = workspace_root / candidate
+        try:
+            candidate = candidate.resolve()
+        except OSError:
+            pass
+        if candidate == resolved_target:
+            found.append(event)
+    return found
 
 
 def _tool_calls(events: list[TraceEvent]) -> int:

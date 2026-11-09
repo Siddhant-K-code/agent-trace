@@ -29,8 +29,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from .instruction_compliance import (
+    ACTION_KINDS,
+    EVIDENCE_STATES,
+    LIMITATIONS as COMPLIANCE_LIMITATIONS,
+    ActionExpectation,
+    analyze_compliance_run,
+    summarize_compliance_runs,
+)
 from .models import EventType, TraceEvent
-from .skills import USER_SKILL_DIRS, _prompt_loads, analyze_session, discover_skills
+from .skills import CONTEXT_FILES, USER_SKILL_DIRS, _prompt_loads, analyze_session, discover_skills
 
 SCHEMA_VERSION = 1
 DEFAULT_RUNS = 3
@@ -76,7 +84,18 @@ _SCRUBBED_ENV = (
 )
 
 _CASE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-_CASE_KEYS = frozenset({"id", "skill", "prompt", "should_trigger", "fixture_dir", "runs", "note"})
+_CASE_KEYS = frozenset({
+    "id",
+    "skill",
+    "prompt",
+    "should_trigger",
+    "fixture_dir",
+    "runs",
+    "note",
+    "instructions",
+    "expected_actions",
+})
+_ACTION_KEYS = frozenset({"id", "kind", "path", "tool"})
 _RUN_INFO_KEYS = ("exit_code", "timed_out", "duration_s", "agent", "agent_version", "error")
 
 CAVEATS = (
@@ -102,11 +121,17 @@ class EvalCase:
     fixture_dir: str = ""
     runs: int | None = None
     note: str = ""
+    instructions: tuple[str, ...] = ()
+    expected_actions: tuple[ActionExpectation, ...] = ()
 
     def explicit_invocation(self) -> str:
         """Return how the prompt invokes the skill by name (``/skill`` or ``$skill``)."""
         found = _prompt_loads(self.prompt, [self.skill])
         return found[0][1] if found else ""
+
+    @property
+    def compliance_enabled(self) -> bool:
+        return bool(self.instructions or self.expected_actions)
 
 
 @dataclass
@@ -121,6 +146,79 @@ class AgentSpec:
 # --------------------------------------------------------------------------- #
 # Cases file
 # --------------------------------------------------------------------------- #
+
+
+def _parse_instructions(value: object, where: str, problems: list[str]) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        problems.append(f"{where}: instructions must be a list of repository instruction file paths")
+        return ()
+    found = []
+    for index, item in enumerate(value, start=1):
+        if not isinstance(item, str) or item not in CONTEXT_FILES:
+            allowed = ", ".join(CONTEXT_FILES)
+            problems.append(f"{where}: instructions[{index}] must be one of: {allowed}")
+            continue
+        if item in found:
+            problems.append(f"{where}: duplicate instruction path: {item}")
+            continue
+        found.append(item)
+    return tuple(found)
+
+
+def _parse_expected_actions(value: object, where: str, problems: list[str]) -> tuple[ActionExpectation, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        problems.append(f"{where}: expected_actions must be a list")
+        return ()
+    actions = []
+    seen = set()
+    for index, item in enumerate(value, start=1):
+        label = f"{where}: expected_actions[{index}]"
+        if not isinstance(item, dict):
+            problems.append(f"{label} must be an object")
+            continue
+        unknown = sorted(set(item) - _ACTION_KEYS)
+        if unknown:
+            problems.append(f"{label} has unknown field(s): {', '.join(unknown)}")
+        action_id = item.get("id")
+        kind = item.get("kind")
+        path = item.get("path") or ""
+        tool = item.get("tool") or ""
+        if not isinstance(action_id, str) or not _CASE_ID_RE.match(action_id):
+            problems.append(f"{label}.id must use the same format as a case id")
+        elif action_id in seen:
+            problems.append(f"{label}.id is duplicated: {action_id}")
+        else:
+            seen.add(action_id)
+        if kind not in ACTION_KINDS:
+            problems.append(f"{label}.kind must be one of: {', '.join(ACTION_KINDS)}")
+        if not isinstance(path, str) or not isinstance(tool, str):
+            problems.append(f"{label}.path and .tool must be strings")
+            continue
+        if kind in ("file_read", "file_write"):
+            if not path:
+                problems.append(f"{label}.path is required for {kind}")
+            if tool:
+                problems.append(f"{label}.tool is only valid for tool_call")
+        elif kind == "tool_call":
+            if not tool:
+                problems.append(f"{label}.tool is required for tool_call")
+            if path:
+                problems.append(f"{label}.path is only valid for file_read or file_write")
+        elif kind == "test" and (path or tool):
+            problems.append(f"{label} cannot set path or tool for test")
+        if (
+            isinstance(action_id, str)
+            and _CASE_ID_RE.match(action_id)
+            and kind in ACTION_KINDS
+            and isinstance(path, str)
+            and isinstance(tool, str)
+        ):
+            actions.append(ActionExpectation(id=action_id, kind=kind, path=path, tool=tool))
+    return tuple(actions)
 
 
 def load_cases(path: str | Path) -> list[EvalCase]:
@@ -180,6 +278,8 @@ def load_cases(path: str | Path) -> list[EvalCase]:
         if not isinstance(note, str):
             problems.append(f"{where}: note must be a string")
             note = ""
+        instructions = _parse_instructions(item.get("instructions"), where, problems)
+        expected_actions = _parse_expected_actions(item.get("expected_actions"), where, problems)
         if len(problems) > problems_before:
             continue
         fixture_path = str((base / os.path.expanduser(fixture)).resolve()) if fixture else ""
@@ -191,6 +291,8 @@ def load_cases(path: str | Path) -> list[EvalCase]:
             fixture_dir=fixture_path,
             runs=runs,
             note=note,
+            instructions=instructions,
+            expected_actions=expected_actions,
         ))
     if problems:
         raise EvalInputError("invalid cases file:\n  " + "\n  ".join(problems))
@@ -437,6 +539,7 @@ def score_trace_dir(
     workspace: str = "",
     extra_dirs: Iterable[str] = (),
     user_dirs: Iterable[str] = USER_SKILL_DIRS,
+    compliance_case: EvalCase | None = None,
 ) -> dict[str, Any]:
     """Score one run's trace store: did the model load ``skill`` anywhere in it?"""
     extra_dirs = list(extra_dirs)
@@ -446,10 +549,12 @@ def score_trace_dir(
     load_sessions: list[dict[str, Any]] = []
     user_invoked = False
     sessions = events_total = without_meta = without_start = unreadable = 0
+    session_events: list[tuple[str, list[TraceEvent]]] = []
     for session_dir in find_session_dirs(trace_dir):
         events = read_events(session_dir / "events.ndjson")
         if not events:
             continue
+        session_events.append((session_dir.name, events))
         sessions += 1
         events_total += len(events)
         has_meta = (session_dir / "meta.json").is_file()
@@ -485,7 +590,7 @@ def score_trace_dir(
                 "has_meta": has_meta,
                 "has_session_start": has_start,
             })
-    return {
+    result = {
         "loaded": bool(methods),
         "methods": sorted(methods),
         "user_invoked": user_invoked,
@@ -497,6 +602,18 @@ def score_trace_dir(
         "load_sessions": load_sessions,
         "other_skills_loaded": sorted(other_skills),
     }
+    if compliance_case is not None and compliance_case.compliance_enabled:
+        result["compliance"] = analyze_compliance_run(
+            session_events,
+            workspace=workspace,
+            skill=compliance_case.skill,
+            should_trigger=compliance_case.should_trigger,
+            instructions=compliance_case.instructions,
+            expected_actions=compliance_case.expected_actions,
+            extra_dirs=extra_dirs,
+            user_dirs=user_dirs,
+        )
+    return result
 
 
 def classify_run(result: dict[str, Any]) -> dict[str, Any]:
@@ -549,7 +666,7 @@ def summarize_case(
     unscored = sum(1 for run in runs if run["status"] == "unscored")
     scored = loaded + not_loaded
     invocation = invocation or {}
-    return {
+    report = {
         "id": case.id,
         "skill": case.skill,
         "should_trigger": case.should_trigger,
@@ -567,6 +684,11 @@ def summarize_case(
         "user_invoked_runs": sum(1 for run in runs if run.get("user_invoked")),
         "run_results": runs,
     }
+    if case.compliance_enabled:
+        report["instructions"] = list(case.instructions)
+        report["expected_actions"] = [action.to_dict() for action in case.expected_actions]
+        report["compliance"] = summarize_compliance_runs(runs)
+    return report
 
 
 def compute_totals(case_reports: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
@@ -653,7 +775,12 @@ def run_case_live(
         )
         result = {"run": f"run-{run_no}", **outcome}
         result.update(score_trace_dir(
-            traces, case.skill, workspace=str(workspace), extra_dirs=extra_dirs, user_dirs=user_dirs,
+            traces,
+            case.skill,
+            workspace=str(workspace),
+            extra_dirs=extra_dirs,
+            user_dirs=user_dirs,
+            compliance_case=case,
         ))
         classify_run(result)
         if save_root is not None:
@@ -729,7 +856,12 @@ def score_recorded_case(
         result: dict[str, Any] = {"run": run_dir.name, "exit_code": None, "timed_out": False, "duration_s": None, "error": ""}
         result.update(_read_run_info(run_dir, warnings))
         result.update(score_trace_dir(
-            run_dir, case.skill, workspace=workspace, extra_dirs=extra_dirs, user_dirs=user_dirs,
+            run_dir,
+            case.skill,
+            workspace=case.fixture_dir or workspace,
+            extra_dirs=extra_dirs,
+            user_dirs=user_dirs,
+            compliance_case=case,
         ))
         results.append(classify_run(result))
     if not results:
@@ -772,6 +904,33 @@ def build_report(
     report["totals"] = compute_totals(case_reports)
     report["warnings"] = list(warnings)
     report["caveats"] = list(CAVEATS)
+    compliance_cases = [case for case in case_reports if "compliance" in case]
+    if compliance_cases:
+        counts = {
+            group: {state: 0 for state in EVIDENCE_STATES}
+            for group in ("loads", "follow", "validation")
+        }
+        for case in compliance_cases:
+            for group in counts:
+                for state in EVIDENCE_STATES:
+                    counts[group][state] += int(case["compliance"][group][state])
+            report["warnings"].extend(
+                f"{case['id']}: {warning}"
+                for warning in case["compliance"].get("warnings", ())
+            )
+        report["compliance"] = {
+            "schema_version": 1,
+            "not_a_score": True,
+            "cases": len(compliance_cases),
+            "evidence_counts": counts,
+            "evidence_states": list(EVIDENCE_STATES),
+            "limitations": list(COMPLIANCE_LIMITATIONS),
+            "warnings": [
+                warning
+                for case in compliance_cases
+                for warning in case["compliance"].get("warnings", ())
+            ],
+        }
     return report
 
 
@@ -834,6 +993,24 @@ def format_text(report: dict[str, Any]) -> str:
         f"  should not trigger: {should_not['runs']} runs, {should_not['loaded']} loaded, "
         f"{should_not['clean']} clean, {should_not['unscored']} unscored"
     )
+    if report.get("compliance"):
+        lines.extend(["", "  Compliance evidence (observed/inferred/missing/unavailable):"])
+        headers = ("CASE", "LOADS", "FOLLOW", "VALIDATION")
+        compliance_rows = []
+        for case in report["cases"]:
+            if "compliance" not in case:
+                continue
+            summary = case["compliance"]
+
+            def counts(group: str) -> str:
+                values = summary[group]
+                return "/".join(str(values[state]) for state in EVIDENCE_STATES)
+
+            compliance_rows.append((case["id"], counts("loads"), counts("follow"), counts("validation")))
+        widths = [max(len(headers[i]), *(len(row[i]) for row in compliance_rows)) for i in range(len(headers))]
+        lines.append("  " + "  ".join(headers[i].ljust(widths[i]) for i in range(len(headers))))
+        lines.extend("  " + "  ".join(row[i].ljust(widths[i]) for i in range(len(row))) for row in compliance_rows)
+        lines.append("  Evidence inventory only. This is not an outcome or developer score.")
 
     notes = []
     for case in report["cases"]:
@@ -864,6 +1041,51 @@ def format_text(report: dict[str, Any]) -> str:
         "the prompt wording is the test."
     )
     lines.append("  See docs/skills-eval.md.")
+    return "\n".join(lines) + "\n"
+
+
+def format_markdown(report: dict[str, Any]) -> str:
+    lines = ["# Skill trigger eval", "", "Counts only. There is no composite score or grade.", ""]
+    lines.extend([
+        "| Case | Skill | Expected | Runs | Loaded | Rate |",
+        "|---|---|---:|---:|---:|---:|",
+    ])
+    for case in report["cases"]:
+        expected = "trigger" if case["should_trigger"] else "no trigger"
+        lines.append(
+            f"| `{case['id']}` | `{case['skill']}` | {expected} | {case['runs']} | "
+            f"{case['loaded']} | {_rate(case)} |"
+        )
+
+    if report.get("compliance"):
+        lines.extend([
+            "",
+            "## Instruction compliance evidence",
+            "",
+            "Counts are ordered as observed, inferred, missing, unavailable.",
+            "",
+            "| Case | Loads | Follow | Validation |",
+            "|---|---:|---:|---:|",
+        ])
+        for case in report["cases"]:
+            if "compliance" not in case:
+                continue
+            summary = case["compliance"]
+
+            def counts(group: str) -> str:
+                values = summary[group]
+                return "/".join(str(values[state]) for state in EVIDENCE_STATES)
+
+            lines.append(
+                f"| `{case['id']}` | {counts('loads')} | {counts('follow')} | "
+                f"{counts('validation')} |"
+            )
+        lines.extend(["", "This evidence inventory is not an outcome or developer score.", "", "### Limitations", ""])
+        lines.extend(f"- {item}" for item in report["compliance"]["limitations"])
+
+    if report.get("warnings"):
+        lines.extend(["", "## Warnings", ""])
+        lines.extend(f"- {warning}" for warning in report["warnings"])
     return "\n".join(lines) + "\n"
 
 
@@ -977,6 +1199,8 @@ def cmd_skills_eval(args: argparse.Namespace) -> int:
 
     if as_json:
         sys.stdout.write(json.dumps(report, indent=2) + "\n")
+    elif getattr(args, "format", "text") == "markdown":
+        sys.stdout.write(format_markdown(report))
     else:
         sys.stdout.write(format_text(report))
 
@@ -1013,6 +1237,7 @@ __all__ = [
     "compute_totals",
     "find_session_dirs",
     "format_text",
+    "format_markdown",
     "gate_failures",
     "hook_command_prefix",
     "load_cases",

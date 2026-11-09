@@ -6,6 +6,10 @@ were already recorded. It cannot say whether a skill *should* have loaded.
 near-miss tasks that should not, run each one through a headless agent several
 times, and count the runs in which the model loaded the skill.
 
+Cases can also declare repository instruction files and expected observable
+actions. The resulting instruction compliance evidence is documented in
+[instruction-compliance.md](instruction-compliance.md).
+
 ```mermaid
 flowchart LR
     C["cases.json<br/>prompt · skill<br/>should_trigger"] --> R["N runs per case<br/>temp workspace<br/>from fixture_dir"]
@@ -53,6 +57,8 @@ list of cases, or `{"cases": [...]}`.
 | `fixture_dir` | no | Directory copied into each run's workspace. Relative to the cases file |
 | `runs` | no | Runs for this case. Default is `--runs`, else 3 |
 | `note` | no | Free text, copied to the report |
+| `instructions` | no | Expected repository instruction files |
+| `expected_actions` | no | Observable file, tool, or test events expected after a load |
 
 [examples/skills-eval/](../examples/skills-eval/) has a complete example: a
 `release-notes` skill in `fixture/.claude/skills/`, a small `CHANGELOG.md`, and
@@ -224,6 +230,17 @@ no definition is found), `runs`, `scored`, `loaded`, `not_loaded`, `unscored`,
 `sessions_without_meta`, `sessions_without_session_start`, `load_sessions`, and
 `other_skills_loaded`.
 
+Cases with `instructions` or `expected_actions` also include `compliance`.
+Evidence is grouped as `observed`, `inferred`, `missing`, or `unavailable`.
+Instruction inference only records that a file was available without an
+observed read. It does not claim client injection or loading.
+Unreadable or malformed session evidence is reported as `unavailable` with a
+bounded warning instead of being counted as missing compliance.
+The top-level report and each case include deterministic evidence counts. Use
+`--format markdown` for a concise CI artifact. See
+[instruction-compliance.md](instruction-compliance.md) for the schema and the
+offline public corpus.
+
 ## What it measures, and what it doesn't
 
 It measures whether, for these prompts, this agent, this model and version, and
@@ -231,8 +248,9 @@ this fixture, the model loaded the skill, and how often over N runs.
 
 It does not measure:
 
-- whether the skill was followed after loading, or helped (see
-  [skills.md](skills.md) for follow signals);
+- whether guidance was actually obeyed or helped. Compliance cases can report
+  observable skill follow signals and expected actions, but they remain event
+  facts rather than a verdict;
 - skills injected into context without a tool call or file read;
 - other prompts. The prompt wording is the test, so a rephrased task can
   trigger differently;
