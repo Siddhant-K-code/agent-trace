@@ -1,0 +1,19 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "agent-strace",
+  "description": "Capture, replay, and analyze GitHub Copilot CLI agent sessions.",
+  "version": "0.104.0",
+  "author": {
+    "name": "Siddhant Khare",
+    "email": "siddhantkhare2694@gmail.com"
+  },
+  "homepage": "https://github.com/Siddhant-K-code/agent-trace",
+  "repository": "https://github.com/Siddhant-K-code/agent-trace",
+  "license": "MIT",
+  "keywords": [
+    "agents",
+    "copilot-cli",
+    "observability",
+    "tracing"
+  ]
+}

@@ -48,11 +48,11 @@ python -m unittest discover -s tests -p 'test_watch.py' -v
 
 ## Version bumping
 
-The version lives in `src/agent_trace/__init__.py`. A release must also sync `plugin.json`, `gemini-extension.json`, both versions in `.github/plugin/marketplace.json` (`metadata.version` and `plugins[0].version`), and both versions in `server.json` (`version` and `packages[0].version`). `tests/test_plugin.py` fails until they match.
+The version lives in `src/agent_trace/__init__.py`. A release must also sync `plugin.json`, `plugins/agent-strace/plugin.json`, `.claude-plugin/plugin.json`, the plugin versions in `.claude-plugin/marketplace.json`, both versions in `.github/plugin/marketplace.json` (`metadata.version` and `plugins[0].version`), and both versions in `server.json` (`version` and `packages[0].version`). Tests fail until they match. `server.json` may lead `__version__` between releases: it names the first PyPI release that ships the current MCP server, and must never name an older one.
 
-The Copilot plugin uses the Agent Plugins 1.0 layout (`plugin.json`, `skills/`, `mcp.json`, `com.github.copilot/`). Root `agents/` and `hooks.json` are legacy copies for older Copilot CLIs; edit both copies together (tests compare them).
+The repo root is a legacy Copilot plugin (`plugin.json` with explicit `agents`, `skills`, `hooks`) and the Claude Code plugin (`.claude-plugin/`, `hooks/hooks.json`). `plugins/agent-strace/` is the Agent Plugins 1.0 copy for marketplaces that require it; its `skills/`, `com.github.copilot/agents/`, and `com.github.copilot/hooks/hooks.json` must match the root `skills/`, `agents/`, and `hooks.json` (tests compare them). Do not add `mcp.json`, `.mcp.json`, or `gemini-extension.json` at the root: see `docs/copilot-plugin.md`.
 
-After the PyPI publish for a release, publish the same version to the MCP Registry from the repo root: `mcp-publisher login github` (one-time device auth) then `mcp-publisher publish`.
+After the PyPI publish for a release, publish the same version to the MCP Registry from the repo root: `mcp-publisher login github` (one-time device auth) then `mcp-publisher publish`. Only publish a version whose PyPI package already exists.
 
 - New feature (new command, new flag, new integration): bump minor (`X.Y.Z` → `X.(Y+1).0`)
 - Bug fix or small improvement: bump patch (`X.Y.Z` → `X.Y.(Z+1)`)

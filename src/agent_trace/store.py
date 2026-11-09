@@ -311,8 +311,13 @@ class TraceStore:
         redact: bool | None = None,
         use_workspace_env: bool = True,
         allow_legacy_workspace_id: bool = False,
+        read_only: bool = False,
     ):
         """Create a TraceStore.
+
+        read_only=True skips the .gitignore setup and journal recovery done
+        at startup and makes every write operation raise PermissionError.
+        Pending journals are recovered by the next writable TraceStore.
 
         workspace_id scopes all reads/writes to a subdirectory:
           <base_dir>/workspaces/<workspace_id>/
@@ -343,6 +348,9 @@ class TraceStore:
         self.redact = redaction_enabled() if redact is None else redact
         self._erasure_audit_mtime_ns = -1
         self._erased_session_hashes: set[str] = set()
+        self.read_only = read_only
+        if read_only:
+            return
         ensure_trace_dir_gitignore(self.storage_root)
         self._recover_tag_journals()
         self._recover_delete_journals()
@@ -515,6 +523,8 @@ class TraceStore:
 
     def write_lock(self):
         """Return the store-wide write lock context manager."""
+        if self.read_only:
+            raise PermissionError("trace store is read-only")
         return _store_write_lock(self.base_dir, self.storage_root)
 
     def _session_was_erased(self, session_id: str) -> bool:
@@ -645,7 +655,7 @@ class TraceStore:
         journal_dir = self._journal_dir()
         if not journal_dir.exists() or journal_dir.is_symlink():
             return
-        with _store_write_lock(self.base_dir, self.storage_root):
+        with self.write_lock():
             for journal_path in sorted(journal_dir.glob("tag-*.json")):
                 if journal_path.is_symlink():
                     continue
@@ -908,7 +918,7 @@ class TraceStore:
         journal_dir = self._journal_dir()
         if not journal_dir.exists() or journal_dir.is_symlink():
             return
-        with _store_write_lock(self.base_dir, self.storage_root):
+        with self.write_lock():
             for journal_path in sorted(journal_dir.glob("delete-*.json")):
                 if journal_path.is_symlink():
                     continue
@@ -981,7 +991,7 @@ class TraceStore:
         session is kept when ``meta`` carries none.
         """
         # Stamp workspace_id onto meta so it's visible in exports/reports
-        with _store_write_lock(self.base_dir, self.storage_root):
+        with self.write_lock():
             _validate_meta_ids(meta, strict_session=True)
             if self._session_was_erased(meta.session_id):
                 raise ValueError(f"session {meta.session_id} was erased and cannot be recreated")
@@ -1042,7 +1052,7 @@ class TraceStore:
             if not existing.tenant_id:
                 self.tag_session(session_id, event.tenant_id)
         f = self._session_file(session_id, "events.ndjson", "event stream")
-        with _store_write_lock(self.base_dir, self.storage_root):
+        with self.write_lock():
             if self._session_was_erased(session_id):
                 raise ValueError(f"session {session_id} was erased and cannot accept events")
             # Session metadata is authoritative.  This prevents a changed
@@ -1084,7 +1094,7 @@ class TraceStore:
         writer since ``meta`` was loaded is kept rather than dropped.
         """
         _validate_meta_ids(meta)
-        with _store_write_lock(self.base_dir, self.storage_root):
+        with self.write_lock():
             f = self._session_file(
                 meta.session_id, "meta.json", "session metadata"
             )
@@ -1281,7 +1291,7 @@ class TraceStore:
         tenant_id = validate_tenant_id(tenant_id)
         path = self._session_file(session_id, "events.ndjson", "event stream")
         meta_path = self._session_file(session_id, "meta.json", "session metadata")
-        with _store_write_lock(self.base_dir, self.storage_root):
+        with self.write_lock():
             meta = self.load_meta(session_id)
             self._store_file("tenant-audit.ndjson", "tenant audit")
             if meta.tenant_id and meta.tenant_id != tenant_id:

@@ -1,7 +1,8 @@
 # GitHub Copilot CLI plugin
 
 The `agent-strace` Copilot CLI plugin records lifecycle events and adds a trace
-analyst agent, a skill, and the [MCP server](mcp.md) for investigating sessions.
+analyst agent and skill for investigating sessions. It does not register the
+[MCP server](mcp.md); add that separately.
 
 ## Install
 
@@ -70,16 +71,16 @@ copilot plugin marketplace add "$PWD"
 copilot plugin install agent-strace@agent-trace
 ```
 
-The manifest follows [Agent Plugins 1.0](https://github.com/agentplugins/agent-plugins-spec/blob/main/spec/1.0.0.md):
+The repository ships the plugin twice:
 
-| Component | Agent Plugins path | Legacy path (older Copilot CLIs) |
-|---|---|---|
-| Skill | `skills/agent-strace/` | same |
-| MCP server | `mcp.json` | not loaded |
-| Agent | `com.github.copilot/agents/` | `agents/` |
-| Hooks | `com.github.copilot/hooks/hooks.json` | `hooks.json` |
+| Package | Manifest | Agent | Hooks | Used by |
+|---|---|---|---|---|
+| Repo root | `plugin.json` (legacy) | `agents/` | `hooks.json` | This repo's marketplace, all Copilot CLI versions |
+| `plugins/agent-strace/` | `plugin.json` ([Agent Plugins 1.0](https://github.com/agentplugins/agent-plugins-spec/blob/main/spec/1.0.0.md)) | `com.github.copilot/agents/` | `com.github.copilot/hooks/hooks.json` | Marketplaces that require Agent Plugins 1.0 |
 
-Keep the agent and hooks copies identical; `tests/test_plugin.py` checks them.
+The repo root is also the Claude Code plugin (`.claude-plugin/`, `hooks/hooks.json`). The root `plugin.json` names `hooks.json` explicitly, so Copilot CLI never falls back to the Claude-format `hooks/hooks.json`. Neither package registers the MCP server: plugin MCP servers start in the plugin directory, not your project, so they would read the wrong `.agent-traces/`.
+
+`plugins/agent-strace/` holds copies of `skills/`, `agents/`, and `hooks.json`. Edit both copies together; `tests/test_plugin.py` checks them.
 
 Copilot caches installed plugin components. Run
 `copilot plugin marketplace update agent-trace` followed by

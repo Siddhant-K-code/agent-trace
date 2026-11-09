@@ -1,6 +1,6 @@
 # MCP server
 
-`agent-strace mcp` runs a local MCP server over stdio. It lets an agent query the sessions agent-strace has already recorded. It reads the trace store only: no network calls, no writes.
+`agent-strace mcp` runs a local MCP server over stdio. It lets an agent query the sessions agent-strace has already recorded. It makes no network calls and does not write to the trace store: it opens the store read-only, so it does not create `.agent-traces/` or its `.gitignore`, and it leaves interrupted tag or delete journals for the next writing command to recover.
 
 Registry name: `io.github.Siddhant-K-code/agent-trace` (PyPI package `agent-strace`).
 
@@ -14,9 +14,11 @@ Registry name: `io.github.Siddhant-K-code/agent-trace` (PyPI package `agent-stra
 | `get_session_summary` | Plain-English phase summary (same as `agent-strace explain`) |
 | `diff_sessions` | Tool, file, token, cost, and error deltas between two sessions |
 | `health` | Evidence health for a session (same JSON as `agent-strace health --format json`). Defaults to the latest session |
-| `skills` | Skill adoption report (same JSON as `agent-strace skills --format json`). One session, or an aggregate over `since` (default `30d`) |
+| `skills` | Skill adoption report (same JSON as `agent-strace skills --format json`, except `command_match` returns `count` and `distinct_signatures` instead of the matched commands). One session, or an aggregate over `since` (default `30d`) |
 
-`initialize` reports the installed package version.
+`initialize` reports the installed package version. Malformed requests get JSON-RPC errors (`-32600` invalid request, `-32602` invalid params or unknown tool). A tool that fails returns a result with `isError: true`.
+
+Tool output can include file paths, commands, and arguments recorded in your traces (secret redaction applies at capture time). The `skills` tool never returns prompt text, `SKILL.md` bodies, or commands taken from them; it returns skill names and paths relative to a skill directory.
 
 ## Add it to your agent
 
@@ -34,7 +36,7 @@ claude mcp add agent-trace -e AGENT_TRACE_DIR=/abs/path/.agent-traces -- agent-s
 
 **GitHub Copilot CLI**
 
-The [Copilot CLI plugin](copilot-plugin.md) already includes the server (via its `mcp.json`, on Copilot CLI versions that support Agent Plugins). Without the plugin:
+The [Copilot CLI plugin](copilot-plugin.md) does not register the server, because plugin MCP servers start in the plugin directory instead of your project. Add it yourself:
 
 ```bash
 copilot mcp add agent-trace -- agent-strace mcp
@@ -70,7 +72,7 @@ args = ["mcp"]
 gemini mcp add -s user agent-trace agent-strace mcp
 ```
 
-The Gemini CLI extension already includes the server. Install it with `agent-strace setup --cli gemini` (adds capture hooks too) or `gemini extensions install https://github.com/Siddhant-K-code/agent-trace` (MCP server only; run `agent-strace setup --cli gemini` afterwards to record sessions).
+`agent-strace setup --cli gemini` installs a Gemini CLI extension with the capture hooks and this server. Its `AGENT_TRACE_DIR` setting applies to both. See [Gemini CLI hooks](setup.md#gemini-cli-hooks).
 
 ## Example prompts
 
