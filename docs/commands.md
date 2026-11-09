@@ -547,6 +547,11 @@ Human-in-the-loop approval queue. A policy rule with
 Approving resumes the agent with `SIGCONT` by default; denying terminates it
 with `SIGTERM` by default.
 
+A request is decided once. If two reviewers approve or deny the same request
+at the same time, exactly one succeeds and the other exits non-zero with
+`Request already approved` or `Request already denied`. Records with an
+unknown `state` are skipped by `list` and rejected by `approve` and `deny`.
+
 | Command/flag | Description |
 |---|---|
 | `list --state STATE` | List requests, optionally filtered to `pending`, `approved`, or `denied` |
