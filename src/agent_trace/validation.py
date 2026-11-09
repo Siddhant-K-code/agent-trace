@@ -22,6 +22,7 @@ from .assignment import (
     MAX_SOURCE_TRACE_BYTES,
     _open_directory_chain,
     _read_child_file,
+    _read_regular_nofollow,
     _strict_json_bytes,
 )
 from .audit import verify_chain_lines
@@ -161,7 +162,12 @@ def _json_type_matches(value: Any, expected: str) -> bool:
     if expected == "boolean":
         return isinstance(value, bool)
     if expected == "integer":
-        return isinstance(value, int) and not isinstance(value, bool)
+        return (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(float(value))
+            and float(value).is_integer()
+        )
     if expected == "number":
         return (
             isinstance(value, (int, float))
@@ -201,7 +207,7 @@ def _schema_errors(
         if "maxLength" in schema and len(value) > int(schema["maxLength"]):
             errors.append(f"{path} is longer than maxLength")
         pattern = schema.get("pattern")
-        if pattern is not None and re.fullmatch(str(pattern), value) is None:
+        if pattern is not None and re.search(str(pattern), value) is None:
             errors.append(f"{path} does not match the required pattern")
 
     if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -485,20 +491,12 @@ def _replay_result(
 ) -> tuple[dict[str, Any] | None, list[ValidationFinding], set[str]]:
     if replay_baseline is None:
         return None, [], set()
-    if replay_baseline.is_symlink() or not replay_baseline.is_file():
-        return (
-            {"baseline": str(replay_baseline), "state": "invalid"},
-            [
-                ValidationFinding(
-                    "replay_baseline_invalid",
-                    "error",
-                    "replay baseline must be a non-symlinked regular file",
-                )
-            ],
-            {"replay_baseline_invalid"},
-        )
-    raw = replay_baseline.read_bytes()
     try:
+        raw = _read_regular_nofollow(
+            replay_baseline,
+            max_bytes=MAX_JSON_BYTES,
+            label="replay baseline",
+        )
         value = _strict_json_bytes(
             raw,
             label="replay baseline",
@@ -506,10 +504,22 @@ def _replay_result(
         )
         if not isinstance(value, dict):
             raise AssignmentError("replay baseline must be an object")
+        steps = value.get("steps", [])
+        if not isinstance(steps, list):
+            raise AssignmentError("replay baseline steps must be an array")
+        if any(not isinstance(step, dict) for step in steps):
+            raise AssignmentError("replay baseline steps must contain objects")
         expected = RegressionFixture.from_json(
             json.dumps(value, separators=(",", ":"), allow_nan=False)
         )
-    except (AssignmentError, TypeError, ValueError) as exc:
+    except (
+        AssignmentError,
+        AttributeError,
+        KeyError,
+        OverflowError,
+        TypeError,
+        ValueError,
+    ) as exc:
         return (
             {"baseline": str(replay_baseline), "state": "invalid"},
             [ValidationFinding("replay_baseline_invalid", "error", str(exc))],

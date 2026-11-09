@@ -12,12 +12,15 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import agent_trace
+from agent_trace.assignment import MAX_JSON_BYTES
 from agent_trace.cli import build_parser
 from agent_trace.freeze import RegressionFixture, extract_steps
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.validation import (
     CORPUS_SCHEMA,
     TRACE_SCHEMA_VERSION,
+    _json_type_matches,
+    _schema_errors,
     cmd_validate,
     load_trace_schema,
     validate_packaged_corpus,
@@ -63,6 +66,43 @@ class TestPublicTraceSchemas(unittest.TestCase):
             {"event_type", "timestamp", "event_id", "data"},
         )
         self.assertFalse(schema["additionalProperties"])
+
+    def test_integer_type_accepts_integral_json_numbers(self):
+        self.assertTrue(_json_type_matches(1, "integer"))
+        self.assertTrue(_json_type_matches(1.0, "integer"))
+        self.assertTrue(_json_type_matches(-0.0, "integer"))
+        self.assertFalse(_json_type_matches(1.5, "integer"))
+        self.assertFalse(_json_type_matches(True, "integer"))
+
+    def test_pattern_uses_json_schema_search_semantics(self):
+        schema = {"type": "string", "pattern": "[0-9a-f]{4}"}
+        self.assertEqual(_schema_errors("prefix-dead-suffix", schema), [])
+        self.assertTrue(_schema_errors("prefix-nope-suffix", schema))
+
+    def test_exact_hash_pattern_is_anchored_in_public_schema(self):
+        schema = load_trace_schema("event")["properties"]["prev_hash"]
+        self.assertEqual(_schema_errors("a" * 64, schema), [])
+        self.assertTrue(_schema_errors("prefix" + "a" * 64, schema))
+        self.assertTrue(_schema_errors("a" * 64 + "suffix", schema))
+
+    def test_schema_subset_matches_independent_validator_when_available(self):
+        try:
+            from jsonschema import Draft202012Validator
+        except ImportError:
+            self.skipTest("jsonschema is not installed")
+        cases = (
+            (1.0, {"type": "integer"}),
+            (1.5, {"type": "integer"}),
+            ("prefix-dead-suffix", {"type": "string", "pattern": "[0-9a-f]{4}"}),
+            ("prefix", {"type": "string", "pattern": "^[0-9a-f]{4}$"}),
+        )
+        for value, schema in cases:
+            with self.subTest(value=value, schema=schema):
+                ours = bool(_schema_errors(value, schema))
+                independent = bool(
+                    list(Draft202012Validator(schema).iter_errors(value))
+                )
+                self.assertEqual(ours, independent)
 
 
 class TestAgentEvidenceCorpus(unittest.TestCase):
@@ -150,6 +190,45 @@ class TestAgentEvidenceCorpus(unittest.TestCase):
         self.assertEqual(report.status, "valid")
         self.assertIn("replay_equivalent", report.labels)
         self.assertNotIn("replay_drift", report.labels)
+
+    def test_malformed_replay_steps_return_invalid_finding(self):
+        case = CORPUS_ROOT / "usage-zero"
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as tmp:
+            baseline = Path(tmp) / "baseline.json"
+            baseline.write_text('{"steps":"not-an-array"}', encoding="utf-8")
+            report = validate_trace_directory(case, replay_baseline=baseline)
+        self.assertEqual(report.status, "invalid")
+        self.assertIn("replay_baseline_invalid", report.labels)
+        self.assertEqual(
+            [finding.code for finding in report.findings],
+            ["replay_baseline_invalid"],
+        )
+
+    def test_replay_baseline_rejects_symlinked_ancestor(self):
+        case = CORPUS_ROOT / "usage-zero"
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as tmp:
+            root = Path(tmp)
+            real = root / "real"
+            real.mkdir()
+            baseline = real / "baseline.json"
+            baseline.write_text('{"steps":[]}', encoding="utf-8")
+            link = root / "link"
+            link.symlink_to(real, target_is_directory=True)
+            report = validate_trace_directory(
+                case,
+                replay_baseline=link / "baseline.json",
+            )
+        self.assertEqual(report.status, "invalid")
+        self.assertIn("replay_baseline_invalid", report.labels)
+
+    def test_replay_baseline_is_bounded_before_parsing(self):
+        case = CORPUS_ROOT / "usage-zero"
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as tmp:
+            baseline = Path(tmp) / "baseline.json"
+            baseline.write_bytes(b" " * (MAX_JSON_BYTES + 1))
+            report = validate_trace_directory(case, replay_baseline=baseline)
+        self.assertEqual(report.status, "invalid")
+        self.assertIn("replay_baseline_invalid", report.labels)
 
 
 class TestValidationCli(unittest.TestCase):
