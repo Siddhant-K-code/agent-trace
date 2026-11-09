@@ -20,6 +20,10 @@ concurrency:
 
 jobs:
   publish:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (startsWith(github.event.release.tag_name, 'v') &&
+      !startsWith(github.event.release.tag_name, 'vscode-v'))
     runs-on: namespace-profile-siddhant-khare
     env:
       PUBLISH_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}

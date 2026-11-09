@@ -65,10 +65,6 @@ jobs:
           marketplace = json.loads(
               Path(".github/plugin/marketplace.json").read_text()
           )
-          extension = json.loads(Path("vscode-extension/package.json").read_text())
-          extension_lock = json.loads(
-              Path("vscode-extension/package-lock.json").read_text()
-          )
 
           versions = {
               "plugin.json": plugin["version"],
@@ -77,11 +73,6 @@ jobs:
               ),
               ".github/plugin/marketplace.json plugin": (
                   marketplace["plugins"][0]["version"]
-              ),
-              "vscode-extension/package.json": extension["version"],
-              "vscode-extension/package-lock.json": extension_lock["version"],
-              "vscode-extension/package-lock.json root package": (
-                  extension_lock["packages"][""]["version"]
               ),
           }
           mismatches = [
@@ -99,7 +90,9 @@ jobs:
       - name: Build changelog
         if: steps.check.outputs.exists == 'false'
         run: |
-          LAST_TAG=$(git describe --tags --abbrev=0 --exclude="${{ steps.check.outputs.tag }}" 2>/dev/null || echo "")
+          LAST_TAG=$(git describe --tags --abbrev=0 \
+            --exclude="${{ steps.check.outputs.tag }}" \
+            --exclude="vscode-v*" 2>/dev/null || echo "")
           if [ -z "$LAST_TAG" ]; then
             git log --pretty=format:"- %s" HEAD | head -20 > /tmp/changelog.txt
           else
@@ -162,17 +155,6 @@ jobs:
         run: |
           TAG="${{ steps.check.outputs.tag }}"
           gh workflow run publish.yml \
-            --repo "$GITHUB_REPOSITORY" \
-            --ref "$TAG" \
-            -f tag="$TAG"
-
-      - name: Dispatch extension publish
-        if: steps.check.outputs.exists == 'false'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${{ steps.check.outputs.tag }}"
-          gh workflow run publish-vscode.yml \
             --repo "$GITHUB_REPOSITORY" \
             --ref "$TAG" \
             -f tag="$TAG"

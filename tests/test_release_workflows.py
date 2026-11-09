@@ -11,14 +11,16 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 
 
 class TestReleaseWorkflows(unittest.TestCase):
-    def test_release_dispatches_all_publishers_at_created_tag(self):
+    def test_core_release_dispatches_only_pypi_at_created_tag(self):
         workflow = (WORKFLOWS / "release.yml").read_text()
 
         self.assertIn("Verify release version parity", workflow)
-        for publisher in ("publish.yml", "publish-vscode.yml"):
-            self.assertIn(f"gh workflow run {publisher}", workflow)
-        self.assertEqual(workflow.count('--ref "$TAG"'), 2)
-        self.assertEqual(workflow.count('-f tag="$TAG"'), 2)
+        self.assertIn("gh workflow run publish.yml", workflow)
+        self.assertNotIn("gh workflow run publish-vscode.yml", workflow)
+        self.assertEqual(workflow.count('--ref "$TAG"'), 1)
+        self.assertEqual(workflow.count('-f tag="$TAG"'), 1)
+        self.assertNotIn("vscode-extension", workflow)
+        self.assertIn('--exclude="vscode-v*"', workflow)
 
     def test_publish_workflows_require_tag_and_checkout_that_tag(self):
         for name in ("publish.yml", "publish-vscode.yml"):
@@ -30,9 +32,20 @@ class TestReleaseWorkflows(unittest.TestCase):
                 self.assertIn("ref: ${{ env.PUBLISH_TAG }}", workflow)
                 self.assertIn("Verify publish target", workflow)
 
+    def test_pypi_publish_ignores_extension_releases(self):
+        workflow = (WORKFLOWS / "publish.yml").read_text()
+
+        self.assertIn(
+            "!startsWith(github.event.release.tag_name, 'vscode-v')",
+            workflow,
+        )
+
     def test_extension_publish_is_deterministic_and_reports_failures(self):
         workflow = (WORKFLOWS / "publish-vscode.yml").read_text()
 
+        self.assertIn('tags:\n      - "vscode-v*"', workflow)
+        self.assertNotIn("types: [published]", workflow)
+        self.assertIn('test "$PUBLISH_TAG" = "vscode-v$VERSION"', workflow)
         self.assertIn("npm ci", workflow)
         self.assertIn("@vscode/vsce@4.1.0", workflow)
         self.assertIn("ovsx@1.3.0", workflow)
