@@ -272,6 +272,7 @@ def _cost_attributes(
 def _event_trace_attributes(event: TraceEvent, role: str) -> dict[str, Any]:
     """Return additive redaction, provenance, and hash-chain attributes."""
     prefix = f"agent.strace.{role}"
+    data = event.data if isinstance(event.data, Mapping) else {}
     attrs: dict[str, Any] = {
         f"{prefix}.event_id": event.event_id,
         f"{prefix}.redacted": event.redacted,
@@ -281,9 +282,9 @@ def _event_trace_attributes(event: TraceEvent, role: str) -> dict[str, Any]:
     if event.prev_hash:
         attrs[f"{prefix}.previous_hash"] = event.prev_hash
     provenance = {
-        key: event.data[key]
+        key: data[key]
         for key in _EVENT_PROVENANCE_KEYS
-        if key in event.data
+        if key in data
     }
     if provenance:
         attrs[f"{prefix}.provenance"] = provenance
@@ -981,7 +982,7 @@ def session_to_otlp_genai(
                 _OI_SESSION_ID: meta.session_id,
                 _OI_TOOL_NAME: tool_name,
             }
-            if call_event:
+            if call_event and isinstance(call_event.data, Mapping):
                 arguments = call_event.data.get("arguments", {})
                 if isinstance(arguments, Mapping):
                     for k, v in arguments.items():
