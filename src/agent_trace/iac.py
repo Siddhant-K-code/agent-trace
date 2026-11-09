@@ -47,6 +47,7 @@ Example ``.agent-strace.yaml``:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import sys
 import urllib.error
@@ -54,6 +55,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from .fileutil import file_lock, write_atomic
 from .store import resolve_trace_dir
 from .workspace import create_workspace, list_workspaces
 from .rbac import RBACStore
@@ -203,32 +205,39 @@ def _apply_rbac(cfg: dict, base_dir: str, dry_run: bool) -> list[str]:
     return changes
 
 
+def _update_lock(path: Path, dry_run: bool):
+    """Lock a read-modify-write of *path*. A dry run writes nothing, so skip it."""
+    if dry_run:
+        return contextlib.nullcontext()
+    return file_lock(path)
+
+
 def _apply_identities(cfg: dict, base_dir: str, dry_run: bool) -> list[str]:
     """Write identity entries to <base_dir>/identities.json."""
     changes = []
     identities_path = Path(base_dir) / "identities.json"
-    existing: dict = {}
-    if identities_path.exists():
-        try:
-            existing = json.loads(identities_path.read_text())
-        except Exception:
-            existing = {}
+    with _update_lock(identities_path, dry_run):
+        existing: dict = {}
+        if identities_path.exists():
+            try:
+                existing = json.loads(identities_path.read_text())
+            except Exception:
+                existing = {}
 
-    for entry in cfg.get("identities", []):
-        name = entry.get("name", "")
-        if not name:
-            continue
-        if existing.get(name) == entry:
-            changes.append(f"  identity: {name} (no change)")
-        else:
-            action = "+" if name not in existing else "~"
-            if not dry_run:
-                existing[name] = entry
-            changes.append(f"{action} identity: {name}")
+        for entry in cfg.get("identities", []):
+            name = entry.get("name", "")
+            if not name:
+                continue
+            if existing.get(name) == entry:
+                changes.append(f"  identity: {name} (no change)")
+            else:
+                action = "+" if name not in existing else "~"
+                if not dry_run:
+                    existing[name] = entry
+                changes.append(f"{action} identity: {name}")
 
-    if not dry_run and changes:
-        identities_path.parent.mkdir(parents=True, exist_ok=True)
-        identities_path.write_text(json.dumps(existing, indent=2))
+        if not dry_run and changes:
+            write_atomic(identities_path, json.dumps(existing, indent=2), allow_symlinks=True)
     return changes
 
 
@@ -236,29 +245,29 @@ def _apply_team_budgets(cfg: dict, base_dir: str, dry_run: bool) -> list[str]:
     """Write team budget entries to <base_dir>/team_budgets.json."""
     changes = []
     budgets_path = Path(base_dir) / "team_budgets.json"
-    existing: dict = {}
-    if budgets_path.exists():
-        try:
-            existing = json.loads(budgets_path.read_text())
-        except Exception:
-            existing = {}
+    with _update_lock(budgets_path, dry_run):
+        existing: dict = {}
+        if budgets_path.exists():
+            try:
+                existing = json.loads(budgets_path.read_text())
+            except Exception:
+                existing = {}
 
-    for entry in cfg.get("team_budgets", []):
-        team = entry.get("team", "")
-        if not team:
-            continue
-        key = f"{team}/{entry.get('workspace', '')}"
-        if existing.get(key) == entry:
-            changes.append(f"  team_budget: {key} (no change)")
-        else:
-            action = "+" if key not in existing else "~"
-            if not dry_run:
-                existing[key] = entry
-            changes.append(f"{action} team_budget: {key} monthly={entry.get('monthly', '?')}")
+        for entry in cfg.get("team_budgets", []):
+            team = entry.get("team", "")
+            if not team:
+                continue
+            key = f"{team}/{entry.get('workspace', '')}"
+            if existing.get(key) == entry:
+                changes.append(f"  team_budget: {key} (no change)")
+            else:
+                action = "+" if key not in existing else "~"
+                if not dry_run:
+                    existing[key] = entry
+                changes.append(f"{action} team_budget: {key} monthly={entry.get('monthly', '?')}")
 
-    if not dry_run and changes:
-        budgets_path.parent.mkdir(parents=True, exist_ok=True)
-        budgets_path.write_text(json.dumps(existing, indent=2))
+        if not dry_run and changes:
+            write_atomic(budgets_path, json.dumps(existing, indent=2), allow_symlinks=True)
     return changes
 
 

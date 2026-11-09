@@ -29,12 +29,13 @@ import os
 import re
 import shutil
 import sys
-import tempfile
 import time
 import unicodedata
 import uuid
 from pathlib import Path
 
+from .fileutil import fsync_directory as _fsync_directory
+from .fileutil import write_atomic as _write_atomic
 from .models import EventType, SessionMeta, TraceEvent
 from .redact import redact_data_with_status, redaction_enabled
 
@@ -250,52 +251,6 @@ def _store_write_lock(base_dir: Path, storage_root: Path | None = None):
             yield
         finally:
             _unlock_file(lock_file)
-
-
-def _write_atomic(path: Path, text: str) -> None:
-    """Write text to a sibling temporary file and atomically replace path."""
-    if path.is_symlink() or path.parent.is_symlink():
-        raise ValueError(f"refusing symlinked atomic write path: {path.name}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_name = ""
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            newline="",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            delete=False,
-        ) as temporary:
-            temporary_name = temporary.name
-            temporary.write(text)
-            temporary.flush()
-            os.fsync(temporary.fileno())
-        if path.exists():
-            os.chmod(temporary_name, path.stat().st_mode)
-        os.replace(temporary_name, path)
-        temporary_name = ""
-        _fsync_directory(path.parent)
-    finally:
-        if temporary_name:
-            try:
-                Path(temporary_name).unlink()
-            except OSError:
-                pass
-
-
-def _fsync_directory(path: Path) -> None:
-    """Best-effort directory fsync for durable rename/unlink operations."""
-    try:
-        descriptor = os.open(path, os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(descriptor)
-    except OSError:
-        pass
-    finally:
-        os.close(descriptor)
 
 
 def _workspace_base(base_dir: str | Path, workspace_id: str) -> Path:

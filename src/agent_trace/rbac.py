@@ -34,6 +34,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from .fileutil import file_lock, write_atomic
 from .store import DEFAULT_TRACE_DIR, resolve_trace_dir
 
 # ---------------------------------------------------------------------------
@@ -107,7 +108,11 @@ class RBACStore:
             return []
 
     def _save(self, assignments: list[RoleAssignment]) -> None:
-        self._path.write_text(json.dumps([a.to_dict() for a in assignments], indent=2))
+        write_atomic(
+            self._path,
+            json.dumps([a.to_dict() for a in assignments], indent=2),
+            allow_symlinks=True,
+        )
 
     def list_assignments(
         self,
@@ -143,35 +148,37 @@ class RBACStore:
                 f"Role {role!r} requires --workspace to be specified."
             )
 
-        assignments = self._load()
-        # Remove any existing assignment for this principal+workspace
-        assignments = [
-            a for a in assignments
-            if not (a.principal == principal and a.workspace_id == workspace_id)
-        ]
-        new = RoleAssignment(
-            principal=principal,
-            principal_type=principal_type,
-            role=role,
-            workspace_id=workspace_id,
-            assigned_by=assigned_by,
-        )
-        assignments.append(new)
-        self._save(assignments)
+        with file_lock(self._path):
+            assignments = self._load()
+            # Remove any existing assignment for this principal+workspace
+            assignments = [
+                a for a in assignments
+                if not (a.principal == principal and a.workspace_id == workspace_id)
+            ]
+            new = RoleAssignment(
+                principal=principal,
+                principal_type=principal_type,
+                role=role,
+                workspace_id=workspace_id,
+                assigned_by=assigned_by,
+            )
+            assignments.append(new)
+            self._save(assignments)
         return new
 
     def revoke(self, principal: str, workspace_id: str = "") -> bool:
         """Remove a role assignment. Returns True if something was removed."""
-        assignments = self._load()
-        before = len(assignments)
-        assignments = [
-            a for a in assignments
-            if not (a.principal == principal and a.workspace_id == workspace_id)
-        ]
-        if len(assignments) < before:
-            self._save(assignments)
-            return True
-        return False
+        with file_lock(self._path):
+            assignments = self._load()
+            before = len(assignments)
+            assignments = [
+                a for a in assignments
+                if not (a.principal == principal and a.workspace_id == workspace_id)
+            ]
+            if len(assignments) < before:
+                self._save(assignments)
+                return True
+            return False
 
     def get_role(self, principal: str, workspace_id: str = "") -> str | None:
         """Return the role for *principal* in *workspace_id* (or org-level)."""

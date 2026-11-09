@@ -637,7 +637,7 @@ agent-strace auth login --server URL [--force]
 agent-strace auth logout --server URL
 agent-strace auth status [--server URL]
 ```
-Authenticate with a hosted collector that has SSO enabled. `login` asks you to open `<URL>/auth/login`, complete the IdP login, and paste the token from the success page. The token is stored per server in `~/.agent-strace/auth.json` and expires after one hour. `--force` re-authenticates when a valid token already exists. `status` without `--server` lists every stored server. Other commands do not read the stored token; `apply --server` authenticates with `--auth-key`.
+Authenticate with a hosted collector that has SSO enabled. `login` asks you to open `<URL>/auth/login`, complete the IdP login, and paste the token from the success page. The token is stored per server in `~/.agent-strace/auth.json` (mode `0600`, written atomically under a file lock) and expires after one hour. `--force` re-authenticates when a valid token already exists. `status` without `--server` lists every stored server. Other commands do not read the stored token; `apply --server` authenticates with `--auth-key`.
 
 ### `apply`
 ```

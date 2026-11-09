@@ -30,6 +30,11 @@ from agent_trace.config_watch import (
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
 
+try:
+    from _concurrency import run_concurrently
+except ImportError:
+    from tests._concurrency import run_concurrently
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -124,6 +129,19 @@ class TestSnapshotPersistence(unittest.TestCase):
         self.assertEqual(len(loaded), 1)
         self.assertEqual(loaded[0].snapshot_id, snap.snapshot_id)
         self.assertEqual(loaded[0].label, "test")
+
+    def test_concurrent_snapshots_are_all_kept(self):
+        root = Path(tempfile.mkdtemp())
+        (root / ".agent-traces").mkdir()
+        script = """
+from pathlib import Path
+from agent_trace.config_watch import take_snapshot
+wait_for_start()
+for _ in range(10):
+    take_snapshot(Path(sys.argv[2]), ["AGENTS.md"])
+"""
+        run_concurrently(script, [[str(root)] for _ in range(5)])
+        self.assertEqual(len(_load_snapshots(root)), 50)
 
     def test_multiple_snapshots_appended(self):
         root = Path(tempfile.mkdtemp())

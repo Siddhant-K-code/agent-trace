@@ -22,10 +22,11 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, Callable, TextIO
 from urllib import request
 
 from . import __version__
+from .fileutil import file_lock, write_atomic
 
 
 # PostHog project tokens are public ingestion tokens, not personal API keys.
@@ -47,6 +48,9 @@ _ENABLED_ENV = "AGENT_STRACE_TELEMETRY"
 _TOKEN_ENV = "AGENT_STRACE_TELEMETRY_TOKEN"
 _HOST_ENV = "AGENT_STRACE_TELEMETRY_HOST"
 _TIMEOUT_ENV = "AGENT_STRACE_TELEMETRY_TIMEOUT"
+
+# Hooks and CLI commands must never wait long on another process.
+_LOCK_TIMEOUT = 2.0
 
 _TRUE = {"1", "true", "yes", "on", "enabled"}
 _FALSE = {"0", "false", "no", "off", "disabled"}
@@ -97,23 +101,41 @@ def _read_config() -> dict[str, Any]:
 
 
 def _write_config(data: dict[str, Any]) -> bool:
+    """Atomically write the config. Use ``_update_config`` for changes."""
     path = _config_path()
-    tmp = path.with_suffix(path.suffix + ".tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
-        try:
-            tmp.chmod(0o600)
-        except OSError:
-            pass
-        tmp.replace(path)
+        write_atomic(
+            path,
+            json.dumps(data, indent=2, sort_keys=True) + "\n",
+            mode=0o600,
+            allow_symlinks=True,
+        )
         return True
-    except OSError:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
+    except (OSError, ValueError):
         return False
+
+
+def _update_config(
+    update: Callable[[dict[str, Any]], dict[str, Any] | None],
+) -> dict[str, Any] | None:
+    """Run one read-modify-write of the config under a cross-process lock.
+
+    *update* gets the current config and returns the dict to write, or None
+    to leave the file unchanged.  Returns the config now on disk, or None if
+    the lock or the write failed.  Never raises: telemetry is best-effort.
+    """
+    try:
+        path = _config_path()
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with file_lock(path, timeout=_LOCK_TIMEOUT):
+            current = _read_config()
+            updated = update(current)
+            if updated is None:
+                return current
+            return updated if _write_config(updated) else None
+    except Exception:
+        return None
 
 
 def _parse_bool(value: str | None) -> bool | None:
@@ -176,17 +198,19 @@ def set_telemetry_enabled(enabled: bool) -> bool:
     Disabling telemetry deletes the anonymous installation identifier.  A
     later re-enable therefore starts with a new identity.
     """
-    current = _read_config()
-    data: dict[str, Any] = {
-        "enabled": bool(enabled),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
-    if enabled:
-        existing_id = current.get("anonymous_id", "")
-        data["anonymous_id"] = (
-            existing_id if _valid_anonymous_id(existing_id) else uuid.uuid4().hex
-        )
-    return _write_config(data)
+    def update(current: dict[str, Any]) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "enabled": bool(enabled),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if enabled:
+            existing_id = current.get("anonymous_id", "")
+            data["anonymous_id"] = (
+                existing_id if _valid_anonymous_id(existing_id) else uuid.uuid4().hex
+            )
+        return data
+
+    return _update_config(update) is not None
 
 
 def _valid_anonymous_id(value: Any) -> bool:
@@ -194,16 +218,27 @@ def _valid_anonymous_id(value: Any) -> bool:
 
 
 def _anonymous_id() -> str:
-    data = _read_config()
-    value = data.get("anonymous_id", "")
+    value = _read_config().get("anonymous_id", "")
     if _valid_anonymous_id(value):
         return value
     if not telemetry_enabled():
         return ""
-    value = uuid.uuid4().hex
-    data["anonymous_id"] = value
-    data["updated_at"] = datetime.now(timezone.utc).isoformat()
-    return value if _write_config(data) else ""
+
+    def assign(current: dict[str, Any]) -> dict[str, Any] | None:
+        # Another process may have created an id or opted out since the
+        # unlocked read above.  Keep its result instead of overwriting it.
+        if _valid_anonymous_id(current.get("anonymous_id")):
+            return None
+        opted_out = current.get("enabled") is False
+        if opted_out and _parse_bool(os.environ.get(_ENABLED_ENV)) is not True:
+            return None
+        current["anonymous_id"] = uuid.uuid4().hex
+        current["updated_at"] = datetime.now(timezone.utc).isoformat()
+        return current
+
+    saved = _update_config(assign) or {}
+    value = saved.get("anonymous_id", "")
+    return value if _valid_anonymous_id(value) else ""
 
 
 def _project_token() -> str:
@@ -339,9 +374,15 @@ def maybe_show_telemetry_notice(
             "Disable at any time with: agent-strace telemetry disable\n"
         )
         output_stream.flush()
-        data["notice_shown"] = True
-        data["updated_at"] = datetime.now(timezone.utc).isoformat()
-        _write_config(data)
+
+        def mark_shown(current: dict[str, Any]) -> dict[str, Any] | None:
+            if current.get("notice_shown") is True:
+                return None
+            current["notice_shown"] = True
+            current["updated_at"] = datetime.now(timezone.utc).isoformat()
+            return current
+
+        _update_config(mark_shown)
         return True
     except OSError:
         return False

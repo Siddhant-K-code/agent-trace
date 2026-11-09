@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import sys
 import tempfile
 import time
@@ -28,6 +29,12 @@ from agent_trace.sso import (
     cmd_auth,
     _SESSION_COOKIE,
 )
+from agent_trace import sso
+
+try:
+    from _concurrency import run_concurrently
+except ImportError:
+    from tests._concurrency import run_concurrently
 
 
 def _make_jwt(claims: dict) -> str:
@@ -188,6 +195,105 @@ class TestTokenStorage(unittest.TestCase):
         save_auth_token("https://b.example.com", "tok_b", time.time() + 3600)
         self.assertEqual(load_auth_token("https://a.example.com"), "tok_a")
         self.assertEqual(load_auth_token("https://b.example.com"), "tok_b")
+
+
+_AUTH_WORKER_SCRIPT = """
+import time
+from pathlib import Path
+from agent_trace import sso
+sso._AUTH_FILE = Path(sys.argv[2])
+wait_for_start()
+mode, servers = sys.argv[3], sys.argv[4:]
+for server in servers:
+    if mode == "login":
+        sso.save_auth_token(server, "tok-" + server, time.time() + 3600)
+    else:
+        assert sso.clear_auth_token(server), server
+"""
+
+
+class TestTokenStorageLocking(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._auth_file = Path(self._tmp.name) / "home" / "auth.json"
+        self._patcher = patch("agent_trace.sso._AUTH_FILE", self._auth_file)
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+        self._tmp.cleanup()
+
+    def test_concurrent_logins_keep_every_token(self):
+        workers, per_worker = 6, 10
+        args = [
+            [str(self._auth_file), "login",
+             *(f"https://w{i}-{n}.example.com" for n in range(per_worker))]
+            for i in range(workers)
+        ]
+        run_concurrently(_AUTH_WORKER_SCRIPT, args)
+        data = json.loads(self._auth_file.read_text())
+        self.assertEqual(len(data), workers * per_worker)
+        for server, entry in data.items():
+            self.assertEqual(entry["token"], "tok-" + server)
+
+    def test_concurrent_login_and_logout_do_not_corrupt_file(self):
+        keep = [f"https://keep-{i}.example.com" for i in range(20)]
+        drop = [f"https://drop-{i}.example.com" for i in range(20)]
+        for server in drop:
+            save_auth_token(server, "old", time.time() + 3600)
+        auth = str(self._auth_file)
+        run_concurrently(
+            _AUTH_WORKER_SCRIPT,
+            [
+                [auth, "login", *keep[:10]],
+                [auth, "login", *keep[10:]],
+                [auth, "logout", *drop[:10]],
+                [auth, "logout", *drop[10:]],
+            ],
+        )
+        data = json.loads(self._auth_file.read_text())
+        self.assertEqual(sorted(data), sorted(keep))
+
+    @unittest.skipIf(os.name == "nt", "POSIX file modes")
+    def test_token_file_is_always_0600(self):
+        self._auth_file.parent.mkdir(parents=True)
+        self._auth_file.write_text("{}")
+        self._auth_file.chmod(0o644)
+        save_auth_token("https://a.example.com", "tok", time.time() + 3600)
+        self.assertEqual(self._auth_file.stat().st_mode & 0o777, 0o600)
+        self._auth_file.chmod(0o644)
+        self.assertTrue(clear_auth_token("https://a.example.com"))
+        self.assertEqual(self._auth_file.stat().st_mode & 0o777, 0o600)
+
+    def test_write_leaves_no_temp_files_and_keeps_format(self):
+        save_auth_token("https://a.example.com", "tok", 123.0)
+        names = sorted(p.name for p in self._auth_file.parent.iterdir())
+        self.assertEqual(names, ["auth.json", "auth.json.lock"])
+        self.assertEqual(
+            self._auth_file.read_text(),
+            json.dumps({"https://a.example.com": {"token": "tok", "expires_at": 123.0}}, indent=2),
+        )
+
+    def test_login_reports_lock_timeout(self):
+        err = StringIO()
+        with patch.object(sso, "file_lock", side_effect=TimeoutError("busy")), \
+                patch("sys.stderr", err):
+            rc, _ = _run_auth(
+                {"auth_cmd": "login", "server": "https://c.example.com", "force": True},
+                stdin_input="tok",
+            )
+        self.assertEqual(rc, 1)
+        self.assertIn("could not store token", err.getvalue())
+
+    def test_logout_reports_lock_timeout(self):
+        save_auth_token("https://c.example.com", "tok", time.time() + 3600)
+        err = StringIO()
+        with patch.object(sso, "file_lock", side_effect=TimeoutError("busy")), \
+                patch("sys.stderr", err):
+            rc, _ = _run_auth({"auth_cmd": "logout", "server": "https://c.example.com"})
+        self.assertEqual(rc, 1)
+        self.assertIn("could not update", err.getvalue())
+        self.assertEqual(load_auth_token("https://c.example.com"), "tok")
 
 
 class TestCLIAuth(unittest.TestCase):

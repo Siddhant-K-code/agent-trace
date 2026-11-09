@@ -27,6 +27,11 @@ from agent_trace.iac import (
 from agent_trace.workspace import list_workspaces, create_workspace
 from agent_trace.rbac import RBACStore
 
+try:
+    from _concurrency import run_concurrently
+except ImportError:
+    from tests._concurrency import run_concurrently
+
 
 def _run(cmd_fn, argv_dict: dict) -> tuple[int, str]:
     ns = argparse.Namespace(**argv_dict)
@@ -188,6 +193,19 @@ class TestApplyIdentities(unittest.TestCase):
         _apply_identities({"identities": [{"name": "billing-agent", "team": "backend"}]},
                           self._tmp, dry_run=True)
         self.assertFalse((Path(self._tmp) / "identities.json").exists())
+        self.assertFalse((Path(self._tmp) / "identities.json.lock").exists())
+
+    def test_concurrent_applies_keep_every_identity(self):
+        script = """
+from agent_trace.iac import _apply_identities
+wait_for_start()
+for name in sys.argv[3:]:
+    _apply_identities({"identities": [{"name": name}]}, sys.argv[2], dry_run=False)
+"""
+        groups = [[f"agent-{i}-{n}" for n in range(10)] for i in range(5)]
+        run_concurrently(script, [[self._tmp, *group] for group in groups])
+        data = json.loads((Path(self._tmp) / "identities.json").read_text())
+        self.assertEqual(set(data), {name for group in groups for name in group})
 
 
 class TestApplyTeamBudgets(unittest.TestCase):
