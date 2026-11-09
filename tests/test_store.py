@@ -1,5 +1,6 @@
 """Tests for trace storage."""
 
+import hashlib
 import io
 import json
 import os
@@ -13,6 +14,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from agent_trace.fileutil import lock_descriptor, unlock_descriptor
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore, ensure_trace_dir_gitignore
 
@@ -472,6 +474,63 @@ class TestTraceDirGitignore(unittest.TestCase):
         self.assertEqual(git("add", "-f", trace_file).returncode, 0)
         staged = git("diff", "--cached", "--name-only").stdout.splitlines()
         self.assertEqual(staged, [trace_file])
+
+
+_APPEND_SCRIPT = """
+from agent_trace.models import EventType, TraceEvent
+from agent_trace.store import TraceStore
+store = TraceStore(sys.argv[2])
+session_id = sys.argv[3]
+wait_for_start()
+for index in range(int(sys.argv[4])):
+    store.append_event(
+        session_id,
+        TraceEvent(event_type=EventType.TOOL_CALL, data={"n": index}),
+    )
+"""
+
+
+class TestStoreWriteLock(unittest.TestCase):
+    def setUp(self):
+        os.environ.pop("AGENT_TRACE_NO_REDACT", None)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = TraceStore(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_write_lock_excludes_other_descriptors(self):
+        lock_path = Path(self.tmp.name) / ".store.lock"
+        with self.store.write_lock():
+            fd = os.open(lock_path, os.O_RDWR)
+            try:
+                with self.assertRaises(TimeoutError):
+                    lock_descriptor(fd, timeout=0.1)
+            finally:
+                os.close(fd)
+        fd = os.open(lock_path, os.O_RDWR)
+        try:
+            lock_descriptor(fd, timeout=1.0)
+            unlock_descriptor(fd)
+        finally:
+            os.close(fd)
+        self.assertEqual(lock_path.stat().st_size, 0)
+
+    def test_concurrent_appends_keep_hash_chain(self):
+        meta = SessionMeta(agent_name="race")
+        self.store.create_session(meta)
+        workers, rounds = 4, 20
+        run_concurrently(
+            _APPEND_SCRIPT,
+            [[self.tmp.name, meta.session_id, str(rounds)] for _ in range(workers)],
+        )
+        events_file = Path(self.tmp.name) / meta.session_id / "events.ndjson"
+        lines = events_file.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), workers * rounds)
+        self.assertEqual(json.loads(lines[0]).get("prev_hash", ""), "")
+        for previous, line in zip(lines, lines[1:]):
+            expected = hashlib.sha256(previous.encode()).hexdigest()
+            self.assertEqual(json.loads(line)["prev_hash"], expected)
 
 
 if __name__ == "__main__":

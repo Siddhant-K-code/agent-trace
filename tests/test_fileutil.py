@@ -5,11 +5,18 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
 
-from agent_trace.fileutil import file_lock, lock_path_for, write_atomic
+from agent_trace.fileutil import (
+    file_lock,
+    lock_descriptor,
+    lock_path_for,
+    unlock_descriptor,
+    write_atomic,
+)
 
 try:
     from _concurrency import run_concurrently
@@ -76,6 +83,30 @@ class TestWriteAtomic(unittest.TestCase):
         self.assertFalse(link.is_symlink())
         self.assertEqual(link.read_text(), "x")
 
+    def test_replace_waits_for_reader_to_close_target(self):
+        path = self.dir / "config.json"
+        path.write_text("old")
+        reader = open(path, encoding="utf-8")
+        closer = threading.Timer(0.1, reader.close)
+        closer.start()
+        try:
+            write_atomic(path, "new")
+        finally:
+            closer.join()
+            reader.close()
+        self.assertEqual(path.read_text(), "new")
+        self.assertEqual([p.name for p in self.dir.iterdir()], ["config.json"])
+
+    @unittest.skipUnless(os.name == "nt", "Windows sharing violations")
+    def test_replace_gives_up_and_cleans_up_when_target_stays_open(self):
+        path = self.dir / "config.json"
+        path.write_text("old")
+        with open(path, encoding="utf-8"):
+            with self.assertRaises(PermissionError):
+                write_atomic(path, "new")
+        self.assertEqual(path.read_text(), "old")
+        self.assertEqual([p.name for p in self.dir.iterdir()], ["config.json"])
+
 
 class TestFileLock(unittest.TestCase):
     def setUp(self):
@@ -112,6 +143,46 @@ class TestFileLock(unittest.TestCase):
             [[str(self.path), str(rounds)] for _ in range(workers)],
         )
         self.assertEqual(json.loads(self.path.read_text())["count"], workers * rounds)
+
+
+class TestLockDescriptor(unittest.TestCase):
+    def setUp(self):
+        # Registered first so it runs after the descriptors close: Windows
+        # cannot delete a file that is still open.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = Path(tmp.name) / "store.lock"
+
+    def _open(self) -> int:
+        fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, fd)
+        return fd
+
+    def test_second_descriptor_waits_until_unlock(self):
+        first, second = self._open(), self._open()
+        lock_descriptor(first)
+        with self.assertRaises(TimeoutError):
+            lock_descriptor(second, timeout=0.1)
+        unlock_descriptor(first)
+        lock_descriptor(second, timeout=1.0)
+        unlock_descriptor(second)
+
+    def test_lock_leaves_lock_file_empty(self):
+        fd = self._open()
+        lock_descriptor(fd)
+        unlock_descriptor(fd)
+        self.assertEqual(self.path.stat().st_size, 0)
+
+    def test_closing_descriptor_releases_lock(self):
+        first = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        lock_descriptor(first)
+        os.close(first)
+        second = self._open()
+        lock_descriptor(second, timeout=1.0)
+        unlock_descriptor(second)
+
+    def test_unlock_without_lock_is_ignored(self):
+        unlock_descriptor(self._open())
 
 
 if __name__ == "__main__":
