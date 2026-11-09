@@ -166,6 +166,10 @@ class _ReplayChecks:
         )
 
     @staticmethod
+    def validate(store, session_id):
+        return validate_trace_directory(Path(store.base_dir).resolve() / session_id)
+
+    @staticmethod
     def codes(report, kind):
         return [r.code for r in report.result.reasons if r.kind.value == kind]
 
@@ -258,6 +262,9 @@ class TestCopilotFixture(_ReplayChecks, unittest.TestCase):
                     self.codes(report, "provider_limitation"),
                 )
                 self.assertIs(report.session_finalized, True)
+                validation = self.validate(store, main.session_id)
+                self.assertNotEqual(validation.status, "invalid")
+                self.assertNotIn("declared_events_before_session_start", validation.labels)
 
     def test_tool_result_pairs_by_name_without_a_call_id(self):
         store, skipped = self.replay("tool")
@@ -383,6 +390,22 @@ class TestCopilotLegacyFixture(TestCopilotFixture):
                     "declared_events_before_session_start",
                     self.codes(report, "provider_limitation"),
                 )
+
+    def test_validate_accepts_the_declared_order(self):
+        for scenario in ("tool", "tool_failure", "permission_denied", "subagent"):
+            store, _ = self.replay(scenario)
+            (main,), _ = self.main_and_child(store)
+            validation = self.validate(store, main.session_id)
+            findings = [(f.code, f.severity) for f in validation.findings]
+            with self.subTest(scenario=scenario):
+                self.assertNotIn(("events_before_session_start", "error"), findings)
+                self.assertEqual(
+                    findings.count(("declared_events_before_session_start", "info")), 1
+                )
+                self.assertIn("declared_events_before_session_start", validation.labels)
+                # The denied tool call has no outcome, which is still a warning.
+                expected = "partial" if scenario == "permission_denied" else "valid"
+                self.assertEqual(validation.status, expected)
 
     def test_denied_tool_leaves_an_unpaired_call(self):
         store, skipped = self.replay("permission_denied")

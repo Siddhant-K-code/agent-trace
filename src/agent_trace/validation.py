@@ -74,6 +74,7 @@ _OUTCOME_CODES = {
 # Gaps the detected provider's capture matrix entry declares. They are reported
 # as info findings, which do not change the status.
 _DECLARED_LIMITATION_CODES = {
+    "declared_events_before_session_start",
     "declared_results_without_requests",
 }
 _ORPHAN_CODES = {
@@ -387,25 +388,37 @@ def _finding_for_reason(code: str, message: str, event_id: str) -> ValidationFin
     return ValidationFinding(code, severity, message, event_id=event_id)
 
 
-def _declared_unrequested_result_types(
+@dataclass(frozen=True)
+class _DeclaredCapture:
+    """Capture-matrix declarations that validate passes to evidence health."""
+
+    events_before_start: tuple[str, ...] = ()
+    results_without_requests: tuple[str, ...] = ()
+
+
+def _declared_capture(
     meta: SessionMeta,
     events: Sequence[TraceEvent],
-) -> tuple[str, ...]:
-    """Return the result types the hook provider records without requests.
+) -> _DeclaredCapture:
+    """Return what the hook provider's capture matrix entry declares.
 
     The provider comes from hook-written evidence only, as in ``health``.
-    Only ``results_without_requests`` is read from its capture matrix entry.
+    Only ``events_before_start`` and ``results_without_requests`` are read
+    from its entry. A matrix that cannot be loaded declares nothing.
     """
     provider = detect_provider(meta, events).provider
     if not provider:
-        return ()
+        return _DeclaredCapture()
     try:
         entry = load_capture_matrix().entry(provider)
     except (OSError, ValueError):
-        return ()
+        return _DeclaredCapture()
     if entry is None:
-        return ()
-    return tuple(entry.get("results_without_requests", []))
+        return _DeclaredCapture()
+    return _DeclaredCapture(
+        events_before_start=tuple(entry.get("events_before_start", [])),
+        results_without_requests=tuple(entry.get("results_without_requests", [])),
+    )
 
 
 def _parent_findings(events: Sequence[TraceEvent]) -> list[ValidationFinding]:
@@ -662,12 +675,12 @@ def validate_trace_directory(
             )
         )
 
+    declared = _declared_capture(meta, events)
     health = assess_evidence_health(
         events,
         session_finalized=False if allow_active else True,
-        allowed_unrequested_result_types=_declared_unrequested_result_types(
-            meta, events
-        ),
+        allowed_pre_start_event_types=declared.events_before_start,
+        allowed_unrequested_result_types=declared.results_without_requests,
     )
     for reason in health.reasons:
         findings.append(
