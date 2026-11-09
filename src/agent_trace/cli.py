@@ -18,20 +18,26 @@ import csv
 import json
 import os
 import shlex
+import shutil
 import sys
 import time
 from pathlib import Path
 
 from . import __version__
 from .store import default_trace_dir
-from .setup_verify import verify_claude_setup, verify_codex_setup
+from .setup_verify import (
+    verify_claude_managed,
+    verify_claude_setup,
+    verify_codex_setup,
+    verify_copilot_managed,
+)
 from .live_verify import (
     LiveCaptureError,
     format_live_capture_text,
     inspect_live_capture,
     live_capture_failure_diagnostic,
 )
-from .hooks import hook_main
+from .hooks import METADATA_ONLY_FLAG, hook_main
 from .http_proxy import HTTPProxyServer
 from .a2a import cmd_a2a_tree
 from .mcp_server import cmd_mcp
@@ -1223,6 +1229,170 @@ def _setup_copilot_cloud(args: argparse.Namespace) -> int:
     return 0
 
 
+_MANAGED_FILE_NAME = "agent-strace.json"
+_MANAGED_PRODUCTS = {"copilot": "GitHub Copilot CLI", "claude": "Claude Code"}
+
+
+def _copilot_policy_dir() -> Path:
+    if sys.platform == "win32":
+        return Path(r"C:\ProgramData\GitHub\Copilot\policy.d")
+    return Path("/etc/github-copilot/policy.d")
+
+
+def _managed_hooks_path(cli: str) -> Path:
+    if cli == "copilot":
+        return _copilot_policy_dir() / _MANAGED_FILE_NAME
+    return _claude_managed_settings_dir() / "managed-settings.d" / _MANAGED_FILE_NAME
+
+
+def _hook_event_arg(command: str) -> str:
+    return command.rsplit(" ", 1)[1]
+
+
+def _managed_hooks_config(cli: str, executable: str) -> dict:
+    """Machine-wide hooks in exec form: no shell, metadata-only capture."""
+    plain = argparse.Namespace(redact=False, no_redact=False)
+    if cli == "copilot":
+        return {
+            "version": 1,
+            "hooks": {
+                event: [{
+                    "type": "command",
+                    "exec": executable,
+                    "args": [
+                        "hook", "--provider", "copilot", METADATA_ONLY_FLAG,
+                        _hook_event_arg(entry["command"]),
+                    ],
+                    "timeoutSec": entry["timeoutSec"],
+                } for entry in entries]
+                for event, entries in _copilot_hooks_config(plain)["hooks"].items()
+            },
+        }
+    hooks: dict = {}
+    for event, groups in _claude_hooks_config(plain)["hooks"].items():
+        hooks[event] = [
+            {
+                **{key: value for key, value in group.items() if key != "hooks"},
+                "hooks": [{
+                    "type": "command",
+                    "command": executable,
+                    "args": ["hook", METADATA_ONLY_FLAG, _hook_event_arg(handler["command"])],
+                } for handler in group["hooks"]],
+            }
+            for group in groups
+        ]
+    return {"hooks": hooks}
+
+
+def _managed_executable(args: argparse.Namespace) -> tuple[str | None, str | None]:
+    """Return (absolute agent-strace path, problem)."""
+    executable = getattr(args, "executable", None)
+    if executable:
+        if not os.path.isabs(executable):
+            return None, f"--executable must be an absolute path: {executable}"
+        return executable, None
+    found = shutil.which("agent-strace")
+    if found is None:
+        return None, (
+            "agent-strace is not on PATH. Install it system-wide and pass its absolute "
+            "path with --executable."
+        )
+    return os.path.abspath(found), None
+
+
+def _setup_managed(args: argparse.Namespace, cli: str, verify: bool, live: bool) -> int:
+    if cli not in _MANAGED_PRODUCTS:
+        sys.stderr.write("setup --managed supports only --cli copilot or --cli claude.\n")
+        return 2
+    if getattr(args, "no_redact", False):
+        sys.stderr.write("setup --managed always redacts; --no-redact is not allowed.\n")
+        return 2
+    if live and cli != "claude":
+        sys.stderr.write("setup --managed --verify --live supports only --cli claude.\n")
+        return 2
+    product = _MANAGED_PRODUCTS[cli]
+
+    if verify:
+        details: dict = {}
+        def expected_for(executable: str) -> dict:
+            return _managed_hooks_config(cli, executable)
+        if cli == "copilot":
+            location = _copilot_policy_dir()
+            ok, problems, warnings = verify_copilot_managed(
+                location,
+                expected_for,
+                __version__,
+                user_hooks_dir=_copilot_config_dir() / "hooks",
+                details=details,
+            )
+            not_checked = (
+                "Not checked: Windows Registry policy (HKLM\\Software\\Policies\\GitHub\\Copilot), "
+                "plugin and repository hooks, and Copilot in the cloud (policy hooks do not run there)."
+            )
+        else:
+            location = _claude_managed_settings_dir()
+            ok, problems, warnings = verify_claude_managed(
+                location,
+                expected_for,
+                __version__,
+                user_settings_path=_claude_config_dir() / "settings.json",
+                details=details,
+            )
+            not_checked = (
+                "Not checked: server-managed settings and MDM or registry policy. By default "
+                "Claude Code uses only the highest-ranked managed source, so a file under "
+                f"{location} is ignored when one of those delivers policy; see /status. "
+                "Project hooks and the --bare flag are not checked."
+            )
+        for warning in warnings:
+            sys.stderr.write(f"Warning: {warning}\n")
+        if not ok:
+            for problem in problems:
+                sys.stderr.write(f"Managed setup verification failed: {problem}\n")
+            return 1
+        lines = [f"{product} managed hook setup verified (metadata-only, redaction: on)."]
+        lines += [f"file:       {path}" for path in details["files"]]
+        lines += [
+            f"events:     {details['event_count']}/{details['event_total']}",
+            f"executable: {details['executable']} ({details['version']})",
+        ]
+        if cli == "claude":
+            lines.append(
+                f"allowManagedHooksOnly: {'true' if details['allow_managed_hooks_only'] else 'false'}"
+            )
+        lines += [
+            not_checked,
+            "This does not prove a session ran the hooks; run a session and check its "
+            "session_start event for capture: metadata-only.",
+        ]
+        sys.stdout.write("\n".join(lines) + "\n")
+        if live:
+            return _verify_live_capture(args, "claude")
+        return 0
+
+    executable, problem = _managed_executable(args)
+    if problem:
+        sys.stderr.write(f"Setup failed: {problem}\n")
+        return 1
+    home = Path.home()
+    try:
+        inside_home = Path(executable).resolve().is_relative_to(home.resolve())
+    except OSError:
+        inside_home = False
+    if inside_home:
+        sys.stderr.write(
+            f"Warning: {executable} is inside {home}; a user can replace or remove it. "
+            "Install agent-strace in a root-owned location and pass --executable.\n"
+        )
+    target = _managed_hooks_path(cli)
+    sys.stderr.write(
+        f"Install this as {target} for {product} (owner root, mode 0644). "
+        "Nothing was written. See docs/platform-install.md.\n\n"
+    )
+    sys.stdout.write(json.dumps(_managed_hooks_config(cli, executable), indent=2) + "\n")
+    return 0
+
+
 def cmd_setup(args: argparse.Namespace) -> int | None:
     """Generate hooks configuration, or verify Codex or Claude Code setup read-only."""
     cli = getattr(args, "cli", "claude") or "claude"
@@ -1235,6 +1405,11 @@ def cmd_setup(args: argparse.Namespace) -> int | None:
     if requested_session and not live:
         sys.stderr.write("setup --session requires --verify --live.\n")
         return 2
+    if getattr(args, "executable", None) and not getattr(args, "managed", False):
+        sys.stderr.write("setup --executable requires --managed.\n")
+        return 2
+    if getattr(args, "managed", False):
+        return _setup_managed(args, cli, verify, live)
     if verify:
         if cli == "claude":
             return _verify_claude_setup(args)
@@ -1529,6 +1704,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_hook = sub.add_parser("hook", help="handle an agent CLI hook event (internal)")
     p_hook.add_argument("--provider", choices=["claude", "codex", "gemini", "cursor", "copilot"], default="claude",
                         help="hook provider (default: claude)")
+    p_hook.add_argument(
+        METADATA_ONLY_FLAG,
+        dest="metadata_only",
+        action="store_true",
+        help="record event types, timing, IDs and tool names only; omit prompts, responses, "
+             "tool input and output, errors, paths and diffs; always redact secrets",
+    )
     p_hook.add_argument("event", nargs="?", help="hook event: session-start, session-end, pre-tool, post-tool, post-tool-failure")
 
     # setup (generate agent CLI hooks config)
@@ -1569,6 +1751,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--session",
         metavar="SESSION_ID",
         help="session ID or prefix for --verify --live",
+    )
+    p_setup.add_argument(
+        "--managed",
+        action="store_true",
+        help="print machine-wide, metadata-only hooks for Copilot CLI policy or Claude Code "
+             "managed settings, and the path to install them at (writes nothing); with "
+             "--verify, check the installed files (requires --cli copilot or --cli claude)",
+    )
+    p_setup.add_argument(
+        "--executable",
+        metavar="PATH",
+        help="with --managed, the absolute agent-strace path the hooks run "
+             "(default: agent-strace on PATH)",
     )
 
     # anonymous product telemetry controls
@@ -3030,6 +3225,8 @@ def main() -> None:
     # hook subcommand is handled separately (reads stdin)
     if args.command == "hook":
         hook_args = ["--provider", getattr(args, "provider", "claude")]
+        if getattr(args, "metadata_only", False):
+            hook_args.append(METADATA_ONLY_FLAG)
         if args.event:
             hook_args.append(args.event)
         hook_main(hook_args)

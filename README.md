@@ -125,7 +125,7 @@ end_session()
 
 Sessions go to `$AGENT_TRACE_DIR` when set, else `.agent-traces`; an explicit `start_session(trace_dir=...)` wins.
 
-Full setup guide: [docs/setup.md](docs/setup.md)
+Full setup guide: [docs/setup.md](docs/setup.md). Machine-wide install for platform teams: [docs/platform-install.md](docs/platform-install.md)
 
 ## What you can do
 

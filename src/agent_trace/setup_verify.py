@@ -1,8 +1,9 @@
-"""Read-only verification of installed Codex and Claude Code hooks (not runtime capture)."""
+"""Read-only verification of installed Codex, Claude Code and Copilot CLI hooks (not runtime capture)."""
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -768,3 +769,355 @@ def verify_claude_setup(
             layers=[(scope, path, "; ".join(notes)) for scope, path, notes in layers],
         )
     return not problems, problems
+
+
+# Machine-wide (managed) installs: `setup --managed --verify`.
+
+_AGENTTRACE_EXECUTABLES = ("agent-strace", "agent-strace.exe")
+_MANAGED_COMMAND_KEYS = ("command", "bash", "powershell", "exec")
+
+
+def posix_owner_problem(path: Path) -> str | None:
+    """Return why a non-root user could change ``path``, or None (POSIX only)."""
+    if os.name != "posix":
+        return None
+    try:
+        info = path.stat()
+    except OSError as exc:
+        return f"Cannot stat {path}: {exc}"
+    if info.st_uid != 0:
+        return f"{path} is not owned by root"
+    if info.st_mode & 0o022:
+        return f"{path} is group- or world-writable"
+    return None
+
+
+def _executable_name(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return re.split(r"[\\/]", value)[-1].lower()
+
+
+def _mentions_agenttrace(entry: object) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    for key in _MANAGED_COMMAND_KEYS:
+        value = entry.get(key)
+        if isinstance(value, str) and (
+            "agent-strace" in value or _executable_name(value) in _AGENTTRACE_EXECUTABLES
+        ):
+            return True
+    return False
+
+
+def _managed_executable(entry: dict, key: str) -> str | None:
+    value = entry.get(key)
+    if isinstance(value, str) and _executable_name(value) in _AGENTTRACE_EXECUTABLES:
+        return value
+    return None
+
+
+def _run_version(executable: str, version: str) -> tuple[str | None, str]:
+    """Return (problem, reported version) for ``executable --version``."""
+    try:
+        probe = subprocess.run(
+            [executable, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"Cannot run {executable} --version: {exc}", ""
+    reported = probe.stdout.strip()
+    expected = f"agent-strace {version}"
+    if probe.returncode != 0 or reported != expected:
+        return (
+            f"AgentTrace CLI version mismatch at {executable}: expected {expected!r}; "
+            f"got {reported!r} (exit {probe.returncode})."
+        ), reported
+    return None, reported
+
+
+def _executable_warnings(executable: str, owner_problem: Callable[[Path], str | None]) -> list[str]:
+    problem = owner_problem(Path(executable))
+    if problem:
+        return [
+            f"{problem}, so a user may be able to replace or remove the hook executable. "
+            "Install agent-strace in a root-owned location."
+        ]
+    return []
+
+
+def _check_managed_events(
+    found: dict[str, list],
+    expected: dict,
+    matches: Callable[[str, object, dict], bool],
+    product: str,
+) -> list[str]:
+    problems: list[str] = []
+    for event, expected_entries in expected["hooks"].items():
+        want = expected_entries[0]
+        entries = found.get(event, [])
+        exact = [entry for entry in entries if matches(event, entry, want)]
+        if not entries:
+            problems.append(f"{product} managed hooks: missing AgentTrace hook for {event}.")
+        elif not exact:
+            problems.append(
+                f"{product} managed hooks: the AgentTrace hook for {event} is not the "
+                "metadata-only handler that setup --managed prints."
+            )
+        elif len(entries) > 1:
+            problems.append(
+                f"{product} managed hooks: {len(entries)} AgentTrace hooks for {event}; "
+                "each event would be recorded more than once. Keep one."
+            )
+    return problems
+
+
+def _read_json_object(path: Path) -> tuple[dict | None, str | None]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None, None
+    except (OSError, UnicodeError, ValueError) as exc:
+        return None, f"Cannot read valid JSON at {path}: {exc}"
+    if not isinstance(data, dict):
+        return None, f"Invalid hooks file {path}: the top level must be a JSON object."
+    return data, None
+
+
+def _copilot_hook_entries(config: dict) -> dict[str, list[dict]]:
+    found: dict[str, list[dict]] = {}
+    hooks = config.get("hooks")
+    if not isinstance(hooks, dict):
+        return found
+    for event, entries in hooks.items():
+        if isinstance(entries, list):
+            mine = [entry for entry in entries if _mentions_agenttrace(entry)]
+            if mine:
+                found[event] = mine
+    return found
+
+
+def verify_copilot_managed(
+    policy_dir: Path,
+    expected_for: Callable[[str], dict],
+    version: str,
+    *,
+    user_hooks_dir: Path | None = None,
+    details: dict | None = None,
+    owner_problem: Callable[[Path], str | None] | None = None,
+) -> tuple[bool, list[str], list[str]]:
+    """Check Copilot CLI policy hooks for metadata-only AgentTrace capture.
+
+    Returns (ok, problems, warnings). Reads files only; runs the installed
+    hook executable with ``--version``.
+    """
+    owner_problem = owner_problem or posix_owner_problem
+    problems: list[str] = []
+    warnings: list[str] = []
+    if not policy_dir.is_dir():
+        return False, [
+            f"No Copilot CLI policy directory at {policy_dir}. "
+            "Run agent-strace setup --managed --cli copilot and install the printed file."
+        ], warnings
+    dir_problem = owner_problem(policy_dir)
+    if dir_problem:
+        problems.append(f"{dir_problem}; a non-root user could remove policy files.")
+
+    found: dict[str, list[dict]] = {}
+    files: list[Path] = []
+    for path in sorted(policy_dir.glob("*.json"), key=lambda p: p.name):
+        config, problem = _read_json_object(path)
+        if problem:
+            problems.append(problem)
+            continue
+        entries = _copilot_hook_entries(config or {})
+        if not entries:
+            continue
+        files.append(path)
+        file_problem = owner_problem(path)
+        if file_problem:
+            problems.append(
+                f"{file_problem}. Copilot CLI requires policy files to be owned by root "
+                "and not group- or world-writable."
+            )
+        for event, mine in entries.items():
+            found.setdefault(event, []).extend(mine)
+
+    executable = next(
+        (exe for entries in found.values() for entry in entries
+         if (exe := _managed_executable(entry, "exec"))),
+        None,
+    )
+    if executable is None:
+        problems.append(
+            f"No AgentTrace policy hooks with an exec path in {policy_dir}. "
+            "Run agent-strace setup --managed --cli copilot and install the printed file."
+        )
+        return False, problems, warnings
+
+    expected = expected_for(executable)
+
+    def matches(_event: str, entry: dict, want: dict) -> bool:
+        return (
+            entry.get("type", "command") == "command"
+            and entry.get("exec") == want["exec"]
+            and entry.get("args") == want["args"]
+            and not any(key in entry for key in ("command", "bash", "powershell"))
+        )
+
+    problems += _check_managed_events(found, expected, matches, "Copilot CLI")
+    version_problem, reported = _run_version(executable, version)
+    if version_problem:
+        problems.append(version_problem)
+    warnings += _executable_warnings(executable, owner_problem)
+
+    if user_hooks_dir is not None and user_hooks_dir.is_dir():
+        for path in sorted(user_hooks_dir.glob("*.json")):
+            config, _ = _read_json_object(path)
+            if config and _copilot_hook_entries(config):
+                warnings.append(
+                    f"User-level AgentTrace hooks in {path} also run, with full content capture "
+                    "and their own redaction mode. Remove that file for metadata-only capture."
+                )
+
+    if details is not None:
+        details.update(
+            files=files,
+            event_count=sum(1 for event in expected["hooks"] if found.get(event)),
+            event_total=len(expected["hooks"]),
+            executable=executable,
+            version=reported,
+        )
+    return not problems, problems, warnings
+
+
+def _claude_handlers(hooks: object) -> dict[str, list[tuple[object, dict]]]:
+    """Return {event: [(matcher, handler)]} for handlers that run agent-strace."""
+    found: dict[str, list[tuple[object, dict]]] = {}
+    if not isinstance(hooks, dict):
+        return found
+    for event, groups in hooks.items():
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+                continue
+            for handler in group["hooks"]:
+                if _mentions_agenttrace(handler):
+                    found.setdefault(event, []).append((group.get("matcher"), handler))
+    return found
+
+
+def verify_claude_managed(
+    managed_dir: Path,
+    expected_for: Callable[[str], dict],
+    version: str,
+    *,
+    user_settings_path: Path | None = None,
+    details: dict | None = None,
+    owner_problem: Callable[[Path], str | None] | None = None,
+) -> tuple[bool, list[str], list[str]]:
+    """Check Claude Code managed settings files for metadata-only AgentTrace hooks.
+
+    Returns (ok, problems, warnings). Reads managed-settings.json and
+    managed-settings.d/*.json only; runs the hook executable with ``--version``.
+    """
+    owner_problem = owner_problem or posix_owner_problem
+    problems: list[str] = []
+    warnings: list[str] = []
+    read, denied, read_problems = _read_claude_managed(managed_dir)
+    problems += read_problems
+    if denied:
+        problems.append(
+            f"The OS denied reading {denied} Claude Code managed settings path(s) under "
+            f"{managed_dir}. Claude Code starts without a managed file it cannot read, so "
+            "make the files readable by developers (mode 0644)."
+        )
+
+    found: dict[str, list[tuple[object, dict]]] = {}
+    files: list[Path] = []
+    disable_all: bool | None = None
+    allow_managed_only: bool | None = None
+    for path, settings in read:
+        handlers = _claude_handlers(settings.get("hooks"))
+        value = _managed_bool(settings.get("disableAllHooks"))
+        if value is not None:
+            disable_all = value
+        value = _managed_bool(settings.get("allowManagedHooksOnly"))
+        if value is not None:
+            allow_managed_only = value
+        if not handlers:
+            continue
+        files.append(path)
+        file_problem = owner_problem(path)
+        if file_problem:
+            problems.append(f"{file_problem}; a non-root user could change the managed hooks.")
+        for event, entries in handlers.items():
+            found.setdefault(event, []).extend(entries)
+
+    drop_ins = managed_dir / "managed-settings.d"
+    if any(path.parent == drop_ins for path in files):
+        dir_problem = owner_problem(drop_ins)
+        if dir_problem:
+            problems.append(f"{dir_problem}; a non-root user could remove the drop-in file.")
+    if disable_all:
+        problems.append(
+            f"Claude Code managed settings under {managed_dir} set disableAllHooks = true, "
+            "which turns off managed hooks too. Remove it."
+        )
+
+    executable = next(
+        (exe for entries in found.values() for _, handler in entries
+         if isinstance(handler.get("args"), list)
+         and (exe := _managed_executable(handler, "command"))),
+        None,
+    )
+    if executable is None:
+        problems.append(
+            f"No AgentTrace exec-form hooks in Claude Code managed settings under {managed_dir}. "
+            "Run agent-strace setup --managed --cli claude and install the printed file."
+        )
+        return False, problems, warnings
+
+    expected = expected_for(executable)
+    expected_matchers = {
+        event: groups[0].get("matcher") for event, groups in expected["hooks"].items()
+    }
+
+    def matches(event: str, entry: tuple[object, dict], want: dict) -> bool:
+        matcher, handler = entry
+        want_handler = want["hooks"][0]
+        return (
+            _matcher_matches(event, matcher, expected_matchers[event])
+            and handler.get("type") == "command"
+            and handler.get("command") == want_handler["command"]
+            and handler.get("args") == want_handler["args"]
+        )
+
+    problems += _check_managed_events(found, expected, matches, "Claude Code")
+    version_problem, reported = _run_version(executable, version)
+    if version_problem:
+        problems.append(version_problem)
+    warnings += _executable_warnings(executable, owner_problem)
+
+    if user_settings_path is not None and not allow_managed_only:
+        user, _ = _read_claude_settings(user_settings_path, "user")
+        if user and _claude_handlers(user.get("hooks")):
+            warnings.append(
+                f"User settings {user_settings_path} have AgentTrace hooks that also run, with "
+                "full content capture. Remove them, or set allowManagedHooksOnly in managed settings."
+            )
+
+    if details is not None:
+        details.update(
+            files=files,
+            event_count=sum(1 for event in expected["hooks"] if found.get(event)),
+            event_total=len(expected["hooks"]),
+            executable=executable,
+            version=reported,
+            allow_managed_hooks_only=bool(allow_managed_only),
+        )
+    return not problems, problems, warnings
