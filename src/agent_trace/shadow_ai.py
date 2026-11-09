@@ -3,8 +3,9 @@
 Scans git history, file patterns, and commit metadata to detect AI tool
 usage signatures. No network calls required — git-only mode by default.
 
-Detected tools: Claude Code, Cursor, GitHub Copilot, Codex/ChatGPT, and
-unknown LLM proxy endpoints referenced in .env history.
+Detected tools (the ``FILE_SIGNALS`` keys): Claude Code, Cursor, GitHub
+Copilot, Codex / ChatGPT, Windsurf, and Aider. Also reports unknown LLM
+proxy endpoints referenced in .env history.
 """
 
 from __future__ import annotations

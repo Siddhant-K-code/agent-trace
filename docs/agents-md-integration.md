@@ -2,9 +2,9 @@
 
 ## What is AGENTS.md?
 
-`AGENTS.md` is a Markdown file placed at the root of a repository that tells AI coding agents how to work with the project. It specifies tool permissions, constraints, coding conventions, and model hints. Claude Code, Cursor, and other agents read it automatically at session start.
+`AGENTS.md` is a Markdown file placed at the root of a repository that tells AI coding agents how to work with the project. It specifies tool permissions, constraints, coding conventions, and model hints. Many coding agents read it automatically at session start.
 
-See the [AGENTS.md specification](https://docs.anthropic.com/en/docs/claude-code/memory) for the full format.
+`AGENTS.md` is an open format with no required fields. See [agents.md](https://agents.md/) for the format and the list of agents that read it.
 
 ---
 
