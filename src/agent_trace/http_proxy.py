@@ -33,17 +33,100 @@ from .propagation import extract_traceparent, inject_traceparent
 from .store import TraceStore
 
 
-class _ProxyHandler(BaseHTTPRequestHandler):
-    """HTTP request handler that proxies to a remote MCP server."""
+# Cap on tool calls waiting for a result. A call whose result never arrives
+# (dropped stream, notification-style misuse) would otherwise stay forever.
+MAX_PENDING_CALLS = 10_000
 
-    # set by HTTPProxyServer before serving
-    remote_url: str = ""
-    store: TraceStore | None = None
-    meta: SessionMeta | None = None
-    on_event: Callable[[TraceEvent], None] | None = None
-    redact: bool = False
-    masking_config: MaskingConfig | None = None
-    pending_calls: dict[Any, TraceEvent] = {}
+
+class _ProxyHTTPServer(HTTPServer):
+    """HTTPServer that owns the proxy config and tool call correlation state.
+
+    Each server gets its own pending call map, so two proxies in one process
+    (or a restarted proxy) never match results against each other's calls.
+    """
+
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        *,
+        remote_url: str,
+        store: TraceStore | None = None,
+        meta: SessionMeta | None = None,
+        on_event: Callable[[TraceEvent], None] | None = None,
+        redact: bool = False,
+        masking_config: MaskingConfig | None = None,
+        max_pending_calls: int = MAX_PENDING_CALLS,
+    ):
+        super().__init__(server_address, _ProxyHandler)
+        self.remote_url = remote_url
+        self.store = store
+        self.meta = meta
+        self.on_event = on_event
+        self.redact = redact
+        self.masking_config = masking_config
+        self.max_pending_calls = max_pending_calls
+        self.pending_calls: dict[Any, TraceEvent] = {}
+        self._pending_lock = threading.Lock()
+
+    def track_call(self, event: TraceEvent) -> None:
+        """Remember a tool_call so its result can be linked later."""
+        req_id = event.data.get("request_id")
+        if req_id is None:
+            return
+        with self._pending_lock:
+            self.pending_calls.pop(req_id, None)
+            self.pending_calls[req_id] = event
+            while len(self.pending_calls) > self.max_pending_calls:
+                self.pending_calls.pop(next(iter(self.pending_calls)))
+
+    def match_result(self, event: TraceEvent) -> None:
+        """Link a tool_result to its pending tool_call, if one exists."""
+        req_id = event.data.get("request_id")
+        with self._pending_lock:
+            call_event = self.pending_calls.pop(req_id, None) if req_id is not None else None
+        if call_event is not None:
+            event.parent_id = call_event.event_id
+            event.duration_ms = (event.timestamp - call_event.timestamp) * 1000
+
+    def clear_pending(self) -> int:
+        """Drop unmatched calls. Returns how many were dropped."""
+        with self._pending_lock:
+            count = len(self.pending_calls)
+            self.pending_calls.clear()
+        return count
+
+
+class _ProxyHandler(BaseHTTPRequestHandler):
+    """HTTP request handler that proxies to a remote MCP server.
+
+    All config and state live on the owning _ProxyHTTPServer (self.server).
+    """
+
+    server: _ProxyHTTPServer
+
+    @property
+    def remote_url(self) -> str:
+        return self.server.remote_url
+
+    @property
+    def store(self) -> TraceStore | None:
+        return self.server.store
+
+    @property
+    def meta(self) -> SessionMeta | None:
+        return self.server.meta
+
+    @property
+    def on_event(self) -> Callable[[TraceEvent], None] | None:
+        return self.server.on_event
+
+    @property
+    def redact(self) -> bool:
+        return self.server.redact
+
+    @property
+    def masking_config(self) -> MaskingConfig | None:
+        return self.server.masking_config
 
     def _emit(self, event: TraceEvent) -> None:
         if self.meta:
@@ -99,9 +182,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             event = _classify_message(msg, "agent_to_server")
             if event:
                 if event.event_type == EventType.TOOL_CALL:
-                    req_id = event.data.get("request_id")
-                    if req_id is not None:
-                        self.pending_calls[req_id] = event
+                    self.server.track_call(event)
                 self._emit(event)
         except (json.JSONDecodeError, UnicodeDecodeError):
             pass
@@ -152,11 +233,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                 resp_event = _classify_message(resp_msg, "server_to_agent")
                 if resp_event:
                     if resp_event.event_type == EventType.TOOL_RESULT:
-                        req_id = resp_event.data.get("request_id")
-                        if req_id in self.pending_calls:
-                            call_event = self.pending_calls.pop(req_id)
-                            resp_event.parent_id = call_event.event_id
-                            resp_event.duration_ms = (resp_event.timestamp - call_event.timestamp) * 1000
+                        self.server.match_result(resp_event)
                     self._emit(resp_event)
             except (json.JSONDecodeError, UnicodeDecodeError):
                 pass
@@ -215,11 +292,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                             event = _classify_message(msg, "server_to_agent")
                             if event:
                                 if event.event_type == EventType.TOOL_RESULT:
-                                    req_id = event.data.get("request_id")
-                                    if req_id in self.pending_calls:
-                                        call_event = self.pending_calls.pop(req_id)
-                                        event.parent_id = call_event.event_id
-                                        event.duration_ms = (event.timestamp - call_event.timestamp) * 1000
+                                    self.server.match_result(event)
                                 self._emit(event)
                         except json.JSONDecodeError:
                             pass
@@ -260,16 +333,19 @@ class HTTPProxyServer:
         self.on_event = on_event
         self.redact = redact
 
+    def make_server(self) -> _ProxyHTTPServer:
+        """Bind a server with its own config and pending call state."""
+        return _ProxyHTTPServer(
+            ("127.0.0.1", self.local_port),
+            remote_url=self.remote_url,
+            store=self.store,
+            meta=self.meta,
+            on_event=self.on_event,
+            redact=self.redact,
+        )
+
     def run(self) -> None:
         """Start the proxy server. Blocks until interrupted."""
-        # configure the handler class
-        _ProxyHandler.remote_url = self.remote_url
-        _ProxyHandler.store = self.store
-        _ProxyHandler.meta = self.meta
-        _ProxyHandler.on_event = self.on_event
-        _ProxyHandler.redact = self.redact
-        _ProxyHandler.pending_calls = {}
-
         self.store.append_event(
             self.meta.session_id,
             TraceEvent(
@@ -283,7 +359,7 @@ class HTTPProxyServer:
             ),
         )
 
-        server = HTTPServer(("127.0.0.1", self.local_port), _ProxyHandler)
+        server = self.make_server()
         sys.stderr.write(
             f"agent-strace: HTTP proxy listening on http://127.0.0.1:{self.local_port}\n"
             f"agent-strace: forwarding to {self.remote_url}\n"
@@ -295,6 +371,7 @@ class HTTPProxyServer:
             pass
         finally:
             server.server_close()
+            server.clear_pending()
             self.meta.ended_at = time.time()
             self.meta.total_duration_ms = (self.meta.ended_at - self.meta.started_at) * 1000
 
