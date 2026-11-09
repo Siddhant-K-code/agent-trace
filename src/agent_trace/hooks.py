@@ -50,6 +50,7 @@ from contextvars import ContextVar
 from pathlib import Path
 
 from .models import EventType, SessionMeta, TraceEvent
+from .pairing import hook_call_timestamp, link_response, match_hook_tool_call
 from .redact import redact_data, redact_data_with_status, redaction_enabled
 from .store import (
     DEFAULT_TRACE_DIR,
@@ -1302,33 +1303,19 @@ def handle_post_tool(input_data: dict, failed: bool = False, provider: str = "cl
         data=event_data,
     )
 
-    # Link to the earliest pending call for this tool name, then remove it.
-    # Pending entries are keyed by event_id so concurrent same-tool calls
-    # don't collide; we match by tool_name in the value and pick the oldest.
-    # Without a tool_use_id, a pending call from the same agent (parent or
-    # subagent) is preferred, so a subagent's result does not pair with the
-    # parent's call to the same tool while its own call is pending.
+    # Link to the pending call this result answers, then remove it. The
+    # matching rule lives in pairing.match_hook_tool_call; the pending file
+    # is read and written here under the store write lock.
     with _update_pending_calls(store, provider=provider) as pending:
-        match_id = None
-        match_ts = float("inf")
-        match_same_agent = False
-        tool_use_id = input_data.get("tool_use_id", "")
-        agent_id = attribution.get("agent_id", "")
-        for eid, info in pending.items():
-            if tool_use_id and info.get("tool_use_id") == tool_use_id:
-                match_id = eid
-                break
-            if tool_use_id or info.get("tool_name") != tool_name:
-                continue
-            same_agent = info.get("agent_id", "") == agent_id
-            if (same_agent, -info["timestamp"]) > (match_same_agent, -match_ts):
-                match_id = eid
-                match_ts = info["timestamp"]
-                match_same_agent = same_agent
+        match_id = match_hook_tool_call(
+            pending,
+            tool_name,
+            tool_use_id=input_data.get("tool_use_id", ""),
+            agent_id=attribution.get("agent_id", ""),
+        )
         if match_id:
             call_info = pending.pop(match_id)
-            event.parent_id = match_id
-            event.duration_ms = (event.timestamp - call_info["timestamp"]) * 1000
+            link_response(event, match_id, hook_call_timestamp(call_info))
 
     _ensure_session_meta(store, session_id, provider, input_data)
     _write_event(store, session_id, event)

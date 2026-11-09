@@ -20,6 +20,7 @@ from .cost import DEFAULT_MODEL, PRICING, _dollars, _estimate_tokens, _event_tok
 from .event_data import object_field, require_object_event_data, str_field
 from .explain import PHASE_DATA_EVENT_TYPES, ExplainResult, Phase, explain_session
 from .models import EventType, TraceEvent
+from .pairing import Pairer, tool_pairer
 from .store import TraceStore
 
 
@@ -142,8 +143,10 @@ TIMELINE_DATA_EVENT_TYPES = PHASE_DATA_EVENT_TYPES | frozenset({
 def _build_entries(phase: Phase, base_ts: float, model: str) -> list[TimelineEntry]:
     entries: list[TimelineEntry] = []
 
-    # Track tool_call events so we can pair them with tool_results for retry detection
-    pending_calls: dict[str, TraceEvent] = {}   # event_id -> tool_call event
+    # Pair tool results with the entries of their calls (see pairing.py).
+    tool_calls: Pairer[int] = tool_pairer()     # tool_call -> entry index
+    call_ids: set[str] = set()
+    open_calls: list[int] = []                  # call entries with no response yet
     call_counts: dict[str, int] = {}            # normalised key -> count
 
     for event in phase.events:
@@ -154,7 +157,10 @@ def _build_entries(phase: Phase, base_ts: float, model: str) -> list[TimelineEnt
 
         if event.event_type == EventType.TOOL_CALL:
             label, detail = _tool_label(event)
-            pending_calls[event.event_id] = event
+            tool_calls.add(event, len(entries))
+            if event.event_id:
+                call_ids.add(event.event_id)
+            open_calls.append(len(entries))
 
             # Retry detection: same tool+args key seen before
             key = f"{event.data.get('tool_name','')}:{json.dumps(event.data.get('arguments',{}), sort_keys=True)}"
@@ -175,13 +181,18 @@ def _build_entries(phase: Phase, base_ts: float, model: str) -> list[TimelineEnt
             # Mark the matching call entry as ok/fail based on result
             result_text = str(event.data.get("result", ""))
             is_error = event.data.get("is_error", False) or "error" in result_text.lower()[:50]
-            # Update the last entry for this tool if it's still "info"
-            for entry in reversed(entries):
-                if entry.status == "info" and entry.label.split(" (attempt")[0]:
-                    entry.status = "fail" if is_error else "ok"
-                    if event.duration_ms:
-                        entry.duration_ms = event.duration_ms
-                    break
+            index = tool_calls.match(event)
+            if index is None and open_calls and event.parent_id not in call_ids:
+                # No parent_id names a call in this phase: assume the newest
+                # call still waiting for a response.
+                index = open_calls[-1]
+            if index is not None:
+                if index in open_calls:
+                    open_calls.remove(index)
+                entry = entries[index]
+                entry.status = "fail" if is_error else "ok"
+                if event.duration_ms:
+                    entry.duration_ms = event.duration_ms
 
         elif event.event_type == EventType.LLM_REQUEST:
             model_name = event.data.get("model", "")
@@ -225,6 +236,11 @@ def _build_entries(phase: Phase, base_ts: float, model: str) -> list[TimelineEnt
             ))
 
         elif event.event_type == EventType.ERROR:
+            # An error answers the call it names; the call entry keeps its
+            # status, since the error gets its own "fail" entry.
+            index = tool_calls.match(event)
+            if index is not None and index in open_calls:
+                open_calls.remove(index)
             msg = event.data.get("message", "") or event.data.get("error", "")
             tool = event.data.get("tool_name", "")
             label = f"Error: {tool}" if tool else "Error"

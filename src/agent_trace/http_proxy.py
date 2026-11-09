@@ -33,15 +33,12 @@ from typing import Any, Callable
 from urllib.parse import urlparse
 
 from .models import EventType, SessionMeta, TraceEvent
-from .proxy import _classify_message, _rpc_id
+from .proxy import MAX_PENDING_CALLS, _classify_message, _rpc_id
 from .masking import MaskingConfig, mask_event_data
+from .pairing import TOOL_RESPONSE_TYPES, KeyedPairer, link_response
 from .propagation import extract_traceparent, inject_traceparent
 from .store import TraceStore
 
-
-# Cap on tool calls waiting for a result. A call whose result never arrives
-# (dropped stream, notification-style misuse) would otherwise stay forever.
-MAX_PENDING_CALLS = 10_000
 
 # How long server_close waits for in-flight requests after shutting down
 # their sockets.
@@ -59,8 +56,9 @@ def _shutdown_socket(sock: socket.socket) -> None:
 class _ProxyHTTPServer(ThreadingHTTPServer):
     """Threaded HTTP server that owns the proxy config and shared state.
 
-    Each server gets its own pending call map, so two proxies in one process
-    (or a restarted proxy) never match results against each other's calls.
+    Each server gets its own :class:`KeyedPairer` of pending calls, so two
+    proxies in one process (or a restarted proxy) never match results
+    against each other's calls.
 
     Requests run on daemon threads. ``state_lock`` serialises everything
     they share: trace store writes, session meta updates and ``on_event``.
@@ -90,8 +88,7 @@ class _ProxyHTTPServer(ThreadingHTTPServer):
         self.redact = redact
         self.masking_config = masking_config
         self.max_pending_calls = max_pending_calls
-        self.pending_calls: dict[Any, TraceEvent] = {}
-        self._pending_lock = threading.Lock()
+        self.calls: KeyedPairer[TraceEvent] = KeyedPairer(max_pending_calls)
         self.state_lock = threading.Lock()
         # Guards the fields below and signals when requests finish.
         self._requests_cond = threading.Condition()
@@ -188,32 +185,24 @@ class _ProxyHTTPServer(ThreadingHTTPServer):
             if self.on_event:
                 self.on_event(event)
 
+    @property
+    def pending_calls(self) -> dict[Any, TraceEvent]:
+        """A copy of the calls waiting for a response, by JSON-RPC id."""
+        return self.calls.pending()
+
     def track_call(self, event: TraceEvent) -> None:
-        """Remember a tool_call so its result can be linked later."""
-        req_id = _rpc_id(event.data)
-        if req_id is None:
-            return
-        with self._pending_lock:
-            self.pending_calls.pop(req_id, None)
-            self.pending_calls[req_id] = event
-            while len(self.pending_calls) > self.max_pending_calls:
-                self.pending_calls.pop(next(iter(self.pending_calls)))
+        """Remember a tool_call so its response can be linked later."""
+        self.calls.add(_rpc_id(event.data), event)
 
     def match_result(self, event: TraceEvent) -> None:
-        """Link a tool_result to its pending tool_call, if one exists."""
-        req_id = _rpc_id(event.data)
-        with self._pending_lock:
-            call_event = self.pending_calls.pop(req_id, None) if req_id is not None else None
+        """Link a tool_result or error to its pending tool_call, if one exists."""
+        call_event = self.calls.match(_rpc_id(event.data))
         if call_event is not None:
-            event.parent_id = call_event.event_id
-            event.duration_ms = (event.timestamp - call_event.timestamp) * 1000
+            link_response(event, call_event.event_id, call_event.timestamp)
 
     def clear_pending(self) -> int:
         """Drop unmatched calls. Returns how many were dropped."""
-        with self._pending_lock:
-            count = len(self.pending_calls)
-            self.pending_calls.clear()
-        return count
+        return self.calls.clear()
 
 
 class _ProxyHandler(BaseHTTPRequestHandler):
@@ -365,7 +354,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                 resp_msg = json.loads(resp_body.decode("utf-8"))
                 resp_event = _classify_message(resp_msg, "server_to_agent")
                 if resp_event:
-                    if resp_event.event_type == EventType.TOOL_RESULT:
+                    if resp_event.event_type in TOOL_RESPONSE_TYPES:
                         self.server.match_result(resp_event)
                     self._emit(resp_event)
             except (json.JSONDecodeError, UnicodeDecodeError):
@@ -432,7 +421,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                             msg = json.loads(data_str)
                             event = _classify_message(msg, "server_to_agent")
                             if event:
-                                if event.event_type == EventType.TOOL_RESULT:
+                                if event.event_type in TOOL_RESPONSE_TYPES:
                                     self.server.match_result(event)
                                 self._emit(event)
                         except json.JSONDecodeError:

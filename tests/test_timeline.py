@@ -10,12 +10,14 @@ import time
 import unittest
 from pathlib import Path
 
+from agent_trace.explain import Phase
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
 from agent_trace.timeline import (
     TimelineEntry,
     TimelinePhase,
     TimelineResult,
+    _build_entries,
     build_timeline,
     cmd_timeline,
     format_timeline,
@@ -304,6 +306,59 @@ class TestBuildTimeline(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # format_timeline (text)
 # ---------------------------------------------------------------------------
+
+class TestToolResultPairing(unittest.TestCase):
+    """Tool results mark the entry of the call they answer."""
+
+    def _entries(self, *specs):
+        events = []
+        for i, (event_type, data, parent) in enumerate(specs):
+            events.append(TraceEvent(
+                event_type=event_type,
+                event_id=f"e{i}",
+                parent_id=parent,
+                timestamp=1000.0 + i,
+                data=data,
+            ))
+        phase = Phase(name="p", index=1, start_offset=0.0, end_offset=10.0, events=events)
+        return _build_entries(phase, 1000.0, "claude-3-5-sonnet")
+
+    def test_linked_results_mark_their_own_calls(self):
+        entries = self._entries(
+            (EventType.TOOL_CALL, {"tool_name": "Bash", "arguments": {"command": "a"}}, ""),
+            (EventType.TOOL_CALL, {"tool_name": "Bash", "arguments": {"command": "b"}}, ""),
+            (EventType.TOOL_RESULT, {"result": "error: boom", "is_error": True}, "e0"),
+            (EventType.TOOL_RESULT, {"result": "fine"}, "e1"),
+        )
+        self.assertEqual([e.status for e in entries], ["fail", "ok"])
+
+    def test_unlinked_result_marks_newest_open_call_only(self):
+        entries = self._entries(
+            (EventType.TOOL_CALL, {"tool_name": "Bash", "arguments": {}}, ""),
+            (EventType.LLM_REQUEST, {"model": "m", "message_count": 1}, ""),
+            (EventType.DECISION, {"choice": "go"}, ""),
+            (EventType.TOOL_RESULT, {"result": "fine"}, ""),
+        )
+        self.assertEqual([e.status for e in entries], ["ok", "info", "info"])
+
+    def test_duplicate_result_does_not_take_another_call(self):
+        entries = self._entries(
+            (EventType.TOOL_CALL, {"tool_name": "Bash", "arguments": {"n": 1}}, ""),
+            (EventType.TOOL_RESULT, {"result": "fine"}, "e0"),
+            (EventType.TOOL_CALL, {"tool_name": "Bash", "arguments": {"n": 2}}, ""),
+            (EventType.TOOL_RESULT, {"result": "error: again", "is_error": True}, "e0"),
+        )
+        self.assertEqual([e.status for e in entries], ["ok", "info"])
+
+    def test_error_closes_its_call_without_marking_it(self):
+        entries = self._entries(
+            (EventType.TOOL_CALL, {"tool_name": "Bash", "arguments": {"n": 1}}, ""),
+            (EventType.TOOL_CALL, {"tool_name": "Bash", "arguments": {"n": 2}}, ""),
+            (EventType.ERROR, {"tool_name": "Bash", "error": "boom"}, "e1"),
+            (EventType.TOOL_RESULT, {"result": "fine"}, ""),
+        )
+        self.assertEqual([e.status for e in entries], ["ok", "info", "fail"])
+
 
 class TestFormatTimeline(unittest.TestCase):
 

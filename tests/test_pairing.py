@@ -1,6 +1,10 @@
 """Tests for the shared request/response pairing rules."""
 
+import io
+import json
 import random
+import tempfile
+import threading
 import unittest
 
 from agent_trace.cost import _session_model_usage
@@ -10,6 +14,8 @@ from agent_trace.langfuse_export import (
     langfuse_data_indexes,
 )
 from agent_trace.models import EventType, SessionMeta, TraceEvent
+from agent_trace.proxy import MCPProxy
+from agent_trace.store import TraceStore
 from agent_trace.otlp import (
     _to_span_id,
     _ts_to_nanos,
@@ -24,9 +30,13 @@ from agent_trace.pairing import (
     NEWEST_SAME_MODEL,
     NO_FALLBACK,
     TOOL_FALLBACK,
+    KeyedPairer,
     Pairer,
     event_model,
+    hook_call_timestamp,
+    link_response,
     llm_pairer,
+    match_hook_tool_call,
     pair_events,
     pair_llm_events,
     pair_tool_events,
@@ -447,6 +457,193 @@ class ExportersAgreeOnModelPrecedenceTest(unittest.TestCase):
 
     def test_cost(self):
         self.assertEqual(_session_model_usage(self.events), {"gpt-4o": (30, 5)})
+
+
+# ---------------------------------------------------------------------------
+# Live pairing: proxies and hooks
+# ---------------------------------------------------------------------------
+
+class LinkResponseTest(unittest.TestCase):
+    def test_sets_parent_and_duration(self):
+        response = _event(EventType.TOOL_RESULT, "r", timestamp=12.5)
+        link_response(response, "c", 10.0)
+        self.assertEqual(response.parent_id, "c")
+        self.assertEqual(response.duration_ms, 2500.0)
+
+
+class KeyedPairerTest(unittest.TestCase):
+    def test_pairs_only_the_same_key(self):
+        pairer = KeyedPairer()
+        pairer.add(1, "a")
+        pairer.add("1", "b")
+        self.assertIsNone(pairer.match(2))
+        self.assertEqual(pairer.match("1"), "b")
+        self.assertEqual(pairer.match(1), "a")
+        self.assertIsNone(pairer.match(1))
+        self.assertEqual(len(pairer), 0)
+
+    def test_none_key_is_never_pending_and_never_pairs(self):
+        pairer = KeyedPairer()
+        pairer.add(None, "a")
+        self.assertEqual(len(pairer), 0)
+        self.assertIsNone(pairer.match(None))
+
+    def test_same_key_replaces_and_becomes_newest(self):
+        pairer = KeyedPairer()
+        pairer.add(1, "old")
+        pairer.add(2, "b")
+        pairer.add(1, "new")
+        self.assertEqual(pairer.pending(), {2: "b", 1: "new"})
+        self.assertEqual(pairer.match(1), "new")
+
+    def test_oldest_is_dropped_past_the_cap(self):
+        pairer = KeyedPairer(max_pending=2)
+        for key in range(4):
+            pairer.add(key, key)
+        self.assertEqual(list(pairer.pending()), [2, 3])
+
+    def test_cap_must_be_positive(self):
+        with self.assertRaises(ValueError):
+            KeyedPairer(max_pending=0)
+
+    def test_clear_returns_count(self):
+        pairer = KeyedPairer()
+        pairer.add(1, "a")
+        pairer.add(2, "b")
+        self.assertEqual(pairer.clear(), 2)
+        self.assertEqual(pairer.pending(), {})
+
+    def test_pending_is_a_copy(self):
+        pairer = KeyedPairer()
+        pairer.add(1, "a")
+        pairer.pending().clear()
+        self.assertEqual(pairer.match(1), "a")
+
+    def test_concurrent_adds_and_matches_pair_every_key_once(self):
+        pairer = KeyedPairer()
+        matched = []
+        lock = threading.Lock()
+
+        def worker(base):
+            for key in range(base, base + 200):
+                pairer.add(key, key)
+            for key in range(base, base + 200):
+                item = pairer.match(key)
+                with lock:
+                    matched.append(item)
+
+        threads = [threading.Thread(target=worker, args=(i * 200,)) for i in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(sorted(matched), list(range(1600)))
+        self.assertEqual(len(pairer), 0)
+
+
+def _hook(tool_name, timestamp, tool_use_id="", agent_id=None):
+    info = {"session_id": "s", "tool_name": tool_name, "tool_use_id": tool_use_id,
+            "timestamp": timestamp}
+    if agent_id:
+        info["agent_id"] = agent_id
+    return info
+
+
+class MatchHookToolCallTest(unittest.TestCase):
+    def test_tool_use_id_matches_only_its_call(self):
+        pending = {
+            "a": _hook("Bash", 1.0, "tu-1"),
+            "b": _hook("Bash", 2.0, "tu-2"),
+        }
+        self.assertEqual(match_hook_tool_call(pending, "Bash", "tu-2"), "b")
+        self.assertEqual(match_hook_tool_call(pending, "Read", "tu-1"), "a")
+        self.assertIsNone(match_hook_tool_call(pending, "Bash", "tu-3"))
+
+    def test_without_tool_use_id_takes_oldest_call_of_the_tool(self):
+        pending = {
+            "new": _hook("Bash", 3.0),
+            "read": _hook("Read", 1.0),
+            "old": _hook("Bash", 2.0),
+        }
+        self.assertEqual(match_hook_tool_call(pending, "Bash"), "old")
+        self.assertEqual(match_hook_tool_call(pending, "Read"), "read")
+        self.assertIsNone(match_hook_tool_call(pending, "Edit"))
+
+    def test_equal_timestamps_keep_file_order(self):
+        pending = {"first": _hook("Bash", 1.0), "second": _hook("Bash", 1.0)}
+        self.assertEqual(match_hook_tool_call(pending, "Bash"), "first")
+
+    def test_same_agent_beats_an_older_call_from_another_agent(self):
+        pending = {
+            "parent": _hook("Bash", 1.0),
+            "sub": _hook("Bash", 2.0, agent_id="agent-1"),
+        }
+        self.assertEqual(match_hook_tool_call(pending, "Bash", agent_id="agent-1"), "sub")
+        self.assertEqual(match_hook_tool_call(pending, "Bash"), "parent")
+        self.assertEqual(match_hook_tool_call(pending, "Bash", agent_id="agent-2"), "parent")
+
+    def test_malformed_entries_never_match(self):
+        pending = {
+            "list": ["Bash"],
+            "no_ts": {"tool_name": "Bash", "tool_use_id": "tu"},
+            "bool_ts": _hook("Bash", True, "tu"),
+            "str_ts": _hook("Bash", "1", "tu"),
+            "nan_ts": _hook("Bash", float("nan"), "tu"),
+            "": _hook("Bash", 0.5, "tu"),
+            "ok": _hook("Bash", 9.0, "tu"),
+        }
+        self.assertEqual(match_hook_tool_call(pending, "Bash"), "ok")
+        self.assertEqual(match_hook_tool_call(pending, "Bash", "tu"), "ok")
+
+    def test_hook_call_timestamp(self):
+        self.assertEqual(hook_call_timestamp({"timestamp": 2}), 2.0)
+        for info in ({"timestamp": True}, {"timestamp": None}, {}, ["x"], None):
+            with self.subTest(info=info):
+                self.assertIsNone(hook_call_timestamp(info))
+
+
+class StdioProxyTraceFollowsSharedRulesTest(unittest.TestCase):
+    """What the stdio proxy records pairs the same way in every exporter."""
+
+    def test_interleaved_results_and_errors(self):
+        store = TraceStore(tempfile.mkdtemp(), redact=False)
+        meta = SessionMeta()
+        store.create_session(meta)
+        proxy = MCPProxy(["true"], store, meta)
+        messages = [
+            ({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+              "params": {"name": "a", "arguments": {}}}, "agent_to_server"),
+            ({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+              "params": {"name": "b", "arguments": {}}}, "agent_to_server"),
+            ({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+              "params": {"name": "c", "arguments": {}}}, "agent_to_server"),
+            ({"jsonrpc": "2.0", "id": 2,
+              "error": {"code": -32602, "message": "bad"}}, "server_to_agent"),
+            ({"jsonrpc": "2.0", "id": 1,
+              "result": {"content": [{"type": "text", "text": "ok"}]}}, "server_to_agent"),
+            ({"jsonrpc": "2.0", "id": 99,
+              "result": {"content": [{"type": "text", "text": "?"}]}}, "server_to_agent"),
+        ]
+        for message, direction in messages:
+            source = io.BytesIO((json.dumps(message) + "\n").encode("utf-8"))
+            proxy._forward_and_trace(source, io.BytesIO(), direction, threading.Event())
+
+        events = store.load_events(meta.session_id)
+        by_rpc_id = {
+            (e.event_type, e.data.get("request_id")): i for i, e in enumerate(events)
+        }
+        call_1 = by_rpc_id[(EventType.TOOL_CALL, 1)]
+        call_2 = by_rpc_id[(EventType.TOOL_CALL, 2)]
+        call_3 = by_rpc_id[(EventType.TOOL_CALL, 3)]
+        error_2 = by_rpc_id[(EventType.ERROR, 2)]
+        result_1 = by_rpc_id[(EventType.TOOL_RESULT, 1)]
+        stray = by_rpc_id[(EventType.TOOL_RESULT, 99)]
+
+        pairing = pair_tool_events(events)
+        self.assertEqual(pairing.pairs, {error_2: call_2, result_1: call_1})
+        self.assertEqual(pairing.unpaired_responses, [stray])
+        self.assertEqual(pairing.unmatched_requests, [call_3])
+        self.assertEqual(proxy._calls.pending(), {3: events[call_3]})
 
 
 if __name__ == "__main__":

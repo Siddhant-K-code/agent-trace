@@ -30,7 +30,14 @@ from typing import IO, Any, Callable
 from .event_data import number_field, str_field
 from .models import EventType, SessionMeta, TraceEvent
 from .masking import MaskingConfig, mask_event_data
+from .pairing import TOOL_RESPONSE_TYPES, KeyedPairer, link_response
 from .store import TraceStore
+
+
+# Cap on tool calls waiting for a response. A call whose response never
+# arrives (dropped stream, notification-style misuse) would otherwise stay
+# forever.
+MAX_PENDING_CALLS = 10_000
 
 
 def _read_message(stream: IO[bytes]) -> dict[str, Any] | None:
@@ -220,7 +227,7 @@ class MCPProxy:
         self.on_event = on_event
         self.redact = redact
         self.masking_config = masking_config
-        self._pending_calls: dict[Any, TraceEvent] = {}
+        self._calls: KeyedPairer[TraceEvent] = KeyedPairer(MAX_PENDING_CALLS)
 
     def _emit(self, event: TraceEvent) -> None:
         event.session_id = self.meta.session_id
@@ -260,17 +267,13 @@ class MCPProxy:
             # trace the message
             event = _classify_message(msg, direction)
             if event:
-                # link tool_result to tool_call
-                if event.event_type == EventType.TOOL_RESULT:
-                    req_id = _rpc_id(event.data)
-                    if req_id in self._pending_calls:
-                        call_event = self._pending_calls.pop(req_id)
-                        event.parent_id = call_event.event_id
-                        event.duration_ms = (event.timestamp - call_event.timestamp) * 1000
+                # link a tool_result or error to its tool_call by JSON-RPC id
+                if event.event_type in TOOL_RESPONSE_TYPES:
+                    call_event = self._calls.match(_rpc_id(event.data))
+                    if call_event is not None:
+                        link_response(event, call_event.event_id, call_event.timestamp)
                 elif event.event_type == EventType.TOOL_CALL:
-                    req_id = _rpc_id(event.data)
-                    if req_id is not None:
-                        self._pending_calls[req_id] = event
+                    self._calls.add(_rpc_id(event.data), event)
 
                 self._emit(event)
 
