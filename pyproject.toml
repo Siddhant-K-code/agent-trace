@@ -47,7 +47,7 @@ all-integrations = [
 ]
 
 [project.scripts]
-agent-strace = "agent_trace.cli:main"
+agent-strace = "agent_trace.entry:main"
 
 [project.urls]
 Homepage = "https://github.com/Siddhant-K-code/agent-trace"

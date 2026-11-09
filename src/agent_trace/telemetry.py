@@ -12,21 +12,41 @@ use ``AGENT_STRACE_TELEMETRY_TOKEN`` while developing and testing.
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
-import platform
 import re
 import sys
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, TextIO
-from urllib import request
+from typing import TYPE_CHECKING, Any, Callable, TextIO
 
 from . import __version__
 from .fileutil import file_lock, write_atomic
+
+if TYPE_CHECKING:
+    import argparse
+
+
+def _urllib_request():
+    """Return ``urllib.request``, importing it on first use.
+
+    It is slow to import and most hook processes never send an event.
+    """
+    module = globals().get("request")
+    if module is None:
+        from urllib import request as module
+
+        globals()["request"] = module
+    return module
+
+
+def __getattr__(name: str):
+    # Keep ``telemetry.request`` available to callers that patch its urlopen.
+    if name == "request":
+        return _urllib_request()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 # PostHog project tokens are public ingestion tokens, not personal API keys.
@@ -299,6 +319,8 @@ def build_payload(
     if event not in _EVENT_FIELDS or not _valid_anonymous_id(anonymous_id):
         return None
 
+    import platform
+
     clean = _sanitise_properties(event, properties)
     clean.update({
         "$process_person_profile": False,
@@ -334,6 +356,7 @@ def capture(event: str, properties: dict[str, Any] | None = None) -> bool:
         if payload is None:
             return False
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        request = _urllib_request()
         req = request.Request(
             _posthog_host() + "/i/v0/e/",
             data=body,

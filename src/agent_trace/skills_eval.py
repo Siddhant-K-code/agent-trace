@@ -348,7 +348,7 @@ def hook_command_prefix() -> str:
     package_parent = Path(__file__).resolve().parent.parent
     return (
         f"PYTHONPATH={shlex.quote(str(package_parent))} "
-        f"{shlex.quote(sys.executable)} -m agent_trace.cli hook"
+        f"{shlex.quote(sys.executable)} -m agent_trace.entry hook"
     )
 
 
