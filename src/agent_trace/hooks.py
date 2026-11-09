@@ -745,6 +745,10 @@ def handle_stop(input_data: dict, provider: str = "claude") -> None:
 _SUBAGENT_SESSION_PROVIDERS = frozenset({"copilot"})
 _SUBAGENT_TOOL_NAMES = frozenset({"task"})
 _MAX_LINK_ANCESTRY = 64
+_SUBAGENT_PHASES = {
+    "start": EventType.SUBAGENT_START,
+    "stop": EventType.SUBAGENT_STOP,
+}
 
 
 def _subagent_attribution(input_data: dict, provider: str) -> dict:
@@ -953,7 +957,14 @@ def handle_subagent(input_data: dict, phase: str, provider: str = "claude") -> N
     Other providers' subagents are not separate sessions: Codex fires a
     subagent's hooks under the parent's ``session_id``. Their ``agent_id`` is
     recorded as-is, and no child session is looked up, linked or created.
+
+    *phase* must be ``"start"`` or ``"stop"``. Any other value is reported on
+    stderr and nothing is written.
     """
+    event_type = _SUBAGENT_PHASES.get(phase)
+    if event_type is None:
+        sys.stderr.write(f"agent-strace: unknown subagent phase: {phase!r}\n")
+        return
     store = _get_store()
     session_id = _resolve_session_id(input_data, provider=provider)
     if not session_id:
@@ -995,7 +1006,6 @@ def handle_subagent(input_data: dict, phase: str, provider: str = "claude") -> N
     if redact:
         event_data = redact_data(event_data)
 
-    event_type = EventType.SUBAGENT_START if phase == "start" else EventType.SUBAGENT_STOP
     _write_event(
         store,
         session_id,

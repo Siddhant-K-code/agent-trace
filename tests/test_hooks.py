@@ -39,6 +39,7 @@ from agent_trace.hooks import (
     handle_post_tool,
     handle_user_prompt,
     handle_stop,
+    handle_subagent,
     hook_main,
 )
 from agent_trace.models import EventType
@@ -437,6 +438,57 @@ class TestHooksStop(unittest.TestCase):
         self.assertEqual(events[4].event_type, EventType.TOOL_RESULT)
         self.assertEqual(events[5].event_type, EventType.ASSISTANT_RESPONSE)
         self.assertIn("fixed the login bug", events[5].data["text"])
+
+
+class TestHooksSubagentPhase(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["AGENT_TRACE_DIR"] = self.tmpdir
+        os.environ.pop("AGENT_TRACE_REDACT", None)
+        handle_session_start({"session_id": "subphase12345678", "source": "startup"})
+        self.session_id = _read_active_session()
+        self.payload = {
+            "agent_type": "explore",
+            "stop_reason": "end_turn",
+            "last_assistant_message": "done",
+        }
+
+    def tearDown(self):
+        _clear_active_session()
+        os.environ.pop("AGENT_TRACE_DIR", None)
+
+    def events(self):
+        return TraceStore(self.tmpdir).load_events(self.session_id)
+
+    def test_start_records_subagent_start(self):
+        handle_subagent(self.payload, "start")
+        (event,) = [e for e in self.events() if e.event_type == EventType.SUBAGENT_START]
+        self.assertEqual(event.data["hook_event"], "subagent_start")
+        self.assertNotIn("stop_reason", event.data)
+        self.assertNotIn("text", event.data)
+        self.assertEqual(
+            [e for e in self.events() if e.event_type == EventType.SUBAGENT_STOP], []
+        )
+
+    def test_stop_records_subagent_stop(self):
+        handle_subagent(self.payload, "stop")
+        (event,) = [e for e in self.events() if e.event_type == EventType.SUBAGENT_STOP]
+        self.assertEqual(event.data["hook_event"], "subagent_stop")
+        self.assertEqual(event.data["stop_reason"], "end_turn")
+        self.assertEqual(event.data["text"], "done")
+        self.assertEqual(
+            [e for e in self.events() if e.event_type == EventType.SUBAGENT_START], []
+        )
+
+    def test_unknown_phase_writes_no_event(self):
+        before = self.events()
+        for phase in ("end", "Stop", "", "subagent-stop"):
+            with self.subTest(phase=phase):
+                err = io.StringIO()
+                with redirect_stderr(err):
+                    handle_subagent(self.payload, phase)
+                self.assertIn("unknown subagent phase", err.getvalue())
+                self.assertEqual(len(self.events()), len(before))
 
 
 class TestHooksRedaction(unittest.TestCase):
