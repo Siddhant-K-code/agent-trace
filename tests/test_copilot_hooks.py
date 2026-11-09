@@ -152,6 +152,47 @@ class TestCopilotHooks(unittest.TestCase):
 
         self.assertEqual(errors[0].data["error"], "Command exited with status 1")
 
+    def test_copilot_tool_call_id_pairs_results_out_of_order(self):
+        # Copilot CLI 1.0.107 sends toolCallId on pre, post and failure hooks.
+        def send(event, payload):
+            payload = {"sessionId": "copilotcallid1234", **payload}
+            with patch.object(sys, "stdin", io.StringIO(json.dumps(payload))):
+                hook_main(["--provider", "copilot", event])
+
+        send("session-start", {"source": "new"})
+        for call_id, path in (("toolu_first", "a.txt"), ("toolu_second", "b.txt")):
+            send("pre-tool", {
+                "toolCallId": call_id,
+                "toolName": "view",
+                "toolArgs": {"path": path},
+            })
+        send("post-tool-failure", {
+            "toolCallId": "toolu_second",
+            "toolName": "view",
+            "toolArgs": {"path": "b.txt"},
+            "error": "Path does not exist",
+        })
+        send("post-tool", {
+            "toolCallId": "toolu_first",
+            "toolName": "view",
+            "toolArgs": {"path": "a.txt"},
+            "toolResult": {"resultType": "success", "textResultForLlm": "a"},
+        })
+
+        session_id = _read_active_session(provider="copilot")
+        events = TraceStore(self.tmpdir).load_events(session_id)
+        calls = {
+            e.data["tool_use_id"]: e for e in events if e.event_type == EventType.TOOL_CALL
+        }
+        (error,) = [e for e in events if e.event_type == EventType.ERROR]
+        (result,) = [e for e in events if e.event_type == EventType.TOOL_RESULT]
+
+        self.assertEqual(set(calls), {"toolu_first", "toolu_second"})
+        self.assertEqual(error.data["tool_use_id"], "toolu_second")
+        self.assertEqual(error.parent_id, calls["toolu_second"].event_id)
+        self.assertEqual(result.data["tool_use_id"], "toolu_first")
+        self.assertEqual(result.parent_id, calls["toolu_first"].event_id)
+
     def test_copilot_resume_preserves_existing_session_metadata(self):
         session_payload = {
             "sessionId": "copilotresume1234",

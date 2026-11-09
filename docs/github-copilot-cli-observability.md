@@ -52,7 +52,10 @@ remain unlinked.
 
 - The first prompt can arrive before the session-start event.
 - A tool denied at the permission prompt can remain without a result or error.
-- Tool hooks have no call ID, so results are paired by tool name.
+- Before Copilot CLI 1.0.107, tool hooks have no call ID, so results are
+  paired by tool name. From 1.0.107 they are paired by `toolCallId`.
+- A shell command that exits non-zero is recorded as a tool result, not an
+  error; the exit code is only in the result text.
 - File and command activity is visible only when tool arguments or results
   contain it.
 - Local Copilot plugins do not run in Copilot cloud agent. Repository hooks
