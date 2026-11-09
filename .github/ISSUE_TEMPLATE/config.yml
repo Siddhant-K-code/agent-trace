@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/Siddhant-K-code/agent-trace/security/advisories/new
+    about: Report vulnerabilities privately.
+  - name: Usage and setup documentation
+    url: https://github.com/Siddhant-K-code/agent-trace/tree/main/docs
+    about: Check setup, commands, integrations, and troubleshooting guidance.

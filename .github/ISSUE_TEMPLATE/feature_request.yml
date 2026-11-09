@@ -1,0 +1,35 @@
+name: Feature request
+description: Propose a focused improvement to agent-trace.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What workflow or limitation should this change address?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Describe the desired behavior and user experience.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: List workarounds or other approaches you evaluated.
+  - type: dropdown
+    id: compatibility
+    attributes:
+      label: Compatibility impact
+      options:
+        - No known compatibility impact
+        - Adds optional behavior
+        - Changes existing behavior
+        - Changes CLI or storage compatibility
+    validations:
+      required: true

@@ -1,56 +1,76 @@
 name: Publish VS Code Extension
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - "vscode-v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Extension tag to publish (e.g. vscode-v0.4.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-vscode-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   publish:
     runs-on: namespace-profile-siddhant-khare
+    env:
+      PUBLISH_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     defaults:
       run:
         working-directory: vscode-extension
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.PUBLISH_TAG }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '20'
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: vscode-extension/package-lock.json
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
-      - name: Resize icon to 128x128
+      - name: Install publishing tools
+        run: npm install --global @vscode/vsce@4.1.0 ovsx@1.3.0
+
+      - name: Verify publish target
         run: |
-          npm install sharp
-          node -e "require('sharp')('../Agent trace.png').resize(128,128,{fit:'cover'}).png().toFile('icon.png').then(()=>console.log('done')).catch(e=>{console.error(e);process.exit(1);})"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "${PUBLISH_TAG}^{commit}")"
+          VERSION=$(node -p "require('./package.json').version")
+          LOCK_VERSION=$(node -p "require('./package-lock.json').version")
+          LOCK_ROOT_VERSION=$(node -p "require('./package-lock.json').packages[''].version")
+          test "$VERSION" = "$LOCK_VERSION"
+          test "$VERSION" = "$LOCK_ROOT_VERSION"
+          test "$PUBLISH_TAG" = "vscode-v$VERSION"
 
-      - name: Install vsce
-        run: npm install -g @vscode/vsce
-
-      # vscode:prepublish runs `tsc` automatically before packaging
+      # vscode:prepublish runs `tsc` automatically before packaging.
       - name: Package extension
         run: vsce package --out agent-strace.vsix
 
       - name: Upload VSIX artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: agent-strace-vsix
           path: vscode-extension/agent-strace.vsix
 
       - name: Publish to VS Code Marketplace
-        run: vsce publish --packagePath agent-strace.vsix --pat ${{ secrets.VSCE_PAT }}
-        continue-on-error: true
-
-      - name: Install ovsx
-        run: npm install -g ovsx
-
-      - name: Create Open VSX namespace
-        run: ovsx create-namespace Siddhant-K-code --pat ${{ secrets.OVSX_PAT }}
-        continue-on-error: true
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: vsce publish --packagePath agent-strace.vsix --skip-duplicate
 
       - name: Publish to Open VSX Registry
-        run: ovsx publish agent-strace.vsix --pat ${{ secrets.OVSX_PAT }} --skip-duplicate
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: ovsx publish agent-strace.vsix --skip-duplicate
