@@ -1,0 +1,11 @@
+{"event_type":"session_start","timestamp":1800000000.0,"event_id":"obs-start","session_id":"session-observed","data":{"provider":"synthetic"}}
+{"event_type":"user_prompt","timestamp":1800000001.0,"event_id":"obs-prompt","session_id":"session-observed","data":{"prompt":"Draft the release notes and validate the repository."}}
+{"event_type":"file_read","timestamp":1800000002.0,"event_id":"obs-agents","session_id":"session-observed","data":{"path":"AGENTS.md"}}
+{"event_type":"tool_call","timestamp":1800000003.0,"event_id":"obs-skill","session_id":"session-observed","data":{"tool_name":"skill","arguments":{"skill":"release-notes"}}}
+{"event_type":"tool_result","timestamp":1800000003.1,"event_id":"obs-skill-result","session_id":"session-observed","parent_id":"obs-skill","data":{"tool_name":"skill","success":true}}
+{"event_type":"file_read","timestamp":1800000004.0,"event_id":"obs-format","session_id":"session-observed","data":{"path":".github/skills/release-notes/references/format.md"}}
+{"event_type":"file_read","timestamp":1800000005.0,"event_id":"obs-changelog","session_id":"session-observed","data":{"path":"CHANGELOG.md"}}
+{"event_type":"file_write","timestamp":1800000006.0,"event_id":"obs-write","session_id":"session-observed","data":{"path":"RELEASE_NOTES.md"}}
+{"event_type":"tool_call","timestamp":1800000007.0,"event_id":"obs-test","session_id":"session-observed","data":{"tool_name":"bash","arguments":{"command":"pytest -q"},"is_test":true}}
+{"event_type":"tool_result","timestamp":1800000008.0,"event_id":"obs-test-result","session_id":"session-observed","parent_id":"obs-test","data":{"tool_name":"bash","exit_code":0,"success":true}}
+{"event_type":"session_end","timestamp":1800000010.0,"event_id":"obs-end","session_id":"session-observed","data":{}}

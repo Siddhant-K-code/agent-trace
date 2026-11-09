@@ -903,7 +903,7 @@ Read with care:
 - Baseline is the oldest version, or the previous version with `--compare`.
 - Sessions that start before the first `config-watch` snapshot count as the current version.
 - Cost is estimated from event size (chars/4) at default model pricing, not recorded token usage.
-- Ignores skills and whether the agent read the context file. For adoption, see [skills.md](skills.md).
+- Ignores skills and whether the agent read the context file. For adoption, see [skills.md](skills.md). For controlled instruction evidence, see [instruction-compliance.md](instruction-compliance.md).
 
 | Flag | Description |
 |---|---|
@@ -934,14 +934,14 @@ Skill adoption from recorded behavior: available → loaded → followed → out
 agent-strace skills eval CASES_FILE (--agent claude|copilot | --agent-cmd TEMPLATE | --from-traces DIR)
                          [--runs N] [--timeout SECONDS] [--case ID ...]
                          [--workspace PATH] [--skills-dir DIR ...]
-                         [--save-traces DIR] [--keep-workspaces] [--format text|json]
+                         [--save-traces DIR] [--keep-workspaces] [--format text|json|markdown]
                          [--fail-on-miss] [--fail-on-false-trigger]
 ```
-Experimental skill trigger eval. Runs each case's prompt through a headless agent N times in a temp workspace, captures each run with agent-strace hooks, and counts the runs in which the model loaded the skill. Counts only, no score. Cases whose skill sets `disable-model-invocation: true` are marked user-only. See [skills-eval.md](skills-eval.md).
+Experimental skill trigger eval. Runs each case's prompt through a headless agent N times in a temp workspace, captures each run with agent-strace hooks, and counts the runs in which the model loaded the skill. Optional instruction and expected-action fields add compliance evidence without adding a score. Cases whose skill sets `disable-model-invocation: true` are marked user-only. See [skills-eval.md](skills-eval.md) and [instruction-compliance.md](instruction-compliance.md).
 
 | Flag | Description |
 |---|---|
-| `CASES_FILE` | JSON list of `{id, skill, prompt, should_trigger}` with optional `fixture_dir`, `runs`, `note` |
+| `CASES_FILE` | JSON list of `{id, skill, prompt, should_trigger}` with optional `fixture_dir`, `runs`, `note`, `instructions`, and `expected_actions` |
 | `--agent claude\|copilot` | Run a preset headless command. Presets never approve every tool |
 | `--agent-cmd TEMPLATE` | Custom agent command. Placeholders: `{prompt}` (required), `{workspace}`, `{trace_dir}`, `{hooks_plugin_dir}`, `{claude_settings}` |
 | `--from-traces DIR` | Score recorded runs in `DIR/<case_id>/<run>/` instead of running an agent |
@@ -952,7 +952,7 @@ Experimental skill trigger eval. Runs each case's prompt through a headless agen
 | `--skills-dir DIR` | Extra skill directory to scan. Repeatable |
 | `--save-traces DIR` | Copy each run's trace store to `DIR/<case_id>/run-<n>/` with `run.json`. Must be new or empty |
 | `--keep-workspaces` | Keep each run's temp workspace, traces, and agent logs |
-| `--format text\|json` | Output format |
+| `--format text\|json\|markdown` | Output format |
 | `--fail-on-miss` | Exit 1 if a should-trigger run missed or was unscored |
 | `--fail-on-false-trigger` | Exit 1 if a should-not-trigger run loaded the skill or was unscored |
 

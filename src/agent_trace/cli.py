@@ -1732,7 +1732,8 @@ def build_parser() -> argparse.ArgumentParser:
             "Compare efficiency stats (cost, tool calls, lint, scope) across AGENTS.md / CLAUDE.md "
             "versions. Not an outcome score: 50 = no change vs baseline, lower cost or fewer "
             "tool calls scores higher, and differences are not causal. For skill adoption, "
-            "see 'agent-strace skills'."
+            "see 'agent-strace skills'. For controlled instruction evidence, see "
+            "'agent-strace skills eval'."
         ),
     )
     p_context_score.add_argument("--file", default="",
@@ -1751,7 +1752,7 @@ def build_parser() -> argparse.ArgumentParser:
         "skills",
         help="report skill availability, loads, follow signals, and post-load facts (no scores)",
         epilog=(
-            "To test whether a skill loads when it should (experimental), run "
+            "To test whether a skill or repository instruction loads and has observable follow evidence, run "
             "'agent-strace skills eval CASES_FILE'. See docs/skills-eval.md."
         ),
     )
@@ -1781,7 +1782,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_skills_eval.add_argument("cases_file", metavar="CASES_FILE",
-                               help="JSON list of {id, skill, prompt, should_trigger[, fixture_dir, runs, note]}")
+                               help="JSON cases with skill trigger expectations and optional instruction compliance evidence")
     eval_source = p_skills_eval.add_mutually_exclusive_group(required=True)
     eval_source.add_argument("--agent", choices=sorted(_SKILLS_EVAL_PRESETS),
                              help="run a preset headless agent command")
@@ -1804,7 +1805,7 @@ def build_parser() -> argparse.ArgumentParser:
                                help="copy each run's trace store to DIR/<case_id>/run-<n>/ (new or empty dir)")
     p_skills_eval.add_argument("--keep-workspaces", action="store_true",
                                help="keep each run's temp workspace, traces, and agent logs")
-    p_skills_eval.add_argument("--format", choices=["text", "json"], default="text",
+    p_skills_eval.add_argument("--format", choices=["text", "json", "markdown"], default="text",
                                help="output format (default: text)")
     p_skills_eval.add_argument("--fail-on-miss", action="store_true",
                                help="exit 1 if any should-trigger run missed or was unscored")

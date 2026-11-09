@@ -1,0 +1,5 @@
+{"event_type":"session_start","timestamp":1800000100.0,"event_id":"neg-start","session_id":"session-negative","data":{"provider":"synthetic"}}
+{"event_type":"user_prompt","timestamp":1800000101.0,"event_id":"neg-prompt","session_id":"session-negative","data":{"prompt":"How many fixes are listed in the Unreleased section?"}}
+{"event_type":"file_read","timestamp":1800000102.0,"event_id":"neg-agents","session_id":"session-negative","data":{"path":"AGENTS.md"}}
+{"event_type":"file_read","timestamp":1800000103.0,"event_id":"neg-changelog","session_id":"session-negative","data":{"path":"CHANGELOG.md"}}
+{"event_type":"session_end","timestamp":1800000104.0,"event_id":"neg-end","session_id":"session-negative","data":{}}
