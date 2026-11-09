@@ -51,6 +51,7 @@ Capture an MCP HTTP/SSE server session. Listens on `--port` (default: 5100) and 
 ```
 agent-strace setup [--cli claude|codex|gemini|cursor|copilot|all]
                     [--redact | --no-redact] [--global] [--verify]
+                    [--live] [--session SESSION_ID]
 ```
 Print or install hooks config for supported agent CLIs. `--cli claude` prints Claude Code settings JSON for `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR/settings.json`); `--cli codex` writes `$CODEX_HOME/hooks.json` or `~/.codex/hooks.json`, the directory Codex reads (a set `CODEX_HOME` must already exist; `CODEX_CONFIG_DIR` is ignored), first preserving an existing file once as `hooks.json.agent-strace.bak`; `--cli gemini` writes a Gemini CLI extension under `$GEMINI_CLI_HOME/.gemini/extensions/agent-strace` or `~/.gemini/extensions/agent-strace`, the directory Gemini CLI loads (`GEMINI_CONFIG_DIR` is ignored); `--cli cursor` writes `.cursor/hooks.json` or `$CURSOR_CONFIG_DIR/hooks.json`; `--cli copilot` writes `$COPILOT_HOME/hooks/agent-strace.json` or `~/.copilot/hooks/agent-strace.json`; `--cli all` configures all supported CLIs. Restore Codex with `cp ~/.codex/hooks.json.agent-strace.bak ~/.codex/hooks.json` (use `$CODEX_HOME` when set); repeated setup runs do not overwrite the backup. Secret redaction is enabled by default; use `--no-redact` only for trusted local traces.
 
@@ -58,9 +59,24 @@ Print or install hooks config for supported agent CLIs. `--cli claude` prints Cl
 |---|---|---|
 | `--cli PROVIDER` | `claude` | Configure `claude`, `codex`, `gemini`, `cursor`, `copilot`, or `all` |
 | `--verify` | off | Read-only check of installed hooks and the AgentTrace CLI version; requires `--cli codex` or `--cli claude`; returns non-zero if incomplete or hooks are disabled; does not capture events. With `--cli codex`: **Codex user-level** hooks in `$CODEX_HOME` or `~/.codex` and the `config.toml` `[features]` hooks flag; also fails if a set `CODEX_HOME` is not an existing directory; skips Codex profiles, `-c` overrides, and project, system, or managed config layers. With `--cli claude`: **Claude Code user settings** hooks, plus hook-disabling settings and AgentTrace hooks in project, local, and managed settings (see [setup.md](setup.md)) |
+| `--live` | off | With `--verify`, run the static setup check and then inspect the newest recorded session whose hook evidence matches the requested provider. Reports the session, capture method, event types, boundaries, redaction, evidence health, and packaged capture-matrix gaps. Returns non-zero when matching reviewable evidence is unavailable. Supports `claude` and `codex` only and never starts a provider process |
+| `--session SESSION_ID` | newest matching | Select a session ID or prefix for `--verify --live` instead of automatic newest-provider selection |
 | `--redact` | on | Explicitly enable secret redaction in generated hook commands |
 | `--no-redact` | off | Disable automatic secret redaction in generated hook commands |
 | `--global` | off | Compatibility flag; Claude setup already targets the user-level settings file |
+
+Use the full live verification after recording one harmless local session:
+
+```bash
+agent-strace setup --cli claude --verify --live
+agent-strace setup --cli codex --verify --live
+```
+
+The static configuration result and the recorded-evidence result are printed
+separately. Missing or stale setup, unsupported providers, no matching session,
+empty or unreadable evidence, provider mismatch, and `unknown` or `invalid`
+evidence health return non-zero with a diagnostic. See
+[live capture verification](setup.md#live-capture-verification).
 
 ### `hook`
 ```

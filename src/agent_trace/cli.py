@@ -25,6 +25,12 @@ from pathlib import Path
 from . import __version__
 from .store import default_trace_dir
 from .setup_verify import verify_claude_setup, verify_codex_setup
+from .live_verify import (
+    LiveCaptureError,
+    format_live_capture_text,
+    inspect_live_capture,
+    live_capture_failure_diagnostic,
+)
 from .hooks import hook_main
 from .http_proxy import HTTPProxyServer
 from .a2a import cmd_a2a_tree
@@ -719,7 +725,28 @@ def _verify_claude_setup(args: argparse.Namespace) -> int:
         "event; run a local session and inspect its trace to check actual capture.",
     ]
     sys.stdout.write("\n".join(lines) + "\n")
+    if getattr(args, "live", False):
+        return _verify_live_capture(args, "claude")
     return 0
+
+
+def _verify_live_capture(args: argparse.Namespace, provider: str) -> int:
+    try:
+        result = inspect_live_capture(
+            getattr(args, "trace_dir", default_trace_dir()),
+            provider,
+            getattr(args, "session", None),
+        )
+    except LiveCaptureError as exc:
+        sys.stderr.write(f"Live capture verification failed: {exc}\n")
+        return 1
+
+    format_live_capture_text(result, sys.stdout)
+    if result.exit_code:
+        diagnostic = live_capture_failure_diagnostic(result)
+        if diagnostic:
+            sys.stderr.write(f"Live capture verification failed: {diagnostic}\n")
+    return result.exit_code
 
 
 def _codex_hooks_config(args: argparse.Namespace) -> dict:
@@ -1084,7 +1111,16 @@ def _write_copilot_hooks_config(args: argparse.Namespace) -> Path:
 def cmd_setup(args: argparse.Namespace) -> int | None:
     """Generate hooks configuration, or verify Codex or Claude Code setup read-only."""
     cli = getattr(args, "cli", "claude") or "claude"
-    if getattr(args, "verify", False):
+    verify = getattr(args, "verify", False)
+    live = getattr(args, "live", False)
+    requested_session = getattr(args, "session", None)
+    if live and not verify:
+        sys.stderr.write("setup --live requires --verify.\n")
+        return 2
+    if requested_session and not live:
+        sys.stderr.write("setup --session requires --verify --live.\n")
+        return 2
+    if verify:
         if cli == "claude":
             return _verify_claude_setup(args)
         if cli != "codex":
@@ -1120,6 +1156,8 @@ def cmd_setup(args: argparse.Namespace) -> int | None:
                 "This does not prove Codex enabled/trusted hooks or captured an event; "
                 "run a local session and inspect its trace to check actual capture.\n"
             )
+            if live:
+                return _verify_live_capture(args, "codex")
             return 0
         for message in messages:
             sys.stderr.write(f"Setup verification failed: {message}\n")
@@ -1375,6 +1413,17 @@ def build_parser() -> argparse.ArgumentParser:
                          help="verify installed hooks without changing files: Codex user-level "
                               "hooks and the config.toml hooks feature flag, or Claude Code "
                               "settings files (requires --cli codex or --cli claude)")
+    p_setup.add_argument(
+        "--live",
+        action="store_true",
+        help="with --verify, inspect recorded evidence from the selected provider; "
+             "uses the newest matching session unless --session is given",
+    )
+    p_setup.add_argument(
+        "--session",
+        metavar="SESSION_ID",
+        help="session ID or prefix for --verify --live",
+    )
 
     # anonymous product telemetry controls
     p_telemetry = sub.add_parser(

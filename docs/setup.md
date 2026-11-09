@@ -11,13 +11,17 @@ Captures the lifecycle events exposed by each CLI: user prompts, assistant respo
 ```bash
 # Generate Claude Code hooks config
 agent-strace setup
-# Check the hooks you added to Claude Code settings (read-only; no trace is created)
+# Check the hooks you added to Claude Code settings
 agent-strace setup --cli claude --verify
+# After one local session, verify that matching events were recorded
+agent-strace setup --cli claude --verify --live
 
 # Install OpenAI Codex user-level hooks
 agent-strace setup --cli codex
-# Check installed Codex config and executable (read-only; no trace is created)
+# Check installed Codex config and executable
 agent-strace setup --cli codex --verify
+# After one local session, verify that matching events were recorded
+agent-strace setup --cli codex --verify --live
 
 # Install Gemini CLI extension hooks
 agent-strace setup --cli gemini
@@ -66,6 +70,37 @@ agent-strace replay   # replay the latest
 agent-strace explain  # plain-English summary
 ```
 
+### Live capture verification
+
+`agent-strace setup --cli PROVIDER --verify --live` is the supported path from
+installed configuration to observed local evidence for Claude Code and Codex.
+It runs the provider's static setup check first, including the resolved config
+and AgentTrace executable. It then selects the newest recorded session whose
+hook evidence matches the requested provider. Pass `--session SESSION_ID` to
+select a specific session or prefix.
+
+The report names the session ID, provider, capture method, observed event
+types, start and end markers, redaction state, evidence-health status, packaged
+capture-matrix version, and every declared gap from that provider's matrix
+entry. The command exits non-zero for missing or stale setup, no matching
+session, empty or unreadable evidence, a provider mismatch, or `unknown` or
+`invalid` evidence health.
+
+The verifier never starts Claude Code, Codex, or a model request. Record a
+small local session yourself, exit it cleanly, then run:
+
+```bash
+agent-strace setup --cli claude --verify --live
+agent-strace setup --cli codex --verify --live
+
+# Select an older or otherwise specific matching trace
+agent-strace setup --cli codex --verify --live --session SESSION_ID
+```
+
+For Claude Code, accept the workspace trust prompt before the representative
+session. For Codex, review and trust every AgentTrace command in `/hooks`;
+`codex exec` skips untrusted hooks without a warning.
+
 ### Claude Code hook verification
 
 `agent-strace setup --cli claude --verify` checks the Claude Code hooks without
@@ -110,10 +145,10 @@ The check fails when:
   and runs an identical handler once, so exact copies pass. Other copies can
   record events twice or with another redaction mode.
 
-**A passing check does not mean Claude Code trusted this folder, ran the hooks
-or captured events.** In an interactive session, Claude Code runs no hooks
-until you accept the workspace trust dialog. Run a local session and inspect it
-with `agent-strace list` and `agent-strace inspect SESSION_ID`.
+**A passing static check does not mean Claude Code trusted this folder, ran the
+hooks or captured events.** In an interactive session, Claude Code runs no
+hooks until you accept the workspace trust dialog. Run a local session, then
+use `agent-strace setup --cli claude --verify --live`.
 
 Not checked: other settings values (run `claude doctor`), the `--settings`,
 `--setting-sources`, `--bare` and `--safe-mode` flags, MDM and server-managed
@@ -187,12 +222,12 @@ config layers are **not** checked. On Python 3.10, which has no `tomllib`, a
 minimal built-in reader looks only for these keys and does not validate the
 rest of the file.
 
-**A passing check does not mean Codex has enabled or trusted these hooks, that
-a provider process ran, or that events were captured.** Reload Codex, review
-the command hooks in its Hooks UI, run a local test session, and use
-`agent-strace list` / `agent-strace inspect SESSION_ID` to inspect
-actually observed evidence. Verification invokes only the local AgentTrace
-executable with `--version`; it does not execute hooks or write config.
+**A passing static check does not mean Codex has enabled or trusted these
+hooks, that a provider process ran, or that events were captured.** Reload
+Codex, review the command hooks in its Hooks UI, run a local test session, then
+use `agent-strace setup --cli codex --verify --live`. Verification invokes only
+the local AgentTrace executable with `--version`; it does not execute hooks,
+write config, or start Codex.
 
 A successful verification prints the installed hooks path, matching event count,
 actual redaction mode, the `config.toml` path and hooks feature state, and

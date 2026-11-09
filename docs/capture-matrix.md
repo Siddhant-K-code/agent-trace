@@ -4,6 +4,27 @@ AgentTrace can only report events exposed by a provider's hook surface. This mat
 
 The machine-readable source is [`src/agent_trace/capture_matrix.json`](../src/agent_trace/capture_matrix.json). It ships inside the package so [`agent-strace health`](commands.md#health) can read the same entries this page describes. An entry marked **unverified** is documentation of the current adapter contract, not proof that a specific provider release was exercised in a clean environment. An entry marked **verified** names the provider release that was exercised; other releases may behave differently.
 
+## Verify one local capture
+
+After recording one local Claude Code or Codex session, run:
+
+```bash
+agent-strace setup --cli claude --verify --live
+agent-strace setup --cli codex --verify --live
+```
+
+The command first verifies the provider config and AgentTrace executable. It
+then selects the newest matching recorded session, or the session passed with
+`--session SESSION_ID`, and applies this packaged matrix through the same
+evidence-health assessment used by `agent-strace health`. Its known-gap list
+comes directly from the selected provider entry. The verifier does not infer a
+gap from a missing event and does not start a provider or model request.
+
+Local live verification and matrix `verification_status` answer different
+questions. Live verification proves that this installation recorded one
+reviewable session. Matrix status records whether the repository contains a
+versioned, reproducible provider fixture for the adapter contract.
+
 | Provider | Setup | Session | Prompt/response | Tools | File/command/error | Verification |
 |---|---|---|---|---|---|---|
 | Claude Code | `agent-strace setup --cli claude` | start + end | captured | captured | provider-defined | unverified |
@@ -17,6 +38,8 @@ The machine-readable source is [`src/agent_trace/capture_matrix.json`](../src/ag
 - Rollback: remove only the AgentTrace command hooks you manually merged into that file, retaining unrelated hooks.
 - Privacy: captured fields still pass through AgentTrace redaction, but AgentTrace cannot expose fields Claude Code never emits.
 - Known gap: file and command semantics depend on the hook-visible tool payload.
+- Local verification: accept workspace trust, record one small session, exit it
+  cleanly, then run `agent-strace setup --cli claude --verify --live`.
 
 ## OpenAI Codex
 
@@ -40,6 +63,9 @@ The machine-readable source is [`src/agent_trace/capture_matrix.json`](../src/ag
   - A failed shell command arrives as a normal `PostToolUse` with the error text in `tool_response`, so it is recorded as a `tool_result`, not an `error`.
   - Hook payloads carry the model name, recorded on the `session_start` event, but no token usage.
   - Shell calls arrive as tool `Bash` with `tool_input.command`; file and command detail depends on those payloads.
+- Local verification: trust every AgentTrace command in `/hooks`, record one
+  small session, exit it cleanly, then run
+  `agent-strace setup --cli codex --verify --live`.
 
 ## GitHub Copilot CLI
 
