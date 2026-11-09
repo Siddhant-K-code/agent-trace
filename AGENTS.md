@@ -48,7 +48,9 @@ python -m unittest discover -s tests -p 'test_watch.py' -v
 
 ## Version bumping
 
-The version lives in `src/agent_trace/__init__.py`. A release must also sync `plugin.json` and both versions in `.github/plugin/marketplace.json` (`metadata.version` and `plugins[0].version`).
+The version lives in `src/agent_trace/__init__.py`. A release must also sync `plugin.json`, `gemini-extension.json`, both versions in `.github/plugin/marketplace.json` (`metadata.version` and `plugins[0].version`), and both versions in `server.json` (`version` and `packages[0].version`). `tests/test_plugin.py` fails until they match.
+
+After the PyPI publish for a release, publish the same version to the MCP Registry from the repo root: `mcp-publisher login github` (one-time device auth) then `mcp-publisher publish`.
 
 - New feature (new command, new flag, new integration): bump minor (`X.Y.Z` → `X.(Y+1).0`)
 - Bug fix or small improvement: bump patch (`X.Y.Z` → `X.Y.(Z+1)`)
@@ -65,6 +67,7 @@ The `docs/` directory contains user-facing documentation. Keep these files curre
 | `docs/production.md` | Per-backend OTLP setup (Datadog, Honeycomb, Grafana, etc.) |
 | `docs/server.md` | Server-side collector setup, Docker, API reference |
 | `docs/integrations.md` | Auto-instrumentation for each framework |
+| `docs/mcp.md` | `agent-strace mcp` tools and client setup |
 | `docs/vscode.md` | VS Code extension docs (setup, commands, settings) |
 | `docs/security.md` | Secret redaction, PII anonymization, policy files |
 

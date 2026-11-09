@@ -1,17 +1,21 @@
 """Tests for the MCP server (agent-strace mcp)."""
 
 import json
+import shutil
 import tempfile
 import time
 import unittest
+from pathlib import Path
 
 from agent_trace.mcp_server import (
     _handle,
     _tool_diff_sessions,
     _tool_get_session,
     _tool_get_session_summary,
+    _tool_health,
     _tool_list_sessions,
     _tool_search_events,
+    _tool_skills,
 )
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
@@ -89,7 +93,7 @@ class TestMcpLifecycle(unittest.TestCase):
         self.assertEqual(r["result"]["serverInfo"]["name"], "agent-trace")
         self.assertIn("protocolVersion", r["result"])
 
-    def test_tools_list_returns_five_tools(self):
+    def test_tools_list_returns_all_tools(self):
         r = _handle(self.store, _rpc("tools/list", {}))
         names = [t["name"] for t in r["result"]["tools"]]
         self.assertIn("list_sessions", names)
@@ -97,7 +101,9 @@ class TestMcpLifecycle(unittest.TestCase):
         self.assertIn("search_events", names)
         self.assertIn("get_session_summary", names)
         self.assertIn("diff_sessions", names)
-        self.assertEqual(len(names), 5)
+        self.assertIn("health", names)
+        self.assertIn("skills", names)
+        self.assertEqual(len(names), 7)
 
     def test_unknown_method_returns_error(self):
         r = _handle(self.store, _rpc("unknown/method", {}))
@@ -386,3 +392,95 @@ class TestHandleToolsCall(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# health and skills
+# ---------------------------------------------------------------------------
+
+class TestServerVersion(unittest.TestCase):
+    def test_initialize_reports_package_version(self):
+        from agent_trace import __version__
+        r = _handle(_make_store(), _rpc("initialize", {}))
+        self.assertEqual(r["result"]["serverInfo"]["version"], __version__)
+
+
+class TestHealthTool(unittest.TestCase):
+    def setUp(self):
+        self.store = _make_store()
+
+    def test_empty_store_returns_error(self):
+        result = json.loads(_tool_health(self.store, {}))
+        self.assertIn("error", result)
+
+    def test_not_found_returns_error(self):
+        result = json.loads(_tool_health(self.store, {"session_id": "nope"}))
+        self.assertIn("session not found", result["error"])
+
+    def test_reports_named_session(self):
+        _add_session(self.store, "health-1", [_tool_call("bash", 1.0), _tool_result(0, 2.0)])
+        result = json.loads(_tool_health(self.store, {"session_id": "health"}))
+        self.assertEqual(result["session_id"], "health-1")
+        self.assertIn("status", result)
+        self.assertIn("capture_matrix", result)
+        self.assertIn("redaction", result)
+
+    def test_defaults_to_latest_session(self):
+        _add_session(self.store, "only-one", [_tool_call("bash", 1.0)])
+        result = json.loads(_tool_health(self.store, {}))
+        self.assertEqual(result["session_id"], "only-one")
+
+    def test_via_handle(self):
+        _add_session(self.store, "handle-health", [])
+        r = _handle(self.store, _rpc("tools/call", {"name": "health", "arguments": {}}))
+        self.assertFalse(r["result"]["isError"])
+        self.assertEqual(json.loads(r["result"]["content"][0]["text"])["session_id"], "handle-health")
+
+
+class TestSkillsTool(unittest.TestCase):
+    def setUp(self):
+        self.store = _make_store()
+        self.repo = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.repo, True)
+        skill_dir = self.repo / ".github" / "skills" / "deploy-check"
+        skill_dir.mkdir(parents=True)
+        self.skill_file = skill_dir / "SKILL.md"
+        self.skill_file.write_text("---\nname: deploy-check\ndescription: test\n---\nSECRET_BODY\n")
+
+    def _session(self, session_id: str, load: bool) -> None:
+        events = [TraceEvent(event_type=EventType.SESSION_START, timestamp=1.0,
+                             data={"cwd": str(self.repo)})]
+        if load:
+            events.append(_file_read(str(self.skill_file), 2.0))
+        _add_session(self.store, session_id, events)
+
+    def test_session_report_lists_loaded_skill(self):
+        self._session("skills-1", load=True)
+        text = _tool_skills(self.store, {"session_id": "skills-1"})
+        self.assertNotIn("SECRET_BODY", text)
+        result = json.loads(text)
+        self.assertIn("deploy-check", [s["name"] for s in result["loaded"]])
+
+    def test_aggregate_report_lists_never_loaded(self):
+        for i in range(2):
+            self._session(f"agg-{i}", load=False)
+        result = json.loads(_tool_skills(self.store, {"since": "7d", "min_sessions": 1}))
+        self.assertIn("deploy-check", json.dumps(result["never_loaded"]))
+
+    def test_not_found_returns_error(self):
+        result = json.loads(_tool_skills(self.store, {"session_id": "missing"}))
+        self.assertIn("session not found", result["error"])
+
+    def test_bad_since_returns_error(self):
+        result = json.loads(_tool_skills(self.store, {"since": "not-a-date"}))
+        self.assertIn("error", result)
+
+    def test_bad_min_sessions_returns_error(self):
+        result = json.loads(_tool_skills(self.store, {"min_sessions": 0}))
+        self.assertIn("error", result)
+
+    def test_listed_in_tools(self):
+        r = _handle(self.store, _rpc("tools/list", {}))
+        names = [t["name"] for t in r["result"]["tools"]]
+        self.assertIn("health", names)
+        self.assertIn("skills", names)

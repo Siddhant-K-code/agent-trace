@@ -203,6 +203,7 @@ class TestGeminiSetup(unittest.TestCase):
         printed_hooks = json.loads(out.getvalue())
 
         self.assertEqual(manifest["name"], "agent-strace")
+        self.assertEqual(manifest["mcpServers"]["agent-strace"]["args"], ["mcp"])
         self.assertIn("BeforeTool", hooks["hooks"])
         self.assertIn("AfterTool", hooks["hooks"])
         self.assertIn("BeforeAgent", hooks["hooks"])

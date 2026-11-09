@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from agent_trace import __version__
-from agent_trace.cli import _copilot_hooks_config
+from agent_trace.cli import _copilot_hooks_config, _gemini_extension_manifest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,6 +32,31 @@ class TestCopilotPlugin(unittest.TestCase):
         self.assertEqual(marketplace["plugins"][0]["name"], "agent-strace")
         self.assertEqual(marketplace["plugins"][0]["version"], __version__)
         self.assertEqual(marketplace["plugins"][0]["source"], ".")
+
+    def test_gemini_extension_manifest_matches_setup(self):
+        manifest = json.loads((ROOT / "gemini-extension.json").read_text())
+
+        self.assertEqual(manifest, _gemini_extension_manifest())
+        self.assertEqual(manifest["version"], __version__)
+        # Copilot legacy plugins also probe hooks/hooks.json; Gemini hooks are
+        # written by `agent-strace setup --cli gemini` instead.
+        self.assertFalse((ROOT / "hooks").exists())
+
+    def test_mcp_registry_server_json_matches_package(self):
+        server = json.loads((ROOT / "server.json").read_text())
+        name = "io.github.Siddhant-K-code/agent-trace"
+
+        self.assertEqual(server["name"], name)
+        self.assertLessEqual(len(server["description"]), 100)
+        self.assertEqual(server["version"], __version__)
+        self.assertEqual(len(server["packages"]), 1)
+        package = server["packages"][0]
+        self.assertEqual(package["registryType"], "pypi")
+        self.assertEqual(package["identifier"], "agent-strace")
+        self.assertEqual(package["version"], __version__)
+        self.assertEqual(package["packageArguments"], [{"type": "positional", "value": "mcp"}])
+        # PyPI ownership marker the MCP Registry checks in the package README.
+        self.assertIn(f"mcp-name: {name}", (ROOT / "README.md").read_text())
 
     def test_plugin_hooks_match_generated_copilot_hooks(self):
         plugin_hooks = json.loads((ROOT / "hooks.json").read_text())

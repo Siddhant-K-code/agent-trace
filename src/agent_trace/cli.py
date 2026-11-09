@@ -972,10 +972,15 @@ def _cursor_hooks_config(args: argparse.Namespace) -> dict:
 
 
 def _gemini_extension_manifest() -> dict:
+    # Kept identical to the repo-root gemini-extension.json used by the
+    # Gemini CLI extension gallery, so both install paths converge.
     return {
         "name": "agent-strace",
         "version": __version__,
         "description": "Capture and replay Gemini CLI sessions with agent-strace",
+        "mcpServers": {
+            "agent-strace": {"command": "agent-strace", "args": ["mcp"]},
+        },
     }
 
 

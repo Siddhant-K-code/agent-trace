@@ -1,28 +1,22 @@
-"""MCP server — expose agent-trace session store as queryable MCP tools.
+"""MCP server: expose the agent-trace session store as queryable MCP tools.
 
 Implements the Model Context Protocol over stdio (JSON-RPC 2.0).
 No external dependencies; uses only stdlib.
 
 Tools exposed:
-  list_sessions     — list captured sessions with metadata
-  get_session       — full event stream for a session
-  search_events     — filter events by tool, file path, exit code, or time range
-  get_session_summary — plain-English phase breakdown (wraps explain_session)
-  diff_sessions     — compare two sessions: what changed between runs
+  list_sessions        list captured sessions with metadata
+  get_session          full event stream for a session
+  search_events        filter events by tool, file path, exit code, or time range
+  get_session_summary  plain-English phase breakdown (wraps explain_session)
+  diff_sessions        compare two sessions: what changed between runs
+  health               evidence health for a session (wraps agent-strace health)
+  skills               skill adoption report (wraps agent-strace skills)
 
 Usage:
   agent-strace mcp                  # stdio transport (default)
   agent-strace mcp --trace-dir DIR  # custom trace directory
 
-Claude Code config (~/.claude/settings.json):
-  {
-    "mcpServers": {
-      "agent-trace": {
-        "command": "agent-strace",
-        "args": ["mcp"]
-      }
-    }
-  }
+Client setup for Claude Code, Copilot CLI, Codex, and Gemini CLI: docs/mcp.md
 """
 
 from __future__ import annotations
@@ -33,7 +27,11 @@ import json
 import sys
 from typing import Any
 
+from . import __version__
+from .cost import parse_since
 from .explain import explain_session, format_explain
+from .health import assess_session, load_capture_matrix
+from .skills import build_aggregate_report, build_session_report
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -171,6 +169,69 @@ _TOOLS: list[dict] = [
                 },
             },
             "required": ["session_a", "session_b"],
+        },
+    },
+    {
+        "name": "health",
+        "description": (
+            "Report evidence health for a session: which agent/provider recorded it, "
+            "whether it was finalized, redaction state, known capture blind spots, "
+            "and structural problems such as orphaned tool results. "
+            "Same data as 'agent-strace health --format json'."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "Session ID or unique prefix. Omit for the latest session.",
+                    "default": "",
+                },
+            },
+        },
+    },
+    {
+        "name": "skills",
+        "description": (
+            "Report agent skill (SKILL.md) adoption: which skills are available, "
+            "which were loaded, follow-up signals after a load, and which never loaded. "
+            "Without session_id, aggregates sessions since 'since'. "
+            "Same data as 'agent-strace skills --format json'. "
+            "Prompt text and SKILL.md bodies are never returned."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "Session ID or prefix for a single-session report. Omit to aggregate.",
+                    "default": "",
+                },
+                "since": {
+                    "type": "string",
+                    "description": "Aggregate window, e.g. 7d, 24h, or 2026-01-01 (default: 30d).",
+                    "default": "30d",
+                },
+                "workspace": {
+                    "type": "string",
+                    "description": (
+                        "Repository path used to discover repo skills when a session has no "
+                        "recorded cwd. Defaults to the server's working directory."
+                    ),
+                    "default": "",
+                },
+                "skills_dirs": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Extra skill directories to scan.",
+                    "default": [],
+                },
+                "min_sessions": {
+                    "type": "integer",
+                    "description": "Minimum sessions before a skill is reported as never loaded (default: 5).",
+                    "default": 5,
+                },
+            },
         },
     },
 ]
@@ -383,6 +444,53 @@ def _tool_diff_sessions(store: TraceStore, args: dict) -> str:
     }, indent=2)
 
 
+def _tool_health(store: TraceStore, args: dict) -> str:
+    requested = str(args.get("session_id") or "")
+    if requested:
+        session_id = store.find_session(requested)
+        if not session_id:
+            return json.dumps({"error": f"session not found: {requested}"})
+    else:
+        session_id = store.get_latest_session_id()
+        if not session_id:
+            return json.dumps({"error": "no sessions found"})
+
+    matrix = load_capture_matrix()
+    meta = store.load_meta(session_id)
+    events = store.load_events(session_id)
+    report = assess_session(store, session_id, meta, events, matrix)
+    return json.dumps(report.to_dict(), indent=2)
+
+
+def _tool_skills(store: TraceStore, args: dict) -> str:
+    workspace = str(args.get("workspace") or "")
+    extra_dirs = [str(d) for d in (args.get("skills_dirs") or [])]
+    try:
+        raw_min = args.get("min_sessions")
+        min_sessions = 5 if raw_min is None else int(raw_min)
+    except (TypeError, ValueError):
+        return json.dumps({"error": "min_sessions must be an integer"})
+    if min_sessions < 1:
+        return json.dumps({"error": "min_sessions must be at least 1"})
+
+    requested = str(args.get("session_id") or "")
+    if requested:
+        session_id = store.find_session(requested)
+        if not session_id:
+            return json.dumps({"error": f"session not found: {requested}"})
+        report = build_session_report(store, session_id, workspace=workspace, extra_dirs=extra_dirs)
+        return json.dumps(report, indent=2)
+
+    try:
+        since = parse_since(str(args.get("since") or "30d"))
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)})
+    report = build_aggregate_report(
+        store, since=since, workspace=workspace, extra_dirs=extra_dirs, min_sessions=min_sessions,
+    )
+    return json.dumps(report, indent=2)
+
+
 # ---------------------------------------------------------------------------
 # JSON-RPC 2.0 dispatcher
 # ---------------------------------------------------------------------------
@@ -400,7 +508,7 @@ def _handle(store: TraceStore, request: dict) -> dict | None:
     method = request.get("method", "")
     params = request.get("params") or {}
 
-    # Notifications (no id) — no response required
+    # Notifications (no id) need no response
     if req_id is None and method not in ("initialize",):
         return None
 
@@ -409,7 +517,7 @@ def _handle(store: TraceStore, request: dict) -> dict | None:
         return _ok(req_id, {
             "protocolVersion": "2024-11-05",
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "agent-trace", "version": "0.38.0"},
+            "serverInfo": {"name": "agent-trace", "version": __version__},
         })
 
     if method == "notifications/initialized":
@@ -428,6 +536,8 @@ def _handle(store: TraceStore, request: dict) -> dict | None:
             "search_events": _tool_search_events,
             "get_session_summary": _tool_get_session_summary,
             "diff_sessions": _tool_diff_sessions,
+            "health": _tool_health,
+            "skills": _tool_skills,
         }
         fn = dispatch.get(name)
         if fn is None:
