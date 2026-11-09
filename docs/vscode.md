@@ -106,7 +106,7 @@ For Claude Code and Codex sessions, **Verify live capture** runs the complete lo
 
 ### Local actions
 
-**Compare** runs the existing local `compare` command. **Save minimized share** writes a local HTML file without session identity, absolute timestamps, raw fields, prompts, commands, paths, results, or annotation text. **Export OTLP JSON** calls the existing export path without an endpoint, so nothing is uploaded.
+**Compare** runs the existing local `compare` command. **Save minimized share** writes a value-free local review ledger with verified capture identifiers and fixed annotation categories. Use `agent-strace share` for the canonical Evidence Packet. **Export OTLP JSON** calls the existing export path without an endpoint, so nothing is uploaded.
 
 ---
 

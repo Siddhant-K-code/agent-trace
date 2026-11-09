@@ -356,6 +356,7 @@ function renderHeader(review){
   document.getElementById('gap-title').textContent=`Capture gaps and limits (${gaps.length})`;
   const gapList=document.getElementById('gap-list');
   gapList.replaceChildren();
+  const unresolvedAnnotations=[...(review.unresolved_annotations||[])];
   if(!gaps.length){
     gapList.appendChild(node('li','', 'No observed structural gaps or declared provider limits.'));
   }else{
@@ -363,6 +364,11 @@ function renderHeader(review){
       const item=node('li');
       const code=node('span','mono',gap.code+': ');
       item.append(code,document.createTextNode(gap.message));
+      if(gap.code==='unresolved_annotation'&&unresolvedAnnotations.length){
+        const annotation=unresolvedAnnotations.shift();
+        const detail=annotation.note||annotation.label||annotation.annotation_id;
+        item.appendChild(document.createTextNode(` Annotation: ${detail}`));
+      }
       if(gap.event_id){
         const jump=node('button','relation-link',` ${gap.event_id}`);
         jump.type='button';
@@ -789,7 +795,7 @@ def api_session_compare(
 
 
 def api_minimized_review_share(store: "TraceStore", session_id: str) -> str | None:
-    """Return a self-contained minimized review file without raw content."""
+    """Return a self-contained value-free review file."""
     full_id = _resolve_session(store, session_id)
     if full_id is None:
         return None

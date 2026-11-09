@@ -79,23 +79,6 @@ class ReviewSurfaceTests(unittest.TestCase):
         self.assertEqual(counts["corrections"], 1)
         self.assertGreaterEqual(counts["gaps"], 1)
 
-    def test_minimized_share_omits_recorded_values(self) -> None:
-        review = build_session_review(self.store, self.session_id)
-        minimized = build_minimized_review_payload(review)
-        encoded = json.dumps(minimized)
-
-        self.assertEqual(minimized["privacy"]["mode"], "minimized")
-        self.assertNotIn(self.session_id, encoded)
-        self.assertNotIn("src/example.py", encoded)
-        self.assertNotIn("python -m pytest", encoded)
-        self.assertNotIn("Human correction:", encoded)
-        self.assertNotIn("1 passed", encoded)
-
-        rendered = render_minimized_review_html(minimized)
-        self.assertIn("Privacy-minimized evidence review", rendered)
-        self.assertNotIn("src/example.py", rendered)
-        self.assertNotIn("python -m pytest", rendered)
-
     def test_surfaces_live_capture_verification_for_supported_provider(self) -> None:
         session_id = "claude-review"
         self.store.create_session(SessionMeta(
@@ -147,6 +130,71 @@ class ReviewSurfaceTests(unittest.TestCase):
         self.assertTrue(review["live_capture"]["supported"])
         self.assertEqual(review["live_capture"]["status"], "observed")
         self.assertEqual(review["live_capture"]["provider"], "claude")
+        minimized = build_minimized_review_payload(review)
+        self.assertEqual(minimized["session"]["provider"], "claude")
+        self.assertEqual(minimized["session"]["capture_method"], "cli_hooks")
+
+    def test_minimized_share_allowlists_capture_and_annotation_metadata(self) -> None:
+        review = build_session_review(self.store, self.session_id)
+        annotated = next(item for item in review["items"] if item["annotations"])
+        annotated["annotations"][0]["label"] = "customer-secret-label"
+
+        minimized = build_minimized_review_payload(review)
+        encoded = json.dumps(minimized)
+
+        self.assertEqual(minimized["session"]["provider"], "unknown")
+        self.assertEqual(minimized["session"]["capture_method"], "unknown")
+        self.assertNotIn(self.session_id, encoded)
+        self.assertNotIn("customer-secret-label", encoded)
+        self.assertNotIn("src/example.py", encoded)
+        self.assertNotIn("python -m pytest", encoded)
+        self.assertNotIn("Human correction:", encoded)
+        self.assertNotIn("1 passed", encoded)
+        labels = [
+            annotation["label"]
+            for item in minimized["items"]
+            for annotation in item["annotations"]
+        ]
+        self.assertEqual(labels, ["correction"])
+
+        rendered = render_minimized_review_html(minimized)
+        self.assertIn("Privacy-minimized evidence review", rendered)
+        self.assertNotIn("customer-secret-label", rendered)
+
+    def test_preserves_missing_and_duplicate_target_annotations_as_gaps(self) -> None:
+        add_annotation(self.store, self.session_id, Annotation(
+            annotation_id="ann-missing",
+            event_id="not-recorded",
+            note="Missing target note",
+        ))
+        for timestamp in (20, 21):
+            self.store.append_event(self.session_id, TraceEvent(
+                EventType.FILE_READ,
+                timestamp=1789300800 + timestamp,
+                session_id=self.session_id,
+                event_id="duplicate-target",
+                data={"path": "src/duplicate.py"},
+            ))
+        add_annotation(self.store, self.session_id, Annotation(
+            annotation_id="ann-duplicate",
+            event_id="duplicate-target",
+            note="Duplicate target note",
+        ))
+
+        review = build_session_review(self.store, self.session_id)
+
+        self.assertEqual(
+            [annotation["annotation_id"] for annotation in review["unresolved_annotations"]],
+            ["ann-missing", "ann-duplicate"],
+        )
+        self.assertEqual(
+            [
+                reason["code"]
+                for reason in review["capture_gaps"]
+                if reason["code"] == "unresolved_annotation"
+            ],
+            ["unresolved_annotation", "unresolved_annotation"],
+        )
 
 
 if __name__ == "__main__":

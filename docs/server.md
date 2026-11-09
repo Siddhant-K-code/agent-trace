@@ -53,6 +53,14 @@ Open `http://127.0.0.1:4317/`, select a session, and review ordered evidence, he
 
 The page can compare two sessions, save a privacy-minimized HTML review, and download OTLP JSON. These actions read the configured local store and return local files. They do not upload trace data.
 
+With `--dashboard`, the server defaults to `127.0.0.1`. An unauthenticated dashboard cannot bind to `0.0.0.0`, `::`, a LAN address, or a hostname. To expose it beyond loopback, set an API key explicitly:
+
+```bash
+agent-strace server --dashboard --host 0.0.0.0 --auth-key ast_<key>
+```
+
+The collector without `--dashboard` keeps its existing `0.0.0.0` default.
+
 Use the event query parameter to target a recorded event:
 
 ```text

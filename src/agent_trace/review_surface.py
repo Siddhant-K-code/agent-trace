@@ -15,6 +15,7 @@ from collections import Counter
 
 from .annotate import Annotation, load_annotations
 from .disclosure import build_disclosure_preview
+from .event_data import require_object_event_data
 from .health import CaptureMatrix, assess_session, load_capture_matrix
 from .live_verify import LiveCaptureError, inspect_live_capture
 from .models import EventType, SessionMeta, TraceEvent
@@ -45,6 +46,15 @@ _EXPECTED_PARENT_TYPES = {
 _REQUEST_TYPES = {
     EventType.TOOL_CALL: frozenset({EventType.TOOL_RESULT, EventType.ERROR}),
     EventType.LLM_REQUEST: frozenset({EventType.LLM_RESPONSE, EventType.ERROR}),
+}
+_MINIMIZED_PROVIDERS = frozenset({"claude", "codex", "copilot"})
+_MINIMIZED_CAPTURE_METHODS = frozenset({"cli_hooks"})
+_MINIMIZED_ANNOTATION_LABELS = {
+    "root-cause": "root_cause",
+    "decision": "decision",
+    "retry": "retry",
+    "fix": "fix",
+    "question": "question",
 }
 
 
@@ -144,6 +154,29 @@ def _annotation_payload(annotation: Annotation) -> dict[str, object]:
         "created_at": annotation.created_at,
         "correction": correction,
     }
+
+
+def _minimized_annotation_label(annotation: dict[str, object]) -> str:
+    if annotation.get("correction"):
+        return "correction"
+    label = str(annotation.get("label") or "").strip().lower()
+    return _MINIMIZED_ANNOTATION_LABELS.get(label, "other" if label else "none")
+
+
+def _minimized_capture_identity(
+    evidence_health: dict[str, object],
+) -> tuple[str, str]:
+    provider = str(evidence_health.get("provider") or "")
+    capture_method = str(evidence_health.get("capture_method") or "")
+    return (
+        provider if provider in _MINIMIZED_PROVIDERS else "unknown",
+        (
+            capture_method
+            if provider in _MINIMIZED_PROVIDERS
+            and capture_method in _MINIMIZED_CAPTURE_METHODS
+            else "unknown"
+        ),
+    )
 
 
 def _annotation_targets(
@@ -286,6 +319,7 @@ def build_session_review(
     """Build the complete local review payload for one stored session."""
     meta = store.load_meta(session_id)
     events = store.load_events(session_id)
+    require_object_event_data(events, session_id=session_id)
     annotations = load_annotations(store, session_id)
     health = assess_session(
         store,
@@ -364,7 +398,7 @@ def build_session_review(
 
 
 def build_minimized_review_payload(review: dict[str, object]) -> dict[str, object]:
-    """Return a content-free review payload suitable for local file sharing."""
+    """Return a value-free review payload suitable for local file sharing."""
     session = review["session"]
     assert isinstance(session, dict)
     items = review["items"]
@@ -403,7 +437,7 @@ def build_minimized_review_payload(review: dict[str, object]) -> dict[str, objec
             "redacted": bool(item.get("redacted")),
             "annotations": [
                 {
-                    "label": annotation.get("label"),
+                    "label": _minimized_annotation_label(annotation),
                     "correction": bool(annotation.get("correction")),
                 }
                 for annotation in item.get("annotations", [])
@@ -413,6 +447,7 @@ def build_minimized_review_payload(review: dict[str, object]) -> dict[str, objec
     evidence_health = review["evidence_health"]
     assert isinstance(evidence_health, dict)
     reasons = evidence_health.get("reasons", [])
+    provider, capture_method = _minimized_capture_identity(evidence_health)
     session_id = str(session["session_id"])
     return {
         "schema_version": MINIMIZED_REVIEW_SCHEMA_VERSION,
@@ -430,8 +465,8 @@ def build_minimized_review_payload(review: dict[str, object]) -> dict[str, objec
         },
         "session": {
             "session_ref": hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:12],
-            "provider": session.get("provider"),
-            "capture_method": session.get("capture_method"),
+            "provider": provider,
+            "capture_method": capture_method,
             "duration_ms": session.get("duration_ms"),
             "event_count": len(minimized_items),
         },
@@ -495,6 +530,7 @@ th{{color:#475569}}details{{margin-top:24px}}pre{{white-space:pre-wrap;overflow-
 <div class="meta">
 <span>Session ref: {html.escape(str(session.get("session_ref") or ""))}</span>
 <span>Provider: {html.escape(str(session.get("provider") or "unknown"))}</span>
+<span>Capture: {html.escape(str(session.get("capture_method") or "unknown"))}</span>
 <span>Evidence health: {html.escape(str(health.get("status") or "unknown"))}</span>
 <span>Events: {len(items)}</span>
 </div>

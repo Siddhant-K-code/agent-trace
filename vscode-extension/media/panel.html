@@ -437,6 +437,7 @@
     pauseBtn.style.display = controls && controls.paused ? 'none' : '';
     resumeBtn.style.display = controls && controls.paused ? '' : 'none';
     const gaps = review.capture_gaps || [];
+    const unresolvedAnnotations = [...(review.unresolved_annotations || [])];
     document.getElementById('gap-summary').textContent =
       'Capture gaps and limits (' + gaps.length + ')';
     const gapList = document.getElementById('gap-list');
@@ -444,11 +445,15 @@
     if (!gaps.length) {
       gapList.appendChild(node('li', '', 'No observed structural gaps or declared provider limits.'));
     } else {
-      gaps.forEach((gap) => gapList.appendChild(node(
-        'li',
-        '',
-        gap.code + ': ' + gap.message,
-      )));
+      gaps.forEach((gap) => {
+        let text = gap.code + ': ' + gap.message;
+        if (gap.code === 'unresolved_annotation' && unresolvedAnnotations.length) {
+          const annotation = unresolvedAnnotations.shift();
+          text += ' Annotation: ' +
+            (annotation.note || annotation.label || annotation.annotation_id);
+        }
+        gapList.appendChild(node('li', '', text));
+      });
     }
   }
   function renderFilters(review) {

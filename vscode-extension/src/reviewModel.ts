@@ -66,6 +66,8 @@ export interface ReviewModel {
   evidence_health: {
     status: string;
     reasons: HealthReason[];
+    provider: string;
+    capture_method: string;
   };
   capture_gaps: HealthReason[];
   privacy: {
@@ -74,6 +76,7 @@ export interface ReviewModel {
   };
   filters: Array<{ id: string; count: number }>;
   items: ReviewItem[];
+  unresolved_annotations: Array<ReviewAnnotation & { correction: boolean }>;
 }
 
 const FILTERS = [
@@ -100,6 +103,22 @@ const CONTENT_TYPES = new Set([
   "file_read",
   "file_write",
 ]);
+const KNOWN_EVENT_TYPES = new Set([
+  "session_start",
+  "session_end",
+  "tool_call",
+  "tool_result",
+  "llm_request",
+  "llm_response",
+  "file_read",
+  "file_write",
+  "decision",
+  "error",
+  "user_prompt",
+  "assistant_response",
+  "subagent_start",
+  "subagent_stop",
+]);
 
 const EXPECTED_PARENTS: Record<string, Set<string>> = {
   tool_result: new Set(["tool_call"]),
@@ -119,6 +138,15 @@ const COMMAND_TOOLS = new Set([
   "terminal",
   "run_command",
 ]);
+const MINIMIZED_PROVIDERS = new Set(["claude", "codex", "copilot"]);
+const MINIMIZED_CAPTURE_METHODS = new Set(["cli_hooks"]);
+const MINIMIZED_ANNOTATION_LABELS: Record<string, string> = {
+  "root-cause": "root_cause",
+  decision: "decision",
+  retry: "retry",
+  fix: "fix",
+  question: "question",
+};
 
 function commandFor(event: TraceEvent): string {
   if (event.event_type !== "tool_call") {
@@ -232,14 +260,19 @@ function correctionFor(annotation: ReviewAnnotation): boolean {
 function annotationMap(
   annotations: ReviewAnnotation[],
   events: TraceEvent[],
-): Map<string, Array<ReviewAnnotation & { correction: boolean }>> {
+): {
+  mapped: Map<string, Array<ReviewAnnotation & { correction: boolean }>>;
+  unresolved: Array<ReviewAnnotation & { correction: boolean }>;
+} {
   const mapped = new Map<string, Array<ReviewAnnotation & { correction: boolean }>>();
+  const unresolved: Array<ReviewAnnotation & { correction: boolean }> = [];
   const idCounts = new Map<string, number>();
   for (const event of events) {
     idCounts.set(event.event_id, (idCounts.get(event.event_id) ?? 0) + 1);
   }
   const startedAt = events[0]?.timestamp ?? 0;
   for (const annotation of annotations) {
+    const projected = { ...annotation, correction: correctionFor(annotation) };
     let target = annotation.event_id;
     if ((!target || idCounts.get(target) !== 1) && !target && events.length > 0) {
       const offset = annotation.offset_seconds ?? 0;
@@ -249,20 +282,28 @@ function annotationMap(
         return distance < bestDistance ? event : best;
       }, events[0]).event_id;
     }
+    if (target && projected.event_id !== target) {
+      projected.event_id = target;
+    }
     if (!target || idCounts.get(target) !== 1) {
+      unresolved.push(projected);
       continue;
     }
     const values = mapped.get(target) ?? [];
-    values.push({ ...annotation, correction: correctionFor(annotation) });
+    values.push(projected);
     mapped.set(target, values);
   }
-  return mapped;
+  return { mapped, unresolved };
 }
 
 function structuralProjection(
   events: TraceEvent[],
   annotations: ReviewAnnotation[],
-): { items: ReviewItem[]; reasons: HealthReason[] } {
+): {
+  items: ReviewItem[];
+  reasons: HealthReason[];
+  unresolvedAnnotations: Array<ReviewAnnotation & { correction: boolean }>;
+} {
   const ordered = events
     .map((event, sourceIndex) => ({ event, sourceIndex }))
     .sort((a, b) => a.event.timestamp - b.event.timestamp || a.sourceIndex - b.sourceIndex);
@@ -272,9 +313,18 @@ function structuralProjection(
     values.push(event);
     byId.set(event.event_id, values);
   }
-  const annotationsByEvent = annotationMap(annotations, events);
+  const annotationProjection = annotationMap(annotations, events);
+  const annotationsByEvent = annotationProjection.mapped;
   const childIds = new Map<string, string[]>();
   const reasons: HealthReason[] = [];
+  for (const annotation of annotationProjection.unresolved) {
+    reasons.push({
+      code: "unresolved_annotation",
+      message: "An annotation references an event that is not present.",
+      kind: "observed",
+      event_id: annotation.event_id ?? null,
+    });
+  }
 
   const relationships = ordered.map(({ event }) => {
     let relationship: ReviewItem["relationship"] = "none";
@@ -385,7 +435,11 @@ function structuralProjection(
       annotations: eventAnnotations,
     };
   });
-  return { items, reasons };
+  return {
+    items,
+    reasons,
+    unresolvedAnnotations: annotationProjection.unresolved,
+  };
 }
 
 function captureIdentity(
@@ -420,7 +474,14 @@ export function buildReviewModel(
   const endedEvent = [...events].reverse().find((event) => event.event_type === "session_end");
   const endedAt = meta.ended_at || endedEvent?.timestamp;
   const durationMs = startedAt && endedAt ? Math.max(0, (endedAt - startedAt) * 1000) : undefined;
-  const contentEvents = events.filter((event) => CONTENT_TYPES.has(event.event_type));
+  const contentEvents = events.filter((event) => (
+    CONTENT_TYPES.has(event.event_type) ||
+    (
+      event.event_type === "subagent_stop" &&
+      typeof event.data.text === "string" &&
+      event.data.text.length > 0
+    )
+  ));
   const redactedContent = contentEvents.filter((event) => event.redacted).length;
   let contentMode = "recorded";
   if (contentEvents.length === 0) {
@@ -430,7 +491,17 @@ export function buildReviewModel(
   } else if (redactedContent > 0) {
     contentMode = "mixed";
   }
-  const reasons = exactHealth?.reasons ?? projection.reasons;
+  const reasons = [...(exactHealth?.reasons ?? [])];
+  const reasonKeys = new Set(
+    reasons.map((reason) => `${reason.code}\0${reason.event_id ?? ""}`),
+  );
+  for (const reason of projection.reasons) {
+    const key = `${reason.code}\0${reason.event_id ?? ""}`;
+    if (!reasonKeys.has(key)) {
+      reasons.push(reason);
+      reasonKeys.add(key);
+    }
+  }
   const status = exactHealth?.status ?? (projection.reasons.length > 0 ? "partial" : "unknown");
   const counts = new Map<string, number>();
   for (const item of projection.items) {
@@ -454,6 +525,8 @@ export function buildReviewModel(
     evidence_health: {
       status,
       reasons,
+      provider: exactHealth?.provider ?? "unknown",
+      capture_method: exactHealth?.capture_method ?? "unknown",
     },
     capture_gaps: reasons,
     privacy: {
@@ -462,13 +535,19 @@ export function buildReviewModel(
     },
     filters: FILTERS.map((id) => ({ id, count: counts.get(id) ?? 0 })),
     items: projection.items,
+    unresolved_annotations: projection.unresolvedAnnotations,
   };
 }
 
 export function loadAnnotations(traceDir: string, sessionId: string): ReviewAnnotation[] {
-  const file = path.join(traceDir, sessionId, "annotations.jsonl");
+  const sessionDir = resolveSessionDir(traceDir, sessionId);
+  const file = path.join(sessionDir, "annotations.jsonl");
+  if (!fs.existsSync(file)) {
+    return [];
+  }
+  const checkedFile = resolveStoredFile(sessionDir, file, "annotations sidecar");
   try {
-    return fs.readFileSync(file, "utf8")
+    return fs.readFileSync(checkedFile, "utf8")
       .split(/\r?\n/)
       .filter(Boolean)
       .flatMap((line) => {
@@ -488,19 +567,97 @@ export function loadStoredReview(
   sessionId: string,
   exactHealth?: CliHealth,
 ): ReviewModel {
-  const sessionDir = path.resolve(traceDir, sessionId);
-  const relative = path.relative(path.resolve(traceDir), sessionDir);
-  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
-    throw new Error("Session path escapes the configured trace directory.");
-  }
+  const sessionDir = resolveSessionDir(traceDir, sessionId);
+  const metaFile = resolveStoredFile(
+    sessionDir,
+    path.join(sessionDir, "meta.json"),
+    "session metadata",
+  );
+  const eventsFile = resolveStoredFile(
+    sessionDir,
+    path.join(sessionDir, "events.ndjson"),
+    "event stream",
+  );
   const meta = JSON.parse(
-    fs.readFileSync(path.join(sessionDir, "meta.json"), "utf8"),
+    fs.readFileSync(metaFile, "utf8"),
   ) as SessionMeta;
-  const events = fs.readFileSync(path.join(sessionDir, "events.ndjson"), "utf8")
+  if (meta.session_id !== sessionId) {
+    throw new Error("Session metadata ID does not match its directory.");
+  }
+  const events = fs.readFileSync(eventsFile, "utf8")
     .split(/\r?\n/)
     .filter(Boolean)
     .map((line) => JSON.parse(line) as TraceEvent);
+  for (const event of events) {
+    if (!KNOWN_EVENT_TYPES.has(event.event_type)) {
+      throw new Error("Session contains an unsupported event type.");
+    }
+    if (event.session_id !== sessionId) {
+      throw new Error("Event session ID does not match its directory.");
+    }
+    if (
+      typeof event.data !== "object" ||
+      event.data === null ||
+      Array.isArray(event.data)
+    ) {
+      throw new Error("Session event data must be an object.");
+    }
+  }
   return buildReviewModel(meta, events, loadAnnotations(traceDir, sessionId), exactHealth);
+}
+
+function validateStoredSessionId(sessionId: string): void {
+  if (
+    !sessionId ||
+    sessionId === "." ||
+    sessionId === ".." ||
+    sessionId.includes("/") ||
+    sessionId.includes("\\") ||
+    /[\u0000-\u001f\u007f]/u.test(sessionId)
+  ) {
+    throw new Error("Invalid stored session ID.");
+  }
+}
+
+function resolveSessionDir(traceDir: string, sessionId: string): string {
+  validateStoredSessionId(sessionId);
+  const root = fs.realpathSync(traceDir);
+  const candidate = path.join(root, sessionId);
+  const stats = fs.lstatSync(candidate);
+  if (stats.isSymbolicLink() || !stats.isDirectory()) {
+    throw new Error("Session directory must be a real directory.");
+  }
+  const resolved = fs.realpathSync(candidate);
+  requireContainedPath(root, resolved);
+  if (path.dirname(resolved) !== root) {
+    throw new Error("Session directory must be one path component below the trace directory.");
+  }
+  return resolved;
+}
+
+function resolveStoredFile(
+  sessionDir: string,
+  candidate: string,
+  label: string,
+): string {
+  const stats = fs.lstatSync(candidate);
+  if (stats.isSymbolicLink() || !stats.isFile()) {
+    throw new Error(`${label} must be a real file.`);
+  }
+  const resolved = fs.realpathSync(candidate);
+  requireContainedPath(sessionDir, resolved);
+  return resolved;
+}
+
+function requireContainedPath(root: string, candidate: string): void {
+  const relative = path.relative(root, candidate);
+  if (
+    !relative ||
+    relative.startsWith("..") ||
+    path.isAbsolute(relative)
+  ) {
+    throw new Error("Stored session path escapes the configured trace directory.");
+  }
 }
 
 export function renderMinimizedReviewHtml(review: ReviewModel): string {
@@ -508,12 +665,37 @@ export function renderMinimizedReviewHtml(review: ReviewModel): string {
     .update(review.session.session_id, "utf8")
     .digest("hex")
     .slice(0, 12);
+  const provider = MINIMIZED_PROVIDERS.has(review.evidence_health.provider)
+    ? review.evidence_health.provider
+    : "unknown";
+  const captureMethod = (
+    provider !== "unknown" &&
+    MINIMIZED_CAPTURE_METHODS.has(review.evidence_health.capture_method)
+  )
+    ? review.evidence_health.capture_method
+    : "unknown";
+  const annotationCounts = new Map<string, number>();
+  const annotations = [
+    ...review.items.flatMap((item) => item.annotations),
+    ...review.unresolved_annotations,
+  ];
+  for (const annotation of annotations) {
+    const label = minimizedAnnotationLabel(annotation);
+    annotationCounts.set(label, (annotationCounts.get(label) ?? 0) + 1);
+  }
+  const annotationSummary = [...annotationCounts.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([label, count]) => `${label} ${count}`)
+    .join(", ") || "none";
   const rows = review.items.map((item) => {
     const categories = item.categories.join(", ") || "none";
+    const eventType = KNOWN_EVENT_TYPES.has(item.event_type)
+      ? item.event_type
+      : "unknown";
     const relation = item.relationship_issue
       ? `${item.relationship} (${item.relationship_issue})`
       : item.relationship;
-    return `<tr><td>${item.sequence}</td><td>${escapeHtml(item.event_type)}</td><td>${escapeHtml(categories)}</td><td>${escapeHtml(relation)}</td><td>${item.redacted ? "yes" : "no"}</td></tr>`;
+    return `<tr><td>${item.sequence}</td><td>${eventType}</td><td>${escapeHtml(categories)}</td><td>${escapeHtml(relation)}</td><td>${item.redacted ? "yes" : "no"}</td></tr>`;
   }).join("");
   return `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -521,9 +703,19 @@ export function renderMinimizedReviewHtml(review: ReviewModel): string {
 <style>body{font:15px/1.5 system-ui,sans-serif;max-width:980px;margin:40px auto;padding:0 20px;color:#172033;background:#f7f8fb}h1{font-size:1.6rem}.meta{display:flex;gap:24px;flex-wrap:wrap;margin:20px 0;padding:16px;background:#fff;border:1px solid #ccd3df}table{width:100%;border-collapse:collapse;background:#fff}th,td{padding:8px 10px;text-align:left;border-bottom:1px solid #dfe4ec}th{color:#475569}</style>
 </head><body><h1>Privacy-minimized evidence review</h1>
 <p>This local file omits session identity, absolute timestamps, raw fields, prompts, commands, paths, results, and annotation text.</p>
-<div class="meta"><span>Session ref: ${sessionRef}</span><span>Provider: ${escapeHtml(review.session.provider)}</span><span>Evidence health: ${escapeHtml(review.evidence_health.status)}</span><span>Events: ${review.items.length}</span></div>
+<div class="meta"><span>Session ref: ${sessionRef}</span><span>Provider: ${provider}</span><span>Capture: ${captureMethod}</span><span>Evidence health: ${escapeHtml(review.evidence_health.status)}</span><span>Events: ${review.items.length}</span><span>Annotation categories: ${annotationSummary}</span></div>
 <table><thead><tr><th>#</th><th>Evidence</th><th>Categories</th><th>Relationship</th><th>Redacted</th></tr></thead><tbody>${rows}</tbody></table>
 </body></html>`;
+}
+
+function minimizedAnnotationLabel(
+  annotation: ReviewAnnotation & { correction: boolean },
+): string {
+  if (annotation.correction) {
+    return "correction";
+  }
+  const label = (annotation.label ?? "").trim().toLowerCase();
+  return MINIMIZED_ANNOTATION_LABELS[label] ?? (label ? "other" : "none");
 }
 
 function escapeHtml(value: string): string {

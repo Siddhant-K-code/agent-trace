@@ -1274,9 +1274,9 @@ Start a server-side event collector. See [server.md](server.md).
 | Flag | Description |
 |---|---|
 | `--port N` | Port to listen on (default: 4317) |
-| `--host HOST` | Host to bind to (default: 0.0.0.0) |
+| `--host HOST` | Host to bind to (default: `127.0.0.1` with `--dashboard`, otherwise `0.0.0.0`) |
 | `--storage DIR` | Trace storage directory (default: `$AGENT_STRACE_STORAGE` or `.agent-traces`) |
-| `--dashboard` | Serve the local session list and evidence review at `/` |
+| `--dashboard` | Serve the session list and evidence review at `/`; non-loopback binding requires `--auth-key` |
 | `--auth-key KEY` | Require `Authorization: Bearer KEY` on all requests (also read from `AGENT_STRACE_AUTH_KEY`) |
 
 `keygen` prints a new `ast_`-prefixed API key to stdout. Set `AGENT_STRACE_AUTH_KEY` on the client side to inject the header automatically into all outbound collector requests.

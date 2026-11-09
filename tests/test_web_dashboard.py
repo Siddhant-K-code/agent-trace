@@ -29,6 +29,7 @@ from agent_trace.web_dashboard import (
 from agent_trace.server import _make_handler
 from agent_trace.store import TraceStore
 from agent_trace.models import SessionMeta, TraceEvent, EventType
+from agent_trace.event_data import NonObjectEventDataError
 
 
 def _start_server(tmp_dir, dashboard=True):
@@ -40,6 +41,19 @@ def _start_server(tmp_dir, dashboard=True):
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
     return server, port, store
+
+
+def _append_raw_event(store, session_id, data):
+    line = json.dumps({
+        "event_type": "tool_call",
+        "timestamp": 2,
+        "event_id": "bad-data",
+        "session_id": session_id,
+        "data": data,
+    })
+    path = store.base_dir / session_id / "events.ndjson"
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(line + "\n")
 
 
 class TestRenderPages(unittest.TestCase):
@@ -177,6 +191,7 @@ class TestApiHelpers(unittest.TestCase):
         share = api_minimized_review_share(store, "artifact001")
         self.assertIn("Privacy-minimized evidence review", share)
         self.assertNotIn("do-not-share", share)
+        self.assertNotIn("synthetic", share)
         otlp = json.loads(api_session_otlp(store, "artifact001"))
         self.assertIn("resourceSpans", otlp)
 
@@ -206,6 +221,19 @@ class TestApiHelpers(unittest.TestCase):
         self.assertEqual(report["session_a"], "compare-a")
         self.assertEqual(report["session_b"], "compare-b")
         self.assertIn("decision_divergence", report)
+
+    def test_review_helpers_reject_non_object_event_data(self):
+        store = TraceStore(self._tmp)
+        store.create_session(SessionMeta(session_id="invalid-review", started_at=1))
+        _append_raw_event(store, "invalid-review", ["not", "an", "object"])
+
+        for operation in (api_session_review, api_minimized_review_share):
+            with self.subTest(operation=operation.__name__):
+                with self.assertRaisesRegex(
+                    NonObjectEventDataError,
+                    "session invalid-review event data must be an object",
+                ):
+                    operation(store, "invalid-review")
 
 
 class TestServerDashboardRoutes(unittest.TestCase):
@@ -334,13 +362,43 @@ class TestServerDashboardRoutes(unittest.TestCase):
                 f"http://127.0.0.1:{port}/api/sessions/downloads001/share?mode=minimized"
             )
             self.assertIn("attachment", share.headers.get("Content-Disposition", ""))
-            self.assertIn("Privacy-minimized", share.read().decode())
+            self.assertIn("Privacy-minimized evidence review", share.read().decode())
 
             otlp = urllib.request.urlopen(
                 f"http://127.0.0.1:{port}/api/sessions/downloads001/otlp"
             )
             self.assertIn("attachment", otlp.headers.get("Content-Disposition", ""))
             self.assertIn("resourceSpans", json.loads(otlp.read()))
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_review_routes_return_400_for_non_object_event_data(self):
+        server, port, store = _start_server(self._tmp)
+        try:
+            store.create_session(SessionMeta(
+                session_id="invalid-review-route",
+                started_at=1,
+            ))
+            _append_raw_event(
+                store,
+                "invalid-review-route",
+                "not-an-object",
+            )
+            for suffix in ("review", "share?mode=minimized"):
+                with self.subTest(suffix=suffix):
+                    with self.assertRaises(urllib.error.HTTPError) as context:
+                        urllib.request.urlopen(
+                            f"http://127.0.0.1:{port}/api/sessions/"
+                            f"invalid-review-route/{suffix}"
+                        )
+                    self.assertEqual(context.exception.code, 400)
+                    payload = json.loads(context.exception.read())
+                    self.assertEqual(
+                        payload["error"],
+                        "session invalid-review-route event data must be an object: "
+                        "event 1 of 1 (tool_call) has string data",
+                    )
         finally:
             server.shutdown()
             server.server_close()

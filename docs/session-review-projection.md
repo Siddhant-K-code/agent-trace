@@ -41,10 +41,10 @@ For Claude Code and Codex sessions, the local payload also reports the recorded-
 The browser dashboard and extension keep actions on the local machine:
 
 - **Compare** runs the existing deterministic session comparison.
-- **Save minimized share** writes HTML that omits session identity, absolute timestamps, raw fields, prompts, responses, commands, paths, results, and annotation text.
+- **Save minimized share** writes a value-free review ledger with verified capture identifiers and fixed annotation categories.
 - **Export OTLP JSON** writes the existing OTLP/HTTP JSON representation without an endpoint. It does not send the payload.
 
-The ordinary `agent-strace share` command still includes recorded content. Use the review surface's minimized action when content must be omitted.
+Use `agent-strace share` when a portable Evidence Packet with its disclosure manifest is required. The review action is a smaller local ledger export. Full-content Evidence Packets require `share --include-content`.
 
 ## Navigation
 

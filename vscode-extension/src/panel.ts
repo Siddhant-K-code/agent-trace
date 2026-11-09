@@ -54,6 +54,11 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
   private currentState: SessionState | null = null;
   private selectedSessionId: string | null = null;
   private currentModel: ReviewModel | null = null;
+  private readonly exactHealth = new Map<string, CliHealth>();
+  private readonly healthRefreshTimers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -107,15 +112,21 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
     this.currentState = state;
     if (this.selectedSessionId === state.sessionId) {
       this._postLiveReview(state);
+      this._scheduleHealthRefresh(state.sessionId);
     }
   }
 
   async showSession(sessionId: string): Promise<void> {
     this.selectedSessionId = sessionId;
     try {
-      const structural = loadStoredReview(this.traceDir, sessionId);
+      const structural = loadStoredReview(
+        this.traceDir,
+        sessionId,
+        this.exactHealth.get(sessionId),
+      );
       this._postReview(structural, null);
       const health = await this._loadHealth(sessionId);
+      this.exactHealth.set(sessionId, health);
       if (this.selectedSessionId !== sessionId) {
         return;
       }
@@ -129,12 +140,20 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
   }
 
   private _postLiveReview(state: SessionState): void {
-    const model = buildReviewModel(
-      state.meta,
-      state.events,
-      loadAnnotations(this.traceDir, state.sessionId),
-    );
-    this._postReview(model, state);
+    try {
+      const model = buildReviewModel(
+        state.meta,
+        state.events,
+        loadAnnotations(this.traceDir, state.sessionId),
+        this.exactHealth.get(state.sessionId),
+      );
+      this._postReview(model, state);
+    } catch (error) {
+      this.view?.webview.postMessage({
+        type: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   private _postReview(model: ReviewModel, liveState: SessionState | null): void {
@@ -154,6 +173,7 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
   private async _refreshHealth(sessionId: string): Promise<void> {
     try {
       const health = await this._loadHealth(sessionId);
+      this.exactHealth.set(sessionId, health);
       if (
         this.selectedSessionId !== sessionId ||
         this.currentState?.sessionId !== sessionId
@@ -171,6 +191,18 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
     } catch {
       // Structural review remains available when the CLI is not on PATH.
     }
+  }
+
+  private _scheduleHealthRefresh(sessionId: string): void {
+    const existing = this.healthRefreshTimers.get(sessionId);
+    if (existing) {
+      clearTimeout(existing);
+    }
+    const timer = setTimeout(() => {
+      this.healthRefreshTimers.delete(sessionId);
+      void this._refreshHealth(sessionId);
+    }, 400);
+    this.healthRefreshTimers.set(sessionId, timer);
   }
 
   private async _loadHealth(sessionId: string): Promise<CliHealth> {
