@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -82,6 +83,30 @@ class TestWriteAtomic(unittest.TestCase):
         self.assertFalse(link.is_symlink())
         self.assertEqual(link.read_text(), "x")
 
+    def test_replace_waits_for_reader_to_close_target(self):
+        path = self.dir / "config.json"
+        path.write_text("old")
+        reader = open(path, encoding="utf-8")
+        closer = threading.Timer(0.1, reader.close)
+        closer.start()
+        try:
+            write_atomic(path, "new")
+        finally:
+            closer.join()
+            reader.close()
+        self.assertEqual(path.read_text(), "new")
+        self.assertEqual([p.name for p in self.dir.iterdir()], ["config.json"])
+
+    @unittest.skipUnless(os.name == "nt", "Windows sharing violations")
+    def test_replace_gives_up_and_cleans_up_when_target_stays_open(self):
+        path = self.dir / "config.json"
+        path.write_text("old")
+        with open(path, encoding="utf-8"):
+            with self.assertRaises(PermissionError):
+                write_atomic(path, "new")
+        self.assertEqual(path.read_text(), "old")
+        self.assertEqual([p.name for p in self.dir.iterdir()], ["config.json"])
+
 
 class TestFileLock(unittest.TestCase):
     def setUp(self):
@@ -122,11 +147,11 @@ class TestFileLock(unittest.TestCase):
 
 class TestLockDescriptor(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.path = Path(self.tmp.name) / "store.lock"
-
-    def tearDown(self):
-        self.tmp.cleanup()
+        # Registered first so it runs after the descriptors close: Windows
+        # cannot delete a file that is still open.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = Path(tmp.name) / "store.lock"
 
     def _open(self) -> int:
         fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)

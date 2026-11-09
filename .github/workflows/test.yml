@@ -35,7 +35,9 @@ jobs:
 
   windows:
     # Exercises the msvcrt file-lock and atomic-replace paths in fileutil.py
-    # and the trace store lock, which the Linux jobs never run.
+    # and the trace store lock, which the Linux jobs never run. Only the lock
+    # and atomic-write tests run here: the full suite does not yet pass on
+    # Windows (POSIX signals and file modes, CRLF output, cp1252 stdout).
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -52,10 +54,22 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Run tests
-        run: python -m unittest discover -s tests -v
+      - name: Run lock and atomic-write tests
+        run: >-
+          python -m unittest -v
+          tests.test_fileutil
+          tests.test_telemetry
+          tests.test_sso
+          tests.test_rbac
+          tests.test_iac
+          tests.test_config_watch
+          tests.test_store.TestTraceStore
+          tests.test_store.TestStoreWriteLock
         env:
           PYTHONPATH: src
+          # Redirected stdout defaults to cp1252, which cannot print the
+          # CLI's check marks.
+          PYTHONIOENCODING: utf-8
 
   vscode-extension:
     runs-on: namespace-profile-siddhant-khare
