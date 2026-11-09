@@ -1,0 +1,169 @@
+{
+  "meta": {
+    "session_id": "otlp-genai-conformance-001",
+    "started_at": 1700000000.0,
+    "ended_at": 1700000004.0,
+    "agent_name": "claude-code",
+    "command": "claude --fixture",
+    "tool_calls": 2,
+    "llm_requests": 1,
+    "errors": 1,
+    "total_tokens": 20,
+    "total_duration_ms": 4000,
+    "attribution": {
+      "agent_provider": "claude-code",
+      "agent_version": "fixture",
+      "git_repo": "https://example.invalid/acme/widget.git",
+      "git_branch": "feature/otlp-conformance",
+      "git_commit": "0123456"
+    }
+  },
+  "events": [
+    {
+      "event_type": "session_start",
+      "timestamp": 1700000000.0,
+      "event_id": "session-start",
+      "session_id": "otlp-genai-conformance-001",
+      "data": {
+        "provider": "anthropic",
+        "capture_method": "fixture",
+        "source": "startup"
+      }
+    },
+    {
+      "event_type": "user_prompt",
+      "timestamp": 1700000000.1,
+      "event_id": "user-prompt",
+      "session_id": "otlp-genai-conformance-001",
+      "data": {
+        "prompt": "[REDACTED:synthetic-secret] inspect the fixture"
+      },
+      "redacted": true
+    },
+    {
+      "event_type": "llm_request",
+      "timestamp": 1700000000.2,
+      "event_id": "llm-request",
+      "session_id": "otlp-genai-conformance-001",
+      "data": {
+        "provider": "anthropic",
+        "model": "claude-3-5-sonnet",
+        "input_tokens": 12,
+        "max_tokens": 64,
+        "input_cost_usd": 0.000036,
+        "context_stream": "primary"
+      },
+      "prev_hash": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "event_type": "llm_response",
+      "timestamp": 1700000000.7,
+      "event_id": "llm-response",
+      "session_id": "otlp-genai-conformance-001",
+      "parent_id": "llm-request",
+      "duration_ms": 500.0,
+      "data": {
+        "provider": "anthropic",
+        "model": "claude-3-5-sonnet",
+        "output_tokens": 8,
+        "stop_reason": "end_turn",
+        "output_cost_usd": 0.00012,
+        "cost_usd": 0.000156,
+        "source_uuid": "upstream-response-1"
+      },
+      "prev_hash": "2222222222222222222222222222222222222222222222222222222222222222"
+    },
+    {
+      "event_type": "tool_call",
+      "timestamp": 1700000001.0,
+      "event_id": "tool-read-call",
+      "session_id": "otlp-genai-conformance-001",
+      "data": {
+        "tool_name": "Read",
+        "arguments": {
+          "file_path": "README.md"
+        },
+        "source_agent_id": "agent-fixture"
+      },
+      "prev_hash": "3333333333333333333333333333333333333333333333333333333333333333"
+    },
+    {
+      "event_type": "tool_result",
+      "timestamp": 1700000001.02,
+      "event_id": "tool-read-result",
+      "session_id": "otlp-genai-conformance-001",
+      "parent_id": "tool-read-call",
+      "duration_ms": 20.0,
+      "data": {
+        "tool_name": "Read",
+        "result": "fixture content",
+        "source_uuid": "tool-result-1"
+      },
+      "prev_hash": "4444444444444444444444444444444444444444444444444444444444444444"
+    },
+    {
+      "event_type": "tool_call",
+      "timestamp": 1700000002.0,
+      "event_id": "tool-bash-call",
+      "session_id": "otlp-genai-conformance-001",
+      "data": {
+        "tool_name": "Bash",
+        "arguments": {
+          "command": "false"
+        },
+        "capture_method": "fixture"
+      },
+      "prev_hash": "5555555555555555555555555555555555555555555555555555555555555555"
+    },
+    {
+      "event_type": "error",
+      "timestamp": 1700000002.05,
+      "event_id": "tool-bash-error",
+      "session_id": "otlp-genai-conformance-001",
+      "parent_id": "tool-bash-call",
+      "duration_ms": 50.0,
+      "data": {
+        "tool_name": "Bash",
+        "error": "command failed",
+        "error_type": "ShellError",
+        "source_uuid": "tool-error-1"
+      },
+      "prev_hash": "6666666666666666666666666666666666666666666666666666666666666666"
+    },
+    {
+      "event_type": "tool_result",
+      "timestamp": 1700000003.0,
+      "event_id": "orphan-tool-result",
+      "session_id": "otlp-genai-conformance-001",
+      "parent_id": "missing-tool-call",
+      "duration_ms": 1.0,
+      "data": {
+        "tool_name": "Search",
+        "result": [],
+        "capture_method": "fixture"
+      },
+      "prev_hash": "7777777777777777777777777777777777777777777777777777777777777777"
+    },
+    {
+      "event_type": "assistant_response",
+      "timestamp": 1700000003.5,
+      "event_id": "assistant-response",
+      "session_id": "otlp-genai-conformance-001",
+      "data": {
+        "text": "The fixture is complete.",
+        "provider": "anthropic"
+      },
+      "prev_hash": "8888888888888888888888888888888888888888888888888888888888888888"
+    },
+    {
+      "event_type": "session_end",
+      "timestamp": 1700000004.0,
+      "event_id": "session-end",
+      "session_id": "otlp-genai-conformance-001",
+      "data": {
+        "reason": "completed"
+      },
+      "prev_hash": "9999999999999999999999999999999999999999999999999999999999999999"
+    }
+  ]
+}

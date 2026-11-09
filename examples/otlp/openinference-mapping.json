@@ -1,0 +1,144 @@
+{
+  "schema_version": 1,
+  "source_format": "agent-strace otlp-genai",
+  "destination_convention": "OpenInference",
+  "span_kinds": [
+    {
+      "scope": "root",
+      "otlp_span_kind": 1,
+      "openinference_span_kind": "AGENT"
+    },
+    {
+      "scope": "llm",
+      "otlp_span_kind": 3,
+      "openinference_span_kind": "LLM"
+    },
+    {
+      "scope": "tool",
+      "otlp_span_kind": 3,
+      "openinference_span_kind": "TOOL"
+    }
+  ],
+  "attribute_mappings": [
+    {
+      "scope": "root",
+      "source_attribute": "gen_ai.agent.id",
+      "destination_attribute": "session.id",
+      "representation": "renamed",
+      "loss": "none"
+    },
+    {
+      "scope": "root",
+      "source_attribute": "agent.strace.provenance",
+      "destination_attribute": "metadata",
+      "representation": "packed_json",
+      "loss": "none"
+    },
+    {
+      "scope": "root",
+      "source_attribute": "agent.strace.redacted",
+      "destination_attribute": "metadata",
+      "representation": "packed_json",
+      "loss": "redacted source values cannot be reconstructed"
+    },
+    {
+      "scope": "root",
+      "source_attribute": "agent.strace.evidence.gaps",
+      "destination_attribute": "metadata",
+      "representation": "packed_json",
+      "loss": "provider capture-matrix blind spots are not included"
+    },
+    {
+      "scope": "llm",
+      "source_attribute": "gen_ai.system",
+      "destination_attribute": "llm.provider",
+      "representation": "renamed",
+      "loss": "unknown and custom providers remain heuristic"
+    },
+    {
+      "scope": "llm",
+      "source_attribute": "gen_ai.request.model",
+      "destination_attribute": "llm.model_name",
+      "representation": "renamed",
+      "loss": "none"
+    },
+    {
+      "scope": "llm",
+      "source_attribute": "gen_ai.usage.input_tokens",
+      "destination_attribute": "llm.token_count.prompt",
+      "representation": "renamed",
+      "loss": "none"
+    },
+    {
+      "scope": "llm",
+      "source_attribute": "gen_ai.usage.output_tokens",
+      "destination_attribute": "llm.token_count.completion",
+      "representation": "renamed",
+      "loss": "none"
+    },
+    {
+      "scope": "llm",
+      "source_attribute": "agent.strace.cost.total_usd",
+      "destination_attribute": "llm.cost.total",
+      "representation": "renamed",
+      "loss": "only recorded cost is emitted; missing cost is not estimated"
+    },
+    {
+      "scope": "llm",
+      "source_attribute": "gen_ai.request.max_tokens",
+      "destination_attribute": "llm.invocation_parameters",
+      "representation": "packed_json",
+      "loss": "none for max_tokens"
+    },
+    {
+      "scope": "tool",
+      "source_attribute": "gen_ai.tool.name",
+      "destination_attribute": "tool.name",
+      "representation": "renamed",
+      "loss": "none"
+    },
+    {
+      "scope": "tool",
+      "source_attribute": "gen_ai.tool.input.*",
+      "destination_attribute": "input.value",
+      "representation": "packed_json",
+      "loss": "input.value is capped at 1000 characters"
+    },
+    {
+      "scope": "tool",
+      "source_attribute": "gen_ai.tool.output",
+      "destination_attribute": "output.value",
+      "representation": "renamed",
+      "loss": "output.value is capped at 500 characters"
+    },
+    {
+      "scope": "tool",
+      "source_attribute": "gen_ai.tool.call.id",
+      "destination_attribute": "metadata",
+      "representation": "packed_json",
+      "loss": "none"
+    }
+  ],
+  "not_losslessly_represented": [
+    {
+      "field": "multi-turn message events",
+      "reason": "User and assistant messages stay as root span events. They are not collapsed into one LLM span input or output."
+    },
+    {
+      "field": "gen_ai.response.finish_reasons",
+      "reason": "The original attribute is retained and copied into metadata because this recipe has no dedicated OpenInference field."
+    },
+    {
+      "field": "provider capture blind spots",
+      "reason": "The payload carries observed structural evidence gaps. Declared provider limitations remain in agent-strace health and the capture matrix."
+    },
+    {
+      "field": "redacted values",
+      "reason": "The redaction flag and marker survive export, but removed secret values cannot be reconstructed."
+    },
+    {
+      "field": "complete hash-chain verification",
+      "reason": "Represented event IDs and previous hashes are metadata. Verify the source NDJSON for complete chain validation."
+    }
+  ]
+}

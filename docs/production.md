@@ -2,7 +2,7 @@
 
 ## Quick demo (no signup required)
 
-Spin up Jaeger locally — one Docker command, full trace UI in the browser:
+Spin up Jaeger locally with one Docker command and a browser trace UI:
 
 ```bash
 # Start Jaeger (OTLP on 4318, UI on 16686)
@@ -41,37 +41,101 @@ agent-strace export <session-id> --format otlp-genai \
 
 `--format otlp` is unchanged for backwards compatibility. See [ADR-0011](../ADRs/0011-otlp-genai-semantic-conventions.md) for design rationale.
 
+### OpenInference compatibility
+
+The same `otlp-genai` payload includes additive OpenInference attributes for
+Phoenix and other OpenInference consumers. The OTLP span kind stays unchanged.
+`openinference.span.kind` identifies the AI operation.
+
+| Span | OTLP kind | OpenInference kind | Key attributes |
+|---|---:|---|---|
+| Session root | `INTERNAL` (`1`) | `AGENT` | `session.id`, `metadata` |
+| LLM call | `CLIENT` (`3`) | `LLM` | `llm.provider`, `llm.model_name`, token counts, recorded cost |
+| Tool call | `CLIENT` (`3`) | `TOOL` | `tool.name`, `input.value`, `output.value` |
+
+`agent.strace.*` attributes preserve redaction state, persisted provenance,
+event IDs, previous hashes, recorded cost, and observed structural evidence
+gaps. `session.id` is copied to every span for backend filtering.
+
+The mapping is not fully lossless:
+
+- Multi-turn user and assistant messages remain root span events.
+- Tool input is capped at 1000 characters and tool output at 500 characters.
+- Only recorded cost is exported. Missing cost is not estimated.
+- Redaction markers and flags survive, but removed secret values do not.
+- Observed structural gaps survive. Provider capture-matrix blind spots remain
+  in `agent-strace health`.
+- Complete hash-chain verification still requires the source NDJSON.
+
+The machine-readable contract is
+[`examples/otlp/openinference-mapping.json`](../examples/otlp/openinference-mapping.json).
+
 ---
 
 ## Per-backend setup
 
-### Datadog
+### Phoenix / OpenInference
 
 ```bash
-# Via the Datadog Agent's OTLP receiver (port 4318)
-agent-strace export <session-id> --format otlp \
-  --endpoint http://localhost:4318
+agent-strace export <session-id> --format otlp-genai \
+  --endpoint http://localhost:6006
+```
 
-# Via Datadog's OTLP intake directly
-agent-strace export <session-id> --format otlp \
-  --endpoint https://http-intake.logs.datadoghq.com:443 \
-  --header "DD-API-KEY: $DD_API_KEY"
+The exporter appends `/v1/traces`. Phoenix serves OTLP/HTTP on its UI port
+`6006`. OpenInference span kinds and compatibility attributes are included in
+the payload.
+
+### Langfuse
+
+Langfuse accepts OTLP/HTTP JSON at `/api/public/otel/v1/traces`. Pass the base
+OTLP endpoint because the exporter appends `/v1/traces`.
+
+```bash
+AUTH_STRING="$(
+  printf '%s' "$LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY" |
+  base64 | tr -d '\n'
+)"
+
+agent-strace export <session-id> --format otlp-genai \
+  --endpoint https://cloud.langfuse.com/api/public/otel \
+  --header "Authorization: Basic $AUTH_STRING" \
+  --header "x-langfuse-ingestion-version: 4"
+```
+
+The OTLP recipe exports traces. Eval scores still use the existing direct
+exporter:
+
+```bash
+agent-strace export --scores --backend langfuse
 ```
 
 ### Honeycomb
 
 ```bash
-agent-strace export <session-id> --format otlp \
+agent-strace export <session-id> --format otlp-genai \
   --endpoint https://api.honeycomb.io \
   --header "x-honeycomb-team: $HONEYCOMB_API_KEY" \
   --service-name my-agent
 ```
 
+Use `https://api.eu1.honeycomb.io` for the EU instance.
+
+### Datadog
+
+Enable the Datadog Agent OTLP HTTP receiver, then send to port `4318`:
+
+```bash
+agent-strace export <session-id> --format otlp-genai \
+  --endpoint http://localhost:4318
+```
+
+This recipe does not send OTLP JSON to the Datadog logs intake.
+
 ### Grafana Tempo / Jaeger
 
 ```bash
 # Local collector
-agent-strace export <session-id> --format otlp \
+agent-strace export <session-id> --format otlp-genai \
   --endpoint http://localhost:4318
 ```
 
@@ -91,24 +155,17 @@ agent-strace export <session-id> --format otlp \
   --header "X-SF-Token: $SPLUNK_ACCESS_TOKEN"
 ```
 
-### Langfuse
+### Offline fixture validation
 
-Sessions appear as Traces, tool calls as Spans, LLM calls as Generations, and eval scores as Langfuse Scores.
+The fixtures contain no credentials and require no network:
 
 ```bash
-export LANGFUSE_PUBLIC_KEY=pk-lf-...
-export LANGFUSE_SECRET_KEY=sk-lf-...
-
-# Export latest session with eval scores
-agent-strace export --scores --backend langfuse
-
-# Export last 7 days
-agent-strace export --since 7d --scores --backend langfuse
-
-# Self-hosted Langfuse
-agent-strace export --scores --backend langfuse \
-  --langfuse-host https://langfuse.your-domain.com
+python3 -m json.tool examples/otlp/genai-conformance.json >/dev/null
+PYTHONPATH=src python3 -m unittest tests.test_otlp_conformance -v
 ```
+
+Backend metadata and limitations are in
+[`examples/otlp/backend-recipes.json`](../examples/otlp/backend-recipes.json).
 
 ---
 

@@ -1,0 +1,874 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "agent-trace-conformance"
+            }
+          },
+          {
+            "key": "service.version",
+            "value": {
+              "stringValue": "agent-trace"
+            }
+          },
+          {
+            "key": "agent.session_id",
+            "value": {
+              "stringValue": "otlp-genai-conformance-001"
+            }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "agent-trace",
+            "version": "genai-semconv-1.27"
+          },
+          "spans": [
+            {
+              "traceId": "aa543ecb964e5a73d2b5055dc63a0e82",
+              "spanId": "d0baf196ae7096a2",
+              "name": "gen_ai.agent.session (claude-code)",
+              "kind": 1,
+              "startTimeUnixNano": "1700000000000000000",
+              "endTimeUnixNano": "1700000004000000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.agent.id",
+                  "value": {
+                    "stringValue": "otlp-genai-conformance-001"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.name",
+                  "value": {
+                    "stringValue": "claude-code"
+                  }
+                },
+                {
+                  "key": "gen_ai.system",
+                  "value": {
+                    "stringValue": "anthropic"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "agent.session"
+                  }
+                },
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "AGENT"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "otlp-genai-conformance-001"
+                  }
+                },
+                {
+                  "key": "agent.session_id",
+                  "value": {
+                    "stringValue": "otlp-genai-conformance-001"
+                  }
+                },
+                {
+                  "key": "agent.tool_calls",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "agent.llm_requests",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "agent.errors",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "agent.strace.provider",
+                  "value": {
+                    "stringValue": "claude-code"
+                  }
+                },
+                {
+                  "key": "agent.strace.redacted",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "agent.strace.redacted_event_count",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "agent.strace.evidence.schema_version",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "agent.strace.evidence.status",
+                  "value": {
+                    "stringValue": "partial"
+                  }
+                },
+                {
+                  "key": "agent.strace.evidence.gap_count",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "agent.strace.evidence.gap_codes",
+                  "value": {
+                    "stringValue": "[\"orphan_tool_result\"]"
+                  }
+                },
+                {
+                  "key": "agent.strace.evidence.gaps",
+                  "value": {
+                    "stringValue": "[{\"code\": \"orphan_tool_result\", \"kind\": \"observed\", \"event_id\": \"orphan-tool-result\", \"message\": \"tool result 'orphan-tool-result' references unknown parent 'missing-tool-call'\"}]"
+                  }
+                },
+                {
+                  "key": "agent.strace.provenance",
+                  "value": {
+                    "stringValue": "{\"agent_provider\": \"claude-code\", \"agent_version\": \"fixture\", \"git_repo\": \"https://example.invalid/acme/widget.git\", \"git_branch\": \"feature/otlp-conformance\", \"git_commit\": \"0123456\"}"
+                  }
+                },
+                {
+                  "key": "metadata",
+                  "value": {
+                    "stringValue": "{\"agent_strace\": {\"provider\": \"claude-code\", \"redacted\": true, \"redacted_event_count\": 1, \"evidence.schema_version\": 1, \"evidence.status\": \"partial\", \"evidence.gap_count\": 1, \"evidence.gap_codes\": [\"orphan_tool_result\"], \"evidence.gaps\": [{\"code\": \"orphan_tool_result\", \"kind\": \"observed\", \"event_id\": \"orphan-tool-result\", \"message\": \"tool result 'orphan-tool-result' references unknown parent 'missing-tool-call'\"}], \"provenance\": {\"agent_provider\": \"claude-code\", \"agent_version\": \"fixture\", \"git_repo\": \"https://example.invalid/acme/widget.git\", \"git_branch\": \"feature/otlp-conformance\", \"git_commit\": \"0123456\"}}}"
+                  }
+                }
+              ],
+              "events": [
+                {
+                  "timeUnixNano": "1700000000100000000",
+                  "name": "gen_ai.user.message",
+                  "attributes": [
+                    {
+                      "key": "gen_ai.prompt",
+                      "value": {
+                        "stringValue": "[REDACTED:synthetic-secret] inspect the fixture"
+                      }
+                    },
+                    {
+                      "key": "agent.strace.event.event_id",
+                      "value": {
+                        "stringValue": "user-prompt"
+                      }
+                    },
+                    {
+                      "key": "agent.strace.event.redacted",
+                      "value": {
+                        "boolValue": true
+                      }
+                    },
+                    {
+                      "key": "metadata",
+                      "value": {
+                        "stringValue": "{\"agent_strace\": {\"event.event_id\": \"user-prompt\", \"event.redacted\": true}}"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "1700000003500000000",
+                  "name": "gen_ai.assistant.message",
+                  "attributes": [
+                    {
+                      "key": "gen_ai.completion",
+                      "value": {
+                        "stringValue": "The fixture is complete."
+                      }
+                    },
+                    {
+                      "key": "agent.strace.event.event_id",
+                      "value": {
+                        "stringValue": "assistant-response"
+                      }
+                    },
+                    {
+                      "key": "agent.strace.event.redacted",
+                      "value": {
+                        "boolValue": false
+                      }
+                    },
+                    {
+                      "key": "agent.strace.event.previous_hash",
+                      "value": {
+                        "stringValue": "8888888888888888888888888888888888888888888888888888888888888888"
+                      }
+                    },
+                    {
+                      "key": "agent.strace.event.provenance",
+                      "value": {
+                        "stringValue": "{\"provider\": \"anthropic\"}"
+                      }
+                    },
+                    {
+                      "key": "metadata",
+                      "value": {
+                        "stringValue": "{\"agent_strace\": {\"event.event_id\": \"assistant-response\", \"event.redacted\": false, \"event.previous_hash\": \"8888888888888888888888888888888888888888888888888888888888888888\", \"event.provenance\": {\"provider\": \"anthropic\"}}}"
+                      }
+                    }
+                  ]
+                }
+              ],
+              "status": {
+                "code": 2
+              }
+            },
+            {
+              "traceId": "aa543ecb964e5a73d2b5055dc63a0e82",
+              "spanId": "3e9d2870f8295f74",
+              "parentSpanId": "d0baf196ae7096a2",
+              "name": "gen_ai.client.operation",
+              "kind": 3,
+              "startTimeUnixNano": "1700000000200000000",
+              "endTimeUnixNano": "1700000000700000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.system",
+                  "value": {
+                    "stringValue": "anthropic"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "LLM"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "otlp-genai-conformance-001"
+                  }
+                },
+                {
+                  "key": "llm.provider",
+                  "value": {
+                    "stringValue": "anthropic"
+                  }
+                },
+                {
+                  "key": "agent.strace.provider",
+                  "value": {
+                    "stringValue": "anthropic"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "claude-3-5-sonnet"
+                  }
+                },
+                {
+                  "key": "llm.model_name",
+                  "value": {
+                    "stringValue": "claude-3-5-sonnet"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.max_tokens",
+                  "value": {
+                    "intValue": "64"
+                  }
+                },
+                {
+                  "key": "llm.invocation_parameters",
+                  "value": {
+                    "stringValue": "{\"max_tokens\":64}"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "12"
+                  }
+                },
+                {
+                  "key": "llm.token_count.prompt",
+                  "value": {
+                    "intValue": "12"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "8"
+                  }
+                },
+                {
+                  "key": "llm.token_count.completion",
+                  "value": {
+                    "intValue": "8"
+                  }
+                },
+                {
+                  "key": "llm.token_count.total",
+                  "value": {
+                    "intValue": "20"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.finish_reasons",
+                  "value": {
+                    "stringValue": "end_turn"
+                  }
+                },
+                {
+                  "key": "agent.strace.finish_reason",
+                  "value": {
+                    "stringValue": "end_turn"
+                  }
+                },
+                {
+                  "key": "agent.strace.cost.input_usd",
+                  "value": {
+                    "doubleValue": 3.6e-05
+                  }
+                },
+                {
+                  "key": "llm.cost.prompt",
+                  "value": {
+                    "doubleValue": 3.6e-05
+                  }
+                },
+                {
+                  "key": "agent.strace.cost.output_usd",
+                  "value": {
+                    "doubleValue": 0.00012
+                  }
+                },
+                {
+                  "key": "llm.cost.completion",
+                  "value": {
+                    "doubleValue": 0.00012
+                  }
+                },
+                {
+                  "key": "agent.strace.cost.total_usd",
+                  "value": {
+                    "doubleValue": 0.000156
+                  }
+                },
+                {
+                  "key": "llm.cost.total",
+                  "value": {
+                    "doubleValue": 0.000156
+                  }
+                },
+                {
+                  "key": "agent.strace.request.event_id",
+                  "value": {
+                    "stringValue": "llm-request"
+                  }
+                },
+                {
+                  "key": "agent.strace.request.redacted",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "agent.strace.request.previous_hash",
+                  "value": {
+                    "stringValue": "1111111111111111111111111111111111111111111111111111111111111111"
+                  }
+                },
+                {
+                  "key": "agent.strace.request.provenance",
+                  "value": {
+                    "stringValue": "{\"provider\": \"anthropic\", \"context_stream\": \"primary\"}"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.event_id",
+                  "value": {
+                    "stringValue": "llm-response"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.redacted",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "agent.strace.response.parent_event_id",
+                  "value": {
+                    "stringValue": "llm-request"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.previous_hash",
+                  "value": {
+                    "stringValue": "2222222222222222222222222222222222222222222222222222222222222222"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.provenance",
+                  "value": {
+                    "stringValue": "{\"provider\": \"anthropic\", \"source_uuid\": \"upstream-response-1\"}"
+                  }
+                },
+                {
+                  "key": "metadata",
+                  "value": {
+                    "stringValue": "{\"agent_strace\": {\"provider\": \"anthropic\", \"finish_reason\": \"end_turn\", \"cost.input_usd\": 3.6e-05, \"cost.output_usd\": 0.00012, \"cost.total_usd\": 0.000156, \"request.event_id\": \"llm-request\", \"request.redacted\": false, \"request.previous_hash\": \"1111111111111111111111111111111111111111111111111111111111111111\", \"request.provenance\": {\"provider\": \"anthropic\", \"context_stream\": \"primary\"}, \"response.event_id\": \"llm-response\", \"response.redacted\": false, \"response.parent_event_id\": \"llm-request\", \"response.previous_hash\": \"2222222222222222222222222222222222222222222222222222222222222222\", \"response.provenance\": {\"provider\": \"anthropic\", \"source_uuid\": \"upstream-response-1\"}}}"
+                  }
+                }
+              ],
+              "status": {
+                "code": 1
+              }
+            },
+            {
+              "traceId": "aa543ecb964e5a73d2b5055dc63a0e82",
+              "spanId": "f5bdea3632c8f9d7",
+              "parentSpanId": "d0baf196ae7096a2",
+              "name": "gen_ai.tool.call/Read",
+              "kind": 3,
+              "startTimeUnixNano": "1700000001000000000",
+              "endTimeUnixNano": "1700000001020000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": {
+                    "stringValue": "Read"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "execute"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.id",
+                  "value": {
+                    "stringValue": "tool-read-call"
+                  }
+                },
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "TOOL"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "otlp-genai-conformance-001"
+                  }
+                },
+                {
+                  "key": "tool.name",
+                  "value": {
+                    "stringValue": "Read"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.input.file_path",
+                  "value": {
+                    "stringValue": "README.md"
+                  }
+                },
+                {
+                  "key": "input.value",
+                  "value": {
+                    "stringValue": "{\"file_path\":\"README.md\"}"
+                  }
+                },
+                {
+                  "key": "input.mime_type",
+                  "value": {
+                    "stringValue": "application/json"
+                  }
+                },
+                {
+                  "key": "agent.strace.request.event_id",
+                  "value": {
+                    "stringValue": "tool-read-call"
+                  }
+                },
+                {
+                  "key": "agent.strace.request.redacted",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "agent.strace.request.previous_hash",
+                  "value": {
+                    "stringValue": "3333333333333333333333333333333333333333333333333333333333333333"
+                  }
+                },
+                {
+                  "key": "agent.strace.request.provenance",
+                  "value": {
+                    "stringValue": "{\"source_agent_id\": \"agent-fixture\"}"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.output",
+                  "value": {
+                    "stringValue": "fixture content"
+                  }
+                },
+                {
+                  "key": "output.value",
+                  "value": {
+                    "stringValue": "fixture content"
+                  }
+                },
+                {
+                  "key": "output.mime_type",
+                  "value": {
+                    "stringValue": "text/plain"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.event_id",
+                  "value": {
+                    "stringValue": "tool-read-result"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.redacted",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "agent.strace.response.parent_event_id",
+                  "value": {
+                    "stringValue": "tool-read-call"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.previous_hash",
+                  "value": {
+                    "stringValue": "4444444444444444444444444444444444444444444444444444444444444444"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.provenance",
+                  "value": {
+                    "stringValue": "{\"source_uuid\": \"tool-result-1\"}"
+                  }
+                },
+                {
+                  "key": "metadata",
+                  "value": {
+                    "stringValue": "{\"agent_strace\": {\"request.event_id\": \"tool-read-call\", \"request.redacted\": false, \"request.previous_hash\": \"3333333333333333333333333333333333333333333333333333333333333333\", \"request.provenance\": {\"source_agent_id\": \"agent-fixture\"}, \"response.event_id\": \"tool-read-result\", \"response.redacted\": false, \"response.parent_event_id\": \"tool-read-call\", \"response.previous_hash\": \"4444444444444444444444444444444444444444444444444444444444444444\", \"response.provenance\": {\"source_uuid\": \"tool-result-1\"}}}"
+                  }
+                }
+              ],
+              "status": {
+                "code": 1
+              }
+            },
+            {
+              "traceId": "aa543ecb964e5a73d2b5055dc63a0e82",
+              "spanId": "ff4033b8ce687d09",
+              "parentSpanId": "d0baf196ae7096a2",
+              "name": "gen_ai.tool.call/Bash",
+              "kind": 3,
+              "startTimeUnixNano": "1700000002000000000",
+              "endTimeUnixNano": "1700000002049999872",
+              "attributes": [
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": {
+                    "stringValue": "Bash"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "execute"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.id",
+                  "value": {
+                    "stringValue": "tool-bash-call"
+                  }
+                },
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "TOOL"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "otlp-genai-conformance-001"
+                  }
+                },
+                {
+                  "key": "tool.name",
+                  "value": {
+                    "stringValue": "Bash"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.input.command",
+                  "value": {
+                    "stringValue": "false"
+                  }
+                },
+                {
+                  "key": "input.value",
+                  "value": {
+                    "stringValue": "{\"command\":\"false\"}"
+                  }
+                },
+                {
+                  "key": "input.mime_type",
+                  "value": {
+                    "stringValue": "application/json"
+                  }
+                },
+                {
+                  "key": "agent.strace.request.event_id",
+                  "value": {
+                    "stringValue": "tool-bash-call"
+                  }
+                },
+                {
+                  "key": "agent.strace.request.redacted",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "agent.strace.request.previous_hash",
+                  "value": {
+                    "stringValue": "5555555555555555555555555555555555555555555555555555555555555555"
+                  }
+                },
+                {
+                  "key": "agent.strace.request.provenance",
+                  "value": {
+                    "stringValue": "{\"capture_method\": \"fixture\"}"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.event_id",
+                  "value": {
+                    "stringValue": "tool-bash-error"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.redacted",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "agent.strace.response.parent_event_id",
+                  "value": {
+                    "stringValue": "tool-bash-call"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.previous_hash",
+                  "value": {
+                    "stringValue": "6666666666666666666666666666666666666666666666666666666666666666"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.provenance",
+                  "value": {
+                    "stringValue": "{\"source_uuid\": \"tool-error-1\"}"
+                  }
+                },
+                {
+                  "key": "metadata",
+                  "value": {
+                    "stringValue": "{\"agent_strace\": {\"request.event_id\": \"tool-bash-call\", \"request.redacted\": false, \"request.previous_hash\": \"5555555555555555555555555555555555555555555555555555555555555555\", \"request.provenance\": {\"capture_method\": \"fixture\"}, \"response.event_id\": \"tool-bash-error\", \"response.redacted\": false, \"response.parent_event_id\": \"tool-bash-call\", \"response.previous_hash\": \"6666666666666666666666666666666666666666666666666666666666666666\", \"response.provenance\": {\"source_uuid\": \"tool-error-1\"}}}"
+                  }
+                }
+              ],
+              "events": [
+                {
+                  "timeUnixNano": "1700000002049999872",
+                  "name": "exception",
+                  "attributes": [
+                    {
+                      "key": "exception.type",
+                      "value": {
+                        "stringValue": "ShellError"
+                      }
+                    },
+                    {
+                      "key": "exception.message",
+                      "value": {
+                        "stringValue": "command failed"
+                      }
+                    },
+                    {
+                      "key": "exception.escaped",
+                      "value": {
+                        "boolValue": false
+                      }
+                    },
+                    {
+                      "key": "agent.strace.response.event_id",
+                      "value": {
+                        "stringValue": "tool-bash-error"
+                      }
+                    },
+                    {
+                      "key": "agent.strace.response.redacted",
+                      "value": {
+                        "boolValue": false
+                      }
+                    },
+                    {
+                      "key": "agent.strace.response.parent_event_id",
+                      "value": {
+                        "stringValue": "tool-bash-call"
+                      }
+                    },
+                    {
+                      "key": "agent.strace.response.previous_hash",
+                      "value": {
+                        "stringValue": "6666666666666666666666666666666666666666666666666666666666666666"
+                      }
+                    },
+                    {
+                      "key": "agent.strace.response.provenance",
+                      "value": {
+                        "stringValue": "{\"source_uuid\": \"tool-error-1\"}"
+                      }
+                    }
+                  ]
+                }
+              ],
+              "status": {
+                "code": 2,
+                "message": "command failed"
+              }
+            },
+            {
+              "traceId": "aa543ecb964e5a73d2b5055dc63a0e82",
+              "spanId": "ffe0a378e9667a0e",
+              "parentSpanId": "d0baf196ae7096a2",
+              "name": "gen_ai.tool.call/Search",
+              "kind": 3,
+              "startTimeUnixNano": "1700000003000000000",
+              "endTimeUnixNano": "1700000003000999936",
+              "attributes": [
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": {
+                    "stringValue": "Search"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "execute"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.id",
+                  "value": {
+                    "stringValue": "orphan-tool-result"
+                  }
+                },
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "TOOL"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "otlp-genai-conformance-001"
+                  }
+                },
+                {
+                  "key": "tool.name",
+                  "value": {
+                    "stringValue": "Search"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.event_id",
+                  "value": {
+                    "stringValue": "orphan-tool-result"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.redacted",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "agent.strace.response.parent_event_id",
+                  "value": {
+                    "stringValue": "missing-tool-call"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.previous_hash",
+                  "value": {
+                    "stringValue": "7777777777777777777777777777777777777777777777777777777777777777"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.provenance",
+                  "value": {
+                    "stringValue": "{\"capture_method\": \"fixture\"}"
+                  }
+                },
+                {
+                  "key": "metadata",
+                  "value": {
+                    "stringValue": "{\"agent_strace\": {\"response.event_id\": \"orphan-tool-result\", \"response.redacted\": false, \"response.parent_event_id\": \"missing-tool-call\", \"response.previous_hash\": \"7777777777777777777777777777777777777777777777777777777777777777\", \"response.provenance\": {\"capture_method\": \"fixture\"}}}"
+                  }
+                }
+              ],
+              "status": {
+                "code": 1
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

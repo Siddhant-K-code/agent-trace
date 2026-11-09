@@ -1015,6 +1015,20 @@ agent-strace export <session-id> [--format json|csv|ndjson|otlp|otlp-genai|tempo
 ```
 Export a session. See [production.md](production.md) for per-backend OTLP setup.
 
+`--format otlp-genai` writes OTLP/HTTP JSON with the project's
+`gen_ai.*` convention and additive OpenInference attributes. With
+`--endpoint`, the command appends `/v1/traces`. Use the endpoint base, such as
+`http://localhost:6006` for Phoenix or
+`https://cloud.langfuse.com/api/public/otel` for Langfuse. Repeated `--header`
+flags add backend authentication headers.
+
+The GenAI payload preserves provider, model, tools, span parenting, exceptions,
+token counts, recorded cost, redaction state, persisted provenance, and
+observed structural evidence gaps. It does not reconstruct redacted values,
+estimate missing cost, include provider capture-matrix blind spots, or replace
+source NDJSON hash-chain verification. See
+[OpenInference compatibility](production.md#openinference-compatibility).
+
 `--format temporal` emits OTLP/HTTP JSON using the upstream W3C trace ID and
 Temporal activity parent span previously captured by `watch`. It can be written
 to a file or sent directly with `--endpoint`. See
