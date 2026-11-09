@@ -163,4 +163,4 @@ The session browser appears in the Explorer sidebar when `.agent-traces/` exists
 
 ## Release checks
 
-The extension release workflow installs locked dependencies, runs lint, compiles TypeScript, runs extension tests, and then packages the VSIX. The extension version remains independent from the Python package version. Release preparation must bump it in a separate release change when a new marketplace build is intended.
+The extension release workflow installs locked dependencies, runs lint, compiles TypeScript, runs extension tests, and then packages the VSIX. A separate job publishes that VSIX to the VS Code Marketplace and Open VSX with OIDC trusted publishing; no registry token is stored. See [extension trusted publishing setup](releases.md#extension-trusted-publishing-setup). The extension version remains independent from the Python package version. Release preparation must bump it in a separate release change when a new marketplace build is intended.

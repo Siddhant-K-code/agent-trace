@@ -104,6 +104,45 @@ class TestReleaseWorkflows(unittest.TestCase):
         self.assertNotIn("continue-on-error", workflow)
         self.assertNotIn("npm install sharp", workflow)
 
+    def test_extension_publish_uses_trusted_publishing_in_isolated_job(self):
+        workflow = (WORKFLOWS / "publish-vscode.yml").read_text()
+        header, _, jobs = workflow.partition("\njobs:\n")
+        build_job, _, publish_job = jobs.partition("\n  publish:\n")
+
+        self.assertIn("\npermissions:\n  contents: read\n", header)
+        self.assertNotIn("id-token", header)
+        self.assertTrue(publish_job)
+
+        self.assertNotIn("id-token", build_job)
+        self.assertIn("npm ci", build_job)
+        self.assertIn("Verify publish target", build_job)
+        self.assertIn("vsce package --out agent-strace.vsix", build_job)
+        self.assertIn("name: agent-strace-vsix", build_job)
+        self.assertNotIn("vsce publish", build_job)
+        self.assertNotIn("ovsx publish", build_job)
+
+        self.assertIn("needs: build", publish_job)
+        self.assertIn("environment: vscode-publish", publish_job)
+        self.assertIn(
+            "permissions:\n      contents: read\n      id-token: write\n",
+            publish_job,
+        )
+        self.assertNotIn("actions/checkout", publish_job)
+        self.assertNotIn("npm ci", publish_job)
+        self.assertIn("name: agent-strace-vsix", publish_job)
+        self.assertIn(
+            "vsce publish --oidc --packagePath agent-strace.vsix --skip-duplicate",
+            publish_job,
+        )
+        self.assertIn(
+            "ovsx publish agent-strace.vsix --trusted-publishing --skip-duplicate",
+            publish_job,
+        )
+
+        for credential in ("VSCE_PAT", "OVSX_PAT", "secrets.", "--pat", "--azure-credential"):
+            with self.subTest(credential=credential):
+                self.assertNotIn(credential, workflow)
+
     def test_extension_manifest_and_lock_versions_match(self):
         manifest = json.loads(
             (ROOT / "vscode-extension" / "package.json").read_text()

@@ -16,8 +16,8 @@ Do not make one line wait for, inherit, or publish the other line.
 | GitHub core release | The `Release` workflow needs `contents: write` and `actions: write` for `GITHUB_TOKEN`. |
 | PyPI | The `pypi` GitHub environment must be a trusted publisher for the `agent-strace` project. No long-lived PyPI token is used. |
 | MCP Registry | None. The `mcp-registry` job uses GitHub OIDC (`id-token: write`) for the `io.github.Siddhant-K-code` namespace. |
-| VS Code Marketplace | Add a repository secret named `VSCE_PAT` with publish permission for publisher `Siddhant-K-code`. |
-| Open VSX | Create the `Siddhant-K-code` namespace once, then add a repository secret named `OVSX_PAT` with publish access. |
+| VS Code Marketplace | None. A Marketplace Trusted Publishing policy for publisher `Siddhant-K-code` trusts the `vscode-publish` environment of `publish-vscode.yml`. See [extension trusted publishing setup](#extension-trusted-publishing-setup). |
+| Open VSX | None. An Open VSX trusted publisher registration for `Siddhant-K-code.agent-strace` trusts the same workflow and environment. See [extension trusted publishing setup](#extension-trusted-publishing-setup). |
 
 Protect production credentials with environment approvals or repository secret
 access controls where appropriate.
@@ -100,9 +100,11 @@ The extension tag uses `vscode-vX.Y.Z`. VS Code Marketplace and Open VSX report
 2. Run `cd vscode-extension && npm ci && npm test`.
 3. Merge the extension release pull request to `main`.
 4. Create `vscode-vX.Y.Z` at the merge commit and push the tag.
-5. The tag starts `Publish VS Code Extension`, which checks out that exact tag,
-   verifies extension parity, packages one VSIX, and publishes it to both
-   registries.
+5. The tag starts `Publish VS Code Extension`. Its `build` job checks out that
+   exact tag, verifies extension parity, tests, and packages one VSIX. Its
+   `publish` job, the only job with `id-token: write`, runs in the
+   `vscode-publish` environment and publishes that VSIX to both registries
+   with OIDC trusted publishing.
 6. Create or update the GitHub release for the same extension tag.
 7. Confirm VS Code Marketplace and Open VSX both report `X.Y.Z`.
 
@@ -122,5 +124,69 @@ publishing.
 - If automatic tag dispatch does not start, manually run
   `Publish VS Code Extension` with the existing `vscode-vX.Y.Z` tag.
 
+- `Marketplace OIDC token exchange failed` or `No trusted publisher matches the
+  presented token` means a registry policy does not match the workflow. Check
+  the owner, repository, workflow filename, and environment name against the
+  values below, then rerun with the same tag.
+
 Never rebuild from a branch after a tag exists. Recovery runs must use the
 original tag so each registry receives artifacts from the same commit.
+
+### Extension trusted publishing setup
+
+Both registries publish with short-lived credentials exchanged from the GitHub
+Actions OIDC token. No Azure subscription, Microsoft Entra app registration,
+managed identity, or repository variable is needed: Marketplace Trusted
+Publishing is the Microsoft-documented path for GitHub Actions. The Entra
+workload identity path (`vsce publish --azure-credential` with a service
+connection) is documented for Azure Pipelines.
+
+Global Azure DevOps personal access tokens, the only PAT type that can publish
+to the Marketplace, stop working on January 27, 2027. The VS Code publishing
+guide still states December 1, 2026, so finish this setup before December 1,
+2026.
+
+One-time setup, done once by the publisher owner before the next
+`vscode-vX.Y.Z` tag:
+
+1. GitHub environment. In repository **Settings > Environments**, create
+   `vscode-publish`. Under **Deployment branches and tags**, choose
+   **Selected branches and tags** and add the tag rule `vscode-v*` and the
+   branch rule `main` (manual dispatch runs from `main`). Optionally add
+   required reviewers.
+2. VS Code Marketplace. Sign in to
+   <https://marketplace.visualstudio.com/manage>, open publisher
+   `Siddhant-K-code`, select **Trusted Publishing**, expand **Create**, and
+   enter:
+
+   | Field | Value |
+   |---|---|
+   | Policy name | `publish-vscode` |
+   | Repository owner | `Siddhant-K-code` |
+   | Repository | `agent-trace` |
+   | Workflow | `publish-vscode.yml` |
+   | Environment | `vscode-publish` |
+
+   The resulting OIDC token has audience `marketplace.visualstudio.com`,
+   repository `Siddhant-K-code/agent-trace`, workflow
+   `.github/workflows/publish-vscode.yml`, and environment `vscode-publish`.
+3. Open VSX. Sign in to <https://open-vsx.org> as the owner of the verified
+   `Siddhant-K-code` namespace, open **Settings > Trusted Publishers**, pick
+   the namespace and extension `agent-strace`, choose **GitHub Actions**, and
+   enter owner `Siddhant-K-code`, repository `agent-trace`, workflow
+   `publish-vscode.yml`, and environment `vscode-publish`. The extension must
+   keep at least one active version.
+4. After the first extension release publishes to both registries through the
+   workflow, delete the repository secrets `VSCE_PAT` and `OVSX_PAT`, then
+   revoke the matching tokens in Azure DevOps (**User settings > Personal
+   access tokens**) and Open VSX (**Settings > Access Tokens**). An `OVSX_PAT`
+   value takes precedence over trusted publishing in `ovsx`, so it must not be
+   reintroduced in the workflow.
+
+Sources:
+
+- [VS Code: Secure automated publishing to Visual Studio Marketplace](https://code.visualstudio.com/api/working-with-extensions/publishing-extension#secure-automated-publishing-to-visual-studio-marketplace)
+- [Azure DevOps: Publish with OIDC Trusted Publishing](https://learn.microsoft.com/azure/devops/extend/publish/overview#publish-with-oidc-trusted-publishing)
+- [Azure DevOps Blog: Retirement of Global Personal Access Tokens](https://devblogs.microsoft.com/devops/retirement-of-global-personal-access-tokens-in-azure-devops/)
+- [Microsoft Learn: Use personal access tokens](https://learn.microsoft.com/azure/devops/organizations/accounts/use-personal-access-tokens-to-authenticate)
+- [Open VSX wiki: Trusted Publishing](https://github.com/eclipse-openvsx/openvsx/wiki/Trusted-Publishing)
