@@ -1,0 +1,50 @@
+name: Capture matrix freshness
+
+# Reports capture matrix entries whose last_verified date is older than the
+# threshold in scripts/check_capture_matrix_freshness.py. It runs on a schedule
+# and on demand only, so pull requests never fail because time has passed.
+# See docs/capture-matrix.md#freshness.
+
+on:
+  schedule:
+    - cron: "41 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  freshness:
+    name: Check last_verified dates
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Check capture matrix freshness
+        run: |
+          report="$RUNNER_TEMP/capture-matrix-freshness.txt"
+          status=0
+          python scripts/check_capture_matrix_freshness.py --check > "$report" || status=$?
+          cat "$report"
+          {
+            echo "## Capture matrix freshness"
+            echo
+            echo '```text'
+            cat "$report"
+            echo '```'
+            if [ "$status" -ne 0 ]; then
+              echo
+              echo "Re-verify the stale or malformed entries: see docs/capture-matrix.md#freshness."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"

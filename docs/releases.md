@@ -45,18 +45,22 @@ checked during release validation.
 
 1. Update all core version sources and release notes in one pull request.
 2. Run the Python suite.
-3. Merge the release pull request to `main`.
-4. The `Release` workflow checks core parity, creates `vX.Y.Z`, and creates the
+3. Run `python scripts/check_capture_matrix_freshness.py`. A stale capture
+   matrix entry does not block the release: re-verify it first, or release
+   knowing that the entry describes an older provider release. See
+   [capture matrix freshness](capture-matrix.md#freshness).
+4. Merge the release pull request to `main`.
+5. The `Release` workflow checks core parity, creates `vX.Y.Z`, and creates the
    GitHub release at the triggering commit. Core changelog generation ignores
    extension tags.
-5. The same workflow dispatches `Publish to PyPI` at the exact core tag. This
+6. The same workflow dispatches `Publish to PyPI` at the exact core tag. This
    explicit dispatch is required because a release created by `GITHUB_TOKEN`
    does not start a `release: published` workflow.
-6. Confirm the GitHub release includes the interoperability schema and Agent
+7. Confirm the GitHub release includes the interoperability schema and Agent
    Evidence Corpus ZIP.
-7. After the PyPI upload, the `mcp-registry` job publishes `server.json` to
+8. After the PyPI upload, the `mcp-registry` job publishes `server.json` to
    the MCP Registry. See [MCP Registry publishing](mcp.md#mcp-registry-publishing).
-8. Confirm the GitHub release, PyPI, and the MCP Registry all report the
+9. Confirm the GitHub release, PyPI, and the MCP Registry all report the
    intended version.
 
 `Publish to PyPI` also retains its release trigger for core releases created

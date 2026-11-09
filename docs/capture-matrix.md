@@ -112,3 +112,28 @@ An entry may also list `events_before_start`: event types the provider is known 
 A provider entry may move to `verified` only when `tested_version`, `last_verified`, and `fixture_test_reference` are all populated from a reproducible verification run. Keeping unknown values explicit prevents stale compatibility claims from looking current.
 
 A verification run uses the provider's real CLI with agent-strace hooks, a throwaway workspace, a temporary trace directory, a harmless prompt and no flags that approve every tool. `tested_version` is the provider's `--version` output and `last_verified` is the date of the run. The hook payloads it records are sanitized into [`tests/fixtures/capture_matrix/`](../tests/fixtures/capture_matrix/): every value that could identify a person, machine, repository or prompt is replaced with a synthetic one, keeping the payload shape and event order. The `fixture_test_reference`, [`tests/test_capture_matrix_fixtures.py`](../tests/test_capture_matrix_fixtures.py), replays each fixture through the hook handlers and checks the resulting trace against the entry's coverage and known gaps. To re-verify a provider, repeat the run, refresh its fixture and update `tested_version` and `last_verified`.
+
+## Freshness
+
+A verified entry is **stale** when its `last_verified` date is more than 30 days before the check date. The threshold is a date, not a release count, because both providers ship faster than verification runs can follow: GitHub Copilot CLI publishes a stable release every one to three days and Codex a stable minor about once a week, with prereleases in between, so any release-count rule would flag every entry within days. Hook payloads still changed within a month in both providers (`subagentStart` fields and event order between Copilot CLI `1.0.94-3` and `1.0.103-0`, the `fork_turns` input between Codex `0.163.0-alpha.11` and `0.167.0-alpha.3.2`), so a verification older than a month should not keep looking current. The same threshold applies to every provider. Unverified entries have no date to age; they are listed for information and never fail the check.
+
+The [`Capture matrix freshness`](../.github/workflows/capture-matrix-freshness.yml) workflow runs the check every Monday and can be started manually from the Actions tab. It fails when a verified entry is stale or its `last_verified` is not a valid `YYYY-MM-DD` date, and writes the report to the run summary. It does not run on pushes or pull requests, so an aging entry never fails an unrelated change. The [release runbook](releases.md#release-order) includes the same check.
+
+Run it locally from the repository root:
+
+```bash
+python scripts/check_capture_matrix_freshness.py           # report only, exits 0
+python scripts/check_capture_matrix_freshness.py --check   # exits 1 on a stale or malformed entry
+python scripts/check_capture_matrix_freshness.py --format json --today 2026-12-01 --max-age-days 45
+```
+
+`--today` defaults to the current UTC date and `--max-age-days` to 30. A `last_verified` date one day after the check date counts as verified that day, which absorbs the difference between a maintainer's local date and UTC; a later date is malformed. Exit status 2 means invalid arguments or an unreadable matrix. The script is repository tooling and is not part of the installed package.
+
+To refresh a stale entry:
+
+1. Repeat the verification run described in [Verification policy](#verification-policy) with the provider's current release.
+2. Refresh the provider's fixtures in `tests/fixtures/capture_matrix/`, and update its coverage and known gaps if behavior changed.
+3. Set `tested_version` and `last_verified` in `src/agent_trace/capture_matrix.json`, and update the provider's row and "Verified with" text on this page.
+4. Run `python -m unittest discover -s tests -p 'test_capture_matrix*.py' -v` and the freshness check.
+
+Do not change `last_verified` without a verification run. If a provider cannot be re-verified, leave its entry stale so the report keeps showing it.
