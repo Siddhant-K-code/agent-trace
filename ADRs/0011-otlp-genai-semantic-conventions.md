@@ -49,6 +49,17 @@ session root span (gen_ai.agent.session)
 - Tool input/output attributes use `gen_ai.tool.input.*` / `gen_ai.tool.output`
 - Scope name includes `genai-semconv-1.27` for version tracking
 
+### OpenInference compatibility
+
+The GenAI payload also emits additive OpenInference attributes. Session, LLM,
+and tool spans use `openinference.span.kind` values `AGENT`, `LLM`, and `TOOL`.
+Provider, model, token, recorded cost, session, tool, input, output, redaction,
+provenance, and observed evidence-gap fields remain in the same OTLP/HTTP JSON
+payload.
+
+No separate exporter or transport is added. The machine-readable mapping and
+its explicit losses live in `examples/otlp/openinference-mapping.json`.
+
 ## Consequences
 
 - Traces exported with `--format otlp-genai` appear in Grafana, Datadog, and

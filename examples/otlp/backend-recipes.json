@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "transport": "otlp_http_json",
+  "otlp_fixture": "examples/otlp/genai-conformance.json",
+  "langfuse_fixture": "examples/otlp/langfuse-conformance.json",
+  "backends": [
+    {
+      "id": "phoenix-openinference",
+      "exporter": "otlp-genai",
+      "endpoint_example": "http://localhost:6006",
+      "request_path": "/v1/traces",
+      "required_headers": [],
+      "preserves": [
+        "provider",
+        "model",
+        "tool",
+        "parent_child",
+        "errors",
+        "tokens",
+        "recorded_cost",
+        "redaction",
+        "provenance",
+        "observed_evidence_gaps"
+      ],
+      "limitations": [
+        "See examples/otlp/openinference-mapping.json"
+      ]
+    },
+    {
+      "id": "langfuse",
+      "exporter": "otlp-genai",
+      "endpoint_example": "https://cloud.langfuse.com/api/public/otel",
+      "request_path": "/v1/traces",
+      "required_headers": [
+        "Authorization",
+        "x-langfuse-ingestion-version"
+      ],
+      "preserves": [
+        "provider",
+        "model",
+        "tool",
+        "parent_child",
+        "errors",
+        "tokens",
+        "recorded_cost",
+        "redaction",
+        "provenance",
+        "observed_evidence_gaps"
+      ],
+      "limitations": [
+        "Eval scores still use --scores --backend langfuse.",
+        "The direct Langfuse trace ingestion API is deprecated; use the OTLP endpoint for traces."
+      ]
+    },
+    {
+      "id": "honeycomb",
+      "exporter": "otlp-genai",
+      "endpoint_example": "https://api.honeycomb.io",
+      "request_path": "/v1/traces",
+      "required_headers": [
+        "x-honeycomb-team"
+      ],
+      "preserves": [
+        "provider",
+        "model",
+        "tool",
+        "parent_child",
+        "errors",
+        "tokens",
+        "recorded_cost",
+        "redaction",
+        "provenance",
+        "observed_evidence_gaps"
+      ],
+      "limitations": [
+        "OpenInference attributes are queryable fields, but Honeycomb does not apply Phoenix-specific UI semantics."
+      ]
+    },
+    {
+      "id": "datadog",
+      "exporter": "otlp-genai",
+      "endpoint_example": "http://localhost:4318",
+      "request_path": "/v1/traces",
+      "required_headers": [],
+      "preserves": [
+        "provider",
+        "model",
+        "tool",
+        "parent_child",
+        "errors",
+        "tokens",
+        "recorded_cost",
+        "redaction",
+        "provenance",
+        "observed_evidence_gaps"
+      ],
+      "limitations": [
+        "Datadog product views may not index every custom agent.strace or OpenInference attribute by default."
+      ]
+    }
+  ]
+}

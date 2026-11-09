@@ -1,0 +1,65 @@
+{
+  "trace": {
+    "id": "otlp-genai-conformance-001",
+    "name": "agent-session (claude-code)",
+    "timestamp": "2023-11-14T22:13:20.000Z",
+    "metadata": {
+      "agent_name": "claude-code",
+      "command": "claude --fixture",
+      "tool_calls": 2,
+      "llm_requests": 1,
+      "errors": 1,
+      "total_tokens": 20
+    },
+    "tags": [
+      "agent-strace"
+    ],
+    "duration": 4.0
+  },
+  "observations": [
+    {
+      "id": "llm-response",
+      "traceId": "otlp-genai-conformance-001",
+      "type": "GENERATION",
+      "name": "llm-call",
+      "startTime": "2023-11-14T22:13:20.200Z",
+      "endTime": "2023-11-14T22:13:20.700Z",
+      "model": "claude-3-5-sonnet",
+      "usage": {
+        "input": 12,
+        "output": 8,
+        "total": 20
+      },
+      "input": null,
+      "output": null
+    },
+    {
+      "id": "tool-read-result",
+      "traceId": "otlp-genai-conformance-001",
+      "type": "SPAN",
+      "name": "tool/Read",
+      "startTime": "2023-11-14T22:13:21.000Z",
+      "endTime": "2023-11-14T22:13:21.020Z",
+      "input": {
+        "file_path": "README.md"
+      },
+      "output": "fixture content",
+      "metadata": {
+        "tool_name": "Read"
+      }
+    },
+    {
+      "id": "orphan-tool-result",
+      "traceId": "otlp-genai-conformance-001",
+      "type": "SPAN",
+      "name": "tool/Search",
+      "startTime": "2023-11-14T22:13:23.000Z",
+      "endTime": "2023-11-14T22:13:23.000Z",
+      "input": null,
+      "output": [],
+      "metadata": {
+        "tool_name": "Search"
+      }
+    }
+  ]
+}

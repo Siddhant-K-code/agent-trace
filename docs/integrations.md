@@ -44,7 +44,7 @@ Install all integrations at once:
 pip install agent-strace[all-integrations]
 ```
 
-Each integration is an optional extra — the core package stays dependency-free. See [ADR-0003](../ADRs/0003-zero-runtime-dependencies.md).
+Each integration is an optional extra. The core package stays dependency-free. See [ADR-0003](../ADRs/0003-zero-runtime-dependencies.md).
 
 ---
 
@@ -206,6 +206,32 @@ if ctx:
 Pass `trace_id` from the extracted context into `inject_traceparent` on any further outbound calls to propagate the same trace ID through the full call chain.
 
 The implementation follows [W3C Trace Context Level 1](https://www.w3.org/TR/trace-context/). No third-party dependencies required.
+
+---
+
+## OTLP GenAI interoperability
+
+`agent-strace export --format otlp-genai` uses one OTLP/HTTP JSON payload for
+Phoenix/OpenInference, Langfuse, Honeycomb, Datadog, and standard OTel
+collectors. It does not install an OpenTelemetry SDK or add a gRPC path.
+
+The payload carries both the project's `gen_ai.*` attributes and additive
+OpenInference attributes. Root, LLM, and tool spans map to `AGENT`, `LLM`, and
+`TOOL`. Parent span IDs, exceptions, token counts, recorded cost, redaction
+state, persisted provenance, and observed structural evidence gaps remain
+queryable where the backend indexes custom attributes.
+
+Use the local fixtures before configuring credentials:
+
+```bash
+python3 -m json.tool examples/otlp/genai-conformance.json >/dev/null
+python3 -m json.tool examples/otlp/openinference-mapping.json >/dev/null
+```
+
+Message arrays, provider blind spots, removed redacted values, and complete
+hash-chain verification are not losslessly represented. See
+[production tracing](production.md#openinference-compatibility) for the mapping
+and backend recipes.
 
 ---
 
