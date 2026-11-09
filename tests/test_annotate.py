@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -16,7 +17,9 @@ from agent_trace.annotate import (
     filter_annotations,
     format_annotations,
     load_annotations,
+    cmd_annotate,
 )
+from agent_trace.cli import build_parser
 from agent_trace.models import SessionMeta
 from agent_trace.store import TraceStore
 
@@ -49,11 +52,23 @@ class TestParseOffset(unittest.TestCase):
 
 class TestAnnotationRoundTrip(unittest.TestCase):
     def test_to_from_json(self):
-        a = Annotation(event_id="ev-001", note="test note", label="root-cause")
+        a = Annotation(
+            event_id="ev-001",
+            note="test note",
+            label="root-cause",
+            shareable=True,
+        )
         restored = Annotation.from_json(a.to_json())
         self.assertEqual(restored.event_id, "ev-001")
         self.assertEqual(restored.note, "test note")
         self.assertEqual(restored.label, "root-cause")
+        self.assertTrue(restored.shareable)
+
+    def test_legacy_annotation_defaults_to_not_shareable(self):
+        restored = Annotation.from_json(
+            '{"annotation_id":"legacy","session_id":"s","note":"private"}'
+        )
+        self.assertFalse(restored.shareable)
 
     def test_annotation_id_generated(self):
         a = Annotation()
@@ -108,12 +123,20 @@ class TestFormatAnnotations(unittest.TestCase):
         self.assertIn("No annotations", buf.getvalue())
 
     def test_format_with_annotations(self):
-        anns = [Annotation(event_id="ev-001", note="root cause", label="root-cause")]
+        anns = [
+            Annotation(
+                event_id="ev-001",
+                note="root cause",
+                label="root-cause",
+                shareable=True,
+            )
+        ]
         buf = io.StringIO()
         format_annotations(anns, out=buf)
         output = buf.getvalue()
         self.assertIn("root cause", output)
         self.assertIn("root-cause", output)
+        self.assertIn("shareable", output)
 
 
 class TestFilterAnnotations(unittest.TestCase):
@@ -157,6 +180,28 @@ class TestFilterAnnotations(unittest.TestCase):
         anns = self._make_annotations()
         result = filter_annotations(anns)
         self.assertEqual(len(result), 3)
+
+
+class TestShareableAnnotationCli(unittest.TestCase):
+    def test_shareable_flag_is_persisted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TraceStore(tmp)
+            meta = SessionMeta(session_id="shareable-annotation", agent_name="test")
+            store.create_session(meta)
+            args = build_parser().parse_args([
+                "--trace-dir",
+                tmp,
+                "annotate",
+                meta.session_id,
+                "--note",
+                "safe to share",
+                "--shareable",
+            ])
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(cmd_annotate(args), 0)
+            annotations = load_annotations(store, meta.session_id)
+            self.assertEqual(len(annotations), 1)
+            self.assertTrue(annotations[0].shareable)
 
 
 class TestWatchPolicyFlag(unittest.TestCase):

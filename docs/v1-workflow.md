@@ -94,13 +94,12 @@ from optional or experimental surfaces.
    ```bash
    agent-strace share <session-id> --dry-run
    ```
-   The preview reports mode `include_content` because ordinary `share` output
-   embeds full event data. For anonymized export, preview the replacements:
+   The preview reports mode `minimized` by default. Full prompts, responses,
+   commands, paths, tool inputs, and tool results require an explicit
+   `--include-content` flag. For anonymized export, preview the replacements:
    ```bash
    agent-strace export <session-id> --anonymize --dry-run
    ```
-   A privacy-minimized share-by-default workflow is tracked in #252. Until that
-   is released, do not assume ordinary `share` output is minimized.
 
 9. **Optionally compare or export.**
    Comparison is local:

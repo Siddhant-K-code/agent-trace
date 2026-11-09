@@ -57,9 +57,16 @@ class TestDisclosurePreview(unittest.TestCase):
         self.assertEqual(preview.command_count, 1)
         self.assertEqual(preview.path_count, 2)
         self.assertEqual(preview.annotation_count, 2)
+        self.assertEqual(preview.source_annotation_count, 2)
+        self.assertEqual(preview.omitted_annotation_count, 0)
         self.assertEqual(preview.content_rich_event_count, 5)
+        self.assertEqual(preview.minimized_content_rich_event_count, 5)
         self.assertEqual(preview.redacted_event_count, 1)
         self.assertEqual(preview.unredacted_content_rich_event_count, 4)
+        self.assertEqual(preview.unresolved_sensitive_field_warning_count, 0)
+        self.assertEqual(preview.anonymization_action_count, 0)
+        self.assertEqual(preview.evidence_health_status, "not_assessed")
+        self.assertIn("commands and paths", preview.omitted_field_categories)
 
         for secret in (
             "SECRET-PROMPT",
@@ -149,11 +156,22 @@ class TestDisclosurePreview(unittest.TestCase):
         )
         preview = build_disclosure_preview([event], include_content=True)
         self.assertEqual(preview.mode, "include_content")
+        self.assertEqual(preview.minimized_content_rich_event_count, 0)
+        self.assertEqual(preview.unresolved_sensitive_field_warning_count, 1)
+        self.assertEqual(preview.omitted_field_categories, ())
         self.assertNotIn("do not echo this", json.dumps(preview.to_dict()))
 
     def test_negative_annotation_count_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "non-negative"):
             build_disclosure_preview([], annotation_count=-1)
+
+    def test_source_annotation_count_cannot_be_smaller_than_included_count(self):
+        with self.assertRaisesRegex(ValueError, "at least annotation_count"):
+            build_disclosure_preview(
+                [],
+                annotation_count=2,
+                source_annotation_count=1,
+            )
 
     def test_non_object_data_is_rejected_by_position_and_type(self):
         # Key names cannot be read from these payloads, so counting the event as one
