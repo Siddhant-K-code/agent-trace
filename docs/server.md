@@ -157,7 +157,7 @@ each session selected after the month/team metadata filters. These N+1 reads
 are bounded but are not a transactionally consistent snapshot; the generated
 report records that limitation. See [Organization reporting](org-report.md).
 
-**Client side** — set `AGENT_STRACE_AUTH_KEY` alongside `AGENT_STRACE_ENDPOINT` and all outbound requests include the header automatically:
+**Client side** — set `AGENT_STRACE_AUTH_KEY` alongside `AGENT_STRACE_ENDPOINT`. The `agent-strace hook` commands then add the `Authorization: Bearer` header to the events and session metadata they send to the collector:
 
 ```bash
 export AGENT_STRACE_ENDPOINT=https://collector.example.com
@@ -165,12 +165,7 @@ export AGENT_STRACE_AUTH_KEY=ast_a3f9b2c1d4e5f6a7b8c9d0e1f2a3b4c5
 python my_agent.py
 ```
 
-The `--stream-headers` flag on `agent-strace watch` also works for one-off overrides:
-
-```bash
-agent-strace watch --stream-to https://collector.example.com \
-  --stream-headers "Authorization=Bearer ast_..."
-```
+`agent-strace watch --stream-to` does not send an `Authorization` header and has no flag to add one, so a collector started with `--auth-key` rejects its requests with 401. Stream from `watch` only to a collector that runs without `--auth-key`.
 
 Key format: `ast_` prefix + 32 hex characters. Generated with `secrets.token_hex(16)` — no new dependencies.
 
