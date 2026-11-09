@@ -106,3 +106,5 @@ The core assessment module intentionally does not read configuration files, prov
 [`agent-strace health`](commands.md#health) is the CLI adapter. It reads session metadata, hook active-session markers, and the [capture matrix](capture-matrix.md) packaged with agent-strace, then passes them to this function.
 
 This keeps the health rules independently testable and gives later integration work one stable source of reason codes rather than several slightly different implementations.
+
+[`agent-strace review`](review.md) reuses this adapter as the evidence health finding in the PR reviewability check.

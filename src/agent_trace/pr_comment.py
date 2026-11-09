@@ -310,6 +310,52 @@ def current_branch(cwd: str | Path = ".") -> str:
     )
 
 
+def select_sessions_with_link(
+    store: TraceStore,
+    requested_session: str | None = None,
+    *,
+    branch: str = "",
+    cwd: str | Path = ".",
+) -> tuple[list[str], str]:
+    """Resolve sessions like :func:`select_sessions` and say how they were linked.
+
+    The link is ``explicit`` for a named session, ``branch`` when session
+    attribution matches the branch, ``commit_time`` when the session start
+    closest to the head commit time was chosen, and ``latest`` otherwise.
+    """
+
+    if requested_session:
+        session_id = store.find_session(requested_session)
+        if not session_id:
+            raise PRCommentError(f"Session not found: {requested_session}")
+        return [session_id], "explicit"
+
+    sessions = store.list_sessions()
+    if not sessions:
+        raise PRCommentError("No agent-trace sessions found")
+
+    active_branch = branch or current_branch(cwd)
+    if active_branch and active_branch != "HEAD":
+        matching = [
+            meta for meta in sessions
+            if str((meta.attribution or {}).get("git_branch", "")) == active_branch
+        ]
+        if matching:
+            return [meta.session_id for meta in reversed(matching)], "branch"
+
+    commit_timestamp = _git(cwd, "log", "-1", "--format=%ct")
+    try:
+        timestamp = float(commit_timestamp)
+    except (TypeError, ValueError):
+        return [sessions[0].session_id], "latest"
+
+    closest = min(
+        sessions,
+        key=lambda meta: (abs(meta.started_at - timestamp), -meta.started_at),
+    )
+    return [closest.session_id], "commit_time"
+
+
 def select_sessions(
     store: TraceStore,
     requested_session: str | None = None,
@@ -324,36 +370,9 @@ def select_sessions(
     as specified by the issue, with the latest trace as a final fallback.
     """
 
-    if requested_session:
-        session_id = store.find_session(requested_session)
-        if not session_id:
-            raise PRCommentError(f"Session not found: {requested_session}")
-        return [session_id]
-
-    sessions = store.list_sessions()
-    if not sessions:
-        raise PRCommentError("No agent-trace sessions found")
-
-    active_branch = branch or current_branch(cwd)
-    if active_branch and active_branch != "HEAD":
-        matching = [
-            meta for meta in sessions
-            if str((meta.attribution or {}).get("git_branch", "")) == active_branch
-        ]
-        if matching:
-            return [meta.session_id for meta in reversed(matching)]
-
-    commit_timestamp = _git(cwd, "log", "-1", "--format=%ct")
-    try:
-        timestamp = float(commit_timestamp)
-    except (TypeError, ValueError):
-        return [sessions[0].session_id]
-
-    closest = min(
-        sessions,
-        key=lambda meta: (abs(meta.started_at - timestamp), -meta.started_at),
-    )
-    return [closest.session_id]
+    return select_sessions_with_link(
+        store, requested_session, branch=branch, cwd=cwd
+    )[0]
 
 
 _INLINE_MARKDOWN_RE = re.compile(r"([\\*_[\]()~])")
@@ -448,8 +467,16 @@ def _safe_share_url(raw_url: str, session_id: str) -> str:
     return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, query, ""))
 
 
-def render_comment(summaries: list[SessionSummary], share_url: str = "") -> str:
-    """Render one idempotently identifiable Markdown PR comment."""
+def render_comment(
+    summaries: list[SessionSummary],
+    share_url: str = "",
+    review_section: str = "",
+) -> str:
+    """Render one idempotently identifiable Markdown PR comment.
+
+    ``review_section`` is optional Markdown placed after the session table,
+    used by ``pr-comment --review``.
+    """
 
     if not summaries:
         raise ValueError("at least one session summary is required")
@@ -479,6 +506,9 @@ def render_comment(summaries: list[SessionSummary], share_url: str = "") -> str:
                 f"${summary.cost_usd:.4f} | {summary.tool_calls} | "
                 f"{_table_text(model)} | {_table_text(summary.status)} |"
             )
+
+    if review_section:
+        lines.extend(["", review_section.rstrip("\n")])
 
     files_read = {path for summary in summaries for path in summary.files_read}
     files_modified = {path for summary in summaries for path in summary.files_modified}
@@ -901,9 +931,20 @@ def cmd_pr_comment(args: argparse.Namespace) -> int:
     platform = str(getattr(args, "platform", "github") or "github").lower()
     requested = getattr(args, "session_id", None)
     branch = current_branch()
+    review = bool(getattr(args, "review", False))
+    review_exit = 0
+
+    if review:
+        from .reviewability import ReviewConfigError, threshold_from_args
+
+        try:
+            threshold = threshold_from_args(args)
+        except ReviewConfigError as exc:
+            sys.stderr.write(f"pr-comment: {exc}\n")
+            return 2
 
     try:
-        session_ids = select_sessions(store, requested, branch=branch)
+        session_ids, link = select_sessions_with_link(store, requested, branch=branch)
         # summarize_session reads the data of every event.
         for session_id in session_ids:
             require_object_event_data(
@@ -914,11 +955,25 @@ def cmd_pr_comment(args: argparse.Namespace) -> int:
             getattr(args, "share_url", "")
             or os.environ.get("AGENT_STRACE_REPLAY_URL", "")
         )
-        body = render_comment(summaries, share_url=share_url)
+        review_section = ""
+        if review:
+            from .reviewability import LinkedSession, build_report, render_markdown
+
+            report = build_report(
+                store,
+                [LinkedSession(session_id, link) for session_id in session_ids],
+                threshold,
+                branch=branch,
+            )
+            review_section = render_markdown(report)
+            review_exit = report.exit_code
+        body = render_comment(
+            summaries, share_url=share_url, review_section=review_section
+        )
 
         if getattr(args, "dry_run", False):
             sys.stdout.write(body)
-            return 0
+            return review_exit
 
         token, token_header = _platform_token(platform)
         if not token:
@@ -950,7 +1005,9 @@ def cmd_pr_comment(args: argparse.Namespace) -> int:
 
     noun = "PR" if platform == "github" else "MR"
     sys.stdout.write(f"{action.title()} agent-trace comment on {noun} #{target.number}.\n")
-    return 0
+    if review_exit:
+        sys.stderr.write("pr-comment: reviewability check failed the threshold.\n")
+    return review_exit
 
 
 __all__ = [
@@ -964,5 +1021,6 @@ __all__ = [
     "render_comment",
     "resolve_target",
     "select_sessions",
+    "select_sessions_with_link",
     "summarize_session",
 ]
