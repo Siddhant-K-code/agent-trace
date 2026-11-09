@@ -40,6 +40,9 @@
       "tested_version": "0.167.0-alpha.3.2",
       "last_verified": "2026-11-09",
       "fixture_test_reference": "tests/test_capture_matrix_fixtures.py",
+      "results_without_requests": [
+        "llm_response"
+      ],
       "coverage": {
         "session_start": "captured",
         "session_end": "captured",
@@ -58,7 +61,7 @@
         "SessionEnd always reports reason \"other\", so the session_end event does not say why the session ended.",
         "Subagents are not separate sessions: their hooks arrive under the parent session_id with an agent_id. SubagentStart and SubagentStop are recorded as subagent_start and subagent_stop events in the parent trace, and the subagent's tool events carry its agent_id and agent_type, but no event links a subagent to the spawn_agent call that started it.",
         "A failed shell command arrives as a normal PostToolUse with the error text in tool_response and no exit code, so it is recorded as a tool_result rather than an error.",
-        "Of the hook payloads observed, only PostModelRequest carries token usage, and setup does not register that hook, so no token usage is recorded. The model name is recorded on the session_start event.",
+        "Token usage comes only from PostModelRequest, which Codex 0.164.0 and later fire after every model request, including a subagent's. Each is recorded as an llm_response event with the model, status, error and token_usage; a subagent's also carry its agent_id and agent_type. In token_usage, input_tokens includes cached_input_tokens, output_tokens includes reasoning_output_tokens, and total_tokens is their sum. PreModelRequest is not registered, so no llm_request event is recorded: llm_response events have no parent_id and no request duration. A failed or cancelled request is an llm_response with that status and no token usage, not an error event. Older Codex releases record no token usage.",
         "File and command detail depends on PreToolUse/PostToolUse payloads; shell calls arrive as tool_name Bash with tool_input.command."
       ]
     },

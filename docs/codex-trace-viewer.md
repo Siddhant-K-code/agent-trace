@@ -26,8 +26,9 @@ agent-strace setup --cli codex --verify --live
 
 Codex must trust each generated command hook in its Hooks UI. Headless
 `codex exec` can skip untrusted hooks without a warning. Re-run setup after
-upgrading from an older AgentTrace configuration so newer session-end and
-subagent hooks are present. Live verification reports observed event types,
+upgrading from an older AgentTrace configuration so newer session-end,
+subagent and model-request hooks are present, then trust the hooks setup names
+as new or changed. Live verification reports observed event types,
 boundaries, redaction, evidence health, and packaged capture-matrix gaps. It
 returns non-zero when matching reviewable evidence is unavailable.
 
@@ -45,11 +46,17 @@ agent-strace stats SESSION_ID
 Codex subagent events and their tool calls are stored in the parent session.
 Replay and statistics label them by the provider-supplied agent identity.
 
+On Codex `0.164.0` and later, each model request is recorded as an
+`llm_response` event with the model, status and token usage, a subagent's
+included. `input_tokens` already includes cached input and `output_tokens`
+already includes reasoning, so `total_tokens` is their sum.
+
 ## Known capture gaps
 
 - Hidden reasoning is not available.
-- The observed `PostModelRequest` hook carries token usage, but AgentTrace
-  setup does not register that hook, so token usage is not recorded.
+- Token usage is recorded only on Codex `0.164.0` and later, once the
+  `PostModelRequest` hook is trusted. Model requests have no request event or
+  duration, because setup does not register `PreModelRequest`.
 - A failed shell command can arrive as a normal tool result rather than an
   error event.
 - No recorded event directly links a subagent identity to the `spawn_agent`

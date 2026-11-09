@@ -103,6 +103,7 @@ class LiveSetupVerifyTests(unittest.TestCase):
         *,
         duplicate_start=False,
         empty=False,
+        before_end=(),
     ):
         agent = _AGENTS[provider]
         store = TraceStore(self.trace_dir)
@@ -135,6 +136,7 @@ class LiveSetupVerifyTests(unittest.TestCase):
                 timestamp=started_at + 2,
                 data={"text": "synthetic response", "hook_event": "stop", "provider": provider},
             ),
+            *before_end,
             TraceEvent(EventType.SESSION_END, timestamp=started_at + 3, data={"reason": "other"}),
         ]
         if duplicate_start:
@@ -178,6 +180,39 @@ class LiveSetupVerifyTests(unittest.TestCase):
         ):
             self.assertIn(expected, out)
         self.assertNotIn("claude-newest-session", out)
+
+    def test_codex_session_without_model_requests_gets_a_trust_note(self):
+        self._write_session("codex-no-usage-session", "codex", 100)
+        status, out, _ = self._run(session="codex-no-usage")
+        self.assertEqual(status, 0)
+        self.assertIn(
+            "Model requests: none recorded. PostModelRequest runs only on Codex 0.164.0 "
+            "or later, and only after it is trusted in /hooks",
+            out,
+        )
+
+        self._write_session(
+            "codex-usage-session",
+            "codex",
+            200,
+            before_end=[
+                TraceEvent(
+                    EventType.LLM_RESPONSE,
+                    timestamp=202.5,
+                    data={"hook_event": "post_model_request", "provider": "codex"},
+                ),
+            ],
+        )
+        status, out, _ = self._run(session="codex-usage")
+        self.assertEqual(status, 0)
+        self.assertNotIn("Model requests: none recorded", out)
+        self.assertIn("llm_response 1", out)
+        self.assertNotIn("orphan_llm_response", out)
+
+    def test_claude_session_gets_no_model_request_note(self):
+        self._write_session("claude-session", "claude", 100)
+        _, out, _ = self._run(cli="claude", session="claude-session")
+        self.assertNotIn("Model requests:", out)
 
     def test_explicit_session_prefix_is_used(self):
         self._write_session("codex-selected-session", "codex", 100)

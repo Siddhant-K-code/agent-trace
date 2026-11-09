@@ -242,6 +242,7 @@ def _summary(event: TraceEvent) -> str:
 def _review_items(
     events: list[TraceEvent],
     annotations: list[Annotation],
+    standalone_result_types: frozenset[EventType] = frozenset(),
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     projection = build_review_projection(events)
     annotation_map, unresolved_annotations = _annotation_targets(annotations, events)
@@ -266,7 +267,11 @@ def _review_items(
         relationship_issue = projected.relationship_issue
         child_ids = children.get(projected.event_id, [])
 
-        if event.event_type in _EXPECTED_PARENT_TYPES and not projected.parent_id:
+        if (
+            event.event_type in _EXPECTED_PARENT_TYPES
+            and event.event_type not in standalone_result_types
+            and not projected.parent_id
+        ):
             relationship = "orphaned"
             relationship_issue = "missing_parent"
             categories.add("gaps")
@@ -328,7 +333,11 @@ def build_session_review(
         events,
         matrix or load_capture_matrix(),
     )
-    items, unresolved_annotations = _review_items(events, annotations)
+    standalone = frozenset(
+        EventType(kind)
+        for kind in (health.entry or {}).get("results_without_requests", [])
+    )
+    items, unresolved_annotations = _review_items(events, annotations, standalone)
     content_mode, disclosure = _content_mode(events, len(annotations))
     started_at = meta.started_at or (items[0]["timestamp"] if items else None)
     ended_events = [event.timestamp for event in events if event.event_type == EventType.SESSION_END]

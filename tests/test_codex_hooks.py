@@ -25,10 +25,11 @@ from agent_trace.hooks import (
     handle_user_prompt,
     hook_main,
 )
-from agent_trace.models import EventType
+from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.otlp import session_to_otlp, session_to_otlp_genai
 from agent_trace.store import TraceStore
 from agent_trace.timeline import build_timeline, format_timeline
+from agent_trace.validation import validate_trace_directory
 
 
 class TestCodexHooks(unittest.TestCase):
@@ -306,6 +307,58 @@ class TestCodexSetup(unittest.TestCase):
             f"Preserved existing OpenAI Codex hooks backup (not overwritten): {backup_path}",
             err.getvalue(),
         )
+
+    def _setup_stderr(self):
+        args = argparse.Namespace(
+            redact=False, no_redact=False, global_config=False, cli="codex"
+        )
+        err = io.StringIO()
+        with patch.object(sys, "stdout", io.StringIO()), patch.object(sys, "stderr", err):
+            cmd_setup(args)
+        return err.getvalue()
+
+    def test_setup_names_hooks_that_need_trusting_after_an_upgrade(self):
+        hooks_path = Path(self.tmpdir) / "hooks.json"
+        previous = _codex_hooks_config(
+            argparse.Namespace(redact=False, no_redact=False, global_config=False)
+        )
+        del previous["hooks"]["PostModelRequest"]
+        hooks_path.write_text(json.dumps(previous))
+
+        text = self._setup_stderr()
+        self.assertIn(
+            "untrusted until reviewed in /hooks: PostModelRequest. "
+            "Until then codex exec skips them without a warning.",
+            text,
+        )
+
+        text = self._setup_stderr()
+        self.assertNotIn("untrusted until reviewed", text)
+        self.assertIn("AgentTrace hooks are unchanged since the previous hooks.json", text)
+
+    def test_setup_names_every_hook_whose_command_changed(self):
+        hooks_path = Path(self.tmpdir) / "hooks.json"
+        hooks_path.write_text(json.dumps(_codex_hooks_config(
+            argparse.Namespace(redact=True, no_redact=False, global_config=False)
+        )))
+        text = self._setup_stderr()
+        self.assertIn(
+            "untrusted until reviewed in /hooks: SessionStart, UserPromptSubmit, PreToolUse, "
+            "PostToolUse, Stop, SubagentStart, SubagentStop, SessionEnd, PostModelRequest.",
+            text,
+        )
+
+    def test_setup_without_a_previous_config_lists_no_changed_hooks(self):
+        text = self._setup_stderr()
+        self.assertNotIn("untrusted until reviewed", text)
+        self.assertNotIn("unchanged since the previous hooks.json", text)
+        self.assertIn("codex exec skips untrusted hooks", text)
+
+    def test_setup_over_an_unreadable_config_names_every_hook(self):
+        (Path(self.tmpdir) / "hooks.json").write_text("{garbage")
+        text = self._setup_stderr()
+        self.assertIn("untrusted until reviewed in /hooks: SessionStart,", text)
+        self.assertIn("PostModelRequest.", text)
 
     def test_setup_cli_all_outputs_claude_and_codex_sections(self):
         args = argparse.Namespace(
@@ -594,13 +647,14 @@ class TestCodexSessionEndAndSubagentHooks(unittest.TestCase):
             list(hooks),
             [
                 "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop",
-                "SubagentStart", "SubagentStop", "SessionEnd",
+                "SubagentStart", "SubagentStop", "SessionEnd", "PostModelRequest",
             ],
         )
         for event, subcommand in (
             ("SubagentStart", "subagent-start"),
             ("SubagentStop", "subagent-stop"),
             ("SessionEnd", "session-end"),
+            ("PostModelRequest", "post-model-request"),
         ):
             with self.subTest(event=event):
                 (group,) = hooks[event]
@@ -612,6 +666,10 @@ class TestCodexSessionEndAndSubagentHooks(unittest.TestCase):
                 )
         self.assertEqual(hooks["SessionEnd"][0]["hooks"][0]["timeout"], 3)
         self.assertNotIn("timeout", hooks["SubagentStart"][0]["hooks"][0])
+        # Observation-only: registered synchronously so the last request of a
+        # codex exec run is not lost when async hooks are aborted at shutdown.
+        self.assertNotIn("async", hooks["PostModelRequest"][0]["hooks"][0])
+        self.assertNotIn("PreModelRequest", hooks)
 
     def test_subagent_hooks_are_recorded_in_the_parent_trace(self):
         self.start()
@@ -892,6 +950,284 @@ class TestCodexSessionEndAndSubagentHooks(unittest.TestCase):
         self.assertIsNotNone(self.store().load_meta(self.PARENT[:16]).ended_at)
         report = self.health()
         self.assertEqual([r.code for r in report.result.reasons if r.kind.value == "observed"], [])
+
+
+class TestCodexPostModelRequest(unittest.TestCase):
+    """PostModelRequest as Codex 0.167.0-alpha.3.2 sends it."""
+
+    SESSION = "d0000201-0000-4000-8000-000000000201"
+    TURN = "d0000202-0000-4000-8000-000000000202"
+    AGENT = "d0000203-0000-4000-8000-000000000203"
+    USAGE = {
+        "input_tokens": 1200,
+        "cached_input_tokens": 1024,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 48,
+        "reasoning_output_tokens": 16,
+        "total_tokens": 1248,
+    }
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name) / ".agent-traces"
+        env = patch.dict(
+            os.environ, {"AGENT_TRACE_DIR": str(self.root), "DO_NOT_TRACK": "1"}, clear=False
+        )
+        env.start()
+        self.addCleanup(env.stop)
+        for name in (*_PROVIDER_ENV.values(), "AGENT_TRACE_REDACT"):
+            os.environ.pop(name, None)
+
+    def dispatch(self, event, *, expect_stderr="", **payload):
+        payload = {
+            "session_id": self.SESSION,
+            "cwd": "/workspace/project",
+            "transcript_path": "/codex-home/sessions/rollout.jsonl",
+            "hook_event_name": event,
+            **payload,
+        }
+        err = io.StringIO()
+        with patch.object(sys, "stdin", io.StringIO(json.dumps(payload))), patch.object(
+            sys, "stderr", err
+        ):
+            hook_main(["--provider", "codex", event])
+        self.assertEqual(err.getvalue(), expect_stderr, event)
+
+    def model_request(self, *, expect_stderr="", **overrides):
+        payload = {
+            "turn_id": self.TURN,
+            "model": "synthetic-model",
+            "status": "completed",
+            "error": None,
+            "token_usage": dict(self.USAGE),
+        }
+        payload.update(overrides)
+        self.dispatch("PostModelRequest", expect_stderr=expect_stderr, **payload)
+
+    def store(self):
+        return TraceStore(str(self.root))
+
+    def responses(self):
+        events = self.store().load_events(self.SESSION[:16])
+        return [e for e in events if e.event_type == EventType.LLM_RESPONSE]
+
+    def test_records_one_llm_response_with_usage(self):
+        self.dispatch("SessionStart", source="startup", model="synthetic-model")
+        self.model_request()
+
+        (event,) = self.responses()
+        self.assertEqual(event.parent_id, "")
+        self.assertEqual(event.data["hook_event"], "post_model_request")
+        self.assertEqual(event.data["provider"], "codex")
+        self.assertEqual(event.data["model"], "synthetic-model")
+        self.assertEqual(event.data["status"], "completed")
+        self.assertEqual(event.data["turn_id"], self.TURN)
+        self.assertNotIn("error", event.data)
+        self.assertEqual(event.data["token_usage"], self.USAGE)
+        self.assertEqual(event.data["input_tokens"], 1200)
+        self.assertEqual(event.data["output_tokens"], 48)
+        self.assertEqual(event.data["total_tokens"], 1248)
+        self.assertNotIn("cached_input_tokens", event.data)
+        self.assertNotIn("agent_id", event.data)
+        self.assertNotIn("cwd", event.data)
+        self.assertNotIn("transcript_path", event.data)
+
+    def test_each_request_adds_tokens_but_not_llm_requests(self):
+        self.dispatch("SessionStart", source="startup", model="synthetic-model")
+        self.model_request()
+        self.model_request(token_usage={**self.USAGE, "total_tokens": 2000})
+        self.model_request(status="failed", error="synthetic failure", token_usage=None)
+
+        meta = self.store().load_meta(self.SESSION[:16])
+        self.assertEqual(meta.llm_requests, 0)
+        self.assertEqual(meta.total_tokens, 3248)
+        self.assertEqual(len(self.responses()), 3)
+
+    def test_failed_and_cancelled_requests_have_no_usage(self):
+        self.model_request(status="failed", error="synthetic failure", token_usage=None)
+        self.model_request(status="cancelled", token_usage=None)
+
+        failed, cancelled = self.responses()
+        self.assertEqual(failed.data["status"], "failed")
+        self.assertEqual(failed.data["error"], "synthetic failure")
+        self.assertIsNone(failed.data["token_usage"])
+        self.assertNotIn("total_tokens", failed.data)
+        self.assertEqual(cancelled.data["status"], "cancelled")
+        self.assertNotIn("error", cancelled.data)
+        self.assertEqual(self.store().load_meta(self.SESSION[:16]).total_tokens, 0)
+
+    def test_subagent_request_carries_agent_id_and_type(self):
+        self.model_request(agent_id=self.AGENT, agent_type="explorer")
+        self.model_request(agent_type="explorer")
+
+        subagent, unattributed = self.responses()
+        self.assertEqual(subagent.data["agent_id"], self.AGENT)
+        self.assertEqual(subagent.data["agent_type"], "explorer")
+        self.assertNotIn("agent_id", unattributed.data)
+        self.assertNotIn("agent_type", unattributed.data)
+        self.assertEqual(len(self.store().list_sessions()), 1)
+
+    def test_malformed_counts_are_kept_nested_but_not_mirrored(self):
+        self.model_request(
+            token_usage={
+                "input_tokens": "1200",
+                "output_tokens": True,
+                "total_tokens": -1,
+            }
+        )
+        self.model_request(token_usage="not an object")
+
+        nested, scalar = self.responses()
+        self.assertEqual(nested.data["token_usage"]["input_tokens"], "1200")
+        for key in ("input_tokens", "output_tokens", "total_tokens"):
+            self.assertNotIn(key, nested.data)
+            self.assertNotIn(key, scalar.data)
+        self.assertNotIn("token_usage", scalar.data)
+        self.assertEqual(self.store().load_meta(self.SESSION[:16]).total_tokens, 0)
+
+    def test_error_text_is_redacted(self):
+        secret = "sk-" + "a" * 48
+        with patch.dict(os.environ, {"AGENT_TRACE_REDACT": "1"}):
+            self.model_request(
+                status="failed",
+                error=f"bad key {secret}",
+                token_usage=None,
+                expect_stderr="agent-strace: redacted secrets from trace event\n",
+            )
+
+        (event,) = self.responses()
+        self.assertNotIn(secret, event.data["error"])
+        self.assertTrue(event.redacted or "REDACTED" in event.data["error"])
+
+    def test_health_reports_one_declared_limitation_not_orphans(self):
+        self.dispatch("SessionStart", source="startup", model="synthetic-model")
+        for _ in range(3):
+            self.model_request()
+        self.model_request(agent_id=self.AGENT, agent_type="explorer")
+        self.dispatch("SessionEnd", reason="other")
+
+        store = self.store()
+        session_id = self.SESSION[:16]
+        report = assess_session(
+            store,
+            session_id,
+            store.load_meta(session_id),
+            store.load_events(session_id),
+            load_capture_matrix(),
+        )
+        codes = [r.code for r in report.result.reasons]
+        self.assertNotIn("orphan_llm_response", codes)
+        self.assertEqual(codes.count("declared_results_without_requests"), 1)
+        (declared,) = [
+            r for r in report.result.reasons if r.code == "declared_results_without_requests"
+        ]
+        self.assertEqual(declared.kind.value, "provider_limitation")
+        self.assertIn("4 llm_response events", declared.message)
+        self.assertEqual(
+            [r.code for r in report.result.reasons if r.kind.value == "observed"], []
+        )
+
+    def validate(self):
+        # Resolve the temp dir: validate refuses symlinked components such as
+        # macOS's /var.
+        return validate_trace_directory(self.root.resolve() / self.SESSION[:16])
+
+    def test_validate_accepts_declared_responses_without_requests(self):
+        self.dispatch("SessionStart", source="startup", model="synthetic-model")
+        for _ in range(3):
+            self.model_request()
+        self.model_request(agent_id=self.AGENT, agent_type="explorer")
+        self.dispatch("SessionEnd", reason="other")
+
+        report = self.validate()
+        self.assertEqual(report.status, "valid")
+        self.assertEqual(report.exit_code, 0)
+        self.assertIn("declared_results_without_requests", report.labels)
+        self.assertNotIn("orphan_parent", report.labels)
+        self.assertEqual(
+            [(f.code, f.severity) for f in report.findings],
+            [("declared_results_without_requests", "info")],
+        )
+        self.assertIn("4 llm_response events", report.findings[0].message)
+        self.assertNotEqual(report.summary["state"], "contradictory")
+
+    def test_validate_keeps_a_response_naming_a_missing_parent_an_orphan(self):
+        self.dispatch("SessionStart", source="startup", model="synthetic-model")
+        self.model_request()
+        session_id = self.SESSION[:16]
+        self.store().append_event(
+            session_id,
+            TraceEvent(
+                event_type=EventType.LLM_RESPONSE,
+                session_id=session_id,
+                parent_id="000000000000",
+                data={"total_tokens": 1},
+            ),
+        )
+        self.dispatch("SessionEnd", reason="other")
+
+        report = self.validate()
+        self.assertEqual(report.status, "partial")
+        self.assertIn("orphan_parent", report.labels)
+        self.assertIn("declared_results_without_requests", report.labels)
+        findings = [(f.code, f.severity) for f in report.findings]
+        self.assertEqual(
+            sorted(findings),
+            [
+                ("declared_results_without_requests", "info"),
+                ("orphan_llm_response", "warning"),
+            ],
+        )
+
+    def test_validate_without_hook_provider_reports_each_orphan(self):
+        store = self.store()
+        session_id = "sdk-session-0001"
+        store.create_session(SessionMeta(session_id=session_id, agent_name="sdk"))
+        store.append_event(
+            session_id,
+            TraceEvent(event_type=EventType.SESSION_START, session_id=session_id),
+        )
+        for _ in range(2):
+            store.append_event(
+                session_id,
+                TraceEvent(
+                    event_type=EventType.LLM_RESPONSE,
+                    session_id=session_id,
+                    data={"total_tokens": 1},
+                ),
+            )
+        store.append_event(
+            session_id,
+            TraceEvent(event_type=EventType.SESSION_END, session_id=session_id),
+        )
+
+        report = validate_trace_directory(self.root.resolve() / session_id)
+        self.assertEqual(report.status, "partial")
+        self.assertIn("orphan_parent", report.labels)
+        self.assertNotIn("declared_results_without_requests", report.labels)
+        self.assertEqual(
+            [(f.code, f.severity) for f in report.findings],
+            [("orphan_llm_response", "warning")] * 2,
+        )
+
+    def test_subagent_requests_do_not_look_like_a_parent_compaction(self):
+        from agent_trace.compaction import detect_compactions
+
+        self.model_request(token_usage={**self.USAGE, "input_tokens": 90_000, "total_tokens": 90_048})
+        self.model_request(
+            agent_id=self.AGENT,
+            agent_type="explorer",
+            token_usage={**self.USAGE, "input_tokens": 3_000, "total_tokens": 3_048},
+        )
+        self.model_request(token_usage={**self.USAGE, "input_tokens": 92_000, "total_tokens": 92_048})
+
+        events = self.store().load_events(self.SESSION[:16])
+        self.assertEqual(detect_compactions(events), [])
+
+    def test_post_model_request_subcommand_aliases(self):
+        self.dispatch("post-model-request", token_usage=dict(self.USAGE))
+        self.assertEqual(len(self.responses()), 1)
 
 
 if __name__ == "__main__":

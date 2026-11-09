@@ -718,6 +718,10 @@ class TestCaptureMatrixLoader(unittest.TestCase):
             b' "coverage": {}, "known_gaps": [], "events_before_start": "user_prompt"}]}',
             b'{"schema_version": 1, "providers": [{"id": "x", "capture_method": "m",'
             b' "coverage": {}, "known_gaps": [], "events_before_start": ["not_an_event"]}]}',
+            b'{"schema_version": 1, "providers": [{"id": "x", "capture_method": "m",'
+            b' "coverage": {}, "known_gaps": [], "results_without_requests": "llm_response"}]}',
+            b'{"schema_version": 1, "providers": [{"id": "x", "capture_method": "m",'
+            b' "coverage": {}, "known_gaps": [], "results_without_requests": ["nope"]}]}',
         ):
             with self.subTest(raw=raw), self.assertRaises(ValueError):
                 self.load(raw)

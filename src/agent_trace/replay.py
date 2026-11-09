@@ -236,6 +236,13 @@ def format_event(event: TraceEvent, base_ts: float | None = None) -> str:
         parts.append(f"{color}llm_response{C.RESET}")
         if tokens:
             parts.append(f"{C.DIM}({tokens} tokens){C.RESET}")
+        status = event.data.get("status")
+        if status in ("failed", "cancelled"):
+            parts.append(f"{C.RED}{status}{C.RESET}")
+            error = event.data.get("error")
+            if isinstance(error, str) and error.strip():
+                parts.append(f"{C.DIM}{' '.join(error.split())[:80]}{C.RESET}")
+        _append_subagent_tag(parts, event)
         parts.append(f"{duration}")
 
     elif event.event_type == EventType.FILE_READ:

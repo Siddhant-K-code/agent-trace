@@ -102,6 +102,7 @@ def load_capture_matrix() -> CaptureMatrix:
             and isinstance(entry.get("known_gaps"), list)
             and all(isinstance(gap, str) for gap in entry["known_gaps"])
             and _valid_event_types(entry.get("events_before_start", []))
+            and _valid_event_types(entry.get("results_without_requests", []))
         ):
             raise ValueError("capture matrix provider entry is malformed")
     return CaptureMatrix(
@@ -381,6 +382,9 @@ def assess_session(
         session_finalized=finalized,
         allowed_pre_start_event_types=(
             entry.get("events_before_start", []) if entry is not None else ()
+        ),
+        allowed_unrequested_result_types=(
+            entry.get("results_without_requests", []) if entry is not None else ()
         ),
     )
     return HealthReport(

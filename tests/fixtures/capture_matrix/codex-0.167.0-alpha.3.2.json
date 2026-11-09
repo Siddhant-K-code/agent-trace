@@ -3,7 +3,7 @@
   "cli": "OpenAI Codex CLI",
   "tested_version": "0.167.0-alpha.3.2",
   "recorded": "2026-11-09",
-  "sanitized": "Hook payloads recorded from real headless runs and then sanitized: session, turn and agent ids, paths, prompts, model names, token counts and subagent task names and messages are synthetic. Tool commands were chosen for the test and their output is as observed. Hook names, event order, payload keys and value types are as observed. PreModelRequest and PostModelRequest were recorded by extra recorder-only hooks; agent-strace setup does not register them.",
+  "sanitized": "Hook payloads recorded from real headless runs and then sanitized: session, turn and agent ids, paths, prompts, model names, token counts and subagent task names and messages are synthetic. Tool commands were chosen for the test and their output is as observed. Hook names, event order, payload keys and value types are as observed. PreModelRequest and PostModelRequest were recorded by extra recorder-only hooks. agent-strace setup now registers PostModelRequest; it does not register PreModelRequest.",
   "scenarios": {
     "tool": {
       "description": "codex exec session: one prompt, one successful shell command.",
@@ -127,7 +127,7 @@
               "cached_input_tokens": 512,
               "cache_write_input_tokens": 0,
               "output_tokens": 7,
-              "reasoning_output_tokens": 0,
+              "reasoning_output_tokens": 3,
               "total_tokens": 1027
             }
           }
@@ -213,7 +213,7 @@
               "cached_input_tokens": 512,
               "cache_write_input_tokens": 0,
               "output_tokens": 8,
-              "reasoning_output_tokens": 0,
+              "reasoning_output_tokens": 4,
               "total_tokens": 1038
             }
           }
@@ -280,7 +280,7 @@
               "cached_input_tokens": 512,
               "cache_write_input_tokens": 0,
               "output_tokens": 9,
-              "reasoning_output_tokens": 0,
+              "reasoning_output_tokens": 4,
               "total_tokens": 1049
             }
           }
@@ -366,7 +366,7 @@
               "cached_input_tokens": 512,
               "cache_write_input_tokens": 0,
               "output_tokens": 10,
-              "reasoning_output_tokens": 0,
+              "reasoning_output_tokens": 5,
               "total_tokens": 1060
             }
           }
@@ -464,7 +464,7 @@
               "cached_input_tokens": 512,
               "cache_write_input_tokens": 0,
               "output_tokens": 11,
-              "reasoning_output_tokens": 0,
+              "reasoning_output_tokens": 5,
               "total_tokens": 1071
             }
           }
@@ -504,7 +504,7 @@
               "cached_input_tokens": 512,
               "cache_write_input_tokens": 0,
               "output_tokens": 12,
-              "reasoning_output_tokens": 0,
+              "reasoning_output_tokens": 6,
               "total_tokens": 1082
             }
           }
@@ -579,7 +579,7 @@
               "cached_input_tokens": 512,
               "cache_write_input_tokens": 0,
               "output_tokens": 13,
-              "reasoning_output_tokens": 0,
+              "reasoning_output_tokens": 6,
               "total_tokens": 1093
             }
           }
@@ -646,7 +646,7 @@
               "cached_input_tokens": 512,
               "cache_write_input_tokens": 0,
               "output_tokens": 14,
-              "reasoning_output_tokens": 0,
+              "reasoning_output_tokens": 7,
               "total_tokens": 1104
             }
           }

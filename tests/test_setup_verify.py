@@ -138,6 +138,29 @@ class CodexSetupVerifyTests(unittest.TestCase):
         for event in ("SessionEnd", "SubagentStart", "SubagentStop"):
             self.assertTrue(any(p.startswith(f"{event}: missing") for p in problems), event)
 
+    def test_config_without_post_model_request_fails_with_trust_hint(self):
+        config = _codex_hooks_config(_args())
+        del config["hooks"]["PostModelRequest"]
+        self.hooks_path.write_text(json.dumps(config))
+        err = io.StringIO()
+        with patch("agent_trace.setup_verify.shutil.which", return_value="/bin/agent-strace"), self._probe_ok():
+            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(cmd_setup(_args()), 1)
+        text = err.getvalue()
+        self.assertIn("PostModelRequest: missing", text)
+        self.assertIn("agent-strace hook --provider codex post-model-request", text)
+        self.assertIn("Run agent-strace setup --cli codex to add the missing hooks", text)
+        self.assertIn("trust it in /hooks, or codex exec skips it without a warning", text)
+
+    def test_verified_output_says_hook_trust_is_not_checked(self):
+        self._write_config()
+        output = io.StringIO()
+        with patch("agent_trace.setup_verify.shutil.which", return_value="/bin/agent-strace"), self._probe_ok():
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(cmd_setup(_args()), 0)
+        self.assertIn("Not checked: hook trust.", output.getvalue())
+        self.assertIn("such as PostModelRequest, need trusting", output.getvalue())
+
     def test_wrong_event_matcher_or_hook_type_cannot_appear_verified(self):
         for mutation in ("matcher", "type"):
             with self.subTest(mutation=mutation):
@@ -245,7 +268,7 @@ class CodexSetupVerifyTests(unittest.TestCase):
                     )
                 self.assertTrue(ok, issues)
                 self.assertEqual(details["redaction"], mode.replace("_", "-"))
-                self.assertEqual(details["event_count"], 8)
+                self.assertEqual(details["event_count"], 9)
                 self.assertEqual(details["executable"], "/bin/agent-strace")
 
     def test_mixed_modes_are_rejected(self):
@@ -346,7 +369,7 @@ class CodexSetupVerifyTests(unittest.TestCase):
         with patch("agent_trace.setup_verify.shutil.which", return_value="/bin/agent-strace"), self._probe_ok():
             with contextlib.redirect_stdout(output):
                 self.assertEqual(cmd_setup(_args()), 0)
-        self.assertIn("8/8 events, redaction: default", output.getvalue())
+        self.assertIn("9/9 events, redaction: default", output.getvalue())
         self.assertIn("/bin/agent-strace (agent-strace", output.getvalue())
         self.assertIn("\n"+"hooks:      ", output.getvalue())
         self.assertEqual(output.getvalue().count(str(self.hooks_path)), 1)

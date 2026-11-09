@@ -811,6 +811,13 @@ def _codex_hooks_config(args: argparse.Namespace) -> dict:
                     "timeout": 3,
                 }],
             }],
+            # Codex 0.164.0 and later. Older releases ignore the unknown key.
+            "PostModelRequest": [{
+                "hooks": [{
+                    "type": "command",
+                    "command": f"{cmd_prefix} post-model-request",
+                }],
+            }],
         }
     }
 
@@ -1059,6 +1066,39 @@ def _codex_dir_problem(config_dir: Path) -> str | None:
     return None
 
 
+def _codex_hooks_needing_trust(previous: object, config: dict) -> list[str]:
+    """Return events whose AgentTrace hook is new or changed since *previous*.
+
+    Codex keys a hook's trust to its event, position, matcher and handler, so
+    each of these starts untrusted. ``codex exec`` skips untrusted hooks
+    without a warning.
+    """
+    old_hooks = previous.get("hooks") if isinstance(previous, dict) else None
+    if not isinstance(old_hooks, dict):
+        old_hooks = {}
+    changed = []
+    for event, groups in config["hooks"].items():
+        new_group = groups[0]
+        old_groups = old_hooks.get(event)
+        old_group = old_groups[0] if isinstance(old_groups, list) and old_groups else None
+        old_handlers = old_group.get("hooks") if isinstance(old_group, dict) else None
+        if (
+            not isinstance(old_handlers, list)
+            or not old_handlers
+            or old_group.get("matcher") != new_group.get("matcher")
+            or old_handlers[0] != new_group["hooks"][0]
+        ):
+            changed.append(event)
+    return changed
+
+
+def _read_json_or_none(path: Path) -> object:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return None
+
+
 def _write_codex_hooks_config(args: argparse.Namespace) -> tuple[Path, Path | None, bool]:
     config_dir = _codex_config_dir()
     # cmd_setup rejects a missing CODEX_HOME first, so this only creates ~/.codex.
@@ -1178,6 +1218,9 @@ def cmd_setup(args: argparse.Namespace) -> int | None:
                 f"executable: {details['executable']} ({details['version']})\n"
                 "Not checked: Codex profiles, -c overrides, and project, system, "
                 "or managed config layers.\n"
+                "Not checked: hook trust. Codex runs a hook only after it is trusted in /hooks, "
+                "and codex exec skips untrusted hooks without a warning. Hooks that setup added "
+                "or changed since your last review, such as PostModelRequest, need trusting.\n"
                 "This does not prove Codex enabled/trusted hooks or captured an event; "
                 "run a local session and inspect its trace to check actual capture.\n"
             )
@@ -1186,9 +1229,16 @@ def cmd_setup(args: argparse.Namespace) -> int | None:
             return 0
         for message in messages:
             sys.stderr.write(f"Setup verification failed: {message}\n")
+        if any(": missing " in message for message in messages):
+            sys.stderr.write(
+                "Run agent-strace setup --cli codex to add the missing hooks. Codex treats "
+                "a hook added to hooks.json as new: trust it in /hooks, or codex exec skips "
+                "it without a warning.\n"
+            )
         return 1
 
     configs: list[tuple[str, str, dict]] = []
+    codex_needing_trust: list[str] | None = None
     if cli in ("claude", "all"):
         configs.append(("Claude Code", _claude_settings_target(), _claude_hooks_config(args)))
     if cli in ("codex", "all"):
@@ -1196,6 +1246,11 @@ def cmd_setup(args: argparse.Namespace) -> int | None:
         if problem:
             sys.stderr.write(f"Setup failed: {problem}\n")
             return 1
+        previous_path = _codex_config_dir() / "hooks.json"
+        if previous_path.exists():
+            codex_needing_trust = _codex_hooks_needing_trust(
+                _read_json_or_none(previous_path), _codex_hooks_config(args)
+            )
         hooks_path, backup_path, backup_created = _write_codex_hooks_config(args)
         if backup_created:
             sys.stderr.write(
@@ -1251,6 +1306,17 @@ def cmd_setup(args: argparse.Namespace) -> int | None:
             "- Reload Codex, then review and trust command hooks in the Hooks UI or /hooks. "
             "Hooks added by a newer agent-strace need trusting again; codex exec skips untrusted hooks.\n"
         )
+        if codex_needing_trust:
+            sys.stderr.write(
+                "- New or changed since the previous hooks.json, so untrusted until reviewed in "
+                f"/hooks: {', '.join(codex_needing_trust)}. Until then codex exec skips them "
+                "without a warning.\n"
+            )
+        elif codex_needing_trust is not None:
+            sys.stderr.write(
+                "- AgentTrace hooks are unchanged since the previous hooks.json; "
+                "hooks you already trusted stay trusted.\n"
+            )
 
     if cli == "gemini":
         sys.stdout.write(json.dumps(_gemini_hooks_config(args), indent=2) + "\n")

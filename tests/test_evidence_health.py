@@ -639,5 +639,105 @@ class TestDeclaredEventsBeforeStart(unittest.TestCase):
             self.assess(self.PROMPT_FIRST, ["not_an_event_type"])
 
 
+
+class TestDeclaredResultsWithoutRequests(unittest.TestCase):
+    """Provider metadata may declare result types recorded without a request."""
+
+    @staticmethod
+    def assess(events, allowed=()):
+        return assess_evidence_health(
+            events,
+            session_finalized=True,
+            allowed_unrequested_result_types=allowed,
+        )
+
+    @staticmethod
+    def located(result):
+        return [(reason.code, reason.kind, reason.event_id) for reason in result.reasons]
+
+    @staticmethod
+    def session(*middle):
+        return [
+            event(EventType.SESSION_START, 1.0, "start"),
+            *middle,
+            event(EventType.SESSION_END, 9.0, "end"),
+        ]
+
+    def test_undeclared_parentless_responses_are_orphans(self):
+        result = self.assess(self.session(
+            event(EventType.LLM_RESPONSE, 2.0, "r1"),
+            event(EventType.LLM_RESPONSE, 3.0, "r2"),
+        ))
+
+        self.assertEqual(result.status, EvidenceHealthStatus.PARTIAL)
+        self.assertEqual(
+            [r.code for r in result.reasons],
+            ["orphan_llm_response", "orphan_llm_response"],
+        )
+
+    def test_declared_parentless_responses_are_one_provider_limitation(self):
+        for allowed in (["llm_response"], [EventType.LLM_RESPONSE]):
+            with self.subTest(allowed=allowed):
+                result = self.assess(
+                    self.session(
+                        event(EventType.LLM_RESPONSE, 2.0, "r1"),
+                        event(EventType.LLM_RESPONSE, 3.0, "r2"),
+                    ),
+                    allowed,
+                )
+
+                self.assertEqual(result.status, EvidenceHealthStatus.PARTIAL)
+                self.assertEqual(
+                    self.located(result),
+                    [(
+                        "declared_results_without_requests",
+                        EvidenceHealthReasonKind.PROVIDER_LIMITATION,
+                        "r1",
+                    )],
+                )
+                self.assertIn("2 llm_response events have", result.reasons[0].message)
+
+    def test_one_declared_response_is_singular(self):
+        result = self.assess(
+            self.session(event(EventType.LLM_RESPONSE, 2.0, "r1")), ["llm_response"]
+        )
+
+        self.assertIn("1 llm_response event has", result.reasons[0].message)
+
+    def test_declared_response_naming_a_missing_request_is_still_an_orphan(self):
+        result = self.assess(
+            self.session(
+                event(EventType.LLM_RESPONSE, 2.0, "r1"),
+                event(EventType.LLM_RESPONSE, 3.0, "r2", parent_id="gone"),
+            ),
+            ["llm_response"],
+        )
+
+        self.assertEqual(
+            sorted(r.code for r in result.reasons),
+            ["declared_results_without_requests", "orphan_llm_response"],
+        )
+
+    def test_declaration_does_not_cover_other_result_types(self):
+        result = self.assess(
+            self.session(event(EventType.TOOL_RESULT, 2.0, "result")), ["llm_response"]
+        )
+
+        self.assertEqual([r.code for r in result.reasons], ["orphan_tool_result"])
+
+    def test_paired_responses_are_unaffected(self):
+        events = self.session(
+            event(EventType.LLM_REQUEST, 2.0, "req"),
+            event(EventType.LLM_RESPONSE, 3.0, "resp", parent_id="req"),
+        )
+
+        self.assertEqual(self.assess(events, ["llm_response"]).reasons, ())
+        self.assertEqual(self.assess(events).reasons, ())
+
+    def test_unknown_declared_result_type_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.assess(self.session(), ["not_an_event_type"])
+
+
 if __name__ == "__main__":
     unittest.main()

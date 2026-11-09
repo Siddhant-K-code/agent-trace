@@ -78,6 +78,15 @@ start is still invalid, and a session with no start is still
 `missing_session_start`. `agent-strace health` takes the declared types from
 the capture matrix's `events_before_start`.
 
+Some providers record results with no request event. A caller can declare
+those result types with `allowed_unrequested_result_types`. Result events of a
+declared type with no `parent_id` are then reported once as the provider
+limitation `declared_results_without_requests`, instead of one
+`orphan_<type>` each. A result that names a request missing from the trace is
+still an orphan. `agent-strace health` takes the declared types from the
+capture matrix's `results_without_requests`; Codex declares `llm_response`,
+because AgentTrace records its model requests from `PostModelRequest` alone.
+
 ## Provider limitations
 
 A missing event alone is not enough to conclude that capture failed: some providers never expose certain categories of activity. Callers should therefore pass known blind spots from a versioned provider/capture matrix:

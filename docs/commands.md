@@ -98,6 +98,7 @@ normalized event to the active session. `--provider` defaults to `claude`.
 | `subagent-start` | Subagent start in the parent session: agent type and name, plus the child session ID for GitHub Copilot CLI or the agent ID for Codex |
 | `subagent-stop` | Subagent stop in the parent session, with the same fields and the stop reason when the provider sends one. For Codex, also the subagent's final message as `text` and its `agent_transcript_path`, both redacted |
 | `session-end` | Finish the active session and clear its hook state |
+| `post-model-request` | Codex only: one `llm_response` per model request with the model, status, error, turn ID and token usage, plus `agent_id` and `agent_type` for a subagent's request |
 
 Provider-specific aliases in generated configurations are normalized to these
 events. Prefer `agent-strace setup --cli PROVIDER` over invoking `hook`
@@ -216,7 +217,10 @@ Each reason has a `kind`:
   types precede the first session start, `declared_events_before_session_start`
   replaces the observed `events_before_session_start`. GitHub Copilot CLI
   declares `user_prompt`, because it sends the first prompt before its session
-  start.
+  start. When the entry lists `results_without_requests`, result events of
+  those types with no `parent_id` are reported once as
+  `declared_results_without_requests` instead of one orphan each. Codex
+  declares `llm_response`.
 
 The provider comes only from hook-written evidence: the `session_start` and
 stop events the hooks record, or the metadata the hooks write when a session's

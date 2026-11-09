@@ -104,7 +104,10 @@ agent-strace setup --cli codex --verify --live --session SESSION_ID
 
 For Claude Code, accept the workspace trust prompt before the representative
 session. For Codex, review and trust every AgentTrace command in `/hooks`;
-`codex exec` skips untrusted hooks without a warning.
+`codex exec` skips untrusted hooks without a warning. `--verify` does not read
+trust state, so it passes while hooks are untrusted. `--verify --live` notes a
+Codex session that recorded no model requests, the usual sign that
+`PostModelRequest` is untrusted or the Codex release predates it.
 
 ### Claude Code hook verification
 
@@ -186,14 +189,15 @@ When `CODEX_HOME` is set, use `cp "$CODEX_HOME/hooks.json.agent-strace.bak" "$CO
     "Stop": [{ "hooks": [{ "type": "command", "command": "agent-strace hook --provider codex stop" }] }],
     "SubagentStart": [{ "hooks": [{ "type": "command", "command": "agent-strace hook --provider codex subagent-start" }] }],
     "SubagentStop": [{ "hooks": [{ "type": "command", "command": "agent-strace hook --provider codex subagent-stop" }] }],
-    "SessionEnd": [{ "hooks": [{ "type": "command", "command": "agent-strace hook --provider codex session-end", "timeout": 3 }] }]
+    "SessionEnd": [{ "hooks": [{ "type": "command", "command": "agent-strace hook --provider codex session-end", "timeout": 3 }] }],
+    "PostModelRequest": [{ "hooks": [{ "type": "command", "command": "agent-strace hook --provider codex post-model-request" }] }]
   }
 }
 ```
 
-Codex sends one JSON object to each command hook on stdin. agent-strace records the common Codex fields (`session_id`, `turn_id`, `tool_use_id`, `tool_name`, `tool_input`, `tool_response`, `prompt`, `last_assistant_message`, and for subagent hooks `agent_id` and `agent_type`) into the same `.agent-traces/` session store used by Claude Code. `SessionEnd` records a `session_end` event; its `timeout` of 3 seconds is the most Codex allows for that hook. A Codex subagent is not a separate session: `SubagentStart` and `SubagentStop` are recorded as `subagent_start` and `subagent_stop` events in the parent's trace, and the subagent's tool calls are recorded there too. See the [capture matrix](capture-matrix.md#openai-codex) for details.
+Codex sends one JSON object to each command hook on stdin. agent-strace records the common Codex fields (`session_id`, `turn_id`, `tool_use_id`, `tool_name`, `tool_input`, `tool_response`, `prompt`, `last_assistant_message`, and for subagent hooks `agent_id` and `agent_type`) into the same `.agent-traces/` session store used by Claude Code. `SessionEnd` records a `session_end` event; its `timeout` of 3 seconds is the most Codex allows for that hook. A Codex subagent is not a separate session: `SubagentStart` and `SubagentStop` are recorded as `subagent_start` and `subagent_stop` events in the parent's trace, and the subagent's tool calls are recorded there too. `PostModelRequest` records one `llm_response` event per model request with the `model`, `status`, `error`, `turn_id` and `token_usage` Codex sends, attributed to the subagent when it made the request. Codex `0.164.0` and later fire it; older releases ignore it. See the [capture matrix](capture-matrix.md#openai-codex) for details and token semantics.
 
-**Upgrading from an earlier agent-strace:** installs made before `SessionEnd`, `SubagentStart` and `SubagentStop` were added do not have those hooks, so Codex traces have no `session_end` or subagent events. Re-run `agent-strace setup --cli codex`, then trust the new hooks in `/hooks`; Codex treats them as new hooks, and `codex exec` skips them until they are trusted. `agent-strace setup --cli codex --verify` reports them as missing until setup is re-run.
+**Upgrading from an earlier agent-strace:** installs made before `SessionEnd`, `SubagentStart`, `SubagentStop` and `PostModelRequest` were added do not have those hooks, so Codex traces have no `session_end`, subagent or `llm_response` events. Re-run `agent-strace setup --cli codex`; it names the hooks that are new or changed since your previous `hooks.json`. Then trust those hooks in `/hooks`. Codex treats them as new hooks, and `codex exec` skips them without a warning until they are trusted; the hooks you trusted before stay trusted. `agent-strace setup --cli codex --verify` reports the hooks as missing until setup is re-run, but it cannot see trust. After one session, `--verify --live` notes a Codex session with no model requests.
 
 If Codex does not list the hooks after you create the file:
 
@@ -228,7 +232,10 @@ minimal built-in reader looks only for these keys and does not validate the
 rest of the file.
 
 **A passing static check does not mean Codex has enabled or trusted these
-hooks, that a provider process ran, or that events were captured.** Reload
+hooks, that a provider process ran, or that events were captured.** Its
+output says that hook trust was not checked. When a hook is missing it tells
+you to run `agent-strace setup --cli codex` again and reminds you that Codex
+treats a hook added to `hooks.json` as new. Reload
 Codex, review the command hooks in its Hooks UI, run a local test session, then
 use `agent-strace setup --cli codex --verify --live`. Verification invokes only
 the local AgentTrace executable with `--version`; it does not execute hooks,
