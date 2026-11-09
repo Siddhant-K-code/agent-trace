@@ -744,7 +744,7 @@ framework sources, privacy behavior, and limitations.
 | `--since VALUE` | Inclusive UTC timestamp/date or duration such as `90d`; default is `90d` |
 | `--until UTC` | Exclusive UTC timestamp/date; default is the fixed snapshot time |
 | `--format FORMAT` | `json` (authoritative), `sarif`, or `pdf`; default is `json` |
-| `--output FILE`, `-o FILE` | Atomically write a nonsymlinked private file with mode `0600`; required for PDF |
+| `--output FILE`, `-o FILE` | Atomically write a nonsymlinked private file with mode `0600`; required for PDF. A symlink in a parent directory must be [root-owned](#symlinked-parent-directories) |
 | `--policy FILE` | Evaluate a bounded local policy at report time; outcomes are `would_allow`/`would_deny`, never historical authorization |
 | `--rescan [installed\|FILE]` | With no value or `installed`, explicitly reuse the installed manifest; a file selects a local versioned JSON manifest. Performs no network, CVE, or SBOM scan |
 
@@ -1157,8 +1157,12 @@ manifest. It cannot be combined with `--stdout`, `--open`, `--postmortem`, or
 `--dry-run`. It also cannot be combined with `--include-content`. Assignment
 bundles keep their separate privacy format and are not evidence packets. The
 output name must have a lowercase `.zip` suffix and is atomically written with
-owner-only permissions. See the [assignment review guide](hiring.md) for the
-privacy boundary and interpretation limits.
+owner-only permissions. The trace store and the output path may pass through
+root-owned operating system links such as `/tmp` on macOS. Other symlinks in
+their parent directories are refused; see
+[Symlinked parent directories](#symlinked-parent-directories). See the
+[assignment review guide](hiring.md) for the privacy boundary and
+interpretation limits.
 
 Every event's `data` must be a JSON object. If any event's `data` is an array,
 string, number, boolean, or null (for example after a hand edit or from another
@@ -1188,12 +1192,14 @@ ordering.
 |---|---|
 | `SUBMISSION.zip` | One canonical assignment bundle |
 | `DIRECTORY` | Directory of direct lowercase `.zip` files; requires `--compare` |
-| `--rubric FILE` | Required strict assignment rubric; symbolic links are rejected |
+| `--rubric FILE` | Required strict assignment rubric; symbolic links are rejected, and a symlink in a parent directory must be [root-owned](#symlinked-parent-directories) |
 | `--compare` | Score and rank a bounded directory batch |
 | `--format text\|json` | Human-readable table/detail or versioned JSON (default: `text`) |
 
 Invalid archives and rubrics exit non-zero. A low rubric score is a report for
-human review, not a pass/fail hiring gate. See [hiring.md](hiring.md).
+human review, not a pass/fail hiring gate. See [hiring.md](hiring.md). The
+bundle, the comparison directory, and the rubric follow the same
+[symlink rule](#symlinked-parent-directories) as `share --assignment`.
 
 ### `pr-comment`
 ```
@@ -1440,6 +1446,28 @@ apply to them as soon as they are visible. Run `agent-strace retention status`
 after `--apply` and before the next `retention clean`.
 
 Exit status is 1 when a store cannot be scanned or a write fails, otherwise 0.
+
+---
+
+## Symlinked parent directories
+
+`share --assignment`, `score`, and `compliance-report --output` refuse a path
+when one of its directories is a symbolic link, because a cloned repository or
+an unpacked archive can plant links that move where these commands read or
+write. They follow a symlink in a parent directory only when all of these hold:
+
+- root owns the symlink;
+- root owns the directory that holds it;
+- group and other users cannot write that directory, or it has the sticky bit.
+
+This covers operating system links such as `/tmp`, `/var`, and `/etc` on macOS,
+so absolute paths under the default macOS `TMPDIR` work. The components of a
+trusted symlink's target are checked by the same rule. A symlink that the
+current user owns is always refused. No symlink is trusted on Windows, where
+Python reports owner ID 0 for every file, or when the command runs as root.
+These are still refused when they are symbolic links, even root-owned ones:
+the output file, the rubric, the submission bundle, and the trace store
+directory itself.
 
 ---
 

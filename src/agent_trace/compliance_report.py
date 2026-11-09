@@ -30,6 +30,7 @@ from typing import Any, Iterable, TextIO
 from .approval import APPROVAL_STATES, DECIDED_STATES, PENDING, ApprovalRequest
 from .audit import Policy, _audit_event, _extract_urls, _is_sensitive
 from .event_data import str_field
+from .fileutil import has_untrusted_symlink
 from .models import EventType, SessionMeta, TraceEvent
 from .correlation import correlate_tool_events
 from .redact import contains_redaction_marker, redact_data
@@ -1905,14 +1906,13 @@ def _atomic_write_private(path_value: str | Path, data: bytes) -> None:
     if path.name in {"", ".", ".."}:
         raise ComplianceReportError("--output must name a file")
     parent = path.parent
-    for candidate in (parent, *parent.parents):
-        if candidate.is_symlink():
-            raise ComplianceReportError("refusing a symlinked output path")
+    if has_untrusted_symlink(parent):
+        raise ComplianceReportError("refusing a symlinked output path")
     try:
         parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise ComplianceReportError("output directory could not be created") from exc
-    if parent.is_symlink() or not parent.is_dir():
+    if has_untrusted_symlink(parent) or not parent.is_dir():
         raise ComplianceReportError("output directory is not a safe directory")
     if path.is_symlink() or (path.exists() and not path.is_file()):
         raise ComplianceReportError("output must be a non-symlinked regular file")

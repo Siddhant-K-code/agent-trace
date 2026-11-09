@@ -6,6 +6,8 @@ import hashlib
 import io
 import json
 import os
+import secrets
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -25,6 +27,7 @@ from agent_trace.compliance_report import (
     load_framework_manifest,
     resolve_report_window,
 )
+from agent_trace.fileutil import trusted_symlink_target
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
 
@@ -532,6 +535,59 @@ class TestFormatsOutputAndCLI(unittest.TestCase):
             with self.assertRaises(ComplianceReportError):
                 _atomic_write_private(link / "child" / "report.json", b"unsafe")
             self.assertFalse((child / "report.json").exists())
+
+    @unittest.skipIf(os.name == "nt" or not hasattr(os, "symlink"), "POSIX symlink resolution")
+    def test_atomic_write_follows_only_trusted_parent_symlinks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(os.path.realpath(directory))
+            real = root / "real"
+            real.mkdir()
+            (root / "other").mkdir()
+            trusted_link = root / "trusted"
+            trusted_link.symlink_to(real, target_is_directory=True)
+            (real / "inner").symlink_to(root / "other", target_is_directory=True)
+            info = os.lstat(trusted_link)
+            trusted = {(info.st_dev, info.st_ino)}
+
+            def is_trusted(link_stat, dir_stat):
+                return (link_stat.st_dev, link_stat.st_ino) in trusted
+
+            with patch("agent_trace.fileutil._trusts_root_owned_symlinks", return_value=True), \
+                    patch("agent_trace.fileutil._symlink_is_trusted", side_effect=is_trusted):
+                _atomic_write_private(trusted_link / "report.json", b"direct")
+                _atomic_write_private(trusted_link / "made" / "report.json", b"made")
+                with self.assertRaisesRegex(
+                    ComplianceReportError, "refusing a symlinked output path"
+                ):
+                    _atomic_write_private(trusted_link / "inner" / "report.json", b"unsafe")
+                with self.assertRaisesRegex(
+                    ComplianceReportError, "output must be a non-symlinked regular file"
+                ):
+                    _atomic_write_private(trusted_link, b"unsafe")
+            self.assertEqual((real / "report.json").read_bytes(), b"direct")
+            self.assertEqual((real / "made" / "report.json").read_bytes(), b"made")
+            self.assertFalse((root / "other" / "report.json").exists())
+
+    def test_atomic_write_accepts_root_owned_tmp_on_macos(self):
+        if sys.platform != "darwin" or trusted_symlink_target("/tmp") is None:
+            self.skipTest("needs the root-owned /tmp symlink of macOS")
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            self.assertTrue(directory.startswith("/tmp/"))
+            nested = Path(directory) / "new" / "report.json"
+            _atomic_write_private(nested, b"nested")
+            self.assertEqual(nested.read_bytes(), b"nested")
+            self.assertEqual(nested.stat().st_mode & 0o777, 0o600)
+            link = Path(directory) / "link"
+            link.symlink_to(nested.parent, target_is_directory=True)
+            with self.assertRaisesRegex(ComplianceReportError, "refusing a symlinked output path"):
+                _atomic_write_private(link / "report.json", b"unsafe")
+        direct = Path("/tmp") / f"agent-strace-test-{secrets.token_hex(8)}.json"
+        try:
+            _atomic_write_private(direct, b"direct")
+            self.assertEqual(direct.read_bytes(), b"direct")
+        finally:
+            if direct.exists():
+                direct.unlink()
 
     def test_pdf_dependency_error_is_actionable(self):
         real_import = __import__
