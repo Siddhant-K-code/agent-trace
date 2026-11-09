@@ -1,5 +1,5 @@
 name: agent-trace eval
-description: Run agent-trace evals and a PR reviewability check in CI. Post results to the step summary or the PR, and fail on regression or a missing review signal.
+description: Run agent-trace evals and a PR reviewability check in CI. Upload PR evidence artifacts, post results to the step summary or the PR, and fail on regression or a missing review signal.
 author: Siddhant-K-code
 branding:
   icon: activity
@@ -45,6 +45,9 @@ inputs:
   review-min-confidence:
     description: Lowest confidence that can fail the check (low, medium, high). Empty uses config, then medium.
     default: ""
+  cognitive-debt:
+    description: Cognitive debt report for the review session. false skips it, report adds it to the review, check also fails the check unless the result is a pass. Status unknown is never a pass.
+    default: "report"
 
 outputs:
   passed:
@@ -56,6 +59,36 @@ outputs:
   review-passed:
     description: "true if the reviewability check passed, false if it failed, empty if it did not run"
     value: ${{ steps.review.outputs.passed }}
+  review-result:
+    description: "pass, fail, or error. Empty if the check did not run."
+    value: ${{ steps.review.outputs.review-result }}
+  review-markdown-path:
+    description: Path to review.md on the runner
+    value: ${{ steps.review.outputs.review-markdown-path }}
+  review-json-path:
+    description: Path to review.json on the runner
+    value: ${{ steps.review.outputs.review-json-path }}
+  evidence-packet-path:
+    description: Path to the metadata-only evidence packet HTML. Empty if it was not generated.
+    value: ${{ steps.evidence.outputs.evidence-packet-path }}
+  cognitive-debt-json-path:
+    description: Path to the schema v1 cognitive debt JSON. Empty if it was not generated.
+    value: ${{ steps.evidence.outputs.cognitive-debt-json-path }}
+  cognitive-debt-badge-path:
+    description: Path to the Shields endpoint JSON. Empty if it was not generated.
+    value: ${{ steps.evidence.outputs.cognitive-debt-badge-path }}
+  cognitive-debt-status:
+    description: "Cognitive debt status from the schema v1 report: clean, partial, above_threshold, unknown, or empty"
+    value: ${{ steps.review.outputs.cognitive-debt-status }}
+  cognitive-debt-result:
+    description: "pass, fail, or unavailable. unknown status and missing reports are unavailable."
+    value: ${{ steps.review.outputs.cognitive-debt-result }}
+  artifacts-dir:
+    description: Directory holding the PR evidence files
+    value: ${{ steps.review.outputs.artifacts-dir || steps.evidence.outputs.artifacts-dir }}
+  evidence-artifact-url:
+    description: URL of the agent-trace-pr-evidence artifact. Empty if the upload did not happen.
+    value: ${{ steps.upload-evidence.outputs.artifact-url }}
 
 runs:
   using: composite
@@ -132,55 +165,51 @@ runs:
           echo "::notice::No agent-trace sessions found; skipping PR comment."
         fi
 
+    - name: Prepare PR evidence
+      id: evidence
+      if: ${{ always() && inputs.review == 'true' }}
+      shell: bash
+      env:
+        AGENT_TRACE_DIR: ${{ inputs.trace-dir }}
+        COGNITIVE_DEBT_MODE: ${{ inputs.cognitive-debt }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/pr-evidence.sh" prepare
+
+    - name: Upload PR evidence
+      id: upload-evidence
+      if: ${{ always() && inputs.review == 'true' && steps.evidence.outputs.artifacts-dir != '' }}
+      continue-on-error: true
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: agent-trace-pr-evidence
+        path: |
+          ${{ steps.evidence.outputs.evidence-packet-path }}
+          ${{ steps.evidence.outputs.cognitive-debt-json-path }}
+          ${{ steps.evidence.outputs.cognitive-debt-badge-path }}
+        if-no-files-found: ignore
+
     - name: Reviewability check
       id: review
       if: ${{ always() && inputs.review == 'true' }}
       shell: bash
       env:
         GITHUB_TOKEN: ${{ inputs.github-token }}
-        REVIEW_TRACE_DIR: ${{ inputs.trace-dir }}
+        AGENT_TRACE_DIR: ${{ inputs.trace-dir }}
         REVIEW_FAIL_ON: ${{ inputs.review-fail-on }}
         REVIEW_MIN_CONFIDENCE: ${{ inputs.review-min-confidence }}
         REVIEW_POST_COMMENT: ${{ inputs.post-pr-comment }}
+        COGNITIVE_DEBT_MODE: ${{ inputs.cognitive-debt }}
+        ARTIFACT_URL: ${{ steps.upload-evidence.outputs.artifact-url }}
         PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
         PR_BASE_REPOSITORY: ${{ github.repository }}
-      run: |
-        ARGS=()
-        if [ -n "$REVIEW_FAIL_ON" ]; then
-          ARGS+=(--fail-on "$REVIEW_FAIL_ON")
-        fi
-        if [ -n "$REVIEW_MIN_CONFIDENCE" ]; then
-          ARGS+=(--min-confidence "$REVIEW_MIN_CONFIDENCE")
-        fi
+      run: bash "$GITHUB_ACTION_PATH/scripts/pr-evidence.sh" check
 
-        POST=false
-        if [ "$REVIEW_POST_COMMENT" = "true" ]; then
-          if [ -n "$PR_HEAD_REPOSITORY" ] && [ "$PR_HEAD_REPOSITORY" != "$PR_BASE_REPOSITORY" ]; then
-            echo "::notice::Skipping PR comment for a fork because pull_request tokens are read-only."
-          elif find "$REVIEW_TRACE_DIR" -mindepth 2 -name meta.json -print -quit 2>/dev/null | grep -q .; then
-            POST=true
-          else
-            echo "::notice::No agent-trace sessions found; skipping PR comment."
-          fi
-        fi
-
-        status=0
-        if [ "$POST" = "true" ]; then
-          agent-strace --trace-dir "$REVIEW_TRACE_DIR" pr-comment --review "${ARGS[@]}" || status=$?
-        fi
-        if [ -n "$GITHUB_STEP_SUMMARY" ]; then
-          summary_status=0
-          agent-strace --trace-dir "$REVIEW_TRACE_DIR" review --format markdown "${ARGS[@]}" >> "$GITHUB_STEP_SUMMARY" || summary_status=$?
-          if [ "$POST" != "true" ]; then
-            status=$summary_status
-          fi
-        elif [ "$POST" != "true" ]; then
-          agent-strace --trace-dir "$REVIEW_TRACE_DIR" review "${ARGS[@]}" || status=$?
-        fi
-
-        if [ "$status" -eq 0 ]; then
-          echo "passed=true" >> "$GITHUB_OUTPUT"
-        else
-          echo "passed=false" >> "$GITHUB_OUTPUT"
-          exit "$status"
-        fi
+    - name: Upload review report
+      if: ${{ always() && inputs.review == 'true' && (steps.review.outputs.review-json-path != '' || steps.review.outputs.review-markdown-path != '') }}
+      continue-on-error: true
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: agent-trace-pr-review
+        path: |
+          ${{ steps.review.outputs.review-json-path }}
+          ${{ steps.review.outputs.review-markdown-path }}
+        if-no-files-found: ignore

@@ -75,6 +75,7 @@ from .policy_backtest import (
     cmd_policy_diff,
 )
 from .pr_comment import cmd_pr_comment
+from .reviewability import add_artifact_arguments as add_review_artifact_arguments
 from .reviewability import add_threshold_arguments as add_review_threshold_arguments
 from .reviewability import cmd_review
 from .postmortem import cmd_postmortem
@@ -1651,6 +1652,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="add the reviewability check to the comment and exit 1 when it fails the threshold",
     )
     add_review_threshold_arguments(p_pr_comment)
+    add_review_artifact_arguments(p_pr_comment)
 
     # review
     p_review = sub.add_parser(
@@ -1670,6 +1672,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="branch to link sessions by (default: from CI or git)",
     )
     add_review_threshold_arguments(p_review)
+    add_review_artifact_arguments(p_review)
 
     # postmortem
     p_postmortem = sub.add_parser("postmortem", help="generate a structured postmortem for a failed session")

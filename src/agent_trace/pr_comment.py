@@ -310,6 +310,61 @@ def current_branch(cwd: str | Path = ".") -> str:
     )
 
 
+_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$")
+
+
+def pull_request_head_sha() -> tuple[bool, str]:
+    """Return ``(in_pull_request, head_sha)`` from CI event data.
+
+    In a GitHub pull request job the checkout is usually a synthetic merge
+    commit, so ``HEAD`` is not the PR head. The head SHA comes from the event
+    payload. GitLab merged results pipelines expose it in
+    ``CI_MERGE_REQUEST_SOURCE_BRANCH_SHA``. The SHA is empty when the job is
+    a pull request but the head cannot be read.
+    """
+
+    event_path = os.environ.get("GITHUB_EVENT_PATH", "")
+    if event_path:
+        try:
+            payload = json.loads(Path(event_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            payload = None
+        pull = payload.get("pull_request") if isinstance(payload, dict) else None
+        if isinstance(pull, dict):
+            head = pull.get("head")
+            sha = head.get("sha") if isinstance(head, dict) else None
+            return True, sha if isinstance(sha, str) and _SHA_RE.match(sha) else ""
+    if os.environ.get("GITHUB_HEAD_REF"):
+        return True, ""
+    if os.environ.get("CI_MERGE_REQUEST_IID"):
+        sha = (
+            os.environ.get("CI_MERGE_REQUEST_SOURCE_BRANCH_SHA", "")
+            or os.environ.get("CI_COMMIT_SHA", "")
+        )
+        return True, sha if _SHA_RE.match(sha) else ""
+    return False, ""
+
+
+def head_commit_timestamp(cwd: str | Path = ".") -> float | None:
+    """Commit time of the branch head, or None when it cannot be resolved.
+
+    Outside a pull request job this is ``HEAD``. Inside one it is the PR head
+    commit, which must be present in the clone.
+    """
+
+    in_pull_request, sha = pull_request_head_sha()
+    if in_pull_request:
+        if not sha:
+            return None
+        raw = _git(cwd, "show", "-s", "--format=%ct", f"{sha}^{{commit}}")
+    else:
+        raw = _git(cwd, "log", "-1", "--format=%ct")
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def select_sessions_with_link(
     store: TraceStore,
     requested_session: str | None = None,
@@ -321,7 +376,9 @@ def select_sessions_with_link(
 
     The link is ``explicit`` for a named session, ``branch`` when session
     attribution matches the branch, ``commit_time`` when the session start
-    closest to the head commit time was chosen, and ``latest`` otherwise.
+    closest to the head commit time was chosen, and ``latest`` otherwise. In
+    a pull request job the head commit is the PR head, never the synthetic
+    merge commit. When that head is not available there is no commit match.
     """
 
     if requested_session:
@@ -343,10 +400,8 @@ def select_sessions_with_link(
         if matching:
             return [meta.session_id for meta in reversed(matching)], "branch"
 
-    commit_timestamp = _git(cwd, "log", "-1", "--format=%ct")
-    try:
-        timestamp = float(commit_timestamp)
-    except (TypeError, ValueError):
+    timestamp = head_commit_timestamp(cwd)
+    if timestamp is None:
         return [sessions[0].session_id], "latest"
 
     closest = min(
@@ -935,10 +990,11 @@ def cmd_pr_comment(args: argparse.Namespace) -> int:
     review_exit = 0
 
     if review:
-        from .reviewability import ReviewConfigError, threshold_from_args
+        from .reviewability import ReviewConfigError, artifacts_from_args, threshold_from_args
 
         try:
             threshold = threshold_from_args(args)
+            artifacts = artifacts_from_args(args)
         except ReviewConfigError as exc:
             sys.stderr.write(f"pr-comment: {exc}\n")
             return 2
@@ -964,6 +1020,7 @@ def cmd_pr_comment(args: argparse.Namespace) -> int:
                 [LinkedSession(session_id, link) for session_id in session_ids],
                 threshold,
                 branch=branch,
+                artifacts=artifacts,
             )
             review_section = render_markdown(report)
             review_exit = report.exit_code
@@ -1017,7 +1074,9 @@ __all__ = [
     "SessionSummary",
     "cmd_pr_comment",
     "current_branch",
+    "head_commit_timestamp",
     "post_or_update_comment",
+    "pull_request_head_sha",
     "render_comment",
     "resolve_target",
     "select_sessions",

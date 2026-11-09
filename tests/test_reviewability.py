@@ -5,6 +5,9 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -14,18 +17,27 @@ from unittest.mock import patch
 from agent_trace.approval import ApprovalRequest, save_request
 from agent_trace.cli import build_parser
 from agent_trace.models import EventType, SessionMeta, TraceEvent
-from agent_trace.pr_comment import COMMENT_MARKER, cmd_pr_comment
+from agent_trace.pr_comment import (
+    COMMENT_MARKER,
+    cmd_pr_comment,
+    head_commit_timestamp,
+    pull_request_head_sha,
+    select_sessions_with_link,
+)
 from agent_trace.reviewability import (
     FINDINGS,
+    Artifacts,
     LinkedSession,
     ReviewConfigError,
     Threshold,
     Finding,
+    artifacts_from_args,
     build_report,
     classify_validation,
     cmd_review,
     link_sessions,
     load_threshold,
+    read_cognitive_debt,
     render_markdown,
 )
 from agent_trace.store import TraceStore
@@ -210,8 +222,10 @@ class TestFindings(_StoreCase):
         self.assertEqual(
             validation.facts["latest"],
             [
-                {"label": "pytest", "kind": "test", "outcome": "passed", "exit_code": 0},
-                {"label": "ruff", "kind": "check", "outcome": "passed", "exit_code": 0},
+                {"label": "pytest", "kind": "test", "outcome": "passed", "exit_code": 0,
+                 "changed_after": 0},
+                {"label": "ruff", "kind": "check", "outcome": "passed", "exit_code": 0,
+                 "changed_after": 0},
             ],
         )
         stewardship = self.finding(report, "stewardship")
@@ -249,13 +263,21 @@ class TestFindings(_StoreCase):
         self.assertEqual(validation.status, "partial")
         self.assertEqual(validation.facts["writes_after_last_run"], 1)
 
-    def test_success_without_exit_code_is_medium(self):
+    def test_status_less_result_is_unknown_and_success_flag_is_medium(self):
         b = _Builder(self.store, "nocode000001")
         b.prompt()
         b.tool("Bash", result="all good", command="pytest")
         validation = self.finding(self.report(b.save()), "validation")
+        self.assertEqual((validation.status, validation.confidence), ("partial", "medium"))
+        self.assertEqual(validation.facts["latest"][0]["outcome"], "unknown")
+        self.assertIn("pytest outcome unknown (no exit status)", validation.detail)
+
+        b = _Builder(self.store, "flag00000001", start=5000)
+        b.prompt()
+        call = b.add(EventType.TOOL_CALL, tool_name="Bash", arguments={"command": "pytest"})
+        b.add(EventType.TOOL_RESULT, parent=call.event_id, result="ok", success=True)
+        validation = self.finding(self.report(b.save()), "validation")
         self.assertEqual((validation.status, validation.confidence), ("present", "medium"))
-        self.assertEqual(validation.facts["latest"][0]["outcome"], "succeeded")
 
     def test_scope_lists_ungrounded_paths(self):
         b = _Builder(self.store, "scope0000001")
@@ -334,6 +356,253 @@ class TestFindings(_StoreCase):
         self.assertNotIn("zebra-quartz-77", rendered)
         self.assertNotIn("python -m pytest", rendered)
         self.assertNotIn("\u2014", rendered)
+
+
+class TestValidationOutcomes(_StoreCase):
+    def _validate(self, sid: str, command: str, *results: dict, failed: bool = False,
+                 before: bool = False):
+        b = _Builder(self.store, sid)
+        b.prompt()
+        call = TraceEvent(event_type=EventType.TOOL_CALL, timestamp=b.ts + 5, session_id=sid,
+                          data={"tool_name": "Bash", "arguments": {"command": command}})
+        if not before:
+            b.events.append(call)
+        for data in results:
+            b.add(EventType.ERROR if failed else EventType.TOOL_RESULT,
+                  parent=call.event_id, tool_name="Bash", **data)
+            b.events[-1].timestamp = call.timestamp + 1
+        if before:
+            b.events.append(call)
+        validation = self.finding(self.report(b.save()), "validation")
+        return validation, validation.facts["latest"][0]
+
+    def test_single_command_owns_exit_code(self):
+        validation, run = self._validate("single000001", "pytest -k 'a && b'", {"result": "exit_code: 0"})
+        self.assertEqual((validation.status, run["outcome"], run["exit_code"]), ("present", "passed", 0))
+        _, run = self._validate("single000002", "pytest", {"result": "exit code 1"})
+        self.assertEqual((run["outcome"], run["exit_code"]), ("failed", 1))
+        _, run = self._validate("single000003", "pytest", {"error": "boom"}, failed=True)
+        self.assertEqual(run["outcome"], "failed")
+
+    def test_compound_shell_shapes_are_unknown(self):
+        for index, command in enumerate((
+            "pytest || true", "pytest | tee log.txt", "pytest > log.txt", "pytest &",
+            "pytest; echo done", "pytest $(cat args)", "pytest\necho done",
+        )):
+            with self.subTest(command=command):
+                validation, run = self._validate(f"compound{index:04d}", command,
+                                                {"result": "exit_code: 0"})
+                self.assertEqual(run["outcome"], "unknown")
+                self.assertIsNone(run["exit_code"])
+                self.assertEqual(validation.status, "partial")
+
+    def test_and_chain_carries_only_a_pass(self):
+        validation, run = self._validate("chain0000001", "cd repo && pytest", {"result": "exit_code: 0"})
+        self.assertEqual((validation.status, run["outcome"]), ("present", "passed"))
+        _, run = self._validate("chain0000002", "cd repo && pytest", {"result": "exit_code: 2"})
+        self.assertEqual(run["outcome"], "unknown")
+        self.assertIn("failing part not known", self.finding(self.report("chain0000002"), "validation").detail)
+
+    def test_result_must_be_single_valid_and_later(self):
+        cases = {
+            "none00000001": ((), False, "no valid result recorded"),
+            "dupe00000001": (({"result": "exit_code: 0"}, {"result": "exit_code: 0"}), False,
+                             "more than one result"),
+            "before000001": (({"result": "exit_code: 0"},), True, "no valid result recorded"),
+            "conflict0001": (({"result": "exit_code: 0", "success": False},), False,
+                             "conflicting status"),
+            "codes0000001": (({"result": "exit code 0 then exit code 3"},), False,
+                             "conflicting status"),
+            "errzero00001": (({"error": "exit_code: 0"},), False, "conflicting status"),
+        }
+        for sid, (results, before, reason) in cases.items():
+            with self.subTest(sid=sid):
+                failed = sid.startswith("errzero")
+                validation, run = self._validate(sid, "pytest", *results, failed=failed, before=before)
+                self.assertEqual(run["outcome"], "unknown")
+                self.assertEqual(validation.status, "partial")
+                self.assertIn(reason, validation.detail)
+
+    def test_freshness_is_global_across_sessions(self):
+        a = _Builder(self.store, "aaaa00000001", start=1000)
+        a.prompt()
+        a.tool("Bash", result="exit_code: 0", command="pytest")
+        a.save()
+        b = _Builder(self.store, "bbbb00000001", start=2000)
+        b.prompt()
+        b.tool("Edit", file_path=f"{CWD}/src/auth.py")
+        b.save()
+        for order in (("aaaa00000001", "bbbb00000001"), ("bbbb00000001", "aaaa00000001")):
+            with self.subTest(order=order):
+                report = self.report(*order)
+                validation = self.finding(report, "validation")
+                self.assertEqual(validation.status, "partial")
+                self.assertEqual(validation.facts["latest"][0]["changed_after"], 1)
+                self.assertEqual(validation.facts["writes_after_last_run"], 1)
+                self.assertIn("Files changed after the last run of: pytest (1 file)", validation.detail)
+        first = self.finding(self.report("aaaa00000001", "bbbb00000001"), "validation")
+        second = self.finding(self.report("bbbb00000001", "aaaa00000001"), "validation")
+        self.assertEqual(first.to_dict(), second.to_dict())
+
+    def test_validation_in_later_session_clears_staleness(self):
+        a = _Builder(self.store, "cccc00000001", start=1000)
+        a.prompt()
+        a.tool("Edit", file_path=f"{CWD}/src/auth.py")
+        a.save()
+        b = _Builder(self.store, "dddd00000001", start=2000)
+        b.prompt()
+        b.tool("Bash", result="exit_code: 0", command="pytest")
+        b.save()
+        validation = self.finding(self.report("cccc00000001", "dddd00000001"), "validation")
+        self.assertEqual((validation.status, validation.confidence), ("present", "high"))
+
+
+class TestConfigFailsClosed(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        cwd = os.getcwd()
+        os.chdir(self.tmp.name)
+        self.addCleanup(os.chdir, cwd)
+
+    def _yaml(self, text: str) -> Threshold:
+        Path(".agent-strace.yaml").write_text(text)
+        return load_threshold()
+
+    def test_block_and_flow_lists(self):
+        threshold = self._yaml(
+            "budget:\n  weekly: 3\nreview:\n  fail_on:\n    - missing\n    - partial  # strict\n"
+            "  findings: [validation, 'scope']\nother: 1\n"
+        )
+        self.assertEqual(threshold.fail_on, ("partial", "missing"))
+        self.assertEqual(threshold.findings, ("scope", "validation"))
+
+    def test_only_literal_none_disables(self):
+        self.assertEqual(self._yaml("review:\n  fail_on: none\n").fail_on, ())
+        self.assertEqual(self._yaml("review:\n  fail_on: \"none\"\n").fail_on, ())
+        bad = (
+            "review:\n  fail_on:\n",
+            "review:\n  fail_on: null\n",
+            "review:\n  fail_on: ~\n",
+            "review:\n  fail_on: []\n",
+            "review:\n  fail_on: [none]\n",
+            "review:\n  fail_on:\n    - none\n",
+            "review:\n  fail_on: missing, none\n",
+            "review:\n  fail_on: missing,,partial\n",
+            "review:\n  findings:\n",
+            "review:\n  findings: []\n",
+            "review:\n  min_confidence:\n",
+        )
+        for text in bad:
+            with self.subTest(text=text), self.assertRaises(ReviewConfigError):
+                self._yaml(text)
+
+    def test_unsupported_structures_fail(self):
+        bad = (
+            "review: {fail_on: missing}\n",
+            "review:\n  fail_on: {missing: true}\n",
+            "review:\n  fail_on:\n    missing: 1\n",
+            "review:\n  fail_on: [missing\n",
+            "review:\n  fail_on: &anchor missing\n",
+            "review:\n  fail_on: missing\n  fail_on: partial\n",
+            "review:\n  - missing\n",
+            "review:\n  fail_on: missing\n      deeper: 1\n",
+        )
+        for text in bad:
+            with self.subTest(text=text), self.assertRaises(ReviewConfigError):
+                self._yaml(text)
+
+    def test_json_types(self):
+        Path("cfg.json").write_text(json.dumps({"review": {"fail_on": ["missing", "partial"]}}))
+        self.assertEqual(load_threshold("cfg.json").fail_on, ("partial", "missing"))
+        for block in ({"fail_on": None}, {"fail_on": []}, {"fail_on": [1]}, {"fail_on": True},
+                      {"min_confidence": None}, {"findings": None}, None, "missing"):
+            with self.subTest(block=block), self.assertRaises(ReviewConfigError):
+                Path("cfg.json").write_text(json.dumps({"review": block}))
+                load_threshold("cfg.json")
+        Path("cfg.json").write_text("{not json")
+        with self.assertRaises(ReviewConfigError):
+            load_threshold("cfg.json")
+
+    def test_empty_flag_does_not_disable(self):
+        for value in ("", " ", ","):
+            with self.subTest(value=value), self.assertRaises(ReviewConfigError):
+                load_threshold(fail_on=value)
+
+
+class TestPullRequestHead(_StoreCase):
+    SHA = "a" * 40
+
+    def _env(self, **values):
+        keys = ("GITHUB_EVENT_PATH", "GITHUB_HEAD_REF", "CI_MERGE_REQUEST_IID",
+                "CI_MERGE_REQUEST_SOURCE_BRANCH_SHA", "CI_COMMIT_SHA")
+        env = {key: "" for key in keys}
+        env.update(values)
+        return patch.dict(os.environ, env)
+
+    def _event(self, payload) -> str:
+        path = Path(self.tmp.name) / "event.json"
+        path.write_text(json.dumps(payload))
+        return str(path)
+
+    def test_github_pull_request_uses_event_head_sha(self):
+        calls = []
+
+        def fake_git(_cwd, *args):
+            calls.append(args)
+            return "195"
+
+        event = self._event({"pull_request": {"head": {"sha": self.SHA}}})
+        with self._env(GITHUB_EVENT_PATH=event, GITHUB_HEAD_REF="feature"), \
+                patch("agent_trace.pr_comment._git", side_effect=fake_git):
+            self.assertEqual(pull_request_head_sha(), (True, self.SHA))
+            self.assertEqual(head_commit_timestamp(), 195.0)
+        self.assertEqual(calls, [("show", "-s", "--format=%ct", f"{self.SHA}^{{commit}}")])
+
+    def test_pull_request_without_resolvable_head_skips_commit_time(self):
+        _Builder(self.store, "far000000001", branch="", start=100).save()
+        _Builder(self.store, "near00000001", branch="", start=195).save()
+        cases = (
+            {"GITHUB_EVENT_PATH": self._event({"pull_request": {"head": {}}})},
+            {"GITHUB_EVENT_PATH": self._event({"pull_request": {"head": {"sha": "--bad"}}})},
+            {"GITHUB_HEAD_REF": "feature"},
+        )
+        for env in cases:
+            with self.subTest(env=env), self._env(**env), \
+                    patch("agent_trace.pr_comment._git", return_value="200") as git:
+                self.assertIsNone(head_commit_timestamp())
+                git.assert_not_called()
+                ids, link = select_sessions_with_link(self.store, branch="missing")
+                self.assertEqual(link, "latest")
+        event = self._event({"pull_request": {"head": {"sha": self.SHA}}})
+        with self._env(GITHUB_EVENT_PATH=event), \
+                patch("agent_trace.pr_comment._git", return_value=""):
+            self.assertIsNone(head_commit_timestamp())
+            self.assertEqual(select_sessions_with_link(self.store, branch="missing")[1], "latest")
+        with self._env(GITHUB_EVENT_PATH=event), \
+                patch("agent_trace.pr_comment._git", return_value="200"):
+            self.assertEqual(
+                select_sessions_with_link(self.store, branch="missing"),
+                (["near00000001"], "commit_time"),
+            )
+
+    def test_local_and_push_use_head(self):
+        push = self._event({"ref": "refs/heads/main"})
+        for env in ({}, {"GITHUB_EVENT_PATH": push}):
+            with self.subTest(env=env), self._env(**env), \
+                    patch("agent_trace.pr_comment._git", return_value="200") as git:
+                self.assertEqual(head_commit_timestamp(), 200.0)
+                git.assert_called_once_with(".", "log", "-1", "--format=%ct")
+
+    def test_gitlab_merge_request_prefers_source_branch_sha(self):
+        other = "b" * 40
+        with self._env(CI_MERGE_REQUEST_IID="5", CI_MERGE_REQUEST_SOURCE_BRANCH_SHA=self.SHA,
+                       CI_COMMIT_SHA=other):
+            self.assertEqual(pull_request_head_sha(), (True, self.SHA))
+        with self._env(CI_MERGE_REQUEST_IID="5", CI_COMMIT_SHA=other):
+            self.assertEqual(pull_request_head_sha(), (True, other))
+        with self._env(CI_MERGE_REQUEST_IID="5"):
+            self.assertEqual(pull_request_head_sha(), (True, ""))
 
 
 class TestCommands(_StoreCase):
@@ -425,19 +694,320 @@ class TestCommands(_StoreCase):
         self.assertIn("### Reviewability", posted["body"])
 
 
+class TestArtifacts(_StoreCase):
+    def _write(self, name: str, payload) -> str:
+        path = Path(self.tmp.name) / name
+        path.write_text(payload if isinstance(payload, str) else json.dumps(payload))
+        return str(path)
+
+    def test_read_cognitive_debt_uses_schema_fields(self):
+        good = {"schema_version": 1, "metric": "cognitive_debt"}
+        cases = {
+            "clean": ({**good, "status": "clean"}, "pass"),
+            "partial": ({**good, "status": "partial"}, "pass"),
+            "above": ({**good, "status": "above_threshold"}, "fail"),
+            "unknown": ({**good, "status": "unknown", "color": "brightgreen"}, "unavailable"),
+            "v2": ({**good, "schema_version": 2, "status": "clean"}, "unavailable"),
+            "metric": ({"schema_version": 1, "metric": "other", "status": "clean"}, "unavailable"),
+            "badge": ({"schemaVersion": 1, "color": "green", "message": "0%"}, "unavailable"),
+            "odd": ({**good, "status": "great"}, "unavailable"),
+            "list": ([], "unavailable"),
+            "broken": ("{not json", "unavailable"),
+        }
+        for name, (payload, result) in cases.items():
+            with self.subTest(name=name):
+                evidence = read_cognitive_debt(self._write(f"{name}.json", payload))
+                self.assertEqual(evidence.result, result)
+        missing = read_cognitive_debt(Path(self.tmp.name) / "absent.json")
+        self.assertEqual((missing.result, missing.reason), ("unavailable", "report not generated"))
+
+    def test_artifact_flags(self):
+        parser = build_parser()
+        args = parser.parse_args(["review", "--artifact-url", "http://x"])
+        with self.assertRaises(ReviewConfigError):
+            artifacts_from_args(args)
+        args = parser.parse_args(["review", "--artifact-url", "https://x/a)b"])
+        with self.assertRaises(ReviewConfigError):
+            artifacts_from_args(args)
+        self.assertIsNone(artifacts_from_args(parser.parse_args(["review"])))
+        args = parser.parse_args(["review", "--cognitive-debt-mode", "check"])
+        artifacts = artifacts_from_args(args)
+        self.assertTrue(artifacts.cognitive_debt_fails)
+
+    def test_markdown_never_claims_an_upload(self):
+        _good_session(self.store)
+        packet = self._write("evidence-packet.html", "<html></html>")
+        url = "https://github.com/o/r/actions/runs/1/artifacts/2"
+        states = {
+            Artifacts(packet): "`evidence-packet.html` (local file, not uploaded)",
+            Artifacts(packet, url=url): f"`evidence-packet.html` in the [workflow artifact]({url})",
+            Artifacts(str(Path(self.tmp.name) / "none.html"), url=url): "Evidence packet: not generated.",
+            Artifacts(self._write("empty.html", "")): "Evidence packet: not generated.",
+        }
+        for artifacts, expected in states.items():
+            with self.subTest(expected=expected):
+                report = build_report(self.store, [LinkedSession("good0001aaaa", "branch")],
+                                      Threshold(), artifacts=artifacts)
+                markdown = render_markdown(report)
+                self.assertIn(expected, markdown)
+                self.assertNotIn(self.tmp.name, markdown)
+                if "not uploaded" in expected or "not generated" in expected:
+                    self.assertNotIn("in the [workflow artifact]", markdown)
+
+    def test_cognitive_check_changes_result_not_findings(self):
+        _good_session(self.store)
+        unknown = read_cognitive_debt(self._write(
+            "debt.json", {"schema_version": 1, "metric": "cognitive_debt", "status": "unknown"}))
+        linked = [LinkedSession("good0001aaaa", "branch")]
+        report = build_report(self.store, linked, Threshold(fail_on=()),
+                              artifacts=Artifacts(cognitive_debt=unknown))
+        self.assertTrue(report.passed)
+        report = build_report(self.store, linked, Threshold(fail_on=()),
+                              artifacts=Artifacts(cognitive_debt=unknown, cognitive_debt_mode="check"))
+        self.assertFalse(report.passed)
+        self.assertTrue(report.review_passed)
+        self.assertEqual(report.to_dict()["result"], "fail")
+        self.assertEqual(report.to_dict()["review_result"], "pass")
+        self.assertIn("**Fails the check.**", render_markdown(report))
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "scripts" / "pr-evidence.sh"
+
+_SHIM = """#!{python}
+import json, os, sys
+sys.path.insert(0, {src!r})
+args = sys.argv[1:]
+with open(os.environ["SHIM_LOG"], "a", encoding="utf-8") as log:
+    log.write(json.dumps(args) + "\\n")
+command = next((a for a in args if a in ("share", "cognitive-debt", "pr-comment", "review")), "")
+if command == "share" and os.environ.get("SHIM_FAIL_SHARE"):
+    sys.exit(1)
+if command == "cognitive-debt" and os.environ.get("SHIM_COGNITIVE_STATUS"):
+    out = args[args.index("--output") + 1]
+    if args[args.index("--format") + 1] == "json":
+        payload = {{"schema_version": 1, "metric": "cognitive_debt",
+                   "status": os.environ["SHIM_COGNITIVE_STATUS"]}}
+    else:
+        payload = {{"schemaVersion": 1, "label": "cognitive debt", "message": "x", "color": "green"}}
+    open(out, "w", encoding="utf-8").write(json.dumps(payload))
+    sys.exit(0)
+if command == "pr-comment":
+    sys.exit(int(os.environ.get("SHIM_COMMENT_EXIT", "0")))
+from agent_trace.cli import main
+sys.argv = ["agent-strace"] + args
+main()
+"""
+
+
 class TestAction(unittest.TestCase):
-    def test_composite_action_registers_review_step(self):
-        action = (Path(__file__).parents[1] / "action.yml").read_text()
-        for name in ("run-eval", "review", "review-fail-on", "review-min-confidence"):
+    def test_composite_action_wires_evidence_steps(self):
+        action = (ROOT / "action.yml").read_text()
+        for name in ("run-eval", "review", "review-fail-on", "review-min-confidence",
+                     "cognitive-debt"):
             self.assertIn(f"  {name}:\n", action)
-        self.assertIn("  review-passed:\n", action)
+        for name in ("passed", "summary-path", "review-passed", "review-result",
+                     "review-markdown-path", "review-json-path", "evidence-packet-path",
+                     "cognitive-debt-json-path", "cognitive-debt-badge-path",
+                     "cognitive-debt-status", "cognitive-debt-result", "artifacts-dir",
+                     "evidence-artifact-url"):
+            self.assertIn(f"  {name}:\n", action)
         self.assertIn("if: ${{ inputs.run-eval == 'true' }}", action)
         self.assertIn("inputs.post-pr-comment == 'true' && inputs.review != 'true'", action)
-        self.assertIn("if: ${{ always() && inputs.review == 'true' }}", action)
-        self.assertIn('pr-comment --review "${ARGS[@]}" || status=$?', action)
-        self.assertIn('review --format markdown "${ARGS[@]}" >> "$GITHUB_STEP_SUMMARY"', action)
-        self.assertIn('exit "$status"', action)
+        self.assertEqual(action.count("if: ${{ always() && inputs.review == 'true' }}"), 2)
+        self.assertEqual(action.count("always() && inputs.review == 'true' && "), 2)
+        self.assertIn('bash "$GITHUB_ACTION_PATH/scripts/pr-evidence.sh" prepare', action)
+        self.assertIn('bash "$GITHUB_ACTION_PATH/scripts/pr-evidence.sh" check', action)
+        self.assertIn("name: agent-trace-pr-evidence", action)
+        self.assertIn("name: agent-trace-pr-review", action)
+        self.assertIn("ARTIFACT_URL: ${{ steps.upload-evidence.outputs.artifact-url }}", action)
+        self.assertEqual(action.count("continue-on-error: true"), 2)
+        self.assertNotIn("--include-content", action)
         self.assertNotIn("\u2014", action)
+        # Inputs reach the shell only through env, never inline in run blocks.
+        for block in action.split("run: ")[1:]:
+            body = block.split("\n    - name:")[0]
+            self.assertNotIn("${{ inputs.review-fail-on }}", body.split("env:")[0])
+        script = SCRIPT.read_text()
+        self.assertNotIn("eval ", script)
+        self.assertNotIn("\u2014", script)
+
+
+@unittest.skipUnless(shutil.which("bash"), "bash is required")
+class TestActionScript(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.work = root / "work dir"
+        self.work.mkdir()
+        self.trace_dir = self.work / "agent traces"
+        self.store = TraceStore(str(self.trace_dir))
+        self.out_dir = root / "runner temp" / "agent-trace-pr-evidence"
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        shim = bin_dir / "agent-strace"
+        shim.write_text(_SHIM.format(python=sys.executable, src=str(ROOT / "src")))
+        shim.chmod(0o755)
+        self.log = root / "calls.log"
+        self.output = root / "github_output"
+        self.summary = root / "summary.md"
+        self.env = {
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+            "HOME": self.tmp.name,
+            "TMPDIR": self.tmp.name,
+            "SHIM_LOG": str(self.log),
+            "GITHUB_OUTPUT": str(self.output),
+            "GITHUB_STEP_SUMMARY": str(self.summary),
+            "GITHUB_HEAD_REF": BRANCH,
+            "AGENT_TRACE_DIR": str(self.trace_dir),
+            "PR_EVIDENCE_DIR": str(self.out_dir),
+        }
+
+    def run_script(self, mode: str, **env) -> subprocess.CompletedProcess:
+        self.output.write_text("")
+        merged = dict(self.env)
+        merged.update(env)
+        return subprocess.run(
+            ["bash", str(SCRIPT), mode], cwd=self.work, env=merged,
+            capture_output=True, text=True, timeout=120,
+        )
+
+    def outputs(self) -> dict[str, str]:
+        pairs = [line.split("=", 1) for line in self.output.read_text().splitlines() if line]
+        return dict(pairs)
+
+    def calls(self, command: str) -> list[list[str]]:
+        if not self.log.exists():
+            return []
+        rows = [json.loads(line) for line in self.log.read_text().splitlines()]
+        return [row for row in rows if command in row]
+
+    def test_full_flow_with_spaces_and_unknown_cognitive_status(self):
+        _good_session(self.store)
+        prepared = self.run_script("prepare")
+        self.assertEqual(prepared.returncode, 0, prepared.stderr + prepared.stdout)
+        out = self.outputs()
+        self.assertEqual(out["session-id"], "good0001aaaa")
+        packet = Path(out["evidence-packet-path"])
+        self.assertEqual(packet, self.out_dir / "evidence-packet.html")
+        self.assertTrue(packet.is_file())
+        self.assertNotIn("zebra-quartz-77", packet.read_text())
+        self.assertNotIn("--include-content", json.dumps(self.calls("share")))
+        self.assertEqual(Path(out["cognitive-debt-json-path"]).name, "cognitive-debt.json")
+        self.assertEqual(Path(out["cognitive-debt-badge-path"]).name, "cognitive-debt-badge.json")
+        self.assertEqual(out["artifacts-dir"], str(self.out_dir))
+
+        checked = self.run_script("check")
+        self.assertEqual(checked.returncode, 0, checked.stderr + checked.stdout)
+        out = self.outputs()
+        self.assertEqual(out["review-result"], "pass")
+        self.assertEqual(out["passed"], "true")
+        self.assertEqual(out["cognitive-debt-status"], "unknown")
+        self.assertEqual(out["cognitive-debt-result"], "unavailable")
+        report = json.loads(Path(out["review-json-path"]).read_text())
+        self.assertEqual(report["artifacts"]["evidence_packet"]["state"], "local")
+        self.assertIsNone(report["artifacts"]["url"])
+        markdown = Path(out["review-markdown-path"]).read_text()
+        self.assertIn("`evidence-packet.html` (local file, not uploaded)", markdown)
+        self.assertIn("Unavailable, not a pass. (report only)", markdown)
+        self.assertNotIn("zebra-quartz-77", markdown)
+        self.assertEqual(self.summary.read_text(), markdown)
+        self.assertEqual(self.calls("pr-comment"), [])
+
+        url = "https://github.com/o/r/actions/runs/1/artifacts/2"
+        self.run_script("check", ARTIFACT_URL=url)
+        markdown = Path(self.outputs()["review-markdown-path"]).read_text()
+        self.assertIn(f"`evidence-packet.html` in the [workflow artifact]({url})", markdown)
+        self.run_script("check", ARTIFACT_URL="javascript:alert(1)")
+        self.assertNotIn("javascript", Path(self.outputs()["review-markdown-path"]).read_text())
+
+    def test_unknown_cognitive_status_fails_check_mode(self):
+        _good_session(self.store)
+        for status, code, result in (("unknown", 1, "unavailable"), ("above_threshold", 1, "fail"),
+                                     ("partial", 0, "pass"), ("clean", 0, "pass")):
+            with self.subTest(status=status):
+                env = {"SHIM_COGNITIVE_STATUS": status, "COGNITIVE_DEBT_MODE": "check"}
+                self.assertEqual(self.run_script("prepare", **env).returncode, 0)
+                checked = self.run_script("check", **env)
+                self.assertEqual(checked.returncode, code, checked.stderr)
+                out = self.outputs()
+                self.assertEqual(out["review-result"], "pass" if code == 0 else "fail")
+                self.assertEqual(out["cognitive-debt-status"], status)
+                self.assertEqual(out["cognitive-debt-result"], result)
+                report = json.loads(Path(out["review-json-path"]).read_text())
+                self.assertEqual(report["review_result"], "pass")
+                self.assertEqual(report["artifacts"]["cognitive_debt"]["fails_check"], code == 1)
+
+    def test_badge_color_is_not_read(self):
+        _good_session(self.store)
+        env = {"SHIM_COGNITIVE_STATUS": "unknown", "COGNITIVE_DEBT_MODE": "check"}
+        self.run_script("prepare", **env)
+        badge = self.out_dir / "cognitive-debt-badge.json"
+        self.assertEqual(json.loads(badge.read_text())["color"], "green")
+        self.assertEqual(self.run_script("check", **env).returncode, 1)
+
+    def test_packet_generation_failure(self):
+        _good_session(self.store)
+        prepared = self.run_script("prepare", SHIM_FAIL_SHARE="1")
+        self.assertEqual(prepared.returncode, 0)
+        self.assertIn("Evidence packet was not generated", prepared.stdout)
+        self.assertNotIn("evidence-packet-path", self.outputs())
+        self.assertFalse((self.out_dir / "evidence-packet.html").exists())
+        checked = self.run_script("check", ARTIFACT_URL="https://example.test/a")
+        self.assertEqual(checked.returncode, 0)
+        markdown = Path(self.outputs()["review-markdown-path"]).read_text()
+        self.assertIn("Evidence packet: not generated.", markdown)
+        self.assertNotIn("in the [workflow artifact]", markdown)
+
+    def test_cognitive_debt_false_skips_reports(self):
+        _good_session(self.store)
+        self.run_script("prepare", COGNITIVE_DEBT_MODE="false")
+        self.assertEqual(self.calls("cognitive-debt"), [])
+        self.assertNotIn("cognitive-debt-json-path", self.outputs())
+        self.run_script("check", COGNITIVE_DEBT_MODE="false")
+        out = self.outputs()
+        self.assertNotIn("cognitive-debt-result", out)
+        self.assertNotIn("cognitive_debt", Path(out["review-json-path"]).read_text())
+        bad = self.run_script("prepare", COGNITIVE_DEBT_MODE="maybe")
+        self.assertEqual(bad.returncode, 2)
+
+    def test_shell_values_are_not_executed(self):
+        _good_session(self.store)
+        marker = Path(self.tmp.name) / "pwned"
+        payload = f"$(touch {marker}); `touch {marker}`"
+        checked = self.run_script("check", REVIEW_FAIL_ON=payload, REVIEW_MIN_CONFIDENCE=payload)
+        self.assertEqual(checked.returncode, 2)
+        self.assertFalse(marker.exists())
+        self.assertEqual(self.outputs()["review-result"], "error")
+        self.assertEqual(self.outputs()["passed"], "false")
+        self.assertTrue(all(row.count(payload) == 2 for row in self.calls("review")))
+
+    def test_comment_posts_once_and_skips_forks(self):
+        _good_session(self.store)
+        base = {"REVIEW_POST_COMMENT": "true", "PR_BASE_REPOSITORY": "o/r"}
+        forked = self.run_script("check", PR_HEAD_REPOSITORY="fork/r", **base)
+        self.assertIn("Skipping PR comment for a fork", forked.stdout)
+        self.assertEqual(self.calls("pr-comment"), [])
+        self.assertEqual(self.run_script("check", PR_HEAD_REPOSITORY="o/r", **base).returncode, 0)
+        posted = self.calls("pr-comment")
+        self.assertEqual(len(posted), 1)
+        self.assertIn("--review", posted[0])
+        self.assertNotIn("--dry-run", posted[0])
+        failed = self.run_script("check", PR_HEAD_REPOSITORY="o/r", SHIM_COMMENT_EXIT="1", **base)
+        self.assertEqual(failed.returncode, 1)
+        self.assertIn("PR comment was not posted", failed.stdout)
+
+    def test_no_sessions(self):
+        prepared = self.run_script("prepare")
+        self.assertEqual(prepared.returncode, 0)
+        self.assertEqual(self.outputs()["session-id"], "")
+        checked = self.run_script("check", REVIEW_FAIL_ON="none")
+        self.assertEqual(checked.returncode, 0)
+        out = self.outputs()
+        self.assertEqual(out["cognitive-debt-result"], "unavailable")
+        self.assertIn("Evidence packet: not generated.",
+                      Path(out["review-markdown-path"]).read_text())
 
 
 if __name__ == "__main__":

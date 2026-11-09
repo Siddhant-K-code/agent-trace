@@ -49,9 +49,24 @@ Confidence is `high`, `medium`, or `low`. It says how much the status depends on
 heuristics. Prompt capture is high. Path matching for scope is medium. A weak
 session link lowers evidence confidence to low.
 
-Validation uses the last run of each check. A check that passed before later
-file edits is reported as `partial`. Command strings are never printed. They
-are mapped to fixed labels such as `pytest`, `npm test`, `ruff`, or `tsc`.
+Validation uses the last run of each check across all linked sessions. Sessions
+are ordered by start time, then ID. A check that passed before a later file
+edit in any linked session is reported as `partial`. Command strings are never
+printed. They are mapped to fixed labels such as `pytest`, `npm test`, `ruff`,
+or `tsc`.
+
+A run counts only when it has exactly one result recorded after the call, with
+an explicit status: an exit code, a success flag, or an error event. A missing,
+duplicate, earlier, status-less, or conflicting result makes the outcome
+unknown, and validation is `partial`.
+
+The exit code belongs to the whole shell invocation. It is assigned to a check
+only when the check is the whole command, such as `pytest -k 'a && b'` or
+`CI=1 uv run pytest`. Pipes, `||`, `;`, redirects, background jobs, command
+substitution, and multi-line scripts make the outcome unknown. One exception:
+in a chain joined only by `&&`, exit 0 means every part ran and passed, so a
+pass is kept. A failing `&&` chain is unknown because the failing part is not
+known.
 
 Stewardship counts turns and decisions. It does not rank or score people.
 
@@ -63,6 +78,13 @@ Stewardship counts turns and decisions. It does not rank or score people.
 | `branch` | The session's recorded git branch matches the PR branch |
 | `commit_time` | No branch match. The session closest to the head commit time was used. |
 | `latest` | No branch or commit to match. The latest session was used. |
+
+In a pull request job, `commit_time` uses the PR head commit from the event
+payload (`pull_request.head.sha` on GitHub, `CI_MERGE_REQUEST_SOURCE_BRANCH_SHA`
+on GitLab), not the synthetic merge commit that `actions/checkout` creates.
+That commit must be in the clone. Check out the head SHA as in the example
+below. If the head SHA is unavailable, the `commit_time` link is skipped and
+`latest` is used.
 
 `commit_time` and `latest` are weak links. Evidence confidence drops to `low`
 and a `present` evidence result becomes `partial`.
@@ -80,15 +102,22 @@ Add a `review` block to `.agent-strace.yaml`:
 
 ```yaml
 review:
-  fail_on: missing, partial     # or none
+  fail_on:                      # a list, a comma list, or none
+    - missing
+    - partial
   min_confidence: medium        # low, medium, high
-  findings: rationale, validation
+  findings: [rationale, validation]
 ```
 
 `.agent-strace.yml` and `.agent-strace.json` also work. `--fail-on`,
 `--min-confidence`, `--findings`, and `--config` override the file.
 
-Exit codes: `0` pass, `1` threshold failed, `2` bad config or unknown session.
+The config fails closed. An empty or null value, an empty list, an unknown key,
+a nested mapping, or any YAML the parser does not support is an error (exit
+`2`). Only the literal value `none`, on its own, turns failures off.
+
+Exit codes: `0` pass, `1` threshold or cognitive debt check failed, `2` bad
+config or unknown session.
 
 ## GitHub Action
 
@@ -104,10 +133,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
       - uses: Siddhant-K-code/agent-trace@main   # pin a release tag
         with:
           run-eval: "false"
           review: "true"
+          cognitive-debt: report                 # false, report, or check
           post-pr-comment: "true"
           github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
@@ -120,7 +152,43 @@ skip the comment because their tokens are read-only, but still run the check.
 The Action reads sessions from `trace-dir` (default `.agent-traces`). Commit
 the sessions, or restore them from an artifact, before this step.
 
+### Artifacts
+
+With `review: "true"`, the Action takes the first linked session and writes:
+
+| File | Artifact | Made by |
+|---|---|---|
+| `evidence-packet.html` | `agent-trace-pr-evidence` | `share SESSION --output FILE`. Metadata only. Prompt and tool content are never included. |
+| `cognitive-debt.json` | `agent-trace-pr-evidence` | `cognitive-debt --session SESSION --format json` |
+| `cognitive-debt-badge.json` | `agent-trace-pr-evidence` | `cognitive-debt --session SESSION --format badge` |
+| `review.json`, `review.md` | `agent-trace-pr-review` | `review --format json` and `--format markdown` |
+
+The review table links the evidence packet only when the upload returned a URL.
+Otherwise it says the file is local and not uploaded, or not generated. A
+failed packet or upload does not fail the step. The step outputs give each
+path, the review result, and the cognitive debt status and result. See
+[commands.md](commands.md#github-actions).
+
+The existing `agent-traces` artifact still uploads the whole trace directory.
+It can hold prompt and tool content if your traces do.
+
+### Cognitive debt
+
+`cognitive-debt` reads `schema_version` and `status` from the JSON report. It
+never reads the badge color.
+
+| Status | Result | With `check` |
+|---|---|---|
+| `clean`, `partial` | pass | passes |
+| `above_threshold` | fail | fails |
+| `unknown`, missing, or unsupported report | unavailable | fails |
+
+`unknown` means review coverage could not be measured. It is never a pass. With
+`report`, the result is shown and does not change the exit code.
+
 ## Sample comment section
+
+Two linked sessions. The second edits a file after the first ran its checks.
 
 ```markdown
 ### Reviewability
@@ -129,9 +197,14 @@ the sessions, or restore them from an artifact, before this step.
 |---|---|---|---|---|
 | Rationale | present | high | 3 prompts captured in 2 sessions. | user\_prompt events \(content not shown\) |
 | Scope | partial | medium | 1 of 2 written files were named in a prompt or read in the session. Not named or read: `src/extra.py` | file and edit tool events, prompt path mentions, file reads |
-| Validation | present | high | Last run: pytest passed, exit 0; ruff passed, exit 0. | shell tool calls and linked results inside the session \(not CI\) |
+| Validation | partial | medium | Last run: pytest passed, exit 0; ruff passed, exit 0. Files changed after the last run of: pytest \(1 file\), ruff \(1 file\). | shell tool calls and linked results inside the session \(not CI\) |
 | Stewardship | present | medium | 3 human turns, 1 after the first tool call, 0 approval decisions. Permission modes: default. | user\_prompt events, approval requests, recorded permission modes |
 | Evidence health | partial | high | Health: 2 partial \(claude\). Redaction: on. Linked by: branch. | agent-strace health, capture matrix, session link |
+
+**Artifacts**
+
+- Evidence packet: `evidence-packet.html` in the [workflow artifact](https://github.com/OWNER/REPO/actions/runs/123/artifacts/456). Metadata only.
+- Cognitive debt: `unknown`, review coverage unknown. Unavailable, not a pass. (report only)
 
 Check: **pass**. Threshold fails on `missing` at `medium` or higher confidence (default).
 ```
@@ -142,7 +215,9 @@ Check: **pass**. Threshold fails on `missing` at `medium` or higher confidence (
   show that attaching this evidence changes review outcomes.
 - The check reports captured evidence only. It does not claim complete
   capture. Providers differ; see the [capture matrix](capture-matrix.md).
-- Validation is in-session only. It does not read CI results.
+- Validation is in-session only. It does not read CI results. Many hooks do
+  not record exit codes, so a run without one is reported as unknown.
 - Scope uses path matching against prompts and reads. A file can be in scope
   without being named, and the check will still report it as not named.
+- Cognitive debt measures review coverage, not code quality.
 - Output is deterministic. No LLM writes or summarizes any part of it.
