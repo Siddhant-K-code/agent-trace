@@ -19,6 +19,7 @@ from typing import Any, Mapping, TextIO
 from .event_data import require_object_event_data
 from .explain import PHASE_DATA_EVENT_TYPES, ExplainResult, Phase, explain_session
 from .models import EventType, TraceEvent
+from .pairing import Pairer, event_model, llm_pairer
 from .store import TraceStore
 
 
@@ -440,14 +441,6 @@ def _usage_tokens(data: Mapping[str, Any]) -> tuple[int, int, bool, bool]:
     return 0, 0, False, False
 
 
-def _event_model(data: Mapping[str, Any]) -> str:
-    for key in ("model", "model_id", "modelId"):
-        value = data.get(key)
-        if value:
-            return str(value).strip()
-    return ""
-
-
 @dataclass
 class _UsageSample:
     model: str
@@ -456,6 +449,8 @@ class _UsageSample:
     has_input: bool = False
     has_output: bool = False
 
+
+_NO_SAMPLE = -1
 
 # _session_model_usage reads the data of every event of these types.
 MODEL_USAGE_EVENT_TYPES = frozenset({
@@ -466,41 +461,35 @@ MODEL_USAGE_EVENT_TYPES = frozenset({
 
 
 def _session_model_usage(events: list[TraceEvent]) -> dict[str, tuple[int, int]]:
-    """Aggregate usage by model while avoiding request/response double counts."""
+    """Aggregate usage by model while avoiding request/response double counts.
+
+    Responses pair with requests under the pairing.py LLM rules. An
+    assistant_response counts as a response too, because it can carry usage.
+    A request that names no model is not a usage sample. It still joins the
+    pairer, so a response that names it by parent_id does not pair with
+    another request; that response counts on its own.
+    """
     samples: list[_UsageSample] = []
-    pending: set[int] = set()
-    request_indexes: dict[str, int] = {}
+    requests: Pairer[int] = llm_pairer()
 
     for event in events:
-        if event.event_type not in {
-            EventType.LLM_REQUEST,
-            EventType.LLM_RESPONSE,
-            EventType.ASSISTANT_RESPONSE,
-        }:
+        if event.event_type not in MODEL_USAGE_EVENT_TYPES:
             continue
 
-        model = _event_model(event.data)
+        model = event_model(event.data)
         inp, out, has_inp, has_out = _usage_tokens(event.data)
 
         if event.event_type == EventType.LLM_REQUEST:
             if not model:
+                requests.add(event, _NO_SAMPLE)
                 continue
             sample = _UsageSample(model, inp, out, has_inp, has_out)
             samples.append(sample)
-            index = len(samples) - 1
-            pending.add(index)
-            if event.event_id:
-                request_indexes[event.event_id] = index
+            requests.add(event, len(samples) - 1)
             continue
 
-        index = request_indexes.get(event.parent_id) if event.parent_id else None
-        if index is None:
-            for candidate in reversed(range(len(samples))):
-                if candidate in pending and (not model or samples[candidate].model == model):
-                    index = candidate
-                    break
-
-        if index is None:
+        index = requests.match(event)
+        if index is None or index == _NO_SAMPLE:
             if not model:
                 continue
             samples.append(_UsageSample(model))
@@ -514,7 +503,6 @@ def _session_model_usage(events: list[TraceEvent]) -> dict[str, tuple[int, int]]
         if has_out:
             sample.output_tokens = out
             sample.has_output = True
-        pending.discard(index)
 
     usage: dict[str, list[int]] = {}
     for sample in samples:

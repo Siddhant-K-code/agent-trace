@@ -29,6 +29,15 @@ import urllib.request
 from typing import Any
 
 from .models import EventType, SessionMeta, TraceEvent
+from .pairing import (
+    LLM_REQUEST_TYPES,
+    LLM_RESPONSE_TYPES,
+    TOOL_REQUEST_TYPES,
+    TOOL_RESPONSE_TYPES,
+    Pairer,
+    llm_pairer,
+    tool_pairer,
+)
 from .store import TraceStore
 
 
@@ -358,62 +367,62 @@ OTLP_DATA_EVENT_TYPES = frozenset({
 def otlp_data_indexes(events: list[TraceEvent]) -> list[int]:
     """Return the 0-based indexes of the events whose data session_to_otlp reads.
 
-    It pairs events by ID exactly as the converter does. A tool_call is read
-    when a tool_result or an error pairs with it or when it is still unpaired
-    at the end, but not when a later tool_call with the same ID replaces it
-    before that.
+    It pairs events with the same pairing.py rules as the converter. A
+    tool_call is read when a tool_result or an error pairs with it or when it
+    is still unpaired at the end, but not when a later tool_call with the
+    same ID replaces it before that.
     """
     read: set[int] = set()
-    pending_calls: dict[str, int] = {}
+    calls: Pairer[int] = tool_pairer()
     for index, event in enumerate(events):
-        if event.event_type == EventType.TOOL_CALL:
-            pending_calls[event.event_id] = index
+        if event.event_type in TOOL_REQUEST_TYPES:
+            calls.add(event, index)
         elif event.event_type in OTLP_DATA_EVENT_TYPES:
             read.add(index)
-            if (
-                event.event_type in (EventType.TOOL_RESULT, EventType.ERROR)
-                and event.parent_id
-                and event.parent_id in pending_calls
-            ):
-                read.add(pending_calls.pop(event.parent_id))
-    read.update(pending_calls.values())
+            if event.event_type in TOOL_RESPONSE_TYPES:
+                call_index = calls.match(event)
+                if call_index is not None:
+                    read.add(call_index)
+    read.update(calls.unmatched())
     return sorted(read)
 
 
 def otlp_genai_data_indexes(events: list[TraceEvent]) -> list[int]:
     """Return the 0-based indexes of the events whose data session_to_otlp_genai reads.
 
-    It pairs events by ID exactly as the converter does. A tool_call is read
-    when a tool_result pairs with it or when it is still unpaired at the end,
-    but not when an error pairs with it. An llm_request is read when an
-    llm_response pairs with it or when it is still unpaired at the end.
+    It pairs events with the same pairing.py rules as the converter. A
+    tool_call is read when a tool_result pairs with it or when it is still
+    unpaired at the end, but not when an error pairs with it. An llm_request
+    is read when an llm_response pairs with it or when it is still unpaired
+    at the end. Pairing an llm_response without a matching parent_id also
+    reads the model of each pending llm_request; a request whose data is not
+    an object counts as naming no model.
     """
     read: set[int] = set()
-    pending_llm: dict[str, int] = {}
-    pending_calls: dict[str, int] = {}
+    requests: Pairer[int] = llm_pairer()
+    calls: Pairer[int] = tool_pairer()
     for index, event in enumerate(events):
         if event.event_type in (EventType.USER_PROMPT, EventType.ASSISTANT_RESPONSE):
             read.add(index)
-        elif event.event_type == EventType.LLM_REQUEST:
-            pending_llm[event.event_id] = index
-        elif event.event_type == EventType.LLM_RESPONSE:
+        elif event.event_type in LLM_REQUEST_TYPES:
+            requests.add(event, index)
+        elif event.event_type in LLM_RESPONSE_TYPES:
             read.add(index)
-            if event.parent_id and event.parent_id in pending_llm:
-                read.add(pending_llm.pop(event.parent_id))
-            elif pending_llm:
-                read.add(pending_llm.pop(next(iter(pending_llm))))
-        elif event.event_type == EventType.TOOL_CALL:
-            pending_calls[event.event_id] = index
+            request_index = requests.match(event)
+            if request_index is not None:
+                read.add(request_index)
+        elif event.event_type in TOOL_REQUEST_TYPES:
+            calls.add(event, index)
         elif event.event_type == EventType.TOOL_RESULT:
             read.add(index)
-            if event.parent_id and event.parent_id in pending_calls:
-                read.add(pending_calls.pop(event.parent_id))
+            call_index = calls.match(event)
+            if call_index is not None:
+                read.add(call_index)
         elif event.event_type == EventType.ERROR:
             read.add(index)
-            if event.parent_id and event.parent_id in pending_calls:
-                pending_calls.pop(event.parent_id)
-    read.update(pending_llm.values())
-    read.update(pending_calls.values())
+            calls.match(event)
+    read.update(requests.unmatched())
+    read.update(calls.unmatched())
     return sorted(read)
 
 
@@ -472,8 +481,8 @@ def session_to_otlp(
     root_events = []
     child_spans = []
 
-    # Track tool_call events so we can pair them with tool_result
-    pending_calls: dict[str, TraceEvent] = {}
+    # Pair tool_call events with their tool_result or error (see pairing.py)
+    calls: Pairer[TraceEvent] = tool_pairer()
 
     for event in events:
         if event.event_type == EventType.USER_PROMPT:
@@ -501,13 +510,10 @@ def session_to_otlp(
             ))
 
         elif event.event_type == EventType.TOOL_CALL:
-            pending_calls[event.event_id] = event
+            calls.add(event)
 
         elif event.event_type == EventType.TOOL_RESULT:
-            # Find the matching tool_call
-            call_event = None
-            if event.parent_id and event.parent_id in pending_calls:
-                call_event = pending_calls.pop(event.parent_id)
+            call_event = calls.match(event)
 
             tool_name = event.data.get("tool_name", "") or (
                 call_event.data.get("tool_name", "tool") if call_event else "tool"
@@ -543,10 +549,7 @@ def session_to_otlp(
             })
 
         elif event.event_type == EventType.ERROR:
-            # Find the matching tool_call
-            call_event = None
-            if event.parent_id and event.parent_id in pending_calls:
-                call_event = pending_calls.pop(event.parent_id)
+            call_event = calls.match(event)
 
             tool_name = event.data.get("tool_name", "error")
             error_msg = event.data.get("error", "") or event.data.get("message", "")
@@ -598,7 +601,7 @@ def session_to_otlp(
             root_events.append(_make_event("gen_ai.assistant.message", event.timestamp, llm_attrs))
 
     # Emit any unmatched tool_calls as spans (no result received)
-    for call_event in pending_calls.values():
+    for call_event in calls.unmatched():
         tool_name = call_event.data.get("tool_name", "tool")
         child_spans.append({
             "traceId": trace_id,
@@ -779,9 +782,9 @@ def session_to_otlp_genai(
     root_events: list[dict] = []
     child_spans: list[dict] = []
 
-    # Pair LLM requests with their responses
-    pending_llm: dict[str, TraceEvent] = {}
-    pending_calls: dict[str, TraceEvent] = {}
+    # Pair LLM requests and tool calls with their responses (see pairing.py)
+    requests: Pairer[TraceEvent] = llm_pairer()
+    calls: Pairer[TraceEvent] = tool_pairer()
 
     for event in events:
         if event.event_type == EventType.USER_PROMPT:
@@ -810,17 +813,10 @@ def session_to_otlp_genai(
             ))
 
         elif event.event_type == EventType.LLM_REQUEST:
-            pending_llm[event.event_id] = event
+            requests.add(event)
 
         elif event.event_type == EventType.LLM_RESPONSE:
-            # Find matching request
-            req_event = None
-            if event.parent_id and event.parent_id in pending_llm:
-                req_event = pending_llm.pop(event.parent_id)
-            elif pending_llm:
-                # Take the oldest unmatched request
-                oldest_id = next(iter(pending_llm))
-                req_event = pending_llm.pop(oldest_id)
+            req_event = requests.match(event)
 
             span_start = req_event.timestamp if req_event else event.timestamp
             span_end = event.timestamp
@@ -897,12 +893,10 @@ def session_to_otlp_genai(
             })
 
         elif event.event_type == EventType.TOOL_CALL:
-            pending_calls[event.event_id] = event
+            calls.add(event)
 
         elif event.event_type == EventType.TOOL_RESULT:
-            call_event = None
-            if event.parent_id and event.parent_id in pending_calls:
-                call_event = pending_calls.pop(event.parent_id)
+            call_event = calls.match(event)
 
             tool_name = event.data.get("tool_name", "") or (
                 call_event.data.get("tool_name", "tool") if call_event else "tool"
@@ -956,9 +950,7 @@ def session_to_otlp_genai(
             })
 
         elif event.event_type == EventType.ERROR:
-            call_event = None
-            if event.parent_id and event.parent_id in pending_calls:
-                call_event = pending_calls.pop(event.parent_id)
+            call_event = calls.match(event)
 
             tool_name = event.data.get("tool_name", "error")
             error_msg = event.data.get("error", "") or event.data.get("message", "")
@@ -1013,7 +1005,7 @@ def session_to_otlp_genai(
             })
 
     # Emit unmatched LLM requests as minimal spans
-    for req_event in pending_llm.values():
+    for req_event in requests.unmatched():
         model = req_event.data.get("model", "")
         raw_llm_provider, system = _provider_value(
             meta,
@@ -1057,7 +1049,7 @@ def session_to_otlp_genai(
         })
 
     # Emit unmatched tool calls
-    for call_event in pending_calls.values():
+    for call_event in calls.unmatched():
         tool_name = call_event.data.get("tool_name", "tool")
         tool_attrs: dict[str, Any] = {
             _SEMCONV_TOOL_NAME: tool_name,

@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from agent_trace.cost import (
+    _session_model_usage,
     LivePricingUnavailable,
     PRICING_SNAPSHOT_DATE,
     PRICING_SOURCES,
@@ -215,6 +216,48 @@ class TestProviderCostReport(unittest.TestCase):
             build_provider_cost_report(
                 self.fixture.store, since="7d", now=NOW, live_pricing=True,
             )
+
+
+class TestModelUsagePairing(unittest.TestCase):
+    """Usage pairing follows the pairing.py LLM rules."""
+
+    @staticmethod
+    def _event(event_type, event_id, parent_id="", **data):
+        return TraceEvent(
+            event_type=event_type, event_id=event_id, parent_id=parent_id, data=data,
+        )
+
+    def test_response_naming_a_request_without_model_counts_on_its_own(self):
+        # It used to take over the usage sample of another pending request.
+        events = [
+            self._event(EventType.LLM_REQUEST, "plain"),
+            self._event(EventType.LLM_REQUEST, "gpt", model="gpt-4o", input_tokens=10),
+            self._event(EventType.LLM_RESPONSE, "r1", "plain", model="gpt-4o",
+                        input_tokens=5, output_tokens=5),
+            self._event(EventType.LLM_RESPONSE, "r2", "gpt", output_tokens=7),
+        ]
+        self.assertEqual(_session_model_usage(events), {"gpt-4o": (15, 12)})
+
+    def test_parentless_response_replaces_newest_same_model_request(self):
+        events = [
+            self._event(EventType.LLM_REQUEST, "old", model="gpt-4o", input_tokens=10),
+            self._event(EventType.LLM_REQUEST, "new", model="gpt-4o", input_tokens=20),
+            self._event(EventType.LLM_REQUEST, "other", model="claude-opus-4-6", input_tokens=40),
+            self._event(EventType.ASSISTANT_RESPONSE, "a1", model="gpt-4o",
+                        input_tokens=25, output_tokens=3),
+        ]
+        self.assertEqual(
+            _session_model_usage(events),
+            {"gpt-4o": (35, 3), "claude-opus-4-6": (40, 0)},
+        )
+
+    def test_duplicate_response_counts_on_its_own(self):
+        events = [
+            self._event(EventType.LLM_REQUEST, "a", model="gpt-4o", input_tokens=10),
+            self._event(EventType.LLM_RESPONSE, "r1", "a", output_tokens=4),
+            self._event(EventType.LLM_RESPONSE, "r2", "a", model="gpt-4o", output_tokens=6),
+        ]
+        self.assertEqual(_session_model_usage(events), {"gpt-4o": (10, 10)})
 
 
 class TestProviderCostFormatting(unittest.TestCase):

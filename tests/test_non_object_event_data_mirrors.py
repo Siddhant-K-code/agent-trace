@@ -95,9 +95,9 @@ EXPORT_ROWS = [
     ("llm_response", _LLM_RESPONSE, "", "llm-a"),                            # 5
     ("llm_request", _LLM_REQUEST, "llm-b"),                                  # 6
     ("llm_request", _LLM_REQUEST, "llm-c"),                                  # 7
-    ("llm_response", _LLM_RESPONSE),                                         # 8 pairs with 6, the oldest open request
-    ("llm_request", _LLM_REQUEST, "llm-b"),                                  # 9 reuses the ID of 6
-    ("llm_request", _LLM_REQUEST, "llm-c"),                                  # 10 replaces 7 and keeps its place
+    ("llm_response", _LLM_RESPONSE),                                         # 8 pairs with 7, the newest open request
+    ("llm_request", _LLM_REQUEST, "llm-b"),                                  # 9 replaces 6 and keeps its place
+    ("llm_request", _LLM_REQUEST, "llm-c"),                                  # 10 reuses the ID of 7 after 8 paired with it
     ("llm_response", _LLM_RESPONSE),                                         # 11 pairs with 10
     ("llm_request", _LLM_REQUEST, "llm-b"),                                  # 12 replaces 9, 38 replaces it
     ("tool_call", _PYTEST, "call-1"),                                        # 13
@@ -641,13 +641,13 @@ class MirroredCheckTest(unittest.TestCase):
         # otlp-genai and temporal read a tool_call when a tool_result pairs
         # with it or nothing does, but not when an error pairs with it, whether
         # or not a later tool_call reuses its ID. An llm_response pairs with
-        # the request it names, and a parentless one pairs with the oldest
+        # the request it names, and a parentless one pairs with the newest
         # open request. A request replaced by one with the same ID before it
         # pairs is not read.
         for label in ("export otlp-genai -o", "export temporal -o"):
             self.assertEqual(
                 sweep.positions(label, M1),
-                {2, 3, 4, 5, 6, 8, 10, 11, 13, 14, 16, 17, 18, 19, 21, 22, 25, 26, 28, 30, 31, 33, 34,
+                {2, 3, 4, 5, 7, 8, 10, 11, 13, 14, 16, 17, 18, 19, 21, 22, 25, 26, 28, 30, 31, 33, 34,
                  35, 36, 37, 38},
                 label,
             )

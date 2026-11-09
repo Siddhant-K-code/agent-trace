@@ -27,6 +27,13 @@ from typing import Any
 
 from .event_data import require_object_event_data
 from .models import EventType, SessionMeta, TraceEvent
+from .pairing import (
+    LLM_REQUEST_TYPES,
+    TOOL_REQUEST_TYPES,
+    Pairer,
+    llm_pairer,
+    tool_pairer,
+)
 from .store import TraceStore
 
 
@@ -143,16 +150,24 @@ def langfuse_data_indexes(events: list[TraceEvent]) -> list[int]:
     """Return the positions of the events whose data the Langfuse export reads.
 
     Every tool result and LLM response is read. A tool call or LLM request is
-    read only when a later result or response names it as its parent.
+    read only when a later result or response pairs with it under the
+    pairing.py rules. An error is not read, but it can pair with a tool call,
+    which then is not read either.
     """
     indexes = []
-    pending: dict[str, int] = {}
+    calls: Pairer[int] = tool_pairer()
+    requests: Pairer[int] = llm_pairer()
     for index, event in enumerate(events):
-        if event.event_type in (EventType.TOOL_CALL, EventType.LLM_REQUEST):
-            pending[event.event_id] = index
+        if event.event_type in TOOL_REQUEST_TYPES:
+            calls.add(event, index)
+        elif event.event_type in LLM_REQUEST_TYPES:
+            requests.add(event, index)
+        elif event.event_type == EventType.ERROR:
+            calls.match(event)
         elif event.event_type in (EventType.TOOL_RESULT, EventType.LLM_RESPONSE):
             indexes.append(index)
-            parent = pending.pop(event.parent_id, None)
+            pairer = calls if event.event_type == EventType.TOOL_RESULT else requests
+            parent = pairer.match(event)
             if parent is not None:
                 indexes.append(parent)
     return indexes
@@ -164,14 +179,19 @@ def _events_to_langfuse_observations(
 ) -> list[dict]:
     """Convert trace events to Langfuse Span/Generation observations."""
     observations = []
-    pending_calls: dict[str, TraceEvent] = {}
+    calls: Pairer[TraceEvent] = tool_pairer()
+    requests: Pairer[TraceEvent] = llm_pairer()
 
     for ev in events:
         if ev.event_type == EventType.TOOL_CALL:
-            pending_calls[ev.event_id] = ev
+            calls.add(ev)
+
+        elif ev.event_type == EventType.ERROR:
+            # Errors are not exported, but an error ends its tool call.
+            calls.match(ev)
 
         elif ev.event_type == EventType.TOOL_RESULT:
-            call = pending_calls.pop(ev.parent_id, None)
+            call = calls.match(ev)
             tool_name = ev.data.get("tool_name") or (
                 call.data.get("tool_name", "tool") if call else "tool"
             )
@@ -190,10 +210,10 @@ def _events_to_langfuse_observations(
             })
 
         elif ev.event_type == EventType.LLM_REQUEST:
-            pending_calls[ev.event_id] = ev
+            requests.add(ev)
 
         elif ev.event_type == EventType.LLM_RESPONSE:
-            req_ev = pending_calls.pop(ev.parent_id, None)
+            req_ev = requests.match(ev)
             start_ts = req_ev.timestamp if req_ev else ev.timestamp
             input_tokens = (req_ev.data.get("input_tokens", 0) if req_ev else 0) or 0
             output_tokens = ev.data.get("output_tokens", 0) or 0
