@@ -75,6 +75,8 @@ from .policy_backtest import (
     cmd_policy_diff,
 )
 from .pr_comment import cmd_pr_comment
+from .reviewability import add_threshold_arguments as add_review_threshold_arguments
+from .reviewability import cmd_review
 from .postmortem import cmd_postmortem
 from .project_budget import enforce_new_session_budget, load_project_budget_config
 from .share import cmd_share
@@ -1623,6 +1625,30 @@ def build_parser() -> argparse.ArgumentParser:
         "--share-url", default="", metavar="URL",
         help="optional replay URL; {session_id} is replaced per session",
     )
+    p_pr_comment.add_argument(
+        "--review", action="store_true",
+        help="add the reviewability check to the comment and exit 1 when it fails the threshold",
+    )
+    add_review_threshold_arguments(p_pr_comment)
+
+    # review
+    p_review = sub.add_parser(
+        "review",
+        help="check the reviewability evidence of the sessions linked to this branch",
+    )
+    p_review.add_argument(
+        "session_id", nargs="*",
+        help="session IDs or prefixes (default: sessions attributed to this branch)",
+    )
+    p_review.add_argument(
+        "--format", choices=("text", "json", "markdown"), default="text",
+        help="output format (default: text)",
+    )
+    p_review.add_argument(
+        "--branch", default="", metavar="NAME",
+        help="branch to link sessions by (default: from CI or git)",
+    )
+    add_review_threshold_arguments(p_review)
 
     # postmortem
     p_postmortem = sub.add_parser("postmortem", help="generate a structured postmortem for a failed session")
@@ -2880,6 +2906,7 @@ def main() -> None:
         "share": cmd_share,
         "score": cmd_score,
         "pr-comment": cmd_pr_comment,
+        "review": cmd_review,
         "postmortem": cmd_postmortem,
         "eval": cmd_eval,
         "watch": cmd_watch,

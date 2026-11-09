@@ -202,6 +202,7 @@ Full setup guide: [docs/setup.md](docs/setup.md)
 | [`agent-strace share --assignment <id>`](docs/hiring.md) | Create a privacy-minimized assignment submission ZIP |
 | [`agent-strace score submission.zip`](docs/hiring.md) | Apply a deterministic process-telemetry rubric |
 | [`agent-strace pr-comment`](docs/commands.md#pr-comment) | Post or update a session summary on the current PR |
+| [`agent-strace review`](docs/review.md) | Check PR reviewability: rationale, scope, validation, stewardship, evidence health |
 | [`agent-strace sample`](docs/commands.md#sample) | Export worst sessions as JSONL for eval datasets |
 
 Full flag reference: [docs/commands.md](docs/commands.md)

@@ -1,5 +1,5 @@
 name: agent-trace eval
-description: Run agent-trace evals in CI, post results to the step summary, and fail on regression.
+description: Run agent-trace evals and a PR reviewability check in CI. Post results to the step summary or the PR, and fail on regression or a missing review signal.
 author: Siddhant-K-code
 branding:
   icon: activity
@@ -33,6 +33,18 @@ inputs:
   github-token:
     description: GitHub token used only when post-pr-comment is true
     default: ""
+  run-eval:
+    description: Run agent-strace eval. Set to false for a review-only workflow.
+    default: "true"
+  review:
+    description: Run the reviewability check and fail the step per the threshold
+    default: "false"
+  review-fail-on:
+    description: Statuses that fail the check (comma list or none). Empty uses the review block in .agent-strace.yaml, then missing.
+    default: ""
+  review-min-confidence:
+    description: Lowest confidence that can fail the check (low, medium, high). Empty uses config, then medium.
+    default: ""
 
 outputs:
   passed:
@@ -41,6 +53,9 @@ outputs:
   summary-path:
     description: Path to the written eval summary markdown file
     value: ${{ steps.eval.outputs.summary-path }}
+  review-passed:
+    description: "true if the reviewability check passed, false if it failed, empty if it did not run"
+    value: ${{ steps.review.outputs.passed }}
 
 runs:
   using: composite
@@ -62,6 +77,7 @@ runs:
 
     - name: Run evals
       id: eval
+      if: ${{ inputs.run-eval == 'true' }}
       shell: bash
       env:
         EVAL_CONFIG: ${{ inputs.config }}
@@ -100,7 +116,7 @@ runs:
         if-no-files-found: ignore
 
     - name: Post agent-trace PR comment
-      if: ${{ always() && inputs.post-pr-comment == 'true' }}
+      if: ${{ always() && inputs.post-pr-comment == 'true' && inputs.review != 'true' }}
       shell: bash
       env:
         GITHUB_TOKEN: ${{ inputs.github-token }}
@@ -114,4 +130,57 @@ runs:
           agent-strace --trace-dir "$PR_COMMENT_TRACE_DIR" pr-comment
         else
           echo "::notice::No agent-trace sessions found; skipping PR comment."
+        fi
+
+    - name: Reviewability check
+      id: review
+      if: ${{ always() && inputs.review == 'true' }}
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        REVIEW_TRACE_DIR: ${{ inputs.trace-dir }}
+        REVIEW_FAIL_ON: ${{ inputs.review-fail-on }}
+        REVIEW_MIN_CONFIDENCE: ${{ inputs.review-min-confidence }}
+        REVIEW_POST_COMMENT: ${{ inputs.post-pr-comment }}
+        PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        PR_BASE_REPOSITORY: ${{ github.repository }}
+      run: |
+        ARGS=()
+        if [ -n "$REVIEW_FAIL_ON" ]; then
+          ARGS+=(--fail-on "$REVIEW_FAIL_ON")
+        fi
+        if [ -n "$REVIEW_MIN_CONFIDENCE" ]; then
+          ARGS+=(--min-confidence "$REVIEW_MIN_CONFIDENCE")
+        fi
+
+        POST=false
+        if [ "$REVIEW_POST_COMMENT" = "true" ]; then
+          if [ -n "$PR_HEAD_REPOSITORY" ] && [ "$PR_HEAD_REPOSITORY" != "$PR_BASE_REPOSITORY" ]; then
+            echo "::notice::Skipping PR comment for a fork because pull_request tokens are read-only."
+          elif find "$REVIEW_TRACE_DIR" -mindepth 2 -name meta.json -print -quit 2>/dev/null | grep -q .; then
+            POST=true
+          else
+            echo "::notice::No agent-trace sessions found; skipping PR comment."
+          fi
+        fi
+
+        status=0
+        if [ "$POST" = "true" ]; then
+          agent-strace --trace-dir "$REVIEW_TRACE_DIR" pr-comment --review "${ARGS[@]}" || status=$?
+        fi
+        if [ -n "$GITHUB_STEP_SUMMARY" ]; then
+          summary_status=0
+          agent-strace --trace-dir "$REVIEW_TRACE_DIR" review --format markdown "${ARGS[@]}" >> "$GITHUB_STEP_SUMMARY" || summary_status=$?
+          if [ "$POST" != "true" ]; then
+            status=$summary_status
+          fi
+        elif [ "$POST" != "true" ]; then
+          agent-strace --trace-dir "$REVIEW_TRACE_DIR" review "${ARGS[@]}" || status=$?
+        fi
+
+        if [ "$status" -eq 0 ]; then
+          echo "passed=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "passed=false" >> "$GITHUB_OUTPUT"
+          exit "$status"
         fi

@@ -1161,6 +1161,9 @@ human review, not a pass/fail hiring gate. See [hiring.md](hiring.md).
 agent-strace pr-comment [SESSION_ID] [--dry-run] [--platform github|gitlab]
                            [--repo OWNER/REPO] [--pr NUMBER]
                            [--api-url URL] [--share-url URL]
+                           [--review] [--fail-on STATUSES]
+                           [--min-confidence low|medium|high]
+                           [--findings NAMES] [--config FILE]
 ```
 Post a structured session summary to the current branch's open pull request or
 merge request. The comment includes duration, cost, model, status, tool calls,
@@ -1176,11 +1179,45 @@ An embedded marker makes repeated runs update the existing comment.
 | `--pr NUMBER` | Override the PR/MR number inferred from CI or the current branch |
 | `--api-url URL` | GitHub Enterprise or self-hosted GitLab API base URL |
 | `--share-url URL` | Optional HTML replay URL; `{session_id}` is replaced for each session |
+| `--review` | Add the [reviewability](review.md) table to the comment and exit 1 when the threshold fails |
+| `--fail-on STATUSES` | With `--review`: statuses that fail. See [`review`](#review). |
+| `--min-confidence low\|medium\|high` | With `--review`: lowest confidence that can fail |
+| `--findings NAMES` | With `--review`: findings the threshold applies to |
+| `--config FILE` | With `--review`: config file with a `review` block |
+
+With `--review`, the comment is still posted or updated when the check fails.
+The exit code then follows the threshold.
 
 GitHub uses `GITHUB_TOKEN` or `GH_TOKEN`. GitLab requires a writable project or
 personal access token in `GITLAB_TOKEN`, `GITLAB_ACCESS_TOKEN`, or
 `PRIVATE_TOKEN`; GitLab job tokens cannot write merge-request notes. Tokens are
 read only from the environment.
+
+### `review`
+```
+agent-strace review [SESSION_ID ...] [--format text|json|markdown]
+                    [--branch NAME] [--fail-on STATUSES]
+                    [--min-confidence low|medium|high]
+                    [--findings NAMES] [--config FILE]
+```
+Report what the linked sessions can show a PR reviewer: rationale, scope,
+validation, stewardship, and evidence health. Each finding has a status
+(`present`, `partial`, `missing`, `inconclusive`), a confidence (`high`,
+`medium`, `low`), and its evidence source. Prompt text and command strings are
+never printed. See [review.md](review.md).
+
+| Flag | Description |
+|---|---|
+| `SESSION_ID ...` | Session IDs or prefixes; otherwise use sessions attributed to the current branch |
+| `--format text\|json\|markdown` | Terminal text, versioned JSON, or a PR comment body (default: `text`) |
+| `--branch NAME` | Branch to link sessions by (default: from CI or git) |
+| `--fail-on STATUSES` | Comma-separated statuses that fail: `missing`, `partial`, `inconclusive`, or `none` (default: `missing`) |
+| `--min-confidence low\|medium\|high` | Lowest confidence that can fail the check (default: `medium`) |
+| `--findings NAMES` | Comma-separated findings the threshold applies to: `rationale`, `scope`, `validation`, `stewardship`, `evidence` (default: all) |
+| `--config FILE` | Config file with a `review` block (default: `.agent-strace.yaml`, `.yml`, or `.json` if present) |
+
+Flags override the config file. Exit codes: `0` pass, `1` threshold failed,
+`2` bad config or unknown session.
 
 ### `sample`
 ```
@@ -1408,7 +1445,7 @@ way and skips live events with non-object data with an `[mcp-scan]` line.
 
 ## GitHub Actions
 
-The `agent-trace eval` composite action runs evals in CI, posts a scored table to the GitHub Actions step summary, and exits non-zero on regression.
+The `agent-trace eval` composite action runs evals in CI, posts a scored table to the GitHub Actions step summary, and exits non-zero on regression. It can also run the [reviewability check](review.md) as a required status check.
 
 ```yaml
 permissions:
@@ -1436,11 +1473,16 @@ steps:
 | `install-extras` | none | Optional extras, e.g. `openai,anthropic` |
 | `post-pr-comment` | `false` | Post or update the structured session summary on the PR |
 | `github-token` | none | Token for PR comments; pass `${{ secrets.GITHUB_TOKEN }}` |
+| `run-eval` | `true` | Run `agent-strace eval`. Set `false` for a review-only job. |
+| `review` | `false` | Run `agent-strace review` and fail the step per the threshold. With `post-pr-comment`, the table is added to the single PR comment. |
+| `review-fail-on` | none | Statuses that fail the check. Empty uses the config file, then `missing`. |
+| `review-min-confidence` | none | Lowest confidence that can fail. Empty uses the config file, then `medium`. |
 
 | Output | Description |
 |---|---|
 | `passed` | `true` if all scorers passed |
 | `summary-path` | Path to the written eval summary markdown |
+| `review-passed` | `true` or `false` when `review` ran; empty otherwise |
 
 Trace artifacts are uploaded automatically under the `agent-traces` artifact name.
 
