@@ -225,6 +225,8 @@ class TestHasUntrustedSymlink(unittest.TestCase):
     def test_real_directories_and_missing_components_are_clean(self):
         self.assertFalse(has_untrusted_symlink(self.root / "real" / "sub"))
         self.assertFalse(has_untrusted_symlink(self.root / "missing" / "child"))
+        (self.root / "file").write_text("not a directory")
+        self.assertFalse(has_untrusted_symlink(self.root / "file" / "child"))
 
     def test_untrusted_link_is_found_as_last_or_middle_component(self):
         self._link("plain", "real", trusted=False)
@@ -271,6 +273,19 @@ class TestHasUntrustedSymlink(unittest.TestCase):
         self.addCleanup(os.chdir, previous)
         self.assertTrue(has_untrusted_symlink(Path("plain") / "sub"))
         self.assertFalse(has_untrusted_symlink(Path("relative") / ".." / "real" / "sub"))
+
+    def test_dotdot_onto_untrusted_link_is_found(self):
+        self._link("plain", "real", trusted=False)
+        path = self.root / "real" / "sub" / ".." / ".." / "plain" / "sub"
+        self.assertTrue(has_untrusted_symlink(path))
+
+    def test_dotdot_above_working_directory_onto_untrusted_link_is_found(self):
+        self._link("plain", "real", trusted=False)
+        previous = os.getcwd()
+        os.chdir(self.root / "real")
+        self.addCleanup(os.chdir, previous)
+        # Path(".").parent is ".", so a lexical ".." would stay in "real".
+        self.assertTrue(has_untrusted_symlink(Path("..") / "plain" / "sub"))
 
     def test_windows_refuses_any_symlink_among_lexical_ancestors(self):
         self._link("relative", "real", trusted=True)
