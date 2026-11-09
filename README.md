@@ -289,13 +289,6 @@ Supported: OpenAI Agents SDK, LangChain, LangGraph, CrewAI, LiteLLM, Anthropic S
 python -m unittest discover -s tests -v
 ```
 
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development and pull request
-requirements. Report vulnerabilities through [SECURITY.md](SECURITY.md).
-Maintainers use the [release runbook](docs/releases.md) for coordinated
-publishing and recovery.
-
 ## License
 
 MIT. Use it however you want.
@@ -303,5 +296,4 @@ MIT. Use it however you want.
 ---
 
 <!-- mcp-name: io.github.Siddhant-K-code/agent-trace -->
-
-[Sponsor](https://github.com/sponsors/Siddhant-K-code) · [ADRs](ADRs/) · [Security](docs/security.md) · [PyPI](https://pypi.org/project/agent-strace/)
+[Sponsor](https://github.com/sponsors/Siddhant-K-code) · [ADRs](ADRs/) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md) · [Release guide](docs/releases.md) · [PyPI](https://pypi.org/project/agent-strace/)

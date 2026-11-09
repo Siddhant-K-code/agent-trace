@@ -55,16 +55,29 @@ jobs:
         env:
           RELEASE_VERSION: ${{ steps.version.outputs.version }}
         run: |
-          python - <<'PY'
+          PYTHONPATH=src python - <<'PY'
           import json
           import os
           from pathlib import Path
+
+          from agent_trace.cli import _gemini_extension_manifest
 
           expected = os.environ["RELEASE_VERSION"]
           plugin = json.loads(Path("plugin.json").read_text())
           marketplace = json.loads(
               Path(".github/plugin/marketplace.json").read_text()
           )
+          agent_plugin = json.loads(
+              Path("plugins/agent-strace/plugin.json").read_text()
+          )
+          claude_plugin = json.loads(
+              Path(".claude-plugin/plugin.json").read_text()
+          )
+          claude_marketplace = json.loads(
+              Path(".claude-plugin/marketplace.json").read_text()
+          )
+          server = json.loads(Path("server.json").read_text())
+          gemini_extension = _gemini_extension_manifest()
 
           versions = {
               "plugin.json": plugin["version"],
@@ -74,6 +87,14 @@ jobs:
               ".github/plugin/marketplace.json plugin": (
                   marketplace["plugins"][0]["version"]
               ),
+              "plugins/agent-strace/plugin.json": agent_plugin["version"],
+              ".claude-plugin/plugin.json": claude_plugin["version"],
+              ".claude-plugin/marketplace.json plugin": (
+                  claude_marketplace["plugins"][0]["version"]
+              ),
+              "server.json": server["version"],
+              "server.json PyPI package": server["packages"][0]["version"],
+              "generated Gemini extension": gemini_extension["version"],
           }
           mismatches = [
               f"{source}: expected {expected}, found {version}"

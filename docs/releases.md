@@ -31,10 +31,14 @@ Set the same `X.Y.Z` value in:
 - `plugin.json`
 - `.github/plugin/marketplace.json` at `metadata.version`
 - `.github/plugin/marketplace.json` at `plugins[0].version`
+- `plugins/agent-strace/plugin.json`
+- `.claude-plugin/plugin.json`
+- `.claude-plugin/marketplace.json` at `plugins[0].version`
+- `server.json` at the top level and at `packages[0].version`
 
 The core tag and GitHub release use `vX.Y.Z`. PyPI reports `X.Y.Z`.
-Add other core-coupled metadata to this parity check when its publishing
-lifecycle is integrated.
+The generated Gemini extension reads the same Python `__version__` value and is
+checked during release validation.
 
 ### Release order
 
@@ -47,7 +51,9 @@ lifecycle is integrated.
 5. The same workflow dispatches `Publish to PyPI` at the exact core tag. This
    explicit dispatch is required because a release created by `GITHUB_TOKEN`
    does not start a `release: published` workflow.
-6. Confirm the GitHub release and PyPI both report the intended version.
+6. Confirm the GitHub release includes the interoperability schema and Agent
+   Evidence Corpus ZIP.
+7. Confirm the GitHub release and PyPI both report the intended version.
 
 `Publish to PyPI` also retains its release trigger for core releases created
 outside the automated workflow and a manual dispatch with a required core tag.

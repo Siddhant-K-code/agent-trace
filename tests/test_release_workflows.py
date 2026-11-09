@@ -21,6 +21,13 @@ class TestReleaseWorkflows(unittest.TestCase):
         self.assertEqual(workflow.count('-f tag="$TAG"'), 1)
         self.assertNotIn("vscode-extension", workflow)
         self.assertIn('--exclude="vscode-v*"', workflow)
+        self.assertIn("plugins/agent-strace/plugin.json", workflow)
+        self.assertIn(".claude-plugin/plugin.json", workflow)
+        self.assertIn(".claude-plugin/marketplace.json", workflow)
+        self.assertIn("server.json PyPI package", workflow)
+        self.assertIn("generated Gemini extension", workflow)
+        self.assertIn("agent-strace-interoperability-v1.zip", workflow)
+        self.assertIn("src/agent_trace/corpus/v1", workflow)
 
     def test_publish_workflows_require_tag_and_checkout_that_tag(self):
         for name in ("publish.yml", "publish-vscode.yml"):

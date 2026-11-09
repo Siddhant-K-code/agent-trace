@@ -11,13 +11,21 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agent_trace.cli import _gemini_config_dir, cmd_setup
+from agent_trace import __version__
+from agent_trace.cli import (
+    _gemini_config_dir,
+    _gemini_extension_manifest,
+    cmd_setup,
+)
 from agent_trace.hooks import _read_active_session, hook_main
 from agent_trace.models import EventType
 from agent_trace.store import TraceStore
 
 
 class TestGeminiHooks(unittest.TestCase):
+    def test_generated_extension_uses_core_version(self):
+        self.assertEqual(_gemini_extension_manifest()["version"], __version__)
+
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
         os.environ["AGENT_TRACE_DIR"] = self.tmpdir
