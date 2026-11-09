@@ -778,6 +778,31 @@ class TestHooksMetadataOnly(unittest.TestCase):
         self.assertEqual(prompt.data["prompt"], "please read the customer list")
         self.assertNotIn("capture", prompt.data)
 
+    def test_conversation_id_is_kept_in_both_capture_modes(self):
+        # The native session ID is an identifier, not content: metadata-only
+        # keeps it so exports still join with native agent telemetry.
+        from agent_trace.otlp import session_to_otlp_genai
+
+        cases = (
+            ("full", [], "session_id", "0a1b2c3d-full-4e5f-claude-000001"),
+            ("metadata-only", ["--metadata-only"], "session_id", "0a1b2c3d-meta-4e5f-claude-000002"),
+            ("metadata-only copilot", ["--metadata-only", "--provider", "copilot"],
+             "sessionId", "9f8e7d6c-copi-4e5f-copilot-00003"),
+        )
+        for label, prefix, key, native in cases:
+            with self.subTest(label):
+                start = "sessionStart" if key == "sessionId" else "session-start"
+                prompt = "userPromptSubmitted" if key == "sessionId" else "user-prompt"
+                self._hook([*prefix, start], {key: native, "source": "startup"})
+                self._hook([*prefix, prompt], {key: native, "prompt": "do not export me"})
+                store = TraceStore(self.tmpdir, redact=False)
+                meta = store.load_meta(native[:16])
+                self.assertEqual(meta.conversation_id, native)
+                payload = session_to_otlp_genai(meta, store.load_events(native[:16]))
+                root = payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+                attrs = {a["key"]: a["value"].get("stringValue") for a in root["attributes"]}
+                self.assertEqual(attrs["gen_ai.conversation.id"], native)
+
     def test_remote_endpoint_receives_metadata_only_redacted_events(self):
         with patch.dict(os.environ, {
             "AGENT_STRACE_ENDPOINT": "https://collector.invalid",
