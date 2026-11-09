@@ -9,7 +9,13 @@ import time
 import unittest
 from pathlib import Path
 
-from agent_trace.fileutil import file_lock, lock_path_for, write_atomic
+from agent_trace.fileutil import (
+    file_lock,
+    lock_descriptor,
+    lock_path_for,
+    unlock_descriptor,
+    write_atomic,
+)
 
 try:
     from _concurrency import run_concurrently
@@ -112,6 +118,46 @@ class TestFileLock(unittest.TestCase):
             [[str(self.path), str(rounds)] for _ in range(workers)],
         )
         self.assertEqual(json.loads(self.path.read_text())["count"], workers * rounds)
+
+
+class TestLockDescriptor(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "store.lock"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _open(self) -> int:
+        fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, fd)
+        return fd
+
+    def test_second_descriptor_waits_until_unlock(self):
+        first, second = self._open(), self._open()
+        lock_descriptor(first)
+        with self.assertRaises(TimeoutError):
+            lock_descriptor(second, timeout=0.1)
+        unlock_descriptor(first)
+        lock_descriptor(second, timeout=1.0)
+        unlock_descriptor(second)
+
+    def test_lock_leaves_lock_file_empty(self):
+        fd = self._open()
+        lock_descriptor(fd)
+        unlock_descriptor(fd)
+        self.assertEqual(self.path.stat().st_size, 0)
+
+    def test_closing_descriptor_releases_lock(self):
+        first = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        lock_descriptor(first)
+        os.close(first)
+        second = self._open()
+        lock_descriptor(second, timeout=1.0)
+        unlock_descriptor(second)
+
+    def test_unlock_without_lock_is_ignored(self):
+        unlock_descriptor(self._open())
 
 
 if __name__ == "__main__":

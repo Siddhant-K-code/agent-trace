@@ -35,6 +35,8 @@ import uuid
 from pathlib import Path
 
 from .fileutil import fsync_directory as _fsync_directory
+from .fileutil import lock_descriptor as _lock_descriptor
+from .fileutil import unlock_descriptor as _unlock_descriptor
 from .fileutil import write_atomic as _write_atomic
 from .models import EventType, SessionMeta, TraceEvent
 from .redact import redact_data_with_status, redaction_enabled
@@ -171,20 +173,17 @@ def _carry_parent_link(meta: SessionMeta, existing: SessionMeta) -> bool:
 
 
 def _lock_file(file_obj) -> None:
-    """Best-effort exclusive lock shared by event append and tenant tagging."""
-    try:
-        import fcntl
-        fcntl.flock(file_obj.fileno(), fcntl.LOCK_EX)
-    except (ImportError, OSError):
-        pass
+    """Exclusive lock shared by event append and tenant tagging.
+
+    Uses ``flock`` on POSIX and ``msvcrt.locking`` on Windows (see
+    ``fileutil.lock_descriptor``). Filesystems that cannot lock fall back to
+    running unlocked.
+    """
+    _lock_descriptor(file_obj.fileno(), description=getattr(file_obj, "name", "file"))
 
 
 def _unlock_file(file_obj) -> None:
-    try:
-        import fcntl
-        fcntl.flock(file_obj.fileno(), fcntl.LOCK_UN)
-    except (ImportError, OSError):
-        pass
+    _unlock_descriptor(file_obj.fileno())
 
 
 _GITIGNORE_NAME = ".gitignore"
