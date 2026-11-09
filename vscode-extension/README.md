@@ -60,7 +60,7 @@ All commands are available from the Command Palette (`Cmd/Ctrl+Shift+P`):
 | `agent-trace: View Post-Mortem` | View the watchdog post-mortem for the latest killed session |
 | `agent-trace: Refresh Session Browser` | Reload the session list |
 | `agent-trace: Reveal Session in Browser` | Jump to a session by ID |
-| `agent-trace: Pause Agent` | Send SIGSTOP to the agent (requires `watch` running) |
+| `agent-trace: Pause Agent` | Send SIGSTOP to the agent (requires `watch --agent-pid` running) |
 | `agent-trace: Resume Agent` | Send SIGCONT to resume a paused agent |
 | `agent-trace: Clear File Decorations` | Remove all gutter annotations from the editor |
 | `agent-trace: Enable Product Telemetry` | Enable anonymous extension usage telemetry |
@@ -68,11 +68,11 @@ All commands are available from the Command Palette (`Cmd/Ctrl+Shift+P`):
 
 ## Watchdog integration
 
-Run `agent-strace watch` alongside your session to enable the pause button and post-mortem viewer:
+Run `agent-strace watch` alongside your session to enable the pause button and post-mortem viewer. Pass the agent's PID so watch can stop and kill it:
 
 ```bash
 # Kill session after 30 minutes or $5 spend
-agent-strace watch --timeout 30m --budget 5.00 --on-violation kill
+agent-strace watch --agent-pid "$(pgrep -n claude)" --timeout 30m --budget 5.00 --on-violation kill
 ```
 
 When the watchdog kills a session, the post-mortem viewer opens automatically. The "Copy recovery context" button copies a summary you can paste into a new session to resume where the agent left off.
@@ -106,6 +106,6 @@ arguments, endpoints, usernames, hostnames, or exception messages. See the
 
 The extension watches `.agent-traces/.active-session` for the current session ID, then tails `events.ndjson` for new events using `fs.watch`. No polling when idle and no new processes. Its only outbound network path, other than an explicitly configured live-stream collector, is the documented best-effort anonymous product telemetry above.
 
-Pause works by writing the session ID to `.agent-traces/.pause-request`. `agent-strace watch` checks this file on every poll cycle and sends SIGSTOP / SIGCONT to the agent PID. Pause needs a running `watch` for the session. A pause held by a `require_approval` rule is released only by the approval decision.
+Pause works by writing the session ID to `.agent-traces/.pause-request`. `agent-strace watch` checks this file on every poll cycle and sends SIGSTOP / SIGCONT to the agent PID. Pause needs a running `watch --agent-pid PID` for the session. A pause held by a `require_approval` rule is released only by the approval decision.
 
 The post-mortem viewer reads `watchdog-postmortem.json` from the session directory, written by `agent-strace watch` on kill.

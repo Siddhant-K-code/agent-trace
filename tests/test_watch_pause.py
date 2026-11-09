@@ -1,6 +1,9 @@
 """Tests for who owns an agent pause in watch (editor, rule, approval)."""
 
+import argparse
 import io
+import json
+import os
 import tempfile
 import time
 import unittest
@@ -21,6 +24,8 @@ from agent_trace.watch import (
     _check_pause_file,
     _dispatch_alert,
     _dispatch_nanny_rule,
+    cmd_watch,
+    validate_agent_pid,
     watch_session,
 )
 
@@ -129,6 +134,109 @@ class TestEditorPause(PauseTestCase):
         self.tick()
         self.mocks["pause"].assert_not_called()
         self.assertFalse(self.state.paused)
+
+
+class TestNoAgentPid(PauseTestCase):
+    def setUp(self):
+        super().setUp()
+        self.state.agent_pid = None
+
+    def warnings(self) -> list[str]:
+        return [c.args[0] for c in self.mocks["terminal"].call_args_list
+                if "--agent-pid" in c.args[0]]
+
+    def test_rule_pause_warns_once(self):
+        self.rule_pause()
+        self.rule_pause()
+        self.mocks["pause"].assert_not_called()
+        self.assertFalse(self.state.paused)
+        self.assertEqual(len(self.warnings()), 1)
+        self.assertIn("Cannot pause the agent", self.warnings()[0])
+
+    def test_kill_warns(self):
+        _dispatch_alert("too costly", self.config, self.state, action="kill")
+        self.mocks["kill"].assert_not_called()
+        self.assertEqual(len(self.warnings()), 1)
+
+    def test_approval_warns_and_does_not_own_pause(self):
+        request_id = self.require_approval()
+        self.mocks["pause"].assert_not_called()
+        self.assertIsNone(self.state.pause_owner)
+        self.assertIsNone(request_id)
+        self.assertEqual(len(self.warnings()), 1)
+        self.assertIn("approval rule 'big-change'", self.warnings()[0])
+
+    def test_editor_marker_warns_once(self):
+        self.marker.write_text(SESSION)
+        self.tick(3)
+        self.mocks["pause"].assert_not_called()
+        self.assertEqual(self.out.getvalue().count("--agent-pid"), 1)
+
+    def test_no_warning_without_a_pause_request(self):
+        self.tick(3)
+        _dispatch_alert("just an alert", self.config, self.state)
+        self.assertEqual(self.warnings(), [])
+        self.assertNotIn("--agent-pid", self.out.getvalue())
+
+    def test_dry_run_does_not_warn(self):
+        _dispatch_alert("rule fired", self.config, self.state, action="pause", dry_run=True)
+        self.assertEqual(self.warnings(), [])
+
+    def test_one_warning_across_rule_and_editor(self):
+        self.rule_pause()
+        self.marker.write_text(SESSION)
+        self.tick()
+        self.assertEqual(len(self.warnings()), 1)
+        self.assertNotIn("--agent-pid", self.out.getvalue())
+
+
+class TestValidateAgentPid(unittest.TestCase):
+    def test_live_process_is_accepted(self):
+        with patch("os.kill") as kill:
+            self.assertIsNone(validate_agent_pid(PID))
+        kill.assert_called_once_with(PID, 0)
+
+    def test_missing_process_is_rejected(self):
+        with patch("os.kill", side_effect=ProcessLookupError):
+            self.assertIn("no process", validate_agent_pid(PID))
+
+    def test_process_of_another_user_is_rejected(self):
+        with patch("os.kill", side_effect=PermissionError):
+            self.assertIn("not allowed", validate_agent_pid(PID))
+
+    def test_reserved_and_own_pids_are_rejected_without_signalling(self):
+        with patch("os.kill") as kill:
+            for pid in (-5, 0, 1, os.getpid()):
+                self.assertIsNotNone(validate_agent_pid(pid), pid)
+        kill.assert_not_called()
+
+    def test_real_parent_process_is_accepted(self):
+        self.assertIsNone(validate_agent_pid(os.getppid()))
+
+
+class TestCmdWatchAgentPid(PauseTestCase):
+    def args(self, **kw):
+        base = dict(trace_dir=self._tmp.name, session_id=SESSION, agent_pid=None)
+        base.update(kw)
+        return argparse.Namespace(**base)
+
+    def test_invalid_pid_exits_before_watching(self):
+        self.mocks["os_kill"].side_effect = ProcessLookupError
+        with patch("agent_trace.watch.watch_session") as ws, \
+             patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(cmd_watch(self.args(agent_pid=PID)), 1)
+        ws.assert_not_called()
+        self.assertIn(f"no process with PID {PID}", err.getvalue())
+
+    def test_valid_pid_is_passed_to_watch_session(self):
+        with patch("agent_trace.watch.watch_session") as ws:
+            self.assertEqual(cmd_watch(self.args(agent_pid=PID)), 0)
+        self.assertEqual(ws.call_args.kwargs["agent_pid"], PID)
+
+    def test_cli_parses_agent_pid(self):
+        from agent_trace.cli import build_parser
+        ns = build_parser().parse_args(["watch", "--agent-pid", str(PID)])
+        self.assertEqual(ns.agent_pid, PID)
 
 
 class TestApprovalPause(PauseTestCase):
@@ -245,14 +353,30 @@ class TestApprovalPause(PauseTestCase):
 class TestWatchSessionLoop(PauseTestCase):
     def _run(self, items, **kwargs):
         real_state = WatchState
+        kwargs.setdefault("agent_pid", PID)
 
         def make_state(**kw):
-            self.loop_state = real_state(agent_pid=PID, **kw)
+            self.loop_state = real_state(**kw)
             return self.loop_state
 
         with patch("agent_trace.watch._tail_events", return_value=iter(items)), \
              patch("agent_trace.watch.WatchState", side_effect=make_state):
             watch_session(self.store, SESSION, self.config, out=self.out, **kwargs)
+
+    def heartbeat(self) -> dict:
+        return json.loads((Path(self._tmp.name) / SESSION / ".heartbeat").read_text())
+
+    def test_agent_pid_reaches_state_and_heartbeat(self):
+        self._run([_IDLE_SENTINEL])
+        self.assertEqual(self.loop_state.agent_pid, PID)
+        self.assertIn(f"Agent pid {PID}", self.out.getvalue())
+        self.assertEqual(self.heartbeat()["agent_pid"], PID)
+
+    def test_heartbeat_reports_missing_agent_pid(self):
+        self._run([_IDLE_SENTINEL], agent_pid=None)
+        self.assertIsNone(self.loop_state.agent_pid)
+        self.assertIn("agent_pid", self.heartbeat())
+        self.assertIsNone(self.heartbeat()["agent_pid"])
 
     def test_rule_pause_is_not_undone_by_idle_ticks(self):
         rule = NannyRule(name="stop", condition="files_modified > 0", action="pause")

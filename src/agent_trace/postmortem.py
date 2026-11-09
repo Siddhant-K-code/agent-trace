@@ -175,11 +175,17 @@ def heartbeat_path(store: TraceStore, session_id: str) -> Path:
     return store._session_dir(session_id) / HEARTBEAT_FILE
 
 
-def write_heartbeat(store: TraceStore, session_id: str) -> None:
-    """Touch the session heartbeat file with lightweight JSON metadata."""
+def write_heartbeat(
+    store: TraceStore, session_id: str, agent_pid: int | None = None,
+) -> None:
+    """Touch the session heartbeat file with lightweight JSON metadata.
+
+    ``agent_pid`` is the PID watch signals, or null when it has none. The
+    VS Code extension reads it to refuse a pause that would do nothing.
+    """
     path = heartbeat_path(store, session_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"session_id": session_id, "updated_at": time.time()}
+    payload = {"session_id": session_id, "updated_at": time.time(), "agent_pid": agent_pid}
     path.write_text(json.dumps(payload, separators=(",", ":")))
 
 

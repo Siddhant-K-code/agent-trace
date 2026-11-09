@@ -388,7 +388,8 @@ checkpoint setup.
 
 ### `watch`
 ```
-agent-strace watch [session-id] [--timeout DURATION] [--budget $N] [--on-violation ACTION]
+agent-strace watch [session-id] [--agent-pid PID] [--timeout DURATION] [--budget $N]
+                   [--on-violation ACTION]
                    [--on-death CMD] [--policy FILE] [--rules FILE_OR_BUILTINS] [--stream-to URL]
                    [--stream-batch-size N] [--stream-flush-interval S]
                    [--loop-threshold N] [--loop-window N] [--max-context-pct N]
@@ -399,6 +400,7 @@ Live session monitor with kill-switch rules.
 
 | Flag | Description |
 |---|---|
+| `--agent-pid PID` | Agent process that pause, kill and approval actions signal. Watch exits with an error if the PID does not exist or cannot be signalled. Not supported on Windows |
 | `--timeout DURATION` | Kill after duration (e.g. `30m`, `2h`) |
 | `--budget $N` | Kill when spend exceeds N dollars |
 | `--loop-threshold N` | Alert when the same tool call and arguments repeat N times; default is 3 |
@@ -412,6 +414,21 @@ Live session monitor with kill-switch rules.
 | `--stream-to URL` | Stream events to HTTP endpoint in real-time |
 | `--dry-run` | Evaluate rules without acting |
 | `--tenant-id ID` | Tag the session and all events; defaults to `AGENT_STRACE_TENANT_ID` |
+
+Watch does not guess the agent PID. Capture hooks run as children of a
+shell, so their parent is not reliably the agent, and signalling the wrong
+process is worse than not signalling. Pass `--agent-pid` to let watch stop,
+resume and kill the agent:
+
+```bash
+claude &                                  # or any agent
+agent-strace watch --agent-pid $! --rules .watch-rules.json
+```
+
+Without `--agent-pid`, every check still alerts, but `pause`, `kill` and
+`require_approval` actions and VS Code Pause cannot stop the agent. The first
+time one of them fires, watch prints `Cannot ...: no agent PID is known`
+once. A `require_approval` rule still creates the approval request.
 
 **Project budget config** (`.agent-strace.yaml`):
 ```yaml
@@ -584,6 +601,7 @@ agent-strace approval deny <request-id> [--reason TEXT] [--by NAME] [--no-kill]
 ```
 Human-in-the-loop approval queue. A policy rule with
 `action=require_approval` pauses the agent while it waits for a decision.
+`watch` can only pause the agent when it was started with `--agent-pid`.
 Approving resumes the agent with `SIGCONT` by default; denying terminates it
 with `SIGTERM` by default.
 

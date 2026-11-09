@@ -1750,6 +1750,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_watch.add_argument("--tenant-id", dest="tenant_id", metavar="ID",
                          help="tag this session and its events with a tenant ID; "
                               "defaults to AGENT_STRACE_TENANT_ID")
+    p_watch.add_argument("--agent-pid", dest="agent_pid", type=int, metavar="PID",
+                         help="agent process to pause, resume and kill; without it watch "
+                              "only alerts (the process must exist at startup)")
     p_watch.add_argument("--max-retries", type=int, default=5, help="max retries before alert (default: 5)")
     p_watch.add_argument("--max-cost", type=float, default=10.0, help="max cost in dollars (default: 10)")
     p_watch.add_argument("--max-duration", type=int, default=1800, help="max duration in seconds (default: 1800)")

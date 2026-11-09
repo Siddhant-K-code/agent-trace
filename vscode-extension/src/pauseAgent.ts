@@ -4,7 +4,7 @@
  * Uses a marker file (.agent-traces/.pause-request) that watch.py polls.
  * The marker holds the session ID it applies to. Writing it requests a
  * pause; deleting it requests a resume. watch.py sends SIGSTOP / SIGCONT
- * to the agent PID on its next poll.
+ * to the agent PID from `watch --agent-pid` on its next poll.
  *
  * watch.py only resumes a pause that the marker started. A pause held by a
  * require_approval rule stays in place until the approval is decided.
@@ -51,19 +51,26 @@ export class PauseManager {
     }
   }
 
-  /** True when `agent-strace watch` has written a recent heartbeat for the session. */
-  isWatcherRunning(sessionId: string): boolean {
+  /** The session heartbeat if `agent-strace watch` wrote it recently, else null. */
+  private freshHeartbeat(sessionId: string): Record<string, unknown> | null {
     try {
       const raw = fs.readFileSync(
         path.join(this.traceDir, sessionId, ".heartbeat"),
         "utf8",
       );
-      const updatedAt = Number(JSON.parse(raw).updated_at);
-      return Number.isFinite(updatedAt) &&
+      const heartbeat = JSON.parse(raw);
+      const updatedAt = Number(heartbeat?.updated_at);
+      const fresh = Number.isFinite(updatedAt) &&
         this.now() - updatedAt * 1000 < HEARTBEAT_FRESH_MS;
+      return fresh ? heartbeat : null;
     } catch {
-      return false;
+      return null;
     }
+  }
+
+  /** True when `agent-strace watch` has written a recent heartbeat for the session. */
+  isWatcherRunning(sessionId: string): boolean {
+    return this.freshHeartbeat(sessionId) !== null;
   }
 
   /** IDs of pending approval requests for the session. */
@@ -100,10 +107,19 @@ export class PauseManager {
 
   pause(state: SessionState): PauseResult {
     if (state.paused) { return { ok: true }; }
-    if (!this.isWatcherRunning(state.sessionId)) {
+    const heartbeat = this.freshHeartbeat(state.sessionId);
+    if (!heartbeat) {
       return {
         ok: false,
         message: "agent-strace watch is not running for this session. Start it, then pause again.",
+      };
+    }
+    // Older watchers omit agent_pid; null means this watcher cannot signal.
+    if ("agent_pid" in heartbeat && heartbeat.agent_pid === null) {
+      return {
+        ok: false,
+        message: "agent-strace watch has no agent PID, so it cannot pause the agent. " +
+          "Restart it with --agent-pid PID, then pause again.",
       };
     }
     try {

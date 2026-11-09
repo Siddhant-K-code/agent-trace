@@ -14,7 +14,7 @@ The **agent-strace** extension shows live session activity without leaving the e
 | Status bar | Live cost, tool call count, and active tool name. Click to open the event stream. |
 | Gutter annotations | Blue border on files the agent read, amber on files it modified. Inline label shows read/write counts. |
 | Event stream panel | Live feed in the Explorer sidebar: every tool call, file op, LLM request, and error. |
-| Pause button | Stops the agent mid-session via SIGSTOP. Requires `agent-strace watch` running in a terminal. |
+| Pause button | Stops the agent mid-session via SIGSTOP. Requires `agent-strace watch --agent-pid PID` running in a terminal. |
 | Watchdog status bar | Polls the active session for cost and tool count; updates every 5 seconds (configurable). |
 | Post-mortem viewer | Auto-opens when a session is killed by the watchdog. Shows kill reason, cost at death, and a copyable recovery context. |
 | Session browser | Explorer sidebar tree listing all sessions with timestamp, duration, tool calls, and error count. |
@@ -50,7 +50,7 @@ All commands are available from the Command Palette (`Cmd/Ctrl+Shift+P`):
 | `agent-trace: Open Post-Mortem` | View the watchdog post-mortem for the latest killed session |
 | `agent-trace: Refresh Session Browser` | Reload the session list in the Explorer sidebar |
 | `agent-trace: Reveal Session` | Jump to a session in the browser |
-| `agent-trace: Pause Agent` | Send SIGSTOP to the agent process (requires `watch` running) |
+| `agent-trace: Pause Agent` | Send SIGSTOP to the agent process (requires `watch --agent-pid` running) |
 | `agent-trace: Resume Agent` | Send SIGCONT to resume a paused agent |
 | `agent-trace: Open Panel` | Open the main agent-strace panel |
 | `agent-trace: Clear Decorations` | Remove all gutter annotations from the editor |
@@ -61,11 +61,11 @@ All commands are available from the Command Palette (`Cmd/Ctrl+Shift+P`):
 
 ## Pause / resume
 
-The pause button requires `agent-strace watch` running in a separate terminal:
+The pause button requires `agent-strace watch` running in a separate terminal, with the agent's process ID:
 
 ```bash
-# In a separate terminal, start the watcher
-agent-strace watch
+# In a separate terminal, start the watcher with the agent's PID
+agent-strace watch --agent-pid "$(pgrep -n claude)"
 
 # Then use the Pause button in the event stream panel,
 # or run: agent-trace: Pause Agent from the command palette
@@ -73,7 +73,7 @@ agent-strace watch
 
 When paused, the agent process receives SIGSTOP and freezes. Resume with the Resume command or SIGCONT.
 
-Pause shows a warning and does nothing if `agent-strace watch` is not running for the session (no heartbeat in the last 15 seconds). The pause request file holds the session ID, so Resume and session end never clear another session's pause.
+Pause shows a warning and does nothing if `agent-strace watch` is not running for the session (no heartbeat in the last 15 seconds), or if it was started without `--agent-pid` and so cannot signal the agent. The pause request file holds the session ID, so Resume and session end never clear another session's pause.
 
 `watch` tracks who paused the agent. Resume only releases a pause that the editor started. A pause from a `pause` rule is handed to the editor when you run Pause Agent, so Pause then Resume releases it. A pause from a `require_approval` rule stays until the request is decided with `agent-strace approval`; Resume shows the pending request ID instead. After a denial the agent stays stopped and Pause then Resume releases it.
 
