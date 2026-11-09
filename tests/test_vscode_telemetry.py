@@ -15,7 +15,11 @@ class TestVSCodeTelemetryManifest(unittest.TestCase):
         cls.package = json.loads((EXTENSION / "package.json").read_text())
 
     def test_extension_minor_version_is_bumped(self):
-        self.assertEqual(self.package["version"], "0.3.0")
+        version = tuple(int(part) for part in self.package["version"].split("."))
+        self.assertGreaterEqual(version, (0, 3, 0))
+        lock = json.loads((EXTENSION / "package-lock.json").read_text())
+        self.assertEqual(lock["version"], self.package["version"])
+        self.assertEqual(lock["packages"][""]["version"], self.package["version"])
 
     def test_default_on_application_setting_is_registered(self):
         setting = self.package["contributes"]["configuration"]["properties"][
