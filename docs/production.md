@@ -360,6 +360,13 @@ the same rules, defined in `src/agent_trace/pairing.py`:
 Requests still pending at the end are exported as unfinished spans in OTLP and
 are not exported to Langfuse.
 
+Recorders set `parent_id` while they write the trace, with rules from the same
+module. `record` and `record-http` link a `tool_result` or `error` to the
+pending `tool_call` with the same JSON-RPC id, and keep at most 10,000 calls
+pending per proxy. Hooks link a result to the pending call with its
+`tool_use_id`, or, when the provider sends none, to the oldest pending call of
+the same tool name, preferring calls from the same subagent.
+
 ---
 
 ## Inspect the OTLP payload

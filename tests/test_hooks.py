@@ -931,6 +931,24 @@ class TestConcurrentToolCalls(unittest.TestCase):
         linked_ids = {r.parent_id for r in results}
         self.assertEqual(len(linked_ids), 2, "each result must link to a distinct call")
 
+    def test_malformed_pending_entries_do_not_drop_the_result(self):
+        """A corrupt pending entry is skipped instead of crashing the hook."""
+        handle_pre_tool({"tool_name": "Bash", "tool_input": {"command": "ls"}})
+        pending = _read_pending_calls()
+        pending["corrupt"] = "Bash"
+        pending["no_timestamp"] = {"tool_name": "Bash"}
+        _write_pending_calls(pending)
+
+        handle_post_tool({"tool_name": "Bash", "tool_output": "ok"}, failed=False)
+
+        store = TraceStore(self.tmpdir)
+        events = store.load_events(self.session_id)
+        (call,) = [e for e in events if e.event_type == EventType.TOOL_CALL]
+        (result,) = [e for e in events if e.event_type == EventType.TOOL_RESULT]
+        self.assertEqual(result.parent_id, call.event_id)
+        self.assertGreaterEqual(result.duration_ms, 0)
+        self.assertEqual(set(_read_pending_calls()), {"corrupt", "no_timestamp"})
+
     def test_pending_calls_keyed_by_event_id(self):
         """Pending calls file must use event_id as key, not tool name."""
         handle_pre_tool({"tool_name": "Read", "tool_input": {"file_path": "/a"}})

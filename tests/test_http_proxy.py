@@ -37,13 +37,20 @@ class FakeMCPHandler(BaseHTTPRequestHandler):
             # simulate a server that answers with an id nobody asked for
             if msg.get("params", {}).get("name") == "mismatched_id":
                 resp_id = f"other-{resp_id}"
-            response = {
-                "jsonrpc": "2.0",
-                "id": resp_id,
-                "result": {
-                    "content": [{"type": "text", "text": "tool output"}],
-                },
-            }
+            if msg.get("params", {}).get("name") == "fails":
+                response = {
+                    "jsonrpc": "2.0",
+                    "id": resp_id,
+                    "error": {"code": -32602, "message": "invalid arguments"},
+                }
+            else:
+                response = {
+                    "jsonrpc": "2.0",
+                    "id": resp_id,
+                    "result": {
+                        "content": [{"type": "text", "text": "tool output"}],
+                    },
+                }
         elif msg.get("method") == "initialize":
             response = {
                 "jsonrpc": "2.0",
@@ -436,7 +443,7 @@ class TestHTTPProxyPendingCalls(unittest.TestCase):
     def test_two_servers_keep_independent_pending_maps(self):
         a = self._make_server()
         b = self._make_server()
-        self.assertIsNot(a.pending_calls, b.pending_calls)
+        self.assertIsNot(a.calls, b.calls)
 
         call_a = TraceEvent(event_type=EventType.TOOL_CALL, data={"request_id": 1})
         a.track_call(call_a)
@@ -517,6 +524,28 @@ class TestHTTPProxyPendingCalls(unittest.TestCase):
 
         stored = server.store.load_events(server.meta.session_id)
         self.assertIn(EventType.TOOL_RESULT, [e.event_type for e in stored])
+
+    def test_error_links_to_matching_call_and_closes_it(self):
+        server = self._make_server()
+        call = TraceEvent(event_type=EventType.TOOL_CALL, timestamp=100.0, data={"request_id": 4})
+        server.track_call(call)
+
+        error = TraceEvent(event_type=EventType.ERROR, timestamp=100.25, data={"request_id": 4})
+        server.match_result(error)
+
+        self.assertEqual(error.parent_id, call.event_id)
+        self.assertAlmostEqual(error.duration_ms, 250.0)
+        self.assertEqual(server.pending_calls, {})
+
+    def test_live_error_response_links_to_its_call(self):
+        server, events = self._start_proxy()
+        self.assertEqual(_post_tool_call(server.server_address[1], 9, "fails"), 200)
+
+        (call,) = [e for e in events if e.event_type == EventType.TOOL_CALL]
+        (error,) = [e for e in events if e.event_type == EventType.ERROR]
+        self.assertEqual(error.parent_id, call.event_id)
+        self.assertGreaterEqual(error.duration_ms, 0)
+        self.assertEqual(server.pending_calls, {})
 
     def test_pending_calls_are_bounded(self):
         server = self._make_server(max_pending_calls=3)

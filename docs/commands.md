@@ -334,6 +334,9 @@ Plain-English phase breakdown: what the agent did, files touched, retries, waste
 agent-strace timeline [session-id] [--format text|json] [--model MODEL]
 ```
 Structured phase-by-phase view with tool calls, errors, retries, and cost per phase.
+A tool result marks the call its `parent_id` names as ok or failed. A result
+without a usable `parent_id` marks the newest call in the phase that has no
+result or error yet.
 
 | Flag | Default | Description |
 |---|---|---|
@@ -1576,9 +1579,9 @@ Some output still prints the stored value as it is, for example the `share`
 page, `export --format json`, the `otlp` and `otlp-genai` exports, `audit`,
 `postmortem`, and the `compliance export` access log. Cost and token estimates
 still count the stored size of each event.
-`record` and `record-http` link a tool result to its call only when the JSON-RPC
-id is a string or a number. With any other id they forward both messages and
-record both events without the link.
+`record` and `record-http` link a tool result or a JSON-RPC error to its call
+only when the JSON-RPC id is a string or a number. With any other id they
+forward both messages and record both events without the link.
 
 ---
 
