@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import tempfile
 import unittest
 from dataclasses import fields
@@ -142,7 +143,7 @@ class TestAgentEvidenceCorpus(unittest.TestCase):
             task="synthetic",
             steps=extract_steps(events),
         )
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as tmp:
             baseline = Path(tmp) / "baseline.json"
             baseline.write_text(fixture.to_json(), encoding="utf-8")
             report = validate_trace_directory(case, replay_baseline=baseline)
@@ -180,14 +181,15 @@ class TestValidationCli(unittest.TestCase):
             replay_baseline=None,
         )
         stdout = io.StringIO()
-        with patch("sys.stdout", stdout):
-            result = cmd_validate(args)
+        with patch.dict(os.environ, {"AGENT_STRACE_WORKSPACE": ""}, clear=False):
+            with patch("sys.stdout", stdout):
+                result = cmd_validate(args)
         self.assertEqual(result, 0)
         self.assertTrue(json.loads(stdout.getvalue())["matched"])
 
     def test_session_id_resolution_does_not_write_to_store(self):
         source = CORPUS_ROOT / "usage-zero"
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as tmp:
             root = Path(tmp)
             case = root / "usage-zero"
             case.mkdir()
