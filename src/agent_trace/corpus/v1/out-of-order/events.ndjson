@@ -1,0 +1,4 @@
+{"event_type":"session_start","timestamp":1700001500.0,"event_id":"start","data":{"provider":"synthetic"}}
+{"event_type":"user_prompt","timestamp":1700001502.0,"event_id":"prompt","data":{"prompt":"synthetic request"}}
+{"event_type":"assistant_response","timestamp":1700001501.0,"event_id":"response","data":{"text":"synthetic response"}}
+{"event_type":"session_end","timestamp":1700001503.0,"event_id":"end","data":{"status":"completed"}}

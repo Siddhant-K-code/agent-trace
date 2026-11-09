@@ -1,0 +1,2 @@
+{"event_type":"session_start","timestamp":1700001200.0,"event_id":"start","data":{"provider":"synthetic"}}
+{"event_type":"session_end","timestamp":1700001201.0,"event_id":"end","data":{"status":"completed"}}

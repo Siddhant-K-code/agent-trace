@@ -503,6 +503,30 @@ agent-strace verify --from-export FILE [--format text|json]
 Verify a session hash chain, or verify the chain links embedded in an EU AI Act
 export package.
 
+### `validate`
+```
+agent-strace validate [TARGET] [--format text|json] [--allow-active]
+                       [--replay-baseline FILE]
+agent-strace validate --corpus [--format text|json]
+```
+Validate a session ID, session prefix, or session directory against the public
+[`meta.json` and event schemas](trace-schema.md), relationship rules, ordering
+policy, summary consistency, and hash-chain states. The default target is the
+latest session. Validation is read-only and exits `0` only for a conformant
+`valid` report.
+
+| Flag | Description |
+|---|---|
+| `--format text\|json` | Human-readable result or the versioned validation report |
+| `--allow-active` | Treat absent terminal outcomes as in-flight evidence instead of finalized evidence |
+| `--replay-baseline FILE` | Compare tool-call behavior with an existing regression fixture |
+| `--corpus` | Validate all packaged [Agent Evidence Corpus](agent-evidence-corpus.md) cases and exact expected labels |
+
+The validator distinguishes missing usage from explicit zero usage. It accepts
+legacy records that omit event `session_id` and hash links, but it does not
+silently repair them. See [Public trace schema](trace-schema.md) for all rules,
+status meanings, and compatibility decisions.
+
 ### `policy`
 ```
 agent-strace policy [generate] [SESSION_ID ...] [--output FILE] [--dry-run]

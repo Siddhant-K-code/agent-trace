@@ -1,0 +1,4 @@
+{"event_type":"session_start","timestamp":1700000000.0,"event_id":"start","session_id":"complete-current","data":{"provider":"synthetic","capture_method":"corpus"}}
+{"event_type":"tool_call","timestamp":1700000001.0,"event_id":"call","session_id":"complete-current","data":{"tool_name":"read","arguments":{"path":"README.md"}},"prev_hash":"4e9f6e90d17540b153cd9f23313d62f7ab3095c35be97a8d1edd80e0fe38cbd9"}
+{"event_type":"tool_result","timestamp":1700000002.0,"event_id":"result","session_id":"complete-current","parent_id":"call","data":{"tool_name":"read","result":"synthetic content"},"prev_hash":"6b27e77bc05cc89c051caa04343c18d4518b63053f7a0240e52ecae0d6398eb1"}
+{"event_type":"session_end","timestamp":1700000003.0,"event_id":"end","session_id":"complete-current","data":{"status":"completed"},"prev_hash":"90005aaed7047f0113f078bb04a51f217edef49dc2dae98e940af970d9b8f9bc"}

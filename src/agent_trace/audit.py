@@ -453,20 +453,30 @@ def verify_chain(store: TraceStore, session_id: str) -> ChainVerifyResult:
     Events without prev_hash (written before v0.62.0) are skipped.
     Returns ChainVerifyResult with ok=True if no broken links are found.
     """
-    import hashlib
-
     events_path = store._session_file(session_id, "events.ndjson", "event stream")
     if not events_path.exists():
         return ChainVerifyResult(session_id=session_id, ok=False,
                                  total_events=0, broken_at=0)
 
     lines = [l for l in events_path.read_text().splitlines() if l.strip()]
-    if not lines:
-        return ChainVerifyResult(session_id=session_id, ok=True, total_events=0)
+    return verify_chain_lines(lines, session_id=session_id)
+
+
+def verify_chain_lines(
+    lines: list[str],
+    *,
+    session_id: str = "",
+) -> ChainVerifyResult:
+    """Verify hash links in already-read event lines.
+
+    Missing ``prev_hash`` values remain valid for legacy compatibility. Callers
+    that need to distinguish legacy, partial, and fully linked streams should
+    retain the richer state returned by the compliance snapshot parser.
+    """
+    import hashlib
 
     import json as _json
     prev_line = ""
-    checked = 0
     for i, line in enumerate(lines):
         try:
             obj = _json.loads(line)
@@ -486,7 +496,6 @@ def verify_chain(store: TraceStore, session_id: str) -> ChainVerifyResult:
                 broken_event_id=event_id,
             )
         prev_line = line
-        checked += 1
 
     return ChainVerifyResult(session_id=session_id, ok=True, total_events=len(lines))
 

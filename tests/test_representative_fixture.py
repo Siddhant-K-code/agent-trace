@@ -2,11 +2,17 @@ import json
 import unittest
 from pathlib import Path
 
+import agent_trace
 from agent_trace.annotate import Annotation
 from agent_trace.models import EventType, TraceEvent
 
 
-FIXTURE_DIR = Path(__file__).parent / "fixtures" / "representative_session"
+FIXTURE_DIR = (
+    Path(agent_trace.__file__).parent
+    / "corpus"
+    / "v1"
+    / "fixture-review-001"
+)
 
 
 class TestRepresentativeEvidenceFixture(unittest.TestCase):

@@ -1,0 +1,187 @@
+{
+  "schema": "agent-strace-agent-evidence-corpus/v1",
+  "version": "1.0.0",
+  "title": "Agent Evidence Corpus",
+  "description": "Synthetic AgentTrace sessions for interoperability and conformance testing.",
+  "license": "MIT",
+  "synthetic": true,
+  "contains_private_traces": false,
+  "contains_real_secrets": false,
+  "cases": [
+    {
+      "id": "complete-current",
+      "path": "complete-current",
+      "expected_status": "valid",
+      "expected_labels": [
+        "complete",
+        "conformant",
+        "current",
+        "hash_chain_unanchored",
+        "schema_valid",
+        "usage_zero",
+        "valid"
+      ]
+    },
+    {
+      "id": "incomplete-missing-outcome",
+      "path": "incomplete-missing-outcome",
+      "expected_status": "partial",
+      "expected_labels": [
+        "hash_chain_legacy",
+        "incomplete",
+        "legacy",
+        "missing_outcome",
+        "nonconformant",
+        "partial",
+        "schema_valid",
+        "usage_missing"
+      ]
+    },
+    {
+      "id": "terminal-absent",
+      "path": "terminal-absent",
+      "expected_status": "partial",
+      "expected_labels": [
+        "hash_chain_legacy",
+        "incomplete",
+        "legacy",
+        "nonconformant",
+        "partial",
+        "schema_valid",
+        "terminal_absent",
+        "usage_zero"
+      ]
+    },
+    {
+      "id": "representative-recovered-redacted",
+      "path": "fixture-review-001",
+      "expected_status": "partial",
+      "expected_labels": [
+        "complete",
+        "hash_chain_legacy",
+        "legacy",
+        "nonconformant",
+        "orphan_parent",
+        "partial",
+        "recovered",
+        "redacted",
+        "schema_valid",
+        "usage_missing"
+      ]
+    },
+    {
+      "id": "tampered",
+      "path": "tampered",
+      "expected_status": "invalid",
+      "expected_labels": [
+        "complete",
+        "current",
+        "hash_chain_broken",
+        "invalid",
+        "nonconformant",
+        "schema_valid",
+        "tampered",
+        "usage_zero"
+      ]
+    },
+    {
+      "id": "summary-contradiction",
+      "path": "summary-contradiction",
+      "expected_status": "invalid",
+      "expected_labels": [
+        "complete",
+        "hash_chain_legacy",
+        "invalid",
+        "legacy",
+        "nonconformant",
+        "schema_valid",
+        "summary_contradiction",
+        "usage_zero"
+      ]
+    },
+    {
+      "id": "usage-missing",
+      "path": "usage-missing",
+      "expected_status": "valid",
+      "expected_labels": [
+        "complete",
+        "conformant",
+        "hash_chain_legacy",
+        "legacy",
+        "schema_valid",
+        "usage_missing",
+        "valid"
+      ]
+    },
+    {
+      "id": "usage-zero",
+      "path": "usage-zero",
+      "expected_status": "valid",
+      "expected_labels": [
+        "complete",
+        "conformant",
+        "hash_chain_legacy",
+        "legacy",
+        "schema_valid",
+        "usage_zero",
+        "valid"
+      ]
+    },
+    {
+      "id": "duplicate-event-id",
+      "path": "duplicate-event-id",
+      "expected_status": "invalid",
+      "expected_labels": [
+        "complete",
+        "duplicate_ids",
+        "hash_chain_legacy",
+        "invalid",
+        "legacy",
+        "nonconformant",
+        "schema_valid",
+        "usage_missing"
+      ]
+    },
+    {
+      "id": "out-of-order",
+      "path": "out-of-order",
+      "expected_status": "invalid",
+      "expected_labels": [
+        "complete",
+        "hash_chain_legacy",
+        "invalid",
+        "legacy",
+        "nonconformant",
+        "out_of_order",
+        "schema_valid",
+        "usage_missing"
+      ]
+    },
+    {
+      "id": "invalid-schema",
+      "path": "invalid-schema",
+      "expected_status": "invalid",
+      "expected_labels": [
+        "invalid",
+        "nonconformant",
+        "schema_invalid"
+      ]
+    },
+    {
+      "id": "replay-drift",
+      "path": "replay-drift",
+      "replay_baseline": "replay-baseline.json",
+      "expected_status": "invalid",
+      "expected_labels": [
+        "complete",
+        "hash_chain_legacy",
+        "invalid",
+        "legacy",
+        "nonconformant",
+        "replay_drift",
+        "schema_valid",
+        "usage_missing"
+      ]
+    }
+  ]
+}

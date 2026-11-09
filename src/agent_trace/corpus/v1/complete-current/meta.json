@@ -1,0 +1,11 @@
+{
+  "session_id": "complete-current",
+  "started_at": 1700000000.0,
+  "ended_at": 1700000003.0,
+  "agent_name": "synthetic-corpus",
+  "tool_calls": 1,
+  "llm_requests": 0,
+  "errors": 0,
+  "total_tokens": 0,
+  "total_duration_ms": 3000.0
+}

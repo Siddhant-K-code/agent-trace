@@ -1,0 +1,7 @@
+{
+  "session_id": "replay-drift",
+  "started_at": 1700001700.0,
+  "ended_at": 1700001703.0,
+  "agent_name": "synthetic-corpus",
+  "tool_calls": 1
+}

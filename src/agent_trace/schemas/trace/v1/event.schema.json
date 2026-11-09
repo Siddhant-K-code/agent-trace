@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-strace.dev/schema/trace/v1/event.schema.json",
+  "title": "AgentTrace event record v1",
+  "description": "Canonical JSON object for one line of events.ndjson.",
+  "type": "object",
+  "required": [
+    "event_type",
+    "timestamp",
+    "event_id",
+    "data"
+  ],
+  "properties": {
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "session_start",
+        "session_end",
+        "tool_call",
+        "tool_result",
+        "llm_request",
+        "llm_response",
+        "file_read",
+        "file_write",
+        "decision",
+        "error",
+        "user_prompt",
+        "assistant_response",
+        "subagent_start",
+        "subagent_stop"
+      ]
+    },
+    "timestamp": {
+      "type": "number",
+      "minimum": 0
+    },
+    "event_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "session_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "parent_id": {
+      "type": "string"
+    },
+    "duration_ms": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "prev_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "redacted": {
+      "type": "boolean"
+    },
+    "tenant_id": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false
+}

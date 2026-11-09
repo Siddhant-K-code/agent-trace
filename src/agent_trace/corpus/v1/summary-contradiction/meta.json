@@ -1,0 +1,8 @@
+{
+  "session_id": "summary-contradiction",
+  "started_at": 1700001100.0,
+  "ended_at": 1700001103.0,
+  "agent_name": "synthetic-corpus",
+  "tool_calls": 0,
+  "total_tokens": 0
+}

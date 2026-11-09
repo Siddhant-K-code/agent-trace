@@ -1,0 +1,3 @@
+{"event_type":"session_start","timestamp":1700001400.0,"event_id":"duplicate","data":{"provider":"synthetic"}}
+{"event_type":"user_prompt","timestamp":1700001401.0,"event_id":"duplicate","data":{"prompt":"synthetic duplicate"}}
+{"event_type":"session_end","timestamp":1700001402.0,"event_id":"end","data":{"status":"completed"}}

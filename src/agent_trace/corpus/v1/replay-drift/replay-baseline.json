@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "session": "replay-drift-baseline",
+  "task": "read the expected synthetic file",
+  "created_at": 0.0,
+  "steps": [
+    {
+      "seq": 1,
+      "tool": "read",
+      "input_hash": "afa6c72ea43d8c22885d7c39f3024252acd9785885b43f0dedd6a0acd9d8b91b"
+    }
+  ]
+}

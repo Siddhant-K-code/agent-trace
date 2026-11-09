@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-strace.dev/schema/trace/v1/meta.schema.json",
+  "title": "AgentTrace session metadata v1",
+  "description": "Canonical meta.json record for an AgentTrace session.",
+  "type": "object",
+  "required": [
+    "session_id",
+    "started_at"
+  ],
+  "properties": {
+    "session_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "started_at": {
+      "type": "number",
+      "minimum": 0
+    },
+    "ended_at": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "agent_name": {
+      "type": "string"
+    },
+    "command": {
+      "type": "string"
+    },
+    "tool_calls": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "llm_requests": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "errors": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "total_tokens": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "total_duration_ms": {
+      "type": "number",
+      "minimum": 0
+    },
+    "parent_session_id": {
+      "type": "string"
+    },
+    "parent_event_id": {
+      "type": "string"
+    },
+    "depth": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "team": {
+      "type": "string"
+    },
+    "workspace_id": {
+      "type": "string"
+    },
+    "attribution": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "trace_id": {
+      "type": "string"
+    },
+    "parent_span_id": {
+      "type": "string"
+    },
+    "trace_flags": {
+      "type": "string"
+    },
+    "redacted": {
+      "type": "boolean"
+    },
+    "tenant_id": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false
+}
