@@ -105,7 +105,7 @@ from .server import cmd_server
 from .validation import cmd_validate
 from .watch import cmd_watch
 from .why import cmd_why
-from .event_data import NonObjectEventDataError, require_object_event_data
+from .event_data import NonObjectEventDataError, require_object_event_data, str_field
 from .models import EventType, SessionMeta, TraceEvent
 from .proxy import MCPProxy
 from .replay import format_event, format_summary, list_sessions, replay_session
@@ -587,7 +587,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
 
     for e in events:
         if e.event_type == EventType.TOOL_CALL:
-            name = e.data.get("tool_name", "unknown")
+            name = str_field(e.data, "tool_name", "unknown")
             tool_counts[name] = tool_counts.get(name, 0) + 1
             # find matching result
             result = result_events.get(e.event_id)
@@ -620,7 +620,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
     if errors:
         print(f"\n  Errors ({len(errors)}):")
         for e in errors:
-            msg = e.data.get("message", "unknown")
+            msg = str_field(e.data, "message", "unknown")
             print(f"    {msg[:80]}")
 
     print()

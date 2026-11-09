@@ -1,4 +1,4 @@
-"""Tests for the shared check that refuses non-object event data."""
+"""Tests for the shared event data checks and typed field readers."""
 
 import types
 import unittest
@@ -6,8 +6,13 @@ import unittest
 from agent_trace import disclosure
 from agent_trace.event_data import (
     NonObjectEventDataError,
+    list_field,
+    number_field,
+    object_field,
     require_object_event_data,
     skipped_event_warning,
+    str_field,
+    str_list_field,
 )
 from agent_trace.models import EventType, TraceEvent
 
@@ -146,6 +151,67 @@ class TestSkippedEventWarning(unittest.TestCase):
                     "[watch] Skipped checks for one tool_result event because its data "
                     f"is {phrase}, not an object.\n",
                 )
+
+
+_MISSING = object()
+_SAMPLES = {
+    "string": "Bash",
+    "empty string": "",
+    "numeric string": "12",
+    "int": 12,
+    "float": 1.5,
+    "true": True,
+    "false": False,
+    "null": None,
+    "array": ["x", 1],
+    "string array": ["x", "y"],
+    "tuple": ("x", "y"),
+    "object": {"k": "v"},
+}
+
+
+class TestTypedFieldReaders(unittest.TestCase):
+    """A value of another JSON type reads the same as an absent key."""
+
+    def _check(self, reader, accepted: set[str]) -> None:
+        for name, value in _SAMPLES.items():
+            with self.subTest(reader=reader.__name__, value=name):
+                expected = value if name in accepted else _MISSING
+                self.assertIs(reader({"key": value}, "key", _MISSING), expected)
+        with self.subTest(reader=reader.__name__, value="absent"):
+            self.assertIs(reader({}, "key", _MISSING), _MISSING)
+
+    def test_str_field_accepts_strings_only(self):
+        self._check(str_field, {"string", "empty string", "numeric string"})
+
+    def test_number_field_accepts_int_and_float_but_not_bool_or_numeric_strings(self):
+        self._check(number_field, {"int", "float"})
+
+    def test_object_field_accepts_objects_only(self):
+        self._check(object_field, {"object"})
+
+    def test_list_field_accepts_arrays_only(self):
+        self._check(list_field, {"array", "string array", "tuple"})
+
+    def test_str_list_field_accepts_arrays_of_strings_only(self):
+        self._check(str_list_field, {"string array", "tuple"})
+        self.assertEqual(str_list_field({"key": []}, "key", _MISSING), [])
+
+    def test_defaults_match_the_absent_key_defaults_callers_used(self):
+        self.assertEqual(str_field({}, "key"), "")
+        self.assertEqual(number_field({}, "key"), 0)
+        self.assertIsNone(object_field({}, "key"))
+        self.assertIsNone(list_field({}, "key"))
+        self.assertIsNone(str_list_field({}, "key"))
+
+    def test_non_object_data_still_raises(self):
+        # require_object_event_data alone decides which sessions are refused,
+        # so the readers must fail on non-object data where dict.get did.
+        for data in (None, ["key"], "key", 42, True):
+            for reader in (str_field, number_field, object_field, list_field, str_list_field):
+                with self.subTest(data=data, reader=reader.__name__):
+                    with self.assertRaises(AttributeError):
+                        reader(data, "key", _MISSING)
 
 
 if __name__ == "__main__":

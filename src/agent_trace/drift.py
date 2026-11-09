@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import TextIO
 
 from .cost import estimate_cost
+from .event_data import str_field
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -246,7 +247,7 @@ def _extract_metrics(
 
     for ev in events:
         if ev.event_type == EventType.TOOL_CALL:
-            name = ev.data.get("tool_name", "unknown")
+            name = str_field(ev.data, "tool_name", "unknown")
             tool_mix[name] = tool_mix.get(name, 0) + 1
             total_tool_calls += 1
             # Detect retry: same tool called consecutively
@@ -259,7 +260,7 @@ def _extract_metrics(
                 prev_tool_count = 1
 
         elif ev.event_type in (EventType.FILE_WRITE,):
-            path = ev.data.get("path") or ev.data.get("file_path") or ""
+            path = str_field(ev.data, "path", "") or str_field(ev.data, "file_path", "")
             if path:
                 files_written.add(path)
 

@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
 
-from .event_data import require_object_event_data
+from .event_data import require_object_event_data, str_field
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -83,7 +83,7 @@ def _extract_patterns_heuristic(
             if ev.event_type in (EventType.FILE_WRITE,):
                 last_error_tool2 = None  # any file write clears the error context
             elif ev.event_type == EventType.TOOL_CALL:
-                name = ev.data.get("tool_name", "")
+                name = str_field(ev.data, "tool_name", "")
                 if name.lower() in ("write", "edit", "create"):
                     last_error_tool2 = None  # write-type tool call also clears context
                 elif (
@@ -103,7 +103,7 @@ def _extract_patterns_heuristic(
         files_written: set[str] = set()
         for ev in events:
             if ev.event_type == EventType.FILE_WRITE:
-                path = ev.data.get("path") or ev.data.get("file_path") or ""
+                path = str_field(ev.data, "path", "") or str_field(ev.data, "file_path", "")
                 if path:
                     files_written.add(path)
         if len(files_written) > 8 and sid not in scope_sessions:
@@ -200,7 +200,7 @@ def _build_llm_prompt(
         if runs:
             summary += f", consecutive runs: {', '.join(runs[:3])}"
         if errors:
-            msgs = [e.data.get("message", "")[:60] for e in errors[:2]]
+            msgs = [str_field(e.data, "message", "")[:60] for e in errors[:2]]
             summary += f", error samples: {'; '.join(msgs)}"
         session_summaries.append(summary)
 

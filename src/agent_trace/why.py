@@ -20,7 +20,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TextIO
 
-from .event_data import require_object_event_data
+from .event_data import object_field, require_object_event_data, str_field
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -139,11 +139,12 @@ def build_causal_chain(events: list[TraceEvent], target_index: int) -> CausalCha
                 if causing_idx >= 0 and events[causing_idx].event_type == EventType.TOOL_CALL:
                     causing = _data(events[causing_idx])
                     target = _data(event)
-                    same_tool = causing.get("tool_name", "") == target.get("tool_name", "")
+                    causing_tool = str_field(causing, "tool_name", "")
+                    same_tool = causing_tool == str_field(target, "tool_name", "")
                     # For Bash, also require the same command string
-                    causing_args = causing.get("arguments", {}) or {}
-                    target_args = target.get("arguments", {}) or {}
-                    if same_tool and causing.get("tool_name", "").lower() == "bash":
+                    causing_args = object_field(causing, "arguments", {}) or {}
+                    target_args = object_field(target, "arguments", {}) or {}
+                    if same_tool and causing_tool.lower() == "bash":
                         same_cmd = causing_args.get("command", "") == target_args.get("command", "")
                         if same_cmd:
                             _walk(prev_idx, f"retry after error at #{prev_idx + 1}")
@@ -170,7 +171,7 @@ def build_causal_chain(events: list[TraceEvent], target_index: int) -> CausalCha
             # Write tool calls (Write/Edit) via tool_call event type
             if (prev.event_type in (EventType.TOOL_CALL, EventType.FILE_READ)
                     and event.event_type == EventType.TOOL_CALL):
-                tool = _data(event).get("tool_name", "").lower()
+                tool = str_field(_data(event), "tool_name", "").lower()
                 if tool in ("write", "edit", "create"):
                     prev_paths = _event_paths(prev)
                     if target_paths & prev_paths:
@@ -221,15 +222,15 @@ def _event_summary(event: TraceEvent, index: int) -> str:
         return f"#{index + 1:>3}  tool_result: {preview}"
 
     if event.event_type == EventType.ERROR:
-        msg = (data.get("message", "") or data.get("error", ""))[:60]
+        msg = (str_field(data, "message", "") or str_field(data, "error", ""))[:60]
         return f"#{index + 1:>3}  error: {msg}"
 
     if event.event_type == EventType.USER_PROMPT:
-        prompt = data.get("prompt", "")[:60]
+        prompt = str_field(data, "prompt", "")[:60]
         return f"#{index + 1:>3}  user_prompt: \"{prompt}\""
 
     if event.event_type == EventType.ASSISTANT_RESPONSE:
-        text = data.get("text", "")[:60]
+        text = str_field(data, "text", "")[:60]
         return f"#{index + 1:>3}  assistant_response: \"{text}\""
 
     if event.event_type in (EventType.FILE_READ, EventType.FILE_WRITE):

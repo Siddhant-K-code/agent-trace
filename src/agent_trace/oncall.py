@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TextIO
 
-from .event_data import require_object_event_data
+from .event_data import object_field, require_object_event_data, str_field
 from .models import EventType
 from .store import TraceStore
 
@@ -146,8 +146,8 @@ def analyse_oncall(
         for event in events:
             if event.event_type not in (EventType.TOOL_CALL, EventType.FILE_WRITE):
                 continue
-            args = event.data.get("arguments", {}) or {}
-            tool = event.data.get("tool_name", "").lower()
+            args = object_field(event.data, "arguments", {}) or {}
+            tool = str_field(event.data, "tool_name", "").lower()
             path = str(args.get("file_path") or args.get("path") or
                        event.data.get("path") or "")
             if not path:

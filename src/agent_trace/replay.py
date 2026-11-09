@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TextIO
 
-from .event_data import require_object_event_data
+from .event_data import object_field, require_object_event_data, str_field, str_list_field
 from .models import EventType, TraceEvent, SessionMeta
 from .store import TraceStore
 from .subagent import _returned_preview, _event_agent_id, subagent_label
@@ -192,8 +192,8 @@ def format_event(event: TraceEvent, base_ts: float | None = None) -> str:
     ]
 
     if event.event_type == EventType.TOOL_CALL:
-        name = event.data.get("tool_name", "?")
-        args = event.data.get("arguments", {})
+        name = str_field(event.data, "tool_name", "?")
+        args = object_field(event.data, "arguments", {})
         parts.append(f"{color}{C.BOLD}tool_call{C.RESET} {C.WHITE}{name}{C.RESET}")
         _append_subagent_tag(parts, event)
         # Show the most useful argument value inline
@@ -205,7 +205,7 @@ def format_event(event: TraceEvent, base_ts: float | None = None) -> str:
         name = event.data.get("tool_name", "")
         result = event.data.get("result", "")
         preview = event.data.get("content_preview", "")
-        types = event.data.get("content_types", [])
+        types = str_list_field(event.data, "content_types", [])
         type_str = ",".join(types) if types else ""
         parts.append(f"{color}tool_result{C.RESET}")
         if name:
@@ -264,7 +264,7 @@ def format_event(event: TraceEvent, base_ts: float | None = None) -> str:
             parts.append(f"\n{C.GRAY}{'':>14}  {C.RED}{msg_preview}{C.RESET}")
 
     elif event.event_type == EventType.SESSION_START:
-        cmd = event.data.get("command", [])
+        cmd = str_list_field(event.data, "command", [])
         parts.append(f"{color}{C.BOLD}session_start{C.RESET}")
         if cmd:
             parts.append(f"{C.DIM}{' '.join(cmd)}{C.RESET}")
@@ -277,13 +277,13 @@ def format_event(event: TraceEvent, base_ts: float | None = None) -> str:
 
     elif event.event_type == EventType.DECISION:
         choice = event.data.get("choice", "")
-        reason = event.data.get("reason", "")
+        reason = str_field(event.data, "reason", "")
         parts.append(f"{color}{C.BOLD}decision{C.RESET} {C.WHITE}{choice}{C.RESET}")
         if reason:
             parts.append(f"\n{C.GRAY}{'':>14}  reason: {reason[:120]}{C.RESET}")
 
     elif event.event_type == EventType.USER_PROMPT:
-        prompt = event.data.get("prompt", "")
+        prompt = str_field(event.data, "prompt", "")
         preview = prompt[:150]
         if len(prompt) > 150:
             preview += "..."
@@ -291,7 +291,7 @@ def format_event(event: TraceEvent, base_ts: float | None = None) -> str:
         parts.append(f"\n{C.GRAY}{'':>14}  \"{preview}\"{C.RESET}")
 
     elif event.event_type == EventType.ASSISTANT_RESPONSE:
-        text = event.data.get("text", "")
+        text = str_field(event.data, "text", "")
         text = _strip_markdown(text)
         preview = text[:200]
         if len(text) > 200:

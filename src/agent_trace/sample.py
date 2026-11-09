@@ -21,7 +21,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TextIO
 
-from .event_data import require_object_event_data
+from .event_data import number_field, object_field, require_object_event_data, str_field
 from .models import EventType, SessionMeta, TraceEvent
 from .store import TraceStore
 
@@ -49,7 +49,7 @@ def _estimate_cost(events: list[TraceEvent]) -> float:
     total = 0.0
     for ev in events:
         if ev.event_type == EventType.LLM_RESPONSE:
-            tokens = ev.data.get("total_tokens", 0) or 0
+            tokens = number_field(ev.data, "total_tokens", 0) or 0
             # Assume 80/20 input/output split
             inp = int(tokens * 0.8)
             out = int(tokens * 0.2)
@@ -78,7 +78,7 @@ def _score_session(
     for ev in events:
         if ev.event_type == EventType.TOOL_CALL:
             tool_calls += 1
-            name = ev.data.get("tool_name", "")
+            name = str_field(ev.data, "tool_name", "")
             if name == prev_tool:
                 prev_count += 1
                 if prev_count >= 2:
@@ -88,11 +88,8 @@ def _score_session(
                 prev_count = 1
             # Track writes
             if name.lower() in ("write", "edit", "create", "str_replace"):
-                path = str(
-                    ev.data.get("arguments", {}).get("file_path")
-                    or ev.data.get("arguments", {}).get("path")
-                    or ""
-                )
+                args = object_field(ev.data, "arguments", {})
+                path = str(args.get("file_path") or args.get("path") or "")
                 if path:
                     files_written.add(path)
         elif ev.event_type == EventType.FILE_WRITE:
@@ -234,7 +231,10 @@ def _session_to_jsonl_record(
 def _tool_sequence_key(events: list[TraceEvent]) -> str:
     """Fingerprint a session by the sorted (tool_name, command) pairs of its tool calls."""
     seq = tuple(sorted(
-        (ev.data.get("tool_name", ""), str(ev.data.get("arguments", {}).get("command", "")))
+        (
+            str_field(ev.data, "tool_name", ""),
+            str(object_field(ev.data, "arguments", {}).get("command", "")),
+        )
         for ev in events
         if ev.event_type == EventType.TOOL_CALL
     ))

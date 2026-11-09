@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, TextIO
 
+from .event_data import number_field, object_field, str_field
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -234,7 +235,10 @@ def _rule_budget_proximity(events: list[TraceEvent], cfg: dict) -> list[LintResu
     budget: float | None = None
     for ev in events:
         if ev.event_type == EventType.SESSION_START:
-            budget = ev.data.get("budget_dollars") or ev.data.get("max_cost_dollars")
+            budget = (
+                number_field(ev.data, "budget_dollars", None)
+                or number_field(ev.data, "max_cost_dollars", None)
+            )
             if budget:
                 break
 
@@ -307,11 +311,11 @@ def _rule_redundant_read(events: list[TraceEvent], cfg: dict) -> list[LintResult
     for ev in events:
         if ev.event_type not in {EventType.TOOL_CALL, EventType.FILE_READ}:
             continue
-        tool = ev.data.get("tool_name", "").lower()
+        tool = str_field(ev.data, "tool_name", "").lower()
         if tool in ("read", "read_file", "file_read") or ev.event_type == EventType.FILE_READ:
             path = (
-                ev.data.get("arguments", {}).get("file_path")
-                or ev.data.get("arguments", {}).get("path")
+                object_field(ev.data, "arguments", {}).get("file_path")
+                or object_field(ev.data, "arguments", {}).get("path")
                 or ev.data.get("path")
                 or ev.data.get("file_path")
             )
@@ -343,7 +347,7 @@ def _rule_error_retry_loop(events: list[TraceEvent], cfg: dict) -> list[LintResu
 
     for ev in events:
         if ev.event_type == EventType.TOOL_CALL:
-            last_tool = ev.data.get("tool_name", "")
+            last_tool = str_field(ev.data, "tool_name", "")
         elif ev.event_type == EventType.ERROR:
             if last_tool:
                 error_counts[last_tool] += 1
@@ -376,7 +380,7 @@ def _rule_no_output(events: list[TraceEvent], cfg: dict) -> list[LintResult]:
 
     has_write = any(
         e.event_type == EventType.TOOL_CALL
-        and e.data.get("tool_name", "").lower() in _WRITE_TOOLS
+        and str_field(e.data, "tool_name", "").lower() in _WRITE_TOOLS
         for e in events
     )
     has_file_write = any(e.event_type == EventType.FILE_WRITE for e in events)

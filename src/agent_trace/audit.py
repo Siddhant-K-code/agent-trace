@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, TextIO
 
-from .event_data import require_object_event_data
+from .event_data import object_field, require_object_event_data, str_field
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -232,8 +232,8 @@ def _audit_event(
     """Return zero or more AuditEntry objects for a single tool_call event."""
     entries: list[AuditEntry] = []
     data = event.data
-    tool_name = data.get("tool_name", "").lower()
-    args = data.get("arguments", {}) or {}
+    tool_name = str_field(data, "tool_name", "").lower()
+    args = object_field(data, "arguments", {}) or {}
 
     # --- File read (Read, View, Grep, Glob) ---
     if tool_name in ("read", "view", "grep", "glob"):
@@ -337,7 +337,7 @@ def _audit_event(
     else:
         entries.append(AuditEntry(
             event=event, event_index=index,
-            action=f"Tool: {data.get('tool_name', '?')}",
+            action=f"Tool: {str_field(data, 'tool_name', '?')}",
             verdict="no_policy",
             reason="no policy rule for this tool type",
         ))

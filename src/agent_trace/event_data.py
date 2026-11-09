@@ -7,13 +7,59 @@ and hand edits can store an array, string, number, boolean, or null, and
 anything, so such a session is refused with one message instead of a
 traceback. The CLI turns :class:`NonObjectEventDataError` into one
 ``Error:`` line on stderr and exit code 1.
+
+A field inside an object ``data`` can have the wrong JSON type too, such as a
+number for ``tool_name`` or a list for ``arguments``. Commands read such a
+field as missing and keep going. The typed readers below return the caller's
+default both when the key is absent and when its value has another JSON type,
+so a caller that passes the default it already used for an absent key gets
+the same result for both. A JSON number is an ``int`` or ``float`` but not a
+``bool``, and a numeric string such as ``"12"`` is a string, not a number.
+The readers check only the value. They call ``data.get`` like the reads they
+replace, so data that is not an object still fails where it did before and
+:func:`require_object_event_data` alone decides which sessions are refused.
 """
 
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping, Sequence
+from typing import Any
 
 from .models import EventType, TraceEvent
+
+
+def str_field(data: Mapping[str, Any], key: str, default: Any = "") -> Any:
+    """Return ``data[key]`` if it is a string, otherwise ``default``."""
+    value = data.get(key, default)
+    return value if isinstance(value, str) else default
+
+
+def number_field(data: Mapping[str, Any], key: str, default: Any = 0) -> Any:
+    """Return ``data[key]`` if it is an int or float but not a bool, otherwise ``default``."""
+    value = data.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    return value
+
+
+def object_field(data: Mapping[str, Any], key: str, default: Any = None) -> Any:
+    """Return ``data[key]`` if it is a JSON object, otherwise ``default``."""
+    value = data.get(key, default)
+    return value if isinstance(value, Mapping) else default
+
+
+def list_field(data: Mapping[str, Any], key: str, default: Any = None) -> Any:
+    """Return ``data[key]`` if it is a JSON array, otherwise ``default``."""
+    value = data.get(key, default)
+    return value if isinstance(value, (list, tuple)) else default
+
+
+def str_list_field(data: Mapping[str, Any], key: str, default: Any = None) -> Any:
+    """Return ``data[key]`` if it is an array of strings, otherwise ``default``."""
+    value = list_field(data, key, None)
+    if value is None or not all(isinstance(item, str) for item in value):
+        return default
+    return value
 
 
 class NonObjectEventDataError(ValueError):

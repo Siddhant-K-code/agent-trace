@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import TextIO
 
 from .cost import estimate_cost, DEFAULT_MODEL
-from .event_data import require_object_event_data
+from .event_data import require_object_event_data, str_field
 from .models import EventType, SessionMeta
 from .store import TraceStore
 
@@ -131,7 +131,7 @@ def _tool_breakdown(store: TraceStore, session_id: str, total_cost: float) -> di
     tool_counts: dict[str, int] = {}
     for ev in events:
         if ev.event_type == EventType.TOOL_CALL:
-            tool = ev.data.get("tool_name", "unknown")
+            tool = str_field(ev.data, "tool_name", "unknown")
             tool_counts[tool] = tool_counts.get(tool, 0) + 1
 
     total_calls = sum(tool_counts.values())

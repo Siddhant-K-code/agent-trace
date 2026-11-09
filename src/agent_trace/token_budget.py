@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from typing import TextIO
 
 from .cost import _estimate_tokens
-from .event_data import require_object_event_data
+from .event_data import number_field, require_object_event_data, str_field
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -143,17 +143,17 @@ def analyse_token_budget(
             offset = event.timestamp - base_ts
 
             # Try to get explicit token count from event data
-            inp_tok = event.data.get("input_tokens", 0)
+            inp_tok = number_field(event.data, "input_tokens", 0)
             if not inp_tok:
                 # Fall back to estimation from payload size
                 import json
                 inp_tok = _estimate_tokens(json.dumps(event.data))
 
-            out_tok = event.data.get("output_tokens", 0)
+            out_tok = number_field(event.data, "output_tokens", 0)
 
             # Detect model
             if not model:
-                model = event.data.get("model", "")
+                model = str_field(event.data, "model", "")
                 if model:
                     context_limit = _resolve_limit(model)
 
@@ -173,7 +173,7 @@ def analyse_token_budget(
         elif event.event_type == EventType.LLM_RESPONSE:
             # Update output tokens on the last request if available
             if requests:
-                out_tok = event.data.get("output_tokens", 0)
+                out_tok = number_field(event.data, "output_tokens", 0)
                 if out_tok:
                     requests[-1].output_tokens = out_tok
 
@@ -256,14 +256,14 @@ class TokenBudgetWatcher:
 
         # Detect model on first LLM request
         if not self.model:
-            self.model = event.data.get("model", "")
+            self.model = str_field(event.data, "model", "")
             if self.model:
                 self.context_limit = _resolve_limit(self.model)
 
         if self.context_limit is None:
             return None  # unknown model — watcher disabled
 
-        inp_tok = event.data.get("input_tokens", 0)
+        inp_tok = number_field(event.data, "input_tokens", 0)
         if not inp_tok:
             import json
             inp_tok = _estimate_tokens(json.dumps(event.data))

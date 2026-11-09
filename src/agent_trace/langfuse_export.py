@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .event_data import require_object_event_data
+from .event_data import number_field, require_object_event_data, str_field
 from .models import EventType, SessionMeta, TraceEvent
 from .pairing import (
     LLM_REQUEST_TYPES,
@@ -215,8 +215,8 @@ def _events_to_langfuse_observations(
         elif ev.event_type == EventType.LLM_RESPONSE:
             req_ev = requests.match(ev)
             start_ts = req_ev.timestamp if req_ev else ev.timestamp
-            input_tokens = (req_ev.data.get("input_tokens", 0) if req_ev else 0) or 0
-            output_tokens = ev.data.get("output_tokens", 0) or 0
+            input_tokens = (number_field(req_ev.data, "input_tokens", 0) if req_ev else 0) or 0
+            output_tokens = number_field(ev.data, "output_tokens", 0) or 0
             model = (req_ev.data.get("model", "") if req_ev else "") or ""
             observations.append({
                 "id": ev.event_id,
@@ -355,7 +355,7 @@ def _session_metrics(
         elif ev.event_type == EventType.ERROR:
             errors += 1
         elif ev.event_type == EventType.FILE_WRITE:
-            path = ev.data.get("path") or ev.data.get("file_path") or ""
+            path = str_field(ev.data, "path", "") or str_field(ev.data, "file_path", "")
             if path:
                 files_written.add(path)
 
