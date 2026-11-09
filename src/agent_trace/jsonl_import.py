@@ -224,6 +224,9 @@ def import_jsonl(
                 extra_meta["git_branch"] = raw.get("gitBranch", "")
                 extra_meta["version"] = raw.get("version", "")
 
+    # Only Claude's own sessionId becomes gen_ai.conversation.id; the file-name
+    # fallback below is not a native conversation ID.
+    conversation_id = session_id if isinstance(session_id, str) else ""
     if not session_id:
         session_id = path.stem
 
@@ -233,6 +236,7 @@ def import_jsonl(
         started_at=first_ts,
         agent_name="claude-code",
         command=f"imported from {path.name} (branch: {extra_meta.get('git_branch', '')}, v{extra_meta.get('version', '')})",
+        conversation_id=conversation_id,
     )
     store.create_session(meta)
 

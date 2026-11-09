@@ -1107,6 +1107,12 @@ Export a session. See [production.md](production.md) for per-backend OTLP setup.
 `https://cloud.langfuse.com/api/public/otel` for Langfuse. Repeated `--header`
 flags add backend authentication headers.
 
+`--format otlp` and `otlp-genai` emit `gen_ai.conversation.id` with the
+agent's own session ID when the session has one (hook payloads that carry
+`session_id`, Claude JSONL `import`), so exports join with native Copilot CLI
+and Claude Code telemetry. See
+[production.md](production.md#joining-with-native-agent-telemetry).
+
 The GenAI payload preserves provider, model, tools, span parenting, exceptions,
 token counts, recorded cost, redaction state, persisted provenance, and
 observed structural evidence gaps. It does not reconstruct redacted values,
@@ -1453,6 +1459,7 @@ hook-written metadata:
 | `tenant_id` | The single tenant ID on the events, or empty. `AGENT_STRACE_TENANT_ID` is ignored |
 | `workspace_id` | The workspace store the directory is in |
 | `attribution` | Empty: the current user and git state do not describe the original capture |
+| `conversation_id` | Empty: the events do not carry the agent's full session ID, so the export omits `gen_ai.conversation.id` |
 
 Safety:
 

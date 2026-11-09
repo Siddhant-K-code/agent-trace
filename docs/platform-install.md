@@ -109,8 +109,9 @@ at. It writes nothing. The printed hooks:
 `agent-strace hook --metadata-only` records:
 
 - event types, timestamps, and event IDs;
-- session ID, provider, model, start source, permission mode, and stop or end
-  reason;
+- session ID, the agent's full native session ID (`conversation_id`, exported
+  as `gen_ai.conversation.id`), provider, model, start source, permission
+  mode, and stop or end reason;
 - tool names, tool call IDs, turn IDs, and durations;
 - subagent IDs, types, and names, and parent links;
 - token counts when the provider reports them;

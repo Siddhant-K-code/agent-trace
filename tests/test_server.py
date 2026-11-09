@@ -220,6 +220,16 @@ class TestPostSessions(unittest.TestCase):
         status, resp = _post(f"{self.base}/sessions", body)
         self.assertEqual(status, 400)
 
+    def test_post_session_from_newer_client_with_unknown_field(self):
+        # A client one release ahead may send fields this collector does not
+        # know. The session is still created and the field is kept.
+        meta = json.loads(SessionMeta(session_id="newer-client-001").to_json())
+        meta["field_from_a_future_release"] = "kept"
+        status, _ = _post(f"{self.base}/sessions", json.dumps(meta).encode("utf-8"))
+        self.assertEqual(status, 200)
+        stored = self.store.base_dir / "newer-client-001" / "meta.json"
+        self.assertEqual(json.loads(stored.read_text())["field_from_a_future_release"], "kept")
+
     def test_existing_tenant_cannot_be_cleared_or_changed(self):
         meta = SessionMeta(session_id="tenant-session", tenant_id="tenant-a")
         self.store.create_session(meta)

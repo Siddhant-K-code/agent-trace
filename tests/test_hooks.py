@@ -30,6 +30,7 @@ from agent_trace.hooks import (
     _read_active_session,
     _write_active_session,
     _clear_active_session,
+    _native_conversation_id,
     _read_pending_calls,
     _write_pending_calls,
     _state_suffix,
@@ -191,6 +192,63 @@ class TestHooksSessionContinuation(unittest.TestCase):
                 self.assertNotEqual(meta.started_at, self.STARTED_AT)
                 self.assertEqual(meta.tool_calls, 0)
                 self.assertEqual(meta.command, f"claude-code ({source})")
+
+
+class TestHooksConversationId(unittest.TestCase):
+    """Hooks store the agent's full session ID for gen_ai.conversation.id."""
+
+    NATIVE_ID = "1f0c2b9e-7d3a-4e6b-9c1d-2a3b4c5d6e7f"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        env = patch.dict(os.environ, {"AGENT_TRACE_DIR": tmp.name})
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("AGENT_TRACE_REDACT", None)
+        self.store = TraceStore(tmp.name)
+        self.local_id = self.NATIVE_ID[:16]
+
+    def test_session_start_stores_full_native_id(self):
+        handle_session_start({"session_id": self.NATIVE_ID, "source": "startup"})
+        meta = self.store.load_meta(self.local_id)
+        self.assertEqual(meta.session_id, self.local_id)
+        self.assertEqual(meta.conversation_id, self.NATIVE_ID)
+
+    def test_resume_backfills_session_recorded_without_it(self):
+        handle_session_start({"session_id": self.NATIVE_ID, "source": "startup"})
+        meta = self.store.load_meta(self.local_id)
+        meta.conversation_id = ""
+        meta.tool_calls = 4
+        self.store.update_meta(meta)
+
+        handle_session_start({"session_id": self.NATIVE_ID, "source": "resume"})
+
+        meta = self.store.load_meta(self.local_id)
+        self.assertEqual(meta.conversation_id, self.NATIVE_ID)
+        self.assertEqual(meta.tool_calls, 4)
+
+    def test_hook_without_session_start_stores_native_id(self):
+        handle_user_prompt({"session_id": self.NATIVE_ID, "prompt": "hi"})
+        meta = self.store.load_meta(self.local_id)
+        self.assertEqual(meta.conversation_id, self.NATIVE_ID)
+
+    def test_native_id_is_validated(self):
+        local = self.local_id
+        self.assertEqual(_native_conversation_id({"session_id": self.NATIVE_ID}, local), self.NATIVE_ID)
+        rejected = {
+            "missing": {},
+            "not a string": {"session_id": 12345},
+            "empty": {"session_id": ""},
+            "prefix mismatch": {"session_id": "ffffffffffffffff-other"},
+            "too long": {"session_id": local + "x" * 300},
+            "control character": {"session_id": local + "\n"},
+        }
+        for label, payload in rejected.items():
+            with self.subTest(label):
+                self.assertEqual(_native_conversation_id(payload, local), "")
+        self.assertEqual(_native_conversation_id(None, local), "")
+        self.assertEqual(_native_conversation_id({"session_id": self.NATIVE_ID}, ""), "")
 
 
 class TestHooksToolCapture(unittest.TestCase):
@@ -719,6 +777,31 @@ class TestHooksMetadataOnly(unittest.TestCase):
         prompt = next(e for e in events if e.event_type == EventType.USER_PROMPT)
         self.assertEqual(prompt.data["prompt"], "please read the customer list")
         self.assertNotIn("capture", prompt.data)
+
+    def test_conversation_id_is_kept_in_both_capture_modes(self):
+        # The native session ID is an identifier, not content: metadata-only
+        # keeps it so exports still join with native agent telemetry.
+        from agent_trace.otlp import session_to_otlp_genai
+
+        cases = (
+            ("full", [], "session_id", "0a1b2c3d-full-4e5f-claude-000001"),
+            ("metadata-only", ["--metadata-only"], "session_id", "0a1b2c3d-meta-4e5f-claude-000002"),
+            ("metadata-only copilot", ["--metadata-only", "--provider", "copilot"],
+             "sessionId", "9f8e7d6c-copi-4e5f-copilot-00003"),
+        )
+        for label, prefix, key, native in cases:
+            with self.subTest(label):
+                start = "sessionStart" if key == "sessionId" else "session-start"
+                prompt = "userPromptSubmitted" if key == "sessionId" else "user-prompt"
+                self._hook([*prefix, start], {key: native, "source": "startup"})
+                self._hook([*prefix, prompt], {key: native, "prompt": "do not export me"})
+                store = TraceStore(self.tmpdir, redact=False)
+                meta = store.load_meta(native[:16])
+                self.assertEqual(meta.conversation_id, native)
+                payload = session_to_otlp_genai(meta, store.load_events(native[:16]))
+                root = payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+                attrs = {a["key"]: a["value"].get("stringValue") for a in root["attributes"]}
+                self.assertEqual(attrs["gen_ai.conversation.id"], native)
 
     def test_remote_endpoint_receives_metadata_only_redacted_events(self):
         with patch.dict(os.environ, {

@@ -257,7 +257,36 @@ def _write_session_meta(meta: SessionMeta) -> None:
 IMPLICIT_SESSION_SOURCE = "no session-start"
 
 
-def _ensure_session_meta(store: TraceStore, session_id: str, provider: str) -> None:
+_MAX_CONVERSATION_ID_LEN = 256
+
+
+def _native_conversation_id(input_data: dict | None, session_id: str) -> str:
+    """Return the agent's own session ID from a hook payload, or "".
+
+    The value is only trusted when it is the ID the local session ID was
+    derived from (its first 16 characters), so a payload can never attach
+    another session's ID. agent-trace never invents a fallback: the GenAI
+    semantic conventions say ``gen_ai.conversation.id`` SHOULD NOT be a
+    generated UUID or similar.
+    """
+    raw = (input_data or {}).get("session_id")
+    if not isinstance(raw, str) or not raw or not session_id:
+        return ""
+    if len(raw) > _MAX_CONVERSATION_ID_LEN:
+        return ""
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in raw):
+        return ""
+    if raw[:16] != session_id:
+        return ""
+    return raw
+
+
+def _ensure_session_meta(
+    store: TraceStore,
+    session_id: str,
+    provider: str,
+    input_data: dict | None = None,
+) -> None:
     """Create metadata for a session whose first hook was not SessionStart.
 
     GitHub Copilot CLI subagents (the ``task`` tool) fire prompt, tool and stop
@@ -279,6 +308,7 @@ def _ensure_session_meta(store: TraceStore, session_id: str, provider: str) -> N
             agent_name=agent_name,
             command=f"{agent_name} ({IMPLICIT_SESSION_SOURCE})",
             attribution=collect_attribution().to_dict(),
+            conversation_id=_native_conversation_id(input_data, session_id),
         )
         if store.create_session(meta, if_missing=True) is not None:
             _write_session_meta(meta)
@@ -601,6 +631,8 @@ def handle_session_start(input_data: dict, provider: str = "claude") -> None:
     # Use Claude Code's session ID as part of our session ID for correlation
     if session_id:
         meta.session_id = session_id[:16]
+    conversation_id = _native_conversation_id(input_data, meta.session_id)
+    meta.conversation_id = conversation_id
 
     source = input_data.get("source", "startup")
     # resume and compact continue the session already recorded under this ID:
@@ -612,6 +644,8 @@ def handle_session_start(input_data: dict, provider: str = "claude") -> None:
             store.create_session(meta)
         else:
             existing_meta.ended_at = None
+            if conversation_id and not existing_meta.conversation_id:
+                existing_meta.conversation_id = conversation_id
             meta = existing_meta
             store.update_meta(meta, preserve_parent_link=True)
     else:
@@ -720,7 +754,7 @@ def handle_pre_tool(input_data: dict, provider: str = "claude") -> None:
         session_id=session_id,
         data=event_data,
     )
-    _ensure_session_meta(store, session_id, provider)
+    _ensure_session_meta(store, session_id, provider, input_data)
     _write_event(store, session_id, event)
 
     # Update meta
@@ -760,7 +794,7 @@ def handle_user_prompt(input_data: dict, provider: str = "claude") -> None:
     if redact:
         event_data = redact_data(event_data)
 
-    _ensure_session_meta(store, session_id, provider)
+    _ensure_session_meta(store, session_id, provider, input_data)
     _write_event(store, 
         session_id,
         TraceEvent(
@@ -804,7 +838,7 @@ def handle_stop(input_data: dict, provider: str = "claude") -> None:
     if redact:
         event_data = redact_data(event_data)
 
-    _ensure_session_meta(store, session_id, provider)
+    _ensure_session_meta(store, session_id, provider, input_data)
     _write_event(store, 
         session_id,
         TraceEvent(
@@ -862,7 +896,7 @@ def handle_post_model_request(input_data: dict, provider: str = "claude") -> Non
     if redact:
         event_data = redact_data(event_data)
 
-    _ensure_session_meta(store, session_id, provider)
+    _ensure_session_meta(store, session_id, provider, input_data)
     _write_event(
         store,
         session_id,
@@ -1115,7 +1149,7 @@ def handle_subagent(input_data: dict, phase: str, provider: str = "claude") -> N
 
     redact = _should_redact()
     child_id = _subagent_child_session_id(input_data, session_id, provider)
-    _ensure_session_meta(store, session_id, provider)
+    _ensure_session_meta(store, session_id, provider, input_data)
 
     parent_event_id = ""
     if provider in _SUBAGENT_SESSION_PROVIDERS:
@@ -1178,7 +1212,7 @@ def handle_file_write(input_data: dict, provider: str = "claude") -> None:
     if redact:
         data = redact_data(data)
 
-    _ensure_session_meta(store, session_id, provider)
+    _ensure_session_meta(store, session_id, provider, input_data)
     _write_event(
         store,
         session_id,
@@ -1270,7 +1304,7 @@ def handle_post_tool(input_data: dict, failed: bool = False, provider: str = "cl
             event.parent_id = match_id
             event.duration_ms = (event.timestamp - call_info["timestamp"]) * 1000
 
-    _ensure_session_meta(store, session_id, provider)
+    _ensure_session_meta(store, session_id, provider, input_data)
     _write_event(store, session_id, event)
 
     # Update meta on errors
