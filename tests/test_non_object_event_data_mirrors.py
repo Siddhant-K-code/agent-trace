@@ -654,12 +654,13 @@ class MirroredCheckTest(unittest.TestCase):
         # with it or nothing does, but not when an error pairs with it, whether
         # or not a later tool_call reuses its ID. An llm_response pairs with
         # the request it names, and a parentless one pairs with the newest
-        # open request. A request replaced by one with the same ID before it
-        # pairs is not read.
+        # open request that names its model. A request replaced by one with
+        # the same ID before it pairs is not read. Non-object data at 7 names
+        # no model, so 8 pairs with 6 instead and 10 replaces 7 unread.
         for label in ("export otlp-genai -o", "export temporal -o"):
             self.assertEqual(
                 sweep.positions(label, M1),
-                {2, 3, 4, 5, 7, 8, 10, 11, 13, 14, 16, 17, 18, 19, 21, 22, 25, 26, 28, 30, 31, 33, 34,
+                {2, 3, 4, 5, 8, 10, 11, 13, 14, 16, 17, 18, 19, 21, 22, 25, 26, 28, 30, 31, 33, 34,
                  35, 36, 37, 38},
                 label,
             )

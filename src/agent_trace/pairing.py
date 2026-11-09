@@ -15,12 +15,22 @@ Rules, applied in order to each response as the trace is read:
 
    - ``NO_FALLBACK``: the response stays unpaired.
    - ``NEWEST_SAME_MODEL``: the response pairs with the most recent
-     pending request whose model is compatible. Models are compatible when
-     they are equal or when either side names no model. The most recent
-     request wins because SDK integrations record a failed call as an
-     ``error`` with no response, which leaves its request pending. Taking
-     the oldest request would then pair every later response with the
-     request before it.
+     pending request that names the same model as the response. Two events
+     that both name no model count as the same model. Only when no pending
+     request names the same model does the response pair with the most
+     recent pending request where exactly one side names no model. A
+     request and a response that name different models never pair. The
+     model is the only evidence the fallback has, so a request whose model
+     agrees with the response always beats one that names no model: a
+     model-less request, such as a CrewAI task, never takes a response from
+     an older request for the response's model, and a model-less response
+     never takes a model-named request while a model-less one is pending.
+     The model-less match remains as a last resort because some
+     integrations record the model on only one side of a call. The most
+     recent request wins because SDK integrations record a failed call as
+     an ``error`` with no response, which leaves its request pending.
+     Taking the oldest request would then pair every later response with
+     the request before it.
 
    A response whose ``parent_id`` names a request that already paired is a
    duplicate. It stays unpaired, so it never takes another request's place.
@@ -118,10 +128,14 @@ class Pairer(Generic[T]):
             return None
         if self.fallback == NEWEST_SAME_MODEL:
             model = event_model(response.data)
-            for key, (request_model, item) in reversed(self._pending.items()):
-                if not model or not request_model or model == request_model:
-                    del self._pending[key]
-                    return item
+            partial: object = None
+            for key, (request_model, _) in reversed(self._pending.items()):
+                if request_model == model:
+                    return self._pending.pop(key)[1]
+                if partial is None and (not model or not request_model):
+                    partial = key
+            if partial is not None:
+                return self._pending.pop(partial)[1]
         return None
 
     def unmatched(self) -> list[T]:

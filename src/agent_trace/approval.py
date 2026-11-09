@@ -274,6 +274,42 @@ def _decide(
     return req, ""
 
 
+def _known_pid(pid: object) -> int | None:
+    """Return ``pid`` if it names a single process, else ``None``.
+
+    0, negative values and non-integers are never signalled: ``os.kill``
+    treats 0 and negative PIDs as process groups.
+    """
+    if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+        return pid
+    return None
+
+
+def _signal_agent(pid: object, sig: int | None, done: str, skip_flag: str) -> str:
+    """Send ``sig`` to the request's agent and describe what happened.
+
+    ``sig`` is ``None`` when the caller opted out with ``skip_flag``. The
+    decision is already recorded, so a missing PID or a failed signal is
+    reported, not treated as an error.
+    """
+    known = _known_pid(pid)
+    if known is None:
+        return (
+            "decision recorded, but no agent was signalled because the request "
+            "has no agent PID (run watch with --agent-pid to let approval "
+            "decisions signal the agent)"
+        )
+    if sig is None:
+        return f"agent {known} not signalled ({skip_flag})"
+    try:
+        os.kill(known, sig)
+    except ProcessLookupError:
+        return f"decision recorded, but agent {known} was not signalled: no such process"
+    except PermissionError:
+        return f"decision recorded, but agent {known} was not signalled: permission denied"
+    return f"agent {known} {done}"
+
+
 def approve_request(
     store: TraceStore,
     request_id: str,
@@ -289,14 +325,11 @@ def approve_request(
     if req is None:
         return False, error
 
-    if resume_agent and req.agent_pid:
-        try:
-            import signal
-            os.kill(req.agent_pid, signal.SIGCONT)
-        except (ProcessLookupError, PermissionError):
-            pass
-
-    return True, f"Approved — agent {req.agent_pid} resumed"
+    import signal
+    return True, "Approved — " + _signal_agent(
+        req.agent_pid, signal.SIGCONT if resume_agent else None,
+        "resumed", "--no-resume",
+    )
 
 
 def deny_request(
@@ -315,14 +348,11 @@ def deny_request(
     if req is None:
         return False, error
 
-    if kill_agent and req.agent_pid:
-        try:
-            import signal
-            os.kill(req.agent_pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            pass
-
-    return True, f"Denied — agent {req.agent_pid} terminated"
+    import signal
+    return True, "Denied — " + _signal_agent(
+        req.agent_pid, signal.SIGTERM if kill_agent else None,
+        "terminated", "--no-kill",
+    )
 
 
 def _check_decision(store: TraceStore, request_id: str) -> PollResult | None:

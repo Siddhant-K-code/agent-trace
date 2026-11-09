@@ -306,10 +306,21 @@ the same rules, defined in `src/agent_trace/pairing.py`:
 
 1. A response pairs with the pending request its `parent_id` names.
 2. If there is no such request, a `tool_result` or `error` stays unpaired. An
-   `llm_response` pairs with the most recent pending `llm_request` whose model
-   matches, or either side names no model. This covers SDK integrations that
-   record responses without a `parent_id`. The most recent request wins
-   because a failed call leaves its request without a response.
+   `llm_response` pairs with the most recent pending `llm_request` that names
+   the same model. A request and a response that both name no model count as
+   the same model. Only when no pending request names the same model does the
+   response pair with the most recent pending request where one side names no
+   model. Requests and responses that name different models never pair. This
+   covers SDK integrations that record responses without a `parent_id`. The
+   most recent request wins because a failed call leaves its request without
+   a response.
+
+   A matching model is the only evidence this fallback has, so it always
+   beats a missing one. Without that order, a request with no model (for
+   example a CrewAI task) would take the response of an older `gpt-4o`
+   request, and a CrewAI task result would take a failed `gpt-4o` request.
+   The match where one side names no model stays as a last resort because
+   some integrations record the model on only one side of a call.
 3. A response whose `parent_id` names a request that already paired stays
    unpaired. It never takes another request's place.
 
