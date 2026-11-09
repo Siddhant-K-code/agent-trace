@@ -54,7 +54,7 @@ Use setup-generated hooks when the agent CLI has its own lifecycle hook system.
 
 | CLI | Setup | What's traced |
 |---|---|---|
-| Claude Code | `agent-strace setup --cli claude` | Session start/end, user prompts, assistant responses, tool calls/results |
+| Claude Code | [Native plugin](claude-code-plugin.md) or `agent-strace setup --cli claude` | Session start/end, user prompts, assistant responses, tool calls/results |
 | OpenAI Codex | `agent-strace setup --cli codex` | Session start/end, user prompts, assistant responses, `PreToolUse`/`PostToolUse` tools, and subagent starts/stops recorded in the parent session, with the subagent's tool calls and final message attributed to it. Re-run setup after upgrading and trust the new hooks in `/hooks`. See the [capture matrix](capture-matrix.md#openai-codex) |
 | Gemini CLI | `agent-strace setup --cli gemini` | Session start/end, prompts, assistant responses, `BeforeTool`/`AfterTool` tools |
 | Cursor | `agent-strace setup --cli cursor` | Session start/end, prompts, shell execution, file edits, assistant responses when emitted by Cursor hooks |

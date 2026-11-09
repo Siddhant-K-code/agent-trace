@@ -1,0 +1,20 @@
+{
+  "name": "agent-strace",
+  "displayName": "AgentTrace",
+  "version": "0.103.0",
+  "description": "Capture and investigate Claude Code agent sessions with local AgentTrace hooks, a trace analyst, and reusable skills.",
+  "author": {
+    "name": "Siddhant Khare",
+    "email": "siddhantkhare2694@gmail.com",
+    "url": "https://github.com/Siddhant-K-code"
+  },
+  "homepage": "https://github.com/Siddhant-K-code/agent-trace",
+  "repository": "https://github.com/Siddhant-K-code/agent-trace",
+  "license": "MIT",
+  "keywords": [
+    "agents",
+    "claude-code",
+    "observability",
+    "tracing"
+  ]
+}
