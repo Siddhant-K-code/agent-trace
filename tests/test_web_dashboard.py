@@ -21,6 +21,10 @@ from agent_trace.web_dashboard import (
     render_health_page,
     api_sessions,
     api_session_events,
+    api_session_review,
+    api_session_compare,
+    api_minimized_review_share,
+    api_session_otlp,
 )
 from agent_trace.server import _make_handler
 from agent_trace.store import TraceStore
@@ -51,7 +55,13 @@ class TestRenderPages(unittest.TestCase):
         self.assertIn('class="active"', render_sessions_page())
 
     def test_detail_page_contains_session_id(self):
-        self.assertIn("abc123def4", render_detail_page("abc123def456"))
+        html = render_detail_page("abc123def456")
+        self.assertIn("abc123def4", html)
+        self.assertIn("Local evidence review", html)
+        self.assertIn("Save minimized share", html)
+        self.assertIn("Download OTLP JSON", html)
+        self.assertIn("Compare sessions", html)
+        self.assertIn("J/K or arrows move", html)
 
     def test_cost_page_title(self):
         html = render_cost_page()
@@ -106,6 +116,96 @@ class TestApiHelpers(unittest.TestCase):
                                       session_id="abcdef123456"))
         data = json.loads(api_session_events(store, "abcdef"))
         self.assertEqual(len(data), 1)
+
+    def test_api_session_review_returns_projected_evidence(self):
+        store = TraceStore(self._tmp)
+        store.create_session(SessionMeta(
+            session_id="review001",
+            started_at=1,
+            ended_at=3,
+            agent_name="review-agent",
+        ))
+        store.append_event("review001", TraceEvent(
+            event_type=EventType.SESSION_START,
+            timestamp=1,
+            session_id="review001",
+            event_id="start",
+            data={"provider": "synthetic", "capture_method": "fixture"},
+        ))
+        store.append_event("review001", TraceEvent(
+            event_type=EventType.TOOL_RESULT,
+            timestamp=2,
+            session_id="review001",
+            event_id="orphan",
+            parent_id="missing",
+            data={"output": "private output"},
+        ))
+        store.append_event("review001", TraceEvent(
+            event_type=EventType.SESSION_END,
+            timestamp=3,
+            session_id="review001",
+            event_id="end",
+        ))
+
+        payload = json.loads(api_session_review(store, "review001"))
+
+        self.assertEqual(payload["session"]["provider"], "synthetic")
+        self.assertEqual(payload["items"][1]["relationship"], "orphaned")
+        self.assertIn("gaps", payload["items"][1]["categories"])
+
+    def test_minimized_share_and_otlp_are_local_artifacts(self):
+        store = TraceStore(self._tmp)
+        store.create_session(SessionMeta(
+            session_id="artifact001",
+            started_at=1,
+            ended_at=2,
+        ))
+        store.append_event("artifact001", TraceEvent(
+            event_type=EventType.SESSION_START,
+            timestamp=1,
+            session_id="artifact001",
+            event_id="start",
+            data={"provider": "synthetic", "secret": "do-not-share"},
+        ))
+        store.append_event("artifact001", TraceEvent(
+            event_type=EventType.SESSION_END,
+            timestamp=2,
+            session_id="artifact001",
+            event_id="end",
+        ))
+
+        share = api_minimized_review_share(store, "artifact001")
+        self.assertIn("Privacy-minimized evidence review", share)
+        self.assertNotIn("do-not-share", share)
+        otlp = json.loads(api_session_otlp(store, "artifact001"))
+        self.assertIn("resourceSpans", otlp)
+
+    def test_api_session_compare_reuses_existing_report(self):
+        store = TraceStore(self._tmp)
+        for session_id, ended_at in (("compare-a", 2), ("compare-b", 3)):
+            store.create_session(SessionMeta(
+                session_id=session_id,
+                started_at=1,
+                ended_at=ended_at,
+            ))
+            store.append_event(session_id, TraceEvent(
+                event_type=EventType.SESSION_START,
+                timestamp=1,
+                session_id=session_id,
+                event_id=f"{session_id}-start",
+            ))
+            store.append_event(session_id, TraceEvent(
+                event_type=EventType.SESSION_END,
+                timestamp=ended_at,
+                session_id=session_id,
+                event_id=f"{session_id}-end",
+            ))
+
+        report = json.loads(api_session_compare(store, "compare-a", "compare-b"))
+
+        self.assertEqual(report["session_a"], "compare-a")
+        self.assertEqual(report["session_b"], "compare-b")
+        self.assertIn("decision_divergence", report)
 
 
 class TestServerDashboardRoutes(unittest.TestCase):
@@ -199,6 +299,48 @@ class TestServerDashboardRoutes(unittest.TestCase):
                 urllib.request.urlopen(
                     f"http://127.0.0.1:{port}/api/sessions/nosuch/events")
             self.assertEqual(ctx.exception.code, 404)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_review_download_routes(self):
+        server, port, store = _start_server(self._tmp)
+        try:
+            store.create_session(SessionMeta(
+                session_id="downloads001",
+                started_at=1,
+                ended_at=2,
+            ))
+            store.append_event("downloads001", TraceEvent(
+                event_type=EventType.SESSION_START,
+                timestamp=1,
+                session_id="downloads001",
+                event_id="start",
+            ))
+            store.append_event("downloads001", TraceEvent(
+                event_type=EventType.SESSION_END,
+                timestamp=2,
+                session_id="downloads001",
+                event_id="end",
+            ))
+
+            review = urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/sessions/downloads001/review"
+            )
+            self.assertEqual(review.status, 200)
+            self.assertEqual(json.loads(review.read())["session"]["session_id"], "downloads001")
+
+            share = urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/sessions/downloads001/share?mode=minimized"
+            )
+            self.assertIn("attachment", share.headers.get("Content-Disposition", ""))
+            self.assertIn("Privacy-minimized", share.read().decode())
+
+            otlp = urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/sessions/downloads001/otlp"
+            )
+            self.assertIn("attachment", otlp.headers.get("Content-Disposition", ""))
+            self.assertIn("resourceSpans", json.loads(otlp.read()))
         finally:
             server.shutdown()
             server.server_close()

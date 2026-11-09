@@ -44,7 +44,7 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from .models import SessionMeta, TraceEvent
 from .store import (
@@ -68,6 +68,15 @@ def _decode_read_session_id(segment: str) -> str:
     return validate_stored_id(
         unquote(segment, encoding="utf-8", errors="strict"), "stored session ID"
     )
+
+
+def _attachment_stem(session_id: str) -> str:
+    """Return a short ASCII filename component for a stored session ID."""
+    value = "".join(
+        character if character.isascii() and character.isalnum() else "-"
+        for character in session_id[:32]
+    ).strip("-")
+    return value or "session"
 
 
 def generate_api_key() -> str:
@@ -190,11 +199,28 @@ class CollectorHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_attachment(
+        self,
+        status: int,
+        content: str,
+        *,
+        content_type: str,
+        filename: str,
+    ) -> None:
+        body = content.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self) -> None:
         if not self._check_auth():
             self._send_json(401, {"error": "Unauthorized"})
             return
-        path = urlparse(self.path).path.rstrip("/")
+        parsed_url = urlparse(self.path)
+        path = parsed_url.path.rstrip("/")
 
         # ------------------------------------------------------------------
         # Dashboard UI routes (only when --dashboard is enabled)
@@ -246,6 +272,90 @@ class CollectorHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+                return
+            if len(parts) == 5 and parts[1] == "api" and parts[2] == "sessions" and parts[4] == "review":
+                try:
+                    session_id = _decode_read_session_id(parts[3])
+                except (UnicodeDecodeError, ValueError) as exc:
+                    self._send_json(400, {"error": str(exc)})
+                    return
+                result = _wd.api_session_review(self.store, session_id)
+                if result is None:
+                    self._send_json(404, {"error": f"session not found: {parts[3]}"})
+                    return
+                body = result.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if len(parts) == 5 and parts[1] == "api" and parts[2] == "sessions" and parts[4] == "compare":
+                try:
+                    session_id = _decode_read_session_id(parts[3])
+                    other_values = parse_qs(parsed_url.query).get("other", [])
+                    if len(other_values) != 1:
+                        raise ValueError("compare requires one other session ID")
+                    other_id = validate_stored_id(other_values[0], "stored session ID")
+                except (UnicodeDecodeError, ValueError) as exc:
+                    self._send_json(400, {"error": str(exc)})
+                    return
+                try:
+                    result = _wd.api_session_compare(self.store, session_id, other_id)
+                except (OSError, ValueError, TypeError, KeyError) as exc:
+                    self._send_json(400, {"error": f"comparison failed: {exc}"})
+                    return
+                if result is None:
+                    self._send_json(404, {"error": "one or both sessions were not found"})
+                    return
+                body = result.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if len(parts) == 5 and parts[1] == "api" and parts[2] == "sessions" and parts[4] == "share":
+                try:
+                    session_id = _decode_read_session_id(parts[3])
+                except (UnicodeDecodeError, ValueError) as exc:
+                    self._send_json(400, {"error": str(exc)})
+                    return
+                modes = parse_qs(parsed_url.query).get("mode", [])
+                if modes != ["minimized"]:
+                    self._send_json(400, {"error": "only mode=minimized is supported"})
+                    return
+                result = _wd.api_minimized_review_share(self.store, session_id)
+                if result is None:
+                    self._send_json(404, {"error": f"session not found: {parts[3]}"})
+                    return
+                self._send_attachment(
+                    200,
+                    result,
+                    content_type="text/html; charset=utf-8",
+                    filename=f"review-{_attachment_stem(session_id)}-minimized.html",
+                )
+                return
+            if len(parts) == 5 and parts[1] == "api" and parts[2] == "sessions" and parts[4] == "otlp":
+                try:
+                    session_id = _decode_read_session_id(parts[3])
+                except (UnicodeDecodeError, ValueError) as exc:
+                    self._send_json(400, {"error": str(exc)})
+                    return
+                try:
+                    result = _wd.api_session_otlp(self.store, session_id)
+                except (OSError, ValueError, TypeError, KeyError) as exc:
+                    self._send_json(400, {"error": f"OTLP export failed: {exc}"})
+                    return
+                if result is None:
+                    self._send_json(404, {"error": f"session not found: {parts[3]}"})
+                    return
+                self._send_attachment(
+                    200,
+                    result,
+                    content_type="application/json",
+                    filename=f"trace-{_attachment_stem(session_id)}-otlp.json",
+                )
                 return
 
         if path == "/health":

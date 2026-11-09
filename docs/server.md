@@ -41,6 +41,26 @@ The server writes traces in the same `.agent-traces/` format as local mode. All 
 
 ---
 
+## Local evidence review
+
+Start the collector with its local dashboard:
+
+```bash
+agent-strace server --storage ./traces --dashboard
+```
+
+Open `http://127.0.0.1:4317/`, select a session, and review ordered evidence, health reasons, provider limits, annotations, raw fields, and unresolved relationships.
+
+The page can compare two sessions, save a privacy-minimized HTML review, and download OTLP JSON. These actions read the configured local store and return local files. They do not upload trace data.
+
+Use the event query parameter to target a recorded event:
+
+```text
+http://127.0.0.1:4317/session/<session-id>?event=<event-id>
+```
+
+---
+
 ## Docker
 
 ```dockerfile

@@ -1,184 +1,393 @@
 /**
- * Side panel webview showing the live event stream.
+ * Review-oriented session panel.
  *
- * Renders as a VS Code WebviewView in the Explorer sidebar.
- * Receives events via postMessage from the extension host.
- * Includes a Pause / Resume button that posts a command back.
+ * The webview renders ordered evidence for active and historical sessions.
+ * All actions stay local: comparison runs the CLI, minimized share writes a
+ * content-free HTML file, and OTLP export writes JSON without an endpoint.
  */
 
+import { execFile } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
-import { SessionState, TraceEvent } from "./traceStore";
+import {
+  buildReviewModel,
+  CliHealth,
+  loadAnnotations,
+  loadStoredReview,
+  renderMinimizedReviewHtml,
+  ReviewModel,
+} from "./reviewModel";
+import { SessionState } from "./traceStore";
 
-// ---------------------------------------------------------------------------
-// Icons / labels per event type
-// ---------------------------------------------------------------------------
-
-const EVENT_ICON: Record<string, string> = {
-  session_start: "▶",
-  session_end: "■",
-  user_prompt: "👤",
-  assistant_response: "🤖",
-  tool_call: "→",
-  tool_result: "←",
-  llm_request: "⇢",
-  llm_response: "⇠",
-  file_read: "📖",
-  file_write: "✏️",
-  decision: "🔀",
-  error: "✗",
-};
-
-function eventSummary(event: TraceEvent): string {
-  const d = event.data;
-  switch (event.event_type) {
-    case "tool_call":
-      return `${d.tool_name ?? ""}  ${_truncate(JSON.stringify(d.arguments ?? ""), 60)}`;
-    case "tool_result":
-      return _truncate(String(d.output ?? d.result ?? ""), 80);
-    case "user_prompt":
-      return _truncate(String(d.prompt ?? d.text ?? ""), 80);
-    case "assistant_response":
-      return _truncate(String(d.text ?? d.response ?? ""), 80);
-    case "file_read":
-    case "file_write":
-      return String(d.path ?? "");
-    case "error":
-      return _truncate(String(d.message ?? d.error ?? ""), 80);
-    default:
-      return "";
-  }
+interface CliResult {
+  stdout: string;
+  stderr: string;
+  failed: boolean;
 }
 
-function _truncate(s: string, n: number): string {
-  return s.length > n ? s.slice(0, n) + "…" : s;
+function runCli(args: string[]): Promise<CliResult> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      "agent-strace",
+      args,
+      { encoding: "utf8", maxBuffer: 8 * 1024 * 1024 },
+      (error, stdout, stderr) => {
+        if (error && !stdout && "code" in error && error.code === "ENOENT") {
+          reject(new Error("agent-strace CLI was not found on PATH."));
+          return;
+        }
+        resolve({
+          stdout: String(stdout ?? ""),
+          stderr: String(stderr ?? ""),
+          failed: Boolean(error),
+        });
+      },
+    );
+  });
 }
-
-function _relTime(ts: number): string {
-  const s = Math.floor(Date.now() / 1000 - ts);
-  if (s < 60) { return `${s}s ago`; }
-  const m = Math.floor(s / 60);
-  return `${m}m ago`;
-}
-
-// ---------------------------------------------------------------------------
-// EventStreamPanel — WebviewViewProvider
-// ---------------------------------------------------------------------------
 
 export class EventStreamPanel implements vscode.WebviewViewProvider {
   public static readonly viewId = "agentTrace.eventStream";
 
   private view?: vscode.WebviewView;
-  private pendingEvents: TraceEvent[] = [];
   private currentState: SessionState | null = null;
+  private selectedSessionId: string | null = null;
+  private currentModel: ReviewModel | null = null;
 
-  constructor(private readonly extensionUri: vscode.Uri) {}
+  constructor(
+    private readonly extensionUri: vscode.Uri,
+    private readonly traceDir: string,
+  ) {}
+
+  resolveWebviewView(
+    webviewView: vscode.WebviewView,
+    _context: vscode.WebviewViewResolveContext,
+    _token: vscode.CancellationToken,
+  ): void {
+    this.view = webviewView;
+    webviewView.webview.options = { enableScripts: true };
+    webviewView.webview.html = this._buildHtml(webviewView.webview);
+    webviewView.webview.onDidReceiveMessage((message: unknown) => {
+      void this._handleMessage(message);
+    });
+
+    if (
+      this.selectedSessionId &&
+      this.selectedSessionId !== this.currentState?.sessionId
+    ) {
+      void this.showSession(this.selectedSessionId);
+    } else if (this.currentState) {
+      this._postLiveReview(this.currentState);
+    } else if (this.selectedSessionId) {
+      void this.showSession(this.selectedSessionId);
+    }
+  }
+
+  onSessionStart(state: SessionState): void {
+    this.currentState = state;
+    this.selectedSessionId = state.sessionId;
+    this.view?.webview.postMessage({ type: "reset" });
+    this._postLiveReview(state);
+    void this._refreshHealth(state.sessionId);
+  }
+
+  onSessionEnd(state: SessionState): void {
+    this.currentState = null;
+    if (this.selectedSessionId !== state.sessionId) {
+      return;
+    }
+    this.selectedSessionId = state.sessionId;
+    this._postLiveReview(state);
+    this.view?.webview.postMessage({ type: "sessionEnd" });
+    void this.showSession(state.sessionId);
+  }
+
+  onStateChange(state: SessionState): void {
+    this.currentState = state;
+    if (this.selectedSessionId === state.sessionId) {
+      this._postLiveReview(state);
+    }
+  }
+
+  async showSession(sessionId: string): Promise<void> {
+    this.selectedSessionId = sessionId;
+    try {
+      const structural = loadStoredReview(this.traceDir, sessionId);
+      this._postReview(structural, null);
+      const health = await this._loadHealth(sessionId);
+      if (this.selectedSessionId !== sessionId) {
+        return;
+      }
+      this._postReview(loadStoredReview(this.traceDir, sessionId, health), null);
+    } catch (error) {
+      this.view?.webview.postMessage({
+        type: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private _postLiveReview(state: SessionState): void {
+    const model = buildReviewModel(
+      state.meta,
+      state.events,
+      loadAnnotations(this.traceDir, state.sessionId),
+    );
+    this._postReview(model, state);
+  }
+
+  private _postReview(model: ReviewModel, liveState: SessionState | null): void {
+    this.currentModel = model;
+    this.view?.webview.postMessage({
+      type: "review",
+      model,
+      controls: {
+        live: Boolean(liveState),
+        paused: liveState?.paused ?? false,
+        activeTool: liveState?.activeTool ?? null,
+        cost: liveState?.estimatedCostUsd.toFixed(4) ?? null,
+      },
+    });
+  }
+
+  private async _refreshHealth(sessionId: string): Promise<void> {
+    try {
+      const health = await this._loadHealth(sessionId);
+      if (
+        this.selectedSessionId !== sessionId ||
+        this.currentState?.sessionId !== sessionId
+      ) {
+        return;
+      }
+      const state = this.currentState;
+      const model = buildReviewModel(
+        state.meta,
+        state.events,
+        loadAnnotations(this.traceDir, sessionId),
+        health,
+      );
+      this._postReview(model, state);
+    } catch {
+      // Structural review remains available when the CLI is not on PATH.
+    }
+  }
+
+  private async _loadHealth(sessionId: string): Promise<CliHealth> {
+    const result = await runCli([
+      "--trace-dir",
+      this.traceDir,
+      "health",
+      sessionId,
+      "--format",
+      "json",
+    ]);
+    try {
+      return JSON.parse(result.stdout) as CliHealth;
+    } catch {
+      throw new Error(result.stderr.trim() || "Evidence health JSON was unavailable.");
+    }
+  }
+
+  private async _handleMessage(raw: unknown): Promise<void> {
+    if (typeof raw !== "object" || raw === null) {
+      return;
+    }
+    const message = raw as { command?: string };
+    if (message.command === "pause") {
+      await vscode.commands.executeCommand("agentTrace.pauseAgent");
+    } else if (message.command === "resume") {
+      await vscode.commands.executeCommand("agentTrace.resumeAgent");
+    } else if (message.command === "compare") {
+      await this._compareCurrentSession();
+    } else if (message.command === "saveMinimizedShare") {
+      await this._saveMinimizedShare();
+    } else if (message.command === "exportOtlp") {
+      await this._exportOtlp();
+    } else if (message.command === "verifyLiveCapture") {
+      await this._verifyLiveCapture();
+    }
+  }
+
+  private async _compareCurrentSession(): Promise<void> {
+    const current = this.currentModel?.session.session_id;
+    if (!current) {
+      return;
+    }
+    const sessions = this._sessionChoices().filter((choice) => choice.id !== current);
+    const selected = await vscode.window.showQuickPick(sessions, {
+      placeHolder: "Choose a local session to compare",
+      matchOnDescription: true,
+    });
+    if (!selected) {
+      return;
+    }
+    try {
+      const result = await runCli([
+        "--trace-dir",
+        this.traceDir,
+        "compare",
+        current,
+        selected.id,
+        "--format",
+        "json",
+      ]);
+      if (result.failed) {
+        throw new Error(result.stderr.trim() || "Session comparison failed.");
+      }
+      this.view?.webview.postMessage({
+        type: "comparison",
+        report: JSON.parse(result.stdout),
+      });
+    } catch (error) {
+      vscode.window.showErrorMessage(
+        `agent-trace: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  private _sessionChoices(): Array<vscode.QuickPickItem & { id: string }> {
+    try {
+      return fs.readdirSync(this.traceDir).flatMap((id) => {
+        const metaPath = path.join(this.traceDir, id, "meta.json");
+        try {
+          const meta = JSON.parse(fs.readFileSync(metaPath, "utf8")) as {
+            agent_name?: string;
+            started_at?: number;
+          };
+          return [{
+            id,
+            label: id.slice(0, 12),
+            description: [
+              meta.agent_name,
+              meta.started_at ? new Date(meta.started_at * 1000).toLocaleString() : "",
+            ].filter(Boolean).join(" | "),
+          }];
+        } catch {
+          return [];
+        }
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  private async _saveMinimizedShare(): Promise<void> {
+    if (!this.currentModel) {
+      return;
+    }
+    const target = await vscode.window.showSaveDialog({
+      defaultUri: vscode.Uri.file(path.join(
+        path.dirname(this.traceDir),
+        `review-${this.currentModel.session.session_id.slice(0, 12)}-minimized.html`,
+      )),
+      filters: { "HTML files": ["html"] },
+      saveLabel: "Save minimized review",
+    });
+    if (!target) {
+      return;
+    }
+    await vscode.workspace.fs.writeFile(
+      target,
+      Buffer.from(renderMinimizedReviewHtml(this.currentModel), "utf8"),
+    );
+    vscode.window.showInformationMessage("Privacy-minimized review saved locally.");
+  }
+
+  private async _exportOtlp(): Promise<void> {
+    const sessionId = this.currentModel?.session.session_id;
+    if (!sessionId) {
+      return;
+    }
+    const target = await vscode.window.showSaveDialog({
+      defaultUri: vscode.Uri.file(path.join(
+        path.dirname(this.traceDir),
+        `trace-${sessionId.slice(0, 12)}-otlp.json`,
+      )),
+      filters: { "JSON files": ["json"] },
+      saveLabel: "Export OTLP JSON",
+    });
+    if (!target) {
+      return;
+    }
+    try {
+      const result = await runCli([
+        "--trace-dir",
+        this.traceDir,
+        "export",
+        sessionId,
+        "--format",
+        "otlp",
+        "--output",
+        target.fsPath,
+      ]);
+      if (result.failed) {
+        throw new Error(result.stderr.trim() || "OTLP export failed.");
+      }
+      vscode.window.showInformationMessage("OTLP JSON saved locally.");
+    } catch (error) {
+      vscode.window.showErrorMessage(
+        `agent-trace: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  private async _verifyLiveCapture(): Promise<void> {
+    const model = this.currentModel;
+    if (!model) {
+      return;
+    }
+    const provider = model.session.provider;
+    if (provider !== "claude" && provider !== "codex") {
+      vscode.window.showWarningMessage(
+        "Live capture verification currently supports Claude Code and Codex.",
+      );
+      return;
+    }
+    try {
+      const result = await runCli([
+        "--trace-dir",
+        this.traceDir,
+        "setup",
+        "--cli",
+        provider,
+        "--verify",
+        "--live",
+        "--session",
+        model.session.session_id,
+      ]);
+      this.view?.webview.postMessage({
+        type: "liveCapture",
+        result: {
+          ok: !result.failed,
+          output: [result.stdout.trim(), result.stderr.trim()]
+            .filter(Boolean)
+            .join("\n"),
+        },
+      });
+    } catch (error) {
+      this.view?.webview.postMessage({
+        type: "liveCapture",
+        result: {
+          ok: false,
+          output: error instanceof Error ? error.message : String(error),
+        },
+      });
+    }
+  }
 
   private _getNonce(): string {
     let text = "";
     const possible = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    for (let i = 0; i < 32; i++) {
+    for (let index = 0; index < 32; index++) {
       text += possible.charAt(Math.floor(Math.random() * possible.length));
     }
     return text;
   }
 
-  resolveWebviewView(
-    webviewView: vscode.WebviewView,
-    _context: vscode.WebviewViewResolveContext,
-    _token: vscode.CancellationToken
-  ): void {
-    this.view = webviewView;
-
-    webviewView.webview.options = {
-      enableScripts: true,
-    };
-
-    webviewView.webview.html = this._buildHtml(webviewView.webview);
-
-    // Handle messages from the webview (pause/resume button)
-    webviewView.webview.onDidReceiveMessage((msg) => {
-      if (msg.command === "pause") {
-        vscode.commands.executeCommand("agentTrace.pauseAgent");
-      } else if (msg.command === "resume") {
-        vscode.commands.executeCommand("agentTrace.resumeAgent");
-      }
-    });
-
-    // Flush any events that arrived before the view was ready
-    if (this.currentState) {
-      this._postState(this.currentState);
-    }
-    for (const e of this.pendingEvents) {
-      this._postEvent(e);
-    }
-    this.pendingEvents = [];
-  }
-
-  /** Called when a new session starts — resets the panel. */
-  onSessionStart(state: SessionState): void {
-    this.currentState = state;
-    this.pendingEvents = [];
-    this.view?.webview.postMessage({ type: "reset" });
-    this._postState(state);
-  }
-
-  /** Called when the session ends. */
-  onSessionEnd(state: SessionState): void {
-    this.currentState = null;
-    this._postState({ ...state, activeTool: null });
-    this.view?.webview.postMessage({ type: "sessionEnd" });
-  }
-
-  /** Called on every new event. */
-  pushEvent(state: SessionState, event: TraceEvent): void {
-    this.currentState = state;
-    if (!this.view) {
-      this.pendingEvents.push(event);
-      return;
-    }
-    this._postState(state);
-    this._postEvent(event);
-  }
-
-  private _postState(state: SessionState): void {
-    this.view?.webview.postMessage({
-      type: "state",
-      cost: state.estimatedCostUsd.toFixed(4),
-      toolCalls: state.toolCallCount,
-      errors: state.errorCount,
-      activeTool: state.activeTool,
-      paused: state.paused,
-      sessionId: state.sessionId.slice(0, 8),
-    });
-  }
-
-  private _postEvent(event: TraceEvent): void {
-    this.view?.webview.postMessage({
-      type: "event",
-      icon: EVENT_ICON[event.event_type] ?? "·",
-      eventType: event.event_type,
-      summary: eventSummary(event),
-      time: _relTime(event.timestamp),
-      isError: event.event_type === "error",
-    });
-  }
-
-  // -------------------------------------------------------------------------
-  // HTML — loaded from media/panel.html with a per-render CSP nonce
-  // -------------------------------------------------------------------------
-
-  private _buildHtml(webview: vscode.Webview): string {
-    const htmlPath = path.join(
-      this.extensionUri.fsPath,
-      "media",
-      "panel.html"
-    );
+  private _buildHtml(_webview: vscode.Webview): string {
+    const htmlPath = path.join(this.extensionUri.fsPath, "media", "panel.html");
     const nonce = this._getNonce();
-    let html = fs.readFileSync(htmlPath, "utf8");
-    // Inject nonce into CSP meta tag and script tag
-    html = html.replace(/NONCE_PLACEHOLDER/g, nonce);
-    return html;
+    return fs.readFileSync(htmlPath, "utf8").replace(/NONCE_PLACEHOLDER/g, nonce);
   }
 }

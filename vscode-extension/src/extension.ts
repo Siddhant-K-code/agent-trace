@@ -2,7 +2,7 @@
  * agent-trace VS Code extension entry point.
  *
  * Activates when a workspace contains a .agent-traces directory.
- * Zero overhead when no session is active — all watchers are fs.watch
+ * Zero overhead when no session is active. All watchers are fs.watch
  * based, no polling timers run until a session starts.
  */
 
@@ -39,7 +39,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const watchdogBar = new WatchdogStatusBar();
   const decorations = new DecorationManager();
   const pauseManager = new PauseManager(traceDir);
-  const panel = new EventStreamPanel(context.extensionUri);
+  const panel = new EventStreamPanel(context.extensionUri, traceDir);
   const postMortem = new PostMortemManager(traceDir);
   const liveStream = new LiveStreamPanel(context.extensionUri);
   const sessionTree = new SessionTreeProvider(traceDir);
@@ -90,13 +90,10 @@ export function activate(context: vscode.ExtensionContext): void {
   watcher.onStateChange((state) => {
     statusBar.update(state);
     watchdogBar.onStateChange(state);
+    panel.onStateChange(state);
     if (config.get<boolean>("showGutterAnnotations", true)) {
       decorations.update(state);
     }
-  });
-
-  watcher.onEvent(({ state, event }) => {
-    panel.pushEvent(state, event);
   });
 
   // -------------------------------------------------------------------------
@@ -116,6 +113,7 @@ export function activate(context: vscode.ExtensionContext): void {
         }
         const result = pauseManager.pause(state);
         statusBar.update(state);
+        panel.onStateChange(state);
         if (!result.ok) {
           vscode.window.showWarningMessage(`agent-trace: ${result.message}`);
           return;
@@ -135,6 +133,7 @@ export function activate(context: vscode.ExtensionContext): void {
         }
         const result = pauseManager.resume(state);
         statusBar.update(state);
+        panel.onStateChange(state);
         if (!result.ok) {
           vscode.window.showErrorMessage(`agent-trace: ${result.message}`);
           return;
@@ -151,8 +150,11 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand(
       "agentTrace.openPanel",
-      telemetry.trackCommand("open_panel", () => {
+      telemetry.trackCommand("open_panel", (sessionId?: unknown) => {
         vscode.commands.executeCommand("agentTrace.eventStream.focus");
+        if (typeof sessionId === "string" && sessionId) {
+          void panel.showSession(sessionId);
+        }
       }),
     ),
   );
@@ -167,7 +169,7 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   // -------------------------------------------------------------------------
-  // Config change — re-read traceDir if it changes
+  // Config change: re-read traceDir if it changes
   // -------------------------------------------------------------------------
 
   context.subscriptions.push(
@@ -180,7 +182,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       if (e.affectsConfiguration("agentTrace") && !telemetryChanged) {
         vscode.window.showInformationMessage(
-          "agent-trace: configuration changed — reload window to apply.",
+          "agent-trace: configuration changed. Reload the window to apply.",
         );
       }
     }),
