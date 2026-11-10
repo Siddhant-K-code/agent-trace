@@ -251,6 +251,12 @@ flagged when any comparable metric exceeds `--sigma` standard deviations from
 the mean (default: `2.0`). At least three baseline samples are required before
 a metric is compared.
 
+Cost is the same total that `agent-strace cost` reports with its default
+model, including recorded token usage where the agent provides it. A session
+whose events cannot be priced adds no cost sample and is not compared on cost.
+Older versions saved every cost as 0, so run `agent-strace baseline update`
+again after upgrading.
+
 ```bash
 agent-strace baseline check <session-id> --sigma 2.5
 ```
