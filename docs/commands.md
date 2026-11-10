@@ -1386,7 +1386,14 @@ Start a server-side event collector. See [server.md](server.md).
 ```
 agent-strace auto [--framework NAME] [--detect] -- <command>
 ```
-Run a command with auto-instrumentation. See [integrations.md](integrations.md).
+Run a command with every Python interpreter it starts auto-instrumented: `python script.py`, `python -m module`, and console or shebang scripts that run Python. Exits with the command's exit code. How it works and its limits: [integrations.md](integrations.md#how-agent-strace-auto-works).
+
+| Flag | Description |
+|---|---|
+| `--framework NAME`, `-f NAME` | Framework to instrument, or a comma-separated list: `openai-agents`, `langchain`, `langgraph`, `litellm`, `anthropic`, `openai`, `strands`, `crewai` |
+| `--detect` | Instrument every installed framework (the default when `--framework` is not given) |
+
+Events go to `$AGENT_TRACE_DIR` or `.agent-traces`. Use the global `--trace-dir` (`agent-strace --trace-dir DIR auto -- <command>`) to choose the store.
 
 ### `mcp`
 ```

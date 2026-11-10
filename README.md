@@ -254,9 +254,8 @@ Full guide: [docs/server.md](docs/server.md)
 
 **Auto-instrumentation**: no code changes required:
 
-```python
-from agent_trace.integrations import instrument_langchain
-instrument_langchain()
+```bash
+agent-strace auto --detect -- python my_agent.py
 ```
 
 Supported: OpenAI Agents SDK, LangChain, LangGraph, CrewAI, LiteLLM, Anthropic SDK, OpenAI SDK, AWS Strands. Guide: [docs/integrations.md](docs/integrations.md)

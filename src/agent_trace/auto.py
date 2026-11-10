@@ -1,12 +1,15 @@
 """Auto-instrumentation entry point.
 
 Importing this module triggers auto-instrumentation based on the
-AGENT_STRACE_AUTO_INSTRUMENT environment variable.
+AGENT_STRACE_AUTO_INSTRUMENT environment variable. Setting the variable
+does nothing until this module is imported.
 
-Usage in sitecustomize.py (instrument at interpreter startup):
-    import agent_trace.auto
+`agent-strace auto -- <command>` imports it at interpreter startup through
+a generated sitecustomize (see auto_bootstrap.py). Without the wrapper,
+import it first, before any framework import:
 
-Or via environment variable:
+    import agent_trace.auto   # first line of my_agent.py
+
     AGENT_STRACE_AUTO_INSTRUMENT=openai-agents,langchain python my_agent.py
 """
 
