@@ -25,6 +25,9 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TextIO
 
+from .cost import estimate_cost
+from .event_data import require_object_event_data
+from .explain import PHASE_DATA_EVENT_TYPES
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -122,8 +125,34 @@ class AnomalyResult:
 # Building a baseline
 # ---------------------------------------------------------------------------
 
+def _session_cost(
+    store: TraceStore, session_id: str, events: list[TraceEvent]
+) -> float | None:
+    """Return the session's cost as ``agent-strace cost`` with no flags reports it.
+
+    This is ``estimate_cost`` with its default model, so sessions that record
+    token usage (such as Codex model requests) are priced from that usage and
+    other sessions from event sizes. Returns None when the session cannot be
+    priced: its events cannot be read, or a tool call or prompt has data that
+    is not a JSON object, which ``agent-strace cost`` refuses. Other errors
+    propagate so that a bug cannot pass for a $0 session.
+    """
+    try:
+        require_object_event_data(
+            events, event_types=PHASE_DATA_EVENT_TYPES, session_id=session_id
+        )
+        return estimate_cost(store, session_id).total_cost
+    except (OSError, ValueError):
+        return None
+
+
 def _session_metrics(store: TraceStore, session_id: str) -> dict[str, float] | None:
-    """Extract scalar metrics from a single session. Returns None if unusable."""
+    """Extract scalar metrics from a single session. Returns None if unusable.
+
+    ``cost_usd`` is left out when the session cannot be priced, so it adds no
+    cost sample to a baseline and ``check`` does not compare its cost, rather
+    than counting it as $0. A session with nothing to price still costs $0.
+    """
     try:
         meta = store.load_meta(session_id)
     except Exception:
@@ -131,27 +160,24 @@ def _session_metrics(store: TraceStore, session_id: str) -> dict[str, float] | N
     if not meta or not meta.ended_at:
         return None
     try:
-        events = store.load_events(session_id)
+        events: list[TraceEvent] | None = store.load_events(session_id)
     except Exception:
-        events = []
-    errors = sum(1 for e in events if e.event_type == EventType.ERROR)
-    tool_calls = max(meta.tool_calls, 1)
-
-    # Compute cost from token events if available (lazy import to avoid circular deps)
-    cost_usd = 0.0
+        events = None
+    errors = sum(1 for e in events or [] if e.event_type == EventType.ERROR)
     try:
-        from .cost import compute_cost
-        cost_usd = compute_cost(events) or 0.0
-    except Exception:
-        pass
-
-    return {
-        "cost_usd": cost_usd,
-        "tool_calls": float(meta.tool_calls),
-        "duration_ms": meta.total_duration_ms or 0.0,
-        "error_rate": errors / tool_calls,
-        "llm_requests": float(meta.llm_requests),
-    }
+        metrics = {
+            "tool_calls": float(meta.tool_calls),
+            "duration_ms": float(meta.total_duration_ms or 0.0),
+            "error_rate": errors / max(meta.tool_calls, 1),
+            "llm_requests": float(meta.llm_requests),
+        }
+    except (TypeError, ValueError):
+        return None  # hand-edited metadata with non-numeric counters
+    if events is not None:
+        cost_usd = _session_cost(store, session_id, events)
+        if cost_usd is not None:
+            metrics["cost_usd"] = cost_usd
+    return metrics
 
 
 def build_baseline(store: TraceStore, since_days: float = 30.0) -> BaselineProfile:
@@ -164,19 +190,22 @@ def build_baseline(store: TraceStore, since_days: float = 30.0) -> BaselineProfi
         "error_rate": [], "llm_requests": [],
     }
 
+    session_count = 0
     for meta in session_ids:
         try:
-            if not meta or not meta.ended_at or meta.started_at < cutoff:
-                continue
-            m = _session_metrics(store, meta.session_id)
-            if m is None:
-                continue
-            for key, val in m.items():
-                samples[key].append(val)
-        except Exception:
+            in_window = bool(meta.ended_at) and meta.started_at >= cutoff
+        except TypeError:
+            continue  # hand-edited metadata with a non-numeric start time
+        if not in_window:
             continue
+        m = _session_metrics(store, meta.session_id)
+        if m is None:
+            continue
+        session_count += 1
+        for key, val in m.items():
+            samples[key].append(val)
 
-    profile = BaselineProfile(session_count=len(samples["cost_usd"]))
+    profile = BaselineProfile(session_count=session_count)
     for metric, values in samples.items():
         if not values:
             continue

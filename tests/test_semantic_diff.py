@@ -100,6 +100,38 @@ class TestSemanticDiff(unittest.TestCase):
         report = semantic_diff(self.store, sid_a, sid_b)
         self.assertEqual(report.verdict, "inconclusive")
 
+    def test_eval_config_scores_both_sessions(self):
+        sid_a = _make_session(self.store, cmds=["pytest"])
+        sid_b = _make_session(self.store, cmds=["pytest"])
+        self.store.append_event(sid_b, TraceEvent(
+            event_type=EventType.ERROR, session_id=sid_b, data={"message": "exit 1"},
+        ))
+        config = os.path.join(self.tmpdir, "evals.yaml")
+        with open(config, "w", encoding="utf-8") as f:
+            f.write("scorers:\n  - type: no_errors\n    threshold: 1.0\n")
+        report = semantic_diff(self.store, sid_a, sid_b, eval_config=config)
+        self.assertEqual(report.eval_scores_a, {"no_errors": 1.0})
+        self.assertEqual(report.eval_scores_b, {"no_errors": 0.0})
+        buf = io.StringIO()
+        format_semantic_diff(report, out=buf)
+        self.assertIn("Eval no_errors", buf.getvalue())
+
+    def test_missing_eval_config_adds_no_scores(self):
+        sid_a = _make_session(self.store)
+        sid_b = _make_session(self.store)
+        missing = os.path.join(self.tmpdir, "missing.yaml")
+        report = semantic_diff(self.store, sid_a, sid_b, eval_config=missing)
+        self.assertEqual((report.eval_scores_a, report.eval_scores_b), ({}, {}))
+
+    def test_malformed_eval_config_adds_no_scores(self):
+        sid_a = _make_session(self.store)
+        sid_b = _make_session(self.store)
+        config = os.path.join(self.tmpdir, "bad.yaml")
+        with open(config, "w", encoding="utf-8") as f:
+            f.write("scorers:\n  - type: no_errors\n    threshold: high\n")
+        report = semantic_diff(self.store, sid_a, sid_b, eval_config=config)
+        self.assertEqual((report.eval_scores_a, report.eval_scores_b), ({}, {}))
+
 
 class TestFormatSemanticDiff(unittest.TestCase):
     def test_format_no_crash(self):

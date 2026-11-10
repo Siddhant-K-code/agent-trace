@@ -393,7 +393,7 @@ table, check the official URLs in `PRICING_SOURCES`, update `PRICING` and
 
 ### `diff`
 ```
-agent-strace diff <session-a> <session-b> [--semantic] [--compare]
+agent-strace diff <session-a> <session-b> [--semantic] [--compare] [--eval-config FILE]
 ```
 Compare two sessions structurally.
 
@@ -401,6 +401,7 @@ Compare two sessions structurally.
 |---|---|
 | `--semantic` | Compare by outcome, not event order |
 | `--compare` | Side-by-side table with verdict (cost, duration, tools, errors) |
+| `--eval-config FILE` | With `--semantic`, compare scores from this eval config's `scorers` (default: `.agent-evals.yaml`; skipped if missing) |
 
 ### `compare`
 ```
@@ -853,6 +854,10 @@ session with that profile. The default profile path is
 | `show --baseline FILE` | `.agent-traces/baseline.json` | Display profile statistics from a custom path |
 
 The profile tracks cost, tool calls, duration, error rate, and LLM requests.
+Cost matches `agent-strace cost` with its default model; a session whose
+events cannot be priced adds no cost sample. Profiles saved by older versions
+recorded every cost as 0, so rebuild yours with `baseline update` after
+upgrading.
 `check` exits with status 1 for an anomalous session, a missing session, or a
 missing or unreadable baseline, so it can be used as a CI gate. See
 [production.md](production.md#baseline-anomaly-detection) for an example.

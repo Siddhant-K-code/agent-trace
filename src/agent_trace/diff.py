@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from dataclasses import dataclass, field
 from typing import TextIO
@@ -315,14 +316,20 @@ def semantic_diff(
     # Eval scores
     eval_a: dict = {}
     eval_b: dict = {}
-    try:
-        from .eval import run_evals
-        import os
-        if os.path.exists(eval_config):
-            eval_a = {r.scorer_name: r.score for r in run_evals(store, session_a, eval_config)}
-            eval_b = {r.scorer_name: r.score for r in run_evals(store, session_b, eval_config)}
-    except Exception:
-        pass
+    if os.path.exists(eval_config):
+        from .eval.config import load_config
+        from .eval.runner import run_eval
+
+        # An unreadable config or session leaves both score maps empty so the
+        # comparison stays like-for-like; programming errors still propagate.
+        try:
+            config = load_config(eval_config)
+            eval_a, eval_b = (
+                {r.scorer: r.score for r in run_eval(store, sid, config).results}
+                for sid in (session_a, session_b)
+            )
+        except (OSError, ValueError):
+            eval_a, eval_b = {}, {}
 
     # Verdict: B is better if it has fewer errors, lower cost, shorter duration
     # and is not worse on any metric
