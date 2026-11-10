@@ -10,9 +10,11 @@ import time
 import unittest
 import urllib.request
 import urllib.error
+from unittest import mock
 from urllib.parse import quote
 from pathlib import Path
 
+from agent_trace.audit import verify_chain
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.server import (
     CollectorHandler,
@@ -192,6 +194,140 @@ class TestPostEvents(unittest.TestCase):
         status, resp = _post(f"{self.base}/events", body, "application/x-ndjson")
         data = json.loads(resp)
         self.assertGreater(data["errors"], 0)
+
+
+_SECRET = "SECRET-DATA-VALUE"
+_NO_DATA = object()
+
+
+def _event_record(session_id: str, event_id: str, data: object = _NO_DATA) -> dict:
+    record = {
+        "event_type": "tool_call",
+        "timestamp": 1760000000.0,
+        "event_id": event_id,
+        "session_id": session_id,
+    }
+    if data is not _NO_DATA:
+        record["data"] = data
+    return record
+
+
+class TestPostEventsNonObjectData(unittest.TestCase):
+    """POST /events refuses an event whose data is present but not an object."""
+
+    def setUp(self):
+        self.store, _ = _make_store()
+        self.server, self.port, _ = _start_test_server(self.store)
+        self.base = f"http://127.0.0.1:{self.port}"
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+    def _post_records(self, *records: dict) -> tuple[int, dict, str]:
+        """POST one NDJSON line per record. Returns status, body, and server stderr."""
+        body = "".join(json.dumps(record) + "\n" for record in records)
+        stderr = io.StringIO()
+        with mock.patch("sys.stderr", stderr):
+            status, resp = _post(
+                f"{self.base}/events", body.encode("utf-8"), "application/x-ndjson"
+            )
+        return status, json.loads(resp), stderr.getvalue()
+
+    def _stored(self, session_id: str) -> list[dict]:
+        path = self.store.base_dir / session_id / "events.ndjson"
+        return [json.loads(line) for line in path.read_text().splitlines()]
+
+    def test_each_non_object_data_type_is_refused(self):
+        for name, data, phrase in (
+            ("array", [_SECRET], "an array"),
+            ("string", _SECRET, "a string"),
+            ("empty-string", "", "a string"),
+            ("number", 42, "a number"),
+            ("zero", 0, "a number"),
+            ("float", 4.5, "a number"),
+            ("true", True, "a boolean"),
+            ("false", False, "a boolean"),
+            ("null", None, "null"),
+        ):
+            with self.subTest(data=name):
+                session_id = f"refused-{name}"
+                status, resp, stderr = self._post_records(
+                    _event_record(session_id, "evt-1", data)
+                )
+                self.assertEqual(status, 202)
+                self.assertEqual(resp, {"accepted": 0, "errors": 1})
+                self.assertFalse(self.store.session_exists(session_id))
+                self.assertIn(
+                    "[server] Refused one tool_call event because its data is "
+                    f"{phrase}, not an object.\n",
+                    stderr,
+                )
+
+    def test_object_events_around_a_refused_event_are_stored_in_order(self):
+        session_id = "mixed-batch"
+        status, resp, _ = self._post_records(
+            _event_record(session_id, "evt-1", {"tool_name": "first"}),
+            _event_record(session_id, "evt-2", [_SECRET]),
+            _event_record(session_id, "evt-3", {"tool_name": "third"}),
+        )
+        self.assertEqual(status, 202)
+        self.assertEqual(resp, {"accepted": 2, "errors": 1})
+        stored = self._stored(session_id)
+        self.assertEqual([event["event_id"] for event in stored], ["evt-1", "evt-3"])
+        self.assertEqual(
+            [event["data"] for event in stored],
+            [{"tool_name": "first"}, {"tool_name": "third"}],
+        )
+        # The server computes prev_hash from what it stored, so the chain holds.
+        self.assertTrue(verify_chain(self.store, session_id).ok)
+
+    def test_event_without_data_is_stored_with_an_empty_object(self):
+        session_id = "no-data-key"
+        status, resp, stderr = self._post_records(_event_record(session_id, "evt-1"))
+        self.assertEqual(status, 200)
+        self.assertEqual(resp, {"accepted": 1, "errors": 0})
+        self.assertEqual([event["data"] for event in self._stored(session_id)], [{}])
+        self.assertNotIn("Refused", stderr)
+
+    def test_object_with_a_wrong_typed_field_is_stored(self):
+        session_id = "wrong-typed-field"
+        status, resp, _ = self._post_records(
+            _event_record(session_id, "evt-1", {"tool_name": 5})
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(resp, {"accepted": 1, "errors": 0})
+        self.assertEqual(
+            [event["data"] for event in self._stored(session_id)], [{"tool_name": 5}]
+        )
+
+    def test_batch_of_only_refused_events_creates_no_session(self):
+        session_id = "only-refused"
+        status, resp, _ = self._post_records(
+            _event_record(session_id, "evt-1", [_SECRET]),
+            _event_record(session_id, "evt-2", _SECRET),
+        )
+        self.assertEqual(status, 202)
+        self.assertEqual(resp, {"accepted": 0, "errors": 2})
+        self.assertFalse((self.store.base_dir / session_id).exists())
+        self.assertEqual(self.store.list_sessions(), [])
+
+    def test_refusal_lines_have_no_data_values_or_event_ids(self):
+        _, _, stderr = self._post_records(
+            _event_record("leak-check", "SECRET-EVENT-ID-1", [_SECRET, {"key": _SECRET}]),
+            _event_record("leak-check", "SECRET-EVENT-ID-2", _SECRET),
+        )
+        self.assertNotIn(_SECRET, stderr)
+        self.assertNotIn("SECRET-EVENT-ID", stderr)
+        self.assertEqual(
+            [line for line in stderr.splitlines() if "Refused" in line],
+            [
+                "[server] Refused one tool_call event because its data is an array, "
+                "not an object.",
+                "[server] Refused one tool_call event because its data is a string, "
+                "not an object.",
+            ],
+        )
 
 
 # ---------------------------------------------------------------------------

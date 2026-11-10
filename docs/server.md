@@ -106,6 +106,20 @@ docker run -p 4317:4317 -v $(pwd)/traces:/data agent-strace-server
 | `GET` | `/health` | Liveness check |
 
 Events are accepted as NDJSON (`application/x-ndjson`), one event per line.
+Each line is stored or refused on its own. The collector refuses a line that is
+not a valid event, has an invalid session ID, or has a `data` value that is not
+a JSON object: an array, a string (including `""`), a number, a boolean, or
+`null`. An event without `data` is stored with an empty object. The response is
+`{"accepted": N, "errors": M}`, where `errors` counts the lines that were not
+stored, with status 200 when every line was stored and 202 otherwise. An event refused for
+its `data` is not stored and does not create a session. The collector prints
+one line to stderr for it, naming the event type and the JSON type of `data`
+but never data values or event IDs:
+
+```
+[server] Refused one tool_call event because its data is an array, not an object.
+```
+
 GET session IDs are URL-decoded as one containment-safe path component, so
 legacy IDs containing spaces, Unicode, or more than 128 characters remain
 readable. POST routes retain the strict 1–128 character ASCII policy for new

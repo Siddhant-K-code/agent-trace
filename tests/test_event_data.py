@@ -9,6 +9,7 @@ from agent_trace.event_data import (
     list_field,
     number_field,
     object_field,
+    refused_event_warning,
     require_object_event_data,
     skipped_event_warning,
     str_field,
@@ -149,6 +150,30 @@ class TestSkippedEventWarning(unittest.TestCase):
                 self.assertEqual(
                     skipped_event_warning("watch", event),
                     "[watch] Skipped checks for one tool_result event because its data "
+                    f"is {phrase}, not an object.\n",
+                )
+
+
+class TestRefusedEventWarning(unittest.TestCase):
+    def test_warning_names_the_event_type_and_json_type_only(self):
+        for data, phrase in (
+            (["SECRET-ARRAY"], "an array"),
+            ("SECRET-STRING", "a string"),
+            ("", "a string"),
+            (42, "a number"),
+            (0, "a number"),
+            (True, "a boolean"),
+            (None, "null"),
+        ):
+            with self.subTest(data=data):
+                event = TraceEvent(
+                    event_type=EventType.TOOL_CALL,
+                    event_id="SECRET-EVENT-ID",
+                    data=data,
+                )
+                self.assertEqual(
+                    refused_event_warning("server", event),
+                    "[server] Refused one tool_call event because its data "
                     f"is {phrase}, not an object.\n",
                 )
 

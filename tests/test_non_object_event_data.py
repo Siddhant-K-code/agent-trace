@@ -1,7 +1,8 @@
 """Commands on sessions whose stored event data is not a JSON object.
 
-``agent-strace server`` stores array, string, number and boolean ``data`` as it
-arrives, so these sessions exist without hand edits. A command that would read
+Older ``agent-strace server`` versions stored array, string, number and boolean
+``data`` as it arrived, so these sessions exist without hand edits. The current
+collector refuses such events (see test_server). A command that would read
 such data as an object refuses up front, as ``share`` does: one ``Error:`` line
 on stderr, exit code 1, and nothing printed, written, sent or opened. Commands
 that never read the data keep their output and exit code.
