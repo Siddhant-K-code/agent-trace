@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, TextIO
 
 from .event_data import require_object_event_data
-from .explain import PHASE_DATA_EVENT_TYPES, ExplainResult, Phase, explain_session
+from .explain import PHASE_DATA_EVENT_TYPES, ExplainResult, explain_session
 from .models import EventType, TraceEvent
 from .pairing import Pairer, event_model, llm_pairer
 from .store import TraceStore
@@ -262,13 +262,72 @@ def _event_tokens(event: TraceEvent) -> tuple[int, int]:
     return 0, 0
 
 
-def _phase_tokens(phase: Phase) -> tuple[int, int]:
-    inp = out = 0
-    for event in phase.events:
-        i, o = _event_tokens(event)
-        inp += i
-        out += o
+def _recorded_usage(data: Any) -> tuple[int, int] | None:
+    """Return the token counts an event recorded, or None when it has none."""
+    if not isinstance(data, Mapping):
+        return None
+    inp, out, has_inp, has_out = _usage_tokens(data)
+    if not (has_inp or has_out):
+        return None
     return inp, out
+
+
+class TokenCounter:
+    """Count (input, output) tokens per event of one session, in trace order.
+
+    Each event is estimated from its JSON size by default. Some providers
+    record each model request only as an ``llm_response`` with no
+    ``llm_request`` (Codex ``PostModelRequest``), and that response carries
+    the request's exact usage. Once such a response with token counts is
+    seen, the counter switches to recorded usage: every ``llm_response``
+    counts its own recorded tokens, or none when it recorded none (a failed
+    or cancelled request), and every other event counts nothing, because its
+    content is already part of some request's input.
+    """
+
+    def __init__(self, recorded_usage: bool = False) -> None:
+        self.recorded_usage = recorded_usage
+        self._requests: Pairer[bool] = llm_pairer()
+
+    def observe(self, event: TraceEvent) -> None:
+        """Update the request pairing and switch to recorded usage if due."""
+        if event.event_type == EventType.LLM_REQUEST:
+            self._requests.add(event, True)
+        elif event.event_type == EventType.LLM_RESPONSE:
+            paired = self._requests.match(event) is not None
+            if not paired and _recorded_usage(event.data) is not None:
+                self.recorded_usage = True
+
+    def count(self, event: TraceEvent) -> tuple[int, int]:
+        """Observe *event* and return its (input, output) tokens."""
+        if not self.recorded_usage:
+            self.observe(event)
+        if not self.recorded_usage:
+            return _event_tokens(event)
+        if event.event_type != EventType.LLM_RESPONSE:
+            return 0, 0
+        return _recorded_usage(event.data) or (0, 0)
+
+
+def session_records_usage(events: list[TraceEvent]) -> bool:
+    """True when *events* hold an unpaired ``llm_response`` with token counts."""
+    counter = TokenCounter()
+    for event in events:
+        counter.observe(event)
+        if counter.recorded_usage:
+            return True
+    return False
+
+
+def session_event_tokens(events: list[TraceEvent]) -> list[tuple[int, int]]:
+    """Return (input, output) tokens for each event of one session.
+
+    A session that records usage (see :class:`TokenCounter`) counts it for
+    every event, including those before the first usage response. Any other
+    session gets the size estimate of :func:`_event_tokens` for each event.
+    """
+    counter = TokenCounter(recorded_usage=session_records_usage(events))
+    return [counter.count(event) for event in events]
 
 
 def _dollars(input_tokens: int, output_tokens: int, model: str) -> float:
@@ -452,6 +511,9 @@ class _UsageSample:
 
 _NO_SAMPLE = -1
 
+# Shown in the text dashboard for usage recorded without a model name.
+UNRECORDED_MODEL_LABEL = "(not recorded)"
+
 # _session_model_usage reads the data of every event of these types.
 MODEL_USAGE_EVENT_TYPES = frozenset({
     EventType.LLM_REQUEST,
@@ -468,6 +530,11 @@ def _session_model_usage(events: list[TraceEvent]) -> dict[str, tuple[int, int]]
     A request that names no model is not a usage sample. It still joins the
     pairer, so a response that names it by parent_id does not pair with
     another request; that response counts on its own.
+
+    An llm_response that pairs with no request and names no model, but
+    records token counts (a Codex request whose model was not reported),
+    is a sample under the empty model name, so its tokens are reported
+    without inventing a model or a price.
     """
     samples: list[_UsageSample] = []
     requests: Pairer[int] = llm_pairer()
@@ -490,7 +557,12 @@ def _session_model_usage(events: list[TraceEvent]) -> dict[str, tuple[int, int]]
 
         index = requests.match(event)
         if index is None or index == _NO_SAMPLE:
-            if not model:
+            unrequested_usage = (
+                index is None
+                and event.event_type == EventType.LLM_RESPONSE
+                and (has_inp or has_out)
+            )
+            if not model and not unrequested_usage:
                 continue
             samples.append(_UsageSample(model))
             index = len(samples) - 1
@@ -596,12 +668,20 @@ def estimate_cost(
         model = "custom"
 
     result = explain_session(store, session_id)
+    # Phases hold every event of the session, in order.
+    tokens = iter(session_event_tokens(
+        [event for phase in result.phases for event in phase.events]
+    ))
 
     phase_costs: list[PhaseCost] = []
     total_input = total_output = 0
 
     for phase in result.phases:
-        inp, out = _phase_tokens(phase)
+        inp = out = 0
+        for _ in phase.events:
+            i, o = next(tokens)
+            inp += i
+            out += o
         cost = _dollars(inp, out, model)
         phase_costs.append(PhaseCost(
             phase_index=phase.index,
@@ -731,8 +811,9 @@ def format_provider_cost_report(
 ) -> None:
     """Write the offline provider/model cost dashboard."""
     summaries = report.summaries
+    models = [row.model or UNRECORDED_MODEL_LABEL for row in summaries]
     provider_width = max([len("Provider"), *(len(row.provider) for row in summaries)])
-    model_width = max([len("Model"), *(len(row.model) for row in summaries)])
+    model_width = max([len("Model"), *(len(model) for model in models)])
     model_width = min(max(model_width, 24), 44)
     divider = "─" * (provider_width + model_width + 26)
 
@@ -743,8 +824,7 @@ def format_provider_cost_report(
         f"{'Provider':<{provider_width}}  {'Model':<{model_width}}  {'Sessions':>8}  {'Cost':>10}\n"
         f"{divider}\n"
     )
-    for row in summaries:
-        model = row.model
+    for row, model in zip(summaries, models):
         if len(model) > model_width:
             model = model[:model_width - 1] + "…"
         out.write(

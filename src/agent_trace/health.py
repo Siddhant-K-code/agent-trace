@@ -193,6 +193,41 @@ def detect_provider(meta: SessionMeta, events: Sequence[TraceEvent]) -> Provider
     return ProviderEvidence()
 
 
+@dataclass(frozen=True)
+class DeclaredCapture:
+    """Capture-matrix declarations passed to evidence health."""
+
+    events_before_start: tuple[str, ...] = ()
+    results_without_requests: tuple[str, ...] = ()
+
+
+def declared_capture(
+    meta: SessionMeta,
+    events: Sequence[TraceEvent],
+) -> DeclaredCapture:
+    """Return what the hook provider's capture matrix entry declares.
+
+    The provider comes from hook-written evidence only, as in
+    :func:`detect_provider`. Only ``events_before_start`` and
+    ``results_without_requests`` are read from its entry. A trace with no
+    hook provider, a provider with no entry, and a matrix that cannot be
+    loaded all declare nothing.
+    """
+    provider = detect_provider(meta, events).provider
+    if not provider:
+        return DeclaredCapture()
+    try:
+        entry = load_capture_matrix().entry(provider)
+    except (OSError, ValueError):
+        return DeclaredCapture()
+    if entry is None:
+        return DeclaredCapture()
+    return DeclaredCapture(
+        events_before_start=tuple(entry.get("events_before_start", [])),
+        results_without_requests=tuple(entry.get("results_without_requests", [])),
+    )
+
+
 def _implicit_hook_session(meta: SessionMeta) -> bool:
     """Return True for metadata the hooks wrote because the first hook was not SessionStart."""
     implicit_command = f"{meta.agent_name} ({IMPLICIT_SESSION_SOURCE})"

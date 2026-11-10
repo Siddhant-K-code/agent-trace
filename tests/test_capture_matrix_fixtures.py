@@ -28,6 +28,7 @@ from agent_trace.cli import _codex_hooks_config, _copilot_hooks_config
 from agent_trace.health import assess_session, load_capture_matrix
 from agent_trace.hooks import _PROVIDER_ENV, IMPLICIT_SESSION_SOURCE, hook_main
 from agent_trace.models import EventType
+from agent_trace.otlp import session_to_otlp_genai
 from agent_trace.store import TraceStore
 from agent_trace.subagent import build_tree
 from agent_trace.validation import validate_trace_directory
@@ -609,6 +610,23 @@ class TestCopilotLegacyFixture(TestCopilot103Fixture):
                 # The denied tool call has no outcome, which is still a warning.
                 expected = "partial" if scenario == "permission_denied" else "valid"
                 self.assertEqual(validation.status, expected)
+
+    def test_otlp_evidence_accepts_the_declared_order(self):
+        for scenario in ("tool", "tool_failure", "permission_denied", "subagent"):
+            store, _ = self.replay(scenario)
+            (main,), _ = self.main_and_child(store)
+            payload = session_to_otlp_genai(
+                store.load_meta(main.session_id), store.load_events(main.session_id)
+            )
+            root = payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+            attrs = {a["key"]: a["value"] for a in root["attributes"]}
+            gaps = json.loads(attrs["agent.strace.evidence.gaps"]["stringValue"])
+            with self.subTest(scenario=scenario):
+                self.assertNotIn("events_before_session_start", [g["code"] for g in gaps])
+                self.assertIn(
+                    ("declared_events_before_session_start", "provider_limitation"),
+                    [(g["code"], g["kind"]) for g in gaps],
+                )
 
     def test_denied_tool_leaves_an_unpaired_call(self):
         store, skipped = self.replay("permission_denied")

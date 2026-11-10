@@ -36,6 +36,7 @@ from .pairing import (
     TOOL_REQUEST_TYPES,
     TOOL_RESPONSE_TYPES,
     Pairer,
+    event_model,
     llm_pairer,
     tool_pairer,
 )
@@ -330,13 +331,24 @@ def _evidence_attributes(
     meta: SessionMeta,
     events: list[TraceEvent],
 ) -> dict[str, Any]:
-    """Summarize observed structural evidence gaps without reading event data."""
-    from .evidence_health import assess_evidence_health
+    """Summarize observed structural evidence gaps.
 
+    Gaps are assessed without event data. The event types the hook provider
+    sends before its session start, and the result types it records without
+    requests, come from its capture matrix entry, as in ``health`` and
+    ``validate``; identifying the provider reads only the hook-written
+    session_start and stop events, and ignores data that is not an object.
+    """
+    from .evidence_health import assess_evidence_health
+    from .health import declared_capture
+
+    declared = declared_capture(meta, events)
     structural_events = [replace(event, data={}) for event in events]
     result = assess_evidence_health(
         structural_events,
         session_finalized=True if meta.ended_at is not None else None,
+        allowed_pre_start_event_types=declared.events_before_start,
+        allowed_unrequested_result_types=declared.results_without_requests,
     )
     reasons = [
         {
@@ -497,8 +509,10 @@ def session_to_otlp(
     root_events = []
     child_spans = []
 
-    # Pair tool_call events with their tool_result or error (see pairing.py)
+    # Pair tool_call events with their tool_result or error, and LLM
+    # requests with their responses (see pairing.py)
     calls: Pairer[TraceEvent] = tool_pairer()
+    requests: Pairer[TraceEvent] = llm_pairer()
 
     for event in events:
         if event.event_type == EventType.USER_PROMPT:
@@ -597,6 +611,7 @@ def session_to_otlp(
             })
 
         elif event.event_type == EventType.LLM_REQUEST:
+            requests.add(event)
             llm_attrs: dict = {_SEMCONV_OP: "chat"}
             model = event.data.get("model", "")
             if model:
@@ -608,6 +623,15 @@ def session_to_otlp(
 
         elif event.event_type == EventType.LLM_RESPONSE:
             llm_attrs = {_SEMCONV_OP: "chat"}
+            if requests.match(event) is None:
+                # A response with no request (Codex records each model
+                # request this way) carries its own model and input count.
+                model = event_model(event.data)
+                if model:
+                    llm_attrs[_SEMCONV_MODEL] = model
+                inp_tok = event.data.get("input_tokens", 0)
+                if inp_tok:
+                    llm_attrs[_SEMCONV_INPUT_TOKENS] = inp_tok
             out_tok = event.data.get("output_tokens", 0)
             if out_tok:
                 llm_attrs[_SEMCONV_OUTPUT_TOKENS] = out_tok

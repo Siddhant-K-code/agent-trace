@@ -357,11 +357,20 @@ agent-strace cost --tenant ID [--since DATE_OR_DURATION]
 ```
 Token and dollar cost by phase. Flags wasted spend on failed phases.
 
+Tokens are estimated from the size of each event. A session that records each
+model request as an `llm_response` with no `llm_request` and its own token
+counts, as OpenAI Codex does, is priced from those recorded counts instead,
+and no event is also estimated from size. `tree`, `timeline`, `replay`,
+`watch` and the EU AI Act compliance export count tokens the same way. See
+[Responses recorded without a request](production.md#responses-recorded-without-a-request).
+
 `--breakdown provider` aggregates all stored sessions in the selected window by
 inferred provider and model. It uses actual recorded token counters and a bundled,
 dated pricing snapshot, so the default path makes no network calls. CSV output has
 the stable columns `provider`, `model`, `session_id`, `input_tokens`,
-`output_tokens`, and `cost_usd`.
+`output_tokens`, and `cost_usd`. Usage recorded without a model name is listed
+under the model `(not recorded)` (an empty `model` in CSV) and the provider
+`Unknown`, with no estimated price.
 
 | Flag | Default | Description |
 |---|---|---|
@@ -375,7 +384,9 @@ the stable columns `provider`, `model`, `session_id`, `input_tokens`,
 | `--tenant ID` | — | Scope an explicit session or aggregate the selected time window to one tenant |
 
 Pricing estimates exclude caching, batch discounts, regional or service-tier
-differences, long-context premiums, and non-token charges. To update the bundled
+differences, long-context premiums, and non-token charges. Cached input tokens
+are priced at the full input rate, so estimates for providers that count cached
+input inside `input_tokens`, such as Codex, are an upper bound. To update the bundled
 table, check the official URLs in `PRICING_SOURCES`, update `PRICING` and
 `_MODEL_PROVIDERS`, advance `PRICING_SNAPSHOT_DATE`, and extend
 `tests/test_provider_cost.py` for every added model family.

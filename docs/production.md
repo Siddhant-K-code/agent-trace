@@ -367,6 +367,46 @@ pending per proxy. Hooks link a result to the pending call with its
 `tool_use_id`, or, when the provider sends none, to the oldest pending call of
 the same tool name, preferring calls from the same subagent.
 
+### Responses recorded without a request
+
+OpenAI Codex records each model request only as an `llm_response` event, from
+its `PostModelRequest` hook. No `llm_request` is recorded, by design: the
+Codex [capture matrix](capture-matrix.md#openai-codex) entry declares
+`results_without_requests: ["llm_response"]`. Each response carries its own
+`model` (when Codex reports one), `status` and token usage. `input_tokens`
+already includes cached input and `output_tokens` already includes reasoning.
+A failed or cancelled request records no usage.
+
+A response that pairs with no request is treated as the whole model request:
+
+- `--format otlp-genai` and Temporal: the response is its own `chat` span with
+  its model and token counts. The root span's `agent.strace.evidence.*`
+  attributes read the same capture matrix declaration as `validate`, so
+  declared Codex responses are one `declared_results_without_requests`
+  provider limitation instead of one `orphan_llm_response` gap each. Responses
+  without a request from any other source are still orphans.
+- `--format otlp`: the `gen_ai.assistant.message` event carries the
+  response's own `gen_ai.request.model` and `gen_ai.usage.input_tokens`. A
+  paired response is unchanged, because its request event already carries
+  them.
+- Langfuse: the generation takes its model and input count from the response.
+  A paired response still takes them from its request.
+- `cost`, `tree`, `timeline`, `replay`, `watch` and the EU AI Act compliance
+  export: once a session has such a response with token counts, every
+  `llm_response` counts the tokens it recorded, or none if it recorded none
+  (as for a failed or cancelled request), and no other event is counted,
+  because its content is already part of a request's input. Nothing is also
+  estimated from event size. Sessions without such a response keep the size
+  estimate. `watch` counts events as they arrive, so events before the first
+  recorded usage keep their size estimate.
+- `cost --breakdown provider`: a response that names no model still reports
+  its tokens, under the model `(not recorded)` (empty in CSV) and the provider
+  `Unknown`, with no estimated price.
+
+The bundled pricing snapshot has no cached-input rates, so cached input is
+priced at the full input rate. Cost estimates for Codex sessions are therefore
+an upper bound.
+
 ---
 
 ## Inspect the OTLP payload

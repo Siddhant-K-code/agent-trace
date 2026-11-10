@@ -707,7 +707,7 @@ def replay_to_html(
     Returns the HTML string. If output_path is given, also writes to disk.
     """
     import json as _json
-    from .cost import _dollars, _event_tokens
+    from .cost import _dollars, session_event_tokens
 
     meta = store.load_meta(session_id)
     events = store.load_events(session_id)
@@ -730,7 +730,7 @@ def replay_to_html(
     events_data = []
     costs_data = []
     running_cost = 0.0
-    for e in events:
+    for e, (inp, out) in zip(events, session_event_tokens(events)):
         d = dict(e.data)
         d_out = {
             "event_type": e.event_type.value,
@@ -739,7 +739,6 @@ def replay_to_html(
             "duration_ms": e.duration_ms,
             "data": d,
         }
-        inp, out = _event_tokens(e)
         running_cost += _dollars(inp, out, "sonnet")
         events_data.append(d_out)
         costs_data.append(round(running_cost, 6))
@@ -857,7 +856,7 @@ def replay_to_html_diff(
     Returns the HTML string; writes to output_path if given.
     """
     import json as _json
-    from .cost import _dollars, _event_tokens
+    from .cost import _dollars, session_event_tokens
     from .diff import diff_sessions
 
     events_a = store.load_events(session_a)
@@ -881,8 +880,7 @@ def replay_to_html_diff(
 
     def _session_cost(events: list) -> float:
         total = 0.0
-        for e in events:
-            inp, out = _event_tokens(e)
+        for inp, out in session_event_tokens(events):
             total += _dollars(inp, out, "sonnet")
         return total
 

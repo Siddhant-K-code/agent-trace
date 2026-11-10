@@ -32,7 +32,7 @@ from typing import Any, Literal, TextIO
 
 from . import __version__
 from .audit import verify_chain
-from .cost import _dollars, _event_tokens
+from .cost import _dollars, session_event_tokens
 from .event_data import require_object_event_data, str_field
 from .models import EventType, TraceEvent
 from .store import TraceStore
@@ -98,9 +98,11 @@ def _event_tool_name(event: TraceEvent) -> str:
     return str(event.data.get("tool_name") or event.data.get("tool") or "")
 
 
-def _event_cost(event: TraceEvent) -> float:
-    input_tokens, output_tokens = _event_tokens(event)
-    return _dollars(input_tokens, output_tokens, "sonnet")
+def _event_costs(events: list[TraceEvent]) -> list[float]:
+    return [
+        _dollars(input_tokens, output_tokens, "sonnet")
+        for input_tokens, output_tokens in session_event_tokens(events)
+    ]
 
 
 def _data_categories(events: list[TraceEvent]) -> list[str]:
@@ -368,6 +370,7 @@ def _eu_ai_act_session_record(
     chain = verify_chain(store, session_id)
 
     event_records = []
+    costs = _event_costs(events)
     for idx, event in enumerate(events):
         input_summary = ""
         output_summary = ""
@@ -387,7 +390,7 @@ def _eu_ai_act_session_record(
             "input_summary": input_summary,
             "output_summary": output_summary,
             "duration_ms": event.duration_ms,
-            "cost_usd": round(_event_cost(event), 8),
+            "cost_usd": round(costs[idx], 8),
             "prev_hash": event.prev_hash,
             "line_hash": hashes[idx] if idx < len(hashes) else "",
         })

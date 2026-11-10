@@ -319,7 +319,7 @@ class TestDeclaredEventsBeforeStart(unittest.TestCase):
                 for entry in matrix.providers
             ),
         )
-        with patch("agent_trace.validation.load_capture_matrix", return_value=declared):
+        with patch("agent_trace.health.load_capture_matrix", return_value=declared):
             report = self.validate(
                 [EventType.USER_PROMPT], provider="claude", agent_name="claude-code"
             )
@@ -341,7 +341,7 @@ class TestDeclaredEventsBeforeStart(unittest.TestCase):
     def test_matrix_load_failure_declares_nothing(self):
         for error in (OSError("unreadable"), ValueError("malformed")):
             with self.subTest(error=type(error).__name__):
-                with patch("agent_trace.validation.load_capture_matrix", side_effect=error):
+                with patch("agent_trace.health.load_capture_matrix", side_effect=error):
                     self.assert_undeclared(self.validate([EventType.USER_PROMPT]))
 
 

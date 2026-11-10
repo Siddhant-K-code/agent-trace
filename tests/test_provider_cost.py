@@ -202,6 +202,28 @@ class TestProviderCostReport(unittest.TestCase):
         self.assertEqual(report.records[0].provider, "Unknown")
         self.assertEqual(report.records[0].cost_usd, 0.0)
 
+    def test_usage_without_model_is_reported_without_a_price(self):
+        store = self.fixture.store
+        store.create_session(SessionMeta(session_id="codex", started_at=NOW - 1))
+        store.append_event("codex", TraceEvent(
+            event_type=EventType.LLM_RESPONSE,
+            timestamp=NOW - 1,
+            session_id="codex",
+            data={"provider": "codex", "input_tokens": 2500, "output_tokens": 30},
+        ))
+        report = build_provider_cost_report(store, since="7d", now=NOW)
+        self.assertEqual(
+            [(r.provider, r.model, r.input_tokens, r.output_tokens, r.cost_usd)
+             for r in report.records],
+            [("Unknown", "", 2500, 30, 0.0)],
+        )
+        text = io.StringIO()
+        format_provider_cost_report(report, text)
+        self.assertIn("(not recorded)", text.getvalue())
+        rows = io.StringIO()
+        format_provider_cost_csv(report, rows)
+        self.assertEqual(next(csv.DictReader(io.StringIO(rows.getvalue())))["model"], "")
+
     def test_default_mode_makes_no_network_call(self):
         self.fixture.add_session(
             "offline", NOW - 1, "gpt-4o",
@@ -269,6 +291,27 @@ class TestModelUsagePairing(unittest.TestCase):
             self._event(EventType.LLM_RESPONSE, "r2", "a", model="gpt-4o", output_tokens=6),
         ]
         self.assertEqual(_session_model_usage(events), {"gpt-4o": (10, 10)})
+
+    def test_unrequested_response_without_model_reports_its_usage(self):
+        # A Codex model request whose model was not reported.
+        events = [
+            self._event(EventType.LLM_RESPONSE, "r1", model="gpt-5-codex",
+                        input_tokens=1200, output_tokens=10),
+            self._event(EventType.LLM_RESPONSE, "r2", input_tokens=2500, output_tokens=30),
+        ]
+        self.assertEqual(
+            _session_model_usage(events),
+            {"gpt-5-codex": (1200, 10), "": (2500, 30)},
+        )
+
+    def test_responses_without_model_or_usage_stay_out(self):
+        events = [
+            self._event(EventType.LLM_RESPONSE, "r1", status="failed", token_usage=None),
+            self._event(EventType.ASSISTANT_RESPONSE, "a1", input_tokens=5, output_tokens=5),
+            self._event(EventType.LLM_REQUEST, "plain"),
+            self._event(EventType.LLM_RESPONSE, "r2", "plain", input_tokens=5, output_tokens=5),
+        ]
+        self.assertEqual(_session_model_usage(events), {})
 
 
 class TestProviderCostFormatting(unittest.TestCase):
