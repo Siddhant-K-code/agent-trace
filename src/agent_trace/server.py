@@ -43,12 +43,13 @@ import secrets
 import sys
 import threading
 import time
+from collections.abc import Mapping
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
-from .event_data import NonObjectEventDataError
+from .event_data import NonObjectEventDataError, refused_event_warning
 from .models import SessionMeta, TraceEvent
 from .store import (
     TraceStore,
@@ -468,7 +469,13 @@ class CollectorHandler(BaseHTTPRequestHandler):
         self._send_json(404, {"error": "not found"})
 
     def _handle_post_events(self, body: bytes) -> None:
-        """Accept a batch of NDJSON events."""
+        """Accept a batch of NDJSON events.
+
+        Each line is stored or refused on its own. A line that does not parse,
+        has an invalid session ID, or has ``data`` that is present but not a
+        JSON object is not stored and counts in ``errors``. An event without
+        ``data`` is stored with an empty object.
+        """
         accepted = 0
         errors = 0
         for line in body.decode("utf-8", errors="replace").splitlines():
@@ -477,6 +484,12 @@ class CollectorHandler(BaseHTTPRequestHandler):
                 continue
             try:
                 event = TraceEvent.from_json(line)
+                # Checked before the session is auto-created, so a batch of
+                # refused events leaves no session behind.
+                if not isinstance(event.data, Mapping):
+                    sys.stderr.write(refused_event_warning("server", event))
+                    errors += 1
+                    continue
                 session_id = validate_session_id(event.session_id)
                 if not session_id:
                     errors += 1

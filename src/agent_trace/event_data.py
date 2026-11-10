@@ -1,12 +1,14 @@
 """Refuse event ``data`` that is not a JSON object.
 
-Hook capture always records ``data`` as an object, but the collector server
-and hand edits can store an array, string, number, boolean, or null, and
-``TraceEvent.from_json`` keeps whatever it finds. Commands that read keys from
-``data`` call :func:`require_object_event_data` before they print or write
-anything, so such a session is refused with one message instead of a
-traceback. The CLI turns :class:`NonObjectEventDataError` into one
-``Error:`` line on stderr and exit code 1.
+Hook capture always records ``data`` as an object, and the collector server
+refuses an event whose ``data`` is not one (see :func:`refused_event_warning`).
+An older collector stored array, string, number, and boolean ``data`` as it
+arrived, and a hand edit can store any JSON value, so a session can still
+contain such data. ``TraceEvent.from_json`` keeps whatever it finds. Commands
+that read keys from ``data`` call :func:`require_object_event_data` before
+they print or write anything, so such a session is refused with one message
+instead of a traceback. The CLI turns :class:`NonObjectEventDataError` into
+one ``Error:`` line on stderr and exit code 1.
 
 A field inside an object ``data`` can have the wrong JSON type too, such as a
 number for ``tool_name`` or a list for ``arguments``. Commands read such a
@@ -90,17 +92,33 @@ def _event_type_value(event: TraceEvent) -> str:
 _JSON_TYPE_PHRASES = {"null": "null", "array": "an array"}
 
 
+def _json_type_phrase(value: object) -> str:
+    name = _json_type_name(value)
+    return _JSON_TYPE_PHRASES.get(name, f"a {name}")
+
+
 def skipped_event_warning(command: str, event: TraceEvent) -> str:
     """Return the stderr line a live command prints when it skips an event.
 
     A live command cannot refuse an event that arrives after it starts, so it
     skips the checks for that event, prints this line, and keeps watching.
     """
-    name = _json_type_name(event.data)
-    phrase = _JSON_TYPE_PHRASES.get(name, f"a {name}")
     return (
         f"[{command}] Skipped checks for one {_event_type_value(event)} event "
-        f"because its data is {phrase}, not an object.\n"
+        f"because its data is {_json_type_phrase(event.data)}, not an object.\n"
+    )
+
+
+def refused_event_warning(command: str, event: TraceEvent) -> str:
+    """Return the stderr line the collector prints when it refuses an event.
+
+    ``POST /events`` does not store an event whose ``data`` is present but not
+    an object. The line names the event type and the JSON type of the data,
+    never data values or event IDs.
+    """
+    return (
+        f"[{command}] Refused one {_event_type_value(event)} event "
+        f"because its data is {_json_type_phrase(event.data)}, not an object.\n"
     )
 
 

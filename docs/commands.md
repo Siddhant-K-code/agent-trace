@@ -1560,13 +1560,15 @@ and the trace store directory that `share --assignment` reads.
 
 ## Sessions with non-object event data
 
-Hook capture records every event's `data` as a JSON object. `agent-strace server`
-stores array, string, number, and boolean `data` as it arrives, and a hand edit
-can store any JSON value. A command that reads keys from `data` checks the
-session first. If an event it reads has non-object data, the command writes one
-line to stderr and exits 1 before it prints, writes, sends, or opens anything.
-`optimize` with an LLM configured is the one exception, described below. The
-line looks like this:
+Hook capture records every event's `data` as a JSON object, and
+`agent-strace server` refuses an event whose `data` is not an object (see
+[server.md](server.md#api-reference)). An older collector stored array, string,
+number, and boolean `data` as it arrived, and a hand edit can store any JSON
+value, so a session can still contain non-object data. A command that reads
+keys from `data` checks the session first. If an event it reads has non-object
+data, the command writes one line to stderr and exits 1 before it prints,
+writes, sends, or opens anything. `optimize` with an LLM configured is the one
+exception, described below. The line looks like this:
 
 ```
 Error: session event data must be an object: event 6 of 25 (tool_call) has string data; 5 more events have non-object data
