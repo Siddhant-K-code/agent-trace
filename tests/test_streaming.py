@@ -587,10 +587,12 @@ class TestOtlpStreamNonObjectData(_ReceiverTestCase):
                     )
 
     def test_each_session_of_a_batch_is_sent_with_the_events_left(self) -> None:
+        # session-c comes first and has no event left, which must not stop the
+        # sessions after it from being sent.
         batch = [
+            _event("user_prompt", "SECRET-STRING", "c1", session_id="session-c"),
             _event("user_prompt", {"prompt": "hi"}, "a1", session_id="session-a"),
             _event("user_prompt", {"prompt": "hi"}, "b1", session_id="session-b"),
-            _event("user_prompt", "SECRET-STRING", "c1", session_id="session-c"),
             _event("tool_call", {"tool_name": "Bash"}, "b2", session_id="session-b", ts=2.0),
             _event("tool_result", ["SECRET-ARRAY"], "b3", parent_id="b2",
                    session_id="session-b", ts=3.0),
@@ -604,9 +606,9 @@ class TestOtlpStreamNonObjectData(_ReceiverTestCase):
         ])
         self.assertEqual(
             stderr,
-            _left_out("tool_result", "an array")
-            + _left_out("user_prompt", "a string")
-            + _left_out("error", "null"),
+            _left_out("user_prompt", "a string")
+            + _left_out("error", "null")
+            + _left_out("tool_result", "an array"),
         )
         self._assert_quotes_nothing(stderr)
 
@@ -674,6 +676,39 @@ class TestOtlpStreamConversionFailure(_ReceiverTestCase):
             "they were not sent.\n",
         )
         self.assertEqual(self._sent(posts), [(_SESSION, [_ASSISTANT], [])])
+        self._assert_quotes_nothing(stderr)
+
+    def test_failed_session_is_counted_and_the_later_sessions_of_the_batch_are_sent(self) -> None:
+        real = session_to_otlp_genai
+        converted: list[tuple[str, int]] = []
+
+        def fail_for_session_a(meta, events, **kwargs):
+            converted.append((meta.session_id, len(events)))
+            if meta.session_id == "session-a":
+                raise KeyError("SECRET-MESSAGE")
+            return real(meta, events, **kwargs)
+
+        batch = [
+            _event("user_prompt", {"prompt": "SECRET-PROMPT"}, "a1", session_id="session-a"),
+            _event("user_prompt", {"prompt": "hi"}, "b1", session_id="session-b"),
+            _event("tool_call", {"tool_name": "Bash"}, "a2", session_id="session-a", ts=2.0),
+            _event("user_prompt", {"prompt": "hi"}, "c1", session_id="session-c"),
+            _event("tool_result", {"tool_name": "Bash", "result": "SECRET-RESULT"}, "a3",
+                   parent_id="a2", session_id="session-a", ts=3.0),
+            _event("assistant_response", {"text": "done"}, "b2", session_id="session-b", ts=4.0),
+        ]
+        with patch("agent_trace.otlp.session_to_otlp_genai", new=fail_for_session_a):
+            posts, stderr = self._stream(batch)
+        self.assertEqual(converted, [("session-a", 3), ("session-b", 2), ("session-c", 1)])
+        self.assertEqual(
+            stderr,
+            "[stream] Could not convert 3 events to OTLP spans (KeyError); "
+            "they were not sent.\n",
+        )
+        self.assertEqual(self._sent(posts), [
+            ("session-b", [_USER, _ASSISTANT], []),
+            ("session-c", [_USER], []),
+        ])
         self._assert_quotes_nothing(stderr)
 
     def test_count_leaves_out_the_events_already_reported(self) -> None:
