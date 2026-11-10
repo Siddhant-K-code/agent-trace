@@ -441,7 +441,7 @@ checkpoint setup.
 agent-strace watch [session-id] [--agent-pid PID] [--timeout DURATION] [--budget DOLLARS]
                    [--on-violation ACTION]
                    [--on-death CMD] [--policy FILE] [--rules FILE_OR_BUILTINS] [--stream-to URL]
-                   [--stream-batch-size N] [--stream-flush-interval S]
+                   [--stream-otlp] [--stream-batch-size N] [--stream-flush-interval S]
                    [--loop-threshold N] [--loop-window N] [--max-context-pct N]
                    [--compaction-checkpoint] [--checkpoint-at RATIO] [--dry-run]
                    [--tenant-id ID]
@@ -462,6 +462,7 @@ Live session monitor with kill-switch rules.
 | `--policy FILE` | Scope policy file to enforce (default: `.agent-scope.json`) |
 | `--rules FILE_OR_BUILTINS` | JSON/YAML rules file, or comma-separated built-ins such as `mcp-poisoning,loop:3/10,budget:5,timeout:30m,cognitive-debt:0.8` |
 | `--stream-to URL` | Stream events to HTTP endpoint in real-time |
+| `--stream-otlp` | With `--stream-to`, POST OTLP/HTTP JSON spans to URL + `/v1/traces` instead of NDJSON to URL. Pass the collector base URL, such as `http://localhost:4318` |
 | `--dry-run` | Evaluate rules without acting |
 | `--tenant-id ID` | Tag the session and all events; defaults to `AGENT_STRACE_TENANT_ID` |
 
@@ -1612,6 +1613,23 @@ not an object.` to stderr, and still counts the event. `watch
 --compaction-checkpoint` refuses at startup when the session already has an
 event with non-object data. `mcp-scan --watch` refuses at startup in the same
 way and skips live events with non-object data with an `[mcp-scan]` line.
+
+Without `--stream-otlp`, `watch --stream-to` sends a live event with non-object
+data as stored. With `--stream-otlp`, watch turns each batch into spans and
+leaves out each such event whose data the span converter reads, with one line
+per event on stderr such as `[stream] Left one tool_result event out of the
+OTLP stream because its data is an array, not an object.` The other events of
+the batch are still sent. The converter reads `user_prompt`,
+`assistant_response`, `llm_request`, `llm_response`, `tool_call`,
+`tool_result`, and `error` data, but not the data of a tool_call that an error
+event pairs with, so that tool_call and events such as `session_start`,
+`decision`, and `file_read` stay in the batch. Leaving an event out can change
+how the others pair, so the check repeats on the events that are left: when an
+error event and the tool_call it pairs with both have non-object data, both are
+left out. Nothing is sent for a session with no event left in the batch. If the
+conversion still fails, watch prints one line such as `[stream] Could not
+convert 4 events to OTLP spans (KeyError); they were not sent.`, which names
+the exception type but never its message, and keeps sending later batches.
 
 ### Fields with the wrong type
 

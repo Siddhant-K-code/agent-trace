@@ -10,6 +10,12 @@ they print or write anything, so such a session is refused with one message
 instead of a traceback. The CLI turns :class:`NonObjectEventDataError` into
 one ``Error:`` line on stderr and exit code 1.
 
+A live command cannot refuse an event with such data that arrives after it
+starts. ``watch`` and ``mcp-scan --watch`` skip their checks for such an event
+(see :func:`skipped_event_warning`), and the OTLP stream of
+``watch --stream-otlp`` leaves such an event out when its converter would read
+the data (see :func:`left_out_event_warning`).
+
 A field inside an object ``data`` can have the wrong JSON type too, such as a
 number for ``tool_name`` or a list for ``arguments``. Commands read such a
 field as missing and keep going. The typed readers below return the caller's
@@ -119,6 +125,20 @@ def refused_event_warning(command: str, event: TraceEvent) -> str:
     return (
         f"[{command}] Refused one {_event_type_value(event)} event "
         f"because its data is {_json_type_phrase(event.data)}, not an object.\n"
+    )
+
+
+def left_out_event_warning(command: str, event: TraceEvent) -> str:
+    """Return the stderr line a live OTLP stream prints when it leaves an event out.
+
+    ``watch --stream-otlp`` cannot turn an event into spans when the converter
+    would read its data and the data is not an object, so it sends the other
+    events of the batch without it. The line names the event type and the
+    JSON type of the data, never data values or event IDs.
+    """
+    return (
+        f"[{command}] Left one {_event_type_value(event)} event out of the OTLP "
+        f"stream because its data is {_json_type_phrase(event.data)}, not an object.\n"
     )
 
 

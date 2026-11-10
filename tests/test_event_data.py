@@ -6,6 +6,7 @@ import unittest
 from agent_trace import disclosure
 from agent_trace.event_data import (
     NonObjectEventDataError,
+    left_out_event_warning,
     list_field,
     number_field,
     object_field,
@@ -175,6 +176,28 @@ class TestRefusedEventWarning(unittest.TestCase):
                     refused_event_warning("server", event),
                     "[server] Refused one tool_call event because its data "
                     f"is {phrase}, not an object.\n",
+                )
+
+
+class TestLeftOutEventWarning(unittest.TestCase):
+    def test_warning_names_the_event_type_and_json_type_only(self):
+        for data, phrase in (
+            (["SECRET-ARRAY"], "an array"),
+            ("SECRET-STRING", "a string"),
+            (42, "a number"),
+            (True, "a boolean"),
+            (None, "null"),
+        ):
+            with self.subTest(data=data):
+                event = TraceEvent(
+                    event_type=EventType.TOOL_RESULT,
+                    event_id="SECRET-EVENT-ID",
+                    data=data,
+                )
+                self.assertEqual(
+                    left_out_event_warning("stream", event),
+                    "[stream] Left one tool_result event out of the OTLP stream because "
+                    f"its data is {phrase}, not an object.\n",
                 )
 
 

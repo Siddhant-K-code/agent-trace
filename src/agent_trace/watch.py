@@ -41,6 +41,7 @@ from .cost import TokenCounter, _dollars
 from .compaction import CompactionCheckpointWatcher
 from .event_data import (
     NonObjectEventDataError,
+    left_out_event_warning,
     object_field,
     skipped_event_warning,
     str_field,
@@ -481,6 +482,12 @@ class EventStreamer:
     Thread-safe: events are enqueued from the watch loop and flushed by a
     dedicated daemon thread. Failures are logged to stderr but never block
     the watch loop.
+
+    NDJSON mode sends every event with its data as stored. OTLP mode
+    converts each session's events to spans. It leaves out each event whose
+    data is not a JSON object when the converter would read that data, with
+    one line on stderr per event, and still sends the other events of the
+    batch.
     """
 
     def __init__(self, config: StreamConfig) -> None:
@@ -557,7 +564,15 @@ class EventStreamer:
             sys.stderr.write(f"[stream] POST to {self.config.url} failed: {exc}\n")
 
     def _flush_otlp(self, events: list[TraceEvent]) -> None:
-        """Convert events to OTLP GenAI spans and POST to /v1/traces."""
+        """Convert events to OTLP GenAI spans and POST to /v1/traces.
+
+        Each session in the batch is converted and sent on its own. Events
+        whose non-object data the converter would read are left out (see
+        :func:`_otlp_readable_events`), and a session with no event left
+        sends nothing. If the conversion still fails, one line on stderr
+        gives the number of events not sent and the exception class, never
+        its message, and later batches are still sent.
+        """
         import json as _json
         try:
             from .otlp import session_to_otlp_genai
@@ -576,11 +591,16 @@ class EventStreamer:
             meta = _SessionMeta(agent_name=self.config.service_name)
             meta.session_id = sid
             meta.tenant_id = next((ev.tenant_id for ev in evs if ev.tenant_id), "")
+            unsent = evs
             try:
+                unsent = _otlp_readable_events(evs)
+                if not unsent:
+                    continue
                 payload = session_to_otlp_genai(
-                    meta, evs, service_name=self.config.service_name
+                    meta, unsent, service_name=self.config.service_name
                 )
-            except Exception:
+            except Exception as exc:
+                sys.stderr.write(_otlp_conversion_failed_line(len(unsent), exc))
                 continue
             body = _json.dumps(payload).encode("utf-8")
             req_headers = {"Content-Type": "application/json"}
@@ -594,6 +614,52 @@ class EventStreamer:
                         )
             except Exception as exc:
                 sys.stderr.write(f"[stream] OTLP POST to {url} failed: {exc}\n")
+
+
+def _otlp_readable_events(events: list[TraceEvent]) -> list[TraceEvent]:
+    """Return the events of one session that the OTLP converter can read.
+
+    ``session_to_otlp_genai`` reads the data of the events that
+    ``otlp_genai_data_indexes`` names. Each of those whose data is not a JSON
+    object is left out, with one line on stderr per event in batch order.
+    Leaving an event out changes how the others pair, which can make the
+    converter read another event, so the check repeats on the events that
+    are left. Events whose data the converter never reads are kept.
+    """
+    from .otlp import otlp_genai_data_indexes
+
+    positions = list(range(len(events)))
+    while True:
+        kept = [events[position] for position in positions]
+        unreadable = {
+            index
+            for index in otlp_genai_data_indexes(kept)
+            if not isinstance(kept[index].data, Mapping)
+        }
+        if not unreadable:
+            break
+        positions = [
+            position for index, position in enumerate(positions) if index not in unreadable
+        ]
+    for position in sorted(set(range(len(events))).difference(positions)):
+        sys.stderr.write(left_out_event_warning("stream", events[position]))
+    return kept
+
+
+def _otlp_conversion_failed_line(count: int, exc: Exception) -> str:
+    """Return the stderr line for events the OTLP converter could not convert.
+
+    It names the exception class but never its message, which can quote
+    event data.
+    """
+    if count == 1:
+        noun, result = "1 event", "it was"
+    else:
+        noun, result = f"{count} events", "they were"
+    return (
+        f"[stream] Could not convert {noun} to OTLP spans "
+        f"({type(exc).__name__}); {result} not sent.\n"
+    )
 
 
 PAUSE_EDITOR = "editor"      # .pause-request marker; released when it is removed
@@ -1335,10 +1401,12 @@ def watch_session(
     stream_config: when set, events are pushed in real-time to the configured
     URL as they arrive (push-based streaming).
 
-    An event whose data is not a JSON object is still counted and streamed.
-    When a check would read that data, watch writes one warning to *out* and
-    skips the checks for that event. Compaction checkpoints leave such events
-    out.
+    An event whose data is not a JSON object is still counted and passed to
+    the streamer. When a check would read that data, watch writes one warning
+    to *out* and skips the checks for that event. Compaction checkpoints
+    leave such events out. NDJSON streaming sends them with their data as
+    stored; OTLP streaming leaves them out when its converter would read the
+    data and writes one line to stderr for each (see EventStreamer).
     """
     events_file = store._session_file(session_id, "events.ndjson", "event stream")
     if not events_file.exists():
