@@ -534,7 +534,7 @@ class TestInSessionSubagentAttribution(unittest.TestCase):
         self.assertNotIn("subagents", tree_to_dict(self.node(attributed=False)))
 
     def run_stats(self, attributed):
-        meta = SessionMeta(session_id=self.SID, agent_name="codex", started_at=0.0)
+        meta = SessionMeta(session_id=self.SID, agent_name="codex", started_at=1.0)
         store, tmp = _make_store_with_sessions([(meta, self.events(attributed))])
         self.addCleanup(tmp.cleanup)
         out = io.StringIO()
