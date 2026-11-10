@@ -9,6 +9,7 @@ import json
 import os
 import stat
 import struct
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -17,6 +18,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
+from agent_trace import fileutil
 from agent_trace.assignment import (
     AssignmentError,
     AssignmentCriterion,
@@ -29,9 +31,11 @@ from agent_trace.assignment import (
     _atomic_write_private,
     _canonical_json_bytes,
     _inflate_exact_member,
+    _open_directory_chain,
     _parse_trace,
     _read_regular_nofollow,
     _strict_json_bytes,
+    _validate_no_symlink_ancestors,
     build_assignment_bundle,
     build_score_report,
     cmd_score,
@@ -42,6 +46,7 @@ from agent_trace.assignment import (
     load_assignment_rubric,
 )
 from agent_trace.cli import build_parser
+from agent_trace.fileutil import MAX_TRUSTED_SYMLINKS, trusted_symlink_target
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
 
@@ -528,6 +533,143 @@ class AssignmentScoringTests(unittest.TestCase):
                 self.assertEqual(cmd_share_assignment(args), 0)
             self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
             load_assignment_bundle(output.read_bytes())
+
+
+def _same_directory(test: unittest.TestCase, fd: int, expected: str | Path) -> None:
+    opened = os.fstat(fd)
+    target = os.stat(expected)
+    test.assertEqual((opened.st_dev, opened.st_ino), (target.st_dev, target.st_ino))
+
+
+class TrustedParentSymlinkTests(unittest.TestCase):
+    """Root-owned OS links such as macOS /tmp and /var, with the real policy."""
+
+    def test_directory_chain_follows_root_owned_system_link(self):
+        link = next(
+            (
+                candidate
+                for candidate in ("/tmp", "/var", "/etc", "/bin", "/sbin", "/lib")
+                if trusted_symlink_target(candidate) is not None
+            ),
+            None,
+        )
+        if link is None:
+            self.skipTest("no trusted root-owned symlink in /")
+        fd = _open_directory_chain(link)
+        try:
+            _same_directory(self, fd, os.path.realpath(link))
+        finally:
+            os.close(fd)
+
+    def test_share_and_score_accept_absolute_paths_through_tmp(self):
+        if sys.platform != "darwin" or trusted_symlink_target("/tmp") is None:
+            self.skipTest("needs the root-owned /tmp symlink of macOS")
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            self.assertTrue(directory.startswith("/tmp/"))
+            store_dir = Path(directory) / "traces"
+            store = TraceStore(store_dir)
+            meta = SessionMeta(session_id="assignment-session")
+            store.create_session(meta)
+            output = Path(directory) / "bundles" / "submission.zip"
+            args = argparse.Namespace(
+                trace_dir=str(store_dir), session_id=meta.session_id, output=str(output),
+                stdout=False, open=False, postmortem=False, assignment=True,
+            )
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                self.assertEqual(cmd_share_assignment(args), 0, stderr.getvalue())
+            self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
+            rubric = _write_rubric(directory, _valid_rubric())
+            for submission, compare in ((output, False), (output.parent, True)):
+                with self.subTest(compare=compare):
+                    score_args = argparse.Namespace(
+                        submission=str(submission), rubric=str(rubric),
+                        compare=compare, format="json",
+                    )
+                    stdout, stderr = io.StringIO(), io.StringIO()
+                    with redirect_stdout(stdout), redirect_stderr(stderr):
+                        self.assertEqual(cmd_score(score_args), 0, stderr.getvalue())
+                    self.assertEqual(json.loads(stdout.getvalue())["submission_count"], 1)
+
+
+@unittest.skipIf(os.name == "nt" or not hasattr(os, "symlink"), "POSIX directory descriptors")
+class DirectoryChainSymlinkTests(unittest.TestCase):
+    """Anchored directory walks that trust only the links each test marks."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        # Resolve first so the walk meets only the links each test makes.
+        self.root = Path(os.path.realpath(tmp.name))
+        (self.root / "real" / "sub").mkdir(parents=True)
+        (self.root / "other").mkdir()
+        self.trusted: set[tuple[int, int]] = set()
+        for patcher in (
+            patch.object(fileutil, "_trusts_root_owned_symlinks", return_value=True),
+            patch.object(fileutil, "_symlink_is_trusted", side_effect=self._is_trusted),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _is_trusted(self, link_stat, dir_stat):
+        return (link_stat.st_dev, link_stat.st_ino) in self.trusted
+
+    def _link(self, name: str, target: str, *, trusted: bool) -> Path:
+        path = self.root / name
+        path.symlink_to(target, target_is_directory=True)
+        if trusted:
+            info = os.lstat(path)
+            self.trusted.add((info.st_dev, info.st_ino))
+        return path
+
+    def test_follows_relative_absolute_and_parent_targets(self):
+        (self.root / "nested").mkdir()
+        self._link("relative", "real", trusted=True)
+        self._link("absolute", str(self.root / "real"), trusted=True)
+        self._link("nested/up", "../real", trusted=True)
+        for name in ("relative", "absolute", "nested/up"):
+            with self.subTest(name=name):
+                fd = _open_directory_chain(self.root / name / "sub")
+                try:
+                    _same_directory(self, fd, self.root / "real" / "sub")
+                finally:
+                    os.close(fd)
+
+    def test_refuses_untrusted_link_inside_trusted_target(self):
+        self._link("real/inner", "../other", trusted=False)
+        self._link("outer", "real", trusted=True)
+        self._link("direct", "real/inner", trusted=True)
+        for path in (self.root / "outer" / "inner", self.root / "direct"):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(AssignmentError, "directory has an unsafe component"):
+                    _open_directory_chain(path)
+                with self.assertRaisesRegex(
+                    AssignmentError, "refusing a path with a symlink component"
+                ):
+                    _validate_no_symlink_ancestors(path / "store")
+        _validate_no_symlink_ancestors(self.root / "outer" / "sub")
+
+    def test_creates_only_components_named_by_the_caller(self):
+        self._link("relative", "real", trusted=True)
+        self._link("dangling", "missing", trusted=True)
+        fd = _open_directory_chain(self.root / "relative" / "made", create=True)
+        os.close(fd)
+        self.assertTrue((self.root / "real" / "made").is_dir())
+        with self.assertRaisesRegex(AssignmentError, "directory does not exist"):
+            _open_directory_chain(self.root / "dangling" / "made", create=True)
+        self.assertFalse((self.root / "missing").exists())
+
+    def test_refuses_trusted_link_loop_and_long_chain(self):
+        self._link("loop", "loop", trusted=True)
+        with self.assertRaisesRegex(AssignmentError, "directory has an unsafe component"):
+            _open_directory_chain(self.root / "loop")
+        previous = "real"
+        for index in range(MAX_TRUSTED_SYMLINKS):
+            previous = self._link(f"hop{index}", previous, trusted=True).name
+        os.close(_open_directory_chain(self.root / previous))
+        self._link("one-more", previous, trusted=True)
+        with self.assertRaisesRegex(AssignmentError, "directory has an unsafe component"):
+            _open_directory_chain(self.root / "one-more")
 
 
 if __name__ == "__main__":

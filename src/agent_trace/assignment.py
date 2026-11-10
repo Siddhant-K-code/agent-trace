@@ -34,7 +34,13 @@ from typing import Any, Iterable
 
 from . import __version__
 from .eval.config import _parse_yaml_value
-from .fileutil import lock_descriptor, unlock_descriptor
+from .fileutil import (
+    MAX_TRUSTED_SYMLINKS,
+    has_untrusted_symlink,
+    lock_descriptor,
+    trusted_symlink_target,
+    unlock_descriptor,
+)
 from .models import EventType, SessionMeta, TraceEvent
 from .store import TraceStore, validate_stored_id
 
@@ -369,14 +375,19 @@ def _number(
 def _validate_no_symlink_ancestors(path: Path) -> None:
     absolute = path.absolute()
     for candidate in (absolute, *absolute.parents):
-        if candidate.is_symlink():
+        if candidate.is_symlink() and has_untrusted_symlink(candidate):
             raise AssignmentError("refusing a path with a symlink component")
         if candidate.exists() and not candidate.is_dir() and candidate != absolute:
             raise AssignmentError("path ancestor is not a directory")
 
 
 def _open_directory_chain(path_value: str | Path, *, create: bool = False) -> int:
-    """Open every absolute path component relative to its anchored parent fd."""
+    """Open every absolute path component relative to its anchored parent fd.
+
+    A symlink is followed only when ``trusted_symlink_target`` trusts it, and
+    the components of its target are opened the same way.  Those components
+    may use "..", but a missing one is never created.
+    """
     path = Path(path_value).absolute()
     parts = path.parts
     if not parts or not path.is_absolute():
@@ -390,14 +401,21 @@ def _open_directory_chain(path_value: str | Path, *, create: bool = False) -> in
         current_fd = os.open(path.anchor, flags)
     except OSError as exc:
         raise AssignmentError("directory root could not be opened safely") from exc
+    # A stack of (component, from_link) pairs, popped in path order.
+    pending = [(part, False) for part in reversed(parts[1:])]
+    hops = 0
     try:
-        for part in parts[1:]:
-            if part in {"", ".", ".."}:
+        while pending:
+            part, from_link = pending.pop()
+            if from_link:
+                if part in {"", "."}:
+                    continue
+            elif part in {"", ".", ".."}:
                 raise AssignmentError("directory path contains an unsafe component")
             try:
                 next_fd = os.open(part, flags, dir_fd=current_fd)
             except FileNotFoundError:
-                if not create:
+                if not create or from_link:
                     raise AssignmentError("directory does not exist")
                 try:
                     os.mkdir(part, 0o700, dir_fd=current_fd)
@@ -405,7 +423,21 @@ def _open_directory_chain(path_value: str | Path, *, create: bool = False) -> in
                 except OSError as exc:
                     raise AssignmentError("directory could not be created safely") from exc
             except OSError as exc:
-                raise AssignmentError("directory has an unsafe component") from exc
+                hops += 1
+                target = trusted_symlink_target(part, dir_fd=current_fd)
+                if target is None or hops > MAX_TRUSTED_SYMLINKS:
+                    raise AssignmentError("directory has an unsafe component") from exc
+                if target.startswith("/"):
+                    try:
+                        next_fd = os.open("/", flags)
+                    except OSError as root_exc:
+                        raise AssignmentError(
+                            "directory root could not be opened safely"
+                        ) from root_exc
+                    os.close(current_fd)
+                    current_fd = next_fd
+                pending.extend((piece, True) for piece in reversed(target.split("/")))
+                continue
             os.close(current_fd)
             current_fd = next_fd
         return current_fd
