@@ -569,13 +569,15 @@ Validate a session ID, session prefix, or session directory against the public
 [`meta.json` and event schemas](trace-schema.md), relationship rules, ordering
 policy, summary consistency, and hash-chain states. The default target is the
 latest session. Validation is read-only and exits `0` only for a conformant
-`valid` report.
+`valid` report. The path to the session may pass through root-owned operating
+system links such as `/tmp` on macOS. Other symlinks on it are refused; see
+[Symlinked parent directories](#symlinked-parent-directories).
 
 | Flag | Description |
 |---|---|
 | `--format text\|json` | Human-readable result or the versioned validation report |
 | `--allow-active` | Treat absent terminal outcomes as in-flight evidence instead of finalized evidence |
-| `--replay-baseline FILE` | Compare tool-call behavior with an existing regression fixture |
+| `--replay-baseline FILE` | Compare tool-call behavior with an existing regression fixture; symbolic links are rejected, and a symlink in a parent directory must be [root-owned](#symlinked-parent-directories) |
 | `--corpus` | Validate all packaged [Agent Evidence Corpus](agent-evidence-corpus.md) cases and exact expected labels |
 
 The validator distinguishes missing usage from explicit zero usage. It accepts
@@ -1517,10 +1519,11 @@ Exit status is 1 when a store cannot be scanned or a write fails, otherwise 0.
 
 ## Symlinked parent directories
 
-`share --assignment`, `score`, and `compliance-report --output` refuse a path
-when one of its directories is a symbolic link, because a cloned repository or
-an unpacked archive can plant links that move where these commands read or
-write. They follow a symlink in a parent directory only when all of these hold:
+`share --assignment`, `score`, `compliance-report --output`, and `validate`
+refuse a path when one of its directories is a symbolic link, because a cloned
+repository or an unpacked archive can plant links that move where these
+commands read or write. They follow a symlink in a parent directory only when
+all of these hold:
 
 - root owns the symlink;
 - root owns the directory that holds it;
@@ -1531,9 +1534,16 @@ so absolute paths under the default macOS `TMPDIR` work. The components of a
 trusted symlink's target are checked by the same rule. A symlink that the
 current user owns is always refused. No symlink is trusted on Windows, where
 Python reports owner ID 0 for every file, or when the command runs as root.
+
+For `validate`, the rule covers the path to the session directory, whether
+`TARGET` names the directory or the session is found by ID, prefix, or as the
+latest session under `--trace-dir` or `AGENT_TRACE_DIR`. It also covers the
+directories that hold the `--replay-baseline` file. When this rule refuses a
+path, `validate` reports the session as `invalid` and exits 1.
+
 These are still refused when they are symbolic links, even root-owned ones:
-the output file, the rubric, the submission bundle, and the trace store
-directory itself.
+the output file, the rubric, the submission bundle, the replay baseline file,
+and the trace store directory that `share --assignment` reads.
 
 ---
 
