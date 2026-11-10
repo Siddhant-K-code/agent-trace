@@ -7,12 +7,14 @@ Usage:
     from agent_trace.integrations import instrument_openai_agents
     instrument_openai_agents()
 
-Or via environment variable (no code changes):
-    AGENT_STRACE_AUTO_INSTRUMENT=openai-agents,langchain python my_agent.py
-
-Or via CLI:
+Or via CLI (no code changes):
     agent-strace auto --framework openai-agents -- python my_agent.py
     agent-strace auto --detect -- python my_agent.py
+
+Or via environment variable, which is read only when agent_trace.auto is
+imported, so the program must import it before any framework:
+    import agent_trace.auto   # first line of my_agent.py
+    AGENT_STRACE_AUTO_INSTRUMENT=openai-agents,langchain python my_agent.py
 
 Each integration ships as an optional extra:
     pip install agent-strace[openai-agents]

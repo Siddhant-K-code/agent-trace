@@ -2984,9 +2984,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def cmd_auto(args: argparse.Namespace) -> int:
-    """Run a command with auto-instrumentation applied."""
+    """Run a command with every Python interpreter it starts auto-instrumented.
+
+    See :mod:`agent_trace.auto_bootstrap` for how the child is instrumented.
+    """
     import subprocess
-    import os
+
+    from . import auto_bootstrap
 
     command = getattr(args, "server_cmd", [])
     # Strip leading '--' separator
@@ -3004,29 +3008,17 @@ def cmd_auto(args: argparse.Namespace) -> int:
     else:
         env_val = "detect"
 
-    env = os.environ.copy()
-    env["AGENT_STRACE_AUTO_INSTRUMENT"] = env_val
-
-    # Inject agent_trace.auto into PYTHONSTARTUP or sitecustomize is complex;
-    # instead set PYTHONPATH and use -c to import auto before the script.
-    # Simplest approach: set env var and let the user's code import agent_trace.auto,
-    # or use python -c "import agent_trace.auto; exec(open(script).read())"
-    # For subprocess execution, we prepend the auto-import via PYTHONSTARTUP.
-    import tempfile
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
-        f.write("import agent_trace.auto\n")
-        startup_path = f.name
-
-    env["PYTHONSTARTUP"] = startup_path
-
+    bootstrap_dir = auto_bootstrap.create_bootstrap_dir()
     try:
+        env = auto_bootstrap.child_env(os.environ, bootstrap_dir, env_val)
+        # The global --trace-dir names the store the child's events go to.
+        trace_dir = getattr(args, "trace_dir", None)
+        if trace_dir and trace_dir != default_trace_dir():
+            env["AGENT_TRACE_DIR"] = os.path.abspath(trace_dir)
         result = subprocess.run(command, env=env)
         return result.returncode
     finally:
-        try:
-            os.unlink(startup_path)
-        except OSError:
-            pass
+        auto_bootstrap.remove_bootstrap_dir(bootstrap_dir)
 
 
 _TELEMETRY_SUBCOMMAND_ATTRS = (

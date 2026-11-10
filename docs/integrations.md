@@ -13,11 +13,27 @@ agent-strace auto --framework langchain -- python my_agent.py
 # Auto-detect all installed frameworks
 agent-strace auto --detect -- python my_agent.py
 
-# Via environment variable (no CLI wrapper needed)
+# Modules, console scripts, and shebang scripts work the same way
+agent-strace auto --detect -- python -m my_package
+agent-strace auto --detect -- my-agent-cli --some-flag
+```
+
+[How `agent-strace auto` works](#how-agent-strace-auto-works) describes what it changes in the command's environment and its limits.
+
+Without the CLI wrapper, set `AGENT_STRACE_AUTO_INSTRUMENT` and import `agent_trace.auto` in your program before it imports any framework. The variable is read only when that module is imported, so setting it on its own instruments nothing.
+
+```python
+# my_agent.py: the first import, before any framework import
+import agent_trace.auto
+```
+
+```bash
 AGENT_STRACE_AUTO_INSTRUMENT=langchain,litellm python my_agent.py
 ```
 
-Or in code:
+`AGENT_STRACE_AUTO_INSTRUMENT` takes a comma-separated list of `openai-agents`, `langchain` (or `langgraph`), `litellm`, `anthropic`, `openai`, `strands`, and `crewai`, or `detect` to instrument every installed framework.
+
+Or call an instrument function directly in code:
 
 ```python
 from agent_trace.integrations import instrument_langchain
@@ -45,6 +61,29 @@ pip install agent-strace[all-integrations]
 ```
 
 Each integration is an optional extra. The core package stays dependency-free. See [ADR-0003](../ADRs/0003-zero-runtime-dependencies.md).
+
+---
+
+## How `agent-strace auto` works
+
+`agent-strace auto [--framework NAME | --detect] -- <command>` runs `<command>` with two changes to its environment:
+
+- `AGENT_STRACE_AUTO_INSTRUMENT` is set to the `--framework` value (one name or a comma-separated list), or to `detect` when `--detect` is given or no framework is named.
+- A private temporary directory holding a `sitecustomize.py` is put first on `PYTHONPATH`. Existing `PYTHONPATH` entries are kept after it. The directory is deleted when the command exits.
+
+Python imports `sitecustomize` while it starts, before any user code. So every Python interpreter the command starts is instrumented: `python my_agent.py`, `python -m my_package`, console scripts and shebang scripts that run Python, and Python subprocesses those start while the command runs. In each interpreter the hook:
+
+1. Runs the `sitecustomize` module it shadows, if there is one (for example a venv's or a Linux distribution's), so existing start-up code still runs.
+2. Imports `agent_trace.auto`, which instruments the frameworks named in `AGENT_STRACE_AUTO_INSTRUMENT`. If the interpreter has agent-strace installed, that copy is used. Otherwise the package is loaded from the agent-strace installation that ran `auto`, without adding that directory to `sys.path`, so the interpreter's own packages are never shadowed. A venv Python therefore needs no extra install. agent-strace supports Python 3.10 and newer; an older interpreter may fail to load it.
+3. If `agent_trace` cannot be imported, prints one `[agent-strace] auto-instrumentation disabled ...` line on stderr and lets the program run uninstrumented.
+
+`agent-strace auto` exits with the command's exit code. Events go to `$AGENT_TRACE_DIR`, or to `.agent-traces` in the program's working directory. `agent-strace --trace-dir DIR auto -- <command>` sets `AGENT_TRACE_DIR` for the command.
+
+Limits:
+
+- Interpreters started with `-E`, `-I`, or `-S`, and embedded interpreters that ignore `PYTHONPATH`, are not instrumented.
+- Frameworks are instrumented at start-up, so they must be importable then. A framework the program only makes importable later, for example by editing `sys.path`, is not instrumented; call its `instrument_*` function in code instead.
+- A non-Python command is not instrumented itself, but the Python processes it starts are.
 
 ---
 
