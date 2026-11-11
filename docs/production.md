@@ -205,28 +205,67 @@ Backend metadata and limitations are in
 
 ## Live OTLP streaming
 
-Stream events to an OTLP endpoint in real-time as the session runs, rather than exporting after it ends. Use `watch --stream-to` to enable:
+Stream spans to an OTLP/HTTP receiver while the session runs, rather than exporting after it ends. Pass the receiver's base URL to `watch --stream-to` and add `--stream-otlp`:
 
 ```bash
-agent-strace watch --stream-to http://localhost:4318/v1/traces
+agent-strace watch --stream-to http://localhost:4318 --stream-otlp
 ```
 
-Each tool call is flushed as a span immediately on completion. The session root span is closed when the session ends or the watchdog kills it.
+Without `--stream-otlp`, `--stream-to` POSTs the raw events as NDJSON to the URL exactly as given. That suits the [agent-strace collector](server.md#live-streaming-from-watch), not an OTLP receiver.
 
-Configure batch size and flush interval:
+With `--stream-otlp`, watch drops trailing slashes from the URL path, then appends `/v1/traces` unless the path already ends with it. The query string is kept:
+
+| `--stream-to` | Spans are POSTed to |
+|---|---|
+| `http://localhost:4318` | `http://localhost:4318/v1/traces` |
+| `http://localhost:4318/v1/traces` | `http://localhost:4318/v1/traces` |
+| `https://otel.example.com/api/public/otel/` | `https://otel.example.com/api/public/otel/v1/traces` |
+| `https://otel.example.com/ingest?team=a` | `https://otel.example.com/ingest/v1/traces?team=a` |
+
+Watch sends events in batches: when `--stream-batch-size` events are waiting, when `--stream-flush-interval` seconds have passed since the last POST, and when watch stops. Each POST carries only the spans built from its own batch, so the backend receives the session in pieces:
+
+- Every POST includes the session root span again, with the same trace ID and span ID. A backend may show it more than once or keep only one copy.
+- A tool call whose call and result land in different batches arrives as two spans, one from each batch.
+
+For one complete set of spans per session, export it after it ends with `agent-strace export --format otlp-genai` (see [Per-backend setup](#per-backend-setup)).
+
+Watch sends no authentication headers and has no flag to add them, so it cannot stream straight to a hosted backend that needs an API key, such as Honeycomb. A local receiver that needs no key, such as Jaeger or the Datadog Agent's OTLP receiver, works directly. For a hosted backend, run a local [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/) that adds the key and forwards the spans:
+
+```yaml
+# otel-collector.yaml
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 127.0.0.1:4318
+exporters:
+  otlphttp:
+    endpoint: https://api.honeycomb.io
+    headers:
+      x-honeycomb-team: ${env:HONEYCOMB_API_KEY}
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [otlphttp]
+```
 
 ```bash
-agent-strace watch \
-  --stream-to https://api.honeycomb.io/v1/traces \
-  --stream-batch-size 10 \
-  --stream-flush-interval 5
+agent-strace watch --stream-to http://127.0.0.1:4318 --stream-otlp
 ```
 
 | Flag | Default | Description |
 |---|---|---|
-| `--stream-to URL` | none | OTLP HTTP endpoint to stream to |
-| `--stream-batch-size N` | `10` | Flush after N events |
-| `--stream-flush-interval S` | `5` | Flush every S seconds regardless of batch size |
+| `--stream-to URL` | none | `http://` or `https://` URL to stream to |
+| `--stream-otlp` | off | POST OTLP/HTTP JSON spans to the `/v1/traces` path under `--stream-to` instead of NDJSON to the URL itself |
+| `--stream-batch-size N` | `10` | Send once N events are waiting |
+| `--stream-flush-interval S` | `2` | Send waiting events once S seconds have passed since the last POST, even if the batch is not full. `0` sends each event at once |
+
+Watch checks `--stream-to` and `--stream-flush-interval` before it looks up the session or writes anything. It refuses a URL that does not start with `http://` or `https://`, has no host, has a bad port, contains spaces or control characters, or carries a user name or password. It also refuses a flush interval that is negative, infinite or NaN. Each refusal is one line, such as `[watch] invalid --stream-to value: it must not contain a user name or password`, and exit status 1.
+
+A failed POST never stops watch. It prints one line to stderr, such as `[stream] OTLP POST to https://otel.example.com failed: HTTP Error 500: Internal Server Error`, and goes on with the next batch. The failed batch is not sent again. These lines, and the `[watch] Streaming events to` line at startup, name only the URL's scheme, host and port, never its path, query or user info. Watch does not follow redirects: a 3xx answer is a failed POST whose line says so, so pass the final URL. Each POST times out after 10 seconds.
+
+When watch stops, it waits up to 15 seconds for the last POST to finish. If that takes more than a second, it prints `[stream] Waiting up to 14s more for the last events to be sent; press Ctrl-C to stop waiting.` If the wait runs out or you press Ctrl-C, it prints one line such as `[stream] Stopped waiting; 3 events were not confirmed sent.` and exits as it would have otherwise.
 
 ---
 

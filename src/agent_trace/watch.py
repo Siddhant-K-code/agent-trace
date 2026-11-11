@@ -22,6 +22,7 @@ import argparse
 import fnmatch
 import hashlib
 import json
+import math
 import os
 import queue
 import re
@@ -30,6 +31,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 from collections import Counter, deque
 from collections.abc import Mapping
@@ -456,10 +459,30 @@ class WatcherConfig:
 # Push-based event streaming
 # ---------------------------------------------------------------------------
 
+# Seconds one stream POST may take before it fails.
+_STREAM_POST_TIMEOUT = 10.0
+# Seconds EventStreamer.stop() waits for the worker. It is longer than one
+# POST may take, so a slow collector still receives the last batch.
+_STREAM_STOP_TIMEOUT = 15.0
+# Once stop() has waited this many seconds, it says how long it will wait.
+_STREAM_STOP_NOTICE_AFTER = 1.0
+# Longest single wait for the next event. queue.get raises OverflowError for
+# a timeout above threading.TIMEOUT_MAX, so a huge flush interval must never
+# reach it unchanged.
+_STREAM_MAX_QUEUE_WAIT = 60.0
+
+
 @dataclass
 class StreamConfig:
-    """Configuration for push-based event streaming."""
-    url: str = ""                    # webhook URL or OTLP collector endpoint
+    """Configuration for push-based event streaming.
+
+    NDJSON mode POSTs to ``url`` unchanged. OTLP mode (``otlp=True``) treats
+    ``url`` as a base URL: trailing slashes are dropped from its path and
+    ``/v1/traces`` is appended unless the path already ends with it. The
+    query string is kept. Stream messages name only the URL's
+    scheme://host[:port], never its user info, path, query or fragment.
+    """
+    url: str = ""                    # NDJSON endpoint or OTLP/HTTP base URL
     batch_size: int = 10             # max events per POST
     flush_interval: float = 1.0     # max seconds between flushes
     headers: dict[str, str] = field(default_factory=dict)
@@ -476,12 +499,157 @@ class StreamConfig:
         return cls(url=url, headers=headers or {}, otlp=otlp)
 
 
+def _stream_endpoint(url: str) -> str:
+    """Return the scheme://host[:port] that stream messages may name.
+
+    User info, path, query and fragment can carry tokens, so messages never
+    show them. Returns "" when no host can be read; the message then names
+    no endpoint.
+    """
+    if not isinstance(url, str):
+        return ""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname
+        port = parts.port
+    except ValueError:
+        return ""
+    if not parts.scheme or not host or not host.isprintable() or " " in host:
+        return ""
+    if ":" in host:
+        host = f"[{host}]"
+    return f"{parts.scheme}://{host}" + ("" if port is None else f":{port}")
+
+
+def _otlp_traces_url(url: str) -> str:
+    """Return the OTLP/HTTP traces URL for a stream base URL.
+
+    Trailing slashes are dropped from the path, then ``/v1/traces`` is
+    appended unless the path already ends with it. The query and the rest
+    of the URL are kept as given. The URL is split by hand because urlsplit
+    drops tab, CR and LF, which would send to a URL the user did not give.
+    """
+    rest, hash_mark, fragment = url.partition("#")
+    rest, question_mark, query = rest.partition("?")
+    after_scheme = rest.find(":") + 1
+    if rest.startswith("//", after_scheme):
+        slash = rest.find("/", after_scheme + 2)
+        path_start = len(rest) if slash < 0 else slash
+    else:
+        path_start = after_scheme
+    path = rest[path_start:].rstrip("/")
+    if not path.endswith("/v1/traces"):
+        path += "/v1/traces"
+    return f"{rest[:path_start]}{path}{question_mark}{query}{hash_mark}{fragment}"
+
+
+def _stream_opener() -> urllib.request.OpenerDirector:
+    """Return an opener for stream POSTs that never follows a redirect.
+
+    urlopen re-sends a POST answered with 301, 302 or 303 as a GET with no
+    body, so the batch is lost. With no redirect handler every 3xx raises
+    HTTPError instead. Only http and https URLs can be opened.
+    """
+    opener = urllib.request.OpenerDirector()
+    handlers: list[urllib.request.BaseHandler] = [
+        urllib.request.ProxyHandler(),
+        urllib.request.UnknownHandler(),
+        urllib.request.HTTPHandler(),
+        urllib.request.HTTPDefaultErrorHandler(),
+        urllib.request.HTTPErrorProcessor(),
+    ]
+    if hasattr(urllib.request, "HTTPSHandler"):
+        handlers.append(urllib.request.HTTPSHandler())
+    for handler in handlers:
+        opener.add_handler(handler)
+    return opener
+
+
+def _stream_error_detail(exc: BaseException) -> str:
+    """Describe why a stream POST failed without quoting its URL.
+
+    Keeps the status and reason of an HTTP error and the reason of a network
+    error. Other exceptions (InvalidURL, ValueError, UnicodeEncodeError and
+    more) can repeat the URL, so only their class name is given.
+    """
+    if isinstance(exc, urllib.error.HTTPError):
+        detail = f"HTTP Error {exc.code}: {exc.reason}"
+        if 300 <= exc.code < 400:
+            detail += " (redirects are not followed; give the final URL)"
+        return detail
+    if isinstance(exc, urllib.error.URLError):
+        return str(exc.reason)
+    return type(exc).__name__
+
+
+def _stream_queue_wait(interval: float, elapsed: float) -> float:
+    """Return how long the stream worker may wait for the next event.
+
+    The wait never exceeds _STREAM_MAX_QUEUE_WAIT, so an infinite, NaN or
+    huge flush interval means "send on batch size or at stop" instead of
+    killing the worker.
+    """
+    remaining = interval - elapsed
+    if not remaining < _STREAM_MAX_QUEUE_WAIT:
+        return _STREAM_MAX_QUEUE_WAIT
+    return max(0.01, remaining)
+
+
+def _stream_unconfirmed_line(count: int) -> str:
+    """Return the line stop() writes when it stops waiting for the worker."""
+    noun = "1 event was" if count == 1 else f"{count} events were"
+    return f"[stream] Stopped waiting; {noun} not confirmed sent.\n"
+
+
+def _stream_to_problem(url: str) -> str | None:
+    """Return why *url* cannot be a --stream-to value, or None if it can.
+
+    The reason never repeats any part of the URL.
+    """
+    if any(ch == " " or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in url):
+        return "it must not contain spaces or control characters"
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname
+    except ValueError:
+        return "it is not a valid URL"
+    if parts.scheme not in ("http", "https"):
+        return "it must start with http:// or https://"
+    if not host:
+        return "it has no host"
+    if "@" in parts.netloc:
+        return "it must not contain a user name or password"
+    try:
+        parts.port
+    except ValueError:
+        return "its port must be a number from 0 to 65535"
+    return None
+
+
+def _stream_flush_interval_problem(seconds: float) -> str | None:
+    """Return why *seconds* cannot be a --stream-flush-interval, or None."""
+    if math.isnan(seconds) or math.isinf(seconds):
+        return "it must be a finite number of seconds"
+    if seconds < 0:
+        return "it must not be negative"
+    return None
+
+
 class EventStreamer:
     """Background thread that batches and POSTs events to a remote URL.
 
     Thread-safe: events are enqueued from the watch loop and flushed by a
-    dedicated daemon thread. Failures are logged to stderr but never block
-    the watch loop.
+    dedicated daemon thread. A batch is sent when it holds batch_size events,
+    when flush_interval seconds have passed since the last flush, and at
+    stop(). An infinite, NaN or huge flush_interval sends only on batch size
+    and at stop().
+
+    Each POST may take up to _STREAM_POST_TIMEOUT seconds and never follows
+    a redirect. A failed POST, a 3xx, or a status other than 200 or 202
+    gives one line on stderr, and the worker goes on with the next batch,
+    even when the URL cannot be used at all. These lines name only the
+    URL's scheme://host[:port] (see :func:`_stream_endpoint`) and never
+    quote an exception message that can repeat the URL.
 
     NDJSON mode sends every event with its data as stored. OTLP mode
     converts each session's events to spans. It leaves out each event whose
@@ -493,6 +661,15 @@ class EventStreamer:
     def __init__(self, config: StreamConfig) -> None:
         self.config = config
         self._queue: queue.Queue[TraceEvent | None] = queue.Queue()
+        # _handed counts the events enqueue() accepted. _settled counts those
+        # whose POST finished or that a stderr line already reported. Both
+        # change under _lock, so stop() can count the events not confirmed
+        # sent without counting a reported event twice.
+        self._lock = threading.Lock()
+        self._handed = 0
+        self._settled = 0
+        self._abandoned = False
+        self._done = threading.Event()
         self._thread = threading.Thread(target=self._worker, daemon=True)
         self._thread.start()
 
@@ -501,20 +678,69 @@ class EventStreamer:
         if self.config.event_types:
             if event.event_type.value not in self.config.event_types:
                 return
+        with self._lock:
+            self._handed += 1
         self._queue.put(event)
 
     def stop(self) -> None:
-        """Signal the worker to flush and exit."""
-        self._queue.put(None)  # sentinel
-        self._thread.join(timeout=5.0)
+        """Send the remaining events and wait for the worker to finish.
+
+        Waits up to _STREAM_STOP_TIMEOUT seconds, longer than one POST may
+        take. If the wait lasts _STREAM_STOP_NOTICE_AFTER seconds, one line
+        says how much longer it may last and that Ctrl-C stops it. If the
+        worker is still busy when the wait ends or Ctrl-C stops it, one line
+        gives the number of events not confirmed sent, and the worker writes
+        nothing more. Ctrl-C during the wait never raises KeyboardInterrupt.
+        """
+        start = time.monotonic()
+        limit = _STREAM_STOP_TIMEOUT
+        notice_after = min(_STREAM_STOP_NOTICE_AFTER, limit)
+        try:
+            self._queue.put(None)  # sentinel: send what is left, then exit
+            if not self._wait_until(start + notice_after) and limit > notice_after:
+                seconds = max(1, math.ceil(limit - (time.monotonic() - start)))
+                sys.stderr.write(
+                    f"[stream] Waiting up to {seconds}s more for the last events "
+                    "to be sent; press Ctrl-C to stop waiting.\n"
+                )
+                self._wait_until(start + limit)
+        except KeyboardInterrupt:
+            pass
+        if self._done.is_set():
+            return
+        with self._lock:
+            self._abandoned = True
+            pending = self._handed - self._settled
+        if pending > 0:
+            sys.stderr.write(_stream_unconfirmed_line(pending))
+
+    def _wait_until(self, deadline: float) -> bool:
+        """Wait for the worker until *deadline*; return True if it finished.
+
+        Waiting in short steps lets Ctrl-C stop the wait at once on every
+        platform.
+        """
+        while not self._done.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            self._done.wait(min(remaining, 0.1))
+        return True
 
     def _worker(self) -> None:
+        try:
+            self._send_batches()
+        finally:
+            self._done.set()
+
+    def _send_batches(self) -> None:
         batch: list[TraceEvent] = []
         last_flush = time.time()
 
         while True:
+            interval = self.config.flush_interval
             try:
-                timeout = max(0.01, self.config.flush_interval - (time.time() - last_flush))
+                timeout = _stream_queue_wait(interval, time.time() - last_flush)
                 item = self._queue.get(timeout=timeout)
                 if item is None:
                     # Sentinel: flush remaining and exit
@@ -528,16 +754,49 @@ class EventStreamer:
             now = time.time()
             should_flush = (
                 len(batch) >= self.config.batch_size
-                or (batch and now - last_flush >= self.config.flush_interval)
+                or (batch and now - last_flush >= interval)
             )
             if should_flush:
                 self._flush(batch)
                 batch = []
                 last_flush = now
 
+    def _report(self, text: str | None, count: int) -> None:
+        """Count *count* events as settled and write *text* to stderr.
+
+        Both happen under the lock, so stop() never counts an event that a
+        line already reported. Nothing is written once stop() gave up.
+        """
+        with self._lock:
+            self._settled += count
+            if text and not self._abandoned:
+                sys.stderr.write(text)
+
+    def _post_line(self, label: str, outcome: str) -> str:
+        endpoint = _stream_endpoint(self.config.url)
+        target = f"{label} to {endpoint}" if endpoint else label
+        return f"[stream] {target} {outcome}\n"
+
+    def _post(self, body: bytes, content_type: str, *, otlp: bool) -> int:
+        """POST *body* without following redirects and return the status.
+
+        Raises for a URL that cannot be used, for a network error and for
+        every status outside 2xx, 3xx included.
+        """
+        url = _otlp_traces_url(self.config.url) if otlp else self.config.url
+        headers = {"Content-Type": content_type}
+        headers.update(self.config.headers)
+        request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+        try:
+            with _stream_opener().open(request, timeout=_STREAM_POST_TIMEOUT) as response:
+                return response.status
+        except urllib.error.HTTPError as exc:
+            exc.close()
+            raise
+
     def _flush(self, events: list[TraceEvent]) -> None:
         """POST a batch of events as NDJSON or OTLP JSON spans."""
-        if not events or not self.config.url:
+        if not events:
             return
         if self.config.otlp:
             self._flush_otlp(events)
@@ -545,26 +804,18 @@ class EventStreamer:
             self._flush_ndjson(events)
 
     def _flush_ndjson(self, events: list[TraceEvent]) -> None:
-        body = "\n".join(e.to_json() for e in events).encode("utf-8")
-        headers = {"Content-Type": "application/x-ndjson"}
-        headers.update(self.config.headers)
-        req = urllib.request.Request(
-            self.config.url,
-            data=body,
-            headers=headers,
-            method="POST",
-        )
+        line = None
         try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                if resp.status not in (200, 202):
-                    sys.stderr.write(
-                        f"[stream] POST to {self.config.url} returned {resp.status}\n"
-                    )
+            body = "\n".join(e.to_json() for e in events).encode("utf-8")
+            status = self._post(body, "application/x-ndjson", otlp=False)
+            if status not in (200, 202):
+                line = self._post_line("POST", f"returned {status}")
         except Exception as exc:
-            sys.stderr.write(f"[stream] POST to {self.config.url} failed: {exc}\n")
+            line = self._post_line("POST", f"failed: {_stream_error_detail(exc)}")
+        self._report(line, len(events))
 
     def _flush_otlp(self, events: list[TraceEvent]) -> None:
-        """Convert events to OTLP GenAI spans and POST to /v1/traces.
+        """Convert events to OTLP GenAI spans and POST them to the traces URL.
 
         Each session in the batch is converted and sent on its own. Events
         whose non-object data the converter would read are left out (see
@@ -573,7 +824,6 @@ class EventStreamer:
         gives the number of events not sent and the exception class, never
         its message, and later batches are still sent.
         """
-        import json as _json
         try:
             from .otlp import session_to_otlp_genai
             from .models import SessionMeta as _SessionMeta
@@ -586,45 +836,46 @@ class EventStreamer:
         for ev in events:
             by_session.setdefault(ev.session_id, []).append(ev)
 
-        url = self.config.url.rstrip("/") + "/v1/traces"
         for sid, evs in by_session.items():
             meta = _SessionMeta(agent_name=self.config.service_name)
             meta.session_id = sid
             meta.tenant_id = next((ev.tenant_id for ev in evs if ev.tenant_id), "")
-            unsent = evs
             try:
-                unsent = _otlp_readable_events(evs)
-                if not unsent:
-                    continue
+                kept, left_out_lines = _otlp_readable_events(evs)
+            except Exception as exc:
+                self._report(_otlp_conversion_failed_line(len(evs), exc), len(evs))
+                continue
+            self._report(left_out_lines, len(evs) - len(kept))
+            if not kept:
+                continue
+            try:
                 payload = session_to_otlp_genai(
-                    meta, unsent, service_name=self.config.service_name
+                    meta, kept, service_name=self.config.service_name
                 )
             except Exception as exc:
-                sys.stderr.write(_otlp_conversion_failed_line(len(unsent), exc))
+                self._report(_otlp_conversion_failed_line(len(kept), exc), len(kept))
                 continue
-            body = _json.dumps(payload).encode("utf-8")
-            req_headers = {"Content-Type": "application/json"}
-            req_headers.update(self.config.headers)
-            req = urllib.request.Request(url, data=body, headers=req_headers, method="POST")
+            line = None
             try:
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    if resp.status not in (200, 202):
-                        sys.stderr.write(
-                            f"[stream] OTLP POST to {url} returned {resp.status}\n"
-                        )
+                body = json.dumps(payload).encode("utf-8")
+                status = self._post(body, "application/json", otlp=True)
+                if status not in (200, 202):
+                    line = self._post_line("OTLP POST", f"returned {status}")
             except Exception as exc:
-                sys.stderr.write(f"[stream] OTLP POST to {url} failed: {exc}\n")
+                line = self._post_line("OTLP POST", f"failed: {_stream_error_detail(exc)}")
+            self._report(line, len(kept))
 
 
-def _otlp_readable_events(events: list[TraceEvent]) -> list[TraceEvent]:
+def _otlp_readable_events(events: list[TraceEvent]) -> tuple[list[TraceEvent], str]:
     """Return the events of one session that the OTLP converter can read.
 
     ``session_to_otlp_genai`` reads the data of the events that
     ``otlp_genai_data_indexes`` names. Each of those whose data is not a JSON
-    object is left out, with one line on stderr per event in batch order.
-    Leaving an event out changes how the others pair, which can make the
-    converter read another event, so the check repeats on the events that
-    are left. Events whose data the converter never reads are kept.
+    object is left out. Leaving an event out changes how the others pair,
+    which can make the converter read another event, so the check repeats on
+    the events that are left. Events whose data the converter never reads
+    are kept. The second value is the stderr text for the events left out:
+    one line per event, in batch order.
     """
     from .otlp import otlp_genai_data_indexes
 
@@ -641,9 +892,11 @@ def _otlp_readable_events(events: list[TraceEvent]) -> list[TraceEvent]:
         positions = [
             position for index, position in enumerate(positions) if index not in unreadable
         ]
-    for position in sorted(set(range(len(events))).difference(positions)):
-        sys.stderr.write(left_out_event_warning("stream", events[position]))
-    return kept
+    lines = "".join(
+        left_out_event_warning("stream", events[position])
+        for position in sorted(set(range(len(events))).difference(positions))
+    )
+    return kept, lines
 
 
 def _otlp_conversion_failed_line(count: int, exc: Exception) -> str:
@@ -1398,7 +1651,10 @@ def watch_session(
     it watch still alerts but warns once instead of signalling.
 
     stream_config: when set, events are pushed in real-time to the configured
-    URL as they arrive (push-based streaming).
+    URL as they arrive (push-based streaming). The startup line names only
+    the URL's scheme://host[:port]. When watching ends, EventStreamer.stop()
+    waits for the last POST; Ctrl-C during that wait ends it without a
+    traceback.
 
     An event whose data is not a JSON object is still counted and passed to
     the streamer. When a check would read that data, watch writes one warning
@@ -1437,7 +1693,9 @@ def watch_session(
     if nanny_rules:
         out.write(f"[watch] {len(nanny_rules)} nanny rule(s) active\n")
     if stream_config and stream_config.url:
-        out.write(f"[watch] Streaming events to {stream_config.url}\n")
+        endpoint = _stream_endpoint(stream_config.url)
+        out.write(f"[watch] Streaming events to {endpoint}\n" if endpoint
+                  else "[watch] Streaming events\n")
     if checkpoint_watcher:
         try:
             checkpoint_path = checkpoint_watcher.checkpoint_current()
@@ -1587,6 +1845,21 @@ def watch_session(
 # ---------------------------------------------------------------------------
 
 def cmd_watch(args: argparse.Namespace) -> int:
+    # Check the stream flags before anything is read or written, so a bad
+    # value costs one line and exit status 1.
+    stream_url = getattr(args, "stream_to", None)
+    if stream_url is not None:
+        problem = _stream_to_problem(stream_url)
+        if problem:
+            sys.stderr.write(f"[watch] invalid --stream-to value: {problem}\n")
+            return 1
+        problem = _stream_flush_interval_problem(
+            getattr(args, "stream_flush_interval", 2.0)
+        )
+        if problem:
+            sys.stderr.write(f"[watch] invalid --stream-flush-interval value: {problem}\n")
+            return 1
+
     store = TraceStore(args.trace_dir)
 
     # Load config file if provided
@@ -1702,9 +1975,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
             sys.stderr.write(f"[watch] invalid checkpoint threshold: {exc}\n")
             return 1
 
-    # Build StreamConfig if --stream-to was provided
+    # Build StreamConfig if --stream-to was provided (checked above)
     stream_cfg: StreamConfig | None = None
-    stream_url = getattr(args, "stream_to", None)
     if stream_url:
         stream_cfg = StreamConfig(
             url=stream_url,

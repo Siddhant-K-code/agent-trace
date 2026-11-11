@@ -2140,15 +2140,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_watch.add_argument("--dry-run", action="store_true", dest="dry_run",
                          help="evaluate rules without taking action (for testing)")
     p_watch.add_argument("--stream-otlp", dest="stream_otlp", action="store_true",
-                         help="stream events as OTLP JSON spans instead of raw NDJSON")
+                         help="with --stream-to, send OTLP/HTTP JSON spans instead of NDJSON; "
+                              "/v1/traces is appended to the URL path unless it already "
+                              "ends with it, and the query is kept")
     p_watch.add_argument("--stream-to", dest="stream_to", metavar="URL",
-                         help="push events in real-time to this HTTP endpoint as NDJSON")
+                         help="POST events as NDJSON to this http:// or https:// URL while "
+                              "watching (no user name or password; redirects are not "
+                              "followed; errors name only scheme://host[:port])")
     p_watch.add_argument("--stream-batch-size", dest="stream_batch_size", type=int, default=10,
                          metavar="N",
-                         help="number of events per batch when streaming (default: 10)")
+                         help="max events per POST when streaming (default: 10)")
     p_watch.add_argument("--stream-flush-interval", dest="stream_flush_interval", type=float,
                          default=2.0, metavar="SECONDS",
-                         help="max seconds between flushes when streaming (default: 2.0)")
+                         help="max seconds between POSTs while events wait when streaming "
+                              "(default: 2.0; 0 sends each event at once)")
 
     # cognitive-debt
     p_debt = sub.add_parser(
