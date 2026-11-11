@@ -41,7 +41,7 @@ from .pr_comment import (
     current_branch,
     select_sessions_with_link,
 )
-from .shell_split import is_operator, split_tokens
+from .shell_split import is_operator, split_tokens, write_targets
 from .store import TraceStore
 
 SCHEMA_VERSION = 1
@@ -621,10 +621,23 @@ def _session_cwd(events: Sequence[TraceEvent]) -> str:
     return ""
 
 
+def _cwd_forms(cwd: str) -> tuple[str, ...]:
+    """Return ``cwd`` and its macOS alias (``/tmp`` is ``/private/tmp``)."""
+    if not cwd:
+        return ()
+    if re.match(r"^/private/(?:tmp|var|etc)(?:/|$)", cwd):
+        return cwd, cwd[len("/private"):]
+    if re.match(r"^/(?:tmp|var|etc)(?:/|$)", cwd):
+        return cwd, "/private" + cwd
+    return (cwd,)
+
+
 def _normalise_path(path: str, cwd: str) -> str:
     value = path.strip().replace("\\", "/")
-    if cwd and value.startswith(cwd + "/"):
-        value = value[len(cwd) + 1:]
+    for form in _cwd_forms(cwd):
+        if value.startswith(form + "/"):
+            value = value[len(form) + 1:]
+            break
     while value.startswith("./"):
         value = value[2:]
     return value
@@ -668,6 +681,13 @@ def _is_shell_call(event: TraceEvent) -> bool:
         return False
     tool = str(event.data.get("tool_name") or "").lower()
     return tool in _SHELL_TOOLS or bool(_command_text(event))
+
+
+def _shell_writes(event: TraceEvent, cwd: str) -> list[str]:
+    """Return paths a shell tool call wrote by redirection or ``tee``."""
+    if not _is_shell_call(event):
+        return []
+    return [_normalise_path(path, cwd) for path in write_targets(_command_text(event))]
 
 
 def _strip_prefixes(tokens: Sequence[str]) -> list[str]:
@@ -910,6 +930,7 @@ def assess_scope(sessions: Sequence[_Session]) -> Finding:
     if not sessions:
         return _inconclusive("scope", "No session is linked, so no file activity was found.")
     written: dict[str, bool] = {}
+    explicit: set[str] = set()
     for session in sessions:
         cwd = _session_cwd(session.events)
         files_read, files_written, _ = _file_activity(session.events)
@@ -917,13 +938,20 @@ def assess_scope(sessions: Sequence[_Session]) -> Finding:
         prompts = [
             _prompt_text(e) for e in session.events if e.event_type == EventType.USER_PROMPT
         ]
-        for raw in files_written:
-            path = _normalise_path(raw, cwd)
+        paths = [_normalise_path(raw, cwd) for raw in files_written]
+        explicit.update(paths)
+        for event in session.events:
+            paths.extend(_shell_writes(event, cwd))
+        for path in paths:
             grounded = _named_in(path, prompts) or any(_same_file(path, read) for read in reads)
             written[path] = written.get(path, False) or grounded
-    source = "file and edit tool events, prompt path mentions, file reads"
+    source = (
+        "file and edit tool events, shell redirection targets, "
+        "prompt path mentions, file reads"
+    )
+    shell_only = len(set(written) - explicit)
     if not written:
-        facts = {"files_written": 0, "grounded": 0, "ungrounded": []}
+        facts = {"files_written": 0, "grounded": 0, "ungrounded": [], "shell_writes": 0}
         detail = "No file writes captured. The session may not have edited files."
         return Finding("scope", "inconclusive", "low", source, detail, facts)
     ungrounded = sorted(path for path, grounded in written.items() if not grounded)
@@ -932,19 +960,29 @@ def assess_scope(sessions: Sequence[_Session]) -> Finding:
         "files_written": len(written),
         "grounded": grounded_count,
         "ungrounded": [_display_path(path) for path in ungrounded],
+        "shell_writes": shell_only,
     }
+    # Redirect targets are read from command text, not observed as writes, so
+    # they never raise confidence above what explicit write events give.
+    confidence = "medium" if explicit else "low"
+    if shell_only == len(written):
+        origin = " All writes come from shell redirection."
+    elif shell_only:
+        origin = f" {_plural(shell_only, 'file')} seen only as a shell redirection target."
+    else:
+        origin = ""
     if not ungrounded:
         detail = (
             f"All {_plural(len(written), 'written file')} were named in a prompt "
-            "or read in the session."
+            f"or read in the session.{origin}"
         )
-        return Finding("scope", "present", "medium", source, detail, facts)
+        return Finding("scope", "present", confidence, source, detail, facts)
     detail = (
         f"{grounded_count} of {_plural(len(written), 'written file')} were named in a prompt "
-        "or read in the session."
+        f"or read in the session.{origin}"
     )
     status = "partial" if grounded_count else "missing"
-    return Finding("scope", status, "medium", source, detail, facts)
+    return Finding("scope", status, confidence, source, detail, facts)
 
 
 def _ordered(sessions: Sequence[_Session]) -> list[_Session]:
@@ -969,15 +1007,17 @@ def assess_validation(sessions: Sequence[_Session]) -> Finding:
     shell_calls = 0
     tool_calls = 0
     for rank, session in enumerate(_ordered(sessions)):
+        cwd = _session_cwd(session.events)
         outcomes = _call_outcomes(session.events)
         for index, event in enumerate(session.events):
             key = (float(event.timestamp), rank, index)
             if event.event_type == EventType.TOOL_CALL:
                 tool_calls += 1
             if _is_write(event):
-                writes.append((key, _path_from_event(event)))
+                writes.append((key, _normalise_path(_path_from_event(event), cwd)))
             if not _is_shell_call(event):
                 continue
+            writes.extend((key, path) for path in _shell_writes(event, cwd))
             shell_calls += 1
             command = _command_text(event)
             shape = _shell_shape(command)

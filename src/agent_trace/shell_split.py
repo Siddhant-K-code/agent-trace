@@ -16,6 +16,7 @@ This is a best-effort reading for classification, not a shell parser.
 
 from __future__ import annotations
 
+import posixpath
 import re
 import shlex
 
@@ -129,3 +130,122 @@ def command_segments(command: str) -> list[list[str]]:
     if current:
         segments.append(current)
     return segments
+
+
+_WRITE_REDIRECTS = frozenset({">", ">>", ">|", "&>", "&>>"})
+_UNRESOLVED = re.compile(r"[$`*?\[\]{}]|^~")
+_ABSOLUTE = re.compile(r"^(?:/|[A-Za-z]:/)")
+_ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _literal_path(word: str) -> str | None:
+    if not word or word == "-" or _UNRESOLVED.search(word):
+        return None
+    return word
+
+
+def _resolve(target: str, base: str | None) -> str | None:
+    if target.startswith("/dev/"):
+        return None
+    if _ABSOLUTE.match(target):
+        return posixpath.normpath(target)
+    if base is None:
+        return None
+    return posixpath.normpath(posixpath.join(base, target))
+
+
+def _command_words(words: list[str]) -> list[str]:
+    words = list(words)
+    while words and _ENV_ASSIGN.match(words[0]):
+        words.pop(0)
+    if words and words[0] == "sudo":
+        words.pop(0)
+    return words
+
+
+def _tee_files(words: list[str]) -> list[str]:
+    files: list[str] = []
+    options = True
+    for word in words[1:]:
+        if options and word == "--":
+            options = False
+        elif options and word.startswith("-") and word != "-":
+            continue
+        else:
+            files.append(word)
+    return files
+
+
+def _cd_base(words: list[str], base: str | None) -> str | None:
+    args = [word for word in words[1:] if word not in ("-P", "-L", "-e", "--")]
+    if len(args) != 1:
+        return None
+    target = _literal_path(args[0])
+    if target is None:
+        return None
+    if _ABSOLUTE.match(target):
+        return posixpath.normpath(target)
+    if base is None:
+        return None
+    return posixpath.normpath(posixpath.join(base, target))
+
+
+def write_targets(command: str) -> list[str]:
+    """Return file paths a command writes through redirection or ``tee``.
+
+    Covers ``>``, ``>>``, ``>|``, ``&>``, ``&>>`` (with or without a leading
+    fd number) and ``tee [-a] FILE...``. A path is relative to the directory
+    the command started in, unless an earlier ``cd DIR`` in the same command
+    moved it: an absolute ``DIR`` is applied, a relative literal one is joined,
+    and any other ``cd`` makes later relative targets unknown, so they are
+    dropped. Targets under ``/dev/``, fd duplications such as ``2>&1``, and
+    words with ``$``, backticks, globs, braces, or a leading ``~`` are skipped.
+    Other ways to write files (``sed -i``, ``cp``, interpreters) are not read.
+    """
+    tokens, parsed = split_tokens(command)
+    if not parsed:
+        return []
+    found: list[str] = []
+    base: str | None = ""
+    words: list[str] = []
+    redirects: list[str] = []
+    arithmetic = False
+
+    def finish() -> None:
+        nonlocal base
+        command_words = _command_words(words)
+        if arithmetic or (command_words and command_words[0] == "[["):
+            return
+        targets = list(redirects)
+        name = command_words[0].rsplit("/", 1)[-1] if command_words else ""
+        if name == "tee":
+            targets.extend(_tee_files(command_words))
+        for word in targets:
+            literal = _literal_path(word)
+            path = _resolve(literal, base) if literal else None
+            if path and path not in found:
+                found.append(path)
+        if name == "cd":
+            base = _cd_base(command_words, base)
+
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token in _WRITE_REDIRECTS:
+            following = tokens[index + 1] if index + 1 < len(tokens) else ""
+            if following and not is_operator(following):
+                redirects.append(following)
+                index += 2
+                continue
+        if is_break(token):
+            finish()
+            words, redirects = [], []
+            arithmetic = token.endswith("((")
+        elif is_operator(token):
+            if index + 1 < len(tokens) and not is_operator(tokens[index + 1]):
+                index += 1
+        else:
+            words.append(token)
+        index += 1
+    finish()
+    return found

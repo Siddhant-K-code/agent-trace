@@ -345,6 +345,70 @@ class TestFindings(_StoreCase):
         scope = self.finding(self.report(b.save()), "scope")
         self.assertEqual((scope.status, scope.confidence), ("inconclusive", "low"))
 
+    def test_scope_reads_shell_redirection_in_bash_only_session(self):
+        # Demo shape from a Copilot CLI run: every file is written through
+        # bash heredocs, so the trace has no edit or create events.
+        b = _Builder(self.store, "shellwrite01", agent="copilot")
+        b.prompt("Add a sentence counter in src/pkg/sentences.py with tests")
+        b.tool("bash", command=f"cd {CWD} && ls -R src tests && cat README.md",
+               description="Inspect")
+        b.tool("bash", result="Ran 1 test\n\nOK",
+               command=MULTI_LINE_SCRIPT.replace("/work/demo", CWD),
+               description="Write files and run tests")
+        report = self.report(b.save())
+        scope = self.finding(report, "scope")
+        self.assertEqual((scope.status, scope.confidence), ("partial", "low"))
+        self.assertEqual(scope.facts["files_written"], 3)
+        self.assertEqual(scope.facts["shell_writes"], 3)
+        self.assertEqual(scope.facts["ungrounded"], ["src/pkg/__init__.py", "tests/test_sentences.py"])
+        self.assertIn("shell redirection", scope.detail)
+        self.assertIn("shell redirection", scope.source)
+        self.assertNotIn("scope", [f.name for f in report.failing])
+        text = io.StringIO()
+        format_text(report, text)
+        for fragment in ("cat >", "EOF", "sentence_count", "cd /work"):
+            self.assertNotIn(fragment, text.getvalue())
+            self.assertNotIn(fragment, render_markdown(report))
+            self.assertNotIn(fragment, json.dumps(report.to_dict()))
+
+    def test_shell_writes_do_not_raise_explicit_write_confidence(self):
+        b = _Builder(self.store, "shellmixed01")
+        b.prompt()
+        b.tool("Edit", file_path=f"{CWD}/src/auth.py")
+        b.tool("Bash", command="echo x > notes.txt 2>&1; echo y > /dev/null")
+        scope = self.finding(self.report(b.save()), "scope")
+        self.assertEqual((scope.status, scope.confidence), ("partial", "medium"))
+        self.assertEqual(scope.facts["shell_writes"], 1)
+        self.assertEqual(scope.facts["ungrounded"], ["notes.txt"])
+
+        b = _Builder(self.store, "shellsame001", start=5000)
+        b.prompt()
+        b.tool("Edit", file_path=f"{CWD}/src/auth.py")
+        b.tool("Bash", command="cat src/auth.py | tee -a src/auth.py")
+        scope = self.finding(self.report(b.save()), "scope")
+        self.assertEqual((scope.status, scope.confidence), ("present", "medium"))
+        self.assertEqual((scope.facts["files_written"], scope.facts["shell_writes"]), (1, 0))
+
+    def test_shell_write_target_under_macos_tmp_alias(self):
+        store_cwd = "/private/tmp/demo"
+        b = _Builder(self.store, "shelltmp0001")
+        b.events[0].data["cwd"] = store_cwd
+        b.prompt("fix the app")
+        b.tool("bash", command="cd /tmp/demo && cat > app.py <<'EOF'\nx = 1\nEOF")
+        scope = self.finding(self.report(b.save()), "scope")
+        self.assertEqual((scope.status, scope.confidence), ("missing", "low"))
+        self.assertEqual(scope.facts["ungrounded"], ["app.py"])
+
+    def test_shell_write_after_last_run_marks_validation_stale(self):
+        b = _Builder(self.store, "shellstale01")
+        b.prompt()
+        b.tool("Bash", result="exit_code: 0", command="pytest")
+        b.tool("Bash", command="cat > src/auth.py <<'EOF'\npass\nEOF")
+        validation = self.finding(self.report(b.save()), "validation")
+        self.assertEqual(validation.status, "partial")
+        self.assertEqual(validation.facts["writes_after_last_run"], 1)
+        self.assertEqual(validation.facts["latest"][0]["changed_after"], 1)
+
     def test_rationale_missing_when_provider_captures_prompts(self):
         b = _Builder(self.store, "noprompt0001")
         b.tool("Bash", command="ls")

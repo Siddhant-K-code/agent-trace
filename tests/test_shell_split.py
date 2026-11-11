@@ -14,6 +14,7 @@ from agent_trace.shell_split import (
     split_tokens,
     strip_comments,
     strip_heredocs,
+    write_targets,
 )
 
 
@@ -90,3 +91,80 @@ class TestIsTestCommand(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestWriteTargets(unittest.TestCase):
+    def test_heredoc_writes_after_absolute_cd(self):
+        command = (
+            "cd /work/demo && cat > src/pkg/a.py <<'EOF'\n"
+            "x = 1 > 0\n"
+            "print('>', file=out)\n"
+            "EOF\n"
+            "cat >> tests/test_a.py <<EOF\n"
+            "EOF\n"
+            "python3 -m unittest 2>&1 | tail -4"
+        )
+        self.assertEqual(
+            write_targets(command), ["/work/demo/src/pkg/a.py", "/work/demo/tests/test_a.py"]
+        )
+
+    def test_redirect_forms(self):
+        cases = {
+            "echo hi > out.txt": ["out.txt"],
+            "echo hi >> log.txt": ["log.txt"],
+            "echo hi 1>one.txt": ["one.txt"],
+            "make &> all.log": ["all.log"],
+            "make &>> all.log": ["all.log"],
+            "echo hi >| clobber.txt": ["clobber.txt"],
+            "echo a>b": ["b"],
+            "cat < in.txt > out.txt": ["out.txt"],
+            "echo > './my file.txt'": ["my file.txt"],
+            'echo > "/abs/dir/x.md"': ["/abs/dir/x.md"],
+        }
+        for command, expected in cases.items():
+            with self.subTest(command=command):
+                self.assertEqual(write_targets(command), expected)
+
+    def test_tee(self):
+        self.assertEqual(write_targets("echo x | tee a.txt"), ["a.txt"])
+        self.assertEqual(
+            write_targets("echo x | tee -a a.txt b.txt > /dev/null"), ["a.txt", "b.txt"]
+        )
+        self.assertEqual(write_targets("echo x | sudo tee --append /etc/hosts"), ["/etc/hosts"])
+        self.assertEqual(write_targets("echo x | tee"), [])
+
+    def test_ignored_targets(self):
+        for command in (
+            "pytest 2>&1",
+            "echo hi >&2",
+            "ls > /dev/null 2>&1",
+            "ls &> /dev/null",
+            "echo > /dev/stdout; echo > /dev/stderr",
+            "echo > $OUT",
+            'echo > "$DIR/x"',
+            "echo > `mktemp`",
+            "echo > *.txt",
+            "echo > file{1,2}",
+            "echo > ~/x",
+            "(( a > b ))",
+            "[[ a > b ]]",
+            "python -c 'print(1 > 0)'",
+            "awk '$1 > 5' data.txt",
+            "sed -i s/a/b/ f.txt && cp a b && mv c d",
+            "echo 'unbalanced > out.txt",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(write_targets(command), [])
+
+    def test_fd_duplication_does_not_hide_a_file_target(self):
+        self.assertEqual(write_targets("pytest > out.txt 2>&1"), ["out.txt"])
+        self.assertEqual(write_targets("pytest 2>&1 > out.txt"), ["out.txt"])
+
+    def test_cd_prefix(self):
+        self.assertEqual(write_targets("cd sub && echo > a.txt"), ["sub/a.txt"])
+        self.assertEqual(
+            write_targets("cd /a/b && cd ../c && echo > ../d.txt"), ["/a/d.txt"]
+        )
+        self.assertEqual(write_targets("cd $X && echo > a.txt; echo > /abs/b.txt"), ["/abs/b.txt"])
+        self.assertEqual(write_targets("cd - && echo > a.txt"), [])
+        self.assertEqual(write_targets("echo > a.txt; cd /x"), ["a.txt"])
