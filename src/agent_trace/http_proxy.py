@@ -25,6 +25,7 @@ import contextlib
 import http.client
 import json
 import socket
+import ssl
 import sys
 import threading
 import time
@@ -51,6 +52,34 @@ def _shutdown_socket(sock: socket.socket) -> None:
         sock.shutdown(socket.SHUT_RDWR)
     except OSError:
         pass
+
+
+class _UpstreamHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS upstream connection whose TLS handshake can be interrupted.
+
+    http.client wraps and handshakes in one step, so a server that accepts
+    TCP but never answers the handshake blocks connect() on a socket nobody
+    can reach. This connection hands the TLS socket to ``watch`` before the
+    handshake, so closing the proxy shuts it down.
+
+    Certificates and host names are verified with
+    ``ssl.create_default_context()``, as http.client does by default.
+    """
+
+    def __init__(self, host: str, port: int, watch: Callable[[socket.socket], None]):
+        context = ssl.create_default_context()
+        context.set_alpn_protocols(["http/1.1"])
+        super().__init__(host, port, context=context)
+        self._tls_context = context
+        self._watch = watch
+
+    def connect(self) -> None:
+        http.client.HTTPConnection.connect(self)
+        self.sock = self._tls_context.wrap_socket(
+            self.sock, server_hostname=self.host, do_handshake_on_connect=False
+        )
+        self._watch(self.sock)
+        self.sock.do_handshake()
 
 
 class _ProxyHTTPServer(ThreadingHTTPServer):
@@ -243,12 +272,20 @@ class _ProxyHandler(BaseHTTPRequestHandler):
     def _get_connection(self) -> http.client.HTTPConnection | http.client.HTTPSConnection:
         parsed = urlparse(self.remote_url)
         if parsed.scheme == "https":
-            return http.client.HTTPSConnection(parsed.hostname, parsed.port or 443)
+            return _UpstreamHTTPSConnection(
+                parsed.hostname, parsed.port or 443, self.server.watch_socket
+            )
         return http.client.HTTPConnection(parsed.hostname, parsed.port or 80)
 
     def _connect(self, conn: http.client.HTTPConnection) -> socket.socket:
         """Open the upstream socket and register it for shutdown."""
-        conn.connect()
+        try:
+            conn.connect()
+        except BaseException:
+            # A failed TLS handshake has already registered its socket.
+            if conn.sock is not None:
+                self.server.unwatch_socket(conn.sock)
+            raise
         sock = conn.sock
         self.server.watch_socket(sock)
         return sock

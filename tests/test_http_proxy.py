@@ -2,14 +2,19 @@
 
 import hashlib
 import http.client
+import io
 import json
 import os
+import queue
+import socket
+import ssl
 import sys
 import tempfile
 import threading
 import time
 import unittest
 from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -798,6 +803,388 @@ class TestHTTPProxyConcurrency(unittest.TestCase):
         self.assertEqual(events, [])
         self.assertEqual(server.meta.tool_calls, 0)
         self.assertEqual(server.store.load_events(server.meta.session_id), [])
+
+
+# Test-only certificates. See tests/fixtures/tls/generate.sh.
+TLS_DIR = os.path.join(os.path.dirname(__file__), "fixtures", "tls")
+TLS_CA = os.path.join(TLS_DIR, "ca.pem")
+TLS_KEY = os.path.join(TLS_DIR, "server.key")
+TLS_LOCALHOST_CERT = os.path.join(TLS_DIR, "localhost.pem")
+TLS_WRONG_HOST_CERT = os.path.join(TLS_DIR, "wrong-host.pem")
+
+
+class TLSMCPHandler(FakeMCPHandler):
+    """Fake MCP server for HTTPS tests.
+
+    POST /fail answers 503 with a plain body. A tools/call named "via_sse"
+    gets 202 and its result is pushed onto the open GET /sse stream, as in
+    the MCP SSE transport. GET /sse stays open until the server releases it.
+    """
+
+    server: "_TLSUpstream"
+
+    def do_POST(self):
+        self.server.hosts.append(self.headers.get("Host"))
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length)
+        if self.path.endswith("/fail"):
+            body = b"upstream unavailable"
+            self.send_response(503)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        msg = json.loads(raw.decode("utf-8"))
+        if msg.get("params", {}).get("name") == "via_sse":
+            self.server.sse_queue.put({
+                "jsonrpc": "2.0",
+                "id": msg["id"],
+                "result": {"content": [{"type": "text", "text": "streamed"}]},
+            })
+            self.send_response(202)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        # let FakeMCPHandler answer the body we already read
+        self.rfile = io.BytesIO(raw)
+        super().do_POST()
+
+    def do_GET(self):
+        self.server.hosts.append(self.headers.get("Host"))
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        self.wfile.write(b": stream open\n\n")
+        self.wfile.flush()
+        while not self.server.release.is_set():
+            try:
+                msg = self.server.sse_queue.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            self.wfile.write(f"data: {json.dumps(msg)}\n\n".encode("utf-8"))
+            self.wfile.flush()
+
+
+class _TLSUpstream(ThreadingHTTPServer):
+    """Threaded HTTPS server that does the TLS handshake on the handler thread."""
+
+    daemon_threads = True
+    request_queue_size = 128
+
+    def __init__(self, certfile):
+        super().__init__(("127.0.0.1", 0), TLSMCPHandler)
+        self.tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        self.tls.load_cert_chain(certfile, TLS_KEY)
+        self.tls.sni_callback = self._record_sni
+        self.sni: list = []
+        self.hosts: list = []
+        self.handshake_errors: list = []
+        self.sse_queue: queue.Queue = queue.Queue()
+        self.release = threading.Event()
+
+    def _record_sni(self, _sock, server_name, _context):
+        self.sni.append(server_name)
+
+    def finish_request(self, request, client_address):
+        try:
+            tls_sock = self.tls.wrap_socket(request, server_side=True)
+        except OSError as exc:
+            self.handshake_errors.append(exc)
+            return
+        try:
+            super().finish_request(tls_sock, client_address)
+        finally:
+            tls_sock.close()
+
+
+def _wait_until(predicate, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
+
+
+def _post_json(port, msg, path="/message"):
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    body = json.dumps(msg)
+    conn.request("POST", path, body=body, headers={
+        "Content-Type": "application/json",
+        "Content-Length": str(len(body)),
+    })
+    resp = conn.getresponse()
+    data = resp.read()
+    conn.close()
+    return resp.status, data
+
+
+def _tool_call(req_id, name="read_file"):
+    return {
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": {"path": "/tmp/x"}},
+    }
+
+
+class TestHTTPProxyHTTPSUpstream(unittest.TestCase):
+    """The proxy forwards to HTTPS upstreams and verifies their certificates.
+
+    The proxy uses ssl.create_default_context(), so it trusts the system CA
+    store. A custom CA is trusted through OpenSSL's SSL_CERT_FILE variable,
+    which the tests set to the test CA.
+    """
+
+    def _upstream(self, certfile=TLS_LOCALHOST_CERT):
+        upstream = _TLSUpstream(certfile)
+        threading.Thread(target=upstream.serve_forever, daemon=True).start()
+
+        def stop():
+            upstream.release.set()
+            upstream.shutdown()
+            upstream.server_close()
+
+        self.addCleanup(stop)
+        return upstream
+
+    def _proxy(self, remote_url):
+        store = TraceStore(tempfile.mkdtemp())
+        meta = SessionMeta(command="test", agent_name="test-agent")
+        store.create_session(meta)
+        events = []
+        proxy = HTTPProxyServer(
+            remote_url=remote_url,
+            local_port=0,
+            store=store,
+            session_meta=meta,
+            on_event=events.append,
+        )
+        server = proxy.make_server()
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+
+        def stop():
+            server.shutdown()
+            server.server_close()
+
+        self.addCleanup(stop)
+        return server, events
+
+    def _trust(self, cafile):
+        """Point OpenSSL's default CA file at cafile, or at nothing."""
+        patcher = mock.patch.dict(os.environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop("SSL_CERT_DIR", None)
+        if cafile:
+            os.environ["SSL_CERT_FILE"] = cafile
+        else:
+            os.environ.pop("SSL_CERT_FILE", None)
+
+    def _assert_idle(self, server):
+        """Every request finished and no upstream socket is still registered."""
+        self.assertTrue(_wait_until(
+            lambda: server._active_requests == 0 and not server._open_sockets
+        ))
+
+    def _errors(self, events):
+        return [e for e in events if e.event_type == EventType.ERROR]
+
+    def test_tool_call_and_result_are_paired(self):
+        self._trust(TLS_CA)
+        upstream = self._upstream()
+        port = upstream.server_address[1]
+        server, events = self._proxy(f"https://127.0.0.1:{port}")
+
+        status, body = _post_json(server.server_address[1], _tool_call(1))
+
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["result"]["content"][0]["text"], "tool output")
+        (call,) = [e for e in events if e.event_type == EventType.TOOL_CALL]
+        (result,) = [e for e in events if e.event_type == EventType.TOOL_RESULT]
+        self.assertEqual(call.data["tool_name"], "read_file")
+        self.assertEqual(result.parent_id, call.event_id)
+        self.assertGreaterEqual(result.duration_ms, 0)
+        self.assertEqual(server.pending_calls, {})
+        stored = [e.event_type for e in server.store.load_events(server.meta.session_id)]
+        self.assertEqual(stored, [EventType.TOOL_CALL, EventType.TOOL_RESULT])
+        # Host names the upstream, not the proxy; no SNI is sent for an IP
+        self.assertEqual(upstream.hosts, [f"127.0.0.1:{port}"])
+        self.assertEqual(upstream.sni, [None])
+        self._assert_idle(server)
+
+    def test_host_header_and_sni_name_the_upstream_host(self):
+        self._trust(TLS_CA)
+        upstream = self._upstream()
+        port = upstream.server_address[1]
+        server, events = self._proxy(f"https://localhost:{port}")
+
+        status, _body = _post_json(server.server_address[1], _tool_call(2))
+
+        self.assertEqual(status, 200)
+        self.assertEqual(upstream.hosts, [f"localhost:{port}"])
+        self.assertEqual(upstream.sni, ["localhost"])
+        self.assertEqual(self._errors(events), [])
+
+    def test_json_rpc_error_links_to_its_call(self):
+        self._trust(TLS_CA)
+        upstream = self._upstream()
+        server, events = self._proxy(f"https://127.0.0.1:{upstream.server_address[1]}")
+
+        status, body = _post_json(server.server_address[1], _tool_call(3, "fails"))
+
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["error"]["code"], -32602)
+        (call,) = [e for e in events if e.event_type == EventType.TOOL_CALL]
+        (error,) = self._errors(events)
+        self.assertEqual(error.parent_id, call.event_id)
+        self.assertEqual(server.pending_calls, {})
+
+    def test_upstream_http_error_is_passed_through(self):
+        self._trust(TLS_CA)
+        upstream = self._upstream()
+        server, events = self._proxy(f"https://127.0.0.1:{upstream.server_address[1]}")
+
+        status, body = _post_json(server.server_address[1], _tool_call(4), path="/fail")
+
+        self.assertEqual(status, 503)
+        self.assertEqual(body, b"upstream unavailable")
+        # a non-JSON body is not a result, so the call stays open
+        self.assertEqual(self._errors(events), [])
+        self.assertIn(4, server.pending_calls)
+        self._assert_idle(server)
+
+    def test_sse_stream_carries_result_for_post(self):
+        self._trust(TLS_CA)
+        upstream = self._upstream()
+        server, events = self._proxy(f"https://127.0.0.1:{upstream.server_address[1]}")
+        port = server.server_address[1]
+
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        self.addCleanup(conn.close)
+        conn.request("GET", "/sse", headers={"Accept": "text/event-stream"})
+        resp = conn.getresponse()
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(resp.getheader("Content-Type"), "text/event-stream")
+        self.assertEqual(resp.readline(), b": stream open\n")
+
+        status, body = _post_json(port, _tool_call(5, "via_sse"))
+        self.assertEqual((status, body), (202, b""))
+
+        line = resp.readline()
+        while line and not line.startswith(b"data: "):
+            line = resp.readline()
+        self.assertEqual(json.loads(line[6:])["id"], 5)
+
+        self.assertTrue(_wait_until(
+            lambda: any(e.event_type == EventType.TOOL_RESULT for e in events)
+        ))
+        (call,) = [e for e in events if e.event_type == EventType.TOOL_CALL]
+        (result,) = [e for e in events if e.event_type == EventType.TOOL_RESULT]
+        self.assertEqual(result.parent_id, call.event_id)
+        self.assertEqual(server.pending_calls, {})
+
+    def test_server_close_ends_open_https_stream(self):
+        self._trust(TLS_CA)
+        upstream = self._upstream()
+        server, events = self._proxy(f"https://127.0.0.1:{upstream.server_address[1]}")
+
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+        self.addCleanup(conn.close)
+        conn.request("GET", "/sse")
+        resp = conn.getresponse()
+        self.assertEqual(resp.readline(), b": stream open\n")
+
+        start = time.monotonic()
+        server.shutdown()
+        server.server_close()
+
+        self.assertLess(time.monotonic() - start, 3)
+        self.assertTrue(server.close_streams(timeout=0))
+        self.assertEqual(resp.read().strip(), b"")
+        self.assertEqual(self._errors(events), [])
+
+    def test_untrusted_certificate_is_rejected(self):
+        self._trust(None)
+        upstream = self._upstream()
+        server, events = self._proxy(f"https://127.0.0.1:{upstream.server_address[1]}")
+        port = server.server_address[1]
+
+        status, _body = _post_json(port, _tool_call(6))
+        self.assertEqual(status, 502)
+
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("GET", "/sse")
+        resp = conn.getresponse()
+        resp.read()
+        conn.close()
+        self.assertEqual(resp.status, 502)
+
+        messages = [e.data["message"] for e in self._errors(events)]
+        self.assertEqual(len(messages), 2)
+        self.assertTrue(messages[0].startswith("Proxy error: "))
+        self.assertTrue(messages[1].startswith("SSE proxy error: "))
+        for message in messages:
+            self.assertIn("CERTIFICATE_VERIFY_FAILED", message)
+        # the request was never sent upstream
+        self.assertEqual(upstream.hosts, [])
+        self._assert_idle(server)
+
+    def test_certificate_for_another_host_is_rejected(self):
+        self._trust(TLS_CA)
+        upstream = self._upstream(TLS_WRONG_HOST_CERT)
+        server, events = self._proxy(f"https://127.0.0.1:{upstream.server_address[1]}")
+
+        status, _body = _post_json(server.server_address[1], _tool_call(7))
+
+        self.assertEqual(status, 502)
+        (error,) = self._errors(events)
+        self.assertIn("CERTIFICATE_VERIFY_FAILED", error.data["message"])
+        self.assertEqual(upstream.hosts, [])
+        self._assert_idle(server)
+
+    def test_https_url_for_a_plain_http_server_is_an_error(self):
+        self._trust(TLS_CA)
+        plain = HTTPServer(("127.0.0.1", 0), FakeMCPHandler)
+        threading.Thread(target=plain.serve_forever, daemon=True).start()
+        self.addCleanup(plain.server_close)
+        self.addCleanup(plain.shutdown)
+        server, events = self._proxy(f"https://127.0.0.1:{plain.server_address[1]}")
+
+        status, _body = _post_json(server.server_address[1], _tool_call(8))
+
+        self.assertEqual(status, 502)
+        (error,) = self._errors(events)
+        self.assertTrue(error.data["message"].startswith("Proxy error: "))
+        self._assert_idle(server)
+
+    def test_server_close_interrupts_a_stalled_tls_handshake(self):
+        self._trust(TLS_CA)
+        for method in ("POST", "GET"):
+            with self.subTest(method=method):
+                # accepts TCP through the backlog but never answers the handshake
+                stalled = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                stalled.bind(("127.0.0.1", 0))
+                stalled.listen(8)
+                self.addCleanup(stalled.close)
+                server, events = self._proxy(f"https://127.0.0.1:{stalled.getsockname()[1]}")
+
+                conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=10)
+                self.addCleanup(conn.close)
+                body = json.dumps(_tool_call(9)) if method == "POST" else None
+                conn.request(method, "/message", body=body)
+                # the client socket and the upstream TLS socket
+                self.assertTrue(_wait_until(lambda: len(server._open_sockets) == 2))
+
+                start = time.monotonic()
+                server.shutdown()
+                server.server_close()
+
+                self.assertLess(time.monotonic() - start, 3)
+                self.assertTrue(server.close_streams(timeout=0))
+                self.assertEqual(server._open_sockets, set())
+                self.assertEqual(self._errors(events), [])
 
 
 if __name__ == "__main__":
