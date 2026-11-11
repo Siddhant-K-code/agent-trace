@@ -1,7 +1,7 @@
 {
   "name": "agent-strace",
   "displayName": "AgentTrace",
-  "version": "0.107.0",
+  "version": "0.107.1",
   "description": "Capture and investigate Claude Code agent sessions with local AgentTrace hooks, a trace analyst, and reusable skills.",
   "author": {
     "name": "Siddhant Khare",
