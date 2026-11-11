@@ -196,7 +196,7 @@ Full setup guide: [docs/setup.md](docs/setup.md). Machine-wide install for platf
 | [`agent-strace export --format eu-ai-act`](docs/commands.md#export) | Generate Article 12/13 audit packages |
 | [`agent-strace export --metrics`](docs/production.md#behavioral-metrics) | Export per-session behavioral metrics as OTLP gauges |
 | [`agent-strace identity show`](docs/commands.md#identity) | Machine identity: sign and verify sessions |
-| [`agent-strace mcp`](docs/mcp.md) | MCP server: query sessions, health, and skill reports from Claude Code, Copilot CLI, Codex, or Gemini CLI |
+| [`agent-strace mcp`](docs/mcp.md) | MCP server: query sessions, health, skill, and PR reviewability reports from Claude Code, Copilot CLI, Codex, or Gemini CLI |
 | [`agent-strace server`](docs/server.md) | Server-side collector for multi-agent, multi-machine |
 | [`agent-strace share <id>`](docs/commands.md#share) | Generate a shareable HTML replay |
 | [`agent-strace share --assignment <id>`](docs/hiring.md) | Create a privacy-minimized assignment submission ZIP |

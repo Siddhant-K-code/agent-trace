@@ -1,11 +1,15 @@
 """Tests for the MCP server (agent-strace mcp)."""
 
+import io
 import json
+import os
 import shutil
 import tempfile
 import time
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 from agent_trace.mcp_server import (
     _handle,
@@ -14,6 +18,7 @@ from agent_trace.mcp_server import (
     _tool_get_session_summary,
     _tool_health,
     _tool_list_sessions,
+    _tool_review,
     _tool_search_events,
     _tool_skills,
 )
@@ -103,7 +108,8 @@ class TestMcpLifecycle(unittest.TestCase):
         self.assertIn("diff_sessions", names)
         self.assertIn("health", names)
         self.assertIn("skills", names)
-        self.assertEqual(len(names), 7)
+        self.assertIn("review", names)
+        self.assertEqual(len(names), 8)
 
     def test_unknown_method_returns_error(self):
         r = _handle(self.store, _rpc("unknown/method", {}))
@@ -522,6 +528,140 @@ class TestSkillsCommandMatchRedaction(unittest.TestCase):
     def test_mcp_aggregate_report_omits_signature(self):
         text = _tool_skills(self.store, {"since": "7d", "min_sessions": 1})
         self.assertNotIn("zzdeployctl", text)
+
+
+class TestReviewTool(unittest.TestCase):
+    BRANCH = "feature/mcp-review"
+    SECRET_PROMPT = "Refactor auth for the zebra-quartz-77 rollout"
+    SECRET_COMMAND = "python -m pytest tests -q --zz-secret-flag"
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        cwd = os.getcwd()
+        os.chdir(self.tmp)
+        self.addCleanup(os.chdir, cwd)
+        self.trace_dir = self.tmp / ".agent-traces"
+        writer = TraceStore(str(self.trace_dir))
+        meta = SessionMeta(session_id="rev0001aaaa", started_at=1000.0, ended_at=1500.0,
+                           agent_name="claude-code", attribution={"git_branch": self.BRANCH})
+        writer.create_session(meta)
+        ts = [1000.0]
+
+        def add(kind, parent="", **data):
+            ts[0] += 1
+            ev = TraceEvent(event_type=kind, timestamp=ts[0], session_id="rev0001aaaa",
+                            parent_id=parent, data=data)
+            writer.append_event("rev0001aaaa", ev)
+            return ev
+
+        add(EventType.SESSION_START, mode="claude-code-hooks", cwd="/work/repo", redaction="on")
+        add(EventType.USER_PROMPT, prompt=self.SECRET_PROMPT)
+        add(EventType.TOOL_CALL, tool_name="Read", arguments={"file_path": "/work/repo/src/auth.py"})
+        add(EventType.TOOL_CALL, tool_name="Edit", arguments={"file_path": "/work/repo/src/auth.py"})
+        call = add(EventType.TOOL_CALL, tool_name="Bash", arguments={"command": self.SECRET_COMMAND})
+        add(EventType.TOOL_RESULT, parent=call.event_id, tool_name="Bash", result="exit code 0")
+        add(EventType.ASSISTANT_RESPONSE, text="done", hook_event="stop", provider="claude")
+        add(EventType.SESSION_END)
+        self.store = TraceStore(str(self.trace_dir), read_only=True)
+        branch = patch("agent_trace.mcp_server.current_branch", return_value=self.BRANCH)
+        branch.start()
+        self.addCleanup(branch.stop)
+
+    def _call(self, args: dict) -> dict:
+        r = _handle(self.store, _rpc("tools/call", {"name": "review", "arguments": args}))
+        return r["result"]
+
+    def _snapshot(self) -> list[str]:
+        return sorted(str(p.relative_to(self.tmp)) for p in self.tmp.rglob("*"))
+
+    def test_matches_cli_json(self):
+        from agent_trace.cli import build_parser
+        from agent_trace.reviewability import cmd_review
+        args = build_parser().parse_args(
+            ["--trace-dir", str(self.trace_dir), "review", "--format", "json"])
+        out = io.StringIO()
+        with redirect_stdout(out), \
+                patch("agent_trace.reviewability.current_branch", return_value=self.BRANCH):
+            cmd_review(args)
+        self.assertEqual(json.loads(_tool_review(self.store, {})), json.loads(out.getvalue()))
+
+    def test_links_by_branch_and_explicit_ids(self):
+        result = json.loads(_tool_review(self.store, {}))
+        self.assertEqual(result["schema_version"], 1)
+        self.assertEqual(result["branch"], self.BRANCH)
+        self.assertEqual(result["sessions"], [{"session_id": "rev0001aaaa", "link": "branch"}])
+        result = json.loads(_tool_review(self.store, {"session_ids": ["rev0001"],
+                                                      "branch": "other"}))
+        self.assertEqual(result["sessions"], [{"session_id": "rev0001aaaa", "link": "explicit"}])
+        self.assertEqual(result["branch"], "other")
+
+    def test_never_returns_prompt_or_command(self):
+        for fmt in ("json", "markdown"):
+            text = self._call({"format": fmt})["content"][0]["text"]
+            self.assertNotIn("zebra-quartz-77", text)
+            self.assertNotIn("zz-secret-flag", text)
+
+    def test_markdown_format(self):
+        result = self._call({"format": "markdown"})
+        self.assertFalse(result["isError"])
+        self.assertTrue(result["content"][0]["text"].startswith("## agent-trace reviewability"))
+
+    def test_threshold_options(self):
+        result = json.loads(_tool_review(self.store, {
+            "fail_on": "partial,missing,inconclusive", "min_confidence": "low",
+        }))
+        self.assertEqual(result["result"], "fail")
+        self.assertTrue(result["failing"])
+        self.assertEqual(result["threshold"]["source"], "flags")
+        result = json.loads(_tool_review(self.store, {"fail_on": "none"}))
+        self.assertEqual(result["result"], "pass")
+        result = json.loads(_tool_review(self.store, {"findings": "validation"}))
+        self.assertEqual(result["threshold"]["findings"], ["validation"])
+
+    def test_invalid_inputs_return_errors(self):
+        cases = [
+            {"fail_on": "wrong"},
+            {"min_confidence": "very"},
+            {"findings": "nope"},
+            {"commits": "--output=/tmp/x"},
+            {"commits": "-n1"},
+            {"session_ids": "rev0001"},
+            {"session_ids": [1]},
+            {"session_ids": ["missing"]},
+            {"format": "text"},
+            {"otel_logs": "logs\x00.json"},
+            {"branch": 5},
+            {"config": "missing.yaml"},
+        ]
+        for args in cases:
+            with self.subTest(args=args):
+                result = self._call(args)
+                self.assertTrue(result["isError"])
+                self.assertIn("error", json.loads(result["content"][0]["text"]))
+
+    def test_otel_logs_reported_as_external_evidence(self):
+        logs = self.tmp / "otel.jsonl"
+        logs.write_text(json.dumps({
+            "attributes": {"event.name": "claude_code.safety_event", "session.id": "s1",
+                           "category": "cyber", "decision": "reject"},
+            "body": "claude_code.safety_event",
+        }) + "\n")
+        result = json.loads(_tool_review(self.store, {"otel_logs": "otel.jsonl"}))
+        evidence = next(f for f in result["findings"] if f["name"] == "evidence")
+        external = evidence["facts"]["external"]
+        self.assertEqual(external["otel_logs"], "otel.jsonl")
+        self.assertFalse(external["graded"])
+        self.assertEqual(external["signals"][0]["status"], "present")
+        self.assertNotIn(str(self.tmp), json.dumps(external))
+
+    def test_read_only(self):
+        before = self._snapshot()
+        with patch("agent_trace.pr_comment.post_or_update_comment") as post:
+            self._call({"format": "markdown"})
+            self._call({"fail_on": "partial"})
+            post.assert_not_called()
+        self.assertEqual(self._snapshot(), before)
 
 
 class TestJsonRpcValidation(unittest.TestCase):

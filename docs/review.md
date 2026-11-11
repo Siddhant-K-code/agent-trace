@@ -12,6 +12,10 @@ agent-strace review --format json        # versioned JSON
 agent-strace pr-comment --review         # post or update the PR comment, exit per threshold
 ```
 
+An agent can run the same check over MCP with the `review` tool of
+`agent-strace mcp`. It returns the same JSON and never posts a comment. See
+[mcp.md](mcp.md#review).
+
 ## Why
 
 Rahman et al. surveyed 239 practitioners about reviewing AI-authored pull
