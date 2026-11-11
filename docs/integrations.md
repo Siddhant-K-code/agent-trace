@@ -106,6 +106,10 @@ All paths write the same event stream under `.agent-traces/`, so replay, timelin
 
 For Copilot Desktop, use a shared absolute trace directory such as `/Users/alice/.agent-strace/traces`, configure `agent-strace --trace-dir <dir> mcp` as an optional trace-reader MCP server, and wrap each tool-providing MCP server with `agent-strace --trace-dir <dir> record --name <label> -- <original-command> <args>`. See [setup.md](setup.md#github-copilot-desktop) for the full Local server field values and validation commands.
 
+### Remote MCP servers over HTTPS
+
+`agent-strace record-http --url https://...` proxies a remote HTTP/SSE MCP server. The proxy verifies the server certificate and host name against the system CA store. To trust a private CA, set `SSL_CERT_FILE=/path/to/ca.pem` for the proxy process; this replaces OpenSSL's default CA file. There is no flag to turn verification off. A failed TLS connection returns 502 to the agent and records an `error` event. Ctrl-C also stops a TLS handshake that the server never completes. See [`record-http`](commands.md#record-http).
+
 ---
 
 ## OpenAI Agents SDK

@@ -45,7 +45,9 @@ Capture an MCP stdio server session. Wraps `<command>` as a transparent proxy.
 ```
 agent-strace record-http --url URL [--port N] [--name NAME] [--parent SESSION] [--no-redact]
 ```
-Capture an MCP HTTP/SSE server session. Listens on `--port` (default: 5100) and proxies to `--url`. Requests are handled concurrently, so an open `GET /sse` stream does not block `POST /message`. On Ctrl-C the proxy closes open streams, waits up to 5 seconds for in-flight requests, then records the session end.
+Capture an MCP HTTP/SSE server session. Listens on `--port` (default: 5100) and proxies to `--url`. Requests are handled concurrently, so an open `GET /sse` stream does not block `POST /message`. On Ctrl-C the proxy closes open streams, including TLS handshakes still in progress, waits up to 5 seconds for in-flight requests, then records the session end.
+
+For an `https://` URL the proxy verifies the server certificate and host name with the system CA store, sends the URL host as SNI (none for an IP address) and in the `Host` header. To trust a private CA, set `SSL_CERT_FILE` to its PEM file. A TLS failure, such as an untrusted certificate or a host name mismatch, returns 502 to the agent and records an `error` event.
 
 ### `setup`
 ```
