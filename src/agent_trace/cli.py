@@ -26,6 +26,7 @@ from pathlib import Path
 from . import __version__
 from .store import default_trace_dir
 from .setup_verify import (
+    find_copilot_plugins,
     verify_claude_managed,
     verify_claude_setup,
     verify_codex_setup,
@@ -1181,6 +1182,26 @@ def _write_copilot_hooks_config(args: argparse.Namespace) -> Path:
     return hooks_path
 
 
+def _report_copilot_plugin(plugin_dirs: list[Path]) -> None:
+    """Explain why setup leaves Copilot CLI hooks to an installed plugin."""
+    user_hooks = _copilot_config_dir() / "hooks" / "agent-strace.json"
+    for plugin_dir in plugin_dirs:
+        sys.stderr.write(
+            f"Found the AgentTrace Copilot CLI plugin at {plugin_dir}; it already registers "
+            "the agent-strace hooks.\n"
+        )
+    sys.stderr.write(
+        f"Did not write {user_hooks}: Copilot CLI would run both and record every event twice.\n"
+        "To use user-level hooks instead, run `copilot plugin uninstall agent-strace`, "
+        "then run `agent-strace setup --cli copilot` again.\n"
+    )
+    if user_hooks.is_file():
+        sys.stderr.write(
+            f"{user_hooks} already exists and duplicates the plugin hooks. Remove it with: "
+            f"rm {shlex.quote(str(user_hooks))}\n"
+        )
+
+
 def _copilot_cloud_redact_env(args: argparse.Namespace) -> dict[str, str]:
     if getattr(args, "no_redact", False):
         return {"AGENT_TRACE_NO_REDACT": "1"}
@@ -1325,11 +1346,12 @@ def _setup_managed(args: argparse.Namespace, cli: str, verify: bool, live: bool)
                 expected_for,
                 __version__,
                 user_hooks_dir=_copilot_config_dir() / "hooks",
+                plugin_dirs=find_copilot_plugins(_copilot_config_dir()),
                 details=details,
             )
             not_checked = (
                 "Not checked: Windows Registry policy (HKLM\\Software\\Policies\\GitHub\\Copilot), "
-                "plugin and repository hooks, and Copilot in the cloud (policy hooks do not run there)."
+                "repository hooks, and Copilot in the cloud (policy hooks do not run there)."
             )
         else:
             location = _claude_managed_settings_dir()
@@ -1506,9 +1528,14 @@ def cmd_setup(args: argparse.Namespace) -> int | None:
     if cli in ("cursor", "all"):
         hooks_path = _write_cursor_hooks_config(args)
         sys.stderr.write(f"Wrote Cursor hooks config: {hooks_path}\n")
+    copilot_plugins: list[Path] = []
     if cli in ("copilot", "all"):
-        hooks_path = _write_copilot_hooks_config(args)
-        sys.stderr.write(f"Wrote GitHub Copilot hooks config: {hooks_path}\n")
+        copilot_plugins = find_copilot_plugins(_copilot_config_dir())
+        if copilot_plugins:
+            _report_copilot_plugin(copilot_plugins)
+        else:
+            hooks_path = _write_copilot_hooks_config(args)
+            sys.stderr.write(f"Wrote GitHub Copilot hooks config: {hooks_path}\n")
 
     for idx, (name, path, config) in enumerate(configs):
         if idx:
@@ -1552,7 +1579,7 @@ def cmd_setup(args: argparse.Namespace) -> int | None:
         sys.stdout.write(json.dumps(_gemini_hooks_config(args), indent=2) + "\n")
     if cli == "cursor":
         sys.stdout.write(json.dumps(_cursor_hooks_config(args), indent=2) + "\n")
-    if cli == "copilot":
+    if cli == "copilot" and not copilot_plugins:
         sys.stdout.write(json.dumps(_copilot_hooks_config(args), indent=2) + "\n")
 
     sys.stderr.write(

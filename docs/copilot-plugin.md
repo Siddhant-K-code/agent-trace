@@ -20,9 +20,11 @@ copilot plugin marketplace add Siddhant-K-code/agent-trace
 copilot plugin install agent-strace@agent-trace
 ```
 
-Restart Copilot CLI after installation. Do not also run
+Restart Copilot CLI after installation. Do not also install the hooks with
 `agent-strace setup --cli copilot`; both approaches register the same hooks and
-would record duplicate events.
+would record duplicate events. When this plugin is installed and enabled,
+`agent-strace setup --cli copilot` skips writing `~/.copilot/hooks/agent-strace.json`
+and tells you to remove that file if an earlier setup created it.
 
 ## Verify
 

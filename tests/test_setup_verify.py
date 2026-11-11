@@ -1316,6 +1316,18 @@ class ManagedSetupTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertIn(f"Warning: User-level AgentTrace hooks in {user}", err)
 
+    def test_copilot_verify_warns_on_installed_plugin(self):
+        self._install("copilot")
+        plugin = self.copilot_home / "installed-plugins" / "agent-trace" / "agent-strace"
+        plugin.mkdir(parents=True)
+        (plugin / "plugin.json").write_text(json.dumps({"name": "agent-strace", "hooks": "hooks.json"}))
+        (plugin / "hooks.json").write_text(json.dumps({"version": 1, "hooks": {"sessionStart": [
+            {"type": "command", "command": "agent-strace hook --provider copilot session-start"}
+        ]}}), encoding="utf-8")
+        status, _, err = self._cmd(verify=True)
+        self.assertEqual(status, 0)
+        self.assertIn(f"Warning: The AgentTrace Copilot CLI plugin at {plugin}", err)
+
     def test_claude_verify_passes_and_reports_lock(self):
         self._install("claude")
         (self.managed / "managed-settings.json").write_text(
