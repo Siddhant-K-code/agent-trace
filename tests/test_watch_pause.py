@@ -4,13 +4,14 @@ import argparse
 import io
 import json
 import os
+import signal
 import tempfile
 import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agent_trace.approval import approve_request, deny_request, load_request
+from agent_trace.approval import approve_request, deny_request, list_requests, load_request
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
 from agent_trace.watch import (
@@ -24,6 +25,7 @@ from agent_trace.watch import (
     _check_pause_file,
     _dispatch_alert,
     _dispatch_nanny_rule,
+    _kill_process,
     cmd_watch,
     validate_agent_pid,
     watch_session,
@@ -350,6 +352,117 @@ class TestApprovalPause(PauseTestCase):
         self.assertIsNotNone(load_request(self.store, self.state.approval_request_id))
 
 
+class TestReusedAgentPid(PauseTestCase):
+    """The agent exited and the OS gave its PID to another process."""
+
+    def setUp(self):
+        super().setUp()
+        self.state.agent_start_time = "proc:100"
+        p = patch("agent_trace.watch.pid_reused", return_value=True)
+        self.reused = p.start()
+        self.addCleanup(p.stop)
+
+    def said(self) -> str:
+        lines = [str(c.args[0]) for c in self.mocks["terminal"].call_args_list]
+        return "\n".join(lines) + self.out.getvalue()
+
+    def assert_not_signalled(self):
+        for name in ("pause", "resume", "kill"):
+            self.mocks[name].assert_not_called()
+        self.assertIsNone(self.state.agent_pid)
+        self.assertFalse(self.state.paused)
+        self.assertIn(f"Agent pid {PID}: the PID now belongs to another process", self.said())
+        self.assertIn("no agent was signalled", self.said())
+
+    def test_rule_pause_is_refused_and_logged(self):
+        self.rule_pause()
+        self.assert_not_signalled()
+        self.reused.assert_called_with(PID, "proc:100")
+        self.assertIn("now belongs to another process", Path(self.config.alert_log).read_text())
+
+    def test_kill_is_refused_without_post_mortem(self):
+        _dispatch_alert("too costly", self.config, self.state, action="kill",
+                        store=self.store, session_id=SESSION)
+        self.assert_not_signalled()
+        self.assertFalse((Path(self._tmp.name) / SESSION / "watchdog-postmortem.json").exists())
+
+    def test_approval_rule_records_request_without_pid(self):
+        request_id = self.require_approval()
+        self.assert_not_signalled()
+        self.assertIsNone(request_id)
+        (req,) = list_requests(self.store)
+        self.assertEqual(req.agent_pid, 0)
+        self.assertEqual(req.agent_start_time, "")
+
+    def test_editor_marker_is_refused(self):
+        self.marker.write_text(SESSION)
+        self.tick()
+        self.assert_not_signalled()
+
+    def test_paused_agent_whose_pid_was_reused_clears_pause(self):
+        self.reused.return_value = False
+        self.marker.write_text(SESSION)
+        self.tick()
+        self.assertEqual(self.state.pause_owner, PAUSE_EDITOR)
+        self.reused.return_value = True
+        self.tick()
+        self.assertIsNone(self.state.pause_owner)
+        self.assertIsNone(self.state.agent_pid)
+        self.assertIn("Pause cleared", self.out.getvalue())
+        self.marker.unlink()
+        self.tick()
+        self.mocks["resume"].assert_not_called()
+
+    def test_said_once_then_quiet(self):
+        self.rule_pause()
+        self.rule_pause()
+        _dispatch_alert("too costly", self.config, self.state, action="kill")
+        self.assertEqual(self.said().count("now belongs to another process"), 1)
+        self.assertNotIn("no agent PID is known", self.said())
+
+    def test_matching_identity_signals_as_before(self):
+        self.reused.return_value = False
+        self.rule_pause()
+        self.mocks["pause"].assert_called_once_with(PID)
+        _dispatch_alert("too costly", self.config, self.state, action="kill")
+        self.mocks["kill"].assert_called_once_with(PID, "proc:100")
+
+    def test_approval_request_records_agent_identity(self):
+        self.reused.return_value = False
+        request_id = self.require_approval()
+        req = load_request(self.store, request_id)
+        self.assertEqual((req.agent_pid, req.agent_start_time), (PID, "proc:100"))
+
+
+class TestKillProcessIdentity(unittest.TestCase):
+    """_kill_process checks the identity before SIGTERM and before SIGKILL."""
+
+    def _kill(self, reused):
+        class SyncThread:
+            def __init__(self, target, daemon):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        with patch("agent_trace.watch.pid_reused", side_effect=reused), \
+             patch("os.kill") as kill, patch("threading.Thread", SyncThread), \
+             patch("agent_trace.watch.time.sleep"):
+            _kill_process(PID, "proc:100")
+        return [c.args for c in kill.call_args_list]
+
+    def test_reused_pid_gets_no_signal(self):
+        self.assertEqual(self._kill([True]), [])
+
+    def test_pid_reused_after_sigterm_gets_no_sigkill(self):
+        self.assertEqual(self._kill([False, True]), [(PID, signal.SIGTERM)])
+
+    def test_same_process_is_escalated(self):
+        self.assertEqual(
+            self._kill([False, False]), [(PID, signal.SIGTERM), (PID, signal.SIGKILL)],
+        )
+
+
 class TestWatchSessionLoop(PauseTestCase):
     def _run(self, items, **kwargs):
         real_state = WatchState
@@ -371,6 +484,20 @@ class TestWatchSessionLoop(PauseTestCase):
         self.assertEqual(self.loop_state.agent_pid, PID)
         self.assertIn(f"Agent pid {PID}", self.out.getvalue())
         self.assertEqual(self.heartbeat()["agent_pid"], PID)
+
+    def test_agent_identity_is_recorded_at_startup(self):
+        with patch("agent_trace.watch.process_identity", return_value="proc:7") as ident:
+            self._run([_IDLE_SENTINEL])
+        ident.assert_called_once_with(PID)
+        self.assertEqual(self.loop_state.agent_start_time, "proc:7")
+
+    def test_loop_drops_reused_agent_pid(self):
+        self.marker.write_text(SESSION)
+        with patch("agent_trace.watch.process_identity", return_value="proc:7"), \
+             patch("agent_trace.watch.pid_reused", return_value=True):
+            self._run([_IDLE_SENTINEL, _IDLE_SENTINEL])
+        self.assertIsNone(self.loop_state.agent_pid)
+        self.mocks["pause"].assert_not_called()
 
     def test_heartbeat_reports_missing_agent_pid(self):
         self._run([_IDLE_SENTINEL], agent_pid=None)

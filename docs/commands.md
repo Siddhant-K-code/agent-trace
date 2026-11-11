@@ -483,7 +483,7 @@ Live session monitor with kill-switch rules.
 
 | Flag | Description |
 |---|---|
-| `--agent-pid PID` | Agent process that pause, kill and approval actions signal. Watch exits with an error if the PID does not exist or cannot be signalled. Not supported on Windows |
+| `--agent-pid PID` | Agent process that pause, kill and approval actions signal. Watch exits with an error if the PID does not exist or cannot be signalled. Watch records the process start time and checks it before each signal, so it never signals a process that reused the PID (see below). Not supported on Windows |
 | `--timeout DURATION` | Kill after duration (e.g. `30m`, `2h`) |
 | `--budget DOLLARS` | Kill when spend exceeds this many dollars. Pass a plain number such as `5`, not `$5` |
 | `--loop-threshold N` | Alert when the same tool call and arguments repeat N times; default is 3 |
@@ -515,6 +515,19 @@ Without `--agent-pid`, every check still alerts, but `pause`, `kill` and
 `require_approval` actions and VS Code Pause cannot stop the agent. The first
 time one of them fires, watch prints `Cannot ...: no agent PID is known`
 once. A `require_approval` rule still creates the approval request.
+
+If the agent exits, the OS can give its PID to an unrelated process. At
+startup watch records the agent's start time (field 22 of `/proc/PID/stat` on
+Linux, `ps -o lstart=` on macOS and other POSIX systems). Before a pause,
+resume or kill, and while it holds a pause, watch reads the start time again.
+If it differs, watch sends no signal, prints and writes to the alert log
+`Agent pid PID: the PID now belongs to another process ..., so no agent was
+signalled`, clears any pause it held, and never signals that PID again; the
+heartbeat then reports no agent PID, so VS Code Pause is refused. Later
+`require_approval` rules create requests with no agent PID, and `kill` writes
+no post-mortem. If either start time cannot be read, watch signals as before.
+`ps` reports start times to the second, so on macOS a PID reused within the
+same second is not detected.
 
 **Project budget config** (`.agent-strace.yaml`):
 ```yaml
@@ -701,6 +714,15 @@ Approving resumes the agent with `SIGCONT` by default; denying terminates it
 with `SIGTERM` by default. A request created by a `watch` without
 `--agent-pid` has no agent PID: `approve` and `deny` still record the decision
 and exit 0, but signal nothing and say so.
+
+A request made by `watch --agent-pid` also stores the agent's start time in
+`agent_start_time`. Before `approve` or `deny` signals the PID, it reads the
+start time again. If it differs, the agent has exited and its PID was reused:
+the decision is still recorded and the command exits 0, but nothing is
+signalled and it prints `decision recorded, but agent PID was not signalled:
+the PID now belongs to another process`. Requests written by older versions
+have no `agent_start_time`, and are signalled as before, as are requests whose
+start time cannot be read now (for example on Windows).
 
 A request is decided once. If two reviewers approve or deny the same request
 at the same time, exactly one succeeds and the other exits non-zero with
