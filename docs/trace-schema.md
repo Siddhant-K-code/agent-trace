@@ -67,6 +67,8 @@ The validator uses the packaged JSON Schemas for record shape, then reuses the b
 
 JSON key order and whitespace affect line hashes. A producer that intentionally reserializes events must rebuild the chain as one explicit storage operation. The validator never does this.
 
+A line hash covers the line's bytes without its line ending. agent-strace writes `\n` line endings on every OS. Older versions wrote `\r\n` on Windows; those files still verify, and new events appended to them end in `\n`.
+
 ## Status and labels
 
 `valid` means the trace conforms to the independent rules. `partial` means the records are parseable but evidence is incomplete or has a non-fatal relationship gap. `invalid` means shape, identity, uniqueness, ordering, integrity, summary, or replay checks failed.

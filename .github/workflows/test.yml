@@ -34,10 +34,11 @@ jobs:
           PYTHONPATH: src
 
   windows:
-    # Exercises the msvcrt file-lock and atomic-replace paths in fileutil.py
-    # and the trace store lock, which the Linux jobs never run. Only the lock
-    # and atomic-write tests run here: the full suite does not yet pass on
-    # Windows (POSIX signals and file modes, CRLF output, cp1252 stdout).
+    # Exercises the msvcrt file-lock and atomic-replace paths in fileutil.py,
+    # the trace store lock, and LF line endings in trace-store files, which
+    # the Linux jobs never run natively. Only these tests run here: the full
+    # suite does not yet pass on Windows (POSIX signals and file modes, CRLF
+    # in CLI and report output, cp1252 stdout).
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -54,10 +55,11 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Run lock and atomic-write tests
+      - name: Run lock, atomic-write and line-ending tests
         run: >-
           python -m unittest -v
           tests.test_fileutil
+          tests.test_line_endings
           tests.test_telemetry
           tests.test_sso
           tests.test_rbac

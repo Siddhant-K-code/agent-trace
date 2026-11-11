@@ -48,7 +48,7 @@ def _ensure_dir(path: Path) -> None:
 def add_entry(dataset_path: str | Path, entry: DatasetEntry) -> None:
     p = Path(dataset_path)
     _ensure_dir(p)
-    with open(p, "a", encoding="utf-8") as f:
+    with open(p, "a", encoding="utf-8", newline="\n") as f:
         f.write(entry.to_json() + "\n")
 
 

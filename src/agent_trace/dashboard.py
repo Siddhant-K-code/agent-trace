@@ -124,7 +124,7 @@ def load_annotations(store: TraceStore) -> list[TrendAnnotation]:
 def save_annotation(store: TraceStore, annotation: TrendAnnotation) -> None:
     p = _annotations_path(store)
     p.parent.mkdir(parents=True, exist_ok=True)
-    with open(p, "a") as f:
+    with open(p, "a", encoding="utf-8", newline="\n") as f:
         f.write(json.dumps({"date": annotation.date, "note": annotation.note}) + "\n")
 
 

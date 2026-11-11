@@ -297,7 +297,7 @@ def _log_deletion(session_id: str, log_path: str) -> None:
     p = Path(log_path)
     p.parent.mkdir(parents=True, exist_ok=True)
     ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    with open(p, "a", encoding="utf-8") as f:
+    with open(p, "a", encoding="utf-8", newline="\n") as f:
         f.write(json.dumps({"deleted_at": ts, "session_id": session_id}) + "\n")
 
 

@@ -225,7 +225,7 @@ def ensure_trace_dir_gitignore(directory: str | Path) -> None:
     except OSError:
         return
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as gitignore:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as gitignore:
             gitignore.write(_GITIGNORE_CONTENT)
     except OSError:
         # Do not leave an empty file that would block a later retry.
@@ -531,7 +531,7 @@ class TraceStore:
     def _append_tenant_audit(self, record: dict) -> Path:
         path = self._store_file("tenant-audit.ndjson", "tenant audit")
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a", encoding="utf-8") as audit_file:
+        with open(path, "a", encoding="utf-8", newline="\n") as audit_file:
             audit_file.write(json.dumps(record, separators=(",", ":")) + "\n")
             audit_file.flush()
             os.fsync(audit_file.fileno())
@@ -648,7 +648,7 @@ class TraceStore:
             "tenant-deletions.ndjson", "tenant deletion audit"
         )
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a", encoding="utf-8") as audit_file:
+        with open(path, "a", encoding="utf-8", newline="\n") as audit_file:
             audit_file.write(json.dumps(record, separators=(",", ":")) + "\n")
             audit_file.flush()
             os.fsync(audit_file.fileno())
@@ -979,7 +979,7 @@ class TraceStore:
             d.mkdir(parents=True, exist_ok=True)
             self._session_file(
                 meta.session_id, "meta.json", "session metadata"
-            ).write_text(meta.to_json())
+            ).write_text(meta.to_json(), encoding="utf-8", newline="\n")
             # create empty events file
             self._session_file(
                 meta.session_id, "events.ndjson", "event stream"
@@ -1029,13 +1029,16 @@ class TraceStore:
                 event.tenant_id = validate_tenant_id(event.tenant_id)
             self._redact_event(event)
             f.parent.mkdir(parents=True, exist_ok=True)
-            with open(f, "a+", encoding="utf-8") as fh:
+            # newline="\n" writes LF on every OS. It also turns off newline
+            # translation on read, so strip the "\r" that older Windows
+            # versions wrote: prev_hash covers the line without its ending.
+            with open(f, "a+", encoding="utf-8", newline="\n") as fh:
                 # Compute the hash and append while holding one lock so a
                 # concurrent tenant-tag operation cannot split the chain.
                 if not event.prev_hash:
                     fh.seek(0)
                     text = fh.read()
-                    last_line = text.rstrip("\n").rsplit("\n", 1)[-1] if text.strip() else ""
+                    last_line = text.rstrip("\r\n").rsplit("\n", 1)[-1] if text.strip() else ""
                     event.prev_hash = hashlib.sha256(last_line.encode()).hexdigest() if last_line else ""
                 fh.write(event.to_json() + "\n")
                 fh.flush()
@@ -1286,7 +1289,9 @@ class TraceStore:
                     f"session {session_id} is already assigned to tenant {meta.tenant_id!r}"
                 )
             self._enforce_tag_tenant_links(meta, tenant_id)
-            raw_text = path.read_text(encoding="utf-8") if path.exists() else ""
+            # Read the bytes untranslated so a rollback restores them exactly,
+            # including CRLF endings written by older Windows versions.
+            raw_text = path.read_bytes().decode("utf-8") if path.exists() else ""
             raw_lines = [line for line in raw_text.splitlines() if line]
             for raw_line in raw_lines:
                 event = TraceEvent.from_json(raw_line)
@@ -1297,7 +1302,7 @@ class TraceStore:
             previous_terminal_hash = (
                 hashlib.sha256(raw_lines[-1].encode()).hexdigest() if raw_lines else ""
             )
-            original_meta_text = meta_path.read_text(encoding="utf-8")
+            original_meta_text = meta_path.read_bytes().decode("utf-8")
             operation_id = uuid.uuid4().hex
             journal_dir = self._journal_dir()
             journal_dir.mkdir(parents=True, exist_ok=True)
@@ -1321,7 +1326,7 @@ class TraceStore:
                     raise
                 # Pre-commit exceptions can safely restore the exact input.
                 _write_atomic(path, raw_text)
-                if meta_path.read_text(encoding="utf-8") != original_meta_text:
+                if meta_path.read_bytes().decode("utf-8") != original_meta_text:
                     _write_atomic(meta_path, original_meta_text)
                 journal_path.unlink(missing_ok=True)
                 _fsync_directory(journal_path.parent)

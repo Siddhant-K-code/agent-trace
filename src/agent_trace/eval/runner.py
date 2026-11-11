@@ -590,7 +590,7 @@ def _write_github_summary(report: "EvalReport", baseline: dict[str, float], tole
     else:
         summary_path = Path(".agent-traces/eval-summary.md")
         summary_path.parent.mkdir(parents=True, exist_ok=True)
-        summary_path.write_text(content)
+        summary_path.write_text(content, encoding="utf-8", newline="\n")
         sys.stderr.write(f"GitHub summary written to {summary_path}\n")
 
 

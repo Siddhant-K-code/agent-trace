@@ -84,7 +84,7 @@ def add_annotation(
     """Append an annotation to the sidecar file."""
     annotation.session_id = session_id
     path = _annotations_path(store, session_id)
-    with open(path, "a", encoding="utf-8") as f:
+    with open(path, "a", encoding="utf-8", newline="\n") as f:
         f.write(annotation.to_json() + "\n")
 
 
@@ -129,7 +129,11 @@ def delete_annotation(
             pass
         new_lines.append(line)
     if found:
-        path.write_text("\n".join(new_lines) + ("\n" if new_lines else ""), encoding="utf-8")
+        path.write_text(
+            "\n".join(new_lines) + ("\n" if new_lines else ""),
+            encoding="utf-8",
+            newline="\n",
+        )
     return found
 
 
