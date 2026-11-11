@@ -78,9 +78,9 @@ def instrument_crewai(agent_name: str = "crewai") -> None:
             agent_role = getattr(self, "role", str(self))
             task_desc = getattr(task, "description", str(task))[:200]
             t0 = time.time()
-            emit(EventType.LLM_REQUEST, sid, store,
-                 agent_role=agent_role,
-                 task=task_desc)
+            request = emit(EventType.LLM_REQUEST, sid, store,
+                           agent_role=agent_role,
+                           task=task_desc)
             try:
                 result = _orig_execute_task(self, task, *args, **kwargs)
                 emit(EventType.LLM_RESPONSE, sid, store,
@@ -89,8 +89,9 @@ def instrument_crewai(agent_name: str = "crewai") -> None:
                      result_preview=str(result)[:300])
                 return result
             except Exception as exc:
-                emit(EventType.ERROR, sid, store,
-                     agent_role=agent_role, error=str(exc))
+                emit(EventType.ERROR, sid, store, parent=request,
+                     agent_role=agent_role, error=str(exc),
+                     error_type=type(exc).__name__)
                 raise
 
         Agent.execute_task = _patched_execute_task

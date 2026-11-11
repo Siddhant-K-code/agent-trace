@@ -549,5 +549,189 @@ class TestOTLPGenAICLIFlag(unittest.TestCase):
         self.assertIn("otlp-genai", output)
 
 
+# ---------------------------------------------------------------------------
+# Failed and cancelled model requests
+# ---------------------------------------------------------------------------
+
+def _codex_response(event_id: str = "resp1", timestamp: float = 1010.0, **data) -> TraceEvent:
+    """An llm_response as the Codex PostModelRequest hook records it."""
+    base = {
+        "hook_event": "post_model_request",
+        "provider": "codex",
+        "model": "gpt-5-codex",
+        "turn_id": "turn-1",
+    }
+    base.update(data)
+    return TraceEvent(
+        event_type=EventType.LLM_RESPONSE,
+        event_id=event_id,
+        timestamp=timestamp,
+        data=base,
+    )
+
+
+class TestGenAIFailedModelRequests(unittest.TestCase):
+    """A failed or cancelled model request exports with ERROR status."""
+
+    def _llm_spans(self, events: list[TraceEvent]) -> list[dict]:
+        meta = SessionMeta(
+            session_id="s1", agent_name="codex", started_at=1000.0, ended_at=1100.0,
+        )
+        spans = _get_spans(session_to_otlp_genai(meta, events))
+        return [s for s in spans if s["name"] == "gen_ai.client.operation"]
+
+    def _span(self, **data) -> dict:
+        (span,) = self._llm_spans([_codex_response(**data)])
+        return span
+
+    def test_failed_with_error_text(self):
+        span = self._span(status="failed", error="synthetic failure", token_usage=None)
+        self.assertEqual(span["status"], {"code": 2, "message": "synthetic failure"})
+        self.assertEqual(_get_attr(span, "error.type"), "_OTHER")
+        self.assertEqual(_get_attr(span, "gen_ai.response.finish_reasons"), "error")
+        self.assertIsNone(_get_attr(span, "agent.strace.finish_reason"))
+        self.assertNotIn("events", span)
+
+    def test_failed_without_error_text(self):
+        span = self._span(status="failed", token_usage=None)
+        self.assertEqual(span["status"], {"code": 2})
+        self.assertEqual(_get_attr(span, "error.type"), "_OTHER")
+        self.assertEqual(_get_attr(span, "gen_ai.response.finish_reasons"), "error")
+
+    def test_cancelled(self):
+        span = self._span(status="cancelled", token_usage=None)
+        self.assertEqual(span["status"], {"code": 2})
+        self.assertEqual(_get_attr(span, "error.type"), "cancelled")
+        self.assertEqual(_get_attr(span, "gen_ai.response.finish_reasons"), "error")
+
+    def test_status_is_case_insensitive_and_accepts_canceled(self):
+        self.assertEqual(_get_attr(self._span(status="Canceled"), "error.type"), "cancelled")
+        self.assertEqual(_get_attr(self._span(status=" FAILED "), "error.type"), "_OTHER")
+
+    def test_error_without_status_fails(self):
+        span = self._span(error="upstream 500")
+        self.assertEqual(span["status"], {"code": 2, "message": "upstream 500"})
+        self.assertEqual(_get_attr(span, "error.type"), "_OTHER")
+
+    def test_error_object_supplies_type_and_message(self):
+        span = self._span(
+            status="failed",
+            error={"message": "rate limited", "code": "rate_limit_exceeded"},
+        )
+        self.assertEqual(span["status"], {"code": 2, "message": "rate limited"})
+        self.assertEqual(_get_attr(span, "error.type"), "rate_limit_exceeded")
+
+    def test_recorded_error_type_wins(self):
+        span = self._span(status="cancelled", error_type="ClientDisconnected")
+        self.assertEqual(_get_attr(span, "error.type"), "ClientDisconnected")
+
+    def test_status_message_is_bounded(self):
+        span = self._span(status="failed", error="x" * 5000)
+        self.assertEqual(span["status"]["message"], "x" * 200)
+
+    def test_recorded_finish_reason_is_kept(self):
+        span = self._span(status="failed", finish_reason="length")
+        self.assertEqual(_get_attr(span, "gen_ai.response.finish_reasons"), "length")
+        self.assertEqual(_get_attr(span, "agent.strace.finish_reason"), "length")
+        self.assertEqual(span["status"]["code"], 2)
+
+    def test_completed_and_unknown_statuses_stay_ok(self):
+        for data in (
+            {"status": "completed", "input_tokens": 10, "output_tokens": 2},
+            {"input_tokens": 10, "output_tokens": 2},
+            {"status": "incomplete"},
+            {"status": "completed", "error": ""},
+            {"status": "completed", "error": None},
+        ):
+            with self.subTest(data=data):
+                span = self._span(**data)
+                self.assertEqual(span["status"], {"code": 1})
+                self.assertIsNone(_get_attr(span, "error.type"))
+                self.assertIsNone(_get_attr(span, "gen_ai.response.finish_reasons"))
+
+    def test_only_the_failed_request_changes(self):
+        events = [
+            _codex_response("a", 1001.0, status="completed", input_tokens=10, output_tokens=2),
+            _codex_response("b", 1002.0, status="failed", error="boom", token_usage=None),
+            _codex_response("c", 1003.0, status="cancelled", token_usage=None),
+        ]
+        spans = self._llm_spans(events)
+        self.assertEqual([s["status"]["code"] for s in spans], [1, 2, 2])
+        root = _get_spans(session_to_otlp_genai(
+            SessionMeta(session_id="s1", agent_name="codex", started_at=1000.0, ended_at=1100.0),
+            events,
+        ))[0]
+        self.assertEqual(root["status"], {"code": 1})
+
+    def _linked_error_spans(self, error_data: dict) -> list[dict]:
+        request = TraceEvent(
+            event_type=EventType.LLM_REQUEST, event_id="req1", timestamp=1001.0,
+            data={"model": "gpt-4o", "max_tokens": 100, "message_count": 1},
+        )
+        error = TraceEvent(
+            event_type=EventType.ERROR, event_id="err1", parent_id="req1",
+            timestamp=1001.5, duration_ms=500.0, data=error_data,
+        )
+        meta = SessionMeta(session_id="s1", agent_name="openai", started_at=1000.0, ended_at=1100.0)
+        return _get_spans(session_to_otlp_genai(meta, [request, error]))[1:]
+
+    def test_sdk_error_linked_to_request_is_one_failed_llm_span(self):
+        spans = self._linked_error_spans({
+            "error": "Rate limit reached", "error_type": "RateLimitError",
+        })
+        self.assertEqual([s["name"] for s in spans], ["gen_ai.client.operation"])
+        (span,) = spans
+        self.assertEqual(span["spanId"], _to_span_id("req1"))
+        self.assertEqual(span["startTimeUnixNano"], _ts_to_nanos(1001.0))
+        self.assertEqual(span["endTimeUnixNano"], _ts_to_nanos(1001.5))
+        self.assertEqual(span["status"], {"code": 2, "message": "Rate limit reached"})
+        self.assertEqual(_get_attr(span, "error.type"), "RateLimitError")
+        self.assertEqual(_get_attr(span, "gen_ai.request.model"), "gpt-4o")
+        self.assertEqual(_get_attr(span, "gen_ai.response.finish_reasons"), "error")
+        (exc,) = span["events"]
+        exc_attrs = {a["key"]: a["value"] for a in exc["attributes"]}
+        self.assertEqual(exc["name"], "exception")
+        self.assertEqual(exc_attrs["exception.type"], {"stringValue": "RateLimitError"})
+        self.assertEqual(exc_attrs["exception.message"], {"stringValue": "Rate limit reached"})
+
+    def test_decorator_error_linked_to_request_uses_exception_type(self):
+        (span,) = self._linked_error_spans({
+            "message": "boom", "exception_type": "ValueError",
+        })
+        self.assertEqual(span["status"], {"code": 2, "message": "boom"})
+        self.assertEqual(_get_attr(span, "error.type"), "ValueError")
+
+    def test_unlinked_error_after_request_is_unchanged(self):
+        request = TraceEvent(
+            event_type=EventType.LLM_REQUEST, event_id="req1", timestamp=1001.0,
+            data={"model": "gpt-4o"},
+        )
+        error = TraceEvent(
+            event_type=EventType.ERROR, event_id="err1", timestamp=1002.0,
+            data={"error": "boom", "error_type": "APIError"},
+        )
+        meta = SessionMeta(session_id="s1", agent_name="openai", started_at=1000.0, ended_at=1100.0)
+        spans = _get_spans(session_to_otlp_genai(meta, [request, error]))[1:]
+        names = sorted(s["name"] for s in spans)
+        self.assertEqual(names, ["gen_ai.client.operation", "gen_ai.tool.call/error"])
+        llm = next(s for s in spans if s["name"] == "gen_ai.client.operation")
+        self.assertEqual(llm["status"], {"code": 0})
+        self.assertIsNone(_get_attr(llm, "error.type"))
+
+    def test_error_linked_to_tool_call_is_still_a_tool_error(self):
+        call = TraceEvent(
+            event_type=EventType.TOOL_CALL, event_id="call1", timestamp=1001.0,
+            data={"tool_name": "Bash", "arguments": {"command": "false"}},
+        )
+        error = TraceEvent(
+            event_type=EventType.ERROR, event_id="err1", parent_id="call1",
+            timestamp=1002.0, data={"tool_name": "Bash", "error": "exit 1"},
+        )
+        meta = SessionMeta(session_id="s1", agent_name="claude-code", started_at=1000.0, ended_at=1100.0)
+        (span,) = _get_spans(session_to_otlp_genai(meta, [call, error]))[1:]
+        self.assertEqual(span["name"], "gen_ai.tool.call/Bash")
+        self.assertIsNone(_get_attr(span, "error.type"))
+
+
 if __name__ == "__main__":
     unittest.main()

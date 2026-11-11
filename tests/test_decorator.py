@@ -102,6 +102,37 @@ class TestDecorator(unittest.TestCase):
         self.assertEqual(llm_reqs[0].data["model"], "gpt-4")
         self.assertEqual(llm_reqs[0].data["message_count"], 1)
 
+    def test_trace_llm_call_failure_exports_as_failed_model_call(self):
+        from agent_trace.otlp import _to_span_id, session_to_otlp_genai
+
+        session_id = start_session(name="test", trace_dir=self.tmpdir)
+
+        @trace_llm_call
+        def call_llm(messages: list, model: str = "gpt-4") -> str:
+            raise TimeoutError("model timed out")
+
+        with self.assertRaises(TimeoutError):
+            call_llm([{"role": "user", "content": "hi"}], model="gpt-4")
+        meta = end_session()
+
+        store = TraceStore(self.tmpdir)
+        events = store.load_events(session_id)
+        request = next(e for e in events if e.event_type == EventType.LLM_REQUEST)
+        error = next(e for e in events if e.event_type == EventType.ERROR)
+        self.assertEqual(error.parent_id, request.event_id)
+
+        spans = session_to_otlp_genai(meta, events)["resourceSpans"][0][
+            "scopeSpans"][0]["spans"]
+        llm = [s for s in spans if s["name"] == "gen_ai.client.operation"]
+        self.assertEqual(len(llm), 1)
+        self.assertEqual(llm[0]["spanId"], _to_span_id(request.event_id))
+        self.assertEqual(
+            llm[0]["status"], {"code": 2, "message": "model timed out"})
+        attrs = {a["key"]: a["value"] for a in llm[0]["attributes"]}
+        self.assertEqual(attrs["error.type"], {"stringValue": "TimeoutError"})
+        self.assertFalse(
+            [s for s in spans if s["name"] == "gen_ai.tool.call/error"])
+
     def test_log_decision(self):
         session_id = start_session(name="test", trace_dir=self.tmpdir)
 

@@ -79,8 +79,8 @@ def instrument_langchain(agent_name: str = "langchain") -> None:
             sid = _get_or_create_session(store, agent_name)
             model = getattr(self, "model_name", getattr(self, "model", "unknown"))
             t0 = time.time()
-            emit(EventType.LLM_REQUEST, sid, store,
-                 model=str(model), message_count=len(messages))
+            request = emit(EventType.LLM_REQUEST, sid, store,
+                           model=str(model), message_count=len(messages))
             try:
                 result = _orig_generate(self, messages, *args, **kwargs)
                 emit(EventType.LLM_RESPONSE, sid, store,
@@ -88,7 +88,7 @@ def instrument_langchain(agent_name: str = "langchain") -> None:
                      duration_ms=(time.time() - t0) * 1000)
                 return result
             except Exception as exc:
-                emit(EventType.ERROR, sid, store,
+                emit(EventType.ERROR, sid, store, parent=request,
                      error=str(exc), error_type=type(exc).__name__)
                 raise
 

@@ -27,6 +27,7 @@ from typing import Any
 
 from .event_data import number_field, require_object_event_data, str_field
 from .models import EventType, SessionMeta, TraceEvent
+from .otlp import llm_failure
 from .pairing import (
     LLM_REQUEST_TYPES,
     TOOL_REQUEST_TYPES,
@@ -152,8 +153,10 @@ def langfuse_data_indexes(events: list[TraceEvent]) -> list[int]:
 
     Every tool result and LLM response is read. A tool call or LLM request is
     read only when a later result or response pairs with it under the
-    pairing.py rules. An error is not read, but it can pair with a tool call,
-    which then is not read either.
+    pairing.py rules. An error whose parent_id names a pending LLM request
+    ends that request (see Pairer.match_parent), and both are read. Any other
+    error is not read, but it can pair with a tool call, which then is not
+    read either.
     """
     indexes = []
     calls: Pairer[int] = tool_pairer()
@@ -164,7 +167,11 @@ def langfuse_data_indexes(events: list[TraceEvent]) -> list[int]:
         elif event.event_type in LLM_REQUEST_TYPES:
             requests.add(event, index)
         elif event.event_type == EventType.ERROR:
-            calls.match(event)
+            request_index = requests.match_parent(event)
+            if request_index is not None:
+                indexes.extend((index, request_index))
+            else:
+                calls.match(event)
         elif event.event_type in (EventType.TOOL_RESULT, EventType.LLM_RESPONSE):
             indexes.append(index)
             pairer = calls if event.event_type == EventType.TOOL_RESULT else requests
@@ -172,6 +179,56 @@ def langfuse_data_indexes(events: list[TraceEvent]) -> list[int]:
             if parent is not None:
                 indexes.append(parent)
     return indexes
+
+
+def _generation(
+    session_id: str,
+    req_ev: TraceEvent | None,
+    ev: TraceEvent,
+) -> dict:
+    """Build the GENERATION for one model request.
+
+    ``ev`` ends the request: an LLM response, or an error linked to
+    ``req_ev``. A failed or cancelled request gets level ERROR and a status
+    message; a completed one has neither.
+    """
+    start_ts = req_ev.timestamp if req_ev else ev.timestamp
+    output_tokens = number_field(ev.data, "output_tokens", 0) or 0
+    if req_ev:
+        input_tokens = number_field(req_ev.data, "input_tokens", 0) or 0
+        model = req_ev.data.get("model", "") or ""
+    else:
+        # A response with no request (Codex records each model
+        # request this way) carries its own model and input count.
+        input_tokens = number_field(ev.data, "input_tokens", 0) or 0
+        model = event_model(ev.data)
+    generation = {
+        "id": ev.event_id,
+        "traceId": session_id,
+        "type": "GENERATION",
+        "name": "llm-call",
+        "startTime": _iso(start_ts),
+        "endTime": _iso(ev.timestamp),
+        "model": model or None,
+        "usage": {
+            "input": input_tokens,
+            "output": output_tokens,
+            "total": input_tokens + output_tokens,
+        },
+        "input": req_ev.data.get("prompt") if req_ev else None,
+        "output": ev.data.get("text"),
+    }
+    failure = llm_failure(ev)
+    if failure is not None:
+        generation["level"] = "ERROR"
+        if failure.message:
+            generation["statusMessage"] = failure.message
+        elif failure.cancelled:
+            generation["statusMessage"] = "cancelled"
+        else:
+            generation["statusMessage"] = "failed"
+        generation["metadata"] = {"error.type": failure.error_type}
+    return generation
 
 
 def _events_to_langfuse_observations(
@@ -188,8 +245,14 @@ def _events_to_langfuse_observations(
             calls.add(ev)
 
         elif ev.event_type == EventType.ERROR:
-            # Errors are not exported, but an error ends its tool call.
-            calls.match(ev)
+            req_ev = requests.match_parent(ev)
+            if req_ev is not None:
+                # An error linked to an LLM request ends that request as a
+                # failed generation.
+                observations.append(_generation(session_id, req_ev, ev))
+            else:
+                # Other errors are not exported, but an error ends its tool call.
+                calls.match(ev)
 
         elif ev.event_type == EventType.TOOL_RESULT:
             call = calls.match(ev)
@@ -214,33 +277,7 @@ def _events_to_langfuse_observations(
             requests.add(ev)
 
         elif ev.event_type == EventType.LLM_RESPONSE:
-            req_ev = requests.match(ev)
-            start_ts = req_ev.timestamp if req_ev else ev.timestamp
-            output_tokens = number_field(ev.data, "output_tokens", 0) or 0
-            if req_ev:
-                input_tokens = number_field(req_ev.data, "input_tokens", 0) or 0
-                model = req_ev.data.get("model", "") or ""
-            else:
-                # A response with no request (Codex records each model
-                # request this way) carries its own model and input count.
-                input_tokens = number_field(ev.data, "input_tokens", 0) or 0
-                model = event_model(ev.data)
-            observations.append({
-                "id": ev.event_id,
-                "traceId": session_id,
-                "type": "GENERATION",
-                "name": "llm-call",
-                "startTime": _iso(start_ts),
-                "endTime": _iso(ev.timestamp),
-                "model": model or None,
-                "usage": {
-                    "input": input_tokens,
-                    "output": output_tokens,
-                    "total": input_tokens + output_tokens,
-                },
-                "input": req_ev.data.get("prompt") if req_ev else None,
-                "output": ev.data.get("text"),
-            })
+            observations.append(_generation(session_id, requests.match(ev), ev))
 
     return [o for o in observations if o]  # drop None entries
 

@@ -42,10 +42,10 @@ def instrument_anthropic(agent_name: str = "anthropic") -> None:
         def _patched_create(self_messages, model: str = "", messages=None, **kwargs):
             sid = _get_or_create_session(store, agent_name)
             t0 = time.time()
-            emit(EventType.LLM_REQUEST, sid, store,
-                 model=model,
-                 max_tokens=kwargs.get("max_tokens", 0),
-                 message_count=len(messages or []))
+            request = emit(EventType.LLM_REQUEST, sid, store,
+                           model=model,
+                           max_tokens=kwargs.get("max_tokens", 0),
+                           message_count=len(messages or []))
             try:
                 result = _orig_create(self_messages, model=model, messages=messages, **kwargs)
                 usage = getattr(result, "usage", None)
@@ -57,7 +57,7 @@ def instrument_anthropic(agent_name: str = "anthropic") -> None:
                      duration_ms=(time.time() - t0) * 1000)
                 return result
             except Exception as exc:
-                emit(EventType.ERROR, sid, store,
+                emit(EventType.ERROR, sid, store, parent=request,
                      error=str(exc), error_type=type(exc).__name__)
                 raise
 

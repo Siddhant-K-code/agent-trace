@@ -294,6 +294,96 @@ class TestEventsToLangfuseObservations(unittest.TestCase):
         self.assertEqual(obs, [])
 
 
+class TestFailedModelRequestsInLangfuse(unittest.TestCase):
+    """A failed or cancelled model request becomes an ERROR-level generation."""
+
+    @staticmethod
+    def _generation(**data) -> dict:
+        response = TraceEvent(
+            event_type=EventType.LLM_RESPONSE,
+            timestamp=1.0,
+            data={"model": "gpt-5-codex", **data},
+        )
+        (obs,) = _events_to_langfuse_observations("sess1", [response])
+        return obs
+
+    def test_failed_with_error_text(self):
+        obs = self._generation(status="failed", error="synthetic failure", token_usage=None)
+        self.assertEqual(obs["level"], "ERROR")
+        self.assertEqual(obs["statusMessage"], "synthetic failure")
+        self.assertEqual(obs["metadata"], {"error.type": "_OTHER"})
+        self.assertEqual(obs["usage"], {"input": 0, "output": 0, "total": 0})
+
+    def test_failed_without_error_text(self):
+        obs = self._generation(status="failed", token_usage=None)
+        self.assertEqual(obs["level"], "ERROR")
+        self.assertEqual(obs["statusMessage"], "failed")
+        self.assertEqual(obs["metadata"], {"error.type": "_OTHER"})
+
+    def test_cancelled(self):
+        obs = self._generation(status="cancelled", token_usage=None)
+        self.assertEqual(obs["level"], "ERROR")
+        self.assertEqual(obs["statusMessage"], "cancelled")
+        self.assertEqual(obs["metadata"], {"error.type": "cancelled"})
+
+    def test_error_object_supplies_type_and_message(self):
+        obs = self._generation(
+            status="failed", error={"message": "rate limited", "code": "rate_limit_exceeded"},
+        )
+        self.assertEqual(obs["statusMessage"], "rate limited")
+        self.assertEqual(obs["metadata"], {"error.type": "rate_limit_exceeded"})
+
+    def test_completed_has_no_level_or_status_message(self):
+        obs = self._generation(status="completed", input_tokens=10, output_tokens=2)
+        self.assertEqual(sorted(obs), [
+            "endTime", "id", "input", "model", "name", "output", "startTime",
+            "traceId", "type", "usage",
+        ])
+
+    def test_error_linked_to_request_is_a_failed_generation(self):
+        request = _llm_req(ts=1.0, event_id="lr1")
+        request.data["prompt"] = "hello"
+        error = TraceEvent(
+            event_type=EventType.ERROR,
+            event_id="err1",
+            parent_id="lr1",
+            timestamp=1.5,
+            data={"error": "Rate limit reached", "error_type": "RateLimitError"},
+        )
+        events = [request, error]
+        (obs,) = _events_to_langfuse_observations("sess1", events)
+        self.assertEqual(obs["id"], "err1")
+        self.assertEqual(obs["type"], "GENERATION")
+        self.assertEqual(obs["startTime"], _iso(1.0))
+        self.assertEqual(obs["endTime"], _iso(1.5))
+        self.assertEqual(obs["model"], "claude-3")
+        self.assertEqual(obs["input"], "hello")
+        self.assertEqual(obs["usage"], {"input": 100, "output": 0, "total": 100})
+        self.assertEqual(obs["level"], "ERROR")
+        self.assertEqual(obs["statusMessage"], "Rate limit reached")
+        self.assertEqual(obs["metadata"], {"error.type": "RateLimitError"})
+        self.assertEqual(sorted(langfuse_data_indexes(events)), [0, 1])
+
+    def test_linked_error_ends_its_request(self):
+        # A later parentless response must not pair with the failed request.
+        events = [
+            _llm_req(ts=0.0, event_id="lr1"),
+            TraceEvent(event_type=EventType.ERROR, parent_id="lr1", timestamp=1.0,
+                       data={"error": "boom"}),
+            _llm_resp(ts=2.0, parent_id=""),
+        ]
+        failed, response = _events_to_langfuse_observations("sess1", events)
+        self.assertEqual(failed["level"], "ERROR")
+        self.assertEqual(response["startTime"], _iso(2.0))
+        self.assertIsNone(response["input"])
+        self.assertNotIn("level", response)
+
+    def test_unlinked_error_is_not_exported(self):
+        events = [_llm_req(ts=0.0, event_id="lr1"), _error_ev(ts=1.0)]
+        self.assertEqual(_events_to_langfuse_observations("sess1", events), [])
+        self.assertEqual(langfuse_data_indexes(events), [])
+
+
 class TestScoresToLangfuse(unittest.TestCase):
     def test_scores_mapped_correctly(self):
         scores = [
