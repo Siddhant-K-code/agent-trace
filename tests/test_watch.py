@@ -498,7 +498,8 @@ class TestWatchStreamFlagChecks(unittest.TestCase):
             )
 
     def test_bad_stream_to_values_are_refused(self):
-        controls = (" ", "\t", "\n", "\r", "\x00", "\x1f", "\x7f")
+        c1_controls = ("\x85", "\x9b")
+        controls = (" ", "\t", "\n", "\r", "\x00", "\x1f", "\x7f", *c1_controls)
         reasons = {
             "it must start with http:// or https://": (
                 "",
@@ -521,8 +522,9 @@ class TestWatchStreamFlagChecks(unittest.TestCase):
                 "http://SECRET-HOST:99999/SECRET-PATH?token=SECRET-QUERY",
                 "http://SECRET-HOST:SECRET-PORT/SECRET-PATH?token=SECRET-QUERY",
             ),
-            "it must not contain spaces or control characters": tuple(
-                f"http://SECRET-HOST/SECRET{char}PATH?token=SECRET-QUERY" for char in controls
+            "it must not contain spaces or control characters": (
+                *(f"http://SECRET-HOST/SECRET{char}PATH?token=SECRET-QUERY" for char in controls),
+                *(f"http://SECRET{char}HOST/SECRET-PATH?token=SECRET-QUERY" for char in c1_controls),
             ),
         }
         for reason, urls in reasons.items():
@@ -552,6 +554,9 @@ class TestWatchStreamFlagChecks(unittest.TestCase):
             ("http://[::1]:4318", "1e12"),
             ("HTTP://collector.example", "2"),
             (self._URL, "0.25"),
+            # Non-ASCII characters that are not control characters
+            ("http://collector.example/caf\u00e9", "1"),
+            ("http://a\u202eb.example/x", "1"),
         )
         for url, interval in cases:
             for config in (False, True):

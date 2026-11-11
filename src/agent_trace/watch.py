@@ -31,6 +31,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -657,7 +658,9 @@ def _stream_to_problem(url: str) -> str | None:
 
     The reason never repeats any part of the URL.
     """
-    if any(ch == " " or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in url):
+    # Category Cc is C0, DEL and C1 (U+0080 to U+009F). urllib cannot send
+    # any of them, so each POST would fail.
+    if any(ch == " " or unicodedata.category(ch) == "Cc" for ch in url):
         return "it must not contain spaces or control characters"
     try:
         parts = urllib.parse.urlsplit(url)
