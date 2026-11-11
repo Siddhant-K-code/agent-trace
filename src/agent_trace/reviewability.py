@@ -41,7 +41,7 @@ from .pr_comment import (
     current_branch,
     select_sessions_with_link,
 )
-from .shell_split import is_operator, split_tokens, write_targets
+from .shell_split import is_operator, read_targets, split_tokens, write_targets
 from .store import TraceStore
 
 SCHEMA_VERSION = 1
@@ -690,6 +690,13 @@ def _shell_writes(event: TraceEvent, cwd: str) -> list[str]:
     return [_normalise_path(path, cwd) for path in write_targets(_command_text(event))]
 
 
+def _shell_reads(event: TraceEvent, cwd: str) -> list[str]:
+    """Return paths a shell tool call read with a plain file viewer."""
+    if not _is_shell_call(event):
+        return []
+    return [_normalise_path(path, cwd) for path in read_targets(_command_text(event))]
+
+
 def _strip_prefixes(tokens: Sequence[str]) -> list[str]:
     tokens = list(tokens)
     while tokens and _ENV_ASSIGN_RE.match(tokens[0]):
@@ -942,12 +949,13 @@ def assess_scope(sessions: Sequence[_Session]) -> Finding:
         explicit.update(paths)
         for event in session.events:
             paths.extend(_shell_writes(event, cwd))
+            reads.extend(_shell_reads(event, cwd))
         for path in paths:
             grounded = _named_in(path, prompts) or any(_same_file(path, read) for read in reads)
             written[path] = written.get(path, False) or grounded
     source = (
         "file and edit tool events, shell redirection targets, "
-        "prompt path mentions, file reads"
+        "prompt path mentions, file reads, shell read targets"
     )
     shell_only = len(set(written) - explicit)
     if not written:

@@ -371,6 +371,44 @@ class TestFindings(_StoreCase):
             self.assertNotIn(fragment, render_markdown(report))
             self.assertNotIn(fragment, json.dumps(report.to_dict()))
 
+    def test_shell_reads_ground_shell_writes_in_demo_shape(self):
+        # Demo shape: the agent reads a file with cat, then rewrites it and
+        # creates two new ones through heredocs. The prompt names none of them.
+        b = _Builder(self.store, "shellread001", agent="copilot")
+        b.prompt("Add a sentence counter with tests")
+        b.tool("bash", command=(
+            f"cd {CWD} && ls -R src tests | head -30 && cat src/pkg/__init__.py"
+            " && cat README.md && head -20 tests/*.py | head -60"
+        ), description="Inspect")
+        b.tool("bash", result="Ran 1 test\n\nOK",
+               command=MULTI_LINE_SCRIPT.replace("/work/demo", CWD),
+               description="Write files and run tests")
+        report = self.report(b.save())
+        scope = self.finding(report, "scope")
+        self.assertEqual((scope.status, scope.confidence), ("partial", "low"))
+        self.assertTrue(scope.detail.startswith("1 of 3 written files"))
+        self.assertEqual((scope.facts["grounded"], scope.facts["shell_writes"]), (1, 3))
+        self.assertEqual(
+            scope.facts["ungrounded"], ["src/pkg/sentences.py", "tests/test_sentences.py"]
+        )
+
+    def test_shell_reads_alone_are_not_writes(self):
+        b = _Builder(self.store, "shellread002")
+        b.prompt()
+        b.tool("Bash", command="cat src/auth.py && wc -l < src/other.py")
+        scope = self.finding(self.report(b.save()), "scope")
+        self.assertEqual((scope.status, scope.confidence), ("inconclusive", "low"))
+        self.assertEqual(scope.facts["files_written"], 0)
+
+    def test_shell_read_grounds_explicit_write_without_raising_confidence(self):
+        b = _Builder(self.store, "shellread003")
+        b.events[0].data["cwd"] = "/private/tmp/demo"
+        b.prompt("tidy things up")
+        b.tool("bash", command="cd /tmp/demo && head -n 40 lib/util.py")
+        b.tool("Edit", file_path="/private/tmp/demo/lib/util.py")
+        scope = self.finding(self.report(b.save()), "scope")
+        self.assertEqual((scope.status, scope.confidence), ("present", "medium"))
+
     def test_shell_writes_do_not_raise_explicit_write_confidence(self):
         b = _Builder(self.store, "shellmixed01")
         b.prompt()

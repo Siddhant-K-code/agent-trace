@@ -13,6 +13,7 @@ from agent_trace.shell_split import (
     is_operator,
     split_tokens,
     strip_comments,
+    read_targets,
     strip_heredocs,
     write_targets,
 )
@@ -168,3 +169,56 @@ class TestWriteTargets(unittest.TestCase):
         self.assertEqual(write_targets("cd $X && echo > a.txt; echo > /abs/b.txt"), ["/abs/b.txt"])
         self.assertEqual(write_targets("cd - && echo > a.txt"), [])
         self.assertEqual(write_targets("echo > a.txt; cd /x"), ["a.txt"])
+
+
+class TestReadTargets(unittest.TestCase):
+    def test_demo_inspect_command(self):
+        command = (
+            "cd /work/demo && ls -R src tests | head -30 && cat src/pkg/__init__.py"
+            " && cat README.md && head -20 tests/*.py | head -60"
+        )
+        self.assertEqual(
+            read_targets(command), ["/work/demo/src/pkg/__init__.py", "/work/demo/README.md"]
+        )
+        self.assertEqual(write_targets(command), [])
+
+    def test_viewer_operands_and_option_values(self):
+        cases = {
+            "cat a.py b.py": ["a.py", "b.py"],
+            "head -n 20 a.py": ["a.py"],
+            "head -20 a.py": ["a.py"],
+            "head -c 100 a.py": ["a.py"],
+            "tail -n20 -f app.log": ["app.log"],
+            "tail +5 a.txt": ["a.txt"],
+            "nl -b a -w 3 a.py": ["a.py"],
+            "wc -l a.py": ["a.py"],
+            "less -N a.py": ["a.py"],
+            "more a.py": ["a.py"],
+            "cat -- -odd.txt": ["-odd.txt"],
+            "cat - a.txt": ["a.txt"],
+            "/bin/cat 'my file.txt'": ["my file.txt"],
+            "wc -l < in.txt": ["in.txt"],
+            "sort < in.txt > out.txt": ["in.txt"],
+            "cd sub && cat a.py": ["sub/a.py"],
+        }
+        for command, expected in cases.items():
+            with self.subTest(command=command):
+                self.assertEqual(read_targets(command), expected)
+
+    def test_ignored_reads(self):
+        for command in (
+            "head -20 tests/*.py",
+            "cat $FILE",
+            "cat `ls`",
+            "cat ~/notes.txt",
+            "cat /dev/null",
+            "cat <<EOF\nhello.txt\nEOF",
+            "cat <<< hello.txt",
+            "grep foo a.py",
+            "sed -n 1,5p a.py",
+            "awk '{print}' a.py",
+            "cd $X && cat a.py",
+            "cat 'unbalanced",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(read_targets(command), [])
