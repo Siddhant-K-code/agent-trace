@@ -319,7 +319,7 @@ def _write_meta_exclusive(store: TraceStore, session_id: str, meta: SessionMeta)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags, 0o666)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(meta.to_json())
             handle.flush()
             os.fsync(handle.fileno())

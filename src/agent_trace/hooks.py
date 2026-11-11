@@ -422,14 +422,14 @@ def _resolve_session_id(input_data: dict, provider: str = "claude") -> str | Non
 def _write_active_session(session_id: str, provider: str = "claude") -> None:
     path = _active_session_path(provider)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(session_id)
+    path.write_text(session_id, encoding="utf-8", newline="\n")
 
     # Provider-scoped markers preserve concurrent hook state. The canonical
     # marker is a compatibility pointer for the VS Code/OpenVSX extension and
     # other consumers defined by ADR-0002.
     canonical = _canonical_active_session_path()
     if path != canonical:
-        canonical.write_text(session_id)
+        canonical.write_text(session_id, encoding="utf-8", newline="\n")
 
 
 def _clear_active_session(provider: str = "claude") -> None:
@@ -477,7 +477,7 @@ def _write_pending_calls(calls: dict, provider: str = "claude", path: Path | Non
         path.unlink(missing_ok=True)
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(calls))
+    path.write_text(json.dumps(calls), encoding="utf-8", newline="\n")
 
 
 # Code holding the store write lock must not construct a TraceStore (startup

@@ -263,7 +263,7 @@ def check_session(
 def save_baseline(profile: BaselineProfile, path: str = DEFAULT_BASELINE_PATH) -> None:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(profile.to_json())
+    p.write_text(profile.to_json(), encoding="utf-8", newline="\n")
 
 
 def load_baseline(path: str = DEFAULT_BASELINE_PATH) -> BaselineProfile | None:

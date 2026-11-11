@@ -967,6 +967,7 @@ def write_checkpoint(
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     path.write_text(
         build_checkpoint_markdown(events, session_id, timestamp), encoding="utf-8",
+        newline="\n",
     )
     return path
 

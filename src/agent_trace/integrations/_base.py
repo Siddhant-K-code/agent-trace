@@ -30,7 +30,7 @@ def _get_or_create_session(store: TraceStore, name: str) -> str:
     meta = SessionMeta(agent_name=name)
     store.create_session(meta)
     active_path.parent.mkdir(parents=True, exist_ok=True)
-    active_path.write_text(meta.session_id)
+    active_path.write_text(meta.session_id, encoding="utf-8", newline="\n")
     return meta.session_id
 
 

@@ -186,7 +186,9 @@ def write_heartbeat(
     path = heartbeat_path(store, session_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"session_id": session_id, "updated_at": time.time(), "agent_pid": agent_pid}
-    path.write_text(json.dumps(payload, separators=(",", ":")))
+    path.write_text(
+        json.dumps(payload, separators=(",", ":")), encoding="utf-8", newline="\n"
+    )
 
 
 def clear_heartbeat(store: TraceStore, session_id: str) -> None:
@@ -556,7 +558,7 @@ def write_crash_postmortem(
     ])
     for rec in report.recommendations:
         lines.append(f"- {rec}")
-    path.write_text("\n".join(lines) + "\n")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     return path
 
 

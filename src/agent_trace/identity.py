@@ -154,7 +154,7 @@ def _load_sig(store: TraceStore, session_id: str) -> dict | None:
 def _save_sig(store: TraceStore, session_id: str, sig_data: dict) -> None:
     p = _sig_path(store, session_id)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(sig_data, indent=2))
+    p.write_text(json.dumps(sig_data, indent=2), encoding="utf-8", newline="\n")
 
 
 def sign_session(store: TraceStore, session_id: str,
