@@ -40,8 +40,16 @@ from .pr_comment import (
     _table_text,
     current_branch,
     select_sessions_with_link,
+    session_file_activity,
 )
-from .shell_split import is_operator, read_targets, split_tokens, write_targets
+from .session_paths import (
+    command_text as _command_text,
+    is_shell_call as _is_shell_call,
+    normalise_path as _normalise_path,
+    session_cwd as _session_cwd,
+    shell_writes as _shell_writes,
+)
+from .shell_split import is_operator, split_tokens
 from .store import TraceStore
 
 SCHEMA_VERSION = 1
@@ -67,10 +75,6 @@ DEFAULT_CONFIG_PATHS = (".agent-strace.yaml", ".agent-strace.yml", ".agent-strac
 DOCS_URL = "https://github.com/Siddhant-K-code/agent-trace/blob/main/docs/review.md"
 
 _STRONG_LINKS = frozenset({"explicit", "branch"})
-_SHELL_TOOLS = frozenset({
-    "bash", "shell", "run", "exec", "exec_command", "execute_command",
-    "terminal", "run_command", "run_in_terminal", "powershell",
-})
 _EXIT_CODE_RE = re.compile(r"exit(?:ed with)?[ _]code['\"]?\s*[:=]?\s*(-?\d+)", re.IGNORECASE)
 _SUBSTITUTION_RE = re.compile(r"\$\(|`|<\(|>\(")
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -612,37 +616,6 @@ class _Session:
         return entry is not None and entry["coverage"].get(capability) == "captured"
 
 
-def _session_cwd(events: Sequence[TraceEvent]) -> str:
-    for event in events:
-        if event.event_type == EventType.SESSION_START:
-            cwd = event.data.get("cwd")
-            if isinstance(cwd, str) and cwd.strip():
-                return cwd.strip().replace("\\", "/").rstrip("/")
-    return ""
-
-
-def _cwd_forms(cwd: str) -> tuple[str, ...]:
-    """Return ``cwd`` and its macOS alias (``/tmp`` is ``/private/tmp``)."""
-    if not cwd:
-        return ()
-    if re.match(r"^/private/(?:tmp|var|etc)(?:/|$)", cwd):
-        return cwd, cwd[len("/private"):]
-    if re.match(r"^/(?:tmp|var|etc)(?:/|$)", cwd):
-        return cwd, "/private" + cwd
-    return (cwd,)
-
-
-def _normalise_path(path: str, cwd: str) -> str:
-    value = path.strip().replace("\\", "/")
-    for form in _cwd_forms(cwd):
-        if value.startswith(form + "/"):
-            value = value[len(form) + 1:]
-            break
-    while value.startswith("./"):
-        value = value[2:]
-    return value
-
-
 def _same_file(left: str, right: str) -> bool:
     return left == right or left.endswith("/" + right) or right.endswith("/" + left)
 
@@ -662,39 +635,6 @@ def _named_in(path: str, texts: Sequence[str]) -> bool:
 def _prompt_text(event: TraceEvent) -> str:
     value = event.data.get("prompt")
     return value if isinstance(value, str) else ""
-
-
-def _command_text(event: TraceEvent) -> str:
-    args = event.data.get("arguments")
-    if not isinstance(args, dict):
-        args = event.data.get("tool_input")
-    if not isinstance(args, dict):
-        args = {}
-    command = args.get("command") or args.get("cmd") or event.data.get("command") or ""
-    if isinstance(command, list):
-        command = " ".join(str(part) for part in command)
-    return command if isinstance(command, str) else ""
-
-
-def _is_shell_call(event: TraceEvent) -> bool:
-    if event.event_type != EventType.TOOL_CALL:
-        return False
-    tool = str(event.data.get("tool_name") or "").lower()
-    return tool in _SHELL_TOOLS or bool(_command_text(event))
-
-
-def _shell_writes(event: TraceEvent, cwd: str) -> list[str]:
-    """Return paths a shell tool call wrote by redirection or ``tee``."""
-    if not _is_shell_call(event):
-        return []
-    return [_normalise_path(path, cwd) for path in write_targets(_command_text(event))]
-
-
-def _shell_reads(event: TraceEvent, cwd: str) -> list[str]:
-    """Return paths a shell tool call read with a plain file viewer."""
-    if not _is_shell_call(event):
-        return []
-    return [_normalise_path(path, cwd) for path in read_targets(_command_text(event))]
 
 
 def _strip_prefixes(tokens: Sequence[str]) -> list[str]:
@@ -939,18 +879,13 @@ def assess_scope(sessions: Sequence[_Session]) -> Finding:
     written: dict[str, bool] = {}
     explicit: set[str] = set()
     for session in sessions:
-        cwd = _session_cwd(session.events)
-        files_read, files_written, _ = _file_activity(session.events)
-        reads = [_normalise_path(path, cwd) for path in files_read]
+        activity = session_file_activity(session.events)
+        reads = activity.read
         prompts = [
             _prompt_text(e) for e in session.events if e.event_type == EventType.USER_PROMPT
         ]
-        paths = [_normalise_path(raw, cwd) for raw in files_written]
-        explicit.update(paths)
-        for event in session.events:
-            paths.extend(_shell_writes(event, cwd))
-            reads.extend(_shell_reads(event, cwd))
-        for path in paths:
+        explicit.update(activity.explicit_written)
+        for path in activity.written:
             grounded = _named_in(path, prompts) or any(_same_file(path, read) for read in reads)
             written[path] = written.get(path, False) or grounded
     source = (

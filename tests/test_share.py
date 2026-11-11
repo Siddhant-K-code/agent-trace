@@ -193,6 +193,36 @@ class TestRenderHtml(unittest.TestCase):
         self.assertIn("POSTMORTEM", html)
 
 
+class TestPacketCost(unittest.TestCase):
+    def _html(self, events: list[TraceEvent]) -> str:
+        store, tmp = _make_store(events, "cost1")
+        self.addCleanup(tmp.cleanup)
+        return render_html(store, "cost1")
+
+    def test_cost_not_captured_without_model_or_token_usage(self):
+        html = self._html(_basic_events("cost1"))
+        self.assertIn(
+            '<div class="meta-label">Est. cost</div>\n'
+            '        <div class="meta-value">not captured</div>',
+            html,
+        )
+        self.assertNotIn("Cost Breakdown", html)
+        self.assertNotRegex(html, r"\$\d+\.\d{4}")
+
+    def test_recorded_model_shows_estimated_cost(self):
+        events = _basic_events("cost1")
+        events.insert(2, _make_event(
+            EventType.LLM_REQUEST, 1.5, "cost1", model="claude-sonnet-4-5",
+        ))
+        html = self._html(events)
+        self.assertIn("Estimated Cost Breakdown", html)
+        self.assertRegex(
+            html,
+            r'<div class="meta-label">Est\. cost</div>\s*'
+            r'<div class="meta-value">\$\d+\.\d{4}</div>',
+        )
+
+
 _SENTINELS = (
     "sentinel-prompt-41f7",
     "sentinel-command-8c2e",

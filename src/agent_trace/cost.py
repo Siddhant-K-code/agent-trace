@@ -488,6 +488,19 @@ class TokenCounter:
         return usage.input_tokens, usage.output_tokens
 
 
+def cost_inputs_captured(events: list[TraceEvent]) -> bool:
+    """True when *events* record a model name or token usage.
+
+    Without either, :func:`estimate_cost` only prices event payload sizes at
+    the default model. That figure says nothing about what the session cost,
+    so reviewer-facing output reports the cost as not captured instead.
+    """
+    return any(
+        event_model(event.data) or _recorded_token_usage(event.data) is not None
+        for event in events
+    )
+
+
 def session_records_usage(events: list[TraceEvent]) -> bool:
     """True when *events* hold an unpaired ``llm_response`` with token counts."""
     counter = TokenCounter()

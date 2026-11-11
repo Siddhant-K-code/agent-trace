@@ -15,7 +15,7 @@ import sys
 from datetime import datetime, timezone
 from typing import TextIO
 
-from .cost import estimate_cost
+from .cost import cost_inputs_captured, estimate_cost
 from .disclosure import (
     DisclosurePreview,
     NonObjectEventDataError,
@@ -649,11 +649,16 @@ def render_html(
     require_object_event_data(events)
     explain = _packet_explain(packet)
 
+    cost_result = None
+    total_cost_str = "not captured"
+    phase_costs: dict[int, float] = {}
+    wasted_cost = 0.0
     try:
-        cost_result = estimate_cost(store, session_id)
-        total_cost_str = f"${cost_result.total_cost:.4f}"
-        phase_costs = {pc.phase_index: pc.cost_dollars for pc in cost_result.phase_costs}
-        wasted_cost = cost_result.wasted_cost
+        if cost_inputs_captured(store.load_events(session_id)):
+            cost_result = estimate_cost(store, session_id)
+            total_cost_str = f"${cost_result.total_cost:.4f}"
+            phase_costs = {pc.phase_index: pc.cost_dollars for pc in cost_result.phase_costs}
+            wasted_cost = cost_result.wasted_cost
     except Exception:
         cost_result = None
         total_cost_str = "n/a"
@@ -720,7 +725,7 @@ def render_html(
           <td>${pc.cost_dollars:.4f}{"  ← wasted" if pc.failed else ""}</td>
         </tr>"""
         cost_html = f"""
-    <h2>Cost Breakdown</h2>
+    <h2>Estimated Cost Breakdown</h2>
     <table class="cost-table">
       <thead><tr><th>#</th><th>Phase</th><th>Input tok</th><th>Output tok</th><th>Cost</th></tr></thead>
       <tbody>{rows}</tbody>
