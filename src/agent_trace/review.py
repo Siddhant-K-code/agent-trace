@@ -7,11 +7,15 @@ show gaps instead of inventing a complete story.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import re
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Iterable, Literal
 
 from .models import EventType, TraceEvent
+from .shell_split import command_segments
+
+_ENV_ASSIGN_RE = re.compile(r"^[a-z_][a-z0-9_]*=")
 
 ReviewCategory = Literal[
     "commands",
@@ -83,18 +87,36 @@ def _tool_command(event: TraceEvent) -> str:
     return command if isinstance(command, str) else ""
 
 
-def is_test_command(command: str) -> bool:
-    """Return True when a single shell command invokes a known test runner."""
-    tokens = command.strip().lower().split()
+def is_test_argv(words: Sequence[str]) -> bool:
+    """Return True when one simple command's words invoke a known test runner."""
+    tokens = [word.lower() for word in words]
+    while tokens and _ENV_ASSIGN_RE.match(tokens[0]):
+        tokens.pop(0)
     if not tokens:
         return False
-    if tokens[0] in ("pytest", "py.test") or tokens[:3] == ["python", "-m", "pytest"]:
+    if tokens[0] in ("pytest", "py.test"):
         return True
     if tokens[:2] in (["npm", "test"], ["bun", "test"], ["cargo", "test"], ["go", "test"]):
         return True
-    if tokens[:3] in (["python3", "-m", "pytest"], ["uv", "run", "pytest"]):
+    if tokens[:3] in (
+        ["python", "-m", "pytest"],
+        ["python3", "-m", "pytest"],
+        ["python", "-m", "unittest"],
+        ["python3", "-m", "unittest"],
+        ["uv", "run", "pytest"],
+    ):
         return True
     return False
+
+
+def is_test_command(command: str) -> bool:
+    """Return True when a shell command runs a known test runner.
+
+    Each simple command is checked: parts joined by ``&&``, ``;`` or a pipe,
+    and each line of a multi-line script. Heredoc bodies and comments are
+    skipped, so text written to a file is never read as a command.
+    """
+    return any(is_test_argv(words) for words in command_segments(command))
 
 
 def _explicit_categories(event: TraceEvent) -> set[ReviewCategory]:

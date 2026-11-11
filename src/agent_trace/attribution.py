@@ -134,11 +134,15 @@ def _detect_agent_provider() -> tuple[str, str]:
     return "unknown", ""
 
 
-def _detect_git_context() -> tuple[str, str, str]:
-    """Return (repo_url, branch, commit_sha) from the current working directory."""
+def _detect_git_context(cwd: str | None = None) -> tuple[str, str, str]:
+    """Return (repo_url, branch, commit_sha) for ``cwd``.
+
+    ``cwd`` defaults to the process working directory.
+    """
     try:
         import subprocess
-        cwd = os.getcwd()
+        if cwd is None:
+            cwd = os.getcwd()
 
         def _git(*args: str) -> str:
             result = subprocess.run(
@@ -159,13 +163,49 @@ def _detect_git_context() -> tuple[str, str, str]:
 # Public API
 # ---------------------------------------------------------------------------
 
-def collect_attribution() -> Attribution:
-    """Collect attribution data for the current process."""
+# Hook ``--provider`` values mapped to ``Attribution.agent_provider``.
+HOOK_PROVIDERS = {
+    "claude": "claude-code",
+    "codex": "codex",
+    "gemini": "gemini",
+    "cursor": "cursor",
+    "copilot": "copilot",
+}
+
+
+def _usable_dir(path: object) -> str | None:
+    if not isinstance(path, str) or not path:
+        return None
+    try:
+        if os.path.isabs(path) and os.path.isdir(path):
+            return path
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def collect_attribution(
+    cwd: str | None = None,
+    hook_provider: str | None = None,
+) -> Attribution:
+    """Collect attribution data for the current process.
+
+    Hooks pass the agent's working directory from the hook payload as ``cwd``
+    and their ``--provider`` as ``hook_provider``. An agent may run hooks from
+    another directory (GitHub Copilot CLI runs plugin hooks from the plugin
+    directory), so the payload ``cwd`` is used for ``working_dir`` and git
+    context when it is an existing absolute directory. Otherwise the process
+    working directory is used.
+    """
     os_user = _detect_os_user()
     hostname = _detect_hostname()
     ancestry = _detect_process_ancestry()
     provider, version = _detect_agent_provider()
-    repo, branch, commit = _detect_git_context()
+    if hook_provider in HOOK_PROVIDERS and provider != HOOK_PROVIDERS[hook_provider]:
+        # The hook knows which agent invoked it; environment guesses do not.
+        provider, version = HOOK_PROVIDERS[hook_provider], ""
+    working_dir = _usable_dir(cwd) or os.getcwd()
+    repo, branch, commit = _detect_git_context(working_dir)
 
     return Attribution(
         os_user=os_user,
@@ -179,7 +219,7 @@ def collect_attribution() -> Attribution:
         git_repo=repo,
         git_branch=branch,
         git_commit=commit,
-        working_dir=os.getcwd(),
+        working_dir=working_dir,
     )
 
 

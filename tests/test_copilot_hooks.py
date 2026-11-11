@@ -4,6 +4,7 @@ import argparse
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -448,6 +449,114 @@ class TestCopilotSetup(unittest.TestCase):
             "agent-strace hook --provider copilot subagent-stop",
         )
         self.assertIn("GitHub Copilot hooks config", err.getvalue())
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+COPILOT_PLUGIN_HOOK = {"type": "command", "command": "agent-strace hook --provider copilot session-start"}
+
+
+class TestCopilotSetupWithPlugin(unittest.TestCase):
+    """setup --cli copilot must not register hooks that an installed plugin already registers."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = Path(tmp.name) / "copilot-home"
+        self.home.mkdir()
+        env = patch.dict(os.environ, {"COPILOT_HOME": str(self.home)})
+        env.start()
+        self.addCleanup(env.stop)
+        self.user_hooks = self.home / "hooks" / "agent-strace.json"
+
+    def _install_plugin(self, marketplace="agent-trace", name="agent-strace", source=REPO_ROOT):
+        plugin = self.home / "installed-plugins" / marketplace / name
+        plugin.mkdir(parents=True)
+        for relative in ("plugin.json", "hooks.json"):
+            (plugin / relative).write_text((source / relative).read_text(encoding="utf-8"))
+        return plugin
+
+    def _setup(self, cli="copilot"):
+        args = argparse.Namespace(redact=False, no_redact=False, global_config=False, cli=cli)
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(sys, "stdout", out), patch.object(sys, "stderr", err):
+            status = cmd_setup(args)
+        return status, out.getvalue(), err.getvalue()
+
+    def test_installed_plugin_skips_user_hooks(self):
+        plugin = self._install_plugin()
+        status, out, err = self._setup()
+        self.assertIn(status, (0, None))
+        self.assertFalse(self.user_hooks.exists())
+        self.assertEqual(out, "")
+        self.assertIn(f"AgentTrace Copilot CLI plugin at {plugin}", err)
+        self.assertIn(f"Did not write {self.user_hooks}", err)
+        self.assertIn("copilot plugin uninstall agent-strace", err)
+        self.assertNotIn("Wrote GitHub Copilot hooks config", err)
+
+    def test_installed_plugin_flags_existing_user_hooks(self):
+        self._install_plugin()
+        self.user_hooks.parent.mkdir()
+        self.user_hooks.write_text("{}")
+        _, _, err = self._setup()
+        self.assertIn(f"{self.user_hooks} already exists and duplicates the plugin hooks", err)
+        self.assertTrue(self.user_hooks.exists(), "setup must not delete user files")
+
+    def test_agent_plugins_layout_is_detected(self):
+        source = REPO_ROOT / "plugins" / "agent-strace"
+        plugin = self.home / "installed-plugins" / "_direct" / "agent-strace"
+        (plugin / "com.github.copilot" / "hooks").mkdir(parents=True)
+        (plugin / "plugin.json").write_text((source / "plugin.json").read_text(encoding="utf-8"))
+        (plugin / "com.github.copilot" / "hooks" / "hooks.json").write_text(
+            (source / "com.github.copilot" / "hooks" / "hooks.json").read_text(encoding="utf-8")
+        )
+        _, _, err = self._setup()
+        self.assertFalse(self.user_hooks.exists())
+        self.assertIn(str(plugin), err)
+
+    def test_disabled_plugin_still_writes_user_hooks(self):
+        for settings, config in (
+            ({"enabledPlugins": {"agent-strace@agent-trace": False}}, None),
+            (None, "// comment\n" + json.dumps({"installedPlugins": [
+                {"name": "agent-strace", "marketplace": "agent-trace", "enabled": False},
+            ]})),
+        ):
+            with self.subTest(settings=settings, config=config):
+                plugin = self._install_plugin()
+                (self.home / "settings.json").write_text(json.dumps(settings or {}))
+                (self.home / "config.json").write_text(config or "{}")
+                _, out, err = self._setup()
+                self.assertTrue(self.user_hooks.exists())
+                self.assertIn("Wrote GitHub Copilot hooks config", err)
+                self.assertEqual(json.loads(out)["hooks"]["sessionStart"][0]["command"],
+                                 COPILOT_PLUGIN_HOOK["command"])
+                self.user_hooks.unlink()
+                shutil.rmtree(plugin.parent.parent)
+
+    def test_unrelated_plugin_does_not_block_setup(self):
+        plugin = self.home / "installed-plugins" / "other" / "linter"
+        plugin.mkdir(parents=True)
+        (plugin / "hooks.json").write_text(json.dumps({"version": 1, "hooks": {"preToolUse": [
+            {"type": "command", "command": "lint-hook"}
+        ]}}))
+        self._setup()
+        self.assertTrue(self.user_hooks.exists())
+
+    def test_cli_all_skips_only_copilot(self):
+        self._install_plugin()
+        dirs = {name: Path(tempfile.mkdtemp()) for name in ("codex", "cursor", "gemini")}
+        for path in dirs.values():
+            self.addCleanup(shutil.rmtree, path, True)
+        with patch.dict(os.environ, {
+            "CODEX_HOME": str(dirs["codex"]),
+            "CURSOR_CONFIG_DIR": str(dirs["cursor"]),
+            "GEMINI_CLI_HOME": str(dirs["gemini"]),
+        }):
+            _, out, err = self._setup(cli="all")
+        self.assertTrue((dirs["codex"] / "hooks.json").exists())
+        self.assertTrue((dirs["cursor"] / "hooks.json").exists())
+        self.assertFalse(self.user_hooks.exists())
+        self.assertIn("Did not write", err)
+        self.assertIn("agent-strace hook --provider codex", out)
 
 
 class TestCopilotConversationId(unittest.TestCase):

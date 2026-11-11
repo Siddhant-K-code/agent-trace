@@ -35,6 +35,7 @@ from agent_trace.reviewability import (
     build_report,
     classify_validation,
     cmd_review,
+    format_text,
     link_sessions,
     load_threshold,
     read_cognitive_debt,
@@ -45,6 +46,31 @@ from agent_trace.store import TraceStore
 SECRET_PROMPT = "Refactor src/auth.py for the zebra-quartz-77 rollout"
 BRANCH = "feature/review"
 CWD = "/work/repo"
+
+
+# Sanitized from a recorded GitHub Copilot CLI shell call: file contents are
+# written with heredocs, then the test suite runs on the last line.
+MULTI_LINE_SCRIPT = (
+    "cd /work/demo && cat > src/pkg/sentences.py <<'EOF'\n"
+    "import re\n"
+    "\n"
+    "\n"
+    "def sentence_count(text):\n"
+    "    \"\"\"Count sentences.\"\"\"\n"
+    "    return len(re.findall(r\"[.!?]+(?=\\s|$)\", text))\n"
+    "EOF\n"
+    "cat > src/pkg/__init__.py <<'EOF'\n"
+    "from .sentences import sentence_count\n"
+    "EOF\n"
+    "cat > tests/test_sentences.py <<'EOF'\n"
+    "import unittest\n"
+    "\n"
+    "class T(unittest.TestCase):\n"
+    "    def test_it(self):\n"
+    "        self.assertEqual(1, 1)\n"
+    "EOF\n"
+    "PYTHONPATH=src python3 -m unittest discover -s tests 2>&1 | tail -4"
+)
 
 
 class _Builder:
@@ -142,6 +168,30 @@ class TestClassifyValidation(unittest.TestCase):
 
     def test_unbalanced_quotes_do_not_raise(self):
         self.assertEqual(classify_validation("pytest -k 'oops"), [("pytest", "test")])
+
+    def test_multi_line_script_finds_run_after_heredocs(self):
+        # Shape of a real Copilot CLI call: heredocs write files, then the
+        # last line runs the tests.
+        self.assertEqual(classify_validation(MULTI_LINE_SCRIPT), [("unittest", "test")])
+
+    def test_heredoc_bodies_are_not_commands(self):
+        for command in (
+            "cat > run.sh <<EOF\npytest -q\nEOF",
+            "cat > run.sh <<'EOF'\npytest -q\nEOF\n",
+            'cat > run.sh <<"EOF"\nnpm test\nEOF',
+            "cat > run.sh <<-EOF\n\tgo test ./...\n\tEOF",
+            "python3 - <<'PY'\nimport subprocess\nsubprocess.run(['pytest'])\nPY",
+            "# pytest later\nls",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(classify_validation(command), [])
+
+    def test_newlines_separate_commands(self):
+        self.assertEqual(
+            classify_validation("cd repo\nruff check src\npytest -q"),
+            [("ruff", "check"), ("pytest", "test")],
+        )
+        self.assertEqual(classify_validation("python -m \\\n  pytest -q"), [("pytest", "test")])
 
 
 class TestThreshold(unittest.TestCase):
@@ -395,6 +445,22 @@ class TestValidationOutcomes(_StoreCase):
                 self.assertEqual(run["outcome"], "unknown")
                 self.assertIsNone(run["exit_code"])
                 self.assertEqual(validation.status, "partial")
+
+    def test_multi_line_script_is_partial_not_missing(self):
+        validation, run = self._validate(
+            "multiline001", MULTI_LINE_SCRIPT,
+            {"result": "Ran 7 tests in 0.000s\n\nOK\n<shellId: 1 completed with exit code 0>"},
+        )
+        self.assertEqual((validation.status, validation.confidence), ("partial", "medium"))
+        self.assertEqual((run["label"], run["outcome"]), ("unittest", "unknown"))
+        self.assertIsNone(run["exit_code"])
+        report = self.report("multiline001")
+        self.assertNotIn("validation", [f.name for f in report.failing])
+        text = io.StringIO()
+        format_text(report, text)
+        for fragment in ("sentence_count", "PYTHONPATH", "EOF", "tail -4"):
+            self.assertNotIn(fragment, text.getvalue())
+            self.assertNotIn(fragment, render_markdown(report))
 
     def test_and_chain_carries_only_a_pass(self):
         validation, run = self._validate("chain0000001", "cd repo && pytest", {"result": "exit_code: 0"})

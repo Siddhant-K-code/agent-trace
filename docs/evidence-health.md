@@ -64,6 +64,11 @@ These stay `invalid`:
   `events_after_session_end`, reported once per closed span on the first such
   event.
 
+A start and an end that each appear twice, with every other event doubled, usually
+means the same hooks are registered twice, for example by the GitHub Copilot CLI
+plugin and by `agent-strace setup --cli copilot`. Keep one registration; see
+[GitHub Copilot CLI hooks](setup.md#github-copilot-cli-hooks).
+
 Source matching is exact and case-sensitive. When a continued session has no
 end after its last continuation start, it reports `session_active` or
 `missing_session_end` like any other open session. `observed_end` still reports

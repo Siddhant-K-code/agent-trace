@@ -900,12 +900,99 @@ def _copilot_hook_entries(config: dict) -> dict[str, list[dict]]:
     return found
 
 
+_COPILOT_PLUGIN_MANIFESTS = (
+    Path(".plugin") / "plugin.json",
+    Path("plugin.json"),
+    Path(".github") / "plugin" / "plugin.json",
+    Path(".claude-plugin") / "plugin.json",
+)
+_COPILOT_PLUGIN_HOOK_FILES = (
+    Path("hooks.json"),
+    Path("hooks") / "hooks.json",
+    Path("com.github.copilot") / "hooks" / "hooks.json",
+)
+
+
+def _read_commented_json(path: Path) -> dict:
+    """Read a JSON object that may contain whole-line ``//`` comments, or return {}."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return {}
+    lines = [line for line in text.splitlines() if not line.lstrip().startswith("//")]
+    try:
+        data = json.loads("\n".join(lines))
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _copilot_disabled_plugins(config_dir: Path) -> tuple[set[str], set[str]]:
+    """Return (disabled ``name@marketplace`` keys, disabled install paths)."""
+    keys: set[str] = set()
+    paths: set[str] = set()
+    enabled = _read_commented_json(config_dir / "settings.json").get("enabledPlugins")
+    if isinstance(enabled, dict):
+        keys.update(key for key, value in enabled.items() if value is False)
+    installed = _read_commented_json(config_dir / "config.json").get("installedPlugins")
+    if isinstance(installed, list):
+        for item in installed:
+            if not isinstance(item, dict) or item.get("enabled") is not False:
+                continue
+            if isinstance(item.get("cache_path"), str):
+                paths.add(os.path.normpath(item["cache_path"]))
+            if item.get("name") and item.get("marketplace"):
+                keys.add(f"{item['name']}@{item['marketplace']}")
+    return keys, paths
+
+
+def _plugin_hook_configs(plugin_dir: Path) -> Iterator[dict]:
+    manifest: dict = {}
+    for relative in _COPILOT_PLUGIN_MANIFESTS:
+        data, _ = _read_json_object(plugin_dir / relative)
+        if data is not None:
+            manifest = data
+            break
+    declared = manifest.get("hooks")
+    if isinstance(declared, dict):
+        yield declared
+    paths = [declared] if isinstance(declared, str) else declared if isinstance(declared, list) else []
+    candidates = [Path(p) for p in paths if isinstance(p, str)] + list(_COPILOT_PLUGIN_HOOK_FILES)
+    for relative in candidates:
+        config, _ = _read_json_object(plugin_dir / relative)
+        if config:
+            yield config
+
+
+def find_copilot_plugins(config_dir: Path) -> list[Path]:
+    """Return enabled installed Copilot CLI plugins that register AgentTrace hooks.
+
+    Plugins live in ``<config_dir>/installed-plugins/<marketplace>/<plugin>``
+    (``_direct/<id>`` for direct installs). Reads files only.
+    """
+    root = config_dir / "installed-plugins"
+    try:
+        plugin_dirs = sorted(path for path in root.glob("*/*") if path.is_dir())
+    except OSError:
+        return []
+    disabled_keys, disabled_paths = _copilot_disabled_plugins(config_dir)
+    found: list[Path] = []
+    for plugin_dir in plugin_dirs:
+        key = f"{plugin_dir.name}@{plugin_dir.parent.name}"
+        if key in disabled_keys or os.path.normpath(str(plugin_dir)) in disabled_paths:
+            continue
+        if any(_copilot_hook_entries(config) for config in _plugin_hook_configs(plugin_dir)):
+            found.append(plugin_dir)
+    return found
+
+
 def verify_copilot_managed(
     policy_dir: Path,
     expected_for: Callable[[str], dict],
     version: str,
     *,
     user_hooks_dir: Path | None = None,
+    plugin_dirs: list[Path] | None = None,
     details: dict | None = None,
     owner_problem: Callable[[Path], str | None] | None = None,
 ) -> tuple[bool, list[str], list[str]]:
@@ -982,6 +1069,11 @@ def verify_copilot_managed(
                     f"User-level AgentTrace hooks in {path} also run, with full content capture "
                     "and their own redaction mode. Remove that file for metadata-only capture."
                 )
+    for plugin_dir in plugin_dirs or []:
+        warnings.append(
+            f"The AgentTrace Copilot CLI plugin at {plugin_dir} also registers hooks, with full "
+            "content capture, so each event is recorded twice. Uninstall it for metadata-only capture."
+        )
 
     if details is not None:
         details.update(

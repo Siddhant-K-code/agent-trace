@@ -173,9 +173,14 @@ def _get_store_dir() -> str:
     return _HOOK_STORE_DIR.get() or DEFAULT_TRACE_DIR
 
 
-def _payload_store_dir(input_data: dict) -> str | None:
-    """Resolve a safe workspace-local trace directory from a hook payload."""
-    cwd = input_data.get("cwd")
+def _payload_cwd(input_data: dict | None) -> str | None:
+    """Return the agent's working directory from a hook payload, if usable.
+
+    Agents may run hooks from another directory (GitHub Copilot CLI runs
+    plugin hooks from the plugin directory), so the payload ``cwd`` is the
+    workspace, not the hook process working directory.
+    """
+    cwd = (input_data or {}).get("cwd")
     if not isinstance(cwd, str) or not cwd:
         return None
 
@@ -186,7 +191,15 @@ def _payload_store_dir(input_data: dict) -> str | None:
     except (OSError, ValueError):
         return None
 
-    return str(workspace / ".agent-traces")
+    return cwd
+
+
+def _payload_store_dir(input_data: dict) -> str | None:
+    """Resolve a safe workspace-local trace directory from a hook payload."""
+    cwd = _payload_cwd(input_data)
+    if cwd is None:
+        return None
+    return str(Path(cwd) / ".agent-traces")
 
 
 def _get_store() -> TraceStore:
@@ -308,7 +321,9 @@ def _ensure_session_meta(
             session_id=session_id,
             agent_name=agent_name,
             command=f"{agent_name} ({IMPLICIT_SESSION_SOURCE})",
-            attribution=collect_attribution().to_dict(),
+            attribution=collect_attribution(
+                cwd=_payload_cwd(input_data), hook_provider=provider
+            ).to_dict(),
             conversation_id=_native_conversation_id(input_data, session_id),
         )
         if store.create_session(meta, if_missing=True) is not None:
@@ -645,7 +660,7 @@ def handle_session_start(input_data: dict, provider: str = "claude") -> None:
 
     session_id = input_data.get("session_id", "")
     agent_name = _PROVIDER_AGENT.get(provider, "agent-cli")
-    attr = collect_attribution()
+    attr = collect_attribution(cwd=_payload_cwd(input_data), hook_provider=provider)
     meta = SessionMeta(
         agent_name=agent_name,
         command=f"{agent_name} ({input_data.get('source', 'startup')})",

@@ -14,7 +14,6 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import shlex
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -42,6 +41,7 @@ from .pr_comment import (
     current_branch,
     select_sessions_with_link,
 )
+from .shell_split import is_operator, split_tokens
 from .store import TraceStore
 
 SCHEMA_VERSION = 1
@@ -72,8 +72,6 @@ _SHELL_TOOLS = frozenset({
     "terminal", "run_command", "run_in_terminal", "powershell",
 })
 _EXIT_CODE_RE = re.compile(r"exit(?:ed with)?[ _]code['\"]?\s*[:=]?\s*(-?\d+)", re.IGNORECASE)
-_SEGMENT_SPLIT_RE = re.compile(r"&&|\|\||;|\||&")
-_SHELL_OPERATOR_CHARS = frozenset("();<>|&")
 _SUBSTITUTION_RE = re.compile(r"\$\(|`|<\(|>\(")
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _PERMISSION_MODE_RE = re.compile(r"^[A-Za-z][A-Za-z_-]{0,31}$")
@@ -709,24 +707,23 @@ class _ShellShape:
 
 
 def _shell_shape(command: str) -> _ShellShape:
+    """Split a command into segments for classification.
+
+    Newlines separate commands, and heredoc bodies and comments are skipped,
+    so a test run on the last line of a script is found and file contents are
+    never read as commands. A multi-line command, one that does not tokenize,
+    or one with command substitution is never exact: its exit status is not
+    assigned to any one segment.
+    """
     text = command.strip()
     if not text:
         return _ShellShape((), (), True)
-    lexer = shlex.shlex(text, posix=True, punctuation_chars=True)
-    lexer.whitespace_split = True
-    lexer.commenters = ""
-    try:
-        tokens = list(lexer)
-    except ValueError:
-        segments = tuple(
-            tuple(part.split()) for part in _SEGMENT_SPLIT_RE.split(text) if part.strip()
-        )
-        return _ShellShape(segments, ("?",), False)
+    tokens, parsed = split_tokens(text)
     segments: list[tuple[str, ...]] = []
     operators: list[str] = []
     current: list[str] = []
     for token in tokens:
-        if token and all(char in _SHELL_OPERATOR_CHARS for char in token):
+        if is_operator(token):
             operators.append(token)
             if current:
                 segments.append(tuple(current))
@@ -735,7 +732,12 @@ def _shell_shape(command: str) -> _ShellShape:
             current.append(token)
     if current:
         segments.append(tuple(current))
-    exact = "\n" not in text and "\r" not in text and not _SUBSTITUTION_RE.search(text)
+    exact = (
+        parsed
+        and "\n" not in text
+        and "\r" not in text
+        and not _SUBSTITUTION_RE.search(text)
+    )
     return _ShellShape(tuple(segments), tuple(operators), exact)
 
 

@@ -228,9 +228,11 @@ It fails (exit 1) when:
 - the executable is missing or reports a different version;
 - Claude Code managed settings set `disableAllHooks: true`.
 
-It warns, without failing, when user-level AgentTrace hooks also exist, or when
+It warns, without failing, when user-level AgentTrace hooks also exist, when
+an enabled AgentTrace Copilot CLI plugin is installed (`--cli copilot`), or when
 the executable itself is not root-owned. It does not check the Windows
-Registry, server-managed settings, MDM profiles, plugins, or repository hooks.
+Registry, server-managed settings, MDM profiles, Claude Code plugins, or
+repository hooks.
 
 With `--cli claude`, add `--live` to also inspect the newest recorded session
 in the current project. See [live capture verification](setup.md#live-capture-verification).

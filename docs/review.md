@@ -63,7 +63,10 @@ Validation uses the last run of each check across all linked sessions. Sessions
 are ordered by start time, then ID. A check that passed before a later file
 edit in any linked session is reported as `partial`. Command strings are never
 printed. They are mapped to fixed labels such as `pytest`, `npm test`, `ruff`,
-or `tsc`.
+or `tsc`. Each command in a shell call is checked: parts joined by `&&`, `;`,
+or a pipe, and each line of a multi-line script. Heredoc bodies (`<<EOF` and
+its quoted and `<<-` forms) and `#` comments are skipped, so text written to a
+file is never read as a test run.
 
 A run counts only when it has exactly one result recorded after the call, with
 an explicit status: an exit code, a success flag, or an error event. A missing,
