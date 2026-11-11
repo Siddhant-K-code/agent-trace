@@ -14,6 +14,7 @@ import hashlib
 import io
 import json
 import os
+import pathlib
 import sys
 import tempfile
 import unittest
@@ -51,7 +52,13 @@ def _windows_open(file, mode="r", buffering=-1, encoding=None, errors=None,
 @contextlib.contextmanager
 def windows_newlines():
     """Translate "\\n" to "\\r\\n" in text-mode writes that leave newline unset."""
-    with patch.object(builtins, "open", _windows_open), patch.object(io, "open", _windows_open):
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(patch.object(builtins, "open", _windows_open))
+        stack.enter_context(patch.object(io, "open", _windows_open))
+        # Python 3.10 pathlib binds io.open on a module-level accessor.
+        accessor = getattr(pathlib, "_normal_accessor", None)
+        if accessor is not None:
+            stack.enter_context(patch.object(accessor, "open", _windows_open))
         yield
 
 
@@ -221,8 +228,10 @@ class TestLegacyCrlfEvents(_LineEndingCase):
                 meta = store.load_meta(session_id)
                 _, state = _parse_event_snapshot(raw, meta)
                 self.assertEqual(state, "unanchored")
-                report = validate_trace_directory(trace_dir / session_id, allow_active=True)
-                self.assertEqual(report.hash_chain["state"], "unanchored")
+                # validate opens directories by fd, which Windows does not support.
+                if os.name != "nt":
+                    report = validate_trace_directory(trace_dir / session_id, allow_active=True)
+                    self.assertEqual(report.hash_chain["state"], "unanchored")
 
     def test_tag_session_rewrites_legacy_crlf_file_as_lf(self):
         for mode in MODES:
