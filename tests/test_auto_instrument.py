@@ -21,6 +21,11 @@ from agent_trace.integrations._base import _get_store, emit
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
 
+try:
+    import _sdk_stubs as stubs
+except ImportError:  # run as a package module
+    from tests import _sdk_stubs as stubs
+
 
 # ---------------------------------------------------------------------------
 # Integration registry
@@ -181,20 +186,18 @@ def _raise_rate_limit(*args, **kwargs):
 
 
 def _fake_openai():
-    mod = types.ModuleType("openai")
-    mod.OpenAI = types.SimpleNamespace(chat=types.SimpleNamespace(
-        completions=types.SimpleNamespace(create=_raise_rate_limit),
-    ))
-    return {"openai": mod}, lambda: mod.OpenAI.chat.completions.create(
-        None, model="gpt-4o", messages=[{"role": "user", "content": "hi"}], max_tokens=100,
+    modules = stubs.openai_modules(chat=_raise_rate_limit)
+    completions = modules["openai.resources.chat.completions"].Completions
+    return modules, lambda: completions().create(
+        model="gpt-4o", messages=[{"role": "user", "content": "hi"}], max_tokens=100,
     )
 
 
 def _fake_anthropic():
-    mod = types.ModuleType("anthropic")
-    mod.Anthropic = types.SimpleNamespace(messages=types.SimpleNamespace(create=_raise_rate_limit))
-    return {"anthropic": mod}, lambda: mod.Anthropic.messages.create(
-        None, model="claude-x", messages=[{"role": "user", "content": "hi"}],
+    modules = stubs.anthropic_modules(_raise_rate_limit)
+    messages = modules["anthropic.resources.messages"].Messages
+    return modules, lambda: messages().create(
+        model="claude-x", messages=[{"role": "user", "content": "hi"}],
     )
 
 
