@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -248,6 +249,72 @@ class TestDecisionWithoutAgentPid(unittest.TestCase):
         self.assertEqual(load_request(self.store, req.request_id).state, DENIED)
 
 
+class TestDecisionWithReusedAgentPid(unittest.TestCase):
+    """The agent exited and its PID now belongs to another process."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.store = TraceStore(self.tmpdir)
+
+    def _request(self):
+        return create_approval_request(
+            self.store, "s1", "rule", agent_pid=99999, agent_start_time="proc:100",
+        )
+
+    def test_approve_and_deny_record_without_signalling(self):
+        for decide, state in ((approve_request, APPROVED), (deny_request, DENIED)):
+            with self.subTest(decide=decide.__name__):
+                req = self._request()
+                with patch("agent_trace.approval.pid_reused", return_value=True) as reused, \
+                     patch("os.kill") as mock_kill:
+                    ok, msg = decide(self.store, req.request_id)
+                reused.assert_called_once_with(99999, "proc:100")
+                mock_kill.assert_not_called()
+                self.assertTrue(ok)
+                self.assertIn(
+                    "decision recorded, but agent 99999 was not signalled: "
+                    "the PID now belongs to another process", msg,
+                )
+                self.assertNotIn("resumed", msg)
+                self.assertNotIn("terminated", msg)
+                self.assertEqual(load_request(self.store, req.request_id).state, state)
+
+    def test_cli_exits_zero_and_explains(self):
+        import argparse
+        import io
+        req = self._request()
+        args = argparse.Namespace(trace_dir=self.tmpdir, approval_cmd="deny",
+                                  request_id=req.request_id)
+        out = io.StringIO()
+        with patch("agent_trace.approval.pid_reused", return_value=True), \
+             patch("os.kill") as mock_kill, patch("sys.stdout", out):
+            self.assertEqual(approval_mod.cmd_approval(args), 0)
+        mock_kill.assert_not_called()
+        self.assertIn("was not signalled", out.getvalue())
+
+    def test_matching_identity_signals(self):
+        import signal
+        req = self._request()
+        with patch("agent_trace.approval.pid_reused", return_value=False), \
+             patch("os.kill") as mock_kill:
+            ok, msg = deny_request(self.store, req.request_id)
+        mock_kill.assert_called_once_with(99999, signal.SIGTERM)
+        self.assertTrue(msg.endswith("agent 99999 terminated"))
+
+    def test_opt_out_does_not_look_up_identity(self):
+        req = self._request()
+        with patch("agent_trace.approval.pid_reused") as reused, patch("os.kill"):
+            ok, msg = deny_request(self.store, req.request_id, kill_agent=False)
+        reused.assert_not_called()
+        self.assertIn("not signalled (--no-kill)", msg)
+
+    def test_identity_is_stored_and_loaded(self):
+        req = self._request()
+        raw = json.loads((Path(self.tmpdir) / ".approvals" / f"{req.request_id}.json").read_text())
+        self.assertEqual(raw["agent_start_time"], "proc:100")
+        self.assertEqual(load_request(self.store, req.request_id).agent_start_time, "proc:100")
+
+
 class TestPollForDecision(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
@@ -390,6 +457,8 @@ class TestStateDefinition(unittest.TestCase):
         req = ApprovalRequest.from_json(json.dumps(record))
         self.assertEqual(req.state, APPROVED)
         self.assertEqual(req.decided_by, "alice")
+        # Records written before agent_start_time existed load with it empty.
+        self.assertEqual(req.agent_start_time, "")
 
     def test_save_rejects_unknown_state(self):
         store = TraceStore(tempfile.mkdtemp())

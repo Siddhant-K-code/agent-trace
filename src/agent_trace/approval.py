@@ -41,6 +41,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from .process_identity import PID_REUSED_REASON, pid_reused
 from .store import TraceStore, _write_atomic
 
 ApprovalState = Literal["pending", "approved", "denied"]
@@ -82,6 +83,9 @@ class ApprovalRequest:
     tool_input: dict = field(default_factory=dict)
     event_id: str = ""
     agent_pid: int = 0
+    # Start-time identity of agent_pid when the request was made (see
+    # process_identity.py). Empty when unknown, including older records.
+    agent_start_time: str = ""
     state: ApprovalState = PENDING
     created_at: float = field(default_factory=time.time)
     decided_at: float | None = None
@@ -200,8 +204,15 @@ def create_approval_request(
     tool_input: dict | None = None,
     event_id: str = "",
     agent_pid: int = 0,
+    agent_start_time: str = "",
 ) -> ApprovalRequest:
-    """Create and persist a new pending approval request."""
+    """Create and persist a new pending approval request.
+
+    ``agent_start_time`` is the identity of ``agent_pid`` from
+    :func:`process_identity.process_identity`, taken when the PID was known
+    to be the agent. Approve and deny refuse to signal when it no longer
+    matches.
+    """
     req = ApprovalRequest(
         session_id=session_id,
         rule_name=rule_name,
@@ -209,6 +220,7 @@ def create_approval_request(
         tool_input=tool_input or {},
         event_id=event_id,
         agent_pid=agent_pid,
+        agent_start_time=agent_start_time,
     )
     save_request(store, req)
     return req
@@ -285,12 +297,16 @@ def _known_pid(pid: object) -> int | None:
     return None
 
 
-def _signal_agent(pid: object, sig: int | None, done: str, skip_flag: str) -> str:
+def _signal_agent(
+    pid: object, sig: int | None, done: str, skip_flag: str,
+    start_time: object = "",
+) -> str:
     """Send ``sig`` to the request's agent and describe what happened.
 
     ``sig`` is ``None`` when the caller opted out with ``skip_flag``. The
-    decision is already recorded, so a missing PID or a failed signal is
-    reported, not treated as an error.
+    decision is already recorded, so a missing PID, a PID that now belongs
+    to another process, or a failed signal is reported, not treated as an
+    error.
     """
     known = _known_pid(pid)
     if known is None:
@@ -301,6 +317,11 @@ def _signal_agent(pid: object, sig: int | None, done: str, skip_flag: str) -> st
         )
     if sig is None:
         return f"agent {known} not signalled ({skip_flag})"
+    if pid_reused(known, start_time):
+        return (
+            f"decision recorded, but agent {known} was not signalled: "
+            f"{PID_REUSED_REASON} (the agent exited and PID {known} was reused)"
+        )
     try:
         os.kill(known, sig)
     except ProcessLookupError:
@@ -328,7 +349,7 @@ def approve_request(
     import signal
     return True, "Approved — " + _signal_agent(
         req.agent_pid, signal.SIGCONT if resume_agent else None,
-        "resumed", "--no-resume",
+        "resumed", "--no-resume", req.agent_start_time,
     )
 
 
@@ -351,7 +372,7 @@ def deny_request(
     import signal
     return True, "Denied — " + _signal_agent(
         req.agent_pid, signal.SIGTERM if kill_agent else None,
-        "terminated", "--no-kill",
+        "terminated", "--no-kill", req.agent_start_time,
     )
 
 

@@ -51,6 +51,7 @@ from .event_data import (
 )
 from .models import EventType, TraceEvent
 from .postmortem import clear_heartbeat, write_heartbeat
+from .process_identity import PID_REUSED_REASON, pid_reused, process_identity
 from .project_budget import (
     ProjectBudgetConfig,
     ProjectBudgetStatus,
@@ -128,10 +129,17 @@ def _alert_webhook(message: str, url: str) -> None:
         pass  # webhook failures are non-fatal
 
 
-def _kill_process(pid: int) -> None:
-    """Send SIGTERM; escalate to SIGKILL after 5s in a background thread."""
+def _kill_process(pid: int, start_time: str | None = None) -> None:
+    """Send SIGTERM; escalate to SIGKILL after 5s in a background thread.
+
+    ``start_time`` is the agent's identity from :func:`process_identity`.
+    Neither signal is sent once the PID belongs to another process, so an
+    agent that exits on SIGTERM cannot have its PID reused and SIGKILLed.
+    """
     import threading
 
+    if pid_reused(pid, start_time):
+        return
     try:
         os.kill(pid, signal.SIGTERM)
     except (ProcessLookupError, PermissionError):
@@ -139,6 +147,8 @@ def _kill_process(pid: int) -> None:
 
     def _escalate() -> None:
         time.sleep(5)
+        if pid_reused(pid, start_time):
+            return
         try:
             os.kill(pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
@@ -188,6 +198,47 @@ NO_AGENT_PID_HINT = (
     "no agent PID is known. Restart watch with --agent-pid PID "
     "to let it pause, resume and kill the agent. This warning is shown once."
 )
+
+
+def _agent_pid_reused(
+    state: "WatchState", out: TextIO | None = None, alert_log: str | None = None,
+) -> bool:
+    """Return True, and stop using the agent PID, if another process now has it.
+
+    Call before signalling the agent. When the start time recorded at watch
+    startup can be read and differs, the agent has exited and the OS gave
+    its PID to another process: watch says so, records it in *alert_log*,
+    drops the PID and any pause it held, and never signals that PID again.
+    When either start time is unknown this returns False and watch signals
+    as before.
+    """
+    pid = state.agent_pid
+    if not pid or not pid_reused(pid, state.agent_start_time):
+        return False
+    msg = (
+        f"Agent pid {pid}: {PID_REUSED_REASON} (the agent exited and its PID "
+        f"was reused), so no agent was signalled. Watch will not signal PID "
+        f"{pid} again; restart watch with --agent-pid PID for a new agent."
+    )
+    if state.paused:
+        msg += " Pause cleared."
+    if out is None:
+        _alert_terminal(msg)
+    else:
+        out.write(f"[watch] {msg}\n")
+        out.flush()
+    if alert_log:
+        try:
+            _alert_file(msg, alert_log)
+        except OSError:
+            pass
+    state.agent_pid = None
+    state.agent_start_time = None
+    state.pause_owner = None
+    state.approval_request_id = None
+    # The message above already explains why watch cannot signal.
+    state.warned_no_agent_pid = True
+    return True
 
 
 def _warn_no_agent_pid(state: "WatchState", what: str, out: TextIO | None = None) -> None:
@@ -936,6 +987,8 @@ class WatchState:
     fired: set = field(default_factory=set)
     # Agent PID from --agent-pid. Without it watch can alert but not signal.
     agent_pid: int | None = None
+    # Identity of agent_pid at startup (see process_identity.py); None if unknown
+    agent_start_time: str | None = None
     # True once watch has said it cannot signal because no PID is known
     warned_no_agent_pid: bool = False
     # Token budget watcher (lazy-initialised on first LLM_REQUEST)
@@ -1067,7 +1120,9 @@ def _dispatch_alert(
             return
         # Pause before creating the request so an approval cannot land
         # before the SIGSTOP and leave the agent stopped.
-        if state.agent_pid and not state.paused:
+        if state.agent_pid and not state.paused and not _agent_pid_reused(
+            state, alert_log=config.alert_log,
+        ):
             _pause_process(state.agent_pid)
         elif not state.agent_pid:
             _warn_no_agent_pid(state, f"pause the agent for approval rule '{rule_name}'")
@@ -1082,6 +1137,7 @@ def _dispatch_alert(
                     rule_name=rule_name,
                     tool_name="",
                     agent_pid=state.agent_pid or 0,
+                    agent_start_time=state.agent_start_time or "",
                 )
                 _alert_terminal(
                     f"[HITL] Approval required for rule '{rule_name}'. "
@@ -1127,6 +1183,8 @@ def _dispatch_alert(
         _alert_terminal(f"[dry-run] would {action} agent process")
         return
 
+    if action == "kill" or (action == "pause" and not state.paused):
+        _agent_pid_reused(state, alert_log=config.alert_log)
     if action in ("pause", "kill") and not state.agent_pid:
         _warn_no_agent_pid(state, f"{action} the agent")
     elif action == "pause" and not state.paused:
@@ -1145,7 +1203,7 @@ def _dispatch_alert(
                 _alert_terminal(f"Post-mortem written to {pm_path}")
         if config.on_death_cmd:
             _invoke_on_death(config.on_death_cmd, pm_path)
-        _kill_process(state.agent_pid)
+        _kill_process(state.agent_pid, state.agent_start_time)
 
 
 def _write_watchdog_postmortem(
@@ -1564,8 +1622,10 @@ def _check_agent_alive(state: "WatchState", out: "TextIO") -> None:
         out.flush()
         state.pause_owner = None
         state.approval_request_id = None
+        return
     except OSError:
-        pass
+        return
+    _agent_pid_reused(state, out)
 
 
 def _check_pause_file(store: "TraceStore", state: "WatchState", out: "TextIO") -> None:
@@ -1585,6 +1645,10 @@ def _check_pause_file(store: "TraceStore", state: "WatchState", out: "TextIO") -
     if not state.agent_pid:
         if wants_pause:
             _warn_no_agent_pid(state, "pause the agent for the editor", out)
+        return
+
+    signals = (state.pause_owner is None) if wants_pause else (state.pause_owner == PAUSE_EDITOR)
+    if signals and _agent_pid_reused(state, out):
         return
 
     if wants_pause:
@@ -1684,7 +1748,10 @@ def watch_session(
             f"{temporal_context.parent_span_id}\n"
         )
 
-    state = WatchState(start_time=time.time(), session_id=session_id, agent_pid=agent_pid)
+    state = WatchState(
+        start_time=time.time(), session_id=session_id, agent_pid=agent_pid,
+        agent_start_time=process_identity(agent_pid) if agent_pid else None,
+    )
 
     mode = " [dry-run]" if dry_run else ""
     out.write(f"[watch] Monitoring session {session_id[:12]}...{mode}\n")
@@ -1733,7 +1800,7 @@ def watch_session(
         for item in _tail_events(events_file, poll_interval=poll_interval):
             now = time.time()
             if now - last_heartbeat_time >= 5.0:
-                write_heartbeat(store, session_id, agent_pid=agent_pid)
+                write_heartbeat(store, session_id, agent_pid=state.agent_pid)
                 last_heartbeat_time = now
 
             # Idle timeout: checked on every poll cycle (including when no
