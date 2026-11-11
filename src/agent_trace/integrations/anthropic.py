@@ -11,8 +11,40 @@ Install:
 from __future__ import annotations
 
 import time
+from typing import Any
 
 _PATCHED = False
+
+
+def _count(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _usage_fields(usage: Any) -> dict[str, Any]:
+    """Token counts of an Anthropic ``usage`` object.
+
+    ``input_tokens`` excludes cache reads and writes, which Anthropic reports
+    beside it and bills at their own rates, so those are kept as well.
+    """
+    fields: dict[str, Any] = {
+        "input_tokens": getattr(usage, "input_tokens", 0) if usage else 0,
+        "output_tokens": getattr(usage, "output_tokens", 0) if usage else 0,
+    }
+    if not usage:
+        return fields
+    for key in ("cache_read_input_tokens", "cache_creation_input_tokens"):
+        value = _count(getattr(usage, key, None))
+        if value is not None:
+            fields[key] = value
+    split = getattr(usage, "cache_creation", None)
+    ttl = {
+        key: value
+        for key in ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")
+        if (value := _count(getattr(split, key, None))) is not None
+    }
+    if ttl:
+        fields["cache_creation"] = ttl
+    return fields
 
 
 def instrument_anthropic(agent_name: str = "anthropic") -> None:
@@ -51,8 +83,7 @@ def instrument_anthropic(agent_name: str = "anthropic") -> None:
                 usage = getattr(result, "usage", None)
                 emit(EventType.LLM_RESPONSE, sid, store,
                      model=model,
-                     input_tokens=getattr(usage, "input_tokens", 0) if usage else 0,
-                     output_tokens=getattr(usage, "output_tokens", 0) if usage else 0,
+                     **_usage_fields(usage),
                      stop_reason=getattr(result, "stop_reason", ""),
                      duration_ms=(time.time() - t0) * 1000)
                 return result

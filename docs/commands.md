@@ -132,6 +132,12 @@ agent-strace import <path.jsonl> [--discover]
 ```
 Import a Claude Code JSONL session log. `--discover` lists available sessions in `~/.claude/projects/`. When the log records a working directory, the imported session starts with a `session_start` event holding that `cwd`.
 
+Claude Code writes one log line per content block of a model response and
+repeats the response's token usage on each. The import keeps that usage once,
+on the response's last line, so token totals, request counts and
+[`cost`](#cost) count each response once. Sessions imported by earlier versions
+count the usage once per line; import them again to correct their totals.
+
 ---
 
 ## Replay and inspection
@@ -368,7 +374,8 @@ and no event is also estimated from size. `tree`, `timeline`, `replay`,
 inferred provider and model. It uses actual recorded token counters and a bundled,
 dated pricing snapshot, so the default path makes no network calls. CSV output has
 the stable columns `provider`, `model`, `session_id`, `input_tokens`,
-`output_tokens`, and `cost_usd`. Usage recorded without a model name is listed
+`output_tokens`, and `cost_usd`, followed by `cache_read_tokens` and
+`cache_write_tokens`. Usage recorded without a model name is listed
 under the model `(not recorded)` (an empty `model` in CSV) and the provider
 `Unknown`, with no estimated price.
 
@@ -383,12 +390,37 @@ under the model `(not recorded)` (an empty `model` in CSV) and the provider
 | `--live-pricing` | off | Request authoritative live rates; error when compatible provider APIs are unavailable rather than scrape or guess |
 | `--tenant ID` | — | Scope an explicit session or aggregate the selected time window to one tenant |
 
-Pricing estimates exclude caching, batch discounts, regional or service-tier
-differences, long-context premiums, and non-token charges. Cached input tokens
-are priced at the full input rate, so estimates for providers that count cached
-input inside `input_tokens`, such as Codex, are an upper bound. To update the bundled
-table, check the official URLs in `PRICING_SOURCES`, update `PRICING` and
-`_MODEL_PROVIDERS`, advance `PRICING_SNAPSHOT_DATE`, and extend
+Recorded prompt-cache usage is priced at the model's cache rates: cache reads
+(cached input) at the cache read rate and cache writes at the cache write rate.
+A write recorded with the long lifetime (Anthropic 1 hour, OpenAI 12 hours) uses
+the long write rate. These usage shapes are read:
+
+| Source | Cache fields | Input count |
+|---|---|---|
+| OpenAI Chat Completions | `prompt_tokens_details`: `cached_tokens`, `cache_write_tokens` | `prompt_tokens` includes them |
+| OpenAI Responses | `input_tokens_details`: `cached_tokens`, `cache_write_tokens`, `cache_write_tokens_details` (`ttl_30m_tokens`, `ttl_12h_tokens`) | `input_tokens` includes them |
+| OpenAI Codex `token_usage` | `cached_input_tokens`, `cache_write_input_tokens` | `input_tokens` includes them |
+| Anthropic Messages, imported Claude Code transcripts | `cache_read_input_tokens`, `cache_creation_input_tokens`, `cache_creation` (`ephemeral_5m_input_tokens`, `ephemeral_1h_input_tokens`) | `input_tokens` excludes them, so they are added |
+| Bedrock Converse | `cacheReadInputTokens`, `cacheWriteInputTokens`, `cacheDetails` (`ttl`, `inputTokens`) | `inputTokens` excludes them, so they are added |
+| Gemini | `cachedContentTokenCount` | `promptTokenCount` includes them |
+
+`input_tokens` in every report is the whole input, cache reads and writes
+included, and the cache parts are reported beside it: in the per-session text
+output when non-zero, and in the CSV columns above. Anthropic and Bedrock usage
+therefore reports more input tokens than its own `input_tokens` field. Gemini
+thinking tokens are counted as output and tool-use prompt tokens as input, as
+Gemini bills them. OpenAI and Codex output already includes reasoning tokens.
+
+Cache tokens are billed at the input rate when the model has no published
+cache rate (for example the `haiku`, `gpt4` and `gpt4o` choices of `--model`,
+retired models, and `--input-price`), and a long write without its own rate
+uses the default write rate. Tokens estimated from event size have no cache
+split. Pricing estimates exclude batch discounts, regional or service-tier
+differences, long-context premiums, cache storage fees, and non-token charges.
+When a pricing page lists a temporary promotional price and the price that
+follows it, the following price is used. To update the bundled table, check the
+official URLs in `PRICING_SOURCES`, update `PRICING` (each key's provider is
+derived from its name), advance `PRICING_SNAPSHOT_DATE`, and extend
 `tests/test_provider_cost.py` for every added model family.
 
 ### `diff`

@@ -249,6 +249,14 @@ class CompactionDetectionTests(unittest.TestCase):
 
 class ImportedCompactionTests(unittest.TestCase):
     def test_imported_usage_and_compaction_summary_drive_the_report(self):
+        self._assert_imported_compaction_report(split_response=False)
+
+    def test_summary_stays_with_usage_of_a_response_split_over_lines(self):
+        # Claude Code writes a text block and a tool_use block of one response
+        # as two lines with the same message id, each repeating the usage.
+        self._assert_imported_compaction_report(split_response=True)
+
+    def _assert_imported_compaction_report(self, split_response: bool):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         source = Path(temporary.name) / "claude.jsonl"
@@ -314,6 +322,25 @@ class ImportedCompactionTests(unittest.TestCase):
                 },
             },
         ]
+        if split_response:
+            entries[-1]["message"]["id"] = "msg_after"
+            entries.append({
+                "type": "assistant",
+                "sessionId": "imported-session",
+                "timestamp": "2025-01-01T00:00:05Z",
+                "uuid": "a3",
+                "parentUuid": "a2",
+                "message": {
+                    "id": "msg_after",
+                    "role": "assistant",
+                    "model": "claude-sonnet-4",
+                    "content": [{
+                        "type": "tool_use", "id": "toolu_1", "name": "Read",
+                        "input": {"file_path": "src/app.py"},
+                    }],
+                    "usage": {"input_tokens": 12_000, "output_tokens": 10},
+                },
+            })
         source.write_text(
             "".join(json.dumps(entry) + "\n" for entry in entries),
             encoding="utf-8",

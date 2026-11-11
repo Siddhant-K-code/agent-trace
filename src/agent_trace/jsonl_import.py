@@ -257,8 +257,19 @@ def import_jsonl(
     pending_compaction: set[str] = set()
     pending_context: dict[str, str] = {}
 
+    # Claude Code writes one line per content block of a response, and each
+    # line repeats the response's usage. Count it once, on the last line.
+    usage_line: dict[str, int] = {}
+    for index, raw in enumerate(entries):
+        msg = raw.get("message")
+        if raw.get("type") != "assistant" or not isinstance(msg, dict):
+            continue
+        message_id = msg.get("id")
+        if isinstance(message_id, str) and message_id and msg.get("usage"):
+            usage_line[message_id] = index
+
     # Second pass: convert entries to TraceEvents
-    for raw in entries:
+    for index, raw in enumerate(entries):
         entry_type = raw.get("type", "")
         ts = _parse_iso_timestamp(raw.get("timestamp", ""))
         msg = raw.get("message", {})
@@ -267,6 +278,12 @@ def import_jsonl(
 
         content = msg.get("content", "")
         usage = msg.get("usage", {})
+        message_id = msg.get("id")
+        usage_deferred = (
+            isinstance(message_id, str) and usage_line.get(message_id, index) != index
+        )
+        if usage_deferred:
+            usage = {}
         model = msg.get("model", "")
         is_sidechain = bool(raw.get("isSidechain", False))
         raw_uuid = str(raw.get("uuid", ""))
@@ -407,7 +424,10 @@ def import_jsonl(
                     response_data["text"] = text[:2000]
                 if isinstance(usage, dict) and usage:
                     response_data["usage"] = dict(usage)
-                summary = pending_context.pop(context_stream, "")
+                # A post-compaction summary belongs with the response's usage.
+                summary = (
+                    "" if usage_deferred else pending_context.pop(context_stream, "")
+                )
                 if summary:
                     response_data["context_summary"] = summary
                 event = TraceEvent(

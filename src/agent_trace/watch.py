@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
 
-from .cost import TokenCounter, _dollars
+from .cost import TokenCounter, _usage_dollars
 from .compaction import CompactionCheckpointWatcher
 from .event_data import (
     NonObjectEventDataError,
@@ -1005,8 +1005,7 @@ def check_event(
     violations: list[str] = []
 
     # --- Cost accumulation ---
-    inp, out = state.token_counter.count(event)
-    state.estimated_cost += _dollars(inp, out, "sonnet")
+    state.estimated_cost += _usage_dollars(state.token_counter.usage(event), "sonnet")
 
     # --- Track files modified (for nanny rules) ---
     if event.event_type == EventType.TOOL_CALL:

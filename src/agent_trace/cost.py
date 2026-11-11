@@ -13,7 +13,7 @@ import json
 import re
 import sys
 import time as _time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as _replace
 from typing import Any, Mapping, TextIO
 
 from .event_data import require_object_event_data
@@ -27,98 +27,216 @@ from .store import TraceStore
 # Pricing table  (dollars per 1M tokens)
 # ---------------------------------------------------------------------------
 
-PRICING_SNAPSHOT_DATE = "2026-08-16"
+PRICING_SNAPSHOT_DATE = "2026-11-11"
 """Effective date of the bundled, offline pricing snapshot.
 
-Rates are estimates in USD per one million text tokens.  They intentionally
-exclude provider-specific discounts, caching, batch rates, regional pricing,
-long-context tiers, and non-token charges.  Updating this table requires
-checking each URL in ``PRICING_SOURCES``, updating ``PRICING`` and
-``_MODEL_PROVIDERS``, advancing the snapshot date, and extending the
-provider-cost tests for every added model family.
+Rates are estimates in USD per one million text tokens.  Each model has an
+``input`` rate for uncached input and an ``output`` rate, which also covers
+reasoning and thinking tokens.  Where the provider publishes them, a model
+also has ``cache_read`` (cached input, a cache hit), ``cache_write`` (a cache
+write with the default lifetime: 5 minutes for Anthropic and Bedrock, 30
+minutes for OpenAI) and ``cache_write_long`` (a cache write with the long
+lifetime: 1 hour for Anthropic and Bedrock, 12 hours for OpenAI).  A model
+without a cache read or write rate bills those tokens at its input rate, and
+a long write without a long rate uses the default write rate.
+
+Each model uses its standard (non-batch) rate in its shortest context or
+smallest prompt tier.  When a pricing page lists a temporary promotional
+price together with the price that follows it, the following price is used.
+Batch, flex, fast and priority tiers, regional or data-residency uplifts,
+long-context tiers, cache storage fees and other non-token charges are
+excluded.
+
+Updating this table requires checking each URL in ``PRICING_SOURCES``,
+updating ``PRICING`` (``_MODEL_PROVIDERS`` is derived from its keys),
+advancing the snapshot date, and extending the provider-cost tests for every
+added model family.
 """
 
 PRICING_SOURCES: dict[str, str] = {
     "Anthropic": "https://platform.claude.com/docs/en/about-claude/pricing",
-    "OpenAI": "https://openai.com/api/pricing/",
+    "OpenAI": "https://developers.openai.com/api/docs/pricing",
     "AWS Bedrock": "https://aws.amazon.com/bedrock/pricing/",
     "Gemini": "https://ai.google.dev/gemini-api/docs/pricing",
 }
 
 
+def _rates(
+    input_rate: float,
+    output_rate: float,
+    cache_read: float | None = None,
+    cache_write: float | None = None,
+    cache_write_long: float | None = None,
+) -> dict[str, float]:
+    rates = {"input": input_rate, "output": output_rate}
+    for key, value in (
+        ("cache_read", cache_read),
+        ("cache_write", cache_write),
+        ("cache_write_long", cache_write_long),
+    ):
+        if value is not None:
+            rates[key] = value
+    return rates
+
+
 PRICING: dict[str, dict[str, float]] = {
     # Backward-compatible short names used by the existing per-session report.
-    "sonnet": {"input": 3.00,  "output": 15.00},
-    "opus":   {"input": 15.00, "output": 75.00},
-    "haiku":  {"input": 0.25,  "output": 1.25},
-    "gpt4":   {"input": 30.00, "output": 60.00},
-    "gpt4o":  {"input": 5.00,  "output": 15.00},
+    # sonnet and opus carry the Claude Sonnet 4.x and Opus 4.1 cache rates.
+    "sonnet": _rates(3.00, 15.00, 0.30, 3.75, 6.00),
+    "opus":   _rates(15.00, 75.00, 1.50, 18.75, 30.00),
+    "haiku":  _rates(0.25, 1.25),
+    "gpt4":   _rates(30.00, 60.00),
+    "gpt4o":  _rates(5.00, 15.00),
 
-    # Anthropic direct API.
-    "claude-opus-4-6": {"input": 5.00, "output": 25.00},
-    "claude-opus-4-5": {"input": 5.00, "output": 25.00},
-    "claude-opus-4-1": {"input": 15.00, "output": 75.00},
-    "claude-sonnet-4": {"input": 3.00, "output": 15.00},
-    "claude-3-7-sonnet": {"input": 3.00, "output": 15.00},
-    "claude-3-5-sonnet": {"input": 3.00, "output": 15.00},
-    "claude-haiku-4-5": {"input": 1.00, "output": 5.00},
-    "claude-3-haiku": {"input": 0.25, "output": 1.25},
-    "claude-3-opus": {"input": 15.00, "output": 75.00},
+    # Anthropic direct API: input, output, cache hit, 5-minute write, 1-hour
+    # write.  Haiku 5.5 uses its tier for prompts up to 100k tokens.
+    "claude-fable-5-2": _rates(8.00, 40.00, 0.20, 10.00, 16.00),
+    "claude-mythos-5-2": _rates(8.00, 40.00, 0.20, 10.00, 16.00),
+    "claude-fable-5-1": _rates(10.00, 50.00, 0.25, 12.50, 20.00),
+    "claude-mythos-5-1": _rates(10.00, 50.00, 0.25, 12.50, 20.00),
+    "claude-fable-5": _rates(10.00, 50.00, 1.00, 12.50, 20.00),
+    "claude-mythos-5": _rates(10.00, 50.00, 1.00, 12.50, 20.00),
+    "claude-opus-5-5": _rates(4.00, 20.00, 0.20, 5.00, 8.00),
+    "claude-opus-5": _rates(5.00, 25.00, 0.50, 6.25, 10.00),
+    "claude-opus-4-8": _rates(5.00, 25.00, 0.50, 6.25, 10.00),
+    "claude-opus-4-7": _rates(5.00, 25.00, 0.50, 6.25, 10.00),
+    "claude-opus-4-6": _rates(5.00, 25.00, 0.50, 6.25, 10.00),
+    "claude-opus-4-5": _rates(5.00, 25.00, 0.50, 6.25, 10.00),
+    "claude-opus-4-1": _rates(15.00, 75.00, 1.50, 18.75, 30.00),
+    "claude-opus-4": _rates(15.00, 75.00, 1.50, 18.75, 30.00),
+    "claude-sonnet-5-5": _rates(2.00, 10.00, 0.10, 2.50, 4.00),
+    "claude-sonnet-5": _rates(2.00, 10.00, 0.20, 2.50, 4.00),
+    "claude-sonnet-4-6": _rates(3.00, 15.00, 0.30, 3.75, 6.00),
+    "claude-sonnet-4-5": _rates(3.00, 15.00, 0.30, 3.75, 6.00),
+    "claude-sonnet-4": _rates(3.00, 15.00, 0.30, 3.75, 6.00),
+    "claude-haiku-5-5": _rates(0.10, 0.50, 0.01, 0.125, 0.20),
+    "claude-haiku-4-5": _rates(1.00, 5.00, 0.10, 1.25, 2.00),
+    # Retired Claude 3 models are no longer on the pricing page; their last
+    # input and output rates are kept, without cache rates.
+    "claude-3-7-sonnet": _rates(3.00, 15.00),
+    "claude-3-5-sonnet": _rates(3.00, 15.00),
+    "claude-3-haiku": _rates(0.25, 1.25),
+    "claude-3-opus": _rates(15.00, 75.00),
 
-    # OpenAI direct API (standard, non-batch text-token rates).
-    "gpt-4.1": {"input": 2.00, "output": 8.00},
-    "gpt-4.1-mini": {"input": 0.40, "output": 1.60},
-    "gpt-4.1-nano": {"input": 0.10, "output": 0.40},
-    "gpt-4o": {"input": 2.50, "output": 10.00},
-    "gpt-4o-mini": {"input": 0.15, "output": 0.60},
-    "o3": {"input": 2.00, "output": 8.00},
-    "o3-mini": {"input": 1.10, "output": 4.40},
-    "o4-mini": {"input": 1.10, "output": 4.40},
+    # OpenAI direct API, standard tier, short context (up to 272K input
+    # tokens): input, output, cached input, 30-minute write, 12-hour write.
+    # Models without write rates bill cache writes as ordinary input.
+    "gpt-6-astra": _rates(10.00, 50.00, 1.00, 12.50, 25.00),
+    "gpt-6.1-sol": _rates(2.00, 10.00, 0.10, 2.50, 5.00),
+    "gpt-6.1-terra": _rates(1.00, 5.00, 0.05, 1.25, 2.50),
+    "gpt-6-sol": _rates(2.00, 10.00, 0.20, 2.50, 5.00),
+    "gpt-6-luna": _rates(0.10, 0.50, 0.01, 0.125, 0.25),
+    "gpt-5.6-sol": _rates(4.00, 20.00, 0.40, 5.00, 10.00),
+    "gpt-5.6-terra": _rates(2.00, 12.00, 0.20, 2.50, 5.00),
+    "gpt-5.6-luna": _rates(0.20, 1.20, 0.02, 0.25, 0.50),
+    "gpt-5.5": _rates(5.00, 30.00, 0.50),
+    "gpt-5.5-pro": _rates(30.00, 180.00),
+    "gpt-5.4": _rates(2.50, 15.00, 0.25),
+    "gpt-5.4-pro": _rates(30.00, 180.00),
+    "gpt-5.4-mini": _rates(0.75, 4.50, 0.075),
+    "gpt-5.4-nano": _rates(0.20, 1.25, 0.02),
+    "gpt-5.3-codex": _rates(1.75, 14.00, 0.175),
+    "gpt-5.2": _rates(1.75, 14.00, 0.175),
+    "gpt-5.2-pro": _rates(21.00, 168.00),
+    "gpt-5.1": _rates(1.25, 10.00, 0.125),
+    "gpt-5": _rates(1.25, 10.00, 0.125),
+    "gpt-5-mini": _rates(0.25, 2.00, 0.025),
+    "gpt-5-nano": _rates(0.05, 0.40, 0.005),
+    "gpt-5-pro": _rates(15.00, 120.00),
+    "gpt-5-search-api": _rates(1.25, 10.00, 0.125),
+    "gpt-4.1": _rates(2.00, 8.00, 0.50),
+    "gpt-4.1-mini": _rates(0.40, 1.60, 0.10),
+    "gpt-4o": _rates(2.50, 10.00, 1.25),
+    "gpt-4o-mini": _rates(0.15, 0.60, 0.075),
+    "o3-pro": _rates(20.00, 80.00),
+    "o3": _rates(2.00, 8.00, 0.50),
+    # No longer on the pricing page; last input and output rates are kept.
+    "gpt-4.1-nano": _rates(0.10, 0.40),
+    "o3-mini": _rates(1.10, 4.40),
+    "o4-mini": _rates(1.10, 4.40),
 
-    # Amazon models through AWS Bedrock.  Actual charges can vary by region
-    # and inference tier; these are standard on-demand snapshot rates.
-    "amazon.nova-pro-v1": {"input": 0.80, "output": 3.20},
-    "amazon.nova-lite-v1": {"input": 0.06, "output": 0.24},
-    "amazon.nova-micro-v1": {"input": 0.035, "output": 0.14},
+    # Amazon models through AWS Bedrock, us-east-1 on-demand: input, output,
+    # cache read, cache write.  Actual charges vary by region and tier.
+    "amazon.nova-pro-v1": _rates(0.80, 3.20, 0.20, 0.00),
+    "amazon.nova-lite-v1": _rates(0.06, 0.24, 0.015, 0.00),
+    "amazon.nova-micro-v1": _rates(0.035, 0.14, 0.00875, 0.00),
 
-    # Google Gemini Developer API paid tier.  The 2.5 Pro entry uses the
-    # <=200k-token tier; long-context requests can cost more.
-    "gemini-2.5-pro": {"input": 1.25, "output": 10.00},
-    "gemini-2.5-flash": {"input": 0.30, "output": 2.50},
-    "gemini-2.5-flash-lite": {"input": 0.10, "output": 0.40},
-    "gemini-2.0-flash": {"input": 0.10, "output": 0.40},
+    # Google Gemini Developer API, paid tier: input, output, context caching.
+    # Pro models use the tier for prompts up to 200k tokens, and Gemini 4 and
+    # 3.8/3.6 Flash the rates that follow their promotional prices
+    # (December 1, 2026 and January 1, 2027).
+    "gemini-4-carbon": _rates(4.00, 20.00, 0.20),
+    "gemini-4-argon": _rates(4.00, 20.00, 0.20),
+    "gemini-3.8-flash": _rates(1.50, 7.50, 0.15),
+    "gemini-3.6-flash": _rates(1.50, 7.50, 0.15),
+    "gemini-3.5-flash-lite": _rates(0.30, 2.50, 0.03),
+    "gemini-3.1-flash-lite": _rates(0.25, 1.50, 0.025),
+    "gemini-3.1-pro-preview": _rates(2.00, 12.00, 0.20),
+    "gemini-3-flash-preview": _rates(0.50, 3.00, 0.05),
+    "gemini-2.5-pro": _rates(1.25, 10.00, 0.125),
+    "gemini-2.5-flash": _rates(0.30, 2.50, 0.03),
+    "gemini-2.5-flash-lite": _rates(0.10, 0.40, 0.01),
+    # No longer on the pricing page; last input and output rates are kept.
+    "gemini-2.0-flash": _rates(0.10, 0.40),
 }
 DEFAULT_MODEL = "sonnet"
 
+_SHORT_MODEL_NAMES = frozenset({"sonnet", "opus", "haiku", "gpt4", "gpt4o"})
+
+
+def _provider_for_key(key: str) -> str:
+    if key.startswith("claude-"):
+        return "Anthropic"
+    if key.startswith("amazon."):
+        return "AWS Bedrock"
+    if key.startswith("gemini-"):
+        return "Gemini"
+    return "OpenAI"
+
 
 _MODEL_PROVIDERS: dict[str, str] = {
-    model: provider
-    for provider, models in {
-        "Anthropic": (
-            "claude-opus-4-6", "claude-opus-4-5", "claude-opus-4-1",
-            "claude-sonnet-4", "claude-3-7-sonnet", "claude-3-5-sonnet",
-            "claude-haiku-4-5", "claude-3-haiku", "claude-3-opus",
-        ),
-        "OpenAI": (
-            "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano", "gpt-4o",
-            "gpt-4o-mini", "o3", "o3-mini", "o4-mini",
-        ),
-        "AWS Bedrock": (
-            "amazon.nova-pro-v1", "amazon.nova-lite-v1",
-            "amazon.nova-micro-v1",
-        ),
-        "Gemini": (
-            "gemini-2.5-pro", "gemini-2.5-flash",
-            "gemini-2.5-flash-lite", "gemini-2.0-flash",
-        ),
-    }.items()
-    for model in models
+    model: _provider_for_key(model)
+    for model in PRICING
+    if model not in _SHORT_MODEL_NAMES
 }
 
 
 # ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class TokenUsage:
+    """Token counts split by the rate each part is billed at.
+
+    ``input_tokens`` is the whole input: uncached input, cache reads and
+    cache writes.  ``cache_write_long_tokens`` is the part of
+    ``cache_write_tokens`` written with the long cache lifetime.
+    """
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    cache_write_long_tokens: int = 0
+
+    @property
+    def uncached_input_tokens(self) -> int:
+        return max(0, self.input_tokens - self.cache_read_tokens - self.cache_write_tokens)
+
+    def __add__(self, other: "TokenUsage") -> "TokenUsage":
+        if not isinstance(other, TokenUsage):
+            return NotImplemented
+        return TokenUsage(
+            input_tokens=self.input_tokens + other.input_tokens,
+            output_tokens=self.output_tokens + other.output_tokens,
+            cache_read_tokens=self.cache_read_tokens + other.cache_read_tokens,
+            cache_write_tokens=self.cache_write_tokens + other.cache_write_tokens,
+            cache_write_long_tokens=(
+                self.cache_write_long_tokens + other.cache_write_long_tokens
+            ),
+        )
+
 
 @dataclass
 class PhaseCost:
@@ -128,6 +246,9 @@ class PhaseCost:
     output_tokens: int
     cost_dollars: float
     failed: bool = False
+    # Parts of input_tokens read from or written to a prompt cache.
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
     @property
     def total_tokens(self) -> int:
@@ -143,6 +264,9 @@ class CostResult:
     output_tokens: int
     phase_costs: list[PhaseCost]
     wasted_cost: float      # cost from failed phases
+    # Parts of input_tokens read from or written to a prompt cache.
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -153,21 +277,48 @@ class TenantCostResult:
     total_cost: float
     input_tokens: int
     output_tokens: int
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
 
 @dataclass(frozen=True)
 class ModelPrice:
-    """One model's bundled, offline token rates."""
+    """One model's bundled, offline token rates.
+
+    A cache rate is ``None`` when the provider publishes none for the model;
+    :meth:`cost` then bills those tokens at the input rate (or, for a long
+    cache write, at the default write rate).
+    """
 
     model_key: str
     provider: str
     input_per_million: float
     output_per_million: float
+    cache_read_per_million: float | None = None
+    cache_write_per_million: float | None = None
+    cache_write_long_per_million: float | None = None
+
+    def cost(self, usage: TokenUsage) -> float:
+        """Return the USD cost of *usage* at these rates."""
+        rates = {"input": self.input_per_million, "output": self.output_per_million}
+        for key, value in (
+            ("cache_read", self.cache_read_per_million),
+            ("cache_write", self.cache_write_per_million),
+            ("cache_write_long", self.cache_write_long_per_million),
+        ):
+            if value is not None:
+                rates[key] = value
+        return _usage_cost(usage, rates)
 
 
 @dataclass(frozen=True)
 class ProviderCostRecord:
-    """Raw provider cost for one model used in one session."""
+    """Raw provider cost for one model used in one session.
+
+    ``input_tokens`` is the whole input; ``cache_read_tokens`` and
+    ``cache_write_tokens`` are the parts of it read from or written to a
+    prompt cache.
+    """
 
     provider: str
     model: str
@@ -175,6 +326,8 @@ class ProviderCostRecord:
     input_tokens: int
     output_tokens: int
     cost_usd: float
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -187,6 +340,8 @@ class ProviderCostSummary:
     input_tokens: int
     output_tokens: int
     cost_usd: float
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
 
 @dataclass
@@ -206,11 +361,16 @@ class ProviderCostReport:
             key = (record.provider, record.model)
             values = grouped.setdefault(
                 key,
-                {"sessions": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0},
+                {
+                    "sessions": 0, "input_tokens": 0, "output_tokens": 0,
+                    "cache_read_tokens": 0, "cache_write_tokens": 0, "cost_usd": 0.0,
+                },
             )
             values["sessions"] += 1
             values["input_tokens"] += record.input_tokens
             values["output_tokens"] += record.output_tokens
+            values["cache_read_tokens"] += record.cache_read_tokens
+            values["cache_write_tokens"] += record.cache_write_tokens
             values["cost_usd"] += record.cost_usd
         summaries = [
             ProviderCostSummary(
@@ -220,6 +380,8 @@ class ProviderCostReport:
                 input_tokens=int(values["input_tokens"]),
                 output_tokens=int(values["output_tokens"]),
                 cost_usd=float(values["cost_usd"]),
+                cache_read_tokens=int(values["cache_read_tokens"]),
+                cache_write_tokens=int(values["cache_write_tokens"]),
             )
             for (provider, model), values in grouped.items()
         ]
@@ -262,14 +424,22 @@ def _event_tokens(event: TraceEvent) -> tuple[int, int]:
     return 0, 0
 
 
-def _recorded_usage(data: Any) -> tuple[int, int] | None:
-    """Return the token counts an event recorded, or None when it has none."""
+def _recorded_token_usage(data: Any) -> TokenUsage | None:
+    """Return the token usage an event recorded, or None when it has none."""
     if not isinstance(data, Mapping):
         return None
-    inp, out, has_inp, has_out = _usage_tokens(data)
+    usage, has_inp, has_out = _usage_detail(data)
     if not (has_inp or has_out):
         return None
-    return inp, out
+    return usage
+
+
+def _recorded_usage(data: Any) -> tuple[int, int] | None:
+    """Return the (input, output) tokens an event recorded, or None."""
+    usage = _recorded_token_usage(data)
+    if usage is None:
+        return None
+    return usage.input_tokens, usage.output_tokens
 
 
 class TokenCounter:
@@ -298,15 +468,24 @@ class TokenCounter:
             if not paired and _recorded_usage(event.data) is not None:
                 self.recorded_usage = True
 
-    def count(self, event: TraceEvent) -> tuple[int, int]:
-        """Observe *event* and return its (input, output) tokens."""
+    def usage(self, event: TraceEvent) -> TokenUsage:
+        """Observe *event* and return its token usage.
+
+        Size estimates have no cache split; recorded usage keeps the cache
+        reads and writes the provider reported.
+        """
         if not self.recorded_usage:
             self.observe(event)
         if not self.recorded_usage:
-            return _event_tokens(event)
+            return TokenUsage(*_event_tokens(event))
         if event.event_type != EventType.LLM_RESPONSE:
-            return 0, 0
-        return _recorded_usage(event.data) or (0, 0)
+            return TokenUsage()
+        return _recorded_token_usage(event.data) or TokenUsage()
+
+    def count(self, event: TraceEvent) -> tuple[int, int]:
+        """Observe *event* and return its (input, output) tokens."""
+        usage = self.usage(event)
+        return usage.input_tokens, usage.output_tokens
 
 
 def session_records_usage(events: list[TraceEvent]) -> bool:
@@ -319,23 +498,57 @@ def session_records_usage(events: list[TraceEvent]) -> bool:
     return False
 
 
-def session_event_tokens(events: list[TraceEvent]) -> list[tuple[int, int]]:
-    """Return (input, output) tokens for each event of one session.
+def session_event_usage(events: list[TraceEvent]) -> list[TokenUsage]:
+    """Return the token usage of each event of one session.
 
     A session that records usage (see :class:`TokenCounter`) counts it for
     every event, including those before the first usage response. Any other
     session gets the size estimate of :func:`_event_tokens` for each event.
     """
     counter = TokenCounter(recorded_usage=session_records_usage(events))
-    return [counter.count(event) for event in events]
+    return [counter.usage(event) for event in events]
+
+
+def session_event_tokens(events: list[TraceEvent]) -> list[tuple[int, int]]:
+    """Return (input, output) tokens for each event of one session.
+
+    See :func:`session_event_usage`; input includes cache reads and writes.
+    """
+    return [
+        (usage.input_tokens, usage.output_tokens)
+        for usage in session_event_usage(events)
+    ]
+
+
+def _usage_cost(usage: TokenUsage, rates: Mapping[str, float]) -> float:
+    """Return the USD cost of *usage* at *rates* (USD per 1M tokens).
+
+    Cache reads and writes without a rate of their own are billed at the
+    input rate, and long cache writes without one at the default write rate.
+    """
+    input_rate = float(rates["input"])
+    read_rate = float(rates.get("cache_read", input_rate))
+    write_rate = float(rates.get("cache_write", input_rate))
+    long_write_rate = float(rates.get("cache_write_long", write_rate))
+    long_writes = min(usage.cache_write_long_tokens, usage.cache_write_tokens)
+    short_writes = usage.cache_write_tokens - long_writes
+    return (
+        usage.uncached_input_tokens / 1_000_000 * input_rate
+        + usage.cache_read_tokens / 1_000_000 * read_rate
+        + short_writes / 1_000_000 * write_rate
+        + long_writes / 1_000_000 * long_write_rate
+        + usage.output_tokens / 1_000_000 * float(rates["output"])
+    )
+
+
+def _usage_dollars(usage: TokenUsage, model: str) -> float:
+    """Price *usage* at the ``PRICING`` entry *model*, or the default model."""
+    return _usage_cost(usage, PRICING.get(model, PRICING[DEFAULT_MODEL]))
 
 
 def _dollars(input_tokens: int, output_tokens: int, model: str) -> float:
-    pricing = PRICING.get(model, PRICING[DEFAULT_MODEL])
-    return (
-        input_tokens  / 1_000_000 * pricing["input"] +
-        output_tokens / 1_000_000 * pricing["output"]
-    )
+    """Price input and output tokens with no cache reads or writes."""
+    return _usage_dollars(TokenUsage(input_tokens, output_tokens), model)
 
 
 # ---------------------------------------------------------------------------
@@ -418,8 +631,16 @@ def get_model_pricing(
                     provider=infer_provider(model),
                     input_per_million=float(rates["input"]),
                     output_per_million=float(rates["output"]),
+                    cache_read_per_million=_optional_rate(rates, "cache_read"),
+                    cache_write_per_million=_optional_rate(rates, "cache_write"),
+                    cache_write_long_per_million=_optional_rate(rates, "cache_write_long"),
                 )
     return None
+
+
+def _optional_rate(rates: Mapping[str, float], key: str) -> float | None:
+    value = rates.get(key)
+    return None if value is None else float(value)
 
 
 def parse_since(value: str | None, now: float | None = None) -> float:
@@ -454,59 +675,246 @@ _INPUT_TOKEN_KEYS = (
 )
 _OUTPUT_TOKEN_KEYS = (
     "output_tokens", "completion_tokens", "outputTokens", "candidatesTokenCount",
-    "completion_token_count",
+    "candidates_token_count", "completion_token_count",
 )
+_GEMINI_INPUT_KEYS = frozenset({"promptTokenCount", "prompt_token_count"})
+_GEMINI_OUTPUT_KEYS = frozenset({"candidatesTokenCount", "candidates_token_count"})
+
+# (cache read, cache write, long-lifetime cache write) token counts.
+_CacheSplit = tuple[int, int, int]
 
 
-def _token_value(data: Mapping[str, Any], keys: tuple[str, ...]) -> tuple[int, bool]:
+def _count(value: Any) -> int | None:
+    """Return *value* as a non-negative token count, or None."""
+    if isinstance(value, bool):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if number >= 0 else None
+
+
+def _token_entry(data: Mapping[str, Any], keys: tuple[str, ...]) -> tuple[int, str | None]:
     for key in keys:
         if key not in data:
             continue
-        value = data[key]
-        if isinstance(value, bool):
-            continue
-        try:
-            number = int(value)
-        except (TypeError, ValueError, OverflowError):
-            continue
-        if number >= 0:
-            return number, True
-    return 0, False
+        number = _count(data[key])
+        if number is not None:
+            return number, key
+    return 0, None
 
 
-def _usage_tokens(data: Mapping[str, Any]) -> tuple[int, int, bool, bool]:
-    """Read common provider token-counter shapes without an SDK dependency."""
-    input_tokens, has_input = _token_value(data, _INPUT_TOKEN_KEYS)
-    output_tokens, has_output = _token_value(data, _OUTPUT_TOKEN_KEYS)
-    if has_input or has_output:
-        return input_tokens, output_tokens, has_input, has_output
+def _token_value(data: Mapping[str, Any], keys: tuple[str, ...]) -> tuple[int, bool]:
+    number, key = _token_entry(data, keys)
+    return number, key is not None
 
-    nested_candidates = (
+
+def _first_count(data: Any, *keys: str) -> int | None:
+    if not isinstance(data, Mapping):
+        return None
+    number, key = _token_entry(data, keys)
+    return number if key is not None else None
+
+
+def _anthropic_cache(data: Mapping[str, Any]) -> _CacheSplit | None:
+    """Anthropic Messages: cache tokens are reported beside ``input_tokens``."""
+    read = _first_count(data, "cache_read_input_tokens")
+    write = _first_count(data, "cache_creation_input_tokens")
+    split = data.get("cache_creation")
+    short_write = _first_count(split, "ephemeral_5m_input_tokens")
+    long_write = _first_count(split, "ephemeral_1h_input_tokens")
+    if read is None and write is None and short_write is None and long_write is None:
+        return None
+    if write is None:
+        write = (short_write or 0) + (long_write or 0)
+    return read or 0, write, min(long_write or 0, write)
+
+
+def _bedrock_cache(data: Mapping[str, Any]) -> _CacheSplit | None:
+    """Bedrock Converse: cache tokens are reported beside ``inputTokens``."""
+    read = _first_count(data, "cacheReadInputTokens")
+    write = _first_count(data, "cacheWriteInputTokens")
+    details = data.get("cacheDetails")
+    detail_writes = long_write = 0
+    has_details = False
+    if isinstance(details, list):
+        for item in details:
+            tokens = _first_count(item, "inputTokens")
+            if tokens is None:
+                continue
+            has_details = True
+            detail_writes += tokens
+            if item.get("ttl") == "1h":
+                long_write += tokens
+    if read is None and write is None and not has_details:
+        return None
+    if write is None:
+        write = detail_writes
+    return read or 0, write, min(long_write, write)
+
+
+def _codex_cache(data: Mapping[str, Any]) -> _CacheSplit | None:
+    """Codex ``token_usage``: cache tokens are part of ``input_tokens``."""
+    read = _first_count(data, "cached_input_tokens")
+    write = _first_count(data, "cache_write_input_tokens")
+    if read is None and write is None:
+        return None
+    return read or 0, write or 0, 0
+
+
+def _openai_cache(details: Any) -> _CacheSplit | None:
+    """OpenAI ``input_tokens_details`` or ``prompt_tokens_details``.
+
+    Their cache tokens are part of ``input_tokens`` or ``prompt_tokens``.
+    """
+    if not isinstance(details, Mapping):
+        return None
+    read = _first_count(details, "cached_tokens")
+    write = _first_count(details, "cache_write_tokens")
+    ttl = details.get("cache_write_tokens_details")
+    short_write = _first_count(ttl, "ttl_30m_tokens")
+    long_write = _first_count(ttl, "ttl_12h_tokens")
+    if read is None and write is None and short_write is None and long_write is None:
+        return None
+    if write is None:
+        write = (short_write or 0) + (long_write or 0)
+    return read or 0, write, min(long_write or 0, write)
+
+
+def _usage_shape(data: Mapping[str, Any]) -> tuple[TokenUsage, bool, bool, bool]:
+    """Normalize one usage mapping.
+
+    Returns ``(usage, has_input, has_output, has_cache_detail)``.  The usage
+    input is the whole input whichever way the provider counts it:
+
+    - Anthropic ``input_tokens`` and Bedrock ``inputTokens`` exclude cache
+      reads and writes, so they are added.
+    - Codex ``input_tokens``, OpenAI ``input_tokens``/``prompt_tokens`` and
+      Gemini ``promptTokenCount`` include them, so they are not.
+    - Gemini tool-use prompt tokens are added to input and thinking tokens to
+      output, because Gemini bills them as such.  OpenAI and Codex output
+      already include reasoning tokens.
+    """
+    input_tokens, input_key = _token_entry(data, _INPUT_TOKEN_KEYS)
+    output_tokens, output_key = _token_entry(data, _OUTPUT_TOKEN_KEYS)
+    has_input = input_key is not None
+    has_output = output_key is not None
+    cache: _CacheSplit | None = None
+    beside_input = False
+
+    if input_key == "input_tokens":
+        cache = _anthropic_cache(data)
+        beside_input = cache is not None
+        if cache is None:
+            cache = _codex_cache(data) or _openai_cache(data.get("input_tokens_details"))
+    elif input_key == "prompt_tokens":
+        cache = _openai_cache(data.get("prompt_tokens_details"))
+    elif input_key == "inputTokens":
+        cache = _bedrock_cache(data)
+        beside_input = cache is not None
+    elif input_key in _GEMINI_INPUT_KEYS:
+        read = _first_count(data, "cachedContentTokenCount", "cached_content_token_count")
+        if read is not None:
+            cache = (read, 0, 0)
+        tool_prompt = _first_count(
+            data, "toolUsePromptTokenCount", "tool_use_prompt_token_count",
+        )
+        input_tokens += tool_prompt or 0
+
+    if input_key in _GEMINI_INPUT_KEYS or output_key in _GEMINI_OUTPUT_KEYS:
+        thoughts = _first_count(data, "thoughtsTokenCount", "thoughts_token_count")
+        if thoughts is not None:
+            output_tokens += thoughts
+            has_output = True
+
+    read = write = long_write = 0
+    if cache is not None:
+        read, write, long_write = cache
+        if beside_input:
+            input_tokens += read + write
+        else:
+            read = min(read, input_tokens)
+            write = min(write, input_tokens - read)
+            long_write = min(long_write, write)
+    usage = TokenUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_tokens=read,
+        cache_write_tokens=write,
+        cache_write_long_tokens=long_write,
+    )
+    return usage, has_input, has_output, cache is not None
+
+
+def _nested_usage(data: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    candidates = [
         data.get("usage"),
         data.get("usage_metadata"),
         data.get("usageMetadata"),
         data.get("token_usage"),
-    )
+    ]
     response_metadata = data.get("response_metadata")
     if isinstance(response_metadata, Mapping):
-        nested_candidates += (response_metadata.get("token_usage"),)
-    for nested in nested_candidates:
-        if not isinstance(nested, Mapping):
-            continue
-        input_tokens, has_input = _token_value(nested, _INPUT_TOKEN_KEYS)
-        output_tokens, has_output = _token_value(nested, _OUTPUT_TOKEN_KEYS)
+        candidates.append(response_metadata.get("token_usage"))
+    return [candidate for candidate in candidates if isinstance(candidate, Mapping)]
+
+
+def _usage_detail(data: Mapping[str, Any]) -> tuple[TokenUsage, bool, bool]:
+    """Read common provider token-counter shapes without an SDK dependency.
+
+    Returns ``(usage, has_input, has_output)``.  Counters at the top level of
+    *data* win over nested usage objects.  When the top-level counters carry
+    no cache detail but repeat a nested object's input and output counts, as
+    the Codex hooks copy them from ``token_usage``, the nested object's cache
+    detail is used.
+    """
+    usage, has_input, has_output, detailed = _usage_shape(data)
+    if has_input or has_output:
+        if not detailed:
+            counters = (
+                _token_value(data, _INPUT_TOKEN_KEYS),
+                _token_value(data, _OUTPUT_TOKEN_KEYS),
+            )
+            for nested in _nested_usage(data):
+                if (
+                    _token_value(nested, _INPUT_TOKEN_KEYS),
+                    _token_value(nested, _OUTPUT_TOKEN_KEYS),
+                ) != counters:
+                    continue
+                inner, inner_input, inner_output, inner_detailed = _usage_shape(nested)
+                if inner_detailed:
+                    return inner, inner_input, inner_output
+        return usage, has_input, has_output
+
+    for nested in _nested_usage(data):
+        usage, has_input, has_output, _ = _usage_shape(nested)
         if has_input or has_output:
-            return input_tokens, output_tokens, has_input, has_output
-    return 0, 0, False, False
+            return usage, has_input, has_output
+    return TokenUsage(), False, False
+
+
+def _usage_tokens(data: Mapping[str, Any]) -> tuple[int, int, bool, bool]:
+    """Return ``(input, output, has_input, has_output)``; see :func:`_usage_detail`."""
+    usage, has_input, has_output = _usage_detail(data)
+    return usage.input_tokens, usage.output_tokens, has_input, has_output
 
 
 @dataclass
 class _UsageSample:
     model: str
-    input_tokens: int = 0
-    output_tokens: int = 0
+    usage: TokenUsage = field(default_factory=TokenUsage)
     has_input: bool = False
     has_output: bool = False
+
+    def record(self, usage: TokenUsage, has_input: bool, has_output: bool) -> None:
+        """Replace the input side, the output side, or both with *usage*."""
+        if has_input:
+            self.usage = _replace(usage, output_tokens=self.usage.output_tokens)
+            self.has_input = True
+        if has_output:
+            self.usage = _replace(self.usage, output_tokens=usage.output_tokens)
+            self.has_output = True
 
 
 _NO_SAMPLE = -1
@@ -522,7 +930,7 @@ MODEL_USAGE_EVENT_TYPES = frozenset({
 })
 
 
-def _session_model_usage(events: list[TraceEvent]) -> dict[str, tuple[int, int]]:
+def _session_model_token_usage(events: list[TraceEvent]) -> dict[str, TokenUsage]:
     """Aggregate usage by model while avoiding request/response double counts.
 
     Responses pair with requests under the pairing.py LLM rules. An
@@ -544,13 +952,14 @@ def _session_model_usage(events: list[TraceEvent]) -> dict[str, tuple[int, int]]
             continue
 
         model = event_model(event.data)
-        inp, out, has_inp, has_out = _usage_tokens(event.data)
+        recorded, has_inp, has_out = _usage_detail(event.data)
 
         if event.event_type == EventType.LLM_REQUEST:
             if not model:
                 requests.add(event, _NO_SAMPLE)
                 continue
-            sample = _UsageSample(model, inp, out, has_inp, has_out)
+            sample = _UsageSample(model)
+            sample.record(recorded, has_inp, has_out)
             samples.append(sample)
             requests.add(event, len(samples) - 1)
             continue
@@ -569,19 +978,20 @@ def _session_model_usage(events: list[TraceEvent]) -> dict[str, tuple[int, int]]
         sample = samples[index]
         if not model:
             model = sample.model
-        if has_inp:
-            sample.input_tokens = inp
-            sample.has_input = True
-        if has_out:
-            sample.output_tokens = out
-            sample.has_output = True
+        sample.record(recorded, has_inp, has_out)
 
-    usage: dict[str, list[int]] = {}
+    usage: dict[str, TokenUsage] = {}
     for sample in samples:
-        totals = usage.setdefault(sample.model, [0, 0])
-        totals[0] += sample.input_tokens
-        totals[1] += sample.output_tokens
-    return {model: (values[0], values[1]) for model, values in usage.items()}
+        usage[sample.model] = usage.get(sample.model, TokenUsage()) + sample.usage
+    return usage
+
+
+def _session_model_usage(events: list[TraceEvent]) -> dict[str, tuple[int, int]]:
+    """Return ``{model: (input, output)}``; see :func:`_session_model_token_usage`."""
+    return {
+        model: (usage.input_tokens, usage.output_tokens)
+        for model, usage in _session_model_token_usage(events).items()
+    }
 
 
 def build_provider_cost_report(
@@ -621,21 +1031,18 @@ def build_provider_cost_report(
         require_object_event_data(
             events, event_types=MODEL_USAGE_EVENT_TYPES, session_id=meta.session_id
         )
-        for model, (input_tokens, output_tokens) in _session_model_usage(events).items():
+        for model, usage in _session_model_token_usage(events).items():
             price = get_model_pricing(model, pricing_table=pricing_table)
-            cost = 0.0
-            if price is not None:
-                cost = (
-                    input_tokens / 1_000_000 * price.input_per_million
-                    + output_tokens / 1_000_000 * price.output_per_million
-                )
+            cost = 0.0 if price is None else price.cost(usage)
             records.append(ProviderCostRecord(
                 provider=infer_provider(model),
                 model=model,
                 session_id=meta.session_id,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
                 cost_usd=cost,
+                cache_read_tokens=usage.cache_read_tokens,
+                cache_write_tokens=usage.cache_write_tokens,
             ))
 
     records.sort(key=lambda row: (row.provider, row.model, row.session_id))
@@ -658,7 +1065,11 @@ def estimate_cost(
     input_price: float | None = None,
     output_price: float | None = None,
 ) -> CostResult:
-    """Estimate cost for *session_id*, broken down by phase."""
+    """Estimate cost for *session_id*, broken down by phase.
+
+    Recorded cache reads and writes are billed at the model's cache rates.
+    A custom ``input_price`` applies to them too, because it has none.
+    """
     if (input_price is None) != (output_price is None):
         raise ValueError(
             "Both --input-price and --output-price must be provided together"
@@ -669,42 +1080,42 @@ def estimate_cost(
 
     result = explain_session(store, session_id)
     # Phases hold every event of the session, in order.
-    tokens = iter(session_event_tokens(
+    usages = iter(session_event_usage(
         [event for phase in result.phases for event in phase.events]
     ))
 
     phase_costs: list[PhaseCost] = []
-    total_input = total_output = 0
+    total = TokenUsage()
 
     for phase in result.phases:
-        inp = out = 0
+        usage = TokenUsage()
         for _ in phase.events:
-            i, o = next(tokens)
-            inp += i
-            out += o
-        cost = _dollars(inp, out, model)
+            usage = usage + next(usages)
         phase_costs.append(PhaseCost(
             phase_index=phase.index,
             phase_name=phase.name,
-            input_tokens=inp,
-            output_tokens=out,
-            cost_dollars=cost,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            cost_dollars=_usage_dollars(usage, model),
             failed=phase.failed,
+            cache_read_tokens=usage.cache_read_tokens,
+            cache_write_tokens=usage.cache_write_tokens,
         ))
-        total_input += inp
-        total_output += out
+        total = total + usage
 
-    total_cost = _dollars(total_input, total_output, model)
+    total_cost = _usage_dollars(total, model)
     wasted_cost = sum(pc.cost_dollars for pc in phase_costs if pc.failed)
 
     return CostResult(
         session_id=session_id,
         model=model,
         total_cost=total_cost,
-        input_tokens=total_input,
-        output_tokens=total_output,
+        input_tokens=total.input_tokens,
+        output_tokens=total.output_tokens,
         phase_costs=phase_costs,
         wasted_cost=wasted_cost,
+        cache_read_tokens=total.cache_read_tokens,
+        cache_write_tokens=total.cache_write_tokens,
     )
 
 
@@ -720,7 +1131,7 @@ def build_tenant_cost_report(
     """Aggregate legacy per-session estimates for one exact tenant tag."""
     generated_at = _time.time() if now is None else float(now)
     cutoff = parse_since(since, now=generated_at)
-    sessions = total_input = total_output = 0
+    sessions = total_input = total_output = total_read = total_write = 0
     total_cost = 0.0
     for meta in store.list_sessions(tenant_id=tenant_id):
         if meta.started_at < cutoff or meta.started_at > generated_at:
@@ -745,6 +1156,8 @@ def build_tenant_cost_report(
         sessions += 1
         total_input += result.input_tokens
         total_output += result.output_tokens
+        total_read += result.cache_read_tokens
+        total_write += result.cache_write_tokens
         total_cost += result.total_cost
     return TenantCostResult(
         tenant_id=tenant_id,
@@ -753,6 +1166,8 @@ def build_tenant_cost_report(
         total_cost=total_cost,
         input_tokens=total_input,
         output_tokens=total_output,
+        cache_read_tokens=total_read,
+        cache_write_tokens=total_write,
     )
 
 
@@ -760,11 +1175,23 @@ def build_tenant_cost_report(
 # Formatting
 # ---------------------------------------------------------------------------
 
+def _cache_note(read_tokens: int, write_tokens: int) -> str:
+    """Describe the cached part of an input count, or return ''."""
+    parts = []
+    if read_tokens:
+        parts.append(f"{read_tokens:,} cache read")
+    if write_tokens:
+        parts.append(f"{write_tokens:,} cache write")
+    return f" ({', '.join(parts)})" if parts else ""
+
+
 def format_cost(result: CostResult, out: TextIO = sys.stdout) -> None:
     w = out.write
     w(f"\nSession: {result.session_id} — Estimated cost: ${result.total_cost:.4f}\n")
+    cache = _cache_note(result.cache_read_tokens, result.cache_write_tokens)
     w(f"Model: {result.model}  |  "
-      f"{result.input_tokens:,} input tokens, {result.output_tokens:,} output tokens\n\n")
+      f"{result.input_tokens:,} input tokens{cache}, "
+      f"{result.output_tokens:,} output tokens\n\n")
 
     if result.phase_costs:
         total = result.total_cost or 1e-9  # avoid div/0
@@ -789,7 +1216,9 @@ def format_tenant_cost(result: TenantCostResult, out: TextIO = sys.stdout) -> No
         f"Window: {_since_description(result.since)}\n"
         f"Sessions: {result.sessions}\n"
         f"Estimated cost: ${result.total_cost:.4f}\n"
-        f"Tokens: {result.input_tokens:,} input, {result.output_tokens:,} output\n"
+        f"Tokens: {result.input_tokens:,} input"
+        f"{_cache_note(result.cache_read_tokens, result.cache_write_tokens)}, "
+        f"{result.output_tokens:,} output\n"
     )
 
 
@@ -843,10 +1272,14 @@ def format_provider_cost_csv(
     report: ProviderCostReport,
     out: TextIO = sys.stdout,
 ) -> None:
-    """Write raw per-session/model rows using the issue's stable columns."""
+    """Write raw per-session/model rows.
+
+    The first six columns are stable; the cache columns were appended later.
+    """
     writer = csv.writer(out, lineterminator="\n")
     writer.writerow([
         "provider", "model", "session_id", "input_tokens", "output_tokens", "cost_usd",
+        "cache_read_tokens", "cache_write_tokens",
     ])
     for row in report.records:
         writer.writerow([
@@ -856,6 +1289,8 @@ def format_provider_cost_csv(
             row.input_tokens,
             row.output_tokens,
             f"{row.cost_usd:.8f}",
+            row.cache_read_tokens,
+            row.cache_write_tokens,
         ])
 
 
