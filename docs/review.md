@@ -35,7 +35,7 @@ Each finding has a status, a confidence, and the source of its evidence.
 | Finding | What it checks | Source |
 |---|---|---|
 | Rationale | Whether the original request was captured | `user_prompt` events. Counts only. Prompt text is never printed. |
-| Scope | Files written vs files a prompt named or the session read | File and edit tool events, prompt path mentions, file reads |
+| Scope | Files written vs files a prompt named or the session read | File and edit tool events, shell redirection targets, prompt path mentions, file reads, shell read targets |
 | Validation | Tests and checks run inside the session, with exit codes | Shell tool calls and their linked results. CI is not read. |
 | Stewardship | Human turns, interventions after the agent started, approval decisions | `user_prompt` events, approval requests, recorded permission modes |
 | Evidence health | Capture gaps, redaction state, provider limits, and how the session was linked | [`health`](evidence-health.md), [capture matrix](capture-matrix.md), session link |
@@ -58,6 +58,27 @@ Statuses:
 Confidence is `high`, `medium`, or `low`. It says how much the status depends on
 heuristics. Prompt capture is high. Path matching for scope is medium. A weak
 session link lowers evidence confidence to low.
+
+Scope also reads file writes made through a shell tool call, because some
+agents write every file with `cat > file <<'EOF'` instead of an edit tool. The
+targets of `>`, `>>`, `>|`, `&>`, and `tee [-a] FILE` count as written files.
+A relative target is resolved against an earlier `cd DIR` in the same command,
+otherwise against the session working directory. Targets under `/dev/`, fd
+duplications such as `2>&1`, and targets with `$`, backticks, globs, or a
+leading `~` are skipped. These paths are read from command text, not observed
+as writes, so they never raise confidence: when shell redirection is the only
+write evidence, scope is low confidence, the detail says so, and
+`facts.shell_writes` counts the files seen only that way. Only paths are
+shown, never the command. Writes made by `sed -i`, `cp`, `mv`, or an
+interpreter such as `python -c` are not detected. A redirect target also
+counts as a file change for validation staleness.
+
+Shell reads count as file reads for grounding: file operands of `cat`,
+`head`, `tail`, `less`, `more`, `nl`, and `wc` (option words and values such
+as `-n 20` are skipped) and `<` input redirect targets, with the same `cd`
+and literal-path rules. They only ground a written file. They never add a
+written file or raise confidence. Operands of `grep`, `sed`, `awk`, and other
+tools are not read.
 
 Validation uses the last run of each check across all linked sessions. Sessions
 are ordered by start time, then ID. A check that passed before a later file
@@ -214,7 +235,7 @@ Two linked sessions. The second edits a file after the first ran its checks.
 | Finding | Status | Confidence | Evidence | Source |
 |---|---|---|---|---|
 | Rationale | present | high | 3 prompts captured in 2 sessions. | user\_prompt events \(content not shown\) |
-| Scope | partial | medium | 1 of 2 written files were named in a prompt or read in the session. Not named or read: `src/extra.py` | file and edit tool events, prompt path mentions, file reads |
+| Scope | partial | medium | 1 of 2 written files were named in a prompt or read in the session. Not named or read: `src/extra.py` | file and edit tool events, shell redirection targets, prompt path mentions, file reads, shell read targets |
 | Validation | partial | medium | Last run: pytest passed, exit 0; ruff passed, exit 0. Files changed after the last run of: pytest \(1 file\), ruff \(1 file\). | shell tool calls and linked results inside the session \(not CI\) |
 | Stewardship | present | medium | 3 human turns, 1 after the first tool call, 0 approval decisions. Permission modes: default. | user\_prompt events, approval requests, recorded permission modes |
 | Evidence health | partial | high | Health: 2 partial \(claude\). Redaction: on. Linked by: branch. | agent-strace health, capture matrix, session link |
@@ -240,5 +261,9 @@ Check: **pass**. Threshold fails on `missing` at `medium` or higher confidence (
   not record exit codes, so a run without one is reported as unknown.
 - Scope uses path matching against prompts and reads. A file can be in scope
   without being named, and the check will still report it as not named.
+- Shell file writes are found only through redirection and `tee`, and shell
+  reads only through the viewers listed above and `<`. Other shell commands
+  that write or read files (`sed -i`, `cp`, `mv`, `grep`, scripts) are not
+  seen, and a redirect in a command that failed still counts.
 - Cognitive debt measures review coverage, not code quality.
 - Output is deterministic. No LLM writes or summarizes any part of it.

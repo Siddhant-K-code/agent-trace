@@ -16,6 +16,7 @@ This is a best-effort reading for classification, not a shell parser.
 
 from __future__ import annotations
 
+import posixpath
 import re
 import shlex
 
@@ -129,3 +130,180 @@ def command_segments(command: str) -> list[list[str]]:
     if current:
         segments.append(current)
     return segments
+
+
+_WRITE_REDIRECTS = frozenset({">", ">>", ">|", "&>", "&>>"})
+_UNRESOLVED = re.compile(r"[$`*?\[\]{}]|^~")
+_ABSOLUTE = re.compile(r"^(?:/|[A-Za-z]:/)")
+_ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _literal_path(word: str) -> str | None:
+    if not word or word == "-" or _UNRESOLVED.search(word):
+        return None
+    return word
+
+
+def _resolve(target: str, base: str | None) -> str | None:
+    if target.startswith("/dev/"):
+        return None
+    if _ABSOLUTE.match(target):
+        return posixpath.normpath(target)
+    if base is None:
+        return None
+    return posixpath.normpath(posixpath.join(base, target))
+
+
+def _command_words(words: list[str]) -> list[str]:
+    words = list(words)
+    while words and _ENV_ASSIGN.match(words[0]):
+        words.pop(0)
+    if words and words[0] == "sudo":
+        words.pop(0)
+    return words
+
+
+def _tee_files(words: list[str]) -> list[str]:
+    files: list[str] = []
+    options = True
+    for word in words[1:]:
+        if options and word == "--":
+            options = False
+        elif options and word.startswith("-") and word != "-":
+            continue
+        else:
+            files.append(word)
+    return files
+
+
+def _cd_base(words: list[str], base: str | None) -> str | None:
+    args = [word for word in words[1:] if word not in ("-P", "-L", "-e", "--")]
+    if len(args) != 1:
+        return None
+    target = _literal_path(args[0])
+    if target is None:
+        return None
+    if _ABSOLUTE.match(target):
+        return posixpath.normpath(target)
+    if base is None:
+        return None
+    return posixpath.normpath(posixpath.join(base, target))
+
+
+_READ_COMMANDS = frozenset({"cat", "head", "tail", "less", "more", "nl", "wc"})
+# Short options that take the next word as their value.
+_READ_VALUE_FLAGS = {
+    "head": frozenset({"-n", "-c"}),
+    "tail": frozenset({"-n", "-c", "-s", "--pid", "--sleep-interval", "--max-unchanged-stats"}),
+    "nl": frozenset({"-b", "-d", "-f", "-h", "-i", "-l", "-n", "-s", "-v", "-w"}),
+}
+
+
+def _read_files(name: str, words: list[str]) -> list[str]:
+    files: list[str] = []
+    value_flags = _READ_VALUE_FLAGS.get(name, frozenset())
+    options = True
+    skip = False
+    for word in words[1:]:
+        if skip:
+            skip = False
+        elif options and word == "--":
+            options = False
+        elif options and word in value_flags:
+            skip = True
+        elif options and len(word) > 1 and word[0] in "-+":
+            continue
+        else:
+            files.append(word)
+    return files
+
+
+def _file_targets(command: str) -> tuple[list[str], list[str]]:
+    """Return ``(written, read)`` paths for :func:`write_targets` and :func:`read_targets`."""
+    tokens, parsed = split_tokens(command)
+    if not parsed:
+        return [], []
+    written: list[str] = []
+    read: list[str] = []
+    base: str | None = ""
+    words: list[str] = []
+    redirects: list[str] = []
+    inputs: list[str] = []
+    arithmetic = False
+
+    def add(found: list[str], targets: list[str]) -> None:
+        for word in targets:
+            literal = _literal_path(word)
+            path = _resolve(literal, base) if literal else None
+            if path and path not in found:
+                found.append(path)
+
+    def finish() -> None:
+        nonlocal base
+        command_words = _command_words(words)
+        if arithmetic or (command_words and command_words[0] == "[["):
+            return
+        targets = list(redirects)
+        name = command_words[0].rsplit("/", 1)[-1] if command_words else ""
+        if name == "tee":
+            targets.extend(_tee_files(command_words))
+        add(written, targets)
+        sources = list(inputs)
+        if name in _READ_COMMANDS:
+            sources.extend(_read_files(name, command_words))
+        add(read, sources)
+        if name == "cd":
+            base = _cd_base(command_words, base)
+
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        following = tokens[index + 1] if index + 1 < len(tokens) else ""
+        operand = bool(following) and not is_operator(following)
+        if token in _WRITE_REDIRECTS and operand:
+            redirects.append(following)
+            index += 2
+            continue
+        if token == "<" and operand:
+            inputs.append(following)
+            index += 2
+            continue
+        if is_break(token):
+            finish()
+            words, redirects, inputs = [], [], []
+            arithmetic = token.endswith("((")
+        elif is_operator(token):
+            if operand:
+                index += 1
+        else:
+            words.append(token)
+        index += 1
+    finish()
+    return written, read
+
+
+def write_targets(command: str) -> list[str]:
+    """Return file paths a command writes through redirection or ``tee``.
+
+    Covers ``>``, ``>>``, ``>|``, ``&>``, ``&>>`` (with or without a leading
+    fd number) and ``tee [-a] FILE...``. A path is relative to the directory
+    the command started in, unless an earlier ``cd DIR`` in the same command
+    moved it: an absolute ``DIR`` is applied, a relative literal one is joined,
+    and any other ``cd`` makes later relative targets unknown, so they are
+    dropped. Targets under ``/dev/``, fd duplications such as ``2>&1``, and
+    words with ``$``, backticks, globs, braces, or a leading ``~`` are skipped.
+    Other ways to write files (``sed -i``, ``cp``, interpreters) are not read.
+    """
+    return _file_targets(command)[0]
+
+
+def read_targets(command: str) -> list[str]:
+    """Return file paths a command reads with a plain file viewer.
+
+    Covers file operands of ``cat``, ``head``, ``tail``, ``less``, ``more``,
+    ``nl``, and ``wc`` (option words and the values of options such as
+    ``-n 20`` are skipped) and ``<`` input redirect targets. Paths follow the
+    same ``cd`` and literal-word rules as :func:`write_targets`. Operands of
+    ``grep``, ``sed``, ``awk`` and other tools are not read.
+    """
+    return _file_targets(command)[1]
