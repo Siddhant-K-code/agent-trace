@@ -15,10 +15,27 @@ Registry name: `io.github.Siddhant-K-code/agent-trace` (PyPI package `agent-stra
 | `diff_sessions` | Tool, file, token, cost, and error deltas between two sessions |
 | `health` | Evidence health for a session (same JSON as `agent-strace health --format json`). Defaults to the latest session |
 | `skills` | Skill adoption report (same JSON as `agent-strace skills --format json`, except `command_match` returns `count` and `distinct_signatures` instead of the matched commands). One session, or an aggregate over `since` (default `30d`) |
+| `review` | PR reviewability check (same versioned JSON as `agent-strace review --format json`, or the Markdown section with `format: "markdown"`). See [review](#review) |
 
 `initialize` reports the installed package version. Malformed requests get JSON-RPC errors (`-32600` invalid request, `-32602` invalid params or unknown tool). A tool that fails returns a result with `isError: true`.
 
-Tool output can include file paths, commands, and arguments recorded in your traces (secret redaction applies at capture time). The `skills` tool never returns prompt text, `SKILL.md` bodies, or commands taken from them; it returns skill names and paths relative to a skill directory.
+Tool output can include file paths, commands, and arguments recorded in your traces (secret redaction applies at capture time). The `skills` tool never returns prompt text, `SKILL.md` bodies, or commands taken from them; it returns skill names and paths relative to a skill directory. The `review` tool never returns prompt text, command strings, or tool output.
+
+### review
+
+Runs the same check as [`agent-strace review`](review.md) and returns its report. A failing threshold is a normal result (`"result": "fail"`), not an error. Bad input returns `{"error": ...}` with `isError: true`, where the CLI exits `2`.
+
+| Argument | CLI flag | Meaning |
+|---|---|---|
+| `session_ids` | positional `SESSION_ID...` | Session IDs or prefixes. Linked as `explicit`. Empty links by branch, then head commit time, then latest |
+| `branch` | `--branch` | Branch to link sessions by. Default: the CI source branch or the git branch of the server's working directory |
+| `commits` | `--commits` | Git revision range for commit trailers, such as `origin/main..HEAD`. A value starting with `-` is rejected |
+| `otel_logs` | `--otel-logs` | Claude Code OpenTelemetry logs file. Relative paths resolve against the server's working directory. Only the file name is returned |
+| `fail_on`, `min_confidence`, `findings` | `--fail-on`, `--min-confidence`, `--findings` | Threshold overrides, validated like the flags |
+| `config` | `--config` | Config file with a `review` block. Default: `.agent-strace.yaml` in the server's working directory, if present |
+| `format` | `--format` | `json` (default) or `markdown` |
+
+`commits` and `otel_logs` are reported as external evidence and never change a finding. The tool is read-only: it does not post a PR comment, write files, or take the artifact flags (`--evidence-packet`, `--cognitive-debt`, `--artifact-url`).
 
 ## Add it to your agent
 
@@ -79,6 +96,7 @@ gemini mcp add -s user agent-trace agent-strace mcp
 - "List my last 5 agent-trace sessions and summarize the one with the most errors."
 - "Which of my skills never loaded in the last 30 days?"
 - "Run health on the latest session and tell me what the trace cannot show."
+- "Run review for this branch with commits origin/main..HEAD and list what a reviewer would miss."
 
 ## Check it by hand
 

@@ -11,6 +11,7 @@ Tools exposed:
   diff_sessions        compare two sessions: what changed between runs
   health               evidence health for a session (wraps agent-strace health)
   skills               skill adoption report (wraps agent-strace skills)
+  review               pull-request reviewability check (wraps agent-strace review)
 
 Usage:
   agent-strace mcp                  # stdio transport (default)
@@ -31,7 +32,17 @@ from . import __version__
 from .cost import parse_since
 from .event_data import str_field
 from .explain import explain_session, format_explain
+from .external_evidence import ExternalEvidenceError, collect_external_evidence
 from .health import assess_session, load_capture_matrix
+from .pr_comment import PRCommentError, current_branch
+from .reviewability import (
+    CONFIDENCES,
+    ReviewConfigError,
+    build_report,
+    link_sessions,
+    load_threshold,
+    render_markdown,
+)
 from .skills import build_aggregate_report, build_session_report
 from .models import EventType, TraceEvent
 from .store import TraceStore
@@ -232,6 +243,89 @@ _TOOLS: list[dict] = [
                     "type": "integer",
                     "description": "Minimum sessions before a skill is reported as never loaded (default: 5).",
                     "default": 5,
+                },
+            },
+        },
+    },
+    {
+        "name": "review",
+        "description": (
+            "Run the pull-request reviewability check: rationale, scope, validation, "
+            "stewardship, and evidence health for the sessions linked to a branch, "
+            "each with a status, confidence, and source, plus the threshold result. "
+            "Same versioned JSON as 'agent-strace review --format json'. Read-only: "
+            "it never posts a PR comment or writes a file. Prompt text and command "
+            "strings are never returned."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Session IDs or prefixes to review (explicit link). "
+                        "Empty links sessions by branch, then head commit time, then latest."
+                    ),
+                    "default": [],
+                },
+                "branch": {
+                    "type": "string",
+                    "description": (
+                        "Branch to link sessions by. Defaults to the CI source branch "
+                        "or the git branch of the server's working directory."
+                    ),
+                    "default": "",
+                },
+                "commits": {
+                    "type": "string",
+                    "description": (
+                        "Git revision range to read Entire-Checkpoint and Agent-Logs-Url "
+                        "trailers from, such as origin/main..HEAD. Reported, not graded."
+                    ),
+                    "default": "",
+                },
+                "otel_logs": {
+                    "type": "string",
+                    "description": (
+                        "Path to a Claude Code OpenTelemetry logs export (OTLP JSON or "
+                        "JSON Lines) to read safety_event from. Relative paths resolve "
+                        "against the server's working directory. Reported, not graded."
+                    ),
+                    "default": "",
+                },
+                "fail_on": {
+                    "type": "string",
+                    "description": (
+                        "Comma-separated statuses that fail: missing, partial, inconclusive, "
+                        "or none (default: missing, or the config file)."
+                    ),
+                },
+                "min_confidence": {
+                    "type": "string",
+                    "enum": list(CONFIDENCES),
+                    "description": "Lowest confidence that can fail the check (default: medium).",
+                },
+                "findings": {
+                    "type": "string",
+                    "description": (
+                        "Comma-separated findings the threshold applies to: rationale, scope, "
+                        "validation, stewardship, evidence (default: all)."
+                    ),
+                },
+                "config": {
+                    "type": "string",
+                    "description": (
+                        "Config file with a review block. Defaults to .agent-strace.yaml "
+                        "in the server's working directory if present."
+                    ),
+                    "default": "",
+                },
+                "format": {
+                    "type": "string",
+                    "enum": ["json", "markdown"],
+                    "description": "json (default) or markdown, same as the CLI formats.",
+                    "default": "json",
                 },
             },
         },
@@ -515,6 +609,47 @@ def _tool_skills(store: TraceStore, args: dict) -> str:
     return json.dumps(_redact_command_matches(report), indent=2)
 
 
+def _text_arg(args: dict, name: str) -> str:
+    """Return an optional string argument. Reject other types and NUL bytes."""
+    value = args.get(name)
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ReviewConfigError(f"{name} must be a string")
+    if "\x00" in value:
+        raise ReviewConfigError(f"{name} must not contain NUL bytes")
+    return value.strip()
+
+
+def _tool_review(store: TraceStore, args: dict) -> str:
+    try:
+        raw_ids = args.get("session_ids")
+        if raw_ids is None:
+            raw_ids = []
+        if not isinstance(raw_ids, list) or not all(isinstance(v, str) for v in raw_ids):
+            raise ReviewConfigError("session_ids must be a list of strings")
+        output = _text_arg(args, "format") or "json"
+        if output not in ("json", "markdown"):
+            raise ReviewConfigError("format must be json or markdown")
+        threshold = load_threshold(
+            _text_arg(args, "config") or None,
+            fail_on=args.get("fail_on"),
+            min_confidence=args.get("min_confidence"),
+            findings=args.get("findings"),
+        )
+        external = collect_external_evidence(
+            _text_arg(args, "commits"), _text_arg(args, "otel_logs"),
+        )
+        branch = _text_arg(args, "branch") or current_branch()
+        linked = link_sessions(store, [v.strip() for v in raw_ids], branch=branch)
+        report = build_report(store, linked, threshold, branch=branch, external=external)
+    except (ReviewConfigError, ExternalEvidenceError, PRCommentError, OSError, ValueError) as exc:
+        return json.dumps({"error": str(exc)})
+    if output == "markdown":
+        return render_markdown(report, heading="## agent-trace reviewability")
+    return json.dumps(report.to_dict(), indent=2)
+
+
 # ---------------------------------------------------------------------------
 # JSON-RPC 2.0 dispatcher
 # ---------------------------------------------------------------------------
@@ -535,6 +670,7 @@ _DISPATCH = {
     "diff_sessions": _tool_diff_sessions,
     "health": _tool_health,
     "skills": _tool_skills,
+    "review": _tool_review,
 }
 
 
