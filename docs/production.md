@@ -40,6 +40,7 @@ agent-strace export <session-id> --format otlp-genai \
 | Errors | Custom error span | OTel `exception` event format |
 | Failed or cancelled model request | `error.type` on the `gen_ai.assistant.message` event | ERROR status and `error.type` on the `gen_ai.client.operation` span |
 | `gen_ai.conversation.id` | Root span | Root, LLM and tool spans |
+| Token usage | `gen_ai.usage.*` on the LLM events | `gen_ai.usage.*` and `llm.token_count.*` on the LLM spans; see [Token usage and prompt caching](#token-usage-and-prompt-caching) |
 
 `--format otlp` is unchanged for backwards compatibility. See [ADR-0011](../ADRs/0011-otlp-genai-semantic-conventions.md) for design rationale.
 
@@ -103,6 +104,53 @@ The mapping is not fully lossless:
 
 The machine-readable contract is
 [`examples/otlp/openinference-mapping.json`](../examples/otlp/openinference-mapping.json).
+
+### Token usage and prompt caching
+
+Each model request exports its input, output and prompt cache token counts in
+`--format otlp`, `--format otlp-genai` and the direct Langfuse export. They are
+read with the same provider normalization as [`cost`](commands.md#cost), so
+the input is the whole input, cache reads and writes included, for every
+provider. Anthropic `input_tokens` and Bedrock `inputTokens` leave cache
+tokens out, so they are added. OpenAI, Codex and Gemini counts already include
+them. Gemini thinking tokens count as output and tool-use prompt tokens as
+input.
+
+| Count | `--format otlp-genai` | `--format otlp` | Langfuse `usageDetails` |
+|---|---|---|---|
+| Whole input | `gen_ai.usage.input_tokens`, `llm.token_count.prompt` | `gen_ai.usage.input_tokens` | sum of the `input*` keys |
+| Uncached input | not exported | not exported | `input` |
+| Cache reads | `gen_ai.usage.cache_read.input_tokens`, `llm.token_count.prompt_details.cache_read` | `gen_ai.usage.cache_read.input_tokens` | `input_cached_tokens` |
+| Cache writes | `gen_ai.usage.cache_write.input_tokens`, `llm.token_count.prompt_details.cache_write` | `gen_ai.usage.cache_write.input_tokens` | `input_cache_creation`, and `input_cache_creation_1h` for Anthropic and Bedrock 1-hour writes |
+| Output | `gen_ai.usage.output_tokens`, `llm.token_count.completion` | `gen_ai.usage.output_tokens` | `output` |
+| Total | `llm.token_count.total` | not exported | `total` |
+
+- The cache read and write attributes appear only when they are not zero, as
+  the [GenAI inference span](https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/client-inference.md)
+  conventions recommend. They are part of `gen_ai.usage.input_tokens`, not
+  added to it. The OpenInference `prompt_details` counts are part of
+  `llm.token_count.prompt` in the same way.
+- The input and its cache counts come from the request when it recorded an
+  input count, otherwise from the response. The output comes from the
+  response, otherwise from the request. In `--format otlp` they go on the
+  request's `gen_ai.system.message` event when the request recorded them, and
+  on the response's `gen_ai.assistant.message` event otherwise, as for the SDK
+  integrations, which record usage on the response.
+- Langfuse generations always carry `usage` with `input` (the whole input),
+  `output` and `total`. A request that read or wrote a cache also carries
+  `usageDetails`. Langfuse prices each usage key with the model price of the
+  same key and expects the keys to be exclusive, so `usageDetails.input` is
+  the uncached input. Langfuse lays `usageDetails` over `usage`. See
+  [Langfuse token and cost tracking](https://langfuse.com/docs/observability/features/token-and-cost-tracking).
+  OpenAI 12-hour cache writes are sent as `input_cache_creation`, because
+  Langfuse has no 12-hour key. Long writes of a model whose provider cannot be
+  inferred from its name are sent the same way. No cost is sent: Langfuse
+  computes it from its model prices.
+- Langfuse's OTLP endpoint reads the same `gen_ai.usage.*` attributes and
+  subtracts the cache reads and writes from the input itself.
+- Usage that a Claude Code import records on `assistant_response` events is
+  not exported, because those events do not become model request spans or
+  generations. `cost` still counts it.
 
 ---
 
@@ -440,11 +488,12 @@ A response that pairs with no request is treated as the whole model request:
   provider limitation instead of one `orphan_llm_response` gap each. Responses
   without a request from any other source are still orphans.
 - `--format otlp`: the `gen_ai.assistant.message` event carries the
-  response's own `gen_ai.request.model` and `gen_ai.usage.input_tokens`. A
-  paired response is unchanged, because its request event already carries
-  them.
+  response's own `gen_ai.request.model` and its token counts. A paired
+  response carries the input counts only when its request event recorded
+  none (see [Token usage and prompt caching](#token-usage-and-prompt-caching)).
 - Langfuse: the generation takes its model and input count from the response.
-  A paired response still takes them from its request.
+  A paired response takes its model from its request, and its input count from
+  its request when the request recorded one.
 - `cost`, `tree`, `timeline`, `replay`, `watch` and the EU AI Act compliance
   export: once a session has such a response with token counts, every
   `llm_response` counts the tokens it recorded, or none if it recorded none

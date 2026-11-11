@@ -262,9 +262,11 @@ collectors. It does not install an OpenTelemetry SDK or add a gRPC path.
 
 The payload carries both the project's `gen_ai.*` attributes and additive
 OpenInference attributes. Root, LLM, and tool spans map to `AGENT`, `LLM`, and
-`TOOL`. Parent span IDs, exceptions, token counts, recorded cost, redaction
+`TOOL`. Parent span IDs, exceptions, token counts (prompt cache reads and
+writes included), recorded cost, redaction
 state, persisted provenance, and observed structural evidence gaps remain
-queryable where the backend indexes custom attributes.
+queryable where the backend indexes custom attributes. See
+[Token usage and prompt caching](production.md#token-usage-and-prompt-caching).
 
 Use the local fixtures before configuring credentials:
 

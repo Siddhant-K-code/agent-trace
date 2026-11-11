@@ -913,6 +913,17 @@ def _usage_tokens(data: Mapping[str, Any]) -> tuple[int, int, bool, bool]:
     return usage.input_tokens, usage.output_tokens, has_input, has_output
 
 
+def usage_detail(data: Any) -> tuple[TokenUsage, bool, bool]:
+    """Return ``(usage, has_input, has_output)`` for the token counts in *data*.
+
+    This is the normalization the cost report uses (see :func:`_usage_detail`),
+    for exporters.  Data that is not a JSON object records no usage.
+    """
+    if not isinstance(data, Mapping):
+        return TokenUsage(), False, False
+    return _usage_detail(data)
+
+
 @dataclass
 class _UsageSample:
     model: str
