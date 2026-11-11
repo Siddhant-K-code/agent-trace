@@ -22,15 +22,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from .cost import estimate_cost
+from .cost import cost_inputs_captured, estimate_cost
 from .event_data import NonObjectEventDataError, require_object_event_data
 from .explain import explain_session
 from .lint import lint_session
 from .models import EventType, SessionMeta, TraceEvent
+from .session_paths import normalise_path, session_cwd, shell_reads, shell_writes
 from .store import TraceStore
 
 
 COMMENT_MARKER = "<!-- agent-trace-pr-comment -->"
+_NOT_CAPTURED = "not captured"
 DEFAULT_GITHUB_API_URL = "https://api.github.com"
 DEFAULT_GITLAB_API_URL = "https://gitlab.com/api/v4"
 _HTTP_TIMEOUT = 15
@@ -70,7 +72,8 @@ class SessionSummary:
 
     session_id: str
     duration_seconds: float
-    cost_usd: float
+    # None when the trace records no model name or token usage.
+    cost_usd: float | None
     tool_calls: int
     models: list[str]
     status: str
@@ -104,12 +107,21 @@ def _path_from_event(event: TraceEvent) -> str:
     ).strip()
 
 
-def _file_activity(events: list[TraceEvent]) -> tuple[list[str], list[str], dict[str, int]]:
+def _file_activity(
+    events: list[TraceEvent], cwd: str | None = None
+) -> tuple[list[str], list[str], dict[str, int]]:
+    """Return explicit file event ``(reads, writes, redundant reads)``.
+
+    With ``cwd``, paths are made relative to it first, so ``/tmp/x/a.py``,
+    ``/private/tmp/x/a.py`` and ``./a.py`` count as one file.
+    """
     read_counts: Counter[str] = Counter()
     modified: set[str] = set()
 
     for event in events:
         path = _path_from_event(event)
+        if path and cwd is not None:
+            path = normalise_path(path, cwd)
         if not path:
             continue
         if event.event_type == EventType.FILE_READ:
@@ -127,6 +139,42 @@ def _file_activity(events: list[TraceEvent]) -> tuple[list[str], list[str], dict
         path: count for path, count in sorted(read_counts.items()) if count > 1
     }
     return sorted(read_counts), sorted(modified), redundant
+
+
+@dataclass(frozen=True)
+class FileActivity:
+    """Files one session read and wrote, relative to its working directory.
+
+    ``read`` and ``written`` combine explicit file events with the files a
+    shell command read or wrote (see :mod:`agent_trace.shell_split`).
+    ``explicit_written`` holds the writes seen as file or edit events.
+    ``redundant`` counts repeated explicit reads only.
+    """
+
+    read: list[str]
+    written: list[str]
+    explicit_written: frozenset[str]
+    redundant: dict[str, int]
+
+
+def session_file_activity(events: list[TraceEvent]) -> FileActivity:
+    """Return the file activity the PR summary and the Scope finding share."""
+
+    cwd = session_cwd(events)
+    reads, writes, redundant = _file_activity(events, cwd)
+    read = set(reads)
+    written = set(writes)
+    for event in events:
+        read.update(shell_reads(event, cwd))
+        written.update(shell_writes(event, cwd))
+    read.discard("")
+    written.discard("")
+    return FileActivity(
+        read=sorted(read),
+        written=sorted(written),
+        explicit_written=frozenset(writes),
+        redundant=redundant,
+    )
 
 
 def _models(events: list[TraceEvent]) -> list[str]:
@@ -247,21 +295,23 @@ def summarize_session(store: TraceStore, session_id: str) -> SessionSummary:
     meta = store.load_meta(session_id)
     events = store.load_events(session_id)
     models = _models(events)
-    files_read, files_modified, redundant = _file_activity(events)
+    activity = session_file_activity(events)
     explanation = explain_session(store, session_id)
     lint = lint_session(store, session_id)
     non_redundant_findings = [
         finding for finding in lint.findings if finding.rule != "redundant-read"
     ]
 
-    try:
-        cost = estimate_cost(
-            store,
-            session_id,
-            model=models[0] if models else "sonnet",
-        ).total_cost
-    except (OSError, ValueError, TypeError):
-        cost = 0.0
+    cost: float | None = None
+    if models or cost_inputs_captured(events):
+        try:
+            cost = estimate_cost(
+                store,
+                session_id,
+                model=models[0] if models else "sonnet",
+            ).total_cost
+        except (OSError, ValueError, TypeError):
+            cost = None
 
     error_events = sum(1 for event in events if event.event_type == EventType.ERROR)
     tool_events = sum(1 for event in events if event.event_type == EventType.TOOL_CALL)
@@ -273,15 +323,15 @@ def summarize_session(store: TraceStore, session_id: str) -> SessionSummary:
         tool_calls=tool_events or meta.tool_calls,
         models=models,
         status=_status(meta, events),
-        files_read=files_read,
-        files_modified=files_modified,
+        files_read=activity.read,
+        files_modified=activity.written,
         phases=_categorical_phases(explanation.phases),
         test_runs=_test_runs(events),
         context_resets=_context_resets(events),
         lint_violations=len(non_redundant_findings),
         lint_errors=sum(1 for finding in non_redundant_findings if finding.level == "ERROR"),
         lint_warnings=sum(1 for finding in non_redundant_findings if finding.level == "WARN"),
-        redundant_reads=redundant,
+        redundant_reads=activity.redundant,
         errors=max(meta.errors, error_events),
     )
 
@@ -539,26 +589,35 @@ def render_comment(
     lines = [COMMENT_MARKER, "## agent-trace session summary", ""]
     if len(summaries) == 1:
         summary = summaries[0]
-        model = ", ".join(summary.models) if summary.models else "unknown"
+        model = ", ".join(summary.models) if summary.models else _NOT_CAPTURED
+        cost = (
+            f"{_NOT_CAPTURED}: no model or token usage recorded"
+            if summary.cost_usd is None
+            else f"${summary.cost_usd:.4f} (estimate)"
+        )
         lines.extend([
             "| | |",
             "|---|---|",
             f"| **Session** | `{_table_text(summary.session_id)}` · {_format_duration(summary.duration_seconds)} |",
-            f"| **Cost** | ${summary.cost_usd:.4f} ({summary.tool_calls} tool calls) |",
+            f"| **Cost** | {cost} |",
+            f"| **Tool calls** | {summary.tool_calls} |",
             f"| **Model** | {_table_text(model)} |",
             f"| **Status** | {_table_text(summary.status)} |",
         ])
     else:
         lines.extend([
-            "| Session | Duration | Cost | Tool calls | Model | Status |",
+            "| Session | Duration | Est. cost | Tool calls | Model | Status |",
             "|---|---:|---:|---:|---|---|",
         ])
         for summary in summaries:
-            model = ", ".join(summary.models) if summary.models else "unknown"
+            model = ", ".join(summary.models) if summary.models else _NOT_CAPTURED
+            cost = (
+                _NOT_CAPTURED if summary.cost_usd is None else f"${summary.cost_usd:.4f}"
+            )
             lines.append(
                 f"| `{_table_text(summary.session_id)}` | "
                 f"{_format_duration(summary.duration_seconds)} | "
-                f"${summary.cost_usd:.4f} | {summary.tool_calls} | "
+                f"{cost} | {summary.tool_calls} | "
                 f"{_table_text(model)} | {_table_text(summary.status)} |"
             )
 
@@ -1072,6 +1131,7 @@ def cmd_pr_comment(args: argparse.Namespace) -> int:
 
 __all__ = [
     "COMMENT_MARKER",
+    "FileActivity",
     "PRCommentError",
     "ReviewTarget",
     "SessionSummary",
@@ -1084,5 +1144,6 @@ __all__ = [
     "resolve_target",
     "select_sessions",
     "select_sessions_with_link",
+    "session_file_activity",
     "summarize_session",
 ]

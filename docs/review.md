@@ -80,6 +80,13 @@ and literal-path rules. They only ground a written file. They never add a
 written file or raise confidence. Operands of `grep`, `sed`, `awk`, and other
 tools are not read.
 
+The session summary above the Reviewability table in the PR comment counts
+files read and modified from the same evidence: file and edit tool events plus
+the shell read and write targets described here. Its paths are relative to the
+session working directory, as in Scope. Its cost row shows an estimate only
+when the trace records a model name or token usage, and says `not captured`
+otherwise. See [`pr-comment`](commands.md#pr-comment).
+
 Validation uses the last run of each check across all linked sessions. Sessions
 are ordered by start time, then ID. A check that passed before a later file
 edit in any linked session is reported as `partial`. Command strings are never

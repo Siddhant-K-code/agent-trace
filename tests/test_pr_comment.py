@@ -181,6 +181,207 @@ class TestSessionSummary(unittest.TestCase):
         self.assertEqual(summarize_session(self.store, "abc123").status, "failed")
 
 
+# Shape of the public demo session recorded by GitHub Copilot CLI 1.0.103
+# (Siddhant-K-code/agent-trace-demo#1): hooks carry no model or token usage,
+# the session cwd is /private/tmp/atdemo, the agent uses both /private/tmp
+# and /tmp paths, and it reads files only through a shell ``cat``.
+DEMO_CWD = "/private/tmp/atdemo"
+DEMO_PROMPT = (
+    "Add a sentence_count(text) function to tinytext. Put it in a new module "
+    "src/tinytext/sentences.py, export it from the package, add unittest tests "
+    "in tests/test_sentences.py, and document it in README.md."
+)
+
+
+def _add_demo_session(store: TraceStore, session_id: str = "b13539e7-7f48-4d") -> None:
+    meta = SessionMeta(
+        session_id=session_id,
+        started_at=100.0,
+        ended_at=120.0,
+        total_duration_ms=20_000,
+        tool_calls=7,
+        attribution={"git_branch": "add-sentence-count", "working_dir": DEMO_CWD},
+    )
+    store.create_session(meta)
+    events = [
+        _event(session_id, EventType.USER_PROMPT, 100.0, prompt=DEMO_PROMPT),
+        _event(
+            session_id, EventType.SESSION_START, 100.1,
+            mode="github-copilot-hooks", provider="copilot", model="", cwd=DEMO_CWD,
+        ),
+        _event(
+            session_id, EventType.TOOL_CALL, 101.0, tool_name="bash",
+            arguments={"command": (
+                "cd /private/tmp/atdemo && git ls-files && "
+                "cat src/tinytext/__init__.py README.md && ls tests && "
+                "head -20 tests/*.py | head -40"
+            )},
+        ),
+        _event(session_id, EventType.TOOL_RESULT, 102.0, tool_name="bash", result="ok"),
+        _event(
+            session_id, EventType.TOOL_CALL, 103.0, tool_name="create",
+            arguments={"path": "/private/tmp/atdemo/src/tinytext/sentences.py"},
+        ),
+        _event(
+            session_id, EventType.TOOL_CALL, 104.0, tool_name="create",
+            arguments={"path": "/private/tmp/atdemo/tests/test_sentences.py"},
+        ),
+        _event(
+            session_id, EventType.TOOL_CALL, 105.0, tool_name="edit",
+            arguments={"path": "/tmp/atdemo/src/tinytext/__init__.py"},
+        ),
+        _event(
+            session_id, EventType.TOOL_CALL, 106.0, tool_name="edit",
+            arguments={"path": "/tmp/atdemo/README.md"},
+        ),
+        _event(
+            session_id, EventType.TOOL_CALL, 106.5, tool_name="bash",
+            arguments={"command": (
+                "cd /private/tmp/atdemo && PYTHONPATH=src python3 -m unittest 2>&1 "
+                "| tail -5; python3 -m unittest 2>&1 | tail -5"
+            )},
+        ),
+        _event(session_id, EventType.TOOL_RESULT, 106.6, tool_name="bash", result="NO TESTS RAN"),
+        _event(
+            session_id, EventType.TOOL_CALL, 107.0, tool_name="bash",
+            arguments={"command": (
+                "cd /private/tmp/atdemo && PYTHONPATH=src python3 -m unittest "
+                "discover -s tests 2>&1 | tail -5"
+            )},
+        ),
+        _event(session_id, EventType.TOOL_RESULT, 108.0, tool_name="bash", result="OK"),
+        _event(
+            session_id, EventType.ASSISTANT_RESPONSE, 119.0,
+            text="", provider="copilot", cwd=DEMO_CWD,
+        ),
+        _event(session_id, EventType.SESSION_END, 120.0, reason="complete", cwd=DEMO_CWD),
+    ]
+    for event in events:
+        store.append_event(session_id, event)
+
+
+DEMO_MODIFIED = [
+    "README.md",
+    "src/tinytext/__init__.py",
+    "src/tinytext/sentences.py",
+    "tests/test_sentences.py",
+]
+
+
+class TestDemoSessionSummary(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = TraceStore(self.temp.name, redact=False)
+        _add_demo_session(self.store)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_cost_is_not_captured_without_model_or_token_usage(self):
+        summary = summarize_session(self.store, "b13539e7-7f48-4d")
+        self.assertIsNone(summary.cost_usd)
+        self.assertEqual(summary.models, [])
+
+    def test_shell_read_targets_count_as_reads(self):
+        summary = summarize_session(self.store, "b13539e7-7f48-4d")
+        self.assertEqual(summary.files_read, ["README.md", "src/tinytext/__init__.py"])
+
+    def test_paths_are_relative_to_the_session_cwd(self):
+        summary = summarize_session(self.store, "b13539e7-7f48-4d")
+        self.assertEqual(summary.files_modified, DEMO_MODIFIED)
+
+    def test_rendered_summary_matches_reviewability_scope(self):
+        from agent_trace.reviewability import LinkedSession, Threshold, build_report
+
+        summary = summarize_session(self.store, "b13539e7-7f48-4d")
+        report = build_report(
+            self.store,
+            [LinkedSession("b13539e7-7f48-4d", "branch")],
+            Threshold(),
+            branch="add-sentence-count",
+        )
+        scope = next(f for f in report.findings if f.name == "scope")
+        self.assertEqual(scope.facts["files_written"], len(summary.files_modified))
+        self.assertEqual(scope.status, "present")
+
+        body = render_comment([summary])
+        self.assertIn(
+            "| **Cost** | not captured: no model or token usage recorded |", body
+        )
+        self.assertIn("| **Tool calls** | 7 |", body)
+        self.assertIn("| **Model** | not captured |", body)
+        self.assertIn("- Read 2 files, modified 4\n", body)
+        self.assertIn(
+            "- Modified: `README.md`, `src/tinytext/__init__.py`, "
+            "`src/tinytext/sentences.py`, `tests/test_sentences.py`\n",
+            body,
+        )
+        self.assertNotIn("$", body)
+        self.assertNotIn("…", body)
+        self.assertNotIn("/tmp", body)
+
+    def test_recorded_model_shows_a_labelled_estimate(self):
+        self.store.append_event(
+            "b13539e7-7f48-4d",
+            _event("b13539e7-7f48-4d", EventType.LLM_REQUEST, 109.0, model="gpt-5"),
+        )
+        summary = summarize_session(self.store, "b13539e7-7f48-4d")
+        self.assertIsNotNone(summary.cost_usd)
+        self.assertGreater(summary.cost_usd, 0)
+        body = render_comment([summary])
+        self.assertIn(f"| **Cost** | ${summary.cost_usd:.4f} (estimate) |", body)
+
+    def test_recorded_token_usage_shows_a_labelled_estimate(self):
+        self.store.append_event(
+            "b13539e7-7f48-4d",
+            _event(
+                "b13539e7-7f48-4d", EventType.LLM_RESPONSE, 109.0,
+                usage={"input_tokens": 1000, "output_tokens": 200},
+            ),
+        )
+        summary = summarize_session(self.store, "b13539e7-7f48-4d")
+        self.assertIsNotNone(summary.cost_usd)
+        self.assertIn("(estimate)", render_comment([summary]))
+
+    def test_dry_run_comment_for_demo_session(self):
+        args = argparse.Namespace(
+            trace_dir=self.temp.name,
+            session_id="b13539e7",
+            platform="github",
+            dry_run=True,
+            share_url="",
+        )
+        stdout = io.StringIO()
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "urllib.request.urlopen", side_effect=AssertionError("network attempted")
+        ), patch("sys.stdout", stdout):
+            result = cmd_pr_comment(args)
+        self.assertEqual(result, 0)
+        body = stdout.getvalue()
+        self.assertIn("not captured", body)
+        self.assertNotIn("$0.", body)
+        self.assertIn("- Read 2 files, modified 4", body)
+        self.assertIn("`src/tinytext/sentences.py`", body)
+
+
+class TestRenderCostCapture(unittest.TestCase):
+    def test_missing_cost_is_not_shown_as_dollars(self):
+        body = render_comment([_summary(cost_usd=None, models=[])])
+        self.assertIn(
+            "| **Cost** | not captured: no model or token usage recorded |", body
+        )
+        self.assertIn("| **Model** | not captured |", body)
+        self.assertNotIn("$", body)
+
+    def test_multi_session_missing_cost_cell(self):
+        body = render_comment([
+            _summary("one", cost_usd=None, models=[]),
+            _summary("two", cost_usd=0.2),
+        ])
+        self.assertIn("| `one` | 2m 14s | not captured | 142 | not captured |", body)
+        self.assertIn("| `two` | 2m 14s | $0.2000 | 142 |", body)
+
+
 class TestSessionSelection(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -243,7 +444,8 @@ class TestRenderComment(unittest.TestCase):
 
         self.assertTrue(body.startswith(COMMENT_MARKER))
         self.assertIn("`abc123` · 2m 14s", body)
-        self.assertIn("$0.3100 (142 tool calls)", body)
+        self.assertIn("| **Cost** | $0.3100 (estimate) |", body)
+        self.assertIn("| **Tool calls** | 142 |", body)
         self.assertIn("claude-opus-4-6", body)
         self.assertIn("Read 2 files, modified 1", body)
         self.assertIn("2 redundant reads", body)
@@ -256,6 +458,7 @@ class TestRenderComment(unittest.TestCase):
             _summary("one", cost_usd=0.10),
             _summary("two", cost_usd=0.20, status="failed"),
         ])
+        self.assertIn("| Session | Duration | Est. cost |", body)
         self.assertIn("| `one` | 2m 14s | $0.1000", body)
         self.assertIn("| `two` | 2m 14s | $0.2000", body)
         self.assertIn("failed", body)

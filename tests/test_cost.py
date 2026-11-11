@@ -17,6 +17,7 @@ from agent_trace.cost import (
     _estimate_tokens,
     _event_tokens,
     _usage_dollars,
+    cost_inputs_captured,
     estimate_cost,
     format_cost,
     session_event_tokens,
@@ -228,6 +229,29 @@ def _codex_events(session_id: str = "s1") -> list[TraceEvent]:
         _model_request(8.0, 2500, 30, model=None, session_id=session_id),
         _make_event(EventType.ASSISTANT_RESPONSE, 9.0, session_id, text="Three."),
     ]
+
+
+class TestCostInputsCaptured(unittest.TestCase):
+    def _ev(self, kind: EventType, **data) -> TraceEvent:
+        return TraceEvent(event_type=kind, timestamp=1.0, session_id="s", data=data)
+
+    def test_hook_session_without_model_or_usage(self):
+        events = [
+            self._ev(EventType.SESSION_START, provider="copilot", model=""),
+            self._ev(EventType.TOOL_CALL, tool_name="bash", arguments={"command": "ls"}),
+            self._ev(EventType.TOOL_RESULT, tool_name="bash", result="ok"),
+        ]
+        self.assertFalse(cost_inputs_captured(events))
+
+    def test_recorded_model(self):
+        events = [self._ev(EventType.SESSION_START, model="claude-sonnet-4-5")]
+        self.assertTrue(cost_inputs_captured(events))
+
+    def test_recorded_token_usage(self):
+        events = [self._ev(
+            EventType.LLM_RESPONSE, usage={"input_tokens": 10, "output_tokens": 2},
+        )]
+        self.assertTrue(cost_inputs_captured(events))
 
 
 class TestRecordedUsage(unittest.TestCase):

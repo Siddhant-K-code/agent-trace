@@ -1220,6 +1220,10 @@ gaps, failures, retries, recovery, redaction state, and annotations explicitly
 marked shareable. It omits prompts, responses, commands, paths, tool input and
 result values, and other content-rich values.
 
+The packet's `Est. cost` and its estimated cost breakdown appear only when the
+trace records a model name or token usage. Otherwise `Est. cost` says `not
+captured` and no breakdown is shown.
+
 | Flag | Description |
 |---|---|
 | `session-id` | Session ID or prefix (default: latest session) |
@@ -1320,9 +1324,19 @@ agent-strace pr-comment [SESSION_ID] [--dry-run] [--platform github|gitlab]
                            [--commits RANGE] [--otel-logs FILE]
 ```
 Post a structured session summary to the current branch's open pull request or
-merge request. The comment includes duration, cost, model, status, tool calls,
-files changed, lint findings, errors, redundant reads, and replay commands.
-An embedded marker makes repeated runs update the existing comment.
+merge request. The comment includes duration, estimated cost, model, status,
+tool calls, files read and changed, lint findings, errors, redundant reads, and
+replay commands. An embedded marker makes repeated runs update the existing
+comment.
+
+Cost is shown only when the trace records a model name or token usage, and
+then as an estimate (see [`cost`](#cost)). Otherwise the comment says `not
+captured`; GitHub Copilot CLI hooks, for example, carry neither. The model row
+says `not captured` when no event names a model. Files read and modified use
+the same evidence as the reviewability Scope finding: file and edit tool events
+plus the files shell commands read or wrote. Paths are shown relative to the
+session's working directory (`/tmp` and `/private/tmp` are the same directory
+on macOS); paths outside it keep only their last three components.
 
 | Flag | Description |
 |---|---|
