@@ -459,6 +459,58 @@ class ExportersAgreeOnModelPrecedenceTest(unittest.TestCase):
         self.assertEqual(_session_model_usage(self.events), {"gpt-4o": (30, 5)})
 
 
+class MatchParentTest(unittest.TestCase):
+    def test_pops_the_named_request(self):
+        pairer = llm_pairer()
+        pairer.add(_req("r1", "gpt-4o"), "first")
+        pairer.add(_req("r2", "gpt-4o"), "second")
+        error = _event(EventType.ERROR, "e", "r1", error="boom")
+        self.assertEqual(pairer.match_parent(error), "first")
+        self.assertEqual(pairer.unmatched(), ["second"])
+        self.assertIsNone(pairer.match_parent(error))
+
+    def test_never_falls_back(self):
+        pairer = llm_pairer()
+        pairer.add(_req("r1", "gpt-4o"), "first")
+        self.assertIsNone(pairer.match_parent(_event(EventType.ERROR, "e", "", error="boom")))
+        self.assertIsNone(pairer.match_parent(_event(EventType.ERROR, "e", "tool-1", error="boom")))
+        self.assertEqual(pairer.unmatched(), ["first"])
+
+
+class ExportersAgreeOnLinkedLLMErrorTest(unittest.TestCase):
+    """An error whose parent_id names an llm_request ends that request everywhere."""
+
+    def setUp(self):
+        self.events = [
+            _event(EventType.LLM_REQUEST, "failed", "", 1.0, model="gpt-4o", input_tokens=10, prompt="a"),
+            _event(EventType.ERROR, "err", "failed", 2.0, error="rate limited", error_type="RateLimitError"),
+            _event(EventType.LLM_RESPONSE, "resp", "", 4.0, model="gpt-4o", output_tokens=5, input_tokens=30),
+        ]
+
+    def test_otlp_genai(self):
+        spans = {s["spanId"]: s for s in _spans(session_to_otlp_genai(_META, self.events))[1:]}
+        self.assertEqual(spans[_to_span_id("failed")]["status"], {"code": 2, "message": "rate limited"})
+        self.assertEqual(spans[_to_span_id("resp")]["startTimeUnixNano"], _ts_to_nanos(4.0))
+        self.assertEqual(spans[_to_span_id("resp")]["status"], {"code": 1})
+        self.assertEqual(len(spans), 2)
+        self.assertEqual(sorted(otlp_genai_data_indexes(self.events)), [0, 1, 2])
+
+    def test_plain_otlp(self):
+        root = _spans(session_to_otlp(_META, self.events))[0]
+        (message,) = [e for e in root["events"] if e["name"] == "gen_ai.assistant.message"]
+        attrs = {a["key"]: a["value"] for a in message["attributes"]}
+        # The response did not pair with the failed request, so it keeps its own model.
+        self.assertEqual(attrs["gen_ai.request.model"], {"stringValue": "gpt-4o"})
+
+    def test_langfuse(self):
+        failed, response = _events_to_langfuse_observations("s", self.events)
+        self.assertEqual(failed["id"], "err")
+        self.assertEqual(failed["level"], "ERROR")
+        self.assertEqual(response["startTime"], _iso(4.0))
+        self.assertIsNone(response["input"])
+        self.assertEqual(sorted(langfuse_data_indexes(self.events)), [0, 1, 2])
+
+
 # ---------------------------------------------------------------------------
 # Live pairing: proxies and hooks
 # ---------------------------------------------------------------------------

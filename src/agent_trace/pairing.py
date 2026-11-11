@@ -48,7 +48,11 @@ The standard channels are:
   ``parent_id`` cannot be placed safely.
 - LLM: ``llm_request`` requests, ``llm_response`` responses,
   ``NEWEST_SAME_MODEL``. Several SDK integrations record responses without
-  a ``parent_id``.
+  a ``parent_id``. An ``error`` whose ``parent_id`` names a pending
+  ``llm_request`` ends that request as a failed call. Exporters pass each
+  ``error`` to :meth:`Pairer.match_parent` on the LLM channel before the
+  tool channel; it applies rule 1 only, so an error without that link never
+  takes a request through the fallback and stays on the tool channel.
 
 A caller may feed more event types to a pairer, for example cost reporting
 also treats ``assistant_response`` as an LLM response because it carries
@@ -155,6 +159,13 @@ class Pairer(Generic[T]):
                     partial = key
             if partial is not None:
                 return self._pending.pop(partial)[1]
+        return None
+
+    def match_parent(self, response: TraceEvent) -> T | None:
+        """Like :meth:`match`, but apply rule 1 only, never the fallback."""
+        parent_id = response.parent_id
+        if parent_id and parent_id in self._pending:
+            return self._pending.pop(parent_id)[1]
         return None
 
     def unmatched(self) -> list[T]:

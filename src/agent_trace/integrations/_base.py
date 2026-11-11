@@ -7,6 +7,7 @@ import time
 from typing import Any
 
 from ..models import EventType, SessionMeta, TraceEvent
+from ..pairing import link_response
 from ..store import TraceStore, default_trace_dir
 
 
@@ -33,12 +34,27 @@ def _get_or_create_session(store: TraceStore, name: str) -> str:
     return meta.session_id
 
 
-def emit(event_type: EventType, session_id: str, store: TraceStore, **data: Any) -> None:
-    """Write a single event to the store (or remote endpoint if configured)."""
+def emit(
+    event_type: EventType,
+    session_id: str,
+    store: TraceStore,
+    *,
+    parent: TraceEvent | None = None,
+    **data: Any,
+) -> TraceEvent:
+    """Write a single event to the store (or remote endpoint if configured).
+
+    With ``parent``, the event records that it answers that request: its
+    ``parent_id`` and ``duration_ms`` are set (see pairing.link_response).
+    Returns the event.
+    """
     ev = TraceEvent(event_type=event_type, session_id=session_id, data=dict(data))
+    if parent is not None:
+        link_response(ev, parent.event_id, parent.timestamp)
     endpoint = os.environ.get("AGENT_STRACE_ENDPOINT", "").rstrip("/")
     if endpoint:
         from ..server import send_event_to_endpoint
         send_event_to_endpoint(ev, endpoint)
     else:
         store.append_event(session_id, ev)
+    return ev

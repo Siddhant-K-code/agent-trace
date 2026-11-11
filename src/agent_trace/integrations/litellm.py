@@ -41,8 +41,8 @@ def instrument_litellm(agent_name: str = "litellm") -> None:
     def _patched_completion(model: str = "", messages=None, **kwargs):
         sid = _get_or_create_session(store, agent_name)
         t0 = time.time()
-        emit(EventType.LLM_REQUEST, sid, store,
-             model=model, message_count=len(messages or []))
+        request = emit(EventType.LLM_REQUEST, sid, store,
+                       model=model, message_count=len(messages or []))
         try:
             result = _orig_completion(model=model, messages=messages, **kwargs)
             usage = getattr(result, "usage", None)
@@ -53,7 +53,7 @@ def instrument_litellm(agent_name: str = "litellm") -> None:
                  duration_ms=(time.time() - t0) * 1000)
             return result
         except Exception as exc:
-            emit(EventType.ERROR, sid, store,
+            emit(EventType.ERROR, sid, store, parent=request,
                  error=str(exc), error_type=type(exc).__name__)
             raise
 

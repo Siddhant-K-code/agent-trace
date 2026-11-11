@@ -65,6 +65,7 @@ versioned, reproducible provider fixture for the adapter contract.
   - `token_usage` has `input_tokens`, `cached_input_tokens`, `cache_write_input_tokens`, `output_tokens`, `reasoning_output_tokens` and `total_tokens`. `input_tokens` already includes the cached and cache-write tokens, `output_tokens` already includes the reasoning tokens, and `total_tokens` is `input_tokens + output_tokens`. Do not add the parts to the totals.
   - The session's `total_tokens` is the sum of `total_tokens` over its requests. Its `llm_requests` stays 0, because it counts `llm_request` events and this hook records none; `validate` and `backfill` rely on that.
   - A failed request has the error text and no `token_usage`; a cancelled request has neither. Neither is recorded as an `error` event.
+  - The exports report a failed or cancelled request as an error (ERROR span status and `error.type` in OTLP GenAI, level `ERROR` in Langfuse); see [Failed and cancelled model requests](production.md#failed-and-cancelled-model-requests).
   - `cost` and the exports use these recorded counts for the request; see [Responses recorded without a request](production.md#responses-recorded-without-a-request).
   - The hook runs synchronously, so Codex waits for it before acting on each response.
 - Hooks setup does not register: `/hooks` in `0.167.0-alpha.3.2` lists 14 hook events and setup registers 9. Recorder-only hooks in the verification runs showed:

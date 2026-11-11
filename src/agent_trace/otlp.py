@@ -16,7 +16,7 @@ Usage:
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import math
@@ -57,6 +57,7 @@ _SEMCONV_TOOL_NAME = "gen_ai.tool.name"
 _SEMCONV_TOOL_CALL_ID = "gen_ai.tool.call.id"
 _SEMCONV_FINISH_REASON = "gen_ai.response.finish_reasons"
 _SEMCONV_CONVERSATION_ID = "gen_ai.conversation.id"
+_SEMCONV_ERROR_TYPE = "error.type"
 
 # OpenInference compatibility attributes. These are emitted additively by the
 # GenAI exporter so the same OTLP/HTTP JSON payload remains useful in Phoenix.
@@ -118,6 +119,101 @@ def _to_span_id(event_id: str) -> str:
 def _ts_to_nanos(ts: float) -> str:
     """Convert Unix timestamp to nanoseconds as string."""
     return str(int(ts * 1_000_000_000))
+
+
+# ---------------------------------------------------------------------------
+# Failed and cancelled model requests
+# ---------------------------------------------------------------------------
+
+# error.type when nothing more specific was recorded: the GenAI semconv
+# fallback value.
+ERROR_TYPE_OTHER = "_OTHER"
+# error.type for a cancelled request that recorded no error type. The GenAI
+# semconv names no span status for a cancelled request, but ends its span and
+# reports the finish reason "error" for it, so it exports as an error.
+ERROR_TYPE_CANCELLED = "cancelled"
+_FINISH_REASON_ERROR = "error"
+_ERROR_MESSAGE_LIMIT = 200
+_FAILED_STATUSES = frozenset({"failed"})
+_CANCELLED_STATUSES = frozenset({"cancelled", "canceled"})
+_ERROR_TYPE_KEYS = ("error_type", "exception_type")
+_ERROR_CODE_KEYS = ("type", "code")
+
+
+@dataclass(frozen=True)
+class LLMFailure:
+    """How a model request ended when it did not complete."""
+
+    error_type: str
+    """Low-cardinality value for the ``error.type`` attribute."""
+    message: str = ""
+    """Recorded error text, at most 200 characters. Empty when there is none."""
+    cancelled: bool = False
+
+
+def _error_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, Mapping):
+        message = value.get("message")
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+    if value is None or isinstance(value, bool):
+        return ""
+    if isinstance(value, (Mapping, list, tuple)):
+        return json.dumps(value, sort_keys=True, default=str) if value else ""
+    return str(value)
+
+
+def _recorded_error_type(data: Mapping[str, Any], error: Any) -> str:
+    for key in _ERROR_TYPE_KEYS:
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:_ERROR_MESSAGE_LIMIT]
+    if isinstance(error, Mapping):
+        for key in _ERROR_CODE_KEYS:
+            value = error.get(key)
+            if isinstance(value, (str, int)) and not isinstance(value, bool) and str(value).strip():
+                return str(value).strip()[:_ERROR_MESSAGE_LIMIT]
+    return ""
+
+
+def llm_failure(event: TraceEvent) -> LLMFailure | None:
+    """Return how the model request that ``event`` ends failed, or ``None``.
+
+    ``event`` is an ``llm_response``, or an ``error`` linked to the
+    ``llm_request`` it ends. An error always fails. A response is cancelled
+    when its ``status`` is ``cancelled`` and failed when its ``status`` is
+    ``failed`` or it carries a non-empty ``error``. Any other response,
+    including one with no ``status``, completed and returns ``None``.
+
+    ``error_type`` is the recorded ``error_type`` or ``exception_type``, else
+    the ``type`` or ``code`` of an ``error`` object, else ``cancelled`` for a
+    cancelled request and ``_OTHER`` for a failed one.
+    """
+    data = event.data if isinstance(event.data, Mapping) else {}
+    error = data.get("error")
+    text = _error_text(error)
+    cancelled = False
+    if event.event_type == EventType.ERROR:
+        text = text or _error_text(data.get("message"))
+    else:
+        status = data.get("status")
+        status = status.strip().lower() if isinstance(status, str) else ""
+        cancelled = status in _CANCELLED_STATUSES
+        if not cancelled and status not in _FAILED_STATUSES and not text:
+            return None
+    error_type = _recorded_error_type(data, error) or (
+        ERROR_TYPE_CANCELLED if cancelled else ERROR_TYPE_OTHER
+    )
+    return LLMFailure(error_type, text[:_ERROR_MESSAGE_LIMIT], cancelled)
+
+
+def _failure_status(failure: LLMFailure) -> dict:
+    """Return the OTLP ERROR status for a failed or cancelled model request."""
+    if failure.message:
+        return {"code": 2, "message": failure.message}  # STATUS_CODE_ERROR
+    return {"code": 2}
 
 
 def _duration_to_nanos(ms: float | None) -> int:
@@ -420,10 +516,11 @@ def otlp_genai_data_indexes(events: list[TraceEvent]) -> list[int]:
     It pairs events with the same pairing.py rules as the converter. A
     tool_call is read when a tool_result pairs with it or when it is still
     unpaired at the end, but not when an error pairs with it. An llm_request
-    is read when an llm_response pairs with it or when it is still unpaired
-    at the end. Pairing an llm_response without a matching parent_id also
-    reads the model of each pending llm_request; a request whose data is not
-    an object counts as naming no model.
+    is read when an llm_response or a linked error ends it (see
+    Pairer.match_parent) or when it is still unpaired at the end. Pairing an
+    llm_response without a matching parent_id also reads the model of each
+    pending llm_request; a request whose data is not an object counts as
+    naming no model.
     """
     read: set[int] = set()
     requests: Pairer[int] = llm_pairer()
@@ -447,7 +544,11 @@ def otlp_genai_data_indexes(events: list[TraceEvent]) -> list[int]:
                 read.add(call_index)
         elif event.event_type == EventType.ERROR:
             read.add(index)
-            calls.match(event)
+            request_index = requests.match_parent(event)
+            if request_index is not None:
+                read.add(request_index)
+            else:
+                calls.match(event)
     read.update(requests.unmatched())
     read.update(calls.unmatched())
     return sorted(read)
@@ -579,6 +680,9 @@ def session_to_otlp(
             })
 
         elif event.event_type == EventType.ERROR:
+            # An error linked to an LLM request ends that request; it still
+            # exports as an error span below.
+            requests.match_parent(event)
             call_event = calls.match(event)
 
             tool_name = event.data.get("tool_name", "error")
@@ -638,6 +742,15 @@ def session_to_otlp(
             finish = event.data.get("stop_reason", event.data.get("finish_reason", ""))
             if finish:
                 llm_attrs[_SEMCONV_FINISH_REASON] = finish
+            failure = llm_failure(event)
+            if failure is not None:
+                # The classic export has no span per model request, so a
+                # failed or cancelled one is marked on its event instead.
+                if not finish:
+                    llm_attrs[_SEMCONV_FINISH_REASON] = _FINISH_REASON_ERROR
+                llm_attrs[_SEMCONV_ERROR_TYPE] = failure.error_type
+                if failure.message:
+                    llm_attrs["error.message"] = failure.message
             root_events.append(_make_event("gen_ai.assistant.message", event.timestamp, llm_attrs))
 
     # Emit any unmatched tool_calls as spans (no result received)
@@ -761,6 +874,117 @@ def tree_to_otlp(
     }
 
 
+def _genai_llm_span(
+    meta: SessionMeta,
+    trace_id: str,
+    root_span_id: str,
+    req_event: TraceEvent | None,
+    event: TraceEvent,
+) -> dict:
+    """Build the gen_ai.client.operation span for one model request.
+
+    ``event`` ends the request: an ``llm_response``, or an ``error`` linked
+    to ``req_event``. A failed or cancelled request (see :func:`llm_failure`)
+    gets ERROR status and ``error.type``; a completed one keeps OK status.
+    """
+    span_start = req_event.timestamp if req_event else event.timestamp
+    span_end = event.timestamp
+
+    model = event.data.get("model", "") or (
+        req_event.data.get("model", "") if req_event else ""
+    )
+    req_data = req_event.data if req_event else {}
+    raw_llm_provider, system = _provider_value(
+        meta,
+        str(model),
+        event.data,
+        req_data,
+    )
+
+    llm_attrs: dict = {
+        _SEMCONV_SYSTEM: system,
+        _SEMCONV_OP: "chat",
+        _OI_SPAN_KIND: "LLM",
+        _OI_SESSION_ID: meta.session_id,
+        **_conversation_attributes(meta),
+        _OI_LLM_PROVIDER: system if system != "unknown" else raw_llm_provider,
+        "agent.strace.provider": raw_llm_provider,
+    }
+    if model:
+        llm_attrs[_SEMCONV_MODEL] = model
+        llm_attrs[_OI_LLM_MODEL] = model
+    if req_event:
+        max_tok = req_event.data.get("max_tokens")
+        if max_tok:
+            llm_attrs["gen_ai.request.max_tokens"] = max_tok
+            llm_attrs["llm.invocation_parameters"] = json.dumps(
+                {"max_tokens": max_tok},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+
+    inp_tok = _token_count(req_data, _INPUT_TOKEN_KEYS)
+    if inp_tok is None:
+        inp_tok = _token_count(event.data, _INPUT_TOKEN_KEYS)
+    out_tok = _token_count(event.data, _OUTPUT_TOKEN_KEYS)
+    if out_tok is None:
+        out_tok = _token_count(req_data, _OUTPUT_TOKEN_KEYS)
+    if inp_tok is not None:
+        llm_attrs[_SEMCONV_INPUT_TOKENS] = inp_tok
+        llm_attrs[_OI_INPUT_TOKENS] = inp_tok
+    if out_tok is not None:
+        llm_attrs[_SEMCONV_OUTPUT_TOKENS] = out_tok
+        llm_attrs[_OI_OUTPUT_TOKENS] = out_tok
+    if inp_tok is not None or out_tok is not None:
+        llm_attrs[_OI_TOTAL_TOKENS] = (inp_tok or 0) + (out_tok or 0)
+    finish = event.data.get("stop_reason") or event.data.get("finish_reason", "")
+    if finish:
+        llm_attrs[_SEMCONV_FINISH_REASON] = finish
+        llm_attrs["agent.strace.finish_reason"] = finish
+    failure = llm_failure(event)
+    if failure is not None:
+        if not finish:
+            # The GenAI conventions report "error" when a failed or
+            # cancelled generation returned no finish reason.
+            llm_attrs[_SEMCONV_FINISH_REASON] = _FINISH_REASON_ERROR
+        llm_attrs[_SEMCONV_ERROR_TYPE] = failure.error_type
+    llm_attrs.update(_cost_attributes(req_data, event.data))
+    if req_event:
+        llm_attrs.update(_event_trace_attributes(req_event, "request"))
+    llm_attrs.update(_event_trace_attributes(event, "response"))
+    llm_attrs["metadata"] = _openinference_metadata(llm_attrs)
+
+    span: dict = {
+        "traceId": trace_id,
+        "spanId": _to_span_id(req_event.event_id if req_event else event.event_id),
+        "parentSpanId": root_span_id,
+        "name": "gen_ai.client.operation",
+        "kind": 3,  # SPAN_KIND_CLIENT
+        "startTimeUnixNano": _ts_to_nanos(span_start),
+        "endTimeUnixNano": _ts_to_nanos(max(span_end, span_start + 0.001)),
+        "attributes": _make_attributes(llm_attrs),
+    }
+    if event.event_type == EventType.ERROR:
+        span["events"] = [_make_event("exception", event.timestamp, {
+            "exception.type": (
+                str_field(event.data, "error_type", "")
+                or str_field(event.data, "exception_type", "")
+                or "Error"
+            ),
+            "exception.message": (
+                _error_text(event.data.get("error"))
+                or _error_text(event.data.get("message"))
+            )[:500],
+            "exception.escaped": False,
+            **_event_trace_attributes(event, "response"),
+        })]
+    if failure is None:
+        span["status"] = {"code": 1}  # STATUS_CODE_OK
+    else:
+        span["status"] = _failure_status(failure)
+    return span
+
+
 def session_to_otlp_genai(
     meta: SessionMeta,
     events: list[TraceEvent],
@@ -772,7 +996,9 @@ def session_to_otlp_genai(
 
     Differences from session_to_otlp():
     - LLM request/response pairs become gen_ai.client.operation child spans
-      (not just events on the root span)
+      (not just events on the root span). A failed or cancelled model
+      request, or an error linked to an llm_request, gets ERROR status and
+      error.type
     - Root span carries gen_ai.agent.id and gen_ai.agent.name
     - Root, LLM and tool spans carry gen_ai.conversation.id when the agent
       supplied its own session ID
@@ -860,81 +1086,9 @@ def session_to_otlp_genai(
 
         elif event.event_type == EventType.LLM_RESPONSE:
             req_event = requests.match(event)
-
-            span_start = req_event.timestamp if req_event else event.timestamp
-            span_end = event.timestamp
-
-            model = event.data.get("model", "") or (
-                req_event.data.get("model", "") if req_event else ""
-            )
-            req_data = req_event.data if req_event else {}
-            raw_llm_provider, system = _provider_value(
-                meta,
-                str(model),
-                event.data,
-                req_data,
-            )
-
-            llm_attrs: dict = {
-                _SEMCONV_SYSTEM: system,
-                _SEMCONV_OP: "chat",
-                _OI_SPAN_KIND: "LLM",
-                _OI_SESSION_ID: meta.session_id,
-                **_conversation_attributes(meta),
-                _OI_LLM_PROVIDER: system if system != "unknown" else raw_llm_provider,
-                "agent.strace.provider": raw_llm_provider,
-            }
-            if model:
-                llm_attrs[_SEMCONV_MODEL] = model
-                llm_attrs[_OI_LLM_MODEL] = model
-            if req_event:
-                max_tok = req_event.data.get("max_tokens")
-                if max_tok:
-                    llm_attrs["gen_ai.request.max_tokens"] = max_tok
-                    llm_attrs["llm.invocation_parameters"] = json.dumps(
-                        {"max_tokens": max_tok},
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    )
-
-            inp_tok = _token_count(req_data, _INPUT_TOKEN_KEYS)
-            if inp_tok is None:
-                inp_tok = _token_count(event.data, _INPUT_TOKEN_KEYS)
-            out_tok = _token_count(event.data, _OUTPUT_TOKEN_KEYS)
-            if out_tok is None:
-                out_tok = _token_count(req_data, _OUTPUT_TOKEN_KEYS)
-            if inp_tok is not None:
-                llm_attrs[_SEMCONV_INPUT_TOKENS] = inp_tok
-                llm_attrs[_OI_INPUT_TOKENS] = inp_tok
-            if out_tok is not None:
-                llm_attrs[_SEMCONV_OUTPUT_TOKENS] = out_tok
-                llm_attrs[_OI_OUTPUT_TOKENS] = out_tok
-            if inp_tok is not None or out_tok is not None:
-                llm_attrs[_OI_TOTAL_TOKENS] = (inp_tok or 0) + (out_tok or 0)
-            finish = event.data.get("stop_reason") or event.data.get("finish_reason", "")
-            if finish:
-                llm_attrs[_SEMCONV_FINISH_REASON] = finish
-                llm_attrs["agent.strace.finish_reason"] = finish
-            llm_attrs.update(_cost_attributes(req_data, event.data))
-            if req_event:
-                llm_attrs.update(_event_trace_attributes(req_event, "request"))
-            llm_attrs.update(_event_trace_attributes(event, "response"))
-            llm_attrs["metadata"] = _openinference_metadata(llm_attrs)
-
-            llm_span_id = _to_span_id(
-                req_event.event_id if req_event else event.event_id
-            )
-            child_spans.append({
-                "traceId": trace_id,
-                "spanId": llm_span_id,
-                "parentSpanId": root_span_id,
-                "name": "gen_ai.client.operation",
-                "kind": 3,  # SPAN_KIND_CLIENT
-                "startTimeUnixNano": _ts_to_nanos(span_start),
-                "endTimeUnixNano": _ts_to_nanos(max(span_end, span_start + 0.001)),
-                "attributes": _make_attributes(llm_attrs),
-                "status": {"code": 1},  # STATUS_CODE_OK
-            })
+            child_spans.append(_genai_llm_span(
+                meta, trace_id, root_span_id, req_event, event,
+            ))
 
         elif event.event_type == EventType.TOOL_CALL:
             calls.add(event)
@@ -995,6 +1149,15 @@ def session_to_otlp_genai(
             })
 
         elif event.event_type == EventType.ERROR:
+            req_event = requests.match_parent(event)
+            if req_event is not None:
+                # An error linked to an LLM request ends that request, so it
+                # exports as one failed model call instead of a tool error.
+                child_spans.append(_genai_llm_span(
+                    meta, trace_id, root_span_id, req_event, event,
+                ))
+                continue
+
             call_event = calls.match(event)
 
             tool_name = event.data.get("tool_name", "error")

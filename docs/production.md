@@ -38,6 +38,7 @@ agent-strace export <session-id> --format otlp-genai \
 | Tool calls | `tool/<name>` spans | `gen_ai.tool.call/<name>` spans |
 | Root span | `agent.name` attribute | `gen_ai.agent.id` + `gen_ai.agent.name` |
 | Errors | Custom error span | OTel `exception` event format |
+| Failed or cancelled model request | `error.type` on the `gen_ai.assistant.message` event | ERROR status and `error.type` on the `gen_ai.client.operation` span |
 | `gen_ai.conversation.id` | Root span | Root, LLM and tool spans |
 
 `--format otlp` is unchanged for backwards compatibility. See [ADR-0011](../ADRs/0011-otlp-genai-semantic-conventions.md) for design rationale.
@@ -332,6 +333,7 @@ agent-strace export --metrics --backend otlp --since 30d
 | session | trace |
 | tool_call + tool_result | span (with duration) |
 | error | span with error status + exception event |
+| failed or cancelled model request | error status and `error.type`; see [Failed and cancelled model requests](#failed-and-cancelled-model-requests) |
 | user_prompt | event on root span |
 | assistant_response | event on root span |
 | session_id | trace ID |
@@ -362,6 +364,13 @@ the same rules, defined in `src/agent_trace/pairing.py`:
    some integrations record the model on only one side of a call.
 3. A response whose `parent_id` names a request that already paired stays
    unpaired. It never takes another request's place.
+
+The exports also end an `llm_request` at an `error` whose `parent_id` names
+it, and export the pair as one failed model call (see
+[Failed and cancelled model requests](#failed-and-cancelled-model-requests)).
+Only rule 1 applies: such an `error` never pairs with a request by model, and
+any other `error` stays on the tool channel. `cost` does not read `error`
+events.
 
 Requests still pending at the end are exported as unfinished spans in OTLP and
 are not exported to Langfuse.
@@ -412,6 +421,49 @@ A response that pairs with no request is treated as the whole model request:
 The bundled pricing snapshot has no cached-input rates, so cached input is
 priced at the full input rate. Cost estimates for Codex sessions are therefore
 an upper bound.
+
+### Failed and cancelled model requests
+
+A model request failed or was cancelled when either:
+
+- its `llm_response` has `status` `failed` or `cancelled` (also `canceled`,
+  in any case), or carries a non-empty `error`. Codex records failed and
+  cancelled requests this way. A response with any other `status`, or none,
+  completed.
+- an `error` event's `parent_id` names its `llm_request`. The SDK
+  integrations and `@trace_llm_call` record a model call that raised this way.
+
+The exports report such a request as an error, following the
+[OTel GenAI spans](https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-spans.md)
+conventions and
+[Recording errors](https://opentelemetry.io/docs/specs/semconv/general/recording-errors/):
+
+| Export | Failed or cancelled request |
+|---|---|
+| `--format otlp-genai`, Temporal, `watch --stream-otlp` | The `gen_ai.client.operation` span has status ERROR with the recorded error text (at most 200 characters) as its description, and `error.type`. A request ended by an `error` is one span with the request's span ID and an `exception` event, with no separate error span. |
+| `--format otlp` | There is no span per request, so the `gen_ai.assistant.message` event carries `error.type` and, when recorded, `error.message`. |
+| `export --scores --backend langfuse` | The generation has level `ERROR`, `statusMessage` set to the error text (`failed` or `cancelled` when none was recorded), and `error.type` in its metadata. A request ended by an `error` is exported as a generation too. |
+
+`error.type` is the recorded `error_type` or `exception_type`, else the `type`
+or `code` of an `error` object, else `cancelled` for a cancelled request and
+`_OTHER`, the conventions' fallback value, for a failed one. When no finish
+reason was recorded, `gen_ai.response.finish_reasons` is `error`, which the
+conventions specify for a generation that failed or was cancelled.
+
+The GenAI conventions name no span status for a cancelled request, but they
+treat cancellation as an abnormal end, so the exports report it as an error
+with `error.type` `cancelled`.
+
+What does not change:
+
+- A completed request, or a response with no `status`, exports exactly as
+  before, with OK status.
+- A failed request is not an `error` event. Session `errors`,
+  `agent_strace.session.error_rate`, `timeline` and the root span status do
+  not count it.
+- An `error` with no `parent_id`, as older versions recorded a failed SDK
+  call, still exports as an unfinished request span and a separate error
+  span.
 
 ---
 

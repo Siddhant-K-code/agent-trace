@@ -282,5 +282,63 @@ class TestUnrequestedLLMResponse(unittest.TestCase):
         self.assertEqual(sorted(attrs[0]), ["gen_ai.operation.name", "gen_ai.usage.output_tokens"])
 
 
+class TestFailedLLMResponse(unittest.TestCase):
+    """A failed or cancelled model request is marked on its response event."""
+
+    META = SessionMeta(session_id="s1", agent_name="openai-codex", started_at=1000.0, ended_at=1100.0)
+
+    def _payload(self, events):
+        return session_to_otlp(self.META, events)
+
+    def _response_attrs(self, *responses):
+        events = [
+            TraceEvent(event_type=EventType.LLM_RESPONSE, timestamp=1001.0 + i, data=data)
+            for i, data in enumerate(responses)
+        ]
+        root = self._payload(events)["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+        return [
+            {a["key"]: a["value"] for a in e["attributes"]}
+            for e in root["events"] if e["name"] == "gen_ai.assistant.message"
+        ]
+
+    def test_failed_with_error_text(self):
+        (attrs,) = self._response_attrs({
+            "model": "gpt-5-codex", "status": "failed", "error": "synthetic failure",
+            "token_usage": None,
+        })
+        self.assertEqual(attrs["error.type"], {"stringValue": "_OTHER"})
+        self.assertEqual(attrs["error.message"], {"stringValue": "synthetic failure"})
+        self.assertEqual(attrs["gen_ai.response.finish_reasons"], {"stringValue": "error"})
+
+    def test_failed_without_error_text(self):
+        (attrs,) = self._response_attrs({"model": "gpt-5-codex", "status": "failed"})
+        self.assertEqual(attrs["error.type"], {"stringValue": "_OTHER"})
+        self.assertNotIn("error.message", attrs)
+
+    def test_cancelled(self):
+        (attrs,) = self._response_attrs({"model": "gpt-5-codex", "status": "cancelled"})
+        self.assertEqual(attrs["error.type"], {"stringValue": "cancelled"})
+        self.assertEqual(attrs["gen_ai.response.finish_reasons"], {"stringValue": "error"})
+        self.assertNotIn("error.message", attrs)
+
+    def test_completed_is_unchanged(self):
+        (attrs,) = self._response_attrs({
+            "model": "gpt-5-codex", "status": "completed", "output_tokens": 3,
+        })
+        self.assertEqual(sorted(attrs), [
+            "gen_ai.operation.name", "gen_ai.request.model", "gen_ai.usage.output_tokens",
+        ])
+
+    def test_root_status_does_not_count_failed_requests(self):
+        completed = [TraceEvent(event_type=EventType.LLM_RESPONSE, timestamp=1001.0,
+                                data={"status": "completed"})]
+        failed = [TraceEvent(event_type=EventType.LLM_RESPONSE, timestamp=1001.0,
+                             data={"status": "failed", "error": "boom"})]
+        def root(events):
+            return self._payload(events)["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+
+        self.assertEqual(root(failed)["status"], root(completed)["status"])
+
+
 if __name__ == "__main__":
     unittest.main()

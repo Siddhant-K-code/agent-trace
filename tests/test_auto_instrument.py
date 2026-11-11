@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import time
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -135,6 +136,169 @@ class TestBaseEmit(unittest.TestCase):
 
         self.assertEqual(len(sent), 1)
         self.assertEqual(sent[0][1], "http://localhost:9999")
+
+    def test_emit_returns_the_event(self):
+        env = {k: v for k, v in os.environ.items() if k != "AGENT_STRACE_ENDPOINT"}
+        with patch.dict(os.environ, env, clear=True):
+            ev = emit(EventType.LLM_REQUEST, self.meta.session_id, self.store, model="m")
+        self.assertIsInstance(ev, TraceEvent)
+        self.assertEqual(ev.parent_id, "")
+        self.assertEqual(self.store.load_events(self.meta.session_id)[0].event_id, ev.event_id)
+
+    def test_emit_links_to_parent(self):
+        env = {k: v for k, v in os.environ.items() if k != "AGENT_STRACE_ENDPOINT"}
+        with patch.dict(os.environ, env, clear=True):
+            request = emit(EventType.LLM_REQUEST, self.meta.session_id, self.store, model="m")
+            error = emit(EventType.ERROR, self.meta.session_id, self.store,
+                         parent=request, error="boom")
+        self.assertEqual(error.parent_id, request.event_id)
+        self.assertIsNotNone(error.duration_ms)
+        self.assertNotIn("parent", error.data)
+        stored = self.store.load_events(self.meta.session_id)[1]
+        self.assertEqual(stored.parent_id, request.event_id)
+
+    def test_emit_links_to_parent_when_sending_to_endpoint(self):
+        sent = []
+        request = TraceEvent(event_type=EventType.LLM_REQUEST, session_id=self.meta.session_id)
+        with patch.dict(os.environ, {"AGENT_STRACE_ENDPOINT": "http://localhost:9999"}):
+            with patch("agent_trace.server.send_event_to_endpoint",
+                       lambda event, endpoint: sent.append(event) or True):
+                emit(EventType.ERROR, self.meta.session_id, self.store,
+                     parent=request, error="boom")
+        self.assertEqual(sent[0].parent_id, request.event_id)
+
+
+# ---------------------------------------------------------------------------
+# A failed SDK model call is recorded as an error linked to its request
+# ---------------------------------------------------------------------------
+
+class RateLimitError(Exception):
+    pass
+
+
+def _raise_rate_limit(*args, **kwargs):
+    raise RateLimitError("Rate limit reached")
+
+
+def _fake_openai():
+    mod = types.ModuleType("openai")
+    mod.OpenAI = types.SimpleNamespace(chat=types.SimpleNamespace(
+        completions=types.SimpleNamespace(create=_raise_rate_limit),
+    ))
+    return {"openai": mod}, lambda: mod.OpenAI.chat.completions.create(
+        None, model="gpt-4o", messages=[{"role": "user", "content": "hi"}], max_tokens=100,
+    )
+
+
+def _fake_anthropic():
+    mod = types.ModuleType("anthropic")
+    mod.Anthropic = types.SimpleNamespace(messages=types.SimpleNamespace(create=_raise_rate_limit))
+    return {"anthropic": mod}, lambda: mod.Anthropic.messages.create(
+        None, model="claude-x", messages=[{"role": "user", "content": "hi"}],
+    )
+
+
+def _fake_litellm():
+    mod = types.ModuleType("litellm")
+    mod.completion = _raise_rate_limit
+    return {"litellm": mod}, lambda: mod.completion(
+        model="gpt-4o", messages=[{"role": "user", "content": "hi"}],
+    )
+
+
+def _fake_langchain():
+    root = types.ModuleType("langchain_core")
+    models = types.ModuleType("langchain_core.language_models")
+
+    class BaseChatModel:
+        model_name = "gpt-4o"
+
+        def _generate(self, messages, *args, **kwargs):
+            raise RateLimitError("Rate limit reached")
+
+    models.BaseChatModel = BaseChatModel
+    root.language_models = models
+    modules = {
+        "langchain_core": root,
+        "langchain_core.language_models": models,
+        "langgraph": None,
+        "langgraph.graph": None,
+    }
+    return modules, lambda: BaseChatModel()._generate(["hi"])
+
+
+def _fake_crewai():
+    mod = types.ModuleType("crewai")
+
+    class Agent:
+        role = "researcher"
+
+        def execute_task(self, task, *args, **kwargs):
+            raise RateLimitError("Rate limit reached")
+
+    mod.Agent = Agent
+    return {"crewai": mod}, lambda: Agent().execute_task(types.SimpleNamespace(description="t"))
+
+
+class TestSDKModelCallFailure(unittest.TestCase):
+    """Each SDK integration links a failed model call's error to its request."""
+
+    CASES = {
+        "openai": _fake_openai,
+        "anthropic": _fake_anthropic,
+        "litellm": _fake_litellm,
+        "langchain": _fake_langchain,
+        "crewai": _fake_crewai,
+    }
+
+    def _record_failure(self, name):
+        import importlib
+        integration = importlib.import_module(f"agent_trace.integrations.{name}")
+        modules, call = self.CASES[name]()
+        tmp = tempfile.mkdtemp()
+        env = {k: v for k, v in os.environ.items() if k != "AGENT_STRACE_ENDPOINT"}
+        env["AGENT_TRACE_DIR"] = tmp
+        integration._PATCHED = False
+        try:
+            with patch.dict(os.environ, env, clear=True), patch.dict(sys.modules, modules):
+                getattr(integration, f"instrument_{name}")(agent_name=f"{name}-test")
+                with self.assertRaises(RateLimitError):
+                    call()
+        finally:
+            getattr(integration, f"uninstrument_{name}")()
+        store = TraceStore(tmp)
+        (meta,) = store.list_sessions()
+        return meta, store.load_events(meta.session_id)
+
+    def test_error_is_linked_to_its_request(self):
+        for name in self.CASES:
+            with self.subTest(integration=name):
+                _, events = self._record_failure(name)
+                request, error = events
+                self.assertEqual(request.event_type, EventType.LLM_REQUEST)
+                self.assertEqual(error.event_type, EventType.ERROR)
+                self.assertEqual(error.parent_id, request.event_id)
+                self.assertIsNotNone(error.duration_ms)
+                self.assertEqual(error.data["error"], "Rate limit reached")
+                self.assertEqual(error.data["error_type"], "RateLimitError")
+
+    def test_failure_exports_as_a_failed_model_call(self):
+        from agent_trace.langfuse_export import _events_to_langfuse_observations
+        from agent_trace.otlp import session_to_otlp_genai
+
+        for name in self.CASES:
+            with self.subTest(integration=name):
+                meta, events = self._record_failure(name)
+                payload = session_to_otlp_genai(meta, events)
+                spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"][1:]
+                (span,) = spans
+                attrs = {a["key"]: a["value"] for a in span["attributes"]}
+                self.assertEqual(span["name"], "gen_ai.client.operation")
+                self.assertEqual(span["status"], {"code": 2, "message": "Rate limit reached"})
+                self.assertEqual(attrs["error.type"], {"stringValue": "RateLimitError"})
+                (generation,) = _events_to_langfuse_observations(meta.session_id, events)
+                self.assertEqual(generation["level"], "ERROR")
+                self.assertEqual(generation["statusMessage"], "Rate limit reached")
 
 
 # ---------------------------------------------------------------------------
