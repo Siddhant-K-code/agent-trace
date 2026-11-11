@@ -8,6 +8,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from agent_trace.cost import build_provider_cost_report
 from agent_trace.jsonl_import import import_jsonl
 from agent_trace.models import EventType
 from agent_trace.store import TraceStore
@@ -76,6 +77,72 @@ class TestJSONLImport(unittest.TestCase):
         )
         self.assertEqual(response.data["usage"]["input_tokens"], 100)
         self.assertEqual(response.data["context_stream"], "main")
+
+    def test_import_counts_and_prices_each_response_usage_once(self):
+        # Claude Code writes one line per content block of a response, and
+        # every line repeats the response's usage.  Streaming can leave a
+        # smaller output count on the earlier lines.
+        usage = {
+            "input_tokens": 10,
+            "output_tokens": 200,
+            "cache_creation_input_tokens": 1000,
+            "cache_read_input_tokens": 5000,
+        }
+        lines = []
+        for index, (content, output_tokens) in enumerate((
+            ({"type": "thinking", "thinking": "Look first."}, 1),
+            ({"type": "text", "text": "Listing the files."}, 1),
+            ({"type": "tool_use", "id": "tool1", "name": "Bash",
+              "input": {"command": "ls"}}, 200),
+        )):
+            lines.append({
+                "type": "assistant",
+                "sessionId": "dup123",
+                "timestamp": f"2025-01-01T00:00:0{index + 1}Z",
+                "message": {
+                    "id": "msg_1",
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-6",
+                    "content": [content],
+                    "usage": {**usage, "output_tokens": output_tokens},
+                },
+                "uuid": f"a{index}",
+            })
+        path = self._write_jsonl([
+            {
+                "type": "user",
+                "sessionId": "dup123",
+                "timestamp": "2025-01-01T00:00:00Z",
+                "message": {"role": "user", "content": "List the files"},
+                "uuid": "u1",
+            },
+            *lines,
+        ])
+
+        session_id = import_jsonl(path, store=self.store)
+        meta = self.store.load_meta(session_id)
+        self.assertEqual(meta.llm_requests, 1)
+        self.assertEqual(meta.total_tokens, 10 + 200 + 1000 + 5000)
+
+        events = self.store.load_events(session_id)
+        with_usage = [e for e in events if "usage" in e.data]
+        self.assertEqual(len(with_usage), 1)
+        self.assertEqual(with_usage[0].data["usage"]["output_tokens"], 200)
+        texts = [e.data.get("text") for e in events
+                 if e.event_type == EventType.ASSISTANT_RESPONSE and e.data.get("text")]
+        self.assertEqual(texts, ["Listing the files."])
+
+        # claude-sonnet-4-6: input 3, cache read 0.30, 5m write 3.75, output 15.
+        report = build_provider_cost_report(self.store, since="2020-01-01")
+        [record] = report.records
+        self.assertEqual(
+            (record.model, record.input_tokens, record.output_tokens,
+             record.cache_read_tokens, record.cache_write_tokens),
+            ("claude-sonnet-4-6", 6010, 200, 5000, 1000),
+        )
+        self.assertAlmostEqual(
+            record.cost_usd, (10 * 3 + 5000 * 0.30 + 1000 * 3.75 + 200 * 15) / 1e6, places=12,
+        )
 
     def test_import_tool_calls(self):
         path = self._write_jsonl([

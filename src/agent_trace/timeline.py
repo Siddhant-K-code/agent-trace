@@ -16,7 +16,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, TextIO
 
-from .cost import DEFAULT_MODEL, PRICING, _dollars, _estimate_tokens, session_event_tokens
+from .cost import (
+    DEFAULT_MODEL,
+    PRICING,
+    TokenUsage,
+    _estimate_tokens,
+    _usage_dollars,
+    session_event_usage,
+)
 from .event_data import object_field, require_object_event_data, str_field
 from .explain import PHASE_DATA_EVENT_TYPES, ExplainResult, Phase, explain_session
 from .models import EventType, TraceEvent
@@ -118,10 +125,8 @@ def _tool_label(event: TraceEvent) -> tuple[str, str]:
     return name, ""
 
 
-def _phase_cost(tokens: list[tuple[int, int]], model: str) -> float:
-    inp = sum(i for i, _ in tokens)
-    out = sum(o for _, o in tokens)
-    return _dollars(inp, out, model)
+def _phase_cost(usages: list[TokenUsage], model: str) -> float:
+    return _usage_dollars(sum(usages, TokenUsage()), model)
 
 
 # build_timeline reads the data of every event of these types.
@@ -141,15 +146,15 @@ def _build_entries(
     phase: Phase,
     base_ts: float,
     model: str,
-    event_tokens: list[tuple[int, int]] | None = None,
+    event_usage: list[TokenUsage] | None = None,
 ) -> list[TimelineEntry]:
     """Build the entries of *phase*.
 
-    *event_tokens* holds each event's counts, taken from the whole session.
-    Without it, the phase's events are counted on their own.
+    *event_usage* holds each event's token usage, taken from the whole
+    session.  Without it, the phase's events are counted on their own.
     """
-    if event_tokens is None:
-        event_tokens = session_event_tokens(phase.events)
+    if event_usage is None:
+        event_usage = session_event_usage(phase.events)
     entries: list[TimelineEntry] = []
 
     # Pair tool results with the entries of their calls (see pairing.py).
@@ -158,10 +163,10 @@ def _build_entries(
     open_calls: list[int] = []                  # call entries with no response yet
     call_counts: dict[str, int] = {}            # normalised key -> count
 
-    for event, (inp, out) in zip(phase.events, event_tokens):
+    for event, usage in zip(phase.events, event_usage):
         offset = event.timestamp - base_ts
-        tokens = inp + out
-        cost = _dollars(inp, out, model)
+        tokens = usage.input_tokens + usage.output_tokens
+        cost = _usage_dollars(usage, model)
 
         if event.event_type == EventType.TOOL_CALL:
             label, detail = _tool_label(event)
@@ -315,16 +320,16 @@ def build_timeline(
     phases: list[TimelinePhase] = []
 
     # Phases hold every event of the session, in order.
-    event_tokens = session_event_tokens(
+    event_usage = session_event_usage(
         [event for phase in explain.phases for event in phase.events]
     )
     position = 0
 
     for phase in explain.phases:
-        tokens = event_tokens[position:position + len(phase.events)]
+        usages = event_usage[position:position + len(phase.events)]
         position += len(phase.events)
-        phase_cost = _phase_cost(tokens, model)
-        entries = _build_entries(phase, base_ts, model, tokens)
+        phase_cost = _phase_cost(usages, model)
+        entries = _build_entries(phase, base_ts, model, usages)
 
         # Count errors and retries from entries
         phase_errors = sum(1 for e in entries if e.status == "fail")

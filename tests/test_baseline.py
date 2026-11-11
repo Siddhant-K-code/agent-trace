@@ -27,7 +27,7 @@ from agent_trace.baseline import (
     _z_score,
 )
 from agent_trace.cli import build_parser
-from agent_trace.cost import DEFAULT_MODEL, _dollars, estimate_cost
+from agent_trace.cost import DEFAULT_MODEL, TokenUsage, _usage_dollars, estimate_cost
 from agent_trace.hooks import _PROVIDER_ENV, hook_main
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
@@ -253,6 +253,12 @@ def _priced_session(
     return sid
 
 
+def _priced(input_tokens: int) -> float:
+    """The cost of one _priced_session request at the default model."""
+    usage = TokenUsage(input_tokens, 10, cache_read_tokens=input_tokens // 2)
+    return _usage_dollars(usage, DEFAULT_MODEL)
+
+
 class TestBaselineCost(unittest.TestCase):
     """Baselines price each session exactly as ``agent-strace cost`` does."""
 
@@ -275,8 +281,9 @@ class TestBaselineCost(unittest.TestCase):
         self.assertGreater(profile.cost_usd.stddev, 0)
         self.assertAlmostEqual(profile.cost_usd.mean, sum(costs) / len(costs), places=12)
         # Priced from the recorded usage at the default model, as `cost` does.
-        self.assertAlmostEqual(profile.cost_usd.min, _dollars(1000, 10, DEFAULT_MODEL), places=12)
-        self.assertAlmostEqual(profile.cost_usd.max, _dollars(1500, 10, DEFAULT_MODEL), places=12)
+        # Half of each request's input was a cache read.
+        self.assertAlmostEqual(profile.cost_usd.min, _priced(1000), places=12)
+        self.assertAlmostEqual(profile.cost_usd.max, _priced(1500), places=12)
 
     def test_check_flags_cost_outlier(self):
         profile = build_baseline(self.store, since_days=30)
@@ -301,7 +308,7 @@ class TestBaselineCost(unittest.TestCase):
         self.assertEqual(profile.session_count, 7)
         self.assertEqual(profile.tool_calls.count, 7)
         self.assertEqual(profile.cost_usd.count, 6)
-        self.assertAlmostEqual(profile.cost_usd.min, _dollars(1000, 10, DEFAULT_MODEL), places=12)
+        self.assertAlmostEqual(profile.cost_usd.min, _priced(1000), places=12)
 
     def test_check_does_not_compare_cost_of_unpriceable_session(self):
         profile = build_baseline(self.store, since_days=30)
@@ -356,15 +363,18 @@ class TestBaselineFromCodexFixture(unittest.TestCase):
         trace_dir = str(Path(tmp.name) / ".agent-traces")
         os.environ["AGENT_TRACE_DIR"] = trace_dir
         registered = registered_hooks("codex")
-        self.recorded: dict[str, tuple[int, int]] = {}
+        self.recorded: dict[str, TokenUsage] = {}
         for scenario in load_fixture(FIXTURES["codex"])["scenarios"].values():
             for hook in scenario["hooks"]:
                 event, payload = hook["event"], hook["payload"]
                 usage = payload.get("token_usage") if event == "PostModelRequest" else None
                 if usage:
-                    inp, out = self.recorded.get(payload["session_id"], (0, 0))
-                    self.recorded[payload["session_id"]] = (
-                        inp + usage["input_tokens"], out + usage["output_tokens"],
+                    total = self.recorded.get(payload["session_id"], TokenUsage())
+                    self.recorded[payload["session_id"]] = total + TokenUsage(
+                        input_tokens=usage["input_tokens"],
+                        output_tokens=usage["output_tokens"],
+                        cache_read_tokens=usage["cached_input_tokens"],
+                        cache_write_tokens=usage["cache_write_input_tokens"],
                     )
                 if event not in registered or not matcher_applies(
                     registered[event][0], event, payload
@@ -379,7 +389,7 @@ class TestBaselineFromCodexFixture(unittest.TestCase):
         sessions = self.store.list_sessions()
         self.assertEqual(len(sessions), 3)
         costs = [estimate_cost(self.store, m.session_id).total_cost for m in sessions]
-        expected = [_dollars(inp, out, DEFAULT_MODEL) for inp, out in self.recorded.values()]
+        expected = [_usage_dollars(usage, DEFAULT_MODEL) for usage in self.recorded.values()]
         for cost, want in zip(sorted(costs), sorted(expected)):
             self.assertAlmostEqual(cost, want, places=12)
 

@@ -409,9 +409,12 @@ A response that pairs with no request is treated as the whole model request:
   its tokens, under the model `(not recorded)` (empty in CSV) and the provider
   `Unknown`, with no estimated price.
 
-The bundled pricing snapshot has no cached-input rates, so cached input is
-priced at the full input rate. Cost estimates for Codex sessions are therefore
-an upper bound.
+Cost estimates price each response's `cached_input_tokens` at the model's
+cached input rate and its `cache_write_input_tokens` at the cache write rate,
+and the rest of `input_tokens` at the input rate. A model without a published
+cache rate, such as the `haiku`, `gpt4` and `gpt4o` choices of `--model`,
+bills cached input at its input rate. See [`cost`](commands.md#cost)
+for the usage shapes read from each provider.
 
 ---
 

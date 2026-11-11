@@ -11,8 +11,34 @@ Install:
 from __future__ import annotations
 
 import time
+from typing import Any
 
 _PATCHED = False
+
+
+def _count(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _usage_fields(usage: Any) -> dict[str, Any]:
+    """Token counts of a Chat Completions ``usage`` object.
+
+    ``prompt_tokens`` includes the cached prompt tokens, which are billed at
+    their own rates, so the cache read and write counts are kept as well.
+    """
+    fields: dict[str, Any] = {
+        "input_tokens": getattr(usage, "prompt_tokens", 0) if usage else 0,
+        "output_tokens": getattr(usage, "completion_tokens", 0) if usage else 0,
+    }
+    details = getattr(usage, "prompt_tokens_details", None) if usage else None
+    for source, key in (
+        ("cached_tokens", "cached_input_tokens"),
+        ("cache_write_tokens", "cache_write_input_tokens"),
+    ):
+        value = _count(getattr(details, source, None))
+        if value is not None:
+            fields[key] = value
+    return fields
 
 
 def instrument_openai(agent_name: str = "openai") -> None:
@@ -52,8 +78,7 @@ def instrument_openai(agent_name: str = "openai") -> None:
                 finish = choices[0].finish_reason if choices else ""
                 emit(EventType.LLM_RESPONSE, sid, store,
                      model=model,
-                     input_tokens=getattr(usage, "prompt_tokens", 0) if usage else 0,
-                     output_tokens=getattr(usage, "completion_tokens", 0) if usage else 0,
+                     **_usage_fields(usage),
                      finish_reason=finish,
                      duration_ms=(time.time() - t0) * 1000)
                 return result

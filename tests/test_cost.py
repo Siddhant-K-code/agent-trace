@@ -12,12 +12,15 @@ from agent_trace.cost import (
     PhaseCost,
     PRICING,
     TokenCounter,
+    TokenUsage,
     _dollars,
     _estimate_tokens,
     _event_tokens,
+    _usage_dollars,
     estimate_cost,
     format_cost,
     session_event_tokens,
+    session_event_usage,
     session_records_usage,
 )
 from agent_trace.models import EventType, SessionMeta, TraceEvent
@@ -286,7 +289,15 @@ class TestRecordedUsage(unittest.TestCase):
             [(p.input_tokens, p.output_tokens) for p in result.phase_costs],
             [(3500, 30), (2500, 30)],
         )
-        self.assertAlmostEqual(result.total_cost, _dollars(6000, 60, DEFAULT_MODEL), places=10)
+        # Half of each request's input was a cache read.
+        self.assertEqual((result.cache_read_tokens, result.cache_write_tokens), (3000, 0))
+        self.assertEqual(
+            [(p.cache_read_tokens, p.cache_write_tokens) for p in result.phase_costs],
+            [(1750, 0), (1250, 0)],
+        )
+        usage = TokenUsage(6000, 60, cache_read_tokens=3000)
+        self.assertAlmostEqual(result.total_cost, _usage_dollars(usage, DEFAULT_MODEL), places=10)
+        self.assertLess(result.total_cost, _dollars(6000, 60, DEFAULT_MODEL))
 
     def test_other_commands_agree_on_recorded_usage(self):
         from agent_trace.compliance import _event_costs
@@ -297,7 +308,7 @@ class TestRecordedUsage(unittest.TestCase):
         events = _codex_events()
         store, tmp = _make_store(events)
         self.addCleanup(tmp.cleanup)
-        expected = _dollars(6000, 60, "sonnet")
+        expected = _usage_dollars(TokenUsage(6000, 60, cache_read_tokens=3000), "sonnet")
 
         self.assertAlmostEqual(build_timeline(store, "s1").total_cost, expected, places=10)
         self.assertAlmostEqual(sum(_event_costs(events)), expected, places=10)
@@ -369,6 +380,104 @@ class TestFormatCost(unittest.TestCase):
         format_cost(result, out=buf)
         output = buf.getvalue()
         self.assertNotIn("Wasted", output)
+
+
+def _unpaired_response(ts: float, session_id: str = "s1", **data) -> TraceEvent:
+    return TraceEvent(event_type=EventType.LLM_RESPONSE, timestamp=ts,
+                      session_id=session_id, data=data)
+
+
+class TestCachedTokenCost(unittest.TestCase):
+    """estimate_cost and its consumers bill cache reads and writes apart."""
+
+    def test_uncached_usage_costs_exactly_what_input_and_output_did(self):
+        for model in ("sonnet", "haiku", "claude-sonnet-4-6", "gpt-4o"):
+            with self.subTest(model=model):
+                rates = PRICING[model]
+                self.assertEqual(
+                    _dollars(1234, 567, model),
+                    1234 / 1_000_000 * rates["input"] + 567 / 1_000_000 * rates["output"],
+                )
+
+    def test_token_usage_keeps_cache_parts_inside_input(self):
+        usage = TokenUsage(1000, 10, cache_read_tokens=600, cache_write_tokens=300,
+                           cache_write_long_tokens=100)
+        self.assertEqual(usage.uncached_input_tokens, 100)
+        self.assertEqual(
+            usage + usage,
+            TokenUsage(2000, 20, cache_read_tokens=1200, cache_write_tokens=600,
+                       cache_write_long_tokens=200),
+        )
+
+    def test_anthropic_session_includes_cache_tokens_in_input(self):
+        store, tmp = _make_store([
+            _make_event(EventType.USER_PROMPT, 0.0, prompt="hi"),
+            _unpaired_response(1.0, model="claude-sonnet-4-6", input_tokens=100,
+                               output_tokens=50, cache_read_input_tokens=8000,
+                               cache_creation_input_tokens=1000),
+        ])
+        self.addCleanup(tmp.cleanup)
+        result = estimate_cost(store, "s1", model="sonnet")
+        self.assertEqual(
+            (result.input_tokens, result.output_tokens,
+             result.cache_read_tokens, result.cache_write_tokens),
+            (9100, 50, 8000, 1000),
+        )
+        # sonnet: input 3, cache read 0.30, 5m cache write 3.75, output 15.
+        self.assertAlmostEqual(
+            result.total_cost, (100 * 3 + 8000 * 0.30 + 1000 * 3.75 + 50 * 15) / 1e6, places=12,
+        )
+        self.assertEqual(session_event_usage(_codex_events())[1],
+                         TokenUsage(1200, 10, cache_read_tokens=600))
+
+    def test_model_without_cache_rates_bills_cache_reads_as_input(self):
+        store, tmp = _make_store(_codex_events())
+        self.addCleanup(tmp.cleanup)
+        result = estimate_cost(store, "s1", model="haiku")
+        self.assertEqual(result.cache_read_tokens, 3000)
+        self.assertAlmostEqual(result.total_cost, _dollars(6000, 60, "haiku"), places=12)
+
+    def test_custom_prices_bill_cache_reads_at_the_custom_input_price(self):
+        store, tmp = _make_store(_codex_events())
+        self.addCleanup(tmp.cleanup)
+        result = estimate_cost(store, "s1", input_price=1.0, output_price=2.0)
+        self.assertEqual(result.cache_read_tokens, 3000)
+        self.assertAlmostEqual(result.total_cost, (6000 * 1.0 + 60 * 2.0) / 1e6, places=12)
+
+    def test_format_cost_names_cached_input_only_when_present(self):
+        result = CostResult(
+            session_id="abc", model="sonnet", total_cost=0.01,
+            input_tokens=2030, output_tokens=13, phase_costs=[], wasted_cost=0.0,
+            cache_read_tokens=1024, cache_write_tokens=5,
+        )
+        buf = io.StringIO()
+        format_cost(result, out=buf)
+        self.assertIn("2,030 input tokens (1,024 cache read, 5 cache write), 13 output tokens",
+                      buf.getvalue())
+
+        result.cache_read_tokens = result.cache_write_tokens = 0
+        buf = io.StringIO()
+        format_cost(result, out=buf)
+        self.assertIn("2,030 input tokens, 13 output tokens", buf.getvalue())
+
+    def test_tenant_report_sums_cache_tokens(self):
+        from agent_trace.cost import build_tenant_cost_report, format_tenant_cost
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store = TraceStore(tmp.name)
+        for session_id in ("t1", "t2"):
+            store.create_session(SessionMeta(session_id=session_id, tenant_id="acme",
+                                             started_at=1000.0))
+            for event in _codex_events(session_id):
+                event.timestamp += 1000.0
+                store.append_event(session_id, event)
+        report = build_tenant_cost_report(store, "acme", since="1d", now=2000.0)
+        self.assertEqual((report.sessions, report.input_tokens, report.cache_read_tokens),
+                         (2, 12_000, 6000))
+        buf = io.StringIO()
+        format_tenant_cost(report, out=buf)
+        self.assertIn("Tokens: 12,000 input (6,000 cache read), 120 output", buf.getvalue())
 
 
 if __name__ == "__main__":

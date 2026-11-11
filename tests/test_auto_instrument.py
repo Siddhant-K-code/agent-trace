@@ -252,6 +252,67 @@ class TestAnthropicIntegration(unittest.TestCase):
         self.assertFalse(m._PATCHED)
 
 
+class TestSDKUsageFields(unittest.TestCase):
+    """The SDK integrations keep the cache token counts they are billed for."""
+
+    def test_anthropic_records_cache_reads_and_writes(self):
+        from types import SimpleNamespace
+        from agent_trace.cost import _usage_detail
+        from agent_trace.integrations.anthropic import _usage_fields
+
+        usage = SimpleNamespace(
+            input_tokens=100,
+            output_tokens=50,
+            cache_read_input_tokens=8000,
+            cache_creation_input_tokens=3000,
+            cache_creation=SimpleNamespace(
+                ephemeral_5m_input_tokens=1000, ephemeral_1h_input_tokens=2000,
+            ),
+        )
+        fields = _usage_fields(usage)
+        self.assertEqual(fields, {
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "cache_read_input_tokens": 8000,
+            "cache_creation_input_tokens": 3000,
+            "cache_creation": {
+                "ephemeral_5m_input_tokens": 1000, "ephemeral_1h_input_tokens": 2000,
+            },
+        })
+        recorded, _, _ = _usage_detail(fields)
+        self.assertEqual(
+            (recorded.input_tokens, recorded.cache_read_tokens,
+             recorded.cache_write_tokens, recorded.cache_write_long_tokens),
+            (11_100, 8000, 3000, 2000),
+        )
+
+    def test_openai_records_cached_prompt_tokens(self):
+        from types import SimpleNamespace
+        from agent_trace.cost import _usage_detail
+        from agent_trace.integrations.openai import _usage_fields
+
+        usage = SimpleNamespace(
+            prompt_tokens=2000,
+            completion_tokens=100,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=1500, audio_tokens=0),
+        )
+        fields = _usage_fields(usage)
+        self.assertEqual(fields, {
+            "input_tokens": 2000, "output_tokens": 100, "cached_input_tokens": 1500,
+        })
+        recorded, _, _ = _usage_detail(fields)
+        self.assertEqual((recorded.input_tokens, recorded.cache_read_tokens), (2000, 1500))
+
+    def test_missing_or_mock_usage_adds_no_cache_fields(self):
+        from agent_trace.integrations.anthropic import _usage_fields as anthropic_fields
+        from agent_trace.integrations.openai import _usage_fields as openai_fields
+
+        for fields in (anthropic_fields, openai_fields):
+            with self.subTest(fields.__module__):
+                self.assertEqual(fields(None), {"input_tokens": 0, "output_tokens": 0})
+                self.assertLessEqual(set(fields(MagicMock())), {"input_tokens", "output_tokens"})
+
+
 # ---------------------------------------------------------------------------
 # Strands integration (mock-based)
 # ---------------------------------------------------------------------------

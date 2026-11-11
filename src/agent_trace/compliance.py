@@ -32,7 +32,7 @@ from typing import Any, Literal, TextIO
 
 from . import __version__
 from .audit import verify_chain
-from .cost import _dollars, session_event_tokens
+from .cost import _usage_dollars, session_event_usage
 from .event_data import require_object_event_data, str_field
 from .models import EventType, TraceEvent
 from .store import TraceStore
@@ -99,10 +99,7 @@ def _event_tool_name(event: TraceEvent) -> str:
 
 
 def _event_costs(events: list[TraceEvent]) -> list[float]:
-    return [
-        _dollars(input_tokens, output_tokens, "sonnet")
-        for input_tokens, output_tokens in session_event_tokens(events)
-    ]
+    return [_usage_dollars(usage, "sonnet") for usage in session_event_usage(events)]
 
 
 def _data_categories(events: list[TraceEvent]) -> list[str]:
