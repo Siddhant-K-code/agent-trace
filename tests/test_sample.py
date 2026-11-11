@@ -8,6 +8,7 @@ import time
 import unittest
 from pathlib import Path
 
+from agent_trace.cost import estimate_cost
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.sample import (
     SessionScore,
@@ -20,6 +21,11 @@ from agent_trace.sample import (
     run_sample,
 )
 from agent_trace.store import TraceStore
+
+try:
+    from test_cost import _codex_events
+except ImportError:  # pragma: no cover - package-style test discovery
+    from tests.test_cost import _codex_events
 
 
 # ---------------------------------------------------------------------------
@@ -337,6 +343,88 @@ class TestRunSample(unittest.TestCase):
         lines = Path(self.output).read_text().strip().splitlines()
         # All three have identical sequences — only 1 should survive dedup
         self.assertEqual(len(lines), 1)
+
+
+class TestSampleCost(unittest.TestCase):
+    """cost_estimate is the `agent-strace cost` total."""
+
+    def setUp(self):
+        self.store, self.tmpdir = _make_store()
+        self.output = os.path.join(self.tmpdir, "out.jsonl")
+
+    def _codex(self, prompt_data=None) -> SessionMeta:
+        meta = SessionMeta(started_at=time.time())
+        self.store.create_session(meta)
+        events = _codex_events(meta.session_id)
+        if prompt_data is not None:
+            events[0].data = prompt_data
+        for event in events:
+            self.store.append_event(meta.session_id, event)
+        return meta
+
+    def _score(self, meta: SessionMeta) -> SessionScore:
+        return _score_session(
+            meta.session_id, meta, self.store.load_events(meta.session_id)
+        )
+
+    def _records(self) -> dict[str, dict]:
+        lines = Path(self.output).read_text().splitlines()
+        return {r["session_id"]: r["score"] for r in map(json.loads, lines)}
+
+    def test_cost_matches_cost_command(self):
+        meta = self._codex()
+        score = self._score(meta)
+        want = estimate_cost(self.store, meta.session_id).total_cost
+        self.assertEqual(score.cost_estimate, want)
+        # The old estimate split llm_response total_tokens 80/20 at $3/$15.
+        self.assertNotAlmostEqual(score.cost_estimate, 0.032724)
+
+    def test_unpriceable_session_has_no_cost(self):
+        priced = self._score(self._codex())
+        unpriced = self._score(self._codex(prompt_data=["list the files"]))
+        self.assertIsNone(unpriced.cost_estimate)
+        self.assertEqual(
+            (unpriced.error_rate, unpriced.retry_rate, unpriced.blast_radius,
+             unpriced.tool_calls, unpriced.duration_s),
+            (priced.error_rate, priced.retry_rate, priced.blast_radius,
+             priced.tool_calls, priced.duration_s),
+        )
+        self.assertAlmostEqual(
+            unpriced.worst_score,
+            priced.worst_score - min(priced.cost_estimate / 5.0, 1.0) * 0.20,
+        )
+
+    def test_unpriceable_session_writes_null_cost(self):
+        priced = self._codex()
+        unpriced = self._codex(prompt_data=["list the files"])
+        for strategy in ("worst", "diverse", "recent", "random"):
+            with self.subTest(strategy=strategy):
+                rc = run_sample(self.store, strategy, n=5, output_path=self.output,
+                                seed=1, out=io.StringIO())
+                self.assertEqual(rc, 0)
+                records = self._records()
+                self.assertIsNone(records[unpriced.session_id]["cost_estimate"])
+                self.assertEqual(
+                    records[priced.session_id]["cost_estimate"],
+                    round(estimate_cost(self.store, priced.session_id).total_cost, 6),
+                )
+
+    def test_diverse_compares_unpriced_sessions_on_other_dimensions(self):
+        scores = [
+            _make_score("a", error_rate=1.0, cost_estimate=None, worst_score=1.0),
+            _make_score("b", error_rate=1.0, cost_estimate=4.0, worst_score=0.9),
+            _make_score("c", error_rate=0.0, cost_estimate=None, worst_score=0.1),
+            _make_score("d", error_rate=1.0, cost_estimate=None, worst_score=0.8),
+        ]
+        picked = [s.session_id for s in _sample_diverse(scores, 3)]
+        self.assertEqual(picked, ["a", "c", "b"])
+
+    def test_sessions_without_model_usage_are_still_scored(self):
+        meta = _add_session(self.store, errors=2, tool_calls=4, retries=3)
+        score = self._score(meta)
+        self.assertEqual(score.cost_estimate,
+                         estimate_cost(self.store, meta.session_id).total_cost)
+        self.assertEqual((score.tool_calls, score.error_rate), (7, 2 / 7))
 
 
 # ---------------------------------------------------------------------------

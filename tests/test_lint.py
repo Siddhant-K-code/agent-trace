@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from agent_trace.lint import (
     DEFAULT_CONFIG,
@@ -25,8 +27,14 @@ from agent_trace.lint import (
     format_report_json,
     cmd_lint,
 )
+from agent_trace.cost import estimate_cost
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
+
+try:
+    from test_cost import _codex_events
+except ImportError:  # pragma: no cover - package-style test discovery
+    from tests.test_cost import _codex_events
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +200,48 @@ class TestRuleBudgetProximity(unittest.TestCase):
         events = [start, _llm_request()]
         results = _rule_budget_proximity(events, self._cfg())
         self.assertEqual(results, [])
+
+    def _budgeted(self, budget: float, prompt_data=None) -> tuple[TraceStore, str]:
+        events = _codex_events()
+        if prompt_data is not None:
+            events[0].data = prompt_data
+        start = _ev(EventType.SESSION_START, budget_dollars=budget)
+        start.timestamp = 0.0
+        return _make_store_with_events([start, *events])
+
+    def test_cost_matches_cost_command(self):
+        store, sid = self._budgeted(1.0)
+        cost = estimate_cost(store, sid).total_cost
+        self.assertGreater(estimate_cost(store, sid).cache_read_tokens, 0)
+        events = store.load_events(sid)
+        events[0].data["budget_dollars"] = cost / 0.95
+        [result] = _rule_budget_proximity(events, self._cfg())
+        self.assertIn(f"(estimated ${cost:.4f} spent)", result.message)
+        self.assertIn("reached 95% of", result.message)
+        events[0].data["budget_dollars"] = cost / 0.85
+        self.assertEqual(_rule_budget_proximity(events, self._cfg()), [])
+
+    def test_unpriceable_session_is_reported_not_flagged(self):
+        store, sid = self._budgeted(0.000001, prompt_data=["list the files"])
+        for _ in range(6):
+            call = _tool_call("Read")
+            call.session_id = sid
+            store.append_event(sid, call)
+        with patch("sys.stderr", new_callable=io.StringIO) as err:
+            report = lint_session(store, sid)
+        self.assertIn(
+            f"[lint] Rule 'budget-proximity' failed: session {sid} event data "
+            "must be an object",
+            err.getvalue(),
+        )
+        rules = {f.rule for f in report.findings}
+        self.assertNotIn("budget-proximity", rules)
+        self.assertIn("tool-loop", rules)
+
+    def test_not_priced_without_budget(self):
+        with patch("agent_trace.lint.session_cost") as priced:
+            self.assertEqual(_rule_budget_proximity(_codex_events(), self._cfg()), [])
+        priced.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

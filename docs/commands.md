@@ -873,6 +873,15 @@ agent-strace dashboard [--limit N] [--since Nd] [--html FILE] [--trend]
 ```
 Multi-session aggregate view. `--trend` shows eval quality and behavioral metrics over time.
 
+Session costs, the total and the cost trend match `agent-strace cost` with its
+default model, so recorded token usage, cache reads and writes included, is
+priced at the model's rates. Earlier versions priced each session's token count
+at a flat $3 per million. A session whose events cannot be read, or that
+`agent-strace cost` refuses, is not priced: its cost shows `n/a`, it is left out
+of the total and the cost trend, and the total says how many sessions were not
+priced (`--trend` prints a `Sessions not priced` line, and its HTML report
+marks the cost chart). It is never counted as $0.
+
 ```bash
 # Add a timeline annotation (appears as a vertical marker on trend charts)
 agent-strace dashboard annotate --date 2026-05-10 --note "Added retry policy"
@@ -946,6 +955,14 @@ after a detected compaction.
 
 `--strict` exits 1 on any WARN or ERROR. Configure rules via `.agent-strace-lint.json`.
 
+`budget-proximity` compares the session's `agent-strace cost` total, at the
+default model, with the `budget_dollars` or `max_cost_dollars` in its
+`session_start` event, and fires at `threshold` (default 0.90) of the budget.
+Earlier versions estimated the cost from the size of prompts, model requests
+and responses at $9 per million tokens. For a session that `agent-strace cost`
+refuses, the rule prints `[lint] Rule 'budget-proximity' failed: ...` to stderr
+and adds no finding; the other rules still run.
+
 ### `eval`
 ```
 agent-strace eval [session-id] [--config FILE] [--baseline FILE]
@@ -966,6 +983,12 @@ that match `--filter` (default: `has-errors`) to
 `<trace-dir>/workspaces/<id>/datasets/NAME.jsonl` when `AGENT_STRACE_WORKSPACE`
 is set. `--dataset FILE` writes to a different path.
 `agent-strace optimize --dataset NAME` reads the same file.
+
+`--filter` also accepts `high-retry`, `cost-above:N`, `wide-blast`,
+`long-duration:Ns` and `low-eval-score:N`. `cost-above:N` adds sessions whose
+`agent-strace cost` total, with its default model, is above $N. Earlier
+versions priced each session's token count at a flat $3 per million. A session
+that `agent-strace cost` refuses never matches it.
 
 Configure named criteria in `.agent-evals.yaml`:
 ```yaml
@@ -1441,6 +1464,13 @@ agent-strace sample [--strategy worst|diverse|recent|random] [--n N]
 ```
 Export sessions as JSONL for eval datasets. Compatible with LangSmith, Braintrust, and custom eval frameworks.
 
+Each record's `score.cost_estimate` is the session's `agent-strace cost` total
+with its default model, and the `worst` and `diverse` strategies rank and
+compare sessions by it. Earlier versions split `llm_response` token counts
+80/20 and priced them at $3 and $15 per million. For a session that
+`agent-strace cost` refuses, `cost_estimate` is `null` and the session is
+ranked and compared on its other scores only.
+
 ### `server`
 ```
 agent-strace server [--port N] [--host HOST] [--storage DIR] [--auth-key KEY]
@@ -1675,7 +1705,11 @@ These commands refuse such sessions: `a2a-tree`, `audit`, `budget-report`,
 `standup`, `stats`, `team-report`, `tenant report`, `timeline`, `token-budget`,
 and `why`. A command refuses only when it reads an event whose data is not an
 object, so the same session keeps working with commands that never read that
-event. For example, `export --format otlp-genai` and `temporal` pair events by
+event. When only the cost calculation reads such an event, `dashboard`,
+`export --metrics --backend otlp`, `lint`, `sample` and `eval dataset auto
+--filter cost-above:N` show the session as not priced instead of refusing it, as
+described for each command. For example, `export --format otlp-genai` and
+`temporal` pair events by
 ID and do not read a tool_call that an error event pairs with.
 `export --format temporal` checks the session's Temporal trace context first, so
 a session without one keeps its `Temporal export failed` message. `optimize`

@@ -23,8 +23,14 @@ from agent_trace.langfuse_export import (
     export_session_to_langfuse,
     langfuse_data_indexes,
 )
+from agent_trace.cost import estimate_cost
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
+
+try:
+    from test_cost import _codex_events
+except ImportError:  # pragma: no cover - package-style test discovery
+    from tests.test_cost import _codex_events
 
 
 # ---------------------------------------------------------------------------
@@ -430,10 +436,33 @@ class TestSessionMetrics(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.store = _make_store(self.tmp)
 
-    def test_cost_computed_from_tokens(self):
-        meta = _add_session(self.store, "s1", total_tokens=1_000_000)
+    def test_cost_matches_cost_command(self):
+        # meta.total_tokens alone was priced at a flat $3 per million.
+        meta = _add_session(
+            self.store, "s1", events=_codex_events("s1"), total_tokens=1_000_000
+        )
         m = _session_metrics(self.store, meta)
-        self.assertAlmostEqual(m["agent_strace.session.cost_usd"], 3.0)
+        want = estimate_cost(self.store, "s1").total_cost
+        self.assertEqual(m["agent_strace.session.cost_usd"], want)
+        self.assertNotAlmostEqual(want, 3.0)
+        self.assertEqual(next(iter(m)), "agent_strace.session.cost_usd")
+
+    def test_unpriceable_session_has_no_cost_metric(self):
+        events = _codex_events("s1")
+        events[0].data = ["list the files"]  # the cost command refuses this
+        meta = _add_session(self.store, "s1", events=events)
+        m = _session_metrics(self.store, meta)
+        self.assertNotIn("agent_strace.session.cost_usd", m)
+        self.assertEqual(m["agent_strace.session.tool_calls"], 1.0)
+        self.assertEqual(len(m), 5)
+
+    def test_unreadable_events_have_no_cost_metric(self):
+        meta = _add_session(self.store, "s1", events=_codex_events("s1"))
+        with open(self.store.base_dir / "s1" / "events.ndjson", "a") as f:
+            f.write("not json\n")
+        m = _session_metrics(self.store, meta)
+        self.assertNotIn("agent_strace.session.cost_usd", m)
+        self.assertEqual(m["agent_strace.session.tool_calls"], 0.0)
 
     def test_error_rate_computed(self):
         events = [_tool_call("Bash"), _error_ev()]
@@ -587,6 +616,43 @@ class TestExportMetricsToOtlp(unittest.TestCase):
         metrics = posted_bodies[0]["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
         names = [m["name"] for m in metrics]
         self.assertIn("agent_strace.session.cost_usd", names)
+
+    def test_unpriceable_session_has_no_cost_data_point(self):
+        _add_session(self.store, "priced", events=_codex_events("priced"))
+        events = _codex_events("unpriced")
+        events[0].data = ["list the files"]
+        _add_session(self.store, "unpriced", events=events)
+        cfg = OtlpMetricsConfig(endpoint="http://localhost:4318")
+        posted_bodies = []
+
+        def _capture(req, timeout=30):
+            posted_bodies.append(json.loads(req.data))
+            return self._mock_urlopen(200)
+
+        with patch("urllib.request.urlopen", side_effect=_capture):
+            export_metrics_to_otlp(
+                self.store, ["priced", "unpriced"], cfg, include_scores=False
+            )
+
+        metrics = posted_bodies[0]["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
+
+        def points(name):
+            return [
+                (
+                    m["gauge"]["dataPoints"][0]["attributes"][0]["value"]["stringValue"],
+                    m["gauge"]["dataPoints"][0]["asDouble"],
+                )
+                for m in metrics if m["name"] == name
+            ]
+
+        self.assertEqual(
+            points("agent_strace.session.cost_usd"),
+            [("priced", estimate_cost(self.store, "priced").total_cost)],
+        )
+        self.assertEqual(
+            [sid for sid, _ in points("agent_strace.session.tool_calls")],
+            ["priced", "unpriced"],
+        )
 
     def test_eval_scores_included_as_metrics(self):
         _add_session(self.store, "m3")

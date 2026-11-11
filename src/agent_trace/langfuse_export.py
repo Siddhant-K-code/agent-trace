@@ -372,11 +372,20 @@ def _session_metrics(
     store: TraceStore,
     meta: SessionMeta,
 ) -> dict[str, float]:
-    """Extract behavioral metrics for a session."""
+    """Extract behavioral metrics for a session.
+
+    ``agent_strace.session.cost_usd`` is the `agent-strace cost` total. It is
+    left out when the session cannot be priced: its events cannot be read,
+    or that command refuses the session.
+    """
+    from .cost import session_cost
+
+    loaded = True
     try:
         events = store.load_events(meta.session_id)
     except Exception:
         events = []
+        loaded = False
 
     tool_calls = 0
     errors = 0
@@ -403,17 +412,24 @@ def _session_metrics(
             if path:
                 files_written.add(path)
 
-    cost = meta.total_tokens / 1_000_000 * 3.0
+    metrics: dict[str, float] = {}
+    if loaded:
+        try:
+            metrics["agent_strace.session.cost_usd"] = session_cost(
+                events, session_id=meta.session_id
+            )
+        except ValueError:
+            pass
     duration_s = meta.total_duration_ms / 1000 if meta.total_duration_ms else 0.0
 
-    return {
-        "agent_strace.session.cost_usd": cost,
+    metrics.update({
         "agent_strace.session.error_rate": errors / max(tool_calls, 1),
         "agent_strace.session.retry_rate": retries / max(tool_calls, 1),
         "agent_strace.session.blast_radius": float(len(files_written)),
         "agent_strace.session.duration_s": duration_s,
         "agent_strace.session.tool_calls": float(tool_calls),
-    }
+    })
+    return metrics
 
 
 def export_metrics_to_otlp(

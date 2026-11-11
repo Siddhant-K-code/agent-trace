@@ -21,9 +21,11 @@ from agent_trace.cost import (
     estimate_cost,
     format_cost,
     session_event_tokens,
+    session_cost,
     session_event_usage,
     session_records_usage,
 )
+from agent_trace.event_data import NonObjectEventDataError
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
 
@@ -229,6 +231,54 @@ def _codex_events(session_id: str = "s1") -> list[TraceEvent]:
         _model_request(8.0, 2500, 30, model=None, session_id=session_id),
         _make_event(EventType.ASSISTANT_RESPONSE, 9.0, session_id, text="Three."),
     ]
+
+
+class TestSessionCost(unittest.TestCase):
+    """session_cost prices loaded events exactly as `agent-strace cost` does."""
+
+    def _check_matches(self, events):
+        store, tmp = _make_store(events)
+        self.addCleanup(tmp.cleanup)
+        loaded = store.load_events("s1")
+        for model in (DEFAULT_MODEL, "opus", "gpt4o", "no-such-model"):
+            self.assertEqual(
+                session_cost(loaded, model),
+                estimate_cost(store, "s1", model=model).total_cost,
+            )
+        return estimate_cost(store, "s1")
+
+    def test_matches_recorded_usage_with_cache_reads(self):
+        result = self._check_matches(_codex_events())
+        self.assertGreater(result.cache_read_tokens, 0)
+
+    def test_matches_size_estimate(self):
+        result = self._check_matches([
+            _make_event(EventType.USER_PROMPT, 0.0, prompt="fix the bug"),
+            _make_event(EventType.TOOL_CALL, 1.0, tool_name="Read",
+                        arguments={"file_path": "a.py"}),
+            _make_event(EventType.TOOL_RESULT, 2.0, result="x" * 400),
+            _make_event(EventType.USER_PROMPT, 3.0, prompt="and test it"),
+            _make_event(EventType.ASSISTANT_RESPONSE, 4.0, text="Done."),
+        ])
+        self.assertGreater(result.total_cost, 0)
+        self.assertEqual(result.cache_read_tokens, 0)
+
+    def test_empty_session_costs_nothing(self):
+        self.assertEqual(session_cost([]), 0.0)
+
+    def test_refuses_what_the_cost_command_refuses(self):
+        for index in (0, 2):  # a user_prompt and a tool_call
+            events = _codex_events()
+            events[index].data = ["not", "an", "object"]
+            with self.assertRaises(NonObjectEventDataError) as caught:
+                session_cost(events, session_id="s1")
+            self.assertIsInstance(caught.exception, ValueError)
+            self.assertIn("s1", str(caught.exception))
+
+    def test_prices_non_object_data_the_cost_command_does_not_read(self):
+        events = _codex_events()
+        events[3].data = ["README.md"]  # a tool_result
+        self._check_matches(events)
 
 
 class TestCostInputsCaptured(unittest.TestCase):

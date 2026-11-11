@@ -742,8 +742,8 @@ class MirroredCheckTest(unittest.TestCase):
         # Sessions are scored newest first, so --deduplicate drops S1 after
         # reading only its tool calls.
         self.assertEqual(sweep.positions("sample --deduplicate", S1), {3, 5})
-        self.assertEqual(sweep.positions("sample", S1), {3, 5, 8, 9})
-        self.assertEqual(sweep.positions("sample --deduplicate", S2), {3, 5, 8, 9})
+        self.assertEqual(sweep.positions("sample", S1), {3, 5, 9})
+        self.assertEqual(sweep.positions("sample --deduplicate", S2), {3, 5, 9})
 
     def test_mcp_scan(self):
         root, sessions = self.workspace(

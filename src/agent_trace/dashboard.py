@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TextIO
 
+from .cost import session_cost
 from .event_data import require_object_event_data
 from .models import EventType, SessionMeta, TraceEvent
 from .store import TraceStore
@@ -40,7 +41,8 @@ class SessionSummary:
     llm_requests: int
     errors: int
     total_tokens: int
-    estimated_cost: float
+    # Same as `agent-strace cost`; None when the session cannot be priced.
+    estimated_cost: float | None
     agent_name: str
     succeeded: bool   # True if no errors recorded
 
@@ -54,6 +56,7 @@ class DashboardReport:
     total_errors: int
     avg_duration_s: float
     success_rate: float   # 0.0–1.0
+    unpriced_sessions: int = 0   # left out of total_cost
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +78,7 @@ class TrendPoint:
     started_at: float
     error_rate: float        # errors / tool_calls
     retry_rate: float        # consecutive same-tool calls / tool_calls
-    cost: float
+    cost: float | None       # same as `agent-strace cost`; None if unpriced
     duration_s: float
     eval_scores: list[EvalScorePoint] = field(default_factory=list)
 
@@ -154,14 +157,24 @@ def _load_eval_scores(store: TraceStore, session_id: str) -> list[EvalScorePoint
 # Trend metrics extraction
 # ---------------------------------------------------------------------------
 
+def _priced(events: list[TraceEvent], session_id: str) -> float | None:
+    """Return the session's `agent-strace cost` total, or None if it refuses it."""
+    try:
+        return session_cost(events, session_id=session_id)
+    except ValueError:
+        return None
+
+
 def _extract_trend_point(
     store: TraceStore,
     meta: SessionMeta,
 ) -> TrendPoint:
+    loaded = True
     try:
         events: list[TraceEvent] = store.load_events(meta.session_id)
     except Exception:
         events = []
+        loaded = False
     require_object_event_data(
         events, event_types={EventType.TOOL_CALL}, session_id=meta.session_id
     )
@@ -188,7 +201,7 @@ def _extract_trend_point(
 
     error_rate = errors / max(tool_calls, 1)
     retry_rate = retries / max(tool_calls, 1)
-    cost = meta.total_tokens / 1_000_000 * 3.0
+    cost = _priced(events, meta.session_id) if loaded else None
     duration_s = meta.total_duration_ms / 1000 if meta.total_duration_ms else 0.0
 
     eval_scores = _load_eval_scores(store, meta.session_id)
@@ -297,7 +310,12 @@ def format_trend_terminal(report: TrendReport, out: TextIO = sys.stdout) -> None
     _trend_line([p.error_rate for p in report.points], "Error rate")
     _trend_line([p.retry_rate for p in report.points], "Retry rate")
     w("\nCost trend:\n")
-    _trend_line([p.cost for p in report.points], "Avg cost/session ($)")
+    _trend_line(
+        [p.cost for p in report.points if p.cost is not None], "Avg cost/session ($)"
+    )
+    unpriced = sum(1 for p in report.points if p.cost is None)
+    if unpriced:
+        w(f"  {'Sessions not priced':<30} {unpriced}\n")
     _trend_line([p.duration_s for p in report.points], "Avg duration (s)")
     w("\n")
 
@@ -422,7 +440,11 @@ def render_html_trend(report: TrendReport) -> str:
     # Behavioral charts
     error_spark = _spark([p.error_rate for p in pts], "#f85149")
     retry_spark = _spark([p.retry_rate for p in pts], "#ffa657")
-    cost_spark = _spark([p.cost for p in pts], "#3fb950")
+    cost_spark = _spark([p.cost for p in pts if p.cost is not None], "#3fb950")
+    unpriced = sum(1 for p in pts if p.cost is None)
+    cost_note = (
+        f' <span class="badge">{unpriced} not priced</span>' if unpriced else ""
+    )
     dur_spark = _spark([p.duration_s for p in pts], "#d2a8ff")
 
     # Annotation list
@@ -446,7 +468,7 @@ def render_html_trend(report: TrendReport) -> str:
             f"<td>{dt}</td>"
             f"<td>{p.error_rate:.2%}</td>"
             f"<td>{p.retry_rate:.2%}</td>"
-            f"<td>${p.cost:.4f}</td>"
+            f"<td>{_fmt_cost(p.cost)}</td>"
             f"<td>{scores_str}</td>"
             f"</tr>\n"
         )
@@ -502,7 +524,7 @@ polyline{{fill:none}}
     {retry_spark}
   </div>
   <div class="chart-block">
-    <div class="chart-label">Estimated cost ($)</div>
+    <div class="chart-label">Estimated cost ($){cost_note}</div>
     {cost_spark}
   </div>
   <div class="chart-block">
@@ -547,8 +569,10 @@ def build_dashboard(
     summaries: list[SessionSummary] = []
     for meta in sessions:
         duration_s = meta.total_duration_ms / 1000 if meta.total_duration_ms else 0.0
-        # Estimate cost cheaply from token count stored in meta
-        cost = meta.total_tokens / 1_000_000 * 3.0  # rough sonnet input price
+        try:
+            cost = _priced(store.load_events(meta.session_id), meta.session_id)
+        except (OSError, ValueError):
+            cost = None
 
         summaries.append(SessionSummary(
             session_id=meta.session_id,
@@ -563,7 +587,8 @@ def build_dashboard(
             succeeded=meta.errors == 0,
         ))
 
-    total_cost = sum(s.estimated_cost for s in summaries)
+    costs = [s.estimated_cost for s in summaries if s.estimated_cost is not None]
+    total_cost = sum(costs)
     total_tokens = sum(s.total_tokens for s in summaries)
     total_tools = sum(s.tool_calls for s in summaries)
     total_errors = sum(s.errors for s in summaries)
@@ -584,6 +609,7 @@ def build_dashboard(
         total_errors=total_errors,
         avg_duration_s=avg_dur,
         success_rate=success_rate,
+        unpriced_sessions=len(summaries) - len(costs),
     )
 
 
@@ -595,6 +621,10 @@ def _fmt_dur(s: float) -> str:
     if s < 60:
         return f"{s:.0f}s"
     return f"{int(s)//60}m{int(s)%60:02d}s"
+
+
+def _fmt_cost(cost: float | None) -> str:
+    return "n/a" if cost is None else f"${cost:.4f}"
 
 
 def _fmt_ts(ts: float) -> str:
@@ -612,7 +642,10 @@ def format_dashboard(report: DashboardReport, out: TextIO = sys.stdout) -> None:
     w(f"\nDashboard — {n} session{'s' if n != 1 else ''}\n\n")
 
     # Summary row
-    w(f"  Total cost:    ~${report.total_cost:.4f}\n")
+    unpriced = (
+        f" ({report.unpriced_sessions} not priced)" if report.unpriced_sessions else ""
+    )
+    w(f"  Total cost:    ~${report.total_cost:.4f}{unpriced}\n")
     w(f"  Total tokens:  {report.total_tokens:,}\n")
     w(f"  Tool calls:    {report.total_tool_calls:,}\n")
     w(f"  Errors:        {report.total_errors}\n")
@@ -629,11 +662,12 @@ def format_dashboard(report: DashboardReport, out: TextIO = sys.stdout) -> None:
 
     for s in report.summaries:
         status = "✓" if s.succeeded else "✗"
+        cost = "n/a".rjust(8) if s.estimated_cost is None else f"${s.estimated_cost:>7.4f}"
         w(
             f"  {s.session_id[:12]:<14}  {_fmt_ts(s.started_at):<12}  "
             f"{_fmt_dur(s.duration_s):>7}  {s.tool_calls:>5}  "
             f"{s.llm_requests:>4}  {s.errors:>3}  "
-            f"{s.total_tokens:>8,}  ${s.estimated_cost:>7.4f}  {status}\n"
+            f"{s.total_tokens:>8,}  {cost}  {status}\n"
         )
 
     w("\n")
@@ -641,14 +675,15 @@ def format_dashboard(report: DashboardReport, out: TextIO = sys.stdout) -> None:
     # Trend: last 10 sessions cost
     if len(report.summaries) >= 3:
         recent = list(reversed(report.summaries[:10]))
-        costs = [s.estimated_cost for s in recent]
-        max_cost = max(costs) or 1.0
-        w("  Cost trend (oldest → newest):\n  ")
-        bars = "▁▂▃▄▅▆▇█"
-        for c in costs:
-            idx = min(int(c / max_cost * (len(bars) - 1)), len(bars) - 1)
-            w(bars[idx])
-        w("\n\n")
+        costs = [s.estimated_cost for s in recent if s.estimated_cost is not None]
+        if costs:
+            max_cost = max(costs) or 1.0
+            w("  Cost trend (oldest → newest):\n  ")
+            bars = "▁▂▃▄▅▆▇█"
+            for c in costs:
+                idx = min(int(c / max_cost * (len(bars) - 1)), len(bars) - 1)
+                w(bars[idx])
+            w("\n\n")
 
 
 # ---------------------------------------------------------------------------
@@ -670,14 +705,20 @@ def render_html_dashboard(report: DashboardReport) -> str:
             f"<td>{s.llm_requests}</td>"
             f"<td>{s.errors}</td>"
             f"<td>{s.total_tokens:,}</td>"
-            f"<td>${s.estimated_cost:.4f}</td>"
+            f"<td>{_fmt_cost(s.estimated_cost)}</td>"
             f"<td>{status_sym}</td>"
             f"</tr>\n"
         )
 
     # Sparkline data for Chart.js-free inline SVG
-    costs = [s.estimated_cost for s in reversed(report.summaries[:20])]
-    max_c = max(costs) or 1.0
+    costs = [
+        s.estimated_cost for s in reversed(report.summaries[:20])
+        if s.estimated_cost is not None
+    ]
+    max_c = max(costs, default=0.0) or 1.0
+    unpriced_note = (
+        f" ({report.unpriced_sessions} not priced)" if report.unpriced_sessions else ""
+    )
     spark_points = ""
     if costs:
         w = 200
@@ -715,7 +756,7 @@ polyline{{fill:none;stroke:#58a6ff;stroke-width:1.5}}
 <h1>agent-strace dashboard</h1>
 <div class="stats">
   <div class="stat"><div class="label">Sessions</div><div class="value">{len(report.summaries)}</div></div>
-  <div class="stat"><div class="label">Est. cost</div><div class="value">${report.total_cost:.4f}</div></div>
+  <div class="stat"><div class="label">Est. cost</div><div class="value">${report.total_cost:.4f}{unpriced_note}</div></div>
   <div class="stat"><div class="label">Total tokens</div><div class="value">{report.total_tokens:,}</div></div>
   <div class="stat"><div class="label">Tool calls</div><div class="value">{report.total_tool_calls:,}</div></div>
   <div class="stat"><div class="label">Errors</div><div class="value">{report.total_errors}</div></div>

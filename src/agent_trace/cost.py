@@ -533,6 +533,26 @@ def session_event_tokens(events: list[TraceEvent]) -> list[tuple[int, int]]:
     ]
 
 
+def session_cost(
+    events: list[TraceEvent],
+    model: str = DEFAULT_MODEL,
+    *,
+    session_id: str | None = None,
+) -> float:
+    """Return the USD cost of one session's *events*, as ``agent-strace cost`` prices it.
+
+    Equals ``estimate_cost(store, session_id, model).total_cost`` for the
+    same events, without loading the session again. Raises
+    :class:`~agent_trace.event_data.NonObjectEventDataError`, a
+    ``ValueError``, for a session ``agent-strace cost`` refuses because a
+    tool_call or user_prompt event's data is not an object.
+    """
+    require_object_event_data(
+        events, event_types=PHASE_DATA_EVENT_TYPES, session_id=session_id
+    )
+    return _usage_dollars(sum(session_event_usage(events), TokenUsage()), model)
+
+
 def _usage_cost(usage: TokenUsage, rates: Mapping[str, float]) -> float:
     """Return the USD cost of *usage* at *rates* (USD per 1M tokens).
 

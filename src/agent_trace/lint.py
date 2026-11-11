@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, TextIO
 
+from .cost import session_cost
 from .event_data import number_field, object_field, str_field
 from .models import EventType, TraceEvent
 from .store import TraceStore
@@ -245,15 +246,9 @@ def _rule_budget_proximity(events: list[TraceEvent], cfg: dict) -> list[LintResu
     if not budget:
         return []
 
-    # Estimate cost from token events
-    total_tokens = sum(
-        len(json.dumps(ev.data)) // 4
-        for ev in events
-        if ev.event_type in {EventType.LLM_REQUEST, EventType.LLM_RESPONSE,
-                              EventType.ASSISTANT_RESPONSE, EventType.USER_PROMPT}
-    )
-    # Use sonnet pricing: $3/M input, $15/M output — rough average $9/M
-    estimated_cost = total_tokens * 9.0 / 1_000_000
+    # The `agent-strace cost` total. A session that command refuses raises
+    # NonObjectEventDataError, which lint_session reports as a rule failure.
+    estimated_cost = session_cost(events, session_id=events[0].session_id or None)
 
     if estimated_cost >= budget * threshold:
         pct = estimated_cost / budget * 100

@@ -16,8 +16,14 @@ from agent_trace.eval.runner import (
     _write_github_summary,
 )
 from agent_trace.eval.scorers import ScoreResult, run_scorer, score_llm_judge
+from agent_trace.cost import estimate_cost
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
+
+try:
+    from test_cost import _codex_events
+except ImportError:  # pragma: no cover - package-style test discovery
+    from tests.test_cost import _codex_events
 
 
 # ---------------------------------------------------------------------------
@@ -243,12 +249,35 @@ class TestDatasetAutoPopulate(unittest.TestCase):
 
     def test_cost_above_filter(self):
         now = time.time()
-        # 1M tokens * $3/M = $3.00 > $1.00
-        _add_session(self.store, "s_expensive", total_tokens=1_000_000, started_at=now - 100)
-        _add_session(self.store, "s_cheap", total_tokens=100, started_at=now - 100)
-        added = auto_populate(self.store, self.ds_path, "cost-above:1.00", since_days=1)
+        # The filter prices recorded usage, as `agent-strace cost` does. It
+        # used to price meta.total_tokens at a flat $3 per million.
+        _add_session(self.store, "s_expensive", _codex_events("s_expensive"),
+                     total_tokens=100, started_at=now - 100)
+        _add_session(self.store, "s_cheap", total_tokens=1_000_000, started_at=now - 100)
+        cost = estimate_cost(self.store, "s_expensive").total_cost
+        self.assertGreater(cost, 0)
+        added = auto_populate(
+            self.store, self.ds_path, f"cost-above:{cost * 0.999}", since_days=1
+        )
         self.assertEqual(added, 1)
         self.assertEqual(list_entries(self.ds_path)[0].session_id, "s_expensive")
+        self.assertEqual(
+            auto_populate(self.store, self.ds_path, f"cost-above:{cost * 1.001}",
+                          since_days=1),
+            0,
+        )
+
+    def test_cost_above_skips_unpriceable_session(self):
+        now = time.time()
+        events = _codex_events("s_unpriced")
+        events[0].data = ["list the files"]  # `agent-strace cost` refuses this
+        _add_session(self.store, "s_unpriced", events, total_tokens=1_000_000,
+                     started_at=now - 100)
+        added = auto_populate(self.store, self.ds_path, "cost-above:0", since_days=1)
+        self.assertEqual(added, 0)
+        # The other filters still read the session.
+        added = auto_populate(self.store, self.ds_path, "long-duration:30s", since_days=1)
+        self.assertEqual(added, 1)
 
     def test_wide_blast_filter(self):
         now = time.time()
