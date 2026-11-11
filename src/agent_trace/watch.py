@@ -707,6 +707,7 @@ class EventStreamer:
         except KeyboardInterrupt:
             pass
         if self._done.is_set():
+            self._thread.join()
             return
         with self._lock:
             self._abandoned = True
