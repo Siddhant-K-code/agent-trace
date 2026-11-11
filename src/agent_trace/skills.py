@@ -33,7 +33,8 @@ from typing import Any, Iterable, TextIO
 
 from .cost import parse_since
 from .models import EventType, SessionMeta, TraceEvent
-from .review import is_test_command
+from .review import is_test_argv
+from .shell_split import is_break, split_tokens
 from .store import TraceStore
 
 SCHEMA_VERSION = 1
@@ -158,7 +159,6 @@ _EDIT_TOOLS = frozenset({
 })
 _PATH_KEYS = ("file_path", "path", "absolute_path", "filePath", "target_file", "notebook_path", "uri")
 _SHELL_FENCE_LANGS = frozenset({"bash", "sh", "shell", "zsh", "console", "shell-session", "text"})
-_SHELL_PUNCT = ";&|()<>\n"
 _LEADING_KEYWORDS = frozenset({"do", "then", "else", "elif", "if", "while", "until", "!", "{", "}", "time", "done", "fi", "esac"})
 _SKIPPED_KEYWORDS = frozenset({"for", "case", "select", "function"})
 _LOW_SIGNAL_PROGRAMS = frozenset({
@@ -174,7 +174,6 @@ _READ_PROGRAMS = frozenset({"awk", "bat", "cat", "head", "less", "more", "nl", "
 _GIT_PAGER_FLAGS = frozenset({"--no-pager", "-P", "--paginate"})
 _RESOURCE_PROGRAMS = _READ_PROGRAMS | frozenset({"cp", "diff", "egrep", "grep", "jq", "rg", "rsync", "wc", "yq"})
 _ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-_HEREDOC = re.compile(r"(?<!<)<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 _INTERPRETER_VERSION = re.compile(r"^(python|ruby|perl|node)[0-9.]*$")
 _FENCE = re.compile(r"^\s*(`{3,}|~{3,})\s*([A-Za-z0-9_+-]*)")
 _FENCE_CLOSE = re.compile(r"\s*(`{3,}|~{3,})\s*")
@@ -655,81 +654,8 @@ def context_files(workspace: str | os.PathLike[str] | None) -> list[dict[str, ob
 # --------------------------------------------------------------------------- #
 
 
-def _strip_heredocs(command: str) -> str:
-    kept: list[str] = []
-    pending: list[str] = []
-    for line in command.split("\n"):
-        if pending:
-            if line.strip() == pending[0]:
-                pending.pop(0)
-            continue
-        kept.append(line)
-        pending.extend(match.group(2) for match in _HEREDOC.finditer(line))
-    return "\n".join(kept)
-
-
-_WORD_BOUNDARY = frozenset(" \t\r\n;&|()<>")
-
-
-def _strip_comments(command: str) -> str:
-    """Drop ``# ...`` comments the way a shell does, keeping the newline.
-
-    ``#`` starts a comment only at the start of a word and outside quotes;
-    shlex's own comment handling also swallows the newline and fires mid-word.
-    """
-    out: list[str] = []
-    quote = ""
-    i = 0
-    length = len(command)
-    while i < length:
-        char = command[i]
-        if quote:
-            out.append(char)
-            if char == "\\" and quote == '"' and i + 1 < length:
-                out.append(command[i + 1])
-                i += 2
-                continue
-            if char == quote:
-                quote = ""
-        elif char == "\\" and i + 1 < length:
-            out.append(char)
-            out.append(command[i + 1])
-            i += 2
-            continue
-        elif char in "'\"":
-            quote = char
-            out.append(char)
-        elif char == "#" and (i == 0 or command[i - 1] in _WORD_BOUNDARY):
-            end = command.find("\n", i)
-            if end == -1:
-                break
-            i = end
-            continue
-        else:
-            out.append(char)
-        i += 1
-    return "".join(out)
-
-
 def _tokenize(command: str) -> list[str]:
-    command = command[:_MAX_COMMAND_CHARS].replace("\\\n", " ")
-    command = _strip_comments(_strip_heredocs(command))
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=_SHELL_PUNCT)
-    lexer.whitespace = " \t\r"
-    lexer.whitespace_split = True
-    lexer.commenters = ""
-    try:
-        return list(lexer)
-    except ValueError:
-        return re.findall(r"[^\s;&|()<>]+|[;&|()<>\n]+", command)
-
-
-def _is_break(token: str) -> bool:
-    # shlex groups adjacent punctuation ("&&\n", ";\n", "\n\n", ");"), so a
-    # token is a command separator if it is punctuation-only and contains one.
-    if not token or not set(token) <= set(_SHELL_PUNCT):
-        return False
-    return token in ("&", "&&") or any(char in token for char in ";|()\n")
+    return split_tokens(command[:_MAX_COMMAND_CHARS])[0]
 
 
 def _segments(command: str) -> list[list[str]]:
@@ -741,7 +667,7 @@ def _segments(command: str) -> list[list[str]]:
     segments: list[list[str]] = []
     current: list[str] = []
     for token in _tokenize(command):
-        if _is_break(token):
+        if is_break(token):
             if current:
                 segments.append(current)
             current = []
@@ -1151,7 +1077,7 @@ def _prepare_event(event: TraceEvent, cwd: str, *, resolve: bool) -> _Prepared:
         command = _event_command(event)
         effective = cwd
         for words in _segments(command) if command else []:
-            if not is_test and is_test_command(" ".join(words)):
+            if not is_test and is_test_argv(words):
                 is_test = True
             if not resolve:
                 continue
