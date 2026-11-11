@@ -207,4 +207,4 @@ agent-strace watch \
   SESSION_ID
 ```
 
-HTTP failures are logged to stderr but never interrupt the watch loop.
+HTTP failures are logged to stderr but never interrupt the watch loop. Each failure line, like the `[watch] Streaming events to` line at startup, names only the collector's `scheme://host[:port]`. Watch does not follow redirects, so pass the final URL, and it refuses a `--stream-to` URL that carries a user name or password. When watch stops, it waits up to 15 seconds for the last POST. See [Live OTLP streaming](production.md#live-otlp-streaming) for the startup checks, the stop wait, and `--stream-otlp`.

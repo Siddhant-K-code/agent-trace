@@ -2,23 +2,36 @@
 
 from __future__ import annotations
 
+import _thread
 import json
+import os
 import queue
+import re
+import signal
+import socket
 import tempfile
 import threading
 import time
 import unittest
 from contextlib import redirect_stderr
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from io import StringIO
 from pathlib import Path
-from typing import ClassVar
+from typing import Callable, ClassVar
 from unittest.mock import MagicMock, patch
 
+import agent_trace.watch as watch_module
+from agent_trace.cli import build_parser
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.otlp import session_to_otlp_genai
 from agent_trace.store import TraceStore
-from agent_trace.watch import EventStreamer, StreamConfig, WatcherConfig, watch_session
+from agent_trace.watch import (
+    EventStreamer,
+    StreamConfig,
+    WatcherConfig,
+    cmd_watch,
+    watch_session,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -537,7 +550,7 @@ class _ReceiverTestCase(unittest.TestCase):
 
     def _sent(self, posts: list[tuple[str, bytes]]) -> list[tuple[str, list[str], list[str]]]:
         for path, _ in posts:
-            self.assertTrue(path.endswith("/v1/traces"), path)
+            self.assertEqual(path, f"/collector/v1/traces?{_QUERY}")
         return [_summary(body) for _, body in posts]
 
     def _assert_quotes_nothing(self, stderr: str) -> None:
@@ -787,6 +800,554 @@ class TestWatchSessionOtlpStreamNonObjectData(_ReceiverTestCase):
             self._sent(list(_RecordingReceiver.received)),
             [("live-session", [_USER], [_BASH_SPAN])],
         )
+
+
+# ---------------------------------------------------------------------------
+# --stream-to: endpoint-only lines, the OTLP traces URL, redirects, the flush
+# interval and the stop() wait
+# ---------------------------------------------------------------------------
+
+# No stream or watch line may show these parts of a URL.
+_MARKERS = ("SECRET", "token")
+_NOT_FOLLOWED = " (redirects are not followed; give the final URL)"
+_NOTICE = (
+    r"\[stream\] Waiting up to \d+s more for the last events to be sent; "
+    r"press Ctrl-C to stop waiting\.\n"
+)
+_MODES = ((False, "POST"), (True, "OTLP POST"))
+_real_create_connection = socket.create_connection
+
+
+def _resolve_test_hosts(address, *args, **kwargs):
+    """Connect each host that ends in collector.test to this machine.
+
+    urllib passes URL user info on as part of the host, so the host can be
+    SECRET-USER:SECRET-PASS@collector.test.
+    """
+    host, port = address
+    if isinstance(host, str) and host.endswith("collector.test"):
+        address = ("127.0.0.1", port)
+    return _real_create_connection(address, *args, **kwargs)
+
+
+def _wait_for(predicate: Callable[[], bool], timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.01)
+    return True
+
+
+class _ScriptedServer(ThreadingHTTPServer):
+    """Answer each POST with the next scripted (status, hold) reply.
+
+    A reply waits *hold* seconds, or until ``release`` is set, before it is
+    sent. A 3xx reply points Location at a URL with markers in it, and every
+    GET gets 200.
+    """
+
+    daemon_threads = True
+    block_on_close = False
+
+    def __init__(self) -> None:
+        super().__init__(("127.0.0.1", 0), _ScriptedHandler)
+        self.lock = threading.Lock()
+        self.requests: list[tuple[str, str, bytes]] = []
+        self.replies: list[tuple[int, float]] = []
+        self.release = threading.Event()
+
+    def handle_error(self, request, client_address) -> None:
+        pass  # the client timed out and closed the connection
+
+    def script(self, *replies: tuple[int, float]) -> None:
+        with self.lock:
+            self.requests.clear()
+            self.replies[:] = replies
+        self.release.clear()
+
+    def methods(self) -> list[str]:
+        with self.lock:
+            return [method for method, _, _ in self.requests]
+
+    def posts(self) -> list[tuple[str, bytes]]:
+        with self.lock:
+            return [(path, body) for method, path, body in self.requests if method == "POST"]
+
+
+class _ScriptedHandler(BaseHTTPRequestHandler):
+    def do_POST(self) -> None:  # noqa: N802
+        server = self.server
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        with server.lock:
+            server.requests.append(("POST", self.path, body))
+            status, hold = server.replies.pop(0) if server.replies else (200, 0.0)
+        if hold:
+            server.release.wait(hold)
+        self.send_response(status)
+        if 300 <= status < 400:
+            self.send_header("Location", "/SECRET-LOCATION?token=SECRET-QUERY")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_GET(self) -> None:  # noqa: N802
+        with self.server.lock:
+            self.server.requests.append(("GET", self.path, b""))
+        self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *args: object) -> None:
+        pass
+
+
+class _ScriptedReceiverTestCase(unittest.TestCase):
+    """Run a scripted local receiver that hosts ending in collector.test reach."""
+
+    def setUp(self) -> None:
+        self.server = _ScriptedServer()
+        self.port = self.server.server_address[1]
+        threading.Thread(
+            target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True,
+        ).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.addCleanup(self.server.release.set)
+        for patcher in (
+            patch("socket.create_connection", new=_resolve_test_hosts),
+            patch.dict(os.environ, {"no_proxy": "*"}),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _marked_url(self, path: str = "/SECRET-PATH", *, port: object = None) -> str:
+        """Return a receiver URL with markers in its user info, path, query and fragment."""
+        port = self.port if port is None else port
+        return (
+            f"http://SECRET-USER:SECRET-PASS@collector.test:{port}{path}"
+            "?token=SECRET-QUERY#SECRET-FRAGMENT"
+        )
+
+    def _stream(self, url: str, *, otlp: bool, events: list[TraceEvent] | None = None,
+                batch_size: int = 100) -> str:
+        """Stream *events* to *url*, stop, and return what stderr got."""
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            streamer = EventStreamer(StreamConfig(
+                url=url, otlp=otlp, batch_size=batch_size, flush_interval=60.0,
+            ))
+            for event in _wrapped([]) if events is None else events:
+                streamer.enqueue(event)
+            streamer.stop()
+        self.assertFalse(streamer._thread.is_alive())
+        return stderr.getvalue()
+
+    def _assert_no_markers(self, text: str) -> None:
+        for marker in _MARKERS:
+            self.assertNotIn(marker, text)
+
+
+class TestStreamLinesNameOnlyTheEndpoint(_ScriptedReceiverTestCase):
+    """[stream] lines name only scheme://host[:port] and never quote an
+    exception message that can repeat the URL."""
+
+    def _assert_line(self, stderr: str, label: str, outcome: str) -> None:
+        self.assertEqual(
+            stderr, f"[stream] {label} to http://collector.test:{self.port} {outcome}\n",
+        )
+        self._assert_no_markers(stderr)
+
+    def test_error_and_unexpected_statuses(self) -> None:
+        cases = (
+            (500, "failed: HTTP Error 500: Internal Server Error"),
+            (204, "returned 204"),
+        )
+        for otlp, label in _MODES:
+            for status, outcome in cases:
+                with self.subTest(otlp=otlp, status=status):
+                    self.server.script((status, 0.0))
+                    self._assert_line(self._stream(self._marked_url(), otlp=otlp), label, outcome)
+                    self.assertEqual(self.server.methods(), ["POST"])
+
+    def test_redirects_are_reported_and_not_followed(self) -> None:
+        # The Location of each 3xx is a URL whose GET gets 200; urlopen would
+        # send the batch's POST there as a GET with no body.
+        reasons = {
+            301: "Moved Permanently", 302: "Found", 303: "See Other",
+            307: "Temporary Redirect", 308: "Permanent Redirect",
+        }
+        for otlp, label in _MODES:
+            for status, reason in reasons.items():
+                with self.subTest(otlp=otlp, status=status):
+                    self.server.script((status, 0.0))
+                    stderr = self._stream(self._marked_url(), otlp=otlp)
+                    self._assert_line(
+                        stderr, label, f"failed: HTTP Error {status}: {reason}{_NOT_FOLLOWED}",
+                    )
+                    self.assertEqual(self.server.methods(), ["POST"])
+
+    def test_timeout(self) -> None:
+        for otlp, label in _MODES:
+            with self.subTest(otlp=otlp), \
+                    patch.object(watch_module, "_STREAM_POST_TIMEOUT", 0.2):
+                self.server.script((200, 1.0))
+                self._assert_line(
+                    self._stream(self._marked_url(), otlp=otlp), label, "failed: TimeoutError",
+                )
+
+    def test_refused_connection(self) -> None:
+        # A port that was listening a moment ago and is now closed. A bound
+        # socket that never listens is not enough: macOS drops the SYN.
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen()
+            port = listener.getsockname()[1]
+        for otlp, label in _MODES:
+            with self.subTest(otlp=otlp):
+                stderr = self._stream(self._marked_url(port=port), otlp=otlp)
+                self.assertRegex(stderr, re.compile(
+                    rf"\A\[stream\] {label} to http://collector\.test:{port} failed: "
+                    r"[^\n]*refused[^\n]*\n\Z",
+                    re.IGNORECASE,
+                ))
+                self._assert_no_markers(stderr)
+
+    def test_space_or_control_character_in_the_path(self) -> None:
+        for otlp, label in _MODES:
+            for char in ("\x01", "\t", "\n", " ", "\x7f"):
+                with self.subTest(otlp=otlp, char=char):
+                    self.server.script()
+                    stderr = self._stream(self._marked_url(f"/SECRET{char}PATH"), otlp=otlp)
+                    self._assert_line(stderr, label, "failed: InvalidURL")
+                    self.assertEqual(self.server.methods(), [])
+
+    def test_unusable_url_gives_one_line_per_batch_and_the_worker_goes_on(self) -> None:
+        cases = (
+            ("notaurl/SECRET-PATH?token=SECRET-QUERY", "", "failed: ValueError"),
+            ("http://[::1/SECRET-PATH?token=SECRET-QUERY", "", "failed: ValueError"),
+            ("http:///SECRET-PATH?token=SECRET-QUERY", "", "failed: no host given"),
+            ("file:///SECRET-PATH?token=SECRET-QUERY", "", "failed: unknown url type: file"),
+            ("", "", "failed: ValueError"),
+            (self._marked_url(port="SECRET-PORT"), "", "failed: InvalidURL"),
+            (
+                "ftp://SECRET-USER:SECRET-PASS@collector.test/SECRET-PATH?token=SECRET-QUERY",
+                "ftp://collector.test",
+                "failed: unknown url type: ftp",
+            ),
+        )
+        for otlp, label in _MODES:
+            for url, endpoint, outcome in cases:
+                with self.subTest(otlp=otlp, url=url):
+                    target = f"{label} to {endpoint}" if endpoint else label
+                    stderr = StringIO()
+                    with redirect_stderr(stderr):
+                        streamer = EventStreamer(StreamConfig(
+                            url=url, otlp=otlp, batch_size=2, flush_interval=60.0,
+                        ))
+                        for event in _wrapped([]):
+                            streamer.enqueue(event)
+                        self.assertTrue(_wait_for(lambda: stderr.getvalue().endswith("\n")))
+                        self.assertTrue(streamer._thread.is_alive())
+                        for event in _wrapped([]):
+                            streamer.enqueue(event)
+                        streamer.stop()
+                    self.assertFalse(streamer._thread.is_alive())
+                    self.assertEqual(stderr.getvalue(), f"[stream] {target} {outcome}\n" * 2)
+                    self._assert_no_markers(stderr.getvalue())
+
+
+class TestStreamUrlPaths(_ScriptedReceiverTestCase):
+    def test_otlp_posts_to_v1_traces_under_the_base_path_and_keeps_the_query(self) -> None:
+        cases = {
+            "": "/v1/traces",
+            "/": "/v1/traces",
+            "/api/public/otel": "/api/public/otel/v1/traces",
+            "/api/public/otel//": "/api/public/otel/v1/traces",
+            "/collector?token=SECRET-QUERY": "/collector/v1/traces?token=SECRET-QUERY",
+            "/collector/?token=SECRET-QUERY": "/collector/v1/traces?token=SECRET-QUERY",
+            "?token=SECRET-QUERY": "/v1/traces?token=SECRET-QUERY",
+            "/v1/traces": "/v1/traces",
+            "/v1/traces/": "/v1/traces",
+            "/otel/v1/traces?token=SECRET-QUERY": "/otel/v1/traces?token=SECRET-QUERY",
+            "/collector#SECRET-FRAGMENT": "/collector/v1/traces",
+        }
+        for suffix, path in cases.items():
+            with self.subTest(suffix=suffix):
+                self.server.script()
+                stderr = self._stream(f"http://127.0.0.1:{self.port}{suffix}", otlp=True)
+                self.assertEqual(stderr, "")
+                self.assertEqual([sent for sent, _ in self.server.posts()], [path])
+
+    def test_ndjson_posts_to_the_url_unchanged(self) -> None:
+        cases = {
+            "": "/",
+            "/collector/?token=SECRET-QUERY": "/collector/?token=SECRET-QUERY",
+            "/api/public/otel": "/api/public/otel",
+            "/v1/traces": "/v1/traces",
+        }
+        for suffix, path in cases.items():
+            with self.subTest(suffix=suffix):
+                self.server.script()
+                stderr = self._stream(f"http://127.0.0.1:{self.port}{suffix}", otlp=False)
+                self.assertEqual(stderr, "")
+                self.assertEqual([sent for sent, _ in self.server.posts()], [path])
+
+
+class TestStreamFlushInterval(_ScriptedReceiverTestCase):
+    def test_interval_that_never_elapses_sends_on_batch_size_and_at_stop(self) -> None:
+        for interval in (1e12, float("inf"), float("nan")):
+            with self.subTest(interval=interval):
+                self.server.script()
+                stderr = StringIO()
+                with redirect_stderr(stderr):
+                    streamer = EventStreamer(StreamConfig(
+                        url=f"http://127.0.0.1:{self.port}/events",
+                        batch_size=3, flush_interval=interval,
+                    ))
+                    for index in range(4):
+                        streamer.enqueue(_make_event(ts=float(index)))
+                    self.assertTrue(_wait_for(lambda: len(self.server.posts()) == 1))
+                    time.sleep(0.3)
+                    self.assertTrue(streamer._thread.is_alive())
+                    self.assertEqual(len(self.server.posts()), 1)
+                    streamer.stop()
+                self.assertEqual(stderr.getvalue(), "")
+                self.assertEqual(
+                    [len(body.splitlines()) for _, body in self.server.posts()], [3, 1],
+                )
+
+
+class TestEventStreamerStopWait(_ScriptedReceiverTestCase):
+    """stop() waits longer than one POST may take, then counts what is left."""
+
+    def test_stop_waits_longer_than_one_post_may_take(self) -> None:
+        self.assertGreater(watch_module._STREAM_STOP_TIMEOUT, watch_module._STREAM_POST_TIMEOUT)
+
+    def test_slow_collector_within_the_wait_gets_the_last_batch(self) -> None:
+        url = f"http://127.0.0.1:{self.port}/SECRET-PATH?token=SECRET-QUERY"
+        for otlp, _ in _MODES:
+            with self.subTest(otlp=otlp), \
+                    patch.object(watch_module, "_STREAM_POST_TIMEOUT", 2.0), \
+                    patch.object(watch_module, "_STREAM_STOP_TIMEOUT", 3.0), \
+                    patch.object(watch_module, "_STREAM_STOP_NOTICE_AFTER", 0.2):
+                self.server.script((200, 0.6))
+                started = time.monotonic()
+                stderr = self._stream(url, otlp=otlp)
+                self.assertGreaterEqual(time.monotonic() - started, 0.5)
+                self.assertRegex(stderr, re.compile(rf"\A{_NOTICE}\Z"))
+                self.assertEqual(len(self.server.posts()), 1)
+
+    def test_collector_slower_than_the_wait_gives_one_count_line(self) -> None:
+        # The first batch fails with a line, so its events are not counted
+        # again. The second batch is held by the collector, and one more event
+        # waits in the queue: 3 events in NDJSON mode. In OTLP mode the second
+        # batch also leaves one event out with a line, and the other two are
+        # held: 2 held plus 1 queued.
+        url = f"http://127.0.0.1:{self.port}/SECRET-PATH?token=SECRET-QUERY"
+        prompts = [_event("user_prompt", {"prompt": "hi"}, f"p{index}") for index in range(4)]
+        cases = (
+            (False, 2, prompts[:2], prompts[2:], ""),
+            (
+                True,
+                3,
+                prompts[:3],
+                [
+                    prompts[3],
+                    _event("tool_call", {"tool_name": "Bash"}, "c1", ts=2.0),
+                    _event("tool_result", ["SECRET-ARRAY"], "c2", parent_id="c1", ts=3.0),
+                ],
+                _left_out("tool_result", "an array"),
+            ),
+        )
+        for otlp, batch_size, failed, held, left_out in cases:
+            label = "OTLP POST" if otlp else "POST"
+            with self.subTest(otlp=otlp), \
+                    patch.object(watch_module, "_STREAM_POST_TIMEOUT", 60.0), \
+                    patch.object(watch_module, "_STREAM_STOP_TIMEOUT", 0.5), \
+                    patch.object(watch_module, "_STREAM_STOP_NOTICE_AFTER", 0.2):
+                self.server.script((500, 0.0), (200, 30.0))
+                stderr = StringIO()
+                with redirect_stderr(stderr):
+                    streamer = EventStreamer(StreamConfig(
+                        url=url, otlp=otlp, batch_size=batch_size, flush_interval=60.0,
+                    ))
+                    for event in failed + held:
+                        streamer.enqueue(event)
+                    self.assertTrue(_wait_for(lambda: len(self.server.posts()) == 2))
+                    streamer.enqueue(_event("assistant_response", {"text": "done"}, "a1", ts=9.0))
+                    streamer.stop()
+                    stopped = stderr.getvalue()
+                    self.server.release.set()
+                    streamer._thread.join(5)
+                self.assertFalse(streamer._thread.is_alive())
+                self.assertRegex(stopped, re.compile(
+                    r"\A"
+                    + re.escape(
+                        f"[stream] {label} to http://127.0.0.1:{self.port} failed: "
+                        "HTTP Error 500: Internal Server Error\n" + left_out
+                    )
+                    + _NOTICE
+                    + re.escape("[stream] Stopped waiting; 3 events were not confirmed sent.\n")
+                    + r"\Z"
+                ))
+                self.assertEqual(stderr.getvalue(), stopped)
+                self._assert_no_markers(stopped)
+
+
+class TestWatchCtrlCWhileStreamStops(_ScriptedReceiverTestCase):
+    """Ctrl-C while watch waits for the last POST ends the wait cleanly."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+        self.addCleanup(signal.signal, signal.SIGINT, previous)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.trace_dir = tmp.name
+        TraceStore(tmp.name, redact=False).create_session(
+            SessionMeta(session_id="ctrl-c-session", started_at=1.0)
+        )
+
+    def _watch(self, events: list[TraceEvent], *, interrupted: bool):
+        """Run cmd_watch over *events*; press Ctrl-C once stop() says it waits.
+
+        With *interrupted*, the tail raises KeyboardInterrupt after the
+        events, like a first Ctrl-C.
+        """
+        def tail(_path, poll_interval=0.5):
+            yield from events
+            if interrupted:
+                raise KeyboardInterrupt
+
+        streamers: list[EventStreamer] = []
+
+        def make_streamer(config: StreamConfig) -> EventStreamer:
+            streamers.append(EventStreamer(config))
+            return streamers[-1]
+
+        out, stderr = StringIO(), StringIO()
+        pressed = threading.Event()
+
+        def press_ctrl_c() -> None:
+            if _wait_for(lambda: "press Ctrl-C to stop waiting" in stderr.getvalue(), 10.0):
+                pressed.set()
+                _thread.interrupt_main()
+
+        args = build_parser().parse_args([
+            "--trace-dir", self.trace_dir, "watch", "ctrl-c-session",
+            "--stream-to", f"http://127.0.0.1:{self.port}/SECRET-PATH?token=SECRET-QUERY",
+            "--stream-batch-size", "1",
+        ])
+        self.server.script((200, 30.0))
+        presser = threading.Thread(target=press_ctrl_c, daemon=True)
+        started = time.monotonic()
+        with patch.object(watch_module, "_STREAM_STOP_NOTICE_AFTER", 0.1), \
+                patch.object(watch_module, "_STREAM_STOP_TIMEOUT", 30.0), \
+                patch.object(watch_module, "_STREAM_POST_TIMEOUT", 60.0), \
+                patch("agent_trace.watch._tail_events", side_effect=tail), \
+                patch("agent_trace.watch.EventStreamer", side_effect=make_streamer), \
+                patch("agent_trace.watch.watch_session",
+                      side_effect=lambda *a, **kw: watch_session(*a, out=out, **kw)), \
+                patch("agent_trace.watch.clear_heartbeat") as clear_heartbeat_mock, \
+                redirect_stderr(stderr):
+            presser.start()
+            try:
+                status = cmd_watch(args)
+            except KeyboardInterrupt:
+                self.fail("Ctrl-C while stop() waited escaped cmd_watch")
+            finally:
+                presser.join(15)
+                self.server.release.set()
+                for streamer in streamers:
+                    streamer._thread.join(5)
+        self.assertTrue(pressed.is_set())
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual(len(streamers), 1)
+        self.assertFalse(streamers[0]._thread.is_alive())
+        for text in (out.getvalue(), stderr.getvalue()):
+            self.assertNotIn("Traceback", text)
+            self._assert_no_markers(text)
+        self.assertIn(
+            f"[watch] Streaming events to http://127.0.0.1:{self.port}\n", out.getvalue(),
+        )
+        return status, out.getvalue(), stderr.getvalue(), clear_heartbeat_mock
+
+    def _tool_call(self) -> TraceEvent:
+        return TraceEvent(
+            event_type=EventType.TOOL_CALL, timestamp=2.0, session_id="ctrl-c-session",
+            data={"tool_name": "Bash", "arguments": {"command": "ls"}},
+        )
+
+    def test_second_ctrl_c_after_a_first_one(self) -> None:
+        status, out, stderr, clear_heartbeat_mock = self._watch(
+            [self._tool_call()], interrupted=True,
+        )
+        self.assertEqual(status, 0)
+        self.assertIn("\n[watch] Stopped.\n", out)
+        self.assertRegex(stderr, re.compile(
+            rf"\A{_NOTICE}"
+            + re.escape("[stream] Stopped waiting; 1 event was not confirmed sent.\n")
+            + r"\Z"
+        ))
+        clear_heartbeat_mock.assert_not_called()
+
+    def test_ctrl_c_after_the_session_ended_still_clears_the_heartbeat(self) -> None:
+        end = TraceEvent(
+            event_type=EventType.SESSION_END, timestamp=3.0, session_id="ctrl-c-session",
+            data={"exit_code": 0},
+        )
+        status, out, stderr, clear_heartbeat_mock = self._watch(
+            [self._tool_call(), end], interrupted=False,
+        )
+        self.assertEqual(status, 0)
+        self.assertIn("[watch] Session ended (2 events", out)
+        self.assertRegex(stderr, re.compile(
+            rf"\A{_NOTICE}"
+            + re.escape("[stream] Stopped waiting; 2 events were not confirmed sent.\n")
+            + r"\Z"
+        ))
+        self.assertEqual(clear_heartbeat_mock.call_count, 2)
+
+
+class TestWatchStreamingStartupLine(unittest.TestCase):
+    """watch's startup line names only scheme://host[:port] of --stream-to."""
+
+    def test_startup_line_names_only_the_endpoint(self) -> None:
+        cases = {
+            "http://SECRET-USER:SECRET-PASS@127.0.0.1:4318/SECRET-PATH"
+            "?token=SECRET-QUERY#SECRET-FRAGMENT":
+                "[watch] Streaming events to http://127.0.0.1:4318",
+            "https://collector.example/SECRET-PATH?token=SECRET-QUERY":
+                "[watch] Streaming events to https://collector.example",
+            "http://[::1]:4318/SECRET-PATH?token=SECRET-QUERY":
+                "[watch] Streaming events to http://[::1]:4318",
+            "http:///SECRET-PATH?token=SECRET-QUERY": "[watch] Streaming events",
+            "notaurl/SECRET-PATH?token=SECRET-QUERY": "[watch] Streaming events",
+            "http://collector.example:SECRET-PORT/SECRET-PATH?token=SECRET-QUERY":
+                "[watch] Streaming events",
+        }
+        for url, line in cases.items():
+            with self.subTest(url=url), tempfile.TemporaryDirectory() as tmp:
+                store = TraceStore(tmp, redact=False)
+                store.create_session(SessionMeta(session_id="startup-line", started_at=1.0))
+                end = TraceEvent(
+                    event_type=EventType.SESSION_END, timestamp=2.0,
+                    session_id="startup-line", data={"exit_code": 0},
+                )
+                out = StringIO()
+                with patch("agent_trace.watch.EventStreamer"), \
+                        patch("agent_trace.watch._tail_events", return_value=iter([end])):
+                    watch_session(
+                        store, "startup-line", WatcherConfig(), out=out,
+                        stream_config=StreamConfig(url=url),
+                    )
+                self.assertEqual(
+                    [text for text in out.getvalue().splitlines()
+                     if text.startswith("[watch] Streaming")],
+                    [line],
+                )
+                for marker in _MARKERS:
+                    self.assertNotIn(marker, out.getvalue())
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ import tempfile
 import time
 import unittest
 from collections import deque
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -423,6 +424,147 @@ class TestEventKey(unittest.TestCase):
         event = _make_event(EventType.USER_PROMPT, 0.0, prompt="hi")
         key = _event_key(event)
         self.assertEqual(key, "user_prompt")
+
+
+# ---------------------------------------------------------------------------
+# --stream-to and --stream-flush-interval checks
+# ---------------------------------------------------------------------------
+
+class TestWatchStreamFlagChecks(unittest.TestCase):
+    """cmd_watch refuses a bad --stream-to or --stream-flush-interval with one
+    line and status 1 before it looks up the session or writes anything."""
+
+    _URL = "http://127.0.0.1:9/SECRET-PATH?token=SECRET-QUERY"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.trace_dir = self.root / "traces"
+        store = TraceStore(self.trace_dir, redact=False)
+        store.create_session(SessionMeta(session_id="stream-flags", started_at=1.0))
+        store.append_event(
+            "stream-flags",
+            _make_event(EventType.TOOL_CALL, 2.0, session_id="stream-flags", tool_name="Bash"),
+        )
+        # A writable TraceStore writes this file back, so a refusal that
+        # opened the store first changes the snapshot.
+        (self.trace_dir / ".gitignore").unlink(missing_ok=True)
+        self.config = self.root / "watch.json"
+        self.config.write_text("{}")
+        env = patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("AGENT_STRACE_TENANT_ID", None)
+
+    def _snapshot(self):
+        return {
+            path.relative_to(self.root).as_posix(): path.read_bytes() if path.is_file() else None
+            for path in sorted(self.root.rglob("*"))
+        }
+
+    def _run(self, *flags, session="stream-flags", config=False, tenant=False):
+        argv = ["--trace-dir", str(self.trace_dir), "watch", session, *flags]
+        if config:
+            argv += ["--config", str(self.config)]
+        if tenant:
+            argv += ["--tenant-id", "acme"]
+        args = build_parser().parse_args(argv)
+        out, err = io.StringIO(), io.StringIO()
+        with patch("agent_trace.watch.watch_session") as watch_session_mock, \
+                redirect_stdout(out), redirect_stderr(err):
+            status = cmd_watch(args)
+        return status, out.getvalue(), err.getvalue(), watch_session_mock
+
+    def _assert_refused(self, flags, line):
+        for session in ("stream-flags", "missing-session"):
+            for config in (False, True):
+                for tenant in (False, True):
+                    with self.subTest(flags=flags, session=session, config=config, tenant=tenant):
+                        before = self._snapshot()
+                        status, out, err, watch_session_mock = self._run(
+                            *flags, session=session, config=config, tenant=tenant,
+                        )
+                        self.assertEqual((status, out, err), (1, "", line))
+                        for marker in ("SECRET", "token"):
+                            self.assertNotIn(marker, err)
+                        watch_session_mock.assert_not_called()
+                        self.assertEqual(self._snapshot(), before)
+        with self.subTest(flags=flags, check="events stay untagged"):
+            store = TraceStore(self.trace_dir, read_only=True)
+            self.assertEqual(store.load_meta("stream-flags").tenant_id, "")
+            self.assertEqual(
+                [event.tenant_id for event in store.load_events("stream-flags")], [""],
+            )
+
+    def test_bad_stream_to_values_are_refused(self):
+        controls = (" ", "\t", "\n", "\r", "\x00", "\x1f", "\x7f")
+        reasons = {
+            "it must start with http:// or https://": (
+                "",
+                "notaurl/SECRET-PATH?token=SECRET-QUERY",
+                "ftp//SECRET-HOST/SECRET-PATH?token=SECRET-QUERY",
+                "ftp://SECRET-HOST/SECRET-PATH?token=SECRET-QUERY",
+                "file:///SECRET-PATH?token=SECRET-QUERY",
+            ),
+            "it is not a valid URL": ("http://[::1/SECRET-PATH?token=SECRET-QUERY",),
+            "it has no host": (
+                "http:///SECRET-PATH?token=SECRET-QUERY",
+                "https://?token=SECRET-QUERY",
+                "http://:4318/SECRET-PATH?token=SECRET-QUERY",
+            ),
+            "it must not contain a user name or password": (
+                "http://SECRET-USER:SECRET-PASS@SECRET-HOST/SECRET-PATH?token=SECRET-QUERY",
+                "http://SECRET-USER@SECRET-HOST/SECRET-PATH?token=SECRET-QUERY",
+            ),
+            "its port must be a number from 0 to 65535": (
+                "http://SECRET-HOST:99999/SECRET-PATH?token=SECRET-QUERY",
+                "http://SECRET-HOST:SECRET-PORT/SECRET-PATH?token=SECRET-QUERY",
+            ),
+            "it must not contain spaces or control characters": tuple(
+                f"http://SECRET-HOST/SECRET{char}PATH?token=SECRET-QUERY" for char in controls
+            ),
+        }
+        for reason, urls in reasons.items():
+            for url in urls:
+                self._assert_refused(
+                    [f"--stream-to={url}"], f"[watch] invalid --stream-to value: {reason}\n",
+                )
+
+    def test_bad_stream_flush_intervals_are_refused(self):
+        cases = {
+            "nan": "it must be a finite number of seconds",
+            "inf": "it must be a finite number of seconds",
+            "-inf": "it must be a finite number of seconds",
+            "1e999": "it must be a finite number of seconds",
+            "-1": "it must not be negative",
+            "-0.5": "it must not be negative",
+        }
+        for value, reason in cases.items():
+            self._assert_refused(
+                [f"--stream-to={self._URL}", f"--stream-flush-interval={value}"],
+                f"[watch] invalid --stream-flush-interval value: {reason}\n",
+            )
+
+    def test_good_stream_values_are_accepted(self):
+        cases = (
+            ("https://collector.example/api/public/otel?token=x", "0"),
+            ("http://[::1]:4318", "1e12"),
+            ("HTTP://collector.example", "2"),
+            (self._URL, "0.25"),
+        )
+        for url, interval in cases:
+            for config in (False, True):
+                with self.subTest(url=url, interval=interval, config=config):
+                    status, _, err, watch_session_mock = self._run(
+                        f"--stream-to={url}", f"--stream-flush-interval={interval}",
+                        "--stream-otlp", config=config,
+                    )
+                    self.assertEqual((status, err), (0, ""))
+                    stream_config = watch_session_mock.call_args.kwargs["stream_config"]
+                    self.assertEqual(stream_config.url, url)
+                    self.assertEqual(stream_config.flush_interval, float(interval))
+                    self.assertTrue(stream_config.otlp)
 
 
 if __name__ == "__main__":

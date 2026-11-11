@@ -462,8 +462,10 @@ Live session monitor with kill-switch rules.
 | `--checkpoint-at RATIO` | Context fill ratio that triggers a checkpoint (default: `0.80`) |
 | `--policy FILE` | Scope policy file to enforce (default: `.agent-scope.json`) |
 | `--rules FILE_OR_BUILTINS` | JSON/YAML rules file, or comma-separated built-ins such as `mcp-poisoning,loop:3/10,budget:5,timeout:30m,cognitive-debt:0.8` |
-| `--stream-to URL` | Stream events to HTTP endpoint in real-time |
-| `--stream-otlp` | With `--stream-to`, POST OTLP/HTTP JSON spans to URL + `/v1/traces` instead of NDJSON to URL. Pass the collector base URL, such as `http://localhost:4318` |
+| `--stream-to URL` | POST events as NDJSON to this `http://` or `https://` URL while watching. Watch refuses at startup, with one line and exit 1, a URL with no host, a bad port, spaces or control characters, or a user name or password. A failed POST prints one line that names only the URL's `scheme://host[:port]`, and watch goes on. Redirects are not followed, so pass the final URL. When watch stops, it waits up to 15 seconds for the last POST; if the wait runs out or Ctrl-C stops it, one line gives the number of events not confirmed sent |
+| `--stream-otlp` | With `--stream-to`, POST OTLP/HTTP JSON spans instead of NDJSON. Trailing slashes are dropped from the URL path and `/v1/traces` is appended unless the path already ends with it; the query is kept. Pass the collector base URL, such as `http://localhost:4318`. See [Live OTLP streaming](production.md#live-otlp-streaming) |
+| `--stream-batch-size N` | With `--stream-to`, send once N events are waiting (default: `10`) |
+| `--stream-flush-interval S` | With `--stream-to`, send waiting events once S seconds have passed since the last POST (default: `2.0`). `0` sends each event at once. A negative, infinite or NaN value is refused at startup |
 | `--dry-run` | Evaluate rules without acting |
 | `--tenant-id ID` | Tag the session and all events; defaults to `AGENT_STRACE_TENANT_ID` |
 
