@@ -222,6 +222,8 @@ def compute_sessions_to_delete(
     if config.max_size_mb is not None:
         max_bytes = config.max_size_mb * 1024 * 1024
         total = _store_size_bytes(store)
+        # Age/count deletions already free this space, including checkpoints.
+        total -= sum(_retained_session_size_bytes(store, sid) for sid in to_delete)
         if total > max_bytes:
             surviving = [m for m in sessions_oldest_first if m.session_id not in to_delete]
             for meta in surviving:

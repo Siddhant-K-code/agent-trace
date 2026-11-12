@@ -185,6 +185,47 @@ class TestComputeSessionsToDelete(unittest.TestCase):
         self.assertIn(very_old.session_id, result)
         self.assertIn(old.session_id, result)
 
+    def test_size_budget_accounts_for_age_and_count_deletions(self):
+        policies = (
+            {"max_age_days": 30},
+            {"max_sessions": 1},
+            {"max_age_days": 30, "max_sessions": 1},
+        )
+        for policy in policies:
+            with self.subTest(policy=policy), tempfile.TemporaryDirectory() as tmpdir:
+                store = TraceStore(tmpdir)
+                old = _add_session(store, age_days=60)
+                recent = _add_session(store, age_days=1)
+                checkpoint = store.checkpoint_path(old.session_id)
+                checkpoint.parent.mkdir(parents=True, exist_ok=True)
+                checkpoint.write_text("old recovery context" * 100)
+                remaining_bytes = _session_size_bytes(store._session_dir(recent.session_id))
+                config = RetentionConfig(
+                    **policy, max_size_mb=remaining_bytes / (1024 * 1024)
+                )
+
+                self.assertEqual(compute_sessions_to_delete(store, config), [old.session_id])
+                status = get_retention_status(store, config)
+                self.assertEqual(status.sessions_to_delete, [old.session_id])
+                self.assertEqual(status.total_size_bytes - status.bytes_to_free, remaining_bytes)
+                self.assertTrue(store._session_dir(recent.session_id).exists())
+
+    def test_size_policy_only_deletes_additional_sessions_until_budget_is_met(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = TraceStore(tmpdir)
+            old = _add_session(store, age_days=60)
+            middle = _add_session(store, age_days=5)
+            recent = _add_session(store, age_days=1)
+            remaining_bytes = _session_size_bytes(store._session_dir(recent.session_id))
+            config = RetentionConfig(
+                max_age_days=30, max_size_mb=remaining_bytes / (1024 * 1024)
+            )
+
+            self.assertEqual(
+                compute_sessions_to_delete(store, config),
+                [old.session_id, middle.session_id],
+            )
+
     def test_no_duplicates_in_result(self):
         store, _ = _make_store()
         old = _add_session(store, age_days=60)
