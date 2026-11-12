@@ -356,12 +356,18 @@ agent-strace export --metrics --backend otlp --since 30d
 
 | Metric | Description |
 |---|---|
-| `agent_strace.session.cost_usd` | Estimated cost per session |
+| `agent_strace.session.cost_usd` | Session cost, as `agent-strace cost` reports it with its default model |
 | `agent_strace.session.error_rate` | Errors / tool calls |
 | `agent_strace.session.retry_rate` | Consecutive same-tool retries / tool calls |
 | `agent_strace.session.blast_radius` | Distinct files written |
 | `agent_strace.session.duration_s` | Wall-clock session duration |
 | `agent_strace.eval.score` | Judge score per session |
+
+`agent_strace.session.cost_usd` prices recorded token usage, cache reads and
+writes included, at the model's rates. Earlier versions priced each session's
+token count at a flat $3 per million. A session whose events cannot be read, or
+that `agent-strace cost` refuses, has no `cost_usd` data point; its other
+metrics are still exported.
 
 ---
 

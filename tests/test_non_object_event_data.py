@@ -557,7 +557,7 @@ BAD_SESSION_REFUSALS = [
     _row("replay", BAD, "--expand-subagents", event_type="subagent_start", named=True),
     _row("replay", BAD, "--filter", "tool_call,error", event_type="error"),
     _row("replay", BAD, "--limit", "5", event_type="llm_response"),
-    _row("sample", "--strategy", "worst", "--n", "2", event_type="llm_response", named=True),
+    _row("sample", "--strategy", "worst", "--n", "2", event_type="file_write", named=True),
     _row("sample", "--strategy", "diverse", "--n", "2", event_type="file_write", named=True),
     _row("sample", "--strategy", "random", "--n", "2", "--seed", "1",
          event_type="tool_call", named=True),

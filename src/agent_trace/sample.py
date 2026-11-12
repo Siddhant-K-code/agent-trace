@@ -21,7 +21,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TextIO
 
-from .event_data import number_field, object_field, require_object_event_data, str_field
+from .cost import session_cost
+from .event_data import object_field, require_object_event_data, str_field
 from .models import EventType, SessionMeta, TraceEvent
 from .store import TraceStore
 
@@ -37,30 +38,17 @@ class SessionScore:
     error_rate: float       # errors / max(tool_calls, 1)
     retry_rate: float       # retries / max(tool_calls, 1)
     blast_radius: int       # distinct files written
-    cost_estimate: float    # estimated cost in dollars
+    # Same as `agent-strace cost`; None when that command refuses the session.
+    cost_estimate: float | None
     duration_s: float
     tool_calls: int
     # Composite "worst" score (higher = worse session)
     worst_score: float = 0.0
 
 
-def _estimate_cost(events: list[TraceEvent]) -> float:
-    """Rough cost estimate: $3/M input tokens, $15/M output tokens (Sonnet-class)."""
-    total = 0.0
-    for ev in events:
-        if ev.event_type == EventType.LLM_RESPONSE:
-            tokens = number_field(ev.data, "total_tokens", 0) or 0
-            # Assume 80/20 input/output split
-            inp = int(tokens * 0.8)
-            out = int(tokens * 0.2)
-            total += (inp / 1_000_000) * 3.0 + (out / 1_000_000) * 15.0
-    return total
-
-
-# _score_session reads the data of every event of these types.
-SCORE_DATA_EVENT_TYPES = frozenset({
-    EventType.TOOL_CALL, EventType.FILE_WRITE, EventType.LLM_RESPONSE,
-})
+# _score_session reads the data of every event of these types. Its cost is
+# checked by session_cost, which reports a session it refuses as unpriced.
+SCORE_DATA_EVENT_TYPES = frozenset({EventType.TOOL_CALL, EventType.FILE_WRITE})
 
 
 def _score_session(
@@ -103,17 +91,21 @@ def _score_session(
     error_rate = errors / denom
     retry_rate = retries / denom
     blast_radius = len(files_written)
-    cost = _estimate_cost(events)
+    try:
+        cost: float | None = session_cost(events, session_id=session_id)
+    except ValueError:
+        cost = None
     duration_s = (events[-1].timestamp - events[0].timestamp) if len(events) >= 2 else 0.0
 
     # Composite worst score: weighted sum of normalised dimensions
     # Weights chosen so a session with many errors + high retry + high cost
-    # ranks clearly above a clean session.
+    # ranks clearly above a clean session. A session with no cost has no
+    # cost term.
     worst_score = (
         error_rate * 0.35
         + retry_rate * 0.30
         + min(blast_radius / 20.0, 1.0) * 0.15
-        + min(cost / 5.0, 1.0) * 0.20
+        + (min(cost / 5.0, 1.0) * 0.20 if cost is not None else 0.0)
     )
 
     return SessionScore(
@@ -144,23 +136,26 @@ def _sample_diverse(scores: list[SessionScore], n: int) -> list[SessionScore]:
     Uses a greedy max-min distance approach: start with the worst session,
     then repeatedly pick the session most different from those already chosen.
     Distance is Euclidean in the (error_rate, retry_rate, blast_radius_norm,
-    cost_norm) feature space.
+    cost_norm) feature space. A session with no cost is compared on the
+    other dimensions only.
     """
     if not scores or n <= 0:
         return []
     if len(scores) <= n:
         return list(scores)
 
-    def _features(s: SessionScore) -> tuple[float, ...]:
+    def _features(s: SessionScore) -> tuple[float | None, ...]:
         return (
             s.error_rate,
             s.retry_rate,
             min(s.blast_radius / 20.0, 1.0),
-            min(s.cost_estimate / 5.0, 1.0),
+            None if s.cost_estimate is None else min(s.cost_estimate / 5.0, 1.0),
         )
 
     def _dist(a: tuple, b: tuple) -> float:
-        return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
+        return sum(
+            (x - y) ** 2 for x, y in zip(a, b) if x is not None and y is not None
+        ) ** 0.5
 
     remaining = list(scores)
     # Seed with the worst session
@@ -221,7 +216,9 @@ def _session_to_jsonl_record(
             "error_rate": round(score.error_rate, 4),
             "retry_rate": round(score.retry_rate, 4),
             "blast_radius": score.blast_radius,
-            "cost_estimate": round(score.cost_estimate, 6),
+            "cost_estimate": (
+                None if score.cost_estimate is None else round(score.cost_estimate, 6)
+            ),
             "worst_score": round(score.worst_score, 4),
         },
         "events": [json.loads(ev.to_json()) for ev in events],

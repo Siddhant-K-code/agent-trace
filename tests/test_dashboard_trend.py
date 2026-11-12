@@ -19,8 +19,14 @@ from agent_trace.dashboard import (
     render_html_trend,
     save_annotation,
 )
+from agent_trace.cost import estimate_cost
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
+
+try:
+    from test_cost import _codex_events
+except ImportError:  # pragma: no cover - package-style test discovery
+    from tests.test_cost import _codex_events
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +317,70 @@ class TestRenderHtmlTrend(unittest.TestCase):
     def test_self_contained_no_link_tags(self):
         html_out = render_html_trend(self._make_report())
         self.assertNotIn('<link rel="stylesheet"', html_out)
+
+
+class TestTrendCost(unittest.TestCase):
+    """Trend costs are the `agent-strace cost` totals."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.store = _make_store(tmp.name)
+        self.now = time.time()
+
+    def _codex(self, sid: str, offset: float, prompt_data=None) -> None:
+        events = _codex_events(sid)
+        if prompt_data is not None:
+            events[0].data = prompt_data
+        # meta.total_tokens is 1000, which the old flat-rate estimate priced.
+        _add_session(self.store, sid, events, started_at=self.now - offset, tool_calls=1)
+
+    def test_cost_matches_cost_command(self):
+        self._codex("a", 200)
+        [point] = build_trend_report(self.store).points
+        self.assertEqual(point.cost, estimate_cost(self.store, "a").total_cost)
+        self.assertNotAlmostEqual(point.cost, 1000 / 1_000_000 * 3.0)
+        page = render_html_trend(build_trend_report(self.store))
+        self.assertIn(f"<td>${point.cost:.4f}</td>", page)
+        self.assertNotIn("not priced", page)
+
+    def test_unpriceable_session_is_not_priced_at_zero(self):
+        self._codex("a", 300)
+        self._codex("b", 200, prompt_data=["list the files"])
+        self._codex("c", 100)
+        report = build_trend_report(self.store)
+        priced, unpriced, _ = report.points
+        self.assertIsNone(unpriced.cost)
+        self.assertEqual(priced.cost, estimate_cost(self.store, "a").total_cost)
+        # Error and retry rates still come from the events.
+        self.assertEqual((unpriced.error_rate, unpriced.retry_rate),
+                         (priced.error_rate, priced.retry_rate))
+
+        buf = io.StringIO()
+        format_trend_terminal(report, out=buf)
+        text = buf.getvalue()
+        self.assertIn(f"  {'Sessions not priced':<30} 1\n", text)
+        self.assertIn(f"{priced.cost:.3f} → {priced.cost:.3f}", text)
+
+        page = render_html_trend(report)
+        self.assertIn("<td>n/a</td>", page)
+        self.assertIn('<span class="badge">1 not priced</span>', page)
+        self.assertNotIn("$0.0000", page)
+
+    def test_unreadable_events_are_not_priced(self):
+        self._codex("a", 200)
+        with open(self.store.base_dir / "a" / "events.ndjson", "a") as f:
+            f.write("not json\n")
+        [point] = build_trend_report(self.store).points
+        self.assertIsNone(point.cost)
+
+    def test_all_priced_terminal_has_no_unpriced_line(self):
+        self._codex("a", 300)
+        self._codex("b", 200)
+        buf = io.StringIO()
+        format_trend_terminal(build_trend_report(self.store), out=buf)
+        self.assertIn("Avg cost/session ($)", buf.getvalue())
+        self.assertNotIn("not priced", buf.getvalue())
 
 
 if __name__ == "__main__":

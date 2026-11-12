@@ -91,7 +91,11 @@ def _session_passes_filter(
       wide-blast          — distinct files written > 10
       long-duration:Ns    — session duration > N seconds
       low-eval-score:N    — eval.json overall score < N
+
+    cost-above uses the `agent-strace cost` total, so a session that command
+    refuses never matches.
     """
+    from ..cost import session_cost
     from ..event_data import str_field
     from ..models import EventType
 
@@ -129,7 +133,11 @@ def _session_passes_filter(
             threshold_dollars = float(spec.split(":", 1)[1])
         except ValueError:
             return False
-        cost = meta.total_tokens / 1_000_000 * 3.0
+        try:
+            cost = session_cost(events, session_id=session_id)
+        except ValueError:
+            # `agent-strace cost` refuses this session, so it has no cost.
+            return False
         return cost > threshold_dollars
 
     if spec == "wide-blast":
