@@ -156,7 +156,7 @@ class TestOpenAIChat(SDKCase):
         module = modules["openai.resources.chat.completions"]
         return module.Completions(), module.AsyncCompletions()
 
-    def test_sync_call_records_the_same_events(self):
+    def test_sync_call_records_the_same_fields(self):
         sync, _ = self.instrument_chat(lambda kw: _completion(
             ns(prompt_tokens=10, completion_tokens=5, prompt_tokens_details=None)))
         sync.create(model="gpt-4o", messages=HI, max_tokens=100)
@@ -164,7 +164,7 @@ class TestOpenAIChat(SDKCase):
         self.assertEqual(request.data, {"model": "gpt-4o", "max_tokens": 100, "message_count": 1})
         self.assertResponse(response, {"model": "gpt-4o", "input_tokens": 10,
                                        "output_tokens": 5, "finish_reason": "stop"})
-        self.assertFalse(response.parent_id)
+        self.assertLinked(request, response)
 
     def test_sync_call_records_cache_counts(self):
         sync, _ = self.instrument_chat(lambda kw: _completion(CHAT_USAGE))
@@ -239,7 +239,7 @@ class TestOpenAIChat(SDKCase):
             "cached_input_tokens": 800, "cache_write_input_tokens": 100,
             "finish_reason": "stop",
         })
-        self.assertFalse(response.parent_id)
+        self.assertLinked(request, response)
 
     def test_raw_response_never_parsed_records_only_the_request(self):
         sync, _ = self.instrument_chat(lambda kw: _completion(CHAT_USAGE))
@@ -547,7 +547,7 @@ class TestAnthropicMessages(SDKCase):
         module = modules["anthropic.resources.messages"]
         return module.Messages(), module.AsyncMessages()
 
-    def test_sync_call_records_the_same_events(self):
+    def test_sync_call_records_the_same_fields(self):
         sync, _ = self.instrument_messages(
             lambda kw: _message(ns(input_tokens=10, output_tokens=5)))
         sync.create(model="claude-sonnet-4-5", messages=HI, max_tokens=1024)
@@ -556,7 +556,7 @@ class TestAnthropicMessages(SDKCase):
                                         "message_count": 1})
         self.assertResponse(response, {"model": "claude-sonnet-4-5", "input_tokens": 10,
                                        "output_tokens": 5, "stop_reason": "end_turn"})
-        self.assertFalse(response.parent_id)
+        self.assertLinked(request, response)
 
     def test_async_call(self):
         _, client = self.instrument_messages(lambda kw: _message(START_USAGE, "max_tokens"))
@@ -629,10 +629,10 @@ class TestAnthropicMessages(SDKCase):
         self.assertIsInstance(raw.parse(to=str), str)
         self.assertEqual(len(self.events()), 1)
         raw.parse()
-        _, response = self.pair()
+        request, response = self.pair()
         self.assertResponse(response, {"model": "claude-sonnet-4-5", "input_tokens": 10,
                                        "output_tokens": 5, "stop_reason": "end_turn"})
-        self.assertFalse(response.parent_id)
+        self.assertLinked(request, response)
 
     def test_async_raw_stream_is_recorded_at_its_end(self):
         """LangChain's ChatAnthropic streams through ``with_raw_response``."""
@@ -684,7 +684,7 @@ class TestLiteLLM(SDKCase):
         self.instrument("litellm", modules)
         return modules["litellm"]
 
-    def test_call_without_cache_records_the_same_events(self):
+    def test_call_without_cache_records_the_same_fields(self):
         litellm = self.instrument_litellm(lambda kw: _litellm_response(
             ns(prompt_tokens=10, completion_tokens=5, prompt_tokens_details=None)))
         litellm.completion(model="gpt-4o", messages=HI)
@@ -692,7 +692,7 @@ class TestLiteLLM(SDKCase):
         self.assertEqual(request.data, {"model": "gpt-4o", "message_count": 1})
         self.assertResponse(response, {"model": "gpt-4o", "input_tokens": 10,
                                        "output_tokens": 5})
-        self.assertFalse(response.parent_id)
+        self.assertLinked(request, response)
 
     def test_cache_counts(self):
         litellm = self.instrument_litellm(lambda kw: _litellm_response(LITELLM_USAGE))
@@ -781,7 +781,7 @@ class TestLangChain(SDKCase):
             "model": "claude-sonnet-4-5", "input_tokens": 1000, "output_tokens": 50,
             "cached_input_tokens": 800, "cache_write_input_tokens": 100,
         })
-        self.assertFalse(response.parent_id)
+        self.assertLinked(request, response)
 
     def test_cache_writes_split_by_ttl(self):
         base = self.instrument_langchain()
@@ -804,7 +804,7 @@ class TestLangChain(SDKCase):
         self.assertEqual(response.data["cached_input_tokens"], 800)
         self.assertNotIn("cache_write_input_tokens", response.data)
 
-    def test_model_without_usage_records_the_same_events(self):
+    def test_model_without_usage_records_the_same_fields(self):
         base = self.instrument_langchain()
         model, _ = self.chat_model(base, None, name="local-model")
         model.invoke(["hi"])

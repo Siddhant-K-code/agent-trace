@@ -66,7 +66,7 @@ When a model call raises, the OpenAI, Anthropic, LiteLLM, LangChain chat model a
 
 ### Model calls
 
-The OpenAI, Anthropic, LiteLLM and LangChain integrations record each model call as an `llm_request`, then an `llm_response`, or an `error` if the call raises.
+The OpenAI, Anthropic, LiteLLM and LangChain integrations record each model call as an `llm_request`, then an `llm_response`, or an `error` if the call raises. The response or error names the request in its `parent_id`, so concurrent calls pair correctly.
 
 - Sync and async calls are both recorded. The OpenAI and Anthropic integrations patch the SDK resource classes, so clients created before instrumenting are covered too.
 - With `stream=True`, the OpenAI and Anthropic integrations record the response when the caller reaches the end of the stream. The stream the caller gets is unchanged. Token counts come from the last chunk of a Chat Completions stream when the request sets `stream_options={"include_usage": True}` (without it, none are recorded), from the final `Response` of a Responses API stream, and from the `message_start` and `message_delta` events of an Anthropic stream. A stream closed or dropped before its end records only its `llm_request`. Cancelling the task that reads an async stream, or awaits an async call, records a response with `"status": "cancelled"`.

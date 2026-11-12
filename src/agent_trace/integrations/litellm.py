@@ -82,20 +82,15 @@ def instrument_litellm(agent_name: str = "litellm") -> None:
         return ModelCall(store, agent_name, _argument(args, kwargs, 0, "model", ""),
                          message_count=message_count(_argument(args, kwargs, 1, "messages", None)))
 
-    def finisher(is_async: bool):
-        def finish(call: ModelCall, kwargs: dict, result: Any) -> None:
-            usage = getattr(result, "usage", None)
-            # A stream is returned before the model answers, so its counts are unknown.
-            fields = {} if usage is None and kwargs.get("stream") else _usage_fields(usage)
-            # A sync call records an unlinked response, as it always has.
-            call.respond(fields, linked=is_async)
-
-        return finish
+    def finish(call: ModelCall, kwargs: dict, result: Any) -> None:
+        usage = getattr(result, "usage", None)
+        # A stream is returned before the model answers, so its counts are unknown.
+        fields = {} if usage is None and kwargs.get("stream") else _usage_fields(usage)
+        call.respond(fields)
 
     for name, is_async in (("completion", False), ("acompletion", True)):
-        finish = finisher(is_async)
-        _PATCHES.wrap(litellm, name, lambda original, f=finish, a=is_async:
-                      wrap_model_call(original, start, f, is_async=a))
+        _PATCHES.wrap(litellm, name, lambda original, a=is_async:
+                      wrap_model_call(original, start, finish, is_async=a))
 
     _PATCHED = True
 

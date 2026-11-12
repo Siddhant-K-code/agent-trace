@@ -136,27 +136,22 @@ def instrument_anthropic(agent_name: str = "anthropic") -> None:
                          max_tokens=given(kwargs.get("max_tokens", 0), 0),
                          message_count=message_count(kwargs.get("messages")))
 
-    def finisher(is_async: bool):
-        def finish(call: ModelCall, kwargs: dict, result: Any) -> None:
-            if record_when_parsed(result, lambda body: finish(call, kwargs, body)):
-                return
-            if kwargs.get("stream") and record_stream(result, call, _MessageStream()):
-                return
-            fields = _usage_fields(getattr(result, "usage", None))
-            fields["stop_reason"] = getattr(result, "stop_reason", "")
-            # A sync call records an unlinked response, as it always has.
-            call.respond(fields, linked=is_async)
-
-        return finish
+    def finish(call: ModelCall, kwargs: dict, result: Any) -> None:
+        if record_when_parsed(result, lambda body: finish(call, kwargs, body)):
+            return
+        if kwargs.get("stream") and record_stream(result, call, _MessageStream()):
+            return
+        fields = _usage_fields(getattr(result, "usage", None))
+        fields["stop_reason"] = getattr(result, "stop_reason", "")
+        call.respond(fields)
 
     for module_name, class_name, method, is_async in _TARGETS:
         try:
             owner = getattr(importlib.import_module(module_name), class_name)
         except (ImportError, AttributeError):
             continue
-        finish = finisher(is_async)
-        _PATCHES.wrap(owner, method, lambda original, f=finish, a=is_async:
-                      wrap_model_call(original, start, f, is_async=a))
+        _PATCHES.wrap(owner, method, lambda original, a=is_async:
+                      wrap_model_call(original, start, finish, is_async=a))
 
     _PATCHED = True
 

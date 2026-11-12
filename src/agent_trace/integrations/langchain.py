@@ -166,11 +166,10 @@ def _instrument_chat_models(base: type, store: Any, agent_name: str) -> None:
         return ModelCall(store, agent_name, str(name),
                          message_count=message_count(messages))
 
-    def recorder(is_async: bool):
-        def finish(call: ModelCall, kwargs: dict, result: Any) -> None:
-            # A sync call records an unlinked response, as it always has.
-            call.respond(_usage_fields(result), linked=is_async)
+    def finish(call: ModelCall, kwargs: dict, result: Any) -> None:
+        call.respond(_usage_fields(result))
 
+    def recorder(is_async: bool):
         return lambda original: wrap_model_call(original, start, finish, is_async=is_async)
 
     def patch_model_class(cls: type) -> None:

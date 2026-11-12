@@ -210,7 +210,7 @@ def instrument_openai(agent_name: str = "openai") -> None:
                          max_tokens=given(kwargs.get("max_output_tokens", 0), 0),
                          message_count=_input_count(kwargs.get("input")))
 
-    def finisher(api: str, is_async: bool):
+    def finisher(api: str):
         def finish(call: ModelCall, kwargs: dict, result: Any) -> None:
             if record_when_parsed(result, lambda body: finish(call, kwargs, body)):
                 return
@@ -221,8 +221,7 @@ def instrument_openai(agent_name: str = "openai") -> None:
             if api == "chat":
                 fields = _usage_fields(getattr(result, "usage", None))
                 fields["finish_reason"] = _chat_finish_reason(result)
-                # A sync call records an unlinked response, as it always has.
-                call.respond(fields, linked=is_async)
+                call.respond(fields)
             else:
                 call.respond(_with_model(_responses_fields(result), call.model, result))
 
@@ -234,7 +233,7 @@ def instrument_openai(agent_name: str = "openai") -> None:
         except (ImportError, AttributeError):
             continue
         start = start_chat if api == "chat" else start_responses
-        finish = finisher(api, is_async)
+        finish = finisher(api)
         _PATCHES.wrap(owner, method, lambda original, s=start, f=finish, a=is_async:
                       wrap_model_call(original, s, f, is_async=a))
 

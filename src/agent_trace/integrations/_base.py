@@ -135,15 +135,18 @@ class ModelCall:
             EventType.LLM_REQUEST, self.session_id, store, model=model, **request,
         )
 
-    def respond(self, fields: dict[str, Any], *, linked: bool = True) -> None:
-        """Record the ``llm_response``; ``fields`` may override ``model``."""
+    def respond(self, fields: dict[str, Any]) -> None:
+        """Record the ``llm_response``, linked to the request.
+
+        ``fields`` may override ``model``.
+        """
         data = {
             "model": self.model,
             **fields,
             "duration_ms": (time.time() - self.started) * 1000,
         }
         emit(EventType.LLM_RESPONSE, self.session_id, self.store,
-             parent=self.request if linked else None, **data)
+             parent=self.request, **data)
 
     def fail(self, exc: BaseException) -> None:
         emit(EventType.ERROR, self.session_id, self.store, parent=self.request,
