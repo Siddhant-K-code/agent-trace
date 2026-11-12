@@ -47,11 +47,11 @@ instrument_langchain()
 | Framework | Install | What's traced |
 |---|---|---|
 | OpenAI Agents SDK | `pip install agent-strace[openai-agents]` | `Runner.run`, `FunctionTool` calls |
-| LangChain / LangGraph | `pip install agent-strace[langchain]` | `BaseTool._run`, `BaseChatModel._generate` |
+| LangChain / LangGraph | `pip install agent-strace[langchain]` | `BaseTool._run`, chat model `_generate` and `_agenerate`, LangGraph nodes |
 | CrewAI | `pip install agent-strace[crewai]` | `Crew.kickoff`, `Agent.execute_task`, `Task.execute_sync` |
-| LiteLLM | `pip install agent-strace[litellm]` | `litellm.completion` |
-| Anthropic SDK | `pip install anthropic` | `messages.create` |
-| OpenAI SDK | `pip install openai` | `chat.completions.create` |
+| LiteLLM | `pip install agent-strace[litellm]` | `litellm.completion`, `litellm.acompletion` |
+| Anthropic SDK | `pip install anthropic` | `messages.create` (sync and async clients, streams) |
+| OpenAI SDK | `pip install openai` | `chat.completions.create`, `responses.create` (sync and async clients, streams) |
 | AWS Strands | `pip install agent-strace[strands]` | `Agent.__call__`, `BaseTool.invoke` |
 
 Install all integrations at once:
@@ -63,6 +63,20 @@ pip install agent-strace[all-integrations]
 Each integration is an optional extra. The core package stays dependency-free. See [ADR-0003](../ADRs/0003-zero-runtime-dependencies.md).
 
 When a model call raises, the OpenAI, Anthropic, LiteLLM, LangChain chat model and CrewAI `Agent.execute_task` integrations record an `error` event whose `parent_id` names the call's `llm_request`, so the exports report that call as failed. See [Failed and cancelled model requests](production.md#failed-and-cancelled-model-requests).
+
+### Model calls
+
+The OpenAI, Anthropic, LiteLLM and LangChain integrations record each model call as an `llm_request`, then an `llm_response`, or an `error` if the call raises. The response or error names the request in its `parent_id`, so concurrent calls pair correctly.
+
+- Sync and async calls are both recorded. The OpenAI and Anthropic integrations patch the SDK resource classes, so clients created before instrumenting are covered too.
+- With `stream=True`, the OpenAI and Anthropic integrations record the response when the caller reaches the end of the stream. The stream the caller gets is unchanged. Token counts come from the last chunk of a Chat Completions stream when the request sets `stream_options={"include_usage": True}` (without it, none are recorded), from the final `Response` of a Responses API stream, and from the `message_start` and `message_delta` events of an Anthropic stream. A stream closed or dropped before its end records only its `llm_request`. Cancelling the task that reads an async stream, or awaits an async call, records a response with `"status": "cancelled"`.
+- Token counts include cache reads and writes when the SDK reports them, in shapes [`agent-strace cost`](commands.md#cost) reads. The Anthropic SDK integration records Anthropic's `cache_read_input_tokens`, `cache_creation_input_tokens` and `cache_creation` fields. The OpenAI, LiteLLM and LangChain integrations record `cached_input_tokens` and `cache_write_input_tokens` beside an `input_tokens` that includes them, as those libraries count it. The 1-hour and 12-hour cache write split is not kept in that shape, so those writes are priced at the shorter lifetime's rate.
+- A Responses API response also records its `status`, and the `error` of a `failed` response, because the API returns those instead of raising.
+- A `with_raw_response` or `with_streaming_response` call to the OpenAI or Anthropic SDK records its response when the caller parses the body with `parse()`. A body that is never parsed, or is read as bytes, records only the `llm_request`.
+- A call that passes through two instrumented layers, such as LangChain or LiteLLM calling the OpenAI SDK, is recorded once, by the outer layer.
+- A failure to record a call never reaches the caller.
+
+Not recorded: OpenAI `chat.completions.parse` and `responses.parse`; Anthropic `messages.stream`, `messages.parse` and `client.beta.messages`; LangChain `stream` and `astream` output, `streaming=True` models, and responses served from the LangChain LLM cache; token counts of LiteLLM streams. When LangChain streams through an instrumented OpenAI or Anthropic SDK, that SDK call is still recorded.
 
 ---
 
@@ -139,7 +153,7 @@ from langchain_anthropic import ChatAnthropic
 llm = ChatAnthropic(model="claude-3-5-sonnet-20241022")
 ```
 
-Traces: `BaseTool._run`, `BaseChatModel._generate`, `BaseChatModel._stream`.
+Traces: `BaseTool._run`, and the `_generate` and `_agenerate` methods of each chat model class, so `invoke`, `ainvoke`, `batch` and `abatch` are recorded with the token counts in the message's `usage_metadata`. A model class is patched the first time one of its models is called. `stream` and `astream` are not recorded; see [Model calls](#model-calls).
 
 LangGraph node-level tracing is included — each node execution appears as a separate `tool_call` span with the node name and input/output.
 
@@ -171,7 +185,7 @@ import litellm
 response = litellm.completion(model="gpt-4o", messages=[...])
 ```
 
-Traces: `litellm.completion`, `litellm.acompletion`.
+Traces: `litellm.completion`, `litellm.acompletion`. Code that ran `from litellm import completion` before instrumenting keeps the unpatched function. A stream is recorded when the call returns it, without token counts.
 
 ---
 
@@ -186,7 +200,7 @@ client = anthropic.Anthropic()
 message = client.messages.create(model="claude-3-5-sonnet-20241022", ...)
 ```
 
-Traces: `messages.create`, `messages.stream`.
+Traces: `messages.create` on `Anthropic` and `AsyncAnthropic` clients, including `stream=True`. `messages.stream` is not recorded; see [Model calls](#model-calls).
 
 ---
 
@@ -201,7 +215,7 @@ client = OpenAI()
 response = client.chat.completions.create(model="gpt-4o", messages=[...])
 ```
 
-Traces: `chat.completions.create`, `chat.completions.stream`.
+Traces: `chat.completions.create` and `responses.create` on `OpenAI` and `AsyncOpenAI` clients, including `stream=True` and the `chat.completions.stream` and `responses.stream` helpers, which call `create`. `parse` is not recorded; see [Model calls](#model-calls).
 
 ---
 

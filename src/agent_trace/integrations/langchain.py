@@ -2,9 +2,14 @@
 
 Patches:
   - langchain_core.tools.BaseTool._run             → tool_call / tool_result
-  - langchain_core.language_models.BaseChatModel._generate → llm_request / llm_response
+  - chat models' ``_generate`` and ``_agenerate``  → llm_request / llm_response
   - langgraph.graph.StateGraph.compile             → wraps each node with
                                                      decision / tool_call events
+
+Chat model classes override ``_generate``, so the class that defines a
+model's ``_generate`` and ``_agenerate`` is patched the first time the model
+is invoked. A response served from the LangChain LLM cache, and output read
+with ``stream`` or ``astream`` (or with ``streaming=True``), is not recorded.
 
 Install:
     pip install agent-strace[langchain]
@@ -14,17 +19,71 @@ Install:
 
 from __future__ import annotations
 
+import functools
+import threading
 import time
+from typing import Any
+
+from ._base import Patches, count as _count, message_count
 
 _PATCHED = False
 _orig_tool_run = None
-_orig_generate = None
 _orig_compile = None
+_MODEL_PATCHES = Patches()
+_MODEL_CLASSES: set[type] = set()
+_MODEL_CLASSES_LOCK = threading.Lock()
+
+
+def _detail(details: dict, name: str) -> int | None:
+    """``details[name]``, or its service-tier variant such as ``priority_<name>``."""
+    value = _count(details.get(name))
+    if value is not None:
+        return value
+    for key, item in details.items():
+        if isinstance(key, str) and key.endswith("_" + name):
+            return _count(item)
+    return None
+
+
+def _usage_fields(result: Any) -> dict[str, Any]:
+    """Token counts of a ``ChatResult``, from its message's ``usage_metadata``.
+
+    LangChain's ``input_tokens`` is the sum of all input tokens, cache reads
+    and writes included, and ``input_token_details`` holds their counts.
+    LangChain Anthropic reports cache writes split by TTL, with a
+    ``cache_creation`` of 0, when Anthropic splits them.
+    """
+    try:
+        message = getattr(result.generations[0], "message", None)
+    except (AttributeError, IndexError, KeyError, TypeError):
+        return {}
+    usage = getattr(message, "usage_metadata", None)
+    if not isinstance(usage, dict):
+        return {}
+    fields: dict[str, Any] = {
+        "input_tokens": _count(usage.get("input_tokens")) or 0,
+        "output_tokens": _count(usage.get("output_tokens")) or 0,
+    }
+    details = usage.get("input_token_details")
+    if not isinstance(details, dict):
+        return fields
+    read = _detail(details, "cache_read")
+    write = _detail(details, "cache_creation")
+    if not write:
+        split = [_count(details.get(key))
+                 for key in ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")]
+        if any(value is not None for value in split):
+            write = sum(value or 0 for value in split)
+    if read is not None:
+        fields["cached_input_tokens"] = read
+    if write is not None:
+        fields["cache_write_input_tokens"] = write
+    return fields
 
 
 def instrument_langchain(agent_name: str = "langchain") -> None:
     """Patch LangChain (and LangGraph if installed) to emit agent-trace events. Idempotent."""
-    global _PATCHED, _orig_tool_run, _orig_generate, _orig_compile
+    global _PATCHED, _orig_tool_run, _orig_compile
     if _PATCHED:
         return
 
@@ -69,32 +128,13 @@ def instrument_langchain(agent_name: str = "langchain") -> None:
     except (ImportError, AttributeError):
         pass
 
-    # --- Patch BaseChatModel._generate ---
+    # --- Patch chat models ---
     try:
         from langchain_core.language_models import BaseChatModel
-
-        _orig_generate = BaseChatModel._generate
-
-        def _patched_generate(self, messages, *args, **kwargs):
-            sid = _get_or_create_session(store, agent_name)
-            model = getattr(self, "model_name", getattr(self, "model", "unknown"))
-            t0 = time.time()
-            request = emit(EventType.LLM_REQUEST, sid, store,
-                           model=str(model), message_count=len(messages))
-            try:
-                result = _orig_generate(self, messages, *args, **kwargs)
-                emit(EventType.LLM_RESPONSE, sid, store,
-                     model=str(model),
-                     duration_ms=(time.time() - t0) * 1000)
-                return result
-            except Exception as exc:
-                emit(EventType.ERROR, sid, store, parent=request,
-                     error=str(exc), error_type=type(exc).__name__)
-                raise
-
-        BaseChatModel._generate = _patched_generate
     except (ImportError, AttributeError):
-        pass
+        BaseChatModel = None
+    if BaseChatModel is not None:
+        _instrument_chat_models(BaseChatModel, store, agent_name)
 
     # --- Patch LangGraph StateGraph.compile (optional, best-effort) ---
     try:
@@ -112,6 +152,57 @@ def instrument_langchain(agent_name: str = "langchain") -> None:
         pass  # LangGraph not installed — skip silently
 
     _PATCHED = True
+
+
+def _instrument_chat_models(base: type, store: Any, agent_name: str) -> None:
+    """Record chat model calls made through ``base`` and its subclasses."""
+    from ._base import ModelCall, wrap_model_call
+
+    def start(args: tuple, kwargs: dict) -> ModelCall:
+        model = args[0]
+        messages = kwargs["messages"] if "messages" in kwargs else (
+            args[1] if len(args) > 1 else None)
+        name = getattr(model, "model_name", getattr(model, "model", "unknown"))
+        return ModelCall(store, agent_name, str(name),
+                         message_count=message_count(messages))
+
+    def finish(call: ModelCall, kwargs: dict, result: Any) -> None:
+        call.respond(_usage_fields(result))
+
+    def recorder(is_async: bool):
+        return lambda original: wrap_model_call(original, start, finish, is_async=is_async)
+
+    def patch_model_class(cls: type) -> None:
+        if cls in _MODEL_CLASSES:
+            return
+        with _MODEL_CLASSES_LOCK:
+            if cls in _MODEL_CLASSES:
+                return
+            for name, is_async in (("_generate", False), ("_agenerate", True)):
+                owner = next((k for k in cls.__mro__ if name in vars(k)), None)
+                if owner is not None:
+                    _MODEL_PATCHES.wrap(owner, name, recorder(is_async))
+            _MODEL_CLASSES.add(cls)
+
+    def hook(original: Any, is_async: bool) -> Any:
+        if is_async:
+            @functools.wraps(original)
+            async def async_hook(self: Any, *args: Any, **kwargs: Any) -> Any:
+                patch_model_class(type(self))
+                return await original(self, *args, **kwargs)
+
+            return async_hook
+
+        @functools.wraps(original)
+        def sync_hook(self: Any, *args: Any, **kwargs: Any) -> Any:
+            patch_model_class(type(self))
+            return original(self, *args, **kwargs)
+
+        return sync_hook
+
+    _MODEL_PATCHES.wrap(base, "_generate", recorder(False))
+    for name, is_async in (("_generate_with_cache", False), ("_agenerate_with_cache", True)):
+        _MODEL_PATCHES.wrap(base, name, lambda original, a=is_async: hook(original, a))
 
 
 def _wrap_langgraph_nodes(compiled_graph, store, agent_name: str) -> None:
@@ -152,19 +243,16 @@ def _wrap_langgraph_nodes(compiled_graph, store, agent_name: str) -> None:
 
 def uninstrument_langchain() -> None:
     """Remove patches (for testing)."""
-    global _PATCHED, _orig_tool_run, _orig_generate, _orig_compile
+    global _PATCHED, _orig_tool_run, _orig_compile
     if _orig_tool_run is not None:
         try:
             from langchain_core.tools import BaseTool
             BaseTool._run = _orig_tool_run
         except ImportError:
             pass
-    if _orig_generate is not None:
-        try:
-            from langchain_core.language_models import BaseChatModel
-            BaseChatModel._generate = _orig_generate
-        except ImportError:
-            pass
+    _MODEL_PATCHES.restore()
+    with _MODEL_CLASSES_LOCK:
+        _MODEL_CLASSES.clear()
     if _orig_compile is not None:
         try:
             from langgraph.graph import StateGraph
@@ -173,5 +261,4 @@ def uninstrument_langchain() -> None:
             pass
     _PATCHED = False
     _orig_tool_run = None
-    _orig_generate = None
     _orig_compile = None
