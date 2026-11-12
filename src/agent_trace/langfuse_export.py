@@ -25,9 +25,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .cost import TokenUsage, infer_provider
 from .event_data import number_field, require_object_event_data, str_field
 from .models import EventType, SessionMeta, TraceEvent
-from .otlp import llm_failure
+from .otlp import llm_failure, model_request_usage
 from .pairing import (
     LLM_REQUEST_TYPES,
     TOOL_REQUEST_TYPES,
@@ -181,6 +182,38 @@ def langfuse_data_indexes(events: list[TraceEvent]) -> list[int]:
     return indexes
 
 
+_ONE_HOUR_CACHE_PROVIDERS = frozenset({"Anthropic", "AWS Bedrock"})
+
+
+def _usage_details(usage: TokenUsage, model: str) -> dict[str, int]:
+    """Return Langfuse ``usageDetails`` for a request that read or wrote a cache.
+
+    Langfuse prices each usage type with the model price of the same key and
+    expects exclusive buckets, so ``input`` is the uncached input and the
+    cache reads and writes are separate keys. Langfuse lays these keys over
+    the legacy ``usage`` object, which still carries the whole input for
+    older servers. A request without cache usage returns ``{}`` so its
+    generation is unchanged.
+    """
+    if not usage.cache_read_tokens and not usage.cache_write_tokens:
+        return {}
+    details = {"input": usage.uncached_input_tokens}
+    if usage.cache_read_tokens:
+        details["input_cached_tokens"] = usage.cache_read_tokens
+    long_writes = 0
+    if infer_provider(model) in _ONE_HOUR_CACHE_PROVIDERS:
+        # Anthropic and Bedrock price 1-hour cache writes separately.
+        # OpenAI's long lifetime is 12 hours, which Langfuse has no key for.
+        long_writes = min(usage.cache_write_long_tokens, usage.cache_write_tokens)
+    if usage.cache_write_tokens - long_writes:
+        details["input_cache_creation"] = usage.cache_write_tokens - long_writes
+    if long_writes:
+        details["input_cache_creation_1h"] = long_writes
+    details["output"] = usage.output_tokens
+    details["total"] = usage.input_tokens + usage.output_tokens
+    return details
+
+
 def _generation(
     session_id: str,
     req_ev: TraceEvent | None,
@@ -193,14 +226,12 @@ def _generation(
     message; a completed one has neither.
     """
     start_ts = req_ev.timestamp if req_ev else ev.timestamp
-    output_tokens = number_field(ev.data, "output_tokens", 0) or 0
+    usage, _, _ = model_request_usage(req_ev.data if req_ev else {}, ev.data)
     if req_ev:
-        input_tokens = number_field(req_ev.data, "input_tokens", 0) or 0
         model = req_ev.data.get("model", "") or ""
     else:
         # A response with no request (Codex records each model
         # request this way) carries its own model and input count.
-        input_tokens = number_field(ev.data, "input_tokens", 0) or 0
         model = event_model(ev.data)
     generation = {
         "id": ev.event_id,
@@ -211,13 +242,16 @@ def _generation(
         "endTime": _iso(ev.timestamp),
         "model": model or None,
         "usage": {
-            "input": input_tokens,
-            "output": output_tokens,
-            "total": input_tokens + output_tokens,
+            "input": usage.input_tokens,
+            "output": usage.output_tokens,
+            "total": usage.input_tokens + usage.output_tokens,
         },
         "input": req_ev.data.get("prompt") if req_ev else None,
         "output": ev.data.get("text"),
     }
+    usage_details = _usage_details(usage, model)
+    if usage_details:
+        generation["usageDetails"] = usage_details
     failure = llm_failure(ev)
     if failure is not None:
         generation["level"] = "ERROR"

@@ -28,6 +28,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from .cost import TokenUsage, usage_detail
 from .event_data import object_field, str_field
 from .models import EventType, SessionMeta, TraceEvent
 from .pairing import (
@@ -53,6 +54,8 @@ _SEMCONV_OP = "gen_ai.operation.name"
 _SEMCONV_MODEL = "gen_ai.request.model"
 _SEMCONV_INPUT_TOKENS = "gen_ai.usage.input_tokens"
 _SEMCONV_OUTPUT_TOKENS = "gen_ai.usage.output_tokens"
+_SEMCONV_CACHE_READ_TOKENS = "gen_ai.usage.cache_read.input_tokens"
+_SEMCONV_CACHE_WRITE_TOKENS = "gen_ai.usage.cache_write.input_tokens"
 _SEMCONV_TOOL_NAME = "gen_ai.tool.name"
 _SEMCONV_TOOL_CALL_ID = "gen_ai.tool.call.id"
 _SEMCONV_FINISH_REASON = "gen_ai.response.finish_reasons"
@@ -68,27 +71,14 @@ _OI_LLM_MODEL = "llm.model_name"
 _OI_INPUT_TOKENS = "llm.token_count.prompt"
 _OI_OUTPUT_TOKENS = "llm.token_count.completion"
 _OI_TOTAL_TOKENS = "llm.token_count.total"
+_OI_CACHE_READ_TOKENS = "llm.token_count.prompt_details.cache_read"
+_OI_CACHE_WRITE_TOKENS = "llm.token_count.prompt_details.cache_write"
 _OI_TOOL_NAME = "tool.name"
 _OI_INPUT_VALUE = "input.value"
 _OI_INPUT_MIME_TYPE = "input.mime_type"
 _OI_OUTPUT_VALUE = "output.value"
 _OI_OUTPUT_MIME_TYPE = "output.mime_type"
 
-_INPUT_TOKEN_KEYS = (
-    "input_tokens",
-    "prompt_tokens",
-    "inputTokens",
-    "promptTokenCount",
-    "prompt_token_count",
-)
-_OUTPUT_TOKEN_KEYS = (
-    "output_tokens",
-    "completion_tokens",
-    "outputTokens",
-    "candidatesTokenCount",
-    "completion_token_count",
-)
-_USAGE_KEYS = ("usage", "usage_metadata", "usageMetadata", "token_usage")
 _EVENT_PROVENANCE_KEYS = (
     "provider",
     "capture_method",
@@ -287,33 +277,66 @@ def _provider_value(
     return str(raw or "unknown"), _canonical_provider(raw)
 
 
-def _number(data: Mapping[str, Any], keys: tuple[str, ...]) -> int | None:
-    for key in keys:
-        if key not in data or isinstance(data[key], bool):
-            continue
-        try:
-            value = int(data[key])
-        except (TypeError, ValueError, OverflowError):
-            continue
-        if value >= 0:
-            return value
-    return None
+def model_request_usage(
+    request_data: Any,
+    response_data: Any,
+) -> tuple[TokenUsage, bool, bool]:
+    """Return ``(usage, has_input, has_output)`` for one model request.
+
+    Counts are read with the cost report's provider normalization
+    (:func:`agent_trace.cost.usage_detail`), so the input is the whole input,
+    cache reads and writes included, whichever way the provider counts it.
+    The input side (the input and its cache reads and writes) comes from the
+    request when it recorded an input count, otherwise from the response. The
+    output comes from the response when it recorded one, otherwise from the
+    request.
+    """
+    request, request_input, request_output = usage_detail(request_data)
+    response, response_input, response_output = usage_detail(response_data)
+    usage = request if request_input else response
+    output = response.output_tokens if response_output else request.output_tokens
+    return (
+        replace(usage, output_tokens=output),
+        request_input or response_input,
+        request_output or response_output,
+    )
 
 
-def _token_count(data: Mapping[str, Any], keys: tuple[str, ...]) -> int | None:
-    direct = _number(data, keys)
-    if direct is not None:
-        return direct
-    candidates = [data.get(key) for key in _USAGE_KEYS]
-    response_metadata = data.get("response_metadata")
-    if isinstance(response_metadata, Mapping):
-        candidates.append(response_metadata.get("token_usage"))
-    for candidate in candidates:
-        if isinstance(candidate, Mapping):
-            nested = _number(candidate, keys)
-            if nested is not None:
-                return nested
-    return None
+def _cache_attributes(usage: TokenUsage, openinference: bool = False) -> dict[str, int]:
+    """Return the cache read and write counts of *usage* that are not zero.
+
+    The GenAI conventions record them "when available and non-zero". They are
+    part of ``gen_ai.usage.input_tokens``, not added to it.
+    """
+    attrs: dict[str, int] = {}
+    if usage.cache_read_tokens:
+        attrs[_SEMCONV_CACHE_READ_TOKENS] = usage.cache_read_tokens
+        if openinference:
+            attrs[_OI_CACHE_READ_TOKENS] = usage.cache_read_tokens
+    if usage.cache_write_tokens:
+        attrs[_SEMCONV_CACHE_WRITE_TOKENS] = usage.cache_write_tokens
+        if openinference:
+            attrs[_OI_CACHE_WRITE_TOKENS] = usage.cache_write_tokens
+    return attrs
+
+
+def _token_attributes(
+    usage: TokenUsage,
+    has_input: bool,
+    has_output: bool,
+) -> dict[str, int]:
+    """Return the GenAI and OpenInference token attributes of one model request."""
+    attrs: dict[str, int] = {}
+    if has_input:
+        attrs[_SEMCONV_INPUT_TOKENS] = usage.input_tokens
+        attrs[_OI_INPUT_TOKENS] = usage.input_tokens
+        attrs.update(_cache_attributes(usage, openinference=True))
+    if has_output:
+        attrs[_SEMCONV_OUTPUT_TOKENS] = usage.output_tokens
+        attrs[_OI_OUTPUT_TOKENS] = usage.output_tokens
+    if has_input or has_output:
+        attrs[_OI_TOTAL_TOKENS] = usage.input_tokens + usage.output_tokens
+    return attrs
 
 
 def _float_value(data: Mapping[str, Any], keys: tuple[str, ...]) -> float | None:
@@ -720,25 +743,31 @@ def session_to_otlp(
             model = event.data.get("model", "")
             if model:
                 llm_attrs[_SEMCONV_MODEL] = model
-            inp_tok = event.data.get("input_tokens", 0)
-            if inp_tok:
-                llm_attrs[_SEMCONV_INPUT_TOKENS] = inp_tok
+            usage, _, _ = usage_detail(event.data)
+            if usage.input_tokens:
+                llm_attrs[_SEMCONV_INPUT_TOKENS] = usage.input_tokens
+                llm_attrs.update(_cache_attributes(usage))
             root_events.append(_make_event("gen_ai.system.message", event.timestamp, llm_attrs))
 
         elif event.event_type == EventType.LLM_RESPONSE:
             llm_attrs = {_SEMCONV_OP: "chat"}
-            if requests.match(event) is None:
+            req_event = requests.match(event)
+            req_data = req_event.data if req_event is not None else {}
+            if req_event is None:
                 # A response with no request (Codex records each model
                 # request this way) carries its own model and input count.
                 model = event_model(event.data)
                 if model:
                     llm_attrs[_SEMCONV_MODEL] = model
-                inp_tok = event.data.get("input_tokens", 0)
-                if inp_tok:
-                    llm_attrs[_SEMCONV_INPUT_TOKENS] = inp_tok
-            out_tok = event.data.get("output_tokens", 0)
-            if out_tok:
-                llm_attrs[_SEMCONV_OUTPUT_TOKENS] = out_tok
+            usage, _, _ = model_request_usage(req_data, event.data)
+            if not usage_detail(req_data)[1] and usage.input_tokens:
+                # The request event carried no input count (the SDK
+                # integrations record usage on the response), so the input
+                # side is reported here.
+                llm_attrs[_SEMCONV_INPUT_TOKENS] = usage.input_tokens
+                llm_attrs.update(_cache_attributes(usage))
+            if usage.output_tokens:
+                llm_attrs[_SEMCONV_OUTPUT_TOKENS] = usage.output_tokens
             finish = event.data.get("stop_reason", event.data.get("finish_reason", ""))
             if finish:
                 llm_attrs[_SEMCONV_FINISH_REASON] = finish
@@ -923,20 +952,7 @@ def _genai_llm_span(
                 separators=(",", ":"),
             )
 
-    inp_tok = _token_count(req_data, _INPUT_TOKEN_KEYS)
-    if inp_tok is None:
-        inp_tok = _token_count(event.data, _INPUT_TOKEN_KEYS)
-    out_tok = _token_count(event.data, _OUTPUT_TOKEN_KEYS)
-    if out_tok is None:
-        out_tok = _token_count(req_data, _OUTPUT_TOKEN_KEYS)
-    if inp_tok is not None:
-        llm_attrs[_SEMCONV_INPUT_TOKENS] = inp_tok
-        llm_attrs[_OI_INPUT_TOKENS] = inp_tok
-    if out_tok is not None:
-        llm_attrs[_SEMCONV_OUTPUT_TOKENS] = out_tok
-        llm_attrs[_OI_OUTPUT_TOKENS] = out_tok
-    if inp_tok is not None or out_tok is not None:
-        llm_attrs[_OI_TOTAL_TOKENS] = (inp_tok or 0) + (out_tok or 0)
+    llm_attrs.update(_token_attributes(*model_request_usage(req_data, event.data)))
     finish = event.data.get("stop_reason") or event.data.get("finish_reason", "")
     if finish:
         llm_attrs[_SEMCONV_FINISH_REASON] = finish
@@ -1234,16 +1250,7 @@ def session_to_otlp_genai(
         if model:
             llm_attrs[_SEMCONV_MODEL] = model
             llm_attrs[_OI_LLM_MODEL] = model
-        inp_tok = _token_count(req_event.data, _INPUT_TOKEN_KEYS)
-        out_tok = _token_count(req_event.data, _OUTPUT_TOKEN_KEYS)
-        if inp_tok is not None:
-            llm_attrs[_SEMCONV_INPUT_TOKENS] = inp_tok
-            llm_attrs[_OI_INPUT_TOKENS] = inp_tok
-        if out_tok is not None:
-            llm_attrs[_SEMCONV_OUTPUT_TOKENS] = out_tok
-            llm_attrs[_OI_OUTPUT_TOKENS] = out_tok
-        if inp_tok is not None or out_tok is not None:
-            llm_attrs[_OI_TOTAL_TOKENS] = (inp_tok or 0) + (out_tok or 0)
+        llm_attrs.update(_token_attributes(*usage_detail(req_event.data)))
         llm_attrs.update(_cost_attributes(req_event.data, {}))
         llm_attrs["metadata"] = _openinference_metadata(llm_attrs)
         child_spans.append({

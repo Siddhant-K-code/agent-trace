@@ -1244,6 +1244,10 @@ estimate missing cost, include provider capture-matrix blind spots, or replace
 source NDJSON hash-chain verification. See
 [OpenInference compatibility](production.md#openinference-compatibility).
 
+The OTLP formats and `--backend langfuse` export each model request's whole
+input, output and prompt cache read and write token counts. See
+[Token usage and prompt caching](production.md#token-usage-and-prompt-caching).
+
 `--format temporal` emits OTLP/HTTP JSON using the upstream W3C trace ID and
 Temporal activity parent span previously captured by `watch`. It can be written
 to a file or sent directly with `--endpoint`. See
