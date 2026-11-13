@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import _thread
 import json
+import math
 import os
 import queue
 import re
@@ -1055,6 +1056,37 @@ class TestStreamLinesNameOnlyTheEndpoint(_ScriptedReceiverTestCase):
                     self.assertEqual(stderr.getvalue(), f"[stream] {target} {outcome}\n" * 2)
                     self._assert_no_markers(stderr.getvalue())
 
+    def test_host_that_is_not_printable_is_never_shown(self) -> None:
+        # U+202E passes the startup check, and a terminal would show the text
+        # after it reversed, so no line may name the host.
+        url = f"http://a\u202eb.collector.test:{self.port}/SECRET-PATH?token=SECRET-QUERY"
+        self.assertIsNone(watch_module._stream_to_problem(url))
+        end = TraceEvent(
+            event_type=EventType.SESSION_END, timestamp=2.0,
+            session_id="unprintable-host", data={"exit_code": 0},
+        )
+        for otlp, label in _MODES:
+            with self.subTest(otlp=otlp), tempfile.TemporaryDirectory() as tmp:
+                store = TraceStore(tmp, redact=False)
+                store.create_session(SessionMeta(session_id="unprintable-host", started_at=1.0))
+                stderr = StringIO()
+                # Like cmd_watch, write watch's own lines to stderr.
+                with patch("agent_trace.watch._tail_events", return_value=iter([end])), \
+                        redirect_stderr(stderr):
+                    watch_session(
+                        store, "unprintable-host", WatcherConfig(), out=stderr,
+                        stream_config=StreamConfig(url=url, otlp=otlp),
+                    )
+                self.assertEqual(
+                    [
+                        line for line in stderr.getvalue().splitlines()
+                        if line.startswith(("[watch] Streaming", "[stream]"))
+                    ],
+                    ["[watch] Streaming events", f"[stream] {label} failed: UnicodeEncodeError"],
+                )
+                self.assertNotIn("\u202e", stderr.getvalue())
+                self._assert_no_markers(stderr.getvalue())
+
 
 class TestStreamUrlPaths(_ScriptedReceiverTestCase):
     def test_otlp_posts_to_v1_traces_under_the_base_path_and_keeps_the_query(self) -> None:
@@ -1068,6 +1100,7 @@ class TestStreamUrlPaths(_ScriptedReceiverTestCase):
             "?token=SECRET-QUERY": "/v1/traces?token=SECRET-QUERY",
             "/v1/traces": "/v1/traces",
             "/v1/traces/": "/v1/traces",
+            "/xv1/traces": "/xv1/traces/v1/traces",
             "/otel/v1/traces?token=SECRET-QUERY": "/otel/v1/traces?token=SECRET-QUERY",
             "/collector#SECRET-FRAGMENT": "/collector/v1/traces",
         }
@@ -1192,6 +1225,128 @@ class TestEventStreamerStopWait(_ScriptedReceiverTestCase):
                 ))
                 self.assertEqual(stderr.getvalue(), stopped)
                 self._assert_no_markers(stopped)
+
+    def _stop_while_the_post_is_held(self, events: list[TraceEvent], *, otlp: bool) -> str:
+        """Send *events* as one batch and call stop() while the collector
+        holds its POST past the wait. Then answer that POST with 500, wait
+        for the worker to finish, and return what stderr got."""
+        self.server.script((500, 30.0))
+        stderr = StringIO()
+        with patch.object(watch_module, "_STREAM_POST_TIMEOUT", 60.0), \
+                patch.object(watch_module, "_STREAM_STOP_TIMEOUT", 0.5), \
+                patch.object(watch_module, "_STREAM_STOP_NOTICE_AFTER", 0.2), \
+                redirect_stderr(stderr):
+            streamer = EventStreamer(StreamConfig(
+                url=f"http://127.0.0.1:{self.port}/SECRET-PATH?token=SECRET-QUERY",
+                otlp=otlp, batch_size=len(events), flush_interval=60.0,
+            ))
+            for event in events:
+                streamer.enqueue(event)
+            self.assertTrue(_wait_for(lambda: len(self.server.posts()) == 1))
+            streamer.stop()
+            self.server.release.set()
+            streamer._thread.join(5)
+        self.assertFalse(streamer._thread.is_alive())
+        self.assertEqual(len(self.server.posts()), 1)
+        self._assert_no_markers(stderr.getvalue())
+        return stderr.getvalue()
+
+    def test_worker_writes_nothing_after_the_count_line(self) -> None:
+        # The held POST fails after stop() gave up on it. The line for that
+        # failure must not follow the count line.
+        for otlp, _ in _MODES:
+            with self.subTest(otlp=otlp):
+                stderr = self._stop_while_the_post_is_held(_wrapped([]), otlp=otlp)
+                self.assertRegex(stderr, re.compile(
+                    rf"\A{_NOTICE}"
+                    + re.escape("[stream] Stopped waiting; 2 events were not confirmed sent.\n")
+                    + r"\Z"
+                ))
+
+    def _assert_only_the_held_session_is_counted(
+        self, session_a: list[TraceEvent], exception: str,
+    ) -> None:
+        """Session A cannot be converted, then session B's POST is held past
+        the wait. A's 3 events already have their line, so the count line
+        gives only B's 2 events."""
+        session_b = [
+            _event("user_prompt", {"prompt": "hi"}, "b1", session_id="session-b"),
+            _event("assistant_response", {"text": "done"}, "b2", session_id="session-b", ts=2.0),
+        ]
+        stderr = self._stop_while_the_post_is_held(session_a + session_b, otlp=True)
+        self.assertRegex(stderr, re.compile(
+            r"\A"
+            + re.escape(
+                f"[stream] Could not convert 3 events to OTLP spans ({exception}); "
+                "they were not sent.\n"
+            )
+            + _NOTICE
+            + re.escape("[stream] Stopped waiting; 2 events were not confirmed sent.\n")
+            + r"\Z"
+        ))
+
+    def test_count_line_leaves_out_events_the_converter_failed_on(self) -> None:
+        real = session_to_otlp_genai
+
+        def fail_for_session_a(meta, events, **kwargs):
+            if meta.session_id == "session-a":
+                raise KeyError("SECRET-MESSAGE")
+            return real(meta, events, **kwargs)
+
+        session_a = [
+            _event("user_prompt", {"prompt": "SECRET-PROMPT"}, f"a{index}",
+                   session_id="session-a", ts=float(index))
+            for index in range(3)
+        ]
+        with patch("agent_trace.otlp.session_to_otlp_genai", new=fail_for_session_a):
+            self._assert_only_the_held_session_is_counted(session_a, "KeyError")
+
+    def test_count_line_leaves_out_events_that_cannot_be_paired(self) -> None:
+        # The unhashable ID makes the check for the events the converter
+        # reads raise, before the converter runs.
+        unhashable_id = TraceEvent(
+            event_type=EventType.TOOL_CALL,
+            event_id=["SECRET-ID"],  # type: ignore[arg-type]
+            session_id="session-a",
+            data={"tool_name": "Bash"},
+            tenant_id="",
+        )
+        session_a = [
+            _event("user_prompt", {"prompt": "SECRET-PROMPT"}, "a1", session_id="session-a"),
+            unhashable_id,
+            _event("assistant_response", {"text": "done"}, "a3", session_id="session-a", ts=3.0),
+        ]
+        self._assert_only_the_held_session_is_counted(session_a, "TypeError")
+
+    def test_notice_gives_the_seconds_left_of_the_wait(self) -> None:
+        # The notice comes notice_after seconds into the wait, so it gives
+        # ceil(limit - notice_after) seconds. A whole second of notice_after
+        # keeps that number, and one less, apart from int(limit).
+        limit, notice_after = 3.0, 1.0
+        left = math.ceil(limit - notice_after)
+        self.server.script((200, 30.0))
+        stderr = StringIO()
+        with patch.object(watch_module, "_STREAM_POST_TIMEOUT", 60.0), \
+                patch.object(watch_module, "_STREAM_STOP_TIMEOUT", limit), \
+                patch.object(watch_module, "_STREAM_STOP_NOTICE_AFTER", notice_after), \
+                redirect_stderr(stderr):
+            streamer = EventStreamer(StreamConfig(
+                url=f"http://127.0.0.1:{self.port}/events", batch_size=1, flush_interval=60.0,
+            ))
+            streamer.enqueue(_make_event())
+            self.assertTrue(_wait_for(lambda: len(self.server.posts()) == 1))
+            stopper = threading.Thread(target=streamer.stop, daemon=True)
+            stopper.start()
+            # Answer the POST once the notice is out, so stop() returns early.
+            self.assertTrue(_wait_for(lambda: "press Ctrl-C" in stderr.getvalue()))
+            self.server.release.set()
+            stopper.join(5)
+        self.assertFalse(stopper.is_alive())
+        self.assertFalse(streamer._thread.is_alive())
+        self.assertRegex(stderr.getvalue(), re.compile(rf"\A{_NOTICE}\Z"))
+        seconds = int(re.search(r"up to (\d+)s more", stderr.getvalue()).group(1))
+        # A slow machine can write the notice late enough to give one less.
+        self.assertIn(seconds, (left, left - 1))
 
 
 class TestWatchCtrlCWhileStreamStops(_ScriptedReceiverTestCase):
