@@ -1572,6 +1572,10 @@ retention:
   max_size_mb: 500
   on_delete: log
 ```
+Limits apply in order: age, then session count, then storage size. The size
+limit accounts for space freed by sessions already selected by the age/count
+limits, including their compaction checkpoints, before selecting additional
+sessions from oldest to newest. Use `retention clean --dry-run` to preview.
 
 ### `tenant`
 ```
