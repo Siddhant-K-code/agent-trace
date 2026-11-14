@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_trace.cli import build_parser
+from agent_trace.cost import estimate_cost
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
 from agent_trace.team_report import (
@@ -22,6 +23,12 @@ from agent_trace.team_report import (
     format_team_report_json,
     format_team_report_text,
 )
+
+
+try:
+    from test_cost import _codex_events
+except ImportError:  # pragma: no cover - package-style test discovery
+    from tests.test_cost import _codex_events
 
 
 def _make_store() -> tuple[TraceStore, str]:
@@ -240,6 +247,100 @@ class TestTeamReportCLI(unittest.TestCase):
         self.assertEqual(args.command, "team-report")
         self.assertEqual(args.by, "branch")
         self.assertEqual(args.export, "csv")
+
+
+def _add_codex_session(
+    store: TraceStore, started_at: float, branch: str, prompt_data=None
+) -> str:
+    """A session with recorded token usage; list prompt data makes `cost` refuse it."""
+    meta = SessionMeta(agent_name="codex", command="codex")
+    meta.started_at = started_at
+    meta.attribution = {"git_branch": branch, "working_dir": str(store.base_dir)}
+    store.create_session(meta)
+    events = _codex_events(meta.session_id)
+    if prompt_data is not None:
+        events[0].data = prompt_data
+    for event in events:
+        store.append_event(meta.session_id, event)
+    return meta.session_id
+
+
+class TestTeamReportUnpricedSessions(unittest.TestCase):
+    """Costs are the `agent-strace cost` totals; refused sessions are not $0."""
+
+    def setUp(self):
+        self.store, tmp = _make_store()
+        self.now = time.time()
+
+    def _report(self):
+        with patch("agent_trace.team_report._git", _fake_git({})):
+            return build_team_report(
+                self.store, self.now - 86400, self.now, group_by="branch"
+            )
+
+    def test_unpriceable_sessions_are_left_out_of_totals(self):
+        priced = _add_codex_session(self.store, self.now - 300, "main")
+        _add_codex_session(self.store, self.now - 200, "feat/x", prompt_data=[])
+        broken = _add_codex_session(self.store, self.now - 100, "feat/x")
+        with open(self.store.base_dir / broken / "events.ndjson", "a") as f:
+            f.write("not json\n")
+        want = estimate_cost(self.store, priced).total_cost
+
+        report = self._report()
+        costs = {s.session_id: s.cost for s in report.sessions}
+        self.assertEqual(costs.pop(priced), want)
+        self.assertEqual(list(costs.values()), [None, None])
+        self.assertEqual(report.unpriced_sessions, 2)
+        self.assertEqual(report.total_cost, want)
+        self.assertEqual(report.avg_cost, want)
+        self.assertEqual(report.rows["main"]["cost"], want)
+        self.assertEqual(report.rows["main"]["avg_session"], want)
+        self.assertIsNone(report.rows["feat/x"]["cost"])
+        self.assertIsNone(report.rows["feat/x"]["avg_session"])
+        self.assertEqual(report.rows["feat/x"]["unpriced_sessions"], 2.0)
+        self.assertEqual(list(report.rows), ["main", "feat/x"])
+
+        out = io.StringIO()
+        format_team_report_text(report, out)
+        lines = out.getvalue().splitlines()
+        row = next(line for line in lines if line.startswith("feat/x"))
+        self.assertEqual(row.split()[-2:], ["n/a", "n/a"])
+        total = next(line for line in lines if line.startswith("Total"))
+        self.assertTrue(total.endswith(f"${want:.2f} (2 not priced)"), total)
+
+        csv_rows = {
+            r["group"]: r
+            for r in csv.DictReader(io.StringIO(format_team_report_csv(report)))
+        }
+        csv_row = csv_rows["feat/x"]
+        self.assertEqual((csv_row["cost"], csv_row["avg_session"]), ("", ""))
+        self.assertEqual(csv_row["unpriced_sessions"], "2.000")
+
+        data = json.loads(format_team_report_json(report))
+        self.assertEqual(data["unpriced_sessions"], 2)
+        self.assertEqual(data["total_cost"], want)
+        by_group = {r["group"]: r for r in data["rows"]}
+        self.assertIsNone(by_group["feat/x"]["cost"])
+        self.assertIsNone(by_group["feat/x"]["avg_session"])
+
+    def test_no_priced_session_has_unknown_total_and_average(self):
+        _add_codex_session(self.store, self.now - 100, "main", prompt_data=[])
+        report = self._report()
+        self.assertIsNone(report.total_cost)
+        self.assertIsNone(report.avg_cost)
+        self.assertEqual(report.outliers, [])
+        out = io.StringIO()
+        format_team_report_text(report, out)
+        total = next(line for line in out.getvalue().splitlines() if line.startswith("Total"))
+        self.assertEqual(total.split()[-5:], ["n/a", "n/a", "(1", "not", "priced)"])
+        self.assertNotIn("$", total)
+        self.assertIsNone(json.loads(format_team_report_json(report))["total_cost"])
+
+    def test_pricing_bugs_are_not_hidden(self):
+        _add_codex_session(self.store, self.now - 100, "main")
+        with patch("agent_trace.team_report.session_cost", side_effect=TypeError("bug")):
+            with self.assertRaises(TypeError):
+                self._report()
 
 
 if __name__ == "__main__":

@@ -6,7 +6,9 @@ import sys
 import tempfile
 import time
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -19,8 +21,14 @@ from agent_trace.context_score import (
     format_context_score_json,
     format_context_score_text,
 )
+from agent_trace.cost import estimate_cost
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
+
+try:
+    from test_dashboard import _codex_session
+except ImportError:  # pragma: no cover - package-style test discovery
+    from tests.test_dashboard import _codex_session
 
 
 def _write_snapshots(root, snapshots):
@@ -261,6 +269,87 @@ class TestContextScore(unittest.TestCase):
         description = sub_action.choices["context-score"].description
         self.assertIn("Not an outcome score", description)
         self.assertIn("50 = no change vs baseline", description)
+
+
+class TestContextScoreUnpricedSessions(unittest.TestCase):
+    """Cost is the `agent-strace cost` total; sessions it refuses are not $0."""
+
+    def setUp(self):
+        self.tmpdir = Path(tempfile.mkdtemp())
+        self.store = TraceStore(self.tmpdir / ".agent-traces")
+        (self.tmpdir / "AGENTS.md").write_text("Scope:\n- src/**\n")
+
+    def _report(self, **kwargs):
+        kwargs.setdefault("min_sessions", 1)
+        # lint_session reports its rule failures on non-object data to stderr.
+        with redirect_stderr(io.StringIO()):
+            return build_context_score_report(
+                self.store, self.tmpdir, context_file="AGENTS.md", history_days=1, **kwargs
+            )
+
+    def test_unpriceable_sessions_are_left_out_of_avg_cost(self):
+        now = time.time()
+        priced = _codex_session(self.store, started_at=now - 30)
+        _codex_session(self.store, prompt_data=[], started_at=now - 20)
+        broken = _codex_session(self.store, started_at=now - 10)
+        with open(self.store.base_dir / broken / "events.ndjson", "a") as f:
+            f.write("not json\n")
+        want = estimate_cost(self.store, priced).total_cost
+
+        report = self._report()
+        version = report.current
+        costs = {s.session_id: s.cost for s in version.sessions}
+        self.assertEqual(costs.pop(priced), want)
+        self.assertEqual(list(costs.values()), [None, None])
+        self.assertEqual(version.unpriced_sessions, 2)
+        self.assertEqual(version.avg_cost, want)
+
+        buf = io.StringIO()
+        format_context_score_text(report, buf)
+        self.assertIn(f"  cost/session: ${want:.4f} (2 not priced)\n", buf.getvalue())
+        self.assertNotIn("$0.0000", buf.getvalue())
+        data = json.loads(format_context_score_json(report))
+        self.assertEqual(data["current"]["avg_cost"], want)
+        self.assertEqual(data["current"]["unpriced_sessions"], 2)
+
+    def test_no_priced_session_has_unknown_avg_cost(self):
+        _codex_session(self.store, prompt_data=[], started_at=time.time() - 10)
+        report = self._report()
+        self.assertIsNone(report.current.avg_cost)
+        buf = io.StringIO()
+        format_context_score_text(report, buf)
+        self.assertIn("  cost/session: n/a (1 not priced)\n", buf.getvalue())
+        data = json.loads(format_context_score_json(report))
+        self.assertIsNone(data["current"]["avg_cost"])
+
+    def test_unpriced_baseline_does_not_score_cost(self):
+        now = time.time()
+        _write_snapshots(self.tmpdir, [
+            _snapshot("old111", now - 1000, "oldsha", "old"),
+            _snapshot("new222", now - 500, "newsha", "new"),
+        ])
+        for i in range(2):
+            _codex_session(self.store, prompt_data=[], started_at=now - 900 + i)
+        for i in range(2):
+            _codex_session(self.store, started_at=now - 400 + i)
+
+        report = self._report(compare=True, min_sessions=2)
+        self.assertEqual(report.baseline.unpriced_sessions, 2)
+        cost = next(d for d in report.dimensions if d.name == "Cost efficiency")
+        self.assertIsNone(cost.baseline_value)
+        self.assertIsNone(cost.score)
+        self.assertFalse(cost.sufficient_data)
+        tools = next(d for d in report.dimensions if d.name == "Tool efficiency")
+        self.assertTrue(tools.sufficient_data)
+        buf = io.StringIO()
+        format_context_score_text(report, buf)
+        self.assertIn("  cost/session: n/a (2 not priced)\n", buf.getvalue())
+
+    def test_pricing_bugs_are_not_hidden(self):
+        _codex_session(self.store, started_at=time.time() - 10)
+        with patch("agent_trace.context_score.session_cost", side_effect=TypeError("bug")):
+            with self.assertRaises(TypeError):
+                self._report()
 
 
 if __name__ == "__main__":

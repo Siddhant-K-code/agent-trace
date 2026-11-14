@@ -60,10 +60,12 @@ Team selection is exact:
 - `--team platform` works when the name exists in only one domain and fails as
   ambiguous when it exists as both a team tag and a workspace.
 
-Cost values are offline token-size estimates using the selected bundled model
-and the pricing snapshot date recorded in the report. Unknown or invalid costs
-are excluded from spend and average calculations, and cost coverage shows the
-denominator. They are not provider invoices or actual spend.
+Cost values match `agent-strace cost` for the selected bundled model: recorded
+token usage when the session has it, otherwise an event-size estimate, priced
+at the pricing snapshot date recorded in the report. Unknown or invalid costs
+are excluded from spend, average, and median calculations, and cost coverage
+shows the denominator. With no cost-estimated session, the averages and median
+are `n/a` (`null` in JSON). They are not provider invoices or actual spend.
 
 Attributed identities come only from persisted actor, engineer, user, git
 author, OS-user, and hostname fields. The reporting machine's git config is

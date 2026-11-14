@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import TextIO
 
 from .config_watch import ConfigSnapshot, _load_snapshots
-from .cost import estimate_cost
+from .cost import session_cost
 from .event_data import require_object_event_data
 from .freshness import _parse_scope_from_agents_md
 from .lint import lint_session
@@ -39,7 +39,7 @@ CAVEATS = (
     "Before/after only: no task-mix control, no confidence intervals.",
     "Baseline is the oldest version, or the previous version with --compare.",
     "Sessions that start before the first config-watch snapshot count as the current version.",
-    "Cost is estimated from event size (chars/4), not recorded token usage.",
+    "Cost is the `agent-strace cost` estimate; sessions it cannot price are left out of cost averages.",
     "Ignores skills and whether the agent read the context file; use skills eval compliance cases for controlled evidence.",
 )
 
@@ -50,7 +50,7 @@ class SessionContextMetrics:
     version_hash: str
     version_label: str
     started_at: float
-    cost: float
+    cost: float | None
     tool_calls: int
     lint_findings: int
     redundant_reads: int
@@ -72,8 +72,18 @@ class VersionScore:
         return len(self.sessions)
 
     @property
-    def avg_cost(self) -> float:
-        return _avg([s.cost for s in self.sessions])
+    def priced_session_count(self) -> int:
+        return sum(1 for s in self.sessions if s.cost is not None)
+
+    @property
+    def unpriced_sessions(self) -> int:
+        return self.session_count - self.priced_session_count
+
+    @property
+    def avg_cost(self) -> float | None:
+        """Average cost of the priced sessions, or None when none is priced."""
+        costs = [s.cost for s in self.sessions if s.cost is not None]
+        return _avg(costs) if costs else None
 
     @property
     def avg_tool_calls(self) -> float:
@@ -107,7 +117,7 @@ class VersionScore:
 @dataclass
 class DimensionScore:
     name: str
-    current_value: float
+    current_value: float | None
     baseline_value: float | None
     change_pct: float | None
     score: float | None
@@ -264,11 +274,12 @@ def _scope_violations(events: list[TraceEvent], scope_globs: list[str]) -> int:
     return count
 
 
-def _session_cost(store: TraceStore, session_id: str) -> float:
+def _session_cost(events: list[TraceEvent], session_id: str) -> float | None:
+    """Return the `agent-strace cost` total, or None when it refuses the session."""
     try:
-        return estimate_cost(store, session_id).total_cost
-    except Exception:
-        return 0.0
+        return session_cost(events, session_id=session_id)
+    except ValueError:
+        return None
 
 
 def _session_lint(store: TraceStore, session_id: str) -> tuple[int, int, int]:
@@ -304,8 +315,10 @@ def _session_metrics(
 ) -> SessionContextMetrics:
     try:
         events = store.load_events(meta.session_id)
+        loaded = True
     except Exception:
         events = []
+        loaded = False
     require_object_event_data(
         events,
         event_types=_metrics_data_event_types(scope_globs, instruction_lines),
@@ -317,7 +330,7 @@ def _session_metrics(
         version_hash=version_hash,
         version_label=version_label,
         started_at=meta.started_at,
-        cost=_session_cost(store, meta.session_id),
+        cost=_session_cost(events, meta.session_id) if loaded else None,
         tool_calls=_tool_calls(events) or getattr(meta, "tool_calls", 0) or 0,
         lint_findings=lint_count,
         redundant_reads=redundant_reads,
@@ -340,11 +353,11 @@ def _change_score(current: float, baseline: float | None) -> tuple[float | None,
 
 def _dimension(
     name: str,
-    current_value: float,
+    current_value: float | None,
     baseline_value: float | None,
     sufficient_data: bool,
 ) -> DimensionScore:
-    if not sufficient_data:
+    if not sufficient_data or current_value is None or baseline_value is None:
         return DimensionScore(name, current_value, baseline_value, None, None, False)
     change, score = _change_score(current_value, baseline_value)
     return DimensionScore(name, current_value, baseline_value, change, score, True)
@@ -424,10 +437,18 @@ def build_context_score_report(
         and (baseline is None or baseline.session_count >= min_sessions)
     )
 
+    # Cost compares only priced sessions, so each side needs enough of them.
+    cost_sufficient = bool(
+        sufficient
+        and baseline is not None
+        and current is not None
+        and current.priced_session_count >= min_sessions
+        and baseline.priced_session_count >= min_sessions
+    )
     dimensions: list[DimensionScore] = []
     if current:
         dimensions = [
-            _dimension("Cost efficiency", current.avg_cost, baseline.avg_cost if baseline else None, sufficient and baseline is not None),
+            _dimension("Cost efficiency", current.avg_cost, baseline.avg_cost if baseline else None, cost_sufficient),
             _dimension("Tool efficiency", current.avg_tool_calls, baseline.avg_tool_calls if baseline else None, sufficient and baseline is not None),
             _dimension("Lint violations", current.lint_per_session, baseline.lint_per_session if baseline else None, sufficient and baseline is not None),
             _dimension("Scope adherence", current.scope_violations_per_session, baseline.scope_violations_per_session if baseline else None, sufficient and baseline is not None),
@@ -459,6 +480,13 @@ def _fmt_change(value: float | None) -> str:
     return f"{value * 100:+.0f}%"
 
 
+def _fmt_avg_cost(version: VersionScore) -> str:
+    cost = "n/a" if version.avg_cost is None else f"${version.avg_cost:.4f}"
+    if version.unpriced_sessions:
+        cost += f" ({version.unpriced_sessions} not priced)"
+    return cost
+
+
 def format_context_score_text(report: ContextScoreReport, out: TextIO = sys.stdout) -> None:
     w = out.write
     current = report.current
@@ -486,7 +514,7 @@ def format_context_score_text(report: ContextScoreReport, out: TextIO = sys.stdo
 
     w("Current version stats:\n")
     w(f"  sessions: {current.session_count}\n")
-    w(f"  cost/session: ${current.avg_cost:.4f}\n")
+    w(f"  cost/session: {_fmt_avg_cost(current)}\n")
     w(f"  tool calls/session: {current.avg_tool_calls:.1f}\n")
     w(f"  lint findings/session: {current.lint_per_session:.1f}\n")
     w(f"  scope violations/session: {current.scope_violations_per_session:.1f}\n")
@@ -495,7 +523,7 @@ def format_context_score_text(report: ContextScoreReport, out: TextIO = sys.stdo
         base = report.baseline
         w("\nBaseline version stats:\n")
         w(f"  sessions: {base.session_count}\n")
-        w(f"  cost/session: ${base.avg_cost:.4f}\n")
+        w(f"  cost/session: {_fmt_avg_cost(base)}\n")
         w(f"  tool calls/session: {base.avg_tool_calls:.1f}\n")
         w(f"  lint findings/session: {base.lint_per_session:.1f}\n")
         w(f"  scope violations/session: {base.scope_violations_per_session:.1f}\n")
@@ -517,6 +545,7 @@ def format_context_score_json(report: ContextScoreReport) -> str:
             "last_seen": version.last_seen,
             "session_count": version.session_count,
             "avg_cost": version.avg_cost,
+            "unpriced_sessions": version.unpriced_sessions,
             "avg_tool_calls": version.avg_tool_calls,
             "lint_per_session": version.lint_per_session,
             "scope_violations_per_session": version.scope_violations_per_session,

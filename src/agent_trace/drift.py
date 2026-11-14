@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TextIO
 
-from .cost import estimate_cost
+from .cost import session_cost
 from .event_data import str_field
 from .models import EventType, TraceEvent
 from .store import TraceStore
@@ -52,10 +52,13 @@ class BehavioralFingerprint:
     error_rate: DistStats = field(default_factory=DistStats)
     retry_rate: DistStats = field(default_factory=DistStats)
     tool_calls: DistStats = field(default_factory=DistStats)
-    cost_usd: DistStats = field(default_factory=DistStats)
+    # Over priced sessions only; None when no session could be priced.
+    cost_usd: DistStats | None = field(default_factory=DistStats)
     blast_radius: DistStats = field(default_factory=DistStats)
     session_duration_s: DistStats = field(default_factory=DistStats)
     decision_depth: DistStats = field(default_factory=DistStats)
+    # Sessions `agent-strace cost` refuses, left out of cost_usd.
+    unpriced_sessions: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -66,7 +69,8 @@ class BehavioralFingerprint:
             "error_rate": self.error_rate.to_dict(),
             "retry_rate": self.retry_rate.to_dict(),
             "tool_calls": self.tool_calls.to_dict(),
-            "cost_usd": self.cost_usd.to_dict(),
+            "cost_usd": None if self.cost_usd is None else self.cost_usd.to_dict(),
+            "unpriced_sessions": self.unpriced_sessions,
             "blast_radius": self.blast_radius.to_dict(),
             "session_duration_s": self.session_duration_s.to_dict(),
             "decision_depth": self.decision_depth.to_dict(),
@@ -84,6 +88,7 @@ class BehavioralFingerprint:
             period_start=d.get("period", {}).get("start", ""),
             period_end=d.get("period", {}).get("end", ""),
             tool_mix=d.get("tool_mix", {}),
+            unpriced_sessions=d.get("unpriced_sessions", 0),
         )
         for attr in (
             "error_rate",
@@ -95,6 +100,9 @@ class BehavioralFingerprint:
             "decision_depth",
         ):
             raw = d.get(attr, {})
+            if raw is None and attr == "cost_usd":
+                fp.cost_usd = None
+                continue
             setattr(fp, attr, DistStats(
                 mean=raw.get("mean", 0.0),
                 p50=raw.get("p50", 0.0),
@@ -106,8 +114,8 @@ class BehavioralFingerprint:
 @dataclass
 class DimensionDrift:
     name: str
-    score: float          # 0.0 = identical, 1.0 = maximally different
-    label: str            # "stable" / "moderate" / "high"
+    score: float | None   # 0.0 = identical, 1.0 = maximally different; None = not comparable
+    label: str            # "stable" / "moderate" / "high" / "n/a"
     baseline_summary: str = ""
     current_summary: str = ""
 
@@ -121,6 +129,8 @@ class DriftReport:
     baseline_period: str
     current_period: str
     dimensions: list[DimensionDrift]
+    baseline_unpriced: int = 0
+    current_unpriced: int = 0
 
     @property
     def label(self) -> str:
@@ -224,7 +234,7 @@ class SessionMetrics:
     error_count: int
     total_tool_calls: int
     retry_count: int
-    cost_usd: float
+    cost_usd: float | None     # None when `agent-strace cost` refuses the session
     blast_radius: int          # distinct files written
     decision_count: int
 
@@ -233,7 +243,7 @@ def _extract_metrics(
     session_id: str,
     events: list[TraceEvent],
     meta_started: float,
-    cost_usd: float = 0.0,
+    cost_usd: float | None = None,
 ) -> SessionMetrics:
     tool_mix: dict[str, int] = {}
     error_count = 0
@@ -288,11 +298,12 @@ def _extract_metrics(
     )
 
 
-def _session_cost(store: TraceStore, session_id: str) -> float:
+def _session_cost(events: list[TraceEvent], session_id: str) -> float | None:
+    """Return the `agent-strace cost` total, or None when it refuses the session."""
     try:
-        return estimate_cost(store, session_id).total_cost
-    except Exception:
-        return 0.0
+        return session_cost(events, session_id=session_id)
+    except ValueError:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -314,11 +325,12 @@ def compute_fingerprint(
         try:
             meta = store.load_meta(sid)
             events = store.load_events(sid)
-            m = _extract_metrics(sid, events, meta.started_at, _session_cost(store, sid))
-            all_metrics.append(m)
-            timestamps.append(meta.started_at)
+            m = _extract_metrics(sid, events, meta.started_at)
         except Exception:
             continue
+        m.cost_usd = _session_cost(events, sid)
+        all_metrics.append(m)
+        timestamps.append(meta.started_at)
 
     if not all_metrics:
         return BehavioralFingerprint(fingerprint_id=fingerprint_id)
@@ -339,7 +351,7 @@ def compute_fingerprint(
         m.retry_count / max(m.total_tool_calls, 1) for m in all_metrics
     ]
     tool_calls = [float(m.total_tool_calls) for m in all_metrics]
-    costs = [m.cost_usd for m in all_metrics]
+    costs = [m.cost_usd for m in all_metrics if m.cost_usd is not None]
     blast_radii = [float(m.blast_radius) for m in all_metrics]
     durations = [m.duration_s for m in all_metrics]
     decisions = [float(m.decision_count) for m in all_metrics]
@@ -356,10 +368,11 @@ def compute_fingerprint(
         error_rate=_dist_stats(error_rates),
         retry_rate=_dist_stats(retry_rates),
         tool_calls=_dist_stats(tool_calls),
-        cost_usd=_dist_stats(costs),
+        cost_usd=_dist_stats(costs) if costs else None,
         blast_radius=_dist_stats(blast_radii),
         session_duration_s=_dist_stats(durations),
         decision_depth=_dist_stats(decisions),
+        unpriced_sessions=len(all_metrics) - len(costs),
     )
 
 
@@ -394,20 +407,31 @@ def compute_drift(
         ("session_duration_s", "session_duration"),
         ("decision_depth", "decision_depth"),
     ]:
-        b_stat: DistStats = getattr(baseline, attr)
-        c_stat: DistStats = getattr(current, attr)
+        b_stat: DistStats | None = getattr(baseline, attr)
+        c_stat: DistStats | None = getattr(current, attr)
+        if b_stat is None or c_stat is None:
+            # No priced session on one side: cost cannot be compared.
+            dimensions.append(DimensionDrift(
+                name=attr,
+                score=None,
+                label="n/a",
+                baseline_summary=_stats_summary(b_stat),
+                current_summary=_stats_summary(c_stat),
+            ))
+            continue
         score = _stats_divergence(b_stat, c_stat)
         dimensions.append(DimensionDrift(
             name=attr,
             score=round(score, 3),
             label=_drift_label(score, threshold),
-            baseline_summary=f"mean={b_stat.mean:.2f} p50={b_stat.p50:.2f} p95={b_stat.p95:.2f}",
-            current_summary=f"mean={c_stat.mean:.2f} p50={c_stat.p50:.2f} p95={c_stat.p95:.2f}",
+            baseline_summary=_stats_summary(b_stat),
+            current_summary=_stats_summary(c_stat),
         ))
 
-    # Weighted average (tool_mix weighted 2x, others 1x)
+    # Weighted average (tool_mix weighted 2x, others 1x) over comparable dimensions
     weights = [2.0] + [1.0] * (len(dimensions) - 1)
-    overall = sum(d.score * w for d, w in zip(dimensions, weights)) / sum(weights)
+    scored = [(d.score, w) for d, w in zip(dimensions, weights) if d.score is not None]
+    overall = sum(score * w for score, w in scored) / sum(w for _, w in scored)
 
     return DriftReport(
         overall_score=round(overall, 3),
@@ -417,7 +441,15 @@ def compute_drift(
         baseline_period=f"{baseline.period_start} to {baseline.period_end}",
         current_period=f"{current.period_start} to {current.period_end}",
         dimensions=dimensions,
+        baseline_unpriced=baseline.unpriced_sessions,
+        current_unpriced=current.unpriced_sessions,
     )
+
+
+def _stats_summary(stats: DistStats | None) -> str:
+    if stats is None:
+        return "n/a"
+    return f"mean={stats.mean:.2f} p50={stats.p50:.2f} p95={stats.p95:.2f}"
 
 
 def _top_tools(tool_mix: dict[str, float], n: int = 3) -> str:
@@ -473,7 +505,12 @@ def print_fingerprint(fp: BehavioralFingerprint, out: TextIO = sys.stdout) -> No
         ("file touch radius", fp.blast_radius),
         ("decision depth", fp.decision_depth),
     ]:
+        if stats is None:
+            w(f"  {label:<22} {'n/a':>10} {'n/a':>10} {'n/a':>10}\n")
+            continue
         w(f"  {label:<22} {stats.p50:>10.2f} {stats.p95:>10.2f} {stats.mean:>10.2f}\n")
+    if fp.unpriced_sessions:
+        w(f"\nSessions not priced: {fp.unpriced_sessions} (left out of cost usd)\n")
     w("\n")
 
 
@@ -530,6 +567,11 @@ def print_report(report: DriftReport, out: TextIO = sys.stdout) -> None:
     w("\nBehavioral drift report\n")
     w(f"Baseline: {report.baseline_period} ({report.baseline_sessions} sessions)\n")
     w(f"Current:  {report.current_period} ({report.current_sessions} sessions)\n")
+    if report.baseline_unpriced or report.current_unpriced:
+        w(
+            f"Sessions not priced: {report.baseline_unpriced} baseline, "
+            f"{report.current_unpriced} current (left out of cost_usd)\n"
+        )
     w("─" * 70 + "\n")
 
     icon = ICON.get(report.label, "")
@@ -540,7 +582,8 @@ def print_report(report: DriftReport, out: TextIO = sys.stdout) -> None:
     w("─" * 70 + "\n")
     for d in report.dimensions:
         icon_d = ICON.get(d.label, "")
-        w(f"  {d.name:<22} {d.score:>6.3f}  {icon_d}  {d.label}\n")
+        score = f"{'n/a':>6}" if d.score is None else f"{d.score:>6.3f}"
+        w(f"  {d.name:<22} {score}  {icon_d}  {d.label}\n")
 
     w("\n")
     high = [d for d in report.dimensions if d.label == "high"]
@@ -625,6 +668,8 @@ def cmd_drift(args: argparse.Namespace) -> int:
             "label": report.label,
             "baseline_sessions": report.baseline_sessions,
             "current_sessions": report.current_sessions,
+            "baseline_unpriced_sessions": report.baseline_unpriced,
+            "current_unpriced_sessions": report.current_unpriced,
             "dimensions": [
                 {"name": d.name, "score": d.score, "label": d.label}
                 for d in report.dimensions
@@ -660,6 +705,8 @@ def cmd_fingerprint(args: argparse.Namespace) -> int:
                 "label": report.label,
                 "baseline_sessions": report.baseline_sessions,
                 "current_sessions": report.current_sessions,
+                "baseline_unpriced_sessions": report.baseline_unpriced,
+                "current_unpriced_sessions": report.current_unpriced,
                 "dimensions": [
                     {
                         "name": d.name,
