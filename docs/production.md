@@ -433,6 +433,29 @@ metrics are still exported.
 | event_id | span ID |
 | parent_id | parent span ID |
 
+### Span status
+
+The `otlp` and `otlp-genai` exports, Temporal, `watch --stream-otlp` and
+`a2a-tree --format json` set span status as
+[Recording errors](https://github.com/open-telemetry/semantic-conventions/blob/v1.45.0/docs/general/recording-errors.md)
+specifies for instrumentation. The GenAI span conventions defer to that
+document for span status.
+
+| Span | Status |
+|---|---|
+| A tool call with a result, a completed model request, a successful A2A call | UNSET (`{"code": 0}`) |
+| A request or tool call still pending at the end | UNSET (`{"code": 0}`) |
+| A session root span when the session's `errors` is 0 | UNSET (`{"code": 0}`) |
+| An `error`, a failed or cancelled model request, a failed A2A call | ERROR (`{"code": 2}`); error and model request spans carry the recorded error text, at most 200 characters, as `message` |
+| A session root span when the session's `errors` is above 0 | ERROR (`{"code": 2}`) |
+
+No span has status OK. The OpenTelemetry trace API reserves OK for application
+developers and operators who have validated an operation. Earlier versions set
+OK (`{"code": 1}`) on every successful span. A query, alert or dashboard that
+filters on status OK (for example TraceQL `status = ok` or
+`otel.status_code = "OK"`) now matches no agent-strace spans; filter on status
+not ERROR, or on UNSET, instead.
+
 ### How requests and responses are paired
 
 The OTLP, OTLP GenAI, Temporal and Langfuse exports and `cost` pair events with
@@ -554,7 +577,8 @@ with `error.type` `cancelled`.
 What does not change:
 
 - A completed request, or a response with no `status`, exports exactly as
-  before, with OK status.
+  before, except that its span status is UNSET instead of OK; see
+  [Span status](#span-status).
 - A failed request is not an `error` event. Session `errors`,
   `agent_strace.session.error_rate`, `timeline` and the root span status do
   not count it.

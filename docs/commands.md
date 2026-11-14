@@ -1516,7 +1516,7 @@ Start an MCP server that exposes your session store as queryable tools for a deb
 ```
 agent-strace a2a-tree [session-id] [--format text|json]
 ```
-Visualise the A2A agent call graph. Exports as OTLP spans for Jaeger, Tempo, or any OpenTelemetry backend.
+Visualise the A2A agent call graph. Exports as OTLP spans for Jaeger, Tempo, or any OpenTelemetry backend. A failed call span has status ERROR; a successful one leaves status UNSET (see [Span status](production.md#span-status)).
 
 ### `identity`
 ```

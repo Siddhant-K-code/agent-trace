@@ -491,7 +491,7 @@ class ExportersAgreeOnLinkedLLMErrorTest(unittest.TestCase):
         spans = {s["spanId"]: s for s in _spans(session_to_otlp_genai(_META, self.events))[1:]}
         self.assertEqual(spans[_to_span_id("failed")]["status"], {"code": 2, "message": "rate limited"})
         self.assertEqual(spans[_to_span_id("resp")]["startTimeUnixNano"], _ts_to_nanos(4.0))
-        self.assertEqual(spans[_to_span_id("resp")]["status"], {"code": 1})
+        self.assertEqual(spans[_to_span_id("resp")]["status"], {"code": 0})
         self.assertEqual(len(spans), 2)
         self.assertEqual(sorted(otlp_genai_data_indexes(self.events)), [0, 1, 2])
 

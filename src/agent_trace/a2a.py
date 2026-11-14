@@ -384,7 +384,7 @@ def a2a_calls_to_otlp_spans(
                     {"key": "a2a.success", "value": {"boolValue": call.success}},
                     {"key": "a2a.cost_usd", "value": {"doubleValue": call.cost_usd}},
                 ],
-                "status": {"code": 1 if call.success else 2},
+                "status": {"code": 0 if call.success else 2},  # UNSET or ERROR
             })
 
         for child in node.children:

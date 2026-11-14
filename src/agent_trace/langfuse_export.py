@@ -22,11 +22,9 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any
 
 from .cost import TokenUsage, infer_provider
-from .event_data import number_field, require_object_event_data, str_field
+from .event_data import require_object_event_data, str_field
 from .models import EventType, SessionMeta, TraceEvent
 from .otlp import llm_failure, model_request_usage
 from .pairing import (
