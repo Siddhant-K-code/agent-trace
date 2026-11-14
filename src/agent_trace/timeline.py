@@ -26,6 +26,7 @@ from .cost import (
 )
 from .event_data import object_field, require_object_event_data, str_field
 from .explain import PHASE_DATA_EVENT_TYPES, ExplainResult, Phase, explain_session
+from .failures import SessionErrors, response_failure, session_errors
 from .models import EventType, TraceEvent
 from .pairing import Pairer, tool_pairer
 from .store import TraceStore
@@ -39,12 +40,15 @@ from .store import TraceStore
 class TimelineEntry:
     """One rendered line in the timeline."""
     offset: float           # seconds from session start
-    status: str             # "ok", "fail", "info"
+    status: str             # "ok", "fail", "cancelled", "info"
     label: str              # short description
     detail: str = ""        # optional second line
     duration_ms: float | None = None
     tokens: int = 0
     cost: float = 0.0
+    # False for a "fail" entry the session error count leaves out: a failed
+    # model response whose request an error entry already counts.
+    counted: bool = True
 
 
 @dataclass
@@ -147,14 +151,21 @@ def _build_entries(
     base_ts: float,
     model: str,
     event_usage: list[TokenUsage] | None = None,
+    errors: SessionErrors | None = None,
+    start: int = 0,
 ) -> list[TimelineEntry]:
     """Build the entries of *phase*.
 
     *event_usage* holds each event's token usage, taken from the whole
-    session.  Without it, the phase's events are counted on their own.
+    session.  *errors* holds the session's errors, and *start* is the
+    position of the phase's first event in the session.  Without them, the
+    phase's events are counted on their own.
     """
     if event_usage is None:
         event_usage = session_event_usage(phase.events)
+    if errors is None:
+        errors = session_errors(phase.events)
+        start = 0
     entries: list[TimelineEntry] = []
 
     # Pair tool results with the entries of their calls (see pairing.py).
@@ -163,7 +174,9 @@ def _build_entries(
     open_calls: list[int] = []                  # call entries with no response yet
     call_counts: dict[str, int] = {}            # normalised key -> count
 
-    for event, usage in zip(phase.events, event_usage):
+    for position, (event, usage) in enumerate(
+        zip(phase.events, event_usage), start=start,
+    ):
         offset = event.timestamp - base_ts
         tokens = usage.input_tokens + usage.output_tokens
         cost = _usage_dollars(usage, model)
@@ -222,14 +235,21 @@ def _build_entries(
 
         elif event.event_type == EventType.LLM_RESPONSE:
             tok = event.data.get("total_tokens", tokens)
+            status, label, detail = "ok", "LLM response", f"{tok} tokens"
+            failure = response_failure(event)
+            if failure is not None:
+                status = "cancelled" if failure.cancelled else "fail"
+                label = f"LLM response {'cancelled' if failure.cancelled else 'failed'}"
+                detail = failure.message[:120] or (detail if tok else "")
             entries.append(TimelineEntry(
                 offset=offset,
-                status="ok",
-                label="LLM response",
-                detail=f"{tok} tokens",
+                status=status,
+                label=label,
+                detail=detail,
                 duration_ms=event.duration_ms,
                 tokens=tok,
                 cost=cost,
+                counted=position in errors.failed_responses,
             ))
 
         elif event.event_type == EventType.FILE_READ:
@@ -320,19 +340,20 @@ def build_timeline(
     phases: list[TimelinePhase] = []
 
     # Phases hold every event of the session, in order.
-    event_usage = session_event_usage(
-        [event for phase in explain.phases for event in phase.events]
-    )
+    events = [event for phase in explain.phases for event in phase.events]
+    event_usage = session_event_usage(events)
+    errors = session_errors(events)
     position = 0
 
     for phase in explain.phases:
         usages = event_usage[position:position + len(phase.events)]
-        position += len(phase.events)
         phase_cost = _phase_cost(usages, model)
-        entries = _build_entries(phase, base_ts, model, usages)
+        entries = _build_entries(phase, base_ts, model, usages, errors, position)
+        position += len(phase.events)
 
-        # Count errors and retries from entries
-        phase_errors = sum(1 for e in entries if e.status == "fail")
+        # Count errors and retries from entries.  A failed model request
+        # counts once (see failures.py); a cancelled one is not an error.
+        phase_errors = sum(1 for e in entries if e.status == "fail" and e.counted)
         # Retry count: entries with "(attempt N)" where N > 1
         phase_retries = sum(
             1 for e in entries
@@ -384,7 +405,7 @@ def _fmt_duration(ms: float | None) -> str:
 
 
 def _status_icon(status: str) -> str:
-    return {"ok": "✓", "fail": "✗", "info": "·"}.get(status, "·")
+    return {"ok": "✓", "fail": "✗", "cancelled": "⊘", "info": "·"}.get(status, "·")
 
 
 def format_timeline(result: TimelineResult, out: TextIO = sys.stdout) -> None:

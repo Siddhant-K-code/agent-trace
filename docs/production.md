@@ -405,7 +405,7 @@ agent-strace export --metrics --backend otlp --since 30d
 | Metric | Description |
 |---|---|
 | `agent_strace.session.cost_usd` | Session cost, as `agent-strace cost` reports it with its default model |
-| `agent_strace.session.error_rate` | Errors / tool calls |
+| `agent_strace.session.error_rate` | Errors, failed model requests included, / tool calls (see [Session error counts](#session-error-counts)) |
 | `agent_strace.session.retry_rate` | Consecutive same-tool retries / tool calls |
 | `agent_strace.session.blast_radius` | Distinct files written |
 | `agent_strace.session.duration_s` | Wall-clock session duration |
@@ -448,6 +448,13 @@ document for span status.
 | A session root span when the session's `errors` is 0 | UNSET (`{"code": 0}`) |
 | An `error`, a failed or cancelled model request, a failed A2A call | ERROR (`{"code": 2}`); error and model request spans carry the recorded error text, at most 200 characters, as `message` |
 | A session root span when the session's `errors` is above 0 | ERROR (`{"code": 2}`) |
+
+The root span reads the session's stored `errors`, which counts failed model
+requests as well as `error` events (see
+[Session error counts](#session-error-counts)). A session whose only error is a
+failed model request, such as a Codex request that failed, has an ERROR root
+span. A cancelled request alone leaves it UNSET. For a session recorded by an
+earlier version, the stored count leaves failed requests out.
 
 No span has status OK. The OpenTelemetry trace API reserves OK for application
 developers and operators who have validated an operation. Earlier versions set
@@ -579,12 +586,64 @@ What does not change:
 - A completed request, or a response with no `status`, exports exactly as
   before, except that its span status is UNSET instead of OK; see
   [Span status](#span-status).
-- A failed request is not an `error` event. Session `errors`,
-  `agent_strace.session.error_rate`, `timeline` and the root span status do
-  not count it.
 - An `error` with no `parent_id`, as older versions recorded a failed SDK
   call, still exports as an unfinished request span and a separate error
   span.
+
+### Session error counts
+
+A session's error count is its `error` events plus its failed model requests,
+with the definition of a failed request above. The exports and every session
+error count share that definition, in `src/agent_trace/failures.py`, so they
+agree. It applies to:
+
+- `errors` in `meta.json`, as the hooks write it while they capture a session
+  and as `backfill-meta` derives it. The root span's status and `agent.errors`
+  attribute read it, so a session with a failed Codex request now exports a
+  root span with ERROR status.
+- `agent_strace.session.error_rate`, and the error rate in `baseline`,
+  `drift`, `sample` and `dashboard --trend`.
+- `timeline`, `stats`, `dashboard`, `pr-comment`, the `eval` `error_count`
+  scorer and `has-errors` dataset filter, the subagent error counts in
+  `stats`, and the summary check in `validate`.
+
+Each failed request counts once. A request with both an `error` event linked
+to it and a failed `llm_response` is one error. Each attempt is its own
+request: Codex fires `PostModelRequest` for every attempt, so a request that
+failed twice before it succeeded on retry counts as two errors.
+
+A cancelled request is not a session error and does not count toward
+`error_rate`. Codex records `cancelled` when the user interrupts the turn or
+the turn is aborted, with no error text and no token usage, and the SDK
+integrations record it when the calling task is cancelled. Neither means the
+agent failed, so a session the user interrupted is not counted as failed.
+`timeline` marks a cancelled request `⊘` (`cancelled` in JSON) rather than ok,
+and the exports still report it as an error with `error.type` `cancelled`.
+
+`error_rate` is still errors divided by tool calls (at least 1), so a session
+with more failed requests than tool calls has a rate above 1.
+
+#### Sessions recorded by earlier versions
+
+Earlier versions left failed model requests out of the stored `errors`, and
+`backfill-meta` never rewrites an existing `meta.json`. No re-import is
+needed:
+
+- Commands that read the events count failed requests in old sessions too:
+  `timeline`, `stats`, `baseline`, `drift`, `sample`, `eval`, and the Langfuse
+  `error_rate` metric. `dashboard` and `pr-comment` show the larger of the
+  stored count and the count from the events.
+- Commands that read only `meta.json` keep the stored count for an old
+  session: `list`, `diff`, `replay`, `share`, `standup`, the subagent `tree`,
+  the web dashboard, the MCP server's session details, the export root span
+  status and `agent.errors`, and the Langfuse trace's `errors` metadata.
+- `validate` reports a stored count that left out failed requests as the
+  `info` finding `legacy_error_summary`, not as a contradiction. A count of 0
+  is not written to `meta.json`, so `validate` has nothing to compare for a
+  session whose only errors are failed requests.
+- Profiles and fingerprints saved by earlier versions (`baseline update`,
+  `drift --save-baseline`, `fingerprint --output`, `eval --save-baseline`)
+  left failed requests out. Save them again to compare like with like.
 
 ---
 

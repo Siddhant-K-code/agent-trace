@@ -23,6 +23,7 @@ from typing import TextIO
 
 from .cost import session_cost
 from .event_data import object_field, require_object_event_data, str_field
+from .failures import count_session_errors
 from .models import EventType, SessionMeta, TraceEvent
 from .store import TraceStore
 
@@ -57,7 +58,7 @@ def _score_session(
     events: list[TraceEvent],
 ) -> SessionScore:
     tool_calls = 0
-    errors = 0
+    errors = count_session_errors(events)
     retries = 0
     files_written: set[str] = set()
     prev_tool: str | None = None
@@ -84,8 +85,6 @@ def _score_session(
             path = ev.data.get("path") or ev.data.get("file_path") or ""
             if path:
                 files_written.add(str(path))
-        elif ev.event_type == EventType.ERROR:
-            errors += 1
 
     denom = max(tool_calls, 1)
     error_rate = errors / denom

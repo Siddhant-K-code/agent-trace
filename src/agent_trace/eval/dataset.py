@@ -92,11 +92,13 @@ def _session_passes_filter(
       long-duration:Ns    — session duration > N seconds
       low-eval-score:N    — eval.json overall score < N
 
-    cost-above uses the `agent-strace cost` total, so a session that command
-    refuses never matches.
+    has-errors also matches a failed model request, which the session error
+    count includes (see failures.py). cost-above uses the `agent-strace cost`
+    total, so a session that command refuses never matches.
     """
     from ..cost import session_cost
     from ..event_data import str_field
+    from ..failures import count_session_errors
     from ..models import EventType
 
     try:
@@ -108,7 +110,7 @@ def _session_passes_filter(
     spec = filter_spec.strip().lower()
 
     if spec == "has-errors":
-        return any(e.event_type == EventType.ERROR for e in events)
+        return count_session_errors(events) > 0
 
     if spec == "high-retry":
         tool_calls = [e for e in events if e.event_type == EventType.TOOL_CALL]

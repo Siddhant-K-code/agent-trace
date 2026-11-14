@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from .failures import count_session_errors
 from .hooks import _PROVIDER_AGENT
 from .models import EventType, SessionMeta, TraceEvent
 from .store import (
@@ -183,11 +184,12 @@ def derive_meta(
         ended_at=ended_at,
         agent_name=name,
         command=f"{name} ({BACKFILL_SOURCE})",
-        # Same counters the hooks maintain: one per PreToolUse and one per
-        # failed PostToolUse.  llm_request is counted like the proxy paths.
+        # Same counters the hooks maintain: one per PreToolUse, and one per
+        # failed PostToolUse or failed model request.  llm_request is
+        # counted like the proxy paths.
         tool_calls=sum(1 for e in events if e.event_type == EventType.TOOL_CALL),
         llm_requests=sum(1 for e in events if e.event_type == EventType.LLM_REQUEST),
-        errors=sum(1 for e in events if e.event_type == EventType.ERROR),
+        errors=count_session_errors(events),
         total_duration_ms=(ended_at - started_at) * 1000,
         workspace_id=workspace_id,
         # Attribution describes who started the capture.  Collecting it now

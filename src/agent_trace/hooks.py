@@ -49,6 +49,7 @@ import time
 from contextvars import ContextVar
 from pathlib import Path
 
+from .failures import is_failed_response
 from .models import EventType, SessionMeta, TraceEvent
 from .pairing import hook_call_timestamp, link_response, match_hook_tool_call
 from .redact import redact_data, redact_data_with_status, redaction_enabled
@@ -913,7 +914,8 @@ def handle_post_model_request(input_data: dict, provider: str = "claude") -> Non
     ``parent_id``. ``token_usage`` is kept as the provider sent it; Codex counts
     cached input inside ``input_tokens`` and reasoning inside
     ``output_tokens``, and ``total_tokens`` is their sum. It is null when the
-    request failed or was cancelled.
+    request failed or was cancelled. A failed request adds one to the
+    session's ``errors``; a cancelled one does not.
     """
     store = _get_store()
     session_id = _resolve_session_id(input_data, provider=provider)
@@ -942,24 +944,26 @@ def handle_post_model_request(input_data: dict, provider: str = "claude") -> Non
     if redact:
         event_data = redact_data(event_data)
 
-    _ensure_session_meta(store, session_id, provider, input_data)
-    _write_event(
-        store,
-        session_id,
-        TraceEvent(
-            event_type=EventType.LLM_RESPONSE,
-            session_id=session_id,
-            data=event_data,
-        ),
+    event = TraceEvent(
+        event_type=EventType.LLM_RESPONSE,
+        session_id=session_id,
+        data=event_data,
     )
+    _ensure_session_meta(store, session_id, provider, input_data)
+    _write_event(store, session_id, event)
 
     # ``llm_requests`` counts ``llm_request`` events (validate and backfill
-    # rely on that), and this hook records none, so only tokens are added.
-    if total:
-        def _add_tokens(meta: SessionMeta) -> None:
-            meta.total_tokens += total
+    # rely on that), and this hook records none. A failed request is a
+    # session error; a cancelled one is not (see failures.py).
+    failed = is_failed_response(event)
+    if total or failed:
+        def _count(meta: SessionMeta) -> None:
+            if total:
+                meta.total_tokens += total
+            if failed:
+                meta.errors += 1
 
-        _mutate_meta_or_none(store, session_id, _add_tokens)
+        _mutate_meta_or_none(store, session_id, _count)
 
 
 # Providers whose subagent hooks name the child by the child's own hook

@@ -32,6 +32,7 @@ from .compliance_report import (
     _parse_meta_snapshot,
 )
 from .evidence_health import EvidenceHealthStatus, assess_evidence_health
+from .failures import count_session_errors
 from .freeze import RegressionFixture, compare_fixtures, extract_steps
 from .health import declared_capture
 from .models import EventType, SessionMeta, TraceEvent
@@ -432,6 +433,10 @@ def _summary_result(
         field: sum(event.event_type == event_type for event in events)
         for field, event_type in _COUNT_FIELDS.items()
     }
+    # ``errors`` also counts failed model requests. Traces written before
+    # that counted error events only, which stays consistent.
+    error_events = observed["errors"]
+    observed["errors"] = count_session_errors(events)
     findings: list[ValidationFinding] = []
     compared: dict[str, dict[str, int | float]] = {}
     for field in _COUNT_FIELDS:
@@ -439,15 +444,28 @@ def _summary_result(
             continue
         recorded = raw_meta[field]
         compared[field] = {"recorded": recorded, "observed": observed[field]}
-        if recorded != observed[field]:
+        if recorded == observed[field]:
+            continue
+        if field == "errors" and recorded == error_events:
             findings.append(
                 ValidationFinding(
-                    "summary_contradiction",
-                    "error",
-                    f"metadata {field} is {recorded}, but the event stream has "
-                    f"{observed[field]}",
+                    "legacy_error_summary",
+                    "info",
+                    f"metadata errors is {recorded}, the error events only; "
+                    f"it leaves out {observed[field] - error_events} failed "
+                    "model request(s) because it was written before they "
+                    "were counted",
                 )
             )
+            continue
+        findings.append(
+            ValidationFinding(
+                "summary_contradiction",
+                "error",
+                f"metadata {field} is {recorded}, but the event stream has "
+                f"{observed[field]}",
+            )
+        )
 
     observed_end = any(event.event_type == EventType.SESSION_END for event in events)
     if meta.ended_at is not None and not observed_end:
@@ -459,7 +477,8 @@ def _summary_result(
             )
         )
 
-    state = "contradictory" if findings else ("consistent" if compared else "unreported")
+    contradictory = any(finding.severity == "error" for finding in findings)
+    state = "contradictory" if contradictory else ("consistent" if compared else "unreported")
     return {
         "state": state,
         "compared": compared,

@@ -18,6 +18,7 @@ from typing import Any, Callable
 
 from ..cost import estimate_cost
 from ..event_data import object_field, str_field
+from ..failures import count_session_errors
 from ..models import EventType, TraceEvent
 from ..store import TraceStore
 
@@ -68,9 +69,13 @@ def measure_cost_usd(store: TraceStore, session_id: str) -> float:
 
 
 def measure_error_count(events: list[TraceEvent]) -> int:
-    """Return the number of explicit error events."""
+    """Return the session error count: error events plus failed model requests.
 
-    return sum(1 for event in events if event.event_type == EventType.ERROR)
+    A request counts once, and a cancelled request is not an error. See
+    :mod:`agent_trace.failures`.
+    """
+
+    return count_session_errors(events)
 
 
 def measure_session_status(events: list[TraceEvent], meta: object | None = None) -> str:

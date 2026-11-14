@@ -49,7 +49,7 @@ The validator uses the packaged JSON Schemas for record shape, then reuses the b
 | Terminal outcomes | Finalized tool and LLM requests have one recorded result or terminal error |
 | Session boundaries | A finalized trace has valid start and end boundaries. Events before the first start are invalid unless the hook provider's [capture matrix](capture-matrix.md) entry lists every one of their types in `events_before_start` |
 | Hash chain | The existing byte-level `prev_hash` rule is checked without changing legacy records |
-| Metadata summaries | Explicit tool-call, LLM-request, and error counts must equal observed events |
+| Metadata summaries | Explicit tool-call, LLM-request, and error counts must equal observed events. The error count is `error` events plus [failed model requests](production.md#session-error-counts). A count equal to the `error` events alone, as earlier versions wrote it, is the `info` finding `legacy_error_summary`, not a contradiction |
 | Usage presence | Missing `total_tokens` means unreported; explicit `0` means reported zero |
 | Replay baseline | `--replay-baseline` uses the existing regression fixture tool-call projection |
 
@@ -73,7 +73,7 @@ A line hash covers the line's bytes without its line ending. agent-strace writes
 
 `valid` means the trace conforms to the independent rules. `partial` means the records are parseable but evidence is incomplete or has a non-fatal relationship gap. `invalid` means shape, identity, uniqueness, ordering, integrity, summary, or replay checks failed.
 
-Findings have severity `error`, `warning` or `info`. Any `error` makes the report `invalid`, and any `warning` makes it `partial`. An `info` finding records a gap the provider's capture metadata declares, such as `declared_events_before_session_start` or `declared_results_without_requests`, and does not change the status.
+Findings have severity `error`, `warning` or `info`. Any `error` makes the report `invalid`, and any `warning` makes it `partial`. An `info` finding records a gap the provider's capture metadata declares, such as `declared_events_before_session_start` or `declared_results_without_requests`, or a metadata error count written before failed model requests were counted (`legacy_error_summary`), and does not change the status.
 
 Labels are stable machine-readable facts used by the conformance corpus. Examples include `legacy`, `current`, `missing_outcome`, `terminal_absent`, `tampered`, `redacted`, `recovered`, `summary_contradiction`, `usage_missing`, `usage_zero`, `declared_events_before_session_start`, `declared_results_without_requests`, and `replay_drift`.
 
