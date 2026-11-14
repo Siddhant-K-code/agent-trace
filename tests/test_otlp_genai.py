@@ -170,14 +170,22 @@ class TestGenAILLMPairingFallback(unittest.TestCase):
         )
 
     def _span_starts(self, events):
+        # A paired request carries its response's output tokens; an
+        # unmatched one does not. Both leave status unset.
         spans = _get_spans(session_to_otlp_genai(_make_meta(), events))[1:]
-        return {s["spanId"]: (s["startTimeUnixNano"], s["status"]["code"]) for s in spans}
+        return {
+            s["spanId"]: (
+                s["startTimeUnixNano"],
+                _get_attr(s, "gen_ai.usage.output_tokens") is not None,
+            )
+            for s in spans
+        }
 
     def test_parentless_response_pairs_with_newest_open_request(self):
         events = [self._req("failed", 1.0), self._req("ok", 2.0), self._resp(3.0)]
         spans = self._span_starts(events)
-        self.assertEqual(spans[_to_span_id("ok")], (_ts_to_nanos(2.0), 1))
-        self.assertEqual(spans[_to_span_id("failed")], (_ts_to_nanos(1.0), 0))
+        self.assertEqual(spans[_to_span_id("ok")], (_ts_to_nanos(2.0), True))
+        self.assertEqual(spans[_to_span_id("failed")], (_ts_to_nanos(1.0), False))
 
     def test_parentless_response_skips_requests_for_other_models(self):
         events = [
@@ -186,8 +194,8 @@ class TestGenAILLMPairingFallback(unittest.TestCase):
             self._resp(3.0, model="gpt-4o"),
         ]
         spans = self._span_starts(events)
-        self.assertEqual(spans[_to_span_id("gpt")], (_ts_to_nanos(1.0), 1))
-        self.assertEqual(spans[_to_span_id("claude")], (_ts_to_nanos(2.0), 0))
+        self.assertEqual(spans[_to_span_id("gpt")], (_ts_to_nanos(1.0), True))
+        self.assertEqual(spans[_to_span_id("claude")], (_ts_to_nanos(2.0), False))
 
     def test_duplicate_response_does_not_take_another_request(self):
         events = [
@@ -197,7 +205,7 @@ class TestGenAILLMPairingFallback(unittest.TestCase):
             self._resp(4.0, parent_id="a"),
         ]
         spans = self._span_starts(events)
-        self.assertEqual(spans[_to_span_id("b")], (_ts_to_nanos(2.0), 0))
+        self.assertEqual(spans[_to_span_id("b")], (_ts_to_nanos(2.0), False))
 
 
 class TestGenAIUnrequestedResponses(unittest.TestCase):
@@ -329,6 +337,61 @@ class TestGenAIToolSpan(unittest.TestCase):
         payload = session_to_otlp_genai(meta, events)
         tool_span = _get_spans(payload)[1]
         self.assertIsNotNone(_get_attr(tool_span, "gen_ai.tool.output"))
+
+
+class TestGenAISpanStatus(unittest.TestCase):
+    """Successful spans leave status UNSET; only failures set ERROR.
+
+    The GenAI span conventions defer span status to OTel semantic
+    conventions v1.45.0 docs/general/recording-errors.md, which says span
+    status MUST be left unset when the operation ended without errors.
+    """
+
+    def _session(self):
+        call = TraceEvent(event_type=EventType.TOOL_CALL, event_id="call1",
+                          data={"tool_name": "Bash", "arguments": {"command": "ls"}})
+        result = TraceEvent(event_type=EventType.TOOL_RESULT, parent_id="call1",
+                            duration_ms=10.0, data={"tool_name": "Bash", "result": "ok"})
+        req = TraceEvent(event_type=EventType.LLM_REQUEST, event_id="req1",
+                         data={"model": "gpt-4o", "input_tokens": 3})
+        resp = TraceEvent(event_type=EventType.LLM_RESPONSE, parent_id="req1",
+                          data={"model": "gpt-4o", "output_tokens": 2})
+        return [call, result, req, resp]
+
+    def _statuses(self, meta, events):
+        return {s["name"]: s["status"] for s in _get_spans(session_to_otlp_genai(meta, events))}
+
+    def test_successful_tool_llm_and_root_spans_leave_status_unset(self):
+        meta = SessionMeta(session_id="s1", agent_name="claude-code", errors=0)
+        self.assertEqual(self._statuses(meta, self._session()), {
+            "gen_ai.agent.session (claude-code)": {"code": 0},
+            "gen_ai.tool.call/Bash": {"code": 0},
+            "gen_ai.client.operation": {"code": 0},
+        })
+
+    def test_root_with_errors_and_error_spans_are_unchanged(self):
+        meta = SessionMeta(session_id="s1", agent_name="claude-code", errors=1)
+        events = self._session() + [TraceEvent(
+            event_type=EventType.ERROR, data={"tool_name": "Read", "error": "missing"},
+        )]
+        statuses = self._statuses(meta, events)
+        self.assertEqual(statuses["gen_ai.agent.session (claude-code)"], {"code": 2})
+        self.assertEqual(statuses["gen_ai.tool.call/Read"], {"code": 2, "message": "missing"})
+        self.assertEqual(statuses["gen_ai.tool.call/Bash"], {"code": 0})
+        self.assertEqual(statuses["gen_ai.client.operation"], {"code": 0})
+
+    def test_no_span_sets_status_ok(self):
+        events = self._session() + [
+            _codex_response("c1", 1001.0, status="completed"),
+            _codex_response("c2", 1002.0, status="failed", error="boom"),
+            TraceEvent(event_type=EventType.TOOL_CALL, data={"tool_name": "Open"}),
+            TraceEvent(event_type=EventType.LLM_REQUEST, data={"model": "gpt-4o"}),
+        ]
+        for errors in (0, 1):
+            meta = SessionMeta(session_id="s1", agent_name="codex", errors=errors)
+            with self.subTest(errors=errors):
+                spans = _get_spans(session_to_otlp_genai(meta, events))
+                self.assertNotIn(1, [s["status"]["code"] for s in spans])
 
 
 # ---------------------------------------------------------------------------
@@ -635,7 +698,7 @@ class TestGenAIFailedModelRequests(unittest.TestCase):
         self.assertEqual(_get_attr(span, "agent.strace.finish_reason"), "length")
         self.assertEqual(span["status"]["code"], 2)
 
-    def test_completed_and_unknown_statuses_stay_ok(self):
+    def test_completed_and_unknown_statuses_leave_status_unset(self):
         for data in (
             {"status": "completed", "input_tokens": 10, "output_tokens": 2},
             {"input_tokens": 10, "output_tokens": 2},
@@ -645,7 +708,7 @@ class TestGenAIFailedModelRequests(unittest.TestCase):
         ):
             with self.subTest(data=data):
                 span = self._span(**data)
-                self.assertEqual(span["status"], {"code": 1})
+                self.assertEqual(span["status"], {"code": 0})
                 self.assertIsNone(_get_attr(span, "error.type"))
                 self.assertIsNone(_get_attr(span, "gen_ai.response.finish_reasons"))
 
@@ -656,12 +719,12 @@ class TestGenAIFailedModelRequests(unittest.TestCase):
             _codex_response("c", 1003.0, status="cancelled", token_usage=None),
         ]
         spans = self._llm_spans(events)
-        self.assertEqual([s["status"]["code"] for s in spans], [1, 2, 2])
+        self.assertEqual([s["status"]["code"] for s in spans], [0, 2, 2])
         root = _get_spans(session_to_otlp_genai(
             SessionMeta(session_id="s1", agent_name="codex", started_at=1000.0, ended_at=1100.0),
             events,
         ))[0]
-        self.assertEqual(root["status"], {"code": 1})
+        self.assertEqual(root["status"], {"code": 0})
 
     def _linked_error_spans(self, error_data: dict) -> list[dict]:
         request = TraceEvent(

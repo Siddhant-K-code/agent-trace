@@ -699,7 +699,7 @@ def session_to_otlp(
                 "startTimeUnixNano": _ts_to_nanos(span_start),
                 "endTimeUnixNano": _ts_to_nanos(span_start + duration_ns / 1_000_000_000),
                 "attributes": _make_attributes(span_attrs),
-                "status": {"code": 1},  # STATUS_CODE_OK
+                "status": {"code": 0},  # STATUS_CODE_UNSET
             })
 
         elif event.event_type == EventType.ERROR:
@@ -810,7 +810,7 @@ def session_to_otlp(
         "endTimeUnixNano": root_end,
         "attributes": root_attrs,
         "events": root_events,
-        "status": {"code": 2 if meta.errors > 0 else 1},
+        "status": {"code": 2 if meta.errors > 0 else 0},  # ERROR or UNSET
     }
     # Link to parent span for subagent hierarchy
     if parent_span_id:
@@ -995,7 +995,7 @@ def _genai_llm_span(
             **_event_trace_attributes(event, "response"),
         })]
     if failure is None:
-        span["status"] = {"code": 1}  # STATUS_CODE_OK
+        span["status"] = {"code": 0}  # STATUS_CODE_UNSET
     else:
         span["status"] = _failure_status(failure)
     return span
@@ -1161,7 +1161,7 @@ def session_to_otlp_genai(
                     span_start + duration_ns / 1_000_000_000
                 ),
                 "attributes": _make_attributes(tool_attrs),
-                "status": {"code": 1},
+                "status": {"code": 0},  # STATUS_CODE_UNSET
             })
 
         elif event.event_type == EventType.ERROR:
@@ -1308,7 +1308,7 @@ def session_to_otlp_genai(
         "endTimeUnixNano": root_end,
         "attributes": root_attrs,
         "events": root_events,
-        "status": {"code": 2 if meta.errors > 0 else 1},
+        "status": {"code": 2 if meta.errors > 0 else 0},  # ERROR or UNSET
     }
     if parent_span_id:
         root_span["parentSpanId"] = parent_span_id

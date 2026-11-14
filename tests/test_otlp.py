@@ -243,6 +243,51 @@ class TestSessionToOTLP(unittest.TestCase):
         self.assertEqual(len(spans), 1)
 
 
+class TestSpanStatus(unittest.TestCase):
+    """Successful spans leave status UNSET; only failures set ERROR.
+
+    OTel semantic conventions v1.45.0 docs/general/recording-errors.md:
+    span status MUST be left unset when the operation ended without errors.
+    """
+
+    _make_session = TestSessionToOTLP._make_session
+
+    def _spans(self, meta, events):
+        return session_to_otlp(meta, events)["resourceSpans"][0]["scopeSpans"][0]["spans"]
+
+    def test_successful_tool_span_and_root_leave_status_unset(self):
+        meta = SessionMeta(agent_name="claude-code", errors=0)
+        call = TraceEvent(event_type=EventType.TOOL_CALL, event_id="call1",
+                          data={"tool_name": "Bash", "arguments": {"command": "ls"}})
+        result = TraceEvent(event_type=EventType.TOOL_RESULT, parent_id="call1",
+                            duration_ms=10, data={"tool_name": "Bash", "result": "ok"})
+        root, tool = self._spans(meta, [call, result])
+        self.assertEqual(tool["name"], "tool/Bash")
+        self.assertEqual(tool["status"], {"code": 0})
+        self.assertEqual(root["status"], {"code": 0})
+
+    def test_error_statuses_are_unchanged(self):
+        meta, events = self._make_session()
+        spans = self._spans(meta, events)
+        self.assertEqual(spans[0]["status"], {"code": 2})
+        (error,) = [s for s in spans[1:] if s["name"] == "Read"]
+        self.assertEqual(error["status"], {"code": 2, "message": "File not found"})
+        (bash,) = [s for s in spans if s["name"] == "tool/Bash"]
+        self.assertEqual(bash["status"], {"code": 0})
+
+    def test_no_span_sets_status_ok(self):
+        meta, events = self._make_session()
+        events.append(TraceEvent(event_type=EventType.LLM_REQUEST, event_id="r1",
+                                 data={"model": "gpt-4o", "input_tokens": 3}))
+        events.append(TraceEvent(event_type=EventType.LLM_RESPONSE, parent_id="r1",
+                                 data={"model": "gpt-4o", "output_tokens": 2}))
+        for errors in (0, 1):
+            meta.errors = errors
+            with self.subTest(errors=errors):
+                codes = [s["status"]["code"] for s in self._spans(meta, events)]
+                self.assertNotIn(1, codes)
+
+
 class TestUnrequestedLLMResponse(unittest.TestCase):
     """Codex records each model request only as an llm_response."""
 

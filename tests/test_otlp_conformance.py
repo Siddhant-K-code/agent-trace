@@ -166,6 +166,21 @@ class TestOTLPGenAIConformanceFixture(unittest.TestCase):
         self.assertEqual(exception_attrs["exception.type"], "ShellError")
         self.assertEqual(exception_attrs["exception.message"], "command failed")
 
+    def test_successful_spans_leave_status_unset(self):
+        # Recording Errors (semconv v1.45.0): status MUST be left unset on
+        # success, and a description is only allowed with ERROR.
+        for payload in (
+            self.payload,
+            json.loads(OTLP_FIXTURE.read_text(encoding="utf-8")),
+        ):
+            spans = _spans(payload)
+            self.assertEqual(
+                sorted({span["status"]["code"] for span in spans}), [0, 2],
+            )
+            for span in spans:
+                if span["status"]["code"] == 0:
+                    self.assertEqual(span["status"], {"code": 0})
+
 
 class TestOpenInferenceMappingRecipe(unittest.TestCase):
     def setUp(self):

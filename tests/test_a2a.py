@@ -156,6 +156,21 @@ class TestA2ATree(unittest.TestCase):
         self.assertIn("spanId", spans[0])
         self.assertIn("name", spans[0])
 
+    def test_otlp_call_span_status_is_unset_on_success_and_error_on_failure(self):
+        # Recording Errors: instrumentation leaves status unset on success.
+        from agent_trace.a2a import build_a2a_tree, a2a_calls_to_otlp_spans, make_a2a_event
+        store = _make_store(self._tmp)
+        sid = self._make_session(store, "orchestrator")
+        for agent_id, success in (("ok-agent", True), ("bad-agent", False)):
+            store.append_event(sid, make_a2a_event(
+                session_id=sid, agent_id=agent_id, agent_url="http://agent",
+                task="t", response={}, success=success,
+            ))
+        spans = a2a_calls_to_otlp_spans(build_a2a_tree(store, sid))
+        statuses = {s["name"]: s.get("status") for s in spans}
+        self.assertEqual(statuses["a2a_call:ok-agent"], {"code": 0})
+        self.assertEqual(statuses["a2a_call:bad-agent"], {"code": 2})
+
     def test_cli_has_a2a_tree_command(self):
         from agent_trace.cli import build_parser
         parser = build_parser()
