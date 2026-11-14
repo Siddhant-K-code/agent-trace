@@ -1808,6 +1808,7 @@ steps:
 | `trace-dir` | `.agent-traces` | Session storage directory |
 | `python-version` | `3.12` | Python version |
 | `install-extras` | none | Optional extras, e.g. `openai,anthropic` |
+| `agent-strace-version` | none | CLI version to install from PyPI, e.g. `0.108.1`. Overrides the version taken from the Action ref. |
 | `post-pr-comment` | `false` | Post or update the structured session summary on the PR |
 | `github-token` | none | Token for PR comments; pass `${{ secrets.GITHUB_TOKEN }}` |
 | `run-eval` | `true` | Run `agent-strace eval`. Set `false` for a review-only job. |
@@ -1831,6 +1832,17 @@ steps:
 | `cognitive-debt-result` | `pass`, `fail`, or `unavailable` |
 | `artifacts-dir` | Directory with the PR evidence files |
 | `evidence-artifact-url` | URL of the `agent-trace-pr-evidence` artifact; empty if not uploaded |
+
+The Action ref you pin decides the CLI version:
+
+| Ref in `uses:` | CLI installed |
+|---|---|
+| Release tag `vX.Y.Z` | `agent-strace==X.Y.Z` from PyPI. Right after a release PyPI can lag, so the step retries for about 45 seconds, then installs the Action checkout of that tag. |
+| Branch, commit SHA, other tag, or `uses: ./` | The Action checkout, so the code matches the ref |
+| Any ref, with `agent-strace-version` set | That version from PyPI. The step fails if it is not installable. |
+
+The step logs the source and version it installed. It never installs an
+unpinned `agent-strace`.
 
 Trace artifacts are uploaded automatically under the `agent-traces` artifact name.
 With `review`, the evidence packet and cognitive debt files are uploaded as

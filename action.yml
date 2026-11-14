@@ -27,6 +27,9 @@ inputs:
   install-extras:
     description: Comma-separated optional extras to install (e.g. openai,anthropic)
     default: ""
+  agent-strace-version:
+    description: agent-strace version to install from PyPI, such as 0.108.1. Empty installs the version of the Action ref, vX.Y.Z from PyPI, any other ref from the Action checkout.
+    default: ""
   post-pr-comment:
     description: Post or update an agent session summary on the pull request
     default: "false"
@@ -106,13 +109,11 @@ runs:
 
     - name: Install agent-trace
       shell: bash
-      run: |
-        EXTRAS="${{ inputs.install-extras }}"
-        if [ -n "$EXTRAS" ]; then
-          pip install "agent-strace[$EXTRAS]"
-        else
-          pip install agent-strace
-        fi
+      env:
+        ACTION_REF: ${{ github.action_ref }}
+        INSTALL_EXTRAS: ${{ inputs.install-extras }}
+        AGENT_STRACE_VERSION: ${{ inputs.agent-strace-version }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/install-agent-strace.sh"
 
     - name: Run evals
       id: eval

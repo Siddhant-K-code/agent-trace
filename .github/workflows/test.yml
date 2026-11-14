@@ -73,6 +73,35 @@ jobs:
           # CLI's check marks.
           PYTHONIOENCODING: utf-8
 
+  action-install:
+    # Runs the Action from this checkout. uses: ./ has no release ref, so the
+    # install step must install the checkout, not a PyPI release.
+    runs-on: namespace-profile-siddhant-khare
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run the Action
+        uses: ./
+        with:
+          run-eval: "false"
+
+      - name: Check the CLI came from the checkout
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os, pathlib
+          from importlib.metadata import distribution
+          dist = distribution("agent-strace")
+          url = json.loads(dist.read_text("direct_url.json") or "{}").get("url", "")
+          want = pathlib.Path(os.environ["GITHUB_WORKSPACE"]).resolve().as_uri()
+          print(f"agent-strace {dist.version} from {url}")
+          assert url == want, f"expected {want}, got {url!r}"
+          PY
+          agent-strace --version
+
   vscode-extension:
     runs-on: namespace-profile-siddhant-khare
     defaults:

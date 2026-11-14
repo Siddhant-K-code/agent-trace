@@ -193,6 +193,14 @@ skip the comment because their tokens are read-only, but still run the check.
 The Action reads sessions from `trace-dir` (default `.agent-traces`). Commit
 the sessions, or restore them from an artifact, before this step.
 
+The ref in `uses:` decides the CLI version. A release tag `vX.Y.Z` installs
+`agent-strace==X.Y.Z` from PyPI. If PyPI does not serve it yet, right after a
+release, the step retries for about 45 seconds and then installs the Action
+checkout of that tag. A branch, commit SHA, or `uses: ./` installs the Action
+checkout. Set `agent-strace-version` to install a different version from
+PyPI; the step fails if that version is not installable. The step log names
+the source and version installed.
+
 To list external evidence, set `review-commits` to a range such as
 `origin/${{ github.base_ref }}..HEAD`, with `fetch-depth: 0` on the checkout,
 and `review-otel-logs` to a Claude Code OpenTelemetry export in the workspace.
