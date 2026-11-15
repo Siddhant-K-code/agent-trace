@@ -363,12 +363,12 @@ class TestBuiltInRules(unittest.TestCase):
     def test_builtin_rules_spec_enables_mcp_poisoning_and_limits(self):
         config = WatcherConfig()
 
-        warnings = _apply_builtin_rules_spec(
+        # Raises WatchRulesError for an item it cannot use.
+        _apply_builtin_rules_spec(
             "mcp-poisoning,loop:4/12,budget:$5,timeout:30m,cognitive-debt:0.8",
             config,
         )
 
-        self.assertEqual(warnings, [])
         self.assertIn("mcp-poisoning", config.built_in_rules)
         self.assertIn("loop", config.built_in_rules)
         self.assertEqual(config.loop_threshold, 4)
@@ -377,6 +377,32 @@ class TestBuiltInRules(unittest.TestCase):
         self.assertEqual(config.max_duration_seconds, 1800.0)
         self.assertIn("cognitive-debt", config.built_in_rules)
         self.assertAlmostEqual(config.cognitive_debt_threshold, 0.8)
+
+    def test_builtin_rules_spec_refuses_items_before_changing_config(self):
+        import copy
+        from agent_trace.watch import WatchRulesError
+        built_ins = "the built-in rules are mcp-poisoning, loop, budget, timeout and cognitive-debt"
+        cases = (
+            ("loop:4/12,budget:2x", "'budget:2x': N in budget:N must be a finite number, 0 or more"),
+            ("budget:3,cognitive-debt:2",
+             "'cognitive-debt:2': N in cognitive-debt:N must be a number from 0 to 1"),
+            ("mcp-poisoning,loop:0",
+             "'loop:0': N and W in loop:N and loop:N/W must be whole numbers, 1 or more"),
+            ("loop,timeout:0",
+             "'timeout:0': D in timeout:D must be a duration more than 0, such as 30m or 2h"),
+            ("mcp-poisoning,kill", f"'kill' is not a built-in rule or an existing file; {built_ins}"),
+            ("budget:3,budget:4", "'budget:4' lists budget again; list each built-in rule once"),
+            ("timeout:30m,,loop", "item 2 is empty"),
+            (",", "it lists no rules"),
+        )
+        for spec, problem in cases:
+            with self.subTest(spec=spec):
+                config = WatcherConfig()
+                before = copy.deepcopy(vars(config))
+                with self.assertRaises(WatchRulesError) as ctx:
+                    _apply_builtin_rules_spec(spec, config)
+                self.assertEqual(str(ctx.exception), problem)
+                self.assertEqual(vars(config), before)
 
     def test_watch_parser_registers_loop_flags(self):
         parser = build_parser()

@@ -528,7 +528,7 @@ Live session monitor with kill-switch rules.
 | `--compaction-checkpoint` | Write a recovery checkpoint before context saturation |
 | `--checkpoint-at RATIO` | Context fill ratio that triggers a checkpoint (default: `0.80`) |
 | `--policy FILE` | Scope policy file to enforce (default: `.agent-scope.json`) |
-| `--rules FILE_OR_BUILTINS` | JSON/YAML rules file, or comma-separated built-ins such as `mcp-poisoning,loop:3/10,budget:5,timeout:30m,cognitive-debt:0.8` |
+| `--rules FILE_OR_BUILTINS` | A JSON or YAML rules file (see **Rules file format** below), or comma-separated built-in rules such as `mcp-poisoning,loop:3/10,budget:5,timeout:30m,cognitive-debt:0.8` (see **Built-in rules** below). A value that names an existing file is a rules file. Watch refuses a value it cannot use, with one line and exit 1, before it reads the session or writes anything |
 | `--stream-to URL` | POST events as NDJSON to this `http://` or `https://` URL while watching. Watch refuses at startup, with one line and exit 1, a URL with no host, a bad port, spaces or control characters, or a user name or password. A failed POST prints one line that names only the URL's `scheme://host[:port]`, and watch goes on. Redirects are not followed, so pass the final URL. When watch stops, it waits up to 15 seconds for the last POST; if the wait runs out or Ctrl-C stops it, one line gives the number of events not confirmed sent |
 | `--stream-otlp` | With `--stream-to`, POST OTLP/HTTP JSON spans instead of NDJSON. Trailing slashes are dropped from the URL path and `/v1/traces` is appended unless the path already ends with it; the query is kept. Pass the collector base URL, such as `http://localhost:4318`. See [Live OTLP streaming](production.md#live-otlp-streaming) |
 | `--stream-batch-size N` | With `--stream-to`, send once N events are waiting (default: `10`) |
@@ -596,6 +596,76 @@ uses the watchdog cost guard and kills only the over-budget session.
 }
 ```
 
+The same rules in YAML (`.watch-rules.yaml`):
+```yaml
+rules:
+  - name: cost cap
+    condition: cost_usd > 0.50
+    action: kill
+  - name: protected env
+    condition: file_path matches "**/production.env"
+    action: kill  # stop the agent
+  - name: large edit
+    condition: files_modified > 30
+    action: pause
+```
+
+The top level holds one key, `rules`: a list of one or more rules. A rule
+has only these keys, and each value is a string:
+
+| Key | Value |
+|---|---|
+| `condition` | Required. One of the two forms below |
+| `action` | Required, in lower case. `alert` and `terminal` print the alert. `file` also writes it to the alert log. `pause` and `kill` also write it to the alert log and stop or kill the agent. `require_approval` is described below. Every action but `require_approval` also sends the alert to `--webhook`, Slack and Teams when they are set up |
+| `name` | Optional. Names the rule in alerts and refusals; the default is `unnamed` |
+| `notify` | Optional. Slack and Teams alerts and approval requests show it as the rule name |
+
+A condition is one of:
+
+- `METRIC OP NUMBER`. METRIC is `cost_usd` (estimated spend in dollars),
+  `files_modified` (distinct files written or edited), `duration_minutes`
+  (minutes since watch started) or `consecutive_test_failures` (tool results
+  in a row that read as failures). OP is `>`, `>=`, `<`, `<=` or `==`. NUMBER
+  is a plain number such as `5` or `0.50`, with no sign, `$`, exponent or
+  unit.
+- `file_path matches "GLOB"`, or the same with single quotes. It fires on a
+  tool call whose `file_path` or `path` argument matches GLOB, a shell-style
+  pattern in which `*` also matches `/`. GLOB must not be empty.
+
+Extra spaces between the parts are allowed. Nothing may follow the number or
+the closing quote, so one condition cannot combine two tests.
+
+A file whose name ends in `.json`, or whose first character other than
+whitespace is `{` or `[`, is read as JSON. Any other file is read as YAML,
+and watch reads only this subset of it:
+
+- `rules:` on its own line, after an optional `---` line.
+- Each rule starts with `- `, every rule at the same indentation. Each
+  `key: value` pair sits on its own line, aligned with the rule's first key.
+  A rule may also start with a line that holds only `-`.
+- Each value fits on one line, and quotes are optional. A value in a matching
+  pair of single or double quotes loses that pair and nothing else. In single
+  quotes `''` stands for one `'`; in double quotes the only escapes are `\"`
+  and `\\`.
+- Quote a value that starts with a character YAML reserves, such as `[`,
+  `{`, `&`, `*`, `!`, `|`, `>`, `%` or `@`, or that contains `: `.
+- Outside quotes, a `#` after a space starts a comment.
+- `~`, `null` and an empty value are null, which no key accepts.
+- Indent with spaces. Blank lines and comment lines may go anywhere.
+
+Watch checks `--rules` at startup. It refuses the value, prints one line and
+exits 1, before it reads the session or writes anything, when the value is
+empty; the file cannot be read, is a directory or is empty; the file is not
+UTF-8 (a byte order mark is refused too); the file is not valid JSON, or has a
+line outside the YAML subset; the top level holds anything but the `rules`
+list; or a rule breaks the rules above. A key given twice is refused too.
+`--dry-run` refuses the same way. The line names the file, and for a rule its
+position and name, but never a `notify` value:
+
+```
+[watch] invalid --rules file .watch-rules.json: rule 1 'cost cap': condition has an unknown metric 'cost'; use files_modified, cost_usd, consecutive_test_failures or duration_minutes
+```
+
 A `pause` rule keeps the agent stopped until a human resumes it: send
 `SIGCONT`, or run Pause Agent and then Resume Agent in VS Code. A
 `require_approval` rule keeps it stopped until the request is decided; the
@@ -605,6 +675,24 @@ handles `SIGTERM` only acts on it after `SIGCONT`. While watch holds a pause,
 the idle timeout does not count; the pause is dropped if the agent process
 exits. `--dry-run` reports a `require_approval` rule without pausing or
 creating a request.
+
+**Built-in rules** (`--rules mcp-poisoning,loop:3/10,budget:5,timeout:30m`):
+
+| Rule | Effect |
+|---|---|
+| `mcp-poisoning` | Alert on MCP tool poisoning indicators, the checks `mcp-scan` runs. Takes no value |
+| `loop`, `loop:N`, `loop:N/W` | Loop detection always runs. `loop:N` sets its threshold, like `--loop-threshold`, and `loop:N/W` also sets its window, like `--loop-window`. N and W are whole numbers, 1 or more |
+| `budget:N` | Sets the cost limit to N dollars. N is a finite number, 0 or more, and may start with one `$` |
+| `timeout:D` | Sets the duration limit to D, a duration more than 0 such as `30m` or `2h` |
+| `cognitive-debt`, `cognitive-debt:N` | Alert when the session has modified files that have not had human review. N is the threshold, from 0 to 1; without it, `cognitive_debt_threshold` from `--config` is used, or 0.8 |
+
+Names are lower case, and each rule may be listed once. Watch refuses, at
+startup, an item that is not one of these, a value out of range, an empty
+item, a rule listed twice, and a rules file listed with built-in rules:
+
+```
+[watch] invalid --rules value: 'budget:2x': N in budget:N must be a finite number, 0 or more
+```
 
 **Config file** (`--config FILE`):
 ```json
