@@ -119,10 +119,11 @@ def _codex_session(store: TraceStore, prompt_data=None, started_at: float = 1000
     """A session whose model requests record usage with cache reads.
 
     meta.total_tokens is 1M, which the old flat-rate estimate priced at $3.
+    One model request failed, and meta.errors counts it as capture does.
     """
     meta = SessionMeta(
         agent_name="codex", started_at=started_at, tool_calls=1, llm_requests=3,
-        errors=0, total_tokens=1_000_000, total_duration_ms=9000,
+        errors=1, total_tokens=1_000_000, total_duration_ms=9000,
     )
     store.create_session(meta)
     events = _codex_events(meta.session_id)
@@ -203,7 +204,7 @@ class TestDashboardCost(unittest.TestCase):
             (summary.tool_calls, summary.llm_requests, summary.errors,
              summary.total_tokens, summary.duration_s, summary.succeeded),
             (meta.tool_calls, meta.llm_requests, meta.errors,
-             meta.total_tokens, meta.total_duration_ms / 1000, True),
+             meta.total_tokens, meta.total_duration_ms / 1000, False),
         )
         text, page = self._render(report)
         self.assertNotIn("not priced", text + page)

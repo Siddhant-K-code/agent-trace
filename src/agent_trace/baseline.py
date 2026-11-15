@@ -28,7 +28,8 @@ from typing import TextIO
 from .cost import estimate_cost
 from .event_data import require_object_event_data
 from .explain import PHASE_DATA_EVENT_TYPES
-from .models import EventType, TraceEvent
+from .failures import count_session_errors
+from .models import TraceEvent
 from .store import TraceStore
 
 
@@ -163,7 +164,7 @@ def _session_metrics(store: TraceStore, session_id: str) -> dict[str, float] | N
         events: list[TraceEvent] | None = store.load_events(session_id)
     except Exception:
         events = None
-    errors = sum(1 for e in events or [] if e.event_type == EventType.ERROR)
+    errors = count_session_errors(events or [])
     try:
         metrics = {
             "tool_calls": float(meta.tool_calls),

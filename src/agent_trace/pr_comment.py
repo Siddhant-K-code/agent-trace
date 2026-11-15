@@ -25,6 +25,7 @@ from typing import Any, Callable
 from .cost import cost_inputs_captured, estimate_cost
 from .event_data import NonObjectEventDataError, require_object_event_data
 from .explain import explain_session
+from .failures import count_session_errors
 from .lint import lint_session
 from .models import EventType, SessionMeta, TraceEvent
 from .session_paths import normalise_path, session_cwd, shell_reads, shell_writes
@@ -313,7 +314,7 @@ def summarize_session(store: TraceStore, session_id: str) -> SessionSummary:
         except (OSError, ValueError, TypeError):
             cost = None
 
-    error_events = sum(1 for event in events if event.event_type == EventType.ERROR)
+    error_events = count_session_errors(events)
     tool_events = sum(1 for event in events if event.event_type == EventType.TOOL_CALL)
 
     return SessionSummary(

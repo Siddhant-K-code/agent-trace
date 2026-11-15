@@ -22,6 +22,7 @@ from typing import TextIO
 
 from .cost import session_cost
 from .event_data import str_field
+from .failures import count_session_errors
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -246,7 +247,7 @@ def _extract_metrics(
     cost_usd: float | None = None,
 ) -> SessionMetrics:
     tool_mix: dict[str, int] = {}
-    error_count = 0
+    error_count = count_session_errors(events)
     total_tool_calls = 0
     retry_count = 0
     files_written: set[str] = set()
@@ -273,9 +274,6 @@ def _extract_metrics(
             path = str_field(ev.data, "path", "") or str_field(ev.data, "file_path", "")
             if path:
                 files_written.add(path)
-
-        elif ev.event_type == EventType.ERROR:
-            error_count += 1
 
         elif ev.event_type == EventType.DECISION:
             decision_count += 1

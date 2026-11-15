@@ -345,6 +345,95 @@ class TestDeclaredEventsBeforeStart(unittest.TestCase):
                     self.assert_undeclared(self.validate([EventType.USER_PROMPT]))
 
 
+class TestErrorSummary(unittest.TestCase):
+    """metadata ``errors`` counts error events and failed model requests."""
+
+    SESSION = "errors-0001"
+
+    def validate(self, recorded_errors, *, linked_error=False):
+        """Write a session with a failed tool call and a failed model request.
+
+        With *linked_error*, an error event is also linked to the request.
+        """
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name).resolve()
+        store = TraceStore(root, use_workspace_env=False, redact=False)
+        store.create_session(
+            SessionMeta(session_id=self.SESSION, agent_name="test", errors=recorded_errors)
+        )
+        request = TraceEvent(
+            event_type=EventType.LLM_REQUEST, session_id=self.SESSION, data={"model": "m"}
+        )
+        call = TraceEvent(
+            event_type=EventType.TOOL_CALL, session_id=self.SESSION, data={"tool_name": "Bash"}
+        )
+        events = [
+            TraceEvent(event_type=EventType.SESSION_START, session_id=self.SESSION),
+            call,
+            TraceEvent(
+                event_type=EventType.ERROR,
+                session_id=self.SESSION,
+                parent_id=call.event_id,
+                data={"error": "tool failed"},
+            ),
+            request,
+            TraceEvent(
+                event_type=EventType.LLM_RESPONSE,
+                session_id=self.SESSION,
+                parent_id=request.event_id,
+                data={"status": "failed", "error": "stream disconnected"},
+            ),
+        ]
+        if linked_error:
+            events.append(TraceEvent(
+                event_type=EventType.ERROR,
+                session_id=self.SESSION,
+                parent_id=request.event_id,
+                data={"error": "stream disconnected"},
+            ))
+        events.append(TraceEvent(event_type=EventType.SESSION_END, session_id=self.SESSION))
+        for index, event in enumerate(events):
+            event.timestamp = 1000.0 + index
+            store.append_event(self.SESSION, event)
+        return validate_trace_directory(root / self.SESSION)
+
+    @staticmethod
+    def findings(report):
+        return [(finding.code, finding.severity) for finding in report.findings]
+
+    def test_failed_request_is_counted(self):
+        report = self.validate(2)
+        self.assertEqual(report.status, "valid")
+        self.assertEqual(report.findings, ())
+        self.assertEqual(report.summary["state"], "consistent")
+        self.assertEqual(report.summary["compared"]["errors"], {"recorded": 2, "observed": 2})
+
+    def test_count_written_before_failed_requests_is_accepted(self):
+        report = self.validate(1)
+        self.assertEqual(report.status, "valid")
+        self.assertEqual(self.findings(report), [("legacy_error_summary", "info")])
+        self.assertIn("leaves out 1 failed model request", report.findings[0].message)
+        self.assertEqual(report.summary["state"], "consistent")
+        self.assertNotIn("summary_contradiction", report.labels)
+
+    def test_other_counts_contradict(self):
+        for recorded in (3, 4):
+            with self.subTest(recorded=recorded):
+                report = self.validate(recorded)
+                self.assertEqual(report.status, "invalid")
+                self.assertEqual(self.findings(report), [("summary_contradiction", "error")])
+                self.assertEqual(report.summary["state"], "contradictory")
+
+    def test_linked_error_and_failed_response_count_once(self):
+        # Both record the request's outcome, which health reports, but the
+        # request is one error.
+        report = self.validate(2, linked_error=True)
+        self.assertEqual(report.summary["state"], "consistent")
+        self.assertEqual(report.summary["compared"]["errors"], {"recorded": 2, "observed": 2})
+        self.assertNotIn("summary_contradiction", [code for code, _ in self.findings(report)])
+
+
 class TestValidationCli(unittest.TestCase):
     def test_parser_registers_validate_command(self):
         args = build_parser().parse_args(

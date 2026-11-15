@@ -1385,9 +1385,11 @@ class TestMetaCounterConcurrency(_PendingCallsHookTest):
 
         expected = self.PROCESSES * self.HOOKS_PER_PROCESS
         meta = store.load_meta(local_id)
+        # The payload's "error" fails every tool call and every model
+        # request, so each adds one error.
         self.assertEqual(
             (meta.tool_calls, meta.errors, meta.total_tokens),
-            (expected, expected, expected * self.TOKENS),
+            (expected, 2 * expected, expected * self.TOKENS),
         )
         recorded = store.load_events(local_id)
         self.assertEqual(

@@ -210,6 +210,8 @@ agent-strace stats [session-id] [--include-subagents]
 ```
 Tool call frequency and timing. When a Codex subagent made tool calls in the session, a Subagent Tool Calls section counts them per subagent. `--include-subagents` rolls up across the full subagent tree.
 
+The Errors section lists `error` events and [failed model requests](production.md#session-error-counts) (`model request failed: <message>`), each failed request once. A cancelled request is not listed.
+
 ### `health`
 ```
 agent-strace health [session-id] [--format text|json]
@@ -362,6 +364,11 @@ Structured phase-by-phase view with tool calls, errors, retries, and cost per ph
 A tool result marks the call its `parent_id` names as ok or failed. A result
 without a usable `parent_id` marks the newest call in the phase that has no
 result or error yet.
+
+A failed model request is a failed `LLM response failed` entry that fails its
+phase and counts toward the session's errors, once even when an `error` event
+is also linked to it. A cancelled request is marked `⊘` (`cancelled` in JSON)
+and is not counted as an error. See [failed model requests](production.md#session-error-counts).
 
 | Flag | Default | Description |
 |---|---|---|
@@ -890,6 +897,12 @@ agent-strace dashboard [--limit N] [--since Nd] [--html FILE] [--trend]
 ```
 Multi-session aggregate view. `--trend` shows eval quality and behavioral metrics over time.
 
+A session's errors include its [failed model requests](production.md#session-error-counts), and a session with any error is not
+counted as succeeded. For a session recorded by an earlier version, whose
+stored count leaves failed requests out, the dashboard shows the larger of the
+stored count and the count from its events. The `--trend` error rate counts
+failed requests too.
+
 Session costs, the total and the cost trend match `agent-strace cost` with its
 default model, so recorded token usage, cache reads and writes included, is
 priced at the model's rates. Earlier versions priced each session's token count
@@ -924,6 +937,9 @@ statistics, and a `Sessions not priced` line counts them
 side has no priced session, `cost_usd` scores `n/a` (`null` in JSON) and the
 overall score averages the other dimensions.
 
+The error rate counts [failed model requests](production.md#session-error-counts) as errors. Baselines saved by earlier versions
+left them out; save them again to compare like with like.
+
 ### `baseline`
 ```
 agent-strace baseline update [--since DAYS] [--output FILE]
@@ -945,6 +961,8 @@ session with that profile. The default profile path is
 | `show --baseline FILE` | `.agent-traces/baseline.json` | Display profile statistics from a custom path |
 
 The profile tracks cost, tool calls, duration, error rate, and LLM requests.
+The error rate counts [failed model requests](production.md#session-error-counts) as errors; rebuild profiles saved by earlier
+versions with `baseline update` to include them.
 Cost matches `agent-strace cost` with its default model; a session whose
 events cannot be priced adds no cost sample. Profiles saved by older versions
 recorded every cost as 0, so rebuild yours with `baseline update` after
@@ -1012,6 +1030,9 @@ that match `--filter` (default: `has-errors`) to
 `<trace-dir>/workspaces/<id>/datasets/NAME.jsonl` when `AGENT_STRACE_WORKSPACE`
 is set. `--dataset FILE` writes to a different path.
 `agent-strace optimize --dataset NAME` reads the same file.
+
+The `has-errors` filter and the `error_count` scorer count `error` events and
+[failed model requests](production.md#session-error-counts), each failed request once. A cancelled request is not an error.
 
 `--filter` also accepts `high-retry`, `cost-above:N`, `wide-blast`,
 `long-duration:Ns` and `low-eval-score:N`. `cost-above:N` adds sessions whose
@@ -1417,7 +1438,9 @@ Post a structured session summary to the current branch's open pull request or
 merge request. The comment includes duration, estimated cost, model, status,
 tool calls, files read and changed, lint findings, errors, redundant reads, and
 replay commands. An embedded marker makes repeated runs update the existing
-comment.
+comment. Errors include [failed model requests](production.md#session-error-counts); for a session recorded by an earlier version,
+the comment shows the larger of the stored count and the count from its
+events.
 
 Cost is shown only when the trace records a model name or token usage, and
 then as an estimate (see [`cost`](#cost)). Otherwise the comment says `not
@@ -1513,6 +1536,9 @@ compare sessions by it. Earlier versions split `llm_response` token counts
 80/20 and priced them at $3 and $15 per million. For a session that
 `agent-strace cost` refuses, `cost_estimate` is `null` and the session is
 ranked and compared on its other scores only.
+
+`score.error_rate`, which the `worst` and `diverse` strategies use, counts
+[failed model requests](production.md#session-error-counts) as errors.
 
 ### `server`
 ```
@@ -1658,7 +1684,7 @@ hook-written metadata:
 |---|---|
 | `started_at` / `ended_at` | Earliest and latest event timestamps |
 | `total_duration_ms` | `ended_at - started_at` |
-| `tool_calls` / `errors` / `llm_requests` | Count of `tool_call`, `error` and `llm_request` events |
+| `tool_calls` / `errors` / `llm_requests` | Count of `tool_call` events, of `error` events plus [failed model requests](production.md#session-error-counts), and of `llm_request` events |
 | `agent_name` | From a hook `session_start` mode or a hook `stop` response provider; otherwise `--agent-name`; otherwise `agent-cli` |
 | `command` | `"<agent_name> (backfilled)"`, distinct from captured metadata and from hook metadata marked `(no session-start)` |
 | `tenant_id` | The single tenant ID on the events, or empty. `AGENT_STRACE_TENANT_ID` is ignored |

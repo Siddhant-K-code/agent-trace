@@ -115,6 +115,7 @@ from .validation import cmd_validate
 from .watch import cmd_watch
 from .why import cmd_why
 from .event_data import NonObjectEventDataError, require_object_event_data, str_field
+from .failures import llm_failure, session_errors
 from .models import EventType, SessionMeta, TraceEvent
 from .proxy import MCPProxy
 from .replay import format_event, format_summary, list_sessions, replay_session
@@ -630,12 +631,21 @@ def cmd_stats(args: argparse.Namespace) -> int:
             errors_str = f"  {sub.errors} errors" if sub.errors else ""
             print(f"    {label:<30} {sub.tool_calls:>4}x{errors_str}")
 
-    # error summary
-    errors = [e for e in events if e.event_type == EventType.ERROR]
+    # error summary: error events and failed model requests, in order
+    failed_requests = session_errors(events).failed_responses
+    errors = [
+        e for i, e in enumerate(events)
+        if e.event_type == EventType.ERROR or i in failed_requests
+    ]
     if errors:
         print(f"\n  Errors ({len(errors)}):")
         for e in errors:
-            msg = str_field(e.data, "message", "unknown")
+            if e.event_type == EventType.ERROR:
+                msg = str_field(e.data, "message", "unknown")
+            else:
+                failure = llm_failure(e)
+                detail = failure.message if failure else ""
+                msg = f"model request failed: {detail or 'no message'}"
             print(f"    {msg[:80]}")
 
     print()

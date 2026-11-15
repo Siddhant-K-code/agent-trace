@@ -26,7 +26,8 @@ from dataclasses import dataclass, field
 from .cost import TokenUsage, infer_provider
 from .event_data import require_object_event_data, str_field
 from .models import EventType, SessionMeta, TraceEvent
-from .otlp import llm_failure, model_request_usage
+from .failures import llm_failure, session_errors
+from .otlp import model_request_usage
 from .pairing import (
     LLM_REQUEST_TYPES,
     TOOL_REQUEST_TYPES,
@@ -420,7 +421,7 @@ def _session_metrics(
         loaded = False
 
     tool_calls = 0
-    errors = 0
+    errors = session_errors(events).errors
     retries = 0
     files_written: set[str] = set()
     prev_tool: str | None = None
@@ -437,8 +438,6 @@ def _session_metrics(
             else:
                 prev_tool = name
                 run = 0
-        elif ev.event_type == EventType.ERROR:
-            errors += 1
         elif ev.event_type == EventType.FILE_WRITE:
             path = str_field(ev.data, "path", "") or str_field(ev.data, "file_path", "")
             if path:

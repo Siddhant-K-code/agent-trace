@@ -17,6 +17,7 @@ from dataclasses import asdict, dataclass, field
 from typing import TextIO
 
 from .event_data import object_field, require_object_event_data, str_field
+from .failures import session_errors
 from .models import EventType, SessionMeta, TraceEvent
 from .store import TraceStore
 
@@ -188,11 +189,15 @@ def subagent_label(data: object) -> str:
 def in_session_subagents(events: list[TraceEvent]) -> list[InSessionSubagent]:
     """Group a session's attributed events by ``agent_id``, in first-seen order.
 
-    Events whose data is not a JSON object are skipped.
+    ``errors`` counts error events and failed model requests, as the session
+    error count does (see failures.py). Events whose data is not a JSON
+    object are skipped.
     """
+    failed_requests = session_errors(events).failed_responses
     by_id: dict[str, InSessionSubagent] = {}
-    for event in events:
-        if event.event_type not in _IN_SESSION_SUBAGENT_EVENT_TYPES:
+    for index, event in enumerate(events):
+        failed_request = index in failed_requests
+        if event.event_type not in _IN_SESSION_SUBAGENT_EVENT_TYPES and not failed_request:
             continue
         agent_id = _event_agent_id(event.data)
         if not agent_id:
@@ -203,7 +208,7 @@ def in_session_subagents(events: list[TraceEvent]) -> list[InSessionSubagent]:
             entry.agent_type = agent_type
         if event.event_type == EventType.TOOL_CALL:
             entry.tool_calls += 1
-        elif event.event_type == EventType.ERROR:
+        elif event.event_type == EventType.ERROR or failed_request:
             entry.errors += 1
     return list(by_id.values())
 

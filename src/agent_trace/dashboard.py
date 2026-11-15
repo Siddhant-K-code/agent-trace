@@ -24,6 +24,7 @@ from typing import TextIO
 
 from .cost import session_cost
 from .event_data import require_object_event_data
+from .failures import count_session_errors
 from .models import EventType, SessionMeta, TraceEvent
 from .store import TraceStore
 
@@ -180,7 +181,7 @@ def _extract_trend_point(
     )
 
     tool_calls = 0
-    errors = 0
+    errors = count_session_errors(events)
     retries = 0
     prev_tool: str | None = None
     prev_count = 0
@@ -196,8 +197,6 @@ def _extract_trend_point(
             else:
                 prev_tool = name
                 prev_count = 1
-        elif ev.event_type == EventType.ERROR:
-            errors += 1
 
     error_rate = errors / max(tool_calls, 1)
     retry_rate = retries / max(tool_calls, 1)
@@ -569,10 +568,16 @@ def build_dashboard(
     summaries: list[SessionSummary] = []
     for meta in sessions:
         duration_s = meta.total_duration_ms / 1000 if meta.total_duration_ms else 0.0
+        errors = meta.errors
         try:
-            cost = _priced(store.load_events(meta.session_id), meta.session_id)
+            events = store.load_events(meta.session_id)
         except (OSError, ValueError):
             cost = None
+        else:
+            cost = _priced(events, meta.session_id)
+            # A session recorded before failed model requests were counted
+            # stored a lower count than its events show.
+            errors = max(errors, count_session_errors(events))
 
         summaries.append(SessionSummary(
             session_id=meta.session_id,
@@ -580,11 +585,11 @@ def build_dashboard(
             duration_s=duration_s,
             tool_calls=meta.tool_calls,
             llm_requests=meta.llm_requests,
-            errors=meta.errors,
+            errors=errors,
             total_tokens=meta.total_tokens,
             estimated_cost=cost,
             agent_name=meta.agent_name or "unknown",
-            succeeded=meta.errors == 0,
+            succeeded=errors == 0,
         ))
 
     costs = [s.estimated_cost for s in summaries if s.estimated_cost is not None]

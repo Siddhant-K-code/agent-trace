@@ -13,6 +13,7 @@ hooks keep handling payloads from earlier CLI releases.
 """
 
 import argparse
+import copy
 import io
 import json
 import os
@@ -25,12 +26,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_trace.cli import _codex_hooks_config, _copilot_hooks_config
+from agent_trace.failures import count_session_errors
 from agent_trace.health import assess_session, load_capture_matrix
 from agent_trace.hooks import _PROVIDER_ENV, IMPLICIT_SESSION_SOURCE, hook_main
 from agent_trace.models import EventType
 from agent_trace.otlp import session_to_otlp_genai
 from agent_trace.store import TraceStore
-from agent_trace.subagent import build_tree
+from agent_trace.subagent import build_tree, in_session_subagents
+from agent_trace.timeline import build_timeline
 from agent_trace.validation import validate_trace_directory
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -803,6 +806,126 @@ class TestCodexFixture(_ReplayChecks, unittest.TestCase):
         self.assertEqual(kinds.count(EventType.TOOL_RESULT), 1)
         self.assertEqual(meta.errors, 0)
 
+    def replay_ended(self, scenario, status, error=None, subagent=False):
+        """Replay *scenario* with one PostModelRequest ended by *status*.
+
+        Codex reports ``token_usage`` null for a request that did not
+        complete. *subagent* picks a request the subagent made.
+        """
+        fixture = copy.deepcopy(self.fixture)
+        payload = next(
+            h["payload"] for h in fixture["scenarios"][scenario]["hooks"]
+            if h["event"] == "PostModelRequest" and ("agent_id" in h["payload"]) == subagent
+        )
+        payload.update(status=status, error=error, token_usage=None)
+        self.fixture = fixture
+        try:
+            return self.replay(scenario)
+        finally:
+            del self.fixture
+
+    @staticmethod
+    def root_span_status(meta, events):
+        payload = session_to_otlp_genai(meta, events)
+        return payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["status"]["code"]
+
+    def model_responses(self, store, session_id):
+        return [
+            entry
+            for phase in build_timeline(store, session_id).phases
+            for entry in phase.entries
+            if entry.label.startswith("LLM response")
+        ]
+
+    def test_successful_sessions_count_no_errors(self):
+        for scenario in self.fixture["scenarios"]:
+            store, _ = self.replay(scenario)
+            meta = self.only_session(store)
+            events = store.load_events(meta.session_id)
+            with self.subTest(scenario=scenario):
+                self.assertEqual(meta.errors, 0)
+                self.assertEqual(count_session_errors(events), 0)
+                self.assertEqual(
+                    self.validate(store, meta.session_id).summary["state"], "consistent"
+                )
+                self.assertTrue(all(
+                    entry.status == "ok"
+                    for entry in self.model_responses(store, meta.session_id)
+                ))
+
+    def test_failed_model_request_is_a_session_error(self):
+        for scenario in self.fixture["scenarios"]:
+            with self.subTest(scenario=scenario):
+                before, _ = self.replay(scenario)
+                before_meta = self.only_session(before)
+                store, skipped = self.replay_ended(scenario, "failed", "stream disconnected")
+                self.assert_only_unregistered_skipped(skipped)
+                meta = self.only_session(store)
+                events = store.load_events(meta.session_id)
+                self.assertEqual(meta.errors, before_meta.errors + 1)
+                self.assertEqual(count_session_errors(events), meta.errors)
+                self.assertNotIn(EventType.ERROR, {e.event_type for e in events})
+                self.assertEqual(self.root_span_status(meta, events), 2)
+
+                validation = self.validate(store, meta.session_id)
+                self.assertEqual(validation.summary["state"], "consistent")
+                self.assertEqual(validation.status, "valid")
+                self.assertEqual(
+                    [(f.code, f.severity) for f in validation.findings],
+                    [("declared_results_without_requests", "info")],
+                )
+
+                timeline = build_timeline(store, meta.session_id)
+                self.assertEqual(
+                    timeline.error_count,
+                    build_timeline(before, before_meta.session_id).error_count + 1,
+                )
+                (failed,) = [
+                    entry for entry in self.model_responses(store, meta.session_id)
+                    if entry.status != "ok"
+                ]
+                self.assertEqual(
+                    (failed.status, failed.label, failed.detail),
+                    ("fail", "LLM response failed", "stream disconnected"),
+                )
+
+    def test_cancelled_model_request_is_not_a_session_error(self):
+        for scenario in self.fixture["scenarios"]:
+            with self.subTest(scenario=scenario):
+                before, _ = self.replay(scenario)
+                before_meta = self.only_session(before)
+                store, _ = self.replay_ended(scenario, "cancelled")
+                meta = self.only_session(store)
+                events = store.load_events(meta.session_id)
+                self.assertEqual(meta.errors, before_meta.errors)
+                self.assertEqual(count_session_errors(events), meta.errors)
+                self.assertEqual(self.root_span_status(meta, events), 0)
+                validation = self.validate(store, meta.session_id)
+                self.assertEqual(validation.summary["state"], "consistent")
+                self.assertEqual(validation.status, "valid")
+
+                timeline = build_timeline(store, meta.session_id)
+                self.assertEqual(
+                    timeline.error_count,
+                    build_timeline(before, before_meta.session_id).error_count,
+                )
+                (cancelled,) = [
+                    entry for entry in self.model_responses(store, meta.session_id)
+                    if entry.status != "ok"
+                ]
+                self.assertEqual(
+                    (cancelled.status, cancelled.label), ("cancelled", "LLM response cancelled")
+                )
+
+    def test_failed_subagent_model_request_counts_for_the_subagent(self):
+        for scenario in self.subagent_scenarios:
+            with self.subTest(scenario=scenario):
+                store, _ = self.replay_ended(scenario, "failed", "stream disconnected", subagent=True)
+                meta = self.only_session(store)
+                (subagent,) = in_session_subagents(store.load_events(meta.session_id))
+                self.assertEqual(subagent.errors, 1)
+                self.assertEqual(meta.errors, 1)
+
     def test_subagent_events_are_recorded_in_the_parent_session(self):
         for scenario in self.subagent_scenarios:
             with self.subTest(scenario=scenario):
@@ -921,6 +1044,15 @@ class TestCodexLegacyFixture(TestCodexFixture):
         self.skipTest("0.163.0-alpha.11 has no model-request hooks")
 
     def test_post_model_request_records_token_usage(self):
+        self.skipTest("0.163.0-alpha.11 has no model-request hooks")
+
+    def test_failed_model_request_is_a_session_error(self):
+        self.skipTest("0.163.0-alpha.11 has no model-request hooks")
+
+    def test_cancelled_model_request_is_not_a_session_error(self):
+        self.skipTest("0.163.0-alpha.11 has no model-request hooks")
+
+    def test_failed_subagent_model_request_counts_for_the_subagent(self):
         self.skipTest("0.163.0-alpha.11 has no model-request hooks")
 
     def test_sessions_without_model_requests_record_no_tokens(self):

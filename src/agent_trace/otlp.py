@@ -16,7 +16,7 @@ Usage:
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import replace
 import hashlib
 import json
 import math
@@ -30,6 +30,14 @@ from typing import Any
 
 from .cost import TokenUsage, usage_detail
 from .event_data import object_field, str_field
+# ERROR_TYPE_* and LLMFailure stay importable from here.
+from .failures import (
+    ERROR_TYPE_CANCELLED,
+    ERROR_TYPE_OTHER,
+    LLMFailure,
+    error_text as _error_text,
+    llm_failure,
+)
 from .models import EventType, SessionMeta, TraceEvent
 from .pairing import (
     LLM_REQUEST_TYPES,
@@ -115,88 +123,9 @@ def _ts_to_nanos(ts: float) -> str:
 # Failed and cancelled model requests
 # ---------------------------------------------------------------------------
 
-# error.type when nothing more specific was recorded: the GenAI semconv
-# fallback value.
-ERROR_TYPE_OTHER = "_OTHER"
-# error.type for a cancelled request that recorded no error type. The GenAI
-# semconv names no span status for a cancelled request, but ends its span and
-# reports the finish reason "error" for it, so it exports as an error.
-ERROR_TYPE_CANCELLED = "cancelled"
+# The failure predicate lives in failures.py, shared with the session error
+# counts; the names stay importable from here.
 _FINISH_REASON_ERROR = "error"
-_ERROR_MESSAGE_LIMIT = 200
-_FAILED_STATUSES = frozenset({"failed"})
-_CANCELLED_STATUSES = frozenset({"cancelled", "canceled"})
-_ERROR_TYPE_KEYS = ("error_type", "exception_type")
-_ERROR_CODE_KEYS = ("type", "code")
-
-
-@dataclass(frozen=True)
-class LLMFailure:
-    """How a model request ended when it did not complete."""
-
-    error_type: str
-    """Low-cardinality value for the ``error.type`` attribute."""
-    message: str = ""
-    """Recorded error text, at most 200 characters. Empty when there is none."""
-    cancelled: bool = False
-
-
-def _error_text(value: Any) -> str:
-    if isinstance(value, str):
-        return value.strip()
-    if isinstance(value, Mapping):
-        message = value.get("message")
-        if isinstance(message, str) and message.strip():
-            return message.strip()
-    if value is None or isinstance(value, bool):
-        return ""
-    if isinstance(value, (Mapping, list, tuple)):
-        return json.dumps(value, sort_keys=True, default=str) if value else ""
-    return str(value)
-
-
-def _recorded_error_type(data: Mapping[str, Any], error: Any) -> str:
-    for key in _ERROR_TYPE_KEYS:
-        value = data.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()[:_ERROR_MESSAGE_LIMIT]
-    if isinstance(error, Mapping):
-        for key in _ERROR_CODE_KEYS:
-            value = error.get(key)
-            if isinstance(value, (str, int)) and not isinstance(value, bool) and str(value).strip():
-                return str(value).strip()[:_ERROR_MESSAGE_LIMIT]
-    return ""
-
-
-def llm_failure(event: TraceEvent) -> LLMFailure | None:
-    """Return how the model request that ``event`` ends failed, or ``None``.
-
-    ``event`` is an ``llm_response``, or an ``error`` linked to the
-    ``llm_request`` it ends. An error always fails. A response is cancelled
-    when its ``status`` is ``cancelled`` and failed when its ``status`` is
-    ``failed`` or it carries a non-empty ``error``. Any other response,
-    including one with no ``status``, completed and returns ``None``.
-
-    ``error_type`` is the recorded ``error_type`` or ``exception_type``, else
-    the ``type`` or ``code`` of an ``error`` object, else ``cancelled`` for a
-    cancelled request and ``_OTHER`` for a failed one.
-    """
-    data = event.data if isinstance(event.data, Mapping) else {}
-    error = data.get("error")
-    text = _error_text(error)
-    cancelled = False
-    if event.event_type == EventType.ERROR:
-        text = text or _error_text(data.get("message"))
-    else:
-        status = data.get("status")
-        status = status.strip().lower() if isinstance(status, str) else ""
-        cancelled = status in _CANCELLED_STATUSES
-        if not cancelled and status not in _FAILED_STATUSES and not text:
-            return None
-    error_type = _recorded_error_type(data, error) or (
-        ERROR_TYPE_CANCELLED if cancelled else ERROR_TYPE_OTHER
-    )
-    return LLMFailure(error_type, text[:_ERROR_MESSAGE_LIMIT], cancelled)
 
 
 def _failure_status(failure: LLMFailure) -> dict:
