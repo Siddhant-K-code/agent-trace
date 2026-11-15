@@ -524,7 +524,7 @@ Live session monitor with kill-switch rules.
 | `--webhook URL` | POST each alert as JSON to this `http://` or `https://` URL. Watch refuses at startup, with one line and exit 1, a URL with any other scheme or none, no host, a bad port, spaces or control characters, or a user name or password; when `--webhook` is not given, the same check applies to `webhook.url` in the `--config` file. Redirects are not followed, so pass the final URL. Any answer other than 2xx is a failure |
 | `--config FILE` | JSON file that sets watch limits and actions; see **Config file** below. Watch refuses a file it cannot use, with one line and exit 1, before it reads the session or writes anything. Flags given on the command line override the file |
 | `--max-context-pct N` | Alert when the session's input tokens reach N percent of the model's context window (default: `90`). N must be from 1 to 100; any other value is refused at startup |
-| `--on-death CMD` | Command to run after kill (receives `{post_mortem_path}`) |
+| `--on-death CMD` | Shell command that watch runs once, after it sends the agent `SIGTERM`, and only if it sent it: not on `--dry-run`, without `--agent-pid`, or when the signal could not be sent (see below). `{post_mortem_path}` is replaced with the path of the post-mortem JSON file, or with nothing if watch could not write it |
 | `--compaction-checkpoint` | Write a recovery checkpoint before context saturation |
 | `--checkpoint-at RATIO` | Context fill ratio that triggers a checkpoint (default: `0.80`) |
 | `--policy FILE` | Scope policy file to enforce (default: `.agent-scope.json`) |
@@ -543,6 +543,17 @@ the pause or kill, the post-mortem and the `--on-death` command. A channel that
 fails prints one line and watch goes on; a webhook, Slack or Teams line names
 only the URL's `scheme://host[:port]`.
 
+A kill sends the agent `SIGTERM`, and `SIGKILL` 5 seconds later. Only once
+`SIGTERM` is sent does watch write the post-mortem (`watchdog-postmortem.json`
+in the session directory, with the alert as its reason) and run `--on-death`.
+If it cannot send `SIGTERM`, watch prints `Agent pid PID was not killed:` and
+the reason, and writes no post-mortem and runs no `--on-death`. Watch kills
+the agent once: after `SIGTERM` it sends that PID no other signal. A later
+`kill`, `pause` or `require_approval` alert is printed, logged and sent as
+usual, plus the line `Agent pid PID was already killed; no signal sent`, and
+a `require_approval` alert creates no approval request. VS Code Pause and
+Resume are ignored after the kill.
+
 Watch does not guess the agent PID. Capture hooks run as children of a
 shell, so their parent is not reliably the agent, and signalling the wrong
 process is worse than not signalling. Pass `--agent-pid` to let watch stop,
@@ -556,7 +567,8 @@ agent-strace watch --agent-pid $! --rules .watch-rules.json
 Without `--agent-pid`, every check still alerts, but `pause`, `kill` and
 `require_approval` actions and VS Code Pause cannot stop the agent. The first
 time one of them fires, watch prints `Cannot ...: no agent PID is known`
-once. A `require_approval` rule still creates the approval request.
+once. A `require_approval` rule still creates the approval request. A `kill`
+writes no post-mortem and runs no `--on-death`.
 
 If the agent exits, the OS can give its PID to an unrelated process. At
 startup watch records the agent's start time (field 22 of `/proc/PID/stat` on
@@ -567,7 +579,8 @@ If it differs, watch sends no signal, prints and writes to the alert log
 signalled`, clears any pause it held, and never signals that PID again; the
 heartbeat then reports no agent PID, so VS Code Pause is refused. Later
 `require_approval` rules create requests with no agent PID, and `kill` writes
-no post-mortem. If either start time cannot be read, watch signals as before.
+no post-mortem and runs no `--on-death`. If either start time cannot be read,
+watch signals as before.
 `ps` reports start times to the second, so on macOS a PID reused within the
 same second is not detected.
 

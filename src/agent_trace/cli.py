@@ -2143,8 +2143,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_watch.add_argument("--loop-window", type=int, metavar="N",
                          help="events to scan for repeated identical tool calls (default: 10)")
     p_watch.add_argument("--on-death", dest="on_death", metavar="CMD",
-                         help="command to run after the agent is killed; "
-                              "{post_mortem_path} is substituted with the post-mortem JSON path")
+                         help="command to run once, after watch sends the agent SIGTERM, "
+                              "and only if it sent it; {post_mortem_path} is substituted "
+                              "with the post-mortem JSON path")
     p_watch.add_argument("--on-violation", choices=["terminal", "file", "kill"],
                          help="action on violation (default: terminal)")
     p_watch.add_argument("--webhook", metavar="URL",

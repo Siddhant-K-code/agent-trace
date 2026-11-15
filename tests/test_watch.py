@@ -1359,7 +1359,8 @@ class TestNetworkAlertsRunLast(unittest.TestCase):
             "_alert_terminal": lambda msg, *a, **k: record(("terminal", msg)),
             "_alert_file": lambda msg, *a, **k: record(("alert-log", msg)),
             "_pause_process": lambda pid: record(("pause", pid)),
-            "_kill_process": lambda pid, *a: record(("kill", pid)),
+            # True: SIGTERM was sent, so the post-mortem and --on-death follow.
+            "_kill_process": lambda pid, *a: record(("kill", pid)) or True,
             "_write_watchdog_postmortem": (
                 lambda *a, **k: (record(("post-mortem",)), Path("pm.json"))[1]
             ),
@@ -1390,29 +1391,34 @@ class TestNetworkAlertsRunLast(unittest.TestCase):
             ("terminal", self._MSG),
             ("alert-log", self._MSG),
             ("terminal", "Killing agent process 4242"),
+            ("kill", 4242),
             ("post-mortem",),
             ("terminal", "Post-mortem written to pm.json"),
             ("on-death", Path("pm.json")),
-            ("kill", 4242),
             ("webhook", self._MSG),
             ("slack/teams", "kill"),
         ])
 
     def test_nanny_kill(self):
+        # A rule kill takes the watcher's path: one post-mortem and one
+        # --on-death, both after SIGTERM.
         rule = NannyRule(name="cost cap", condition="cost_usd > 0.5", action="kill")
+        msg = "NannyRule 'cost cap': cost_usd > 0.5 → kill"
         config = WatcherConfig(webhook_url=self._URL, on_death_cmd="echo {post_mortem_path}")
         _dispatch_nanny_rule(
             rule, _bash_event("ls"), MagicMock(), "s1", WatchState(agent_pid=4242), config,
         )
-        steps = self._steps()
-        self.assertEqual(steps[-2:], ["webhook", "slack/teams"])
-        self.assertNotIn("webhook", steps[:-2])
-        self.assertNotIn("slack/teams", steps[:-2])
-        self.assertEqual(self.calls[0], ("terminal", "NannyRule 'cost cap': cost_usd > 0.5 → kill"))
-        self.assertLess(steps.index("alert-log"), steps.index("kill"))
-        # The post-mortem and --on-death that follow the kill come before the network.
-        self.assertLess(steps.index("kill"), steps.index("post-mortem"))
-        self.assertEqual(self.calls[-3], ("on-death", Path("pm.json")))
+        self.assertEqual(self.calls, [
+            ("terminal", msg),
+            ("alert-log", msg),
+            ("terminal", "Killing agent process 4242"),
+            ("kill", 4242),
+            ("post-mortem",),
+            ("terminal", "Post-mortem written to pm.json"),
+            ("on-death", Path("pm.json")),
+            ("webhook", msg),
+            ("slack/teams", "kill"),
+        ])
 
     def test_pause(self):
         config = WatcherConfig(on_violation="pause", webhook_url=self._URL)
