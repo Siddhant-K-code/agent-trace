@@ -12,6 +12,7 @@ import threading
 import time
 from typing import Any, Callable, Iterator
 
+from ..fileutil import file_lock
 from ..models import EventType, SessionMeta, TraceEvent
 from ..pairing import link_response
 from ..store import TraceStore, default_trace_dir
@@ -25,19 +26,25 @@ def _get_or_create_session(store: TraceStore, name: str) -> str:
     """Return the active session ID for this agent, creating one if needed.
 
     The state file is scoped by agent name so concurrent agents sharing the
-    same AGENT_TRACE_DIR don't overwrite each other's active session.
+    same AGENT_TRACE_DIR don't overwrite each other's active session. The
+    check and the create run under a per-name file lock, so concurrent first
+    calls from threads or processes share one session.
     """
     safe_name = name.replace("/", "_").replace(" ", "_") or "default"
     active_path = store.base_dir / f".active-session.{safe_name}"
-    if active_path.exists():
-        sid = active_path.read_text().strip()
-        if sid and store.session_exists(sid):
-            return sid
-    meta = SessionMeta(agent_name=name)
-    store.create_session(meta)
-    active_path.parent.mkdir(parents=True, exist_ok=True)
-    active_path.write_text(meta.session_id, encoding="utf-8", newline="\n")
-    return meta.session_id
+    # The lock file name does not start with ".active-session" because hook
+    # and store cleanup code treats every such file as a session marker.
+    store.base_dir.mkdir(parents=True, exist_ok=True)
+    with file_lock(store.base_dir / f".integration-session.{safe_name}"):
+        if active_path.exists():
+            sid = active_path.read_text().strip()
+            if sid and store.session_exists(sid):
+                return sid
+        meta = SessionMeta(agent_name=name)
+        store.create_session(meta)
+        active_path.parent.mkdir(parents=True, exist_ok=True)
+        active_path.write_text(meta.session_id, encoding="utf-8", newline="\n")
+        return meta.session_id
 
 
 def emit(

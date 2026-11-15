@@ -12,6 +12,7 @@ from agent_trace.cost import build_provider_cost_report
 from agent_trace.jsonl_import import import_jsonl
 from agent_trace.models import EventType
 from agent_trace.store import TraceStore
+from agent_trace.validation import validate_trace_directory
 
 
 class TestJSONLImport(unittest.TestCase):
@@ -360,16 +361,25 @@ class TestJSONLImport(unittest.TestCase):
         self.assertEqual(events[0].data["provider"], "claude")
         self.assertEqual(sum(e.event_type == EventType.SESSION_START for e in events), 1)
 
-    def test_import_without_cwd_has_no_session_start(self):
+    def test_import_without_cwd_still_starts_the_session(self):
         path = self._write_jsonl([
             {"type": "user", "sessionId": "nocwd", "timestamp": "2025-01-01T00:00:00Z",
              "message": {"role": "user", "content": "hi"}, "uuid": "u1"},
         ])
 
         session_id = import_jsonl(path, store=self.store)
-        types = [e.event_type for e in self.store.load_events(session_id)]
+        events = self.store.load_events(session_id)
+        types = [e.event_type for e in events]
 
-        self.assertNotIn(EventType.SESSION_START, types)
+        self.assertEqual(types[0], EventType.SESSION_START)
+        self.assertEqual(types[-1], EventType.SESSION_END)
+        self.assertEqual(types.count(EventType.SESSION_START), 1)
+        self.assertEqual(events[0].data, {"mode": "claude-jsonl-import", "provider": "claude"})
+
+        report = validate_trace_directory(self.store.base_dir / session_id)
+        codes = {finding.code for finding in report.findings}
+        self.assertNotIn("missing_session_start", codes)
+        self.assertNotIn("events_before_session_start", codes)
 
     def test_import_stores_claude_session_id_as_conversation_id(self):
         native = "5e2d8c1a-93b4-4f7e-8a6d-0c1b2a3f4e5d"

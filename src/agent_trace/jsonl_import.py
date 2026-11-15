@@ -240,16 +240,19 @@ def import_jsonl(
     )
     store.create_session(meta)
 
+    # Always open the session, since a session_end is always written below.
+    start_data: dict[str, Any] = {"mode": "claude-jsonl-import", "provider": "claude"}
     if cwd:
-        store.append_event(
-            meta.session_id,
-            TraceEvent(
-                event_type=EventType.SESSION_START,
-                timestamp=first_ts,
-                session_id=meta.session_id,
-                data={"mode": "claude-jsonl-import", "provider": "claude", "cwd": cwd},
-            ),
-        )
+        start_data["cwd"] = cwd
+    store.append_event(
+        meta.session_id,
+        TraceEvent(
+            event_type=EventType.SESSION_START,
+            timestamp=first_ts,
+            session_id=meta.session_id,
+            data=start_data,
+        ),
+    )
 
     # UUID ancestry keeps separate Claude sidechains separate even when the
     # source version does not include an explicit agentId on every entry.
