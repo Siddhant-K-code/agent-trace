@@ -54,6 +54,29 @@ def _shutdown_socket(sock: socket.socket) -> None:
         pass
 
 
+def upstream_tls_context(remote_url: str, ca_file: str = "") -> ssl.SSLContext | None:
+    """Build the TLS context for an HTTPS upstream, or None for plain HTTP.
+
+    Certificates and host names are always verified. Without ``ca_file`` the
+    context trusts the system CA store, as http.client does by default. With
+    ``ca_file`` it trusts only that PEM bundle, which replaces the system
+    store, the same as ``org-report --ca-file``.
+
+    Raises ValueError if ``ca_file`` is given for a non-HTTPS URL or cannot
+    be loaded.
+    """
+    if urlparse(remote_url).scheme != "https":
+        if ca_file:
+            raise ValueError("--ca-file requires an https:// URL")
+        return None
+    try:
+        context = ssl.create_default_context(cafile=ca_file or None)
+    except (OSError, ssl.SSLError) as exc:
+        raise ValueError(f"could not load CA file {ca_file}: {exc}") from exc
+    context.set_alpn_protocols(["http/1.1"])
+    return context
+
+
 class _UpstreamHTTPSConnection(http.client.HTTPSConnection):
     """HTTPS upstream connection whose TLS handshake can be interrupted.
 
@@ -62,13 +85,17 @@ class _UpstreamHTTPSConnection(http.client.HTTPSConnection):
     can reach. This connection hands the TLS socket to ``watch`` before the
     handshake, so closing the proxy shuts it down.
 
-    Certificates and host names are verified with
-    ``ssl.create_default_context()``, as http.client does by default.
+    ``context`` comes from :func:`upstream_tls_context`, so certificates and
+    host names are always verified.
     """
 
-    def __init__(self, host: str, port: int, watch: Callable[[socket.socket], None]):
-        context = ssl.create_default_context()
-        context.set_alpn_protocols(["http/1.1"])
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        watch: Callable[[socket.socket], None],
+        context: ssl.SSLContext,
+    ):
         super().__init__(host, port, context=context)
         self._tls_context = context
         self._watch = watch
@@ -108,9 +135,14 @@ class _ProxyHTTPServer(ThreadingHTTPServer):
         redact: bool = False,
         masking_config: MaskingConfig | None = None,
         max_pending_calls: int = MAX_PENDING_CALLS,
+        upstream_tls: ssl.SSLContext | None = None,
     ):
+        if upstream_tls is None:
+            upstream_tls = upstream_tls_context(remote_url)
         super().__init__(server_address, _ProxyHandler)
         self.remote_url = remote_url
+        # Shared by every upstream HTTPS connection; None for plain HTTP.
+        self.upstream_tls = upstream_tls
         self.store = store
         self.meta = meta
         self.on_event = on_event
@@ -273,7 +305,10 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.remote_url)
         if parsed.scheme == "https":
             return _UpstreamHTTPSConnection(
-                parsed.hostname, parsed.port or 443, self.server.watch_socket
+                parsed.hostname,
+                parsed.port or 443,
+                self.server.watch_socket,
+                self.server.upstream_tls,
             )
         return http.client.HTTPConnection(parsed.hostname, parsed.port or 80)
 
@@ -480,7 +515,12 @@ class _ProxyHandler(BaseHTTPRequestHandler):
 
 
 class HTTPProxyServer:
-    """HTTP/SSE proxy for remote MCP servers."""
+    """HTTP/SSE proxy for remote MCP servers.
+
+    ``ca_file`` trusts a PEM CA bundle for an HTTPS upstream instead of the
+    system store. It is loaded here, so a bad file or a non-HTTPS URL raises
+    ValueError before the proxy starts.
+    """
 
     def __init__(
         self,
@@ -490,8 +530,10 @@ class HTTPProxyServer:
         session_meta: SessionMeta,
         on_event: Callable[[TraceEvent], None] | None = None,
         redact: bool = False,
+        ca_file: str = "",
     ):
         self.remote_url = remote_url.rstrip("/")
+        self.upstream_tls = upstream_tls_context(self.remote_url, ca_file)
         self.local_port = local_port
         self.store = store
         self.meta = session_meta
@@ -507,6 +549,7 @@ class HTTPProxyServer:
             meta=self.meta,
             on_event=self.on_event,
             redact=self.redact,
+            upstream_tls=self.upstream_tls,
         )
 
     def run(self) -> None:

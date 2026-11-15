@@ -2,7 +2,7 @@
 
 Usage:
     agent-strace record [--no-redact] -- <server-command> [args...]
-    agent-strace record-http [--no-redact] --url <remote-url> [--port <local-port>]
+    agent-strace record-http [--no-redact] --url <remote-url> [--port <local-port>] [--ca-file <file>]
     agent-strace setup [--no-redact] [--global]
     agent-strace hook <event>
     agent-strace replay [session-id]
@@ -244,6 +244,23 @@ def cmd_record_http(args: argparse.Namespace) -> int:
         parent_event_id=_parent_event_id(),
         depth=_parent_depth(store, parent_session_id),
     )
+
+    on_event = _print_live_event if args.verbose else None
+
+    try:
+        proxy = HTTPProxyServer(
+            remote_url=args.url,
+            local_port=args.port,
+            store=store,
+            session_meta=meta,
+            on_event=on_event,
+            redact=args.redact,
+            ca_file=args.ca_file or "",
+        )
+    except ValueError as exc:
+        sys.stderr.write(f"record-http: {exc}\n")
+        return 2
+
     store.create_session(meta)
 
     if not args.quiet:
@@ -251,17 +268,6 @@ def cmd_record_http(args: argparse.Namespace) -> int:
             f"agent-strace: recording HTTP session {meta.session_id}\n"
             f"agent-strace: proxying http://127.0.0.1:{args.port} -> {args.url}\n"
         )
-
-    on_event = _print_live_event if args.verbose else None
-
-    proxy = HTTPProxyServer(
-        remote_url=args.url,
-        local_port=args.port,
-        store=store,
-        session_meta=meta,
-        on_event=on_event,
-        redact=args.redact,
-    )
 
     proxy.run()
 
@@ -1648,6 +1654,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_record_http.add_argument("--quiet", "-q", action="store_true", help="suppress all output except errors")
     p_record_http.add_argument("--parent", metavar="SESSION",
                                help="parent session ID for subagent correlation")
+    p_record_http.add_argument(
+        "--ca-file", metavar="FILE",
+        help="custom CA bundle for an HTTPS upstream; replaces the system CA store",
+    )
 
     # replay
     p_replay = sub.add_parser("replay", help="replay a recorded session")

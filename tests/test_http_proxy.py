@@ -18,6 +18,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from agent_trace.cli import build_parser, cmd_record_http
 from agent_trace.http_proxy import HTTPProxyServer, _ProxyHTTPServer
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
@@ -932,9 +933,9 @@ def _tool_call(req_id, name="read_file"):
 class TestHTTPProxyHTTPSUpstream(unittest.TestCase):
     """The proxy forwards to HTTPS upstreams and verifies their certificates.
 
-    The proxy uses ssl.create_default_context(), so it trusts the system CA
-    store. A custom CA is trusted through OpenSSL's SSL_CERT_FILE variable,
-    which the tests set to the test CA.
+    By default the proxy trusts the system CA store. A custom CA is trusted
+    either with ca_file (``record-http --ca-file``) or through OpenSSL's
+    SSL_CERT_FILE variable, which most tests set to the test CA.
     """
 
     def _upstream(self, certfile=TLS_LOCALHOST_CERT):
@@ -949,7 +950,7 @@ class TestHTTPProxyHTTPSUpstream(unittest.TestCase):
         self.addCleanup(stop)
         return upstream
 
-    def _proxy(self, remote_url):
+    def _proxy(self, remote_url, ca_file=""):
         store = TraceStore(tempfile.mkdtemp())
         meta = SessionMeta(command="test", agent_name="test-agent")
         store.create_session(meta)
@@ -960,6 +961,7 @@ class TestHTTPProxyHTTPSUpstream(unittest.TestCase):
             store=store,
             session_meta=meta,
             on_event=events.append,
+            ca_file=ca_file,
         )
         server = proxy.make_server()
         threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -1144,6 +1146,83 @@ class TestHTTPProxyHTTPSUpstream(unittest.TestCase):
         self.assertEqual(upstream.hosts, [])
         self._assert_idle(server)
 
+    def test_ca_file_trusts_a_private_ca(self):
+        self._trust(None)
+        upstream = self._upstream()
+        port = upstream.server_address[1]
+        server, events = self._proxy(f"https://localhost:{port}", ca_file=TLS_CA)
+        proxy_port = server.server_address[1]
+
+        status, body = _post_json(proxy_port, _tool_call(10))
+
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["result"]["content"][0]["text"], "tool output")
+        (call,) = [e for e in events if e.event_type == EventType.TOOL_CALL]
+        (result,) = [e for e in events if e.event_type == EventType.TOOL_RESULT]
+        self.assertEqual(result.parent_id, call.event_id)
+        self.assertEqual(upstream.sni, ["localhost"])
+
+        conn = http.client.HTTPConnection("127.0.0.1", proxy_port, timeout=5)
+        self.addCleanup(conn.close)
+        conn.request("GET", "/sse")
+        resp = conn.getresponse()
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(resp.readline(), b": stream open\n")
+        self.assertEqual(self._errors(events), [])
+
+    def test_ca_file_still_rejects_a_certificate_for_another_host(self):
+        self._trust(None)
+        upstream = self._upstream(TLS_WRONG_HOST_CERT)
+        server, events = self._proxy(
+            f"https://127.0.0.1:{upstream.server_address[1]}", ca_file=TLS_CA
+        )
+
+        status, _body = _post_json(server.server_address[1], _tool_call(11))
+
+        self.assertEqual(status, 502)
+        (error,) = self._errors(events)
+        self.assertIn("CERTIFICATE_VERIFY_FAILED", error.data["message"])
+        self.assertEqual(upstream.hosts, [])
+        self._assert_idle(server)
+
+    def test_ca_file_replaces_the_default_ca_store(self):
+        # SSL_CERT_FILE would trust the upstream, but ca_file names a bundle
+        # that does not hold its issuer, so the default store is not used.
+        self._trust(TLS_CA)
+        upstream = self._upstream()
+        server, events = self._proxy(
+            f"https://127.0.0.1:{upstream.server_address[1]}",
+            ca_file=TLS_WRONG_HOST_CERT,
+        )
+
+        status, _body = _post_json(server.server_address[1], _tool_call(12))
+
+        self.assertEqual(status, 502)
+        (error,) = self._errors(events)
+        self.assertIn("CERTIFICATE_VERIFY_FAILED", error.data["message"])
+        self.assertEqual(upstream.hosts, [])
+
+    def test_ca_file_errors_are_raised_before_the_proxy_starts(self):
+        missing = os.path.join(tempfile.mkdtemp(), "missing.pem")
+        cases = [
+            ("http://127.0.0.1:1", TLS_CA, "--ca-file requires an https:// URL"),
+            ("https://127.0.0.1:1", missing, "could not load CA file"),
+            ("https://127.0.0.1:1", TLS_DIR, "could not load CA file"),
+            # a PEM file without a certificate
+            ("https://127.0.0.1:1", TLS_KEY, "could not load CA file"),
+        ]
+        for url, ca_file, message in cases:
+            with self.subTest(url=url, ca_file=ca_file):
+                store = TraceStore(tempfile.mkdtemp())
+                with self.assertRaisesRegex(ValueError, message):
+                    HTTPProxyServer(
+                        remote_url=url,
+                        local_port=0,
+                        store=store,
+                        session_meta=SessionMeta(command="test"),
+                        ca_file=ca_file,
+                    )
+
     def test_https_url_for_a_plain_http_server_is_an_error(self):
         self._trust(TLS_CA)
         plain = HTTPServer(("127.0.0.1", 0), FakeMCPHandler)
@@ -1185,6 +1264,68 @@ class TestHTTPProxyHTTPSUpstream(unittest.TestCase):
                 self.assertTrue(server.close_streams(timeout=0))
                 self.assertEqual(server._open_sockets, set())
                 self.assertEqual(self._errors(events), [])
+
+
+class TestRecordHTTPCAFileFlag(unittest.TestCase):
+    """record-http --ca-file is checked before a session is created."""
+
+    def setUp(self):
+        self.trace_dir = tempfile.mkdtemp()
+        patcher = mock.patch(
+            "agent_trace.cli.HTTPProxyServer.run",
+            side_effect=AssertionError("proxy must not start"),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _run(self, *argv):
+        args = build_parser().parse_args(
+            ["--trace-dir", self.trace_dir, "record-http", *argv]
+        )
+        stderr = io.StringIO()
+        with mock.patch("sys.stderr", stderr):
+            code = cmd_record_http(args)
+        return code, stderr.getvalue()
+
+    def test_flag_is_parsed(self):
+        args = build_parser().parse_args(
+            ["record-http", "--url", "https://example.com", "--ca-file", TLS_CA]
+        )
+        self.assertEqual(args.ca_file, TLS_CA)
+        args = build_parser().parse_args(["record-http", "--url", "https://example.com"])
+        self.assertIsNone(args.ca_file)
+
+    def test_startup_errors_exit_2_without_a_session(self):
+        missing = os.path.join(self.trace_dir, "missing.pem")
+        cases = [
+            ("http://127.0.0.1:1", TLS_CA, "record-http: --ca-file requires an https:// URL\n"),
+            ("https://127.0.0.1:1", missing, f"record-http: could not load CA file {missing}: "),
+            ("https://127.0.0.1:1", TLS_KEY, f"record-http: could not load CA file {TLS_KEY}: "),
+        ]
+        for url, ca_file, message in cases:
+            with self.subTest(url=url, ca_file=ca_file):
+                code, stderr = self._run("--url", url, "--ca-file", ca_file)
+                self.assertEqual(code, 2)
+                self.assertTrue(stderr.startswith(message), stderr)
+                self.assertEqual(TraceStore(self.trace_dir).list_sessions(), [])
+
+    @unittest.skipIf(
+        not hasattr(os, "geteuid") or os.geteuid() == 0,
+        "root can read a file without read permission",
+    )
+    def test_unreadable_ca_file_exits_2(self):
+        unreadable = os.path.join(self.trace_dir, "ca.pem")
+        with open(TLS_CA, "rb") as src, open(unreadable, "wb") as dst:
+            dst.write(src.read())
+        os.chmod(unreadable, 0)
+        self.addCleanup(os.chmod, unreadable, 0o600)
+
+        code, stderr = self._run("--url", "https://127.0.0.1:1", "--ca-file", unreadable)
+
+        self.assertEqual(code, 2)
+        self.assertIn("could not load CA file", stderr)
+        self.assertIn("Permission denied", stderr)
+        self.assertEqual(TraceStore(self.trace_dir).list_sessions(), [])
 
 
 if __name__ == "__main__":

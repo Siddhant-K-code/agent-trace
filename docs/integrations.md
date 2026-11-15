@@ -122,7 +122,7 @@ For Copilot Desktop, use a shared absolute trace directory such as `/Users/alice
 
 ### Remote MCP servers over HTTPS
 
-`agent-strace record-http --url https://...` proxies a remote HTTP/SSE MCP server. The proxy verifies the server certificate and host name against the system CA store. To trust a private CA, set `SSL_CERT_FILE=/path/to/ca.pem` for the proxy process; this replaces OpenSSL's default CA file. There is no flag to turn verification off. A failed TLS connection returns 502 to the agent and records an `error` event. Ctrl-C also stops a TLS handshake that the server never completes. See [`record-http`](commands.md#record-http).
+`agent-strace record-http --url https://...` proxies a remote HTTP/SSE MCP server. The proxy verifies the server certificate and host name against the system CA store. To trust a private CA, pass `--ca-file /path/to/ca.pem`; the bundle replaces the system CA store for the upstream connection. Alternatively, set `SSL_CERT_FILE=/path/to/ca.pem` for the proxy process; this replaces OpenSSL's default CA file for the whole process. There is no flag to turn verification off. A failed TLS connection returns 502 to the agent and records an `error` event. Ctrl-C also stops a TLS handshake that the server never completes. See [`record-http`](commands.md#record-http).
 
 ---
 
