@@ -264,6 +264,28 @@ class TestCursorSetup(unittest.TestCase):
         self.assertTrue((Path(self.copilot_home) / "hooks" / "agent-strace.json").exists())
         self.assertIn("agent-strace hook --provider codex user-prompt", out.getvalue())
         self.assertIn("Cursor hooks config", err.getvalue())
+        self.assertIn("For Cursor, MCP proxy tracing", err.getvalue())
+
+    def test_setup_prints_only_its_own_provider_notes(self):
+        products = {
+            "claude": "Claude Code",
+            "codex": "Codex",
+            "gemini": "Gemini",
+            "cursor": "Cursor",
+            "copilot": "Copilot",
+        }
+        for cli in products:
+            with self.subTest(cli=cli):
+                args = argparse.Namespace(redact=False, no_redact=False, global_config=False, cli=cli)
+                err = io.StringIO()
+                with patch.object(sys, "stdout", io.StringIO()), patch.object(sys, "stderr", err):
+                    cmd_setup(args)
+                text = err.getvalue()
+                self.assertIn(products[cli], text)
+                for other, name in products.items():
+                    if other != cli:
+                        self.assertNotIn(name, text)
+                self.assertEqual("For Cursor, MCP proxy tracing" in text, cli == "cursor")
 
 
 if __name__ == "__main__":

@@ -36,6 +36,10 @@ Set the same `X.Y.Z` value in:
 - `.claude-plugin/plugin.json`
 - `.claude-plugin/marketplace.json` at `plugins[0].version`
 - `server.json` at the top level and at `packages[0].version`
+- every `Siddhant-K-code/agent-trace@vX.Y.Z` Action pin in `README.md`,
+  `docs/`, and `examples/` (today `README.md`, `docs/commands.md`,
+  `docs/review.md`, and `examples/ci/agent-eval.yml`). The pinned tag decides
+  the CLI version the Action installs.
 
 The core tag and GitHub release use `vX.Y.Z`. PyPI reports `X.Y.Z`.
 The generated Gemini extension reads the same Python `__version__` value and is

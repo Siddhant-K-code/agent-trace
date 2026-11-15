@@ -1169,6 +1169,36 @@ class TestCli(SkillsTestBase):
         self.assertIn("No sessions in the window", out)
         self.assertNotIn("No sessions recorded", out)
 
+    def test_aggregate_header_counts_excluded_sessions_by_reason(self):
+        self._seed()
+        self._session("old00001", _Events(str(self.repo)).events, time.time() - 90 * 86400)
+        self._session("old00002", _Events(str(self.repo)).events, time.time() - 60 * 86400)
+        bad = self._session("bad00001", _Events(str(self.repo)).events, time.time() - 30)
+        events_file = next(self.trace_dir.rglob(f"*{bad}*/events.ndjson"))
+        with events_file.open("a") as handle:
+            handle.write('{"event_type": "not_an_event_type"}\n')
+
+        _, out = self._run("--since", "1d", "--min-sessions", "1")
+        _, output = self._run("--since", "1d", "--min-sessions", "1", "--format", "json")
+
+        header = out.splitlines()[0]
+        self.assertRegex(
+            header,
+            r"^Skills across 1 of 4 sessions since \d{4}-\d{2}-\d{2} "
+            r"\(2 started before the window, 1 unreadable or malformed\)\. ",
+        )
+        self.assertNotIn("Skipped", out)
+        report = json.loads(output)
+        self.assertEqual(report["sessions_total"], 4)
+        self.assertEqual(report["sessions_excluded"], {"before_window": 2, "unreadable": 1})
+
+    def test_aggregate_header_without_exclusions_is_unchanged(self):
+        self._seed()
+
+        _, out = self._run("--since", "1d", "--min-sessions", "1")
+
+        self.assertRegex(out.splitlines()[0], r"^Skills across 1 sessions since \d{4}-\d{2}-\d{2}\. Availability")
+
     def _claude_transcript(self, claude_dir: Path) -> Path:
         project = claude_dir / "projects" / "-tmp-repo"
         project.mkdir(parents=True)
@@ -1227,6 +1257,22 @@ class TestCli(SkillsTestBase):
         entry = report["loaded"][0]
         self.assertEqual(entry["name"], "deploy-check")
         self.assertEqual(sorted(load["method"] for load in entry["loads"]), ["skill_tool", "user_prompt"])
+
+    def test_from_claude_reports_window_exclusions_and_merged_transcripts(self):
+        claude_dir = self.tmp / "claude"
+        path = self._claude_transcript(claude_dir)
+        (path.parent / "resumed.jsonl").write_text(path.read_text())
+        old = json.loads(path.read_text().splitlines()[0])
+        old.update(sessionId="c1a0de00-0000-4000-8000-000000000002", timestamp="2020-01-01T00:00:00.000Z")
+        (path.parent / f"{old['sessionId']}.jsonl").write_text(json.dumps(old) + "\n")
+
+        code, out, err = self._run_both("--from-claude", "--claude-dir", str(claude_dir), "--min-sessions", "1")
+
+        self.assertEqual(code, 0)
+        self.assertIn("Read 3 Claude Code session(s)", err)
+        self.assertIn("; 1 shared a session ID with another file and were merged into it.", err)
+        self.assertIn("Skills across 1 of 2 sessions since ", out)
+        self.assertIn(" (1 started before the window). ", out)
 
     def test_from_claude_defaults_to_claude_config_dir(self):
         claude_dir = self.tmp / "custom-claude"

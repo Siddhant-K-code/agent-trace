@@ -1498,11 +1498,13 @@ def build_aggregate_report(
     catalogs: dict[str, SkillCatalog] = {}
     extra = list(extra_dirs)
     reports = []
-    skipped = 0
-    for meta in store.list_sessions():
+    skipped = before_window = 0
+    listed = store.list_sessions()
+    for meta in listed:
         try:
             started = _coerce_timestamp(meta.started_at)
             if started is not None and started < since:
+                before_window += 1
                 continue
             reports.append(build_session_report(
                 store, meta.session_id, workspace=workspace, extra_dirs=extra,
@@ -1514,6 +1516,11 @@ def build_aggregate_report(
     report = aggregate_reports(reports, min_sessions=min_sessions)
     report["since"] = since
     report["sessions_skipped_unreadable"] = skipped
+    report["sessions_total"] = len(listed)
+    report["sessions_excluded"] = {
+        "before_window": before_window,
+        "unreadable": skipped,
+    }
     return report
 
 
@@ -1635,6 +1642,23 @@ def format_session_text(report: Mapping[str, Any], out: TextIO | None = None) ->
     _write_not_measurable(report, out)
 
 
+_EXCLUSION_LABELS = (
+    ("before_window", "started before the window"),
+    ("unreadable", "unreadable or malformed"),
+)
+
+
+def _session_count(report: Mapping[str, Any], window: str) -> str:
+    """``2 sessions since D``, or ``2 of 7 sessions since D (5 started before the window)``."""
+    sessions = report["sessions"]
+    excluded = report.get("sessions_excluded") or {}
+    reasons = [f"{excluded[key]} {label}" for key, label in _EXCLUSION_LABELS if excluded.get(key)]
+    if not reasons:
+        return f"{sessions} sessions{window}"
+    total = report.get("sessions_total") or sessions + sum(excluded.get(key, 0) for key, _ in _EXCLUSION_LABELS)
+    return f"{sessions} of {total} sessions{window} ({', '.join(reasons)})"
+
+
 def format_aggregate_text(report: Mapping[str, Any], out: TextIO | None = None) -> None:
     import datetime
 
@@ -1644,10 +1668,8 @@ def format_aggregate_text(report: Mapping[str, Any], out: TextIO | None = None) 
     window = ""
     if since:
         window = f" since {datetime.datetime.fromtimestamp(since, datetime.timezone.utc).strftime('%Y-%m-%d')}"
-    w(f"Skills across {report['sessions']} sessions{window}. "
+    w(f"Skills across {_session_count(report, window)}. "
       "Availability reflects the filesystem now, not session time.\n")
-    if report.get("sessions_skipped_unreadable"):
-        w(f"Skipped {report['sessions_skipped_unreadable']} unreadable or malformed session(s).\n")
     w("Counts are shown as count/n. There is no score or grade.\n\n")
     if not report["skills"]:
         w("No skills available or loaded in the selected sessions.\n")
@@ -1803,6 +1825,9 @@ def cmd_skills(args: argparse.Namespace) -> int:
                              "uses another config directory.\n")
             return 1
         note = f"; skipped {failed} unreadable" if failed else ""
+        merged = imported - len(store.list_sessions())
+        if merged > 0:
+            note += f"; {merged} shared a session ID with another file and were merged into it"
         sys.stderr.write(f"Read {imported} Claude Code session(s) from {projects}{note}. "
                          "No persistent trace store was written; the temporary directory is deleted on exit.\n")
         return _run_skills(store, args, min_sessions, from_claude=True)
