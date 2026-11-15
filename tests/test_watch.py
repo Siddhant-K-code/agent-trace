@@ -994,11 +994,9 @@ class TestWatchConfigFile(unittest.TestCase):
              "stop_at": 0.9, "per_session_max": 4},
         )
         for document in documents:
-            # per_session_max replaces the default cost limit, and lowers
-            # --max-cost but never raises it.
-            for flags, cost_limit in (
-                ((), 4.0), (("--max-cost", "3"), 3.0), (("--max-cost", "5"), 4.0),
-            ):
+            # per_session_max still wins over --max-cost, as it did before,
+            # because the file's action is not kill.
+            for flags in ((), ("--max-cost", "3")):
                 with self.subTest(document=document, flags=flags):
                     self._write(document)
                     status, out, err, watch_session_mock = self._run(
@@ -1008,7 +1006,7 @@ class TestWatchConfigFile(unittest.TestCase):
                     config = watch_session_mock.call_args.args[2]
                     budget = watch_session_mock.call_args.kwargs["project_budget_config"]
                     self.assertEqual(config.max_retries, 2)
-                    self.assertEqual(config.max_cost_dollars, cost_limit)
+                    self.assertEqual(config.max_cost_dollars, 4.0)
                     self.assertEqual(
                         (budget.weekly, budget.warn_at, budget.stop_at, budget.per_session_max),
                         (50.0, 0.5, 0.9, 4.0),

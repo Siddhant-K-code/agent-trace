@@ -75,10 +75,26 @@ from .store import TraceStore
 # Duration parsing
 # ---------------------------------------------------------------------------
 
+# The units _parse_duration accepts, case-insensitive, in seconds.
+_DURATION_UNITS = {
+    **dict.fromkeys(("s", "sec", "secs", "second", "seconds"), 1),
+    **dict.fromkeys(("m", "min", "mins", "minute", "minutes"), 60),
+    **dict.fromkeys(("h", "hr", "hrs", "hour", "hours"), 3600),
+    **dict.fromkeys(("d", "day", "days"), 86400),
+}
+# One number and its unit, with optional spaces around them.
+_DURATION_PART = re.compile(r"\s*([0-9]+(?:\.[0-9]+)?|\.[0-9]+)\s*([a-z]+)\s*")
+
+
 def _parse_duration(value: str) -> float:
     """Parse a human-readable duration string to seconds.
 
-    Accepts: 30s, 5m, 2h, 1h30m, 90 (bare number = seconds).
+    A bare number is seconds: 90. Anything else must be one or more groups
+    of a number and a unit, with optional spaces: 30s, 5m, 2h, 1d, 1h30m,
+    1h 30m, 30mins, 2hr, 5 minutes. The units, case-insensitive, are s,
+    sec, secs, second, seconds, m, min, mins, minute, minutes, h, hr, hrs,
+    hour, hours, d, day, days. Raises ValueError for anything else, such
+    as 1w, 1h30, 1e3m, -5m or 5 apples, rather than guess.
     """
     value = value.strip()
     if not value:
@@ -90,18 +106,15 @@ def _parse_duration(value: str) -> float:
     except ValueError:
         pass
 
+    text = value.lower()
     total = 0.0
-    pattern = re.compile(r"(\d+(?:\.\d+)?)\s*([smhd]?)")
-    for m in pattern.finditer(value.lower()):
-        num, unit = float(m.group(1)), m.group(2)
-        if unit == "d":
-            total += num * 86400
-        elif unit == "h":
-            total += num * 3600
-        elif unit == "m":
-            total += num * 60
-        else:  # 's' or no unit
-            total += num
+    pos = 0
+    while pos < len(text):
+        m = _DURATION_PART.match(text, pos)
+        if m is None or m.group(2) not in _DURATION_UNITS:
+            raise ValueError(f"cannot parse duration: {value!r}")
+        total += float(m.group(1)) * _DURATION_UNITS[m.group(2)]
+        pos = m.end()
     if total == 0.0:
         raise ValueError(f"cannot parse duration: {value!r}")
     return total
@@ -148,15 +161,14 @@ def _read_limit_flags(args: argparse.Namespace) -> tuple[float | None, float | N
     """
     timeout_seconds: float | None = None
     timeout_str = getattr(args, "timeout", None)
-    if timeout_str:
+    # An empty value is refused too: --timeout "$T" with T unset must not
+    # drop the kill.
+    if timeout_str is not None:
         try:
             timeout_seconds = _parse_duration(timeout_str)
         except ValueError as exc:
             raise ValueError(f"invalid --timeout value: {exc}") from None
         problem = _limit_seconds_problem(timeout_seconds)
-        if problem is None and timeout_str.strip().startswith("-"):
-            # _parse_duration skips the sign of a value with units: -5m is 300.
-            problem = "it must be more than 0 seconds"
         if problem:
             raise ValueError(f"invalid --timeout value: {problem}")
     max_duration = getattr(args, "max_duration", None)
@@ -1015,6 +1027,14 @@ class WatcherConfig:
     # the command line sets these; a config file never does.
     kill_on_timeout: bool = False
     kill_on_budget: bool = False
+    # True when watchers.cost.max_dollars, --max-cost or --budget sets
+    # max_cost_dollars, so it is not the default. per_session_max lowers a
+    # set limit that kills, and replaces any other (see cmd_watch).
+    cost_limit_set: bool = False
+    # True when the config file sets the project budget key weekly or
+    # per_session_max. Its budget keys then replace the standard project
+    # config for the run (see cmd_watch).
+    project_budget_set: bool = False
     # Built-in rule names enabled via --rules mcp-poisoning,budget:$5,...
     built_in_rules: set[str] = field(default_factory=set)
     cognitive_debt_threshold: float | None = None
@@ -1081,7 +1101,15 @@ class WatcherConfig:
             "cognitive_debt_threshold": debt_threshold,
         }
         # Absent keys keep the dataclass defaults.
-        return cls(**{key: value for key, value in values.items() if value is not None})
+        config = cls(**{key: value for key, value in values.items() if value is not None})
+        config.cost_limit_set = max_dollars is not None
+        # project_budget.py reads these keys from "budget", or from the top
+        # level when there is no "budget" key.
+        budget = d.get("budget", d)
+        config.project_budget_set = isinstance(budget, dict) and (
+            "weekly" in budget or "per_session_max" in budget
+        )
+        return config
 
     @classmethod
     def load(cls, path: str) -> "WatcherConfig":
@@ -2266,9 +2294,10 @@ def _agent_exited(state: WatchState) -> bool:
     except (ProcessLookupError, PermissionError):
         # PermissionError: the PID now belongs to another user's process.
         state.agent_exited = True
+        return True
     except OSError:
         pass
-    return state.agent_exited
+    return False
 
 
 def _check_timeout(config: WatcherConfig, state: WatchState) -> str | None:
@@ -2649,6 +2678,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
         config.max_retries = int(args.max_retries)
     if max_cost is not None:
         config.max_cost_dollars = max_cost
+        config.cost_limit_set = True
     if max_duration is not None:
         config.max_duration_seconds = max_duration
     config.kill_on_timeout = timeout_seconds is not None
@@ -2685,14 +2715,19 @@ def cmd_watch(args: argparse.Namespace) -> int:
 
     store = TraceStore(args.trace_dir)
 
-    project_budget_config = load_project_budget_config(config_path)
-    if config_path and not project_budget_config.enabled:
+    # The --config file's budget keys replace the standard project config
+    # when the file sets weekly or per_session_max.
+    if config_path is not None and config.project_budget_set:
+        project_budget_config = load_project_budget_config(config_path)
+    else:
         project_budget_config = load_project_budget_config()
     per_session_max = project_budget_config.per_session_max
     if per_session_max:
-        # It may lower a cost limit given on the command line but never
-        # raise it. It replaces the config file's or the default limit.
-        if max_cost is not None:
+        # per_session_max kills (see _limit_action). It may lower a cost
+        # limit that kills, from --budget, or from --max-cost or the file
+        # with the kill action, but never raises it. It replaces a cost
+        # limit that only alerts or pauses, and the default.
+        if config.kill_on_budget or (config.cost_limit_set and config.on_violation == "kill"):
             config.max_cost_dollars = min(config.max_cost_dollars, per_session_max)
         else:
             config.max_cost_dollars = per_session_max

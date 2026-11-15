@@ -516,7 +516,7 @@ Live session monitor with kill-switch rules.
 | Flag | Description |
 |---|---|
 | `--agent-pid PID` | Agent process that pause, kill and approval actions signal. Watch exits with an error if the PID does not exist or cannot be signalled. Watch records the process start time and checks it before each signal, so it never signals a process that reused the PID (see below). Not supported on Windows |
-| `--timeout DURATION` | Kill the agent once this much time (e.g. `30m`, `2h`, `90`) has passed since watch started, whatever `--on-violation` says. Checked on every poll cycle, so an agent that writes no events is still killed. Needs `--agent-pid`; without it watch alerts and warns once. A value that is not a finite number of seconds more than 0, such as `0`, `-5`, `nan` or `inf`, is refused at startup with one line and exit 1 |
+| `--timeout DURATION` | Kill the agent once this much time has passed since watch started, whatever `--on-violation` says. Checked on every poll cycle, so an agent that writes no events is still killed. Needs `--agent-pid`; without it watch alerts and warns once. DURATION is a number of seconds, such as `90`, or one or more groups of a number and a unit, with optional spaces, such as `30m`, `2h`, `1h30m`, `1h 30m` or `5 minutes`. The units, case-insensitive, are `s`, `sec`, `secs`, `second`, `seconds`, `m`, `min`, `mins`, `minute`, `minutes`, `h`, `hr`, `hrs`, `hour`, `hours`, `d`, `day` and `days`. Watch refuses at startup, with one line and exit 1, an empty value, any other text, such as `1w`, `1h30`, `1e3m` or `-5m`, and a value that is not a finite number of seconds more than 0, such as `0`, `-5`, `nan` or `inf` |
 | `--budget DOLLARS` | Kill the agent when spend exceeds this many dollars, whatever `--on-violation` says. Needs `--agent-pid`; without it watch alerts and warns once. Pass a plain number such as `5`, not `$5`; `0` kills at any spend. A negative, infinite or NaN value is refused at startup with one line and exit 1 |
 | `--loop-threshold N` | Alert when the same tool call and arguments repeat N times; default is 3 |
 | `--loop-window N` | Number of recent events to scan for repeated identical tool calls; default is 10 |
@@ -541,9 +541,10 @@ without `--config`. Every other watch check acts with `--on-violation` (or
 `watchers.retry.alert` from `--config`), including `--max-duration`,
 `--max-cost` and the file's duration and cost limits. They set the same
 limits as `--timeout` and `--budget`, but a default (1800 seconds and $10)
-always applies, so they kill only when that action is `kill`. Bad
-`--max-duration` and `--max-cost` values are refused like bad `--timeout`
-and `--budget` values.
+always applies, so they kill only when that action is `kill`. A project
+budget's `per_session_max` changes the cost limit; see **Project budget
+config** below. Bad `--max-duration` and `--max-cost` values are refused
+like bad `--timeout` and `--budget` values.
 
 `--timeout` counts wall-clock time from when watch starts, including time
 the agent spends paused. With `--agent-pid`, watch does not stop for lack of
@@ -615,10 +616,14 @@ budget:
 When this block is present, `watch` checks rolling seven-day spend at startup
 and during the session. `warn_at` writes a terminal warning and alert-log entry.
 `stop_at` blocks new `record` and `record-http` sessions. `per_session_max`
-uses the watchdog cost guard and kills only the over-budget session. It
-replaces the default cost limit and `watchers.cost.max_dollars` from
-`--config`. When `--budget` or `--max-cost` is given, the lower of the two
-applies, so `per_session_max` never raises a limit set on the command line.
+uses the watchdog cost guard and kills only the over-budget session. When
+the cost limit kills, that is, it comes from `--budget`, or from
+`--max-cost` or `watchers.cost.max_dollars` while the action
+(`--on-violation`, or `watchers.retry.alert` from `--config`) is `kill`, the
+lower of the two applies, so `per_session_max` never raises it. Otherwise
+`per_session_max` replaces the cost limit, including the default $10: a cost
+limit that only alerts or pauses never fires, and the session is killed at
+`per_session_max`.
 
 **Rules file format** (`.watch-rules.json`):
 ```json
@@ -784,13 +789,19 @@ be, but never the value:
 
 Other keys are ignored, so the same file can hold the project budget keys
 above: a `budget` block, or top-level `weekly`, `warn_at`, `stop_at` and
-`per_session_max`. Watch does not check the budget keys.
+`per_session_max`. Watch does not check the budget keys. When the `--config`
+file sets either `weekly` or `per_session_max`, its budget keys replace the
+standard project config for that run, so a weekly budget in
+`.agent-strace.yaml`, `.agent-strace.yml` or `.agent-strace.json` is not
+read then. A key counts as set when it is present, even as `null` or `0`.
+When the file sets neither key, watch reads the standard project config.
 
 Flags given on the command line override the file, and a flag that is not
 given keeps the file's value. `--on-death`, which has no key, applies with
 `--config` too. `per_session_max` from the project budget config is applied
-after the flags and the file; it lowers a `--budget` or `--max-cost` value
-but never raises it. `--rules` built-ins such as `budget:5` are applied last.
+after the flags and the file: it lowers a cost limit that kills but never
+raises it, and it replaces any other cost limit (see **Project budget
+config** above). `--rules` built-ins such as `budget:5` are applied last.
 
 ### `mcp-scan`
 ```
