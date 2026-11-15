@@ -317,7 +317,8 @@ class WatchdogLimitTest(unittest.TestCase):
         for name, target, kwargs in (
             ("pause", "agent_trace.watch._pause_process", {}),
             ("resume", "agent_trace.watch._resume_process", {}),
-            ("kill", "agent_trace.watch._kill_process", {}),
+            # True: SIGTERM was sent, so the post-mortem and --on-death follow.
+            ("kill", "agent_trace.watch._kill_process", {"return_value": True}),
             ("os_kill", "os.kill", {"side_effect": self._signal}),
             ("identity", "agent_trace.watch.process_identity", {"return_value": None}),
             ("terminal", "agent_trace.watch._alert_terminal", {}),
@@ -404,6 +405,25 @@ class TestTimeoutKills(WatchdogLimitTest):
         self.mocks["kill"].assert_called_once_with(PID, None)
         self.assertIn("DurationWatcher: 61s elapsed (threshold: 60s)", self.alerts())
         self.assertIn(f"Killing agent process {PID}", self.alerts())
+
+    def test_timeout_kill_of_a_silent_agent_writes_the_post_mortem_and_runs_on_death_once(self):
+        # The kill on a poll cycle, with no events, gets what a kill on an
+        # event gets: the post-mortem with its reason and --on-death once.
+        post_mortem = (
+            TraceStore(self.trace_dir, redact=False)._session_dir(SESSION)
+            / "watchdog-postmortem.json"
+        )
+        with patch("agent_trace.watch.subprocess.Popen") as popen:
+            self.watch(
+                "--timeout", "1m", "--on-death", "restart-agent --from {post_mortem_path}",
+                steps=(self.pass_deadline, _IDLE_SENTINEL, _IDLE_SENTINEL, _IDLE_SENTINEL),
+            )
+        self.mocks["kill"].assert_called_once_with(PID, None)
+        popen.assert_called_once_with(f"restart-agent --from {post_mortem}", shell=True)
+        self.assertEqual(
+            json.loads(post_mortem.read_text())["reason"],
+            "DurationWatcher: 61s elapsed (threshold: 60s)",
+        )
 
     def test_timeout_kills_once_whatever_on_violation_says(self):
         self.watch("--timeout", "1m", "--on-violation", "terminal", steps=(
