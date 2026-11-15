@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-__version__ = "0.110.1"
+__version__ = "0.110.2"
 
 # The decorator API is exported lazily (PEP 562) so ``import agent_trace``
 # stays cheap and does not load the store until a name is first used.
