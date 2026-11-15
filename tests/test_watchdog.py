@@ -102,8 +102,8 @@ class TestParseDuration(unittest.TestCase):
                 self.assertEqual(str(ctx.exception), f"cannot parse duration: {value!r}")
 
     def test_groups_that_add_up_to_zero_are_refused(self):
-        """Guard: passes on main too. --rules timeout:0m stays an invalid
-        rule rather than a 0 second limit that fires at the first event."""
+        """Guard: passes on main too. Groups that add up to 0 are refused
+        here, not returned as a 0 second limit."""
         for value in ("0m", "0s", "0h 0m", ".0h"):
             with self.subTest(value=value):
                 with self.assertRaises(ValueError) as ctx:

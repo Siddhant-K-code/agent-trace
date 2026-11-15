@@ -722,8 +722,8 @@ creating a request.
 |---|---|
 | `mcp-poisoning` | Alert on MCP tool poisoning indicators, the checks `mcp-scan` runs. Takes no value |
 | `loop`, `loop:N`, `loop:N/W` | Loop detection always runs. `loop:N` sets its threshold, like `--loop-threshold`, and `loop:N/W` also sets its window, like `--loop-window`. N and W are whole numbers, 1 or more |
-| `budget:N` | Sets the cost limit to N dollars. N is a finite number, 0 or more, and may start with one `$` |
-| `timeout:D` | Sets the duration limit to D, a duration more than 0 such as `30m` or `2h` |
+| `budget:N` | Sets the cost limit to N dollars. N is a finite number, 0 or more, and may start with one `$`. Like `--max-cost`, it acts with `--on-violation` and does not kill as `--budget` does |
+| `timeout:D` | Sets the duration limit to D, a duration more than 0 such as `30m` or `2h`. Like `--max-duration`, it acts with `--on-violation` and does not kill as `--timeout` does |
 | `cognitive-debt`, `cognitive-debt:N` | Alert when the session has modified files that have not had human review. N is the threshold, from 0 to 1; without it, `cognitive_debt_threshold` from `--config` is used, or 0.8 |
 
 Names are lower case, and each rule may be listed once. Watch refuses, at
