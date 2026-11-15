@@ -162,18 +162,48 @@ The push policy in `.git/entire/checkpoint-push-policy` (`automatic`, the
 default, or `manual`) is named in the detail. A policy that cannot be read is
 named as `unreadable`, matching Entire, which then uploads nothing.
 
-### Copilot `Agent-Logs-Url`
+### Copilot cloud agent
 
-Commits from the Copilot cloud agent carry an `Agent-Logs-Url` trailer that
-links to the agent session log, such as
-`https://github.com/OWNER/REPO/sessions/<id>`. The line is also found inside
-squash-merge bodies, where it is often indented or in a bullet.
+GitHub's March 2026 changelog says Copilot cloud agent commits are authored by
+Copilot and carry an `Agent-Logs-Url` trailer that links to the agent session
+log, such as `https://github.com/OWNER/REPO/sessions/<id>`. The observed format
+differs. On 2026-11-16 the commits of a pull request the cloud agent made,
+[Siddhant-K-code/agent-trace-demo#3](https://github.com/Siddhant-K-code/agent-trace-demo/pull/3),
+were authored by the human who assigned the issue, committed by
+`GitHub <noreply@github.com>`, and had no `Agent-Logs-Url` trailer. The only
+sign of the agent was a co-author trailer on the commit with the change:
+
+```
+Co-authored-by: copilot-swe-agent[bot] <198982749+Copilot@users.noreply.github.com>
+```
+
+The first commit, `Initial plan`, had no trailer at all.
+
+So the signal reads three things in every commit of the range: the
+`Agent-Logs-Url` trailer, a `Co-authored-by` line that names the agent, and an
+agent commit author. The agent identity is matched strictly: the name
+`copilot-swe-agent[bot]`, or a GitHub noreply address with the agent's numeric
+ID, `198982749+<login>@users.noreply.github.com`. A line that only mentions
+Copilot does not count. The Copilot App adds
+`Co-authored-by: Copilot App <223556219+Copilot@users.noreply.github.com>` to
+local commits; that ID is not the cloud agent's. Both lines are also found
+inside squash-merge bodies, where they are often indented or in a bullet.
 
 | Signal | Status | Confidence |
 |---|---|---|
-| A GitHub session URL | `present` | low. The log is not read, and it may be private or expired. |
-| Any other value | `inconclusive` | medium |
-| No trailer in the range | `missing` | high |
+| An `Agent-Logs-Url` trailer with a GitHub session URL | `present` | low. The log is not read, and it may be private or expired. |
+| An `Agent-Logs-Url` trailer with any other value | `inconclusive` | medium |
+| No trailer, one or more commits name the agent as author or co-author | `inconclusive` | medium. The agent took part, but no commit links its session log. |
+| No trailer and no agent commit in the range | `missing` | high, or medium when more than 500 commits were in the range |
+
+Agent commits without a trailer are `inconclusive`, not `present`: `present`
+means the evidence is where a trailer says it is, and here nothing links the
+session log. They are not `missing` either, because the cloud agent did work
+on the range and its session log exists on GitHub; find it from the pull
+request. The confidence is medium because the identity match is strict but
+the log itself was not found or read. The detail gives the count of agent
+commits, and `facts` lists them with `agent_authored` and `agent_coauthored`
+counts.
 
 ### Claude Code OpenTelemetry
 
@@ -206,7 +236,9 @@ matching safety event are reported as `rejects_without_safety_event`.
   for 0.13.1 (2026-11-06): checkpoint push policy (entireio/cli#2921) and last
   paragraph trailers (entireio/cli#2923).
 - Copilot: [Trace any Copilot coding agent commit to its session logs](https://github.blog/changelog/2026-03-20-trace-any-copilot-coding-agent-commit-to-its-session-logs/)
-  and [Tracking GitHub Copilot's sessions](https://docs.github.com/copilot/how-tos/use-copilot-agents/coding-agent/track-copilot-sessions).
+  (2026-03-20; the commits observed on 2026-11-16 differ, see above),
+  [Tracking GitHub Copilot's sessions](https://docs.github.com/copilot/how-tos/use-copilot-agents/coding-agent/track-copilot-sessions),
+  and the live example [Siddhant-K-code/agent-trace-demo#3](https://github.com/Siddhant-K-code/agent-trace-demo/pull/3).
 - Claude Code: [Monitoring](https://code.claude.com/docs/en/monitoring-usage),
   sections Safety event, Tool decision event and Calls without a safety event.
 

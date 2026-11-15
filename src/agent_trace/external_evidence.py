@@ -5,7 +5,8 @@ a source, a status, and a confidence:
 
 - Entire checkpoints: the ``Entire-Checkpoint`` commit trailer and the local
   checkpoint store, including a trailer whose checkpoint is not pushed.
-- Copilot cloud agent: the ``Agent-Logs-Url`` commit trailer.
+- Copilot cloud agent: the ``Agent-Logs-Url`` commit trailer, and commits the
+  agent authored or co-authored when no trailer is present.
 - Claude Code OpenTelemetry: an exported logs file, including ``safety_event``.
 
 Statuses are ``present``, ``missing``, ``unpushed``, and ``inconclusive``.
@@ -51,6 +52,8 @@ SAFETY_EVENT_MIN_VERSION = (2, 1, 307)
 
 ENTIRE_TRAILER = "Entire-Checkpoint"
 COPILOT_TRAILER = "Agent-Logs-Url"
+COPILOT_AGENT_NAME = "copilot-swe-agent[bot]"
+COPILOT_AGENT_ID = "198982749"
 ENTIRE_REF_PREFIX = "refs/entire/checkpoints/"
 ENTIRE_V1_BRANCH = "entire/checkpoints/v1"
 ENTIRE_PUSH_QUEUE = "entire-checkpoint-push-queue.jsonl"
@@ -72,6 +75,15 @@ _COPILOT_LINE_RE = re.compile(
 _COPILOT_URL_RE = re.compile(
     r"^https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"
     r"/sessions/[A-Za-z0-9_-]{1,128}/?$"
+)
+_COAUTHOR_LINE_RE = re.compile(
+    r"^\s*(?:[*-]\s+)?Co-authored-by:\s*(.*?)\s*<([^<>\s]*)>\s*$", re.IGNORECASE
+)
+# The agent's GitHub noreply address. Other Copilot identities, such as the
+# Copilot App (223556219), have a different numeric ID and do not match.
+_COPILOT_AGENT_EMAIL_RE = re.compile(
+    r"^" + COPILOT_AGENT_ID + r"\+[A-Za-z0-9-]+(?:\[bot\])?@users\.noreply\.github\.com$",
+    re.IGNORECASE,
 )
 _SAFE_URL_RE = re.compile(r"^https://[A-Za-z0-9._~:/?#@!$&'*+,;=%-]{1,512}$")
 _LABEL_RE = re.compile(r"^[a-z][a-z0-9_]{0,40}$")
@@ -177,20 +189,25 @@ def validate_range(value: str) -> str:
     return text
 
 
-def read_commits(rev_range: str, cwd: str | None = None) -> list[tuple[str, str]] | None:
-    """Return ``(sha, message)`` pairs for the range, newest first, or None."""
+def read_commits(
+    rev_range: str, cwd: str | None = None
+) -> list[tuple[str, str, str, str]] | None:
+    """Return ``(sha, author name, author email, message)`` for the range, newest
+    first, or None."""
     out = _git(
-        ["log", f"--max-count={MAX_COMMITS + 1}", "--format=%x1e%H%x1f%B", rev_range, "--"],
+        ["log", f"--max-count={MAX_COMMITS + 1}", "--format=%x1e%H%x1f%an%x1f%ae%x1f%B",
+         rev_range, "--"],
         cwd,
     )
     if out is None:
         return None
-    commits: list[tuple[str, str]] = []
+    commits: list[tuple[str, str, str, str]] = []
     for chunk in out.split("\x1e"):
-        if "\x1f" not in chunk:
+        parts = chunk.split("\x1f", 3)
+        if len(parts) != 4:
             continue
-        sha, message = chunk.split("\x1f", 1)
-        commits.append((sha.strip(), message))
+        sha, name, email, message = parts
+        commits.append((sha.strip(), name, email, message))
     return commits
 
 
@@ -272,6 +289,26 @@ def copilot_log_urls(message: str) -> list[str]:
         if match and match.group(1) not in urls:
             urls.append(match.group(1))
     return urls
+
+
+def is_copilot_agent(name: str, email: str) -> bool:
+    """True for the Copilot cloud agent identity: its bot name or noreply ID."""
+    return (
+        name.strip().lower() == COPILOT_AGENT_NAME
+        or bool(_COPILOT_AGENT_EMAIL_RE.match(email.strip()))
+    )
+
+
+def copilot_agent_coauthored(message: str) -> bool:
+    """True when a ``Co-authored-by`` line names the Copilot cloud agent.
+
+    Reads every line, so squash-merge bodies count, as for ``Agent-Logs-Url``.
+    """
+    for line in message.replace("\r\n", "\n").split("\n"):
+        match = _COAUTHOR_LINE_RE.match(line)
+        if match and is_copilot_agent(match.group(1), match.group(2)):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -487,7 +524,12 @@ def _plural(count: int, word: str) -> str:
 
 
 def assess_commits(rev_range: str, cwd: str | None = None) -> list[ExternalSignal]:
-    """Read Entire and Copilot trailers in the range and resolve each one."""
+    """Read Entire and Copilot trailers in the range and resolve each one.
+
+    A range with Copilot cloud agent commits but no ``Agent-Logs-Url`` trailer
+    is ``inconclusive``, not ``missing``: the agent was involved, and the
+    session log is not linked from the commits.
+    """
     commits = read_commits(rev_range, cwd)
     if commits is None:
         return [ExternalSignal(
@@ -512,7 +554,15 @@ def assess_commits(rev_range: str, cwd: str | None = None) -> list[ExternalSigna
     checkpoint_commits: dict[str, list[str]] = {}
     unlinked_commits: list[str] = []
     url_commits: dict[str, list[str]] = {}
-    for sha, message in reversed(commits):
+    agent_commits: list[str] = []
+    agent_authored = agent_coauthored = 0
+    for sha, name, email, message in reversed(commits):
+        authored = is_copilot_agent(name, email)
+        coauthored = copilot_agent_coauthored(message)
+        if authored or coauthored:
+            agent_commits.append(sha)
+            agent_authored += authored
+            agent_coauthored += coauthored
         linked, unlinked = entire_checkpoints(message)
         for checkpoint_id in linked:
             checkpoint_commits.setdefault(checkpoint_id, []).append(sha)
@@ -559,10 +609,26 @@ def assess_commits(rev_range: str, cwd: str | None = None) -> list[ExternalSigna
                 "agent session link.",
                 url if _SAFE_URL_RE.match(url) else "", facts,
             ))
-    if not url_commits:
+    if not url_commits and agent_commits:
+        count = len(agent_commits)
+        signals.append(ExternalSignal(
+            SOURCE_COPILOT, "inconclusive", "medium",
+            f"{count} of {read} {'names' if count == 1 else 'name'} the Copilot cloud "
+            f"agent as author or co-author, but no commit has an {COPILOT_TRAILER} "
+            "trailer, so no session log link was found.",
+            "", {
+                "commits": agent_commits,
+                "agent_authored": agent_authored,
+                "agent_coauthored": agent_coauthored,
+                "commits_read": len(commits),
+                "truncated": truncated,
+            },
+        ))
+    elif not url_commits:
         signals.append(ExternalSignal(
             SOURCE_COPILOT, "missing", absent_confidence,
-            f"No {COPILOT_TRAILER} trailer; {read}.",
+            f"No {COPILOT_TRAILER} trailer and no Copilot cloud agent author or "
+            f"co-author; {read}.",
             "", {"commits_read": len(commits), "truncated": truncated},
         ))
     return signals
@@ -802,7 +868,8 @@ def add_external_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--commits", default="", metavar="RANGE",
         help="git revision range to read Entire-Checkpoint and Agent-Logs-Url trailers "
-             "from, such as origin/main..HEAD (reported, not graded)",
+             "and Copilot cloud agent authors and co-authors from, such as "
+             "origin/main..HEAD (reported, not graded)",
     )
     parser.add_argument(
         "--otel-logs", dest="otel_logs", default="", metavar="FILE",
@@ -843,10 +910,12 @@ __all__ = [
     "assess_entire_checkpoint",
     "assess_otel_logs",
     "collect_external_evidence",
+    "copilot_agent_coauthored",
     "copilot_log_urls",
     "entire_checkpoints",
     "external_from_args",
     "final_trailer_block",
+    "is_copilot_agent",
     "read_entire_store",
     "signal_lines",
 ]

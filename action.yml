@@ -49,7 +49,7 @@ inputs:
     description: Lowest confidence that can fail the check (low, medium, high). Empty uses config, then medium.
     default: ""
   review-commits:
-    description: Git revision range to read Entire-Checkpoint and Agent-Logs-Url trailers from, such as origin/main..HEAD. Needs the history in the checkout (fetch-depth 0). Reported, not graded.
+    description: Git revision range to read Entire-Checkpoint and Agent-Logs-Url trailers and Copilot cloud agent authors and co-authors from, such as origin/main..HEAD. Needs the history in the checkout (fetch-depth 0). Reported, not graded.
     default: ""
   review-otel-logs:
     description: Path to a Claude Code OpenTelemetry logs export (OTLP JSON or JSON Lines) to read safety_event from. Reported, not graded.
