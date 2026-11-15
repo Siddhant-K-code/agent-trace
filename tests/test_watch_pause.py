@@ -46,8 +46,8 @@ class PauseTestCase(unittest.TestCase):
         self.out = io.StringIO()
 
         patches = {
-            "pause": patch("agent_trace.watch._pause_process"),
-            "resume": patch("agent_trace.watch._resume_process"),
+            "pause": patch("agent_trace.watch._pause_process", return_value=None),
+            "resume": patch("agent_trace.watch._resume_process", return_value=None),
             "kill": patch("agent_trace.watch._kill_process"),
             "os_kill": patch("os.kill"),
             "terminal": patch("agent_trace.watch._alert_terminal"),

@@ -5,6 +5,7 @@ import errno
 import io
 import json
 import os
+import signal
 import socket
 import sys
 import tempfile
@@ -23,6 +24,8 @@ from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.project_budget import ProjectBudgetConfig
 from agent_trace.store import TraceStore
 from agent_trace.watch import (
+    PAUSE_EDITOR,
+    PAUSE_RULE,
     NannyRule,
     WatcherConfig,
     WatchState,
@@ -31,6 +34,7 @@ from agent_trace.watch import (
     _alert_file,
     _alert_webhook,
     _apply_builtin_rules_spec,
+    _check_pause_file,
     _detect_loop,
     _detect_spin_loop,
     _dispatch_alert,
@@ -1350,7 +1354,9 @@ class TestAlertLogFailures(unittest.TestCase):
             with self.subTest(action=action):
                 config = WatcherConfig(on_violation=action, alert_log=self.blocked_log)
                 err = io.StringIO()
-                with patch(f"agent_trace.watch.{target}") as signal_mock, \
+                # None: SIGSTOP was sent. True: SIGTERM was sent.
+                sent = None if action == "pause" else True
+                with patch(f"agent_trace.watch.{target}", return_value=sent) as signal_mock, \
                         patch("agent_trace.watch.pid_reused", return_value=False), \
                         patch("agent_trace.watch._alert_terminal"), \
                         redirect_stderr(err):
@@ -1520,7 +1526,7 @@ class TestNannyPostMortemOnlyOnKill(unittest.TestCase):
                     post_mortem.unlink(missing_ok=True)
                     rule = NannyRule(name="cost cap", condition="cost_usd > 0.5", action=action)
                     with patch("agent_trace.watch.subprocess.Popen") as popen, \
-                            patch("agent_trace.watch._pause_process"), \
+                            patch("agent_trace.watch._pause_process", return_value=None), \
                             patch("agent_trace.watch._kill_process"), \
                             patch("agent_trace.watch.pid_reused", return_value=False), \
                             patch("agent_trace.watch._alert_terminal"):
@@ -1835,6 +1841,131 @@ class TestWatchWebhookCheck(unittest.TestCase):
                     status, _, err, watch_session_mock = self._run(*flags, config=config)
                     self.assertEqual((status, err), (0, ""))
                     self.assertEqual(watch_session_mock.call_args.args[2].webhook_url, url)
+
+
+@unittest.skipUnless(hasattr(signal, "SIGSTOP"), "needs SIGSTOP")
+class TestPauseSignalFailures(unittest.TestCase):
+    """Watch holds a pause only when SIGSTOP was sent, and says when a
+    SIGSTOP or SIGCONT could not be sent."""
+
+    PID = 424242
+    ERRORS = (
+        (PermissionError, "not allowed to signal it"),
+        (ProcessLookupError, "no process has that PID"),
+    )
+
+    def setUp(self):
+        for target, effect in (
+            ("agent_trace.watch.os.kill", self._kill),
+            ("agent_trace.watch._alert_terminal", lambda msg, *a: self.terminal.append(msg)),
+            ("agent_trace.watch.pid_reused", lambda *a: False),
+        ):
+            p = patch(target, side_effect=effect)
+            p.start()
+            self.addCleanup(p.stop)
+        self._fresh()
+
+    def _fresh(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+        self.store = TraceStore(tmp.name, redact=False)
+        self.store.create_session(SessionMeta(session_id="s1", started_at=1.0))
+        self.alert_log = self.tmp / "alerts.log"
+        self.config = WatcherConfig(alert_log=str(self.alert_log))
+        self.state = WatchState(agent_pid=self.PID, session_id="s1")
+        self.out = io.StringIO()
+        self.terminal: list[str] = []
+        self.failing: dict[int, BaseException] = {}
+        self.attempts: list[int] = []
+
+    def _kill(self, pid, sig):
+        self.attempts.append(sig)
+        if sig in self.failing:
+            raise self.failing[sig]
+
+    def _logged(self) -> str:
+        return self.alert_log.read_text() if self.alert_log.exists() else ""
+
+    def _tick(self, n: int = 1) -> None:
+        for _ in range(n):
+            _check_pause_file(self.store, self.state, self.out)
+
+    def test_rule_pause_that_was_not_sent_holds_no_pause(self):
+        for exc, reason in self.ERRORS:
+            with self.subTest(error=exc.__name__):
+                self._fresh()
+                self.failing[signal.SIGSTOP] = exc()
+                _dispatch_alert("rule fired", self.config, self.state, action="pause")
+                self.assertIsNone(self.state.pause_owner)
+                self.assertFalse(self.state.paused)
+                msg = f"Agent pid {self.PID} was not paused: {reason}. Watch holds no pause."
+                self.assertIn(msg, self.terminal)
+                self.assertIn(msg, self._logged())
+
+    def test_rule_pause_that_was_sent_is_held(self):
+        _dispatch_alert("rule fired", self.config, self.state, action="pause")
+        self.assertEqual(self.attempts, [signal.SIGSTOP])
+        self.assertEqual(self.state.pause_owner, PAUSE_RULE)
+        self.assertNotIn("was not paused", self._logged())
+
+    def test_approval_pause_that_was_not_sent_holds_no_pause(self):
+        for exc, reason in self.ERRORS:
+            with self.subTest(error=exc.__name__):
+                self._fresh()
+                self.failing[signal.SIGSTOP] = exc()
+                _dispatch_alert(
+                    "needs approval", self.config, self.state, action="require_approval",
+                    notify="review", store=self.store, session_id="s1",
+                )
+                self.assertIsNone(self.state.pause_owner)
+                self.assertIsNone(self.state.approval_request_id)
+                msg = f"Agent pid {self.PID} was not paused: {reason}. Watch holds no pause."
+                self.assertIn(msg, self.terminal)
+                self.assertIn(msg, self._logged())
+
+    def test_editor_pause_that_was_not_sent_is_reported_once(self):
+        for exc, reason in self.ERRORS:
+            with self.subTest(error=exc.__name__):
+                self._fresh()
+                self.failing[signal.SIGSTOP] = exc()
+                marker = self.tmp / ".pause-request"
+                marker.write_text("s1")
+                self._tick(5)
+                self.assertEqual(self.attempts, [signal.SIGSTOP])
+                self.assertIsNone(self.state.pause_owner)
+                self.assertEqual(self.out.getvalue().count(f"was not paused: {reason}"), 1)
+                # Resume then Pause in the editor tries again.
+                marker.unlink()
+                self._tick()
+                del self.failing[signal.SIGSTOP]
+                marker.write_text("s1")
+                self._tick()
+                self.assertEqual(self.attempts, [signal.SIGSTOP, signal.SIGSTOP])
+                self.assertEqual(self.state.pause_owner, PAUSE_EDITOR)
+
+    def test_editor_resume_that_was_not_sent_clears_the_pause(self):
+        for exc, reason in self.ERRORS:
+            with self.subTest(error=exc.__name__):
+                self._fresh()
+                marker = self.tmp / ".pause-request"
+                marker.write_text("s1")
+                self._tick()
+                self.assertEqual(self.state.pause_owner, PAUSE_EDITOR)
+                self.failing[signal.SIGCONT] = exc()
+                # Signal 0 still finds the agent, so only the resume fails.
+                marker.unlink()
+                self._tick()
+                self.assertIsNone(self.state.pause_owner)
+                out = self.out.getvalue()
+                self.assertIn(f"Agent pid {self.PID} was not resumed: {reason}. Pause cleared.", out)
+                hint = f"run 'kill -CONT {self.PID}' as its owner"
+                if exc is PermissionError:
+                    self.assertIn(hint, out)
+                else:
+                    self.assertNotIn(hint, out)
+                self._tick(3)
+                self.assertEqual(out, self.out.getvalue())
 
 
 if __name__ == "__main__":

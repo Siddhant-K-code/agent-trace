@@ -713,7 +713,11 @@ VS Code Resume command does not release it. Approving releases the pause.
 Denying leaves the agent stopped like a `pause` rule, because an agent that
 handles `SIGTERM` only acts on it after `SIGCONT`. While watch holds a pause,
 the idle timeout does not count; the pause is dropped if the agent process
-exits. `--dry-run` reports a `require_approval` rule without pausing or
+exits. If watch cannot send `SIGSTOP` (the PID is gone or watch may not
+signal it), it prints and logs `Agent pid PID was not paused: REASON` and
+holds no pause; a `require_approval` request is still created. If it cannot
+send `SIGCONT` for a VS Code Resume, it prints `was not resumed` and drops
+the pause, since it could never release it. `--dry-run` reports a `require_approval` rule without pausing or
 creating a request.
 
 **Built-in rules** (`--rules mcp-poisoning,loop:3/10,budget:5,timeout:30m`):
