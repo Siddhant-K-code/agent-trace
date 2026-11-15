@@ -103,6 +103,61 @@ class TestHooksSessionLifecycle(unittest.TestCase):
         _clear_active_session()
         handle_session_end({})  # should not raise
 
+    def test_duplicate_session_end_keeps_the_first_end(self):
+        sid = "dupend0000000001"
+        handle_session_start({"session_id": sid, "source": "startup"})
+        handle_session_end({"session_id": sid, "reason": "exit"})
+        store = TraceStore(self.tmpdir)
+        first = store.load_meta(sid)
+
+        time.sleep(0.01)
+        handle_session_end({"session_id": sid, "reason": "retry"})
+
+        events = store.load_events(sid)
+        ends = [e for e in events if e.event_type == EventType.SESSION_END]
+        self.assertEqual(len(ends), 1)
+        self.assertEqual(ends[0].data["reason"], "exit")
+        meta = store.load_meta(sid)
+        self.assertEqual(meta.ended_at, first.ended_at)
+        self.assertEqual(meta.total_duration_ms, first.total_duration_ms)
+
+    def test_resumed_session_records_a_later_end(self):
+        sid = "resumeend0000001"
+        handle_session_start({"session_id": sid, "source": "startup"})
+        handle_session_end({"session_id": sid})
+        store = TraceStore(self.tmpdir)
+        first_end = store.load_meta(sid).ended_at
+
+        time.sleep(0.01)
+        handle_session_start({"session_id": sid, "source": "resume"})
+        handle_session_end({"session_id": sid})
+        handle_session_end({"session_id": sid})
+
+        events = store.load_events(sid)
+        types = [e.event_type for e in events]
+        self.assertEqual(types, [
+            EventType.SESSION_START,
+            EventType.SESSION_END,
+            EventType.SESSION_START,
+            EventType.SESSION_END,
+        ])
+        self.assertGreater(store.load_meta(sid).ended_at, first_end)
+
+    def test_concurrent_session_ends_write_one_end(self):
+        sid = "raceend000000001"
+        handle_session_start({"session_id": sid, "source": "startup"})
+        script = (
+            "import os\n"
+            "from agent_trace.hooks import handle_session_end\n"
+            "wait_for_start()\n"
+            "handle_session_end({'session_id': sys.argv[2]})\n"
+        )
+        run_concurrently(script, [[sid]] * 4)
+
+        events = TraceStore(self.tmpdir).load_events(sid)
+        ends = [e for e in events if e.event_type == EventType.SESSION_END]
+        self.assertEqual(len(ends), 1)
+
 
 class TestHooksSessionContinuation(unittest.TestCase):
     """resume and compact SessionStart hooks continue the recorded session."""

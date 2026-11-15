@@ -732,17 +732,34 @@ def handle_session_end(input_data: dict, provider: str = "claude") -> None:
     if not session_id:
         return
 
+    claimed = False
     meta = _load_meta_or_none(store, session_id)
     if meta:
         ended_at = time.time()
-        duration_ms = (ended_at - meta.started_at) * 1000
 
-        event_data = {"duration_ms": duration_ms}
+        # Claim the end under the store lock. A session that already ended,
+        # and was not resumed since, keeps its first end: a retried or second
+        # SessionEnd adds no session_end event and does not move ended_at.
+        # Reloading under the lock also keeps counters written by concurrent
+        # hooks since the load above.
+        def _end(current: SessionMeta) -> None:
+            nonlocal claimed
+            if current.ended_at is not None:
+                return
+            claimed = True
+            current.ended_at = ended_at
+            current.total_duration_ms = (ended_at - current.started_at) * 1000
+
+        meta = _mutate_meta_or_none(store, session_id, _end)
+
+    if meta is not None and claimed:
+        event_data = {"duration_ms": meta.total_duration_ms}
         for key in ("reason", "stop_reason", "cwd", "transcript_path", "hook_event_name"):
             if input_data.get(key) not in (None, ""):
                 event_data[key] = input_data.get(key)
 
-        _write_event(store, 
+        _write_event(
+            store,
             session_id,
             TraceEvent(
                 event_type=EventType.SESSION_END,
@@ -750,14 +767,6 @@ def handle_session_end(input_data: dict, provider: str = "claude") -> None:
                 data=event_data,
             ),
         )
-
-        # Reload under the lock so counters written by concurrent hooks since
-        # the load above are kept.
-        def _end(current: SessionMeta) -> None:
-            current.ended_at = ended_at
-            current.total_duration_ms = (ended_at - current.started_at) * 1000
-
-        meta = _mutate_meta_or_none(store, session_id, _end) or meta
         _write_session_meta(meta)
         _product_telemetry.capture(
             _product_telemetry.SESSION_COMPLETED,

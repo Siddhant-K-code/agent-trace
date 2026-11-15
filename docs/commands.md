@@ -122,7 +122,7 @@ uses it. See [Platform-team install](platform-install.md#metadata-only-capture).
 | `stop` | Assistant response or provider stop metadata |
 | `subagent-start` | Subagent start in the parent session: agent type and name, plus the child session ID for GitHub Copilot CLI or the agent ID for Codex |
 | `subagent-stop` | Subagent stop in the parent session, with the same fields and the stop reason when the provider sends one. For Codex, also the subagent's final message as `text` and its `agent_transcript_path`, both redacted |
-| `session-end` | Finish the active session and clear its hook state |
+| `session-end` | Finish the active session and clear its hook state. A repeated `session-end` for a session that already ended, and was not resumed since, records nothing and keeps the first end time |
 | `post-model-request` | Codex only: one `llm_response` per model request with the model, status, error, turn ID and token usage, plus `agent_id` and `agent_type` for a subagent's request |
 
 Provider-specific aliases in generated configurations are normalized to these
@@ -145,7 +145,7 @@ maintainer setup.
 ```
 agent-strace import <path.jsonl> [--discover]
 ```
-Import a Claude Code JSONL session log. `--discover` lists available sessions in `~/.claude/projects/`. When the log records a working directory, the imported session starts with a `session_start` event holding that `cwd`.
+Import a Claude Code JSONL session log. `--discover` lists available sessions in `~/.claude/projects/`. The imported session starts with a `session_start` event, which holds the `cwd` when the log records a working directory.
 
 Claude Code writes one log line per content block of a model response and
 repeats the response's token usage on each. The import keeps that usage once,
