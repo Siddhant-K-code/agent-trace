@@ -263,7 +263,7 @@ Supported: OpenAI Agents SDK, LangChain, LangGraph, CrewAI, LiteLLM, Anthropic S
 **GitHub Actions**: run evals in CI, post results to the step summary, fail on regression:
 
 ```yaml
-- uses: Siddhant-K-code/agent-trace@v0.110.2
+- uses: Siddhant-K-code/agent-trace@v0.111.0
   with:
     config: .agent-evals.yaml
     baseline: .agent-evals-baseline.json
