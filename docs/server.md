@@ -174,7 +174,8 @@ command.
 The read client requires HTTPS except for loopback HTTP, rejects redirects and
 credential-bearing URLs, disables ambient HTTP proxies, and applies bounded
 response, session, event, line, nesting, and total-byte limits. `--ca-file`
-adds a private CA. `--allow-insecure-http` is an explicit opt-in for a
+trusts a private CA bundle, which replaces the system CA store, so include any
+public CAs the collector also needs. `--allow-insecure-http` is an explicit opt-in for a
 non-loopback test collector and should not be used on untrusted networks.
 
 Collector reports use one metadata request followed by one event request for

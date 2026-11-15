@@ -1106,7 +1106,7 @@ security boundary and interpretation details.
 | `--output FILE`, `-o FILE` | Atomically write the complete report; symlinked destinations are refused |
 | `--endpoint URL` | Explicit collector base URL. This command never infers it from `AGENT_STRACE_ENDPOINT` |
 | `--auth-key-file FILE` | Read the collector bearer key from a file; otherwise use `AGENT_STRACE_AUTH_KEY` |
-| `--ca-file FILE` | Trust a custom CA bundle for the HTTPS collector |
+| `--ca-file FILE` | Trust a custom CA bundle for the HTTPS collector. Replaces the system CA store |
 | `--allow-insecure-http` | Opt in to plain HTTP for a non-loopback collector |
 
 ### `cognitive-debt`
