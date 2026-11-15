@@ -409,6 +409,25 @@ class TestFindings(_StoreCase):
         b.tool("Edit", file_path="/private/tmp/demo/lib/util.py")
         scope = self.finding(self.report(b.save()), "scope")
         self.assertEqual((scope.status, scope.confidence), ("present", "medium"))
+        self.assertTrue(scope.detail.startswith(
+            "The 1 written file was named in a prompt or read in the session."
+        ))
+
+    def test_scope_detail_grammar_for_counts(self):
+        b = _Builder(self.store, "scopegram001")
+        b.prompt("tidy things up")
+        b.tool("Edit", file_path=f"{CWD}/lib/util.py")
+        scope = self.finding(self.report(b.save()), "scope")
+        self.assertEqual(scope.status, "missing")
+        self.assertTrue(scope.detail.startswith("0 of 1 written file was named"))
+
+        b = _Builder(self.store, "scopegram002", start=5000)
+        b.prompt("edit lib/a.py and lib/b.py")
+        b.tool("Edit", file_path=f"{CWD}/lib/a.py")
+        b.tool("Edit", file_path=f"{CWD}/lib/b.py")
+        scope = self.finding(self.report(b.save()), "scope")
+        self.assertEqual(scope.status, "present")
+        self.assertTrue(scope.detail.startswith("All 2 written files were named"))
 
     def test_shell_writes_do_not_raise_explicit_write_confidence(self):
         b = _Builder(self.store, "shellmixed01")
