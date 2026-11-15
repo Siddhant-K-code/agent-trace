@@ -934,10 +934,11 @@ class TestWatchConfigFile(unittest.TestCase):
                 watchers("retry", "alert", value),
                 "watchers.retry.alert must be one of terminal, file, kill, pause, require_approval",
             ))
-        for section, key in (("cost", "max_dollars"), ("duration", "max_minutes")):
-            for value in (-0.01, -1, *not_number):
-                cases.append((watchers(section, key, value),
-                              f"watchers.{section}.{key} must be a finite number, 0 or more"))
+        for value in (-0.01, -1, *not_number):
+            cases.append((watchers("cost", "max_dollars", value),
+                          "watchers.cost.max_dollars must be a finite number, 0 or more"))
+            cases.append((watchers("duration", "max_minutes", value),
+                          "watchers.duration.max_minutes must be a finite number more than 0"))
         for key in ("identical_calls", "threshold", "max_repeats", "window", "sequence_length"):
             for value in (0, -1, *not_whole):
                 cases.append((watchers("loop", key, value),
@@ -970,6 +971,18 @@ class TestWatchConfigFile(unittest.TestCase):
                 self._write(document)
                 self._assert_refused(problem)
 
+    def test_a_duration_limit_of_0_is_refused(self):
+        # It would fire at the first event: an alert at once, or a kill at
+        # once when the action is kill. A cost limit of 0 is kept.
+        for value in (0, 0.0, -0.0):
+            with self.subTest(value=value):
+                self._write({"watchers": {"duration": {"max_minutes": value}}})
+                self._assert_refused(
+                    "watchers.duration.max_minutes must be a finite number more than 0",
+                )
+        self._write({"watchers": {"cost": {"max_dollars": 0}}})
+        self.assertEqual(self._config_for(config=str(self.config)).max_cost_dollars, 0.0)
+
     def test_unknown_keys_and_budget_keys_are_not_refused(self):
         documents = (
             {
@@ -981,8 +994,11 @@ class TestWatchConfigFile(unittest.TestCase):
              "stop_at": 0.9, "per_session_max": 4},
         )
         for document in documents:
-            # per_session_max still wins over --max-cost, as it did before.
-            for flags in ((), ("--max-cost", "3")):
+            # per_session_max replaces the default cost limit, and lowers
+            # --max-cost but never raises it.
+            for flags, cost_limit in (
+                ((), 4.0), (("--max-cost", "3"), 3.0), (("--max-cost", "5"), 4.0),
+            ):
                 with self.subTest(document=document, flags=flags):
                     self._write(document)
                     status, out, err, watch_session_mock = self._run(
@@ -992,7 +1008,7 @@ class TestWatchConfigFile(unittest.TestCase):
                     config = watch_session_mock.call_args.args[2]
                     budget = watch_session_mock.call_args.kwargs["project_budget_config"]
                     self.assertEqual(config.max_retries, 2)
-                    self.assertEqual(config.max_cost_dollars, 4.0)
+                    self.assertEqual(config.max_cost_dollars, cost_limit)
                     self.assertEqual(
                         (budget.weekly, budget.warn_at, budget.stop_at, budget.per_session_max),
                         (50.0, 0.5, 0.9, 4.0),
@@ -1015,11 +1031,14 @@ class TestWatchConfigFile(unittest.TestCase):
             (("--max-cost", "3.5"), {"max_cost_dollars": 3.5}),
             (("--max-cost", "0"), {"max_cost_dollars": 0.0}),
             (("--budget", "4"), {"max_cost_dollars": 4.0}),
+            # --budget wins over --max-cost and --timeout over
+            # --max-duration, in either order.
             (("--max-cost", "3.5", "--budget", "4"), {"max_cost_dollars": 4.0}),
+            (("--budget", "4", "--max-cost", "3.5"), {"max_cost_dollars": 4.0}),
             (("--max-duration", "120"), {"max_duration_seconds": 120}),
-            (("--max-duration", "0"), {"max_duration_seconds": 0}),
             (("--timeout", "90s"), {"max_duration_seconds": 90.0}),
             (("--max-duration", "120", "--timeout", "3m"), {"max_duration_seconds": 180.0}),
+            (("--timeout", "3m", "--max-duration", "120"), {"max_duration_seconds": 180.0}),
             (("--on-violation", "kill"), {"on_violation": "kill"}),
             # A flag set to its default still overrides the file.
             (("--on-violation", "terminal"), {"on_violation": "terminal"}),

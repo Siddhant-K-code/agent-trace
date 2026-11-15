@@ -516,8 +516,8 @@ Live session monitor with kill-switch rules.
 | Flag | Description |
 |---|---|
 | `--agent-pid PID` | Agent process that pause, kill and approval actions signal. Watch exits with an error if the PID does not exist or cannot be signalled. Watch records the process start time and checks it before each signal, so it never signals a process that reused the PID (see below). Not supported on Windows |
-| `--timeout DURATION` | Kill after duration (e.g. `30m`, `2h`) |
-| `--budget DOLLARS` | Kill when spend exceeds this many dollars. Pass a plain number such as `5`, not `$5` |
+| `--timeout DURATION` | Kill the agent once this much time (e.g. `30m`, `2h`, `90`) has passed since watch started, whatever `--on-violation` says. Checked on every poll cycle, so an agent that writes no events is still killed. Needs `--agent-pid`; without it watch alerts and warns once. A value that is not a finite number of seconds more than 0, such as `0`, `-5`, `nan` or `inf`, is refused at startup with one line and exit 1 |
+| `--budget DOLLARS` | Kill the agent when spend exceeds this many dollars, whatever `--on-violation` says. Needs `--agent-pid`; without it watch alerts and warns once. Pass a plain number such as `5`, not `$5`; `0` kills at any spend. A negative, infinite or NaN value is refused at startup with one line and exit 1 |
 | `--loop-threshold N` | Alert when the same tool call and arguments repeat N times; default is 3 |
 | `--loop-window N` | Number of recent events to scan for repeated identical tool calls; default is 10 |
 | `--on-violation terminal\|file\|kill` | Action when a rule fires (default: `terminal`) |
@@ -535,6 +535,25 @@ Live session monitor with kill-switch rules.
 | `--stream-flush-interval S` | With `--stream-to`, send waiting events once S seconds have passed since the last POST (default: `2.0`). `0` sends each event at once. A negative, infinite or NaN value is refused at startup |
 | `--dry-run` | Evaluate rules without acting |
 | `--tenant-id ID` | Tag the session and all events; defaults to `AGENT_STRACE_TENANT_ID` |
+
+`--timeout` and `--budget` kill whatever `--on-violation` says, with or
+without `--config`. Every other watch check acts with `--on-violation` (or
+`watchers.retry.alert` from `--config`), including `--max-duration`,
+`--max-cost` and the file's duration and cost limits. They set the same
+limits as `--timeout` and `--budget`, but a default (1800 seconds and $10)
+always applies, so they kill only when that action is `kill`. Bad
+`--max-duration` and `--max-cost` values are refused like bad `--timeout`
+and `--budget` values.
+
+`--timeout` counts wall-clock time from when watch starts, including time
+the agent spends paused. With `--agent-pid`, watch does not stop for lack of
+events before the deadline while the agent process runs, and it waits up to
+10 seconds past the deadline so the `SIGKILL` that follows `SIGTERM` after 5
+seconds is still sent. Once the agent process has exited, `--timeout` kills
+nothing: the idle timeout (5 minutes without events) applies again, and a
+later event past the deadline acts with `--on-violation`. Without
+`--agent-pid`, the deadline still alerts on time, and the idle timeout is
+unchanged.
 
 Alert channels never stop or delay the alert's pause or kill: watch writes the
 alert log before it acts, and sends the `--webhook` POST and any Slack or Teams
@@ -596,7 +615,10 @@ budget:
 When this block is present, `watch` checks rolling seven-day spend at startup
 and during the session. `warn_at` writes a terminal warning and alert-log entry.
 `stop_at` blocks new `record` and `record-http` sessions. `per_session_max`
-uses the watchdog cost guard and kills only the over-budget session.
+uses the watchdog cost guard and kills only the over-budget session. It
+replaces the default cost limit and `watchers.cost.max_dollars` from
+`--config`. When `--budget` or `--max-cost` is given, the lower of the two
+applies, so `per_session_max` never raises a limit set on the command line.
 
 **Rules file format** (`.watch-rules.json`):
 ```json
@@ -734,7 +756,7 @@ Every key is optional. A key that is not in the file keeps its default.
 | `watchers.retry.max` | Whole number, 0 or more: alert when the same Bash command runs more than this many times | `5` | `--max-retries` |
 | `watchers.retry.alert` | `terminal`, `file`, `kill`, `pause` or `require_approval`. This is the action for every watcher, not only retries | `terminal` | `--on-violation` |
 | `watchers.cost.max_dollars` | Number, 0 or more | `10` | `--max-cost`, `--budget` |
-| `watchers.duration.max_minutes` | Number, 0 or more | `30` | `--max-duration`, `--timeout` |
+| `watchers.duration.max_minutes` | Number more than 0 | `30` | `--max-duration`, `--timeout` |
 | `watchers.loop.identical_calls` | Whole number, 1 or more: alert when an identical tool call repeats this many times. When it is absent, `threshold` is read, then `max_repeats` | `3` | `--loop-threshold` |
 | `watchers.loop.window` | Whole number, 1 or more: recent events to scan for identical tool calls | `10` | `--loop-window` |
 | `watchers.loop.sequence_length` | Whole number, 1 or more: length of a repeated event sequence | `3` | |
@@ -766,8 +788,9 @@ above: a `budget` block, or top-level `weekly`, `warn_at`, `stop_at` and
 
 Flags given on the command line override the file, and a flag that is not
 given keeps the file's value. `--on-death`, which has no key, applies with
-`--config` too. As before, `per_session_max` from the project budget config
-and `--rules` built-ins such as `budget:5` are applied after the flags.
+`--config` too. `per_session_max` from the project budget config is applied
+after the flags and the file; it lowers a `--budget` or `--max-cost` value
+but never raises it. `--rules` built-ins such as `budget:5` are applied last.
 
 ### `mcp-scan`
 ```
