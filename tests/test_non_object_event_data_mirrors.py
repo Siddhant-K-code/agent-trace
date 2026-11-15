@@ -625,7 +625,7 @@ class MirroredCheckTest(unittest.TestCase):
             export("otlp-genai -o", "--format", "otlp-genai", "--output", "genai.json",
                    clean_err="OTLP payload written to genai.json"),
             export("otlp-genai --endpoint", "--format", "otlp-genai", "--endpoint", CLOSED,
-                   clean_code=1, clean_err="OTLP GenAI export failed"),
+                   clean_code=1, clean_err=f"OTLP export to {CLOSED} failed"),
             export("temporal -o", "--format", "temporal", "--output", "temporal.json",
                    clean_err="OTLP payload written to temporal.json"),
             export("temporal --endpoint", "--format", "temporal", "--endpoint", CLOSED, clean_code=1),

@@ -206,7 +206,9 @@ class TestTemporalOtlp(unittest.TestCase):
             response.status = 202
             response.__enter__.return_value = response
             response.__exit__.return_value = False
-            with patch("agent_trace.otlp.urllib.request.urlopen", return_value=response) as urlopen:
+            opener = MagicMock()
+            opener.open.return_value = response
+            with patch("agent_trace.otlp.no_redirect_opener", return_value=opener):
                 ok = export_temporal_otlp(
                     store,
                     meta.session_id,
@@ -215,7 +217,7 @@ class TestTemporalOtlp(unittest.TestCase):
                 )
 
         self.assertTrue(ok)
-        request = urlopen.call_args.args[0]
+        request = opener.open.call_args.args[0]
         body = json.loads(request.data.decode("utf-8"))
         root = _spans(body)[0]
         self.assertEqual(request.full_url, "http://tempo:4318/v1/traces")

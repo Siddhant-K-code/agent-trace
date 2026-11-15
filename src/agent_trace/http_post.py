@@ -1,16 +1,21 @@
 """Helpers for POSTing to a URL the user gave, without showing its secrets.
 
-watch (--stream-to, --webhook) and notify (Slack, Teams, generic webhook)
-share these. User info, path, query and fragment can carry tokens, so
-messages name only the URL's scheme://host[:port].
+watch (--stream-to, --webhook), notify (Slack, Teams, generic webhook) and
+export (--endpoint, --header) share these. User info, path, query and
+fragment can carry tokens, so messages name only the URL's
+scheme://host[:port].
 """
 
 from __future__ import annotations
 
+import string
 import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
+
+# RFC 9110 token characters, the only ones an HTTP header name may contain.
+_TOKEN_CHARS = frozenset(string.ascii_letters + string.digits + "!#$%&'*+-.^_`|~")
 
 
 def url_endpoint(url: str) -> str:
@@ -60,6 +65,55 @@ def url_problem(url: str) -> str | None:
     except ValueError:
         return "its port must be a number from 0 to 65535"
     return None
+
+
+def otlp_traces_url(url: str) -> str:
+    """Return the OTLP/HTTP traces URL for a collector base URL.
+
+    Trailing slashes are dropped from the path, then ``/v1/traces`` is
+    appended unless the path already ends with it. The query and the rest
+    of the URL are kept as given. The URL is split by hand because urlsplit
+    drops tab, CR and LF, which would send to a URL the user did not give.
+    """
+    rest, hash_mark, fragment = url.partition("#")
+    rest, question_mark, query = rest.partition("?")
+    after_scheme = rest.find(":") + 1
+    if rest.startswith("//", after_scheme):
+        slash = rest.find("/", after_scheme + 2)
+        path_start = len(rest) if slash < 0 else slash
+    else:
+        path_start = after_scheme
+    path = rest[path_start:].rstrip("/")
+    if not path.endswith("/v1/traces"):
+        path += "/v1/traces"
+    return f"{rest[:path_start]}{path}{question_mark}{query}{hash_mark}{fragment}"
+
+
+def parse_header(header: str) -> tuple[str, str]:
+    """Return the name and value of a ``NAME: VALUE`` header.
+
+    The header is split at its first colon and spaces around the name and
+    the value are dropped. The name must be an HTTP token and the value
+    non-empty printable ASCII. Otherwise raises ValueError with the reason,
+    which never repeats any part of the header: a mistyped header can be
+    all secret.
+    """
+    name, colon, value = header.partition(":")
+    if not colon:
+        raise ValueError("it has no colon; give it as NAME: VALUE")
+    name = name.strip()
+    value = value.strip()
+    if not name:
+        raise ValueError("its name is empty")
+    if not all(ch in _TOKEN_CHARS for ch in name):
+        raise ValueError(
+            "its name may only contain ASCII letters, digits and !#$%&'*+-.^_`|~"
+        )
+    if not value:
+        raise ValueError("its value is empty")
+    if not all(" " <= ch <= "~" for ch in value):
+        raise ValueError("its value must contain only printable ASCII")
+    return name, value
 
 
 def no_redirect_opener() -> urllib.request.OpenerDirector:

@@ -39,6 +39,7 @@ from .failures import (
     llm_failure,
 )
 from .models import EventType, SessionMeta, TraceEvent
+from .http_post import no_redirect_opener, otlp_traces_url, post_error_detail, url_endpoint
 from .pairing import (
     LLM_REQUEST_TYPES,
     LLM_RESPONSE_TYPES,
@@ -1303,41 +1304,71 @@ def export_otlp(
     )
 
 
+# Seconds an export POST may wait to connect and for each read.
+_EXPORT_TIMEOUT = 30
+# Characters of a failed export's reply body that are shown.
+_REPLY_EXCERPT_CHARS = 200
+
+
+def _reply_excerpt(exc: urllib.error.HTTPError) -> str:
+    """Return the start of an error reply body, safe to print on one line.
+
+    At most _REPLY_EXCERPT_CHARS characters, with each line break, ESC or
+    other character str.isprintable() rejects replaced by a space, so the
+    rest of an escape code, such as [31m, still shows.
+    """
+    try:
+        # UTF-8 needs at most 4 bytes for a character.
+        raw = exc.read(_REPLY_EXCERPT_CHARS * 4)
+        text = raw.decode("utf-8", errors="replace")[:_REPLY_EXCERPT_CHARS]
+    except Exception:
+        text = ""
+    try:
+        exc.close()
+    except Exception:
+        pass
+    return "".join(ch if ch.isprintable() else " " for ch in text).strip()
+
+
 def export_otlp_payload(
     payload: dict,
     endpoint: str,
     headers: dict[str, str] | None = None,
     event_count: int = 0,
 ) -> bool:
-    """Send a prepared ExportTraceServiceRequest via OTLP/HTTP JSON."""
-    body = json.dumps(payload).encode("utf-8")
+    """POST a prepared ExportTraceServiceRequest via OTLP/HTTP JSON.
 
-    # POST to /v1/traces
-    url = endpoint.rstrip("/") + "/v1/traces"
-
-    req_headers = {
-        "Content-Type": "application/json",
-    }
+    Sends to otlp_traces_url(endpoint), the URL watch --stream-to
+    --stream-otlp uses, and never follows a redirect. Any 2xx answer is
+    success; anything else, including a 3xx, a network error and a timeout,
+    prints a failure line and returns False without raising. Lines name only
+    the endpoint's scheme://host[:port], because the rest of the URL can
+    carry a token.
+    """
+    url = otlp_traces_url(endpoint)
+    shown = url_endpoint(url)
+    target = f" to {shown}" if shown else ""
+    req_headers = {"Content-Type": "application/json"}
     if headers:
         req_headers.update(headers)
-
-    req = urllib.request.Request(url, data=body, headers=req_headers, method="POST")
-
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            status = resp.status
-            if status in (200, 202):
-                sys.stderr.write(f"Exported {event_count} events to {url} (HTTP {status})\n")
-                return True
-            else:
-                sys.stderr.write(f"OTLP export returned HTTP {status}\n")
-                return False
-    except urllib.error.HTTPError as e:
-        sys.stderr.write(f"OTLP export failed: HTTP {e.code} {e.reason}\n")
-        body = e.read().decode("utf-8", errors="replace")[:200]
-        if body:
-            sys.stderr.write(f"  {body}\n")
+        body = json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(url, data=body, headers=req_headers, method="POST")
+        with no_redirect_opener().open(request, timeout=_EXPORT_TIMEOUT) as response:
+            status = response.status
+    except urllib.error.HTTPError as exc:
+        excerpt = _reply_excerpt(exc)
+        sys.stderr.write(f"OTLP export{target} failed: {post_error_detail(exc)}\n")
+        if excerpt:
+            sys.stderr.write(f"  {excerpt}\n")
         return False
-    except urllib.error.URLError as e:
-        sys.stderr.write(f"OTLP export failed: {e.reason}\n")
+    except Exception as exc:
+        sys.stderr.write(f"OTLP export{target} failed: {post_error_detail(exc)}\n")
         return False
+    if not 200 <= status < 300:
+        # The opener raises HTTPError for every other status; this keeps a
+        # non-2xx answer from ever being reported as exported.
+        sys.stderr.write(f"OTLP export{target} failed: HTTP {status}\n")
+        return False
+    sys.stderr.write(f"Exported {event_count} events{target} (HTTP {status})\n")
+    return True

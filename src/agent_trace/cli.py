@@ -116,6 +116,7 @@ from .watch import cmd_watch
 from .why import cmd_why
 from .event_data import NonObjectEventDataError, require_object_event_data, str_field
 from .failures import llm_failure, session_errors
+from .http_post import parse_header, url_problem
 from .models import EventType, SessionMeta, TraceEvent
 from .proxy import MCPProxy
 from .replay import format_event, format_summary, list_sessions, replay_session
@@ -387,8 +388,84 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     return 0
 
 
+# Export formats whose --endpoint POSTs the spans to an OTLP/HTTP collector.
+_ENDPOINT_FORMATS = ("otlp", "otlp-genai", "temporal")
+
+
+def _export_endpoint_not_used(args: argparse.Namespace) -> str | None:
+    """Return why export would ignore --endpoint with these flags, or None.
+
+    The checks follow cmd_export's routing, and each line names the flag to
+    use instead.
+    """
+    backend = getattr(args, "backend", None)
+    if backend == "otlp":
+        return "--endpoint is not used with --backend otlp; use --otlp-endpoint"
+    if backend:
+        return "--endpoint is not used with --backend langfuse; use --langfuse-host"
+    for flag in ("scores", "metrics"):
+        # Without --backend these send to Langfuse.
+        if getattr(args, flag, False):
+            return (
+                f"--endpoint is not used with --{flag}; "
+                "use --langfuse-host, or --otlp-endpoint with --backend otlp"
+            )
+    if getattr(args, "anonymize", False):
+        return "--endpoint is not used with --anonymize, which only writes a file; use --output"
+    fmt = getattr(args, "format", "json")
+    if fmt not in _ENDPOINT_FORMATS:
+        return (
+            f"--endpoint is not used with --format {fmt}; "
+            "use --format otlp, otlp-genai or temporal"
+        )
+    return None
+
+
+def _export_endpoint_checks(args: argparse.Namespace) -> tuple[dict[str, str], str | None]:
+    """Check export's --endpoint and --header values.
+
+    Returns the headers to send and the refusal line, which is None when
+    export may go on. --header is checked only when --endpoint is given. A
+    line never repeats any part of a value, because the URL and the headers
+    can carry tokens.
+    """
+    endpoint = getattr(args, "endpoint", None)
+    if endpoint is None:
+        return {}, None
+    problem = _export_endpoint_not_used(args)
+    if problem:
+        return {}, problem
+    if not endpoint.strip():
+        return {}, "invalid --endpoint value: it is empty"
+    problem = url_problem(endpoint)
+    if problem:
+        return {}, f"invalid --endpoint value: {problem}"
+    headers: dict[str, str] = {}
+    positions: dict[str, int] = {}
+    for position, header in enumerate(getattr(args, "header", None) or [], start=1):
+        try:
+            name, value = parse_header(header)
+        except ValueError as exc:
+            return {}, f"invalid --header {position}: {exc}"
+        first = positions.setdefault(name.lower(), position)
+        if first != position:
+            return {}, (
+                f"invalid --header {position}: it has the same name as "
+                f"--header {first} (names ignore case)"
+            )
+        headers[name] = value
+    return headers, None
+
+
 def cmd_export(args: argparse.Namespace) -> int:
     """Export a session to JSON, CSV, or OTLP."""
+    # Check --endpoint and --header before routing and before anything is
+    # read or written, so a bad value costs one line and exit status 1.
+    headers, problem = _export_endpoint_checks(args)
+    if problem:
+        sys.stderr.write(f"{problem}\n")
+        return 1
+
     # Route to Langfuse/OTLP export when --scores, --metrics, or --backend is set
     if getattr(args, "scores", False) or getattr(args, "metrics", False) or getattr(args, "backend", None):
         return cmd_export_scores(args)
@@ -441,6 +518,7 @@ def cmd_export(args: argparse.Namespace) -> int:
     elif args.format in ("otlp", "otlp-genai", "temporal"):
         from .otlp import (
             export_otlp,
+            export_otlp_payload,
             otlp_data_indexes,
             otlp_genai_data_indexes,
             session_to_otlp,
@@ -489,13 +567,6 @@ def cmd_export(args: argparse.Namespace) -> int:
             sys.stderr.write(f"Send to a collector: agent-strace export --format {args.format} --endpoint <url>\n")
             return 0
 
-        # Build headers from --header flags
-        headers = {}
-        for h in (args.header or []):
-            if ":" in h:
-                key, val = h.split(":", 1)
-                headers[key.strip()] = val.strip()
-
         if use_temporal:
             from .temporal import export_temporal_otlp
             ok = export_temporal_otlp(
@@ -508,22 +579,10 @@ def cmd_export(args: argparse.Namespace) -> int:
             return 0 if ok else 1
         elif use_genai:
             # Export using GenAI conventions
-            import urllib.request, urllib.error
             meta = store.load_meta(session_id)
             payload = session_to_otlp_genai(meta, events, service_name=args.service_name)
-            body = json.dumps(payload).encode("utf-8")
-            url = endpoint.rstrip("/") + "/v1/traces"
-            req_headers = {"Content-Type": "application/json"}
-            req_headers.update(headers)
-            req = urllib.request.Request(url, data=body, headers=req_headers, method="POST")
-            try:
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    ok = resp.status in (200, 202)
-                    sys.stderr.write(f"Exported {len(events)} events to {url} (HTTP {resp.status})\n")
-                    return 0 if ok else 1
-            except Exception as exc:
-                sys.stderr.write(f"OTLP GenAI export failed: {exc}\n")
-                return 1
+            ok = export_otlp_payload(payload, endpoint, headers=headers, event_count=len(events))
+            return 0 if ok else 1
         else:
             ok = export_otlp(
                 store=store,
@@ -1712,8 +1771,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_export.add_argument("--format", choices=["json", "csv", "ndjson", "otlp", "otlp-genai", "temporal", "eu-ai-act"],
                           default="json",
                           help="output format (temporal preserves an upstream activity parent span)")
-    p_export.add_argument("--endpoint", help="OTLP collector URL (e.g. http://localhost:4318)")
-    p_export.add_argument("--header", action="append", help="HTTP header for OTLP (e.g. 'x-honeycomb-team: KEY')")
+    p_export.add_argument("--endpoint",
+                          help="OTLP/HTTP collector base URL for --format otlp, otlp-genai or temporal; "
+                               "spans are POSTed to its /v1/traces path (e.g. http://localhost:4318)")
+    p_export.add_argument("--header", action="append",
+                          help="HTTP header sent with --endpoint, as 'NAME: VALUE' "
+                               "(e.g. 'x-honeycomb-team: KEY'); repeat for more headers")
     p_export.add_argument("--service-name", default="agent-trace", help="OTel service name (default: agent-trace)")
     # Langfuse / OTLP metrics flags
     p_export.add_argument("--scores", action="store_true",

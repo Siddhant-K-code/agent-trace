@@ -50,6 +50,7 @@ from .event_data import (
 )
 from .http_post import (
     no_redirect_opener as _stream_opener,
+    otlp_traces_url as _otlp_traces_url,
     post_error_detail as _stream_error_detail,
     url_endpoint as _stream_endpoint,
     url_problem as _stream_to_problem,
@@ -1036,28 +1037,6 @@ class StreamConfig:
     def from_url(cls, url: str, headers: dict[str, str] | None = None,
                  otlp: bool = False) -> "StreamConfig":
         return cls(url=url, headers=headers or {}, otlp=otlp)
-
-
-def _otlp_traces_url(url: str) -> str:
-    """Return the OTLP/HTTP traces URL for a stream base URL.
-
-    Trailing slashes are dropped from the path, then ``/v1/traces`` is
-    appended unless the path already ends with it. The query and the rest
-    of the URL are kept as given. The URL is split by hand because urlsplit
-    drops tab, CR and LF, which would send to a URL the user did not give.
-    """
-    rest, hash_mark, fragment = url.partition("#")
-    rest, question_mark, query = rest.partition("?")
-    after_scheme = rest.find(":") + 1
-    if rest.startswith("//", after_scheme):
-        slash = rest.find("/", after_scheme + 2)
-        path_start = len(rest) if slash < 0 else slash
-    else:
-        path_start = after_scheme
-    path = rest[path_start:].rstrip("/")
-    if not path.endswith("/v1/traces"):
-        path += "/v1/traces"
-    return f"{rest[:path_start]}{path}{question_mark}{query}{hash_mark}{fragment}"
 
 
 def _stream_queue_wait(interval: float, elapsed: float) -> float:
