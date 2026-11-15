@@ -865,6 +865,8 @@ class TestWatchRulesFlag(unittest.TestCase):
         cases += [(item, timeout) for item in (
             "timeout", "timeout:", "timeout:0", "timeout:0s", "timeout:-5", "timeout:soon",
             "timeout:inf", "timeout:nan",
+            # Text _parse_duration does not use, once read as 300, 5, 5400 and 3630 seconds.
+            "timeout:-5m", "timeout:5x", "timeout:1h-30m", "timeout:1h30",
         )]
         cases += [(item, loop) for item in (
             "loop:", "loop:0", "loop:3/0", "loop:-1", "loop:1.5", "loop:3/", "loop:/3",

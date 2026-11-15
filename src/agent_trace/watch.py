@@ -10,10 +10,14 @@ Rule-based nanny (--rules rules.yaml):
 
 Watchdog mode (--timeout / --budget):
   Enforces a wall-clock timeout and/or token-cost ceiling. When either limit
-  is breached the agent process is terminated and a structured post-mortem
-  JSON file is written to the session directory. An optional --on-death
-  command is invoked with the post-mortem path substituted for
-  {post_mortem_path}.
+  is breached the agent process is killed, whatever --on-violation says, and
+  a structured post-mortem JSON file is written to the session directory.
+  Killing needs --agent-pid; without it watch alerts and warns once. The
+  timeout counts from when watch starts and is checked on every poll cycle,
+  so an agent that writes no events is still killed at the deadline. An
+  optional --on-death command is invoked with the post-mortem path
+  substituted for {post_mortem_path}. --max-duration and --max-cost set the
+  same limits but act with --on-violation, like the other checks.
 """
 
 from __future__ import annotations
@@ -72,10 +76,26 @@ from .store import TraceStore
 # Duration parsing
 # ---------------------------------------------------------------------------
 
+# The units _parse_duration accepts, case-insensitive, in seconds.
+_DURATION_UNITS = {
+    **dict.fromkeys(("s", "sec", "secs", "second", "seconds"), 1),
+    **dict.fromkeys(("m", "min", "mins", "minute", "minutes"), 60),
+    **dict.fromkeys(("h", "hr", "hrs", "hour", "hours"), 3600),
+    **dict.fromkeys(("d", "day", "days"), 86400),
+}
+# One number and its unit, with optional spaces around them.
+_DURATION_PART = re.compile(r"\s*([0-9]+(?:\.[0-9]+)?|\.[0-9]+)\s*([a-z]+)\s*")
+
+
 def _parse_duration(value: str) -> float:
     """Parse a human-readable duration string to seconds.
 
-    Accepts: 30s, 5m, 2h, 1h30m, 90 (bare number = seconds).
+    A bare number is seconds: 90. Anything else must be one or more groups
+    of a number and a unit, with optional spaces: 30s, 5m, 2h, 1d, 1h30m,
+    1h 30m, 30mins, 2hr, 5 minutes. The units, case-insensitive, are s,
+    sec, secs, second, seconds, m, min, mins, minute, minutes, h, hr, hrs,
+    hour, hours, d, day, days. Raises ValueError for anything else, such
+    as 1w, 1h30, 1e3m, -5m or 5 apples, rather than guess.
     """
     value = value.strip()
     if not value:
@@ -87,21 +107,93 @@ def _parse_duration(value: str) -> float:
     except ValueError:
         pass
 
+    text = value.lower()
     total = 0.0
-    pattern = re.compile(r"(\d+(?:\.\d+)?)\s*([smhd]?)")
-    for m in pattern.finditer(value.lower()):
-        num, unit = float(m.group(1)), m.group(2)
-        if unit == "d":
-            total += num * 86400
-        elif unit == "h":
-            total += num * 3600
-        elif unit == "m":
-            total += num * 60
-        else:  # 's' or no unit
-            total += num
+    pos = 0
+    while pos < len(text):
+        m = _DURATION_PART.match(text, pos)
+        if m is None or m.group(2) not in _DURATION_UNITS:
+            raise ValueError(f"cannot parse duration: {value!r}")
+        total += float(m.group(1)) * _DURATION_UNITS[m.group(2)]
+        pos = m.end()
     if total == 0.0:
         raise ValueError(f"cannot parse duration: {value!r}")
     return total
+
+
+def _limit_seconds_problem(seconds: float) -> str | None:
+    """Return why *seconds* cannot be a --timeout or --max-duration, or None.
+
+    A NaN or infinite limit never fires, and a limit of 0 or less fires at
+    the first check.
+    """
+    try:
+        seconds = float(seconds)
+    except OverflowError:
+        return "it must be a finite number of seconds"
+    if not math.isfinite(seconds):
+        return "it must be a finite number of seconds"
+    if seconds <= 0:
+        return "it must be more than 0 seconds"
+    return None
+
+
+def _limit_dollars_problem(dollars: float) -> str | None:
+    """Return why *dollars* cannot be a --budget or --max-cost, or None.
+
+    0 is allowed: any spend crosses it.
+    """
+    try:
+        dollars = float(dollars)
+    except OverflowError:
+        return "it must be a finite number of dollars"
+    if not math.isfinite(dollars):
+        return "it must be a finite number of dollars"
+    if dollars < 0:
+        return "it must not be negative"
+    return None
+
+
+def _read_limit_flags(args: argparse.Namespace) -> tuple[float | None, float | None]:
+    """Check --timeout, --max-duration, --budget and --max-cost.
+
+    Returns the --timeout seconds and the --budget dollars, each None when
+    the flag is not given. Raises ValueError naming the first bad flag.
+    """
+    timeout_seconds: float | None = None
+    timeout_str = getattr(args, "timeout", None)
+    # An empty value is refused too: --timeout "$T" with T unset must not
+    # drop the kill.
+    if timeout_str is not None:
+        try:
+            timeout_seconds = _parse_duration(timeout_str)
+        except ValueError as exc:
+            raise ValueError(f"invalid --timeout value: {exc}") from None
+        problem = _limit_seconds_problem(timeout_seconds)
+        if problem:
+            raise ValueError(f"invalid --timeout value: {problem}")
+    max_duration = getattr(args, "max_duration", None)
+    if max_duration is not None:
+        problem = _limit_seconds_problem(max_duration)
+        if problem:
+            raise ValueError(f"invalid --max-duration value: {problem}")
+
+    budget: float | None = None
+    budget_str = getattr(args, "budget", None)
+    if budget_str is not None:
+        try:
+            budget = float(budget_str)
+        except ValueError:
+            raise ValueError(f"invalid --budget value: {budget_str!r}") from None
+        problem = _limit_dollars_problem(budget)
+        if problem:
+            raise ValueError(f"invalid --budget value: {problem}")
+    max_cost = getattr(args, "max_cost", None)
+    if max_cost is not None:
+        problem = _limit_dollars_problem(max_cost)
+        if problem:
+            raise ValueError(f"invalid --max-cost value: {problem}")
+    return timeout_seconds, budget
 
 
 # ---------------------------------------------------------------------------
@@ -842,6 +934,18 @@ def _config_number(
     raise WatchConfigError(f"{path} must be a number from {minimum} to {maximum}")
 
 
+def _config_positive_number(parent: dict, key: str, path: str) -> float | None:
+    """Return parent[key] as a finite float more than 0, or None when it is absent."""
+    problem = f"{path} must be a finite number more than 0"
+    try:
+        number = _config_number(parent, key, path, 0)
+    except WatchConfigError:
+        raise WatchConfigError(problem) from None
+    if number is not None and number <= 0:
+        raise WatchConfigError(problem)
+    return number
+
+
 def _config_string(parent: dict, key: str, path: str, non_empty: bool = False) -> str | None:
     """Return parent[key], which must be a string, or None when it is absent."""
     if key not in parent:
@@ -920,6 +1024,18 @@ class WatcherConfig:
     # Watchdog: command to run once, after watch sends the agent SIGTERM,
     # with {post_mortem_path} substituted
     on_death_cmd: str = ""
+    # Watchdog: --timeout and --budget kill whatever on_violation says. Only
+    # the command line sets these; a config file never does.
+    kill_on_timeout: bool = False
+    kill_on_budget: bool = False
+    # True when watchers.cost.max_dollars, --max-cost or --budget sets
+    # max_cost_dollars, so it is not the default. per_session_max lowers a
+    # set limit that kills, and replaces any other (see cmd_watch).
+    cost_limit_set: bool = False
+    # True when the config file sets the project budget key weekly or
+    # per_session_max. Its budget keys then replace the standard project
+    # config for the run (see cmd_watch).
+    project_budget_set: bool = False
     # Built-in rule names enabled via --rules mcp-poisoning,budget:$5,...
     built_in_rules: set[str] = field(default_factory=set)
     cognitive_debt_threshold: float | None = None
@@ -945,7 +1061,11 @@ class WatcherConfig:
         max_retries = _config_whole_number(retry_cfg, "max", "watchers.retry.max", 0)
         on_violation = _config_choice(retry_cfg, "alert", "watchers.retry.alert", _WATCH_ACTIONS)
         max_dollars = _config_number(cost_cfg, "max_dollars", "watchers.cost.max_dollars", 0)
-        max_minutes = _config_number(dur_cfg, "max_minutes", "watchers.duration.max_minutes", 0)
+        # A time limit of 0 fires at the first event, so it is refused like
+        # --max-duration 0. A cost limit of 0 is kept: any spend crosses it.
+        max_minutes = _config_positive_number(
+            dur_cfg, "max_minutes", "watchers.duration.max_minutes",
+        )
         loop = {
             key: _config_whole_number(loop_cfg, key, f"watchers.loop.{key}", 1)
             for key in ("identical_calls", "threshold", "max_repeats", "window", "sequence_length")
@@ -982,7 +1102,15 @@ class WatcherConfig:
             "cognitive_debt_threshold": debt_threshold,
         }
         # Absent keys keep the dataclass defaults.
-        return cls(**{key: value for key, value in values.items() if value is not None})
+        config = cls(**{key: value for key, value in values.items() if value is not None})
+        config.cost_limit_set = max_dollars is not None
+        # project_budget.py reads these keys from "budget", or from the top
+        # level when there is no "budget" key.
+        budget = d.get("budget", d)
+        config.project_budget_set = isinstance(budget, dict) and (
+            "weekly" in budget or "per_session_max" in budget
+        )
+        return config
 
     @classmethod
     def load(cls, path: str) -> "WatcherConfig":
@@ -1376,6 +1504,8 @@ class WatchState:
     # True once watch has sent the agent SIGTERM. Watch then sends that PID
     # no other signal, so the post-mortem and --on-death happen once.
     agent_killed: bool = False
+    # True once signal 0 found the agent PID gone (see _agent_exited)
+    agent_exited: bool = False
     # Token budget watcher (lazy-initialised on first LLM_REQUEST)
     token_budget_watcher: object | None = None
     # Nanny rule metrics
@@ -1743,6 +1873,21 @@ def _dispatch_nanny_rule(
 # Per-event check
 # ---------------------------------------------------------------------------
 
+def _check_duration(config: WatcherConfig, state: WatchState) -> str | None:
+    """Return the DurationWatcher violation once the time limit has passed.
+
+    Returns None before the limit and after the violation has fired once.
+    """
+    elapsed = time.time() - state.start_time
+    if elapsed > config.max_duration_seconds and "duration" not in state.fired:
+        state.fired.add("duration")
+        return (
+            f"DurationWatcher: {elapsed:.0f}s elapsed "
+            f"(threshold: {config.max_duration_seconds:.0f}s)"
+        )
+    return None
+
+
 def check_event(
     event: TraceEvent,
     config: WatcherConfig,
@@ -1828,14 +1973,9 @@ def check_event(
                 )
 
     # --- Duration threshold ---
-    elapsed = time.time() - state.start_time
-    if elapsed > config.max_duration_seconds:
-        key_id = "duration"
-        if key_id not in state.fired:
-            state.fired.add(key_id)
-            violations.append(
-                f"DurationWatcher: {elapsed:.0f}s elapsed (threshold: {config.max_duration_seconds:.0f}s)"
-            )
+    duration_msg = _check_duration(config, state)
+    if duration_msg:
+        violations.append(duration_msg)
 
     # --- Spin loop detection: repeated identical tool calls in a window ---
     spin_msg = _detect_spin_loop(
@@ -2107,6 +2247,92 @@ def _check_pause_file(store: "TraceStore", state: "WatchState", out: "TextIO") -
         state.pause_owner = None
 
 
+# ---------------------------------------------------------------------------
+# Watchdog limits (--timeout / --budget)
+# ---------------------------------------------------------------------------
+
+# Seconds watch keeps running past the --timeout deadline while the agent
+# lives, so the SIGKILL that _kill_process sends 5 seconds after SIGTERM is
+# not lost when watch would otherwise stop for lack of events.
+_TIMEOUT_KILL_GRACE = 10.0
+
+
+def _agent_exited(state: WatchState) -> bool:
+    """Return True once the agent process is known to have exited.
+
+    Signal 0 tests for the process without affecting it. A zombie still
+    answers it, so an agent that exited but was not yet reaped counts as
+    running. Once the PID is gone the answer is kept.
+    """
+    if state.agent_exited:
+        return True
+    if not state.agent_pid:
+        return False
+    try:
+        os.kill(state.agent_pid, 0)
+    except (ProcessLookupError, PermissionError):
+        # PermissionError: the PID now belongs to another user's process.
+        state.agent_exited = True
+        return True
+    except OSError:
+        pass
+    return False
+
+
+def _check_timeout(config: WatcherConfig, state: WatchState) -> str | None:
+    """Return the DurationWatcher violation once the --timeout deadline passes.
+
+    Called on every poll cycle, so an agent that writes no events is still
+    killed at the deadline. Returns None without --timeout, after the
+    violation has fired, and once the agent has exited.
+    """
+    if not config.kill_on_timeout or "duration" in state.fired:
+        return None
+    if time.time() - state.start_time <= config.max_duration_seconds:
+        return None
+    if _agent_exited(state):
+        return None
+    return _check_duration(config, state)
+
+
+def _timeout_holds_watch(config: WatcherConfig, state: WatchState, now: float) -> bool:
+    """Return True while the idle stop must wait for the --timeout deadline.
+
+    With --timeout and --agent-pid, watch keeps running while the agent
+    lives, until _TIMEOUT_KILL_GRACE seconds after the deadline. Without an
+    agent PID watch cannot tell whether the agent runs, so it does not wait.
+    """
+    if not config.kill_on_timeout or not state.agent_pid:
+        return False
+    deadline = state.start_time + config.max_duration_seconds
+    if now > deadline + _TIMEOUT_KILL_GRACE:
+        return False
+    return not _agent_exited(state)
+
+
+def _limit_action(
+    message: str,
+    config: WatcherConfig,
+    state: WatchState,
+    project_budget_config: ProjectBudgetConfig | None,
+) -> str | None:
+    """Return "kill" when the violation *message* must kill the agent.
+
+    --timeout and --budget kill whatever --on-violation says, and so does a
+    project budget's per_session_max. A timeout does not kill an agent that
+    has already exited. None means the --on-violation action applies.
+    """
+    if message.startswith("DurationWatcher:"):
+        if config.kill_on_timeout and not state.agent_exited:
+            return "kill"
+    elif message.startswith("CostWatcher:"):
+        if config.kill_on_budget or (
+            project_budget_config and project_budget_config.per_session_max
+        ):
+            return "kill"
+    return None
+
+
 def _tail_events(events_file: Path, poll_interval: float = 0.5):
     """Generator that yields TraceEvent objects or _IDLE_SENTINEL each poll cycle.
 
@@ -2152,6 +2378,11 @@ def watch_session(
 
     agent_pid: process that pause, kill and approval actions signal. Without
     it watch still alerts but warns once instead of signalling.
+
+    With config.kill_on_timeout (--timeout), the time limit is checked on
+    every poll cycle and kills the agent, so an agent that writes no events
+    is still killed. With agent_pid, the idle stop waits while the agent
+    process runs, until _TIMEOUT_KILL_GRACE seconds after the deadline.
 
     stream_config: when set, events are pushed in real-time to the configured
     URL as they arrive (push-based streaming). The startup line names only
@@ -2242,13 +2473,26 @@ def watch_session(
                 write_heartbeat(store, session_id, agent_pid=state.agent_pid)
                 last_heartbeat_time = now
 
+            # --timeout is wall-clock time, so check it on every poll cycle:
+            # an agent that hangs and writes nothing is still killed.
+            timeout_msg = _check_timeout(config, state)
+            if timeout_msg:
+                _dispatch_alert(
+                    timeout_msg, config, state, action="kill", dry_run=dry_run,
+                    store=store, session_id=session_id,
+                )
+
             # Idle timeout: checked on every poll cycle (including when no
             # event arrived), so it fires reliably after max_idle_seconds.
             # A paused agent writes no events, so the clock stops while
-            # watch holds a pause and restarts when it is released.
+            # watch holds a pause and restarts when it is released. With
+            # --timeout, watch does not stop before the deadline while the
+            # agent process runs (see _timeout_holds_watch).
             if state.paused:
                 last_event_time = now
-            elif now - last_event_time > max_idle_seconds:
+            elif now - last_event_time > max_idle_seconds and not _timeout_holds_watch(
+                config, state, now,
+            ):
                 out.write(f"[watch] No events for {max_idle_seconds:.0f}s - stopping\n")
                 break
 
@@ -2290,16 +2534,10 @@ def watch_session(
 
             violations = check_event(event, config, state)
             for msg in violations:
-                action = None
-                if (
-                    project_budget_config
-                    and project_budget_config.per_session_max
-                    and msg.startswith("CostWatcher")
-                ):
-                    action = "kill"
                 _dispatch_alert(
-                    msg, config, state, action=action, dry_run=dry_run,
-                    store=store, session_id=session_id,
+                    msg, config, state,
+                    action=_limit_action(msg, config, state, project_budget_config),
+                    dry_run=dry_run, store=store, session_id=session_id,
                 )
 
             if project_budget_config and project_budget_config.enabled:
@@ -2373,25 +2611,21 @@ def cmd_watch(args: argparse.Namespace) -> int:
         )
         return 1
 
-    # --timeout is a friendlier alias for --max-duration
-    max_duration = getattr(args, "max_duration", None)
-    timeout_str = getattr(args, "timeout", None)
-    if timeout_str:
-        try:
-            max_duration = _parse_duration(timeout_str)
-        except ValueError as exc:
-            sys.stderr.write(f"[watch] invalid --timeout value: {exc}\n")
-            return 1
+    # A limit that can never fire, or fires at the first check, is refused.
+    try:
+        timeout_seconds, budget = _read_limit_flags(args)
+    except ValueError as exc:
+        sys.stderr.write(f"[watch] {exc}\n")
+        return 1
 
-    # --budget is a friendlier alias for --max-cost
+    # --timeout and --budget replace --max-duration and --max-cost, and they
+    # also kill the agent whatever --on-violation says.
+    max_duration = getattr(args, "max_duration", None)
+    if timeout_seconds is not None:
+        max_duration = timeout_seconds
     max_cost = getattr(args, "max_cost", None)
-    budget_str = getattr(args, "budget", None)
-    if budget_str is not None:
-        try:
-            max_cost = float(budget_str)
-        except ValueError:
-            sys.stderr.write(f"[watch] invalid --budget value: {budget_str!r}\n")
-            return 1
+    if budget is not None:
+        max_cost = budget
 
     # A --config file that cannot be used is refused, not replaced by the
     # defaults, so the limits it sets are never silently dropped.
@@ -2423,8 +2657,11 @@ def cmd_watch(args: argparse.Namespace) -> int:
         config.max_retries = int(args.max_retries)
     if max_cost is not None:
         config.max_cost_dollars = max_cost
+        config.cost_limit_set = True
     if max_duration is not None:
         config.max_duration_seconds = max_duration
+    config.kill_on_timeout = timeout_seconds is not None
+    config.kill_on_budget = budget is not None
     if getattr(args, "on_violation", None) is not None:
         config.on_violation = args.on_violation
     if getattr(args, "webhook", None) is not None:
@@ -2457,11 +2694,22 @@ def cmd_watch(args: argparse.Namespace) -> int:
 
     store = TraceStore(args.trace_dir)
 
-    project_budget_config = load_project_budget_config(config_path)
-    if config_path and not project_budget_config.enabled:
+    # The --config file's budget keys replace the standard project config
+    # when the file sets weekly or per_session_max.
+    if config_path is not None and config.project_budget_set:
+        project_budget_config = load_project_budget_config(config_path)
+    else:
         project_budget_config = load_project_budget_config()
-    if project_budget_config.per_session_max:
-        config.max_cost_dollars = project_budget_config.per_session_max
+    per_session_max = project_budget_config.per_session_max
+    if per_session_max:
+        # per_session_max kills (see _limit_action). It may lower a cost
+        # limit that kills, from --budget, or from --max-cost or the file
+        # with the kill action, but never raises it. It replaces a cost
+        # limit that only alerts or pauses, and the default.
+        if config.kill_on_budget or (config.cost_limit_set and config.on_violation == "kill"):
+            config.max_cost_dollars = min(config.max_cost_dollars, per_session_max)
+        else:
+            config.max_cost_dollars = per_session_max
 
     # Built-in rule values override the flags and the project budget.
     if builtin_rules:

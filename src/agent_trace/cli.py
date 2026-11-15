@@ -2193,14 +2193,21 @@ def build_parser() -> argparse.ArgumentParser:
     # Flags that a --config file can also set default to None, so cmd_watch
     # can tell a given flag (which overrides the file) from an absent one.
     p_watch.add_argument("--max-retries", type=int, help="max retries before alert (default: 5)")
-    p_watch.add_argument("--max-cost", type=float, help="max cost in dollars (default: 10)")
-    p_watch.add_argument("--max-duration", type=int, help="max duration in seconds (default: 1800)")
+    p_watch.add_argument("--max-cost", type=float,
+                         help="cost limit in dollars; crossing it acts with --on-violation "
+                              "(default: 10)")
+    p_watch.add_argument("--max-duration", type=int,
+                         help="time limit in seconds from when watch starts; crossing it "
+                              "acts with --on-violation (default: 1800)")
     p_watch.add_argument("--timeout", metavar="DURATION",
-                         help="wall-clock timeout before killing the agent (e.g. 30m, 2h, 90s); "
-                              "alias for --max-duration with human-readable units")
+                         help="wall-clock timeout before killing the agent (e.g. 30m, 2h, 90s), "
+                              "counted from when watch starts; kills whatever --on-violation "
+                              "says, even if the agent writes no events; needs --agent-pid; "
+                              "replaces --max-duration")
     p_watch.add_argument("--budget", type=float, metavar="DOLLARS",
-                         help="token-cost ceiling in dollars before killing the agent; "
-                              "alias for --max-cost")
+                         help="token-cost ceiling in dollars before killing the agent; kills "
+                              "whatever --on-violation says; needs --agent-pid; replaces "
+                              "--max-cost; 0 kills at any spend")
     p_watch.add_argument("--loop-threshold", type=int, metavar="N",
                          help="alert when an identical tool call repeats N times (default: 3)")
     p_watch.add_argument("--loop-window", type=int, metavar="N",
