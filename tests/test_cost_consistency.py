@@ -8,15 +8,22 @@ figure than the cost command.
 import io
 import json
 import os
+import re
+import statistics
 import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from agent_trace.context_score import (
+    build_context_score_report,
+    format_context_score_json,
+)
 from agent_trace.cost import estimate_cost, session_cost
 from agent_trace.dashboard import (
     build_dashboard,
@@ -27,6 +34,7 @@ from agent_trace.dashboard import (
     render_html_trend,
 )
 from agent_trace.eval.dataset import _session_passes_filter, auto_populate, list_entries
+from agent_trace.drift import _dist_stats, compute_fingerprint
 from agent_trace.hooks import _PROVIDER_ENV, hook_main
 from agent_trace.langfuse_export import (
     OtlpMetricsConfig,
@@ -35,8 +43,12 @@ from agent_trace.langfuse_export import (
 )
 from agent_trace.lint import LintLevel, _rule_budget_proximity
 from agent_trace.models import EventType, TraceEvent
+from agent_trace.org_report import build_org_report, format_org_report_json
+from agent_trace.replay import replay_to_html, replay_to_html_diff
 from agent_trace.sample import _score_session, run_sample
 from agent_trace.store import TraceStore
+from agent_trace.team_report import build_team_report, format_team_report_json
+from agent_trace.tenancy import enumerate_trace_stores
 
 try:
     from test_capture_matrix_fixtures import (
@@ -220,6 +232,71 @@ class TestCostSurfacesMatchCostCommand(unittest.TestCase):
         self.assertEqual(added, 1)
         [expensive] = [sid for sid, cost in self.costs.items() if cost > 0.005]
         self.assertEqual([e.session_id for e in list_entries(dataset)], [expensive])
+
+    def test_context_score_costs(self):
+        report = build_context_score_report(
+            self.store, self.tmp, history_days=36500, min_sessions=1
+        )
+        version = report.current
+        self.assertEqual(
+            {s.session_id: s.cost for s in version.sessions}, self.costs
+        )
+        self.assertEqual(version.unpriced_sessions, 0)
+        self.assertAlmostEqual(
+            version.avg_cost, statistics.mean(self.costs.values()), places=12
+        )
+        data = json.loads(format_context_score_json(report))
+        self.assertEqual(data["current"]["unpriced_sessions"], 0)
+
+    def test_fingerprint_costs(self):
+        fp = compute_fingerprint(self.store, list(self.costs), "fixture")
+        self.assertEqual(fp.cost_usd, _dist_stats(list(self.costs.values())))
+        self.assertEqual(fp.unpriced_sessions, 0)
+
+    def test_team_report_costs(self):
+        report = build_team_report(self.store, 0, 1e12)
+        self.assertEqual({s.session_id: s.cost for s in report.sessions}, self.costs)
+        self.assertAlmostEqual(report.total_cost, sum(self.costs.values()), places=12)
+        self.assertAlmostEqual(
+            report.avg_cost, statistics.mean(self.costs.values()), places=12
+        )
+        data = json.loads(format_team_report_json(report))
+        self.assertEqual(data["unpriced_sessions"], 0)
+
+    def test_org_report_costs(self):
+        started = min(m.started_at for m in self.store.list_sessions())
+        month = datetime.fromtimestamp(started, timezone.utc).strftime("%Y-%m")
+        report = build_org_report(enumerate_trace_stores(self.store.base_dir), month)
+        self.assertEqual(report.cost_estimated_sessions, 3)
+        self.assertAlmostEqual(
+            report.total_estimated_spend_usd, sum(self.costs.values()), places=12
+        )
+        self.assertAlmostEqual(
+            report.avg_estimated_cost_usd, statistics.mean(self.costs.values()), places=12
+        )
+        self.assertEqual(
+            report.median_estimated_cost_usd, statistics.median(self.costs.values())
+        )
+        self.assertIn("agent-strace cost estimate", report.cost_estimation_method)
+        self.assertIn('"agent-strace cost estimate', format_org_report_json(report))
+
+    def test_replay_cost_counter_ends_at_session_cost(self):
+        for sid, cost in self.costs.items():
+            page = replay_to_html(self.store, sid)
+            costs = json.loads(re.search(r"const COSTS = (\[.*?\]);", page).group(1))
+            self.assertEqual(costs[-1], cost)
+            self.assertEqual(costs, sorted(costs))
+
+    def test_replay_diff_costs(self):
+        sid_a, sid_b = sorted(self.costs)[:2]
+        with patch("agent_trace.cost.session_cost", wraps=session_cost) as spy:
+            page = replay_to_html_diff(self.store, sid_a, sid_b)
+        self.assertEqual(
+            sorted(call.kwargs["session_id"] for call in spy.call_args_list),
+            [sid_a, sid_b],
+        )
+        self.assertIn(f"<b>${self.costs[sid_a]:.4f}</b>", page)
+        self.assertIn(f"<b>${self.costs[sid_b]:.4f}</b>", page)
 
 
 if __name__ == "__main__":

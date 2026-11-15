@@ -13,7 +13,6 @@ import urllib.error
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
@@ -197,7 +196,7 @@ class TestMonthAndLocalReport(unittest.TestCase):
             session_id="old", started_at=_timestamp(2026, 7, 31), team="blue"
         )
         store = _MemoryStore([inside, other_team, other_month])
-        with patch("agent_trace.org_report.estimate_cost", return_value=SimpleNamespace(total_cost=1.0)), patch(
+        with patch("agent_trace.org_report.session_cost", return_value=1.0), patch(
             "agent_trace.org_report.lint_session", return_value=LintReport("inside")
         ):
             report = build_org_report([store], "2026-08", team="tag:blue")
@@ -277,7 +276,7 @@ class TestMonthAndLocalReport(unittest.TestCase):
             SessionMeta(session_id="b", started_at=when, tenant_id="customer-other"),
         ]
         store = _MemoryStore(metas)
-        with patch("agent_trace.org_report.estimate_cost", return_value=SimpleNamespace(total_cost=0.5)), patch(
+        with patch("agent_trace.org_report.session_cost", return_value=0.5), patch(
             "agent_trace.org_report.lint_session", side_effect=lambda _s, sid: LintReport(sid)
         ):
             report = build_org_report([store], "2026-08")
@@ -294,11 +293,11 @@ class TestMonthAndLocalReport(unittest.TestCase):
         ]
         store = _MemoryStore(metas)
 
-        def cost(_store, session_id, model="sonnet"):
+        def cost(_events, model="sonnet", *, session_id=None):
             del model
             if session_id == "b":
                 raise ValueError("unknown")
-            return SimpleNamespace(total_cost=2.0)
+            return 2.0
 
         def lint(_store, session_id):
             findings = []
@@ -309,7 +308,7 @@ class TestMonthAndLocalReport(unittest.TestCase):
                 ]
             return LintReport(session_id, findings)
 
-        with patch("agent_trace.org_report.estimate_cost", side_effect=cost), patch(
+        with patch("agent_trace.org_report.session_cost", side_effect=cost), patch(
             "agent_trace.org_report.lint_session", side_effect=lint
         ):
             report = build_org_report([store], "2026-08")
@@ -389,11 +388,11 @@ class TestAnomaliesAndFormats(unittest.TestCase):
         ]
         store = _MemoryStore(metas)
 
-        def estimate(_store, sid, model="sonnet"):
+        def estimate(_events, model="sonnet", *, session_id=None):
             del model
-            return SimpleNamespace(total_cost=4.0 if int(sid[1:]) >= 9 else 1.0)
+            return 4.0 if int(session_id[1:]) >= 9 else 1.0
 
-        with patch("agent_trace.org_report.estimate_cost", side_effect=estimate), patch(
+        with patch("agent_trace.org_report.session_cost", side_effect=estimate), patch(
             "agent_trace.org_report.lint_session", side_effect=lambda _s, sid: LintReport(sid)
         ):
             first = build_org_report(
@@ -420,7 +419,7 @@ class TestAnomaliesAndFormats(unittest.TestCase):
             team='<script src="https://bad.example/x.js">x</script>',
         )
         store = _MemoryStore([meta])
-        with patch("agent_trace.org_report.estimate_cost", return_value=SimpleNamespace(total_cost=1)), patch(
+        with patch("agent_trace.org_report.session_cost", return_value=1), patch(
             "agent_trace.org_report.lint_session", return_value=LintReport("escape")
         ):
             report = build_org_report([store], "2026-08")
@@ -659,6 +658,42 @@ class TestCliAndOutput(unittest.TestCase):
                     _write_atomic(str(stable), "replacement")
             self.assertEqual(stable.read_text(encoding="utf-8"), "original")
             self.assertEqual(list(root.glob(".stable.txt.*")), [])
+
+
+class TestOrgReportUnpricedSessions(unittest.TestCase):
+    """Costs are `agent-strace cost` totals; refused sessions are not $0."""
+
+    def _report(self, side_effect):
+        when = _timestamp(2026, 8, 2)
+        store = _MemoryStore([SessionMeta(session_id="a", started_at=when, team="blue")])
+        with patch("agent_trace.org_report.session_cost", side_effect=side_effect), patch(
+            "agent_trace.org_report.lint_session", side_effect=lambda _s, sid: LintReport(sid)
+        ):
+            return build_org_report([store], "2026-08")
+
+    def test_no_priced_session_has_unknown_averages(self):
+        report = self._report(ValueError("refused"))
+        self.assertEqual(report.cost_estimated_sessions, 0)
+        self.assertEqual(report.cost_estimate_coverage_percent, 0.0)
+        self.assertIsNone(report.avg_estimated_cost_usd)
+        self.assertIsNone(report.median_estimated_cost_usd)
+        self.assertIsNone(report.teams[0].avg_estimated_cost_usd)
+        self.assertIsNone(report.task_types[0].avg_estimated_cost_usd)
+
+        payload = json.loads(format_org_report_json(report))
+        self.assertIsNone(payload["avg_estimated_cost_usd"])
+        self.assertIsNone(payload["median_estimated_cost_usd"])
+        self.assertIsNone(payload["teams"][0]["avg_estimated_cost_usd"])
+        self.assertIsNone(payload["task_types"][0]["avg_estimated_cost_usd"])
+
+        text = format_org_report_text(report)
+        self.assertIn("Average estimate/cost-estimated session: n/a", text)
+        self.assertIn("Median estimate/cost-estimated session: n/a", text)
+        self.assertIn('<div class="value">n/a</div>', format_org_report_html(report))
+
+    def test_pricing_bugs_are_not_hidden(self):
+        with self.assertRaises(TypeError):
+            self._report(TypeError("bug"))
 
 
 if __name__ == "__main__":

@@ -21,7 +21,7 @@ from io import StringIO
 from typing import TextIO
 
 from .budget_report import _parse_date
-from .cost import estimate_cost
+from .cost import session_cost
 from .event_data import require_object_event_data
 from .models import EventType, SessionMeta, TraceEvent
 from .store import TraceStore
@@ -33,7 +33,7 @@ class SessionAttribution:
     started_at: float
     branch: str
     author: str
-    cost: float
+    cost: float | None  # None when `agent-strace cost` refuses the session
     tool_calls: int
     files: list[str] = field(default_factory=list)
     shares: dict[str, float] = field(default_factory=dict)
@@ -49,8 +49,15 @@ class TeamReport:
     outlier_threshold: float = 2.0
 
     @property
-    def total_cost(self) -> float:
-        return sum(row["cost"] for row in self.rows.values())
+    def total_cost(self) -> float | None:
+        """Cost of the priced sessions, or None when sessions exist but none is priced."""
+        if self.sessions and self.unpriced_sessions == len(self.sessions):
+            return None
+        return sum(row["cost"] or 0.0 for row in self.rows.values())
+
+    @property
+    def unpriced_sessions(self) -> int:
+        return sum(1 for s in self.sessions if s.cost is None)
 
     @property
     def total_sessions(self) -> float:
@@ -61,16 +68,20 @@ class TeamReport:
         return sum(row["tool_calls"] for row in self.rows.values())
 
     @property
-    def avg_cost(self) -> float:
-        return self.total_cost / max(1.0, self.total_sessions)
+    def avg_cost(self) -> float | None:
+        """Average cost of the priced sessions, or None when none is priced."""
+        total = self.total_cost
+        if total is None:
+            return None
+        return total / max(1.0, len(self.sessions) - self.unpriced_sessions)
 
     @property
     def outliers(self) -> list[SessionAttribution]:
-        limit = self.avg_cost * self.outlier_threshold
+        limit = (self.avg_cost or 0.0) * self.outlier_threshold
         if limit <= 0:
             return []
         return sorted(
-            [s for s in self.sessions if s.cost > limit],
+            [s for s in self.sessions if s.cost is not None and s.cost > limit],
             key=lambda s: s.cost,
             reverse=True,
         )
@@ -210,11 +221,12 @@ def _author_shares(meta: SessionMeta, files: list[str]) -> dict[str, float]:
     return {author: count / total for author, count in counts.items()}
 
 
-def _session_cost(store: TraceStore, session_id: str) -> float:
+def _session_cost(events: list[TraceEvent], session_id: str) -> float | None:
+    """Return the `agent-strace cost` total, or None when it refuses the session."""
     try:
-        return estimate_cost(store, session_id).total_cost
-    except Exception:
-        return 0.0
+        return session_cost(events, session_id=session_id)
+    except ValueError:
+        return None
 
 
 def _session_tool_calls(events: list[TraceEvent], meta: SessionMeta) -> int:
@@ -253,8 +265,10 @@ def build_team_report(
             continue
         try:
             events = store.load_events(meta.session_id)
+            loaded = True
         except Exception:
             events = []
+            loaded = False
         require_object_event_data(
             events,
             event_types=MODIFIED_FILES_DATA_EVENT_TYPES,
@@ -262,7 +276,7 @@ def build_team_report(
         )
         files = _modified_files(events)
         shares = _author_shares(meta, files)
-        cost = _session_cost(store, meta.session_id)
+        cost = _session_cost(events, meta.session_id) if loaded else None
         tool_calls = _session_tool_calls(events, meta)
         session = SessionAttribution(
             session_id=meta.session_id,
@@ -284,21 +298,31 @@ def build_team_report(
                     "sessions": 0.0,
                     "tool_calls": 0.0,
                     "cost": 0.0,
+                    "unpriced_sessions": 0.0,
                     "authors": set(),
                     "branches": set(),
                 }
             rows[key]["sessions"] += share
             rows[key]["tool_calls"] += tool_calls * share
-            rows[key]["cost"] += cost * share
+            if cost is None:
+                rows[key]["unpriced_sessions"] += share
+            else:
+                rows[key]["cost"] += cost * share
             rows[key]["authors"].add(author)
             rows[key]["branches"].add(session.branch)
 
     for row in rows.values():
-        row["avg_session"] = row["cost"] / max(1e-9, row["sessions"])
+        priced = row["sessions"] - row["unpriced_sessions"]
+        if priced > 1e-9:
+            row["avg_session"] = row["cost"] / priced
+        else:
+            # No priced session in this row: its cost is unknown, not $0.
+            row["cost"] = None
+            row["avg_session"] = None
         row["authors"] = sorted(row["authors"])
         row["branches"] = sorted(row["branches"])
 
-    rows = dict(sorted(rows.items(), key=lambda item: item[1]["cost"], reverse=True))
+    rows = dict(sorted(rows.items(), key=lambda item: _cost_key(item[1]["cost"]), reverse=True))
     return TeamReport(
         group_by=group_by,
         window_start=window_start,
@@ -307,6 +331,14 @@ def build_team_report(
         sessions=sessions,
         outlier_threshold=outlier_threshold,
     )
+
+
+def _cost_key(cost: float | None) -> float:
+    return -1.0 if cost is None else cost
+
+
+def _fmt_cost(cost: float | None, spec: str = ".2f") -> str:
+    return "n/a" if cost is None else f"${cost:{spec}}"
 
 
 def _fmt_date(ts: float) -> str:
@@ -335,14 +367,15 @@ def format_team_report_text(report: TeamReport, out: TextIO = sys.stdout) -> Non
     for row in report.rows.values():
         w(
             f"{row['group']:<28}  {_fmt_count(row['sessions']):>8}  "
-            f"{_fmt_count(row['tool_calls']):>10}  ${row['cost']:>7.2f}  "
-            f"${row['avg_session']:.2f}\n"
+            f"{_fmt_count(row['tool_calls']):>10}  {_fmt_cost(row['cost'], '>7.2f'):>8}  "
+            f"{_fmt_cost(row['avg_session'])}\n"
         )
     w("-" * 72 + "\n")
+    unpriced = f" ({report.unpriced_sessions} not priced)" if report.unpriced_sessions else ""
     w(
         f"{'Total':<28}  {_fmt_count(report.total_sessions):>8}  "
-        f"{_fmt_count(report.total_tool_calls):>10}  ${report.total_cost:>7.2f}  "
-        f"${report.avg_cost:.2f}\n"
+        f"{_fmt_count(report.total_tool_calls):>10}  {_fmt_cost(report.total_cost, '>7.2f'):>8}  "
+        f"{_fmt_cost(report.avg_cost)}{unpriced}\n"
     )
 
     if report.group_by != "branch":
@@ -350,12 +383,16 @@ def format_team_report_text(report: TeamReport, out: TextIO = sys.stdout) -> Non
         for session in report.sessions:
             key = session.branch
             if key not in top_branches:
-                top_branches[key] = {"cost": 0.0, "sessions": 0}
-            top_branches[key]["cost"] += session.cost
+                top_branches[key] = {"cost": None, "sessions": 0}
+            if session.cost is not None:
+                top_branches[key]["cost"] = (top_branches[key]["cost"] or 0.0) + session.cost
             top_branches[key]["sessions"] += 1
         if top_branches:
             w("\nTop cost drivers by branch:\n")
-            for branch, stats in sorted(top_branches.items(), key=lambda item: item[1]["cost"], reverse=True)[:5]:
+            for branch, stats in sorted(top_branches.items(), key=lambda item: _cost_key(item[1]["cost"]), reverse=True)[:5]:
+                if stats["cost"] is None:
+                    w(f"  {branch:<28}  n/a  {stats['sessions']} sessions\n")
+                    continue
                 pct = stats["cost"] / (report.total_cost or 1e-9) * 100
                 w(f"  {branch:<28}  ${stats['cost']:.2f}  ({pct:.0f}%)  {stats['sessions']} sessions\n")
 
@@ -372,17 +409,21 @@ def format_team_report_text(report: TeamReport, out: TextIO = sys.stdout) -> Non
 def format_team_report_csv(report: TeamReport) -> str:
     out = StringIO()
     writer = csv.writer(out)
-    writer.writerow(["group_by", "group", "sessions", "tool_calls", "cost", "avg_session", "authors", "branches"])
+    writer.writerow([
+        "group_by", "group", "sessions", "tool_calls", "cost", "avg_session",
+        "authors", "branches", "unpriced_sessions",
+    ])
     for row in report.rows.values():
         writer.writerow([
             report.group_by,
             row["group"],
             f"{row['sessions']:.3f}",
             f"{row['tool_calls']:.3f}",
-            f"{row['cost']:.6f}",
-            f"{row['avg_session']:.6f}",
+            "" if row["cost"] is None else f"{row['cost']:.6f}",
+            "" if row["avg_session"] is None else f"{row['avg_session']:.6f}",
             ";".join(row["authors"]),
             ";".join(row["branches"]),
+            f"{row['unpriced_sessions']:.3f}",
         ])
     return out.getvalue()
 
@@ -393,6 +434,7 @@ def format_team_report_json(report: TeamReport) -> str:
         "window_start": report.window_start,
         "window_end": report.window_end,
         "total_cost": report.total_cost,
+        "unpriced_sessions": report.unpriced_sessions,
         "total_sessions": report.total_sessions,
         "total_tool_calls": report.total_tool_calls,
         "rows": list(report.rows.values()),

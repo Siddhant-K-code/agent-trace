@@ -23,7 +23,7 @@ from .collector_client import (
     CollectorTraceStore,
     MAX_JSON_DEPTH,
 )
-from .cost import DEFAULT_MODEL, PRICING, PRICING_SNAPSHOT_DATE, estimate_cost
+from .cost import DEFAULT_MODEL, PRICING, PRICING_SNAPSHOT_DATE, session_cost
 from .curve import classify_session
 from .lint import lint_session
 from .models import EventType
@@ -48,7 +48,7 @@ class TeamBreakdown:
     cost_estimated_sessions: int
     cost_estimate_coverage_percent: float
     estimated_spend_usd: float
-    avg_estimated_cost_usd: float
+    avg_estimated_cost_usd: float | None
     active_attributed_identities: int
     lint_findings: int
     sessions_with_lint_signals: int
@@ -62,7 +62,7 @@ class TaskTypeBreakdown:
     cost_estimated_sessions: int
     cost_estimate_coverage_percent: float
     estimated_spend_usd: float
-    avg_estimated_cost_usd: float
+    avg_estimated_cost_usd: float | None
 
 
 @dataclass(frozen=True)
@@ -92,8 +92,8 @@ class OrgReport:
     cost_estimated_sessions: int
     cost_estimate_coverage_percent: float
     total_estimated_spend_usd: float
-    avg_estimated_cost_usd: float
-    median_estimated_cost_usd: float
+    avg_estimated_cost_usd: float | None
+    median_estimated_cost_usd: float | None
     active_attributed_identities: int
     identity_attributed_sessions: int
     identity_coverage_percent: float
@@ -456,7 +456,7 @@ def build_org_report(
             raise ValueError("store workspace_id must be a string")
         workspace_id = workspace_value
         # Remote stores return metadata only here.  The month/team filters run
-        # before load_events, estimate_cost, or lint_session fetch any events.
+        # before load_events or lint_session fetch any events.
         try:
             discovered = store.list_sessions_strict(validate_events=False)
         except RecursionError as exc:
@@ -485,11 +485,12 @@ def build_org_report(
             _validate_report_events(meta, events)
             snapshot = _SessionSnapshotStore(meta, events)
             try:
-                cost_result = estimate_cost(snapshot, meta.session_id, model=model)
-                cost: float | None = float(cost_result.total_cost)
+                cost: float | None = float(
+                    session_cost(events, model, session_id=meta.session_id)
+                )
                 if not math.isfinite(cost) or cost < 0:
                     cost = None
-            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            except ValueError:
                 cost = None
             lint = lint_session(snapshot, meta.session_id)
         finally:
@@ -508,8 +509,8 @@ def build_org_report(
 
     costs = [metric.cost for metric in metrics if metric.cost is not None]
     total_cost = sum(costs)
-    average = total_cost / len(costs) if costs else 0.0
-    median = statistics.median(costs) if costs else 0.0
+    average = total_cost / len(costs) if costs else None
+    median = statistics.median(costs) if costs else None
 
     team_rows: list[TeamBreakdown] = []
     for name, rows in _group_metrics(metrics, "team").items():
@@ -522,7 +523,7 @@ def build_org_report(
             cost_estimated_sessions=len(priced),
             cost_estimate_coverage_percent=len(priced) / len(rows) * 100,
             estimated_spend_usd=team_cost,
-            avg_estimated_cost_usd=team_cost / len(priced) if priced else 0.0,
+            avg_estimated_cost_usd=team_cost / len(priced) if priced else None,
             active_attributed_identities=len(identities),
             lint_findings=sum(len(row.lint_rules) for row in rows),
             sessions_with_lint_signals=sum(bool(row.lint_rules) for row in rows),
@@ -534,7 +535,7 @@ def build_org_report(
     for task_type, rows in _group_metrics(metrics, "task_type").items():
         priced = [row.cost for row in rows if row.cost is not None]
         task_cost = sum(priced)
-        avg_cost = task_cost / len(priced) if priced else 0.0
+        avg_cost = task_cost / len(priced) if priced else None
         task_rows.append(TaskTypeBreakdown(
             task_type=task_type,
             sessions=len(rows),
@@ -609,7 +610,10 @@ def build_org_report(
         ),
         pricing_model=model,
         pricing_snapshot_date=PRICING_SNAPSHOT_DATE,
-        cost_estimation_method="offline heuristic token estimate with bundled model pricing",
+        cost_estimation_method=(
+            "agent-strace cost estimate (recorded token usage when present, "
+            "else event-size estimate) with bundled model pricing"
+        ),
         team_filter=filtered_label,
         anonymized=anonymize,
         session_count=len(metrics),
@@ -650,6 +654,10 @@ def format_org_report_json(report: OrgReport) -> str:
     ) + "\n"
 
 
+def _usd(value: float | None, spec: str = ".2f") -> str:
+    return "n/a" if value is None else f"${value:{spec}}"
+
+
 def format_org_report_text(report: OrgReport) -> str:
     title = datetime.strptime(report.month, "%Y-%m").strftime("%B %Y")
     lines = [
@@ -658,8 +666,8 @@ def format_org_report_text(report: OrgReport) -> str:
         f"Scope: {report.organization_boundary}",
         f"Covered-session estimated spend ({report.pricing_model}): ${report.total_estimated_spend_usd:.2f}",
         f"Sessions: {report.session_count}",
-        f"Average estimate/cost-estimated session: ${report.avg_estimated_cost_usd:.2f}",
-        f"Median estimate/cost-estimated session: ${report.median_estimated_cost_usd:.2f}",
+        f"Average estimate/cost-estimated session: {_usd(report.avg_estimated_cost_usd)}",
+        f"Median estimate/cost-estimated session: {_usd(report.median_estimated_cost_usd)}",
         f"Cost estimate coverage: {report.cost_estimate_coverage_percent:.1f}% "
         f"({report.cost_estimated_sessions}/{report.session_count} sessions)",
         f"Active attributed identities: {report.active_attributed_identities}",
@@ -673,7 +681,7 @@ def format_org_report_text(report: OrgReport) -> str:
         for row in report.teams:
             lines.append(
                 f"{row.team[:24]:<24} {row.sessions:>8} "
-                f"${row.estimated_spend_usd:>11.2f} ${row.avg_estimated_cost_usd:>10.2f} "
+                f"${row.estimated_spend_usd:>11.2f} {_usd(row.avg_estimated_cost_usd, '>10.2f'):>11} "
                 f"{row.cost_estimate_coverage_percent:>8.1f}%"
             )
     else:
@@ -685,7 +693,7 @@ def format_org_report_text(report: OrgReport) -> str:
         for row in report.task_types:
             lines.append(
                 f"{row.task_type[:24]:<24} {row.sessions:>8} "
-                f"${row.avg_estimated_cost_usd:>10.2f} {row.cost_estimate_coverage_percent:>8.1f}%"
+                f"{_usd(row.avg_estimated_cost_usd, '>10.2f'):>11} {row.cost_estimate_coverage_percent:>8.1f}%"
             )
     else:
         lines.append("No task types to report.")
@@ -719,7 +727,7 @@ def format_org_report_html(report: OrgReport) -> str:
         "<tr>"
         f"<td>{esc(row.team)}</td><td>{row.sessions}</td>"
         f"<td>${row.estimated_spend_usd:.2f}</td>"
-        f"<td>${row.avg_estimated_cost_usd:.2f}</td>"
+        f"<td>{_usd(row.avg_estimated_cost_usd)}</td>"
         f"<td>{row.cost_estimate_coverage_percent:.1f}%</td>"
         f"<td>{row.active_attributed_identities}</td>"
         "</tr>"
@@ -728,7 +736,7 @@ def format_org_report_html(report: OrgReport) -> str:
     task_rows = "".join(
         "<tr>"
         f"<td>{esc(row.task_type)}</td><td>{row.sessions}</td>"
-        f"<td>${row.avg_estimated_cost_usd:.2f}</td>"
+        f"<td>{_usd(row.avg_estimated_cost_usd)}</td>"
         f"<td>{row.cost_estimate_coverage_percent:.1f}%</td>"
         "</tr>"
         for row in report.task_types
@@ -764,7 +772,7 @@ th:first-child,td:first-child{{text-align:left}}.note{{background:#f3f6fa;border
 <div class="cards">
 <div class="card"><div>Covered-session estimated spend</div><div class="value">${report.total_estimated_spend_usd:.2f}</div></div>
 <div class="card"><div>Sessions</div><div class="value">{report.session_count}</div></div>
-<div class="card"><div>Average per cost-estimated session</div><div class="value">${report.avg_estimated_cost_usd:.2f}</div></div>
+<div class="card"><div>Average per cost-estimated session</div><div class="value">{_usd(report.avg_estimated_cost_usd)}</div></div>
 <div class="card"><div>Active attributed identities</div><div class="value">{report.active_attributed_identities}</div></div>
 </div>
 <h2>Team breakdown</h2><table><thead><tr><th>Team</th><th>Sessions</th><th>Covered-session estimate</th><th>Average per covered session</th><th>Coverage</th><th>Attributed identities</th></tr></thead><tbody>{team_rows}</tbody></table>

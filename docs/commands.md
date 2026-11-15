@@ -168,6 +168,10 @@ shows what the subagent returned under `subagent_stop`. `--tree` and
 `--expand-subagents` use the same tags and list each in-session subagent with
 its tool count under the session.
 
+The `--format html` cost counter is the running `agent-strace cost` estimate at
+the default model, so it ends at that command's session total. For a session
+`agent-strace cost` refuses, the counter shows `n/a` instead of a dollar figure.
+
 ### `tree`
 ```
 agent-strace tree [session-id] [--format text|json]
@@ -900,6 +904,13 @@ unless `--baseline FILE` or `--baseline-range` supplies one. `--current`
 always needs `--baseline FILE` or `--baseline-range`. Exits 1 when the drift
 score exceeds `--threshold` (default: 0.20).
 
+The `cost_usd` dimension uses each session's `agent-strace cost` total at the
+default model. Sessions that command refuses are left out of the cost
+statistics, and a `Sessions not priced` line counts them
+(`baseline_unpriced_sessions` and `current_unpriced_sessions` in JSON). When one
+side has no priced session, `cost_usd` scores `n/a` (`null` in JSON) and the
+overall score averages the other dimensions.
+
 ### `baseline`
 ```
 agent-strace baseline update [--since DAYS] [--output FILE]
@@ -935,6 +946,11 @@ agent-strace fingerprint [--sessions N] [--output FILE] [--format text|json]
 agent-strace fingerprint --compare A.json B.json [--threshold N] [--format text|json]
 ```
 Characterize an agent's recent behavior: tool mix, error rate, retry rate, file touch radius, duration, and decision depth. Saved JSON fingerprints can be used as drift baselines or compared directly.
+
+Cost statistics are the `agent-strace cost` totals of the priced sessions.
+`unpriced_sessions` counts the sessions that command refuses, and `cost_usd` is
+`null` when no session is priced. Fingerprints saved by older versions counted
+those sessions as $0.
 
 ### `freeze`
 ```
@@ -1041,6 +1057,14 @@ Team cost attribution across recorded sessions. By default it groups spend by gi
 | `--export text|csv|json` | Output format. `csv` is intended for spreadsheets and finance workflows |
 | `--outlier-threshold N` | Flag sessions whose cost is above `N` times the report average; default is `2.0` |
 
+Session costs are `agent-strace cost` totals at the default model. A session
+that command refuses, or whose events cannot be read, is not priced: it is left
+out of the total, the averages and the outliers, and the Total line says how
+many sessions were not priced. A group with no priced session shows `n/a` for
+its cost and average (empty in CSV, `null` in JSON), and so does the total when
+no session in the report is priced. CSV output has an
+`unpriced_sessions` column and JSON an `unpriced_sessions` field.
+
 ### `org-report`
 ```
 agent-strace org-report [--month YYYY-MM] [--team SELECTOR]
@@ -1051,8 +1075,10 @@ agent-strace org-report [--month YYYY-MM] [--team SELECTOR]
 ```
 Build a monthly organization digest from the flat trace directory plus all
 workspace stores, or from one explicitly selected authenticated collector.
-Spend is an offline estimate for sessions with usable event data; the report
-shows its coverage and labels averages as per cost-estimated session. Task
+Spend is an offline estimate for sessions with usable event data and matches
+`agent-strace cost` for the selected model; the report shows its coverage and
+labels averages as per cost-estimated session. With no cost-estimated session,
+the averages and median are `n/a` (`null` in JSON). Task
 types and anomaly callouts are heuristics, not completion or efficiency
 measurements. See the [organization reporting guide](org-report.md) for the
 security boundary and interpretation details.
@@ -1106,7 +1132,7 @@ Read with care:
 - Before/after only: no task-mix control, no confidence intervals, default minimum 5 sessions per version.
 - Baseline is the oldest version, or the previous version with `--compare`.
 - Sessions that start before the first `config-watch` snapshot count as the current version.
-- Cost is estimated from event size (chars/4) at default model pricing, not recorded token usage.
+- Cost is the `agent-strace cost` total at the default model. Sessions it refuses are reported as `N not priced` and left out of cost averages (`avg_cost` is `null` in JSON when none is priced), and the cost dimension needs `--min-sessions` priced sessions per version.
 - Ignores skills and whether the agent read the context file. For adoption, see [skills.md](skills.md). For controlled instruction evidence, see [instruction-compliance.md](instruction-compliance.md).
 
 | Flag | Description |
@@ -1713,9 +1739,10 @@ These commands refuse such sessions: `a2a-tree`, `audit`, `budget-report`,
 `standup`, `stats`, `team-report`, `tenant report`, `timeline`, `token-budget`,
 and `why`. A command refuses only when it reads an event whose data is not an
 object, so the same session keeps working with commands that never read that
-event. When only the cost calculation reads such an event, `dashboard`,
-`export --metrics --backend otlp`, `lint`, `sample` and `eval dataset auto
---filter cost-above:N` show the session as not priced instead of refusing it, as
+event. When only the cost calculation reads such an event, `context-score`,
+`dashboard`, `drift`, `export --metrics --backend otlp`, `fingerprint`, `lint`,
+`replay --format html`, `sample`, `team-report` and `eval dataset auto --filter
+cost-above:N` show the session as not priced instead of refusing it, as
 described for each command. For example, `export --format otlp-genai` and
 `temporal` pair events by
 ID and do not read a tool_call that an error event pairs with.

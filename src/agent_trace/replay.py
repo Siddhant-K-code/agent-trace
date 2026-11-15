@@ -572,7 +572,7 @@ _HTML_TEMPLATE = """\
     <button id="btn-play" onclick="togglePlay()">⏸ Pause</button>
     <button onclick="showAll()">Show all</button>
   </div>
-  <div class="cost-counter">$<span id="cost">0.0000</span></div>
+  <div class="cost-counter"><span id="cost">{cost_initial}</span></div>
 </header>
 <div id="timeline">
   <input type="range" id="scrubber" min="0" max="{max_idx}" value="0" oninput="scrubTo(this.value)">
@@ -637,7 +637,8 @@ function showEvent(idx) {{
   const div = renderEvent(ev, idx);
   document.getElementById('timeline').appendChild(div);
   requestAnimationFrame(() => div.classList.add('visible'));
-  document.getElementById('cost').textContent = COSTS[idx].toFixed(4);
+  const cost = COSTS[idx];
+  document.getElementById('cost').textContent = cost === null ? 'n/a' : '$' + cost.toFixed(4);
   document.getElementById('scrubber').value = idx;
   currentIdx = idx + 1;
 }}
@@ -707,7 +708,7 @@ def replay_to_html(
     Returns the HTML string. If output_path is given, also writes to disk.
     """
     import json as _json
-    from .cost import _usage_dollars, session_event_usage
+    from .cost import DEFAULT_MODEL, TokenUsage, _usage_dollars, session_cost, session_event_usage
 
     meta = store.load_meta(session_id)
     events = store.load_events(session_id)
@@ -726,10 +727,19 @@ def replay_to_html(
     else:
         duration_str = f"{int(duration_s)//60}m {int(duration_s)%60:02d}s"
 
-    # Build event list with offset and running cost
+    # The counter shows the `agent-strace cost` estimate, so it is n/a for a
+    # session that command refuses rather than a guess.
+    try:
+        session_cost(events, DEFAULT_MODEL, session_id=session_id)
+        priced = True
+    except ValueError:
+        priced = False
+
+    # Build event list with offset and running cost.  Pricing the running
+    # usage total makes the last value equal session_cost exactly.
     events_data = []
-    costs_data = []
-    running_cost = 0.0
+    costs_data: list[float | None] = []
+    running = TokenUsage()
     for e, usage in zip(events, session_event_usage(events)):
         d = dict(e.data)
         d_out = {
@@ -739,9 +749,9 @@ def replay_to_html(
             "duration_ms": e.duration_ms,
             "data": d,
         }
-        running_cost += _usage_dollars(usage, "sonnet")
+        running = running + usage
         events_data.append(d_out)
-        costs_data.append(round(running_cost, 6))
+        costs_data.append(_usage_dollars(running, DEFAULT_MODEL) if priced else None)
 
     html = _HTML_TEMPLATE.format(
         session_id=session_id[:16],
@@ -750,6 +760,7 @@ def replay_to_html(
         max_idx=len(events) - 1,
         events_json=_json.dumps(events_data, separators=(",", ":")),
         costs_json=_json.dumps(costs_data, separators=(",", ":")),
+        cost_initial="$0.0000" if priced else "n/a",
     )
 
     if output_path:
@@ -856,7 +867,7 @@ def replay_to_html_diff(
     Returns the HTML string; writes to output_path if given.
     """
     import json as _json
-    from .cost import _usage_dollars, session_event_usage
+    from .cost import session_cost
     from .diff import diff_sessions
 
     events_a = store.load_events(session_a)
@@ -877,12 +888,6 @@ def replay_to_html_diff(
                 "data": dict(e.data),
             })
         return result
-
-    def _session_cost(events: list) -> float:
-        total = 0.0
-        for usage in session_event_usage(events):
-            total += _usage_dollars(usage, "sonnet")
-        return total
 
     # Compute which event_ids are unique to each session (by tool_name+type key)
     def _event_key(e) -> str:
@@ -908,8 +913,10 @@ def replay_to_html_diff(
         sid_b=session_b[:16],
         count_a=len(events_a),
         count_b=len(events_b),
-        cost_a=_session_cost(events_a),
-        cost_b=_session_cost(events_b),
+        # Both streams passed the full object-data check above, so
+        # session_cost cannot refuse them.
+        cost_a=session_cost(events_a, session_id=session_a),
+        cost_b=session_cost(events_b, session_id=session_b),
         divergence_index=divergence_index,
         events_a_json=_json.dumps(_build_event_data(events_a), separators=(",", ":")),
         events_b_json=_json.dumps(_build_event_data(events_b), separators=(",", ":")),

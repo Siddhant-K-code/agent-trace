@@ -23,8 +23,14 @@ from agent_trace.drift import (
     print_fingerprint,
     print_report,
 )
+from agent_trace.cost import estimate_cost
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
+
+try:
+    from test_dashboard import _codex_session
+except ImportError:  # pragma: no cover - package-style test discovery
+    from tests.test_dashboard import _codex_session
 
 
 # ---------------------------------------------------------------------------
@@ -472,6 +478,73 @@ class TestFingerprintCommand(unittest.TestCase):
         self.assertEqual(args.command, "fingerprint")
         self.assertEqual(args.sessions, 5)
         self.assertEqual(args.output, "fp.json")
+
+
+class TestFingerprintUnpricedSessions(unittest.TestCase):
+    """cost_usd is the `agent-strace cost` total; refused sessions are not $0."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.store = _make_store(tmp.name)
+
+    def test_unpriceable_session_is_left_out_of_cost_usd(self):
+        priced = _codex_session(self.store, started_at=1000.0)
+        unpriced = _codex_session(self.store, prompt_data=[], started_at=2000.0)
+        want = estimate_cost(self.store, priced).total_cost
+
+        fp = compute_fingerprint(self.store, [priced, unpriced], "fp")
+        self.assertEqual(fp.sessions, 2)
+        self.assertEqual(fp.unpriced_sessions, 1)
+        self.assertEqual(fp.cost_usd, _dist_stats([want]))
+
+        data = fp.to_dict()
+        self.assertEqual(data["unpriced_sessions"], 1)
+        self.assertEqual(BehavioralFingerprint.from_json(json.dumps(data)).unpriced_sessions, 1)
+        out = io.StringIO()
+        print_fingerprint(fp, out)
+        self.assertIn("Sessions not priced: 1 (left out of cost usd)", out.getvalue())
+
+    def test_no_priced_session_has_null_cost_usd(self):
+        sid = _codex_session(self.store, prompt_data=[], started_at=1000.0)
+        fp = compute_fingerprint(self.store, [sid], "fp")
+        self.assertIsNone(fp.cost_usd)
+        data = fp.to_dict()
+        self.assertIsNone(data["cost_usd"])
+        self.assertIsNone(BehavioralFingerprint.from_json(json.dumps(data)).cost_usd)
+        out = io.StringIO()
+        print_fingerprint(fp, out)
+        cost_row = next(line for line in out.getvalue().splitlines() if "cost usd" in line)
+        self.assertEqual(cost_row.split()[-3:], ["n/a", "n/a", "n/a"])
+
+    def test_unpriced_baseline_does_not_score_cost_drift(self):
+        baseline = compute_fingerprint(
+            self.store, [_codex_session(self.store, prompt_data=[], started_at=1000.0)], "base"
+        )
+        current = compute_fingerprint(
+            self.store, [_codex_session(self.store, started_at=2000.0)], "cur"
+        )
+        report = compute_drift(baseline, current)
+        cost = next(d for d in report.dimensions if d.name == "cost_usd")
+        self.assertIsNone(cost.score)
+        self.assertEqual(cost.label, "n/a")
+        self.assertEqual(cost.baseline_summary, "n/a")
+        self.assertEqual((report.baseline_unpriced, report.current_unpriced), (1, 0))
+        scored = [d.score for d in report.dimensions if d.score is not None]
+        self.assertEqual(len(scored), len(report.dimensions) - 1)
+        self.assertAlmostEqual(
+            report.overall_score, round((2 * scored[0] + sum(scored[1:])) / (len(scored) + 1), 3)
+        )
+        out = io.StringIO()
+        print_report(report, out)
+        self.assertIn("Sessions not priced: 1 baseline, 0 current (left out of cost_usd)", out.getvalue())
+        self.assertIn("cost_usd                  n/a", out.getvalue())
+
+    def test_pricing_bugs_are_not_hidden(self):
+        sid = _codex_session(self.store, started_at=1000.0)
+        with patch("agent_trace.drift.session_cost", side_effect=TypeError("bug")):
+            with self.assertRaises(TypeError):
+                compute_fingerprint(self.store, [sid], "fp")
 
 
 if __name__ == "__main__":

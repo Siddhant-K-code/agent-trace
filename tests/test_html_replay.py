@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
+
+try:
+    from test_dashboard import _codex_session
+except ImportError:  # pragma: no cover - package-style test discovery
+    from tests.test_dashboard import _codex_session
 
 
 def _make_store(tmp_dir: str) -> TraceStore:
@@ -119,3 +127,40 @@ class TestHTMLReplay(unittest.TestCase):
         self.assertEqual(args.output, "out.html")
 
 
+class TestHTMLReplayCost(unittest.TestCase):
+    """The cost counter ends at the `agent-strace cost` total, or shows n/a."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.store = _make_store(tmp.name)
+
+    @staticmethod
+    def _costs(page: str) -> list:
+        return json.loads(re.search(r"const COSTS = (\[.*?\]);", page).group(1))
+
+    def test_counter_ends_at_session_cost(self):
+        from agent_trace.cost import session_cost
+        from agent_trace.replay import replay_to_html
+        sid = _codex_session(self.store)
+        page = replay_to_html(self.store, sid)
+        costs = self._costs(page)
+        self.assertEqual(costs[-1], session_cost(self.store.load_events(sid)))
+        self.assertEqual(costs, sorted(costs))
+        self.assertIn('<span id="cost">$0.0000</span>', page)
+
+    def test_unpriceable_session_shows_na(self):
+        from agent_trace.replay import replay_to_html
+        sid = _codex_session(self.store, prompt_data=[])
+        page = replay_to_html(self.store, sid)
+        costs = self._costs(page)
+        self.assertEqual(costs, [None] * len(self.store.load_events(sid)))
+        self.assertIn('<span id="cost">n/a</span>', page)
+        self.assertIn("cost === null ? 'n/a'", page)
+
+    def test_pricing_bugs_are_not_hidden(self):
+        from agent_trace.replay import replay_to_html
+        sid = _codex_session(self.store)
+        with patch("agent_trace.cost.session_cost", side_effect=TypeError("bug")):
+            with self.assertRaises(TypeError):
+                replay_to_html(self.store, sid)
