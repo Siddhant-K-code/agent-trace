@@ -66,10 +66,42 @@ checked during release validation.
    the MCP Registry. See [MCP Registry publishing](mcp.md#mcp-registry-publishing).
 9. Confirm the GitHub release, PyPI, and the MCP Registry all report the
    intended version.
+10. When `replay`, `health` or `review` output changed, refresh the README
+    demo from the published release in a follow-up pull request. See
+    [README demo image](#readme-demo-image).
 
 `Publish to PyPI` also retains its release trigger for core releases created
 outside the automated workflow and a manual dispatch with a required core tag.
 Extension release tags are explicitly ignored.
+
+### README demo image
+
+`assets/demo.svg` is rendered from a real GitHub Copilot CLI session recorded
+with the published release. Before a launch or announcement, it must come from
+the release being announced. Regenerate it from the repo root on `main`:
+
+```bash
+scripts/demo/record-session.sh
+python3 scripts/demo/render_svg.py \
+  --agent-strace /tmp/demo-tools/venv/bin/agent-strace \
+  --repo /tmp/demo -o assets/demo.svg
+```
+
+`record-session.sh` installs `agent-strace==__version__` from PyPI into
+`/tmp/demo-tools/venv`, creates a throwaway repo in `/tmp/demo` with one
+failing test, registers Copilot CLI hooks in a private `COPILOT_HOME`, and runs
+one `copilot -p` session that fixes the bug. It needs `uv`, `copilot`, and a
+GitHub token with Copilot access (`COPILOT_GITHUB_TOKEN`, else
+`gh auth token`). It does not touch `~/.copilot` or your installed
+agent-strace. Set `AGENT_STRACE_VERSION` to record with another release.
+
+`render_svg.py` runs `replay`, `health` and `review` in that repo and writes a
+static SVG. It only drops or cuts lines: the session summary box, `Source:`
+lines in `review`, the matrix version, and all but three provider limitations.
+Long lines wrap or end in `…`. It refuses to write the file if the output
+contains your home directory, user name, host name, or a token. The session
+is a real model run, so the output differs between runs. Check the image in a
+browser, and update the README alt text if what it shows changed.
 
 ### Core recovery
 
