@@ -670,10 +670,35 @@
       if (details) details.open = !details.open;
     }
   });
+  // A new session starts: drop everything shown for the previous one, so
+  // the next review renders from a clean slate.
+  function resetForNewSession() {
+    state.review = null;
+    state.filter = 'all';
+    state.search = '';
+    state.selectedEventId = null;
+    state.visible = [];
+    state.selected = -1;
+    searchEl.value = '';
+    persist();
+    eventsEl.replaceChildren();
+    document.getElementById('filter-chips').replaceChildren();
+    document.getElementById('count').textContent = '';
+    emptyEl.style.display = '';
+    errorEl.textContent = '';
+    errorEl.style.display = 'none';
+    const comparison = document.getElementById('comparison');
+    comparison.replaceChildren();
+    comparison.classList.remove('visible');
+    const doctor = document.getElementById('capture-doctor');
+    doctor.className = '';
+    doctor.textContent = '';
+    document.getElementById('ended-banner').style.display = 'none';
+  }
   window.addEventListener('message', (event) => {
     const message = event.data;
     if (message.type === 'reset') {
-      document.getElementById('ended-banner').style.display = 'none';
+      resetForNewSession();
       return;
     }
     if (message.type === 'sessionEnd') {

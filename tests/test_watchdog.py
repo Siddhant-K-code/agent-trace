@@ -315,8 +315,8 @@ class WatchdogLimitTest(unittest.TestCase):
         self.yielded = 0
         self.mocks = {}
         for name, target, kwargs in (
-            ("pause", "agent_trace.watch._pause_process", {}),
-            ("resume", "agent_trace.watch._resume_process", {}),
+            ("pause", "agent_trace.watch._pause_process", {"return_value": None}),
+            ("resume", "agent_trace.watch._resume_process", {"return_value": None}),
             # True: SIGTERM was sent, so the post-mortem and --on-death follow.
             ("kill", "agent_trace.watch._kill_process", {"return_value": True}),
             ("os_kill", "os.kill", {"side_effect": self._signal}),

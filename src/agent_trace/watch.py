@@ -296,18 +296,78 @@ def _kill_process(pid: int, start_time: str | None = None) -> bool:
     return True
 
 
-def _pause_process(pid: int) -> None:
-    try:
-        os.kill(pid, signal.SIGSTOP)
-    except (ProcessLookupError, PermissionError):
-        pass
+_NO_SUCH_PROCESS = "no process has that PID"
+_NOT_ALLOWED = "not allowed to signal it"
 
 
-def _resume_process(pid: int) -> None:
+def _send_signal(pid: int, sig: int) -> str | None:
+    """Send *sig* to *pid*. Return None if it was sent, else why it was not."""
     try:
-        os.kill(pid, signal.SIGCONT)
-    except (ProcessLookupError, PermissionError):
-        pass
+        os.kill(pid, sig)
+    except ProcessLookupError:
+        return _NO_SUCH_PROCESS
+    except PermissionError:
+        return _NOT_ALLOWED
+    return None
+
+
+def _pause_process(pid: int) -> str | None:
+    """Send SIGSTOP. Return None if it was sent, else why it was not."""
+    return _send_signal(pid, signal.SIGSTOP)
+
+
+def _resume_process(pid: int) -> str | None:
+    """Send SIGCONT. Return None if it was sent, else why it was not."""
+    return _send_signal(pid, signal.SIGCONT)
+
+
+def _report(msg: str, out: TextIO | None = None, alert_log: str | None = None) -> None:
+    """Show *msg* on *out* (the terminal when None) and add it to *alert_log*."""
+    if out is None:
+        _alert_terminal(msg)
+    else:
+        out.write(f"[watch] {msg}\n")
+        out.flush()
+    if alert_log:
+        _alert_file(msg, alert_log)
+
+
+def _pause_agent(
+    state: "WatchState", out: TextIO | None = None, alert_log: str | None = None,
+) -> bool:
+    """SIGSTOP the agent. Return True if the signal was sent.
+
+    If it was not, say why and return False. Callers record a pause owner
+    only on True, so watch never holds a pause the agent did not get.
+    """
+    pid = state.agent_pid
+    problem = _pause_process(pid)
+    if problem is None:
+        return True
+    _report(f"Agent pid {pid} was not paused: {problem}. Watch holds no pause.", out, alert_log)
+    return False
+
+
+def _resume_agent(
+    state: "WatchState", out: TextIO | None = None, alert_log: str | None = None,
+) -> None:
+    """SIGCONT the agent and drop the pause watch holds.
+
+    The pause is dropped even when SIGCONT was not sent: the PID is gone,
+    or watch may no longer signal it, so watch could never release that
+    pause and would keep the idle timeout stopped for good. Watch says so
+    and, when the process still exists, how to resume it by hand.
+    """
+    pid = state.agent_pid
+    problem = _resume_process(pid)
+    state.pause_owner = None
+    state.approval_request_id = None
+    if problem is None:
+        return
+    msg = f"Agent pid {pid} was not resumed: {problem}. Pause cleared."
+    if problem == _NOT_ALLOWED:
+        msg += f" If the agent is still stopped, run 'kill -CONT {pid}' as its owner."
+    _report(msg, out, alert_log)
 
 
 def validate_agent_pid(pid: int) -> str | None:
@@ -1517,6 +1577,9 @@ class WatchState:
     # PAUSE_APPROVAL. Only the owner's release path may resume the agent.
     pause_owner: str | None = None
     approval_request_id: str | None = None
+    # True once an editor pause request could not SIGSTOP the agent. Watch
+    # does not retry until the marker is removed, so it says so once.
+    editor_pause_failed: bool = False
     session_id: str = ""
     mcp_scan_events: list[TraceEvent] = field(default_factory=list)
 
@@ -1720,11 +1783,13 @@ def _dispatch_alert(
             )
             return
         # Pause before creating the request so an approval cannot land
-        # before the SIGSTOP and leave the agent stopped.
+        # before the SIGSTOP and leave the agent stopped. If SIGSTOP was not
+        # sent the request is still created, but watch holds no pause.
+        pause_failed = False
         if state.agent_pid and not state.paused and not _agent_pid_reused(
             state, alert_log=config.alert_log,
         ):
-            _pause_process(state.agent_pid)
+            pause_failed = not _pause_agent(state, alert_log=config.alert_log)
         elif not state.agent_pid:
             _warn_no_agent_pid(state, f"pause the agent for approval rule '{rule_name}'")
         req = None
@@ -1747,7 +1812,7 @@ def _dispatch_alert(
                 )
             except Exception as exc:
                 _alert_terminal(f"[HITL] Could not create approval request: {exc}")
-        if state.agent_pid:
+        if state.agent_pid and not pause_failed:
             if req is not None:
                 state.pause_owner = PAUSE_APPROVAL
                 state.approval_request_id = req.request_id
@@ -1775,8 +1840,8 @@ def _dispatch_alert(
             _kill_agent(message, config, state, store, session_id)
         elif not state.paused:
             _alert_terminal(f"Pausing agent process {state.agent_pid} (SIGSTOP)")
-            _pause_process(state.agent_pid)
-            state.pause_owner = PAUSE_RULE
+            if _pause_agent(state, alert_log=config.alert_log):
+                state.pause_owner = PAUSE_RULE
 
     _send_network_alerts(message, config, action, notify=notify, session_id=session_id)
 
@@ -2213,6 +2278,8 @@ def _check_pause_file(store: "TraceStore", state: "WatchState", out: "TextIO") -
     then resuming from the editor releases it. An approval pause is never
     released by the marker; only the approval decision ends it. Once watch
     has killed the agent the marker is ignored: watch sends no other signal.
+    If SIGSTOP cannot be sent, watch says so once, holds no pause, and
+    tries again only after the marker is removed and written again.
     """
     _check_approval_decision(store, state, out)
     _check_agent_alive(state, out)
@@ -2226,6 +2293,12 @@ def _check_pause_file(store: "TraceStore", state: "WatchState", out: "TextIO") -
             _warn_no_agent_pid(state, "pause the agent for the editor", out)
         return
 
+    if not wants_pause:
+        state.editor_pause_failed = False
+    elif state.editor_pause_failed and state.pause_owner is None:
+        # SIGSTOP failed for this marker; wait for it to be removed.
+        return
+
     signals = (state.pause_owner is None) if wants_pause else (state.pause_owner == PAUSE_EDITOR)
     if signals and _agent_pid_reused(state, out):
         return
@@ -2234,8 +2307,12 @@ def _check_pause_file(store: "TraceStore", state: "WatchState", out: "TextIO") -
         if state.pause_owner is None:
             out.write(f"[watch] Pause requested by editor - SIGSTOP pid {state.agent_pid}\n")
             out.flush()
-            _pause_process(state.agent_pid)
-            state.pause_owner = PAUSE_EDITOR
+            if _pause_agent(state, out):
+                state.pause_owner = PAUSE_EDITOR
+            else:
+                state.editor_pause_failed = True
+                out.write("[watch] Resume in the editor, then Pause, to try again\n")
+                out.flush()
         elif state.pause_owner == PAUSE_RULE:
             out.write("[watch] Editor took over the rule pause; resume from the editor to continue\n")
             out.flush()
@@ -2243,8 +2320,7 @@ def _check_pause_file(store: "TraceStore", state: "WatchState", out: "TextIO") -
     elif state.pause_owner == PAUSE_EDITOR:
         out.write(f"[watch] Resume requested by editor - SIGCONT pid {state.agent_pid}\n")
         out.flush()
-        _resume_process(state.agent_pid)
-        state.pause_owner = None
+        _resume_agent(state, out)
 
 
 # ---------------------------------------------------------------------------
