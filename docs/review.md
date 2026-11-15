@@ -217,7 +217,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-      - uses: Siddhant-K-code/agent-trace@v0.111.0
+      - uses: Siddhant-K-code/agent-trace@v0.111.1
         with:
           run-eval: "false"
           review: "true"
