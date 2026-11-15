@@ -504,7 +504,7 @@ checkpoint setup.
 ### `watch`
 ```
 agent-strace watch [session-id] [--agent-pid PID] [--timeout DURATION] [--budget DOLLARS]
-                   [--on-violation ACTION] [--config FILE]
+                   [--on-violation ACTION] [--webhook URL] [--config FILE]
                    [--on-death CMD] [--policy FILE] [--rules FILE_OR_BUILTINS] [--stream-to URL]
                    [--stream-otlp] [--stream-batch-size N] [--stream-flush-interval S]
                    [--loop-threshold N] [--loop-window N] [--max-context-pct N]
@@ -521,6 +521,7 @@ Live session monitor with kill-switch rules.
 | `--loop-threshold N` | Alert when the same tool call and arguments repeat N times; default is 3 |
 | `--loop-window N` | Number of recent events to scan for repeated identical tool calls; default is 10 |
 | `--on-violation terminal\|file\|kill` | Action when a rule fires (default: `terminal`) |
+| `--webhook URL` | POST each alert as JSON to this `http://` or `https://` URL. Watch refuses at startup, with one line and exit 1, a URL with any other scheme or none, no host, a bad port, spaces or control characters, or a user name or password; when `--webhook` is not given, the same check applies to `webhook.url` in the `--config` file. Redirects are not followed, so pass the final URL. Any answer other than 2xx is a failure |
 | `--config FILE` | JSON file that sets watch limits and actions; see **Config file** below. Watch refuses a file it cannot use, with one line and exit 1, before it reads the session or writes anything. Flags given on the command line override the file |
 | `--max-context-pct N` | Alert when the session's input tokens reach N percent of the model's context window (default: `90`). N must be from 1 to 100; any other value is refused at startup |
 | `--on-death CMD` | Command to run after kill (receives `{post_mortem_path}`) |
@@ -534,6 +535,13 @@ Live session monitor with kill-switch rules.
 | `--stream-flush-interval S` | With `--stream-to`, send waiting events once S seconds have passed since the last POST (default: `2.0`). `0` sends each event at once. A negative, infinite or NaN value is refused at startup |
 | `--dry-run` | Evaluate rules without acting |
 | `--tenant-id ID` | Tag the session and all events; defaults to `AGENT_STRACE_TENANT_ID` |
+
+Alert channels never stop or delay the alert's pause or kill: watch writes the
+alert log before it acts, and sends the `--webhook` POST and any Slack or Teams
+notification (`AGENT_STRACE_SLACK_WEBHOOK`, `AGENT_STRACE_TEAMS_WEBHOOK`) after
+the pause or kill, the post-mortem and the `--on-death` command. A channel that
+fails prints one line and watch goes on; a webhook, Slack or Teams line names
+only the URL's `scheme://host[:port]`.
 
 Watch does not guess the agent PID. Capture hooks run as children of a
 shell, so their parent is not reliably the agent, and signalling the wrong
@@ -631,7 +639,7 @@ Every key is optional. A key that is not in the file keeps its default.
 | `watchers.loop.sequence_length` | Whole number, 1 or more: length of a repeated event sequence | `3` | |
 | `watchers.loop.max_repeats` | Whole number, 1 or more: repeats of that sequence before an alert | `3` | |
 | `watchers.scope.policy` | Non-empty string: scope policy file | `.agent-scope.json` | `--policy` |
-| `webhook.url` | String. Empty means no webhook | `""` | `--webhook` |
+| `webhook.url` | String: the URL alerts are POSTed to. Empty means no webhook. When `--webhook` is not given, watch refuses at startup a URL it cannot POST to, as for `--webhook` | `""` | `--webhook` |
 | `operation_rules` | Array of objects, each with `tool` (string, default `*`), `pattern` (glob, default `*`), `action` (`alert` or `block`, default `alert`) and `reason` (string). `action` only changes the alert text; what watch does is set by `watchers.retry.alert` | `[]` | |
 | `max_context_pct` | Whole number from 1 to 100 | `90` | `--max-context-pct` |
 | `built_in_rules` | Array of `mcp-poisoning`, `loop` and `cognitive-debt` | `[]` | `--rules` adds to it |

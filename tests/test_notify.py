@@ -1,10 +1,16 @@
 """Tests for Slack/Teams/webhook notifications (issue #138)."""
 
+import io
 import json
 import os
+import socket
 import sys
+import threading
 import unittest
-from unittest.mock import MagicMock, patch
+from contextlib import redirect_stderr
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import call, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -82,33 +88,272 @@ class TestGenericPayload(unittest.TestCase):
         self.assertIn("timestamp", p)
 
 
-class TestPost(unittest.TestCase):
+# No failure line may show these parts of a URL: the token lives there.
+_MARKERS = ("SECRET", "token")
+_NOT_FOLLOWED = " (redirects are not followed; give the final URL)"
+
+
+def _closed_port() -> int:
+    """Return a local port that nothing listens on."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+class _PostServer(ThreadingHTTPServer):
+    """Answer each POST with the next scripted (status, hold) reply.
+
+    A reply waits *hold* seconds, or until ``release`` is set, before it is
+    sent. A 3xx reply points Location at a URL with markers in it, and every
+    GET gets 200.
+    """
+
+    daemon_threads = True
+    block_on_close = False
+
+    def __init__(self) -> None:
+        super().__init__(("127.0.0.1", 0), _PostHandler)
+        self.lock = threading.Lock()
+        self.requests: list[tuple[str, str, bytes]] = []
+        self.replies: list[tuple[int, float]] = []
+        self.release = threading.Event()
+
+    def handle_error(self, request, client_address) -> None:
+        pass  # the client timed out and closed the connection
+
+    def script(self, *replies: tuple[int, float]) -> None:
+        with self.lock:
+            self.requests.clear()
+            self.replies[:] = replies
+        self.release.clear()
+
+    def methods(self) -> list[str]:
+        with self.lock:
+            return [method for method, _, _ in self.requests]
+
+
+class _PostHandler(BaseHTTPRequestHandler):
+    def do_POST(self) -> None:  # noqa: N802
+        server = self.server
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        with server.lock:
+            server.requests.append(("POST", self.path, body))
+            status, hold = server.replies.pop(0) if server.replies else (200, 0.0)
+        if hold:
+            server.release.wait(hold)
+        self.send_response(status)
+        if 300 <= status < 400:
+            self.send_header("Location", "/SECRET-LOCATION?token=SECRET-QUERY")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_GET(self) -> None:  # noqa: N802
+        with self.server.lock:
+            self.server.requests.append(("GET", self.path, b""))
+        self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *args: object) -> None:
+        pass
+
+
+class _PostServerTestCase(unittest.TestCase):
+    """Run a scripted local receiver, with no channel env vars and no sleeps."""
+
+    def setUp(self) -> None:
+        self.server = _PostServer()
+        self.port = self.server.server_address[1]
+        threading.Thread(
+            target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True,
+        ).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.addCleanup(self.server.release.set)
+        env = patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        for var in (_SLACK_ENV, _TEAMS_ENV, _GENERIC_ENV):
+            os.environ.pop(var, None)
+        os.environ["no_proxy"] = "*"
+        # notify's time is the time module, so this records every retry delay.
+        sleep = patch("agent_trace.notify.time.sleep")
+        self.sleep = sleep.start()
+        self.addCleanup(sleep.stop)
+        self.url = f"http://127.0.0.1:{self.port}/SECRET-PATH?token=SECRET-QUERY"
+        self.endpoint = f"http://127.0.0.1:{self.port}"
+
+
+class TestPost(_PostServerTestCase):
+    # Guards: unchanged from main.
+
     def test_returns_true_on_200(self):
-        mock_resp = MagicMock()
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_resp.status = 200
-        with patch("urllib.request.urlopen", return_value=mock_resp):
-            result = _post("http://example.com/hook", {"text": "hi"}, retries=1)
+        self.server.script((200, 0.0))
+        result = _post(self.url, {"text": "hi"}, retries=1)
         self.assertTrue(result)
+        self.assertEqual(
+            self.server.requests,
+            [("POST", "/SECRET-PATH?token=SECRET-QUERY", json.dumps({"text": "hi"}).encode())],
+        )
 
     def test_returns_false_on_4xx(self):
-        import urllib.error
-        with patch("urllib.request.urlopen",
-                   side_effect=urllib.error.HTTPError("url", 400, "Bad Request", {}, None)):
-            result = _post("http://example.com/hook", {}, retries=1)
+        self.server.script((400, 0.0))
+        with redirect_stderr(io.StringIO()):
+            result = _post(self.url, {}, retries=1)
         self.assertFalse(result)
 
     def test_returns_false_on_repeated_failure(self):
-        with patch("urllib.request.urlopen", side_effect=OSError("connection refused")):
-            with patch("time.sleep"):  # don't actually sleep in tests
-                result = _post("http://example.com/hook", {}, retries=2)
+        with redirect_stderr(io.StringIO()):
+            result = _post(f"http://127.0.0.1:{_closed_port()}/hook", {}, retries=2)
         self.assertFalse(result)
+
+
+class TestPostFailureReports(_PostServerTestCase):
+    """A final delivery failure prints one line naming the channel, only
+    scheme://host[:port], and the reason."""
+
+    def _post(self, url: str | None = None, retries: int = 3) -> tuple[bool, str]:
+        err = io.StringIO()
+        with redirect_stderr(err):
+            result = _post(self.url if url is None else url, {"text": "hi"}, retries=retries)
+        for marker in _MARKERS:
+            self.assertNotIn(marker, err.getvalue())
+        return result, err.getvalue()
+
+    def test_any_2xx_answer_succeeds(self):
+        for status in (200, 201, 202, 203, 204):
+            with self.subTest(status=status):
+                self.server.script((status, 0.0))
+                self.assertEqual(self._post(), (True, ""))
+                self.assertEqual(self.server.methods(), ["POST"])
+                self.sleep.assert_not_called()
+
+    def test_3xx_and_4xx_answers_are_reported_at_once(self):
+        for status in (301, 302, 303, 307, 308, 400, 403, 404, 410):
+            with self.subTest(status=status):
+                self.sleep.reset_mock()
+                self.server.script((status, 0.0))
+                hint = _NOT_FOLLOWED if status < 400 else ""
+                self.assertEqual(self._post(), (
+                    False,
+                    f"[notify] Webhook POST to {self.endpoint} failed: "
+                    f"HTTP Error {status}: {HTTPStatus(status).phrase}{hint}\n",
+                ))
+                # Not retried, and a redirect is not followed.
+                self.assertEqual(self.server.methods(), ["POST"])
+                self.sleep.assert_not_called()
+
+    def test_5xx_answers_are_reported_after_the_retries(self):
+        for status in (500, 502, 503):
+            with self.subTest(status=status):
+                self.sleep.reset_mock()
+                self.server.script((status, 0.0), (status, 0.0), (status, 0.0))
+                self.assertEqual(self._post(), (
+                    False,
+                    f"[notify] Webhook POST to {self.endpoint} failed after 3 attempts: "
+                    f"HTTP Error {status}: {HTTPStatus(status).phrase}\n",
+                ))
+                self.assertEqual(self.server.methods(), ["POST"] * 3)
+                self.assertEqual(self.sleep.call_args_list, [call(1.0), call(2.0)])
+
+    def test_single_attempt_has_no_attempt_count(self):
+        self.server.script((503, 0.0))
+        self.assertEqual(self._post(retries=1), (
+            False,
+            f"[notify] Webhook POST to {self.endpoint} failed: "
+            "HTTP Error 503: Service Unavailable\n",
+        ))
+        self.sleep.assert_not_called()
+
+    def test_refused_connection_is_reported_after_the_retries(self):
+        port = _closed_port()
+        result, err = self._post(
+            f"http://127.0.0.1:{port}/SECRET-PATH?token=SECRET-QUERY", retries=2,
+        )
+        self.assertFalse(result)
+        self.assertRegex(
+            err,
+            rf"\A\[notify\] Webhook POST to http://127\.0\.0\.1:{port} failed after "
+            r"2 attempts: \[Errno \d+\] Connection refused\n\Z",
+        )
+        self.assertEqual(self.sleep.call_args_list, [call(1.0)])
+
+    def test_timeout_is_reported(self):
+        self.server.script((200, 30.0))
+        with patch("agent_trace.notify._POST_TIMEOUT", 0.2):
+            self.assertEqual(self._post(retries=1), (
+                False, f"[notify] Webhook POST to {self.endpoint} failed: TimeoutError\n",
+            ))
+
+    def test_unusable_urls_are_not_posted(self):
+        cases = {
+            "it must start with http:// or https://": (
+                "hooks.example.com/services/T0/B0/SECRET-PATH?token=SECRET-QUERY",
+                f"127.0.0.1:{self.port}/SECRET-PATH?token=SECRET-QUERY",
+            ),
+            "it must not contain a user name or password": (
+                f"http://SECRET-USER:SECRET-PASS@127.0.0.1:{self.port}/SECRET-PATH",
+            ),
+            "it must not contain spaces or control characters": (
+                f"http://127.0.0.1:{self.port}/SECRET PATH?token=SECRET-QUERY",
+            ),
+        }
+        for reason, urls in cases.items():
+            for url in urls:
+                with self.subTest(url=url):
+                    self.sleep.reset_mock()
+                    self.server.script()
+                    self.assertEqual(
+                        self._post(url), (False, f"[notify] Webhook URL not used: {reason}\n"),
+                    )
+                    self.assertEqual(self.server.methods(), [])
+                    self.sleep.assert_not_called()
+
+    def test_retry_after_5xx_can_succeed(self):
+        # Guard: unchanged from main.
+        self.server.script((500, 0.0), (200, 0.0))
+        self.assertEqual(self._post(), (True, ""))
+        self.assertEqual(self.server.methods(), ["POST", "POST"])
+        self.assertEqual(self.sleep.call_args_list, [call(1.0)])
+
+
+class TestNotifyFailureLines(_PostServerTestCase):
+    """notify() names the channel that failed."""
+
+    def _notify(self) -> tuple[dict, str]:
+        err = io.StringIO()
+        with redirect_stderr(err):
+            results = notify("t", "m")
+        for marker in _MARKERS:
+            self.assertNotIn(marker, err.getvalue())
+        return results, err.getvalue()
+
+    def test_slack_and_teams(self):
+        os.environ[_SLACK_ENV] = self.url
+        os.environ[_TEAMS_ENV] = self.url.replace("SECRET-PATH", "SECRET-TEAMS")
+        self.server.script((404, 0.0), (404, 0.0))
+        self.assertEqual(self._notify(), (
+            {"slack": False, "teams": False},
+            f"[notify] Slack POST to {self.endpoint} failed: HTTP Error 404: Not Found\n"
+            f"[notify] Teams POST to {self.endpoint} failed: HTTP Error 404: Not Found\n",
+        ))
+
+    def test_generic_webhook(self):
+        os.environ[_GENERIC_ENV] = self.url
+        self.server.script((404, 0.0))
+        self.assertEqual(self._notify(), (
+            {"webhook": False},
+            f"[notify] Webhook POST to {self.endpoint} failed: HTTP Error 404: Not Found\n",
+        ))
 
 
 class TestNotify(unittest.TestCase):
     def setUp(self):
-        # Clear env vars before each test
+        # Clear env vars before each test, and restore them after it so a
+        # channel URL set here never reaches another test module.
+        env = patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
         for var in (_SLACK_ENV, _TEAMS_ENV, _GENERIC_ENV):
             os.environ.pop(var, None)
 
@@ -157,6 +402,9 @@ class TestNotify(unittest.TestCase):
 
 class TestConvenienceWrappers(unittest.TestCase):
     def setUp(self):
+        env = patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
         for var in (_SLACK_ENV, _TEAMS_ENV, _GENERIC_ENV):
             os.environ.pop(var, None)
 

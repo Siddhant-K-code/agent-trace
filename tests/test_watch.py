@@ -5,27 +5,36 @@ import errno
 import io
 import json
 import os
+import socket
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from collections import deque
 from contextlib import redirect_stderr, redirect_stdout
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import call, patch, MagicMock
 
 from agent_trace.cli import build_parser
 from agent_trace.models import EventType, SessionMeta, TraceEvent
+from agent_trace.project_budget import ProjectBudgetConfig
 from agent_trace.store import TraceStore
 from agent_trace.watch import (
+    NannyRule,
     WatcherConfig,
     WatchState,
     check_event,
     _alert_terminal,
     _alert_file,
+    _alert_webhook,
     _apply_builtin_rules_spec,
     _detect_loop,
     _detect_spin_loop,
+    _dispatch_alert,
+    _dispatch_nanny_rule,
     _event_key,
     cmd_watch,
     watch_session,
@@ -1067,6 +1076,716 @@ class TestWatchConfigFile(unittest.TestCase):
         for dest, default in defaults:
             with self.subTest(dest=dest):
                 self.assertIn(f"(default: {default})", helps[dest])
+
+
+# ---------------------------------------------------------------------------
+# Alert channels: the alert log, --webhook, and Slack/Teams through notify.py
+# ---------------------------------------------------------------------------
+
+# No alert line may show these parts of a URL.
+_MARKERS = ("SECRET", "token")
+_USER_INFO = "SECRET-USER:SECRET-PASS@"
+_NOT_FOLLOWED = " (redirects are not followed; give the final URL)"
+_NOTIFY_ENV = ("AGENT_STRACE_SLACK_WEBHOOK", "AGENT_STRACE_TEAMS_WEBHOOK")
+
+
+def _closed_port() -> int:
+    """Return a local port that nothing listens on."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _clear_notify_env(test: unittest.TestCase) -> None:
+    """Unset the Slack and Teams URLs for the rest of *test*."""
+    env = patch.dict(os.environ)
+    env.start()
+    test.addCleanup(env.stop)
+    for name in _NOTIFY_ENV:
+        os.environ.pop(name, None)
+
+
+class _AlertServer(ThreadingHTTPServer):
+    """Answer each POST with the next scripted (status, hold) reply.
+
+    A reply waits *hold* seconds, or until ``release`` is set, before it is
+    sent. A 3xx reply points Location at a URL with markers in it, and every
+    GET gets 200. ``on_post`` is called when a POST arrives.
+    """
+
+    daemon_threads = True
+    block_on_close = False
+
+    def __init__(self) -> None:
+        super().__init__(("127.0.0.1", 0), _AlertHandler)
+        self.lock = threading.Lock()
+        self.requests: list[tuple[str, str, bytes]] = []
+        self.replies: list[tuple[int, float]] = []
+        self.release = threading.Event()
+        self.on_post = None
+
+    def handle_error(self, request, client_address) -> None:
+        pass  # the client timed out and closed the connection
+
+    def script(self, *replies: tuple[int, float]) -> None:
+        with self.lock:
+            self.requests.clear()
+            self.replies[:] = replies
+        self.release.clear()
+
+    def methods(self) -> list[str]:
+        with self.lock:
+            return [method for method, _, _ in self.requests]
+
+
+class _AlertHandler(BaseHTTPRequestHandler):
+    def do_POST(self) -> None:  # noqa: N802
+        server = self.server
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        with server.lock:
+            server.requests.append(("POST", self.path, body))
+            status, hold = server.replies.pop(0) if server.replies else (200, 0.0)
+        if server.on_post is not None:
+            server.on_post()
+        if hold:
+            server.release.wait(hold)
+        self.send_response(status)
+        if 300 <= status < 400:
+            self.send_header("Location", "/SECRET-LOCATION?token=SECRET-QUERY")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_GET(self) -> None:  # noqa: N802
+        with self.server.lock:
+            self.server.requests.append(("GET", self.path, b""))
+        self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *args: object) -> None:
+        pass
+
+
+class _AlertServerTestCase(unittest.TestCase):
+    """Run a scripted local webhook receiver."""
+
+    def setUp(self) -> None:
+        self.server = _AlertServer()
+        self.port = self.server.server_address[1]
+        threading.Thread(
+            target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True,
+        ).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.addCleanup(self.server.release.set)
+        _clear_notify_env(self)
+        os.environ["no_proxy"] = "*"
+        self.url = f"http://127.0.0.1:{self.port}/SECRET-PATH?token=SECRET-QUERY"
+        self.endpoint = f"http://127.0.0.1:{self.port}"
+
+    def _assert_no_markers(self, text: str) -> None:
+        for marker in _MARKERS:
+            self.assertNotIn(marker, text)
+
+
+class TestAlertWebhookFailures(_AlertServerTestCase):
+    """A --webhook POST that fails prints one line naming only
+    scheme://host[:port] and never raises."""
+
+    def _post(self, url: str | None = None) -> str:
+        err = io.StringIO()
+        with redirect_stderr(err):
+            _alert_webhook("alert message", self.url if url is None else url)
+        self._assert_no_markers(err.getvalue())
+        return err.getvalue()
+
+    def test_2xx_answers_print_nothing(self):
+        # Guard: unchanged from main.
+        body = json.dumps({"text": "alert message", "source": "agent-strace"}).encode()
+        for status in (200, 201, 202, 204):
+            with self.subTest(status=status):
+                self.server.script((status, 0.0))
+                self.assertEqual(self._post(), "")
+                self.assertEqual(
+                    self.server.requests,
+                    [("POST", "/SECRET-PATH?token=SECRET-QUERY", body)],
+                )
+
+    def test_error_answers_print_one_line(self):
+        for status in (400, 401, 404, 500, 503):
+            with self.subTest(status=status):
+                self.server.script((status, 0.0))
+                self.assertEqual(
+                    self._post(),
+                    f"[watch] Webhook POST to {self.endpoint} failed: "
+                    f"HTTP Error {status}: {HTTPStatus(status).phrase}\n",
+                )
+                self.assertEqual(self.server.methods(), ["POST"])
+
+    def test_redirects_are_not_followed(self):
+        for status in (301, 302, 303, 307, 308):
+            with self.subTest(status=status):
+                self.server.script((status, 0.0))
+                self.assertEqual(
+                    self._post(),
+                    f"[watch] Webhook POST to {self.endpoint} failed: "
+                    f"HTTP Error {status}: {HTTPStatus(status).phrase}{_NOT_FOLLOWED}\n",
+                )
+                self.assertEqual(self.server.methods(), ["POST"])
+
+    def test_refused_connection_prints_one_line(self):
+        port = _closed_port()
+        self.assertRegex(
+            self._post(f"http://127.0.0.1:{port}/SECRET-PATH?token=SECRET-QUERY"),
+            rf"\A\[watch\] Webhook POST to http://127\.0\.0\.1:{port} failed: "
+            r"\[Errno \d+\] Connection refused\n\Z",
+        )
+
+    def test_timeout_prints_one_line(self):
+        self.server.script((200, 30.0))
+        with patch("agent_trace.watch._WEBHOOK_TIMEOUT", 0.2):
+            started = time.monotonic()
+            line = self._post()
+            elapsed = time.monotonic() - started
+        self.assertEqual(line, f"[watch] Webhook POST to {self.endpoint} failed: TimeoutError\n")
+        self.assertLess(elapsed, 5.0)
+
+    def test_unusable_urls_are_not_posted(self):
+        cases = {
+            "it must start with http:// or https://": (
+                "hooks.example.com/services/T0/B0/SECRET-PATH?token=SECRET-QUERY",
+                f"127.0.0.1:{self.port}/SECRET-PATH?token=SECRET-QUERY",
+                f"localhost:{self.port}/SECRET-PATH?token=SECRET-QUERY",
+            ),
+            "it must not contain a user name or password": (
+                f"http://{_USER_INFO}127.0.0.1:{self.port}/SECRET-PATH?token=SECRET-QUERY",
+            ),
+            "it must not contain spaces or control characters": (
+                f"http://127.0.0.1:{self.port}/SECRET PATH?token=SECRET-QUERY",
+            ),
+        }
+        for reason, urls in cases.items():
+            for url in urls:
+                with self.subTest(url=url):
+                    self.server.script()
+                    self.assertEqual(self._post(url), f"[watch] Webhook URL not used: {reason}\n")
+                    self.assertEqual(self.server.methods(), [])
+
+
+class TestAlertLogFailures(unittest.TestCase):
+    """An alert log that cannot be written prints one line and never raises,
+    so the alert goes on to its pause or kill."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        blocker = Path(tmp.name) / "not-a-directory"
+        blocker.write_text("")
+        self.blocked_log = str(blocker / "alerts.log")
+        self.log = str(Path(tmp.name) / "alerts.log")
+        _clear_notify_env(self)
+
+    def _write(self, message: str, log_path: str) -> str:
+        err = io.StringIO()
+        with redirect_stderr(err):
+            _alert_file(message, log_path)
+        return err.getvalue()
+
+    def _assert_one_line(self, text: str) -> None:
+        self.assertRegex(text, r"\A\[watch\] Could not write alert log: [^\n]+\n\Z")
+
+    def test_unwritable_log_prints_one_line(self):
+        self._assert_one_line(self._write("alert message", self.blocked_log))
+
+    def test_unencodable_message_prints_one_line(self):
+        # A JSON "\ud800" escape in a tool argument reaches the message as a
+        # lone surrogate, which UTF-8 cannot encode.
+        self._assert_one_line(self._write("RetryWatcher: 'echo \ud800' repeated", self.log))
+
+    def test_pause_and_kill_run_when_the_alert_log_fails(self):
+        for action, target in (("kill", "_kill_process"), ("pause", "_pause_process")):
+            with self.subTest(action=action):
+                config = WatcherConfig(on_violation=action, alert_log=self.blocked_log)
+                err = io.StringIO()
+                with patch(f"agent_trace.watch.{target}") as signal_mock, \
+                        patch("agent_trace.watch.pid_reused", return_value=False), \
+                        patch("agent_trace.watch._alert_terminal"), \
+                        redirect_stderr(err):
+                    _dispatch_alert("RetryWatcher: retried", config, WatchState(agent_pid=4242))
+                self.assertEqual(signal_mock.call_args.args[0], 4242)
+                self._assert_one_line(err.getvalue())
+
+
+class TestNetworkAlertsRunLast(unittest.TestCase):
+    """The --webhook POST and Slack/Teams run after the pause or kill, the
+    post-mortem and --on-death. The terminal line and the alert log come
+    first."""
+
+    _MSG = "RetryWatcher: Bash retried"
+    _URL = "http://hooks.example/x"
+
+    def setUp(self):
+        self.calls: list[tuple] = []
+        record = self.calls.append
+        _clear_notify_env(self)
+        os.environ["AGENT_STRACE_SLACK_WEBHOOK"] = "http://127.0.0.1:9/x"
+        steps = {
+            "_alert_terminal": lambda msg, *a, **k: record(("terminal", msg)),
+            "_alert_file": lambda msg, *a, **k: record(("alert-log", msg)),
+            "_pause_process": lambda pid: record(("pause", pid)),
+            "_kill_process": lambda pid, *a: record(("kill", pid)),
+            "_write_watchdog_postmortem": (
+                lambda *a, **k: (record(("post-mortem",)), Path("pm.json"))[1]
+            ),
+            "_invoke_on_death": lambda cmd, path: record(("on-death", path)),
+            "_alert_webhook": lambda msg, url: record(("webhook", msg)),
+            "pid_reused": lambda *a: False,
+        }
+        targets = {f"agent_trace.watch.{name}": step for name, step in steps.items()}
+        targets["agent_trace.notify.notify_violation"] = (
+            lambda **k: record(("slack/teams", k["action"]))
+        )
+        for target, step in targets.items():
+            patcher = patch(target, side_effect=step)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _steps(self) -> list[str]:
+        return [step for step, *_ in self.calls]
+
+    def test_watcher_kill(self):
+        config = WatcherConfig(
+            on_violation="kill", webhook_url=self._URL, on_death_cmd="echo {post_mortem_path}",
+        )
+        _dispatch_alert(
+            self._MSG, config, WatchState(agent_pid=4242), store=MagicMock(), session_id="s1",
+        )
+        self.assertEqual(self.calls, [
+            ("terminal", self._MSG),
+            ("alert-log", self._MSG),
+            ("terminal", "Killing agent process 4242"),
+            ("post-mortem",),
+            ("terminal", "Post-mortem written to pm.json"),
+            ("on-death", Path("pm.json")),
+            ("kill", 4242),
+            ("webhook", self._MSG),
+            ("slack/teams", "kill"),
+        ])
+
+    def test_nanny_kill(self):
+        rule = NannyRule(name="cost cap", condition="cost_usd > 0.5", action="kill")
+        config = WatcherConfig(webhook_url=self._URL, on_death_cmd="echo {post_mortem_path}")
+        _dispatch_nanny_rule(
+            rule, _bash_event("ls"), MagicMock(), "s1", WatchState(agent_pid=4242), config,
+        )
+        steps = self._steps()
+        self.assertEqual(steps[-2:], ["webhook", "slack/teams"])
+        self.assertNotIn("webhook", steps[:-2])
+        self.assertNotIn("slack/teams", steps[:-2])
+        self.assertEqual(self.calls[0], ("terminal", "NannyRule 'cost cap': cost_usd > 0.5 → kill"))
+        self.assertLess(steps.index("alert-log"), steps.index("kill"))
+        # The post-mortem and --on-death that follow the kill come before the network.
+        self.assertLess(steps.index("kill"), steps.index("post-mortem"))
+        self.assertEqual(self.calls[-3], ("on-death", Path("pm.json")))
+
+    def test_pause(self):
+        config = WatcherConfig(on_violation="pause", webhook_url=self._URL)
+        _dispatch_alert(self._MSG, config, WatchState(agent_pid=4242))
+        self.assertEqual(self.calls, [
+            ("terminal", self._MSG),
+            ("alert-log", self._MSG),
+            ("terminal", "Pausing agent process 4242 (SIGSTOP)"),
+            ("pause", 4242),
+            ("webhook", self._MSG),
+            ("slack/teams", "pause"),
+        ])
+
+    def test_dry_run_sends_after_its_line(self):
+        config = WatcherConfig(on_violation="kill", webhook_url=self._URL)
+        _dispatch_alert(self._MSG, config, WatchState(agent_pid=4242), dry_run=True)
+        self.assertEqual(self.calls, [
+            ("terminal", self._MSG),
+            ("alert-log", self._MSG),
+            ("terminal", "[dry-run] would kill agent process"),
+            ("webhook", self._MSG),
+            ("slack/teams", "kill"),
+        ])
+
+    def test_legacy_slack_hint_posts_after_the_pause(self):
+        del os.environ["AGENT_STRACE_SLACK_WEBHOOK"]
+        config = WatcherConfig(on_violation="pause", webhook_url=self._URL)
+        _dispatch_alert(self._MSG, config, WatchState(agent_pid=4242), notify="slack:#ops")
+        self.assertEqual(self.calls, [
+            ("terminal", self._MSG),
+            ("alert-log", self._MSG),
+            ("terminal", "Pausing agent process 4242 (SIGSTOP)"),
+            ("pause", 4242),
+            ("webhook", self._MSG),
+            ("webhook", f"[slack:#ops] {self._MSG}"),
+        ])
+
+    def test_require_approval_sends_nothing_over_the_network(self):
+        # Guard: unchanged from main.
+        config = WatcherConfig(webhook_url=self._URL)
+        rule = NannyRule(name="review", condition="cost_usd > 0.5", action="require_approval")
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TraceStore(tmp, redact=False)
+            store.create_session(SessionMeta(session_id="s1", started_at=1.0))
+            for dry_run in (False, True):
+                with self.subTest(path="watcher", dry_run=dry_run):
+                    self.calls.clear()
+                    _dispatch_alert(
+                        self._MSG, config, WatchState(agent_pid=4242),
+                        action="require_approval", notify="review", dry_run=dry_run,
+                    )
+                    self.assertEqual(self._steps()[0], "terminal")
+                    self.assertNotIn("webhook", self._steps())
+                    self.assertNotIn("slack/teams", self._steps())
+                with self.subTest(path="nanny", dry_run=dry_run):
+                    self.calls.clear()
+                    _dispatch_nanny_rule(
+                        rule, _bash_event("ls"), store, "s1", WatchState(agent_pid=4242),
+                        config, dry_run=dry_run,
+                    )
+                    self.assertEqual(self._steps()[0], "terminal")
+                    self.assertNotIn("webhook", self._steps())
+                    self.assertNotIn("slack/teams", self._steps())
+
+
+class TestNannyPostMortemOnlyOnKill(unittest.TestCase):
+    """Only a kill nanny rule writes the post-mortem and runs --on-death."""
+
+    def test_alert_pause_and_file_rules_write_no_post_mortem(self):
+        # Guard: unchanged from main.
+        _clear_notify_env(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TraceStore(tmp, redact=False)
+            store.create_session(SessionMeta(session_id="s1", started_at=1.0))
+            post_mortem = store._session_dir("s1") / "watchdog-postmortem.json"
+            config = WatcherConfig(
+                alert_log=str(Path(tmp) / "alerts.log"), on_death_cmd="true {post_mortem_path}",
+            )
+            # kill is the control: it shows the checks below can see a post-mortem.
+            for action in ("alert", "pause", "file", "kill"):
+                with self.subTest(action=action):
+                    post_mortem.unlink(missing_ok=True)
+                    rule = NannyRule(name="cost cap", condition="cost_usd > 0.5", action=action)
+                    with patch("agent_trace.watch.subprocess.Popen") as popen, \
+                            patch("agent_trace.watch._pause_process"), \
+                            patch("agent_trace.watch._kill_process"), \
+                            patch("agent_trace.watch.pid_reused", return_value=False), \
+                            patch("agent_trace.watch._alert_terminal"):
+                        _dispatch_nanny_rule(
+                            rule, _bash_event("ls"), store, "s1", WatchState(agent_pid=4242),
+                            config,
+                        )
+                    if action == "kill":
+                        self.assertTrue(post_mortem.exists())
+                        self.assertIn(
+                            call(f"true {post_mortem}", shell=True), popen.call_args_list,
+                        )
+                    else:
+                        self.assertFalse(post_mortem.exists())
+                        popen.assert_not_called()
+
+
+class TestAlertChannelsDoNotHoldTheKill(_AlertServerTestCase):
+    """A slow, failing or unusable channel neither stops nor delays the kill."""
+
+    def _dispatch(self, config: WatcherConfig, events: list[str]) -> tuple[str, float]:
+        """Dispatch one kill alert; return stderr and seconds until the kill."""
+        started = time.monotonic()
+        killed_after: list[float] = []
+
+        def kill(*args):
+            killed_after.append(time.monotonic() - started)
+            events.append("kill")
+            self.server.release.set()
+
+        err = io.StringIO()
+        with patch("agent_trace.watch._kill_process", side_effect=kill), \
+                patch("agent_trace.watch.pid_reused", return_value=False), \
+                patch("agent_trace.watch._alert_file"), \
+                patch("agent_trace.watch._alert_terminal"), \
+                redirect_stderr(err):
+            _dispatch_alert("RetryWatcher: retried", config, WatchState(agent_pid=4242))
+        self.assertEqual(len(killed_after), 1)
+        self._assert_no_markers(err.getvalue())
+        return err.getvalue(), killed_after[0]
+
+    def test_kill_is_sent_before_a_slow_webhook_post(self):
+        events: list[str] = []
+        self.server.on_post = lambda: events.append("webhook-received")
+        self.server.script((200, 3.0))
+        config = WatcherConfig(on_violation="kill", webhook_url=self.url)
+        err, killed_after = self._dispatch(config, events)
+        self.assertEqual(err, "")
+        self.assertEqual(events, ["kill", "webhook-received"])
+        self.assertLess(killed_after, 1.0)
+
+    def test_kill_runs_when_the_webhook_url_is_unusable(self):
+        config = WatcherConfig(
+            on_violation="kill",
+            webhook_url="hooks.example.com/services/T0/B0/SECRET-PATH?token=SECRET-QUERY",
+        )
+        events: list[str] = []
+        err, _ = self._dispatch(config, events)
+        self.assertEqual(events, ["kill"])
+        self.assertEqual(
+            err, "[watch] Webhook URL not used: it must start with http:// or https://\n",
+        )
+
+    def test_kill_runs_when_slack_or_teams_raises(self):
+        os.environ["AGENT_STRACE_SLACK_WEBHOOK"] = self.url
+        config = WatcherConfig(on_violation="kill")
+        events: list[str] = []
+        with patch(
+            "agent_trace.notify.notify_violation",
+            side_effect=RuntimeError("SECRET-PATH?token=SECRET-QUERY"),
+        ):
+            err, _ = self._dispatch(config, events)
+        self.assertEqual(events, ["kill"])
+        self.assertEqual(err, "[watch] Slack/Teams notification failed: RuntimeError\n")
+
+
+class TestProjectBudgetAlertFailures(unittest.TestCase):
+    """A project budget warning whose alert log or webhook fails prints one
+    line for each, and watch goes on."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        blocker = root / "not-a-directory"
+        blocker.write_text("")
+        self.store = TraceStore(root / "traces", redact=False)
+        self.session_id = "budget-session"
+        self.store.create_session(SessionMeta(session_id=self.session_id, started_at=time.time()))
+        self.port = _closed_port()
+        self.config = WatcherConfig(
+            alert_log=str(blocker / "alerts.log"),
+            webhook_url=f"http://127.0.0.1:{self.port}/SECRET-PATH?token=SECRET-QUERY",
+        )
+        _clear_notify_env(self)
+        os.environ["no_proxy"] = "*"
+
+    def _watch(self, budget: ProjectBudgetConfig, events: list[TraceEvent]) -> tuple[str, str]:
+        def tail(_path, poll_interval=0.5):
+            yield from events
+
+        out, err = io.StringIO(), io.StringIO()
+        with patch("agent_trace.watch._tail_events", tail), redirect_stderr(err):
+            watch_session(
+                self.store, self.session_id, self.config, out=out,
+                project_budget_config=budget,
+            )
+        for marker in _MARKERS:
+            self.assertNotIn(marker, err.getvalue())
+        return out.getvalue(), err.getvalue()
+
+    def _end(self) -> TraceEvent:
+        return _make_event(EventType.SESSION_END, time.time(), session_id=self.session_id)
+
+    def test_startup_warning(self):
+        out, err = self._watch(ProjectBudgetConfig(weekly=1.0, warn_at=0.0), [self._end()])
+        self.assertIn("ProjectBudget", out)
+        self.assertIn("[watch] Session ended", out)
+        self.assertRegex(err, r"\A\[watch\] Could not write alert log: [^\n]+\n\Z")
+
+    def test_warning_while_watching(self):
+        events = [
+            _make_event(
+                EventType.ASSISTANT_RESPONSE, time.time(), session_id=self.session_id,
+                text="x" * 10000,
+            ),
+            self._end(),
+        ]
+        out, err = self._watch(ProjectBudgetConfig(weekly=0.01, warn_at=0.5), events)
+        self.assertEqual(out.count("ProjectBudget"), 1)
+        self.assertIn("[watch] Session ended", out)
+        self.assertRegex(
+            err,
+            r"\A\[watch\] Could not write alert log: [^\n]+\n"
+            rf"\[watch\] Webhook POST to http://127\.0\.0\.1:{self.port} failed: "
+            r"\[Errno \d+\] Connection refused\n\Z",
+        )
+
+
+# ---------------------------------------------------------------------------
+# --webhook and webhook.url checks
+# ---------------------------------------------------------------------------
+
+_BAD_WEBHOOK_URLS = {
+    "it must start with http:// or https://": (
+        "hooks.example.com/services/T0/B0/SECRET-PATH?token=SECRET-QUERY",
+        "127.0.0.1:9/SECRET-PATH?token=SECRET-QUERY",
+        "ftp://SECRET-HOST/SECRET-PATH?token=SECRET-QUERY",
+    ),
+    "it is not a valid URL": ("http://[::1/SECRET-PATH?token=SECRET-QUERY",),
+    "it has no host": ("http:///SECRET-PATH?token=SECRET-QUERY",),
+    "it must not contain a user name or password": (
+        f"http://{_USER_INFO}SECRET-HOST/SECRET-PATH?token=SECRET-QUERY",
+    ),
+    "its port must be a number from 0 to 65535": (
+        "http://SECRET-HOST:99999/SECRET-PATH?token=SECRET-QUERY",
+    ),
+    "it must not contain spaces or control characters": (
+        "http://SECRET-HOST/SECRET PATH?token=SECRET-QUERY",
+        "http://SECRET-HOST/SECRET\x00PATH?token=SECRET-QUERY",
+    ),
+}
+
+
+class TestWatchWebhookCheck(unittest.TestCase):
+    """cmd_watch refuses a bad --webhook or config file webhook.url with one
+    line and status 1 before it checks --agent-pid, looks up the session or
+    writes anything."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.trace_dir = self.root / "traces"
+        store = TraceStore(self.trace_dir, redact=False)
+        store.create_session(SessionMeta(session_id="webhook-check", started_at=1.0))
+        store.append_event(
+            "webhook-check",
+            _make_event(EventType.TOOL_CALL, 2.0, session_id="webhook-check", tool_name="Bash"),
+        )
+        # A writable TraceStore writes this file back, so a refusal that
+        # opened the store first changes the snapshot.
+        (self.trace_dir / ".gitignore").unlink(missing_ok=True)
+        self.config = self.root / "watch.json"
+        env = patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("AGENT_STRACE_TENANT_ID", None)
+
+    def _snapshot(self):
+        return {
+            path.relative_to(self.root).as_posix(): path.read_bytes() if path.is_file() else None
+            for path in sorted(self.root.rglob("*"))
+        }
+
+    def _run(self, *flags, session="webhook-check", config=False, tenant=False, agent_pid=False):
+        argv = ["--trace-dir", str(self.trace_dir), "watch", session, *flags]
+        if config:
+            argv += ["--config", str(self.config)]
+        if tenant:
+            argv += ["--tenant-id", "acme"]
+        if agent_pid:
+            # Refused by the --agent-pid check, so the webhook check must come first.
+            argv += ["--agent-pid", "1"]
+        args = build_parser().parse_args(argv)
+        out, err = io.StringIO(), io.StringIO()
+        with patch("agent_trace.watch.watch_session") as watch_session_mock, \
+                redirect_stdout(out), redirect_stderr(err):
+            status = cmd_watch(args)
+        return status, out.getvalue(), err.getvalue(), watch_session_mock
+
+    def _write_config(self, url: str) -> None:
+        self.config.write_text(json.dumps({"webhook": {"url": url}}))
+
+    def _assert_refused(self, flags, line, config=False):
+        for session in ("webhook-check", "missing-session"):
+            for tenant in (False, True):
+                for agent_pid in (False, True):
+                    with self.subTest(
+                        flags=flags, config=config, session=session, tenant=tenant,
+                        agent_pid=agent_pid,
+                    ):
+                        before = self._snapshot()
+                        status, out, err, watch_session_mock = self._run(
+                            *flags, session=session, config=config, tenant=tenant,
+                            agent_pid=agent_pid,
+                        )
+                        self.assertEqual((status, out, err), (1, "", line))
+                        for marker in _MARKERS:
+                            self.assertNotIn(marker, err)
+                        watch_session_mock.assert_not_called()
+                        self.assertEqual(self._snapshot(), before)
+        with self.subTest(flags=flags, config=config, check="events stay untagged"):
+            store = TraceStore(self.trace_dir, read_only=True)
+            self.assertEqual(store.load_meta("webhook-check").tenant_id, "")
+            self.assertEqual(
+                [event.tenant_id for event in store.load_events("webhook-check")], [""],
+            )
+
+    def test_bad_webhook_flag_is_refused(self):
+        for reason, urls in _BAD_WEBHOOK_URLS.items():
+            for url in urls:
+                self._assert_refused(
+                    [f"--webhook={url}"], f"[watch] invalid --webhook value: {reason}\n",
+                )
+
+    def test_bad_config_webhook_url_is_refused(self):
+        for reason, urls in _BAD_WEBHOOK_URLS.items():
+            for url in urls:
+                self._write_config(url)
+                self._assert_refused(
+                    [], f"[watch] invalid webhook.url value in {self.config}: {reason}\n",
+                    config=True,
+                )
+
+    def test_bad_flag_is_named_even_with_a_config_file(self):
+        # A given --webhook overrides webhook.url, so the line names the flag.
+        for file_url in ("https://hooks.example.com/x", "hooks.example.com/SECRET"):
+            self._write_config(file_url)
+            self._assert_refused(
+                ["--webhook=hooks.example.com/services/SECRET"],
+                "[watch] invalid --webhook value: it must start with http:// or https://\n",
+                config=True,
+            )
+
+    def test_flag_replaces_a_bad_config_url_before_the_check(self):
+        # Guard: unchanged from main. Watch checks only the URL it POSTs to.
+        self._write_config("hooks.example.com/services/SECRET")
+        for flags, expected in (
+            (["--webhook=https://hooks.example.com/x"], "https://hooks.example.com/x"),
+            (["--webhook="], ""),
+        ):
+            with self.subTest(flags=flags):
+                status, _, err, watch_session_mock = self._run(*flags, config=True)
+                self.assertEqual((status, err), (0, ""))
+                self.assertEqual(watch_session_mock.call_args.args[2].webhook_url, expected)
+
+    def test_unprintable_config_path_is_shown_quoted(self):
+        self.config = self.root / "watch\n.json"
+        try:
+            self._write_config("hooks.example.com/services/SECRET")
+        except OSError:
+            self.skipTest("this file system refuses a newline in a file name")
+        self._assert_refused(
+            [],
+            f"[watch] invalid webhook.url value in {str(self.config)!r}: "
+            "it must start with http:// or https://\n",
+            config=True,
+        )
+
+    def test_empty_webhook_means_no_webhook(self):
+        # Guard: unchanged from main.
+        self._write_config("")
+        for flags, config in ((["--webhook="], False), ([], True)):
+            with self.subTest(flags=flags, config=config):
+                status, _, err, watch_session_mock = self._run(*flags, config=config)
+                self.assertEqual((status, err), (0, ""))
+                self.assertEqual(watch_session_mock.call_args.args[2].webhook_url, "")
+
+    def test_good_webhook_urls_are_accepted(self):
+        # Guard: unchanged from main.
+        urls = (
+            "https://hooks.example.com/services/T0/B0/x?token=y",
+            "http://[::1]:8080/hook",
+            "HTTP://hooks.example/x",
+            "http://127.0.0.1:9/SECRET-PATH?token=SECRET-QUERY",
+        )
+        for url in urls:
+            self._write_config(url)
+            for flags, config in (([f"--webhook={url}"], False), ([], True)):
+                with self.subTest(url=url, config=config):
+                    status, _, err, watch_session_mock = self._run(*flags, config=config)
+                    self.assertEqual((status, err), (0, ""))
+                    self.assertEqual(watch_session_mock.call_args.args[2].webhook_url, url)
 
 
 if __name__ == "__main__":
