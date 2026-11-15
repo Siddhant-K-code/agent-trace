@@ -27,7 +27,7 @@ agent-strace review                # reviewability of this branch
 
 Works with Claude Code, Codex, Copilot CLI, Gemini CLI, Cursor, and any MCP server, plus partial [Copilot cloud agent capture](docs/copilot-cloud-agent.md). Python 3.10+ standard library only. Secret redaction is on by default. Start with the [docs index](docs/index.md), [provider guides](docs/capture-matrix.md), and [PR evidence workflow](docs/ai-agent-pr-evidence.md).
 
-![demo](assets/demo.svg)
+![Terminal output of agent-strace replay, health and review on a real GitHub Copilot CLI session that fixes a small bug: replay lists the prompt, tool calls and results; health reports the evidence status and the provider's capture gaps; review reports rationale, scope, validation, stewardship and evidence health for the branch.](assets/demo.svg)
 
 > [!WARNING]
 > Experimental. Do not treat it as a production security boundary without your own threat model, controls, and testing.
