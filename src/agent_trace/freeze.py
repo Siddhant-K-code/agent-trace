@@ -358,7 +358,7 @@ def cmd_freeze(args: argparse.Namespace) -> int:
     if output:
         out_path = Path(output)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(fixture.to_json() + "\n")
+        out_path.write_text(fixture.to_json() + "\n", newline="\n")
         message = f"Frozen fixture written to {out_path}\n"
         if fmt == "json":
             sys.stderr.write(message)

@@ -107,7 +107,7 @@ def load_or_create_identity(agent_name: str = "") -> AgentIdentity:
             pass
     identity = AgentIdentity(agent_name=agent_name)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(identity.to_json())
+    path.write_text(identity.to_json(), newline="\n")
     return identity
 
 

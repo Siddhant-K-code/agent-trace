@@ -150,7 +150,9 @@ def write_repository_files(repo_root: Path, redact_env: dict[str, str] | None = 
     hooks_path = repo_root / HOOKS_RELATIVE_PATH
     script_path = repo_root / SCRIPT_RELATIVE_PATH
     hooks_path.parent.mkdir(parents=True, exist_ok=True)
-    hooks_path.write_text(json.dumps(hooks_config(redact_env), indent=2) + "\n", encoding="utf-8")
-    script_path.write_text(hook_script(), encoding="utf-8")
+    hooks_path.write_text(
+        json.dumps(hooks_config(redact_env), indent=2) + "\n", encoding="utf-8", newline="\n"
+    )
+    script_path.write_text(hook_script(), encoding="utf-8", newline="\n")
     script_path.chmod(0o755)
     return hooks_path, script_path

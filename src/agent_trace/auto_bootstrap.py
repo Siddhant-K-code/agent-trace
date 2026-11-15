@@ -156,7 +156,7 @@ def create_bootstrap_dir() -> str:
     bootstrap_dir = tempfile.mkdtemp(prefix=BOOTSTRAP_PREFIX)
     try:
         path = os.path.join(bootstrap_dir, "sitecustomize.py")
-        with open(path, "w", encoding="utf-8") as handle:
+        with open(path, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(render_sitecustomize(package_parent()))
     except BaseException:
         remove_bootstrap_dir(bootstrap_dir)

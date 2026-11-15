@@ -322,6 +322,6 @@ def cmd_policy(args: argparse.Namespace) -> int:
 
     policy_dict = render_policy_json(suggestion)
     out_path = Path(output_path)
-    out_path.write_text(json.dumps(policy_dict, indent=2) + "\n")
+    out_path.write_text(json.dumps(policy_dict, indent=2) + "\n", newline="\n")
     sys.stdout.write(f"Policy written to {out_path}\n")
     return 0

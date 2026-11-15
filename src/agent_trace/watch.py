@@ -110,7 +110,7 @@ def _alert_terminal(message: str, out: TextIO = sys.stderr) -> None:
 
 def _alert_file(message: str, log_path: str = ".agent-traces/alerts.log") -> None:
     Path(log_path).parent.mkdir(parents=True, exist_ok=True)
-    with open(log_path, "a", encoding="utf-8") as f:
+    with open(log_path, "a", encoding="utf-8", newline="\n") as f:
         ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         f.write(f"{ts}  {message}\n")
 
@@ -1259,7 +1259,7 @@ def _write_watchdog_postmortem(
 
     pm_path = store._session_dir(session_id) / "watchdog-postmortem.json"
     try:
-        pm_path.write_text(json.dumps(pm, indent=2))
+        pm_path.write_text(json.dumps(pm, indent=2), newline="\n")
         return pm_path
     except Exception:
         return None

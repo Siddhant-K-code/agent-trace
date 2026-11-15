@@ -358,7 +358,7 @@ def save_gate_baseline(path: str | Path, report: GateReport) -> None:
         "session_id": report.session_id,
         "scores": {result.name: result.score for result in report.results},
     }
-    baseline_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    baseline_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8", newline="\n")
 
 
 def load_gate_baseline(path: str | Path) -> dict[str, MetricValue]:
@@ -429,7 +429,7 @@ def write_gate_github_summary(
     overall = "PASS" if report.overall_passed else "FAIL"
     lines.extend(("", f"**Overall: {overall}** — {report.failed}/{len(report.results)} evals failed.", ""))
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with destination.open("a", encoding="utf-8") as summary:
+    with destination.open("a", encoding="utf-8", newline="\n") as summary:
         summary.write("\n".join(lines))
     return destination
 
@@ -540,7 +540,7 @@ def _save_baseline(path: str, report: "EvalReport") -> None:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     data = {r.scorer: r.score for r in report.results}
-    p.write_text(json.dumps(data, indent=2))
+    p.write_text(json.dumps(data, indent=2), newline="\n")
 
 
 def _write_github_summary(report: "EvalReport", baseline: dict[str, float], tolerance: float) -> None:
@@ -584,7 +584,7 @@ def _write_github_summary(report: "EvalReport", baseline: dict[str, float], tole
     # Write to $GITHUB_STEP_SUMMARY when running inside GitHub Actions
     gha_summary = os.environ.get("GITHUB_STEP_SUMMARY", "")
     if gha_summary:
-        with open(gha_summary, "a", encoding="utf-8") as f:
+        with open(gha_summary, "a", encoding="utf-8", newline="\n") as f:
             f.write(content)
         sys.stderr.write(f"GitHub Actions step summary written to {gha_summary}\n")
     else:
