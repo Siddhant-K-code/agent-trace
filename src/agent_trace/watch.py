@@ -5,8 +5,8 @@ configurable thresholds are exceeded. Zero new dependencies — stdlib only.
 
 Rule-based nanny (--rules rules.yaml):
   Evaluates declarative rules on every event. Supports pause (SIGSTOP/SIGCONT)
-  and kill (SIGTERM) actions with optional notifications. Auto-generates a
-  postmortem when a kill action fires.
+  and kill (SIGTERM) actions with optional notifications. A kill writes a
+  postmortem once watch has sent SIGTERM.
 
 Watchdog mode (--timeout / --budget):
   Enforces a wall-clock timeout and/or token-cost ceiling. When either limit
@@ -34,7 +34,7 @@ import time
 import urllib.error
 import urllib.request
 from collections import Counter, deque
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
@@ -163,8 +163,11 @@ def _alert_webhook(message: str, url: str) -> None:
         sys.stderr.flush()
 
 
-def _kill_process(pid: int, start_time: str | None = None) -> None:
+def _kill_process(pid: int, start_time: str | None = None) -> bool:
     """Send SIGTERM; escalate to SIGKILL after 5s in a background thread.
+
+    Return True if SIGTERM was sent. If it was not, print one line that
+    says why and return False.
 
     ``start_time`` is the agent's identity from :func:`process_identity`.
     Neither signal is sent once the PID belongs to another process, so an
@@ -172,12 +175,19 @@ def _kill_process(pid: int, start_time: str | None = None) -> None:
     """
     import threading
 
+    reason = ""
     if pid_reused(pid, start_time):
-        return
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except (ProcessLookupError, PermissionError):
-        return
+        reason = PID_REUSED_REASON
+    else:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            reason = "no process has that PID"
+        except PermissionError:
+            reason = "not allowed to signal it"
+    if reason:
+        _alert_terminal(f"Agent pid {pid} was not killed: {reason}")
+        return False
 
     def _escalate() -> None:
         time.sleep(5)
@@ -190,6 +200,7 @@ def _kill_process(pid: int, start_time: str | None = None) -> None:
 
     t = threading.Thread(target=_escalate, daemon=True)
     t.start()
+    return True
 
 
 def _pause_process(pid: int) -> None:
@@ -615,7 +626,8 @@ class WatcherConfig:
     operation_rules: list[OperationRule] = field(default_factory=list)
     # Token budget threshold (1–100, percentage of context window)
     max_context_pct: int = 90
-    # Watchdog: command to run after kill, with {post_mortem_path} substituted
+    # Watchdog: command to run once, after watch sends the agent SIGTERM,
+    # with {post_mortem_path} substituted
     on_death_cmd: str = ""
     # Built-in rule names enabled via --rules mcp-poisoning,budget:$5,...
     built_in_rules: set[str] = field(default_factory=set)
@@ -1119,6 +1131,9 @@ class WatchState:
     agent_start_time: str | None = None
     # True once watch has said it cannot signal because no PID is known
     warned_no_agent_pid: bool = False
+    # True once watch has sent the agent SIGTERM. Watch then sends that PID
+    # no other signal, so the post-mortem and --on-death happen once.
+    agent_killed: bool = False
     # Token budget watcher (lazy-initialised on first LLM_REQUEST)
     token_budget_watcher: object | None = None
     # Nanny rule metrics
@@ -1255,6 +1270,39 @@ def _send_network_alerts(
         _alert_webhook(f"[{notify}] {message}", config.webhook_url)
 
 
+def _say_already_killed(state: WatchState, extra: str = "") -> None:
+    """Say that watch skipped a signal because it already killed the agent."""
+    who = f"Agent pid {state.agent_pid}" if state.agent_pid else "The agent"
+    _alert_terminal(f"{who} was already killed; no signal sent{extra}")
+
+
+def _kill_agent(
+    message: str,
+    config: WatcherConfig,
+    state: WatchState,
+    store: TraceStore | None,
+    session_id: str,
+) -> None:
+    """SIGTERM the agent, then write the post-mortem and run --on-death.
+
+    The post-mortem and --on-death follow only when SIGTERM was sent, and
+    run once: after this, watch sends the agent no other signal.
+    """
+    _alert_terminal(f"Killing agent process {state.agent_pid}")
+    if not _kill_process(state.agent_pid, state.agent_start_time):
+        return
+    state.agent_killed = True
+    pm_path: Path | None = None
+    if store and session_id:
+        pm_path = _write_watchdog_postmortem(
+            store, session_id, state, reason=message, config=config
+        )
+        if pm_path:
+            _alert_terminal(f"Post-mortem written to {pm_path}")
+    if config.on_death_cmd:
+        _invoke_on_death(config.on_death_cmd, pm_path)
+
+
 def _dispatch_alert(
     message: str,
     config: WatcherConfig,
@@ -1264,15 +1312,20 @@ def _dispatch_alert(
     dry_run: bool = False,
     store: TraceStore | None = None,
     session_id: str = "",
-    after_action: Callable[[], None] | None = None,
 ) -> None:
     """Show, log and act on one alert, then send it over the network.
 
     Order: the terminal line, the alert log (file, kill and pause actions),
-    the pause or kill (or the dry-run line), *after_action* (not on a dry
-    run), then the --webhook POST and Slack/Teams. No channel failure
-    raises, so none can stop or delay the pause or kill. A require_approval
-    action sends nothing over the network.
+    the pause or kill (or the dry-run line), then the --webhook POST and
+    Slack/Teams. A kill sends SIGTERM and, only if it was sent, writes the
+    post-mortem (when *store* and *session_id* are given) and runs
+    --on-death with its path. No channel failure raises, so none can stop
+    or delay the pause or kill. A require_approval action sends nothing
+    over the network.
+
+    Once watch has sent SIGTERM it sends the agent no other signal: a later
+    kill, pause or require_approval alert says the agent was already killed
+    instead, and creates no approval request.
     """
     action = action or config.on_violation
     # terminal is always shown regardless of action so the operator watching
@@ -1284,6 +1337,9 @@ def _dispatch_alert(
             _alert_terminal(
                 f"[dry-run] would pause agent and require approval for rule '{rule_name}'"
             )
+            return
+        if state.agent_killed:
+            _say_already_killed(state, " and no approval request created")
             return
         if state.pause_owner == PAUSE_APPROVAL:
             _alert_terminal(
@@ -1336,30 +1392,20 @@ def _dispatch_alert(
         _send_network_alerts(message, config, action, notify=notify, session_id=session_id)
         return
 
-    if action == "kill" or (action == "pause" and not state.paused):
-        _agent_pid_reused(state, alert_log=config.alert_log)
-    if action in ("pause", "kill") and not state.agent_pid:
-        _warn_no_agent_pid(state, f"{action} the agent")
-    elif action == "pause" and not state.paused:
-        _alert_terminal(f"Pausing agent process {state.agent_pid} (SIGSTOP)")
-        _pause_process(state.agent_pid)
-        state.pause_owner = PAUSE_RULE
-    elif action == "kill":
-        _alert_terminal(f"Killing agent process {state.agent_pid}")
-        # Write watchdog post-mortem JSON before killing
-        pm_path: Path | None = None
-        if store and session_id:
-            pm_path = _write_watchdog_postmortem(
-                store, session_id, state, reason=message, config=config
-            )
-            if pm_path:
-                _alert_terminal(f"Post-mortem written to {pm_path}")
-        if config.on_death_cmd:
-            _invoke_on_death(config.on_death_cmd, pm_path)
-        _kill_process(state.agent_pid, state.agent_start_time)
+    if action in ("pause", "kill") and state.agent_killed:
+        _say_already_killed(state)
+    elif action in ("pause", "kill"):
+        if action == "kill" or not state.paused:
+            _agent_pid_reused(state, alert_log=config.alert_log)
+        if not state.agent_pid:
+            _warn_no_agent_pid(state, f"{action} the agent")
+        elif action == "kill":
+            _kill_agent(message, config, state, store, session_id)
+        elif not state.paused:
+            _alert_terminal(f"Pausing agent process {state.agent_pid} (SIGSTOP)")
+            _pause_process(state.agent_pid)
+            state.pause_owner = PAUSE_RULE
 
-    if after_action is not None:
-        after_action()
     _send_network_alerts(message, config, action, notify=notify, session_id=session_id)
 
 
@@ -1439,28 +1485,15 @@ def _dispatch_nanny_rule(
     config: WatcherConfig,
     dry_run: bool = False,
 ) -> None:
-    """Fire a nanny rule: alert, pause, or kill."""
+    """Fire a nanny rule: alert, pause, require approval, or kill.
+
+    A kill takes the same path as a watcher kill, so the post-mortem and
+    --on-death come from _dispatch_alert, after SIGTERM is sent.
+    """
     msg = f"NannyRule '{rule.name}': {rule.condition} → {rule.action}"
-    # The approval path needs the store; kill post-mortems are written below.
-    approval_store = store if rule.action == "require_approval" else None
-
-    def write_post_mortem() -> None:
-        # Auto-generate postmortem on kill
-        pm_path = _write_watchdog_postmortem(
-            store, session_id, state, reason=msg, config=config
-        )
-        if pm_path:
-            _alert_terminal(f"Post-mortem written to {pm_path}")
-        on_death = getattr(config, "on_death_cmd", "")
-        if on_death:
-            _invoke_on_death(on_death, pm_path)
-
-    # _dispatch_alert runs write_post_mortem after the kill and before the
-    # network alerts, and skips it on a dry run.
     _dispatch_alert(
         msg, config, state, action=rule.action, notify=rule.notify,
-        dry_run=dry_run, store=approval_store, session_id=session_id,
-        after_action=write_post_mortem if rule.action == "kill" else None,
+        dry_run=dry_run, store=store, session_id=session_id,
     )
 
 
@@ -1796,10 +1829,13 @@ def _check_pause_file(store: "TraceStore", state: "WatchState", out: "TextIO") -
     Marker removed → SIGCONT, but only if the editor owns the pause. A rule
     pause is handed to the editor when the marker appears, so pausing and
     then resuming from the editor releases it. An approval pause is never
-    released by the marker; only the approval decision ends it.
+    released by the marker; only the approval decision ends it. Once watch
+    has killed the agent the marker is ignored: watch sends no other signal.
     """
     _check_approval_decision(store, state, out)
     _check_agent_alive(state, out)
+    if state.agent_killed:
+        return
     wants_pause = _editor_wants_pause(store, state.session_id)
     if wants_pause is None:
         return

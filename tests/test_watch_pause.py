@@ -435,9 +435,11 @@ class TestReusedAgentPid(PauseTestCase):
 
 
 class TestKillProcessIdentity(unittest.TestCase):
-    """_kill_process checks the identity before SIGTERM and before SIGKILL."""
+    """_kill_process checks the identity before SIGTERM and before SIGKILL,
+    and returns whether it sent SIGTERM."""
 
-    def _kill(self, reused):
+    def _kill(self, reused, kill_error=None):
+        """Return the signals sent, the result and the lines printed."""
         class SyncThread:
             def __init__(self, target, daemon):
                 self.target = target
@@ -445,22 +447,43 @@ class TestKillProcessIdentity(unittest.TestCase):
             def start(self):
                 self.target()
 
+        def os_kill(pid, sig):
+            if kill_error is not None and sig == signal.SIGTERM:
+                raise kill_error
+
         with patch("agent_trace.watch.pid_reused", side_effect=reused), \
-             patch("os.kill") as kill, patch("threading.Thread", SyncThread), \
-             patch("agent_trace.watch.time.sleep"):
-            _kill_process(PID, "proc:100")
-        return [c.args for c in kill.call_args_list]
+             patch("os.kill", side_effect=os_kill) as kill, \
+             patch("threading.Thread", SyncThread), \
+             patch("agent_trace.watch.time.sleep"), \
+             patch("agent_trace.watch._alert_terminal") as terminal:
+            result = _kill_process(PID, "proc:100")
+        lines = [c.args[0] for c in terminal.call_args_list]
+        return [c.args for c in kill.call_args_list], result, lines
 
     def test_reused_pid_gets_no_signal(self):
-        self.assertEqual(self._kill([True]), [])
+        self.assertEqual(self._kill([True]), (
+            [], False, [f"Agent pid {PID} was not killed: the PID now belongs to another process"],
+        ))
 
     def test_pid_reused_after_sigterm_gets_no_sigkill(self):
-        self.assertEqual(self._kill([False, True]), [(PID, signal.SIGTERM)])
+        self.assertEqual(self._kill([False, True]), ([(PID, signal.SIGTERM)], True, []))
 
     def test_same_process_is_escalated(self):
         self.assertEqual(
-            self._kill([False, False]), [(PID, signal.SIGTERM), (PID, signal.SIGKILL)],
+            self._kill([False, False]),
+            ([(PID, signal.SIGTERM), (PID, signal.SIGKILL)], True, []),
         )
+
+    def test_failed_sigterm_says_why_and_sends_no_sigkill(self):
+        for error, reason in (
+            (ProcessLookupError(), "no process has that PID"),
+            (PermissionError(), "not allowed to signal it"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                self.assertEqual(self._kill([False, False], error), (
+                    [(PID, signal.SIGTERM)], False,
+                    [f"Agent pid {PID} was not killed: {reason}"],
+                ))
 
 
 class TestWatchSessionLoop(PauseTestCase):
