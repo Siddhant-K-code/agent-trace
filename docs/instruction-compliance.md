@@ -108,7 +108,9 @@ Each run contains:
 - `compliance.follow.instruction_actions` for expected observable actions;
 - `compliance.validation` for tests, the last linked test result, errors, and
   session completion after the earliest observed load. It also reports
-  observed and unavailable result-correlation counts;
+  observed and unavailable result-correlation counts. An observed last test
+  result carries `runner_summary`, the runner's own final summary outcome
+  read as in [review Validation](review.md#findings);
 - `compliance.analysis` and `compliance.warnings` when malformed or unreadable
   session evidence prevents a bounded conclusion;
 - `compliance.evidence_counts` using observed, inferred, missing, and

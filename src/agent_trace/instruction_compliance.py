@@ -182,7 +182,15 @@ def _result_correlation(call: TraceEvent, events: list[TraceEvent]) -> dict[str,
         "reason": None,
         "linked_results": 1,
         **_result_fact(result),
+        "runner_summary": _runner_summary(call, result),
     }
+
+
+def _runner_summary(call: TraceEvent, result: TraceEvent) -> dict[str, str]:
+    """Return ``{runner: outcome}`` read from the test runner's own summary."""
+    from .reviewability import runner_summaries
+
+    return runner_summaries(_tool_command(call), result)
 
 
 def _validation_facts(events: list[TraceEvent], after_timestamp: float | None) -> dict[str, object]:

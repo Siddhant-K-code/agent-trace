@@ -288,7 +288,11 @@ Outcome facts sit next to the load. They do not mean the skill caused them.
 - `tests_run` uses the [session review projection](session-review-projection.md)
   test classifier.
 - `last_test` shows the linked result's `exit_code` and `success` when they
-  were recorded. Result text is not parsed.
+  were recorded. `runner_summary` maps each test runner to `passed` or
+  `failed` when the result holds that runner's final summary, read by the
+  same strict rules as [review Validation](review.md#findings). The text
+  output prints it as `unittest summary passed`. No other result text is
+  parsed or printed.
 - `errors` and `session_end_recorded` are also reported.
 
 ## Aggregate mode
