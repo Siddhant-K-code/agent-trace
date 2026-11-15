@@ -101,12 +101,13 @@ agent-strace export <session-id> --format otlp \
   --endpoint http://localhost:4318
 ```
 
-Or send directly to Grafana Cloud:
+Or send directly to Grafana Cloud. `tr -d '\n'` removes the line breaks GNU
+`base64` adds to long output, because a header value must be one line:
 
 ```bash
 agent-strace export <session-id> --format otlp \
   --endpoint https://otlp-gateway-<zone>.grafana.net/otlp \
-  --header "Authorization: Basic $(echo -n $GRAFANA_INSTANCE_ID:$GRAFANA_API_KEY | base64)"
+  --header "Authorization: Basic $(printf '%s' "$GRAFANA_INSTANCE_ID:$GRAFANA_API_KEY" | base64 | tr -d '\n')"
 ```
 
 ## Jaeger

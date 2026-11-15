@@ -1350,18 +1350,58 @@ Track changes to AGENTS.md and other config files. `check` exits 1 when config h
 ### `export`
 ```
 agent-strace export <session-id> [--format json|csv|ndjson|otlp|otlp-genai|temporal|eu-ai-act]
-                    [--endpoint URL] [--header KEY:VALUE] [--service-name NAME]
+                    [--endpoint URL] [--header 'NAME: VALUE'] [--service-name NAME]
                     [--anonymize] [--scores] [--metrics] [--backend otlp|langfuse]
                     [--all] [--since DURATION_OR_DATE] [--until DATE] [--output FILE]
 ```
 Export a session. See [production.md](production.md) for per-backend OTLP setup.
 
 `--format otlp-genai` writes OTLP/HTTP JSON with the project's
-`gen_ai.*` convention and additive OpenInference attributes. With
-`--endpoint`, the command appends `/v1/traces`. Use the endpoint base, such as
-`http://localhost:6006` for Phoenix or
-`https://cloud.langfuse.com/api/public/otel` for Langfuse. Repeated `--header`
-flags add backend authentication headers.
+`gen_ai.*` convention and additive OpenInference attributes.
+
+`--format otlp`, `otlp-genai` and `temporal` write the payload to `--output`
+or to `trace-<12-character session ID>-<format>.json`. With `--endpoint URL`
+they POST it to an OTLP/HTTP collector instead. Give the collector's base URL:
+export drops trailing slashes from the path and appends `/v1/traces` unless
+the path already ends with it, and keeps the query string. This is the rule
+`watch --stream-otlp` uses:
+
+| `--endpoint` | Spans are POSTed to |
+|---|---|
+| `http://localhost:6006` (Phoenix) | `http://localhost:6006/v1/traces` |
+| `http://localhost:4318/v1/traces` | `http://localhost:4318/v1/traces` |
+| `https://cloud.langfuse.com/api/public/otel/` | `https://cloud.langfuse.com/api/public/otel/v1/traces` |
+| `https://otel.example.com/ingest?team=a` | `https://otel.example.com/ingest/v1/traces?team=a` |
+
+`--header 'NAME: VALUE'` adds a request header, such as an API key; repeat it
+for more headers. It is read only with `--endpoint`. Spaces around the name
+and the value are dropped. The name may contain only ASCII letters, digits and
+``!#$%&'*+-.^_`|~``, the value must be printable ASCII and not empty, and no
+name may be given twice, in any letter case.
+
+Export checks `--endpoint` and `--header` before it reads the session or
+writes anything. It refuses these with one line on stderr and exit 1:
+
+- `--endpoint` where it would be ignored: with `--format json`, `csv`,
+  `ndjson` or `eu-ai-act`, or with `--anonymize`, `--scores`, `--metrics` or
+  `--backend`. The line names the flag to use instead, such as
+  `--otlp-endpoint` for `--backend otlp` and `--langfuse-host` for Langfuse.
+- An `--endpoint` that is empty, does not start with `http://` or `https://`,
+  has no host or a bad port, contains spaces or control characters, or carries
+  a user name or password: `invalid --endpoint value: <reason>`.
+- A `--header` that breaks the rules above. The line names it by position:
+  `invalid --header 2: its value is empty`.
+
+The lines never repeat the URL or a header, which can carry a token.
+
+The POST does not follow redirects, so pass the final URL. Any 2xx answer is
+success: export prints `Exported N events to scheme://host[:port] (HTTP code)`
+and exits 0. Any other answer, a network error, or no answer within 30 seconds
+prints `OTLP export to scheme://host[:port] failed: <reason>` and exits 1. When
+the collector sent an error body, its first 200 characters follow on a second,
+indented line, with escape codes, line breaks and other unprintable characters
+replaced by spaces. These lines name only the URL's `scheme://host[:port]`,
+never its path, query or user info, or a header value.
 
 `--format otlp` and `otlp-genai` emit `gen_ai.conversation.id` with the
 agent's own session ID when the session has one (hook payloads that carry
