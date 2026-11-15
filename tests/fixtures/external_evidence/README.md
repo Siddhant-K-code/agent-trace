@@ -11,5 +11,8 @@ Synthetic inputs for `tests/test_external_evidence.py`. No real sessions.
 - `other_service_otel.json`: another tool's OTel export, so no Claude Code events.
 - `copilot_squash_message.txt`: a squash-merge message with `Agent-Logs-Url` lines in
   the body.
+- `copilot_coauthor_squash_message.txt`: a squash-merge message whose body has an
+  indented Copilot cloud agent `Co-authored-by` line and no `Agent-Logs-Url`, the
+  commit shape seen on Siddhant-K-code/agent-trace-demo#3.
 - `entire_body_trailer_message.txt`: an `Entire-Checkpoint` line outside the final
   trailer block.

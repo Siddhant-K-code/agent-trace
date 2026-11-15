@@ -281,7 +281,8 @@ _TOOLS: list[dict] = [
                     "type": "string",
                     "description": (
                         "Git revision range to read Entire-Checkpoint and Agent-Logs-Url "
-                        "trailers from, such as origin/main..HEAD. Reported, not graded."
+                        "trailers and Copilot cloud agent authors and co-authors from, such "
+                        "as origin/main..HEAD. Reported, not graded."
                     ),
                     "default": "",
                 },

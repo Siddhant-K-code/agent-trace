@@ -146,8 +146,9 @@ The matrix covers what agent-strace hooks capture. Evidence other tools
 recorded is read separately and reported as
 [external evidence](evidence-health.md#external-evidence), never as capture
 coverage: Entire checkpoints and their push state, Copilot cloud agent
-`Agent-Logs-Url` trailers, and Claude Code OpenTelemetry `safety_event`
-records. Pass `--commits RANGE` or `--otel-logs FILE` to `health` or
+commits (`Agent-Logs-Url` trailers, or the agent as author or co-author when
+no trailer is present, the format observed on 2026-11-16), and Claude Code
+OpenTelemetry `safety_event` records. Pass `--commits RANGE` or `--otel-logs FILE` to `health` or
 `review`.
 
 ## Machine-readable coverage values

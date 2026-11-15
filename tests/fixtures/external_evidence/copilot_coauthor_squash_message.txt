@@ -1,0 +1,11 @@
+Add char_count text helper (#3)
+
+* Initial plan
+
+* Add char_count text helper
+
+  Co-authored-by: copilot-swe-agent[bot] <198982749+Copilot@users.noreply.github.com>
+
+---------
+
+Co-authored-by: octocat <octocat@users.noreply.github.com>

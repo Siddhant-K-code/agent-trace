@@ -19,9 +19,11 @@ from agent_trace.external_evidence import (
     assess_commits,
     assess_otel_logs,
     collect_external_evidence,
+    copilot_agent_coauthored,
     copilot_log_urls,
     entire_checkpoints,
     final_trailer_block,
+    is_copilot_agent,
 )
 from agent_trace.health import cmd_health
 from agent_trace.models import EventType, SessionMeta, TraceEvent
@@ -40,6 +42,10 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures" / "external_evidence"
 SECRET = "zebra-quartz-77"
 ULID = "01JABCDEFGHJKMNPQRSTVWXYZ0"
 LEGACY = "abcdef123456"
+AGENT_COAUTHOR = (
+    "Co-authored-by: copilot-swe-agent[bot] <198982749+Copilot@users.noreply.github.com>"
+)
+APP_COAUTHOR = "Co-authored-by: Copilot App <223556219+Copilot@users.noreply.github.com>"
 SESSION_URL = "https://github.com/octo-org/sheet/sessions/7f6a2b1c-1d2e-4f3a-9b8c-0d1e2f3a4b5c"
 HAS_GIT = shutil.which("git") is not None
 
@@ -86,6 +92,27 @@ class TestTrailerParsing(unittest.TestCase):
 
     def test_copilot_urls_in_squash_body(self):
         self.assertEqual(copilot_log_urls(_fixture("copilot_squash_message.txt")), [SESSION_URL])
+
+    def test_copilot_agent_identity_is_strict(self):
+        self.assertTrue(is_copilot_agent("copilot-swe-agent[bot]", "x@example.com"))
+        self.assertTrue(is_copilot_agent("Copilot", "198982749+Copilot@users.noreply.github.com"))
+        self.assertTrue(is_copilot_agent(
+            "x", "198982749+copilot-swe-agent[bot]@users.noreply.github.com"
+        ))
+        for name, email in (
+            ("Copilot App", "223556219+Copilot@users.noreply.github.com"),
+            ("Copilot", "copilot@example.com"),
+            ("copilot-swe-agent", "1198982749+Copilot@users.noreply.github.com"),
+            ("octocat", "198982749+Copilot@users.noreply.github.com.evil"),
+        ):
+            with self.subTest(name=name, email=email):
+                self.assertFalse(is_copilot_agent(name, email))
+
+    def test_copilot_agent_coauthor_lines(self):
+        self.assertTrue(copilot_agent_coauthored(f"Add helper\n\n{AGENT_COAUTHOR}\n"))
+        self.assertTrue(copilot_agent_coauthored(_fixture("copilot_coauthor_squash_message.txt")))
+        self.assertFalse(copilot_agent_coauthored(f"Local change\n\n{APP_COAUTHOR}\n"))
+        self.assertFalse(copilot_agent_coauthored("x\n\nThanks copilot-swe-agent[bot] for this.\n"))
 
 
 @unittest.skipUnless(HAS_GIT, "git is required")
@@ -238,6 +265,55 @@ class TestCommitSignals(_RepoCase):
         self.assertEqual(signal.facts["commits"], [sha])
         self.assertIn("not read", signal.detail)
         self.assertIn("does not show complete evidence", signal.detail)
+
+    def test_agent_coauthor_without_link_is_inconclusive(self):
+        # The commit shape seen on Siddhant-K-code/agent-trace-demo#3 on 2026-11-16.
+        self.commit("Initial plan")
+        sha = self.commit(f"Add char_count text helper\n\n{AGENT_COAUTHOR}\n")
+        [signal] = _by_source(self.signals(), "copilot_agent_logs")
+        self.assertEqual((signal.status, signal.confidence), ("inconclusive", "medium"))
+        self.assertEqual(signal.subject, "")
+        self.assertEqual(
+            signal.detail,
+            "1 of 2 commits read names the Copilot cloud agent as author or co-author, but "
+            "no commit has an Agent-Logs-Url trailer, so no session log link was found.",
+        )
+        self.assertEqual(signal.facts["commits"], [sha])
+        self.assertEqual((signal.facts["agent_authored"], signal.facts["agent_coauthored"]), (0, 1))
+        self.assertEqual(signal.facts["commits_read"], 2)
+
+    def test_agent_author_without_link_is_inconclusive(self):
+        agent = {
+            "GIT_AUTHOR_NAME": "Copilot",
+            "GIT_AUTHOR_EMAIL": "198982749+Copilot@users.noreply.github.com",
+        }
+        self.git("commit", "-q", "--allow-empty", "-m", "a", env=agent)
+        self.git("commit", "-q", "--allow-empty", "-m", "b", env=agent)
+        [signal] = _by_source(self.signals(), "copilot_agent_logs")
+        self.assertEqual((signal.status, signal.confidence), ("inconclusive", "medium"))
+        self.assertIn("2 of 2 commits read name the Copilot cloud agent", signal.detail)
+        self.assertEqual((signal.facts["agent_authored"], signal.facts["agent_coauthored"]), (2, 0))
+
+    def test_agent_coauthor_in_squash_body_is_inconclusive(self):
+        self.commit(_fixture("copilot_coauthor_squash_message.txt"))
+        [signal] = _by_source(self.signals(), "copilot_agent_logs")
+        self.assertEqual((signal.status, signal.confidence), ("inconclusive", "medium"))
+
+    def test_copilot_app_coauthor_is_still_missing(self):
+        self.commit(f"Local change\n\n{APP_COAUTHOR}\n")
+        [signal] = _by_source(self.signals(), "copilot_agent_logs")
+        self.assertEqual((signal.status, signal.confidence), ("missing", "high"))
+        self.assertEqual(
+            signal.detail,
+            "No Agent-Logs-Url trailer and no Copilot cloud agent author or co-author; "
+            "1 commit read.",
+        )
+
+    def test_link_wins_over_agent_commits(self):
+        self.commit(f"a\n\n{AGENT_COAUTHOR}\n")
+        self.commit(f"b\n\nAgent-Logs-Url: {SESSION_URL}\n{AGENT_COAUTHOR}\n")
+        signals = _by_source(self.signals(), "copilot_agent_logs")
+        self.assertEqual([(s.status, s.confidence) for s in signals], [("present", "low")])
 
     def test_unrecognized_copilot_link_is_inconclusive(self):
         self.commit("x\n\nAgent-Logs-Url: https://example.com/logs?id=1\n")
@@ -402,6 +478,21 @@ class TestHealthAndReview(_RepoCase):
         self.assertIn(f"- Entire checkpoint `{ULID}`: unpushed (high).", markdown)
         self.assertIn("- Claude Code OTel `claude_otel_safety.json`: present (medium).", markdown)
         self.assertNotIn(SECRET, markdown)
+
+    def test_agent_commits_without_link_never_change_findings_or_exit(self):
+        start = self.git("rev-parse", "HEAD")
+        self.commit(f"Add helper\n\n{AGENT_COAUTHOR}\n")
+        external = collect_external_evidence(f"{start}..HEAD", cwd=self.repo)
+        [signal] = _by_source(external.signals, "copilot_agent_logs")
+        self.assertEqual(signal.status, "inconclusive")
+        linked = [LinkedSession(self.session_id, "branch")]
+        plain = build_report(self.store, linked, Threshold(), branch="main")
+        report = build_report(self.store, linked, Threshold(), branch="main", external=external)
+        self.assertEqual(
+            [(f.name, f.status, f.confidence, f.detail) for f in plain.findings],
+            [(f.name, f.status, f.confidence, f.detail) for f in report.findings],
+        )
+        self.assertEqual(plain.exit_code, report.exit_code)
 
     def test_review_cli_json_and_no_session(self):
         code, out, err = self.run_cmd(

@@ -42,8 +42,9 @@ Each finding has a status, a confidence, and the source of its evidence.
 
 With `--commits RANGE` or `--otel-logs FILE`, the evidence health finding also
 lists [external evidence](evidence-health.md#external-evidence): Entire
-checkpoints, including a trailer present but not pushed, Copilot
-`Agent-Logs-Url` trailers, and Claude Code `safety_event` records. Each signal
+checkpoints, including a trailer present but not pushed, Copilot cloud agent
+commits (the `Agent-Logs-Url` trailer, or the agent as commit author or
+co-author when the trailer is absent), and Claude Code `safety_event` records. Each signal
 has a source, a status and a confidence. They are reported, not graded.
 
 Statuses:

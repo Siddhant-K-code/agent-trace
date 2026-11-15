@@ -252,7 +252,7 @@ declares known gaps, so their sessions are at least `partial`.
 | Flag | Description |
 |---|---|
 | `--format text\|json` | Output format (default: `text`) |
-| `--commits RANGE` | Git revision range, such as `origin/main..HEAD`, to read `Entire-Checkpoint` and `Agent-Logs-Url` trailers from |
+| `--commits RANGE` | Git revision range, such as `origin/main..HEAD`, to read `Entire-Checkpoint` and `Agent-Logs-Url` trailers and Copilot cloud agent authors and co-authors from |
 | `--otel-logs FILE` | Claude Code OpenTelemetry logs export (OTLP JSON or JSON Lines) to read `safety_event` from |
 
 `--commits` and `--otel-logs` add [external evidence](evidence-health.md#external-evidence)
@@ -265,7 +265,7 @@ that is not a revision expression exits 2.
 ```
 External evidence (commits origin/main..HEAD):
   - Entire checkpoint 01JD4S7Y2V9Q8M3K5N6P7R8T0W: unpushed (high). Trailer present in 1 commit, not pushed: the checkpoint ref is local and waiting in Entire's push queue.
-  - Copilot agent logs: missing (high). No Agent-Logs-Url trailer; 3 commits read.
+  - Copilot agent logs: missing (high). No Agent-Logs-Url trailer and no Copilot cloud agent author or co-author; 3 commits read.
   Reported, not graded: never changes a status or the exit code.
 ```
 
@@ -1762,7 +1762,7 @@ never printed. See [review.md](review.md).
 | `--cognitive-debt FILE` | JSON from `cognitive-debt --format json`. Reads `schema_version` 1 and `status`. `unknown` is unavailable, never a pass. |
 | `--cognitive-debt-mode report\|check` | `report` adds the result. `check` also fails unless the result is a pass (default: `report`). |
 | `--artifact-url URL` | https URL of the uploaded artifact. Without it, files are shown as not uploaded. |
-| `--commits RANGE` | Git revision range to read `Entire-Checkpoint` and `Agent-Logs-Url` trailers from |
+| `--commits RANGE` | Git revision range to read `Entire-Checkpoint` and `Agent-Logs-Url` trailers and Copilot cloud agent authors and co-authors from |
 | `--otel-logs FILE` | Claude Code OpenTelemetry logs export to read `safety_event` from |
 
 `--commits` and `--otel-logs` add [external evidence](evidence-health.md#external-evidence)

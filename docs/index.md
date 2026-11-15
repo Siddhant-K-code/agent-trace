@@ -21,7 +21,7 @@ canonical flag reference.
 - [GitHub Copilot CLI observability](github-copilot-cli-observability.md)
 - [Evidence health](evidence-health.md): what a trace could not prove, and
   [external evidence](evidence-health.md#external-evidence) from Entire,
-  Copilot `Agent-Logs-Url` trailers, and Claude Code OpenTelemetry.
+  Copilot cloud agent commits, and Claude Code OpenTelemetry.
 - [Session evidence review](session-review-projection.md): shared dashboard and
   VS Code review schema, filters, relationships, and local actions.
 - [VS Code evidence review](vscode.md#evidence-review)
