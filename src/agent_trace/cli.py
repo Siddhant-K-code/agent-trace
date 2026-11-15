@@ -2127,9 +2127,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_watch.add_argument("--agent-pid", dest="agent_pid", type=int, metavar="PID",
                          help="agent process to pause, resume and kill; without it watch "
                               "only alerts (the process must exist at startup)")
-    p_watch.add_argument("--max-retries", type=int, default=5, help="max retries before alert (default: 5)")
-    p_watch.add_argument("--max-cost", type=float, default=10.0, help="max cost in dollars (default: 10)")
-    p_watch.add_argument("--max-duration", type=int, default=1800, help="max duration in seconds (default: 1800)")
+    # Flags that a --config file can also set default to None, so cmd_watch
+    # can tell a given flag (which overrides the file) from an absent one.
+    p_watch.add_argument("--max-retries", type=int, help="max retries before alert (default: 5)")
+    p_watch.add_argument("--max-cost", type=float, help="max cost in dollars (default: 10)")
+    p_watch.add_argument("--max-duration", type=int, help="max duration in seconds (default: 1800)")
     p_watch.add_argument("--timeout", metavar="DURATION",
                          help="wall-clock timeout before killing the agent (e.g. 30m, 2h, 90s); "
                               "alias for --max-duration with human-readable units")
@@ -2143,12 +2145,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_watch.add_argument("--on-death", dest="on_death", metavar="CMD",
                          help="command to run after the agent is killed; "
                               "{post_mortem_path} is substituted with the post-mortem JSON path")
-    p_watch.add_argument("--on-violation", choices=["terminal", "file", "kill"], default="terminal",
+    p_watch.add_argument("--on-violation", choices=["terminal", "file", "kill"],
                          help="action on violation (default: terminal)")
     p_watch.add_argument("--webhook", help="webhook URL for alerts")
-    p_watch.add_argument("--config", help="path to .agent-watch.json config file")
-    p_watch.add_argument("--max-context-pct", type=int, default=90, dest="max_context_pct",
-                         help="alert when context window is this %% full (default: 90)")
+    p_watch.add_argument("--config", metavar="FILE",
+                         help="JSON watch config file; watch refuses one it cannot use, "
+                              "and flags given on the command line override it")
+    p_watch.add_argument("--max-context-pct", type=int, dest="max_context_pct", metavar="N",
+                         help="alert when context window is this %% full, 1 to 100 (default: 90)")
     p_watch.add_argument(
         "--compaction-checkpoint", action="store_true",
         help="write a recovery checkpoint before context saturation",

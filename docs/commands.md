@@ -504,7 +504,7 @@ checkpoint setup.
 ### `watch`
 ```
 agent-strace watch [session-id] [--agent-pid PID] [--timeout DURATION] [--budget DOLLARS]
-                   [--on-violation ACTION]
+                   [--on-violation ACTION] [--config FILE]
                    [--on-death CMD] [--policy FILE] [--rules FILE_OR_BUILTINS] [--stream-to URL]
                    [--stream-otlp] [--stream-batch-size N] [--stream-flush-interval S]
                    [--loop-threshold N] [--loop-window N] [--max-context-pct N]
@@ -520,7 +520,9 @@ Live session monitor with kill-switch rules.
 | `--budget DOLLARS` | Kill when spend exceeds this many dollars. Pass a plain number such as `5`, not `$5` |
 | `--loop-threshold N` | Alert when the same tool call and arguments repeat N times; default is 3 |
 | `--loop-window N` | Number of recent events to scan for repeated identical tool calls; default is 10 |
-| `--on-violation terminal\|file\|kill` | Action when a rule fires |
+| `--on-violation terminal\|file\|kill` | Action when a rule fires (default: `terminal`) |
+| `--config FILE` | JSON file that sets watch limits and actions; see **Config file** below. Watch refuses a file it cannot use, with one line and exit 1, before it reads the session or writes anything. Flags given on the command line override the file |
+| `--max-context-pct N` | Alert when the session's input tokens reach N percent of the model's context window (default: `90`). N must be from 1 to 100; any other value is refused at startup |
 | `--on-death CMD` | Command to run after kill (receives `{post_mortem_path}`) |
 | `--compaction-checkpoint` | Write a recovery checkpoint before context saturation |
 | `--checkpoint-at RATIO` | Context fill ratio that triggers a checkpoint (default: `0.80`) |
@@ -596,13 +598,67 @@ the idle timeout does not count; the pause is dropped if the agent process
 exits. `--dry-run` reports a `require_approval` rule without pausing or
 creating a request.
 
-Built-in `loop` rule config:
-```yaml
-watchers:
-  loop:
-    identical_calls: 3
-    window: 10
+**Config file** (`--config FILE`):
+```json
+{
+  "watchers": {
+    "retry": { "max": 5, "alert": "kill" },
+    "cost": { "max_dollars": 10 },
+    "duration": { "max_minutes": 30 },
+    "loop": { "identical_calls": 3, "window": 10, "sequence_length": 3, "max_repeats": 3 },
+    "scope": { "policy": ".agent-scope.json" }
+  },
+  "webhook": { "url": "https://hooks.example.com/agent-watch" },
+  "operation_rules": [
+    { "tool": "bash", "pattern": "rm -rf *", "action": "block", "reason": "destructive delete" }
+  ],
+  "max_context_pct": 90,
+  "built_in_rules": ["mcp-poisoning"],
+  "cognitive_debt_threshold": null
+}
 ```
+
+Every key is optional. A key that is not in the file keeps its default.
+
+| Key | Value | Default | Overridden by |
+|---|---|---|---|
+| `watchers.retry.max` | Whole number, 0 or more: alert when the same Bash command runs more than this many times | `5` | `--max-retries` |
+| `watchers.retry.alert` | `terminal`, `file`, `kill`, `pause` or `require_approval`. This is the action for every watcher, not only retries | `terminal` | `--on-violation` |
+| `watchers.cost.max_dollars` | Number, 0 or more | `10` | `--max-cost`, `--budget` |
+| `watchers.duration.max_minutes` | Number, 0 or more | `30` | `--max-duration`, `--timeout` |
+| `watchers.loop.identical_calls` | Whole number, 1 or more: alert when an identical tool call repeats this many times. When it is absent, `threshold` is read, then `max_repeats` | `3` | `--loop-threshold` |
+| `watchers.loop.window` | Whole number, 1 or more: recent events to scan for identical tool calls | `10` | `--loop-window` |
+| `watchers.loop.sequence_length` | Whole number, 1 or more: length of a repeated event sequence | `3` | |
+| `watchers.loop.max_repeats` | Whole number, 1 or more: repeats of that sequence before an alert | `3` | |
+| `watchers.scope.policy` | Non-empty string: scope policy file | `.agent-scope.json` | `--policy` |
+| `webhook.url` | String. Empty means no webhook | `""` | `--webhook` |
+| `operation_rules` | Array of objects, each with `tool` (string, default `*`), `pattern` (glob, default `*`), `action` (`alert` or `block`, default `alert`) and `reason` (string). `action` only changes the alert text; what watch does is set by `watchers.retry.alert` | `[]` | |
+| `max_context_pct` | Whole number from 1 to 100 | `90` | `--max-context-pct` |
+| `built_in_rules` | Array of `mcp-poisoning`, `loop` and `cognitive-debt` | `[]` | `--rules` adds to it |
+| `cognitive_debt_threshold` | `null`, or a number from 0 to 1 | `null` (0.8 is used) | `--rules cognitive-debt:N` |
+
+Watch checks the file at startup. It refuses the file, prints one line and
+exits 1, before it reads the session or writes anything, when the file is
+missing or unreadable, is not UTF-8 JSON (a byte order mark is refused too),
+its top level is not an object, a key above has the wrong type or a value out
+of range, or an action or rule name is not one listed above. `true` and
+`false` are not numbers, `NaN` and `Infinity` are refused, and `null` is
+refused everywhere except `cognitive_debt_threshold`. A whole number may be
+written as `2.0`. The line names the file, the key and what the value must
+be, but never the value:
+
+```
+[watch] invalid --config file .agent-watch.json: watchers.retry.alert must be one of terminal, file, kill, pause, require_approval
+```
+
+Other keys are ignored, so the same file can hold the project budget keys
+above: a `budget` block, or top-level `weekly`, `warn_at`, `stop_at` and
+`per_session_max`. Watch does not check the budget keys.
+
+Flags given on the command line override the file, and a flag that is not
+given keeps the file's value. `--on-death`, which has no key, applies with
+`--config` too. As before, `per_session_max` from the project budget config
+and `--rules` built-ins such as `budget:5` are applied after the flags.
 
 ### `mcp-scan`
 ```
