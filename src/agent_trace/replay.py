@@ -504,9 +504,9 @@ def list_sessions(
     if tenant_id is not None:
         out.write(f"  {C.DIM}Tenant: {tenant_id}{C.RESET}\n")
     out.write(
-        f"  {C.DIM}Tools = MCP tool calls  "
-        f"LLM = sampling/createMessage or @trace_llm_call  "
-        f"Err = protocol errors{C.RESET}\n\n"
+        f"  {C.DIM}Tools = tool calls  "
+        f"LLM = model requests (hooks record none)  "
+        f"Err = failed tool calls and protocol errors{C.RESET}\n\n"
     )
 
 

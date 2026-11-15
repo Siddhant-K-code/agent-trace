@@ -26,8 +26,28 @@ class TestReleaseWorkflows(unittest.TestCase):
         self.assertIn(".claude-plugin/marketplace.json", workflow)
         self.assertIn("server.json PyPI package", workflow)
         self.assertIn("generated Gemini extension", workflow)
+        self.assertIn("Action pin", workflow)
         self.assertIn("agent-strace-interoperability-v1.zip", workflow)
         self.assertIn("src/agent_trace/corpus/v1", workflow)
+
+    def test_action_pins_in_docs_match_package_version(self):
+        from agent_trace import __version__
+
+        pin = re.compile(r"Siddhant-K-code/agent-trace@v(\d+\.\d+\.\d+)")
+        paths = [ROOT / "README.md", *(ROOT / "docs").rglob("*"), *(ROOT / "examples").rglob("*")]
+        found = {}
+        for path in sorted(p for p in paths if p.is_file()):
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            for number, line in enumerate(text.splitlines(), 1):
+                for match in pin.finditer(line):
+                    found[f"{path.relative_to(ROOT).as_posix()}:{number}"] = match.group(1)
+
+        self.assertTrue(
+            {"README.md", "docs/commands.md", "docs/review.md", "examples/ci/agent-eval.yml"}
+            <= {location.rsplit(":", 1)[0] for location in found}
+        )
+        stale = {location: version for location, version in found.items() if version != __version__}
+        self.assertEqual(stale, {}, f"Action pins must name v{__version__}")
 
     def test_publish_workflows_require_tag_and_checkout_that_tag(self):
         for name in ("publish.yml", "publish-vscode.yml"):

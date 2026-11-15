@@ -58,6 +58,7 @@ jobs:
           PYTHONPATH=src python - <<'PY'
           import json
           import os
+          import re
           from pathlib import Path
 
           from agent_trace.cli import _gemini_extension_manifest
@@ -96,6 +97,13 @@ jobs:
               "server.json PyPI package": server["packages"][0]["version"],
               "generated Gemini extension": gemini_extension["version"],
           }
+          action_pin = re.compile(r"Siddhant-K-code/agent-trace@v(\d+\.\d+\.\d+)")
+          pinned = [Path("README.md"), *Path("docs").rglob("*"), *Path("examples").rglob("*")]
+          for path in sorted(p for p in pinned if p.is_file()):
+              text = path.read_text(encoding="utf-8", errors="ignore")
+              for number, line in enumerate(text.splitlines(), 1):
+                  for match in action_pin.finditer(line):
+                      versions[f"{path}:{number} Action pin"] = match.group(1)
           mismatches = [
               f"{source}: expected {expected}, found {version}"
               for source, version in versions.items()

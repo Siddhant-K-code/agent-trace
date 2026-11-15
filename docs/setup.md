@@ -73,7 +73,7 @@ To keep traces somewhere else, set `AGENT_TRACE_DIR` (a relative path resolves a
 Traces can contain prompts and tool output, so `.agent-traces/` writes its own `.gitignore` and stays out of git by default. To commit a trace deliberately, use `git add -f`.
 
 ```bash
-agent-strace list     # list sessions
+agent-strace list     # list sessions; Tools counts hook tool calls, LLM stays 0 for hooks
 agent-strace replay   # replay the latest
 agent-strace explain  # plain-English summary
 ```
@@ -312,7 +312,7 @@ Set `CURSOR_CONFIG_DIR` to write the file somewhere else. The generated config r
 }
 ```
 
-Cursor hook coverage depends on the events Cursor emits. Native hooks capture prompts, shell commands, file edits, stop markers, and agent responses when available. MCP server tool calls are still captured most reliably through the MCP proxy configuration below.
+Cursor hook coverage depends on the events Cursor emits. Native hooks capture prompts, shell commands, file edits, stop markers, and agent responses when available. MCP server tool calls are still captured most reliably through the MCP proxy configuration below. `setup --cli cursor` (and `--cli all`) prints this note; other providers do not.
 
 ### GitHub Copilot CLI hooks
 

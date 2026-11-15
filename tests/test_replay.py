@@ -6,8 +6,27 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from agent_trace.models import EventType, TraceEvent
-from agent_trace.replay import C, _strip_markdown, _tool_call_detail, format_event
+import io
+import tempfile
+
+from agent_trace.models import EventType, SessionMeta, TraceEvent
+from agent_trace.replay import C, _strip_markdown, _tool_call_detail, format_event, list_sessions
+from agent_trace.store import TraceStore
+
+
+class TestListLegend(unittest.TestCase):
+    def test_legend_describes_columns_for_every_capture_method(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TraceStore(tmp, use_workspace_env=False)
+            store.create_session(SessionMeta(session_id="a1b2c3d4e5f6a7b8", agent_name="copilot", tool_calls=7))
+            out = io.StringIO()
+            list_sessions(store, out=out)
+
+        legend = out.getvalue().strip().splitlines()[-1]
+        self.assertIn("Tools = tool calls", legend)
+        self.assertIn("LLM = model requests (hooks record none)", legend)
+        self.assertIn("Err = failed tool calls and protocol errors", legend)
+        self.assertNotIn("MCP tool calls", legend)
 
 
 class TestStripMarkdown(unittest.TestCase):

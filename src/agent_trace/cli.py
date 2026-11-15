@@ -1591,10 +1591,13 @@ def cmd_setup(args: argparse.Namespace) -> int | None:
     sys.stderr.write(
         "\nThis captures hook-visible agent sessions: user prompts, assistant "
         "responses, and tool calls or edits exposed by the provider.\n"
-        "For Cursor, MCP proxy tracing still captures MCP calls; native hooks "
-        "capture only the prompt, shell, file-edit, and response events Cursor emits.\n"
-        "Replay with: agent-strace replay\n"
     )
+    if cli in ("cursor", "all"):
+        sys.stderr.write(
+            "For Cursor, MCP proxy tracing still captures MCP calls; native hooks "
+            "capture only the prompt, shell, file-edit, and response events Cursor emits.\n"
+        )
+    sys.stderr.write("Replay with: agent-strace replay\n")
 
 
 def build_parser() -> argparse.ArgumentParser:

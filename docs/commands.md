@@ -198,6 +198,12 @@ agent-strace list [--tenant ID]
 List all captured sessions with ID, timestamp, duration, tool calls, and errors.
 `--tenant ID` performs an exact tenant match before listing metadata.
 
+| Column | Counts |
+|---|---|
+| `Tools` | Tool calls from any capture method: hook tool calls, MCP `tools/call` through the proxy, `@trace_tool`, imported tool uses |
+| `LLM` | Model requests: MCP `sampling/createMessage`, `@trace_llm_call`, imported responses with token usage. Hooks record none, so hook sessions show 0 |
+| `Err` | Failed tool calls (hooks, decorator) and JSON-RPC errors (MCP proxy) |
+
 ### `inspect`
 ```
 agent-strace inspect <session-id>
@@ -1177,6 +1183,8 @@ Skill adoption from recorded behavior: available → loaded → followed → out
 
 With no sessions in the trace store, the command prints how to read Claude Code history or set up capture instead of an empty report. In JSON mode the report is still printed and the hint goes to stderr.
 
+When sessions are left out of the aggregate, the first line says how many and why, for example `Skills across 2 of 7 sessions since 2026-10-16 (5 started before the window)`. Reasons: started before the `--since` window, or unreadable or malformed. JSON adds `sessions_total` and `sessions_excluded`. With `--from-claude`, transcripts that share a session ID are merged into one session, and the `Read N Claude Code session(s)` line says how many.
+
 ### `skills eval`
 ```
 agent-strace skills eval CASES_FILE (--agent claude|copilot | --agent-cmd TEMPLATE | --from-traces DIR)
@@ -1830,7 +1838,7 @@ permissions:
   pull-requests: write
 
 steps:
-  - uses: Siddhant-K-code/agent-trace@v0.93.1
+  - uses: Siddhant-K-code/agent-trace@v0.109.0
     with:
       config: .agent-evals.yaml
       baseline: .agent-evals-baseline.json

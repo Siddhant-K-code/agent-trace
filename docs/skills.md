@@ -21,6 +21,19 @@ redacted the same way as `import` and hook capture. Claude Code
 deletes transcripts after 30 days by default (`cleanupPeriodDays`), so the
 history may be short.
 
+The first lines say how many transcripts were read and how many sessions the
+report covers, with the reason for any gap:
+
+```text
+Read 7 Claude Code session(s) from ~/.claude/projects. No persistent trace store was written; the temporary directory is deleted on exit.
+Skills across 2 of 7 sessions since 2026-10-16 (5 started before the window). Availability reflects the filesystem now, not session time.
+```
+
+Sessions are left out when they started before the `--since` window or are
+unreadable or malformed. Transcripts that share a session ID
+are merged into one session, and the `Read` line says so. Widen the window with
+`--since 90d`.
+
 **Any supported agent.** Record sessions, then report:
 
 ```bash
@@ -363,7 +376,9 @@ This command cannot measure:
 - whether a skill caused an outcome.
 
 Malformed events and unreadable sessions are skipped and counted in
-`events_skipped_malformed` and `sessions_skipped_unreadable`.
+`events_skipped_malformed` and `sessions_skipped_unreadable`. In aggregate
+mode, `sessions_total` counts sessions in the store and `sessions_excluded`
+counts those left out, by reason: `before_window` and `unreadable`.
 
 **Older stores:** stores captured before the subagent capture fix can hold
 many Copilot CLI subagent sessions with `events.ndjson` but no `meta.json`.
