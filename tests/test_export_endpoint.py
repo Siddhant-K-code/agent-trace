@@ -254,6 +254,7 @@ class TestParseHeader(unittest.TestCase):
             (f": {SECRET}", "its name is empty"),
             ("   : v", "its name is empty"),
             (f"X {SECRET}: v", NAME_RULE),
+            (f"X\t{SECRET}: v", NAME_RULE),
             (f"X-Pr\u00f8be: {SECRET}", NAME_RULE),
             (f"X\x00{SECRET}: v", NAME_RULE),
             (f"{SECRET}:", "its value is empty"),

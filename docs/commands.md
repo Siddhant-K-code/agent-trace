@@ -1399,9 +1399,10 @@ success: export prints `Exported N events to scheme://host[:port] (HTTP code)`
 and exits 0. Any other answer, a network error, or no answer within 30 seconds
 prints `OTLP export to scheme://host[:port] failed: <reason>` and exits 1. When
 the collector sent an error body, its first 200 characters follow on a second,
-indented line, with escape codes, line breaks and other unprintable characters
-replaced by spaces. These lines name only the URL's `scheme://host[:port]`,
-never its path, query or user info, or a header value.
+indented line, with each line break, ESC or other unprintable character
+replaced by a space, so the rest of an escape code, such as `[31m`, still
+shows. These lines name only the URL's `scheme://host[:port]`, never its path,
+query or user info, or a header value.
 
 `--format otlp` and `otlp-genai` emit `gen_ai.conversation.id` with the
 agent's own session ID when the session has one (hook payloads that carry

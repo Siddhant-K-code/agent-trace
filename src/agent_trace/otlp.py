@@ -1313,8 +1313,9 @@ _REPLY_EXCERPT_CHARS = 200
 def _reply_excerpt(exc: urllib.error.HTTPError) -> str:
     """Return the start of an error reply body, safe to print on one line.
 
-    At most _REPLY_EXCERPT_CHARS characters; each one str.isprintable()
-    rejects, escape codes and line breaks included, becomes a space.
+    At most _REPLY_EXCERPT_CHARS characters, with each line break, ESC or
+    other character str.isprintable() rejects replaced by a space, so the
+    rest of an escape code, such as [31m, still shows.
     """
     try:
         # UTF-8 needs at most 4 bytes for a character.
