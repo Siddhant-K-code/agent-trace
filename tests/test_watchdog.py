@@ -101,6 +101,15 @@ class TestParseDuration(unittest.TestCase):
                     _parse_duration(value)
                 self.assertEqual(str(ctx.exception), f"cannot parse duration: {value!r}")
 
+    def test_groups_that_add_up_to_zero_are_refused(self):
+        """Guard: passes on main too. --rules timeout:0m stays an invalid
+        rule rather than a 0 second limit that fires at the first event."""
+        for value in ("0m", "0s", "0h 0m", ".0h"):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError) as ctx:
+                    _parse_duration(value)
+                self.assertEqual(str(ctx.exception), f"cannot parse duration: {value!r}")
+
 
 # ---------------------------------------------------------------------------
 # _write_watchdog_postmortem
@@ -607,9 +616,9 @@ class TestPerSessionMaxCostLimit(unittest.TestCase):
             SessionMeta(session_id=SESSION, started_at=1.0),
         )
 
-    def cost_limit(self, *flags):
+    def cost_limit(self, *flags, per_session_max=5.0):
         argv = ["--trace-dir", str(self.trace_dir), "watch", SESSION, *flags]
-        budget = ProjectBudgetConfig(per_session_max=5.0)
+        budget = ProjectBudgetConfig(per_session_max=per_session_max)
         with patch("agent_trace.watch.load_project_budget_config", return_value=budget), \
              patch("agent_trace.watch.watch_session") as watch_session_mock:
             self.assertEqual(cmd_watch(build_parser().parse_args(argv)), 0)
@@ -634,6 +643,16 @@ class TestPerSessionMaxCostLimit(unittest.TestCase):
         ):
             with self.subTest(flags=flags):
                 self.assertEqual(self.cost_limit(*flags), 5.0)
+
+    def test_the_kill_action_alone_does_not_cap_per_session_max_at_the_default(self):
+        """Guard: passes on main too. Without --budget, --max-cost or
+        max_dollars, the $10 default is not a set limit, so a per_session_max
+        above it replaces it, even when the action is kill."""
+        config = self.trace_dir.parent / "watch.json"
+        config.write_text(json.dumps({"watchers": {"retry": {"alert": "kill"}}}))
+        for flags in (("--on-violation", "kill"), ("--config", str(config)), ()):
+            with self.subTest(flags=flags):
+                self.assertEqual(self.cost_limit(*flags, per_session_max=20.0), 20.0)
 
     def test_per_session_max_lowers_only_a_config_file_cost_limit_that_kills(self):
         config = self.trace_dir.parent / "watch.json"
