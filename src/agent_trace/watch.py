@@ -430,6 +430,144 @@ class OperationRule:
         return fnmatch.fnmatch(target.lower(), self.pattern.lower()) or self.pattern == "*"
 
 
+# ---------------------------------------------------------------------------
+# watch --config file checks
+# ---------------------------------------------------------------------------
+
+# Actions _dispatch_alert takes; watchers.retry.alert sets it for every watcher.
+_WATCH_ACTIONS = ("terminal", "file", "kill", "pause", "require_approval")
+_OPERATION_RULE_ACTIONS = ("alert", "block")
+# The built-in rule names check_event looks for in built_in_rules.
+_CONFIG_BUILT_IN_RULES = ("mcp-poisoning", "loop", "cognitive-debt")
+
+
+class WatchConfigError(ValueError):
+    """A watch --config file that watch refuses to use.
+
+    The message says what is wrong and, for a key, names its path and what
+    it must be. It never repeats a value from the file.
+    """
+
+
+def _one_of(choices: tuple[str, ...]) -> str:
+    if len(choices) == 2:
+        return f"{choices[0]} or {choices[1]}"
+    return "one of " + ", ".join(choices)
+
+
+def _config_object(parent: dict, key: str, path: str) -> dict:
+    """Return parent[key], which must be a JSON object; {} when it is absent."""
+    if key not in parent:
+        return {}
+    value = parent[key]
+    if not isinstance(value, dict):
+        raise WatchConfigError(f"{path} must be a JSON object")
+    return value
+
+
+def _config_whole_number(
+    parent: dict, key: str, path: str, minimum: int, maximum: int | None = None,
+) -> int | None:
+    """Return parent[key] as an int, or None when it is absent.
+
+    A float with no fraction, such as 2.0, counts as a whole number.
+    """
+    if key not in parent:
+        return None
+    value = parent[key]
+    number: int | None = None
+    if isinstance(value, int) and not isinstance(value, bool):
+        number = value
+    elif isinstance(value, float) and value.is_integer():
+        number = int(value)
+    if number is not None and number >= minimum and (maximum is None or number <= maximum):
+        return number
+    if maximum is None:
+        raise WatchConfigError(f"{path} must be a whole number, {minimum} or more")
+    raise WatchConfigError(f"{path} must be a whole number from {minimum} to {maximum}")
+
+
+def _config_number(
+    parent: dict, key: str, path: str, minimum: int, maximum: int | None = None,
+) -> float | None:
+    """Return parent[key] as a finite float, or None when it is absent."""
+    if key not in parent:
+        return None
+    value = parent[key]
+    number: float | None = None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            number = float(value)
+        except OverflowError:
+            number = None
+    if (
+        number is not None and math.isfinite(number) and number >= minimum
+        and (maximum is None or number <= maximum)
+    ):
+        return number
+    if maximum is None:
+        raise WatchConfigError(f"{path} must be a finite number, {minimum} or more")
+    raise WatchConfigError(f"{path} must be a number from {minimum} to {maximum}")
+
+
+def _config_string(parent: dict, key: str, path: str, non_empty: bool = False) -> str | None:
+    """Return parent[key], which must be a string, or None when it is absent."""
+    if key not in parent:
+        return None
+    value = parent[key]
+    if not isinstance(value, str) or (non_empty and not value):
+        raise WatchConfigError(f"{path} must be a {'non-empty ' if non_empty else ''}string")
+    return value
+
+
+def _config_choice(parent: dict, key: str, path: str, choices: tuple[str, ...]) -> str | None:
+    """Return parent[key], which must be one of *choices*, or None when it is absent."""
+    if key not in parent:
+        return None
+    value = parent[key]
+    if not isinstance(value, str) or value not in choices:
+        raise WatchConfigError(f"{path} must be {_one_of(choices)}")
+    return value
+
+
+def _config_operation_rules(d: dict) -> list[OperationRule]:
+    if "operation_rules" not in d:
+        return []
+    items = d["operation_rules"]
+    if not isinstance(items, list):
+        raise WatchConfigError("operation_rules must be a JSON array")
+    rules: list[OperationRule] = []
+    for index, item in enumerate(items):
+        path = f"operation_rules[{index}]"
+        if not isinstance(item, dict):
+            raise WatchConfigError(f"{path} must be a JSON object")
+        tool = _config_string(item, "tool", f"{path}.tool")
+        pattern = _config_string(item, "pattern", f"{path}.pattern")
+        action = _config_choice(item, "action", f"{path}.action", _OPERATION_RULE_ACTIONS)
+        reason = _config_string(item, "reason", f"{path}.reason")
+        rules.append(OperationRule(
+            tool_name="*" if tool is None else tool,
+            pattern="*" if pattern is None else pattern,
+            action=action or "alert",
+            reason=reason or "",
+        ))
+    return rules
+
+
+def _config_built_in_rules(d: dict) -> set[str] | None:
+    if "built_in_rules" not in d:
+        return None
+    items = d["built_in_rules"]
+    if not isinstance(items, list):
+        raise WatchConfigError("built_in_rules must be a JSON array")
+    for index, item in enumerate(items):
+        if not isinstance(item, str) or item not in _CONFIG_BUILT_IN_RULES:
+            raise WatchConfigError(
+                f"built_in_rules[{index}] must be {_one_of(_CONFIG_BUILT_IN_RULES)}"
+            )
+    return set(items)
+
+
 @dataclass
 class WatcherConfig:
     max_retries: int = 5
@@ -440,7 +578,7 @@ class WatcherConfig:
     loop_sequence_length: int = 3
     loop_max_repeats: int = 3
     scope_policy: str = ".agent-scope.json"
-    on_violation: str = "terminal"   # terminal | file | kill
+    on_violation: str = "terminal"   # one of _WATCH_ACTIONS
     webhook_url: str = ""
     alert_log: str = ".agent-traces/alerts.log"
     # Per-operation enforcement rules
@@ -454,57 +592,101 @@ class WatcherConfig:
     cognitive_debt_threshold: float | None = None
 
     @classmethod
-    def from_dict(cls, d: dict) -> "WatcherConfig":
-        watchers = d.get("watchers", {})
-        retry_cfg = watchers.get("retry", {})
-        cost_cfg = watchers.get("cost", {})
-        dur_cfg = watchers.get("duration", {})
-        loop_cfg = watchers.get("loop", {})
-        scope_cfg = watchers.get("scope", {})
-        webhook = d.get("webhook", {})
+    def from_dict(cls, d: Any) -> "WatcherConfig":
+        """Build a config from a parsed watch --config file.
 
-        # Parse per-operation rules
-        rules: list[OperationRule] = []
-        for rule_dict in d.get("operation_rules", []):
-            rules.append(OperationRule(
-                tool_name=rule_dict.get("tool", "*"),
-                pattern=rule_dict.get("pattern", "*"),
-                action=rule_dict.get("action", "alert"),
-                reason=rule_dict.get("reason", ""),
-            ))
+        Raises WatchConfigError for the first known key that has the wrong
+        type or an impossible value. Unknown keys are ignored, so the file
+        can also hold the budget keys that project_budget.py reads.
+        """
+        if not isinstance(d, dict):
+            raise WatchConfigError("the top level must be a JSON object")
+        watchers = _config_object(d, "watchers", "watchers")
+        retry_cfg = _config_object(watchers, "retry", "watchers.retry")
+        cost_cfg = _config_object(watchers, "cost", "watchers.cost")
+        dur_cfg = _config_object(watchers, "duration", "watchers.duration")
+        loop_cfg = _config_object(watchers, "loop", "watchers.loop")
+        scope_cfg = _config_object(watchers, "scope", "watchers.scope")
+        webhook = _config_object(d, "webhook", "webhook")
 
-        return cls(
-            max_retries=int(retry_cfg.get("max", 5)),
-            max_cost_dollars=float(cost_cfg.get("max_dollars", 10.0)),
-            max_duration_seconds=float(dur_cfg.get("max_minutes", 30)) * 60,
-            loop_threshold=int(loop_cfg.get(
-                "identical_calls",
-                loop_cfg.get("threshold", loop_cfg.get("max_repeats", 3)),
-            )),
-            loop_window=int(loop_cfg.get("window", 10)),
-            loop_sequence_length=int(loop_cfg.get("sequence_length", 3)),
-            loop_max_repeats=int(loop_cfg.get("max_repeats", 3)),
-            scope_policy=str(scope_cfg.get("policy", ".agent-scope.json")),
-            on_violation=str(retry_cfg.get("alert", "terminal")),
-            webhook_url=str(webhook.get("url", "")),
-            operation_rules=rules,
-            max_context_pct=int(d.get("max_context_pct", 90)),
-            built_in_rules=set(d.get("built_in_rules", [])),
-            cognitive_debt_threshold=(
-                float(d["cognitive_debt_threshold"])
-                if d.get("cognitive_debt_threshold") is not None else None
+        max_retries = _config_whole_number(retry_cfg, "max", "watchers.retry.max", 0)
+        on_violation = _config_choice(retry_cfg, "alert", "watchers.retry.alert", _WATCH_ACTIONS)
+        max_dollars = _config_number(cost_cfg, "max_dollars", "watchers.cost.max_dollars", 0)
+        max_minutes = _config_number(dur_cfg, "max_minutes", "watchers.duration.max_minutes", 0)
+        loop = {
+            key: _config_whole_number(loop_cfg, key, f"watchers.loop.{key}", 1)
+            for key in ("identical_calls", "threshold", "max_repeats", "window", "sequence_length")
+        }
+        policy = _config_string(scope_cfg, "policy", "watchers.scope.policy", non_empty=True)
+        webhook_url = _config_string(webhook, "url", "webhook.url")
+        operation_rules = _config_operation_rules(d)
+        max_context_pct = _config_whole_number(d, "max_context_pct", "max_context_pct", 1, 100)
+        built_in_rules = _config_built_in_rules(d)
+        debt_threshold = None
+        if d.get("cognitive_debt_threshold") is not None:
+            debt_threshold = _config_number(
+                d, "cognitive_debt_threshold", "cognitive_debt_threshold", 0, 1,
+            )
+
+        values = {
+            "max_retries": max_retries,
+            "on_violation": on_violation,
+            "max_cost_dollars": max_dollars,
+            "max_duration_seconds": None if max_minutes is None else max_minutes * 60,
+            "loop_threshold": next(
+                (loop[key] for key in ("identical_calls", "threshold", "max_repeats")
+                 if loop[key] is not None),
+                None,
             ),
-        )
+            "loop_window": loop["window"],
+            "loop_sequence_length": loop["sequence_length"],
+            "loop_max_repeats": loop["max_repeats"],
+            "scope_policy": policy,
+            "webhook_url": webhook_url,
+            "operation_rules": operation_rules,
+            "max_context_pct": max_context_pct,
+            "built_in_rules": built_in_rules,
+            "cognitive_debt_threshold": debt_threshold,
+        }
+        # Absent keys keep the dataclass defaults.
+        return cls(**{key: value for key, value in values.items() if value is not None})
 
     @classmethod
     def load(cls, path: str) -> "WatcherConfig":
-        p = Path(path)
-        if not p.exists():
-            return cls()
+        """Read a watch --config file.
+
+        Raises WatchConfigError when the file cannot be read, is not UTF-8
+        JSON, or fails from_dict.
+        """
+        if not path:
+            raise WatchConfigError("the path is empty")
         try:
-            return cls.from_dict(json.loads(p.read_text()))
-        except Exception:
-            return cls()
+            raw = Path(path).read_bytes()
+        except (OSError, ValueError) as exc:
+            detail = getattr(exc, "strerror", None)
+            raise WatchConfigError(
+                f"cannot read it ({detail})" if detail else "cannot read it"
+            ) from None
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            raise WatchConfigError("it is not valid UTF-8") from None
+        if text.startswith("\ufeff"):
+            # project_budget.py reads the same file and cannot parse a BOM either.
+            raise WatchConfigError("it starts with a byte order mark; save it without one")
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise WatchConfigError(
+                f"it is not valid JSON ({exc.msg} at line {exc.lineno} column {exc.colno})"
+            ) from None
+        except RecursionError:
+            raise WatchConfigError("it is nested too deeply") from None
+        except ValueError:
+            # json.loads raises a plain ValueError for an integer with more
+            # digits than int() accepts.
+            raise WatchConfigError("it has a number with too many digits") from None
+        return cls.from_dict(data)
 
 
 # ---------------------------------------------------------------------------
@@ -1931,51 +2113,70 @@ def cmd_watch(args: argparse.Namespace) -> int:
             sys.stderr.write(f"[watch] invalid --stream-flush-interval value: {problem}\n")
             return 1
 
-    store = TraceStore(args.trace_dir)
-
-    # Load config file if provided
-    config_path = getattr(args, "config", None)
-    if config_path:
-        config = WatcherConfig.load(config_path)
-    else:
-        # --timeout is a friendlier alias for --max-duration
-        max_duration = getattr(args, "max_duration", 1800)
-        timeout_str = getattr(args, "timeout", None)
-        if timeout_str:
-            try:
-                max_duration = _parse_duration(timeout_str)
-            except ValueError as exc:
-                sys.stderr.write(f"[watch] invalid --timeout value: {exc}\n")
-                return 1
-
-        # --budget is a friendlier alias for --max-cost
-        max_cost = getattr(args, "max_cost", 10.0)
-        budget_str = getattr(args, "budget", None)
-        if budget_str is not None:
-            try:
-                max_cost = float(budget_str)
-            except ValueError:
-                sys.stderr.write(f"[watch] invalid --budget value: {budget_str!r}\n")
-                return 1
-
-        loop_threshold = getattr(args, "loop_threshold", None)
-        loop_window = getattr(args, "loop_window", None)
-
-        config = WatcherConfig(
-            max_retries=getattr(args, "max_retries", 5),
-            max_cost_dollars=max_cost,
-            max_duration_seconds=max_duration,
-            loop_threshold=3 if loop_threshold is None else int(loop_threshold),
-            loop_window=10 if loop_window is None else int(loop_window),
-            on_violation=getattr(args, "on_violation", "terminal"),
-            webhook_url=getattr(args, "webhook", "") or "",
-            on_death_cmd=getattr(args, "on_death", "") or "",
-            scope_policy=getattr(args, "policy", None) or ".agent-scope.json",
+    max_context_pct = getattr(args, "max_context_pct", None)
+    if max_context_pct is not None and not 1 <= max_context_pct <= 100:
+        sys.stderr.write(
+            "[watch] invalid --max-context-pct value: it must be a whole number from 1 to 100\n"
         )
+        return 1
+
+    # --timeout is a friendlier alias for --max-duration
+    max_duration = getattr(args, "max_duration", None)
+    timeout_str = getattr(args, "timeout", None)
+    if timeout_str:
+        try:
+            max_duration = _parse_duration(timeout_str)
+        except ValueError as exc:
+            sys.stderr.write(f"[watch] invalid --timeout value: {exc}\n")
+            return 1
+
+    # --budget is a friendlier alias for --max-cost
+    max_cost = getattr(args, "max_cost", None)
+    budget_str = getattr(args, "budget", None)
+    if budget_str is not None:
+        try:
+            max_cost = float(budget_str)
+        except ValueError:
+            sys.stderr.write(f"[watch] invalid --budget value: {budget_str!r}\n")
+            return 1
+
+    # A --config file that cannot be used is refused, not replaced by the
+    # defaults, so the limits it sets are never silently dropped.
+    config_path = getattr(args, "config", None)
+    if config_path is not None:
+        try:
+            config = WatcherConfig.load(config_path)
+        except WatchConfigError as exc:
+            shown = config_path if config_path and config_path.isprintable() else repr(config_path)
+            sys.stderr.write(f"[watch] invalid --config file {shown}: {exc}\n")
+            return 1
+    else:
+        config = WatcherConfig()
+
+    # Flags given on the command line override the file. Their argparse
+    # defaults are None, so an absent flag keeps the file's value.
+    if getattr(args, "max_retries", None) is not None:
+        config.max_retries = int(args.max_retries)
+    if max_cost is not None:
+        config.max_cost_dollars = max_cost
+    if max_duration is not None:
+        config.max_duration_seconds = max_duration
+    if getattr(args, "on_violation", None) is not None:
+        config.on_violation = args.on_violation
+    if getattr(args, "webhook", None) is not None:
+        config.webhook_url = args.webhook
+    if getattr(args, "on_death", None) is not None:
+        config.on_death_cmd = args.on_death
+    if getattr(args, "policy", None) is not None:
+        config.scope_policy = args.policy or ".agent-scope.json"
+    if max_context_pct is not None:
+        config.max_context_pct = int(max_context_pct)
     if getattr(args, "loop_threshold", None) is not None:
         config.loop_threshold = int(getattr(args, "loop_threshold"))
     if getattr(args, "loop_window", None) is not None:
         config.loop_window = int(getattr(args, "loop_window"))
+
+    store = TraceStore(args.trace_dir)
 
     project_budget_config = load_project_budget_config(config_path)
     if config_path and not project_budget_config.enabled:

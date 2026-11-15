@@ -1,8 +1,11 @@
 """Tests for live session monitoring and circuit breakers."""
 
+import argparse
+import errno
 import io
 import json
 import os
+import sys
 import tempfile
 import time
 import unittest
@@ -250,10 +253,12 @@ class TestAlertFile(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestWatcherConfigLoad(unittest.TestCase):
-    def test_load_missing_file_returns_defaults(self):
-        config = WatcherConfig.load("/nonexistent/path/.agent-watch.json")
-        self.assertIsInstance(config, WatcherConfig)
-        self.assertEqual(config.max_retries, 5)
+    def test_load_missing_file_is_refused(self):
+        # A missing file used to mean "use the defaults", which silently
+        # dropped every limit the file was meant to set.
+        with self.assertRaises(ValueError) as ctx:
+            WatcherConfig.load("/nonexistent/path/.agent-watch.json")
+        self.assertEqual(str(ctx.exception), f"cannot read it ({os.strerror(errno.ENOENT)})")
 
     def test_load_valid_config(self):
         data = {
@@ -276,6 +281,73 @@ class TestWatcherConfigLoad(unittest.TestCase):
             self.assertEqual(config.loop_window, 12)
         finally:
             os.unlink(path)
+
+    def test_from_dict_reads_every_known_key(self):
+        config = WatcherConfig.from_dict({
+            "watchers": {
+                # A whole number may be written as 2.0.
+                "retry": {"max": 2.0, "alert": "require_approval"},
+                "cost": {"max_dollars": 0},
+                "duration": {"max_minutes": 0.5},
+                "loop": {"threshold": 4, "window": 12, "sequence_length": 2, "max_repeats": 5},
+                "scope": {"policy": "scope.json"},
+            },
+            "webhook": {"url": ""},
+            "operation_rules": [
+                {"tool": "bash", "pattern": "rm -rf *", "action": "block", "reason": "no deletes"},
+                {},
+            ],
+            "max_context_pct": 100,
+            "built_in_rules": ["mcp-poisoning", "loop", "cognitive-debt", "loop"],
+            "cognitive_debt_threshold": 0.5,
+        })
+        self.assertEqual(
+            (
+                config.max_retries, config.on_violation, config.max_cost_dollars,
+                config.max_duration_seconds, config.loop_threshold, config.loop_window,
+                config.loop_sequence_length, config.loop_max_repeats, config.scope_policy,
+                config.webhook_url, config.max_context_pct, config.built_in_rules,
+                config.cognitive_debt_threshold,
+            ),
+            (
+                2, "require_approval", 0.0, 30.0, 4, 12, 2, 5, "scope.json", "", 100,
+                {"mcp-poisoning", "loop", "cognitive-debt"}, 0.5,
+            ),
+        )
+        self.assertEqual(
+            [(r.tool_name, r.pattern, r.action, r.reason) for r in config.operation_rules],
+            [("bash", "rm -rf *", "block", "no deletes"), ("*", "*", "alert", "")],
+        )
+        # identical_calls wins over threshold, which wins over max_repeats.
+        loops = (
+            ({"identical_calls": 6, "threshold": 4, "max_repeats": 5}, 6),
+            ({"threshold": 4, "max_repeats": 5}, 4),
+            ({"max_repeats": 5}, 5),
+        )
+        for loop, threshold in loops:
+            with self.subTest(loop=loop):
+                config = WatcherConfig.from_dict({"watchers": {"loop": loop}})
+                self.assertEqual(config.loop_threshold, threshold)
+        for action in ("terminal", "file", "kill", "pause", "require_approval"):
+            with self.subTest(action=action):
+                config = WatcherConfig.from_dict({"watchers": {"retry": {"alert": action}}})
+                self.assertEqual(config.on_violation, action)
+
+    def test_absent_keys_keep_the_defaults(self):
+        documents = (
+            {},
+            {"watchers": {}},
+            {
+                "watchers": {"retry": {}, "cost": {}, "duration": {}, "loop": {}, "scope": {}},
+                "webhook": {},
+                "operation_rules": [],
+                "built_in_rules": [],
+                "cognitive_debt_threshold": None,
+            },
+        )
+        for document in documents:
+            with self.subTest(document=document):
+                self.assertEqual(WatcherConfig.from_dict(document), WatcherConfig())
 
 
 class TestBuiltInRules(unittest.TestCase):
@@ -570,6 +642,431 @@ class TestWatchStreamFlagChecks(unittest.TestCase):
                     self.assertEqual(stream_config.url, url)
                     self.assertEqual(stream_config.flush_interval, float(interval))
                     self.assertTrue(stream_config.otlp)
+
+
+# ---------------------------------------------------------------------------
+# watch --config FILE checks and flag precedence
+# ---------------------------------------------------------------------------
+
+class TestWatchConfigFile(unittest.TestCase):
+    """cmd_watch refuses a --config file it cannot use with one line and
+    status 1 before it checks --agent-pid, looks up the session or writes
+    anything. Flags given on the command line override the file."""
+
+    # A file that sets every value a flag can override.
+    _FILE = {
+        "watchers": {
+            "retry": {"max": 2, "alert": "pause"},
+            "cost": {"max_dollars": 9},
+            "duration": {"max_minutes": 5},
+            "loop": {"identical_calls": 6, "window": 20},
+            "scope": {"policy": "file-scope.json"},
+        },
+        "webhook": {"url": "http://file.example/hook"},
+        "max_context_pct": 80,
+    }
+    _FILE_VALUES = {
+        "max_retries": 2,
+        "on_violation": "pause",
+        "max_cost_dollars": 9.0,
+        "max_duration_seconds": 300.0,
+        "loop_threshold": 6,
+        "loop_window": 20,
+        "scope_policy": "file-scope.json",
+        "webhook_url": "http://file.example/hook",
+        "on_death_cmd": "",
+        "max_context_pct": 80,
+    }
+    # Flags that must not change which problem is reported.
+    _OTHER_FLAGS = (
+        "--agent-pid", "1", "--max-retries", "2", "--on-violation", "kill",
+        "--webhook", "http://127.0.0.1:9/hook", "--max-context-pct", "50", "--timeout", "1m",
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        cls.parser = build_parser()
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.trace_dir = self.root / "traces"
+        store = TraceStore(self.trace_dir, redact=False)
+        store.create_session(SessionMeta(session_id="config-file", started_at=1.0))
+        store.append_event(
+            "config-file",
+            _make_event(EventType.TOOL_CALL, 2.0, session_id="config-file", tool_name="Bash"),
+        )
+        # A writable TraceStore writes this file back, so a refusal that
+        # opened the store first changes the snapshot.
+        (self.trace_dir / ".gitignore").unlink(missing_ok=True)
+        self.config = self.root / "watch.json"
+        self._write({})
+        # cmd_watch also reads project budget files from the working directory.
+        cwd = os.getcwd()
+        os.chdir(self.root)
+        self.addCleanup(os.chdir, cwd)
+        env = patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("AGENT_STRACE_TENANT_ID", None)
+
+    def _write(self, data):
+        """Write *data* to the config file: bytes as given, anything else as
+        JSON (NaN and Infinity included)."""
+        if not isinstance(data, bytes):
+            data = json.dumps(data).encode("utf-8")
+        self.config.write_bytes(data)
+
+    def _snapshot(self):
+        return {
+            path.relative_to(self.root).as_posix(): path.read_bytes() if path.is_file() else None
+            for path in sorted(self.root.rglob("*"))
+        }
+
+    def _run(self, *flags, session="config-file", config=None):
+        argv = ["--trace-dir", str(self.trace_dir), "watch", session, *flags]
+        if config is not None:
+            argv += ["--config", config]
+        args = self.parser.parse_args(argv)
+        out, err = io.StringIO(), io.StringIO()
+        with patch("agent_trace.watch.watch_session") as watch_session_mock, \
+                redirect_stdout(out), redirect_stderr(err):
+            status = cmd_watch(args)
+        return status, out.getvalue(), err.getvalue(), watch_session_mock
+
+    def _config_for(self, *flags, config=None):
+        """Return the WatcherConfig that cmd_watch passes to watch_session."""
+        status, out, err, watch_session_mock = self._run(*flags, config=config)
+        self.assertEqual((status, out, err), (0, "", ""))
+        return watch_session_mock.call_args.args[2]
+
+    def _assert_status_1(self, flags, line, config=None):
+        """Assert cmd_watch prints *line*, exits 1 and writes nothing, with
+        and without a session that exists and an unusable --agent-pid."""
+        for session, more_flags in (("config-file", ()), ("missing-session", ("--agent-pid", "1"))):
+            with self.subTest(session=session, flags=(*flags, *more_flags)):
+                before = self._snapshot()
+                status, out, err, watch_session_mock = self._run(
+                    *flags, *more_flags, session=session, config=config,
+                )
+                self.assertEqual((status, out, err), (1, "", line))
+                self.assertNotIn("SECRET", err)
+                watch_session_mock.assert_not_called()
+                self.assertEqual(self._snapshot(), before)
+
+    def _assert_refused(self, problem, config=None, shown=None):
+        """Assert cmd_watch refuses the --config file with *problem*."""
+        if config is None:
+            config = str(self.config)
+        line = f"[watch] invalid --config file {config if shown is None else shown}: {problem}\n"
+        self._assert_status_1((), line, config=config)
+        with self.subTest(check="other flags do not hide the problem"):
+            before = self._snapshot()
+            status, out, err, watch_session_mock = self._run(
+                *self._OTHER_FLAGS, session="missing-session", config=config,
+            )
+            self.assertEqual((status, out, err), (1, "", line))
+            watch_session_mock.assert_not_called()
+            self.assertEqual(self._snapshot(), before)
+
+    def test_files_it_cannot_read_are_refused(self):
+        missing = self.root / "missing.json"
+        folder = self.root / "folder.json"
+        folder.mkdir()
+        for path in (missing, folder):
+            with self.subTest(path=path.name):
+                with self.assertRaises(OSError) as ctx:
+                    path.read_bytes()
+                self._assert_refused(f"cannot read it ({ctx.exception.strerror})", config=str(path))
+
+    @unittest.skipUnless(hasattr(os, "geteuid"), "needs POSIX file permissions")
+    def test_file_without_read_permission_is_refused(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        locked = Path(tmp.name) / "locked.json"
+        locked.write_text("{}")
+        locked.chmod(0)
+        self.addCleanup(locked.chmod, 0o600)
+        try:
+            locked.read_bytes()
+        except PermissionError as exc:
+            reason = exc.strerror
+        else:
+            self.skipTest("this user can read a file without read permission")
+        self._assert_refused(f"cannot read it ({reason})", config=str(locked))
+
+    def test_empty_and_unprintable_paths_are_shown_quoted(self):
+        # An empty --config used to mean "no config file".
+        self._assert_refused("the path is empty", config="", shown="''")
+        odd = str(self.root / "watch\n.json")
+        self._assert_refused(
+            f"cannot read it ({os.strerror(errno.ENOENT)})", config=odd, shown=repr(odd),
+        )
+
+    def test_files_that_are_not_utf8_json_are_refused(self):
+        cases = [
+            (b'{"watchers": {"retry": {"alert": "SECRET\xff"}}}', "it is not valid UTF-8"),
+            ('{"webhook": {"url": "SECRET-caf\u00e9"}}'.encode("latin-1"), "it is not valid UTF-8"),
+            ('{"watchers": {}}'.encode("utf-16"), "it is not valid UTF-8"),
+            (
+                b'\xef\xbb\xbf{"watchers": {"retry": {"max": 1, "alert": "kill"}}}',
+                "it starts with a byte order mark; save it without one",
+            ),
+            (b'{"watchers": ' + b"[" * 1_000_000, "it is nested too deeply"),
+        ]
+        if hasattr(sys, "get_int_max_str_digits"):
+            cases.append(
+                (b'{"watchers": {"retry": {"max": ' + b"1" * 5000 + b"}}}",
+                 "it has a number with too many digits"),
+            )
+        texts = (
+            # Case p from the report: a trailing comma.
+            '{"watchers": {"retry": {"max": 1, "alert": "kill"}},}',
+            "",
+            "   \n",
+            # YAML is not read as a watch config.
+            "watchers:\n  retry:\n    max: 1\n",
+            "{'SECRET': 1}",
+            '{"watchers": {"retry": {"alert": "SECRET',
+            '{"webhook": {"url": "http://SECRET"}} trailing SECRET',
+        )
+        for text in texts:
+            # The message from json differs between Python versions.
+            with self.assertRaises(json.JSONDecodeError) as ctx:
+                json.loads(text)
+            exc = ctx.exception
+            cases.append((
+                text.encode("utf-8"),
+                f"it is not valid JSON ({exc.msg} at line {exc.lineno} column {exc.colno})",
+            ))
+        for data, problem in cases:
+            with self.subTest(data=data[:60], problem=problem):
+                self._write(data)
+                self._assert_refused(problem)
+
+    def test_sections_with_wrong_types_are_refused(self):
+        cases = []
+        for value in ([], "SECRET", None, 1, 0.5, True):
+            cases += [
+                (value, "the top level must be a JSON object"),
+                ({"watchers": value}, "watchers must be a JSON object"),
+                *(
+                    ({"watchers": {section: value}}, f"watchers.{section} must be a JSON object")
+                    for section in ("retry", "cost", "duration", "loop", "scope")
+                ),
+                ({"webhook": value}, "webhook must be a JSON object"),
+                ({"operation_rules": [{"tool": "bash"}, value]},
+                 "operation_rules[1] must be a JSON object"),
+            ]
+        for value in ({}, {"tool": "bash"}, "SECRET", None, 1, True):
+            cases += [
+                ({"operation_rules": value}, "operation_rules must be a JSON array"),
+                ({"built_in_rules": value}, "built_in_rules must be a JSON array"),
+            ]
+        cases += [
+            # Case o from the report: the webhook URL given as a string.
+            (
+                {
+                    "watchers": {"retry": {"max": 1, "alert": "kill"}},
+                    "webhook": "http://127.0.0.1:9/SECRET-PATH?token=SECRET-QUERY",
+                },
+                "webhook must be a JSON object",
+            ),
+            ({"built_in_rules": "loop"}, "built_in_rules must be a JSON array"),
+        ]
+        for document, problem in cases:
+            with self.subTest(document=document):
+                self._write(document)
+                self._assert_refused(problem)
+
+    def test_known_fields_with_wrong_types_or_values_are_refused(self):
+        nan, inf = float("nan"), float("inf")
+        not_whole = (1.5, "5", "SECRET", True, False, None, nan, inf, [], {})
+        not_number = ("10", "SECRET", True, False, None, nan, inf, -inf, 10**400, [], {})
+        not_string = (1, 0.5, True, None, ["SECRET"], {"SECRET": 1})
+
+        def watchers(section, key, value):
+            return {"watchers": {section: {key: value}}}
+
+        cases = []
+        for value in (-1, *not_whole):
+            cases.append((watchers("retry", "max", value),
+                          "watchers.retry.max must be a whole number, 0 or more"))
+        for value in ("SECRET-ACTION", "Kill", "block", "", 1, True, None, ["kill"]):
+            cases.append((
+                watchers("retry", "alert", value),
+                "watchers.retry.alert must be one of terminal, file, kill, pause, require_approval",
+            ))
+        for section, key in (("cost", "max_dollars"), ("duration", "max_minutes")):
+            for value in (-0.01, -1, *not_number):
+                cases.append((watchers(section, key, value),
+                              f"watchers.{section}.{key} must be a finite number, 0 or more"))
+        for key in ("identical_calls", "threshold", "max_repeats", "window", "sequence_length"):
+            for value in (0, -1, *not_whole):
+                cases.append((watchers("loop", key, value),
+                              f"watchers.loop.{key} must be a whole number, 1 or more"))
+        for value in ("", *not_string):
+            cases.append((watchers("scope", "policy", value),
+                          "watchers.scope.policy must be a non-empty string"))
+        for value in not_string:
+            cases.append(({"webhook": {"url": value}}, "webhook.url must be a string"))
+        for key in ("tool", "pattern", "reason"):
+            for value in not_string:
+                cases.append(({"operation_rules": [{}, {key: value}]},
+                              f"operation_rules[1].{key} must be a string"))
+        for value in ("SECRET-ACTION", "kill", "Block", "", 1, True, None):
+            cases.append(({"operation_rules": [{"action": value}]},
+                          "operation_rules[0].action must be alert or block"))
+        for value in (0, 101, -5, 50.5, "90", True, None, nan, inf, []):
+            cases.append(({"max_context_pct": value},
+                          "max_context_pct must be a whole number from 1 to 100"))
+        for value in ("SECRET", "loop:5", "Loop", "budget", 1, None, True, []):
+            cases.append((
+                {"built_in_rules": ["loop", value]},
+                "built_in_rules[1] must be one of mcp-poisoning, loop, cognitive-debt",
+            ))
+        for value in (-0.1, 1.5, "0.5", "SECRET", True, False, nan, inf, []):
+            cases.append(({"cognitive_debt_threshold": value},
+                          "cognitive_debt_threshold must be a number from 0 to 1"))
+        for document, problem in cases:
+            with self.subTest(document=document):
+                self._write(document)
+                self._assert_refused(problem)
+
+    def test_unknown_keys_and_budget_keys_are_not_refused(self):
+        documents = (
+            {
+                "watchers": {"retry": {"max": 2, "note": "x"}, "custom": [1, None]},
+                "extra": {"anything": [1, "two", None]},
+                "budget": {"weekly": 50, "warn_at": 0.5, "stop_at": 0.9, "per_session_max": 4},
+            },
+            {"watchers": {"retry": {"max": 2}}, "weekly": 50, "warn_at": 0.5,
+             "stop_at": 0.9, "per_session_max": 4},
+        )
+        for document in documents:
+            # per_session_max still wins over --max-cost, as it did before.
+            for flags in ((), ("--max-cost", "3")):
+                with self.subTest(document=document, flags=flags):
+                    self._write(document)
+                    status, out, err, watch_session_mock = self._run(
+                        *flags, config=str(self.config),
+                    )
+                    self.assertEqual((status, out, err), (0, "", ""))
+                    config = watch_session_mock.call_args.args[2]
+                    budget = watch_session_mock.call_args.kwargs["project_budget_config"]
+                    self.assertEqual(config.max_retries, 2)
+                    self.assertEqual(config.max_cost_dollars, 4.0)
+                    self.assertEqual(
+                        (budget.weekly, budget.warn_at, budget.stop_at, budget.per_session_max),
+                        (50.0, 0.5, 0.9, 4.0),
+                    )
+        # Watch does not check the budget keys; project_budget.py ignores bad ones.
+        self._write({"budget": "not an object", "weekly": "lots"})
+        self.assertEqual(self._config_for(config=str(self.config)), WatcherConfig())
+
+    def test_file_values_are_kept_when_no_flag_is_given(self):
+        self._write(self._FILE)
+        config = self._config_for(config=str(self.config))
+        self.assertEqual({name: getattr(config, name) for name in self._FILE_VALUES},
+                         self._FILE_VALUES)
+
+    def test_given_flags_override_the_file(self):
+        self._write(self._FILE)
+        cases = (
+            (("--max-retries", "7"), {"max_retries": 7}),
+            (("--max-retries", "0"), {"max_retries": 0}),
+            (("--max-cost", "3.5"), {"max_cost_dollars": 3.5}),
+            (("--max-cost", "0"), {"max_cost_dollars": 0.0}),
+            (("--budget", "4"), {"max_cost_dollars": 4.0}),
+            (("--max-cost", "3.5", "--budget", "4"), {"max_cost_dollars": 4.0}),
+            (("--max-duration", "120"), {"max_duration_seconds": 120}),
+            (("--max-duration", "0"), {"max_duration_seconds": 0}),
+            (("--timeout", "90s"), {"max_duration_seconds": 90.0}),
+            (("--max-duration", "120", "--timeout", "3m"), {"max_duration_seconds": 180.0}),
+            (("--on-violation", "kill"), {"on_violation": "kill"}),
+            # A flag set to its default still overrides the file.
+            (("--on-violation", "terminal"), {"on_violation": "terminal"}),
+            (("--webhook", "http://flag.example/hook"), {"webhook_url": "http://flag.example/hook"}),
+            (("--webhook", ""), {"webhook_url": ""}),
+            (("--on-death", "echo {post_mortem_path}"), {"on_death_cmd": "echo {post_mortem_path}"}),
+            (("--policy", "flag-scope.json"), {"scope_policy": "flag-scope.json"}),
+            (("--policy", ""), {"scope_policy": ".agent-scope.json"}),
+            (("--max-context-pct", "50"), {"max_context_pct": 50}),
+            (("--max-context-pct", "90"), {"max_context_pct": 90}),
+            (("--loop-threshold", "4", "--loop-window", "15"), {"loop_threshold": 4, "loop_window": 15}),
+            # Case q from the report.
+            (
+                ("--webhook", "http://flag.example/hook", "--on-violation", "kill"),
+                {"webhook_url": "http://flag.example/hook", "on_violation": "kill"},
+            ),
+        )
+        for flags, changed in cases:
+            with self.subTest(flags=flags):
+                config = self._config_for(*flags, config=str(self.config))
+                self.assertEqual(
+                    {name: getattr(config, name) for name in self._FILE_VALUES},
+                    {**self._FILE_VALUES, **changed},
+                )
+
+    def test_max_context_pct_flag_is_applied(self):
+        self.assertEqual(self._config_for().max_context_pct, 90)
+        for value in ("1", "50", "100"):
+            with self.subTest(value=value):
+                self.assertEqual(self._config_for("--max-context-pct", value).max_context_pct,
+                                 int(value))
+        # 120,000 of claude-sonnet-4's 200,000 tokens is 60%.
+        request = _make_event(
+            EventType.LLM_REQUEST, 2.0, model="claude-sonnet-4", input_tokens=120_000,
+        )
+        cases = (
+            ((), None, False),
+            (("--max-context-pct", "50"), None, True),
+            ((), {"max_context_pct": 50}, True),
+            (("--max-context-pct", "50"), {"max_context_pct": 80}, True),
+            (("--max-context-pct", "70"), {"max_context_pct": 50}, False),
+        )
+        for flags, document, fires in cases:
+            with self.subTest(flags=flags, document=document):
+                config_path = None
+                if document is not None:
+                    self._write(document)
+                    config_path = str(self.config)
+                config = self._config_for(*flags, config=config_path)
+                violations = check_event(request, config, WatchState())
+                self.assertEqual(
+                    any(v.startswith("TokenBudgetWatcher:") for v in violations), fires,
+                )
+
+    def test_bad_max_context_pct_is_refused(self):
+        line = "[watch] invalid --max-context-pct value: it must be a whole number from 1 to 100\n"
+        for value in ("0", "101", "-5"):
+            for config in (None, str(self.config)):
+                self._assert_status_1((f"--max-context-pct={value}",), line, config=config)
+
+    def test_bad_timeout_is_refused_with_or_without_a_config_file(self):
+        line = "[watch] invalid --timeout value: cannot parse duration: 'soon'\n"
+        for config in (None, str(self.config)):
+            self._assert_status_1(("--timeout", "soon"), line, config=config)
+
+    def test_help_still_shows_the_defaults(self):
+        out = io.StringIO()
+        with redirect_stdout(out), self.assertRaises(SystemExit) as ctx:
+            build_parser().parse_args(["watch", "--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        subparsers = next(
+            action for action in self.parser._actions
+            if isinstance(action, argparse._SubParsersAction)
+        )
+        helps = {action.dest: action.help for action in subparsers.choices["watch"]._actions}
+        defaults = (
+            ("max_retries", "5"), ("max_cost", "10"), ("max_duration", "1800"),
+            ("on_violation", "terminal"), ("max_context_pct", "90"),
+        )
+        for dest, default in defaults:
+            with self.subTest(dest=dest):
+                self.assertIn(f"(default: {default})", helps[dest])
 
 
 if __name__ == "__main__":
