@@ -1,4 +1,4 @@
-"""Trace-store files are written with LF line endings on every OS.
+"""Trace-store files and the files agent-strace reads back are LF on every OS.
 
 Text-mode writes translate "\\n" to os.linesep unless ``newline`` is set, so
 Windows used to write CRLF into events.ndjson and other store files. Each
@@ -8,6 +8,7 @@ test runs the real writer twice: once as is, and once under
 that forgets ``newline`` therefore fails on Linux and macOS too.
 """
 
+import argparse
 import builtins
 import contextlib
 import hashlib
@@ -24,13 +25,17 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from agent_trace import annotate, baseline, compaction, dashboard, hooks, identity
-from agent_trace import postmortem, retention
+from agent_trace import annotate, auto_bootstrap, baseline, budget_report, cli, compaction
+from agent_trace import copilot_cloud, dashboard, drift, freeze, hooks, identity, optimize
+from agent_trace import policy, policy_backtest, postmortem, retention, skills_eval, watch
 from agent_trace.audit import verify_chain
 from agent_trace.backfill import _write_meta_exclusive
 from agent_trace.cli import cmd_verify
 from agent_trace.compliance_report import _parse_event_snapshot
 from agent_trace.eval import dataset
+from agent_trace.eval import runner as eval_runner
+from agent_trace.eval.config import EvalConfig
+from agent_trace.eval.scorers import ScoreResult
 from agent_trace.fileutil import write_atomic
 from agent_trace.integrations import _base as integrations_base
 from agent_trace.models import EventType, SessionMeta, TraceEvent
@@ -367,6 +372,270 @@ class TestSidecarLineEndings(_LineEndingCase):
                 _write_meta_exclusive(store, meta.session_id, meta)
                 self.assertLF(trace_dir / meta.session_id / "meta.json")
 
+
+def _crlf(path: Path) -> None:
+    """Rewrite an LF file the way an older Windows version wrote it."""
+    raw = path.read_bytes()
+    assert b"\r" not in raw
+    path.write_bytes(raw.replace(b"\n", b"\r\n"))
+
+
+def _gate_report() -> "eval_runner.GateReport":
+    return eval_runner.GateReport(session_id="gate", results=[
+        eval_runner.CriterionResult(
+            name="no-errors", scorer="error_count", score=0, fail_on="above",
+            threshold=0, criterion_passed=True,
+        ),
+    ])
+
+
+def _eval_report() -> "eval_runner.EvalReport":
+    return eval_runner.EvalReport(
+        session_id="eval",
+        results=[ScoreResult(scorer="no_errors", score=1.0, threshold=1.0, passed=True, reason="")],
+        config=EvalConfig.default(),
+    )
+
+
+class TestReadBackFileLineEndings(_LineEndingCase):
+    """Configs, fixtures, baselines, policies and logs that agent-strace reads back.
+
+    Each test also rewrites the file with CRLF, as older Windows versions
+    did, and checks that it still loads.
+    """
+
+    def _store_with_session(self, trace_dir: Path) -> tuple[TraceStore, str]:
+        store = TraceStore(trace_dir)
+        meta = SessionMeta(agent_name="agent")
+        store.create_session(meta)
+        store.append_event(meta.session_id, _event(meta.session_id, 0))
+        return store, meta.session_id
+
+    def test_alerts_log_is_lf(self):
+        for mode in MODES:
+            with self.in_mode(mode) as trace_dir:
+                log = trace_dir / "alerts.log"
+                watch._alert_file("first", log_path=str(log))
+                watch._alert_file("second", log_path=str(log))
+                self.assertEqual(len(self.assertLF(log).splitlines()), 2)
+
+    def test_watchdog_postmortem_is_lf(self):
+        for mode in MODES:
+            with self.in_mode(mode) as trace_dir:
+                store, session_id = self._store_with_session(trace_dir)
+                path = watch._write_watchdog_postmortem(
+                    store, session_id, watch.WatchState(), "budget",
+                )
+                self.assertIsNotNone(path)
+                self.assertLF(path)
+                _crlf(path)
+                loaded = budget_report._read_postmortem(store, session_id)
+                self.assertEqual(loaded["session_id"], session_id)
+
+    def test_setup_hook_configs_are_lf(self):
+        args = argparse.Namespace(redact=False, no_redact=False)
+        for mode in MODES:
+            with self.in_mode(mode) as trace_dir:
+                env = {
+                    "CODEX_HOME": str(trace_dir / "codex"),
+                    "GEMINI_CLI_HOME": str(trace_dir / "gemini"),
+                    "CURSOR_CONFIG_DIR": str(trace_dir / "cursor"),
+                    "COPILOT_HOME": str(trace_dir / "copilot"),
+                }
+                (trace_dir / "codex").mkdir(parents=True)
+                with patch.dict(os.environ, env):
+                    paths = [
+                        cli._write_codex_hooks_config(args)[0],
+                        *cli._write_gemini_extension(args),
+                        cli._write_cursor_hooks_config(args),
+                        cli._write_copilot_hooks_config(args),
+                    ]
+                for path in paths:
+                    self.assertLF(path)
+                    expected = json.loads(path.read_text(encoding="utf-8"))
+                    _crlf(path)
+                    self.assertEqual(cli._read_json_or_none(path), expected)
+
+    def test_codex_setup_backs_up_legacy_crlf_config_exactly(self):
+        args = argparse.Namespace(redact=False, no_redact=False)
+        for mode in MODES:
+            with self.in_mode(mode) as trace_dir:
+                codex = trace_dir / "codex"
+                codex.mkdir(parents=True)
+                legacy = b'{\r\n  "hooks": {}\r\n}\r\n'
+                (codex / "hooks.json").write_bytes(legacy)
+                with patch.dict(os.environ, {"CODEX_HOME": str(codex)}):
+                    hooks_path, backup, created = cli._write_codex_hooks_config(args)
+                self.assertTrue(created)
+                self.assertEqual(backup.read_bytes(), legacy)
+                self.assertLF(hooks_path)
+
+    def test_copilot_cloud_repository_files_are_lf(self):
+        for mode in MODES:
+            with self.in_mode(mode) as trace_dir:
+                repo = trace_dir / "repo"
+                hooks_path, script_path = copilot_cloud.write_repository_files(repo)
+                self.assertLF(hooks_path)
+                script = self.assertLF(script_path)
+                self.assertTrue(script.startswith(b"#!"))
+
+    def test_policy_is_lf(self):
+        for mode in MODES:
+            with self.in_mode(mode) as trace_dir:
+                self._store_with_session(trace_dir)
+                out = trace_dir / "policy.json"
+                args = argparse.Namespace(
+                    trace_dir=str(trace_dir), session_ids=[], output=str(out), dry_run=False,
+                )
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(policy.cmd_policy(args), 0)
+                self.assertLF(out)
+                _crlf(out)
+                policy_backtest._load_policy(out)
+
+    def test_drift_fingerprints_are_lf(self):
+        for mode in MODES:
+            with self.in_mode(mode) as trace_dir:
+                self._store_with_session(trace_dir)
+                saved = trace_dir / "fp" / "fingerprint.json"
+                args = argparse.Namespace(
+                    trace_dir=str(trace_dir), sessions=20, output=str(saved), id="fp",
+                    compare=None, threshold=0.2, format="text",
+                )
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(drift.cmd_fingerprint(args), 0)
+                self.assertLF(saved)
+
+                baseline_path = trace_dir / "baseline" / "drift.json"
+                args = argparse.Namespace(
+                    trace_dir=str(trace_dir), threshold=0.2, baseline=None, since="30d",
+                    current=None, baseline_range=None, save_baseline=str(baseline_path),
+                )
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(drift.cmd_drift(args), 0)
+                self.assertLF(baseline_path)
+
+                _crlf(saved)
+                loaded = drift.BehavioralFingerprint.from_json(saved.read_text())
+                self.assertEqual(loaded.fingerprint_id, "fp")
+
+    def test_freeze_fixture_is_lf(self):
+        for mode in MODES:
+            with self.in_mode(mode) as trace_dir:
+                _, session_id = self._store_with_session(trace_dir)
+                out = trace_dir / "fixtures" / "fixture.json"
+                args = argparse.Namespace(
+                    trace_dir=str(trace_dir), session_id=session_id, output=str(out),
+                    task="", format="text",
+                )
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(freeze.cmd_freeze(args), 0)
+                self.assertLF(out)
+                _crlf(out)
+                args = argparse.Namespace(
+                    trace_dir=str(trace_dir), fixture_file=str(out), session_id=session_id,
+                    threshold=0.0, format="json",
+                )
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(freeze.cmd_regression(args), 0)
+
+    def test_eval_baselines_and_summaries_are_lf(self):
+        for mode in MODES:
+            with self.in_mode(mode) as trace_dir:
+                gate = trace_dir / "gate-baseline.json"
+                eval_runner.save_gate_baseline(gate, _gate_report())
+                self.assertLF(gate)
+                _crlf(gate)
+                self.assertEqual(eval_runner.load_gate_baseline(gate), {"no-errors": 0})
+
+                legacy = trace_dir / "eval-baseline.json"
+                eval_runner._save_baseline(str(legacy), _eval_report())
+                self.assertLF(legacy)
+                _crlf(legacy)
+                self.assertEqual(eval_runner._load_baseline(str(legacy)), {"no_errors": 1.0})
+
+                summary = trace_dir / "step-summary.md"
+                eval_runner.write_gate_github_summary(_gate_report(), summary)
+                with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary)}):
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        eval_runner._write_github_summary(_eval_report(), {}, tolerance=0.0)
+                self.assertIn(b"agent-strace eval", self.assertLF(summary))
+
+    def test_skills_eval_hook_configs_are_lf(self):
+        for mode in MODES:
+            with self.in_mode(mode) as trace_dir:
+                paths = skills_eval.write_hook_configs(trace_dir)
+                plugin_dir = Path(paths["hooks_plugin_dir"])
+                self.assertLF(plugin_dir / "plugin.json")
+                self.assertLF(plugin_dir / "hooks.json")
+                self.assertLF(Path(paths["claude_settings"]))
+
+    def test_skills_eval_run_info_is_lf(self):
+        case = skills_eval.EvalCase(id="case", skill="demo", prompt="hi", should_trigger=True)
+        spec = skills_eval.AgentSpec(name="agent", template="", tokens=["agent"], timeout=1.0)
+        outcome = {"exit_code": 3, "timed_out": False, "duration_s": 0.5, "error": "boom"}
+        for mode in MODES:
+            with self.in_mode(mode) as trace_dir:
+                with patch.object(skills_eval, "run_agent", return_value=dict(outcome)), \
+                        patch.object(skills_eval, "score_trace_dir", return_value={}), \
+                        patch.object(skills_eval, "classify_run", side_effect=lambda result: result):
+                    skills_eval.run_case_live(case, 1, spec, save_root=trace_dir / "saved")
+                run_dir = trace_dir / "saved" / "case" / "run-1"
+                self.assertLF(run_dir / "run.json")
+                _crlf(run_dir / "run.json")
+                warnings: list[str] = []
+                info = skills_eval._read_run_info(run_dir, warnings)
+                self.assertEqual((info["exit_code"], warnings), (3, []))
+
+    def test_sitecustomize_is_lf(self):
+        for mode in MODES:
+            with self.in_mode(mode):
+                bootstrap_dir = auto_bootstrap.create_bootstrap_dir()
+                self.addCleanup(auto_bootstrap.remove_bootstrap_dir, bootstrap_dir)
+                self.assertLF(Path(bootstrap_dir) / "sitecustomize.py")
+
+    def test_machine_identity_is_lf(self):
+        for mode in MODES:
+            with self.in_mode(mode) as trace_dir:
+                path = trace_dir / "identity.json"
+                with patch.dict(os.environ, {"AGENT_TRACE_IDENTITY_FILE": str(path)}):
+                    created = identity.load_or_create_identity("agent")
+                    self.assertLF(path)
+                    _crlf(path)
+                    self.assertEqual(identity.load_identity().identity_id, created.identity_id)
+
+    def test_optimize_keeps_the_target_file_line_endings(self):
+        cases = (
+            (None, b"# Added\n"),
+            (b"# Rules\n", b"# Rules\n\n---\n\n# Added\n"),
+            (b"# Rules\r\n", b"# Rules\r\n\r\n---\r\n\r\n# Added\r\n"),
+        )
+        pattern = optimize.FailurePattern(
+            name="p", description="d", session_ids=["s"], example_events=[],
+            proposed_instruction="# Added",
+        )
+
+        def propose(_store, _ids, *, target_file, **_kwargs):
+            path = Path(target_file)
+            existing = path.read_text() if path.exists() else ""
+            return optimize.OptimizeProposal(target_file, [pattern], existing)
+
+        for existing, expected in cases:
+            for mode in MODES:
+                with self.in_mode(mode) as trace_dir, self.subTest(existing=existing):
+                    self._store_with_session(trace_dir)
+                    target = trace_dir / "AGENTS.md"
+                    if existing is not None:
+                        target.write_bytes(existing)
+                    args = argparse.Namespace(
+                        trace_dir=str(trace_dir), target=str(target), apply=True, dry_run=False,
+                        session_id=None, dataset=None,
+                        base_url=None, model=None, api_key=None,
+                    )
+                    with patch.object(optimize, "run_optimize", propose), \
+                            contextlib.redirect_stdout(io.StringIO()):
+                        self.assertEqual(optimize.cmd_optimize(args), 0)
+                    self.assertEqual(target.read_bytes(), expected)
 
 if __name__ == "__main__":
     unittest.main()

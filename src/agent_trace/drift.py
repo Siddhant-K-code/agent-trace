@@ -653,7 +653,7 @@ def cmd_drift(args: argparse.Namespace) -> int:
     save_path = getattr(args, "save_baseline", None)
     if save_path:
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-        Path(save_path).write_text(current_fp.to_json())
+        Path(save_path).write_text(current_fp.to_json(), newline="\n")
         sys.stdout.write(f"Behavioral fingerprint saved to {save_path}\n")
         return 0
 
@@ -732,7 +732,7 @@ def cmd_fingerprint(args: argparse.Namespace) -> int:
     if output:
         out_path = Path(output)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(fp.to_json() + "\n")
+        out_path.write_text(fp.to_json() + "\n", newline="\n")
         message = f"Behavioral fingerprint saved to {out_path}\n"
         if fmt == "json":
             sys.stderr.write(message)

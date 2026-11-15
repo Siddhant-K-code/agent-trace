@@ -443,6 +443,14 @@ def _resolve_sessions(store: TraceStore, args: argparse.Namespace) -> list[str]:
     return [latest] if latest else []
 
 
+def _target_newline(path: Path) -> str:
+    """Keep CRLF in an instructions file that already uses it; otherwise write LF."""
+    try:
+        return "\r\n" if b"\r\n" in path.read_bytes() else "\n"
+    except OSError:
+        return "\n"
+
+
 def cmd_optimize(args: argparse.Namespace) -> int:
     import os
     store = TraceStore(args.trace_dir)
@@ -494,6 +502,6 @@ def cmd_optimize(args: argparse.Namespace) -> int:
     new_content = proposal.apply()
     target_path = Path(target)
     target_path.parent.mkdir(parents=True, exist_ok=True)
-    target_path.write_text(new_content)
+    target_path.write_text(new_content, newline=_target_newline(target_path))
     sys.stdout.write(f"Written {len(proposal.patterns)} addition(s) to {target}\n")
     return 0

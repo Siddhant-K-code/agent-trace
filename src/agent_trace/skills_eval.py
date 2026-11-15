@@ -380,13 +380,15 @@ def write_hook_configs(root: Path) -> dict[str, str]:
         "description": "Temporary agent-strace hooks for one skills eval run",
         "version": "0.0.0",
         "hooks": "hooks.json",
-    }, indent=2) + "\n")
+    }, indent=2) + "\n", newline="\n")
     (plugin_dir / "hooks.json").write_text(
-        json.dumps(_rewrite_hook_commands(_copilot_hooks_config(args), prefix), indent=2) + "\n"
+        json.dumps(_rewrite_hook_commands(_copilot_hooks_config(args), prefix), indent=2) + "\n",
+        newline="\n",
     )
     settings = root / "claude-settings.json"
     settings.write_text(
-        json.dumps(_rewrite_hook_commands(_claude_hooks_config(args), prefix), indent=2) + "\n"
+        json.dumps(_rewrite_hook_commands(_claude_hooks_config(args), prefix), indent=2) + "\n",
+        newline="\n",
     )
     return {"hooks_plugin_dir": str(plugin_dir), "claude_settings": str(settings)}
 
@@ -788,7 +790,7 @@ def run_case_live(
             _copy_sessions(traces, destination)
             info = {key: outcome[key] for key in ("exit_code", "timed_out", "duration_s", "error")}
             info.update({"agent": spec.name, "agent_version": spec.version})
-            (destination / "run.json").write_text(json.dumps(info, indent=2) + "\n")
+            (destination / "run.json").write_text(json.dumps(info, indent=2) + "\n", newline="\n")
         if keep_workspaces:
             result["kept_dir"] = str(root)
         return result

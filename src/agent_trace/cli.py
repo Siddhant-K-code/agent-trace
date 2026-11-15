@@ -1147,6 +1147,7 @@ def _write_codex_hooks_config(args: argparse.Namespace) -> tuple[Path, Path | No
     hooks_path.write_text(
         json.dumps(_codex_hooks_config(args), indent=2) + "\n",
         encoding="utf-8",
+        newline="\n",
     )
     return hooks_path, existing_backup, backup_created
 
@@ -1159,8 +1160,8 @@ def _write_gemini_extension(args: argparse.Namespace) -> tuple[Path, Path]:
 
     manifest_path = extension_dir / "gemini-extension.json"
     hooks_path = hooks_dir / "hooks.json"
-    manifest_path.write_text(json.dumps(_gemini_extension_manifest(), indent=2) + "\n")
-    hooks_path.write_text(json.dumps(_gemini_hooks_config(args), indent=2) + "\n")
+    manifest_path.write_text(json.dumps(_gemini_extension_manifest(), indent=2) + "\n", newline="\n")
+    hooks_path.write_text(json.dumps(_gemini_hooks_config(args), indent=2) + "\n", newline="\n")
     return manifest_path, hooks_path
 
 
@@ -1176,7 +1177,7 @@ def _write_cursor_hooks_config(args: argparse.Namespace) -> Path:
     config_dir = _cursor_config_dir()
     config_dir.mkdir(parents=True, exist_ok=True)
     hooks_path = config_dir / "hooks.json"
-    hooks_path.write_text(json.dumps(_cursor_hooks_config(args), indent=2) + "\n")
+    hooks_path.write_text(json.dumps(_cursor_hooks_config(args), indent=2) + "\n", newline="\n")
     return hooks_path
 
 
@@ -1184,7 +1185,7 @@ def _write_copilot_hooks_config(args: argparse.Namespace) -> Path:
     hooks_dir = _copilot_config_dir() / "hooks"
     hooks_dir.mkdir(parents=True, exist_ok=True)
     hooks_path = hooks_dir / "agent-strace.json"
-    hooks_path.write_text(json.dumps(_copilot_hooks_config(args), indent=2) + "\n")
+    hooks_path.write_text(json.dumps(_copilot_hooks_config(args), indent=2) + "\n", newline="\n")
     return hooks_path
 
 

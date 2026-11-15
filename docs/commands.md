@@ -1239,7 +1239,7 @@ Measure tokenizer cost impact of switching model versions. No API calls required
 agent-strace optimize [--target FILE] [--dataset NAME] [--apply]
                       [--base-url URL] [--model MODEL] [--api-key KEY]
 ```
-Cluster failures by root cause and propose additions to `AGENTS.md` or any instruction file. Three built-in heuristic patterns require no LLM.
+Cluster failures by root cause and propose additions to `AGENTS.md` or any instruction file. Three built-in heuristic patterns require no LLM. `--apply` keeps `\r\n` line endings in a file that already uses them and writes `\n` otherwise, on every OS.
 
 ### `config-watch`
 ```
