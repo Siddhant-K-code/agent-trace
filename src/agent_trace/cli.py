@@ -2147,7 +2147,10 @@ def build_parser() -> argparse.ArgumentParser:
                               "{post_mortem_path} is substituted with the post-mortem JSON path")
     p_watch.add_argument("--on-violation", choices=["terminal", "file", "kill"],
                          help="action on violation (default: terminal)")
-    p_watch.add_argument("--webhook", help="webhook URL for alerts")
+    p_watch.add_argument("--webhook", metavar="URL",
+                         help="POST each alert as JSON to this http:// or https:// URL, after "
+                              "any pause or kill (no user name or password; redirects are not "
+                              "followed; errors name only scheme://host[:port])")
     p_watch.add_argument("--config", metavar="FILE",
                          help="JSON watch config file; watch refuses one it cannot use, "
                               "and flags given on the command line override it")

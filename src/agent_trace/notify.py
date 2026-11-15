@@ -24,11 +24,14 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 import urllib.request
 import urllib.error
 from dataclasses import dataclass, field
 from typing import Literal
+
+from .http_post import no_redirect_opener, post_error_detail, url_endpoint, url_problem
 
 Level = Literal["info", "warning", "error"]
 
@@ -47,6 +50,7 @@ _SLACK_COLORS: dict[str, str] = {
 # Retry config
 _MAX_RETRIES = 3
 _RETRY_DELAY = 1.0  # seconds, doubled each attempt
+_POST_TIMEOUT = 10.0  # seconds to wait for each answer
 
 
 # ---------------------------------------------------------------------------
@@ -136,11 +140,34 @@ def _generic_payload(
 # HTTP delivery with retry
 # ---------------------------------------------------------------------------
 
-def _post(url: str, payload: dict, retries: int = _MAX_RETRIES) -> bool:
-    """POST JSON payload to url. Returns True on success."""
+def _report(line: str) -> None:
+    sys.stderr.write(line + "\n")
+    sys.stderr.flush()
+
+
+def _post(
+    url: str, payload: dict, retries: int = _MAX_RETRIES, channel: str = "Webhook",
+) -> bool:
+    """POST JSON payload to url. Returns True on any 2xx answer.
+
+    *retries* is the number of attempts. Redirects are not followed. A 3xx
+    or 4xx answer, or a URL that cannot be used, fails at once. A 5xx
+    answer or a network error is tried again after 1 s, then 2 s.
+
+    A final failure prints one line to stderr naming *channel* and only the
+    URL's scheme://host[:port]: the path and query hold the token.
+    """
+    problem = url_problem(url)
+    if problem:
+        _report(f"[notify] {channel} URL not used: {problem}")
+        return False
+    endpoint = url_endpoint(url)
+    target = f"{channel} POST to {endpoint}" if endpoint else f"{channel} POST"
     body = json.dumps(payload).encode("utf-8")
+    attempts = max(retries, 1)
     delay = _RETRY_DELAY
-    for attempt in range(retries):
+    detail = ""
+    for attempt in range(1, attempts + 1):
         try:
             req = urllib.request.Request(
                 url,
@@ -148,20 +175,23 @@ def _post(url: str, payload: dict, retries: int = _MAX_RETRIES) -> bool:
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                if resp.status in (200, 202, 204):
-                    return True
+            # The opener raises HTTPError for every status outside 2xx.
+            with no_redirect_opener().open(req, timeout=_POST_TIMEOUT):
+                return True
         except urllib.error.HTTPError as exc:
+            exc.close()
+            detail = post_error_detail(exc)
             if exc.code < 500:
-                # 4xx — don't retry
-                import sys
-                sys.stderr.write(f"[notify] HTTP {exc.code} from {url}: {exc.reason}\n")
+                # 3xx or 4xx: trying again gets the same answer
+                _report(f"[notify] {target} failed: {detail}")
                 return False
-        except Exception:
-            pass
-        if attempt < retries - 1:
+        except Exception as exc:
+            detail = post_error_detail(exc)
+        if attempt < attempts:
             time.sleep(delay)
             delay *= 2
+    after = f" after {attempts} attempts" if attempts > 1 else ""
+    _report(f"[notify] {target} failed{after}: {detail}")
     return False
 
 
@@ -192,16 +222,16 @@ def notify(
 
     if slack:
         payload = _slack_payload(title, message, level, session_id, fields)
-        results["slack"] = _post(slack, payload)
+        results["slack"] = _post(slack, payload, channel="Slack")
 
     if teams:
         payload = _teams_payload(title, message, level, session_id, fields)
-        results["teams"] = _post(teams, payload)
+        results["teams"] = _post(teams, payload, channel="Teams")
 
     if generic and not (slack or teams):
         # Only fall back to generic if no provider-specific URL is set
         payload = _generic_payload(title, message, level, session_id, fields)
-        results["webhook"] = _post(generic, payload)
+        results["webhook"] = _post(generic, payload, channel="Webhook")
 
     return results
 

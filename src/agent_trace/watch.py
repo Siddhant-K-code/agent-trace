@@ -31,12 +31,10 @@ import subprocess
 import sys
 import threading
 import time
-import unicodedata
 import urllib.error
-import urllib.parse
 import urllib.request
 from collections import Counter, deque
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
@@ -49,6 +47,12 @@ from .event_data import (
     object_field,
     skipped_event_warning,
     str_field,
+)
+from .http_post import (
+    no_redirect_opener as _stream_opener,
+    post_error_detail as _stream_error_detail,
+    url_endpoint as _stream_endpoint,
+    url_problem as _stream_to_problem,
 )
 from .models import EventType, TraceEvent
 from .postmortem import clear_heartbeat, write_heartbeat
@@ -109,25 +113,54 @@ def _alert_terminal(message: str, out: TextIO = sys.stderr) -> None:
 
 
 def _alert_file(message: str, log_path: str = ".agent-traces/alerts.log") -> None:
-    Path(log_path).parent.mkdir(parents=True, exist_ok=True)
-    with open(log_path, "a", encoding="utf-8", newline="\n") as f:
-        ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        f.write(f"{ts}  {message}\n")
+    """Append *message* to the alert log. Never raises.
+
+    A failed write prints one line to stderr and the alert goes on, so an
+    unwritable log cannot stop a pause or kill.
+    """
+    try:
+        Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8", newline="\n") as f:
+            ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            f.write(f"{ts}  {message}\n")
+    except (OSError, ValueError) as exc:
+        # ValueError covers a lone surrogate in the message and a NUL in the path.
+        sys.stderr.write(f"[watch] Could not write alert log: {exc}\n")
+        sys.stderr.flush()
+
+
+# Seconds to wait for the --webhook answer.
+_WEBHOOK_TIMEOUT = 5.0
 
 
 def _alert_webhook(message: str, url: str) -> None:
-    payload = json.dumps({"text": message, "source": "agent-strace"}).encode()
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+    """POST *message* as JSON to the --webhook URL. Never raises.
+
+    Redirects are not followed and any answer other than 2xx is a failure.
+    A failure prints one line to stderr that names only the URL's
+    scheme://host[:port], because the path and query can hold a token.
+    """
+    problem = _stream_to_problem(url)
+    if problem:
+        sys.stderr.write(f"[watch] Webhook URL not used: {problem}\n")
+        sys.stderr.flush()
+        return
     try:
-        with urllib.request.urlopen(req, timeout=5):
+        req = urllib.request.Request(
+            url,
+            data=json.dumps({"text": message, "source": "agent-strace"}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with _stream_opener().open(req, timeout=_WEBHOOK_TIMEOUT):
             pass
-    except Exception:
-        pass  # webhook failures are non-fatal
+    except Exception as exc:
+        if isinstance(exc, urllib.error.HTTPError):
+            exc.close()
+        endpoint = _stream_endpoint(url)
+        target = f" to {endpoint}" if endpoint else ""
+        sys.stderr.write(f"[watch] Webhook POST{target} failed: {_stream_error_detail(exc)}\n")
+        sys.stderr.flush()
 
 
 def _kill_process(pid: int, start_time: str | None = None) -> None:
@@ -229,10 +262,7 @@ def _agent_pid_reused(
         out.write(f"[watch] {msg}\n")
         out.flush()
     if alert_log:
-        try:
-            _alert_file(msg, alert_log)
-        except OSError:
-            pass
+        _alert_file(msg, alert_log)
     state.agent_pid = None
     state.agent_start_time = None
     state.pause_owner = None
@@ -733,28 +763,6 @@ class StreamConfig:
         return cls(url=url, headers=headers or {}, otlp=otlp)
 
 
-def _stream_endpoint(url: str) -> str:
-    """Return the scheme://host[:port] that stream messages may name.
-
-    User info, path, query and fragment can carry tokens, so messages never
-    show them. Returns "" when no host can be read; the message then names
-    no endpoint.
-    """
-    if not isinstance(url, str):
-        return ""
-    try:
-        parts = urllib.parse.urlsplit(url)
-        host = parts.hostname
-        port = parts.port
-    except ValueError:
-        return ""
-    if not parts.scheme or not host or not host.isprintable() or " " in host:
-        return ""
-    if ":" in host:
-        host = f"[{host}]"
-    return f"{parts.scheme}://{host}" + ("" if port is None else f":{port}")
-
-
 def _otlp_traces_url(url: str) -> str:
     """Return the OTLP/HTTP traces URL for a stream base URL.
 
@@ -777,45 +785,6 @@ def _otlp_traces_url(url: str) -> str:
     return f"{rest[:path_start]}{path}{question_mark}{query}{hash_mark}{fragment}"
 
 
-def _stream_opener() -> urllib.request.OpenerDirector:
-    """Return an opener for stream POSTs that never follows a redirect.
-
-    urlopen re-sends a POST answered with 301, 302 or 303 as a GET with no
-    body, so the batch is lost. With no redirect handler every 3xx raises
-    HTTPError instead. Only http and https URLs can be opened.
-    """
-    opener = urllib.request.OpenerDirector()
-    handlers: list[urllib.request.BaseHandler] = [
-        urllib.request.ProxyHandler(),
-        urllib.request.UnknownHandler(),
-        urllib.request.HTTPHandler(),
-        urllib.request.HTTPDefaultErrorHandler(),
-        urllib.request.HTTPErrorProcessor(),
-    ]
-    if hasattr(urllib.request, "HTTPSHandler"):
-        handlers.append(urllib.request.HTTPSHandler())
-    for handler in handlers:
-        opener.add_handler(handler)
-    return opener
-
-
-def _stream_error_detail(exc: BaseException) -> str:
-    """Describe why a stream POST failed without quoting its URL.
-
-    Keeps the status and reason of an HTTP error and the reason of a network
-    error. Other exceptions (InvalidURL, ValueError, UnicodeEncodeError and
-    more) can repeat the URL, so only their class name is given.
-    """
-    if isinstance(exc, urllib.error.HTTPError):
-        detail = f"HTTP Error {exc.code}: {exc.reason}"
-        if 300 <= exc.code < 400:
-            detail += " (redirects are not followed; give the final URL)"
-        return detail
-    if isinstance(exc, urllib.error.URLError):
-        return str(exc.reason)
-    return type(exc).__name__
-
-
 def _stream_queue_wait(interval: float, elapsed: float) -> float:
     """Return how long the stream worker may wait for the next event.
 
@@ -833,33 +802,6 @@ def _stream_unconfirmed_line(count: int) -> str:
     """Return the line stop() writes when it stops waiting for the worker."""
     noun = "1 event was" if count == 1 else f"{count} events were"
     return f"[stream] Stopped waiting; {noun} not confirmed sent.\n"
-
-
-def _stream_to_problem(url: str) -> str | None:
-    """Return why *url* cannot be a --stream-to value, or None if it can.
-
-    The reason never repeats any part of the URL.
-    """
-    # Category Cc is C0, DEL and C1 (U+0080 to U+009F). urllib cannot send
-    # any of them, so each POST would fail.
-    if any(ch == " " or unicodedata.category(ch) == "Cc" for ch in url):
-        return "it must not contain spaces or control characters"
-    try:
-        parts = urllib.parse.urlsplit(url)
-        host = parts.hostname
-    except ValueError:
-        return "it is not a valid URL"
-    if parts.scheme not in ("http", "https"):
-        return "it must start with http:// or https://"
-    if not host:
-        return "it has no host"
-    if "@" in parts.netloc:
-        return "it must not contain a user name or password"
-    try:
-        parts.port
-    except ValueError:
-        return "its port must be a number from 0 to 65535"
-    return None
 
 
 def _stream_flush_interval_problem(seconds: float) -> str | None:
@@ -1277,6 +1219,42 @@ def _detect_loop(
 # Alert dispatcher
 # ---------------------------------------------------------------------------
 
+def _send_network_alerts(
+    message: str,
+    config: WatcherConfig,
+    action: str,
+    notify: str = "",
+    session_id: str = "",
+) -> None:
+    """Send an alert to --webhook and, when their env vars are set, Slack and Teams.
+
+    Called last, after the pause or kill: each channel can take seconds.
+    A failed channel prints one line and the next one is still tried.
+    """
+    if config.webhook_url:
+        _alert_webhook(message, config.webhook_url)
+
+    # Route to Slack/Teams via notify.py when env vars or rule hint is set
+    has_slack = bool(os.environ.get("AGENT_STRACE_SLACK_WEBHOOK"))
+    has_teams = bool(os.environ.get("AGENT_STRACE_TEAMS_WEBHOOK"))
+    if has_slack or has_teams:
+        try:
+            from .notify import notify_violation as _notify_violation
+            _notify_violation(
+                rule_name=notify or "watch-rule",
+                tool_name="",
+                session_id=session_id,
+                action=action or "alert",
+            )
+        except Exception as exc:
+            # notify reports its own delivery failures; this is anything else.
+            sys.stderr.write(f"[watch] Slack/Teams notification failed: {type(exc).__name__}\n")
+            sys.stderr.flush()
+    elif notify and notify.startswith("slack:") and config.webhook_url:
+        # Legacy: route slack: hint through the generic webhook URL
+        _alert_webhook(f"[{notify}] {message}", config.webhook_url)
+
+
 def _dispatch_alert(
     message: str,
     config: WatcherConfig,
@@ -1286,7 +1264,16 @@ def _dispatch_alert(
     dry_run: bool = False,
     store: TraceStore | None = None,
     session_id: str = "",
+    after_action: Callable[[], None] | None = None,
 ) -> None:
+    """Show, log and act on one alert, then send it over the network.
+
+    Order: the terminal line, the alert log (file, kill and pause actions),
+    the pause or kill (or the dry-run line), *after_action* (not on a dry
+    run), then the --webhook POST and Slack/Teams. No channel failure
+    raises, so none can stop or delay the pause or kill. A require_approval
+    action sends nothing over the network.
+    """
     action = action or config.on_violation
     # terminal is always shown regardless of action so the operator watching
     # the process sees every alert; file/webhook are additive channels
@@ -1343,30 +1330,10 @@ def _dispatch_alert(
 
     if action in ("file", "kill", "pause"):
         _alert_file(message, config.alert_log)
-    if config.webhook_url:
-        _alert_webhook(message, config.webhook_url)
-
-    # Route to Slack/Teams via notify.py when env vars or rule hint is set
-    try:
-        from .notify import notify as _notify, notify_violation as _notify_violation
-        import os as _os
-        has_slack = bool(_os.environ.get("AGENT_STRACE_SLACK_WEBHOOK"))
-        has_teams = bool(_os.environ.get("AGENT_STRACE_TEAMS_WEBHOOK"))
-        if has_slack or has_teams:
-            _notify_violation(
-                rule_name=notify or "watch-rule",
-                tool_name="",
-                session_id=session_id,
-                action=action or "alert",
-            )
-        elif notify and notify.startswith("slack:") and config.webhook_url:
-            # Legacy: route slack: hint through the generic webhook URL
-            _alert_webhook(f"[{notify}] {message}", config.webhook_url)
-    except Exception:
-        pass
 
     if dry_run:
         _alert_terminal(f"[dry-run] would {action} agent process")
+        _send_network_alerts(message, config, action, notify=notify, session_id=session_id)
         return
 
     if action == "kill" or (action == "pause" and not state.paused):
@@ -1390,6 +1357,10 @@ def _dispatch_alert(
         if config.on_death_cmd:
             _invoke_on_death(config.on_death_cmd, pm_path)
         _kill_process(state.agent_pid, state.agent_start_time)
+
+    if after_action is not None:
+        after_action()
+    _send_network_alerts(message, config, action, notify=notify, session_id=session_id)
 
 
 def _write_watchdog_postmortem(
@@ -1472,13 +1443,9 @@ def _dispatch_nanny_rule(
     msg = f"NannyRule '{rule.name}': {rule.condition} → {rule.action}"
     # The approval path needs the store; kill post-mortems are written below.
     approval_store = store if rule.action == "require_approval" else None
-    _dispatch_alert(
-        msg, config, state, action=rule.action, notify=rule.notify,
-        dry_run=dry_run, store=approval_store, session_id=session_id,
-    )
 
-    # Auto-generate postmortem on kill
-    if rule.action == "kill" and not dry_run:
+    def write_post_mortem() -> None:
+        # Auto-generate postmortem on kill
         pm_path = _write_watchdog_postmortem(
             store, session_id, state, reason=msg, config=config
         )
@@ -1487,6 +1454,14 @@ def _dispatch_nanny_rule(
         on_death = getattr(config, "on_death_cmd", "")
         if on_death:
             _invoke_on_death(on_death, pm_path)
+
+    # _dispatch_alert runs write_post_mortem after the kill and before the
+    # network alerts, and skips it on a dry run.
+    _dispatch_alert(
+        msg, config, state, action=rule.action, notify=rule.notify,
+        dry_run=dry_run, store=approval_store, session_id=session_id,
+        after_action=write_post_mortem if rule.action == "kill" else None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2175,6 +2150,21 @@ def cmd_watch(args: argparse.Namespace) -> int:
         config.loop_threshold = int(getattr(args, "loop_threshold"))
     if getattr(args, "loop_window", None) is not None:
         config.loop_window = int(getattr(args, "loop_window"))
+
+    # Check the URL alerts will be POSTed to before the agent pid is checked,
+    # the session is looked up or anything is written. Without this check a
+    # bad URL fails at the first alert. The line never quotes the URL: its
+    # path and query can hold a token. A given --webhook overrides the file.
+    if config.webhook_url:
+        problem = _stream_to_problem(config.webhook_url)
+        if problem:
+            if getattr(args, "webhook", None) is None and config_path is not None:
+                shown = config_path if config_path.isprintable() else repr(config_path)
+                source = f"webhook.url value in {shown}"
+            else:
+                source = "--webhook value"
+            sys.stderr.write(f"[watch] invalid {source}: {problem}\n")
+            return 1
 
     store = TraceStore(args.trace_dir)
 
