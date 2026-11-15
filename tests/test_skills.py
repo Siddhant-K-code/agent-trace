@@ -635,6 +635,23 @@ class TestOutcome(SkillsTestBase):
         self.assertEqual(outcome["errors"], 1)
         self.assertFalse(outcome["session_end_recorded"])
 
+    def test_last_test_reports_runner_summary_when_exit_code_is_masked(self):
+        ev = _Events(str(self.repo))
+        ev.tool("skill", {"skill": "deploy-check"})
+        ev.bash("pytest -q", result={"exit_code": 0})
+        ev.bash("python3 -m unittest 2>&1 | tail -5",
+                result={"result": "..\n" + "-" * 70 + "\nRan 2 tests in 0.000s\n\nOK\n"})
+        ev.add(EventType.SESSION_END)
+
+        report = self.analyze(ev.events)
+        last_test = self.loaded(report, "deploy-check")["outcome_after_load"]["last_test"]
+        self.assertEqual(last_test["runner_summary"], {"unittest": "passed"})
+        self.assertIsNone(last_test["exit_code"])
+        out = io.StringIO()
+        format_session_text(report, out)
+        self.assertIn("(last: unittest summary passed)", out.getvalue())
+        self.assertNotIn("Ran 2 tests", out.getvalue())
+
     def test_is_test_command_is_public(self):
         self.assertTrue(is_test_command("python -m pytest -q"))
         self.assertTrue(is_test_command("npm test"))

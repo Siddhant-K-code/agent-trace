@@ -49,6 +49,7 @@ from .session_paths import (
     session_cwd as _session_cwd,
     shell_writes as _shell_writes,
 )
+from .runner_summary import SUMMARY_RUNNERS, summary_outcome
 from .shell_split import is_operator, split_tokens
 from .store import TraceStore
 
@@ -770,21 +771,53 @@ _CORRELATION_REASONS = {
     "ambiguous_result": "more than one result",
 }
 
+# Unknown reasons where the exit status exists but is not the runner's, or was
+# not recorded. Only these may fall back to the runner's own summary.
+_MASKED_REASONS = frozenset({
+    "compound shell command",
+    "chained command failed; failing part not known",
+    "no exit status",
+})
 
-def _call_outcomes(events: Sequence[TraceEvent]) -> dict[int, tuple[str, int | None, str]]:
-    """Map each tool call index to its single correlated terminal outcome."""
+
+def _call_outcomes(
+    events: Sequence[TraceEvent],
+) -> tuple[dict[int, tuple[str, int | None, str]], dict[int, TraceEvent]]:
+    """Map each tool call index to its single correlated terminal outcome.
+
+    Also return the linked result event for each call that has exactly one.
+    """
     correlation = correlate_tool_events(events)
     result_for_call = {call: result for result, call in correlation.outcome_calls.items()}
     outcomes: dict[int, tuple[str, int | None, str]] = {}
+    results: dict[int, TraceEvent] = {}
     for call_index, state in correlation.call_outcomes.items():
         result_index = result_for_call.get(call_index)
         if state in ("recorded_result", "recorded_error") and result_index is not None:
             outcomes[call_index] = _result_status(events[result_index])
+            results[call_index] = events[result_index]
         else:
             outcomes[call_index] = (
                 "unknown", None, _CORRELATION_REASONS.get(state, "no single valid result"),
             )
-    return outcomes
+    return outcomes, results
+
+
+def runner_summaries(command: str, result: TraceEvent | None) -> dict[str, str]:
+    """Return ``{runner label: outcome}`` read from runner summaries in a result.
+
+    A runner counts only when exactly one command in the shell call invokes it,
+    so its summary cannot belong to another run. Labels come from the same
+    mapping as the Validation finding.
+    """
+    labels = [label for label, _ in filter(None, map(_segment_label, _shell_shape(command).segments))]
+    found: dict[str, str] = {}
+    for label in dict.fromkeys(labels):
+        if label in SUMMARY_RUNNERS and labels.count(label) == 1:
+            outcome = summary_outcome(label, result)
+            if outcome is not None:
+                found[label] = outcome
+    return found
 
 
 def _attribute(
@@ -951,7 +984,7 @@ def assess_validation(sessions: Sequence[_Session]) -> Finding:
     tool_calls = 0
     for rank, session in enumerate(_ordered(sessions)):
         cwd = _session_cwd(session.events)
-        outcomes = _call_outcomes(session.events)
+        outcomes, results = _call_outcomes(session.events)
         for index, event in enumerate(session.events):
             key = (float(event.timestamp), rank, index)
             if event.event_type == EventType.TOOL_CALL:
@@ -970,17 +1003,27 @@ def assess_validation(sessions: Sequence[_Session]) -> Finding:
             outcome, code, reason = _attribute(shape, outcomes.get(
                 index, ("unknown", None, "no valid result recorded"),
             ))
+            summaries: dict[str, str] = {}
+            if outcome == "unknown" and reason in _MASKED_REASONS:
+                summaries = runner_summaries(command, results.get(index))
             seen: set[tuple[str, str]] = set()
             for label, kind in labels:
                 if (label, kind) in seen:
                     continue
                 seen.add((label, kind))
+                if label in summaries:
+                    run_outcome, run_code, run_reason = summaries[label], None, ""
+                    outcome_source = "runner_summary"
+                else:
+                    run_outcome, run_code, run_reason = outcome, code, reason
+                    outcome_source = None if outcome == "unknown" else "exit_status"
                 runs.append({
                     "label": label,
                     "kind": kind,
-                    "outcome": outcome,
-                    "exit_code": code,
-                    "reason": reason,
+                    "outcome": run_outcome,
+                    "exit_code": run_code,
+                    "outcome_source": outcome_source,
+                    "reason": run_reason,
                     "session_id": session.session_id,
                     "key": key,
                 })
@@ -1007,11 +1050,15 @@ def assess_validation(sessions: Sequence[_Session]) -> Finding:
     last_key = runs[-1]["key"]
     facts = {
         "runs": [
-            {key: run[key] for key in ("label", "kind", "outcome", "exit_code", "session_id")}
+            {key: run[key] for key in (
+                "label", "kind", "outcome", "exit_code", "outcome_source", "session_id",
+            )}
             for run in runs
         ],
         "latest": [
-            {key: run[key] for key in ("label", "kind", "outcome", "exit_code", "changed_after")}
+            {key: run[key] for key in (
+                "label", "kind", "outcome", "exit_code", "outcome_source", "changed_after",
+            )}
             for run in final
         ],
         "shell_commands": shell_calls,
@@ -1021,8 +1068,13 @@ def assess_validation(sessions: Sequence[_Session]) -> Finding:
     def describe(run: dict[str, Any]) -> str:
         if run["outcome"] == "unknown":
             return f"{run['label']} outcome unknown ({run['reason']})"
+        if run["outcome_source"] == "runner_summary":
+            return f"{run['label']} {run['outcome']} (runner summary in output, not exit code)"
         code = "" if run["exit_code"] is None else f", exit {run['exit_code']}"
         return f"{run['label']} {run['outcome']}{code}"
+
+    if any(run["outcome_source"] == "runner_summary" for run in final):
+        source += "; runner summary lines in linked output"
 
     detail = "Last run: " + "; ".join(describe(run) for run in final) + "."
     stale = [run for run in final if run["changed_after"]]
@@ -1498,5 +1550,6 @@ __all__ = [
     "load_threshold",
     "read_cognitive_debt",
     "render_markdown",
+    "runner_summaries",
     "threshold_from_args",
 ]

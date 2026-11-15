@@ -40,6 +40,7 @@ from agent_trace.reviewability import (
     load_threshold,
     read_cognitive_debt,
     render_markdown,
+    runner_summaries,
 )
 from agent_trace.store import TraceStore
 
@@ -273,9 +274,9 @@ class TestFindings(_StoreCase):
             validation.facts["latest"],
             [
                 {"label": "pytest", "kind": "test", "outcome": "passed", "exit_code": 0,
-                 "changed_after": 0},
+                 "outcome_source": "exit_status", "changed_after": 0},
                 {"label": "ruff", "kind": "check", "outcome": "passed", "exit_code": 0,
-                 "changed_after": 0},
+                 "outcome_source": "exit_status", "changed_after": 0},
             ],
         )
         stewardship = self.finding(report, "stewardship")
@@ -548,21 +549,32 @@ class TestValidationOutcomes(_StoreCase):
                 self.assertIsNone(run["exit_code"])
                 self.assertEqual(validation.status, "partial")
 
-    def test_multi_line_script_is_partial_not_missing(self):
+    def test_multi_line_script_reads_runner_summary(self):
         validation, run = self._validate(
             "multiline001", MULTI_LINE_SCRIPT,
             {"result": "Ran 7 tests in 0.000s\n\nOK\n<shellId: 1 completed with exit code 0>"},
         )
-        self.assertEqual((validation.status, validation.confidence), ("partial", "medium"))
-        self.assertEqual((run["label"], run["outcome"]), ("unittest", "unknown"))
+        self.assertEqual((validation.status, validation.confidence), ("present", "medium"))
+        self.assertEqual((run["label"], run["outcome"]), ("unittest", "passed"))
+        self.assertEqual(run["outcome_source"], "runner_summary")
         self.assertIsNone(run["exit_code"])
         report = self.report("multiline001")
         self.assertNotIn("validation", [f.name for f in report.failing])
         text = io.StringIO()
         format_text(report, text)
-        for fragment in ("sentence_count", "PYTHONPATH", "EOF", "tail -4"):
+        for fragment in ("sentence_count", "PYTHONPATH", "EOF", "tail -4", "Ran 7"):
             self.assertNotIn(fragment, text.getvalue())
             self.assertNotIn(fragment, render_markdown(report))
+
+    def test_multi_line_script_without_summary_is_partial_not_missing(self):
+        validation, run = self._validate(
+            "multiline002", MULTI_LINE_SCRIPT,
+            {"result": "<shellId: 1 completed with exit code 0>"},
+        )
+        self.assertEqual((validation.status, validation.confidence), ("partial", "medium"))
+        self.assertEqual((run["label"], run["outcome"]), ("unittest", "unknown"))
+        self.assertIsNone(run["outcome_source"])
+        self.assertNotIn("validation", [f.name for f in self.report("multiline002").failing])
 
     def test_and_chain_carries_only_a_pass(self):
         validation, run = self._validate("chain0000001", "cd repo && pytest", {"result": "exit_code: 0"})
@@ -623,6 +635,177 @@ class TestValidationOutcomes(_StoreCase):
         b.save()
         validation = self.finding(self.report("cccc00000001", "dddd00000001"), "validation")
         self.assertEqual((validation.status, validation.confidence), ("present", "high"))
+
+
+UNITTEST_OK = (
+    "..\n----------------------------------------------------------------------\n"
+    "Ran 2 tests in 0.000s\n\nOK\n"
+)
+UNITTEST_FAILED = (
+    "F.\n======================================================================\n"
+    "FAIL: test_x (test_mod.T.test_x)\nAssertionError: 1 != 2\n\n"
+    "----------------------------------------------------------------------\n"
+    "Ran 2 tests in 0.001s\n\nFAILED (failures=1)\n"
+)
+# Commands and results from the public demo trace
+# (Siddhant-K-code/agent-trace-demo, .agent-traces/b13539e7-7f48-4d/).
+DEMO_CALLS = (
+    (
+        "cd /private/tmp/atdemo && PYTHONPATH=src python3 -m unittest 2>&1 | tail -5; "
+        "python3 -m unittest 2>&1 | tail -5",
+        "----------------------------------------------------------------------\n"
+        "Ran 0 tests in 0.000s\n\nNO TESTS RAN\n\n"
+        "----------------------------------------------------------------------\n"
+        "Ran 0 tests in 0.000s\n\nNO TESTS RAN\n<shellId: 1 completed with exit code 0>",
+    ),
+    (
+        "cd /private/tmp/atdemo && PYTHONPATH=src python3 -m unittest discover -s tests 2>&1 | tail -5",
+        ".......\n----------------------------------------------------------------------\n"
+        "Ran 7 tests in 0.000s\n\nOK\n<shellId: 2 completed with exit code 0>",
+    ),
+)
+
+
+class TestRunnerSummaryOutcomes(_StoreCase):
+    """A masked exit status falls back to the runner's own final summary."""
+
+    _validate = TestValidationOutcomes._validate
+
+    def _check(self, sid: str, command: str, result: dict, outcome: str, source: str | None):
+        validation, run = self._validate(sid, command, result)
+        self.assertEqual((run["outcome"], run["outcome_source"]), (outcome, source))
+        return validation, run
+
+    def test_container_quickstart_case(self):
+        command = "apt-get install -y python3 >/dev/null 2>&1; python3 -m unittest 2>&1 | tail -5"
+        for sid, text in (("container001", UNITTEST_OK),
+                          ("container002", " ".join(UNITTEST_OK.split()))):
+            with self.subTest(sid=sid):
+                validation, run = self._check(sid, command, {"result": text}, "passed", "runner_summary")
+                self.assertEqual((validation.status, validation.confidence), ("present", "medium"))
+                self.assertEqual((run["label"], run["exit_code"]), ("unittest", None))
+                self.assertIn("unittest passed (runner summary in output, not exit code)", validation.detail)
+                self.assertIn("runner summary lines in linked output", validation.source)
+                report = self.report(sid)
+                text_out = io.StringIO()
+                format_text(report, text_out)
+                rendered = text_out.getvalue() + render_markdown(report) + json.dumps(report.to_dict())
+                for fragment in ("apt-get", "tail -5", "Ran 2", "-----"):
+                    self.assertNotIn(fragment, rendered)
+
+    def test_demo_trace_shape(self):
+        b = _Builder(self.store, "demo00000001", agent="github-copilot")
+        b.prompt()
+        b.tool("edit", path=f"{CWD}/src/pkg/sentences.py")
+        for command, result in DEMO_CALLS:
+            b.tool("bash", result=result, command=command)
+        validation = self.finding(self.report(b.save()), "validation")
+        self.assertEqual((validation.status, validation.confidence), ("present", "medium"))
+        self.assertEqual(
+            [(run["outcome"], run["outcome_source"]) for run in validation.facts["runs"]],
+            [("unknown", None), ("passed", "runner_summary")],
+        )
+        self.assertEqual(validation.detail,
+                         "Last run: unittest passed (runner summary in output, not exit code).")
+
+    def test_pytest_pass_and_fail(self):
+        command = "cd repo && python -m pytest -q 2>&1 | tail -3"
+        validation, _ = self._check("pytestpass01", command,
+                                    {"result": "...\n3 passed in 0.05s\n"}, "passed", "runner_summary")
+        self.assertEqual(validation.status, "present")
+        validation, _ = self._check(
+            "pytestfail01", command,
+            {"result": "FAILED tests/test_a.py::test_x\n== 1 failed, 2 passed in 0.31s ==\nexit code 0"},
+            "failed", "runner_summary",
+        )
+        self.assertEqual(validation.status, "partial")
+        self.assertIn("pytest failed (runner summary in output, not exit code)", validation.detail)
+
+    def test_failed_unittest_summary(self):
+        validation, _ = self._check("utfail000001", "python3 -m unittest 2>&1 | tail -8",
+                                    {"result": UNITTEST_FAILED}, "failed", "runner_summary")
+        self.assertEqual((validation.status, validation.confidence), ("partial", "medium"))
+
+    def test_summary_followed_by_more_output(self):
+        self._check("utmore000001", "python3 -m unittest 2>&1 | tail -5; git status --short",
+                    {"result": UNITTEST_OK + " M src/pkg/sentences.py\n?? notes.txt\n"},
+                    "passed", "runner_summary")
+
+    def test_truncated_or_missing_summary_keeps_unknown(self):
+        command = "python3 -m unittest -v 2>&1 | tail -200"
+        cases = {
+            "trunc0000001": "test_a ... ok\n" * 80 + "... (truncated)",
+            "trunc0000002": UNITTEST_OK + "x" * 40 + "... (truncated)",
+            "trunc0000003": "test_a ... ok\n----\nRan 2 tests in 0.000s\n",
+            "nosumm000001": "test_a ... ok\ntest_b ... ok\n<shellId: 3 completed with exit code 0>",
+        }
+        for sid, text in cases.items():
+            with self.subTest(sid=sid):
+                validation, _ = self._check(sid, command, {"result": text}, "unknown", None)
+                self.assertEqual(validation.status, "partial")
+                self.assertIn("unittest outcome unknown (", validation.detail)
+                self.assertNotIn("runner summary", validation.detail)
+
+    def test_redacted_result_keeps_unknown(self):
+        validation, run = self._validate("redact000001", "pytest -q | tail -3",
+                                         {"result": "3 passed in 0.1s [REDACTED:token]"})
+        self.assertEqual((run["outcome"], validation.status), ("unknown", "partial"))
+        b = _Builder(self.store, "redact000002")
+        b.prompt()
+        call = b.add(EventType.TOOL_CALL, tool_name="Bash", arguments={"command": "pytest -q | tail -3"})
+        b.add(EventType.TOOL_RESULT, parent=call.event_id, redacted=True, tool_name="Bash",
+              result="3 passed in 0.1s")
+        validation = self.finding(self.report(b.save()), "validation")
+        self.assertEqual(validation.facts["latest"][0]["outcome"], "unknown")
+
+    def test_exit_status_still_wins_when_attributable(self):
+        validation, run = self._check("exitwins0001", "pytest",
+                                      {"result": "== 3 passed in 0.1s ==\nexit code 1"},
+                                      "failed", "exit_status")
+        self.assertEqual(run["exit_code"], 1)
+        _, run = self._check("exitwins0002", "pytest -q", {"result": "== 3 passed in 0.1s =="},
+                             "passed", "runner_summary")
+        self.assertIsNone(run["exit_code"])
+        _, run = self._check("chainfail001", "cd repo && pytest",
+                             {"result": "== 1 failed in 0.1s ==\nexit_code: 1"},
+                             "failed", "runner_summary")
+
+    def test_ambiguous_runs_keep_unknown(self):
+        cases = {
+            "tworuns00001": ("pytest tests/a | tail -1; pytest tests/b | tail -1",
+                             "== 1 passed in 0.1s ==\n== 1 passed in 0.1s =="),
+            "conflict0002": ("pytest | tail -1", "exit code 0 then exit code 3\n== 1 passed in 0.1s =="),
+            "noresult0001": ("npm test | tail -5", "Tests:       5 passed, 5 total"),
+        }
+        for sid, (command, text) in cases.items():
+            with self.subTest(sid=sid):
+                _, run = self._check(sid, command, {"result": text}, "unknown", None)
+
+    def test_error_event_is_not_read(self):
+        validation, run = self._validate("errevent0001", "pytest | tail -3",
+                                         {"error": "== 3 passed in 0.1s =="}, failed=True)
+        self.assertEqual((run["outcome"], run["outcome_source"]), ("unknown", None))
+
+    def test_only_the_named_runner_reads_the_summary(self):
+        b = _Builder(self.store, "mixed0000001")
+        b.prompt()
+        b.tool("Bash", result="== 3 passed in 0.1s ==\nAll checks passed!",
+               command="pytest -q | tail -1; ruff check src")
+        validation = self.finding(self.report(b.save()), "validation")
+        latest = {run["label"]: (run["outcome"], run["outcome_source"])
+                  for run in validation.facts["latest"]}
+        self.assertEqual(latest, {"pytest": ("passed", "runner_summary"), "ruff": ("unknown", None)})
+        self.assertEqual(validation.status, "partial")
+
+
+class TestRunnerSummariesHelper(unittest.TestCase):
+    def test_counts_runner_segments(self):
+        result = TraceEvent(event_type=EventType.TOOL_RESULT, timestamp=1.0,
+                            data={"result": UNITTEST_OK})
+        self.assertEqual(runner_summaries("python3 -m unittest | tail -5", result), {"unittest": "passed"})
+        self.assertEqual(runner_summaries("python3 -m unittest; python3 -m unittest", result), {})
+        self.assertEqual(runner_summaries("ls", result), {})
+        self.assertEqual(runner_summaries("python3 -m unittest", None), {})
 
 
 class TestConfigFailsClosed(unittest.TestCase):

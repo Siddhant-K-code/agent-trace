@@ -262,6 +262,35 @@ class ComplianceEvidenceTests(unittest.TestCase):
         self.assertEqual(report["validation"]["tests_run"], 1)
         self.assertEqual(report["validation"]["last_test"]["result"]["exit_code"], 0)
         self.assertTrue(report["validation"]["session_end_recorded"])
+        self.assertEqual(report["validation"]["last_test"]["result"]["runner_summary"], {})
+
+    def test_last_test_reports_runner_summary_when_exit_code_is_masked(self):
+        events = [
+            _event(EventType.SESSION_START, 0, "start"),
+            _event(EventType.FILE_READ, 1, "agents", path="AGENTS.md"),
+            _event(EventType.TOOL_CALL, 2, "skill", tool_name="skill",
+                   arguments={"skill": "release-notes"}),
+            _event(EventType.TOOL_CALL, 3, "test", tool_name="bash",
+                   arguments={"command": "python -m pytest -q 2>&1 | tail -3"}),
+            TraceEvent(event_type=EventType.TOOL_RESULT, timestamp=T0 + 4, event_id="result",
+                       parent_id="test", data={"result": "FAILED tests/test_a.py::test_x\n"
+                                                         "== 1 failed, 2 passed in 0.31s =="}),
+            _event(EventType.SESSION_END, 5, "end"),
+        ]
+        report = analyze_compliance_run(
+            [("session", events)],
+            workspace=str(self.root),
+            skill="release-notes",
+            should_trigger=True,
+            instructions=("AGENTS.md",),
+            expected_actions=(ActionExpectation("tests", "test"),),
+            user_dirs=(),
+        )
+
+        result = report["validation"]["last_test"]["result"]
+        self.assertEqual(result["evidence"], "observed")
+        self.assertEqual(result["runner_summary"], {"pytest": "failed"})
+        self.assertNotIn("test_a.py", json.dumps(report))
 
     def test_instruction_load_requires_a_read_event(self):
         events = [

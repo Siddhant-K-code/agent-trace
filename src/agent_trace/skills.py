@@ -1188,8 +1188,15 @@ def _outcome(
     tests = [prepared.event for prepared in after if prepared.is_test]
     last_test = None
     if tests:
+        from .reviewability import runner_summaries
+
         last = tests[-1]
-        last_test = {"event_id": last.event_id, **_result_facts(linked.get(last.event_id))}
+        result = linked.get(last.event_id)
+        last_test = {
+            "event_id": last.event_id,
+            **_result_facts(result),
+            "runner_summary": runner_summaries(_event_command(last), result),
+        }
     return {
         "tests_run": len(tests),
         "last_test": last_test,
@@ -1553,6 +1560,9 @@ def _describe_result(facts: Mapping[str, object] | None) -> str:
         parts.append(f"exit_code={facts['exit_code']}")
     if facts.get("success") is not None:
         parts.append(f"success={str(facts['success']).lower()}")
+    summaries = facts.get("runner_summary")
+    if isinstance(summaries, Mapping):
+        parts.extend(f"{runner} summary {outcome}" for runner, outcome in summaries.items())
     return ", ".join(parts) if parts else "result recorded without exit status"
 
 

@@ -36,7 +36,7 @@ Each finding has a status, a confidence, and the source of its evidence.
 |---|---|---|
 | Rationale | Whether the original request was captured | `user_prompt` events. Counts only. Prompt text is never printed. |
 | Scope | Files written vs files a prompt named or the session read | File and edit tool events, shell redirection targets, prompt path mentions, file reads, shell read targets |
-| Validation | Tests and checks run inside the session, with exit codes | Shell tool calls and their linked results. CI is not read. |
+| Validation | Tests and checks run inside the session, with exit codes or the test runner's own summary | Shell tool calls and their linked results. CI is not read. |
 | Stewardship | Human turns, interventions after the agent started, approval decisions | `user_prompt` events, approval requests, recorded permission modes |
 | Evidence health | Capture gaps, redaction state, provider limits, and how the session was linked | [`health`](evidence-health.md), [capture matrix](capture-matrix.md), session link |
 
@@ -108,6 +108,46 @@ substitution, and multi-line scripts make the outcome unknown. One exception:
 in a chain joined only by `&&`, exit 0 means every part ran and passed, so a
 pass is kept. A failing `&&` chain is unknown because the failing part is not
 known.
+
+When the exit code is masked this way, or no exit code was recorded, the
+outcome is read from the test runner's own final summary in the linked result.
+Copilot CLI often pipes test output through `tail`, which hides the runner's
+exit code but keeps its summary. The text output then reads
+`unittest passed (runner summary in output, not exit code)`, the source adds
+`runner summary lines in linked output`, and the JSON run facts carry
+`outcome_source: "runner_summary"` with `exit_code: null`. Runs read from an
+exit code carry `outcome_source: "exit_status"`. Only the runner name and the
+outcome are printed, never the command or the output.
+
+Supported summaries:
+
+| Runner | Pass | Fail |
+|---|---|---|
+| `unittest` | `Ran N tests in Xs`, then `OK` with at least one test that was not skipped | `Ran N tests in Xs`, then `FAILED (failures=N, errors=N)` |
+| `pytest` | One final line such as `3 passed, 1 skipped in 0.12s` | The same line with `failed` or `error` above 0 |
+| `jest` | `Test Suites:` and `Tests:` lines whose counts add up to the total | The same lines with `failed` above 0 |
+| `vitest` | `Test Files` and `Tests` lines whose counts add up to the total | The same lines with `failed` above 0, or an `Errors` line |
+
+The parsing is strict, and any doubt keeps the outcome unknown:
+
+- The shell call must run the runner in exactly one part, and the result must
+  hold exactly one summary for it. Two runs in one call stay unknown.
+- A summary cut short, a result that ends with the hook truncation marker, a
+  redacted result, an error event, or a result whose content was not captured
+  stays unknown.
+- No tests run, all tests skipped, counts that do not add up, unknown count
+  words, and a coverage threshold failure all stay unknown.
+- An explicit exit code still wins. A single `pytest` call with exit code 1 is
+  failed even if its output shows a passing summary. A conflicting or missing
+  result is never repaired from text.
+- `go test` and `cargo test` are not read. They print one line per package or
+  test binary with no run-wide summary, so a `tail` can hide a failing package.
+
+A pass read from a summary gives `present` with `medium` confidence, not
+`high`. The runner's real exit status was not observed: another part of the
+command could print similar text, and coverage gates, plugins, or teardown
+can fail a run after its summary is printed. `high` is kept for an exit code
+the check owns.
 
 Stewardship counts turns and decisions. It does not rank or score people.
 
@@ -273,7 +313,9 @@ Check: **pass**. Threshold fails on `missing` at `medium` or higher confidence (
   fetched, and a trailer alone does not show that the evidence behind it is
   complete.
 - Validation is in-session only. It does not read CI results. Many hooks do
-  not record exit codes, so a run without one is reported as unknown.
+  not record exit codes. A run without one is read from the test runner's
+  summary when one of the supported runners printed it, and is reported as
+  unknown otherwise.
 - Scope uses path matching against prompts and reads. A file can be in scope
   without being named, and the check will still report it as not named.
 - Shell file writes are found only through redirection and `tee`, and shell
