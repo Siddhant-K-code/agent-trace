@@ -2166,8 +2166,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_watch.add_argument("--policy", metavar="POLICY_FILE",
                          help="path to scope policy file (default: .agent-scope.json)")
-    p_watch.add_argument("--rules", metavar="RULES_FILE",
-                         help="YAML/JSON rules file for rule-based kill switch (nanny mode)")
+    p_watch.add_argument("--rules", metavar="FILE_OR_BUILTINS",
+                         help="JSON or YAML rules file for rule-based kill switch (nanny mode), "
+                              "or comma-separated built-in rules (mcp-poisoning, loop[:N[/W]], "
+                              "budget:N, timeout:D, cognitive-debt[:N]); watch refuses a value "
+                              "it cannot use")
     p_watch.add_argument("--dry-run", action="store_true", dest="dry_run",
                          help="evaluate rules without taking action (for testing)")
     p_watch.add_argument("--stream-otlp", dest="stream_otlp", action="store_true",

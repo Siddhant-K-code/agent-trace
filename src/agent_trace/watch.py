@@ -286,15 +286,141 @@ def _warn_no_agent_pid(state: "WatchState", what: str, out: TextIO | None = None
 
 
 # ---------------------------------------------------------------------------
+# Reading --config and --rules files
+# ---------------------------------------------------------------------------
+
+def _shown_path(path: str) -> str:
+    """Return *path* as a refusal shows it: as given when it is printable."""
+    return path if path and path.isprintable() else repr(path)
+
+
+def _read_utf8_file(path: str, error: type[ValueError]) -> str:
+    """Return the text of the file at *path*.
+
+    Raises *error* when the file cannot be read, is not UTF-8, or starts with
+    a byte order mark.
+    """
+    if not path:
+        raise error("the path is empty")
+    try:
+        raw = Path(path).read_bytes()
+    except (OSError, ValueError) as exc:
+        detail = getattr(exc, "strerror", None)
+        raise error(f"cannot read it ({detail})" if detail else "cannot read it") from None
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise error("it is not valid UTF-8") from None
+    if text.startswith("\ufeff"):
+        # project_budget.py reads the --config file and cannot parse a BOM
+        # either, so neither file may start with one.
+        raise error("it starts with a byte order mark; save it without one")
+    return text
+
+
+def _parse_json_text(text: str, error: type[ValueError], **kwargs: Any) -> Any:
+    """Return json.loads(text, **kwargs), raising *error* when it fails."""
+    try:
+        return json.loads(text, **kwargs)
+    except json.JSONDecodeError as exc:
+        raise error(
+            f"it is not valid JSON ({exc.msg} at line {exc.lineno} column {exc.colno})"
+        ) from None
+    except RecursionError:
+        raise error("it is nested too deeply") from None
+    except ValueError:
+        # json.loads raises a plain ValueError for an integer with more
+        # digits than int() accepts.
+        raise error("it has a number with too many digits") from None
+
+
+# ---------------------------------------------------------------------------
 # Nanny rules (--rules rules.yaml)
 # ---------------------------------------------------------------------------
 
+class WatchRulesError(ValueError):
+    """A watch --rules value or rules file that watch refuses to use.
+
+    The message says what is wrong and, for a rule, names its position and
+    name. It never repeats a notify value.
+    """
+
+
+# The metrics WatchState.nanny_metrics returns.
+_NANNY_METRICS = ("files_modified", "cost_usd", "consecutive_test_failures", "duration_minutes")
+_NANNY_OPERATORS = (">", ">=", "<", "<=", "==")
+# The actions _dispatch_alert carries out for a rule. alert and terminal both
+# print the alert and take no other action.
+_NANNY_ACTIONS = ("alert", "terminal", "file", "pause", "kill", "require_approval")
+_NANNY_RULE_KEYS = ("name", "condition", "action", "notify")
+_NANNY_NUMBER = re.compile(r"[0-9]+(?:\.[0-9]*)?|\.[0-9]+", re.ASCII)
+
+
+def _parse_nanny_condition(condition: str) -> tuple[str, str, int | float | None, str]:
+    """Return (metric, operator, threshold, pattern) for a rule condition.
+
+    The whole condition must be ``METRIC OP NUMBER`` or
+    ``file_path matches "GLOB"``. Raises WatchRulesError otherwise, so a rule
+    is never loaded with a condition it cannot evaluate.
+    """
+    if not isinstance(condition, str):
+        raise WatchRulesError("condition must be a string")
+    cond = condition.strip()
+
+    match = re.fullmatch(r"file_path\s+matches\b\s*(.*)", cond, re.ASCII | re.DOTALL)
+    if match:
+        glob = match.group(1)
+        quote = glob[:1]
+        if (
+            quote not in ("'", '"') or len(glob) < 3 or not glob.endswith(quote)
+            or quote in glob[1:-1]
+        ):
+            raise WatchRulesError(
+                'condition must be file_path matches "GLOB" with a non-empty GLOB '
+                "in quotes and nothing after it"
+            )
+        return "file_path", "matches", None, glob[1:-1]
+
+    match = re.fullmatch(r"(\w+)\s*([<>=!]+)\s*(.*)", cond, re.ASCII | re.DOTALL)
+    if not match:
+        raise WatchRulesError('condition must be METRIC OP NUMBER or file_path matches "GLOB"')
+    metric, op, raw = match.groups()
+    if metric not in _NANNY_METRICS:
+        raise WatchRulesError(
+            f"condition has an unknown metric {metric!r}; use "
+            "files_modified, cost_usd, consecutive_test_failures or duration_minutes"
+        )
+    if op not in _NANNY_OPERATORS:
+        raise WatchRulesError(
+            f"condition has an unknown operator {op!r}; use >, >=, <, <= or =="
+        )
+    threshold: int | float | None = None
+    if _NANNY_NUMBER.fullmatch(raw):
+        if "." in raw:
+            number = float(raw)
+            threshold = number if math.isfinite(number) else None
+        else:
+            try:
+                threshold = int(raw)
+            except ValueError:
+                threshold = None  # more digits than int() accepts
+    if threshold is None:
+        raise WatchRulesError(
+            "condition must end with one plain number, such as 5 or 0.50, "
+            "and nothing after it"
+        )
+    return metric, op, threshold, ""
+
+
 @dataclass
 class NannyRule:
-    """A declarative rule evaluated on every event."""
+    """A declarative rule evaluated on every event.
+
+    The constructor raises WatchRulesError for a condition it cannot parse.
+    """
     name: str
     condition: str          # e.g. "files_modified > 20", "cost_usd > 5.00"
-    action: str             # "pause" | "kill" | "alert" | "require_approval"
+    action: str             # one of _NANNY_ACTIONS
     notify: str = ""        # e.g. "slack:#alerts", "email:me@example.com"
     fired: bool = field(default=False, compare=False)
 
@@ -309,25 +435,9 @@ class NannyRule:
 
     def _parse_condition(self) -> None:
         """Parse condition string into metric, operator, threshold."""
-        cond = self.condition.strip()
-
-        # file_path matches "/etc/**"
-        m = re.match(r'file_path\s+matches\s+"([^"]+)"', cond)
-        if not m:
-            m = re.match(r"file_path\s+matches\s+'([^']+)'", cond)
-        if m:
-            self._metric = "file_path"
-            self._op = "matches"
-            self._pattern = m.group(1)
-            return
-
-        # numeric comparisons: metric op value
-        m = re.match(r'(\w+)\s*(>=|<=|>|<|==)\s*([0-9.]+)', cond)
-        if m:
-            self._metric = m.group(1)
-            self._op = m.group(2)
-            raw = m.group(3)
-            self._threshold = float(raw) if "." in raw else int(raw)
+        self._metric, self._op, self._threshold, self._pattern = (
+            _parse_nanny_condition(self.condition)
+        )
 
     def evaluate(self, metrics: dict[str, Any], event: TraceEvent | None = None) -> bool:
         """Return True if this rule's condition is satisfied."""
@@ -362,79 +472,259 @@ class NannyRule:
         return False
 
 
-def _load_nanny_rules(path: str) -> list[NannyRule]:
-    """Load rules from a YAML or JSON file. Returns [] on error."""
-    p = Path(path)
-    if not p.exists():
-        return []
-    text = p.read_text()
+class _RulesObject(dict):
+    """An object from a rules file that remembers the first key given twice."""
+
+    duplicate_key: str | None = None
+
+
+def _rules_object(pairs: list[tuple[str, Any]]) -> _RulesObject:
+    """json object_pairs_hook that records a duplicate key instead of hiding it."""
+    obj = _RulesObject()
+    for key, value in pairs:
+        if key in obj and obj.duplicate_key is None:
+            obj.duplicate_key = key
+        obj[key] = value
+    return obj
+
+
+def _nanny_rule_from_data(item: Any, position: int) -> NannyRule:
+    """Return the NannyRule for entry *position* (1-based) of a rules list."""
+    if not isinstance(item, dict):
+        raise WatchRulesError(f"rule {position} must be an object")
+    name = item.get("name", "unnamed")
+    if not isinstance(name, str):
+        raise WatchRulesError(f"rule {position}: name must be a string")
+    label = f"rule {position} {name!r}" if "name" in item and name else f"rule {position}"
+
+    def refuse(problem: str) -> WatchRulesError:
+        return WatchRulesError(f"{label}: {problem}")
+
+    duplicate = getattr(item, "duplicate_key", None)
+    if duplicate is not None:
+        raise refuse(f"it has {duplicate!r} twice")
+    for key in item:
+        if key not in _NANNY_RULE_KEYS:
+            raise refuse(
+                f"unknown key {key!r}; a rule has only name, condition, action and notify"
+            )
+    if "condition" not in item:
+        raise refuse("it has no condition")
     try:
-        # Try JSON first (no extra dep)
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        # Minimal YAML parser for simple rule files (no PyYAML required)
-        data = _parse_simple_yaml(text)
-
-    rules: list[NannyRule] = []
-    for r in data.get("rules", []):
-        try:
-            rules.append(NannyRule(
-                name=r.get("name", "unnamed"),
-                condition=r.get("condition", ""),
-                action=r.get("action", "alert"),
-                notify=r.get("notify", ""),
-            ))
-        except Exception:
-            pass
-    return rules
+        _parse_nanny_condition(item["condition"])
+    except WatchRulesError as exc:
+        raise refuse(str(exc)) from None
+    if "action" not in item:
+        raise refuse("it has no action")
+    action = item["action"]
+    if not isinstance(action, str) or action not in _NANNY_ACTIONS:
+        raise refuse(f"action must be {_one_of(_NANNY_ACTIONS)}")
+    notify = item.get("notify", "")
+    if not isinstance(notify, str):
+        raise refuse("notify must be a string")
+    return NannyRule(name=name, condition=item["condition"], action=action, notify=notify)
 
 
-def _parse_simple_yaml(text: str) -> dict:
-    """Parse a minimal subset of YAML sufficient for rules files.
+def _nanny_rules_from_data(data: Any) -> list[NannyRule]:
+    """Return the rules in a parsed rules file, refusing anything else in it."""
+    if not isinstance(data, dict):
+        raise WatchRulesError("the top level must be a JSON object")
+    for key in data:
+        if key != "rules":
+            raise WatchRulesError(
+                f"the top level has an unknown key {key!r}; it must hold only rules"
+            )
+    if getattr(data, "duplicate_key", None) is not None:
+        raise WatchRulesError("the top level has 'rules' twice")
+    if "rules" not in data:
+        raise WatchRulesError("the top level has no rules key")
+    items = data["rules"]
+    if not isinstance(items, list) or not items:
+        raise WatchRulesError("rules must be a non-empty list")
+    return [_nanny_rule_from_data(item, position) for position, item in enumerate(items, 1)]
 
-    Handles: top-level 'rules:' list with string scalar fields.
-    Does not handle anchors, multi-line values, or complex types.
+
+def _load_nanny_rules(path: str) -> list[NannyRule]:
+    """Load the rules in a --rules file.
+
+    A file whose name ends in .json, or whose text starts with { or [, is
+    read as JSON; any other file is read as the YAML subset that
+    _parse_rules_yaml accepts. Raises WatchRulesError when the file cannot be
+    read or holds anything watch cannot use, so no rule is dropped or changed.
     """
-    result: dict = {"rules": []}
-    current_rule: dict | None = None
-    in_rules = False
+    if path and os.path.isdir(path):
+        raise WatchRulesError("it is a directory, not a rules file")
+    text = _read_utf8_file(path, WatchRulesError)
+    if not text.strip():
+        raise WatchRulesError("it is empty")
+    if path.lower().endswith(".json") or text.lstrip(" \t\r\n")[:1] in ("{", "["):
+        data = _parse_json_text(text, WatchRulesError, object_pairs_hook=_rules_object)
+    else:
+        data = _parse_rules_yaml(text)
+    return _nanny_rules_from_data(data)
 
-    for raw_line in text.splitlines():
-        line = raw_line.rstrip()
-        stripped = line.lstrip()
 
-        if stripped.startswith("#") or not stripped:
+_YAML_PAIR = re.compile(r"([A-Za-z_][A-Za-z0-9_-]*)[ \t]*:(?:[ \t]+(.*))?", re.ASCII)
+_YAML_DOCUMENT_START = re.compile(r"---(?:[ \t]+#.*)?")
+# YAML reads an unquoted value that starts with one of these as a flow
+# collection, anchor, alias, tag, block scalar or reserved character.
+_YAML_INDICATORS = "[]{},&*!|>%@`"
+
+
+def _yaml_scalar(text: str | None, line: int) -> str | None:
+    """Return one value of the rules-file YAML subset; None for empty or null.
+
+    A value in matching quotes loses that one pair of quotes. In single
+    quotes '' stands for one quote; in double quotes the only escapes are
+    \\" and \\\\. An unquoted value ends before a comment that starts with
+    whitespace and #.
+    """
+    if not text or text.startswith("#"):
+        return None
+    quote = text[0]
+    if quote in ("'", '"'):
+        chars: list[str] = []
+        index = 1
+        while True:
+            if index >= len(text):
+                raise WatchRulesError(f"line {line}: the closing quote is missing")
+            char = text[index]
+            if char == quote:
+                if quote == "'" and text[index + 1:index + 2] == "'":
+                    chars.append("'")
+                    index += 2
+                    continue
+                break
+            if char == "\\" and quote == '"':
+                escaped = text[index + 1:index + 2]
+                if escaped not in ('"', "\\"):
+                    raise WatchRulesError(
+                        f'line {line}: in double quotes a backslash may only escape " or \\; '
+                        "use single quotes for other backslashes"
+                    )
+                chars.append(escaped)
+                index += 2
+                continue
+            chars.append(char)
+            index += 1
+        if not re.fullmatch(r"(?:[ \t]+(?:#.*)?)?", text[index + 1:], re.DOTALL):
+            raise WatchRulesError(f"line {line}: only a comment may follow the closing quote")
+        return "".join(chars)
+    comment = re.search(r"[ \t]#", text)
+    if comment:
+        text = text[:comment.start()].rstrip(" \t")
+    if (
+        text[0] in _YAML_INDICATORS or text in ("-", "?", ":")
+        or text[:2] in ("- ", "? ", ": ", "-\t", "?\t", ":\t")
+    ):
+        raise WatchRulesError(
+            f"line {line}: a value cannot start with {text[0]!r} unless it is quoted"
+        )
+    if ": " in text or ":\t" in text or text.endswith(":"):
+        raise WatchRulesError(
+            f"line {line}: a value cannot contain ': ' or end with ':' unless it is quoted"
+        )
+    return None if text in ("~", "null", "Null", "NULL") else text
+
+
+def _yaml_rule_pair(rule: _RulesObject, text: str, line: int) -> None:
+    """Add one key: value line of the YAML subset to *rule*."""
+    pair = _YAML_PAIR.fullmatch(text)
+    if pair is None:
+        raise WatchRulesError(f"line {line}: expected key: value")
+    key = pair.group(1)
+    if key in rule and rule.duplicate_key is None:
+        rule.duplicate_key = key
+    rule[key] = _yaml_scalar(pair.group(2), line)
+
+
+def _parse_rules_yaml(text: str) -> _RulesObject:
+    """Parse a rules file written in the YAML subset that watch reads.
+
+    The subset is a top-level rules: key holding a block list of rules, each
+    a block mapping of keys to one-line values. Blank lines, comment lines
+    and a leading --- are allowed. Raises WatchRulesError for the first line
+    outside the subset instead of skipping it.
+    """
+    top = _RulesObject()
+    rules: list[Any] = []
+    item_indent = 0
+    key_indent: int | None = None
+    seen_content = False
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    for number, raw_line in enumerate(lines, 1):
+        line = raw_line.rstrip(" \t")
+        body = line.lstrip(" \t")
+        if not body or body.startswith("#"):
+            continue
+        lead = line[:len(line) - len(body)]
+        if "\t" in lead:
+            raise WatchRulesError(f"line {number}: indent with spaces, not tabs")
+        indent = len(lead)
+        first_line, seen_content = not seen_content, True
+
+        if "rules" not in top:
+            if first_line and indent == 0 and _YAML_DOCUMENT_START.fullmatch(body):
+                continue
+            if indent:
+                raise WatchRulesError(f"line {number}: unexpected indentation")
+            pair = _YAML_PAIR.fullmatch(body)
+            if pair is None:
+                raise WatchRulesError(f"line {number}: expected rules:")
+            if pair.group(1) != "rules":
+                raise WatchRulesError(
+                    f"line {number}: the top level has an unknown key "
+                    f"{pair.group(1)!r}; it must hold only rules"
+                )
+            value = pair.group(2)
+            if value is not None and not value.startswith("#"):
+                raise WatchRulesError(
+                    f"line {number}: list the rules on the lines below rules:"
+                )
+            top["rules"] = None
             continue
 
-        if stripped == "rules:":
-            in_rules = True
+        if body == "-" or body.startswith(("- ", "-\t")):
+            if not rules:
+                item_indent = indent
+            elif indent != item_indent:
+                raise WatchRulesError(f"line {number}: unexpected indentation")
+            rest = body[1:]
+            entry = rest.lstrip(" ")
+            if entry.startswith("\t"):
+                raise WatchRulesError(f"line {number}: indent with spaces, not tabs")
+            top["rules"] = rules
+            if not entry or entry.startswith("#"):
+                # A bare "-": the rule's keys start on the next line.
+                rules.append(None)
+                key_indent = None
+                continue
+            rules.append(_RulesObject())
+            key_indent = indent + 1 + len(rest) - len(entry)
+            _yaml_rule_pair(rules[-1], entry, number)
             continue
 
-        if not in_rules:
-            continue
-
-        # New list item
-        if stripped.startswith("- "):
-            if current_rule is not None:
-                result["rules"].append(current_rule)
-            # Inline key: value after the dash
-            rest = stripped[2:].strip()
-            current_rule = {}
-            if ":" in rest:
-                k, _, v = rest.partition(":")
-                current_rule[k.strip()] = v.strip().strip('"').strip("'")
-        elif stripped.startswith("-") and stripped == "-":
-            if current_rule is not None:
-                result["rules"].append(current_rule)
-            current_rule = {}
-        elif current_rule is not None and ":" in stripped:
-            k, _, v = stripped.partition(":")
-            current_rule[k.strip()] = v.strip().strip('"').strip("'")
-
-    if current_rule is not None:
-        result["rules"].append(current_rule)
-
-    return result
+        if indent == 0:
+            pair = _YAML_PAIR.fullmatch(body)
+            if pair is None:
+                raise WatchRulesError(f"line {number}: expected - at the start of a rule")
+            if pair.group(1) == "rules":
+                raise WatchRulesError(f"line {number}: the top level has 'rules' twice")
+            raise WatchRulesError(
+                f"line {number}: the top level has an unknown key "
+                f"{pair.group(1)!r}; it must hold only rules"
+            )
+        if not rules:
+            raise WatchRulesError(f"line {number}: expected - at the start of a rule")
+        if key_indent is None:
+            if indent <= item_indent:
+                raise WatchRulesError(f"line {number}: unexpected indentation")
+            key_indent = indent
+            rules[-1] = _RulesObject()
+        elif indent != key_indent:
+            raise WatchRulesError(f"line {number}: unexpected indentation")
+        _yaml_rule_pair(rules[-1], body, number)
+    return top
 
 
 # ---------------------------------------------------------------------------
@@ -688,35 +978,8 @@ class WatcherConfig:
         Raises WatchConfigError when the file cannot be read, is not UTF-8
         JSON, or fails from_dict.
         """
-        if not path:
-            raise WatchConfigError("the path is empty")
-        try:
-            raw = Path(path).read_bytes()
-        except (OSError, ValueError) as exc:
-            detail = getattr(exc, "strerror", None)
-            raise WatchConfigError(
-                f"cannot read it ({detail})" if detail else "cannot read it"
-            ) from None
-        try:
-            text = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            raise WatchConfigError("it is not valid UTF-8") from None
-        if text.startswith("\ufeff"):
-            # project_budget.py reads the same file and cannot parse a BOM either.
-            raise WatchConfigError("it starts with a byte order mark; save it without one")
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise WatchConfigError(
-                f"it is not valid JSON ({exc.msg} at line {exc.lineno} column {exc.colno})"
-            ) from None
-        except RecursionError:
-            raise WatchConfigError("it is nested too deeply") from None
-        except ValueError:
-            # json.loads raises a plain ValueError for an integer with more
-            # digits than int() accepts.
-            raise WatchConfigError("it has a number with too many digits") from None
-        return cls.from_dict(data)
+        text = _read_utf8_file(path, WatchConfigError)
+        return cls.from_dict(_parse_json_text(text, WatchConfigError))
 
 
 # ---------------------------------------------------------------------------
@@ -2122,11 +2385,22 @@ def cmd_watch(args: argparse.Namespace) -> int:
         try:
             config = WatcherConfig.load(config_path)
         except WatchConfigError as exc:
-            shown = config_path if config_path and config_path.isprintable() else repr(config_path)
-            sys.stderr.write(f"[watch] invalid --config file {shown}: {exc}\n")
+            sys.stderr.write(f"[watch] invalid --config file {_shown_path(config_path)}: {exc}\n")
             return 1
     else:
         config = WatcherConfig()
+
+    # A --rules value that cannot be used is refused the same way, so watch
+    # never runs with fewer or different rules than the user wrote.
+    nanny_rules: list[NannyRule] | None = None
+    builtin_rules: list[tuple[str, Any]] | None = None
+    rules_value = getattr(args, "rules", None)
+    if rules_value is not None:
+        try:
+            nanny_rules, builtin_rules = _load_watch_rules(rules_value)
+        except WatchRulesError as exc:
+            sys.stderr.write(f"[watch] {exc}\n")
+            return 1
 
     # Flags given on the command line override the file. Their argparse
     # defaults are None, so an absent flag keeps the file's value.
@@ -2174,18 +2448,9 @@ def cmd_watch(args: argparse.Namespace) -> int:
     if project_budget_config.per_session_max:
         config.max_cost_dollars = project_budget_config.per_session_max
 
-    # Load nanny rules if --rules provided
-    nanny_rules: list[NannyRule] | None = None
-    rules_path = getattr(args, "rules", None)
-    if rules_path:
-        if Path(rules_path).exists():
-            nanny_rules = _load_nanny_rules(rules_path)
-            if not nanny_rules:
-                sys.stderr.write(f"[watch] Warning: no rules loaded from {rules_path}\n")
-        else:
-            warnings = _apply_builtin_rules_spec(rules_path, config)
-            for warning in warnings:
-                sys.stderr.write(f"[watch] Warning: {warning}\n")
+    # Built-in rule values override the flags and the project budget.
+    if builtin_rules:
+        _apply_builtin_rules(builtin_rules, config)
 
     dry_run = getattr(args, "dry_run", False)
 
@@ -2261,57 +2526,160 @@ def cmd_watch(args: argparse.Namespace) -> int:
     return 0
 
 
-def _apply_builtin_rules_spec(spec: str, config: WatcherConfig) -> list[str]:
+# The built-in rules a --rules value can list, as name or name:value.
+_BUILTIN_RULE_NAMES = ("mcp-poisoning", "loop", "budget", "timeout", "cognitive-debt")
+_WHOLE_NUMBER = re.compile(r"[0-9]+", re.ASCII)
+
+
+def _builtin_rule_value(name: str, value: str | None, item: str) -> Any:
+    """Return the checked value of one built-in rule; None when it has none.
+
+    *value* is the text after the colon, or None when there is no colon.
+    """
+    def refuse(problem: str) -> WatchRulesError:
+        return WatchRulesError(f"{item!r}: {problem}")
+
+    if name == "mcp-poisoning":
+        if value is not None:
+            raise refuse("mcp-poisoning takes no value")
+        return None
+    if name == "loop":
+        if value is None:
+            return None
+        threshold, slash, window = value.partition("/")
+        parts = [part.strip() for part in ((threshold, window) if slash else (threshold,))]
+        numbers: list[int] = []
+        for part in parts:
+            if not _WHOLE_NUMBER.fullmatch(part):
+                break
+            try:
+                numbers.append(int(part))
+            except ValueError:  # more digits than int() accepts
+                break
+        if len(numbers) == len(parts) and min(numbers) >= 1:
+            return numbers[0], numbers[1] if slash else None
+        raise refuse("N and W in loop:N and loop:N/W must be whole numbers, 1 or more")
+    if name == "budget":
+        text = (value or "").strip()
+        try:
+            dollars = float(text[1:] if text.startswith("$") else text)
+        except ValueError:
+            dollars = math.nan
+        if not (math.isfinite(dollars) and dollars >= 0):
+            raise refuse("N in budget:N must be a finite number, 0 or more")
+        return dollars
+    if name == "timeout":
+        try:
+            seconds = _parse_duration(value or "")
+        except ValueError:
+            seconds = math.nan
+        if not (math.isfinite(seconds) and seconds > 0):
+            raise refuse("D in timeout:D must be a duration more than 0, such as 30m or 2h")
+        return seconds
+    # cognitive-debt with no value keeps the configured threshold.
+    if value is None:
+        return None
+    try:
+        threshold_value = float(value)
+    except ValueError:
+        threshold_value = math.nan
+    if not (math.isfinite(threshold_value) and 0 <= threshold_value <= 1):
+        raise refuse("N in cognitive-debt:N must be a number from 0 to 1")
+    return threshold_value
+
+
+def _parse_builtin_rules(spec: str) -> list[tuple[str, Any]]:
+    """Return (name, value) for each item of a comma-separated --rules list.
+
+    Raises WatchRulesError, naming the item, for an empty item, an item that
+    is not a built-in rule, a rule listed twice, or a value the rule cannot
+    use.
+    """
+    items = [item.strip() for item in spec.split(",")]
+    if not any(items):
+        raise WatchRulesError("it lists no rules")
+    parsed: list[tuple[str, Any]] = []
+    for position, item in enumerate(items, 1):
+        if not item:
+            raise WatchRulesError(f"item {position} is empty")
+        name, colon, value = item.partition(":")
+        if name not in _BUILTIN_RULE_NAMES:
+            if os.path.exists(item):
+                raise WatchRulesError(
+                    f"{item!r} is not a built-in rule; --rules takes one rules file "
+                    "or a list of built-in rules, not both"
+                )
+            raise WatchRulesError(
+                f"{item!r} is not a built-in rule or an existing file; the built-in "
+                "rules are mcp-poisoning, loop, budget, timeout and cognitive-debt"
+            )
+        # A second value would replace the first without a word.
+        if any(seen == name for seen, _ in parsed):
+            raise WatchRulesError(f"{item!r} lists {name} again; list each built-in rule once")
+        parsed.append((name, _builtin_rule_value(name, value.strip() if colon else None, item)))
+    return parsed
+
+
+def _apply_builtin_rules(parsed: list[tuple[str, Any]], config: WatcherConfig) -> None:
+    """Apply the rules _parse_builtin_rules returned to config, in order."""
+    for name, value in parsed:
+        if name == "budget":
+            config.max_cost_dollars = value
+        elif name == "timeout":
+            config.max_duration_seconds = value
+        else:
+            if name == "loop" and value is not None:
+                config.loop_threshold, window = value
+                if window is not None:
+                    config.loop_window = window
+            elif name == "cognitive-debt" and value is not None:
+                config.cognitive_debt_threshold = value
+            config.built_in_rules.add(name)
+
+
+def _apply_builtin_rules_spec(spec: str, config: WatcherConfig) -> None:
     """Apply comma-separated built-in watch rules to config.
 
-    Existing --rules FILE behaviour is preserved by cmd_watch; this parser is
-    used only when the provided value is not a path on disk.
+    Raises WatchRulesError, before changing config, for an item that is not
+    a built-in rule or has a value the rule cannot use.
     """
-    warnings: list[str] = []
-    for raw in spec.split(","):
-        item = raw.strip()
-        if not item:
-            continue
-        if item == "mcp-poisoning":
-            config.built_in_rules.add("mcp-poisoning")
-            continue
-        if item == "loop":
-            config.built_in_rules.add("loop")
-            continue
-        if item.startswith("loop:"):
-            value = item.split(":", 1)[1].strip()
-            try:
-                if "/" in value:
-                    threshold, window = value.split("/", 1)
-                    config.loop_threshold = int(threshold)
-                    config.loop_window = int(window)
-                else:
-                    config.loop_threshold = int(value)
-                config.built_in_rules.add("loop")
-            except ValueError:
-                warnings.append(f"invalid loop rule {item!r}")
-            continue
-        if item.startswith("budget:"):
-            value = item.split(":", 1)[1].strip().lstrip("$")
-            try:
-                config.max_cost_dollars = float(value)
-            except ValueError:
-                warnings.append(f"invalid budget rule {item!r}")
-            continue
-        if item.startswith("timeout:"):
-            value = item.split(":", 1)[1].strip()
-            try:
-                config.max_duration_seconds = _parse_duration(value)
-            except ValueError:
-                warnings.append(f"invalid timeout rule {item!r}")
-            continue
-        if item.startswith("cognitive-debt:"):
-            value = item.split(":", 1)[1].strip()
-            try:
-                config.cognitive_debt_threshold = float(value)
-                config.built_in_rules.add("cognitive-debt")
-            except ValueError:
-                warnings.append(f"invalid cognitive-debt rule {item!r}")
-            continue
-        warnings.append(f"unknown built-in rule {item!r}")
-    return warnings
+    _apply_builtin_rules(_parse_builtin_rules(spec), config)
+
+
+def _looks_like_file(item: str) -> bool:
+    """True when a --rules item reads as a file name rather than a rule."""
+    return (
+        "/" in item or "\\" in item
+        or item.lower().endswith((".json", ".yaml", ".yml"))
+    )
+
+
+def _load_watch_rules(
+    value: str,
+) -> tuple[list[NannyRule] | None, list[tuple[str, Any]] | None]:
+    """Check a --rules value before watch reads the session.
+
+    An existing path, or a single item that reads as a file name, is a rules
+    file: the result is (rules, None). Anything else is a comma-separated
+    list of built-in rules: the result is (None, parsed rules), applied later
+    by _apply_builtin_rules. Raises WatchRulesError, with the line cmd_watch
+    prints after "[watch] ", for a value watch cannot use.
+    """
+    if not value.strip():
+        raise WatchRulesError("invalid --rules value: it is empty")
+    items = [item.strip() for item in value.split(",")]
+    names_file = (
+        len(items) == 1 and _looks_like_file(items[0])
+        and items[0].partition(":")[0] not in _BUILTIN_RULE_NAMES
+    )
+    if os.path.exists(value) or names_file:
+        try:
+            return _load_nanny_rules(value), None
+        except WatchRulesError as exc:
+            raise WatchRulesError(
+                f"invalid --rules file {_shown_path(value)}: {exc}"
+            ) from None
+    try:
+        return None, _parse_builtin_rules(value)
+    except WatchRulesError as exc:
+        raise WatchRulesError(f"invalid --rules value: {exc}") from None
