@@ -1136,7 +1136,7 @@ Authenticate with a hosted collector that has SSO enabled. `login` asks you to o
 ```
 agent-strace apply [--config FILE] [--server URL] [--auth-key KEY] [--dry-run] [--dir DIR]
 ```
-Apply `.agent-strace.yaml` to the local store, or to a hosted collector with `--server URL` (authenticated with `--auth-key KEY`). Use `--dry-run` to preview changes without writing. The local store is `--dir DIR` when given, else the global trace store (`--trace-dir`, else `$AGENT_TRACE_DIR`, else `.agent-traces`).
+Apply `.agent-strace.yaml` to the local store, or to a hosted collector with `--server URL` (authenticated with `--auth-key KEY`). The POSTs to `--server` do not follow redirects, so pass the final URL. Use `--dry-run` to preview changes without writing. The local store is `--dir DIR` when given, else the global trace store (`--trace-dir`, else `$AGENT_TRACE_DIR`, else `.agent-traces`).
 
 ### `config-diff`
 ```
@@ -1597,7 +1597,7 @@ Measure tokenizer cost impact of switching model versions. No API calls required
 agent-strace optimize [--target FILE] [--dataset NAME] [--apply]
                       [--base-url URL] [--model MODEL] [--api-key KEY]
 ```
-Cluster failures by root cause and propose additions to `AGENTS.md` or any instruction file. Three built-in heuristic patterns require no LLM. `--apply` keeps `\r\n` line endings in a file that already uses them and writes `\n` otherwise, on every OS.
+Cluster failures by root cause and propose additions to `AGENTS.md` or any instruction file. Three built-in heuristic patterns require no LLM. The POST to `--base-url` (or `AGENT_STRACE_LLM_URL`) does not follow redirects, so pass the final URL. `--apply` keeps `\r\n` line endings in a file that already uses them and writes `\n` otherwise, on every OS.
 
 ### `config-watch`
 ```
@@ -1865,6 +1865,9 @@ GitHub uses `GITHUB_TOKEN` or `GH_TOKEN`. GitLab requires a writable project or
 personal access token in `GITLAB_TOKEN`, `GITLAB_ACCESS_TOKEN`, or
 `PRIVATE_TOKEN`; GitLab job tokens cannot write merge-request notes. Tokens are
 read only from the environment.
+
+The request that creates or updates the comment does not follow redirects, so
+pass the final API URL.
 
 ### `review`
 ```

@@ -24,7 +24,13 @@ from agent_trace.server import (
     send_session_meta_to_endpoint,
 )
 from agent_trace.store import TraceStore
+from http import HTTPStatus
 from http.server import HTTPServer
+
+try:
+    from _redirect_servers import ALL_REDIRECTS, REDIRECT_NOTE, RedirectServers
+except ImportError:
+    from tests._redirect_servers import ALL_REDIRECTS, REDIRECT_NOTE, RedirectServers
 
 
 # ---------------------------------------------------------------------------
@@ -530,6 +536,40 @@ class TestSendEventToEndpoint(unittest.TestCase):
         )
         result = send_event_to_endpoint(ev, "http://127.0.0.1:1")
         self.assertFalse(result)
+
+
+class TestSendersRefuseRedirects(unittest.TestCase):
+    """A followed redirect re-sent the POST as a GET with no body and the key."""
+
+    def setUp(self):
+        self.servers = RedirectServers(self)
+        environ = mock.patch.dict(os.environ, {"AGENT_STRACE_AUTH_KEY": "collector-key"})
+        environ.start()
+        self.addCleanup(environ.stop)
+
+    def _check(self, send, message):
+        self.assertTrue(send(self.servers.b.url))
+        for status in ALL_REDIRECTS:
+            with self.subTest(status=status):
+                self.servers.redirect(status)
+                stderr = io.StringIO()
+                with mock.patch("sys.stderr", stderr):
+                    self.assertFalse(send(self.servers.url))
+                detail = f"HTTP Error {status}: {HTTPStatus(status).phrase}{REDIRECT_NOTE}"
+                self.assertEqual(stderr.getvalue(), f"[agent-strace] {message}: {detail}\n")
+                self.assertEqual(self.servers.a.methods(), ["POST"])
+                self.assertEqual(self.servers.b.received(), [])
+
+    def test_event(self):
+        ev = TraceEvent(event_type=EventType.TOOL_CALL, session_id="s1", data={"tool_name": "Bash"})
+        self._check(lambda url: send_event_to_endpoint(ev, url), "remote send failed")
+
+    def test_session_meta(self):
+        meta = SessionMeta(session_id="s1", agent_name="probe")
+        self._check(
+            lambda url: send_session_meta_to_endpoint(meta, url),
+            "remote session meta send failed",
+        )
 
 
 # ---------------------------------------------------------------------------

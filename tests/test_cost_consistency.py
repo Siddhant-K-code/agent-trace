@@ -20,6 +20,11 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+try:
+    from _redirect_servers import post_opener
+except ImportError:
+    from tests._redirect_servers import post_opener
+
 from agent_trace.context_score import (
     build_context_score_report,
     format_context_score_json,
@@ -168,7 +173,7 @@ class TestCostSurfacesMatchCostCommand(unittest.TestCase):
             return resp
 
         config = OtlpMetricsConfig(endpoint="http://localhost:4318")
-        with patch("urllib.request.urlopen", side_effect=_capture), \
+        with post_opener("agent_trace.langfuse_export.no_redirect_opener", side_effect=_capture), \
                 redirect_stderr(io.StringIO()):
             self.assertTrue(export_metrics_to_otlp(
                 self.store, list(self.costs), config, include_scores=False

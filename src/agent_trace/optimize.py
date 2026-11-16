@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import TextIO
 
 from .event_data import require_object_event_data, str_field
+from .http_post import no_redirect_opener
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -252,10 +253,12 @@ def _call_llm(prompt: str, base_url: str, model: str, api_key: str) -> str | Non
     }
     req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with no_redirect_opener().open(req, timeout=30) as resp:
             data = json.loads(resp.read())
             return data["choices"][0]["message"]["content"]
-    except (urllib.error.URLError, KeyError, json.JSONDecodeError, IndexError):
+    except (urllib.error.URLError, KeyError, json.JSONDecodeError, IndexError) as exc:
+        if isinstance(exc, urllib.error.HTTPError):
+            exc.close()
         return None
 
 

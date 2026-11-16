@@ -11,12 +11,18 @@ from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.optimize import (
     FailurePattern,
     OptimizeProposal,
+    _call_llm,
     _extract_patterns_heuristic,
     _parse_llm_patterns,
     print_proposal,
     run_optimize,
 )
 from agent_trace.store import TraceStore
+
+try:
+    from _redirect_servers import ALL_REDIRECTS, RedirectServers
+except ImportError:
+    from tests._redirect_servers import ALL_REDIRECTS, RedirectServers
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +314,21 @@ class TestRunOptimize(unittest.TestCase):
         )
         # Should not raise; patterns may be empty
         self.assertIsInstance(proposal.patterns, list)
+
+
+class TestCallLlmRefusesRedirects(unittest.TestCase):
+    """urlopen re-sent the POST as a GET with no body and the key, and the
+    Location host's reply became the LLM's answer."""
+
+    def test_redirect_returns_none(self):
+        servers = RedirectServers(self)
+        self.assertEqual(_call_llm("prompt", servers.b.url, "model", "llm-key"), "from B")
+        for status in ALL_REDIRECTS:
+            with self.subTest(status=status):
+                servers.redirect(status)
+                self.assertIsNone(_call_llm("prompt", servers.url, "model", "llm-key"))
+                self.assertEqual(servers.a.methods(), ["POST"])
+                self.assertEqual(servers.b.received(), [])
 
 
 if __name__ == "__main__":

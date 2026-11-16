@@ -1,12 +1,15 @@
 """Tests for Langfuse and OTLP metrics export."""
 
 import base64
+import io
 import json
 import tempfile
 import time
 import unittest
+from contextlib import redirect_stderr
+from http import HTTPStatus
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from agent_trace.langfuse_export import (
     EvalScore,
@@ -14,6 +17,7 @@ from agent_trace.langfuse_export import (
     OtlpMetricsConfig,
     _events_to_langfuse_observations,
     _iso,
+    _lf_post,
     _load_eval_scores,
     _otlp_gauge,
     _scores_to_langfuse,
@@ -31,6 +35,13 @@ try:
     from test_cost import _codex_events
 except ImportError:  # pragma: no cover - package-style test discovery
     from tests.test_cost import _codex_events
+
+try:
+    from _redirect_servers import ALL_REDIRECTS, REDIRECT_NOTE, RedirectServers, post_opener
+except ImportError:
+    from tests._redirect_servers import ALL_REDIRECTS, REDIRECT_NOTE, RedirectServers, post_opener
+
+_OPENER = "agent_trace.langfuse_export.no_redirect_opener"
 
 
 # ---------------------------------------------------------------------------
@@ -527,7 +538,7 @@ class TestExportSessionToLangfuse(unittest.TestCase):
         _add_session(self.store, "sess_lf", events=events)
         cfg = LangfuseConfig(public_key="pk", secret_key="sk")
 
-        with patch("urllib.request.urlopen", return_value=self._mock_urlopen(200)) as mock_open:
+        with post_opener(_OPENER, return_value=self._mock_urlopen(200)) as mock_open:
             result = export_session_to_langfuse(self.store, "sess_lf", cfg, include_scores=False)
 
         self.assertTrue(result)
@@ -548,7 +559,7 @@ class TestExportSessionToLangfuse(unittest.TestCase):
             posted_bodies.append(json.loads(req.data))
             return self._mock_urlopen(200)
 
-        with patch("urllib.request.urlopen", side_effect=_capture_urlopen):
+        with post_opener(_OPENER, side_effect=_capture_urlopen):
             export_session_to_langfuse(self.store, "sess_scores", cfg, include_scores=True)
 
         batch = posted_bodies[0]["batch"]
@@ -561,7 +572,7 @@ class TestExportSessionToLangfuse(unittest.TestCase):
         cfg = LangfuseConfig(public_key="pk", secret_key="sk")
 
         import urllib.error
-        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("connection refused")):
+        with post_opener(_OPENER, side_effect=urllib.error.URLError("connection refused")):
             result = export_session_to_langfuse(self.store, "sess_fail", cfg)
 
         self.assertFalse(result)
@@ -592,7 +603,7 @@ class TestExportMetricsToOtlp(unittest.TestCase):
         _add_session(self.store, "m1", total_tokens=500)
         cfg = OtlpMetricsConfig(endpoint="http://localhost:4318")
 
-        with patch("urllib.request.urlopen", return_value=self._mock_urlopen(200)) as mock_open:
+        with post_opener(_OPENER, return_value=self._mock_urlopen(200)) as mock_open:
             result = export_metrics_to_otlp(self.store, ["m1"], cfg, include_scores=False)
 
         self.assertTrue(result)
@@ -610,7 +621,7 @@ class TestExportMetricsToOtlp(unittest.TestCase):
             posted_bodies.append(json.loads(req.data))
             return self._mock_urlopen(200)
 
-        with patch("urllib.request.urlopen", side_effect=_capture):
+        with post_opener(_OPENER, side_effect=_capture):
             export_metrics_to_otlp(self.store, ["m2"], cfg, include_scores=False)
 
         metrics = posted_bodies[0]["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
@@ -629,7 +640,7 @@ class TestExportMetricsToOtlp(unittest.TestCase):
             posted_bodies.append(json.loads(req.data))
             return self._mock_urlopen(200)
 
-        with patch("urllib.request.urlopen", side_effect=_capture):
+        with post_opener(_OPENER, side_effect=_capture):
             export_metrics_to_otlp(
                 self.store, ["priced", "unpriced"], cfg, include_scores=False
             )
@@ -667,7 +678,7 @@ class TestExportMetricsToOtlp(unittest.TestCase):
             posted_bodies.append(json.loads(req.data))
             return self._mock_urlopen(200)
 
-        with patch("urllib.request.urlopen", side_effect=_capture):
+        with post_opener(_OPENER, side_effect=_capture):
             export_metrics_to_otlp(self.store, ["m3"], cfg, include_scores=True)
 
         metrics = posted_bodies[0]["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
@@ -684,10 +695,50 @@ class TestExportMetricsToOtlp(unittest.TestCase):
         cfg = OtlpMetricsConfig(endpoint="http://localhost:4318")
 
         import urllib.error
-        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("refused")):
+        with post_opener(_OPENER, side_effect=urllib.error.URLError("refused")):
             result = export_metrics_to_otlp(self.store, ["m4"], cfg)
 
         self.assertFalse(result)
+
+
+class TestPostsRefuseRedirects(unittest.TestCase):
+    """A followed redirect re-sent the POST as a GET with no body and the key."""
+
+    def setUp(self):
+        self.servers = RedirectServers(self)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.store = _make_store(tmp.name)
+        _add_session(self.store, "sess_r")
+
+    def test_langfuse(self):
+        direct = LangfuseConfig(public_key="pk", secret_key="sk", host=self.servers.b.url)
+        self.assertTrue(_lf_post(direct, "/api/public/ingestion", {"batch": []}))
+        cfg = LangfuseConfig(public_key="pk", secret_key="sk", host=self.servers.url)
+        for status in ALL_REDIRECTS:
+            with self.subTest(status=status):
+                self.servers.redirect(status)
+                self.assertFalse(_lf_post(cfg, "/api/public/ingestion", {"batch": []}))
+                self.assertFalse(
+                    export_session_to_langfuse(self.store, "sess_r", cfg, include_scores=False)
+                )
+                self.assertEqual(self.servers.a.methods(), ["POST", "POST"])
+                self.assertEqual(self.servers.b.received(), [])
+
+    def test_otlp_metrics(self):
+        cfg = OtlpMetricsConfig(endpoint=self.servers.url, headers={"X-Api-Key": "metrics-key"})
+        for status in ALL_REDIRECTS:
+            with self.subTest(status=status):
+                self.servers.redirect(status)
+                stderr = io.StringIO()
+                with redirect_stderr(stderr):
+                    self.assertFalse(
+                        export_metrics_to_otlp(self.store, ["sess_r"], cfg, include_scores=False)
+                    )
+                detail = f"HTTP Error {status}: {HTTPStatus(status).phrase}{REDIRECT_NOTE}"
+                self.assertEqual(stderr.getvalue(), f"OTLP metrics export failed: {detail}\n")
+                self.assertEqual(self.servers.a.methods(), ["POST"])
+                self.assertEqual(self.servers.b.received(), [])
 
 
 if __name__ == "__main__":
