@@ -1089,9 +1089,15 @@ class WatcherConfig:
     kill_on_timeout: bool = False
     kill_on_budget: bool = False
     # True when watchers.cost.max_dollars, --max-cost or --budget sets
-    # max_cost_dollars, so it is not the default. per_session_max lowers a
-    # set limit that kills, and replaces any other (see cmd_watch).
+    # max_cost_dollars, so it is not the default. per_session_max and a
+    # built-in budget:N lower a set limit that kills, and replace any other
+    # (see _cost_limit_kills).
     cost_limit_set: bool = False
+    # True when watchers.duration.max_minutes, --max-duration or --timeout
+    # sets max_duration_seconds, so it is not the default. A built-in
+    # timeout:D lowers a set limit that kills, and replaces any other (see
+    # _duration_limit_kills).
+    duration_limit_set: bool = False
     # True when the config file sets the project budget key weekly or
     # per_session_max. Its budget keys then replace the standard project
     # config for the run (see cmd_watch).
@@ -1164,6 +1170,7 @@ class WatcherConfig:
         # Absent keys keep the dataclass defaults.
         config = cls(**{key: value for key, value in values.items() if value is not None})
         config.cost_limit_set = max_dollars is not None
+        config.duration_limit_set = max_minutes is not None
         # project_budget.py reads these keys from "budget", or from the top
         # level when there is no "budget" key.
         budget = d.get("budget", d)
@@ -2409,6 +2416,33 @@ def _limit_action(
     return None
 
 
+def _cost_limit_kills(config: WatcherConfig, per_session_max: float | None = None) -> bool:
+    """Return True when the cost limit is one the user set that kills.
+
+    That is a limit from --budget or per_session_max, or from --max-cost or
+    watchers.cost.max_dollars while the action is kill. The default $10 is
+    not set by the user, so it does not count, even with the kill action.
+    """
+    return bool(
+        config.kill_on_budget
+        or per_session_max
+        or (config.cost_limit_set and config.on_violation == "kill")
+    )
+
+
+def _duration_limit_kills(config: WatcherConfig) -> bool:
+    """Return True when the duration limit is one the user set that kills.
+
+    That is a limit from --timeout, or from --max-duration or
+    watchers.duration.max_minutes while the action is kill. The default 1800
+    seconds is not set by the user, so it does not count, even with the kill
+    action.
+    """
+    return config.kill_on_timeout or (
+        config.duration_limit_set and config.on_violation == "kill"
+    )
+
+
 def _tail_events(events_file: Path, poll_interval: float = 0.5):
     """Generator that yields TraceEvent objects or _IDLE_SENTINEL each poll cycle.
 
@@ -2736,6 +2770,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
         config.cost_limit_set = True
     if max_duration is not None:
         config.max_duration_seconds = max_duration
+        config.duration_limit_set = True
     config.kill_on_timeout = timeout_seconds is not None
     config.kill_on_budget = budget is not None
     if getattr(args, "on_violation", None) is not None:
@@ -2782,14 +2817,16 @@ def cmd_watch(args: argparse.Namespace) -> int:
         # limit that kills, from --budget, or from --max-cost or the file
         # with the kill action, but never raises it. It replaces a cost
         # limit that only alerts or pauses, and the default.
-        if config.kill_on_budget or (config.cost_limit_set and config.on_violation == "kill"):
+        if _cost_limit_kills(config):
             config.max_cost_dollars = min(config.max_cost_dollars, per_session_max)
         else:
             config.max_cost_dollars = per_session_max
 
-    # Built-in rule values override the flags and the project budget.
+    # Built-in rules are applied last. budget:N and timeout:D lower a limit
+    # that kills, such as per_session_max, but never raise it; they replace
+    # any other limit.
     if builtin_rules:
-        _apply_builtin_rules(builtin_rules, config)
+        _apply_builtin_rules(builtin_rules, config, per_session_max)
 
     dry_run = getattr(args, "dry_run", False)
 
@@ -2959,13 +2996,31 @@ def _parse_builtin_rules(spec: str) -> list[tuple[str, Any]]:
     return parsed
 
 
-def _apply_builtin_rules(parsed: list[tuple[str, Any]], config: WatcherConfig) -> None:
-    """Apply the rules _parse_builtin_rules returned to config, in order."""
+def _apply_builtin_rules(
+    parsed: list[tuple[str, Any]],
+    config: WatcherConfig,
+    per_session_max: float | None = None,
+) -> None:
+    """Apply the rules _parse_builtin_rules returned to config, in order.
+
+    budget:N and timeout:D may lower a limit the user set that kills, but
+    never raise it, and the limit still kills. They replace any other limit,
+    and the defaults. *per_session_max* is the project budget's: it makes
+    the cost limit one that kills.
+    """
+    cost_kills = _cost_limit_kills(config, per_session_max)
+    duration_kills = _duration_limit_kills(config)
     for name, value in parsed:
+        # The rule's value is first, so min keeps it unless the limit is
+        # lower: a NaN limit never wins.
         if name == "budget":
-            config.max_cost_dollars = value
+            config.max_cost_dollars = (
+                min(value, config.max_cost_dollars) if cost_kills else value
+            )
         elif name == "timeout":
-            config.max_duration_seconds = value
+            config.max_duration_seconds = (
+                min(value, config.max_duration_seconds) if duration_kills else value
+            )
         else:
             if name == "loop" and value is not None:
                 config.loop_threshold, window = value
@@ -2976,13 +3031,17 @@ def _apply_builtin_rules(parsed: list[tuple[str, Any]], config: WatcherConfig) -
             config.built_in_rules.add(name)
 
 
-def _apply_builtin_rules_spec(spec: str, config: WatcherConfig) -> None:
-    """Apply comma-separated built-in watch rules to config.
+def _apply_builtin_rules_spec(
+    spec: str,
+    config: WatcherConfig,
+    per_session_max: float | None = None,
+) -> None:
+    """Apply comma-separated built-in watch rules to config, as cmd_watch does.
 
     Raises WatchRulesError, before changing config, for an item that is not
     a built-in rule or has a value the rule cannot use.
     """
-    _apply_builtin_rules(_parse_builtin_rules(spec), config)
+    _apply_builtin_rules(_parse_builtin_rules(spec), config, per_session_max)
 
 
 def _looks_like_file(item: str) -> bool:

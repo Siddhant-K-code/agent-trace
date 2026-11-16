@@ -955,6 +955,47 @@ class TestWatchRulesFlag(unittest.TestCase):
                 config, _ = self._watched_with(value, *flags)
                 self.assertEqual(getattr(config, field), expected)
 
+    def test_built_in_values_replace_limits_that_do_not_kill(self):
+        """Guard: passes on main too. A limit that only alerts or pauses, and
+        a default even with the kill action, are replaced. A lower value
+        lowers a limit that kills."""
+        limits = {"cost": {"max_dollars": 5}, "duration": {"max_minutes": 2}}
+        files = {}
+        for name, watchers in (
+            ("alert", dict(limits, retry={"alert": "terminal"})),
+            ("pause", dict(limits, retry={"alert": "pause"})),
+            ("kill", dict(limits, retry={"alert": "kill"})),
+            ("kill-action", {"retry": {"alert": "kill"}}),
+        ):
+            files[name] = str(self.root / f"{name}.json")
+            Path(files[name]).write_text(json.dumps({"watchers": watchers}))
+        cases = (
+            ("budget:10", ("--max-cost", "5", "--on-violation", "file"), "max_cost_dollars", 10.0),
+            ("budget:10", ("--config", files["alert"]), "max_cost_dollars", 10.0),
+            ("budget:10", ("--config", files["pause"]), "max_cost_dollars", 10.0),
+            ("budget:10", ("--config", files["kill"], "--on-violation", "terminal"),
+             "max_cost_dollars", 10.0),
+            ("budget:20", ("--on-violation", "kill"), "max_cost_dollars", 20.0),
+            ("budget:20", ("--config", files["kill-action"]), "max_cost_dollars", 20.0),
+            ("budget:3", ("--max-cost", "7", "--on-violation", "kill"), "max_cost_dollars", 3.0),
+            ("budget:3", ("--config", files["kill"]), "max_cost_dollars", 3.0),
+            ("timeout:1h", ("--max-duration", "120", "--on-violation", "file"),
+             "max_duration_seconds", 3600.0),
+            ("timeout:1h", ("--config", files["alert"]), "max_duration_seconds", 3600.0),
+            ("timeout:1h", ("--config", files["pause"]), "max_duration_seconds", 3600.0),
+            ("timeout:1h", ("--config", files["kill"], "--on-violation", "terminal"),
+             "max_duration_seconds", 3600.0),
+            ("timeout:2h", ("--on-violation", "kill"), "max_duration_seconds", 7200.0),
+            ("timeout:2h", ("--config", files["kill-action"]), "max_duration_seconds", 7200.0),
+            ("timeout:30m", ("--max-duration", "7200", "--on-violation", "kill"),
+             "max_duration_seconds", 1800.0),
+            ("timeout:1m", ("--config", files["kill"]), "max_duration_seconds", 60.0),
+        )
+        for value, flags, field, expected in cases:
+            with self.subTest(value=value, flags=flags):
+                config, _ = self._watched_with(value, *flags)
+                self.assertEqual(getattr(config, field), expected)
+
     def test_yaml_comments_and_quotes_inside_values_now_load(self):
         cases = (
             # R21: the comment is not part of the action.

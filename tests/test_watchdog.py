@@ -396,6 +396,9 @@ class WatchdogLimitTest(unittest.TestCase):
     def count(self, prefix):
         return sum(1 for alert in self.alerts() if alert.startswith(prefix))
 
+    def cost_alerts(self):
+        return [alert for alert in self.alerts() if alert.startswith("CostWatcher:")]
+
 
 class TestTimeoutKills(WatchdogLimitTest):
     def test_timeout_kills_an_agent_that_writes_no_events(self):
@@ -585,9 +588,6 @@ class TestPerSessionMaxKills(WatchdogLimitTest):
         # The standard project config, read from the working directory.
         (self.root / ".agent-strace.json").write_text('{"budget": {"per_session_max": 5}}')
 
-    def cost_alerts(self):
-        return [alert for alert in self.alerts() if alert.startswith("CostWatcher:")]
-
     def test_it_replaces_a_max_cost_that_only_alerts(self):
         """Guard: passes on main too. There is no alert at $2, as on main."""
         self.watch("--max-cost", "2", steps=(_three_dollars(), _three_dollars()))
@@ -621,6 +621,106 @@ class TestPerSessionMaxKills(WatchdogLimitTest):
         self.watch("--config", str(self.config), steps=(_three_dollars(),))
         self.assertEqual(self.cost_alerts(), ["CostWatcher: $3.00 (threshold: $2.0)"])
         self.mocks["kill"].assert_called_once_with(PID, None)
+
+    def test_a_built_in_budget_never_raises_it(self):
+        self.watch("--rules", "budget:100", steps=(_three_dollars(), _three_dollars()))
+        self.assertEqual(self.cost_alerts(), ["CostWatcher: $6.00 (threshold: $5.0)"])
+        self.mocks["kill"].assert_called_once_with(PID, None)
+
+    def test_a_lower_built_in_budget_lowers_it_and_still_kills(self):
+        """Guard: passes on main too."""
+        self.watch("--rules", "budget:2", steps=(_three_dollars(),))
+        self.assertEqual(self.cost_alerts(), ["CostWatcher: $3.00 (threshold: $2.0)"])
+        self.mocks["kill"].assert_called_once_with(PID, None)
+
+
+class TestBuiltInLimitsNeverRaiseAKill(WatchdogLimitTest):
+    """--rules budget:N and timeout:D lower a limit that kills, but never
+    raise it, and the limit still kills."""
+
+    def setUp(self):
+        super().setUp()
+        self.config = self.root / "watch.json"
+
+    def test_budget_n_never_raises_budget(self):
+        self.watch("--budget", "5", "--rules", "budget:10", steps=(
+            _three_dollars(), _three_dollars(),
+        ))
+        self.assertEqual(self.cost_alerts(), ["CostWatcher: $6.00 (threshold: $5.0)"])
+        self.mocks["kill"].assert_called_once_with(PID, None)
+
+    def test_budget_n_never_raises_a_max_cost_that_kills(self):
+        self.watch("--max-cost", "5", "--on-violation", "kill", "--rules", "budget:10", steps=(
+            _three_dollars(), _three_dollars(),
+        ))
+        self.assertEqual(self.cost_alerts(), ["CostWatcher: $6.00 (threshold: $5.0)"])
+        self.mocks["kill"].assert_called_once_with(PID, None)
+
+    def test_budget_n_never_raises_a_config_file_cost_limit_that_kills(self):
+        self.config.write_text(
+            '{"watchers": {"cost": {"max_dollars": 5}, "retry": {"alert": "kill"}}}'
+        )
+        self.watch("--config", str(self.config), "--rules", "budget:10", steps=(
+            _three_dollars(), _three_dollars(),
+        ))
+        self.assertEqual(self.cost_alerts(), ["CostWatcher: $6.00 (threshold: $5.0)"])
+        self.mocks["kill"].assert_called_once_with(PID, None)
+
+    def test_timeout_d_never_raises_timeout_for_an_agent_that_writes_no_events(self):
+        # The kill comes on a poll cycle, and watch stops once the kill grace
+        # has passed, not at the 1 h deadline.
+        out = self.watch("--timeout", "1m", "--rules", "timeout:1h", max_idle_seconds=0.05, steps=(
+            self.pass_deadline, _IDLE_SENTINEL,
+            self.idle, _IDLE_SENTINEL,
+            self.pass_grace, _IDLE_SENTINEL,
+            _IDLE_SENTINEL,
+        ))
+        self.mocks["kill"].assert_called_once_with(PID, None)
+        self.assertIn("DurationWatcher: 61s elapsed (threshold: 60s)", self.alerts())
+        self.assertIn("stopping", out)
+        self.assertEqual(self.yielded, 3)
+
+    def test_timeout_d_never_raises_a_max_duration_that_kills(self):
+        self.watch(
+            "--max-duration", "60", "--on-violation", "kill", "--rules", "timeout:1h",
+            steps=(self.pass_deadline, _tool_call()),
+        )
+        self.mocks["kill"].assert_called_once_with(PID, None)
+        self.assertIn("DurationWatcher: 61s elapsed (threshold: 60s)", self.alerts())
+
+    def test_timeout_d_never_raises_a_config_file_duration_limit_that_kills(self):
+        self.config.write_text(
+            '{"watchers": {"duration": {"max_minutes": 1}, "retry": {"alert": "kill"}}}'
+        )
+        self.watch("--config", str(self.config), "--rules", "timeout:1h", steps=(
+            self.pass_deadline, _tool_call(),
+        ))
+        self.mocks["kill"].assert_called_once_with(PID, None)
+        self.assertIn("DurationWatcher: 61s elapsed (threshold: 60s)", self.alerts())
+
+    def test_a_lower_budget_n_lowers_budget_and_still_kills(self):
+        """Guard: passes on main too."""
+        self.watch("--budget", "10", "--rules", "budget:5", steps=(
+            _three_dollars(), _three_dollars(),
+        ))
+        self.assertEqual(self.cost_alerts(), ["CostWatcher: $6.00 (threshold: $5.0)"])
+        self.mocks["kill"].assert_called_once_with(PID, None)
+
+    def test_a_lower_timeout_d_lowers_timeout_and_still_kills(self):
+        """Guard: passes on main too."""
+        self.watch("--timeout", "2m", "--rules", "timeout:1m", steps=(
+            self.pass_deadline, _IDLE_SENTINEL, _IDLE_SENTINEL,
+        ))
+        self.mocks["kill"].assert_called_once_with(PID, None)
+        self.assertIn("DurationWatcher: 61s elapsed (threshold: 60s)", self.alerts())
+
+    def test_a_built_in_replaces_limits_that_only_alert(self):
+        """Guard: passes on main too. There is no alert at $6 or 61 s."""
+        self.watch("--max-cost", "5", "--max-duration", "60", "--rules", "budget:10,timeout:1h",
+                   steps=(self.pass_deadline, _three_dollars(), _three_dollars()))
+        self.assertEqual(self.cost_alerts(), [])
+        self.assertEqual(self.count("DurationWatcher:"), 0)
+        self.mocks["kill"].assert_not_called()
 
 
 # ---------------------------------------------------------------------------
