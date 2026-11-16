@@ -629,6 +629,44 @@ lower of the two applies, so `per_session_max` never raises it. Otherwise
 limit that only alerts or pauses never fires, and the session is killed at
 `per_session_max`.
 
+`watch`, `record` and `record-http` read the first of `.agent-strace.yaml`,
+`.agent-strace.yml` and `.agent-strace.json` in the working directory, and
+only that file. The keys go in the `budget` block, or at the top level when
+there is no `budget` key, but not both. Values:
+
+| Key | Value |
+|---|---|
+| `weekly` | Dollars, 0 or more. `0`, `null` or no value means no weekly budget |
+| `per_session_max` | Dollars, 0 or more. `0`, `null` or no value means no per-session limit |
+| `warn_at`, `stop_at` | A fraction of `weekly`, from 0 to 10: `0.9` is 90%. `null` or no value keeps the default, `0.8` and `1` |
+
+A number may be quoted (`"20"`), and a dollar amount may start with one `$`
+(`$20`). `true`, `false`, `yes`, `nan`, `inf` and other text are refused. A
+percent such as `stop_at: 90` is refused, because spend would never reach
+it. An empty `budget:` block, with every key commented out, or `budget: {}`
+sets no budget. Inside `budget`, a key other than these four is refused.
+Other top-level keys are ignored, and a file that sets no budget keys sets
+no budget, so a file that holds only other config, such as a `review` or
+`retention` block or the [`apply`](#apply) sections, works as before.
+
+The file must be UTF-8, and may start with a byte order mark. A `.json`
+file must hold a JSON object. YAML is read in a small subset: one
+`key: value` per line, every `budget` key indented the same, values plain
+or quoted, and comments after ` #`. Flow style such as
+`budget: {weekly: 20}`, anchors, tags and block scalars are refused in the
+budget keys. A line the reader cannot read is refused when it names a
+budget key, and skipped otherwise. A budget key given twice is refused.
+
+When the file cannot be read or parsed, or a budget key holds a value that
+cannot be used, `watch`, `record` and `record-http` refuse to start. They
+print one line that names the file and the key, exit 1, and write nothing:
+no session, no alert log, no heartbeat. They never run without the budget:
+
+```
+[watch] invalid project budget in .agent-strace.yaml: budget.per_session_max must be a finite number, 0 or more, not -5
+agent-strace: invalid project budget in .agent-strace.yml: budget.stop_at must be a number from 0 to 10, a fraction of weekly such as 0.9 for 90%, not 90
+```
+
 **Rules file format** (`.watch-rules.json`):
 ```json
 {
@@ -807,14 +845,23 @@ be, but never the value:
 [watch] invalid --config file .agent-watch.json: watchers.retry.alert must be one of terminal, file, kill, pause, require_approval
 ```
 
-Other keys are ignored, so the same file can hold the project budget keys
-above: a `budget` block, or top-level `weekly`, `warn_at`, `stop_at` and
-`per_session_max`. Watch does not check the budget keys. When the `--config`
-file sets either `weekly` or `per_session_max`, its budget keys replace the
-standard project config for that run, so a weekly budget in
-`.agent-strace.yaml`, `.agent-strace.yml` or `.agent-strace.json` is not
-read then. A key counts as set when it is present, even as `null` or `0`.
-When the file sets neither key, watch reads the standard project config.
+Other keys are ignored, except the project budget keys above, so the same
+file can hold them: a `budget` block, or top-level `weekly`, `warn_at`,
+`stop_at` and `per_session_max`. Watch checks them by the rules in **Project
+budget config** above, so `null` is allowed for them. It checks a `budget`
+block even when the block sets neither `weekly` nor `per_session_max`. A
+value it cannot use refuses the file the same way:
+
+```
+[watch] invalid --config file .agent-watch.json: budget.per_session_max must be a finite number, 0 or more
+```
+
+When the `--config` file sets either `weekly` or `per_session_max`, its
+budget keys replace the standard project config for that run, so a budget
+in `.agent-strace.yaml`, `.agent-strace.yml` or `.agent-strace.json` is not
+read then, nor checked. A key counts as set when it is present, even as
+`null` or `0`. When the file sets neither key, watch reads the standard
+project config.
 
 Flags given on the command line override the file, and a flag that is not
 given keeps the file's value. `--on-death`, which has no key, applies with

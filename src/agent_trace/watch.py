@@ -64,9 +64,12 @@ from .postmortem import clear_heartbeat, write_heartbeat
 from .process_identity import PID_REUSED_REASON, pid_reused, process_identity
 from .project_budget import (
     ProjectBudgetConfig,
+    ProjectBudgetConfigError,
     ProjectBudgetStatus,
     format_project_budget_status,
     load_project_budget_config,
+    mapping_from_pairs,
+    project_budget_keys,
     project_budget_status,
 )
 from .store import TraceStore
@@ -476,8 +479,9 @@ def _read_utf8_file(path: str, error: type[ValueError]) -> str:
     except UnicodeDecodeError:
         raise error("it is not valid UTF-8") from None
     if text.startswith("\ufeff"):
-        # project_budget.py reads the --config file and cannot parse a BOM
-        # either, so neither file may start with one.
+        # json.loads and the rules reader do not skip a byte order mark, so
+        # a clear line beats the parse error it would cause. The project
+        # budget config files that project_budget.py reads may start with one.
         raise error("it starts with a byte order mark; save it without one")
     return text
 
@@ -1098,10 +1102,10 @@ class WatcherConfig:
     # timeout:D lowers a set limit that kills, and replaces any other (see
     # _duration_limit_kills).
     duration_limit_set: bool = False
-    # True when the config file sets the project budget key weekly or
-    # per_session_max. Its budget keys then replace the standard project
-    # config for the run (see cmd_watch).
-    project_budget_set: bool = False
+    # Set when the config file sets the project budget key weekly or
+    # per_session_max, even to null or 0. It then replaces the standard
+    # project config for the run (see cmd_watch).
+    project_budget: ProjectBudgetConfig | None = None
     # Built-in rule names enabled via --rules mcp-poisoning,budget:$5,...
     built_in_rules: set[str] = field(default_factory=set)
     cognitive_debt_threshold: float | None = None
@@ -1111,8 +1115,9 @@ class WatcherConfig:
         """Build a config from a parsed watch --config file.
 
         Raises WatchConfigError for the first known key that has the wrong
-        type or an impossible value. Unknown keys are ignored, so the file
-        can also hold the budget keys that project_budget.py reads.
+        type or an impossible value. The budget keys are checked as
+        project_budget.py checks a project config file, without showing
+        values. Other unknown keys are ignored.
         """
         if not isinstance(d, dict):
             raise WatchConfigError("the top level must be a JSON object")
@@ -1171,12 +1176,12 @@ class WatcherConfig:
         config = cls(**{key: value for key, value in values.items() if value is not None})
         config.cost_limit_set = max_dollars is not None
         config.duration_limit_set = max_minutes is not None
-        # project_budget.py reads these keys from "budget", or from the top
-        # level when there is no "budget" key.
-        budget = d.get("budget", d)
-        config.project_budget_set = isinstance(budget, dict) and (
-            "weekly" in budget or "per_session_max" in budget
-        )
+        try:
+            budget_keys = project_budget_keys(d, show_values=False, mapping="JSON object")
+        except ValueError as exc:
+            raise WatchConfigError(str(exc)) from None
+        if "weekly" in budget_keys or "per_session_max" in budget_keys:
+            config.project_budget = ProjectBudgetConfig.from_keys(budget_keys)
         return config
 
     @classmethod
@@ -1187,7 +1192,10 @@ class WatcherConfig:
         JSON, or fails from_dict.
         """
         text = _read_utf8_file(path, WatchConfigError)
-        return cls.from_dict(_parse_json_text(text, WatchConfigError))
+        # The hook lets from_dict refuse a budget key given twice.
+        return cls.from_dict(
+            _parse_json_text(text, WatchConfigError, object_pairs_hook=mapping_from_pairs)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2803,14 +2811,20 @@ def cmd_watch(args: argparse.Namespace) -> int:
             sys.stderr.write(f"[watch] invalid {source}: {problem}\n")
             return 1
 
+    # The --config file's budget keys, checked when it was read, replace the
+    # standard project config when the file sets weekly or per_session_max.
+    # A project config that cannot be used is refused before the store is
+    # opened, so nothing is written.
+    project_budget_config = config.project_budget
+    if project_budget_config is None:
+        try:
+            project_budget_config = load_project_budget_config()
+        except ProjectBudgetConfigError as exc:
+            sys.stderr.write(f"[watch] {exc}\n")
+            return 1
+
     store = TraceStore(args.trace_dir)
 
-    # The --config file's budget keys replace the standard project config
-    # when the file sets weekly or per_session_max.
-    if config_path is not None and config.project_budget_set:
-        project_budget_config = load_project_budget_config(config_path)
-    else:
-        project_budget_config = load_project_budget_config()
     per_session_max = project_budget_config.per_session_max
     if per_session_max:
         # per_session_max kills (see _limit_action). It may lower a cost

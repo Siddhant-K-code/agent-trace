@@ -987,7 +987,8 @@ class TestWatchConfigFile(unittest.TestCase):
         self._write({"watchers": {"cost": {"max_dollars": 0}}})
         self.assertEqual(self._config_for(config=str(self.config)).max_cost_dollars, 0.0)
 
-    def test_unknown_keys_and_budget_keys_are_not_refused(self):
+    def test_unknown_keys_and_good_budget_keys_are_not_refused(self):
+        """Guard: passes on main too."""
         documents = (
             {
                 "watchers": {"retry": {"max": 2, "note": "x"}, "custom": [1, None]},
@@ -1015,9 +1016,43 @@ class TestWatchConfigFile(unittest.TestCase):
                         (budget.weekly, budget.warn_at, budget.stop_at, budget.per_session_max),
                         (50.0, 0.5, 0.9, 4.0),
                     )
-        # Watch does not check the budget keys; project_budget.py ignores bad ones.
-        self._write({"budget": "not an object", "weekly": "lots"})
-        self.assertEqual(self._config_for(config=str(self.config)), WatcherConfig())
+
+    def test_budget_keys_that_cannot_be_used_are_refused(self):
+        # Main dropped each of these budgets without a word. The line names
+        # the key but never the value.
+        nan, inf = float("nan"), float("inf")
+        dollars = "must be a finite number, 0 or more"
+        fraction = "must be a number from 0 to 10, a fraction of weekly such as 0.9 for 90%"
+        hint = "use weekly, warn_at, stop_at or per_session_max"
+        cases = [
+            ({"budget": "not an object", "weekly": "lots"}, "budget must be a JSON object"),
+            ({"budget": ["SECRET"]}, "budget must be a JSON object"),
+            ({"budget": 20}, "budget must be a JSON object"),
+            (
+                {"budget": {"weekly": 20}, "per_session_max": 5},
+                "it has both budget and a top-level per_session_max; move per_session_max under budget",
+            ),
+            ({"budget": {"weekly": 20, "per_session": 5}},
+             f"budget has an unknown key 'per_session'; {hint}"),
+            # Checked even when the file sets neither weekly nor per_session_max.
+            ({"budget": {"weekley": 20}}, f"budget has an unknown key 'weekley'; {hint}"),
+            (b'{"budget": {"weekly": 20, "weekly": 30}}', "budget.weekly is given twice"),
+            (b'{"budget": {"weekly": 20}, "budget": {}}', "budget is given twice"),
+            (b'{"per_session_max": 5, "per_session_max": 50}', "per_session_max is given twice"),
+        ]
+        for key in ("weekly", "per_session_max"):
+            for value in (-5, -0.01, "SECRET", "$SECRET", "$-5", True, False, nan, inf, -inf,
+                          10**400, [], {}):
+                cases.append(({"budget": {key: value}}, f"budget.{key} {dollars}"))
+                cases.append(({key: value}, f"{key} {dollars}"))
+        for key in ("warn_at", "stop_at"):
+            for value in (90, 10.5, -0.1, "$0.9", "SECRET", True, nan, inf, []):
+                cases.append(({"budget": {"weekly": 20, key: value}}, f"budget.{key} {fraction}"))
+                cases.append(({key: value}, f"{key} {fraction}"))
+        for document, problem in cases:
+            with self.subTest(document=document):
+                self._write(document)
+                self._assert_refused(problem)
 
     def test_file_values_are_kept_when_no_flag_is_given(self):
         self._write(self._FILE)
