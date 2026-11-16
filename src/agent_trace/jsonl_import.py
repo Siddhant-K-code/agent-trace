@@ -118,6 +118,7 @@ def _extract_tool_results(content: list[dict]) -> list[dict[str, Any]]:
                 {
                     "tool_use_id": block.get("tool_use_id", ""),
                     "content": "\n".join(text_parts),
+                    "is_error": block.get("is_error") is True,
                 }
             )
     return results
@@ -333,6 +334,7 @@ def import_jsonl(
                         data={
                             "tool_use_id": tr["tool_use_id"],
                             "content_preview": preview,
+                            **({"is_error": True} if tr["is_error"] else {}),
                             **provenance,
                         },
                     )

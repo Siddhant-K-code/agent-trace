@@ -28,6 +28,30 @@ class TestJSONLImport(unittest.TestCase):
                 f.write(json.dumps(entry) + "\n")
         return path
 
+    def test_failed_tool_result_keeps_is_error(self):
+        path = self._write_jsonl([
+            {
+                "type": "user",
+                "sessionId": "err1",
+                "timestamp": "2025-01-01T00:00:00Z",
+                "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "boom", "is_error": True},
+                    {"type": "tool_result", "tool_use_id": "t2", "content": "ok"},
+                ]},
+                "uuid": "u1",
+            },
+        ])
+
+        session_id = import_jsonl(path, store=self.store)
+        results = {
+            event.data["tool_use_id"]: event.data
+            for event in self.store.load_events(session_id)
+            if event.event_type == EventType.TOOL_RESULT
+        }
+
+        self.assertIs(results["t1"]["is_error"], True)
+        self.assertNotIn("is_error", results["t2"])
+
     def test_import_basic_session(self):
         path = self._write_jsonl([
             {

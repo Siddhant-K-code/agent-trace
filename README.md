@@ -43,11 +43,11 @@ This reads the Claude Code transcripts already on your machine (`~/.claude/proje
 Sample output (139 recorded sessions, trimmed):
 ```text
 Skills across 139 sessions since 2025-11-09. Availability reflects the filesystem now, not session time.
-skill                   avail loaded load rate user/model median t pre-edit  follow  tests
+skill                   avail loaded load rate  user model median t pre-edit  follow  tests
 ------------------------------------------------------------------------------------------
-frontend-design           139      2     2/139    0/3         3.1h      1/2     0/2    0/2
-grilling                  139      0     0/139    0/0            -        -       -      -
-web-design-guidelines     139      0     0/139    0/0            -        -       -      -
+frontend-design           139      2     2/139     0     3     3.1h      1/2     0/2    0/2
+grilling                  139      0     0/139     0     0        -        -       -      -
+web-design-guidelines     139      0     0/139     0     0        -        -       -      -
 
 Never loaded (available in >= 5 sessions, loaded in 0):
   grilling (available in 139 sessions)

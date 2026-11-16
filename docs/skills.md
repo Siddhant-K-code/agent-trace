@@ -283,6 +283,11 @@ Indigo is invoked by the model. Green is invoked by the user.
   `arguments` or `tool_input`, and serialized strings are parsed.
 - A `SKILL.md` read is a read tool, a `file_read` event, or a shell reader
   (`cat`, `head`, `sed -n`, …). Editing `SKILL.md` is not a load.
+- When the session recorded its skill list (`--from-copilot`, `--from-codex`),
+  only a read of a listed skill's `SKILL.md` is a load. Reading another
+  `SKILL.md`, for example while editing skills in a repo, is not.
+- A path the reader cannot resolve, such as `$d/SKILL.md` in a shell loop, is
+  not a load.
 - Prompt loads match only available skill names, so `/tmp` or `$HOME` is not
   a load. Claude Code transcripts store `/name` as
   `<command-name>/name</command-name>`, which counts the same way.
@@ -364,13 +369,16 @@ Outcome facts sit next to the load. They do not mean the skill caused them.
   same strict rules as [review Validation](review.md#findings). The text
   output prints it as `unittest summary passed`. No other result text is
   parsed or printed.
-- `errors` and `session_end_recorded` are also reported.
+- `errors` counts error events and failed tool results (`success: false`,
+  `is_error: true`, or a non-zero exit code). Hooks record a failed tool call
+  as an error event; transcripts record it as a failed result, so both count.
+- `session_end_recorded` is also reported.
 
 ## Aggregate mode
 
 ```mermaid
 flowchart TD
-    W["Sessions in window<br/>--since, default 30d"] --> P["Per skill<br/>available · loaded<br/>load rate · user/model<br/>median time to load<br/>pre-edit · follow<br/>tests after load"]:::fact
+    W["Sessions in window<br/>--since, default 30d"] --> P["Per skill<br/>available · loaded<br/>load rate · user, model loads<br/>median time to load<br/>pre-edit · follow<br/>tests after load"]:::fact
     P --> N["Never loaded<br/>available: N+ sessions<br/>loaded: 0"]:::none
     P --> UO["User-only, never invoked<br/>disable-model-invocation: true<br/>available: N+ · invoked: 0"]:::nm
     P --> C["Loaded vs not loaded<br/>tests, errors,<br/>session_end<br/>N+ in both groups"]:::signal
