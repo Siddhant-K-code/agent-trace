@@ -543,7 +543,9 @@ without `--config`. Every other watch check acts with `--on-violation` (or
 limits as `--timeout` and `--budget`, but a default (1800 seconds and $10)
 always applies, so they kill only when that action is `kill`. A project
 budget's `per_session_max` changes the cost limit; see **Project budget
-config** below. Bad `--max-duration` and `--max-cost` values are refused
+config** below. The `--rules` built-ins `budget:N` and `timeout:D` change
+these limits too, but never raise a limit that kills; see **Built-in rules**
+below. Bad `--max-duration` and `--max-cost` values are refused
 like bad `--timeout` and `--budget` values.
 
 `--timeout` counts wall-clock time from when watch starts, including time
@@ -726,9 +728,21 @@ creating a request.
 |---|---|
 | `mcp-poisoning` | Alert on MCP tool poisoning indicators, the checks `mcp-scan` runs. Takes no value |
 | `loop`, `loop:N`, `loop:N/W` | Loop detection always runs. `loop:N` sets its threshold, like `--loop-threshold`, and `loop:N/W` also sets its window, like `--loop-window`. N and W are whole numbers, 1 or more |
-| `budget:N` | Sets the cost limit to N dollars. N is a finite number, 0 or more, and may start with one `$`. Like `--max-cost`, it acts with `--on-violation` and does not kill as `--budget` does |
-| `timeout:D` | Sets the duration limit to D, a duration more than 0 such as `30m` or `2h`. Like `--max-duration`, it acts with `--on-violation` and does not kill as `--timeout` does |
+| `budget:N` | Sets the cost limit to N dollars. N is a finite number, 0 or more, and may start with one `$`. Like `--max-cost`, it acts with `--on-violation` and does not kill as `--budget` does. It may lower a cost limit that kills, but never raises it (see below) |
+| `timeout:D` | Sets the duration limit to D, a duration more than 0 such as `30m` or `2h`. Like `--max-duration`, it acts with `--on-violation` and does not kill as `--timeout` does. It may lower a duration limit that kills, but never raises it (see below) |
 | `cognitive-debt`, `cognitive-debt:N` | Alert when the session has modified files that have not had human review. N is the threshold, from 0 to 1; without it, `cognitive_debt_threshold` from `--config` is used, or 0.8 |
+
+A cost limit kills when it comes from `--budget` or `per_session_max`, or
+from `--max-cost` or `watchers.cost.max_dollars` while the action
+(`--on-violation`, or `watchers.retry.alert` from `--config`) is `kill`. A
+duration limit kills when it comes from `--timeout`, or from
+`--max-duration` or `watchers.duration.max_minutes` while the action is
+`kill`. With such a limit, the lower of the limit and the `budget:N` or
+`timeout:D` value applies, and the limit still kills:
+`--budget 5 --rules budget:10` and `--budget 10 --rules budget:5` both kill
+above $5. Any other limit is replaced, and so are the defaults, $10 and 1800
+seconds, even with `--on-violation kill`: `--max-cost 5 --rules budget:10`
+alerts above $10, and `--on-violation kill --rules timeout:2h` sets 2 hours.
 
 Names are lower case, and each rule may be listed once. Watch refuses, at
 startup, an item that is not one of these, a value out of range, an empty
@@ -805,7 +819,10 @@ given keeps the file's value. `--on-death`, which has no key, applies with
 `--config` too. `per_session_max` from the project budget config is applied
 after the flags and the file: it lowers a cost limit that kills but never
 raises it, and it replaces any other cost limit (see **Project budget
-config** above). `--rules` built-ins such as `budget:5` are applied last.
+config** above). `--rules` built-ins such as `budget:5` are applied last,
+the same way: `budget:N` and `timeout:D` lower a limit that kills, including
+`per_session_max`, but never raise it, and they replace any other limit (see
+**Built-in rules** above).
 
 ### `mcp-scan`
 ```
