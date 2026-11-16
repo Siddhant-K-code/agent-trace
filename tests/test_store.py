@@ -280,6 +280,33 @@ class TestTraceStore(unittest.TestCase):
         self.assertTrue(loaded.redacted)
         self.assertNotIn("sk-abc123", loaded.command)
 
+    def test_append_events_matches_append_event(self):
+        secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl"
+        streams = []
+        for batched in (False, True):
+            store_dir = tempfile.mkdtemp()
+            store = TraceStore(store_dir)
+            self.addCleanup(shutil.rmtree, store_dir, True)
+            meta = SessionMeta()
+            meta.session_id = "batch0001"
+            store.create_session(meta)
+            store.append_event(meta.session_id, TraceEvent(event_type=EventType.SESSION_START,
+                                                           event_id="e-start", timestamp=0.5))
+            events = [
+                TraceEvent(event_type=EventType.TOOL_CALL, event_id=f"e{i}", timestamp=1.0 + i,
+                           data={"tool_name": "bash", "arguments": {"command": f"echo {secret} {i}"}})
+                for i in range(3)
+            ]
+            if batched:
+                store.append_events(meta.session_id, events)
+            else:
+                for event in events:
+                    store.append_event(meta.session_id, event)
+            streams.append([json.loads(event.to_json()) for event in store.load_events(meta.session_id)])
+
+        self.assertEqual(streams[0], streams[1])
+        self.assertTrue(all(event["prev_hash"] for event in streams[1][1:]))
+        self.assertNotIn(secret, json.dumps(streams[1]))
 
 _GITIGNORE_BYTES = (
     b"# Created by agent-strace: traces may contain prompts and tool output.\n"

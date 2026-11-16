@@ -1417,7 +1417,8 @@ Read with care:
 ```
 agent-strace skills [SESSION_ID] [--since DATE] [--workspace PATH]
                     [--skills-dir DIR ...] [--min-sessions N]
-                    [--from-claude [--claude-dir DIR]] [--format text|json]
+                    [--from-claude [--claude-dir DIR] | --from-copilot [--copilot-dir DIR]
+                     | --from-codex [--codex-dir DIR]] [--format text|json]
 ```
 Skill adoption from recorded behavior: available → loaded → followed → outcome. Counts and signals only, no score. Omit `SESSION_ID` to aggregate per skill. Skills with `disable-model-invocation: true` are listed as user-only instead of never loaded, and alias or forwarder skills get hints. To test whether a skill loads when it should, use [`skills eval`](#skills-eval). See [skills.md](skills.md).
 
@@ -1430,11 +1431,15 @@ Skill adoption from recorded behavior: available → loaded → followed → out
 | `--min-sessions N` | Minimum sessions for the never-loaded and user-only lists and for each group in the loaded vs not-loaded comparison; default is `5` |
 | `--from-claude` | Read existing Claude Code transcripts (`DIR/projects/*/*.jsonl`) instead of the trace store. Writes no persistent trace store; uses a temporary directory deleted on exit. Imported events are redacted as in `import` |
 | `--claude-dir DIR` | Claude Code config directory for `--from-claude`; default is `$CLAUDE_CONFIG_DIR`, else `~/.claude` |
+| `--from-copilot` | Read existing GitHub Copilot CLI and app session logs (`DIR/session-state/*/events.jsonl`) instead of the trace store. Same temporary store as `--from-claude`. Availability is the skill list each session recorded |
+| `--copilot-dir DIR` | Copilot home for `--from-copilot`; default is `$COPILOT_HOME`, else `~/.copilot` |
+| `--from-codex` | Read existing Codex rollouts (`DIR/sessions/**/rollout-*.jsonl` and `DIR/archived_sessions/**/rollout-*.jsonl`) instead of the trace store. Same temporary store as `--from-claude`. Availability is the skill list each session recorded |
+| `--codex-dir DIR` | Codex home for `--from-codex`; default is `$CODEX_HOME`, else `~/.codex` |
 | `--format text\|json` | Output format |
 
-With no sessions in the trace store, the command prints how to read Claude Code history or set up capture instead of an empty report. In JSON mode the report is still printed and the hint goes to stderr.
+With no sessions in the trace store, the command prints how to read Claude Code, GitHub Copilot or Codex history or set up capture instead of an empty report. In JSON mode the report is still printed and the hint goes to stderr.
 
-When sessions are left out of the aggregate, the first line says how many and why, for example `Skills across 2 of 7 sessions since 2026-10-16 (5 started before the window)`. Reasons: started before the `--since` window, or unreadable or malformed. JSON adds `sessions_total` and `sessions_excluded`. With `--from-claude`, transcripts that share a session ID are merged into one session, and the `Read N Claude Code session(s)` line says how many.
+When sessions are left out of the aggregate, the first line says how many and why, for example `Skills across 2 of 7 sessions since 2026-10-16 (5 started before the window)`. Reasons: started before the `--since` window, or unreadable or malformed. JSON adds `sessions_total` and `sessions_excluded`. With `--from-claude`, transcripts that share a session ID are merged into one session, and the `Read N Claude Code session(s)` line says how many. The three `--from-*` flags are mutually exclusive. With `--from-copilot` or `--from-codex`, the `Read` line also says how many sessions recorded their skill list and what was skipped, and JSON `availability_basis` is `recorded` or `mixed`. The log formats are internal to each agent and can change; see [skills.md](skills.md#quick-start).
 
 ### `skills eval`
 ```

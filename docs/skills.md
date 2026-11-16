@@ -34,6 +34,59 @@ unreadable or malformed. Transcripts that share a session ID
 are merged into one session, and the `Read` line says so. Widen the window with
 `--since 90d`.
 
+**GitHub Copilot and Codex, no setup.** Read the session logs these agents
+already keep:
+
+```bash
+uvx agent-strace skills --from-copilot   # Copilot CLI and the Copilot app
+uvx agent-strace skills --from-codex     # Codex CLI, IDE extension and app
+```
+
+| Flag | Reads | Directory |
+|---|---|---|
+| `--from-copilot` | `session-state/*/events.jsonl` | `--copilot-dir`, else `$COPILOT_HOME`, else `~/.copilot` |
+| `--from-codex` | `sessions/**/rollout-*.jsonl` and `archived_sessions/**/rollout-*.jsonl` | `--codex-dir`, else `$CODEX_HOME`, else `~/.codex` |
+
+Both work like `--from-claude`: a temporary store deleted on exit, the same
+report, the same redaction. Only what the report needs is imported: tool names,
+file paths, commands (for follow signals), result status and exit codes, and
+from each prompt only a leading `/name` and any `$name`. Prompt text, model
+output and reasoning are never read into the store.
+
+These sessions record which skills the agent was offered, so availability is
+the list each session recorded, not today's filesystem. A session that recorded
+no list (for example, no skills were installed then) falls back to skill
+directories on disk now. The first line says how many sessions did each:
+
+```text
+Read 506 GitHub Copilot session(s) from ~/.copilot/session-state. 479 recorded their available skills; the rest use skill directories on disk now. No persistent trace store was written; the temporary directory is deleted on exit.
+```
+
+What each reader counts:
+
+| | GitHub Copilot | Codex |
+|---|---|---|
+| Available | `<available_skills>` in the system message | `<skills_instructions>` or `world_state` skills list |
+| Model load | `skill` tool call, or a `skill.invoked` event | read of a listed `SKILL.md` (Codex has no load event) |
+| User load | prompt starts `/name` or mentions `$name` | prompt mentions `$name`, or a `<skill>` block injected for the user |
+| Skipped | session directories with no `events.jsonl` | files whose first record is not `session_meta`; approval review threads |
+
+- Copilot lists skills by name only. A skill's path comes from a
+  `skill.invoked` event in any session, when that name always had the same
+  path. Otherwise the definition is looked up by name in the skill directories,
+  and a skill found nowhere is reported with `definition_found: false`.
+- Codex archived sessions are included, because the report is about history.
+  Approval review threads (`thread_source: guardian_review`) are excluded:
+  they are reviewer runs, not user sessions.
+- Definitions (commands, resources, invocation settings) are always read from
+  `SKILL.md` on disk now. Add plugin or app-bundled directories with
+  `--skills-dir`.
+
+> [!NOTE]
+> Both log formats are internal to the agents and undocumented. They can
+> change in any release. The readers skip unknown events, missing fields and a
+> truncated last line, and count unreadable files in the `Read` line.
+
 **Any supported agent.** Record sessions, then report:
 
 ```bash
@@ -62,9 +115,9 @@ task needs it, run [`agent-strace skills eval`](skills-eval.md).
 | Agent | Source | Model load seen as |
 |---|---|---|
 | Claude Code | `--from-claude` (existing transcripts) or `setup --cli claude` | `Skill` tool call |
-| GitHub Copilot CLI | `setup --cli copilot` or the plugin | `skill` tool call |
+| GitHub Copilot CLI and app | `--from-copilot` (existing logs), `setup --cli copilot`, or the plugin | `skill` tool call |
 | Gemini CLI | `setup --cli gemini` | `activate_skill` tool call |
-| OpenAI Codex | `setup --cli codex` | read of a `SKILL.md` |
+| OpenAI Codex | `--from-codex` (existing logs) or `setup --cli codex` | read of a `SKILL.md` |
 | Cursor | `setup --cli cursor` | read of a `SKILL.md` |
 
 For every agent, a recorded prompt that starts with `/name` or mentions
@@ -81,8 +134,9 @@ repository for skill discovery.
 ### What it cannot tell you
 
 - Whether a task needed the skill. "Never loaded" can mean "never relevant".
-- What skills existed when an old session ran. Availability is read from
-  today's filesystem.
+- What skills existed when an old session ran, except with `--from-copilot`
+  and `--from-codex`, which read the list each session recorded. Otherwise
+  availability is read from today's filesystem.
 - Whether the skill caused any outcome.
 
 The full list is under [Limits](#limits).
@@ -132,7 +186,11 @@ flowchart TB
   value comes from this command's environment, so run it with the
   `CODEX_HOME` that Codex sees. Reports show the resolved directory.
 - **Availability is read from today's filesystem.** Older sessions see skills
-  added later. Narrow `--since` to reduce this.
+  added later. Narrow `--since` to reduce this. `--from-copilot` and
+  `--from-codex` use the list each session recorded instead (see
+  [Quick start](#quick-start)); JSON `availability_basis` is `recorded`, or
+  `mixed` when some sessions recorded none, with per-basis counts in
+  `availability_basis_sessions`.
 
 ### Who can invoke a skill
 
@@ -341,7 +399,8 @@ as `caveats.never_loaded` and as one line in the text output:
 - **Availability is not relevance.** No task in the window may have needed the
   skill.
 - **Availability reflects today's filesystem.** Sessions from before a skill
-  was installed are over-counted.
+  was installed are over-counted. With a recorded list, this caveat names the
+  sessions that recorded none instead.
 - **User-only skills are listed separately.** See below.
 - **Hints are pattern matches.** A skill with an alias or forwarder hint may
   be unloaded because the model loads its target instead.
@@ -367,7 +426,8 @@ task, so the groups differ in task mix.
 
 This command cannot measure:
 
-- what the skill set looked like when an old session ran;
+- what the skill set looked like when an old session ran, unless the session
+  recorded it (`--from-copilot`, `--from-codex`);
 - whether a task should have triggered a skill (see
   [skills eval](skills-eval.md));
 - client settings that change who can invoke a skill;

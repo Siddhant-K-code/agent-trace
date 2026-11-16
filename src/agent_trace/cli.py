@@ -2326,13 +2326,26 @@ def build_parser() -> argparse.ArgumentParser:
                           metavar="DIR", help="extra skill directory to scan (repeatable)")
     p_skills.add_argument("--min-sessions", type=int, default=5,
                           help="minimum sessions for never-loaded, user-only, and comparison output (default: 5)")
-    p_skills.add_argument("--from-claude", action="store_true",
-                          help="read existing Claude Code transcripts instead of the trace store; "
-                               "writes no persistent trace store; uses a temporary directory "
-                               "deleted on exit")
+    skills_history = p_skills.add_mutually_exclusive_group()
+    skills_history.add_argument("--from-claude", action="store_true",
+                                help="read existing Claude Code transcripts instead of the trace store; "
+                                     "writes no persistent trace store; uses a temporary directory "
+                                     "deleted on exit")
+    skills_history.add_argument("--from-copilot", action="store_true",
+                                help="read existing GitHub Copilot CLI and app session transcripts "
+                                     "instead of the trace store; same temporary handling as --from-claude")
+    skills_history.add_argument("--from-codex", action="store_true",
+                                help="read existing Codex rollout transcripts instead of the trace store; "
+                                     "same temporary handling as --from-claude")
     p_skills.add_argument("--claude-dir", default=None, metavar="DIR",
                           help="Claude Code config directory for --from-claude "
                                "(default: $CLAUDE_CONFIG_DIR, else ~/.claude)")
+    p_skills.add_argument("--copilot-dir", default=None, metavar="DIR",
+                          help="Copilot config directory for --from-copilot "
+                               "(default: $COPILOT_HOME, else ~/.copilot)")
+    p_skills.add_argument("--codex-dir", default=None, metavar="DIR",
+                          help="Codex home directory for --from-codex "
+                               "(default: $CODEX_HOME, else ~/.codex)")
     p_skills.add_argument("--format", choices=["text", "json"], default="text",
                           help="output format (default: text)")
 
