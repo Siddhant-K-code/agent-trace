@@ -82,6 +82,11 @@ def _call(tool: str, args, key: str = "arguments") -> TraceEvent:
     )
 
 
+def _stored(tool: str, args) -> TraceEvent:
+    """Return a tool call as watch reads it back from the events file."""
+    return TraceEvent.from_json(_call(tool, args).to_json())
+
+
 def _file(event_type: EventType, **data) -> TraceEvent:
     return TraceEvent(event_type=event_type, timestamp=2.0, data=data)
 
@@ -228,6 +233,14 @@ class TestFilePathRule(_WatchCase):
         for label, event in cases:
             with self.subTest(label):
                 self.assertEqual(self.watch([event()], [ENV]), [_fired(ENV)])
+
+    def test_json_text_over_the_python_literal_limit(self):
+        from agent_trace.event_data import MAX_ARGUMENT_CHARS
+
+        text = json.dumps({"file_path": "/app/production.env", "content": "x" * MAX_ARGUMENT_CHARS})
+        self.assertEqual(self.watch([_call("Write", text)], [ENV]), [_fired(ENV)])
+        state, _ = self.check(_call("Write", text))
+        self.assertEqual(state.files_modified_set, {"/app/production.env"})
 
     def test_apply_patch_add_move_and_delete(self):
         for label, text in (("Add File", ADD_ENV), ("Move to", MOVE_ENV), ("Delete File", DELETE_ENV)):
@@ -565,6 +578,31 @@ class TestLoopKey(_WatchCase):
         first = _event_key(_call("Write", {"file_path": "/app/a.py"}, key="tool_input"))
         second = _event_key(_call("Write", {"file_path": "/app/b.py"}, key="tool_input"))
         self.assertNotEqual(first, second)
+
+    # JSON allows "\ud800", and TraceEvent.from_json decodes it to a lone
+    # surrogate, which strict UTF-8 cannot encode.
+    def test_a_lone_surrogate_in_a_patch(self):
+        event = _stored("apply_patch", _patch("*** Add File: notes/a\ud800.txt", "+x"))
+        self.assertIn("\ud800", event.data["arguments"])
+        self.assertEqual(self.check(event)[1], [])
+        write = _call("Write", {"file_path": "/app/production.env", "content": "x"})
+        self.assertEqual(self.watch([event, write], [ENV]), [_fired(ENV)])
+
+    def test_identical_patches_with_a_lone_surrogate_are_a_loop(self):
+        calls = [_stored("apply_patch", _patch("*** Add File: notes/a\ud800.txt", "+x")) for _ in range(3)]
+        violations = self.check(*calls)[1]
+        self.assertEqual(len(violations), 1, violations)
+        self.assertTrue(violations[0].startswith(LOOP), violations)
+
+    def test_patches_that_differ_only_by_a_lone_surrogate_are_not_a_loop(self):
+        calls = [
+            _stored("apply_patch", _patch("*** Add File: notes/a.txt", body))
+            for body in ("+x\ud800", "+x\ud801", "+x\ud802")
+        ]
+        keys = {_event_key(call) for call in calls}
+        self.assertEqual(len(keys), 3, keys)
+        self.assertTrue(all(key.startswith("apply_patch:notes/a.txt:") for key in keys), keys)
+        self.assertEqual(self.check(*calls)[1], [])
 
     def test_preview_reads_arguments_stored_as_text(self):
         key = _event_key(_call("bash", json.dumps({"command": "npm test"})))

@@ -304,11 +304,15 @@ class TestToolArguments(unittest.TestCase):
             with self.subTest(data=data):
                 self.assertEqual(tool_arguments(_tool_call(data)), ({}, None))
 
-    def test_text_over_the_limit_is_not_decoded(self):
+    def test_over_the_limit_only_json_text_is_decoded(self):
         from agent_trace.event_data import MAX_ARGUMENT_CHARS, tool_arguments
 
-        text = json.dumps({"path": "/app/a.py", "content": "x" * MAX_ARGUMENT_CHARS})
-        self.assertEqual(tool_arguments(_tool_call({"arguments": text})), ({}, text))
+        args = {"path": "/app/a.py", "content": "x" * MAX_ARGUMENT_CHARS}
+        text = json.dumps(args)
+        self.assertEqual(tool_arguments(_tool_call({"arguments": text})), (args, text))
+        literal = repr(args)
+        self.assertTrue(literal.startswith("{'path': "), literal[:20])
+        self.assertEqual(tool_arguments(_tool_call({"arguments": literal})), ({}, literal))
 
 
 class TestPatchPaths(unittest.TestCase):

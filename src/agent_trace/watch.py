@@ -1713,7 +1713,8 @@ def _event_key(event: TraceEvent) -> str:
             arg_text = stored
         else:
             arg_text = json.dumps(stored, sort_keys=True, default=str)
-        arg_hash = hashlib.sha256(arg_text.encode("utf-8")).hexdigest()[:12]
+        # JSON text can hold a lone surrogate, which strict UTF-8 refuses.
+        arg_hash = hashlib.sha256(arg_text.encode("utf-8", "surrogatepass")).hexdigest()[:12]
         args, raw = tool_arguments(event)
         preview = str(
             args.get("command")

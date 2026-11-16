@@ -43,6 +43,8 @@ from typing import Any
 
 from .models import EventType, TraceEvent
 
+# Longest argument text parse_mapping reads as a Python literal. JSON text is
+# read at any length.
 MAX_ARGUMENT_CHARS = 200_000
 
 # Lower-cased names of tools that write, edit, create or delete files.
@@ -110,15 +112,18 @@ def str_list_field(data: Mapping[str, Any], key: str, default: Any = None) -> An
 def parse_mapping(value: str) -> Mapping[str, Any] | None:
     """Return the object a serialized argument string holds, or None.
 
-    Only text that starts with ``{`` and has at most MAX_ARGUMENT_CHARS
-    characters is read: as JSON, then as a Python literal. No code runs.
+    Only text that starts with ``{`` is read: as JSON at any length, then, if
+    that fails and the text has at most MAX_ARGUMENT_CHARS characters, as a
+    Python literal. No code runs.
     """
     text = value.strip()
-    if not text.startswith("{") or len(text) > MAX_ARGUMENT_CHARS:
+    if not text.startswith("{"):
         return None
     try:
         parsed = json.loads(text)
     except (ValueError, RecursionError, MemoryError):
+        if len(text) > MAX_ARGUMENT_CHARS:
+            return None
         try:
             parsed = ast.literal_eval(text)
         except (ValueError, SyntaxError, MemoryError, RecursionError, TypeError):
