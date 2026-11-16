@@ -113,6 +113,9 @@ The plugin adds no collector by itself. If `AGENT_STRACE_ENDPOINT` is set, the
 CLI sends trace events to that configured collector. Anonymous product
 telemetry is a separate, default-on path with an allowlisted aggregate schema
 that excludes trace contents, prompts, arguments, paths, and session IDs.
+Hooks never show the one-time telemetry notice, so a plugin-only install sends
+nothing until the notice has been shown by an interactive `agent-strace`
+command or telemetry was explicitly enabled.
 Disable it with:
 
 ```bash

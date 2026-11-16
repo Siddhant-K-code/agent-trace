@@ -211,9 +211,9 @@ Full flag reference: [docs/commands.md](docs/commands.md)
 
 Install **agent-strace** from the [Extensions panel](https://open-vsx.org/extension/Siddhant-K-code/agent-strace) to see live session activity without leaving the editor.
 
-Anonymous extension usage telemetry is enabled by default and can be disabled
-from the Command Palette or `agentTrace.telemetry.enabled` setting. No prompts,
-trace contents, paths, session IDs, command arguments, or repository data are sent.
+Anonymous extension usage telemetry is enabled by default, sends nothing until
+its one-time notice is shown, and can be disabled from the Command Palette or
+`agentTrace.telemetry.enabled` setting. No prompts, trace contents, paths, session IDs, command arguments, or repository data are sent.
 
 | Feature | Description |
 |---|---|

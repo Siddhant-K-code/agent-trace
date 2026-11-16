@@ -5,14 +5,16 @@ of traces and derived reports: secret redaction at capture time, PII
 anonymization at export time, and privacy-minimized report formats. A policy
 file lets you audit and restrict what the agent is allowed to do.
 
-Anonymous product telemetry is a separate, default-on data path. CLI telemetry
-can be disabled with `agent-strace telemetry disable`; extension telemetry can
-be disabled with the `agentTrace.telemetry.enabled` setting or the Command
-Palette. `DO_NOT_TRACK=1`, `AGENT_STRACE_TELEMETRY=0`, and the editor-wide
-telemetry switch also disable extension telemetry. Both clients use fixed
-schemas that exclude prompts, responses, command arguments, paths, repository
-data, session IDs, endpoints, and exception messages. The extension sends only
-session success, duration, and aggregate tool/error counts—not trace contents.
+Anonymous product telemetry is a separate, default-on data path. Neither client
+sends anything until its one-time notice has been shown or telemetry was
+explicitly enabled. CLI telemetry can be disabled with
+`agent-strace telemetry disable`; extension telemetry can be disabled with the
+`agentTrace.telemetry.enabled` setting or the Command Palette. `DO_NOT_TRACK=1`,
+`AGENT_STRACE_TELEMETRY=0`, and the editor-wide telemetry switch also disable
+extension telemetry. Both clients use fixed schemas that exclude prompts,
+responses, command arguments, paths, repository data, session IDs, endpoints,
+and exception messages. The extension sends only session success, duration,
+and aggregate tool/error counts, not trace contents.
 See [Product telemetry](telemetry.md) for the complete schemas and controls.
 
 ---
@@ -45,7 +47,7 @@ Detected patterns:
 | Connection strings | `postgres://`, `mysql://`, `mongodb://` |
 | Basic-auth URLs | `https://user:pass@example.com` |
 | Key-named values | Any value under keys: `password`, `secret`, `token`, `api_key`, `authorization` |
-| EKM shared secrets | 64-char hex strings |
+| Long lowercase hex strings | Any run of 40 or more characters from `[0-9a-f]`, anywhere in a string. This includes full 40-character git commit SHAs and SHA-256 digests (`sha256:<hex>` keeps the prefix). Uppercase hex is not matched. The only exception is the `policy_sha256` digest of a schema-validated `agent_trace_authorization` v1 record. |
 | Private keys | PEM blocks |
 
 Redacted values become typed markers such as `[REDACTED:openai-key]`, `[REDACTED:bearer-token]`, or `[REDACTED:sensitive]`. Events with redaction are marked with `"redacted": true`. See [ADR-0007](../ADRs/0007-heuristic-redaction.md) for design rationale.

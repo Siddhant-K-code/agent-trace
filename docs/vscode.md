@@ -130,6 +130,8 @@ All settings are under `agentTrace.*` in VS Code settings:
 
 Anonymous extension telemetry is enabled by default. On first activation, the
 extension displays a non-blocking disclosure and an immediate disable action.
+Nothing is sent before that disclosure is shown unless telemetry was explicitly
+enabled.
 Disable it at any time with the `agentTrace.telemetry.enabled` application
 setting or **agent-trace: Disable Product Telemetry**. The editor-wide telemetry
 switch, `DO_NOT_TRACK=1`, and `AGENT_STRACE_TELEMETRY=0` are also respected.
