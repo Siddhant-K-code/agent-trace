@@ -4,6 +4,8 @@ import hashlib
 import io
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from dataclasses import fields, replace
@@ -22,6 +24,7 @@ from agent_trace.validation import (
     CORPUS_SCHEMA,
     TRACE_SCHEMA_VERSION,
     _json_type_matches,
+    _read_trace_files,
     _schema_errors,
     cmd_validate,
     load_trace_schema,
@@ -31,6 +34,25 @@ from agent_trace.validation import (
 
 
 CORPUS_ROOT = Path(agent_trace.__file__).parent / "corpus" / "v1"
+SRC_ROOT = Path(agent_trace.__file__).resolve().parent.parent
+
+# Windows cannot open directories or use dir_fd, so it only reads by path.
+READ_MODES = (
+    ("dir_fd", "by_path") if os.open in os.supports_dir_fd else ("by_path",)
+)
+
+
+def read_mode(mode):
+    return patch("agent_trace.validation._READ_BY_DIR_FD", mode == "dir_fd")
+
+
+def _comparable(report):
+    """Return a report dict without the paths, which differ per copy."""
+    data = report.to_dict()
+    data.pop("target")
+    if data.get("replay"):
+        data["replay"].pop("baseline")
+    return data
 
 
 class TestPublicTraceSchemas(unittest.TestCase):
@@ -215,13 +237,18 @@ class TestAgentEvidenceCorpus(unittest.TestCase):
             baseline = real / "baseline.json"
             baseline.write_text('{"steps":[]}', encoding="utf-8")
             link = root / "link"
-            link.symlink_to(real, target_is_directory=True)
-            report = validate_trace_directory(
-                case,
-                replay_baseline=link / "baseline.json",
-            )
-        self.assertEqual(report.status, "invalid")
-        self.assertIn("replay_baseline_invalid", report.labels)
+            try:
+                link.symlink_to(real, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks unavailable")
+            for mode in READ_MODES:
+                with self.subTest(mode=mode), read_mode(mode):
+                    report = validate_trace_directory(
+                        case,
+                        replay_baseline=link / "baseline.json",
+                    )
+                    self.assertEqual(report.status, "invalid")
+                    self.assertIn("replay_baseline_invalid", report.labels)
 
     def test_replay_baseline_is_bounded_before_parsing(self):
         case = CORPUS_ROOT / "usage-zero"
@@ -231,6 +258,184 @@ class TestAgentEvidenceCorpus(unittest.TestCase):
             report = validate_trace_directory(case, replay_baseline=baseline)
         self.assertEqual(report.status, "invalid")
         self.assertIn("replay_baseline_invalid", report.labels)
+
+
+class TestTraceFileReads(unittest.TestCase):
+    """validate reads the same bytes and reports the same results on every OS.
+
+    POSIX reads through open directory fds. Windows reads by path. Both run
+    here where the OS allows it.
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        # Resolve: neither reader follows symlinks such as macOS's /var.
+        self.root = Path(tmp.name).resolve()
+
+    def trace_dir(self, name="session", meta=b"{}", events=b""):
+        path = self.root / name
+        path.mkdir()
+        (path / "meta.json").write_bytes(meta)
+        (path / "events.ndjson").write_bytes(events)
+        return path
+
+    def read_errors(self, path):
+        errors = {}
+        for mode in READ_MODES:
+            with read_mode(mode):
+                report = validate_trace_directory(path)
+            self.assertEqual(
+                [finding.code for finding in report.findings], ["trace_read_failed"]
+            )
+            errors[mode] = report.findings[0].message
+        return errors
+
+    def assert_read_error(self, path, message):
+        self.assertEqual(self.read_errors(path), {mode: message for mode in READ_MODES})
+
+    def test_files_are_read_byte_for_byte(self):
+        # A text-mode read on Windows would turn CRLF into LF and stop at ^Z.
+        meta = b'{"a":1}\r\n\x1a tail\r\n'
+        events = b"line one\r\nline two\n\x1a\r\n"
+        path = self.trace_dir(meta=meta, events=events)
+        for mode in READ_MODES:
+            with self.subTest(mode=mode), read_mode(mode):
+                self.assertEqual(_read_trace_files(path), (meta, events))
+
+    def test_corpus_results_match_for_lf_and_crlf_copies(self):
+        manifest = json.loads((CORPUS_ROOT / "manifest.json").read_bytes())
+        for case in manifest["cases"]:
+            source = CORPUS_ROOT / case["path"]
+            results = {}
+            for newline in (b"\n", b"\r\n"):
+                copy = self.root / f"crlf{len(newline) - 1}" / case["path"]
+                copy.mkdir(parents=True)
+                for item in source.iterdir():
+                    lf = item.read_bytes().replace(b"\r\n", b"\n")
+                    (copy / item.name).write_bytes(lf.replace(b"\n", newline))
+                baseline = case.get("replay_baseline")
+                for mode in READ_MODES:
+                    with read_mode(mode):
+                        report = validate_trace_directory(
+                            copy,
+                            replay_baseline=copy / baseline if baseline else None,
+                        )
+                    results[(newline, mode)] = _comparable(report)
+            with self.subTest(case=case["id"]):
+                first = next(iter(results.values()))
+                self.assertEqual(first["status"], case["expected_status"])
+                self.assertEqual(first["labels"], sorted(case["expected_labels"]))
+                for key, result in results.items():
+                    self.assertEqual(result, first, key)
+
+    def test_missing_directory(self):
+        self.assert_read_error(self.root / "missing" / "session", "directory does not exist")
+
+    def test_file_as_directory_component(self):
+        (self.root / "file").write_bytes(b"")
+        self.assert_read_error(self.root / "file" / "session", "directory has an unsafe component")
+
+    def test_missing_trace_file(self):
+        path = self.trace_dir()
+        (path / "meta.json").unlink()
+        self.assert_read_error(path, "session metadata could not be opened safely")
+
+    def test_trace_file_that_is_a_directory(self):
+        path = self.trace_dir()
+        (path / "events.ndjson").unlink()
+        (path / "events.ndjson").mkdir()
+        self.assert_read_error(path, "session event stream size or type is invalid")
+
+    def test_oversized_trace_file(self):
+        path = self.trace_dir(events=b"x" * 11)
+        with patch("agent_trace.validation.MAX_SOURCE_TRACE_BYTES", 10):
+            self.assert_read_error(path, "session event stream size or type is invalid")
+
+    def _symlink(self, link, target, *, directory):
+        try:
+            link.symlink_to(target, target_is_directory=directory)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+
+    def test_symlinked_trace_directory(self):
+        real = self.trace_dir()
+        self._symlink(self.root / "link", real, directory=True)
+        self.assert_read_error(self.root / "link", "directory has an unsafe component")
+
+    def test_symlinked_trace_file(self):
+        path = self.trace_dir()
+        (self.root / "real.json").write_bytes(b"{}")
+        (path / "meta.json").unlink()
+        self._symlink(path / "meta.json", self.root / "real.json", directory=False)
+        self.assert_read_error(path, "session metadata could not be opened safely")
+
+    def test_by_path_refuses_a_file_swapped_after_lstat(self):
+        path = self.trace_dir()
+        other = self.trace_dir("other")
+        real_open = os.open
+
+        def swapped_open(name, flags, *args, **kwargs):
+            if Path(name) == path / "meta.json":
+                name = other / "meta.json"
+            return real_open(name, flags, *args, **kwargs)
+
+        with read_mode("by_path"), patch("os.open", swapped_open):
+            report = validate_trace_directory(path)
+        self.assertEqual(
+            [finding.message for finding in report.findings],
+            ["session metadata changed while it was read"],
+        )
+
+    @unittest.skipUnless(os.name == "nt", "Windows junctions")
+    def test_junction_is_refused(self):
+        import _winapi
+
+        real = self.trace_dir()
+        (real / "baseline.json").write_bytes(b'{"steps":[]}')
+        junction = self.root / "junction"
+        _winapi.CreateJunction(str(real), str(junction))
+        self.assert_read_error(junction, "directory has an unsafe component")
+        report = validate_trace_directory(
+            CORPUS_ROOT / "usage-zero", replay_baseline=junction / "baseline.json"
+        )
+        self.assertIn("replay_baseline_invalid", report.labels)
+        self.assertEqual(report.replay["state"], "invalid")
+
+    def test_cli_validates_a_recorded_session(self):
+        session = "cli-0001"
+        store = TraceStore(self.root, use_workspace_env=False, redact=False)
+        store.create_session(SessionMeta(session_id=session, agent_name="test"))
+        for event_type in (EventType.SESSION_START, EventType.SESSION_END):
+            store.append_event(session, TraceEvent(event_type=event_type, session_id=session))
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("AGENT_STRACE_") and key != "AGENT_TRACE_DIR"
+        }
+        env["PYTHONPATH"] = os.pathsep.join(
+            item for item in (str(SRC_ROOT), env.get("PYTHONPATH", "")) if item
+        )
+        command = [
+            sys.executable, "-c", "from agent_trace.entry import main; main()",
+            "--trace-dir", str(self.root),
+        ]
+        outputs = {}
+        for args in (["validate", session, "--format", "json"], ["validate", "--corpus"]):
+            result = subprocess.run(
+                command + args,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                env=env,
+                timeout=120,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            outputs[args[1]] = result.stdout
+        report = json.loads(outputs[session])
+        self.assertEqual(report["status"], "valid")
+        self.assertEqual(report["session_id"], session)
+        self.assertIn("Agent Evidence Corpus: matched", outputs["--corpus"])
 
 
 class TestDeclaredEventsBeforeStart(unittest.TestCase):

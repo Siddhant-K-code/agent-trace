@@ -487,31 +487,48 @@ def _read_regular_nofollow(path_value: str | Path, *, max_bytes: int, label: str
         os.close(parent_fd)
         raise AssignmentError(f"{label} could not be opened safely") from exc
     try:
-        before = os.fstat(descriptor)
-        if not stat.S_ISREG(before.st_mode) or before.st_size <= 0 or before.st_size > max_bytes:
-            raise AssignmentError(f"{label} size or type is invalid")
-        chunks: list[bytes] = []
-        remaining = max_bytes + 1
-        while remaining > 0:
-            chunk = os.read(descriptor, min(64 * 1024, remaining))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        raw = b"".join(chunks)
-        after = os.fstat(descriptor)
-        if len(raw) > max_bytes or (
-            before.st_dev, before.st_ino, before.st_mode, before.st_size,
-            before.st_mtime_ns, before.st_ctime_ns,
-        ) != (
-            after.st_dev, after.st_ino, after.st_mode, after.st_size,
-            after.st_mtime_ns, after.st_ctime_ns,
-        ):
-            raise AssignmentError(f"{label} changed while it was read")
-        return raw
+        return _read_open_regular(
+            descriptor, os.fstat(descriptor), max_bytes=max_bytes, label=label, min_size=1
+        )
     finally:
         os.close(descriptor)
         os.close(parent_fd)
+
+
+def _read_open_regular(
+    descriptor: int,
+    before: os.stat_result,
+    *,
+    max_bytes: int,
+    label: str,
+    min_size: int,
+) -> bytes:
+    """Read the open regular file *descriptor*, whose ``fstat`` is *before*.
+
+    The read is bounded by *max_bytes*, and the file must not change while it
+    is read.
+    """
+    if not stat.S_ISREG(before.st_mode) or before.st_size < min_size or before.st_size > max_bytes:
+        raise AssignmentError(f"{label} size or type is invalid")
+    chunks: list[bytes] = []
+    remaining = max_bytes + 1
+    while remaining > 0:
+        chunk = os.read(descriptor, min(64 * 1024, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    raw = b"".join(chunks)
+    after = os.fstat(descriptor)
+    if len(raw) > max_bytes or (
+        before.st_dev, before.st_ino, before.st_mode, before.st_size,
+        before.st_mtime_ns, before.st_ctime_ns,
+    ) != (
+        after.st_dev, after.st_ino, after.st_mode, after.st_size,
+        after.st_mtime_ns, after.st_ctime_ns,
+    ):
+        raise AssignmentError(f"{label} changed while it was read")
+    return raw
 
 
 def _read_child_file(
@@ -529,28 +546,9 @@ def _read_child_file(
     except OSError as exc:
         raise AssignmentError(f"{label} could not be opened safely") from exc
     try:
-        before = os.fstat(descriptor)
-        if not stat.S_ISREG(before.st_mode) or before.st_size < 0 or before.st_size > max_bytes:
-            raise AssignmentError(f"{label} size or type is invalid")
-        chunks: list[bytes] = []
-        remaining = max_bytes + 1
-        while remaining > 0:
-            chunk = os.read(descriptor, min(64 * 1024, remaining))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        raw = b"".join(chunks)
-        after = os.fstat(descriptor)
-        if len(raw) > max_bytes or (
-            before.st_dev, before.st_ino, before.st_mode, before.st_size,
-            before.st_mtime_ns, before.st_ctime_ns,
-        ) != (
-            after.st_dev, after.st_ino, after.st_mode, after.st_size,
-            after.st_mtime_ns, after.st_ctime_ns,
-        ):
-            raise AssignmentError(f"{label} changed while it was read")
-        return raw
+        return _read_open_regular(
+            descriptor, os.fstat(descriptor), max_bytes=max_bytes, label=label, min_size=0
+        )
     finally:
         os.close(descriptor)
 
