@@ -257,14 +257,24 @@ def _alert_webhook(message: str, url: str) -> None:
 
 
 def _kill_process(pid: int, start_time: str | None = None) -> bool:
-    """Send SIGTERM; escalate to SIGKILL after 5s in a background thread.
+    """Send SIGTERM, then SIGCONT, and SIGKILL 5s later from a background thread.
+
+    SIGCONT lets a stopped agent act on SIGTERM. A stopped process does not
+    run its SIGTERM handler until it is continued, and on Linux even the
+    default action waits for that: only SIGKILL ends a stopped process at
+    once. The agent may have been stopped by watch (a pause or
+    require_approval rule, the editor's Pause) or from outside watch
+    (Ctrl-Z, kill -STOP), so SIGCONT follows every SIGTERM, as in systemd
+    and daemontools.
 
     Return True if SIGTERM was sent. If it was not, print one line that
-    says why and return False.
+    says why, send no other signal and return False. A SIGCONT that fails
+    is ignored and does not change the result.
 
     ``start_time`` is the agent's identity from :func:`process_identity`.
-    Neither signal is sent once the PID belongs to another process, so an
-    agent that exits on SIGTERM cannot have its PID reused and SIGKILLed.
+    No signal is sent once the PID belongs to another process, so an
+    agent that exits on SIGTERM cannot have its PID reused and then
+    continued or SIGKILLed.
     """
     import threading
 
@@ -281,6 +291,15 @@ def _kill_process(pid: int, start_time: str | None = None) -> bool:
     if reason:
         _alert_terminal(f"Agent pid {pid} was not killed: {reason}")
         return False
+
+    # After SIGTERM, never before, so the agent handles the pending SIGTERM
+    # as soon as it runs again.
+    sigcont = getattr(signal, "SIGCONT", None)
+    if sigcont is not None and not pid_reused(pid, start_time):
+        try:
+            os.kill(pid, sigcont)
+        except (ProcessLookupError, PermissionError):
+            pass
 
     def _escalate() -> None:
         time.sleep(5)
@@ -1568,8 +1587,10 @@ class WatchState:
     agent_start_time: str | None = None
     # True once watch has said it cannot signal because no PID is known
     warned_no_agent_pid: bool = False
-    # True once watch has sent the agent SIGTERM. Watch then sends that PID
-    # no other signal, so the post-mortem and --on-death happen once.
+    # True once watch has sent the agent SIGTERM. Apart from the SIGCONT and
+    # SIGKILL that _kill_process sends with it, watch then sends that PID no
+    # other signal and creates no approval request, so the post-mortem and
+    # --on-death happen once.
     agent_killed: bool = False
     # True once signal 0 found the agent PID gone (see _agent_exited)
     agent_exited: bool = False
@@ -1728,12 +1749,20 @@ def _kill_agent(
     """SIGTERM the agent, then write the post-mortem and run --on-death.
 
     The post-mortem and --on-death follow only when SIGTERM was sent, and
-    run once: after this, watch sends the agent no other signal.
+    run once: after this, watch does not kill, pause or resume the agent
+    again. The kill also ends any pause that watch holds: _kill_process
+    sends SIGCONT right after SIGTERM. A pending approval request stays
+    pending.
     """
     _alert_terminal(f"Killing agent process {state.agent_pid}")
     if not _kill_process(state.agent_pid, state.agent_start_time):
         return
     state.agent_killed = True
+    # Keeping the pause would print "agent stays stopped" or "pause
+    # released" when the request is decided later, and hold the idle stop
+    # until the agent exits.
+    state.pause_owner = None
+    state.approval_request_id = None
     pm_path: Path | None = None
     if store and session_id:
         pm_path = _write_watchdog_postmortem(
@@ -1765,9 +1794,9 @@ def _dispatch_alert(
     or delay the pause or kill. A require_approval action sends nothing
     over the network.
 
-    Once watch has sent SIGTERM it sends the agent no other signal: a later
-    kill, pause or require_approval alert says the agent was already killed
-    instead, and creates no approval request.
+    Once watch has sent SIGTERM it does not kill, pause or gate the agent
+    again: a later kill, pause or require_approval alert says the agent was
+    already killed instead, sends no signal and creates no approval request.
     """
     action = action or config.on_violation
     # terminal is always shown regardless of action so the operator watching
@@ -2283,8 +2312,9 @@ def _check_pause_file(store: "TraceStore", state: "WatchState", out: "TextIO") -
     Marker removed → SIGCONT, but only if the editor owns the pause. A rule
     pause is handed to the editor when the marker appears, so pausing and
     then resuming from the editor releases it. An approval pause is never
-    released by the marker; only the approval decision ends it. Once watch
-    has killed the agent the marker is ignored: watch sends no other signal.
+    released by the marker; the approval decision ends it, and so does a
+    kill. Once watch has killed the agent the marker is ignored: watch sends
+    no SIGSTOP or SIGCONT for it.
     If SIGSTOP cannot be sent, watch says so once, holds no pause, and
     tries again only after the marker is removed and written again.
     """

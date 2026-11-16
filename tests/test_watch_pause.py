@@ -7,6 +7,7 @@ import os
 import signal
 import tempfile
 import time
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -351,6 +352,19 @@ class TestApprovalPause(PauseTestCase):
         self.assertEqual(self.state.pause_owner, PAUSE_APPROVAL)
         self.assertIsNotNone(load_request(self.store, self.state.approval_request_id))
 
+    def test_kill_without_sigterm_keeps_the_approval_pause(self):
+        self.mocks["kill"].return_value = False
+        request_id = self.require_approval()
+        _dispatch_alert("too costly", self.config, self.state, action="kill",
+                        store=self.store, session_id=SESSION)
+        self.mocks["kill"].assert_called_once()
+        self.assertEqual(self.state.pause_owner, PAUSE_APPROVAL)
+        self.assertEqual(self.state.approval_request_id, request_id)
+
+        approve_request(self.store, request_id, resume_agent=False)
+        self.tick()
+        self.assertIn(f"Approval {request_id} approved; pause released", self.out.getvalue())
+
 
 class TestReusedAgentPid(PauseTestCase):
     """The agent exited and the OS gave its PID to another process."""
@@ -435,10 +449,10 @@ class TestReusedAgentPid(PauseTestCase):
 
 
 class TestKillProcessIdentity(unittest.TestCase):
-    """_kill_process checks the identity before SIGTERM and before SIGKILL,
+    """_kill_process checks the identity before SIGTERM, SIGCONT and SIGKILL,
     and returns whether it sent SIGTERM."""
 
-    def _kill(self, reused, kill_error=None):
+    def _kill(self, reused, kill_error=None, cont_error=None):
         """Return the signals sent, the result and the lines printed."""
         class SyncThread:
             def __init__(self, target, daemon):
@@ -450,6 +464,8 @@ class TestKillProcessIdentity(unittest.TestCase):
         def os_kill(pid, sig):
             if kill_error is not None and sig == signal.SIGTERM:
                 raise kill_error
+            if cont_error is not None and sig == signal.SIGCONT:
+                raise cont_error
 
         with patch("agent_trace.watch.pid_reused", side_effect=reused), \
              patch("os.kill", side_effect=os_kill) as kill, \
@@ -465,22 +481,45 @@ class TestKillProcessIdentity(unittest.TestCase):
             [], False, [f"Agent pid {PID} was not killed: the PID now belongs to another process"],
         ))
 
-    def test_pid_reused_after_sigterm_gets_no_sigkill(self):
-        self.assertEqual(self._kill([False, True]), ([(PID, signal.SIGTERM)], True, []))
+    def test_pid_reused_after_sigterm_gets_no_sigcont_or_sigkill(self):
+        self.assertEqual(self._kill([False, True, True]), ([(PID, signal.SIGTERM)], True, []))
 
-    def test_same_process_is_escalated(self):
+    def test_pid_reused_after_sigcont_gets_no_sigkill(self):
         self.assertEqual(
-            self._kill([False, False]),
-            ([(PID, signal.SIGTERM), (PID, signal.SIGKILL)], True, []),
+            self._kill([False, False, True]),
+            ([(PID, signal.SIGTERM), (PID, signal.SIGCONT)], True, []),
         )
 
-    def test_failed_sigterm_says_why_and_sends_no_sigkill(self):
+    def test_same_process_is_continued_then_escalated(self):
+        self.assertEqual(
+            self._kill([False, False, False]),
+            ([(PID, signal.SIGTERM), (PID, signal.SIGCONT), (PID, signal.SIGKILL)], True, []),
+        )
+
+    def test_failed_sigcont_is_ignored(self):
+        for error in (ProcessLookupError(), PermissionError()):
+            with self.subTest(error=type(error).__name__):
+                self.assertEqual(
+                    self._kill([False, False, False], cont_error=error),
+                    ([(PID, signal.SIGTERM), (PID, signal.SIGCONT), (PID, signal.SIGKILL)],
+                     True, []),
+                )
+
+    def test_platform_without_sigcont_gets_sigterm_and_sigkill(self):
+        no_sigcont = types.SimpleNamespace(SIGTERM=signal.SIGTERM, SIGKILL=signal.SIGKILL)
+        with patch("agent_trace.watch.signal", no_sigcont):
+            self.assertEqual(
+                self._kill([False, False, False]),
+                ([(PID, signal.SIGTERM), (PID, signal.SIGKILL)], True, []),
+            )
+
+    def test_failed_sigterm_says_why_and_sends_no_other_signal(self):
         for error, reason in (
             (ProcessLookupError(), "no process has that PID"),
             (PermissionError(), "not allowed to signal it"),
         ):
             with self.subTest(error=type(error).__name__):
-                self.assertEqual(self._kill([False, False], error), (
+                self.assertEqual(self._kill([False, False, False], error), (
                     [(PID, signal.SIGTERM)], False,
                     [f"Agent pid {PID} was not killed: {reason}"],
                 ))
@@ -559,6 +598,34 @@ class TestWatchSessionLoop(PauseTestCase):
             yield _IDLE_SENTINEL
 
         self._run(items(), max_idle_seconds=0.05)
+        self.assertIn("stopping", self.out.getvalue())
+
+    def test_kill_ends_an_approval_pause_and_the_idle_clock_runs_again(self):
+        gate = NannyRule(name="gate", condition="files_modified > 0", action="require_approval")
+        cap = NannyRule(name="cap", condition="cost_usd > 0.5", action="kill")
+        edit = TraceEvent(
+            event_type=EventType.TOOL_CALL, timestamp=time.time(), session_id=SESSION,
+            data={"tool_name": "Write", "arguments": {"file_path": "a.py"}},
+        )
+        spend = TraceEvent(
+            event_type=EventType.LLM_RESPONSE, timestamp=time.time(), session_id=SESSION,
+            data={"input_tokens": 1_000_000, "output_tokens": 0},
+        )
+
+        def items():
+            yield edit  # SIGSTOP and a pending approval request
+            yield spend  # $3.00: the kill
+            for _ in range(3):
+                time.sleep(0.1)
+                yield _IDLE_SENTINEL
+
+        self._run(items(), nanny_rules=[gate, cap], max_idle_seconds=0.05)
+        self.mocks["pause"].assert_called_once_with(PID)
+        self.mocks["kill"].assert_called_once()
+        self.assertFalse(self.loop_state.paused)
+        self.assertIsNone(self.loop_state.approval_request_id)
+        (req,) = list_requests(self.store)
+        self.assertEqual(req.state, "pending")
         self.assertIn("stopping", self.out.getvalue())
 
 
