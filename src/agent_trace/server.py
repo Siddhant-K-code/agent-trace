@@ -616,6 +616,28 @@ def cmd_server(args: argparse.Namespace) -> int:
         sys.stdout.write(generate_api_key() + "\n")
         return 0
 
+    # The server has no SSO, so starting with these flags would serve without
+    # the authentication they ask for. A flag counts when given, even with an
+    # empty value. Name the flags only: --oidc-client-secret holds a secret.
+    sso_flags = []
+    for dest, flag in (
+        ("auth", "--auth"),
+        ("oidc_issuer", "--oidc-issuer"),
+        ("oidc_client_id", "--oidc-client-id"),
+        ("oidc_client_secret", "--oidc-client-secret"),
+        ("enforce_sso", "--enforce-sso"),
+    ):
+        value = getattr(args, dest, None)
+        if value is not None and value is not False:
+            sso_flags.append(flag)
+    if sso_flags:
+        sys.stderr.write(
+            "Error: agent-strace server has no SSO, so it refuses to start with "
+            f"{', '.join(sso_flags)}; to require authentication, "
+            "use --auth-key instead\n"
+        )
+        return 1
+
     port = getattr(args, "port", 4317)
     storage = getattr(args, "storage", None) or os.environ.get(
         "AGENT_STRACE_STORAGE", DEFAULT_TRACE_DIR

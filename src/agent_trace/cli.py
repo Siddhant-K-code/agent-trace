@@ -2923,17 +2923,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_server.add_argument("--auth-key", metavar="KEY", dest="auth_key",
                           help="require Authorization: Bearer <KEY> on all requests "
                                "(also read from AGENT_STRACE_AUTH_KEY env var)")
-    p_server.add_argument("--auth", choices=["oidc"], default="",
-                          help="enable SSO authentication (oidc)")
-    p_server.add_argument("--oidc-issuer", metavar="URL", dest="oidc_issuer", default="",
-                          help="OIDC issuer URL (e.g. https://accounts.google.com)")
-    p_server.add_argument("--oidc-client-id", metavar="ID", dest="oidc_client_id", default="",
-                          help="OIDC client ID")
+    # The server has no SSO. These flags from #163 stay accepted but hidden, so
+    # cmd_server can refuse them by name; None means the flag was not given.
+    p_server.add_argument("--auth", choices=["oidc"], default=None,
+                          help=argparse.SUPPRESS)
+    p_server.add_argument("--oidc-issuer", metavar="URL", dest="oidc_issuer", default=None,
+                          help=argparse.SUPPRESS)
+    p_server.add_argument("--oidc-client-id", metavar="ID", dest="oidc_client_id", default=None,
+                          help=argparse.SUPPRESS)
     p_server.add_argument("--oidc-client-secret", metavar="SECRET",
-                          dest="oidc_client_secret", default="",
-                          help="OIDC client secret")
+                          dest="oidc_client_secret", default=None,
+                          help=argparse.SUPPRESS)
     p_server.add_argument("--enforce-sso", action="store_true", dest="enforce_sso",
-                          help="reject API key fallback when SSO is configured")
+                          help=argparse.SUPPRESS)
     p_server_sub = p_server.add_subparsers(dest="server_subcommand")
     p_server_sub.add_parser("keygen", help="generate a new ast_-prefixed API key")
 

@@ -1086,7 +1086,7 @@ agent-strace auth login --server URL [--force]
 agent-strace auth logout --server URL
 agent-strace auth status [--server URL]
 ```
-Authenticate with a hosted collector that has SSO enabled. `login` asks you to open `<URL>/auth/login`, complete the IdP login, and paste the token from the success page. The token is stored per server in `~/.agent-strace/auth.json` (mode `0600`, written atomically under a file lock) and expires after one hour. `--force` re-authenticates when a valid token already exists. `status` without `--server` lists every stored server. Other commands do not read the stored token; `apply --server` authenticates with `--auth-key`.
+Authenticate with a hosted collector that has SSO enabled. `login` asks you to open `<URL>/auth/login`, complete the IdP login, and paste the token from the success page. `agent-strace server` has no SSO and serves no `/auth/login`. The token is stored per server in `~/.agent-strace/auth.json` (mode `0600`, written atomically under a file lock) and expires after one hour. `--force` re-authenticates when a valid token already exists. `status` without `--server` lists every stored server. Other commands do not read the stored token; `apply --server` authenticates with `--auth-key`.
 
 ### `apply`
 ```
@@ -1897,6 +1897,8 @@ Start a server-side event collector. See [server.md](server.md).
 | `--storage DIR` | Trace storage directory (default: `$AGENT_STRACE_STORAGE` or `.agent-traces`) |
 | `--dashboard` | Serve the session list and evidence review at `/`; non-loopback binding requires `--auth-key` |
 | `--auth-key KEY` | Require `Authorization: Bearer KEY` on all requests (also read from `AGENT_STRACE_AUTH_KEY`) |
+
+The server has no SSO, so it refuses to start with `--auth`, `--oidc-issuer`, `--oidc-client-id`, `--oidc-client-secret` or `--enforce-sso`; use `--auth-key` to require authentication.
 
 `keygen` prints a new `ast_`-prefixed API key to stdout. Set `AGENT_STRACE_AUTH_KEY` on the client side to inject the header automatically into all outbound collector requests.
 
