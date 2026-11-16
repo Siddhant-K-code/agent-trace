@@ -6,6 +6,7 @@ import os
 import hashlib
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from dataclasses import fields
 from pathlib import Path
 from unittest.mock import patch
@@ -476,6 +477,31 @@ class TestTenantCostsAndCommands(TenantTestCase):
         monitor.assert_called_once()
         self.assertEqual(self.store.load_meta(meta.session_id).tenant_id, "tenant-a")
         self.assertEqual(self.store.load_events(meta.session_id)[0].tenant_id, "tenant-a")
+
+    def test_watch_shows_a_tenant_error_as_one_inert_line(self):
+        # The error quotes an event ID from the events file, which the agent
+        # can write.
+        meta = SessionMeta(session_id="watch-forged", tenant_id="")
+        self.store.create_session(meta)
+        record = json.loads(_event(meta.session_id).to_json())
+        record.update(event_id="evt\x1b[2K\n2026-01-01T00:00:00Z  FORGED", tenant_id="tenant-b")
+        events_path = Path(self.tempdir.name) / meta.session_id / "events.ndjson"
+        events_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+        args = build_parser().parse_args([
+            "--trace-dir", self.tempdir.name,
+            "watch", meta.session_id, "--tenant-id", "tenant-a",
+        ])
+
+        err = io.StringIO()
+        with patch("agent_trace.watch.watch_session") as monitor, redirect_stderr(err):
+            self.assertEqual(cmd_watch(args), 1)
+
+        monitor.assert_not_called()
+        self.assertEqual(
+            err.getvalue(),
+            "[watch] could not assign tenant: event evt\\x1b[2K\\n2026-01-01T00:00:00Z  FORGED "
+            "belongs to another tenant\n",
+        )
 
     def test_watch_environment_fallback_tags_existing_events(self):
         meta = SessionMeta(session_id="watch-env", tenant_id="")

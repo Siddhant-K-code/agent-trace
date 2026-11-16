@@ -5,6 +5,7 @@ import errno
 import io
 import json
 import os
+import re
 import signal
 import socket
 import sys
@@ -33,6 +34,7 @@ from agent_trace.watch import (
     _alert_terminal,
     _alert_file,
     _alert_webhook,
+    _agent_pid_reused,
     _apply_builtin_rules_spec,
     _check_pause_file,
     _detect_loop,
@@ -40,6 +42,7 @@ from agent_trace.watch import (
     _dispatch_alert,
     _dispatch_nanny_rule,
     _event_key,
+    _warn_no_agent_pid,
     cmd_watch,
     watch_session,
 )
@@ -235,6 +238,22 @@ class TestAlertTerminal(unittest.TestCase):
         self.assertIn("test alert", buf.getvalue())
         self.assertIn("[watch]", buf.getvalue())
 
+    def test_printable_message_is_unchanged(self):
+        buf = io.StringIO()
+        _alert_terminal("RetryWatcher: command ran 6 times: ls café → 日本 \\x1b", out=buf)
+        self.assertEqual(
+            buf.getvalue(),
+            "[watch] ⚠️  RetryWatcher: command ran 6 times: ls café → 日本 \\x1b\n",
+        )
+
+    def test_message_and_hint_are_one_inert_line_each(self):
+        buf = io.StringIO()
+        _alert_terminal("cmd \x1b[2K\nforged", out=buf, hint="Run: x\x1b]0;t\x07")
+        self.assertEqual(
+            buf.getvalue(),
+            "[watch] ⚠️  cmd \\x1b[2K\\nforged\n  Run: x\\x1b]0;t\\x07\n",
+        )
+
     def test_dispatch_always_writes_terminal(self):
         from agent_trace.watch import _dispatch_alert, WatcherConfig, WatchState
         import unittest.mock as mock
@@ -259,6 +278,172 @@ class TestAlertFile(unittest.TestCase):
             log_path = os.path.join(tmp, "subdir", "alerts.log")
             _alert_file("msg", log_path=log_path)
             self.assertTrue(Path(log_path).exists())
+
+
+# An alerts.log line starts with a UTC timestamp and two spaces.
+_STAMP = r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ  "
+
+
+def _assert_inert_lines(test: unittest.TestCase, text: str, count: int) -> None:
+    """Check *text* is *count* lines with no unprintable character."""
+    lines = text.split("\n")
+    test.assertEqual((len(lines) - 1, lines[-1]), (count, ""), ascii(text))
+    for line in lines[:-1]:
+        test.assertTrue(line.isprintable(), ascii(line))
+
+
+class TestAgentTextInAlerts(unittest.TestCase):
+    """The agent writes the text of its tool calls, and alerts quote it.
+    Each unprintable character shows as an escape, so an escape code cannot
+    hide an alert and a line break cannot forge one. Each alert is one line
+    on the terminal and one line in alerts.log."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.store = TraceStore(self.root / "traces", redact=False)
+        _clear_notify_env(self)
+
+    def _watch(self, command: str) -> tuple[str, str, str]:
+        """Watch six identical Bash calls of *command* with the default
+        rules. Return the terminal, alerts.log and stderr."""
+        session_id = "inert-session"
+        self.store.create_session(SessionMeta(session_id=session_id, started_at=time.time()))
+        call = {"tool_name": "Bash", "arguments": {"command": command}}
+        events = [_make_event(EventType.TOOL_CALL, time.time(), session_id, **call) for _ in range(6)]
+        events.append(_make_event(EventType.SESSION_END, time.time(), session_id))
+
+        def tail(_path, poll_interval=0.5):
+            yield from events
+
+        log = self.root / "alerts.log"
+        terminal, err = io.StringIO(), io.StringIO()
+        with patch("agent_trace.watch._tail_events", tail), \
+                patch("agent_trace.watch._alert_terminal",
+                      side_effect=lambda msg, *a, **k: _alert_terminal(msg, terminal, **k)), \
+                redirect_stderr(err):
+            watch_session(
+                self.store, session_id,
+                WatcherConfig(on_violation="file", alert_log=str(log)), out=io.StringIO(),
+            )
+        logged = log.read_text(encoding="utf-8") if log.exists() else ""
+        return terminal.getvalue(), logged, err.getvalue()
+
+    def _check(self, command: str, shown: str, preview: str | None = None) -> None:
+        """Check both alerts show *command* as *shown*. LoopWatcher shows
+        its first 40 characters as *preview*."""
+        alerts = [
+            "LoopWatcher: identical tool call repeated 3 times in last 10 events "
+            f"(Bash:{shown if preview is None else preview})",
+            f"RetryWatcher: command ran 6 times: {shown}",
+        ]
+        terminal, log, err = self._watch(command)
+        self.assertEqual(terminal, "".join(f"[watch] ⚠️  {alert}\n" for alert in alerts))
+        self.assertRegex(log, "".join(["\\A", *(f"{_STAMP}{re.escape(a)}\n" for a in alerts), "\\Z"]))
+        self.assertEqual(err, "")
+        _assert_inert_lines(self, terminal, 2)
+        _assert_inert_lines(self, log, 2)
+
+    def test_escape_codes_cannot_hide_an_alert(self):
+        # Erase the line, go to column 1, conceal the text after it.
+        self._check("ls \x1b[2K\x1b[1G\x1b[8m", r"ls \x1b[2K\x1b[1G\x1b[8m")
+
+    def test_line_break_cannot_forge_a_log_entry(self):
+        self._check(
+            "true\n2026-01-01T00:00:00Z  FORGED: all clear",
+            r"true\n2026-01-01T00:00:00Z  FORGED: all clear",
+            preview=r"true\n2026-01-01T00:00:00Z  FORGED: all c",
+        )
+
+    def test_c1_control_is_escaped(self):
+        # U+009B starts an escape code on a terminal that reads 8-bit controls.
+        self._check("ls \x9b31m red", r"ls \x9b31m red")
+
+    def test_bidi_control_is_escaped(self):
+        # U+202E shows the text after it right to left.
+        self._check("ls \u202eexe.txt", r"ls \u202eexe.txt")
+
+    def test_lone_surrogate_is_logged_as_an_escape(self):
+        # A JSON "\ud800" escape in a tool argument reaches watch as a lone
+        # surrogate. UTF-8 cannot encode it, so a raw write drops the log line.
+        self._check("ls \ud800", r"ls \ud800")
+
+    def test_printable_text_is_unchanged(self):
+        self._check("ls café → 日本", "ls café → 日本")
+
+
+class TestWatchLinesAreInert(unittest.TestCase):
+    """Lines that watch writes with its own [watch] prefix are made inert
+    like alerts. Their text is watch's own today. The tests feed in escape
+    codes to check the sink, so later text is covered too."""
+
+    _FORGED = "\x1b[2K\n2026-01-01T00:00:00Z  FORGED"
+    _SHOWN = "\\x1b[2K\\n2026-01-01T00:00:00Z  FORGED"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.log = self.root / "alerts.log"
+        _clear_notify_env(self)
+
+    def test_reused_pid_line(self):
+        out = io.StringIO()
+        state = WatchState(agent_pid=424242, agent_start_time="proc:1")
+        with patch("agent_trace.watch.pid_reused", return_value=True), \
+                patch("agent_trace.watch.PID_REUSED_REASON", self._FORGED):
+            self.assertTrue(_agent_pid_reused(state, out, str(self.log)))
+        self.assertTrue(
+            out.getvalue().startswith(f"[watch] Agent pid 424242: {self._SHOWN} (the agent exited"),
+            ascii(out.getvalue()),
+        )
+        _assert_inert_lines(self, out.getvalue(), 1)
+        _assert_inert_lines(self, self.log.read_text(encoding="utf-8"), 1)
+
+    def test_no_agent_pid_line(self):
+        out = io.StringIO()
+        _warn_no_agent_pid(WatchState(), f"pause for rule '{self._FORGED}'", out)
+        self.assertTrue(
+            out.getvalue().startswith(f"[watch] Cannot pause for rule '{self._SHOWN}': no agent PID"),
+            ascii(out.getvalue()),
+        )
+        _assert_inert_lines(self, out.getvalue(), 1)
+
+    def _watch_budget(self, budget: ProjectBudgetConfig, events: list[TraceEvent]) -> str:
+        store = TraceStore(self.root / "traces", redact=False)
+        store.create_session(SessionMeta(session_id="budget-session", started_at=time.time()))
+        events = [*events, _make_event(EventType.SESSION_END, time.time(), "budget-session")]
+
+        def tail(_path, poll_interval=0.5):
+            yield from events
+
+        out = io.StringIO()
+        with patch("agent_trace.watch._tail_events", tail), \
+                patch("agent_trace.watch.format_project_budget_status",
+                      return_value=f"ProjectBudget: {self._FORGED}"):
+            watch_session(
+                store, "budget-session", WatcherConfig(alert_log=str(self.log)), out=out,
+                project_budget_config=budget,
+            )
+        return out.getvalue()
+
+    def _assert_budget_line(self, out: str) -> None:
+        self.assertEqual(out.count(f"[watch] ProjectBudget: {self._SHOWN}\n"), 1, ascii(out))
+        _assert_inert_lines(self, out, out.count("\n"))
+        log = self.log.read_text(encoding="utf-8")
+        self.assertRegex(log, rf"\A{_STAMP}ProjectBudget: {re.escape(self._SHOWN)}\n\Z")
+
+    def test_project_budget_line_at_startup(self):
+        self._assert_budget_line(self._watch_budget(ProjectBudgetConfig(weekly=1.0, warn_at=0.0), []))
+
+    def test_project_budget_line_while_watching(self):
+        response = _make_event(
+            EventType.ASSISTANT_RESPONSE, time.time(), "budget-session", text="x" * 10000,
+        )
+        self._assert_budget_line(
+            self._watch_budget(ProjectBudgetConfig(weekly=0.01, warn_at=0.5), [response])
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1379,10 +1564,10 @@ class TestAlertLogFailures(unittest.TestCase):
     def test_unwritable_log_prints_one_line(self):
         self._assert_one_line(self._write("alert message", self.blocked_log))
 
-    def test_unencodable_message_prints_one_line(self):
-        # A JSON "\ud800" escape in a tool argument reaches the message as a
-        # lone surrogate, which UTF-8 cannot encode.
-        self._assert_one_line(self._write("RetryWatcher: 'echo \ud800' repeated", self.log))
+    def test_nul_in_the_path_prints_one_line(self):
+        # open() raises ValueError for it. A lone surrogate in the message no
+        # longer fails: TestAgentTextInAlerts covers it.
+        self._assert_one_line(self._write("alert message", self.log + "\x00"))
 
     def test_pause_and_kill_run_when_the_alert_log_fails(self):
         for action, target in (("kill", "_kill_process"), ("pause", "_pause_process")):
@@ -1892,7 +2077,7 @@ class TestPauseSignalFailures(unittest.TestCase):
     def setUp(self):
         for target, effect in (
             ("agent_trace.watch.os.kill", self._kill),
-            ("agent_trace.watch._alert_terminal", lambda msg, *a: self.terminal.append(msg)),
+            ("agent_trace.watch._alert_terminal", lambda msg, *a, **k: self.terminal.append(msg)),
             ("agent_trace.watch.pid_reused", lambda *a: False),
         ):
             p = patch(target, side_effect=effect)

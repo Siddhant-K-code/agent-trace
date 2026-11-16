@@ -23,6 +23,7 @@ from agent_trace.watch import (
     WatcherConfig,
     WatchState,
     _IDLE_SENTINEL,
+    _alert_terminal,
     _check_pause_file,
     _dispatch_alert,
     _dispatch_nanny_rule,
@@ -364,6 +365,43 @@ class TestApprovalPause(PauseTestCase):
         approve_request(self.store, request_id, resume_agent=False)
         self.tick()
         self.assertIn(f"Approval {request_id} approved; pause released", self.out.getvalue())
+
+    def test_hitl_alert_is_the_alert_line_then_the_command(self):
+        terminal = io.StringIO()
+        self.mocks["terminal"].side_effect = (
+            lambda msg, *a, **k: _alert_terminal(msg, terminal, **k)
+        )
+        request_id = self.require_approval()
+        self.assertEqual(
+            terminal.getvalue(),
+            "[watch] ⚠️  needs approval\n"
+            f"[watch] ⚠️  [HITL] Approval required for rule 'big-change'. Request ID: {request_id}\n"
+            f"  Run: agent-strace approval approve {request_id}\n",
+        )
+
+    def _decide_with_forged_id(self, state: str) -> str:
+        """Decide the request by rewriting its file, as the agent can, with
+        escape codes in its ID. Return what the next tick prints."""
+        request_id = self.require_approval()
+        path = Path(self._tmp.name) / ".approvals" / f"{request_id}.json"
+        record = json.loads(path.read_text())
+        record.update(state=state, request_id="abc\x1b[2K\n[watch] forged")
+        path.write_text(json.dumps(record))
+        self.tick()
+        return self.out.getvalue()
+
+    def test_approved_request_id_is_inert(self):
+        self.assertEqual(
+            self._decide_with_forged_id("approved"),
+            "[watch] Approval abc\\x1b[2K\\n[watch] forged approved; pause released\n",
+        )
+
+    def test_denied_request_id_is_inert(self):
+        self.assertEqual(
+            self._decide_with_forged_id("denied"),
+            "[watch] Approval abc\\x1b[2K\\n[watch] forged denied; agent stays stopped. "
+            f"Run 'kill -CONT {PID}' or Pause then Resume in the editor to release it\n",
+        )
 
 
 class TestReusedAgentPid(PauseTestCase):

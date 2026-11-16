@@ -119,6 +119,23 @@ class TestTemporalSessionParenting(unittest.TestCase):
         self.assertEqual(restored.parent_span_id, PARENT_SPAN_ID)
         self.assertIn("Attached Temporal parent span", output.getvalue())
 
+    def test_watch_shows_an_invalid_context_as_one_inert_line(self):
+        end = TraceEvent(
+            event_type=EventType.SESSION_END,
+            session_id=self.meta.session_id,
+        )
+        output = io.StringIO()
+        with patch(
+            "agent_trace.temporal.attach_temporal_trace_context",
+            side_effect=ValueError("bad \x1b[2K\nforged"),
+        ), patch("agent_trace.watch._tail_events", return_value=iter([end])):
+            watch_session(self.store, self.meta.session_id, WatcherConfig(), out=output)
+
+        self.assertIn(
+            "[watch] Invalid Temporal trace context: bad \\x1b[2K\\nforged\n",
+            output.getvalue(),
+        )
+
 
 class TestTemporalOtlp(unittest.TestCase):
     def _meta_and_events(self):
