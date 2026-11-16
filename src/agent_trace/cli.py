@@ -87,7 +87,11 @@ from .reviewability import add_artifact_arguments as add_review_artifact_argumen
 from .reviewability import add_threshold_arguments as add_review_threshold_arguments
 from .reviewability import cmd_review
 from .postmortem import cmd_postmortem
-from .project_budget import enforce_new_session_budget, load_project_budget_config
+from .project_budget import (
+    ProjectBudgetConfigError,
+    enforce_new_session_budget,
+    load_project_budget_config,
+)
 from .share import cmd_share
 from .assignment import cmd_score
 from .token_budget import cmd_token_budget
@@ -177,8 +181,15 @@ def _parent_depth(store: TraceStore, parent_session_id: str) -> int:
 
 def cmd_record(args: argparse.Namespace) -> int:
     """Record an MCP server session."""
+    # Read the budget before the store is opened: a budget config that
+    # cannot be used is refused, and nothing is written, not even the trace
+    # directory's .gitignore.
+    try:
+        budget_config = load_project_budget_config()
+    except ProjectBudgetConfigError as exc:
+        sys.stderr.write(f"agent-strace: {exc}\n")
+        return 1
     store = TraceStore(args.trace_dir, redact=_redact_setting(args))
-    budget_config = load_project_budget_config()
     if budget_config.enabled and not enforce_new_session_budget(
         store, budget_config, sys.stderr
     ):
@@ -231,8 +242,15 @@ def cmd_record(args: argparse.Namespace) -> int:
 
 def cmd_record_http(args: argparse.Namespace) -> int:
     """Record a remote MCP server session over HTTP/SSE."""
+    # Read the budget before the store is opened: a budget config that
+    # cannot be used is refused, and nothing is written, not even the trace
+    # directory's .gitignore.
+    try:
+        budget_config = load_project_budget_config()
+    except ProjectBudgetConfigError as exc:
+        sys.stderr.write(f"agent-strace: {exc}\n")
+        return 1
     store = TraceStore(args.trace_dir, redact=_redact_setting(args))
-    budget_config = load_project_budget_config()
     if budget_config.enabled and not enforce_new_session_budget(
         store, budget_config, sys.stderr
     ):

@@ -860,9 +860,9 @@ class TestConfigFileProjectBudget(unittest.TestCase):
 # Bad limit values are refused at startup
 # ---------------------------------------------------------------------------
 
-class TestLimitFlagChecks(unittest.TestCase):
-    """cmd_watch refuses a limit that never fires or fires at once, with one
-    line and status 1, before it opens the store."""
+class WatchStartupTest(unittest.TestCase):
+    """Run cmd_watch on a stored session with watch_session faked, and
+    snapshot the files under the temp dir to show nothing was written."""
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -899,6 +899,11 @@ class TestLimitFlagChecks(unittest.TestCase):
              redirect_stdout(out), redirect_stderr(err):
             status = cmd_watch(build_parser().parse_args(argv))
         return status, out.getvalue(), err.getvalue(), watch_session_mock
+
+
+class TestLimitFlagChecks(WatchStartupTest):
+    """cmd_watch refuses a limit that never fires or fires at once, with one
+    line and status 1, before it opens the store."""
 
     def _assert_refused(self, flags, line):
         for config in (False, True):
@@ -968,6 +973,144 @@ class TestLimitFlagChecks(unittest.TestCase):
                     status, _, err, watch_session_mock = self._run(*flags, config=config)
                     self.assertEqual(status, 0, err)
                     watch_session_mock.assert_called_once()
+
+
+class TestProjectBudgetConfigChecks(WatchStartupTest):
+    """cmd_watch refuses a project budget config it cannot use, with one line
+    and status 1, before it checks --agent-pid or opens the store. Main
+    watched without the budget and said nothing."""
+
+    _HINT = "use weekly, warn_at, stop_at or per_session_max"
+    _NEGATIVE = "budget.per_session_max must be a finite number, 0 or more, not -5"
+
+    def _project_file(self, name, data):
+        path = self.root / name
+        path.write_bytes(data if isinstance(data, bytes) else data.encode("utf-8"))
+        self.addCleanup(path.unlink, missing_ok=True)
+        return path
+
+    def _assert_project_file_refused(self, name, data, problem):
+        path = self._project_file(name, data)
+        line = f"[watch] invalid project budget in {name}: {problem}\n"
+        for flags in (
+            (), ("--budget", "2"), ("--agent-pid", "1"),
+            ("--max-cost", "3", "--on-violation", "kill"), ("--rules", "budget:1"),
+        ):
+            # A --config file that sets neither weekly nor per_session_max
+            # leaves the project file in use.
+            for config in ({}, {"budget": {"warn_at": 0.5}}, None):
+                if config is not None:
+                    self.config.write_text(json.dumps(config))
+                with self.subTest(file=name, data=data, flags=flags, config=config):
+                    before = self._snapshot()
+                    status, out, err, watch_session_mock = self._run(
+                        *flags, config=config is not None,
+                    )
+                    self.assertEqual((status, out, err), (1, "", line))
+                    watch_session_mock.assert_not_called()
+                    self.assertEqual(self._snapshot(), before)
+        path.unlink()
+
+    def test_project_files_it_cannot_use_are_refused(self):
+        # The probe cases: a trailing comma (g3), flow style (g5), a negative
+        # per_session_max (g6), nan (g7) and the typo per_session (g8).
+        trailing = '{"budget": {"weekly": 20, "per_session_max": 5,}}'
+        with self.assertRaises(json.JSONDecodeError) as ctx:
+            json.loads(trailing)
+        error = ctx.exception
+        self._assert_project_file_refused(
+            ".agent-strace.json", trailing,
+            f"it is not valid JSON ({error.msg} at line {error.lineno} column {error.colno})",
+        )
+        for data, problem in (
+            ('{"budget": {"weekly": 20, "per_session_max": -5}}', self._NEGATIVE),
+            (
+                '{"budget": {"weekly": 20, "per_session_max": NaN}}',
+                "budget.per_session_max must be a finite number, 0 or more, not nan",
+            ),
+            (
+                '{"budget": {"weekly": 20, "per_session": 5}}',
+                f"budget has an unknown key 'per_session'; {self._HINT}",
+            ),
+        ):
+            self._assert_project_file_refused(".agent-strace.json", data, problem)
+        for name in (".agent-strace.yaml", ".agent-strace.yml"):
+            for data, problem in (
+                (
+                    "budget: {weekly: 20, per_session_max: 5}\n",
+                    "line 1: budget uses flow style; "
+                    "write each key on its own line, indented under budget:",
+                ),
+                ("budget:\n  weekly: 20\n  per_session_max: -5\n", self._NEGATIVE),
+                (
+                    "budget:\n  weekly: 20\n  per_session_max: nan\n",
+                    "budget.per_session_max must be a finite number, 0 or more, not 'nan'",
+                ),
+                (
+                    "budget:\n  weekly: 20\n  per_session: 5\n",
+                    f"line 3: budget has an unknown key 'per_session'; {self._HINT}",
+                ),
+            ):
+                self._assert_project_file_refused(name, data, problem)
+
+    def test_budgets_main_dropped_are_used(self):
+        # The probe cases g2 ($5) and g4 (a byte order mark).
+        good = "budget:\n  weekly: 20\n  per_session_max: 5\n"
+        for name, data in (
+            (".agent-strace.yaml", "budget:\n  weekly: $20\n  per_session_max: $5\n"),
+            (".agent-strace.yml", 'weekly: "$20"\nper_session_max: " $5"\n'),
+            (".agent-strace.json", '{"budget": {"weekly": "$20", "per_session_max": "$5"}}'),
+            (".agent-strace.yaml", b"\xef\xbb\xbf" + good.encode()),
+            (".agent-strace.json", b'\xef\xbb\xbf{"budget": {"weekly": 20, "per_session_max": 5}}'),
+        ):
+            path = self._project_file(name, data)
+            with self.subTest(file=name, data=data):
+                status, _, err, watch_session_mock = self._run()
+                self.assertEqual(status, 0, err)
+                call = watch_session_mock.call_args
+                self.assertEqual(call.args[2].max_cost_dollars, 5.0)
+                self.assertEqual(call.kwargs["project_budget_config"].weekly, 20.0)
+            path.unlink()
+
+    def test_a_config_file_budget_replaces_a_project_file_it_cannot_use(self):
+        """Guard: passes on main too. The project file is not read then."""
+        self._project_file(".agent-strace.yaml", "budget:\n  weekly: 20\n  per_session_max: -5\n")
+        self.config.write_text('{"budget": {"per_session_max": 2}}')
+        status, _, err, watch_session_mock = self._run(config=True)
+        self.assertEqual(status, 0, err)
+        self.assertEqual(watch_session_mock.call_args.args[2].max_cost_dollars, 2.0)
+
+    def test_a_project_file_without_budget_keys_is_ignored(self):
+        """Guard: passes on main too."""
+        self._project_file(
+            ".agent-strace.yaml",
+            "workspaces:\n  - name: payments\n    path: services/payments\n"
+            "review:\n  fail_on:\n    - missing\n  findings: [rationale, validation]\n"
+            "retention:\n  max_age_days: 30\n",
+        )
+        status, _, err, watch_session_mock = self._run()
+        self.assertEqual(status, 0, err)
+        self.assertEqual(watch_session_mock.call_args.kwargs["project_budget_config"].weekly, 0.0)
+
+
+class TestProjectBudgetFileKills(WatchdogLimitTest):
+    """A per_session_max that main dropped kills the agent."""
+
+    def test_a_per_session_max_with_a_dollar_sign_kills(self):
+        (self.root / ".agent-strace.yaml").write_text(
+            "budget:\n  weekly: 20\n  per_session_max: $5\n"
+        )
+        self.watch(steps=(_three_dollars(), _three_dollars()))
+        self.assertEqual(self.cost_alerts(), ["CostWatcher: $6.00 (threshold: $5.0)"])
+        self.mocks["kill"].assert_called_once_with(PID, None)
+
+    def test_a_per_session_max_after_a_byte_order_mark_kills(self):
+        (self.root / ".agent-strace.yaml").write_bytes(
+            b"\xef\xbb\xbfbudget:\n  weekly: 20\n  per_session_max: 5\n"
+        )
+        self.watch(steps=(_three_dollars(), _three_dollars()))
+        self.assertEqual(self.cost_alerts(), ["CostWatcher: $6.00 (threshold: $5.0)"])
+        self.mocks["kill"].assert_called_once_with(PID, None)
 
 
 # ---------------------------------------------------------------------------
