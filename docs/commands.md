@@ -1997,7 +1997,8 @@ Python reports owner ID 0 for every file, or when the command runs as root.
 For `validate`, the rule covers the path to the session directory, whether
 `TARGET` names the directory or the session is found by ID, prefix, or as the
 latest session under `--trace-dir` or `AGENT_TRACE_DIR`. It also covers the
-directories that hold the `--replay-baseline` file. When this rule refuses a
+directories that hold the `--replay-baseline` file. On Windows, `validate`
+also refuses directory junctions on these paths. When this rule refuses a
 path, `validate` reports the session as `invalid` and exits 1.
 
 These are still refused when they are symbolic links, even root-owned ones:

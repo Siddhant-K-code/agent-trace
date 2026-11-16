@@ -233,10 +233,8 @@ class TestLegacyCrlfEvents(_LineEndingCase):
                 meta = store.load_meta(session_id)
                 _, state = _parse_event_snapshot(raw, meta)
                 self.assertEqual(state, "unanchored")
-                # validate opens directories by fd, which Windows does not support.
-                if os.name != "nt":
-                    report = validate_trace_directory(trace_dir / session_id, allow_active=True)
-                    self.assertEqual(report.hash_chain["state"], "unanchored")
+                report = validate_trace_directory(trace_dir / session_id, allow_active=True)
+                self.assertEqual(report.hash_chain["state"], "unanchored")
 
     def test_tag_session_rewrites_legacy_crlf_file_as_lf(self):
         for mode in MODES:
