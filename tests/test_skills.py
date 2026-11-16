@@ -435,6 +435,33 @@ class TestLoads(SkillsTestBase):
 
         self.assertEqual(self.analyze(ev.events)["loaded"], [])
 
+    def test_unresolved_skill_md_paths_are_not_loads(self):
+        ev = _Events(str(self.repo))
+        ev.bash('for d in .github/skills/*; do cat $d/SKILL.md; done')
+        ev.bash("cat */SKILL.md")
+
+        self.assertEqual(self.analyze(ev.events)["loaded"], [])
+
+    def test_bare_skill_md_read_names_the_working_directory(self):
+        ev = _Events(str(self.deploy_dir))
+        ev.bash("cat SKILL.md")
+
+        self.loaded(self.analyze(ev.events), "deploy-check")
+
+    def test_recorded_list_counts_only_listed_skill_md_reads(self):
+        other = _write_skill(self.tmp / "authoring" / "skills", "writing-style", "body\n")
+        ev = _Events()
+        ev.add(EventType.SESSION_START, cwd=str(self.repo), availability="recorded",
+               available_skills=[{"name": "deploy-check", "listed": True},
+                                 {"name": "unfound", "listed": True}])
+        ev.tool("view", {"path": str(other / "SKILL.md")})
+        ev.tool("view", {"path": ".github/skills/deploy-check/SKILL.md"})
+        ev.tool("view", {"path": str(self.tmp / "elsewhere" / "unfound" / "SKILL.md")})
+
+        report = self.analyze(ev.events)
+
+        self.assertEqual(sorted(entry["name"] for entry in report["loaded"]), ["deploy-check", "unfound"])
+
     def test_multiline_shell_reads_are_loads(self):
         for command in ("git status\n\ncat .github/skills/deploy-check/SKILL.md",
                         "git status &&\ncat .github/skills/deploy-check/SKILL.md",
@@ -620,7 +647,8 @@ class TestOutcome(SkillsTestBase):
         self.assertEqual(outcome["last_test"]["linked_result"], "tool_result")
         self.assertEqual(outcome["last_test"]["exit_code"], 1)
         self.assertIs(outcome["last_test"]["success"], False)
-        self.assertEqual(outcome["errors"], 1)
+        # The failed pytest result and the error event.
+        self.assertEqual(outcome["errors"], 2)
         self.assertTrue(outcome["session_end_recorded"])
         self.assertTrue(report["session_facts"]["tests_run"])
 

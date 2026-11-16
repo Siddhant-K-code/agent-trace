@@ -987,8 +987,12 @@ def _find_loads(
     ordered: list[tuple[int, TraceEvent]],
     catalog: SkillCatalog,
     cwd: str,
+    recorded: bool = False,
 ) -> list[tuple[str, str, str, str, int, TraceEvent]]:
-    """Return (name, method, invoked_by, detail, index, event) tuples."""
+    """Return (name, method, invoked_by, detail, index, event) tuples.
+
+    ``recorded`` means the catalog is the skill list the session recorded.
+    """
     loads = []
     by_file = catalog.by_file()
     names = list(catalog.skills)
@@ -1013,25 +1017,44 @@ def _find_loads(
 
         for raw in _event_paths(event):
             if _is_skill_file(raw):
-                loads.append((_skill_name_for_path(raw, cwd, by_file), "file_read", "model", "read_tool", index, event))
+                name = _skill_name_for_path(raw, cwd, by_file, catalog, recorded)
+                if name is not None:
+                    loads.append((name, "file_read", "model", "read_tool", index, event))
                 break
         else:
             command = _event_command(event)
             if command:
-                for name in _shell_skill_reads(command, cwd, by_file):
+                for name in _shell_skill_reads(command, cwd, by_file, catalog, recorded):
                     loads.append((name, "file_read", "model", "shell_read", index, event))
     return loads
 
 
-def _skill_name_for_path(raw: str, cwd: str, by_file: Mapping[str, SkillDefinition]) -> str:
+def _skill_name_for_path(
+    raw: str, cwd: str, by_file: Mapping[str, SkillDefinition], catalog: SkillCatalog, recorded: bool,
+) -> str | None:
+    """Name the skill a SKILL.md read loads, or ``None`` when it loads none.
+
+    When the session recorded its skill list, only a listed skill counts: a
+    SKILL.md read by its recorded path, or by directory name when no path is
+    known.  Other SKILL.md reads (for example, editing skills in a repo) are
+    file reads, not loads.  Unresolved paths such as ``$d/SKILL.md`` load none.
+    """
     resolved = _resolve(raw, cwd)
     if resolved in by_file:
         return by_file[resolved].name
-    parent = os.path.basename(os.path.dirname(os.path.normpath(_expanduser(raw))))
-    return parent or "SKILL.md"
+    source = resolved or os.path.normpath(_expanduser(raw))
+    parent = os.path.basename(os.path.dirname(source))
+    if not parent or re.search(r"[$*?{}\[\]`]", parent):
+        return None
+    if recorded:
+        definition = catalog.skills.get(parent)
+        return parent if definition is not None and not definition.skill_file else None
+    return parent
 
 
-def _shell_skill_reads(command: str, cwd: str, by_file: Mapping[str, SkillDefinition]) -> list[str]:
+def _shell_skill_reads(
+    command: str, cwd: str, by_file: Mapping[str, SkillDefinition], catalog: SkillCatalog, recorded: bool,
+) -> list[str]:
     names: list[str] = []
     effective = cwd
     for words in _segments(command):
@@ -1045,8 +1068,8 @@ def _shell_skill_reads(command: str, cwd: str, by_file: Mapping[str, SkillDefini
             continue
         for word in words[1:]:
             if _is_skill_file(word) and not word.startswith("-"):
-                name = _skill_name_for_path(word, effective, by_file)
-                if name not in names:
+                name = _skill_name_for_path(word, effective, by_file, catalog, recorded)
+                if name is not None and name not in names:
                     names.append(name)
     return names
 
@@ -1229,15 +1252,34 @@ def _outcome(
     return {
         "tests_run": len(tests),
         "last_test": last_test,
-        "errors": sum(1 for prepared in after if prepared.event.event_type == EventType.ERROR),
+        "errors": sum(1 for prepared in after if _is_error(prepared.event)),
         "session_end_recorded": any(prepared.event.event_type == EventType.SESSION_END for prepared in after),
     }
+
+
+def _is_error(event: TraceEvent) -> bool:
+    """An error event, or a failed tool result as transcript readers record it.
+
+    Hooks record a failed tool call as an ERROR event; transcripts record it as
+    a TOOL_RESULT with ``success: false``, ``is_error: true`` or a non-zero exit.
+    """
+    if event.event_type == EventType.ERROR:
+        return True
+    if event.event_type != EventType.TOOL_RESULT:
+        return False
+    data = event.data
+    exit_code = data.get("exit_code")
+    return (
+        data.get("success") is False
+        or data.get("is_error") is True
+        or (isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code != 0)
+    )
 
 
 def _session_facts(prepared: list[_Prepared]) -> dict[str, bool]:
     return {
         "tests_run": any(item.is_test for item in prepared),
-        "errors": any(item.event.event_type == EventType.ERROR for item in prepared),
+        "errors": any(_is_error(item.event) for item in prepared),
         "session_end_recorded": any(item.event.event_type == EventType.SESSION_END for item in prepared),
     }
 
@@ -1347,7 +1389,7 @@ def analyze_session(
     grouped: dict[str, list[SkillLoad]] = {}
     first_pos: dict[str, int] = {}
     first_event: dict[str, TraceEvent] = {}
-    for name, method, invoked_by, detail, index, event in _find_loads(ordered, catalog, base):
+    for name, method, invoked_by, detail, index, event in _find_loads(ordered, catalog, base, basis == "recorded"):
         pos = position[index]
         load = SkillLoad(
             name=name,
@@ -1815,7 +1857,7 @@ def format_aggregate_text(report: Mapping[str, Any], out: TextIO | None = None) 
         return
 
     width = max(5, min(48, max(len(skill["name"]) + 1 for skill in report["skills"])))
-    header = (f"{'skill':<{width}} {'avail':>5} {'loaded':>6} {'load rate':>9} {'user/model':>10} "
+    header = (f"{'skill':<{width}} {'avail':>5} {'loaded':>6} {'load rate':>9} {'user':>5} {'model':>5} "
               f"{'median t':>8} {'pre-edit':>8} {'follow':>7} {'tests':>6}\n")
     w(header)
     w("-" * (len(header) - 1) + "\n")
@@ -1826,11 +1868,11 @@ def format_aggregate_text(report: Mapping[str, Any], out: TextIO | None = None) 
         label = skill["name"] + "*" if unfound else skill["name"]
         missing = missing or unfound
         w(f"{label[:width]:<{width}} {skill['sessions_available']:>5} {skill['sessions_loaded']:>6} "
-          f"{_frac(skill['load_rate']):>9} {inv['user']:>4}/{inv['model']:<5} "
+          f"{_frac(skill['load_rate']):>9} {inv['user']:>5} {inv['model']:>5} "
           f"{_fmt_seconds(skill['median_seconds_to_load']):>8} {_frac(skill['loaded_before_first_edit']):>8} "
           f"{_frac(skill['follow_signals']):>7} {_frac(skill['tests_after_load']):>6}\n")
     w("\nColumns: load rate = sessions loaded while available / sessions available; "
-      "user/model = load invocations; median t = time from session start to first load; "
+      "user, model = load invocations by each (not sessions); median t = time from session start to first load; "
       "pre-edit = loaded before first edit (n = loaded sessions with an edit); "
       "follow = sessions with follow signals (n = measurable loads); "
       "tests = sessions with a test command after the load.\n")
