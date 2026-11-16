@@ -38,7 +38,7 @@ Works with Claude Code, Codex, Copilot CLI, Gemini CLI, Cursor, and any MCP serv
 uvx agent-strace skills --from-claude
 ```
 
-This reads the Claude Code transcripts already on your machine (`~/.claude/projects`), writes no persistent trace store (it uses a temporary directory deleted on exit), and reports each skill as available, loaded, followed, and what happened after the load. It reports counts, not a score, and only for what the sessions recorded. For other agents, record sessions first, then run `agent-strace skills`. A never-loaded skill is a lead, not a verdict: no task may have needed it. Test it with [`skills eval`](docs/skills-eval.md). Guide: [docs/skills.md](docs/skills.md).
+This reads the Claude Code transcripts already on your machine (`~/.claude/projects`), writes no persistent trace store (it uses a temporary directory deleted on exit), and reports each skill as available, loaded, followed, and what happened after the load. It reports counts, not a score, and only for what the sessions recorded. `--from-copilot` and `--from-codex` do the same for GitHub Copilot and Codex session logs, using the skill list each session recorded. For other agents, record sessions first, then run `agent-strace skills`. A never-loaded skill is a lead, not a verdict: no task may have needed it. Test it with [`skills eval`](docs/skills-eval.md). Guide: [docs/skills.md](docs/skills.md).
 
 Sample output (139 recorded sessions, trimmed):
 ```text

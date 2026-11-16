@@ -131,6 +131,33 @@ NEVER_LOADED_CAVEATS = (
 
 HINT_KINDS = ("description_alias", "forwarder")
 
+_AVAILABILITY_NOTES = {
+    "recorded": "Availability is the skill list each session recorded when it ran. "
+    "Definitions (commands, resources, invocation settings) are read from SKILL.md on disk now.",
+    "mixed": "Availability is the skill list each session recorded when it ran; sessions that "
+    "recorded none use skill directories on disk now. Definitions are read from SKILL.md on disk now.",
+}
+_AVAILABILITY_CAVEATS = {
+    "recorded": "Availability is the list each session recorded, so skills installed later are "
+    "not counted for earlier sessions.",
+    "mixed": "Sessions that recorded no skill list use today's filesystem, so for those sessions "
+    "skills installed later are over-counted as available.",
+}
+
+
+def _not_measurable(basis: str) -> list[str]:
+    lines = list(NOT_MEASURABLE)
+    if basis in _AVAILABILITY_NOTES:
+        lines[0] = _AVAILABILITY_NOTES[basis]
+    return lines
+
+
+def _never_loaded_caveats(basis: str) -> list[str]:
+    lines = list(NEVER_LOADED_CAVEATS)
+    if basis in _AVAILABILITY_CAVEATS:
+        lines[1] = _AVAILABILITY_CAVEATS[basis]
+    return lines
+
 _SKILL_FILE = "SKILL.md"
 _MAX_RESOURCE_FILES = 500
 _MAX_REPORTED_PATHS = 10
@@ -215,6 +242,8 @@ class SkillDefinition:
     # Used only to compute hints; never emitted.
     description: str = field(default="", repr=False, compare=False)
     forward_lines: tuple[str, ...] = field(default=(), repr=False, compare=False)
+    # False for a skill a transcript listed whose SKILL.md is not on disk now.
+    found: bool = field(default=True, repr=False, compare=False)
 
     def summary(self) -> dict[str, object]:
         return {
@@ -246,7 +275,7 @@ class SkillCatalog:
     )
 
     def by_file(self) -> dict[str, SkillDefinition]:
-        return {_real(defn.skill_file): defn for defn in self.skills.values()}
+        return {_real(defn.skill_file): defn for defn in self.skills.values() if defn.skill_file}
 
     def hints(self) -> dict[str, tuple[tuple[str, str], ...]]:
         """Return ``name -> ((kind, target), ...)``; computed once per catalog."""
@@ -1213,6 +1242,73 @@ def _session_facts(prepared: list[_Prepared]) -> dict[str, bool]:
     }
 
 
+def _recorded_skills(events: Iterable[TraceEvent]) -> list[Mapping[str, Any]] | None:
+    """Return the skill list a transcript importer recorded, or ``None``."""
+    for event in events:
+        if event.event_type != EventType.SESSION_START or event.data.get("availability") != "recorded":
+            continue
+        entries = event.data.get("available_skills")
+        if isinstance(entries, list):
+            return [
+                entry for entry in entries
+                if isinstance(entry, Mapping) and isinstance(entry.get("name"), str) and entry["name"].strip()
+            ]
+    return None
+
+
+def _recorded_catalog(
+    entries: list[Mapping[str, Any]],
+    fs_catalog: SkillCatalog,
+    cache: dict[str, SkillDefinition | None],
+) -> SkillCatalog:
+    """Build a catalog of exactly the recorded skills.
+
+    Each entry is matched to a SKILL.md by its recorded path, else by name
+    against the skill directories on disk, so follow signals still work.
+    An entry with no SKILL.md on disk now is kept with ``found=False``.
+    """
+    by_file = fs_catalog.by_file()
+    catalog = SkillCatalog(scanned=list(fs_catalog.scanned))
+    for entry in entries:
+        name = entry["name"].strip()
+        if name in catalog.skills:
+            continue
+        recorded_source = str(entry.get("source") or "recorded")
+        raw_path = entry.get("path")
+        path = _real(raw_path) if isinstance(raw_path, str) and raw_path.strip() else ""
+        if path and os.path.isdir(path):
+            path = os.path.join(path, _SKILL_FILE)
+        definition: SkillDefinition | None = None
+        if path:
+            definition = by_file.get(path)
+            if definition is None:
+                if path not in cache:
+                    cache[path] = _load_definition(
+                        Path(path), recorded_source, _display_path(os.path.dirname(os.path.dirname(path))),
+                    ) if os.path.isfile(path) else None
+                definition = cache[path]
+        else:
+            definition = fs_catalog.skills.get(name) or fs_catalog.skills.get(name.rsplit(":", 1)[-1])
+        if definition is None:
+            definition = SkillDefinition(
+                name=name,
+                skill_dir=os.path.dirname(path) if path else "",
+                skill_file=path,
+                source=recorded_source,
+                source_dir=_display_path(os.path.dirname(os.path.dirname(path))) if path else "",
+                commands=(),
+                resources=(),
+                found=False,
+            )
+        else:
+            definition = replace(definition, name=name)
+        if entry.get("listed") is True and not definition.model_invocable:
+            # The agent listed it to the model, so the model could load it.
+            definition = replace(definition, model_invocable=True)
+        catalog.skills[name] = definition
+    return catalog
+
+
 def analyze_session(
     events: list[TraceEvent],
     *,
@@ -1222,6 +1318,7 @@ def analyze_session(
     extra_dirs: Iterable[str] = (),
     user_dirs: Iterable[str] = USER_SKILL_DIRS,
     catalog: SkillCatalog | None = None,
+    definition_cache: dict[str, SkillDefinition | None] | None = None,
 ) -> dict[str, Any]:
     """Build the available -> loaded -> followed -> outcome report for one session."""
     events, skipped = _sanitize_events(events)
@@ -1231,6 +1328,11 @@ def analyze_session(
     cwd_source = "session_start" if session_cwd else ("--workspace" if workspace else "current_directory")
     if catalog is None:
         catalog = discover_skills(cwd, extra_dirs, user_dirs=user_dirs)
+    basis = "filesystem_now"
+    recorded = _recorded_skills(event for _, event in ordered)
+    if recorded is not None:
+        catalog = _recorded_catalog(recorded, catalog, definition_cache if definition_cache is not None else {})
+        basis = "recorded"
     base = _real(cwd) or cwd
 
     candidates = [event.timestamp for _, event in ordered]
@@ -1271,16 +1373,17 @@ def analyze_session(
     loaded = []
     for name in sorted(grouped, key=lambda n: first_pos[n]):
         definition = catalog.skills.get(name)
+        found = definition is not None and definition.found
         after = prepared[first_pos[name] + 1:]
         loaded.append({
             "name": name,
-            "definition_found": definition is not None,
+            "definition_found": found,
             "source": definition.source if definition else None,
             "dir": definition.source_dir if definition else None,
             "model_invocable": definition.model_invocable if definition else None,
             "user_invocable": definition.user_invocable if definition else None,
             "loads": [load.to_dict() for load in grouped[name]],
-            "follow": _follow_signals(definition, first_event[name], after),
+            "follow": _follow_signals(definition if found else None, first_event[name], after),
             "outcome_after_load": _outcome(after, linked),
         })
 
@@ -1288,6 +1391,8 @@ def analyze_session(
     available = []
     for name in sorted(catalog.skills):
         entry = catalog.skills[name].summary()
+        if basis == "recorded":
+            entry["definition_found"] = catalog.skills[name].found
         entry["also_in"] = list(catalog.also_in.get(name, []))
         entry["hints"] = [
             {"kind": kind, "target": target, "target_loaded": target in grouped}
@@ -1301,7 +1406,7 @@ def analyze_session(
         "session_id": session_id,
         "workspace": _display_path(cwd),
         "workspace_source": cwd_source,
-        "availability_basis": "filesystem_now",
+        "availability_basis": basis,
         "scanned_dirs": [
             {"dir": scanned.display, "source": scanned.source, "exists": scanned.exists, "skills": scanned.skills}
             for scanned in catalog.scanned
@@ -1313,7 +1418,7 @@ def analyze_session(
         "first_edit_recorded": first_edit is not None,
         "session_facts": _session_facts(prepared),
         "events_skipped_malformed": skipped,
-        "not_measurable": list(NOT_MEASURABLE),
+        "not_measurable": _not_measurable(basis),
     }
 
 
@@ -1409,7 +1514,8 @@ def aggregate_reports(
             "follow_signals": _ratio(follow, follow_n),
             "follow_signal_kinds": {kind: _ratio(count, follow_n) for kind, count in kinds.items()},
             "tests_after_load": _ratio(tests_after, len(loaded_entries)),
-            "definition_found": any(entry["definition_found"] for _, entry in loaded_entries) or bool(available_sessions),
+            "definition_found": any(entry["definition_found"] for _, entry in loaded_entries)
+            or any(entry.get("definition_found", True) for entry in definitions),
             "model_invocable": _any_known(entry.get("model_invocable") for entry in definitions),
             "user_invocable": _any_known(entry.get("user_invocable") for entry in definitions),
             "hints": [],
@@ -1446,17 +1552,24 @@ def aggregate_reports(
     def _order(item: Mapping[str, Any]) -> tuple[int, str]:
         return (-item["sessions_available"], item["name"])
 
+    basis_counts: dict[str, int] = {}
+    for report in reports:
+        key = str(report.get("availability_basis", "filesystem_now"))
+        basis_counts[key] = basis_counts.get(key, 0) + 1
+    basis = next(iter(basis_counts)) if len(basis_counts) == 1 else ("mixed" if basis_counts else "filesystem_now")
+
     return {
         "schema_version": SCHEMA_VERSION,
         "mode": "aggregate",
         "sessions": len(reports),
         "min_sessions": min_sessions,
-        "availability_basis": "filesystem_now",
+        "availability_basis": basis,
+        "availability_basis_sessions": basis_counts,
         "skills": skills,
         "never_loaded": sorted(never_loaded, key=_order),
         "user_only_not_invoked": sorted(user_only, key=_order),
-        "caveats": {"never_loaded": list(NEVER_LOADED_CAVEATS)},
-        "not_measurable": list(NOT_MEASURABLE),
+        "caveats": {"never_loaded": _never_loaded_caveats(basis)},
+        "not_measurable": _not_measurable(basis),
     }
 
 
@@ -1468,6 +1581,7 @@ def build_session_report(
     extra_dirs: Iterable[str] = (),
     user_dirs: Iterable[str] = USER_SKILL_DIRS,
     catalogs: dict[str, SkillCatalog] | None = None,
+    definition_cache: dict[str, SkillDefinition | None] | None = None,
 ) -> dict[str, Any]:
     meta: SessionMeta | None
     try:
@@ -1490,6 +1604,7 @@ def build_session_report(
         extra_dirs=extra_dirs,
         user_dirs=user_dirs,
         catalog=catalog,
+        definition_cache=definition_cache,
     )
 
 
@@ -1503,6 +1618,7 @@ def build_aggregate_report(
     min_sessions: int = 5,
 ) -> dict[str, Any]:
     catalogs: dict[str, SkillCatalog] = {}
+    definitions: dict[str, SkillDefinition | None] = {}
     extra = list(extra_dirs)
     reports = []
     skipped = before_window = 0
@@ -1515,7 +1631,7 @@ def build_aggregate_report(
                 continue
             reports.append(build_session_report(
                 store, meta.session_id, workspace=workspace, extra_dirs=extra,
-                user_dirs=user_dirs, catalogs=catalogs,
+                user_dirs=user_dirs, catalogs=catalogs, definition_cache=definitions,
             ))
         except Exception:  # one unreadable or malformed session must not abort the report
             skipped += 1
@@ -1601,8 +1717,12 @@ def format_session_text(report: Mapping[str, Any], out: TextIO | None = None) ->
     if report.get("events_skipped_malformed"):
         w(f"Skipped {report['events_skipped_malformed']} event(s) without a usable timestamp.\n")
     existing = [d for d in report["scanned_dirs"] if d["exists"]]
-    w(f"Scanned {len(report['scanned_dirs'])} skill directories ({len(existing)} exist). "
-      "Availability reflects the filesystem now, not session time.\n\n")
+    if report.get("availability_basis") == "recorded":
+        w(f"Availability is the skill list this session recorded. Definitions are read from SKILL.md on disk "
+          f"now ({len(report['scanned_dirs'])} skill directories scanned, {len(existing)} exist).\n\n")
+    else:
+        w(f"Scanned {len(report['scanned_dirs'])} skill directories ({len(existing)} exist). "
+          "Availability reflects the filesystem now, not session time.\n\n")
 
     w("Context files (auto-injected by most agents; load not observable from hooks):\n")
     for item in report["context_files"]:
@@ -1678,8 +1798,16 @@ def format_aggregate_text(report: Mapping[str, Any], out: TextIO | None = None) 
     window = ""
     if since:
         window = f" since {datetime.datetime.fromtimestamp(since, datetime.timezone.utc).strftime('%Y-%m-%d')}"
-    w(f"Skills across {_session_count(report, window)}. "
-      "Availability reflects the filesystem now, not session time.\n")
+    basis = report.get("availability_basis", "filesystem_now")
+    if basis == "recorded":
+        availability = "Availability is the skill list each session recorded."
+    elif basis == "mixed":
+        unrecorded = (report.get("availability_basis_sessions") or {}).get("filesystem_now", 0)
+        availability = (f"Availability is the skill list each session recorded; {unrecorded} session(s) "
+                        "recorded none and use the filesystem now.")
+    else:
+        availability = "Availability reflects the filesystem now, not session time."
+    w(f"Skills across {_session_count(report, window)}. {availability}\n")
     w("Counts are shown as count/n. There is no score or grade.\n\n")
     if not report["skills"]:
         w("No skills available or loaded in the selected sessions.\n")
@@ -1694,8 +1822,9 @@ def format_aggregate_text(report: Mapping[str, Any], out: TextIO | None = None) 
     missing = False
     for skill in report["skills"]:
         inv = skill["invocations"]
-        label = skill["name"] if skill["definition_found"] else skill["name"] + "*"
-        missing = missing or not skill["definition_found"]
+        unfound = skill["sessions_loaded"] > 0 and not skill["definition_found"]
+        label = skill["name"] + "*" if unfound else skill["name"]
+        missing = missing or unfound
         w(f"{label[:width]:<{width}} {skill['sessions_available']:>5} {skill['sessions_loaded']:>6} "
           f"{_frac(skill['load_rate']):>9} {inv['user']:>4}/{inv['model']:<5} "
           f"{_fmt_seconds(skill['median_seconds_to_load']):>8} {_frac(skill['loaded_before_first_edit']):>8} "
@@ -1719,9 +1848,17 @@ def format_aggregate_text(report: Mapping[str, Any], out: TextIO | None = None) 
 
     w(f"\nNever loaded (available in >= {report['min_sessions']} sessions, loaded in 0):\n")
     if report["never_loaded"]:
-        w("  Caveat: availability is not relevance (no task in the window may have needed the skill), and it "
-          "reflects today's filesystem, so sessions before install are over-counted. Pair with a trigger "
-          "eval on tasks where the skill applies.\n")
+        if basis == "recorded":
+            w("  Caveat: availability is not relevance (no task in the window may have needed the skill). "
+              "Pair with a trigger eval on tasks where the skill applies.\n")
+        elif basis == "mixed":
+            w("  Caveat: availability is not relevance (no task in the window may have needed the skill), and "
+              "sessions that recorded no skill list use today's filesystem, so for those sessions skills installed "
+              "later are over-counted. Pair with a trigger eval on tasks where the skill applies.\n")
+        else:
+            w("  Caveat: availability is not relevance (no task in the window may have needed the skill), and it "
+              "reflects today's filesystem, so sessions before install are over-counted. Pair with a trigger "
+              "eval on tasks where the skill applies.\n")
         for item in report["never_loaded"]:
             w(f"  {item['name']} (available in {item['sessions_available']} sessions)\n")
             _write_hints(out, item.get("hints", ()), "    ", "in the window")
@@ -1802,18 +1939,92 @@ def load_claude_history(claude_dir: str, trace_dir: str) -> tuple[TraceStore, in
     return store, imported, failed
 
 
-def _write_empty_hint(store: TraceStore, report: Mapping[str, Any], out: TextIO, from_claude: bool) -> None:
+_IMPORT_ERRORS = (OSError, ValueError, AttributeError, TypeError, KeyError)
+
+
+def load_copilot_history(copilot_dir: str, trace_dir: str) -> tuple[TraceStore, dict[str, int]]:
+    """Import every GitHub Copilot session under ``copilot_dir/session-state``.
+
+    Returns ``(store, counts)``; ``counts`` has ``recorded``, ``unrecorded``,
+    ``duplicate``, ``empty``, and ``failed``.
+    """
+    import functools
+
+    from .transcript_import import copilot_skill_paths, discover_copilot_sessions, import_copilot_session
+
+    paths = discover_copilot_sessions(copilot_dir)
+    importer = functools.partial(import_copilot_session, known_paths=copilot_skill_paths(paths))
+    return _load_history(paths, importer, trace_dir)
+
+
+def load_codex_history(codex_dir: str, trace_dir: str) -> tuple[TraceStore, dict[str, int]]:
+    """Import every Codex rollout under ``codex_dir/sessions`` and ``archived_sessions``.
+
+    ``counts`` also has ``not_rollout`` and ``review`` (skipped files).
+    """
+    from .transcript_import import discover_codex_rollouts, import_codex_rollout
+
+    return _load_history(discover_codex_rollouts(codex_dir), import_codex_rollout, trace_dir)
+
+
+def _load_history(paths: Iterable[Path], importer: Any, trace_dir: str) -> tuple[TraceStore, dict[str, int]]:
+    import contextlib
+    import io
+
+    store = TraceStore(trace_dir, use_workspace_env=False)
+    counts: dict[str, int] = {"recorded": 0, "unrecorded": 0, "duplicate": 0, "failed": 0}
+    for path in paths:
+        try:
+            # Silences the per-event redaction notices.
+            with contextlib.redirect_stderr(io.StringIO()):
+                status = importer(path, store)
+        except _IMPORT_ERRORS:
+            status = "failed"
+        counts[status] = counts.get(status, 0) + 1
+    return store, counts
+
+
+def _write_empty_hint(store: TraceStore, report: Mapping[str, Any], out: TextIO, from_history: bool) -> None:
     if report.get("sessions_skipped_unreadable"):
         out.write(f"Skipped {report['sessions_skipped_unreadable']} unreadable or malformed session(s).\n")
-    if from_claude or store.list_sessions():
+    if from_history or store.list_sessions():
         out.write("No sessions in the window. Widen it with --since, for example --since 90d.\n")
         return
     out.write(
         f"No sessions recorded in {store.base_dir}.\n"
         "  Claude Code history, no setup: agent-strace skills --from-claude\n"
+        "  GitHub Copilot history, no setup: agent-strace skills --from-copilot\n"
+        "  Codex history, no setup: agent-strace skills --from-codex\n"
         "  Record new sessions: agent-strace setup --cli claude|codex|gemini|cursor|copilot\n"
         "  Guide: https://github.com/Siddhant-K-code/agent-trace/blob/main/docs/skills.md\n"
     )
+
+
+_NO_STORE = "No persistent trace store was written; the temporary directory is deleted on exit."
+
+
+def _skip_note(counts: Mapping[str, int]) -> str:
+    skipped = []
+    if counts.get("not_rollout"):
+        skipped.append(f"{counts['not_rollout']} file(s) that are not Codex rollouts")
+    if counts.get("review"):
+        skipped.append(f"{counts['review']} approval review thread(s)")
+    if counts.get("empty"):
+        skipped.append(f"{counts['empty']} file(s) with no session records")
+    if counts.get("failed"):
+        skipped.append(f"{counts['failed']} unreadable")
+    if counts.get("duplicate"):
+        skipped.append(f"{counts['duplicate']} duplicate session ID(s)")
+    return f"; skipped {', '.join(skipped)}" if skipped else ""
+
+
+def _transcript_summary(agent: str, where: str, counts: Mapping[str, int]) -> str | None:
+    imported = counts.get("recorded", 0) + counts.get("unrecorded", 0)
+    if not imported:
+        return None
+    return (f"Read {imported} {agent} session(s) from {where}{_skip_note(counts)}. "
+            f"{counts.get('recorded', 0)} recorded their available skills; the rest use skill directories "
+            f"on disk now. {_NO_STORE}\n")
 
 
 def cmd_skills(args: argparse.Namespace) -> int:
@@ -1821,8 +2032,10 @@ def cmd_skills(args: argparse.Namespace) -> int:
     if min_sessions < 1:
         sys.stderr.write("--min-sessions must be at least 1\n")
         return 2
+    if getattr(args, "from_copilot", False) or getattr(args, "from_codex", False):
+        return _cmd_skills_transcripts(args, min_sessions)
     if not getattr(args, "from_claude", False):
-        return _run_skills(TraceStore(args.trace_dir), args, min_sessions, from_claude=False)
+        return _run_skills(TraceStore(args.trace_dir), args, min_sessions, from_history=False)
 
     import tempfile
 
@@ -1838,12 +2051,39 @@ def cmd_skills(args: argparse.Namespace) -> int:
         merged = imported - len(store.list_sessions())
         if merged > 0:
             note += f"; {merged} shared a session ID with another file and were merged into it"
-        sys.stderr.write(f"Read {imported} Claude Code session(s) from {projects}{note}. "
-                         "No persistent trace store was written; the temporary directory is deleted on exit.\n")
-        return _run_skills(store, args, min_sessions, from_claude=True)
+        sys.stderr.write(f"Read {imported} Claude Code session(s) from {projects}{note}. {_NO_STORE}\n")
+        return _run_skills(store, args, min_sessions, from_history=True)
 
 
-def _run_skills(store: TraceStore, args: argparse.Namespace, min_sessions: int, from_claude: bool) -> int:
+def _cmd_skills_transcripts(args: argparse.Namespace, min_sessions: int) -> int:
+    import tempfile
+
+    from .transcript_import import default_codex_dir, default_copilot_dir
+
+    if getattr(args, "from_copilot", False):
+        agent, flag = "GitHub Copilot", "--copilot-dir"
+        home = getattr(args, "copilot_dir", None) or default_copilot_dir()
+        where = str(Path(home).expanduser() / "session-state")
+        loader = load_copilot_history
+    else:
+        agent, flag = "Codex", "--codex-dir"
+        home = getattr(args, "codex_dir", None) or default_codex_dir()
+        where = str(Path(home) / "sessions")
+        loader = load_codex_history
+    with tempfile.TemporaryDirectory(prefix="agent-strace-skills-") as tmp:
+        store, counts = loader(home, tmp)
+        summary = _transcript_summary(agent, where, counts)
+        if summary is None:
+            note = _skip_note(counts)
+            note = f" ({note[2:]})" if note else ""
+            sys.stderr.write(f"No {agent} sessions found in {where}{note}. Set {flag} if {agent} uses "
+                             "another config directory.\n")
+            return 1
+        sys.stderr.write(summary)
+        return _run_skills(store, args, min_sessions, from_history=True)
+
+
+def _run_skills(store: TraceStore, args: argparse.Namespace, min_sessions: int, from_history: bool) -> int:
     workspace = getattr(args, "workspace", "") or ""
     extra_dirs = list(getattr(args, "skills_dirs", None) or [])
     as_json = getattr(args, "format", "text") == "json"
@@ -1881,9 +2121,9 @@ def _run_skills(store: TraceStore, args: argparse.Namespace, min_sessions: int, 
     if as_json:
         sys.stdout.write(json.dumps(report, indent=2) + "\n")
         if not report["sessions"]:
-            _write_empty_hint(store, report, sys.stderr, from_claude)
+            _write_empty_hint(store, report, sys.stderr, from_history)
     elif not report["sessions"]:
-        _write_empty_hint(store, report, sys.stdout, from_claude)
+        _write_empty_hint(store, report, sys.stdout, from_history)
     else:
         format_aggregate_text(report)
     return 0
@@ -1908,5 +2148,7 @@ __all__ = [
     "event_arguments",
     "extract_skill_commands",
     "load_claude_history",
+    "load_codex_history",
+    "load_copilot_history",
     "skill_hints",
 ]

@@ -32,7 +32,7 @@ import sys
 import time
 import unicodedata
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from .fileutil import fsync_directory as _fsync_directory
@@ -1041,6 +1041,57 @@ class TraceStore:
                     last_line = text.rstrip("\r\n").rsplit("\n", 1)[-1] if text.strip() else ""
                     event.prev_hash = hashlib.sha256(last_line.encode()).hexdigest() if last_line else ""
                 fh.write(event.to_json() + "\n")
+                fh.flush()
+
+    def append_events(self, session_id: str, events: Iterable[TraceEvent]) -> None:
+        """Append events in order under one lock and one read of the stream.
+
+        Same checks, redaction, and hash chain as calling ``append_event`` for
+        each event.  Events that carry a tenant ID go through ``append_event``.
+        """
+        events = list(events)
+        if not events:
+            return
+        if any(event.tenant_id for event in events):
+            for event in events:
+                self.append_event(session_id, event)
+            return
+        try:
+            session_id = validate_session_id(session_id)
+        except ValueError:
+            session_id = validate_stored_id(session_id, "stored session ID")
+            if not self._session_file(
+                session_id, "meta.json", "session metadata"
+            ).exists():
+                raise
+        for event in events:
+            if event.session_id and event.session_id != session_id:
+                raise ValueError("event session ID does not match target session")
+        f = self._session_file(session_id, "events.ndjson", "event stream")
+        with self.write_lock():
+            if self._session_was_erased(session_id):
+                raise ValueError(f"session {session_id} was erased and cannot accept events")
+            try:
+                meta = self.load_meta(session_id)
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                meta = None
+            tenant_id = validate_tenant_id(meta.tenant_id) if meta is not None and meta.tenant_id else ""
+            f.parent.mkdir(parents=True, exist_ok=True)
+            with open(f, "a+", encoding="utf-8", newline="\n") as fh:
+                fh.seek(0)
+                text = fh.read()
+                last_line = text.rstrip("\r\n").rsplit("\n", 1)[-1] if text.strip() else ""
+                lines = []
+                for event in events:
+                    event.session_id = session_id
+                    if tenant_id:
+                        event.tenant_id = tenant_id
+                    self._redact_event(event)
+                    if not event.prev_hash:
+                        event.prev_hash = hashlib.sha256(last_line.encode()).hexdigest() if last_line else ""
+                    last_line = event.to_json()
+                    lines.append(last_line + "\n")
+                fh.write("".join(lines))
                 fh.flush()
 
     def update_meta(
