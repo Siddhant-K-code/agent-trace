@@ -12,6 +12,11 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+try:  # keeps product telemetry off in this process and its children
+    import _no_telemetry  # noqa: F401
+except ImportError:  # pragma: no cover - run as a package module
+    from tests import _no_telemetry  # noqa: F401
+
 from agent_trace.attribution import (
     Attribution,
     _detect_agent_provider,

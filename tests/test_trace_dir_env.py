@@ -11,6 +11,11 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+try:  # keeps product telemetry off in this process and its children
+    import _no_telemetry  # noqa: F401
+except ImportError:  # pragma: no cover - run as a package module
+    from tests import _no_telemetry  # noqa: F401
+
 from agent_trace import cli, hooks
 from agent_trace.cli import build_parser, main
 from agent_trace.hooks import (

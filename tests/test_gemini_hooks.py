@@ -11,6 +11,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+try:  # keeps product telemetry off in this process and its children
+    import _no_telemetry  # noqa: F401
+except ImportError:  # pragma: no cover - run as a package module
+    from tests import _no_telemetry  # noqa: F401
+
 from agent_trace import __version__
 from agent_trace.cli import (
     _gemini_config_dir,

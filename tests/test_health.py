@@ -12,6 +12,11 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
+try:  # keeps product telemetry off in this process and its children
+    import _no_telemetry  # noqa: F401
+except ImportError:  # pragma: no cover - run as a package module
+    from tests import _no_telemetry  # noqa: F401
+
 from agent_trace import health
 from agent_trace.cli import _telemetry_command_properties, build_parser, main
 from agent_trace.disclosure import build_disclosure_preview

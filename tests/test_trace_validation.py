@@ -13,6 +13,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+try:
+    from _no_telemetry import without_telemetry
+except ImportError:  # pragma: no cover - run as a package module
+    from tests._no_telemetry import without_telemetry
+
 import agent_trace
 from agent_trace.assignment import MAX_JSON_BYTES
 from agent_trace.cli import build_parser
@@ -408,11 +413,11 @@ class TestTraceFileReads(unittest.TestCase):
         store.create_session(SessionMeta(session_id=session, agent_name="test"))
         for event_type in (EventType.SESSION_START, EventType.SESSION_END):
             store.append_event(session, TraceEvent(event_type=event_type, session_id=session))
-        env = {
+        env = without_telemetry({
             key: value
             for key, value in os.environ.items()
             if not key.startswith("AGENT_STRACE_") and key != "AGENT_TRACE_DIR"
-        }
+        })
         env["PYTHONPATH"] = os.pathsep.join(
             item for item in (str(SRC_ROOT), env.get("PYTHONPATH", "")) if item
         )
