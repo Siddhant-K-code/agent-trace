@@ -49,6 +49,10 @@ class TestInert(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(inert(text), text)
 
+    def test_printable_characters_next_to_an_escape_are_unchanged(self):
+        self.assertEqual(inert("café → 日本\x1b[2K"), "café → 日本\\x1b[2K")
+        self.assertEqual(inert("C:\\temp\n'\""), "C:\\temp\\n'\"")
+
     def test_every_result_is_printable(self):
         for code in range(0x10000):
             char = chr(code)
