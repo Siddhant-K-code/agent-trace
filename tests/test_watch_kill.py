@@ -1,8 +1,9 @@
 """Tests for a watch kill: SIGTERM, then the post-mortem and --on-death, once.
 
-Watchers and --rules rules kill through one path. The post-mortem and
---on-death follow only a SIGTERM that watch sent, and after it watch sends
-the agent no other signal.
+Watchers and --rules rules kill through one path. SIGCONT follows SIGTERM,
+so a stopped agent can act on it. The post-mortem and --on-death follow
+only a SIGTERM that watch sent, and after it watch does not kill, pause or
+resume the agent again.
 """
 
 import io
@@ -16,7 +17,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_trace import watch
-from agent_trace.approval import list_requests
+from agent_trace.approval import approve_request, deny_request, list_requests, load_request
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
 from agent_trace.watch import (
@@ -171,6 +172,7 @@ class KillTestCase(unittest.TestCase):
             ("alert-log", message),
             ("line", f"Killing agent process {PID}"),
             ("signal", PID, signal.SIGTERM),
+            ("signal", PID, signal.SIGCONT),
             ("sigkill-timer",),
             ("post-mortem", self.post_mortem),
             ("line", f"Post-mortem written to {self.post_mortem}"),
@@ -182,7 +184,7 @@ class KillTestCase(unittest.TestCase):
 class TestKill(KillTestCase):
     def test_rule_kill_runs_on_death_once_with_the_post_mortem(self):
         self.rule()
-        self.assertEqual(self.recorded("signal"), [signal.SIGTERM])
+        self.assertEqual(self.recorded("signal"), [signal.SIGTERM, signal.SIGCONT])
         self.assertEqual(self.recorded("post-mortem"), [self.post_mortem])
         self.assertEqual(self.reason(), _rule_msg())
         self.assertEqual(self.recorded("on-death"), [f"restart-agent --from {self.post_mortem}"])
@@ -270,9 +272,48 @@ class TestNotKilled(KillTestCase):
         self.not_permitted("rule")
 
 
+class TestKillPausedAgent(KillTestCase):
+    """SIGCONT follows SIGTERM, so a stopped agent can act on it, and the
+    kill ends the pause that watch holds."""
+
+    def test_kill_continues_an_agent_paused_by_a_rule(self):
+        self.rule("pause")
+        self.assertEqual(self.recorded("signal"), [signal.SIGSTOP])
+        self.calls.clear()
+        self.kill("watcher")
+        self.assertEqual(self.calls, self.killed_steps(COST_MSG))
+        self.assertFalse(self.state.paused)
+
+    def test_kill_leaves_a_pending_approval_request_pending(self):
+        # Deciding it later neither prints a pause line nor sends a signal.
+        for decision in ("approve", "deny"):
+            with self.subTest(decision=decision):
+                self.reset()
+                self.out = io.StringIO()
+                self.rule("require_approval")
+                request_id = self.state.approval_request_id
+                self.assertEqual(self.recorded("signal"), [signal.SIGSTOP])
+                self.calls.clear()
+                self.kill("watcher")
+                self.assertEqual(self.calls, self.killed_steps(COST_MSG))
+                self.assertFalse(self.state.paused)
+                self.assertIsNone(self.state.approval_request_id)
+                self.assertEqual(load_request(self.store, request_id).state, "pending")
+
+                self.calls.clear()
+                if decision == "approve":
+                    approve_request(self.store, request_id, resume_agent=False)
+                else:
+                    deny_request(self.store, request_id, kill_agent=False)
+                self.tick()
+                self.assertEqual(self.calls, [])
+                self.assertEqual(self.out.getvalue(), "")
+                self.assertFalse(self.state.paused)
+
+
 class TestKillOnce(KillTestCase):
     """After SIGTERM, later alerts are still shown, logged and sent, but
-    watch sends the agent no other signal."""
+    watch does not kill, pause or resume the agent again."""
 
     def run_watch(self, events: list[TraceEvent], max_cost: float) -> None:
         self.config.max_cost_dollars = max_cost
@@ -361,16 +402,19 @@ class TestKillOnce(KillTestCase):
         self.tick()
         self.marker.unlink()
         self.tick()
-        self.assertEqual(self.recorded("signal"), [signal.SIGTERM])
+        self.assertEqual(self.recorded("signal"), [signal.SIGTERM, signal.SIGCONT])
         self.assertFalse(self.state.paused)
 
-    def test_editor_resume_after_a_kill_sends_no_sigcont(self):
+    def test_editor_resume_after_a_kill_sends_no_second_sigcont(self):
         self.marker.write_text(SESSION)
         self.tick()
         self.kill("rule")
+        self.assertFalse(self.state.paused)
         self.marker.unlink()
         self.tick()
-        self.assertEqual(self.recorded("signal"), [signal.SIGSTOP, signal.SIGTERM])
+        self.assertEqual(
+            self.recorded("signal"), [signal.SIGSTOP, signal.SIGTERM, signal.SIGCONT],
+        )
 
     def test_later_alerts_that_signal_nothing_are_unchanged(self):
         # Guard: unchanged from main. They get no already-killed line.

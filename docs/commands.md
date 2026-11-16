@@ -567,12 +567,18 @@ the pause or kill, the post-mortem and the `--on-death` command. A channel that
 fails prints one line and watch goes on; a webhook, Slack or Teams line names
 only the URL's `scheme://host[:port]`.
 
-A kill sends the agent `SIGTERM`, and `SIGKILL` 5 seconds later. Only once
-`SIGTERM` is sent does watch write the post-mortem (`watchdog-postmortem.json`
-in the session directory, with the alert as its reason) and run `--on-death`.
-If it cannot send `SIGTERM`, watch prints `Agent pid PID was not killed:` and
-the reason, and writes no post-mortem and runs no `--on-death`. Watch kills
-the agent once: after `SIGTERM` it sends that PID no other signal. A later
+A kill sends the agent `SIGTERM`, then `SIGCONT`, and `SIGKILL` 5 seconds
+later. `SIGCONT` lets a stopped agent act on `SIGTERM`: a process stopped by a
+`pause` or `require_approval` rule, VS Code Pause, Ctrl-Z or `kill -STOP` runs
+no `SIGTERM` handler until it is continued, and on Linux even the default
+action waits. A stopped agent that ignores `SIGTERM` runs again until the
+`SIGKILL`. Only once `SIGTERM` is sent does watch write the post-mortem
+(`watchdog-postmortem.json` in the session directory, with the alert as its
+reason) and run `--on-death`. If it cannot send `SIGTERM`, watch prints
+`Agent pid PID was not killed:` and the reason, sends no other signal, and
+writes no post-mortem and runs no `--on-death`. Watch kills the agent once:
+apart from the `SIGCONT` and `SIGKILL` that follow `SIGTERM`, it sends that
+PID no other signal. A later
 `kill`, `pause` or `require_approval` alert is printed, logged and sent as
 usual, plus the line `Agent pid PID was already killed; no signal sent`, and
 a `require_approval` alert creates no approval request. VS Code Pause and
@@ -715,7 +721,9 @@ A `pause` rule keeps the agent stopped until a human resumes it: send
 `require_approval` rule keeps it stopped until the request is decided; the
 VS Code Resume command does not release it. Approving releases the pause.
 Denying leaves the agent stopped like a `pause` rule, because an agent that
-handles `SIGTERM` only acts on it after `SIGCONT`. While watch holds a pause,
+handles `SIGTERM` only acts on it after `SIGCONT`. A kill ends any pause, since
+it sends `SIGCONT` right after `SIGTERM`; a pending request stays pending.
+While watch holds a pause,
 the idle timeout does not count; the pause is dropped if the agent process
 exits. If watch cannot send `SIGSTOP` (the PID is gone or watch may not
 signal it), it prints and logs `Agent pid PID was not paused: REASON` and
