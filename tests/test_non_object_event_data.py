@@ -38,7 +38,7 @@ import agent_trace
 from agent_trace.cli import main
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
-from agent_trace.watch import StreamConfig, WatcherConfig, watch_session
+from agent_trace.watch import NannyRule, StreamConfig, WatcherConfig, watch_session
 
 GOOD = "a1b2c3d4e5f60001"
 BAD = "b2c3d4e5f6a70002"
@@ -874,6 +874,29 @@ class TestWatchSkipsLiveNonObjectEvents(unittest.TestCase):
                 ])
                 self.assertEqual(self._skipped("llm_request", "string") in output, skipped)
                 self.assertIn(f"[watch] Session ended ({len(before) + 2} events,", output)
+
+    def test_file_read_is_skipped_only_while_a_path_rule_can_fire(self):
+        env = 'file_path matches "**/production.env"'
+        cases = [
+            ("no rules", None, False),
+            ("file_path rule", [NannyRule(name="env", condition=env, action="alert")], True),
+            (
+                "file_path rule that already fired",
+                [NannyRule(name="env", condition=env, action="alert", fired=True)],
+                False,
+            ),
+            ("metric rule", [NannyRule(name="n", condition="files_modified > 0", action="alert")], False),
+        ]
+        for label, rules, skipped in cases:
+            with self.subTest(case=label):
+                with mock.patch("agent_trace.watch._dispatch_alert") as alert:
+                    output = self._watch([
+                        _live_event(EventType.FILE_READ, "plain text data"),
+                        _live_event(EventType.SESSION_END, {"exit_code": 0}, ts=3.0),
+                    ], nanny_rules=rules)
+                self.assertEqual(self._skipped("file_read", "string") in output, skipped)
+                self.assertIn("[watch] Session ended (2 events,", output)
+                alert.assert_not_called()
 
     def test_events_that_no_check_reads_are_not_skipped(self):
         for event_type in (EventType.USER_PROMPT, EventType.ERROR, EventType.SESSION_END):

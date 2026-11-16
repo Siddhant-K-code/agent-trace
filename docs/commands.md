@@ -532,7 +532,7 @@ Live session monitor with kill-switch rules.
 | `--on-death CMD` | Shell command that watch runs once, after it sends the agent `SIGTERM`, and only if it sent it: not on `--dry-run`, without `--agent-pid`, or when the signal could not be sent (see below). `{post_mortem_path}` is replaced with the path of the post-mortem JSON file, or with nothing if watch could not write it |
 | `--compaction-checkpoint` | Write a recovery checkpoint before context saturation |
 | `--checkpoint-at RATIO` | Context fill ratio that triggers a checkpoint (default: `0.80`) |
-| `--policy FILE` | Scope policy file to enforce (default: `.agent-scope.json`) |
+| `--policy FILE` | Scope policy file to enforce (default: `.agent-scope.json`). Watch reads its `files.write.deny` globs and alerts `ScopeWatcher: write to PATH denied by policy` once for each denied path that an edit names, from any edit tool, `file_write` event or `apply_patch` patch. PATH is resolved as described in **Paths and edits** below |
 | `--rules FILE_OR_BUILTINS` | A JSON or YAML rules file (see **Rules file format** below), or comma-separated built-in rules such as `mcp-poisoning,loop:3/10,budget:5,timeout:30m,cognitive-debt:0.8` (see **Built-in rules** below). A value that names an existing file is a rules file. Watch refuses a value it cannot use, with one line and exit 1, before it reads the session or writes anything |
 | `--stream-to URL` | POST events as NDJSON to this `http://` or `https://` URL while watching. Watch refuses at startup, with one line and exit 1, a URL with no host, a bad port, spaces or control characters, or a user name or password. A failed POST prints one line that names only the URL's `scheme://host[:port]`, and watch goes on. Redirects are not followed, so pass the final URL. When watch stops, it waits up to 15 seconds for the last POST; if the wait runs out or Ctrl-C stops it, one line gives the number of events not confirmed sent |
 | `--stream-otlp` | With `--stream-to`, POST OTLP/HTTP JSON spans instead of NDJSON. Trailing slashes are dropped from the URL path and `/v1/traces` is appended unless the path already ends with it; the query is kept. Pass the collector base URL, such as `http://localhost:4318`. See [Live OTLP streaming](production.md#live-otlp-streaming) |
@@ -718,17 +718,55 @@ has only these keys, and each value is a string:
 A condition is one of:
 
 - `METRIC OP NUMBER`. METRIC is `cost_usd` (estimated spend in dollars),
-  `files_modified` (distinct files written or edited), `duration_minutes`
-  (minutes since watch started) or `consecutive_test_failures` (tool results
-  in a row that read as failures). OP is `>`, `>=`, `<`, `<=` or `==`. NUMBER
-  is a plain number such as `5` or `0.50`, with no sign, `$`, exponent or
-  unit.
+  `files_modified` (distinct files that edits named; see **Paths and edits**
+  below), `duration_minutes` (minutes since watch started) or
+  `consecutive_test_failures` (tool results in a row that read as failures).
+  OP is `>`, `>=`, `<`, `<=` or `==`. NUMBER is a plain number such as `5` or
+  `0.50`, with no sign, `$`, exponent or unit.
 - `file_path matches "GLOB"`, or the same with single quotes. It fires on a
-  tool call whose `file_path` or `path` argument matches GLOB, a shell-style
-  pattern in which `*` also matches `/`. GLOB must not be empty.
+  tool call, `file_write` event or `file_read` event that names a path
+  matching GLOB, a shell-style pattern in which `*` also matches `/`. Reads
+  count as well as edits. GLOB must not be empty.
 
 Extra spaces between the parts are allowed. Nothing may follow the number or
 the closing quote, so one condition cannot combine two tests.
+
+**Paths and edits.** `file_path matches`, `files_modified`, the
+`cognitive-debt` built-in and `--policy` read the file paths each event
+names:
+
+- A tool call names each of its `file_path`, `path`, `absolute_path`,
+  `filePath`, `target_file`, `notebook_path` and `uri` arguments, also when
+  the arguments are stored as a JSON string. An `apply_patch` call whose
+  arguments are the patch text, as GitHub Copilot CLI stores them, names the
+  file on each `*** Add File:`, `*** Update File:`, `*** Delete File:` and
+  `*** Move to:` line, so a move names both files.
+- A `file_write` or `file_read` event names its `path`, `file_path` or `uri`.
+
+An edit is a `file_write` event or a call to `apply_patch`, `create`,
+`delete_file`, `edit`, `edit_file`, `file_edit`, `insert`, `multiedit`,
+`notebookedit`, `patch`, `replace`, `search_replace`, `str_replace`,
+`str_replace_based_edit_tool`, `str_replace_editor`, `write`, `write_file`
+or `write_to_file`, in any case. A `str_replace_editor` or
+`str_replace_based_edit_tool` call with `command` `view` is a read.
+`files_modified`, `cognitive-debt` and `--policy` count edits only;
+`file_path matches` fires on reads too. Shell commands are never edits, so a
+file written by `echo x > f` or `sed -i` is not counted.
+
+A relative path resolves against the `cwd` of the latest `session_start`
+event that names an absolute one, including one written before watch
+started, so a resumed session that moved to another directory resolves
+against the new one. Paths are joined and normalized as text: `.` and `..`
+collapse, symlinks are not followed and the file system is not read. A
+Windows cwd such as `C:\repo` works too, and its paths come out with `/`,
+such as `C:/repo/a.py`. When no `session_start` names an absolute cwd, a
+relative path is matched as stored. Watch never falls back to its own
+directory or to the `working_dir` saved in the session metadata: watch may
+run elsewhere, and a wrong base could kill the agent for a file it never
+touched. `file_path matches` and `--policy` test the resolved
+path and the path as stored. `files_modified` counts distinct resolved
+paths, so `/app/a.py` and `a.py` with cwd `/app` count once. A URI such as
+`file:///app/x` and a path that starts with `~` are matched as stored.
 
 A file whose name ends in `.json`, or whose first character other than
 whitespace is `{` or `[`, is read as JSON. Any other file is read as YAML,
@@ -2150,7 +2188,8 @@ stored.
 `watch` keeps running when a live event that one of its checks reads has
 non-object data. It skips the checks for that event, prints one line such as
 `[watch] Skipped checks for one tool_call event because its data is a string,
-not an object.` to stderr, and still counts the event. `watch
+not an object.` to stderr, and still counts the event. A `file_read` event is
+read only while a `file_path matches` rule that has not fired is active. `watch
 --compaction-checkpoint` refuses at startup when the session already has an
 event with non-object data. `mcp-scan --watch` refuses at startup in the same
 way and skips live events with non-object data with an `[mcp-scan]` line.

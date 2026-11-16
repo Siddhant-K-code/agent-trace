@@ -2,6 +2,7 @@
 
 import os
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -61,6 +62,55 @@ class TestSessionPaths(unittest.TestCase):
         call = _bash("cd /tmp/atdemo && cat src/a.py > out.txt")
         self.assertEqual(shell_reads(call, cwd), ["src/a.py"])
         self.assertEqual(shell_writes(call, cwd), ["out.txt"])
+
+
+class TestResolvePath(unittest.TestCase):
+    """watch resolves relative paths as text against an absolute session cwd."""
+
+    def test_join_and_normalize(self):
+        from agent_trace.session_paths import resolve_path
+
+        cases = (
+            ("a.py", "/app", "/app/a.py"),
+            ("./src/./a.py", "/app", "/app/src/a.py"),
+            ("../a.py", "/app/src", "/app/a.py"),
+            ("/app/src/../a.py", "", "/app/a.py"),
+            ("/app//src/a.py", "/other", "/app/src/a.py"),
+            ("a.py", "", "a.py"),
+            ("", "/app", ""),
+            ("file:///app/a.py", "/app", "file:///app/a.py"),
+            ("~/a.py", "/app", "~/a.py"),
+            ("config\\production.env", "C:\\repo", "C:/repo/config/production.env"),
+            ("..\\a.py", "C:\\repo\\src", "C:/repo/a.py"),
+            ("C:\\repo\\src\\..\\a.py", "/app", "C:/repo/a.py"),
+            ("\\\\server\\share\\a.py", "", "//server/share/a.py"),
+            ("a.py", "\\\\server\\share", "//server/share/a.py"),
+        )
+        for path, cwd, expected in cases:
+            with self.subTest(path=path, cwd=cwd):
+                self.assertEqual(resolve_path(path, cwd), expected)
+
+    def test_symlinks_are_not_followed(self):
+        from agent_trace.session_paths import resolve_path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.realpath(tmp)
+            os.makedirs(os.path.join(root, "real", "sub"))
+            try:
+                os.symlink(os.path.join(root, "real", "sub"), os.path.join(root, "link"))
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"cannot create a symlink: {exc}")
+            self.assertEqual(resolve_path("link/../a.py", root), f"{root}/a.py")
+
+    def test_absolute_cwd(self):
+        from agent_trace.session_paths import absolute_cwd
+
+        for value in ("/app", "C:\\repo", "C:/repo", "\\\\server\\share"):
+            with self.subTest(value=value):
+                self.assertEqual(absolute_cwd(value), value)
+        for value in ("app", "", "C:repo", "~/app", None, 42, ["/app"]):
+            with self.subTest(value=value):
+                self.assertEqual(absolute_cwd(value), "")
 
 
 class TestSessionFileActivity(unittest.TestCase):

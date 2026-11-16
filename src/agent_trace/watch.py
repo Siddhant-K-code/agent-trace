@@ -50,11 +50,15 @@ from typing import Any, TextIO
 from .cost import TokenCounter, _usage_dollars
 from .compaction import CompactionCheckpointWatcher
 from .event_data import (
+    EDIT_TOOLS,
+    PATH_KEYS,
     NonObjectEventDataError,
+    event_arguments,
     left_out_event_warning,
-    object_field,
+    patch_paths,
     skipped_event_warning,
     str_field,
+    tool_arguments,
 )
 from .http_post import (
     no_redirect_opener as _stream_opener,
@@ -76,6 +80,7 @@ from .project_budget import (
     project_budget_keys,
     project_budget_status,
 )
+from .session_paths import absolute_cwd, resolve_path
 from .store import TraceStore
 
 
@@ -630,15 +635,29 @@ class NannyRule:
             _parse_nanny_condition(self.condition)
         )
 
-    def evaluate(self, metrics: dict[str, Any], event: TraceEvent | None = None) -> bool:
-        """Return True if this rule's condition is satisfied."""
-        if self._metric == "file_path" and self._op == "matches" and event:
-            if event.event_type == EventType.TOOL_CALL:
-                args = object_field(event.data, "arguments", {}) or {}
-                path = str(
-                    args.get("file_path") or args.get("path") or ""
-                )
-                return bool(path and fnmatch.fnmatch(path, self._pattern))
+    @property
+    def reads_paths(self) -> bool:
+        """True for a ``file_path matches`` rule, which reads the paths events name."""
+        return self._metric == "file_path" and self._op == "matches"
+
+    def evaluate(
+        self,
+        metrics: dict[str, Any],
+        event: TraceEvent | None = None,
+        cwd: str = "",
+    ) -> bool:
+        """Return True if this rule's condition is satisfied.
+
+        A ``file_path matches`` rule tests each path the event names (see
+        _event_paths), as given and resolved against *cwd*, the session's
+        working directory.
+        """
+        if self.reads_paths and event:
+            for path in _event_paths(event):
+                if fnmatch.fnmatch(resolve_path(path, cwd), self._pattern) or fnmatch.fnmatch(
+                    path, self._pattern,
+                ):
+                    return True
             return False
 
         if not self._metric or self._threshold is None:
@@ -1621,6 +1640,9 @@ class WatchState:
     # does not retry until the marker is removed, so it says so once.
     editor_pause_failed: bool = False
     session_id: str = ""
+    # Working directory of the latest SESSION_START that names an absolute
+    # one. Relative paths in tool calls resolve against it.
+    session_cwd: str = ""
     mcp_scan_events: list[TraceEvent] = field(default_factory=list)
 
     @property
@@ -1639,21 +1661,83 @@ class WatchState:
         }
 
 
+# FILE_WRITE and FILE_READ events name their file under these keys.
+_FILE_EVENT_PATH_KEYS = ("path", "file_path", "uri")
+# Editor tools that only read the file when their command is "view".
+_VIEW_COMMAND_TOOLS = frozenset({"str_replace_editor", "str_replace_based_edit_tool"})
+
+
+def _event_paths(event: TraceEvent) -> list[str]:
+    """Return the file paths an event names, as stored, in order, once each.
+
+    A tool call names each PATH_KEYS argument and, for apply_patch with the
+    patch stored as text, each file the patch adds, updates, deletes or moves
+    to. A FILE_WRITE or FILE_READ event names its path, file_path or uri.
+    Other events name none.
+    """
+    if not isinstance(event.data, Mapping):
+        return []
+    if event.event_type in (EventType.FILE_WRITE, EventType.FILE_READ):
+        values = [event.data.get(key) for key in _FILE_EVENT_PATH_KEYS]
+    elif event.event_type == EventType.TOOL_CALL:
+        args, raw = tool_arguments(event)
+        values = [args.get(key) for key in PATH_KEYS]
+        if raw is not None and str_field(event.data, "tool_name", "").lower() == "apply_patch":
+            values.extend(patch_paths(raw))
+    else:
+        return []
+    return list(dict.fromkeys(v for v in values if isinstance(v, str) and v))
+
+
+def _is_edit(event: TraceEvent) -> bool:
+    """Return True if *event* writes, edits, creates or deletes the files it names.
+
+    That is a FILE_WRITE event, or a call to an EDIT_TOOLS tool or
+    str_replace. An editor call whose command is "view" only reads. Shell
+    commands are never edits, even when they write files.
+    """
+    if event.event_type == EventType.FILE_WRITE:
+        return True
+    if event.event_type != EventType.TOOL_CALL or not isinstance(event.data, Mapping):
+        return False
+    name = str_field(event.data, "tool_name", "").lower()
+    if name in _VIEW_COMMAND_TOOLS:
+        return tool_arguments(event)[0].get("command") != "view"
+    return name in EDIT_TOOLS or name == "str_replace"
+
+
 def _event_key(event: TraceEvent) -> str:
-    """Stable string key for an event (for loop detection)."""
+    """Stable string key for an event (for loop detection).
+
+    A tool call's key holds a hash of its arguments as stored, under
+    ``arguments`` or else ``tool_input``, so calls with different arguments
+    get different keys. Arguments stored as text, such as an apply_patch
+    patch, are hashed as that text. A call with neither key hashes ``{}``.
+    """
     if event.event_type == EventType.TOOL_CALL:
-        name = str_field(event.data, "tool_name", "?")
-        args = object_field(event.data, "arguments", {}) or {}
-        arg_text = json.dumps(args, sort_keys=True, default=str)
-        arg_hash = hashlib.sha256(arg_text.encode("utf-8")).hexdigest()[:12]
+        data = event.data if isinstance(event.data, Mapping) else {}
+        name = str_field(data, "tool_name", "?")
+        if "arguments" in data:
+            stored = data["arguments"]
+        else:
+            stored = data.get("tool_input", {})
+        if isinstance(stored, str):
+            arg_text = stored
+        else:
+            arg_text = json.dumps(stored, sort_keys=True, default=str)
+        # JSON text can hold a lone surrogate, which strict UTF-8 refuses.
+        arg_hash = hashlib.sha256(arg_text.encode("utf-8", "surrogatepass")).hexdigest()[:12]
+        args, raw = tool_arguments(event)
         preview = str(
             args.get("command")
             or args.get("file_path")
             or args.get("path")
             or args.get("url")
             or ""
-        )[:40]
-        return f"{name}:{preview}:{arg_hash}"
+        )
+        if not preview and raw is not None and name.lower() == "apply_patch":
+            preview = next(iter(patch_paths(raw)), "")
+        return f"{name}:{preview[:40]}:{arg_hash}"
     return event.event_type.value
 
 
@@ -2012,20 +2096,17 @@ def check_event(
     # --- Cost accumulation ---
     state.estimated_cost += _usage_dollars(state.token_counter.usage(event), "sonnet")
 
+    # --- Track the session's working directory ---
+    if event.event_type == EventType.SESSION_START and isinstance(event.data, Mapping):
+        _cwd = absolute_cwd(event.data.get("cwd"))
+        if _cwd:
+            state.session_cwd = _cwd
+
     # --- Track files modified (for nanny rules) ---
-    if event.event_type == EventType.TOOL_CALL:
-        _name = str_field(event.data, "tool_name", "").lower()
-        _args = object_field(event.data, "arguments", {}) or {}
-        if _name in ("write", "edit", "create", "str_replace"):
-            _path = str(_args.get("file_path") or _args.get("path") or "")
-            if _path and _path not in state.files_modified_set:
-                state.files_modified_set.add(_path)
-                state.files_modified = len(state.files_modified_set)
-    elif event.event_type == EventType.FILE_WRITE:
-        _path = str(event.data.get("path") or event.data.get("file_path") or event.data.get("uri") or "")
-        if _path and _path not in state.files_modified_set:
-            state.files_modified_set.add(_path)
-            state.files_modified = len(state.files_modified_set)
+    if _is_edit(event):
+        for _path in _event_paths(event):
+            state.files_modified_set.add(resolve_path(_path, state.session_cwd))
+        state.files_modified = len(state.files_modified_set)
 
     # --- Track consecutive test failures (for nanny rules) ---
     if event.event_type == EventType.TOOL_RESULT:
@@ -2047,7 +2128,7 @@ def check_event(
     # --- Retry detection (bash commands) ---
     if event.event_type == EventType.TOOL_CALL:
         name = str_field(event.data, "tool_name", "").lower()
-        args = object_field(event.data, "arguments", {}) or {}
+        args = event_arguments(event)
         if name == "bash":
             cmd = str(args.get("command", "")).strip()
             if cmd:
@@ -2117,23 +2198,25 @@ def check_event(
             state.fired.add(key_id)
             violations.append(f"LoopWatcher: {loop_msg}")
 
-    # --- Scope check (file operations) ---
-    if event.event_type == EventType.TOOL_CALL:
+    # --- Scope check (file edits) ---
+    if _is_edit(event):
         scope_path = Path(config.scope_policy)
         if scope_path.exists():
             try:
                 from .audit import Policy, _glob_match
                 policy = Policy.load(scope_path)
-                if policy:
-                    name = event.data.get("tool_name", "").lower()
-                    args = event.data.get("arguments", {}) or {}
-                    path = str(args.get("file_path") or args.get("path") or "")
-                    if path and name in ("write", "edit", "create"):
-                        if policy.file_write_deny and _glob_match(path, policy.file_write_deny):
-                            key_id = f"scope:{path}"
-                            if key_id not in state.fired:
-                                state.fired.add(key_id)
-                                violations.append(f"ScopeWatcher: write to {path} denied by policy")
+                if policy and policy.file_write_deny:
+                    for path in _event_paths(event):
+                        resolved = resolve_path(path, state.session_cwd)
+                        if not (
+                            _glob_match(resolved, policy.file_write_deny)
+                            or _glob_match(path, policy.file_write_deny)
+                        ):
+                            continue
+                        key_id = f"scope:{resolved}"
+                        if key_id not in state.fired:
+                            state.fired.add(key_id)
+                            violations.append(f"ScopeWatcher: write to {resolved} denied by policy")
             except Exception:
                 pass
 
@@ -2157,7 +2240,7 @@ def check_event(
     # --- Per-operation enforcement rules ---
     if event.event_type == EventType.TOOL_CALL and config.operation_rules:
         tool_name = str_field(event.data, "tool_name", "").lower()
-        args = object_field(event.data, "arguments", {}) or {}
+        args = event_arguments(event)
         # Derive the target string: command for bash, path for file ops
         if tool_name == "bash":
             target = str(args.get("command", "")).strip()
@@ -2224,9 +2307,16 @@ def _live_checks_read_data(
     event: TraceEvent,
     state: WatchState,
     checkpoint_mode: bool = False,
+    path_rules: bool = False,
 ) -> bool:
-    """Return True if checking *event* now would read its data as an object."""
+    """Return True if checking *event* now would read its data as an object.
+
+    path_rules: a ``file_path matches`` rule that has not fired is active, so
+    the paths of FILE_READ events are read too.
+    """
     if event.event_type in _LIVE_DATA_EVENT_TYPES:
+        return True
+    if path_rules and event.event_type == EventType.FILE_READ:
         return True
     if checkpoint_mode and event.event_type in _CHECKPOINT_DATA_EVENT_TYPES:
         return True
@@ -2250,6 +2340,45 @@ def _live_checks_read_data(
 # ---------------------------------------------------------------------------
 
 _IDLE_SENTINEL = object()  # yielded when poll_interval elapses with no new event
+
+
+class _StartupCwd:
+    """First item _tail_events yields when the file names a working directory.
+
+    cwd is the absolute cwd of the latest SESSION_START written before watch
+    started.
+    """
+
+    def __init__(self, cwd: str) -> None:
+        self.cwd = cwd
+
+
+def _startup_session_cwd(events_file: Path, end: int) -> str:
+    """Return the cwd of the latest SESSION_START in the first *end* bytes.
+
+    Only lines that hold ``"session_start"`` are parsed, so a large file costs
+    one read. A line that runs past *end* is not read; the tail starts there.
+    Returns "" when no SESSION_START names an absolute cwd.
+    """
+    cwd = ""
+    read = 0
+    try:
+        with open(events_file, "rb") as f:
+            for line in f:
+                read += len(line)
+                if read > end:
+                    break
+                if b'"session_start"' not in line:
+                    continue
+                try:
+                    event = TraceEvent.from_json(line.decode("utf-8"))
+                except Exception:
+                    continue
+                if event.event_type == EventType.SESSION_START and isinstance(event.data, Mapping):
+                    cwd = absolute_cwd(event.data.get("cwd")) or cwd
+    except OSError:
+        return ""
+    return cwd
 
 
 def _editor_wants_pause(store: "TraceStore", session_id: str) -> bool | None:
@@ -2496,10 +2625,18 @@ def _tail_events(events_file: Path, poll_interval: float = 0.5):
 
     Yields _IDLE_SENTINEL when no new line arrived during the poll interval,
     allowing callers to implement idle-timeout logic without blocking.
+
+    Events already in the file are not yielded. When one of them is a
+    SESSION_START with an absolute cwd, the first item is a _StartupCwd with
+    the latest such cwd. It is read up to the offset the tail starts from, so
+    no event falls between the two.
     """
     with open(events_file, "r", encoding="utf-8") as f:
         # Skip existing content — start from the end of the file
-        f.seek(0, 2)
+        end = f.seek(0, 2)
+        cwd = _startup_session_cwd(events_file, end)
+        if cwd:
+            yield _StartupCwd(cwd)
         while True:
             line = f.readline()
             if line:
@@ -2627,6 +2764,10 @@ def watch_session(
 
     try:
         for item in _tail_events(events_file, poll_interval=poll_interval):
+            if isinstance(item, _StartupCwd):
+                state.session_cwd = item.cwd
+                continue
+
             now = time.time()
             if now - last_heartbeat_time >= 5.0:
                 write_heartbeat(store, session_id, agent_pid=state.agent_pid)
@@ -2669,6 +2810,9 @@ def watch_session(
 
             if not isinstance(event.data, Mapping) and _live_checks_read_data(
                 event, state, checkpoint_mode=checkpoint_watcher is not None,
+                path_rules=any(
+                    rule.reads_paths and not rule.fired for rule in nanny_rules or ()
+                ),
             ):
                 out.write(skipped_event_warning("watch", event))
                 out.flush()
@@ -2723,7 +2867,7 @@ def watch_session(
                 for rule in nanny_rules:
                     if rule.fired:
                         continue
-                    if rule.evaluate(metrics, event):
+                    if rule.evaluate(metrics, event, cwd=state.session_cwd):
                         rule.fired = True
                         _dispatch_nanny_rule(
                             rule, event, store, session_id,

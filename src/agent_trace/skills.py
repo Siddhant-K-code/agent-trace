@@ -18,7 +18,6 @@ reported.
 from __future__ import annotations
 
 import argparse
-import ast
 import json
 import math
 import os
@@ -32,6 +31,11 @@ from pathlib import Path
 from typing import Any, Iterable, TextIO
 
 from .cost import parse_since
+from .event_data import (
+    EDIT_TOOLS as _EDIT_TOOLS,
+    PATH_KEYS as _PATH_KEYS,
+    event_arguments,
+)
 from .models import EventType, SessionMeta, TraceEvent
 from .review import is_test_argv
 from .shell_split import is_break, split_tokens
@@ -162,29 +166,8 @@ _SKILL_FILE = "SKILL.md"
 _MAX_RESOURCE_FILES = 500
 _MAX_REPORTED_PATHS = 10
 _MAX_COMMAND_CHARS = 100_000
-_MAX_ARGUMENT_CHARS = 200_000
 
 _SKILL_TOOLS = {"skill": ("skill", "command", "name"), "activate_skill": ("name", "skill")}
-_EDIT_TOOLS = frozenset({
-    "apply_patch",
-    "create",
-    "delete_file",
-    "edit",
-    "edit_file",
-    "file_edit",
-    "insert",
-    "multiedit",
-    "notebookedit",
-    "patch",
-    "replace",
-    "search_replace",
-    "str_replace_based_edit_tool",
-    "str_replace_editor",
-    "write",
-    "write_file",
-    "write_to_file",
-})
-_PATH_KEYS = ("file_path", "path", "absolute_path", "filePath", "target_file", "notebook_path", "uri")
 _SHELL_FENCE_LANGS = frozenset({"bash", "sh", "shell", "zsh", "console", "shell-session", "text"})
 _LEADING_KEYWORDS = frozenset({"do", "then", "else", "elif", "if", "while", "until", "!", "{", "}", "time", "done", "fi", "esac"})
 _SKIPPED_KEYWORDS = frozenset({"for", "case", "select", "function"})
@@ -786,38 +769,6 @@ def _looks_like_path(token: str) -> bool:
 # --------------------------------------------------------------------------- #
 # Event helpers
 # --------------------------------------------------------------------------- #
-
-
-def _parse_mapping(value: str) -> Mapping[str, Any] | None:
-    text = value.strip()
-    if not text.startswith("{") or len(text) > _MAX_ARGUMENT_CHARS:
-        return None
-    try:
-        parsed = json.loads(text)
-    except (ValueError, RecursionError, MemoryError):
-        try:
-            parsed = ast.literal_eval(text)
-        except (ValueError, SyntaxError, MemoryError, RecursionError, TypeError):
-            return None
-    return parsed if isinstance(parsed, Mapping) else None
-
-
-def event_arguments(event: TraceEvent) -> Mapping[str, Any]:
-    """Return tool arguments from ``arguments`` or ``tool_input``.
-
-    Some adapters store arguments as a serialized mapping (JSON or a Python
-    literal); those are parsed without evaluating code.
-    """
-    data = event.data if isinstance(event.data, Mapping) else {}
-    for key in ("arguments", "tool_input"):
-        value = data.get(key)
-        if isinstance(value, Mapping):
-            return value
-        if isinstance(value, str):
-            parsed = _parse_mapping(value)
-            if parsed is not None:
-                return parsed
-    return {}
 
 
 def _coerce_timestamp(value: object) -> float | None:

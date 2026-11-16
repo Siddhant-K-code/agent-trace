@@ -1,5 +1,6 @@
 """Tests for the shared event data checks and typed field readers."""
 
+import json
 import types
 import unittest
 
@@ -260,6 +261,99 @@ class TestTypedFieldReaders(unittest.TestCase):
                 with self.subTest(data=data, reader=reader.__name__):
                     with self.assertRaises(AttributeError):
                         reader(data, "key", _MISSING)
+
+
+# The arguments GitHub Copilot CLI 1.0.112 sent for an apply_patch call.
+_PATCH = (
+    "*** Begin Patch\n*** Add File: notes/hello.txt\n+hi\n*** Delete File: README.md\n"
+    "*** Add File: README.md\n+demo\n*** End Patch\n"
+)
+
+
+def _tool_call(data) -> TraceEvent:
+    return TraceEvent(event_type=EventType.TOOL_CALL, timestamp=1.0, data=data)
+
+
+class TestToolArguments(unittest.TestCase):
+    """tool_arguments decodes the stored arguments and keeps the text stored."""
+
+    def test_objects_serialized_objects_and_text(self):
+        from agent_trace.event_data import tool_arguments
+
+        args = {"path": "/app/a.py"}
+        cases = (
+            ("object", {"arguments": args}, (args, None)),
+            ("JSON text", {"arguments": json.dumps(args)}, (args, json.dumps(args))),
+            ("Python literal", {"arguments": repr(args)}, (args, repr(args))),
+            ("patch text", {"arguments": _PATCH}, ({}, _PATCH)),
+            ("tool_input object", {"tool_input": args}, (args, None)),
+            ("tool_input JSON text", {"tool_input": json.dumps(args)}, (args, json.dumps(args))),
+            ("patch text, then a tool_input object", {"arguments": _PATCH, "tool_input": args}, (args, _PATCH)),
+            ("array text", {"arguments": "[1]"}, ({}, "[1]")),
+            ("number", {"arguments": 42}, ({}, None)),
+            ("absent", {}, ({}, None)),
+        )
+        for label, data, expected in cases:
+            with self.subTest(label):
+                self.assertEqual(tool_arguments(_tool_call({"tool_name": "t", **data})), expected)
+
+    def test_data_that_is_not_an_object(self):
+        from agent_trace.event_data import tool_arguments
+
+        for data in ("text", 42, None, ["arguments"]):
+            with self.subTest(data=data):
+                self.assertEqual(tool_arguments(_tool_call(data)), ({}, None))
+
+    def test_over_the_limit_only_json_text_is_decoded(self):
+        from agent_trace.event_data import MAX_ARGUMENT_CHARS, tool_arguments
+
+        args = {"path": "/app/a.py", "content": "x" * MAX_ARGUMENT_CHARS}
+        text = json.dumps(args)
+        self.assertEqual(tool_arguments(_tool_call({"arguments": text})), (args, text))
+        literal = repr(args)
+        self.assertTrue(literal.startswith("{'path': "), literal[:20])
+        self.assertEqual(tool_arguments(_tool_call({"arguments": literal})), ({}, literal))
+
+
+class TestPatchPaths(unittest.TestCase):
+    """patch_paths reads the path on each patch marker line, once each."""
+
+    def test_marker_lines(self):
+        from agent_trace.event_data import patch_paths
+
+        cases = (
+            ("captured Copilot patch", _PATCH, ["notes/hello.txt", "README.md"]),
+            (
+                "move",
+                "*** Begin Patch\n*** Update File: src/old.env\n*** Move to: config/new.env\n"
+                "@@\n-a\n+b\n*** End Patch\n",
+                ["src/old.env", "config/new.env"],
+            ),
+            ("CRLF", "*** Begin Patch\r\n*** Add File: a.py\r\n+x\r\n*** End Patch\r\n", ["a.py"]),
+            ("no Begin Patch", "*** Update File: a.py\n@@\n-a\n+b\n", ["a.py"]),
+            ("trailing spaces", "*** Add File: a.py  \n", ["a.py"]),
+            ("space in the path", "*** Add File: docs/my notes.md\n", ["docs/my notes.md"]),
+        )
+        for label, text, expected in cases:
+            with self.subTest(label):
+                self.assertEqual(patch_paths(text), expected)
+
+    def test_content_and_malformed_lines_name_no_path(self):
+        from agent_trace.event_data import patch_paths
+
+        for text in (
+            "-*** Add File: a.py",
+            "+*** Add File: a.py",
+            " *** Delete File: a.py",
+            "@@ *** Move to: a.py",
+            "  *** Update File: a.py",
+            "*** Add File: ",
+            "*** Add File:a.py",
+            "*** End Patch",
+            "",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(patch_paths(text), [])
 
 
 if __name__ == "__main__":

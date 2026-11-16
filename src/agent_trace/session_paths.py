@@ -3,10 +3,15 @@
 Shared by the PR comment summary and the reviewability check so both count
 the same files under the same names: explicit file events plus the files a
 shell command read or wrote, as found by :mod:`agent_trace.shell_split`.
+
+``watch`` uses :func:`absolute_cwd` and :func:`resolve_path` to read the
+relative paths a tool call names against the session's working directory.
 """
 
 from __future__ import annotations
 
+import ntpath
+import posixpath
 import re
 from typing import Sequence
 
@@ -27,6 +32,44 @@ def session_cwd(events: Sequence[TraceEvent]) -> str:
             if isinstance(cwd, str) and cwd.strip():
                 return cwd.strip().replace("\\", "/").rstrip("/")
     return ""
+
+
+_WINDOWS_ABSOLUTE = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
+_URI = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]+://")
+
+
+def absolute_cwd(value: object) -> str:
+    """Return ``value`` if it can resolve relative paths, otherwise ``""``.
+
+    That is a non-empty string holding an absolute path: POSIX, such as
+    ``/app``, or Windows, such as ``C:\\repo`` or ``\\\\server\\share``.
+    """
+    if isinstance(value, str) and (value.startswith("/") or _WINDOWS_ABSOLUTE.match(value)):
+        return value
+    return ""
+
+
+def resolve_path(path: str, cwd: str = "") -> str:
+    """Return ``path`` joined to ``cwd`` and normalized, as text only.
+
+    ``.`` and ``..`` collapse as in ``normpath``, for absolute paths too.
+    Symlinks are not resolved and the file system is not read. A relative
+    path stays as given when ``cwd`` is empty. A URI such as
+    ``file:///app/x`` and a path that starts with ``~`` stay as given. A
+    Windows path, or a relative path under a Windows ``cwd``, comes back with
+    ``/`` separators, such as ``C:/repo/x.py``.
+    """
+    if not path or _URI.match(path) or path.startswith("~"):
+        return path
+    if path.startswith("/"):
+        return posixpath.normpath(path)
+    if _WINDOWS_ABSOLUTE.match(path):
+        return ntpath.normpath(path).replace("\\", "/")
+    if not cwd:
+        return path
+    if _WINDOWS_ABSOLUTE.match(cwd):
+        return ntpath.normpath(ntpath.join(cwd, path)).replace("\\", "/")
+    return posixpath.normpath(posixpath.join(cwd, path))
 
 
 def cwd_forms(cwd: str) -> tuple[str, ...]:
@@ -88,10 +131,12 @@ def shell_reads(event: TraceEvent, cwd: str) -> list[str]:
 
 __all__ = [
     "SHELL_TOOLS",
+    "absolute_cwd",
     "command_text",
     "cwd_forms",
     "is_shell_call",
     "normalise_path",
+    "resolve_path",
     "session_cwd",
     "shell_reads",
     "shell_writes",
