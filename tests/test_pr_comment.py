@@ -772,6 +772,20 @@ class TestRequestRedirects(unittest.TestCase):
         self.assertEqual(servers.a.methods(), ["GET"])
         self.assertEqual(servers.b.methods(), ["GET"])
 
+    def test_get_error_has_no_redirect_note(self):
+        # A GET follows redirects, so the note would be wrong. urlopen does
+        # not follow a 300; it raises.
+        servers = RedirectServers(self, methods=("GET",))
+        servers.redirect(300)
+        url = servers.url + "/repos/owner/repo/issues/1/comments"
+        with self.assertRaises(PRCommentError) as caught:
+            _request_json("GET", url, "token", platform="github")
+        self.assertEqual(
+            str(caught.exception), "Github API request failed with HTTP 300: Multiple Choices"
+        )
+        self.assertEqual(servers.a.methods(), ["GET"])
+        self.assertEqual(servers.b.received(), [])
+
 
 class TestCommand(unittest.TestCase):
     def setUp(self):
