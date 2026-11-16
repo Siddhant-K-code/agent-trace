@@ -1,38 +1,38 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="812" height="1050" viewBox="0 0 812 1050" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="13" role="img" aria-label="agent-strace 0.111.0: replay, health, review of a real Copilot CLI session (trimmed)">
-  <title>agent-strace 0.111.0: replay, health, review of a real Copilot CLI session (trimmed)</title>
-  <rect width="812" height="1050" rx="8" fill="#0d1117"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="812" height="1033" viewBox="0 0 812 1033" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="13" role="img" aria-label="agent-strace 0.112.0: replay, health, review of a real Copilot CLI session (trimmed)">
+  <title>agent-strace 0.112.0: replay, health, review of a real Copilot CLI session (trimmed)</title>
+  <rect width="812" height="1033" rx="8" fill="#0d1117"/>
   <rect width="812" height="36" rx="8" fill="#161b22"/>
   <rect y="28" width="812" height="8" fill="#161b22"/>
   <circle cx="20" cy="18" r="6" fill="#ff5f57"/>
   <circle cx="40" cy="18" r="6" fill="#febc2e"/>
   <circle cx="60" cy="18" r="6" fill="#28c840"/>
-  <text x="406" y="23" text-anchor="middle" fill="#8b949e" font-size="12">agent-strace 0.111.0: replay, health, review of a real Copilot CLI session (trimmed)</text>
+  <text x="406" y="23" text-anchor="middle" fill="#8b949e" font-size="12">agent-strace 0.112.0: replay, health, review of a real Copilot CLI session (trimmed)</text>
   <g>
     <text x="16" y="60"><tspan fill="#58a6ff">$ </tspan><tspan fill="#e6edf3" font-weight="bold">agent-strace replay</tspan></text>
     <text x="16" y="77"><tspan fill="#8b949e">+  0.00s</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#3fb950">▶</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#3fb950" font-weight="bold">session_start</tspan></text>
-    <text x="16" y="94"><tspan fill="#8b949e">+  0.00s</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#3fb950">👤</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#3fb950" font-weight="bold">user_prompt</tspan></text>
+    <text x="16" y="94"><tspan fill="#8b949e">+  0.01s</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#3fb950">👤</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#3fb950" font-weight="bold">user_prompt</tspan></text>
     <text x="16" y="111"><tspan fill="#8b949e">                "slugify("Hello,   World") returns "hello---world". Fix textkit/slug.py so runs of</tspan></text>
     <text x="16" y="128"><tspan fill="#8b949e">                spaces become one dash, then run python3 -m unittest."</tspan></text>
-    <text x="16" y="145"><tspan fill="#8b949e">+  1.03s</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#39c5cf">→</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#39c5cf" font-weight="bold">tool_call</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#e6edf3">view</tspan></text>
+    <text x="16" y="145"><tspan fill="#8b949e">+  1.01s</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#39c5cf">→</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#39c5cf" font-weight="bold">tool_call</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#e6edf3">view</tspan></text>
     <text x="16" y="162"><tspan fill="#8b949e">                path: /private/tmp/demo/textkit/slug.py</tspan></text>
-    <text x="16" y="179"><tspan fill="#8b949e">+  1.07s</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#58a6ff">←</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#58a6ff">tool_result</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#8b949e">view</tspan><tspan fill="#e6edf3">  (38ms)</tspan></text>
+    <text x="16" y="179"><tspan fill="#8b949e">+  1.04s</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#58a6ff">←</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#58a6ff">tool_result</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#8b949e">view</tspan><tspan fill="#e6edf3">  (36ms)</tspan></text>
     <text x="16" y="196"><tspan fill="#8b949e">                """Turn titles into URL slugs.""" import re def slugify(title: str) -&gt; str:</tspan></text>
     <text x="16" y="213"><tspan fill="#8b949e">                """Lowercase, drop punctuation, join words w...</tspan></text>
     <text x="16" y="230"><tspan fill="#8b949e">+  2.85s</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#39c5cf">→</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#39c5cf" font-weight="bold">tool_call</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#e6edf3">bash</tspan></text>
-    <text x="16" y="247"><tspan fill="#8b949e">                $ python3 -m unittest 2&gt;&amp;1 | tail -15</tspan></text>
+    <text x="16" y="247"><tspan fill="#8b949e">                $ cd /private/tmp/demo &amp;&amp; python3 -m unittest 2&gt;&amp;1 | tail -15</tspan></text>
     <text x="16" y="264"><tspan fill="#8b949e">+  2.85s</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#39c5cf">→</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#39c5cf" font-weight="bold">tool_call</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#e6edf3">edit</tspan></text>
     <text x="16" y="281"><tspan fill="#8b949e">                path: /private/tmp/demo/textkit/slug.py</tspan></text>
-    <text x="16" y="298"><tspan fill="#8b949e">+  2.90s</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#58a6ff">←</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#58a6ff">tool_result</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#8b949e">edit</tspan><tspan fill="#e6edf3">  (48ms)</tspan></text>
+    <text x="16" y="298"><tspan fill="#8b949e">+  2.91s</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#58a6ff">←</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#58a6ff">tool_result</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#8b949e">edit</tspan><tspan fill="#e6edf3">  (65ms)</tspan></text>
     <text x="16" y="315"><tspan fill="#8b949e">                File /private/tmp/demo/textkit/slug.py updated with changes.</tspan></text>
-    <text x="16" y="332"><tspan fill="#8b949e">+  2.95s</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#58a6ff">←</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#58a6ff">tool_result</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#8b949e">bash</tspan><tspan fill="#e6edf3">  (98ms)</tspan></text>
+    <text x="16" y="332"><tspan fill="#8b949e">+  2.96s</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#58a6ff">←</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#58a6ff">tool_result</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#8b949e">bash</tspan><tspan fill="#e6edf3">  (119ms)</tspan></text>
     <text x="16" y="349"><tspan fill="#8b949e">                ... ---------------------------------------------------------------------- Ran 3</tspan></text>
     <text x="16" y="366"><tspan fill="#8b949e">                tests in 0.000s OK &lt;shellId: 0 complete...</tspan></text>
-    <text x="16" y="383"><tspan fill="#8b949e">+  4.40s</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#d2a8ff">🤖</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#d2a8ff" font-weight="bold">assistant_response</tspan></text>
-    <text x="16" y="400"><tspan fill="#8b949e">+  4.43s</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#3fb950">■</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#3fb950" font-weight="bold">session_end</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#8b949e">exit=?</tspan></text>
+    <text x="16" y="383"><tspan fill="#8b949e">+  4.29s</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#d2a8ff">🤖</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#d2a8ff" font-weight="bold">assistant_response</tspan></text>
+    <text x="16" y="400"><tspan fill="#8b949e">+  4.33s</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#3fb950">■</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#3fb950" font-weight="bold">session_end</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#8b949e">exit=?</tspan></text>
     <text x="16" y="417"></text>
     <text x="16" y="434"><tspan fill="#58a6ff">$ </tspan><tspan fill="#e6edf3" font-weight="bold">agent-strace health</tspan></text>
     <text x="16" y="451"><tspan fill="#e6edf3">Evidence health: </tspan><tspan fill="#d29922" font-weight="bold">partial</tspan></text>
-    <text x="16" y="468"><tspan fill="#e6edf3">Session:   866264aa-a32e-4d</tspan></text>
+    <text x="16" y="468"><tspan fill="#e6edf3">Session:   1a210e74-07fa-4a</tspan></text>
     <text x="16" y="485"><tspan fill="#e6edf3">Provider:  copilot (from hook events)</tspan></text>
     <text x="16" y="502"><tspan fill="#e6edf3">Finalized: yes</tspan></text>
     <text x="16" y="519"><tspan fill="#e6edf3">Events:    10</tspan></text>
@@ -40,8 +40,8 @@
     <text x="16" y="553"><tspan fill="#e6edf3">           assistant_response 1</tspan></text>
     <text x="16" y="570"><tspan fill="#e6edf3">Redaction: on (recorded by the session start hook)</tspan></text>
     <text x="16" y="587"><tspan fill="#e6edf3">Redacted:  0 of 10 events</tspan></text>
-    <text x="16" y="604"><tspan fill="#e6edf3">Observed (0):</tspan></text>
-    <text x="16" y="621"><tspan fill="#e6edf3">  none</tspan></text>
+    <text x="16" y="604"><tspan fill="#e6edf3">Observed (1):</tspan></text>
+    <text x="16" y="621"><tspan fill="#e6edf3">  - timestamp_regression: event '76c289b414e2' is earlier than the preceding event</tspan></text>
     <text x="16" y="638"><tspan fill="#e6edf3">Provider limitations (11):</tspan></text>
     <text x="16" y="655"><tspan fill="#8b949e">  - A main session's trace may begin with its first user_prompt event. 1.0.94-3 fired userPromptSub</tspan><tspan fill="#8b949e">…</tspan></text>
     <text x="16" y="672"><tspan fill="#8b949e">  - Subagents started with the task tool record prompt, tool and stop events under their own sessio</tspan><tspan fill="#8b949e">…</tspan></text>
@@ -52,19 +52,18 @@
     <text x="16" y="757"><tspan fill="#58a6ff">$ </tspan><tspan fill="#e6edf3" font-weight="bold">agent-strace review</tspan></text>
     <text x="16" y="774"><tspan fill="#e6edf3">Reviewability: </tspan><tspan fill="#3fb950" font-weight="bold">pass</tspan></text>
     <text x="16" y="791"><tspan fill="#e6edf3">Branch:    fix-slug-spaces</tspan></text>
-    <text x="16" y="808"><tspan fill="#e6edf3">Session:   866264aa-a32e-4d (session git branch matches the PR branch)</tspan></text>
+    <text x="16" y="808"><tspan fill="#e6edf3">Session:   1a210e74-07fa-4a (session git branch matches the PR branch)</tspan></text>
     <text x="16" y="825"><tspan fill="#e6edf3">Threshold: fails on missing at medium or higher confidence (default)</tspan></text>
     <text x="16" y="842"><tspan fill="#e6edf3">Rationale        </tspan><tspan fill="#3fb950" font-weight="bold">present</tspan><tspan fill="#e6edf3">       high</tspan></text>
     <text x="16" y="859"><tspan fill="#8b949e">  1 prompt captured in 1 session.</tspan></text>
     <text x="16" y="876"><tspan fill="#e6edf3">Scope            </tspan><tspan fill="#3fb950" font-weight="bold">present</tspan><tspan fill="#e6edf3">       medium</tspan></text>
-    <text x="16" y="893"><tspan fill="#8b949e">  All 1 written file were named in a prompt or read in the session.</tspan></text>
-    <text x="16" y="910"><tspan fill="#e6edf3">Validation       </tspan><tspan fill="#d29922" font-weight="bold">partial</tspan><tspan fill="#e6edf3">       medium</tspan></text>
-    <text x="16" y="927"><tspan fill="#8b949e">  Last run: unittest passed (runner summary in output, not exit code). Files changed after the last</tspan></text>
-    <text x="16" y="944"><tspan fill="#8b949e">  run of: unittest (1 file).</tspan></text>
-    <text x="16" y="961"><tspan fill="#e6edf3">Stewardship      </tspan><tspan fill="#d29922" font-weight="bold">partial</tspan><tspan fill="#e6edf3">       medium</tspan></text>
-    <text x="16" y="978"><tspan fill="#8b949e">  1 human turn, 0 after the first tool call, 0 approval decisions.</tspan></text>
-    <text x="16" y="995"><tspan fill="#e6edf3">Evidence health  </tspan><tspan fill="#d29922" font-weight="bold">partial</tspan><tspan fill="#e6edf3">       high</tspan></text>
-    <text x="16" y="1012"><tspan fill="#8b949e">  Health: 1 partial (copilot). Redaction: on. Linked by: branch.</tspan></text>
-    <text x="16" y="1029"><tspan fill="#8b949e">Captured evidence only. CI results are not read. See docs/review.md.</tspan></text>
+    <text x="16" y="893"><tspan fill="#8b949e">  The 1 written file was named in a prompt or read in the session.</tspan></text>
+    <text x="16" y="910"><tspan fill="#e6edf3">Validation       </tspan><tspan fill="#3fb950" font-weight="bold">present</tspan><tspan fill="#e6edf3">       medium</tspan></text>
+    <text x="16" y="927"><tspan fill="#8b949e">  Last run: unittest passed (runner summary in output, not exit code).</tspan></text>
+    <text x="16" y="944"><tspan fill="#e6edf3">Stewardship      </tspan><tspan fill="#d29922" font-weight="bold">partial</tspan><tspan fill="#e6edf3">       medium</tspan></text>
+    <text x="16" y="961"><tspan fill="#8b949e">  1 human turn, 0 after the first tool call, 0 approval decisions.</tspan></text>
+    <text x="16" y="978"><tspan fill="#e6edf3">Evidence health  </tspan><tspan fill="#d29922" font-weight="bold">partial</tspan><tspan fill="#e6edf3">       high</tspan></text>
+    <text x="16" y="995"><tspan fill="#8b949e">  Health: 1 partial (copilot). Redaction: on. Linked by: branch.</tspan></text>
+    <text x="16" y="1012"><tspan fill="#8b949e">Captured evidence only. CI results are not read. See docs/review.md.</tspan></text>
   </g>
 </svg>
