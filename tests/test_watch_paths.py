@@ -284,6 +284,11 @@ class TestFilePathRule(_WatchCase):
     def test_relative_patch_path_without_a_session_cwd_does_not_fire(self):
         self.assertEqual(self.watch([_call("apply_patch", UPDATE_SECRET)], [SECRETS]), [])
 
+    def test_relative_pattern_matches_the_path_as_given_with_a_session_cwd(self):
+        config = 'file_path matches "config/*"'
+        write = _call("Write", {"file_path": "config/production.env", "content": "x"})
+        self.assertEqual(self.watch([_start("/app"), write], [config]), [_fired(config)])
+
     def test_resume_moves_the_cwd(self):
         to_app = [_start("/old"), _start("/app", "resume"), _call("apply_patch", UPDATE_SECRET)]
         self.assertEqual(self.watch(to_app, [SECRETS]), [_fired(SECRETS)])
@@ -493,6 +498,10 @@ class TestPolicyWriteDeny(_WatchCase):
 
     def test_relative_deny_pattern_matches_the_path_as_given(self):
         self.deny("config/production.env")
+        self.assertEqual(self.scope(_start("/app"), _call("apply_patch", ADD_ENV)), [ENV_DENIED])
+
+    def test_absolute_deny_pattern_matches_the_resolved_path(self):
+        self.deny("/app/config/*")
         self.assertEqual(self.scope(_start("/app"), _call("apply_patch", ADD_ENV)), [ENV_DENIED])
 
     def test_reads_are_not_checked(self):
