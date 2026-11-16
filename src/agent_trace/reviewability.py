@@ -947,14 +947,13 @@ def assess_scope(sessions: Sequence[_Session]) -> Finding:
         origin = f" {_plural(shell_only, 'file')} seen only as a shell redirection target."
     else:
         origin = ""
+    verb = "was" if len(written) == 1 else "were"
     if not ungrounded:
-        detail = (
-            f"All {_plural(len(written), 'written file')} were named in a prompt "
-            f"or read in the session.{origin}"
-        )
+        lead = "The 1 written file" if len(written) == 1 else f"All {len(written)} written files"
+        detail = f"{lead} {verb} named in a prompt or read in the session.{origin}"
         return Finding("scope", "present", confidence, source, detail, facts)
     detail = (
-        f"{grounded_count} of {_plural(len(written), 'written file')} were named in a prompt "
+        f"{grounded_count} of {_plural(len(written), 'written file')} {verb} named in a prompt "
         f"or read in the session.{origin}"
     )
     status = "partial" if grounded_count else "missing"
