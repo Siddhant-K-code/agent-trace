@@ -371,6 +371,8 @@ class ReviewReport:
             "failing": [finding.name for finding in self.failing],
             "findings": [finding.to_dict() for finding in self.findings],
         }
+        if self.external is not None:
+            payload["external"] = self.external.to_dict()
         if self.artifacts is not None:
             payload["artifacts"] = self.artifacts.to_dict()
         return payload

@@ -133,6 +133,16 @@ evidence behind it is complete.
 | `missing` | The input was read and has no evidence from this tool |
 | `inconclusive` | The input cannot say either way |
 
+### Agent involvement
+
+JSON output sets `shows_agent` to `true` when at least one signal shows that
+an agent took part. A `present`, `unpushed`, or `inconclusive` signal counts,
+with two exceptions that only describe the input: the `commit_trailers`
+signal for a range that could not be read or has no commits, and a signal with
+`facts.read_error` set, such as a logs file that could not be read. A
+`missing` signal never counts. The GitHub Action uses it to decide whether to
+post a PR comment when there is no session. It is not graded.
+
 Nothing is fetched. Remote state is read only from local remote-tracking refs,
 so a stale fetch can make pushed evidence read as unpushed. With
 `actions/checkout`, set `fetch-depth: 0` so the range is in the clone.

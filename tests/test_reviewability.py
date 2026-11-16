@@ -1162,7 +1162,9 @@ if command == "cognitive-debt" and os.environ.get("SHIM_COGNITIVE_STATUS"):
         payload = {{"schemaVersion": 1, "label": "cognitive debt", "message": "x", "color": "green"}}
     open(out, "w", encoding="utf-8").write(json.dumps(payload))
     sys.exit(0)
-if command == "pr-comment":
+if command == "pr-comment" and os.environ.get("SHIM_COMMENT_DRY_RUN"):
+    args = args + ["--dry-run"]
+elif command == "pr-comment":
     sys.exit(int(os.environ.get("SHIM_COMMENT_EXIT", "0")))
 from agent_trace.cli import main
 sys.argv = ["agent-strace"] + args
@@ -1367,6 +1369,88 @@ class TestActionScript(unittest.TestCase):
         failed = self.run_script("check", PR_HEAD_REPOSITORY="o/r", SHIM_COMMENT_EXIT="1", **base)
         self.assertEqual(failed.returncode, 1)
         self.assertIn("PR comment was not posted", failed.stdout)
+
+    def git(self, *args: str, env: dict | None = None) -> str:
+        proc = subprocess.run(
+            ["git", "-c", "commit.gpgsign=false", *args], cwd=self.work,
+            capture_output=True, text=True, check=True,
+            env={**self.env, **self.git_env, **(env or {})},
+        )
+        return proc.stdout.strip()
+
+    def init_repo(self) -> str:
+        self.git_env = {
+            "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com",
+        }
+        self.git("init", "-q", "-b", "main")
+        self.git("commit", "-q", "--allow-empty", "-m", "base")
+        return self.git("rev-parse", "HEAD")
+
+    def check_comment(self, **env) -> subprocess.CompletedProcess:
+        base = {"REVIEW_POST_COMMENT": "true", "PR_BASE_REPOSITORY": "o/r",
+                "PR_HEAD_REPOSITORY": "o/r"}
+        return self.run_script("check", **{**base, **env})
+
+    @unittest.skipUnless(shutil.which("git"), "git is required")
+    def test_no_sessions_comment_needs_an_agent_signal(self):
+        base = self.init_repo()
+        self.git("commit", "-q", "--allow-empty", "-m", "human change")
+        fixtures = ROOT / "tests" / "fixtures" / "external_evidence"
+        skips = {
+            "no external flags": {},
+            "human commits": {"REVIEW_COMMITS": f"{base}..HEAD"},
+            "unreadable range": {"REVIEW_COMMITS": "no-such-ref..HEAD"},
+            "empty range": {"REVIEW_COMMITS": "HEAD..HEAD"},
+            "unreadable logs": {"REVIEW_OTEL_LOGS": str(fixtures / "does-not-exist.json")},
+            "other tool logs": {"REVIEW_OTEL_LOGS": str(fixtures / "other_service_otel.json")},
+        }
+        for name, env in skips.items():
+            with self.subTest(name=name):
+                checked = self.check_comment(**env)
+                self.assertEqual(checked.returncode, 0, checked.stderr)
+                self.assertIn("No agent-trace sessions found and no external signal shows "
+                              "agent involvement; skipping PR comment.", checked.stdout)
+                self.assertEqual(self.calls("pr-comment"), [])
+
+        posts = {
+            "claude code logs": {"REVIEW_COMMITS": f"{base}..HEAD",
+                                 "REVIEW_OTEL_LOGS": str(fixtures / "claude_otel_no_safety.jsonl")},
+        }
+        start = self.git("rev-parse", "HEAD")
+        self.git("commit", "-q", "--allow-empty", "-m", "Add helper\n\nCo-authored-by: "
+                 "copilot-swe-agent[bot] <198982749+Copilot@users.noreply.github.com>")
+        self.git("commit", "-q", "--allow-empty", "-m", "ci: run checks")
+        posts["cloud agent co-author"] = {"REVIEW_COMMITS": f"{start}..HEAD"}
+        for count, (name, env) in enumerate(posts.items(), start=1):
+            with self.subTest(name=name):
+                checked = self.check_comment(**env)
+                self.assertEqual(checked.returncode, 0, checked.stderr)
+                self.assertIn("posting the PR comment because external evidence shows agent "
+                              "involvement", checked.stdout)
+                posted = self.calls("pr-comment")
+                self.assertEqual(len(posted), count)
+                self.assertIn("--review", posted[-1])
+        self.assertIn("--commits", posted[-1])
+        report = json.loads(Path(self.outputs()["review-json-path"]).read_text())
+        self.assertTrue(report["external"]["shows_agent"])
+        self.assertEqual(report["sessions"], [])
+
+    @unittest.skipUnless(shutil.which("git"), "git is required")
+    def test_no_session_comment_body(self):
+        start = self.init_repo()
+        self.git("commit", "-q", "--allow-empty", "-m", "Add helper\n\nCo-authored-by: "
+                 "copilot-swe-agent[bot] <198982749+Copilot@users.noreply.github.com>")
+        checked = self.check_comment(REVIEW_COMMITS=f"{start}..HEAD", SHIM_COMMENT_DRY_RUN="1")
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+        body = checked.stdout
+        self.assertIn(COMMENT_MARKER, body)
+        self.assertIn("No agent-trace session was linked to this branch", body)
+        self.assertIn("| Evidence health | inconclusive | low |", body)
+        self.assertIn("- Copilot agent logs: inconclusive (medium).", body)
+        self.assertIn("Evidence packet: not generated.", body)
+        self.assertNotIn("### What the agent did", body)
 
     def test_no_sessions(self):
         prepared = self.run_script("prepare")

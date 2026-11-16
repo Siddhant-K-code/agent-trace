@@ -86,6 +86,21 @@ print(status or "-", result)
 ' "$1"
 }
 
+# Succeed when the external evidence block of review JSON shows agent
+# involvement. external_evidence.py sets shows_agent: a present, unpushed, or
+# inconclusive signal counts unless it only reports an unreadable or empty
+# commit range or a file that could not be read.
+external_shows_agent() {
+  python3 -c '
+import json, sys
+try:
+    shows = json.load(open(sys.argv[1], encoding="utf-8"))["external"]["shows_agent"]
+except Exception:
+    shows = False
+sys.exit(0 if shows is True else 1)
+' "$1"
+}
+
 prepare() {
   check_cognitive_mode
   mkdir -p "$dir" || exit 2
@@ -187,9 +202,12 @@ check() {
     head_repo="${PR_HEAD_REPOSITORY:-}"
     if [ -n "$head_repo" ] && [ "$head_repo" != "${PR_BASE_REPOSITORY:-}" ]; then
       echo "::notice::Skipping PR comment for a fork because pull_request tokens are read-only."
-    elif ! has_sessions; then
-      echo "::notice::No agent-trace sessions found; skipping PR comment."
+    elif ! has_sessions && ! external_shows_agent "$review_json"; then
+      echo "::notice::No agent-trace sessions found and no external signal shows agent involvement; skipping PR comment."
     elif [ "$status" -le 1 ]; then
+      if ! has_sessions; then
+        echo "::notice::No agent-trace sessions found; posting the PR comment because external evidence shows agent involvement."
+      fi
       post_status=0
       agent-strace --trace-dir "$trace_dir" pr-comment --review "${args[@]}" || post_status=$?
       if [ "$post_status" -ne 0 ] && [ "$post_status" -ne "$status" ]; then

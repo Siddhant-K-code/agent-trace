@@ -227,7 +227,14 @@ jobs:
 ```
 
 The step posts or updates one PR comment with the session summary and the
-reviewability table. It always writes the table to the step summary. It exits
+reviewability table. When `trace-dir` has no session, it posts only if the
+external evidence from `review-commits` or `review-otel-logs` shows agent
+involvement: `shows_agent` is `true` in `review.json` (see
+[agent involvement](evidence-health.md#agent-involvement)). That comment says
+no agent-trace session was linked and shows the five findings and the external
+evidence. A pull request where every external signal is `missing`, or where
+the range or file could not be read, gets no comment, so human pull requests
+stay quiet. It always writes the table to the step summary. It exits
 non-zero per the threshold, so it works as a required status check. Fork PRs
 skip the comment because their tokens are read-only, but still run the check.
 
