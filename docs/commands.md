@@ -342,7 +342,7 @@ the reasons or the exit code.
 | `event_types` | Count of each observed event type, such as `{"session_start": 1, "tool_call": 2}`. Empty when the session has no events |
 | `redaction` | `mode` (`on`, `off`, `mixed` or `not_recorded`), `session_start_modes` (`on`, `off` or `not_recorded` for each session start in order: the implicit start first when the first hook was not SessionStart, then each `session_start` event), `redacted_event_count` and `metadata_redacted` |
 | `capture_matrix` | `schema_version`, `version` (SHA-256 of the packaged matrix), the `entry` applied or `null`, its `blind_spots` (`source`, `text`, and `capability` for coverage lines) and a `note` when no entry was applied |
-| `external` | Only with `--commits` or `--otel-logs`: `commits`, `otel_logs` (file name), `graded` (always `false`) and `signals`, each with `source` (`entire_checkpoint`, `copilot_agent_logs`, `claude_code_otel` or `commit_trailers`), `subject`, `status`, `confidence`, `detail` and `facts` |
+| `external` | Only with `--commits` or `--otel-logs`: `commits`, `otel_logs` (file name), `graded` (always `false`), `shows_agent` (see [agent involvement](evidence-health.md#agent-involvement)) and `signals`, each with `source` (`entire_checkpoint`, `copilot_agent_logs`, `claude_code_otel` or `commit_trailers`), `subject`, `status`, `confidence`, `detail` and `facts` |
 
 `capture_matrix_version` is empty when no entry was applied, while
 `capture_matrix.version` always names the matrix that was consulted. To list
@@ -1690,7 +1690,15 @@ Post a structured session summary to the current branch's open pull request or
 merge request. The comment includes duration, estimated cost, model, status,
 tool calls, files read and changed, lint findings, errors, redundant reads, and
 replay commands. An embedded marker makes repeated runs update the existing
-comment. Errors include [failed model requests](production.md#session-error-counts); for a session recorded by an earlier version,
+comment.
+
+Without a session, `pr-comment` exits 1 with `No agent-trace sessions found`.
+With `--review` and no named session, it still renders: the comment says no
+agent-trace session was linked, shows the five findings as the review reports
+them (all `inconclusive`, low), and lists external evidence from `--commits`
+and `--otel-logs`. It has no session table, file activity, flags, or replay
+commands. This covers a Copilot cloud agent pull request, whose job leaves no
+session in the repository. Errors include [failed model requests](production.md#session-error-counts); for a session recorded by an earlier version,
 the comment shows the larger of the stored count and the count from its
 events.
 
@@ -1767,8 +1775,8 @@ never printed. See [review.md](review.md).
 
 `--commits` and `--otel-logs` add [external evidence](evidence-health.md#external-evidence)
 signals to the evidence health finding: in text and markdown after the
-findings, and in JSON as `facts.external` on the `evidence` finding, in the
-same shape as `health --format json`. They never change a finding's status,
+findings, and in JSON as `facts.external` on the `evidence` finding and as
+top-level `external`, in the same shape as `health --format json`. They never change a finding's status,
 the threshold or the exit code.
 
 Flags override the config file. Exit codes: `0` pass, `1` threshold or
@@ -2127,7 +2135,7 @@ steps:
 | `python-version` | `3.12` | Python version |
 | `install-extras` | none | Optional extras, e.g. `openai,anthropic` |
 | `agent-strace-version` | none | CLI version to install from PyPI, e.g. `0.108.1`. Overrides the version taken from the Action ref. |
-| `post-pr-comment` | `false` | Post or update the structured session summary on the PR |
+| `post-pr-comment` | `false` | Post or update the structured session summary on the PR. With `review`, also posts when no session exists but [external evidence shows agent involvement](review.md#github-action) |
 | `github-token` | none | Token for PR comments; pass `${{ secrets.GITHUB_TOKEN }}` |
 | `run-eval` | `true` | Run `agent-strace eval`. Set `false` for a review-only job. |
 | `review` | `false` | Run `agent-strace review` and fail the step per the threshold. With `post-pr-comment`, the table is added to the single PR comment. |

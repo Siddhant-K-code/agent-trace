@@ -116,6 +116,18 @@ class ExternalSignal:
     def label(self) -> str:
         return SOURCE_LABELS[self.source]
 
+    @property
+    def shows_agent(self) -> bool:
+        """True when the signal shows that an agent took part in the change.
+
+        ``present``, ``unpushed``, and ``inconclusive`` count. Commit trailer
+        signals only describe the range (unreadable or empty), and a
+        ``read_error`` signal only says a read failed, so neither counts.
+        """
+        if self.status not in ("present", "unpushed", "inconclusive"):
+            return False
+        return self.source != SOURCE_COMMITS and not self.facts.get("read_error")
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "source": self.source,
@@ -135,11 +147,17 @@ class ExternalEvidence:
     otel_logs: str
     signals: tuple[ExternalSignal, ...]
 
+    @property
+    def shows_agent(self) -> bool:
+        """True when at least one signal shows agent involvement."""
+        return any(signal.shows_agent for signal in self.signals)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "commits": self.commits or None,
             "otel_logs": Path(self.otel_logs).name if self.otel_logs else None,
             "graded": False,
+            "shows_agent": self.shows_agent,
             "signals": [signal.to_dict() for signal in self.signals],
         }
 
@@ -536,7 +554,7 @@ def assess_commits(rev_range: str, cwd: str | None = None) -> list[ExternalSigna
             SOURCE_COMMITS, "inconclusive", "low",
             "Could not read the commit range in this clone. A shallow checkout or a "
             "missing base ref causes this; fetch more history.",
-            rev_range, {"commits_read": 0},
+            rev_range, {"commits_read": 0, "read_error": True},
         )]
     truncated = len(commits) > MAX_COMMITS
     commits = commits[:MAX_COMMITS]
@@ -749,7 +767,7 @@ def assess_otel_logs(path: str) -> ExternalSignal:
     except OSError:
         return ExternalSignal(
             SOURCE_CLAUDE_OTEL, "inconclusive", "low",
-            "Could not read the logs file.", name, {"records": 0},
+            "Could not read the logs file.", name, {"records": 0, "read_error": True},
         )
 
     events: Counter[str] = Counter()

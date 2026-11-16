@@ -36,7 +36,11 @@ agent-strace pr-comment SESSION_ID --review \
   --dry-run
 ```
 
-Remove `--dry-run` to post or update the comment. The exit code follows the
+Remove `--dry-run` to post or update the comment. With no session, as on a
+Copilot cloud agent pull request, `pr-comment --review --commits RANGE` still
+renders: it says no agent-trace session was linked, shows the findings, and
+lists the external evidence. The Action posts that comment only when the
+external evidence shows agent involvement. The exit code follows the
 configured reviewability threshold. Cognitive debt in `check` mode also fails
 unless its result is a pass. An `unknown` cognitive debt status is unavailable,
 not passing.

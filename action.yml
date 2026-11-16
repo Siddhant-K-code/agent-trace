@@ -31,7 +31,7 @@ inputs:
     description: agent-strace version to install from PyPI, such as 0.108.1. Empty installs the version of the Action ref, vX.Y.Z from PyPI, any other ref from the Action checkout.
     default: ""
   post-pr-comment:
-    description: Post or update an agent session summary on the pull request
+    description: Post or update an agent session summary on the pull request. With review, a pull request with no session gets a comment only when review-commits or review-otel-logs evidence shows agent involvement.
     default: "false"
   github-token:
     description: GitHub token used only when post-pr-comment is true

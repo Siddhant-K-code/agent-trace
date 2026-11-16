@@ -710,6 +710,34 @@ def render_comment(
     return "\n".join(lines)
 
 
+NO_SESSION_NOTE = (
+    "No agent-trace session was linked to this branch, so there is no session "
+    "summary. The findings read no session evidence. External evidence, when "
+    "requested, is listed as found."
+)
+
+
+def render_review_comment(review_section: str) -> str:
+    """Render the PR comment for ``pr-comment --review`` when no session exists.
+
+    It carries the same marker as :func:`render_comment`, so a later run with
+    a session updates the same comment.
+    """
+
+    if not review_section:
+        raise ValueError("a review section is required")
+    lines = [
+        COMMENT_MARKER,
+        "## agent-trace reviewability",
+        "",
+        NO_SESSION_NOTE,
+        "",
+        review_section.rstrip("\n"),
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def _validate_api_url(value: str) -> str:
     parsed = urllib.parse.urlsplit(value.rstrip("/"))
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -1062,7 +1090,10 @@ def cmd_pr_comment(args: argparse.Namespace) -> int:
             return 2
 
     try:
-        session_ids, link = select_sessions_with_link(store, requested, branch=branch)
+        if review and not requested and not store.list_sessions():
+            session_ids, link = [], ""
+        else:
+            session_ids, link = select_sessions_with_link(store, requested, branch=branch)
         # summarize_session reads the data of every event.
         for session_id in session_ids:
             require_object_event_data(
@@ -1085,11 +1116,16 @@ def cmd_pr_comment(args: argparse.Namespace) -> int:
                 artifacts=artifacts,
                 external=external,
             )
-            review_section = render_markdown(report)
+            review_section = render_markdown(
+                report, heading="### Reviewability" if summaries else "### Findings"
+            )
             review_exit = report.exit_code
-        body = render_comment(
-            summaries, share_url=share_url, review_section=review_section
-        )
+        if summaries:
+            body = render_comment(
+                summaries, share_url=share_url, review_section=review_section
+            )
+        else:
+            body = render_review_comment(review_section)
 
         if getattr(args, "dry_run", False):
             sys.stdout.write(body)
@@ -1142,6 +1178,7 @@ __all__ = [
     "post_or_update_comment",
     "pull_request_head_sha",
     "render_comment",
+    "render_review_comment",
     "resolve_target",
     "select_sessions",
     "select_sessions_with_link",

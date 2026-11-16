@@ -27,7 +27,7 @@ from agent_trace.external_evidence import (
 )
 from agent_trace.health import cmd_health
 from agent_trace.models import EventType, SessionMeta, TraceEvent
-from agent_trace.pr_comment import cmd_pr_comment
+from agent_trace.pr_comment import COMMENT_MARKER, NO_SESSION_NOTE, cmd_pr_comment
 from agent_trace.reviewability import (
     LinkedSession,
     Threshold,
@@ -384,6 +384,63 @@ class TestClaudeOtel(unittest.TestCase):
         self.assertEqual((signal.status, signal.confidence), ("inconclusive", "low"))
 
 
+class TestShowsAgent(_RepoCase):
+    def test_commit_signals(self):
+        self.commit("plain change\n")
+        human = collect_external_evidence(f"{self.base}..HEAD", cwd=self.repo)
+        self.assertFalse(human.shows_agent)
+        self.assertFalse(human.to_dict()["shows_agent"])
+
+        start = self.git("rev-parse", "HEAD")
+        self.commit(f"Add helper\n\n{AGENT_COAUTHOR}\n")
+        self.commit("ci: run checks\n")
+        agent = collect_external_evidence(f"{start}..HEAD", cwd=self.repo)
+        self.assertEqual([s.shows_agent for s in agent.signals], [False, True])
+        self.assertTrue(agent.to_dict()["shows_agent"])
+
+    def test_entire_and_copilot_link_signals(self):
+        self.commit(f"feat\n\nEntire-Checkpoint: {ULID}\n")
+        [signal] = _by_source(self.signals(), "entire_checkpoint")
+        self.assertEqual(signal.status, "inconclusive")
+        self.assertTrue(signal.shows_agent)
+        self.entire_ref(ULID, queued=True)
+        [signal] = _by_source(self.signals(), "entire_checkpoint")
+        self.assertEqual(signal.status, "unpushed")
+        self.assertTrue(signal.shows_agent)
+        self.commit(_fixture("copilot_squash_message.txt"))
+        [signal] = _by_source(self.signals(), "copilot_agent_logs")
+        self.assertEqual(signal.status, "present")
+        self.assertTrue(signal.shows_agent)
+
+    def test_unreadable_or_empty_range_does_not_count(self):
+        for rev_range in ("no-such-ref..HEAD", "HEAD..HEAD"):
+            with self.subTest(rev_range=rev_range):
+                evidence = collect_external_evidence(rev_range, cwd=self.repo)
+                [signal] = evidence.signals
+                self.assertEqual(signal.status, "inconclusive")
+                self.assertFalse(evidence.shows_agent)
+        [signal] = self.signals("no-such-ref..HEAD")
+        self.assertTrue(signal.facts["read_error"])
+        [signal] = self.signals("HEAD..HEAD")
+        self.assertNotIn("read_error", signal.facts)
+
+    def test_otel_signals(self):
+        cases = {
+            "claude_otel_safety.json": True,
+            "claude_otel_no_safety.jsonl": True,
+            "claude_otel_old_version.jsonl": True,
+            "other_service_otel.json": False,
+            "does-not-exist.json": False,
+        }
+        for name, expected in cases.items():
+            with self.subTest(name=name):
+                signal = assess_otel_logs(str(FIXTURES / name))
+                self.assertEqual(signal.shows_agent, expected)
+        signal = assess_otel_logs(str(FIXTURES / "does-not-exist.json"))
+        self.assertEqual(signal.status, "inconclusive")
+        self.assertTrue(signal.facts["read_error"])
+
+
 def _session(store: TraceStore, session_id: str = "ext000000001") -> str:
     store.create_session(SessionMeta(
         session_id=session_id, started_at=1000.0, ended_at=1100.0, agent_name="claude-code",
@@ -509,12 +566,81 @@ class TestHealthAndReview(_RepoCase):
         self.assertEqual(code, 2)
         self.assertIn("review: --commits", err)
 
+    def test_review_json_has_top_level_external(self):
+        code, out, err = self.run_cmd(
+            cmd_review, "review", "--format", "json", "--commits", self.range,
+        )
+        payload = json.loads(out)
+        evidence = next(f for f in payload["findings"] if f["name"] == "evidence")
+        self.assertEqual(payload["external"], evidence["facts"]["external"])
+        self.assertTrue(payload["external"]["shows_agent"])
+        code, out, err = self.run_cmd(cmd_review, "review", "--format", "json")
+        self.assertNotIn("external", json.loads(out))
+
     def test_pr_comment_review_dry_run(self):
         code, out, err = self.run_cmd(
             cmd_pr_comment, "pr-comment", "--dry-run", "--review", "--commits", self.range,
         )
         self.assertIn("**External evidence**", out)
         self.assertIn("Copilot agent logs", out)
+
+
+class TestPrCommentWithoutSession(_RepoCase):
+    def setUp(self):
+        super().setUp()
+        self.commit("Initial plan")
+        self.commit(f"Add char_count text helper\n\n{AGENT_COAUTHOR}\n")
+        self.commit("ci: run checks on the cloud agent PR")
+        self.trace_dir = str(Path(self.repo) / ".agent-traces")
+        cwd = os.getcwd()
+        os.chdir(self.repo)
+        self.addCleanup(os.chdir, cwd)
+        self.range = f"{self.base}..HEAD"
+
+    def run_cmd(self, *argv):
+        args = build_parser().parse_args(["--trace-dir", self.trace_dir, *argv])
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = cmd_pr_comment(args)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_review_renders_findings_and_external_evidence(self):
+        code, out, err = self.run_cmd(
+            "pr-comment", "--dry-run", "--review", "--commits", self.range,
+        )
+        self.assertEqual((code, err), (0, ""))
+        self.assertTrue(out.startswith(COMMENT_MARKER))
+        self.assertEqual(out.count(COMMENT_MARKER), 1)
+        self.assertIn("## agent-trace reviewability", out)
+        self.assertIn(NO_SESSION_NOTE, out)
+        self.assertIn("### Findings", out)
+        for label in ("Rationale", "Scope", "Validation", "Stewardship", "Evidence health"):
+            self.assertIn(f"| {label} | inconclusive | low |", out)
+        self.assertIn("**External evidence** (commits `", out)
+        self.assertIn(
+            "- Copilot agent logs: inconclusive (medium). 1 of 3 commits read names the "
+            "Copilot cloud agent", out,
+        )
+        self.assertIn("- Entire checkpoint: missing (high).", out)
+        for absent in ("session summary\n", "### What the agent did", "### Flags",
+                       "agent-strace replay", "| **Session** |", "No redundant reads"):
+            self.assertNotIn(absent, out)
+
+    def test_threshold_still_sets_the_exit_code(self):
+        code, out, _ = self.run_cmd(
+            "pr-comment", "--dry-run", "--review", "--commits", self.range,
+            "--fail-on", "inconclusive", "--min-confidence", "low",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("**inconclusive** (fails)", out)
+
+    def test_without_review_or_with_a_named_session_it_still_errors(self):
+        code, _, err = self.run_cmd("pr-comment", "--dry-run")
+        self.assertEqual(code, 1)
+        self.assertIn("No agent-trace sessions found", err)
+        code, _, err = self.run_cmd("pr-comment", "nope", "--dry-run", "--review")
+        self.assertEqual(code, 1)
+        self.assertIn("Session not found", err)
 
 
 class TestActionPassthrough(unittest.TestCase):
