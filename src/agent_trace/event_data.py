@@ -26,14 +26,51 @@ the same result for both. A JSON number is an ``int`` or ``float`` but not a
 The readers check only the value. They call ``data.get`` like the reads they
 replace, so data that is not an object still fails where it did before and
 :func:`require_object_event_data` alone decides which sessions are refused.
+
+Hooks and adapters store a tool call's arguments in ``arguments`` (or
+``tool_input``) as an object, as a serialized object, or as plain text such as
+the patch an ``apply_patch`` call sends. :func:`tool_arguments` reads all
+three, and :func:`patch_paths` reads the file paths a patch names.
 """
 
 from __future__ import annotations
 
+import ast
+import json
+import re
 from collections.abc import Collection, Mapping, Sequence
 from typing import Any
 
 from .models import EventType, TraceEvent
+
+MAX_ARGUMENT_CHARS = 200_000
+
+# Lower-cased names of tools that write, edit, create or delete files.
+EDIT_TOOLS = frozenset({
+    "apply_patch",
+    "create",
+    "delete_file",
+    "edit",
+    "edit_file",
+    "file_edit",
+    "insert",
+    "multiedit",
+    "notebookedit",
+    "patch",
+    "replace",
+    "search_replace",
+    "str_replace_based_edit_tool",
+    "str_replace_editor",
+    "write",
+    "write_file",
+    "write_to_file",
+})
+# Argument keys that name a file.
+PATH_KEYS = ("file_path", "path", "absolute_path", "filePath", "target_file", "notebook_path", "uri")
+
+_PATCH_PATH_LINE = re.compile(
+    r"^\*\*\* (?:Add File|Update File|Delete File|Move to): (.*)$", re.MULTILINE,
+)
 
 
 def str_field(data: Mapping[str, Any], key: str, default: Any = "") -> Any:
@@ -68,6 +105,75 @@ def str_list_field(data: Mapping[str, Any], key: str, default: Any = None) -> An
     if value is None or not all(isinstance(item, str) for item in value):
         return default
     return value
+
+
+def parse_mapping(value: str) -> Mapping[str, Any] | None:
+    """Return the object a serialized argument string holds, or None.
+
+    Only text that starts with ``{`` and has at most MAX_ARGUMENT_CHARS
+    characters is read: as JSON, then as a Python literal. No code runs.
+    """
+    text = value.strip()
+    if not text.startswith("{") or len(text) > MAX_ARGUMENT_CHARS:
+        return None
+    try:
+        parsed = json.loads(text)
+    except (ValueError, RecursionError, MemoryError):
+        try:
+            parsed = ast.literal_eval(text)
+        except (ValueError, SyntaxError, MemoryError, RecursionError, TypeError):
+            return None
+    return parsed if isinstance(parsed, Mapping) else None
+
+
+def tool_arguments(event: TraceEvent) -> tuple[Mapping[str, Any], str | None]:
+    """Return a tool call's arguments as an object, and the string stored, if any.
+
+    Reads ``arguments``, then ``tool_input``, and stops at the first object or
+    at the first string that holds a serialized object (see
+    :func:`parse_mapping`). The first item is that object, or ``{}``. The
+    second is the first string found, such as the raw patch of an
+    ``apply_patch`` call, or None when no string was found.
+    """
+    data = event.data if isinstance(event.data, Mapping) else {}
+    raw: str | None = None
+    for key in ("arguments", "tool_input"):
+        value = data.get(key)
+        if isinstance(value, Mapping):
+            return value, raw
+        if isinstance(value, str):
+            if raw is None:
+                raw = value
+            parsed = parse_mapping(value)
+            if parsed is not None:
+                return parsed, raw
+    return {}, raw
+
+
+def event_arguments(event: TraceEvent) -> Mapping[str, Any]:
+    """Return tool arguments from ``arguments`` or ``tool_input``.
+
+    Some adapters store arguments as a serialized mapping (JSON or a Python
+    literal); those are parsed without evaluating code.
+    """
+    return tool_arguments(event)[0]
+
+
+def patch_paths(text: str) -> list[str]:
+    """Return the file paths an ``apply_patch`` text names, in order, once each.
+
+    Reads the path on every line that starts with ``*** Add File: ``,
+    ``*** Update File: ``, ``*** Delete File: `` or ``*** Move to: ``, so both
+    ends of a move count. Patch content lines start with ``+``, ``-``, a space
+    or ``@@`` and are never read as markers. ``\\r\\n`` line ends are allowed,
+    and ``*** Begin Patch`` is not required.
+    """
+    paths: dict[str, None] = {}
+    for match in _PATCH_PATH_LINE.finditer(text):
+        path = match.group(1).strip()
+        if path:
+            paths[path] = None
+    return list(paths)
 
 
 class NonObjectEventDataError(ValueError):
