@@ -17,6 +17,11 @@ from http.server import HTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
+try:
+    from _no_telemetry import without_telemetry
+except ImportError:  # pragma: no cover - run as a package module
+    from tests._no_telemetry import without_telemetry
+
 from agent_trace import __version__
 from agent_trace.cli import _copilot_hooks_config, build_parser, cmd_setup
 from agent_trace.copilot_cloud import (
@@ -156,13 +161,13 @@ class TestCopilotCloudHookScript(unittest.TestCase):
         self.install_dir = self.root / "pkg"
 
     def _env(self, **extra) -> dict[str, str]:
-        env = {
+        env = without_telemetry({
             "PATH": f"{self.bin_dir}:/usr/bin:/bin",
             "HOME": str(self.root),
             "AGENT_TRACE_DIR": str(self.trace_dir),
             "AGENT_STRACE_INSTALL_DIR": str(self.install_dir),
             "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
-        }
+        })
         env.update(extra)
         return env
 

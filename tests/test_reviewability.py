@@ -14,6 +14,11 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+try:
+    from _no_telemetry import without_telemetry
+except ImportError:  # pragma: no cover - run as a package module
+    from tests._no_telemetry import without_telemetry
+
 from agent_trace.approval import ApprovalRequest, save_request
 from agent_trace.cli import build_parser
 from agent_trace.models import EventType, SessionMeta, TraceEvent
@@ -1224,7 +1229,7 @@ class TestActionScript(unittest.TestCase):
         self.log = root / "calls.log"
         self.output = root / "github_output"
         self.summary = root / "summary.md"
-        self.env = {
+        self.env = without_telemetry({
             "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
             "HOME": self.tmp.name,
             "TMPDIR": self.tmp.name,
@@ -1234,7 +1239,7 @@ class TestActionScript(unittest.TestCase):
             "GITHUB_HEAD_REF": BRANCH,
             "AGENT_TRACE_DIR": str(self.trace_dir),
             "PR_EVIDENCE_DIR": str(self.out_dir),
-        }
+        })
 
     def run_script(self, mode: str, **env) -> subprocess.CompletedProcess:
         self.output.write_text("")

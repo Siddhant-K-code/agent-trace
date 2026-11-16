@@ -19,6 +19,7 @@ pyproject.toml      Package config and optional extras
 - **Never change the `.agent-traces/` storage format** in a way that breaks existing sessions. Adding new fields is fine. Removing or renaming existing fields requires a major version bump and human approval.
 - **Every new CLI command must be registered in `cli.py`** following the existing subparser pattern.
 - **Every new feature must have tests** in `tests/test_<module>.py`. Run `python -m unittest discover -s tests -v` to verify.
+- **Tests never send product telemetry.** `tests/_no_telemetry.py` turns it off in the test process and in every child it spawns, whatever the disclosure state. A test module that runs agent-strace imports it; a child env built from scratch goes through `without_telemetry()`. A test that exercises telemetry mocks `urlopen` or points `AGENT_STRACE_TELEMETRY_HOST` at a local server.
 - **OTLP export uses HTTP/JSON only** — no gRPC. See ADR-0006.
 
 ## Development workflow

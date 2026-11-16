@@ -22,6 +22,11 @@ try:
 except ImportError:  # pragma: no cover - non-POSIX platforms
     fcntl = None
 
+try:  # keeps product telemetry off in this process and its children
+    import _no_telemetry  # noqa: F401
+except ImportError:  # pragma: no cover - run as a package module
+    from tests import _no_telemetry  # noqa: F401
+
 import agent_trace.store as store_module
 from agent_trace.evidence_health import assess_evidence_health
 from agent_trace.hooks import (
