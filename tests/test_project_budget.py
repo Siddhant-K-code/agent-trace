@@ -347,7 +347,7 @@ class TestProjectBudgetConfigFile(unittest.TestCase):
                     )
 
     def test_fractions_it_cannot_use_are_refused(self):
-        """A percent never fires: stop_at 90 stopped a $20 budget at $1800."""
+        """A percent means that many times weekly: stop_at 90 stopped a $20 budget at $1800."""
         for value, shown in [
             ("90", "90"),
             ("10.5", "10.5"),
@@ -420,6 +420,7 @@ class TestProjectBudgetConfigFile(unittest.TestCase):
             ("budget:\n    weekly: 20\n  per_session_max: 5\n", "line 3: unexpected indentation"),
             ("budget:\n  weekly:\n    amount: 20\n", "line 3: unexpected indentation"),
             ("weekly: 20\n  per_session_max: 5\n", "line 2: unexpected indentation"),
+            ("per_session_max:\n  5\n", "line 2: unexpected indentation"),
             ("  budget:\n    weekly: 20\n", "line 1: unexpected indentation"),
             ("- budget:\n    weekly: 20\n", "line 1: the top level must be a mapping, not a list"),
             ("weekly 20\n", "line 1: expected key: value"),
@@ -582,12 +583,19 @@ class TestProjectBudgetConfigFile(unittest.TestCase):
                 full,
             ),
             (".agent-strace.yaml", '{"budget": {"weekly": 20}}', weekly),
+            (".agent-strace.yaml", '\n{"budget": {"weekly": 20}}', weekly),
             (".agent-strace.yaml", "budget:\n  weekly: \"20\"\n  stop_at: '1'\n", weekly),
             (".agent-strace.yaml", "budget:  # dollars\n  weekly: 20  # a week\n", weekly),
             (".agent-strace.yaml", "budget:\r\n  weekly: 20\r\n", weekly),
             (".agent-strace.yaml", "budget:\n  weekly:20\n", weekly),
             (".agent-strace.yaml", "budget:\n  weekly: 2e1\n", weekly),
             (".agent-strace.yaml", "budget:\n  weekly: 20\nreview:\n  max_lines: 400\n", weekly),
+            (".agent-strace.yaml", "my budget: 5\nweekly: 20\n", weekly),
+            (
+                ".agent-strace.yaml",
+                "retention.days: 30\n  note: weekly cleanup\nweekly: 20\n",
+                weekly,
+            ),
             (".agent-strace.yaml", "budget:\n  weekly: 20\n  per_session_max:\n", weekly),
             (".agent-strace.yaml", "budget:\n  weekly: 20\n  per_session_max: null\n", weekly),
             (".agent-strace.yaml", "budget:\n  weekly: 20\n  per_session_max: ~\n", weekly),
@@ -628,6 +636,7 @@ class TestProjectBudgetConfigFile(unittest.TestCase):
             (".agent-strace.yml", "# budget:\n#   weekly: 20\n"),
             (".agent-strace.yaml", "weekley: 20\nmonthly_budget: 80\n"),
             (".agent-strace.yaml", "[1, 2,]\n"),
+            (".agent-strace.yaml", "{review: {team_budgets: 3}}\n"),
             (".agent-strace.yaml", ""),
             (".agent-strace.json", "  \n"),
             (".agent-strace.json", {"review": {"max_lines": 400}, "retention": {"days": 30}}),

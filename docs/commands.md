@@ -642,24 +642,24 @@ there is no `budget` key, but not both. Values:
 
 A number may be quoted (`"20"`), and a dollar amount may start with one `$`
 (`$20`). `true`, `false`, `yes`, `nan`, `inf` and other text are refused. A
-percent such as `stop_at: 90` is refused, because spend would never reach
-it. An empty `budget:` block, with every key commented out, or `budget: {}`
+percent such as `stop_at: 90` is refused: it would mean 90 times `weekly`.
+An empty `budget:` block, with every key commented out, or `budget: {}`
 sets no budget. Inside `budget`, a key other than these four is refused.
 Other top-level keys are ignored, and a file that sets no budget keys sets
 no budget, so a file that holds only other config, such as a `review` or
 `retention` block or the [`apply`](#apply) sections, works as before.
 
 The file must be UTF-8, and may start with a byte order mark. A `.json`
-file must hold a JSON object. YAML is read in a small subset: one
-`key: value` per line, every `budget` key indented the same, values plain
-or quoted, and comments after ` #`. Flow style such as
+file that is not empty must hold a JSON object. YAML is read in a small
+subset: one `key: value` per line, every `budget` key indented the same,
+values plain or quoted, and comments after ` #`. Flow style such as
 `budget: {weekly: 20}`, anchors, tags and block scalars are refused in the
 budget keys. A line the reader cannot read is refused when it names a
 budget key, and skipped otherwise. A budget key given twice is refused.
 
 When the file cannot be read or parsed, or a budget key holds a value that
 cannot be used, `watch`, `record` and `record-http` refuse to start. They
-print one line that names the file and the key, exit 1, and write nothing:
+print one line that names the file and the problem, exit 1, and write nothing:
 no session, no alert log, no heartbeat. They never run without the budget:
 
 ```
