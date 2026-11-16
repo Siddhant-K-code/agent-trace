@@ -170,6 +170,23 @@ class TestEventStreamerUnit(unittest.TestCase):
         total = sum(len(b) for b in flushed)
         self.assertEqual(total, 3)
 
+    def test_stop_returns_after_the_worker_thread_exits(self) -> None:
+        """stop() joins the worker. The worker sets _done in a finally
+        block, so the thread can still be alive after _done is set."""
+
+        class LingeringDone(threading.Event):
+            def set(self) -> None:
+                super().set()
+                time.sleep(0.3)
+
+        streamer = self._make_streamer(batch_size=100, flush_interval=60.0)
+        streamer._flush = lambda batch: None  # type: ignore[method-assign]
+        # The worker reads _done only after stop() queues the sentinel.
+        streamer._done = LingeringDone()
+        streamer.enqueue(_make_event())
+        streamer.stop()
+        self.assertFalse(streamer._thread.is_alive())
+
     def test_stop_is_idempotent(self) -> None:
         """Calling stop() twice does not raise."""
         streamer = self._make_streamer()
