@@ -2205,7 +2205,7 @@ permissions:
   pull-requests: write
 
 steps:
-  - uses: Siddhant-K-code/agent-trace@v0.113.0
+  - uses: Siddhant-K-code/agent-trace@v0.113.1
     with:
       config: .agent-evals.yaml
       baseline: .agent-evals-baseline.json
