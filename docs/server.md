@@ -153,7 +153,7 @@ agent-strace server --auth-key ast_a3f9b2c1d4e5f6a7b8c9d0e1f2a3b4c5
 AGENT_STRACE_AUTH_KEY=ast_a3f9b2c1d4e5f6a7b8c9d0e1f2a3b4c5 agent-strace server
 ```
 
-Requests without a matching `Authorization: Bearer <key>` header receive `401 Unauthorized`.
+Requests without a matching `Authorization: Bearer <key>` header receive `401 Unauthorized`. `--auth-key` is the server's only authentication; it has no SSO.
 
 The key authorizes the entire collector instance; it is not scoped to a
 `tenant_id`. Treat one collector and storage root as one organization boundary,

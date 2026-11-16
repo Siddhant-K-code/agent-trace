@@ -6,6 +6,7 @@ import argparse
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -13,8 +14,11 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
+from agent_trace.cli import build_parser
 from agent_trace.server import (
     KEY_PREFIX,
     _auth_headers,
@@ -337,6 +341,118 @@ class TestCmdServerKeygen(unittest.TestCase):
     def test_keygen_produces_unique_keys(self):
         keys = {self._run_keygen()[0] for _ in range(5)}
         self.assertEqual(len(keys), 5)
+
+
+# ---------------------------------------------------------------------------
+# cmd_server refuses the SSO flags: the server has no SSO
+# ---------------------------------------------------------------------------
+
+_SECRET = "csecret-4f1d9a"
+_SSO_ARGS = {
+    "--auth": ["--auth", "oidc"],
+    "--oidc-issuer": ["--oidc-issuer", "https://idp.invalid"],
+    "--oidc-client-id": ["--oidc-client-id", "cid"],
+    "--oidc-client-secret": ["--oidc-client-secret", _SECRET],
+    "--enforce-sso": ["--enforce-sso"],
+}
+_ALL_SSO_ARGS = [arg for argv in _SSO_ARGS.values() for arg in argv]
+
+
+def _refusal(flags: str) -> str:
+    return (
+        "Error: agent-strace server has no SSO, so it refuses to start with "
+        f"{flags}; to require authentication, use --auth-key instead\n"
+    )
+
+
+class TestCmdServerRefusesSsoFlags(unittest.TestCase):
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.storage = Path(tmp.name) / "traces"
+
+    def _run(self, *argv):
+        args = build_parser().parse_args(
+            ["server", "--storage", str(self.storage), *argv]
+        )
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ), \
+                mock.patch("agent_trace.server.run_server") as run, \
+                redirect_stdout(out), redirect_stderr(err):
+            os.environ.pop("AGENT_STRACE_AUTH_KEY", None)
+            rc = cmd_server(args)
+        return rc, out.getvalue(), err.getvalue(), run
+
+    def _assert_refused(self, argv, flags):
+        rc, out, err, run = self._run(*argv)
+        self.assertEqual(rc, 1)
+        self.assertNotIn(_SECRET, err)
+        self.assertEqual(err, _refusal(flags))
+        self.assertEqual(out, "")
+        run.assert_not_called()
+        self.assertFalse(self.storage.exists())
+
+    def test_each_flag_alone_is_refused(self):
+        for flag, argv in _SSO_ARGS.items():
+            with self.subTest(flag=flag):
+                self._assert_refused(argv, flag)
+
+    def test_all_five_flags_are_refused_and_named(self):
+        self._assert_refused(
+            _ALL_SSO_ARGS,
+            "--auth, --oidc-issuer, --oidc-client-id, --oidc-client-secret, "
+            "--enforce-sso",
+        )
+
+    def test_an_empty_oidc_value_is_refused(self):
+        for flag in ("--oidc-issuer", "--oidc-client-id", "--oidc-client-secret"):
+            with self.subTest(flag=flag):
+                self._assert_refused([flag, ""], flag)
+
+    def test_auth_key_does_not_lift_the_refusal(self):
+        for flag, argv in _SSO_ARGS.items():
+            with self.subTest(flag=flag):
+                self._assert_refused([*argv, "--auth-key", "ast_probekey"], flag)
+
+    def test_the_refusal_comes_before_the_host_check(self):
+        self._assert_refused(
+            ["--auth", "oidc", "--dashboard", "--host", "0.0.0.0"], "--auth"
+        )
+
+    def test_keygen_still_prints_a_key_with_the_flags(self):
+        rc, out, err, run = self._run(*_ALL_SSO_ARGS, "keygen")
+        self.assertEqual(rc, 0)
+        self.assertRegex(out, r"^ast_[0-9a-f]{32}\n$")
+        self.assertEqual(err, "")
+        run.assert_not_called()
+
+    def test_auth_key_alone_still_starts_the_server(self):
+        rc, _, err, run = self._run("--auth-key", "ast_probekey")
+        self.assertEqual(rc, 0)
+        self.assertEqual(err, "")
+        run.assert_called_once()
+        self.assertEqual(run.call_args.kwargs["auth_key"], "ast_probekey")
+
+    def test_a_namespace_without_the_sso_attributes_still_starts(self):
+        args = argparse.Namespace(
+            server_subcommand=None, port=0, storage=str(self.storage),
+            host=None, dashboard=False, auth_key="ast_probekey",
+        )
+        with mock.patch("agent_trace.server.run_server") as run:
+            self.assertEqual(cmd_server(args), 0)
+        run.assert_called_once()
+
+    def test_help_does_not_list_the_sso_flags(self):
+        out = io.StringIO()
+        with redirect_stdout(out), self.assertRaises(SystemExit) as ctx:
+            build_parser().parse_args(["server", "--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        text = out.getvalue()
+        self.assertIn("--auth-key", text)
+        for flag in _SSO_ARGS:
+            with self.subTest(flag=flag):
+                self.assertNotRegex(text, re.escape(flag) + r"(?![\w-])")
 
 
 # ---------------------------------------------------------------------------

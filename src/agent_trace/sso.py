@@ -4,8 +4,8 @@ Provides:
 - OIDC discovery and token validation (optional dep: authlib or PyJWT)
 - Short-lived session cookie issuance after successful IdP auth
 - CLI ``agent-strace auth login`` stores token in ~/.agent-strace/auth.json
-- ``--auth oidc`` flag on ``agent-strace server`` enables SSO enforcement
-- ``--enforce-sso`` disables API key fallback
+- ``agent-strace server`` does not use these helpers. It has no SSO and
+  refuses to start with ``--auth oidc``, ``--oidc-*`` or ``--enforce-sso``.
 
 OIDC flow:
     1. Client hits a protected endpoint → 302 to /auth/login
