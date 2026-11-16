@@ -155,7 +155,7 @@ Full setup guide: [docs/setup.md](docs/setup.md). Machine-wide install for platf
 | [`agent-strace approval list`](docs/commands.md#approval) | Human-in-the-loop approval queue |
 | [`agent-strace rbac assign`](docs/commands.md#rbac) | Org and workspace-scoped role assignments |
 | [`agent-strace auth login`](docs/commands.md#auth) | SSO/OIDC login to a hosted collector |
-| [`agent-strace telemetry status`](docs/telemetry.md) | Inspect, disable, or re-enable anonymous CLI telemetry, which is on by default |
+| [`agent-strace telemetry status`](docs/telemetry.md) | Inspect, disable, or re-enable anonymous CLI telemetry, on by default once its [one-time notice](docs/telemetry.md#when-sending-starts) is shown |
 | [`agent-strace apply`](docs/commands.md#apply) | Apply `.agent-strace.yaml` config to local store or collector |
 | [`agent-strace workspace new`](docs/commands.md#workspace) | Create an isolated workspace |
 | [`agent-strace compliance export`](docs/commands.md#compliance) | Export compliance reports (EU AI Act, SOC 2, HIPAA) |

@@ -1360,6 +1360,81 @@ def handle_post_tool(input_data: dict, failed: bool = False, provider: str = "cl
         _mutate_meta_or_none(store, session_id, _count_error)
 
 
+# The one-time telemetry notice goes out as a SessionStart ``systemMessage``,
+# which these agents show to the user and keep out of the model's context.
+# Each check confirms that this hook runs where the agent displays it; any
+# doubt shows nothing, so ``notice_shown`` is never set for an unseen notice.
+# Cursor and GitHub Copilot CLI have no such output.  See docs/telemetry.md.
+_ROLLOUT_HEAD_LIMIT = 1 << 20
+
+
+def _claude_displays_message(data: dict) -> bool:
+    # Only the interactive CLI shows it, not `claude -p` or the SDK.  The
+    # session check ignores CLAUDE_CODE_* inherited from a parent session,
+    # for example when another agent runs Claude-format hooks.
+    session_id = data.get("session_id")
+    return (
+        os.environ.get("CLAUDE_CODE_ENTRYPOINT") == "cli"
+        and bool(session_id)
+        and os.environ.get("CLAUDE_CODE_SESSION_ID") == session_id
+    )
+
+
+def _codex_displays_message(data: dict) -> bool:
+    # The TUI shows it; `codex exec` prints only the hook status.  The first
+    # rollout line records which one started the session.  Resumes are
+    # skipped because that line describes the original start.
+    session_id = data.get("session_id")
+    path = data.get("transcript_path")
+    if data.get("source") != "startup" or not session_id or not path:
+        return False
+    try:
+        with open(path, "rb") as fh:
+            meta = json.loads(fh.readline(_ROLLOUT_HEAD_LIMIT))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(meta, dict) or meta.get("type") != "session_meta":
+        return False
+    payload = meta.get("payload")
+    return (
+        isinstance(payload, dict)
+        and payload.get("source") == "cli"
+        and session_id in (payload.get("id"), payload.get("session_id"))
+    )
+
+
+def _gemini_displays_message(data: dict) -> bool:
+    # Shown in the UI and on stderr with -p.  Gemini CLI sets
+    # GEMINI_SESSION_ID for its own hooks.
+    session_id = data.get("session_id")
+    return bool(session_id) and os.environ.get("GEMINI_SESSION_ID") == session_id
+
+
+_MESSAGE_DISPLAYED = {
+    "claude": _claude_displays_message,
+    "codex": _codex_displays_message,
+    "gemini": _gemini_displays_message,
+}
+
+
+def _show_telemetry_notice(provider: str, data: dict) -> None:
+    """Show the one-time telemetry notice if this agent displays it."""
+    try:
+        displayed = _MESSAGE_DISPLAYED.get(provider)
+        if displayed is None or not _product_telemetry.notice_due():
+            return
+        if not displayed(data):
+            return
+
+        def write(text: str) -> None:
+            sys.stdout.write(json.dumps({"systemMessage": text}) + "\n")
+            sys.stdout.flush()
+
+        _product_telemetry.show_hook_notice(write)
+    except Exception:
+        pass
+
+
 def hook_main(args: list[str]) -> None:
     """Entry point for `agent-strace hook <event>` CLI command."""
     provider = "claude"
@@ -1463,3 +1538,6 @@ def hook_main(args: list[str]) -> None:
     finally:
         _HOOK_METADATA_ONLY.reset(metadata_token)
         _HOOK_STORE_DIR.reset(store_dir_token)
+
+    if event == "session-start":
+        _show_telemetry_notice(provider, input_data)
