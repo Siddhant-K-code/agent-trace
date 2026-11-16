@@ -1,9 +1,10 @@
 """Privacy-preserving product telemetry for the agent-strace CLI.
 
-Telemetry is enabled by default and can be disabled at any time.  The client
-sends a small allow-listed event directly to PostHog's public capture API.  It
-never reads or sends trace events, prompts, command arguments, file paths,
-repository metadata, or session identifiers.
+Telemetry is enabled by default and can be disabled at any time.  Nothing is
+sent until the one-time notice has been shown or the user explicitly enabled
+telemetry.  The client sends a small allow-listed event directly to PostHog's
+public capture API.  It never reads or sends trace events, prompts, command
+arguments, file paths, repository metadata, or session identifiers.
 
 The PostHog project token is intentionally a public, write-only ingestion
 token.  Set ``DEFAULT_POSTHOG_PROJECT_TOKEN`` before publishing a release, or
@@ -212,6 +213,18 @@ def telemetry_enabled() -> bool:
     return consent_state() != "disabled"
 
 
+def disclosure_satisfied() -> bool:
+    """Return whether the user saw the notice or explicitly enabled telemetry.
+
+    Hooks and non-interactive commands never show the notice, so an install
+    that only runs those sends nothing until one of these is true.
+    """
+    if _parse_bool(os.environ.get(_ENABLED_ENV)) is True:
+        return True
+    data = _read_config()
+    return data.get("enabled") is True or data.get("notice_shown") is True
+
+
 def set_telemetry_enabled(enabled: bool) -> bool:
     """Persist the user's telemetry preference.
 
@@ -347,9 +360,13 @@ def capture(event: str, properties: dict[str, Any] | None = None) -> bool:
     """Send one product event, returning False silently on any failure.
 
     Telemetry must never change command output, exit status, or control flow.
+    Every caller goes through here, so the disclosure check is enforced here,
+    before the anonymous ID is created.
     """
     try:
         if not telemetry_enabled() or not telemetry_configured():
+            return False
+        if not disclosure_satisfied():
             return False
         anonymous_id = _anonymous_id()
         payload = build_payload(event, properties or {}, anonymous_id)
@@ -381,7 +398,7 @@ def maybe_show_telemetry_notice(
     if (
         consent_state() != "unset"
         or data.get("notice_shown") is True
-        or os.environ.get(_ENABLED_ENV) is not None
+        or _parse_bool(os.environ.get(_ENABLED_ENV)) is not None
         or _parse_bool(os.environ.get("DO_NOT_TRACK")) is True
         or _in_ci()
         or os.environ.get("PYTEST_CURRENT_TEST")
@@ -446,8 +463,16 @@ def cmd_telemetry(args: argparse.Namespace) -> int:
     elif state == "unset":
         source = "enabled by default"
 
+    pending = ""
+    if effective == "enabled" and telemetry_configured() and not disclosure_satisfied():
+        pending = (
+            "Waiting for the one-time notice: nothing is sent until an "
+            "interactive command shows it or telemetry is explicitly enabled.\n"
+        )
+
     sys.stdout.write(
         f"Anonymous product telemetry: {effective} ({source})\n"
+        f"{pending}"
         f"Stored preference: {state}\n"
         f"PostHog destination: "
         f"{_posthog_host() if telemetry_configured() else 'not configured'}\n"

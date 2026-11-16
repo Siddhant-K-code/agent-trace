@@ -143,6 +143,21 @@ export class ExtensionTelemetry implements vscode.Disposable {
       .get<boolean>(CONFIG_KEY, true);
   }
 
+  /** Default-on events wait until the notice was shown or the user opted in. */
+  private disclosureSatisfied(): boolean {
+    if (this.context.globalState.get<boolean>(NOTICE_SHOWN_KEY, false)) {
+      return true;
+    }
+    if (parseBoolean(process.env.AGENT_STRACE_TELEMETRY) === true) {
+      return true;
+    }
+    return (
+      vscode.workspace
+        .getConfiguration(CONFIG_SECTION)
+        .inspect<boolean>(CONFIG_KEY)?.globalValue === true
+    );
+  }
+
   async setEnabled(enabled: boolean, source: EnablementSource): Promise<void> {
     this.settingFromCommand = source === "command";
     try {
@@ -256,7 +271,11 @@ export class ExtensionTelemetry implements vscode.Disposable {
     event: ExtensionTelemetryEvent,
     properties: Record<string, unknown> = {},
   ): void {
-    if (!this.isEnabled() || this.disclosurePending) {
+    if (
+      !this.isEnabled() ||
+      this.disclosurePending ||
+      !this.disclosureSatisfied()
+    ) {
       return;
     }
     const clean = sanitiseEventProperties(event, properties);

@@ -4,6 +4,7 @@ import argparse
 import io
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +15,7 @@ from agent_trace.cli import (
     _run_with_product_telemetry,
     _telemetry_command_properties,
     build_parser,
+    main as cli_main,
 )
 from agent_trace.hooks import handle_session_end, handle_session_start
 
@@ -72,6 +74,9 @@ class TelemetryTestCase(unittest.TestCase):
             if value is not None:
                 os.environ[name] = value
         self.tmp.cleanup()
+
+    def mark_notice_shown(self):
+        self.config_path.write_text(json.dumps({"notice_shown": True}))
 
 
 class TestTelemetryPreference(TelemetryTestCase):
@@ -256,6 +261,7 @@ class TestTelemetryPayload(TelemetryTestCase):
 
     def test_capture_posts_to_posthog_without_raising(self):
         os.environ["AGENT_STRACE_TELEMETRY_HOST"] = "https://eu.i.posthog.com"
+        self.mark_notice_shown()
         with patch.object(telemetry.request, "urlopen", return_value=_Response()) as urlopen:
             sent = telemetry.capture(
                 telemetry.CLI_COMMAND_COMPLETED,
@@ -362,6 +368,114 @@ class TestSessionTelemetry(TelemetryTestCase):
         self.assertEqual(properties["capture_method"], "hooks")
         self.assertNotIn("session_id", properties)
         self.assertNotIn("cwd", properties)
+
+
+class TestDisclosureGate(TelemetryTestCase):
+    """Default-on telemetry sends nothing until the notice or an explicit opt-in."""
+
+    def setUp(self):
+        super().setUp()
+        os.environ["AGENT_STRACE_TELEMETRY_TOKEN"] = "phc_public_project_token"
+        self.trace_dir = Path(self.tmp.name) / "traces"
+        os.environ["AGENT_TRACE_DIR"] = str(self.trace_dir)
+
+    def _run_cli(self, argv, stdin="", stderr=None):
+        stdout = io.StringIO()
+        stderr = stderr if stderr is not None else io.StringIO()
+        with patch.object(sys, "argv", ["agent-strace", *argv]), \
+                patch.object(sys, "stdin", io.StringIO(stdin)), \
+                patch.object(sys, "stdout", stdout), \
+                patch.object(sys, "stderr", stderr), \
+                patch("agent_trace.cli.cmd_list", return_value=0):
+            with self.assertRaises(SystemExit):
+                cli_main()
+        return stdout.getvalue(), stderr.getvalue()
+
+    def _hook_session(self, session_id="gate-session-0001"):
+        """Run session-start and session-end through the CLI hook entry point."""
+        payload = json.dumps({"session_id": session_id, "source": "startup"})
+        output = ""
+        with patch.object(telemetry.request, "urlopen", return_value=_Response()) as urlopen:
+            for event in ("session-start", "session-end"):
+                out, err = self._run_cli(["hook", event], stdin=payload)
+                output += out + err
+        return urlopen, output
+
+    def _sent_events(self, urlopen):
+        return [json.loads(c.args[0].data)["event"] for c in urlopen.call_args_list]
+
+    def test_hook_sends_nothing_and_creates_no_id_before_the_notice(self):
+        urlopen, output = self._hook_session()
+        urlopen.assert_not_called()
+        self.assertEqual(output, "")
+        self.assertFalse(self.config_path.exists())
+
+    def test_hook_sends_once_the_notice_was_shown(self):
+        self.mark_notice_shown()
+        urlopen, output = self._hook_session()
+        self.assertEqual(self._sent_events(urlopen), [telemetry.SESSION_COMPLETED])
+        self.assertEqual(output, "")
+
+    def test_hook_sends_after_an_explicit_choice(self):
+        with self.subTest("telemetry enable"):
+            telemetry.set_telemetry_enabled(True)
+            urlopen, _ = self._hook_session()
+            self.assertEqual(self._sent_events(urlopen), [telemetry.SESSION_COMPLETED])
+        self.config_path.unlink()
+        with self.subTest("AGENT_STRACE_TELEMETRY=1"):
+            os.environ["AGENT_STRACE_TELEMETRY"] = "1"
+            urlopen, _ = self._hook_session("gate-session-0002")
+            self.assertEqual(self._sent_events(urlopen), [telemetry.SESSION_COMPLETED])
+
+    def test_opt_outs_still_block_after_the_notice(self):
+        opt_outs = {
+            "DO_NOT_TRACK=1": {"DO_NOT_TRACK": "1"},
+            "AGENT_STRACE_TELEMETRY=0": {"AGENT_STRACE_TELEMETRY": "0"},
+            "CI default": {"CI": "true"},
+        }
+        for label, env in opt_outs.items():
+            with self.subTest(label), patch.dict(os.environ, env):
+                self.mark_notice_shown()
+                with patch.object(telemetry.request, "urlopen") as urlopen:
+                    self.assertFalse(telemetry.capture(telemetry.SESSION_COMPLETED, {}))
+                urlopen.assert_not_called()
+        with self.subTest("telemetry disable"):
+            self.mark_notice_shown()
+            telemetry.set_telemetry_enabled(False)
+            with patch.object(telemetry.request, "urlopen") as urlopen:
+                self.assertFalse(telemetry.capture(telemetry.SESSION_COMPLETED, {}))
+            urlopen.assert_not_called()
+
+    def test_non_interactive_cli_run_sends_nothing_before_the_notice(self):
+        with patch.object(telemetry.request, "urlopen", return_value=_Response()) as urlopen:
+            _, stderr = self._run_cli(["list"])
+        urlopen.assert_not_called()
+        self.assertNotIn("telemetry", stderr)
+        self.assertFalse(self.config_path.exists())
+
+    def test_first_interactive_cli_run_shows_the_notice_then_sends(self):
+        stderr = _TTY()
+        with patch.object(telemetry.request, "urlopen", return_value=_Response()) as urlopen:
+            self._run_cli(["list"], stderr=stderr)
+        self.assertIn("enabled by default", stderr.getvalue())
+        self.assertEqual(self._sent_events(urlopen), [telemetry.CLI_COMMAND_COMPLETED])
+
+    def test_notice_still_shows_when_the_environment_value_is_not_a_choice(self):
+        os.environ["AGENT_STRACE_TELEMETRY"] = "maybe"
+        self.assertTrue(telemetry.maybe_show_telemetry_notice(_TTY()))
+
+    def test_status_explains_the_pending_notice(self):
+        args = argparse.Namespace(telemetry_command="status")
+        output = io.StringIO()
+        with patch("sys.stdout", output):
+            telemetry.cmd_telemetry(args)
+        self.assertIn("Waiting for the one-time notice", output.getvalue())
+
+        self.mark_notice_shown()
+        output = io.StringIO()
+        with patch("sys.stdout", output):
+            telemetry.cmd_telemetry(args)
+        self.assertNotIn("Waiting", output.getvalue())
 
 
 if __name__ == "__main__":

@@ -7,8 +7,14 @@ duration, and aggregate tool/error counts from the state it already maintains.
 Neither client sends trace contents.
 
 Telemetry is enabled by default on configured CLI and editor-extension builds.
-Each surface shows a one-time, non-blocking disclosure. CI remains disabled by
-default to avoid ephemeral installation identifiers and test noise.
+Each surface shows a one-time, non-blocking disclosure, and sends events only
+after that notice has been shown or telemetry was explicitly enabled. The CLI
+shows its notice on stderr during the first interactive command. Hooks and
+non-interactive runs never show it, so a hooks-only install (for example the
+Claude Code or Copilot CLI plugin, or `setup` run from a script) sends nothing
+until the notice has appeared in a terminal, `agent-strace telemetry enable`
+was run, or `AGENT_STRACE_TELEMETRY=1` is set. CI remains disabled by default
+to avoid ephemeral installation identifiers and test noise.
 
 ## User controls
 
@@ -23,8 +29,10 @@ AGENT_STRACE_TELEMETRY=0 agent-strace list
 AGENT_STRACE_TELEMETRY=1 agent-strace list
 ```
 
-An unset preference means telemetry is enabled. A random installation ID is
-created on the first event and stored in `~/.agent-strace/telemetry.json`
+An unset preference means telemetry is enabled, waiting for the one-time notice;
+`agent-strace telemetry status` says when it is still waiting. A random
+installation ID is created on the first event that is sent and stored in
+`~/.agent-strace/telemetry.json`
 (mode `0600`; updates are locked and atomic, see [Security](security.md#local-config-and-credential-files)).
 `agent-strace telemetry disable` persists the opt-out and deletes the
 identifier. `DO_NOT_TRACK=1` and `AGENT_STRACE_TELEMETRY=0` disable telemetry
@@ -38,6 +46,10 @@ The VS Code/Open VSX extension has its own application-scoped preference:
 - Run **agent-trace: Enable Product Telemetry** to re-enable it.
 - VS Code's editor-wide telemetry switch, `DO_NOT_TRACK=1`, and
   `AGENT_STRACE_TELEMETRY=0` also disable extension events.
+
+Like the CLI, the extension sends nothing until its own notice has been shown,
+or until telemetry was explicitly enabled with the setting, the enable command,
+or `AGENT_STRACE_TELEMETRY=1`.
 
 The extension stores a separate random ID in VS Code global state and deletes
 it when disabled. CLI and extension preferences are separate; environment-level
@@ -99,7 +111,10 @@ No database or deployed service is required. Use a managed PostHog project:
    const POSTHOG_HOST = "https://us.i.posthog.com";
    ```
 
-4. Verify locally without editing the constants first:
+4. Verify locally without editing the constants first. Run these in an
+   interactive terminal: `list` shows the one-time notice and then sends its
+   event, while a piped or scripted run sends nothing until the notice has been
+   shown.
 
    ```bash
    export AGENT_STRACE_TELEMETRY_TOKEN="phc_your_project_token"

@@ -92,9 +92,10 @@ When the watchdog kills a session, the post-mortem viewer opens automatically. T
 ## Product telemetry
 
 Anonymous extension telemetry is enabled by default with a one-time,
-non-blocking disclosure. Disable it using `agentTrace.telemetry.enabled`, the
-Command Palette, VS Code's editor-wide telemetry switch, `DO_NOT_TRACK=1`, or
-`AGENT_STRACE_TELEMETRY=0`.
+non-blocking disclosure, and nothing is sent before that disclosure is shown
+unless telemetry was explicitly enabled. Disable it using
+`agentTrace.telemetry.enabled`, the Command Palette, VS Code's editor-wide
+telemetry switch, `DO_NOT_TRACK=1`, or `AGENT_STRACE_TELEMETRY=0`.
 
 The extension sends activation, fixed command names/outcomes, and session
 success/duration with aggregate tool/error counts. It never sends prompts,

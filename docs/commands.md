@@ -135,11 +135,13 @@ configuration paths.
 agent-strace telemetry [status|enable|disable]
 ```
 Show or change the anonymous product telemetry preference. Telemetry is enabled
-by default outside CI. `disable` persists an opt-out and deletes the local
-anonymous installation ID. `DO_NOT_TRACK=1` or `AGENT_STRACE_TELEMETRY=0`
-always disables collection; `AGENT_STRACE_TELEMETRY=1` explicitly enables it,
-including in CI. See [telemetry.md](telemetry.md) for the exact event schema and
-maintainer setup.
+by default outside CI, but events are sent only after the one-time notice has
+been shown on an interactive command or telemetry was explicitly enabled;
+`status` says when it is still waiting for the notice. `disable` persists an
+opt-out and deletes the local anonymous installation ID. `DO_NOT_TRACK=1` or
+`AGENT_STRACE_TELEMETRY=0` always disables collection;
+`AGENT_STRACE_TELEMETRY=1` explicitly enables it, including in CI. See
+[telemetry.md](telemetry.md) for the exact event schema and maintainer setup.
 
 ### `import`
 ```
