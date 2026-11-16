@@ -12,12 +12,16 @@ Watchdog mode (--timeout / --budget):
   Enforces a wall-clock timeout and/or token-cost ceiling. When either limit
   is breached the agent process is killed, whatever --on-violation says, and
   a structured post-mortem JSON file is written to the session directory.
-  Killing needs --agent-pid; without it watch alerts and warns once. The
-  timeout counts from when watch starts and is checked on every poll cycle,
-  so an agent that writes no events is still killed at the deadline. An
+  Killing needs --agent-pid; without it watch alerts and warns once. An
   optional --on-death command is invoked with the post-mortem path
   substituted for {post_mortem_path}. --max-duration and --max-cost set the
   same limits but act with --on-violation, like the other checks.
+
+  Time counts from when watch starts. A duration limit that kills, from
+  --timeout, or from --max-duration, watchers.duration.max_minutes or a
+  built-in timeout:D while the action is kill, is checked on every poll
+  cycle, so an agent that writes no events is still killed at the deadline.
+  Any other duration limit is checked when an event arrives.
 """
 
 from __future__ import annotations
@@ -1116,10 +1120,10 @@ class WatcherConfig:
     # built-in budget:N lower a set limit that kills, and replace any other
     # (see _cost_limit_kills).
     cost_limit_set: bool = False
-    # True when watchers.duration.max_minutes, --max-duration or --timeout
-    # sets max_duration_seconds, so it is not the default. A built-in
-    # timeout:D lowers a set limit that kills, and replaces any other (see
-    # _duration_limit_kills).
+    # True when watchers.duration.max_minutes, --max-duration, --timeout or
+    # a built-in timeout:D sets max_duration_seconds, so it is not the
+    # default. timeout:D lowers a set limit that kills, and replaces any
+    # other (see _apply_builtin_rules and _duration_limit_kills).
     duration_limit_set: bool = False
     # Set when the config file sets the project budget key weekly or
     # per_session_max, even to null or 0. It then replaces the standard
@@ -2372,9 +2376,10 @@ def _check_pause_file(store: "TraceStore", state: "WatchState", out: "TextIO") -
 # Watchdog limits (--timeout / --budget)
 # ---------------------------------------------------------------------------
 
-# Seconds watch keeps running past the --timeout deadline while the agent
-# lives, so the SIGKILL that _kill_process sends 5 seconds after SIGTERM is
-# not lost when watch would otherwise stop for lack of events.
+# Seconds watch keeps running past the deadline of a duration limit that
+# kills (see _duration_limit_kills) while the agent lives, so the SIGKILL
+# that _kill_process sends 5 seconds after SIGTERM is not lost when watch
+# would otherwise stop for lack of events.
 _TIMEOUT_KILL_GRACE = 10.0
 
 
@@ -2401,13 +2406,17 @@ def _agent_exited(state: WatchState) -> bool:
 
 
 def _check_timeout(config: WatcherConfig, state: WatchState) -> str | None:
-    """Return the DurationWatcher violation once the --timeout deadline passes.
+    """Return the DurationWatcher violation once a deadline that kills passes.
 
-    Called on every poll cycle, so an agent that writes no events is still
-    killed at the deadline. Returns None without --timeout, after the
-    violation has fired, and once the agent has exited.
+    The deadline is that of a duration limit that kills: --timeout, or
+    --max-duration, watchers.duration.max_minutes or a built-in timeout:D
+    while the action is kill (see _duration_limit_kills). Called on every
+    poll cycle, so an agent that writes no events is still killed at the
+    deadline. Returns None after the violation has fired, once the agent has
+    exited, and for any other duration limit, which is checked only when an
+    event arrives (see check_event).
     """
-    if not config.kill_on_timeout or "duration" in state.fired:
+    if not _duration_limit_kills(config) or "duration" in state.fired:
         return None
     if time.time() - state.start_time <= config.max_duration_seconds:
         return None
@@ -2417,13 +2426,14 @@ def _check_timeout(config: WatcherConfig, state: WatchState) -> str | None:
 
 
 def _timeout_holds_watch(config: WatcherConfig, state: WatchState, now: float) -> bool:
-    """Return True while the idle stop must wait for the --timeout deadline.
+    """Return True while the idle stop must wait for a deadline that kills.
 
-    With --timeout and --agent-pid, watch keeps running while the agent
-    lives, until _TIMEOUT_KILL_GRACE seconds after the deadline. Without an
-    agent PID watch cannot tell whether the agent runs, so it does not wait.
+    With a duration limit that kills (see _duration_limit_kills) and
+    --agent-pid, watch keeps running while the agent lives, until
+    _TIMEOUT_KILL_GRACE seconds after the deadline. Without an agent PID
+    watch cannot tell whether the agent runs, so it does not wait.
     """
-    if not config.kill_on_timeout or not state.agent_pid:
+    if not _duration_limit_kills(config) or not state.agent_pid:
         return False
     deadline = state.start_time + config.max_duration_seconds
     if now > deadline + _TIMEOUT_KILL_GRACE:
@@ -2471,10 +2481,10 @@ def _cost_limit_kills(config: WatcherConfig, per_session_max: float | None = Non
 def _duration_limit_kills(config: WatcherConfig) -> bool:
     """Return True when the duration limit is one the user set that kills.
 
-    That is a limit from --timeout, or from --max-duration or
-    watchers.duration.max_minutes while the action is kill. The default 1800
-    seconds is not set by the user, so it does not count, even with the kill
-    action.
+    That is a limit from --timeout, or from --max-duration,
+    watchers.duration.max_minutes or a built-in timeout:D while the action
+    is kill. The default 1800 seconds is not set by the user, so it does not
+    count, even with the kill action.
     """
     return config.kill_on_timeout or (
         config.duration_limit_set and config.on_violation == "kill"
@@ -2527,10 +2537,11 @@ def watch_session(
     agent_pid: process that pause, kill and approval actions signal. Without
     it watch still alerts but warns once instead of signalling.
 
-    With config.kill_on_timeout (--timeout), the time limit is checked on
-    every poll cycle and kills the agent, so an agent that writes no events
-    is still killed. With agent_pid, the idle stop waits while the agent
-    process runs, until _TIMEOUT_KILL_GRACE seconds after the deadline.
+    A duration limit that kills (see _duration_limit_kills), such as
+    --timeout, is checked on every poll cycle and kills the agent, so an
+    agent that writes no events is still killed. With agent_pid, the idle
+    stop waits while the agent process runs, until _TIMEOUT_KILL_GRACE
+    seconds after the deadline.
 
     stream_config: when set, events are pushed in real-time to the configured
     URL as they arrive (push-based streaming). The startup line names only
@@ -2621,8 +2632,9 @@ def watch_session(
                 write_heartbeat(store, session_id, agent_pid=state.agent_pid)
                 last_heartbeat_time = now
 
-            # --timeout is wall-clock time, so check it on every poll cycle:
-            # an agent that hangs and writes nothing is still killed.
+            # A duration limit that kills, such as --timeout, is wall-clock
+            # time, so check it on every poll cycle: an agent that hangs and
+            # writes nothing is still killed.
             timeout_msg = _check_timeout(config, state)
             if timeout_msg:
                 _dispatch_alert(
@@ -2633,9 +2645,10 @@ def watch_session(
             # Idle timeout: checked on every poll cycle (including when no
             # event arrived), so it fires reliably after max_idle_seconds.
             # A paused agent writes no events, so the clock stops while
-            # watch holds a pause and restarts when it is released. With
-            # --timeout, watch does not stop before the deadline while the
-            # agent process runs (see _timeout_holds_watch).
+            # watch holds a pause and restarts when it is released. With a
+            # duration limit that kills, watch does not stop before the
+            # deadline while the agent process runs (see
+            # _timeout_holds_watch).
             if state.paused:
                 last_event_time = now
             elif now - last_event_time > max_idle_seconds and not _timeout_holds_watch(
@@ -3050,7 +3063,9 @@ def _apply_builtin_rules(
     budget:N and timeout:D may lower a limit the user set that kills, but
     never raise it, and the limit still kills. They replace any other limit,
     and the defaults. *per_session_max* is the project budget's: it makes
-    the cost limit one that kills.
+    the cost limit one that kills. timeout:D sets the duration limit, so
+    with the kill action it is a limit that kills (see
+    _duration_limit_kills).
     """
     cost_kills = _cost_limit_kills(config, per_session_max)
     duration_kills = _duration_limit_kills(config)
@@ -3065,6 +3080,7 @@ def _apply_builtin_rules(
             config.max_duration_seconds = (
                 min(value, config.max_duration_seconds) if duration_kills else value
             )
+            config.duration_limit_set = True
         else:
             if name == "loop" and value is not None:
                 config.loop_threshold, window = value

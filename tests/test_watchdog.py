@@ -524,6 +524,197 @@ class TestTimeoutIdleStop(WatchdogLimitTest):
         self.assertEqual(self.yielded, 2)
 
 
+# watchers.duration.max_minutes with the kill action: a 60 s limit that kills.
+_CONFIG_KILL_AFTER_A_MINUTE = (
+    '{"watchers": {"duration": {"max_minutes": 1}, "retry": {"alert": "kill"}}}'
+)
+
+
+class TestDurationLimitsThatKill(WatchdogLimitTest):
+    """--max-duration, watchers.duration.max_minutes and timeout:D kill while
+    the action is kill. They are then checked on every poll cycle, as
+    --timeout is, so an agent that writes no events is still killed."""
+
+    def setUp(self):
+        super().setUp()
+        self.config = self.root / "watch.json"
+
+    def test_max_duration_with_kill_kills_an_agent_that_writes_no_events(self):
+        # The kill on a poll cycle gets what a --timeout kill gets: the
+        # post-mortem with its reason and --on-death once.
+        post_mortem = (
+            TraceStore(self.trace_dir, redact=False)._session_dir(SESSION)
+            / "watchdog-postmortem.json"
+        )
+        with patch("agent_trace.watch.subprocess.Popen") as popen:
+            self.watch(
+                "--max-duration", "60", "--on-violation", "kill",
+                "--on-death", "restart-agent --from {post_mortem_path}",
+                steps=(self.pass_deadline, _IDLE_SENTINEL, _IDLE_SENTINEL, _IDLE_SENTINEL),
+            )
+        self.mocks["kill"].assert_called_once_with(PID, None)
+        self.assertEqual(self.count("DurationWatcher:"), 1)
+        self.assertIn(f"Killing agent process {PID}", self.alerts())
+        popen.assert_called_once_with(f"restart-agent --from {post_mortem}", shell=True)
+        self.assertEqual(
+            json.loads(post_mortem.read_text())["reason"],
+            "DurationWatcher: 61s elapsed (threshold: 60s)",
+        )
+
+    def test_config_file_limit_with_alert_kill_kills_an_agent_that_writes_no_events(self):
+        self.config.write_text(_CONFIG_KILL_AFTER_A_MINUTE)
+        self.watch("--config", str(self.config), steps=(
+            self.pass_deadline, _IDLE_SENTINEL, _IDLE_SENTINEL,
+        ))
+        self.mocks["kill"].assert_called_once_with(PID, None)
+        self.assertIn("DurationWatcher: 61s elapsed (threshold: 60s)", self.alerts())
+
+    def test_timeout_d_with_kill_kills_an_agent_that_writes_no_events(self):
+        self.watch("--rules", "timeout:1m", "--on-violation", "kill", steps=(
+            self.pass_deadline, _IDLE_SENTINEL, _IDLE_SENTINEL,
+        ))
+        self.mocks["kill"].assert_called_once_with(PID, None)
+        self.assertIn("DurationWatcher: 61s elapsed (threshold: 60s)", self.alerts())
+
+    def test_the_kill_comes_on_the_poll_cycle_and_a_later_event_adds_nothing(self):
+        kills_before_the_event = []
+        self.watch("--max-duration", "60", "--on-violation", "kill", steps=(
+            self.pass_deadline, _IDLE_SENTINEL,
+            lambda: kills_before_the_event.append(self.mocks["kill"].call_count),
+            _tool_call(), _IDLE_SENTINEL,
+        ))
+        self.assertEqual(kills_before_the_event, [1])
+        self.mocks["kill"].assert_called_once_with(PID, None)
+        self.assertEqual(self.count("DurationWatcher:"), 1)
+
+    def test_dry_run_reports_the_kill_without_killing(self):
+        self.watch("--max-duration", "60", "--on-violation", "kill", "--dry-run", steps=(
+            self.pass_deadline, _IDLE_SENTINEL,
+        ))
+        self.assertIn("[dry-run] would kill agent process", self.alerts())
+        self.mocks["kill"].assert_not_called()
+
+    def test_without_agent_pid_it_alerts_on_time_and_warns_once(self):
+        self.watch("--max-duration", "60", "--on-violation", "kill", agent_pid=False, steps=(
+            self.pass_deadline, _IDLE_SENTINEL, _IDLE_SENTINEL, _IDLE_SENTINEL,
+        ))
+        self.assertEqual(self.count("DurationWatcher:"), 1)
+        self.assertEqual(self.count("Cannot kill the agent: no agent PID is known"), 1)
+        self.mocks["kill"].assert_not_called()
+
+
+class TestDurationLimitIdleStop(WatchdogLimitTest):
+    """With a duration limit that kills, the idle stop waits for its
+    deadline while the agent runs, as it does for --timeout."""
+
+    def setUp(self):
+        super().setUp()
+        self.config = self.root / "watch.json"
+        self.config.write_text(_CONFIG_KILL_AFTER_A_MINUTE)
+
+    def test_idle_stop_waits_for_the_deadline_while_the_agent_runs(self):
+        for flags in (
+            ("--max-duration", "60", "--on-violation", "kill"),
+            ("--config", str(self.config)),
+            ("--rules", "timeout:1m", "--on-violation", "kill"),
+        ):
+            with self.subTest(flags=flags):
+                self.yielded = 0
+                out = self.watch(*flags, max_idle_seconds=0.05, steps=(
+                    _IDLE_SENTINEL, self.idle, _IDLE_SENTINEL, self.idle, _IDLE_SENTINEL,
+                ))
+                self.assertNotIn("stopping", out)
+                self.assertEqual(self.yielded, 3)
+                self.mocks["kill"].assert_not_called()
+
+    def test_idle_stop_waits_out_the_kill_grace_then_stops(self):
+        out = self.watch(
+            "--rules", "timeout:1m", "--on-violation", "kill", max_idle_seconds=0.05,
+            steps=(
+                self.pass_deadline, _IDLE_SENTINEL,
+                self.idle, _IDLE_SENTINEL,
+                self.pass_grace, _IDLE_SENTINEL,
+                _IDLE_SENTINEL,
+            ),
+        )
+        self.mocks["kill"].assert_called_once_with(PID, None)
+        self.assertIn("No events for 0s - stopping", out)
+        self.assertEqual(self.yielded, 3)
+
+    def test_idle_stop_applies_once_the_agent_exits(self):
+        # The idle stop waits while the agent runs. Once the agent has
+        # exited it applies, and the deadline that has passed kills nothing.
+        out = self.watch(
+            "--max-duration", "60", "--on-violation", "kill", max_idle_seconds=0.05,
+            steps=(
+                _IDLE_SENTINEL, self.idle, _IDLE_SENTINEL,
+                self.agent_exits, self.pass_deadline, _IDLE_SENTINEL,
+                _IDLE_SENTINEL,
+            ),
+        )
+        self.assertIn("No events for 0s - stopping", out)
+        self.assertEqual(self.yielded, 3)
+        self.mocks["kill"].assert_not_called()
+        self.assertEqual(self.count("DurationWatcher:"), 0)
+
+    def test_idle_stop_is_unchanged_without_agent_pid(self):
+        """Guard: passes on main too."""
+        out = self.watch(
+            "--max-duration", "60", "--on-violation", "kill", agent_pid=False,
+            max_idle_seconds=0.05,
+            steps=(_IDLE_SENTINEL, self.idle, _IDLE_SENTINEL, _IDLE_SENTINEL),
+        )
+        self.assertIn("No events for 0s - stopping", out)
+        self.assertEqual(self.yielded, 2)
+
+
+class TestDurationLimitsThatOnlyAlert(WatchdogLimitTest):
+    """Any other duration limit is checked when an event arrives: an agent
+    that writes no events gets no alert and no kill past the limit, and
+    watch stops for lack of events."""
+
+    def setUp(self):
+        super().setUp()
+        self.config = self.root / "watch.json"
+
+    def assert_left_alone(self, *flags, seconds_past_start=61):
+        def pass_the_limit():
+            self.loop_state.start_time -= seconds_past_start
+
+        out = self.watch(*flags, max_idle_seconds=0.05, steps=(
+            pass_the_limit, _IDLE_SENTINEL, self.idle, _IDLE_SENTINEL, _IDLE_SENTINEL,
+        ))
+        self.assertEqual(self.count("DurationWatcher:"), 0)
+        self.mocks["kill"].assert_not_called()
+        self.assertIn("No events for 0s - stopping", out)
+        self.assertEqual(self.yielded, 2)
+
+    def test_max_duration_that_only_alerts(self):
+        """Guard: passes on main too."""
+        self.assert_left_alone("--max-duration", "60")
+
+    def test_timeout_d_that_only_alerts(self):
+        """Guard: passes on main too."""
+        self.assert_left_alone("--rules", "timeout:1m")
+
+    def test_config_file_alert_kill_overridden_by_on_violation_terminal(self):
+        """Guard: passes on main too."""
+        self.config.write_text(_CONFIG_KILL_AFTER_A_MINUTE)
+        self.assert_left_alone("--config", str(self.config), "--on-violation", "terminal")
+
+    def test_config_file_limit_with_alert_pause(self):
+        """Guard: passes on main too."""
+        self.config.write_text(
+            '{"watchers": {"duration": {"max_minutes": 1}, "retry": {"alert": "pause"}}}'
+        )
+        self.assert_left_alone("--config", str(self.config))
+
+    def test_the_default_limit_with_kill(self):
+        """Guard: passes on main too. The default 1800 seconds is not a
+        limit the user set, so it does not count, even with kill."""
+        self.assert_left_alone("--on-violation", "kill", seconds_past_start=1801)
+
+
 class TestBudgetKills(WatchdogLimitTest):
     def test_budget_kills_whatever_on_violation_says(self):
         self.watch("--budget", "0", "--on-violation", "terminal", steps=(_costly_response(),))
