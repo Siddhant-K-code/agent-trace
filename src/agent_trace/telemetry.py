@@ -216,8 +216,9 @@ def telemetry_enabled() -> bool:
 def disclosure_satisfied() -> bool:
     """Return whether the user saw the notice or explicitly enabled telemetry.
 
-    Hooks and non-interactive commands never show the notice, so an install
-    that only runs those sends nothing until one of these is true.
+    Non-interactive commands never show the notice, and hooks show it only
+    where the agent displays hook output to the user (see hooks.py), so an
+    install that only runs those may send nothing until one of these is true.
     """
     if _parse_bool(os.environ.get(_ENABLED_ENV)) is True:
         return True
@@ -389,43 +390,82 @@ def capture(event: str, properties: dict[str, Any] | None = None) -> bool:
         return False
 
 
-def maybe_show_telemetry_notice(
-    output_stream: TextIO | None = None,
-) -> bool:
-    """Show the default-on disclosure once on an interactive CLI."""
-    output_stream = output_stream or sys.stderr
+_NOTICE_SENTENCES = (
+    "Anonymous product telemetry is enabled by default.",
+    "No prompts, arguments, paths, repository data, or trace contents are sent.",
+    "Disable at any time with: agent-strace telemetry disable",
+)
+CLI_NOTICE = f"{_NOTICE_SENTENCES[0]} {_NOTICE_SENTENCES[1]}\n{_NOTICE_SENTENCES[2]}\n"
+# One line: agent UIs show it among other session messages.
+HOOK_NOTICE = "agent-strace: " + " ".join(_NOTICE_SENTENCES)
+
+
+def notice_due() -> bool:
+    """Return whether telemetry is on by default and the notice is unseen."""
     data = _read_config()
-    if (
-        consent_state() != "unset"
+    return not (
+        isinstance(data.get("enabled"), bool)
         or data.get("notice_shown") is True
         or _parse_bool(os.environ.get(_ENABLED_ENV)) is not None
         or _parse_bool(os.environ.get("DO_NOT_TRACK")) is True
         or _in_ci()
         or os.environ.get("PYTEST_CURRENT_TEST")
         or not telemetry_configured()
-    ):
+    )
+
+
+def _mark_notice_shown(current: dict[str, Any]) -> dict[str, Any]:
+    current["notice_shown"] = True
+    current["updated_at"] = datetime.now(timezone.utc).isoformat()
+    return current
+
+
+def maybe_show_telemetry_notice(
+    output_stream: TextIO | None = None,
+) -> bool:
+    """Show the default-on disclosure once on an interactive CLI."""
+    output_stream = output_stream or sys.stderr
+    if not notice_due():
         return False
     try:
         if not output_stream.isatty():
             return False
-        output_stream.write(
-            "Anonymous product telemetry is enabled by default. "
-            "No prompts, arguments, paths, repository data, or trace contents are sent.\n"
-            "Disable at any time with: agent-strace telemetry disable\n"
-        )
+        output_stream.write(CLI_NOTICE)
         output_stream.flush()
 
         def mark_shown(current: dict[str, Any]) -> dict[str, Any] | None:
             if current.get("notice_shown") is True:
                 return None
-            current["notice_shown"] = True
-            current["updated_at"] = datetime.now(timezone.utc).isoformat()
-            return current
+            return _mark_notice_shown(current)
 
         _update_config(mark_shown)
         return True
     except OSError:
         return False
+
+
+def show_hook_notice(write: Callable[[str], None]) -> bool:
+    """Show the notice once through an agent hook's user-visible output.
+
+    *write* must deliver ``HOOK_NOTICE`` to the user or raise.  The check,
+    the write and the mark run under the config lock, so concurrent hooks
+    show it once.  ``notice_shown`` is set only after *write* returns; if
+    the lock or the write fails, nothing is marked.  Never raises.
+    """
+    if not notice_due():
+        return False
+    shown = False
+
+    def show_and_mark(current: dict[str, Any]) -> dict[str, Any] | None:
+        nonlocal shown
+        if current.get("notice_shown") is True or isinstance(current.get("enabled"), bool):
+            return None
+        write(HOOK_NOTICE)
+        shown = True
+        return _mark_notice_shown(current)
+
+    _update_config(show_and_mark)
+    return shown
 
 
 def cmd_telemetry(args: argparse.Namespace) -> int:
@@ -467,7 +507,8 @@ def cmd_telemetry(args: argparse.Namespace) -> int:
     if effective == "enabled" and telemetry_configured() and not disclosure_satisfied():
         pending = (
             "Waiting for the one-time notice: nothing is sent until an "
-            "interactive command shows it or telemetry is explicitly enabled.\n"
+            "interactive command or an interactive Claude Code, Codex, or "
+            "Gemini CLI session shows it, or telemetry is explicitly enabled.\n"
         )
 
     sys.stdout.write(

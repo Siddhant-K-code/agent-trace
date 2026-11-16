@@ -10,6 +10,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+try:  # keeps product telemetry off in this process and its children
+    import _no_telemetry  # noqa: F401
+except ImportError:  # pragma: no cover - run as a package module
+    from tests import _no_telemetry  # noqa: F401
+
 from agent_trace import telemetry
 from agent_trace.cli import (
     _run_with_product_telemetry,
@@ -17,6 +22,7 @@ from agent_trace.cli import (
     build_parser,
     main as cli_main,
 )
+from agent_trace.entry import main as entry_main
 from agent_trace.hooks import handle_session_end, handle_session_start
 
 try:
@@ -57,6 +63,14 @@ class TelemetryTestCase(unittest.TestCase):
         "PYTEST_CURRENT_TEST",
         "AGENT_TRACE_DIR",
         "AGENT_TRACE_CLAUDE_SESSION_ID",
+        "AGENT_TRACE_CODEX_SESSION_ID",
+        "AGENT_TRACE_GEMINI_SESSION_ID",
+        "AGENT_TRACE_CURSOR_SESSION_ID",
+        "AGENT_TRACE_COPILOT_SESSION_ID",
+        # Set by the agents that run hooks; the notice relies on them.
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_CODE_SESSION_ID",
+        "GEMINI_SESSION_ID",
     )
 
     def setUp(self):
@@ -476,6 +490,259 @@ class TestDisclosureGate(TelemetryTestCase):
         with patch("sys.stdout", output):
             telemetry.cmd_telemetry(args)
         self.assertNotIn("Waiting", output.getvalue())
+
+
+_SID = "notice-session-0001"
+
+# Each worker is a separate hook process at session start of its own
+# interactive Claude Code session, racing on one telemetry config.
+_HOOK_NOTICE_SCRIPT = """
+import io, os
+from agent_trace.entry import main
+session_id = sys.argv[2]
+wait_for_start()
+os.environ["CLAUDE_CODE_ENTRYPOINT"] = "cli"
+os.environ["CLAUDE_CODE_SESSION_ID"] = session_id
+sys.argv = ["agent-strace", "hook", "session-start"]
+sys.stdin = io.StringIO('{"session_id": "%s", "source": "startup"}' % session_id)
+try:
+    main()
+except SystemExit as exc:
+    if exc.code not in (0, None):
+        raise
+"""
+
+
+class _BrokenStdout(io.StringIO):
+    def write(self, text):
+        raise BrokenPipeError("agent closed the hook's stdout")
+
+
+class TestHookTelemetryNotice(TelemetryTestCase):
+    """Hooks show the notice once, only where the agent displays it."""
+
+    def setUp(self):
+        super().setUp()
+        os.environ["AGENT_STRACE_TELEMETRY_TOKEN"] = "phc_public_project_token"
+        # Unreachable on purpose; every hook run below also patches urlopen.
+        os.environ["AGENT_STRACE_TELEMETRY_HOST"] = "http://127.0.0.1:9"
+        os.environ["AGENT_TRACE_DIR"] = str(Path(self.tmp.name) / "traces")
+
+    def _hook(self, provider, event, payload, stdout=None):
+        """Run one hook through the console-script entry point."""
+        stdout = stdout if stdout is not None else io.StringIO()
+        argv = ["agent-strace", "hook", "--provider", provider, event]
+        with patch.object(sys, "argv", argv), \
+                patch.object(sys, "stdin", io.StringIO(json.dumps(payload))), \
+                patch.object(sys, "stdout", stdout), \
+                patch.object(sys, "stderr", io.StringIO()), \
+                patch.object(telemetry.request, "urlopen", return_value=_Response()) as urlopen:
+            with self.assertRaises(SystemExit) as exited:
+                entry_main()
+        self.assertIn(exited.exception.code, (0, None))
+        return stdout.getvalue(), [
+            json.loads(c.args[0].data)["event"] for c in urlopen.call_args_list
+        ]
+
+    def _rollout(self, source="cli", session_id=_SID, first_line=None):
+        if first_line is None:
+            first_line = json.dumps({
+                "timestamp": "2026-01-01T00:00:00.000Z",
+                "type": "session_meta",
+                "payload": {
+                    "session_id": session_id,
+                    "id": session_id,
+                    "source": source,
+                    "originator": "codex-tui" if source == "cli" else "codex_exec",
+                    "base_instructions": {"text": "x" * 30000},
+                },
+            })
+        path = Path(self.tmp.name) / f"rollout-{source}.jsonl"
+        path.write_text(first_line + "\n" + json.dumps({"type": "turn_context"}) + "\n")
+        return str(path)
+
+    def _displayed(self, provider):
+        """Env and payload of a session start whose message the agent shows."""
+        payload = {"session_id": _SID, "source": "startup", "hook_event_name": "SessionStart"}
+        if provider == "claude":
+            return {"CLAUDE_CODE_ENTRYPOINT": "cli", "CLAUDE_CODE_SESSION_ID": _SID}, payload
+        if provider == "gemini":
+            return {"GEMINI_SESSION_ID": _SID}, payload
+        if provider == "codex":
+            return {}, {**payload, "transcript_path": self._rollout()}
+        raise AssertionError(provider)
+
+    def _config(self):
+        if not self.config_path.exists():
+            return {}
+        return json.loads(self.config_path.read_text())
+
+    def _assert_notice_shown_once(self, provider):
+        env, payload = self._displayed(provider)
+        with patch.dict(os.environ, env):
+            out, sent = self._hook(provider, "session-start", payload)
+            self.assertEqual(out.count("\n"), 1)
+            self.assertEqual(json.loads(out), {"systemMessage": telemetry.HOOK_NOTICE})
+            self.assertIn("agent-strace telemetry disable", telemetry.HOOK_NOTICE)
+            self.assertEqual(sent, [])
+            config = self._config()
+            self.assertIs(config["notice_shown"], True)
+            self.assertNotIn("anonymous_id", config)
+
+            again, _ = self._hook(provider, "session-start", payload)
+            self.assertEqual(again, "")
+        return env, payload
+
+    def _assert_session_end_sends(self, provider, env, payload):
+        with patch.dict(os.environ, env):
+            out, sent = self._hook(provider, "session-end", payload)
+        self.assertEqual(out, "")
+        self.assertEqual(sent, [telemetry.SESSION_COMPLETED])
+
+    def test_claude_code_interactive_session_shows_the_notice_then_sends(self):
+        env, payload = self._assert_notice_shown_once("claude")
+        self._assert_session_end_sends("claude", env, payload)
+
+    def test_gemini_cli_session_shows_the_notice_then_sends(self):
+        env, payload = self._assert_notice_shown_once("gemini")
+        self._assert_session_end_sends("gemini", env, payload)
+
+    def test_codex_tui_session_shows_the_notice(self):
+        self._assert_notice_shown_once("codex")
+
+    def test_cursor_and_copilot_print_nothing_and_keep_the_gate(self):
+        env = {
+            "CLAUDE_CODE_ENTRYPOINT": "cli",
+            "CLAUDE_CODE_SESSION_ID": _SID,
+            "GEMINI_SESSION_ID": _SID,
+        }
+        payload = {
+            "session_id": _SID,
+            "source": "startup",
+            "transcript_path": self._rollout(),
+        }
+        for provider in ("cursor", "copilot"):
+            with self.subTest(provider), patch.dict(os.environ, env):
+                out, sent = self._hook(provider, "session-start", payload)
+                self.assertEqual(out, "")
+                out, sent_at_end = self._hook(provider, "session-end", payload)
+                self.assertEqual(out, "")
+                self.assertEqual(sent + sent_at_end, [])
+                self.assertFalse(self.config_path.exists())
+
+    def test_no_notice_where_the_agent_does_not_display_it(self):
+        startup = {"session_id": _SID, "source": "startup"}
+        cases = {
+            "claude -p": ("claude", {"CLAUDE_CODE_ENTRYPOINT": "sdk-cli",
+                                     "CLAUDE_CODE_SESSION_ID": _SID}, startup),
+            "claude env from a parent session": (
+                "claude", {"CLAUDE_CODE_ENTRYPOINT": "cli",
+                           "CLAUDE_CODE_SESSION_ID": "parent-session"}, startup),
+            "claude-format hook in another agent": ("claude", {}, startup),
+            "codex exec": ("codex", {}, {**startup, "transcript_path": self._rollout("exec")}),
+            "codex resume": ("codex", {}, {**startup, "source": "resume",
+                                           "transcript_path": self._rollout()}),
+            "codex other session's rollout": (
+                "codex", {}, {**startup,
+                              "transcript_path": self._rollout(session_id="other")}),
+            "codex rollout missing": (
+                "codex", {}, {**startup,
+                              "transcript_path": str(Path(self.tmp.name) / "none.jsonl")}),
+            "codex rollout not session_meta": (
+                "codex", {}, {**startup,
+                              "transcript_path": self._rollout(first_line="{not json")}),
+            "codex no rollout": ("codex", {}, startup),
+            "gemini other session": ("gemini", {"GEMINI_SESSION_ID": "other"}, startup),
+            "gemini env missing": ("gemini", {}, startup),
+        }
+        for label, (provider, env, payload) in cases.items():
+            with self.subTest(label), patch.dict(os.environ, env):
+                out, sent = self._hook(provider, "session-start", payload)
+                self.assertEqual(out, "")
+                self.assertEqual(sent, [])
+                self.assertFalse(self.config_path.exists())
+
+    def test_no_notice_when_telemetry_is_off_or_already_disclosed(self):
+        cases = {
+            "DO_NOT_TRACK=1": ({"DO_NOT_TRACK": "1"}, None),
+            "AGENT_STRACE_TELEMETRY=0": ({"AGENT_STRACE_TELEMETRY": "0"}, None),
+            "telemetry disable": ({}, {"enabled": False}),
+            "CI": ({"CI": "true"}, None),
+            "GITHUB_ACTIONS": ({"GITHUB_ACTIONS": "true"}, None),
+            "notice already shown": ({}, {"notice_shown": True}),
+            "telemetry enable": ({}, {"enabled": True}),
+            "AGENT_STRACE_TELEMETRY=1": ({"AGENT_STRACE_TELEMETRY": "1"}, None),
+        }
+        for provider in ("claude", "codex", "gemini"):
+            agent_env, payload = self._displayed(provider)
+            for label, (env, config) in cases.items():
+                with self.subTest(provider=provider, case=label), \
+                        patch.dict(os.environ, {**agent_env, **env}):
+                    if config is None:
+                        self.config_path.unlink(missing_ok=True)
+                    else:
+                        self.config_path.write_text(json.dumps(config))
+                    out, sent = self._hook(provider, "session-start", payload)
+                    self.assertEqual(out, "")
+                    self.assertEqual(sent, [])
+                    self.assertEqual(self._config(), config or {})
+
+    def test_failed_stdout_write_does_not_mark_the_notice(self):
+        env, payload = self._displayed("claude")
+        with patch.dict(os.environ, env):
+            out, _ = self._hook("claude", "session-start", payload, stdout=_BrokenStdout())
+        self.assertNotIn("notice_shown", self._config())
+        self.assertFalse(telemetry.disclosure_satisfied())
+
+    def test_config_failures_never_fail_the_hook(self):
+        env, payload = self._displayed("claude")
+        blocker = Path(self.tmp.name) / "not-a-directory"
+        blocker.write_text("")
+        with self.subTest("config directory cannot be created"), \
+                patch.dict(os.environ, {
+                    **env,
+                    "AGENT_STRACE_TELEMETRY_CONFIG": str(blocker / "telemetry.json"),
+                }):
+            out, _ = self._hook("claude", "session-start", payload)
+            self.assertEqual(out, "")
+        with self.subTest("lock busy"), patch.dict(os.environ, env), \
+                patch.object(telemetry, "file_lock", side_effect=TimeoutError("busy")):
+            out, _ = self._hook("claude", "session-start", payload)
+            self.assertEqual(out, "")
+            self.assertFalse(self.config_path.exists())
+        with self.subTest("write fails after the notice"), patch.dict(os.environ, env), \
+                patch.object(telemetry, "_write_config", return_value=False):
+            out, _ = self._hook("claude", "session-start", payload)
+            # Shown but not recorded: it shows again rather than claim a
+            # notice that might not have been seen.
+            self.assertEqual(json.loads(out), {"systemMessage": telemetry.HOOK_NOTICE})
+            self.assertFalse(telemetry.disclosure_satisfied())
+
+    def test_notice_rechecks_the_config_under_the_lock(self):
+        # Another process recorded a choice or the notice after notice_due().
+        for config in ({"enabled": False}, {"enabled": True}, {"notice_shown": True}):
+            with self.subTest(config), \
+                    patch.object(telemetry, "notice_due", return_value=True):
+                self.config_path.write_text(json.dumps(config))
+                written = []
+                self.assertFalse(telemetry.show_hook_notice(written.append))
+                self.assertEqual(written, [])
+                self.assertEqual(self._config(), config)
+
+    def test_concurrent_session_starts_show_the_notice_once(self):
+        env = {"HOME": self.tmp.name}
+        for name in self._ENV_NAMES:
+            env.setdefault(name, os.environ.get(name, ""))
+        with patch.dict(os.environ, env):
+            outputs = run_concurrently(
+                _HOOK_NOTICE_SCRIPT, [[f"race-session-{i:04d}"] for i in range(8)]
+            )
+        notices = [out for out in outputs if out]
+        self.assertEqual(len(notices), 1, outputs)
+        self.assertEqual(json.loads(notices[0]), {"systemMessage": telemetry.HOOK_NOTICE})
+        config = self._config()
+        self.assertIs(config["notice_shown"], True)
+        self.assertNotIn("anonymous_id", config)
 
 
 if __name__ == "__main__":

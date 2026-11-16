@@ -9,12 +9,36 @@ Neither client sends trace contents.
 Telemetry is enabled by default on configured CLI and editor-extension builds.
 Each surface shows a one-time, non-blocking disclosure, and sends events only
 after that notice has been shown or telemetry was explicitly enabled. The CLI
-shows its notice on stderr during the first interactive command. Hooks and
-non-interactive runs never show it, so a hooks-only install (for example the
-Claude Code or Copilot CLI plugin, or `setup` run from a script) sends nothing
-until the notice has appeared in a terminal, `agent-strace telemetry enable`
-was run, or `AGENT_STRACE_TELEMETRY=1` is set. CI remains disabled by default
-to avoid ephemeral installation identifiers and test noise.
+notice appears either on stderr during the first interactive command or, for
+hooks-only installs, inside the agent's own UI at session start where the
+agent can show it; see [When sending starts](#when-sending-starts). CI remains
+disabled by default to avoid ephemeral installation identifiers and test noise.
+
+## When sending starts
+
+The CLI shows its notice once per installation, in the first of these places
+that reaches a person. From then on, both CLI commands and hooks send events.
+
+| Where | When the notice appears |
+|---|---|
+| Interactive `agent-strace` command | On stderr, before the first interactive command. Piped or scripted runs never show it. |
+| Claude Code hooks (plugin or `setup --cli claude`) | As a hook message at the start of an interactive `claude` terminal session. Session events are sent from that session's end onward. Other entry points, such as `claude -p` and the Agent SDK, never show it. |
+| Gemini CLI hooks | As a hook message at session start: in the terminal UI, or on stderr for `gemini -p`. Session events are sent from that session's end onward. |
+| Codex hooks | As a `warning:` line at the start of an interactive session. `codex exec` never shows it. Codex has no session-end hook, so Codex hooks send no session events; the notice still enables later `agent-strace` commands. |
+| Cursor and GitHub Copilot CLI hooks | Never: their session-start hooks have no output the user sees. These installs send nothing until one of the places above shows the notice, `agent-strace telemetry enable` is run, or `AGENT_STRACE_TELEMETRY=1` is set. |
+
+The hook message reads:
+
+```text
+agent-strace: Anonymous product telemetry is enabled by default. No prompts, arguments, paths, repository data, or trace contents are sent. Disable at any time with: agent-strace telemetry disable
+```
+
+It uses each agent's display-only `systemMessage` field, so it is not added to
+the model's context. A hook marks the notice as shown only after writing it for
+a session that displays it, and only one of several hooks starting at once
+shows it. No notice is shown, and nothing is sent, when `DO_NOT_TRACK=1` or
+`AGENT_STRACE_TELEMETRY=0` is set, after `agent-strace telemetry disable`, or
+in CI.
 
 ## User controls
 

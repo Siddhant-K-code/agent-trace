@@ -72,6 +72,8 @@ To keep traces somewhere else, set `AGENT_TRACE_DIR` (a relative path resolves a
 
 Traces can contain prompts and tool output, so `.agent-traces/` writes its own `.gitignore` and stays out of git by default. To commit a trace deliberately, use `git add -f`.
 
+Anonymous product telemetry is separate from traces and sends nothing until its one-time notice has been shown. Claude Code, Codex, and Gemini CLI hooks show that notice once, inside the agent's UI at session start; Cursor and GitHub Copilot CLI hooks cannot show it. See [When sending starts](telemetry.md#when-sending-starts).
+
 ```bash
 agent-strace list     # list sessions; Tools counts hook tool calls, LLM stays 0 for hooks
 agent-strace replay   # replay the latest

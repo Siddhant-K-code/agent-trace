@@ -136,7 +136,10 @@ agent-strace telemetry [status|enable|disable]
 ```
 Show or change the anonymous product telemetry preference. Telemetry is enabled
 by default outside CI, but events are sent only after the one-time notice has
-been shown on an interactive command or telemetry was explicitly enabled;
+been shown or telemetry was explicitly enabled. The notice appears on an
+interactive command, or as a hook message at the start of an interactive Claude
+Code, Codex, or Gemini CLI session (see
+[When sending starts](telemetry.md#when-sending-starts));
 `status` says when it is still waiting for the notice. `disable` persists an
 opt-out and deletes the local anonymous installation ID. `DO_NOT_TRACK=1` or
 `AGENT_STRACE_TELEMETRY=0` always disables collection;
