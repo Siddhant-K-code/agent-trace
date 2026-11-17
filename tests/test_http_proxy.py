@@ -710,7 +710,7 @@ class TestHTTPProxyConcurrency(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].parent_id, calls[0].event_id)
         # the stream is still being served
-        self.assertEqual(server._active_requests, 1)
+        self.assertTrue(_wait_until(lambda: server._active_requests == 1))
 
     def test_server_close_ends_open_stream(self):
         server, events = self._start_proxy()
