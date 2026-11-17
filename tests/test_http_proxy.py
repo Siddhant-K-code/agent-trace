@@ -6,6 +6,7 @@ import io
 import json
 import os
 import queue
+import select
 import socket
 import ssl
 import sys
@@ -1875,10 +1876,13 @@ class TestHTTPProxyStreamableHTTP(unittest.TestCase):
         self.store.create_session(self.meta)
         self.events = []
 
-    def _proxy(self, url_rest="/mcp"):
-        """Start a proxy whose --url is the upstream's URL plus url_rest."""
+    def _proxy(self, url_rest="/mcp", upstream_url=None):
+        """Start a proxy whose --url is the upstream's URL plus url_rest.
+
+        upstream_url, if given, replaces the scripted upstream's URL.
+        """
         proxy = HTTPProxyServer(
-            remote_url=self.upstream_url + url_rest,
+            remote_url=(upstream_url or self.upstream_url) + url_rest,
             local_port=0,
             store=self.store,
             session_meta=self.meta,
@@ -2157,6 +2161,48 @@ class TestHTTPProxyStreamableHTTP(unittest.TestCase):
         self.assertEqual(resp.read().strip(), b"")
         self.assertEqual(self._of_type(EventType.ERROR), [])
 
+    def test_streamed_reply_cut_by_the_upstream_ends_without_an_error_page(self):
+        def reply(handler, request):
+            stream = _EventStream(handler)
+            stream.send(_progress(1))
+            # The upstream goes away inside the next chunk.
+            handler.wfile.write(b'100\r\ndata: {"jsonrpc"')
+
+        self.upstream.reply = reply
+        server = self._proxy()
+        resp, data, _ = self._forward(
+            server.server_address[1], "POST", "/", STREAMABLE_POST_HEADERS,
+            json.dumps(_tool_call(13)),
+        )
+        self.assertEqual(resp.status, 200)
+        # The status line is already sent, so the cut ends the reply. A 502
+        # page after the events would corrupt the stream.
+        self.assertEqual(data, _event(_progress(1)))
+        (error,) = self._of_type(EventType.ERROR)
+        self.assertTrue(error.data["message"].startswith("Proxy error: "))
+        self.assertEqual(
+            [event.event_type for event in self.store.load_events(self.meta.session_id)],
+            [EventType.TOOL_CALL, EventType.ERROR],
+        )
+
+    def test_requests_after_close_streams_never_reach_the_upstream(self):
+        # A listener that never accepts. A connection to it waits in its backlog.
+        listener = socket.create_server(("127.0.0.1", 0))
+        self.addCleanup(listener.close)
+        server = self._proxy(upstream_url=f"http://127.0.0.1:{listener.getsockname()[1]}")
+        # serve_forever still runs, so each request below reaches its handler
+        # after close_streams has started, like one accepted just before Ctrl-C.
+        self.assertTrue(server.close_streams(timeout=0))
+        for method, body in (("GET", None), ("POST", PING), ("DELETE", None)):
+            with self.subTest(method=method):
+                # The proxy closes the connection without a reply.
+                with self.assertRaises(ConnectionResetError):
+                    self._open(server.server_address[1], method, "/", body=body)
+                # The proxy ends the reply after its handler returns, so any
+                # connection the handler opened is in the backlog by now.
+                ready, _, _ = select.select([listener], [], [], 0)
+                self.assertEqual(ready, [], f"{method} connected to the upstream")
+
     def test_json_reply_is_relayed_whole_and_traced(self):
         body = json.dumps(_text_result(4, "json output"), indent=2).encode()
 
@@ -2219,6 +2265,21 @@ class TestHTTPProxyStreamableHTTP(unittest.TestCase):
         self._forward(port, "GET", "/")
         self.assertEqual([request["method"] for request in self.upstream.requests], ["GET"])
         self.assertEqual(self.events, [])
+
+    def test_delete_to_an_upstream_that_refuses_the_connection_gets_502(self):
+        server = self._proxy(upstream_url=f"http://127.0.0.1:{_find_free_port()}")
+        # _open times out after 5 seconds, so a proxy that never answers fails fast.
+        resp = self._open(
+            server.server_address[1], "DELETE", "/", {"Mcp-Session-Id": "session-1"}
+        )
+        resp.read()
+        self.assertEqual(resp.status, 502)
+        (error,) = self._of_type(EventType.ERROR)
+        self.assertTrue(error.data["message"].startswith("Proxy error: "))
+        self.assertEqual(
+            [event.event_type for event in self.store.load_events(self.meta.session_id)],
+            [EventType.ERROR],
+        )
 
 
 if __name__ == "__main__":
