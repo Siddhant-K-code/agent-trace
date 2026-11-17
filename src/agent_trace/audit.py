@@ -435,11 +435,29 @@ def format_audit(report: AuditReport, out: TextIO = sys.stdout) -> None:
 
 @dataclass
 class ChainVerifyResult:
+    """The hash-chain check of one session.
+
+    ``state`` is one of the hash-chain states in docs/trace-schema.md, or
+    ``missing`` when the session has no events.ndjson. ``ok`` is true only
+    for ``unanchored``: every event after the first links to the exact
+    previous line. ``broken`` is true when a link does not match, a line
+    can't be read, or events.ndjson is missing. A stream with missing links
+    is neither ``ok`` nor ``broken``.
+    """
+
     session_id: str
     ok: bool
     total_events: int
     broken_at: int | None = None   # 0-based index of first broken link
     broken_event_id: str = ""
+    state: str = ""
+    broken: bool = False
+    # Links that are present and match, counted up to a broken link.
+    links_verified: int = 0
+    # 0-based index of the first event after the first with no prev_hash.
+    first_unlinked_at: int | None = None
+    # SHA-256 of the last line, as in the EU AI Act export. "" for no lines.
+    root_hash: str = ""
 
     def format(self, out: TextIO = sys.stdout) -> None:
         """Write the result to *out*.
@@ -449,6 +467,22 @@ class ChainVerifyResult:
         """
         if self.ok:
             out.write(f"✅ Chain intact — {self.total_events} events verified\n")
+        elif self.state == "partial":
+            out.write(
+                f"❌ Chain incomplete: event #{self.first_unlinked_at} has no hash link "
+                f"({self.links_verified} of {self.total_events - 1} links present)\n"
+                "   An edit to the event before a missing link can't be detected.\n"
+            )
+        elif self.state == "legacy":
+            out.write(
+                f"❌ No hash links in {self.total_events} events\n"
+                "   The session was recorded before v0.62.0, or its links were removed. "
+                "An edit can't be detected.\n"
+            )
+        elif self.state == "empty":
+            out.write("❌ No events to verify\n")
+        elif self.state == "missing":
+            out.write("❌ No event stream to verify: events.ndjson is missing\n")
         else:
             out.write(
                 f"❌ Chain broken at event #{self.broken_at} "
@@ -460,16 +494,24 @@ class ChainVerifyResult:
 def verify_chain(store: TraceStore, session_id: str) -> ChainVerifyResult:
     """Verify the SHA-256 hash chain for a session's event log.
 
-    Each event stores prev_hash = SHA-256(previous event JSON line).
-    Events without prev_hash (written before v0.62.0) are skipped.
-    Returns ChainVerifyResult with ok=True if no broken links are found.
+    Each event after the first stores prev_hash = SHA-256 of the previous
+    event's exact JSON line. See verify_chain_lines for the states.
     """
     events_path = store._session_file(session_id, "events.ndjson", "event stream")
     if not events_path.exists():
-        return ChainVerifyResult(session_id=session_id, ok=False,
-                                 total_events=0, broken_at=0)
+        return ChainVerifyResult(
+            session_id=session_id, ok=False, total_events=0,
+            state="missing", broken=True,
+        )
 
-    lines = [l for l in events_path.read_text().splitlines() if l.strip()]
+    # Split the bytes the way validate does, so both see the same lines.
+    # surrogateescape keeps a line that is not UTF-8, so the check reports
+    # it as broken instead of raising.
+    lines = [
+        line.decode("utf-8", "surrogateescape")
+        for line in events_path.read_bytes().splitlines()
+        if line.strip()
+    ]
     return verify_chain_lines(lines, session_id=session_id)
 
 
@@ -478,37 +520,93 @@ def verify_chain_lines(
     *,
     session_id: str = "",
 ) -> ChainVerifyResult:
-    """Verify hash links in already-read event lines.
+    """Check the hash links in already-read event lines, one event per line.
 
-    Missing ``prev_hash`` values remain valid for legacy compatibility. Callers
-    that need to distinguish legacy, partial, and fully linked streams should
-    retain the richer state returned by the compliance snapshot parser.
+    The first event must have no ``prev_hash``. Each later event must hold
+    the SHA-256 of the exact previous line. The state is:
+
+    - ``empty``: no lines
+    - ``legacy``: two or more events and no links
+    - ``partial``: some links missing, and every present link matches
+    - ``unanchored``: every link present and matching. One event is
+      ``unanchored``.
+    - ``broken``: a link does not match, the first event has a
+      ``prev_hash``, a ``prev_hash`` is not a string, or a line is not a
+      UTF-8 JSON object. The check stops at that line.
+
+    Only ``unanchored`` sets ``ok``. Only ``broken`` sets ``broken``.
     """
     import hashlib
 
-    import json as _json
-    prev_line = ""
+    total = len(lines)
+    root_hash = ""
+    if lines:
+        try:
+            root_hash = hashlib.sha256(
+                lines[-1].encode("utf-8", "surrogateescape")
+            ).hexdigest()
+        except UnicodeEncodeError:
+            root_hash = ""
+
+    links = 0
+    unlinked = 0
+    first_unlinked: int | None = None
+    broken_at: int | None = None
+    broken_event_id = ""
+    prev_digest = ""
     for i, line in enumerate(lines):
         try:
-            obj = _json.loads(line)
-        except Exception:
-            continue
-        stored_hash = obj.get("prev_hash", "")
-        if not stored_hash:
-            # Pre-v0.62.0 event — no hash, skip
-            prev_line = line
-            continue
-        expected = hashlib.sha256(prev_line.encode()).hexdigest() if prev_line else ""
-        if stored_hash != expected:
-            event_id = obj.get("event_id", "")
-            return ChainVerifyResult(
-                session_id=session_id, ok=False,
-                total_events=len(lines), broken_at=i,
-                broken_event_id=event_id,
-            )
-        prev_line = line
+            obj = json.loads(line)
+        except (ValueError, RecursionError):
+            broken_at = i
+            break
+        if not isinstance(obj, dict):
+            broken_at = i
+            break
+        event_id = obj.get("event_id", "")
+        stored = obj.get("prev_hash", "")
+        try:
+            raw = line.encode("utf-8")
+        except UnicodeEncodeError:
+            broken_at, broken_event_id = i, event_id
+            break
+        if i == 0:
+            if stored != "":
+                broken_at, broken_event_id = i, event_id
+                break
+        elif not isinstance(stored, str) or (stored and stored != prev_digest):
+            broken_at, broken_event_id = i, event_id
+            break
+        elif stored:
+            links += 1
+        else:
+            unlinked += 1
+            if first_unlinked is None:
+                first_unlinked = i
+        prev_digest = hashlib.sha256(raw).hexdigest()
 
-    return ChainVerifyResult(session_id=session_id, ok=True, total_events=len(lines))
+    if broken_at is not None:
+        state = "broken"
+    elif total == 0:
+        state = "empty"
+    elif unlinked == 0:
+        state = "unanchored"
+    elif unlinked == total - 1:
+        state = "legacy"
+    else:
+        state = "partial"
+    return ChainVerifyResult(
+        session_id=session_id,
+        ok=state == "unanchored",
+        total_events=total,
+        broken_at=broken_at,
+        broken_event_id=broken_event_id,
+        state=state,
+        broken=state == "broken",
+        links_verified=links,
+        first_unlinked_at=first_unlinked,
+        root_hash=root_hash,
+    )
 
 
 # ---------------------------------------------------------------------------
