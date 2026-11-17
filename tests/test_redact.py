@@ -1,12 +1,28 @@
 """Tests for secret redaction."""
 
+import base64
+import json
 import os
+import random
+import re
 import sys
+import time
+import tracemalloc
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from agent_trace.redact import redact_data, redact_data_with_status, redact_value, redaction_marker
+from agent_trace.redact import (
+    SECRET_PATTERNS,
+    _contains_secret,
+    redact_data,
+    redact_data_with_status,
+    redact_value,
+    redaction_marker,
+)
+
+KEY_MARKER = redaction_marker("private-key")
+SUFFIX = "." * 3 + " (truncated)"
 
 
 class TestRedactValue(unittest.TestCase):
@@ -168,6 +184,420 @@ class TestRedactData(unittest.TestCase):
         result, changed = redact_data_with_status(data)
         self.assertTrue(changed)
         self.assertNotIn("sk-abc123", str(result))
+
+
+def fake_key(label="RSA PRIVATE KEY", seed=1, size=1190):
+    """Return a PEM block of random base64. The RSA default is 1675 characters."""
+    text = base64.b64encode(random.Random(seed).randbytes(size)).decode()
+    lines = [text[i : i + 64] for i in range(0, len(text), 64)]
+    return "\n".join([f"-----BEGIN {label}-----", *lines, f"-----END {label}-----", ""])
+
+
+def fake_pgp_key(seed=2):
+    """Return an armored PGP private key block with a header and a checksum."""
+    text = base64.b64encode(random.Random(seed).randbytes(900)).decode()
+    lines = [text[i : i + 64] for i in range(0, len(text), 64)]
+    return "\n".join([
+        "-----BEGIN PGP PRIVATE KEY BLOCK-----",
+        "Comment: Alice <alice@example.com>",
+        "",
+        *lines,
+        "=Nm2X",
+        "-----END PGP PRIVATE KEY BLOCK-----",
+        "",
+    ])
+
+
+KEY_LABELS = (
+    "PRIVATE KEY",
+    "RSA PRIVATE KEY",
+    "EC PRIVATE KEY",
+    "DSA PRIVATE KEY",
+    "OPENSSH PRIVATE KEY",
+    "ENCRYPTED PRIVATE KEY",
+    "ANY PRIVATE KEY",
+    "A B C D E F G H PRIVATE KEY",
+)
+
+
+class TestPrivateKeyBlocks(unittest.TestCase):
+    def keys(self):
+        for label in KEY_LABELS:
+            yield label, fake_key(label)
+        yield "PGP PRIVATE KEY BLOCK", fake_pgp_key()
+
+    def test_complete_block_for_each_label(self):
+        for label, key in self.keys():
+            with self.subTest(label):
+                text = "$ cat id\n" + key + "$ ls"
+                self.assertEqual(redact_value(text), "$ cat id\n" + KEY_MARKER + "\n$ ls")
+
+    def test_block_cut_before_its_end_line(self):
+        for label, key in self.keys():
+            with self.subTest(label):
+                cut = key[: len(key) // 2].rstrip("\n")
+                self.assertEqual(redact_value("$ cat id\n" + cut), "$ cat id\n" + KEY_MARKER)
+                self.assertEqual(redact_value(cut + SUFFIX), KEY_MARKER + SUFFIX)
+
+    def test_end_label_may_differ_from_begin_label(self):
+        for begin, end in (
+            ("RSA PRIVATE KEY", "EC PRIVATE KEY"),
+            ("PGP PRIVATE KEY BLOCK", "PRIVATE KEY"),
+            ("ENCRYPTED PRIVATE KEY", "PGP PRIVATE KEY BLOCK"),
+        ):
+            with self.subTest(begin=begin, end=end):
+                text = f"-----BEGIN {begin}-----\nMIIE\n-----END {end}-----\nafter"
+                self.assertEqual(redact_value(text), KEY_MARKER + "\nafter")
+
+    def test_end_certificate_does_not_close_a_key(self):
+        text = (
+            "-----BEGIN PRIVATE KEY-----\nMIIE\n-----END CERTIFICATE-----\n"
+            "QQ==\n-----END PRIVATE KEY-----\nafter"
+        )
+        self.assertEqual(redact_value(text), KEY_MARKER + "\nafter")
+        text = "-----BEGIN PRIVATE KEY-----\nMIIE\n-----END CERTIFICATE-----\nafter"
+        self.assertEqual(
+            redact_value(text), KEY_MARKER + "\n-----END CERTIFICATE-----\nafter"
+        )
+
+    def test_nested_begin_gives_two_markers(self):
+        text = (
+            "-----BEGIN RSA PRIVATE KEY-----\nAAAA\n"
+            "-----BEGIN RSA PRIVATE KEY-----\nBBBB\n-----END RSA PRIVATE KEY-----\nafter"
+        )
+        self.assertEqual(redact_value(text), KEY_MARKER + "\n" + KEY_MARKER + "\nafter")
+
+    def test_text_before_a_nested_begin_stays_visible(self):
+        text = (
+            "-----BEGIN RSA PRIVATE KEY-----\nAAAA\n$ echo done\n"
+            "-----BEGIN RSA PRIVATE KEY-----\nBBBB\n-----END RSA PRIVATE KEY-----"
+        )
+        self.assertEqual(redact_value(text), KEY_MARKER + "\n$ echo done\n" + KEY_MARKER)
+
+
+class TestCutPrivateKeyBody(unittest.TestCase):
+    """A key with no END line is redacted from BEGIN to the end of its body."""
+
+    BEGIN = "-----BEGIN PRIVATE KEY-----"
+
+    def test_lone_begin_line(self):
+        self.assertEqual(redact_value(self.BEGIN), KEY_MARKER)
+        self.assertEqual(redact_value("x " + self.BEGIN + "\n"), "x " + KEY_MARKER + "\n")
+
+    def test_each_line_break_form(self):
+        # A real break, JSON-escaped breaks, and breaks escaped twice.
+        for brk in ("\n", "\r\n", "\\n", "\\r\\n", "\\\\n", "\\\\r\\\\n"):
+            with self.subTest(brk=brk):
+                text = self.BEGIN + brk + "MIIE" + brk + "QQ==" + brk + "$ next"
+                self.assertEqual(redact_value(text), KEY_MARKER + brk + "$ next")
+
+    def test_single_space_separator(self):
+        # echo $KEY prints the key on one line with single spaces.
+        key = fake_key().replace("\n", " ")
+        self.assertEqual(redact_value("$ echo " + key), "$ echo " + KEY_MARKER + " ")
+        self.assertEqual(redact_value("$ echo " + key[:1000]), "$ echo " + KEY_MARKER)
+        self.assertEqual(redact_value(self.BEGIN + " MIIE QQ==  next"), KEY_MARKER + "  next")
+
+    def test_header_lines(self):
+        for header in (
+            "Proc-Type: 4,ENCRYPTED",
+            "DEK-Info: AES-256-CBC,3F17F5316E2BAC89",
+            "Version: GnuPG v2",
+            "Comment: alice@example.com",
+        ):
+            with self.subTest(header):
+                text = self.BEGIN + "\n" + header + "\n\nMIIE\nQQ==\n$ next"
+                self.assertEqual(redact_value(text), KEY_MARKER + "\n$ next")
+
+    def test_header_keeps_a_backslash_that_is_not_a_line_break(self):
+        text = self.BEGIN + "\\nComment: C:\\keys\\id_rsa\\nMIIE\\n$ next"
+        self.assertEqual(redact_value(text), KEY_MARKER + "\\n$ next")
+
+    def test_blank_lines_and_indentation(self):
+        text = "  " + self.BEGIN + "\n\n  MIIE\n\t QQ==\n\n  $ next"
+        self.assertEqual(redact_value(text), "  " + KEY_MARKER + "\n\n  $ next")
+
+    def test_long_runs_of_blank_lines(self):
+        for brk in ("\n", "\\n"):
+            with self.subTest(brk=brk):
+                text = self.BEGIN + brk + "MIIE" + brk * 100 + "QQ==" + brk + "$ next"
+                self.assertEqual(redact_value(text), KEY_MARKER + brk + "$ next")
+
+    def test_long_body(self):
+        text = self.BEGIN + "\n" + "\n".join(["A" * 64] * 300) + "\n$ next"
+        self.assertEqual(redact_value(text), KEY_MARKER + "\n$ next")
+
+    def test_body_ends_at_the_first_other_character(self):
+        text = self.BEGIN + "\nMIIE\nthe rest of the key was cut, see notes"
+        self.assertEqual(redact_value(text), KEY_MARKER + ", see notes")
+
+    def test_key_in_json_text(self):
+        once = json.dumps({"private_key": fake_key("PRIVATE KEY")[:900]})
+        self.assertEqual(redact_value(once), '{"private_key": "' + KEY_MARKER + '"}')
+        twice = json.dumps(once)
+        self.assertEqual(
+            redact_value(twice), '"{\\"private_key\\": \\"' + KEY_MARKER + '\\"}"'
+        )
+
+
+class TestTokenPrefixes(unittest.TestCase):
+    def test_openai_project_service_admin_and_none_keys(self):
+        marker = redaction_marker("openai-key")
+        for prefix in ("sk-proj-", "sk-svcacct-", "sk-admin-", "sk-None-"):
+            with self.subTest(prefix):
+                text = "OPENAI_API_KEY=" + prefix + "Ab_9-" * 8 + "\n"
+                self.assertEqual(redact_value(text), "OPENAI_API_KEY=" + marker + "\n")
+
+    def test_openai_prefix_inside_a_word_is_kept(self):
+        for text in ("risk-admin-panel-configuration-file", "disk-proj-backup-volume-snapshots"):
+            with self.subTest(text):
+                self.assertEqual(redact_value(text), text)
+
+    def test_github_token_prefixes(self):
+        marker = redaction_marker("github-token")
+        for prefix in ("ghp_", "gho_", "ghu_", "ghs_", "ghr_"):
+            with self.subTest(prefix):
+                text = "GH_TOKEN=" + prefix + "A1b2" * 9
+                self.assertEqual(redact_value(text), "GH_TOKEN=" + marker)
+
+    def test_anthropic_key_with_an_underscore(self):
+        marker = redaction_marker("anthropic-key")
+        early = "sk-ant-api03_" + "Ab9" * 10
+        late = "sk-ant-api03-" + "Ab9" * 10 + "_" + "Cd8" * 6
+        for name, token in (("early", early), ("late", late)):
+            with self.subTest(name):
+                self.assertEqual(redact_value("key: " + token + "."), "key: " + marker + ".")
+
+    def test_anthropic_key_inside_a_word(self):
+        token = "sk-ant-api03-" + "Ab9" * 10
+        self.assertEqual(redact_value("x" + token), "x" + redaction_marker("anthropic-key"))
+
+
+# Main's patterns before this change. On the inputs main handled, the new
+# patterns must give the same result.
+MAIN_PRIVATE_KEY = re.compile(
+    r"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----"
+    r"[\s\S]*?"
+    r"-----END (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----"
+)
+MAIN_KEY_BEGIN = re.compile(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----")
+MAIN_KEY_END = re.compile(r"-----END (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----")
+MAIN_KEY_LABELS = {
+    "PRIVATE KEY",
+    "RSA PRIVATE KEY",
+    "EC PRIVATE KEY",
+    "DSA PRIVATE KEY",
+    "OPENSSH PRIVATE KEY",
+}
+ANY_KEY_LABEL = re.compile(
+    r"(?=-----(?:BEGIN|END) (PGP PRIVATE KEY BLOCK|(?:[A-Z0-9]+ ){0,8}PRIVATE KEY)-----)"
+)
+MAIN_JWT = re.compile(r"eyJ[a-zA-Z0-9_-]{10,}\.eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}")
+MAIN_BASIC_AUTH = re.compile(r"\b([a-zA-Z][a-zA-Z0-9+.-]*://)([^/\s:@]+:[^/\s@]+)@")
+MAIN_TOKENS = {
+    "anthropic-key": [r"sk-ant-[a-zA-Z0-9\-]{20,}"],
+    "openai-key": [r"sk-[a-zA-Z0-9]{20,}"],
+    "github-token": [r"gh[ps]_[a-zA-Z0-9]{36,}", r"github_pat_[a-zA-Z0-9_]{22,}"],
+}
+HEX_TOKEN = re.compile(r"[0-9a-f]{40,}")
+GLUED_GITHUB_TOKENS = re.compile(r"gh[pousr]_[A-Za-z0-9]*gh[pousr]_")
+
+# The body of a key with no END line, as one regex. It needs memory for each
+# line, so it only runs on short strings here.
+_BREAK = r"(?:\r?\n|\\r\\n|\\n|\\\\r\\\\n|\\\\n)"
+_HEADER = (
+    r"(?:Proc-Type|DEK-Info|Version|Comment):"
+    r"[^\r\n\\]*(?:\\(?!n|r\\n|\\n|\\r\\\\n)[^\r\n\\]*)*"
+)
+_BASE64 = r"[A-Za-z0-9+/=]"
+KEY_BODY = re.compile(
+    _BASE64 + r"*(?:(?:" + _BREAK + r"[ \t]*)+(?:" + _HEADER + "|" + _BASE64 + r"+)"
+    r"| " + _BASE64 + r"+)*"
+)
+
+
+def in_main_domain(text):
+    """Main's labels only, and each BEGIN has its END before another BEGIN."""
+    if any(m.group(1) not in MAIN_KEY_LABELS for m in ANY_KEY_LABEL.finditer(text)):
+        return False
+    for begin in MAIN_KEY_BEGIN.finditer(text):
+        end = MAIN_KEY_END.search(text, begin.end())
+        other = text.find("-----BEGIN ", begin.end())
+        if end is None or -1 < other < end.start():
+            return False
+    return True
+
+
+def covered(patterns, text):
+    """Return the positions that any of the patterns match."""
+    positions = set()
+    for pattern in patterns:
+        for match in pattern.finditer(text):
+            positions.update(range(match.start(), match.end()))
+    return positions
+
+
+class TestPatternsMatchMain(unittest.TestCase):
+    """Seeded fuzz of the rewritten patterns against main's regexes."""
+
+    def test_jwt(self):
+        rng = random.Random(1)
+        marker = redaction_marker("jwt")
+        ends = (".",) * 7 + ("", " ", "eyJ", "/", "é", "=", "+")
+        found = 0
+        for _ in range(20000):
+            parts = []
+            for _ in range(rng.randrange(7)):
+                size = rng.choice((0, 1, 9, 10, 10, 11, 13, 13))
+                run = "".join(rng.choice("aZ0_-") for _ in range(size))
+                if run and rng.random() < 0.3:
+                    cut = rng.randrange(len(run))
+                    run = run[:cut] + "eyJ" + run[cut:]
+                if rng.random() < 0.8:
+                    run = "eyJ" + run
+                parts.append(run + rng.choice(ends))
+            text = "".join(parts)
+            if HEX_TOKEN.search(text):
+                continue
+            expected = MAIN_JWT.sub(marker, text)
+            found += expected != text
+            self.assertEqual(redact_value(text), expected, repr(text))
+            self.assertEqual(_contains_secret(text), expected != text, repr(text))
+        self.assertGreater(found, 1000)
+
+    def test_basic_auth(self):
+        rng = random.Random(2)
+        marker = redaction_marker("basic-auth")
+        pieces = (
+            "https", "a", "Z", "9", "1", "u", "p", "host", "+", ".", "-", "_", "é", "ß",
+            "://", ":", "@", "/", " ", "\n", "x:y@", "://u:p@",
+        )
+        found = 0
+        for _ in range(20000):
+            text = "".join(rng.choice(pieces) for _ in range(rng.randrange(16)))
+            expected = MAIN_BASIC_AUTH.sub(lambda m: m.group(1) + marker + "@", text)
+            found += expected != text
+            self.assertEqual(redact_value(text), expected, repr(text))
+            self.assertEqual(_contains_secret(text), expected != text, repr(text))
+        self.assertGreater(found, 1000)
+
+    def test_private_key(self):
+        rng = random.Random(3)
+        labels = ("", "RSA ", "EC ", "DSA ", "OPENSSH ")
+
+        def begin():
+            return "-----BEGIN " + rng.choice(labels) + "PRIVATE KEY-----"
+
+        def end():
+            return "-----END " + rng.choice(labels) + "PRIVATE KEY-----"
+
+        def block():
+            return begin() + rng.choice(("\nMII\n", "", "abc", "\\nQQ\\n")) + end()
+
+        pieces = [begin, end, block] + [
+            lambda text=text: text
+            for text in (
+                "MIIE", "\n", "\\n", " ", "x.", "-----", "----", "-", "BEGIN ", "END ",
+                "PRIVATE KEY", "-----END CERTIFICATE-----", "-----BEGIN CERTIFICATE-----",
+                "Proc-Type: 4,ENCRYPTED\n",
+            )
+        ]
+        found = 0
+        for _ in range(20000):
+            text = "".join(rng.choice(pieces)() for _ in range(rng.randrange(9)))
+            if not in_main_domain(text):
+                continue
+            expected = MAIN_PRIVATE_KEY.sub(KEY_MARKER, text)
+            found += expected != text
+            self.assertEqual(redact_value(text), expected, repr(text))
+            self.assertEqual(_contains_secret(text), expected != text, repr(text))
+        self.assertGreater(found, 1000)
+
+    def test_token_patterns_cover_main(self):
+        rng = random.Random(4)
+        main = {kind: [re.compile(s) for s in sources] for kind, sources in MAIN_TOKENS.items()}
+        new = {kind: [p.pattern for p in SECRET_PATTERNS if p.kind == kind] for kind in main}
+        pieces = (
+            "sk-", "sk-ant-", "sk-proj-", "sk-svcacct-", "sk-admin-", "sk-None-", "ant-",
+            "proj-", "api03", "_", "-", "A", "z", "0", "x" * 10, "x" * 18, "Q" * 36, "gh",
+            "ghp_", "gho_", "ghs_", "ghu_", "ghr_", "p_", "github_pat_", "ri", "é", " ", ".",
+        )
+        found = dict.fromkeys(main, 0)
+        for _ in range(30000):
+            text = "".join(rng.choice(pieces) for _ in range(rng.randrange(12)))
+            # A GitHub token glued to the next one is out of scope. The first
+            # match takes the start of the second, as on main.
+            if GLUED_GITHUB_TOKENS.search(text):
+                continue
+            for kind in main:
+                before = covered(main[kind], text)
+                found[kind] += bool(before)
+                self.assertLessEqual(before, covered(new[kind], text), (kind, text))
+        for kind, count in found.items():
+            self.assertGreater(count, 200, kind)
+
+    def test_cut_key_body_follows_the_rule(self):
+        rng = random.Random(5)
+        pieces = (
+            "A", "b", "9", "+", "/", "=", "MIIE", "n", "r", "\n", "\r\n", "\r", "\\n",
+            "\\r\\n", "\\\\n", "\\\\r\\\\n", "\\", "\\\\", " ", "  ", "\t", "Proc-Type:",
+            "DEK-Info:", "Version:", "Comment:", "Proc-Type", " 4,ENCRYPTED", ",", ":", "-",
+            ".", "x y", "é", "\n" * 70, "\\n" * 70, "\n " * 66, "a " * 70,
+        )
+        for _ in range(15000):
+            body = "".join(rng.choice(pieces) for _ in range(rng.randrange(14)))
+            expected = KEY_MARKER + body[KEY_BODY.match(body).end() :]
+            self.assertEqual(
+                redact_value("-----BEGIN PRIVATE KEY-----" + body), expected, repr(body)
+            )
+
+
+class TestPatternCost(unittest.TestCase):
+    """Inputs that took quadratic time on main stay fast and small."""
+
+    BEGIN = "-----BEGIN PRIVATE KEY-----"
+
+    def test_long_inputs_finish_fast(self):
+        shapes = {
+            "BEGIN lines": "-----BEGIN RSA PRIVATE KEY-----\n" * 10_000,
+            "one-line BEGIN run": "-----BEGIN " * 29_000,
+            "eyJ run": "eyJ" * 53_000,
+            "a. run": "a." * 80_000,
+            "a. run, then ://": "a." * 80_000 + "://",
+            "label words": "-----BEGIN " + "A " * 160_000,
+            "END label words": self.BEGIN + "\n-----END " + "A " * 160_000,
+            "blank lines": self.BEGIN + "\n" * 320_000,
+            "escaped blank lines": self.BEGIN + "\\n" * 160_000,
+            "base64 lines": self.BEGIN + ("\n" + "A" * 64) * 5_000,
+            "spaced words": self.BEGIN + "\n" + "a " * 160_000,
+            "header backslashes": self.BEGIN + "\nComment: " + "\\x" * 160_000,
+        }
+        for name, text in shapes.items():
+            with self.subTest(name):
+                for check in (_contains_secret, redact_value):
+                    start = time.perf_counter()
+                    check(text)
+                    self.assertLess(time.perf_counter() - start, 1.0, check.__name__)
+
+    def test_long_runs_need_little_memory(self):
+        # 320K characters each. A regex that keeps state for each word or line
+        # needs 25 MB or more here.
+        shapes = {
+            "label words": "-----BEGIN " + "A " * 160_000,
+            "END label words": self.BEGIN + "\n-----END " + "A " * 160_000,
+            "blank lines": self.BEGIN + "\n" * 320_000,
+            "escaped blank lines": self.BEGIN + "\\n" * 160_000,
+            "spaced words": self.BEGIN + "\n" + "a " * 160_000,
+        }
+        for name, text in shapes.items():
+            with self.subTest(name):
+                tracemalloc.start()
+                try:
+                    redact_value(text)
+                    peak = tracemalloc.get_traced_memory()[1]
+                finally:
+                    tracemalloc.stop()
+                self.assertLess(peak, 8_000_000)
 
 
 if __name__ == "__main__":
