@@ -4,6 +4,7 @@ import json
 import tempfile
 import time
 import unittest
+from http import HTTPStatus
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -24,6 +25,13 @@ try:
     from test_cost import _codex_events
 except ImportError:  # pragma: no cover - package-style test discovery
     from tests.test_cost import _codex_events
+
+try:
+    from _redirect_servers import ALL_REDIRECTS, REDIRECT_NOTE, RedirectServers, post_opener
+except ImportError:
+    from tests._redirect_servers import ALL_REDIRECTS, REDIRECT_NOTE, RedirectServers, post_opener
+
+_OPENER = "agent_trace.eval.scorers.no_redirect_opener"
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +109,7 @@ class TestScoreLlmJudge(unittest.TestCase):
         return mock_resp
 
     def test_returns_score_from_llm(self):
-        with patch("urllib.request.urlopen", return_value=self._mock_urlopen(0.85)):
+        with post_opener(_OPENER, return_value=self._mock_urlopen(0.85)):
             result = score_llm_judge(
                 self._events(),
                 prompt="Did the agent complete the task?",
@@ -115,7 +123,7 @@ class TestScoreLlmJudge(unittest.TestCase):
         self.assertEqual(result.scorer, "llm_judge")
 
     def test_fails_below_threshold(self):
-        with patch("urllib.request.urlopen", return_value=self._mock_urlopen(0.5)):
+        with post_opener(_OPENER, return_value=self._mock_urlopen(0.5)):
             result = score_llm_judge(
                 self._events(),
                 prompt="Did the agent complete the task?",
@@ -138,7 +146,7 @@ class TestScoreLlmJudge(unittest.TestCase):
 
     def test_http_error_returns_failure(self):
         import urllib.error
-        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("refused")):
+        with post_opener(_OPENER, side_effect=urllib.error.URLError("refused")):
             result = score_llm_judge(
                 self._events(),
                 prompt="test",
@@ -153,7 +161,7 @@ class TestScoreLlmJudge(unittest.TestCase):
         mock_resp.read.return_value = b'{"choices": [{"message": {"content": "not json"}}]}'
         mock_resp.__enter__ = lambda s: s
         mock_resp.__exit__ = MagicMock(return_value=False)
-        with patch("urllib.request.urlopen", return_value=mock_resp):
+        with post_opener(_OPENER, return_value=mock_resp):
             result = score_llm_judge(
                 self._events(),
                 prompt="test",
@@ -169,7 +177,7 @@ class TestScoreLlmJudge(unittest.TestCase):
         }).encode()
         mock_resp.__enter__ = lambda s: s
         mock_resp.__exit__ = MagicMock(return_value=False)
-        with patch("urllib.request.urlopen", return_value=mock_resp):
+        with post_opener(_OPENER, return_value=mock_resp):
             result = score_llm_judge(
                 self._events(), prompt="test",
                 base_url="http://localhost:11434/v1", api_key="key",
@@ -184,7 +192,7 @@ class TestScoreLlmJudge(unittest.TestCase):
         }).encode()
         mock_resp.__enter__ = lambda s: s
         mock_resp.__exit__ = MagicMock(return_value=False)
-        with patch("urllib.request.urlopen", return_value=mock_resp):
+        with post_opener(_OPENER, return_value=mock_resp):
             result = score_llm_judge(
                 self._events(), prompt="test",
                 base_url="http://localhost:11434/v1", api_key="key",
@@ -201,7 +209,7 @@ class TestScoreLlmJudge(unittest.TestCase):
         }).encode()
         mock_resp.__enter__ = lambda s: s
         mock_resp.__exit__ = MagicMock(return_value=False)
-        with patch("urllib.request.urlopen", return_value=mock_resp):
+        with post_opener(_OPENER, return_value=mock_resp):
             result = run_scorer(
                 "llm_judge",
                 {
@@ -215,6 +223,26 @@ class TestScoreLlmJudge(unittest.TestCase):
             )
         self.assertEqual(result.scorer, "llm_judge")
         self.assertAlmostEqual(result.score, 0.9)
+
+    def test_redirect_is_a_failed_request(self):
+        # urlopen re-sent the POST as a GET with no body and the key, and the
+        # Location host's reply became the score.
+        content = json.dumps({"score": 1.0, "reason": "from B"})
+        servers = RedirectServers(self, reply={"choices": [{"message": {"content": content}}]})
+        judged = score_llm_judge(self._events(), prompt="test", base_url=servers.b.url,
+                                 api_key="judge-key")
+        self.assertEqual((judged.score, judged.reason), (1.0, "from B"))
+        for status in ALL_REDIRECTS:
+            with self.subTest(status=status):
+                servers.redirect(status)
+                result = score_llm_judge(self._events(), prompt="test",
+                                         base_url=servers.url, api_key="judge-key")
+                detail = f"HTTP Error {status}: {HTTPStatus(status).phrase}{REDIRECT_NOTE}"
+                self.assertEqual(result.reason, f"LLM request failed: {detail}")
+                self.assertEqual(result.score, 0.0)
+                self.assertFalse(result.passed)
+                self.assertEqual(servers.a.methods(), ["POST"])
+                self.assertEqual(servers.b.received(), [])
 
 
 # ---------------------------------------------------------------------------

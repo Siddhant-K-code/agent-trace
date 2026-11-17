@@ -27,6 +27,7 @@ from .cost import TokenUsage, infer_provider
 from .event_data import require_object_event_data, str_field
 from .models import EventType, SessionMeta, TraceEvent
 from .failures import llm_failure, session_errors
+from .http_post import no_redirect_opener, post_error_detail
 from .otlp import model_request_usage
 from .pairing import (
     LLM_REQUEST_TYPES,
@@ -119,9 +120,11 @@ def _lf_post(config: LangfuseConfig, path: str, body: dict) -> bool:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with no_redirect_opener().open(req, timeout=30) as resp:
             return resp.status in (200, 201, 202)
-    except (urllib.error.URLError, urllib.error.HTTPError):
+    except (urllib.error.URLError, urllib.error.HTTPError) as exc:
+        if isinstance(exc, urllib.error.HTTPError):
+            exc.close()
         return False
 
 
@@ -519,10 +522,12 @@ def export_metrics_to_otlp(
 
     req = urllib.request.Request(url, data=payload, headers=req_headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with no_redirect_opener().open(req, timeout=30) as resp:
             ok = resp.status in (200, 202)
     except (urllib.error.URLError, urllib.error.HTTPError) as exc:
-        sys.stderr.write(f"OTLP metrics export failed: {exc}\n")
+        if isinstance(exc, urllib.error.HTTPError):
+            exc.close()
+        sys.stderr.write(f"OTLP metrics export failed: {post_error_detail(exc)}\n")
         return False
 
     if ok:

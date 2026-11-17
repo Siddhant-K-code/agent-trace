@@ -3,7 +3,9 @@
 watch (--stream-to, --webhook), notify (Slack, Teams, generic webhook) and
 export (--endpoint, --header) share these. User info, path, query and
 fragment can carry tokens, so messages name only the URL's
-scheme://host[:port].
+scheme://host[:port]. The remote collector senders, Langfuse and OTLP
+metrics export, apply --server, optimize, the llm_judge scorer and
+pr-comment's writes also open their POSTs with no_redirect_opener.
 """
 
 from __future__ import annotations
@@ -120,8 +122,10 @@ def no_redirect_opener() -> urllib.request.OpenerDirector:
     """Return an opener for POSTs that never follows a redirect.
 
     urlopen re-sends a POST answered with 301, 302 or 303 as a GET with no
-    body, so the data is lost. With no redirect handler every 3xx raises
-    HTTPError instead. Only http and https URLs can be opened.
+    body, so the data is lost. It keeps every header, so a credential goes
+    to the Location URL even on another host. With no redirect handler
+    every 3xx raises HTTPError instead. Only http and https URLs can be
+    opened.
     """
     opener = urllib.request.OpenerDirector()
     handlers: list[urllib.request.BaseHandler] = [
@@ -138,6 +142,16 @@ def no_redirect_opener() -> urllib.request.OpenerDirector:
     return opener
 
 
+def redirect_hint(exc: BaseException) -> str:
+    """Return the note for a 3xx that a no_redirect_opener request got, or "".
+
+    Add it only to a message about a request that did not follow redirects.
+    """
+    if isinstance(exc, urllib.error.HTTPError) and 300 <= exc.code < 400:
+        return " (redirects are not followed; give the final URL)"
+    return ""
+
+
 def post_error_detail(exc: BaseException) -> str:
     """Describe why a POST failed without quoting its URL.
 
@@ -146,10 +160,7 @@ def post_error_detail(exc: BaseException) -> str:
     more) can repeat the URL, so only their class name is given.
     """
     if isinstance(exc, urllib.error.HTTPError):
-        detail = f"HTTP Error {exc.code}: {exc.reason}"
-        if 300 <= exc.code < 400:
-            detail += " (redirects are not followed; give the final URL)"
-        return detail
+        return f"HTTP Error {exc.code}: {exc.reason}{redirect_hint(exc)}"
     if isinstance(exc, urllib.error.URLError):
         return str(exc.reason)
     return type(exc).__name__

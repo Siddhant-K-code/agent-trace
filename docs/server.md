@@ -42,6 +42,8 @@ Only two producers read `AGENT_STRACE_ENDPOINT`:
 - The `agent-strace hook` commands that agent CLI hooks run (Claude Code, Codex, Gemini CLI, Cursor, and GitHub Copilot CLI; see [CLI hooks setup](setup.md#option-1-cli-hooks-recommended)). They send events and session metadata to the collector.
 - The Python framework integrations in `agent_trace.integrations` (see [integrations.md](integrations.md)). They send events only.
 
+Their POSTs do not follow redirects, so set the final URL.
+
 Any other process ignores it, including a plain `python my_agent.py`, `agent-strace record`, and `agent-strace watch`. To stream from `watch`, use `--stream-to` (see [Live streaming from watch](#live-streaming-from-watch)).
 
 The server writes traces in the same `.agent-traces/` format as local mode. All existing CLI commands work against its storage directory.

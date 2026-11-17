@@ -9,6 +9,7 @@ import os
 import tempfile
 import unittest
 import urllib.error
+from http import HTTPStatus
 from pathlib import Path
 from unittest.mock import patch
 
@@ -30,6 +31,11 @@ from agent_trace.pr_comment import (
     summarize_session,
 )
 from agent_trace.store import TraceStore
+
+try:
+    from _redirect_servers import ALL_REDIRECTS, REDIRECT_NOTE, RedirectServers
+except ImportError:
+    from tests._redirect_servers import ALL_REDIRECTS, REDIRECT_NOTE, RedirectServers
 
 
 class _Response:
@@ -354,6 +360,9 @@ class TestDemoSessionSummary(unittest.TestCase):
         stdout = io.StringIO()
         with patch.dict(os.environ, {}, clear=True), patch(
             "urllib.request.urlopen", side_effect=AssertionError("network attempted")
+        ), patch(
+            "agent_trace.pr_comment.no_redirect_opener",
+            side_effect=AssertionError("network attempted"),
         ), patch("sys.stdout", stdout):
             result = cmd_pr_comment(args)
         self.assertEqual(result, 0)
@@ -716,6 +725,68 @@ class TestCommentPosting(unittest.TestCase):
         self.assertNotIn("top-secret-token", str(raised.exception))
 
 
+class TestRequestRedirects(unittest.TestCase):
+    """urllib re-sent a redirected POST as a GET with no body and the token."""
+
+    def test_gitlab_post_redirect_is_an_error(self):
+        servers = RedirectServers(self, a_reply=[])
+        target = ReviewTarget("gitlab", "group/repo", 4, servers.url + "/api/v4")
+        for status in ALL_REDIRECTS:
+            with self.subTest(status=status):
+                servers.redirect(status)
+                with self.assertRaises(PRCommentError) as caught:
+                    post_or_update_comment(
+                        target, COMMENT_MARKER + "\nbody", "gitlab-token",
+                        token_header="PRIVATE-TOKEN",
+                    )
+                self.assertEqual(
+                    str(caught.exception),
+                    f"Gitlab API request failed with HTTP {status}: "
+                    f"{HTTPStatus(status).phrase}{REDIRECT_NOTE}",
+                )
+                self.assertEqual(servers.a.methods(), ["GET", "POST"])
+                self.assertEqual(servers.b.received(), [])
+
+    def test_gitlab_put_redirect_names_the_cause(self):
+        servers = RedirectServers(
+            self, methods=("PUT",), a_reply=[{"id": 7, "body": COMMENT_MARKER + " old"}]
+        )
+        servers.redirect(301)
+        target = ReviewTarget("gitlab", "group/repo", 4, servers.url + "/api/v4")
+        with self.assertRaises(PRCommentError) as caught:
+            post_or_update_comment(target, COMMENT_MARKER + " new", "gitlab-token")
+        self.assertEqual(
+            str(caught.exception),
+            f"Gitlab API request failed with HTTP 301: Moved Permanently{REDIRECT_NOTE}",
+        )
+        self.assertEqual(servers.a.methods(), ["GET", "PUT"])
+        self.assertEqual(servers.b.received(), [])
+
+    def test_get_still_follows_a_redirect(self):
+        # GitHub answers a GET for a renamed repository with 301.
+        notes = [{"id": 1, "body": "note"}]
+        servers = RedirectServers(self, methods=("GET",), reply=notes)
+        servers.redirect(301)
+        url = servers.url + "/repos/old/name/issues/1/comments"
+        self.assertEqual(_request_json("GET", url, "token", platform="github"), notes)
+        self.assertEqual(servers.a.methods(), ["GET"])
+        self.assertEqual(servers.b.methods(), ["GET"])
+
+    def test_get_error_has_no_redirect_note(self):
+        # A GET follows redirects, so the note would be wrong. urlopen does
+        # not follow a 300; it raises.
+        servers = RedirectServers(self, methods=("GET",))
+        servers.redirect(300)
+        url = servers.url + "/repos/owner/repo/issues/1/comments"
+        with self.assertRaises(PRCommentError) as caught:
+            _request_json("GET", url, "token", platform="github")
+        self.assertEqual(
+            str(caught.exception), "Github API request failed with HTTP 300: Multiple Choices"
+        )
+        self.assertEqual(servers.a.methods(), ["GET"])
+        self.assertEqual(servers.b.received(), [])
+
+
 class TestCommand(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -736,6 +807,9 @@ class TestCommand(unittest.TestCase):
         stdout = io.StringIO()
         with patch.dict(os.environ, {}, clear=True), patch(
             "urllib.request.urlopen", side_effect=AssertionError("network attempted")
+        ), patch(
+            "agent_trace.pr_comment.no_redirect_opener",
+            side_effect=AssertionError("network attempted"),
         ), patch("sys.stdout", stdout):
             result = cmd_pr_comment(args)
 

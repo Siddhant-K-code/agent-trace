@@ -134,15 +134,19 @@ def send_event_to_endpoint(event: TraceEvent, endpoint: str) -> bool:
     import urllib.request
     import urllib.error
 
+    from .http_post import no_redirect_opener, post_error_detail
+
     url = endpoint.rstrip("/") + "/events"
     body = (event.to_json() + "\n").encode("utf-8")
     headers = {"Content-Type": "application/x-ndjson", **_auth_headers()}
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with no_redirect_opener().open(req, timeout=5) as resp:
             return resp.status in (200, 202)
     except Exception as exc:
-        sys.stderr.write(f"[agent-strace] remote send failed: {exc}\n")
+        if isinstance(exc, urllib.error.HTTPError):
+            exc.close()
+        sys.stderr.write(f"[agent-strace] remote send failed: {post_error_detail(exc)}\n")
         return False
 
 
@@ -155,15 +159,21 @@ def send_session_meta_to_endpoint(meta: SessionMeta, endpoint: str) -> bool:
     import urllib.request
     import urllib.error
 
+    from .http_post import no_redirect_opener, post_error_detail
+
     url = endpoint.rstrip("/") + "/sessions"
     body = meta.to_json().encode("utf-8")
     headers = {"Content-Type": "application/json", **_auth_headers()}
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with no_redirect_opener().open(req, timeout=5) as resp:
             return resp.status in (200, 202)
     except Exception as exc:
-        sys.stderr.write(f"[agent-strace] remote session meta send failed: {exc}\n")
+        if isinstance(exc, urllib.error.HTTPError):
+            exc.close()
+        sys.stderr.write(
+            f"[agent-strace] remote session meta send failed: {post_error_detail(exc)}\n"
+        )
         return False
 
 

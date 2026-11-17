@@ -19,6 +19,7 @@ from typing import Any, Callable
 from ..cost import estimate_cost
 from ..event_data import object_field, str_field
 from ..failures import count_session_errors
+from ..http_post import no_redirect_opener, post_error_detail
 from ..models import EventType, TraceEvent
 from ..store import TraceStore
 
@@ -549,7 +550,7 @@ def score_llm_judge(
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with no_redirect_opener().open(req, timeout=30) as resp:
             data = _json.loads(resp.read())
             content = data["choices"][0]["message"]["content"].strip()
             # Strip markdown fences if present
@@ -562,7 +563,11 @@ def score_llm_judge(
             reason = str(result.get("reason", ""))[:200]
             return ScoreResult("llm_judge", score, threshold, score >= threshold, reason)
     except (urllib.error.URLError, urllib.error.HTTPError) as exc:
-        return ScoreResult("llm_judge", 0.0, threshold, False, f"LLM request failed: {exc}")
+        if isinstance(exc, urllib.error.HTTPError):
+            exc.close()
+        return ScoreResult(
+            "llm_judge", 0.0, threshold, False, f"LLM request failed: {post_error_detail(exc)}"
+        )
     except (_json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         return ScoreResult("llm_judge", 0.0, threshold, False, f"LLM response parse error: {exc}")
 

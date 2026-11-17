@@ -19,6 +19,8 @@ import sys
 import tempfile
 import threading
 import unittest
+import urllib.error
+import urllib.request
 from contextlib import redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -269,6 +271,49 @@ class TestParseHeader(unittest.TestCase):
                 with self.assertRaises(ValueError) as caught:
                     http_post.parse_header(header)
                 self.assertEqual(str(caught.exception), reason)
+
+
+class TestRedirectHint(unittest.TestCase):
+    def test_only_a_3xx_gets_the_note(self):
+        cases = {
+            300: REDIRECT_NOTE,
+            301: REDIRECT_NOTE,
+            308: REDIRECT_NOTE,
+            399: REDIRECT_NOTE,
+            400: "",
+            404: "",
+            500: "",
+        }
+        for code, note in cases.items():
+            with self.subTest(code=code):
+                error = urllib.error.HTTPError("http://h/x", code, "Reason", {}, None)
+                self.addCleanup(error.close)
+                self.assertEqual(http_post.redirect_hint(error), note)
+
+
+class TestNoRedirectOpener(unittest.TestCase):
+    def test_uses_a_proxy_from_the_environment(self):
+        # urlopen sends through http_proxy and https_proxy, so the POSTs
+        # moved off it must too. ProxyHandler reads the environment when
+        # the opener is built.
+        proxy = _Collector()
+        threading.Thread(
+            target=proxy.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True,
+        ).start()
+        self.addCleanup(proxy.server_close)
+        self.addCleanup(proxy.shutdown)
+        proxy_url = f"http://127.0.0.1:{proxy.server_address[1]}"
+        url = "http://collector.invalid/v1/x"
+        environ = {
+            "http_proxy": proxy_url, "HTTP_PROXY": proxy_url, "no_proxy": "", "NO_PROXY": "",
+        }
+        with patch.dict(os.environ, environ):
+            request = urllib.request.Request(url, data=b"{}", method="POST")
+            with http_post.no_redirect_opener().open(request, timeout=5) as response:
+                self.assertEqual(response.status, 200)
+        self.assertEqual(
+            [(r.method, r.path, r.body) for r in proxy.received()], [("POST", url, b"{}")],
+        )
 
 
 class TestExportSends(_CollectorCase):

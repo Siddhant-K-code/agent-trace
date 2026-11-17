@@ -191,6 +191,10 @@ exporter:
 agent-strace export --scores --backend langfuse
 ```
 
+It posts to `--langfuse-host`, else `LANGFUSE_HOST`, else
+`https://cloud.langfuse.com`. The POST does not follow redirects, so pass the
+final URL.
+
 ### Honeycomb
 
 ```bash
@@ -401,6 +405,10 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=https://api.honeycomb.io
 
 agent-strace export --metrics --backend otlp --since 30d
 ```
+
+The metrics are POSTed to `--otlp-endpoint`, else `OTEL_EXPORTER_OTLP_ENDPOINT`,
+with `/v1/metrics` appended. The POST does not follow redirects, so pass the
+final URL.
 
 | Metric | Description |
 |---|---|

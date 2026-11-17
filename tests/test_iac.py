@@ -32,6 +32,11 @@ try:
 except ImportError:
     from tests._concurrency import run_concurrently
 
+try:
+    from _redirect_servers import ALL_REDIRECTS, REDIRECT_NOTE, RedirectServers
+except ImportError:
+    from tests._redirect_servers import ALL_REDIRECTS, REDIRECT_NOTE, RedirectServers
+
 
 def _run(cmd_fn, argv_dict: dict) -> tuple[int, str]:
     ns = argparse.Namespace(**argv_dict)
@@ -285,6 +290,28 @@ class TestCLIApply(unittest.TestCase):
                                  "dry_run": False, "server": "", "auth_key": "",
                                  "dir": self._tmp})
         self.assertEqual(rc, 1)
+
+    def test_apply_server_post_redirect_is_an_error(self):
+        # urlopen re-sent the POST as a GET with no body and the key, and the
+        # workspace was reported as added.
+        servers = RedirectServers(self, a_reply=[])
+        cfg_file = Path(self._tmp) / ".agent-strace.yaml"
+        cfg_file.write_text("workspaces:\n  - name: prod\n")
+        for status in ALL_REDIRECTS:
+            with self.subTest(status=status):
+                servers.redirect(status)
+                rc, out = _run(cmd_apply, {"config": str(cfg_file), "dry_run": False,
+                                           "server": servers.url, "auth_key": "iac-key",
+                                           "dir": self._tmp})
+                self.assertEqual(rc, 1)
+                self.assertIn(
+                    f"  ! workspace: prod: POST {servers.url}/api/workspaces → "
+                    f"{status}{REDIRECT_NOTE}\n",
+                    out,
+                )
+                self.assertNotIn("+ workspace: prod", out)
+                self.assertEqual(servers.a.methods(), ["GET", "POST"])
+                self.assertEqual(servers.b.received(), [])
 
 
 class TestCLIConfigDiff(unittest.TestCase):
