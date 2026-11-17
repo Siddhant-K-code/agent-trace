@@ -736,6 +736,7 @@ class TestHostRuleOnLoopbackWithoutKey(_RuleServerCase):
             [f"foo.localhost:{port}"],
             [""],
             ["localhost:abc"],
+            ["localhost:"],
             ["[::1"],
             [f"127.0.0.1:{port}", "attacker.test"],
         )
@@ -976,6 +977,7 @@ class TestAllowHostFlag(unittest.TestCase):
                 self.assertEqual(self._get(port, host)[0], 200)
         for host in (
             "evildash.example.test",
+            f"www.dash.example.test:{port}",
             f"dash.example.test.attacker.test:{port}",
             f"attacker.test:{port}",
         ):
