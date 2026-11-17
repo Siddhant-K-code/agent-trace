@@ -24,6 +24,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TextIO
 
+from .inert import inert
 from .store import TraceStore
 
 
@@ -207,6 +208,12 @@ def format_annotations(
     annotations: list[Annotation],
     out: TextIO = sys.stdout,
 ) -> None:
+    """Write the annotations as terminal text to *out*.
+
+    An annotations file can hold any JSON value in each field, so each one
+    goes through inert() and an escape code or a line break in it shows as
+    text. In the note, each run of whitespace becomes one space first.
+    """
     w = out.write
     if not annotations:
         w("No annotations.\n")
@@ -214,13 +221,13 @@ def format_annotations(
     w(f"\n{len(annotations)} annotation(s):\n\n")
     for a in annotations:
         ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(a.created_at))
-        label_str = f"  [{a.label}]" if a.label else ""
-        event_str = f"  event={a.event_id}" if a.event_id else f"  offset={a.offset_seconds:.1f}s"
-        w(f"  {a.annotation_id}  {ts}{label_str}{event_str}\n")
+        label_str = f"  [{inert(a.label)}]" if a.label else ""
+        event_str = f"  event={inert(a.event_id)}" if a.event_id else f"  offset={a.offset_seconds:.1f}s"
+        w(f"  {inert(a.annotation_id)}  {ts}{label_str}{event_str}\n")
         if a.note:
-            w(f"    {a.note}\n")
+            w(f"    {inert(' '.join(str(a.note).split()))}\n")
         if a.author:
-            w(f"    {a.author}\n")
+            w(f"    {inert(a.author)}\n")
         if a.shareable:
             w("    shareable\n")
         w("\n")

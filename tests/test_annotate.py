@@ -1,6 +1,7 @@
 """Tests for replay annotations (issue #26)."""
 
 import io
+import json
 import os
 import sys
 import tempfile
@@ -22,6 +23,11 @@ from agent_trace.annotate import (
 from agent_trace.cli import build_parser
 from agent_trace.models import SessionMeta
 from agent_trace.store import TraceStore
+
+try:
+    import _escapes
+except ImportError:
+    from tests import _escapes
 
 
 def _make_store():
@@ -218,6 +224,86 @@ class TestWatchPolicyFlag(unittest.TestCase):
         from agent_trace.watch import WatcherConfig
         config = WatcherConfig()
         self.assertEqual(config.scope_policy, ".agent-scope.json")
+
+
+def _annotation(**fields):
+    values = dict(annotation_id="plain", event_id="plain", label="plain", note="plain",
+                  author="plain", created_at=0.0)
+    values.update(fields)
+    return Annotation(**values)
+
+
+def _render(annotation):
+    buf = io.StringIO()
+    format_annotations([annotation], out=buf)
+    return buf.getvalue()
+
+
+# (label, kind, build): build(value) returns an annotation with value in the
+# field the label names. The kinds are in tests/_escapes.py.
+FORMAT_ANNOTATIONS_CASES = [
+    ("annotation ID", "text", lambda v: _annotation(annotation_id=v)),
+    ("label", "text", lambda v: _annotation(label=v)),
+    ("event ID", "text", lambda v: _annotation(event_id=v)),
+    ("note", "free", lambda v: _annotation(note=v)),
+    ("author", "text", lambda v: _annotation(author=v)),
+]
+
+
+class TestFormatAnnotationsShowsEscapesAsText(unittest.TestCase):
+    """An annotations file can hold any JSON value in each field. annotate
+    --list shows escape codes and line breaks in them as text."""
+
+    def test_each_value_shows_escapes_as_text(self):
+        _escapes.check_each_value(self, FORMAT_ANNOTATIONS_CASES, _render)
+
+    def test_plain_text_prints_unchanged(self):
+        _escapes.check_plain_text_unchanged(self, FORMAT_ANNOTATIONS_CASES, _render)
+
+    def test_whitespace_in_free_text_shows_as_one_space(self):
+        _escapes.check_whitespace_in_free_text(self, FORMAT_ANNOTATIONS_CASES, _render)
+
+    def test_sgr_code_shows_as_text(self):
+        sgr = "a\x1b[8mhidden"
+        output = _render(_annotation(annotation_id=sgr, label=sgr, event_id=sgr, note=sgr, author=sgr))
+        self.assertEqual(output.count(r"a\x1b[8mhidden"), 5)
+        self.assertNotIn("\x1b", output)
+
+    def test_value_that_is_not_a_string_prints_as_before(self):
+        cases = [
+            ({"note": ["root", "cause"]}, "\n    ['root', 'cause']\n"),
+            ({"note": 2.5}, "\n    2.5\n"),
+            ({"author": 42}, "\n    42\n"),
+            ({"label": ["a", 1]}, "  [['a', 1]]  event=plain\n"),
+            ({"event_id": 7}, "  event=7\n"),
+            ({"annotation_id": 12}, "\n  12  "),
+        ]
+        for fields, expected in cases:
+            with self.subTest(fields):
+                self.assertIn(expected, _render(_annotation(**fields)))
+
+    def test_note_of_only_whitespace_keeps_its_line(self):
+        expected = _render(_annotation(note="x")).replace("\n    x\n", "\n    \n")
+        self.assertEqual(_render(_annotation(note=" \t\n ")), expected)
+
+    def test_json_export_keeps_the_raw_text(self):
+        payload = _escapes.PAYLOAD
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TraceStore(tmp)
+            store.create_session(SessionMeta(session_id="esc-annotate", agent_name="test"))
+            add_annotation(store, "esc-annotate", Annotation(
+                annotation_id=payload, label=payload, event_id=payload, note=payload, author=payload,
+            ))
+            args = build_parser().parse_args([
+                "--trace-dir", tmp, "annotate", "esc-annotate", "--list", "--export-format", "json",
+            ])
+            out = io.StringIO()
+            with redirect_stdout(out):
+                self.assertEqual(cmd_annotate(args), 0)
+        [loaded] = json.loads(out.getvalue())
+        for name in ("annotation_id", "label", "event_id", "note", "author"):
+            with self.subTest(name):
+                self.assertEqual(loaded[name], payload)
 
 
 if __name__ == "__main__":
