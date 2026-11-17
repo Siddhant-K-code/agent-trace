@@ -318,9 +318,10 @@ def _is_workspace_list(reply: Any) -> bool:
 def _apply_remote(cfg: dict, server: str, auth_key: str, dry_run: bool) -> list[str]:
     """Push config sections to a hosted collector via HTTP.
 
-    When the config declares a workspace, the server's workspaces are listed
-    first. If that GET fails, or its reply is not a list of workspaces with
-    names, no POST is sent and the only change is one ``!`` line.
+    When the config declares a workspace with a name, the server's workspaces
+    are listed first. If that GET fails, or its reply is not a list of
+    workspaces with names, no POST is sent and the only change is one ``!``
+    line.
     """
     changes = []
     base = server.rstrip("/")

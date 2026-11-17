@@ -574,6 +574,19 @@ class TestApplyServerListing(unittest.TestCase):
                     posts = [] if dry_run else [("POST", "/api/rbac", _ALICE_POST)]
                     self.assertEqual(server.requests(), posts)
 
+    def test_get_is_made_when_a_later_workspace_has_a_name(self):
+        # The first workspace has no name. The GET must still be made for prod.
+        server = self._serve({"GET /api/workspaces": _json_reply([{"name": "prod"}])})
+        for dry_run in (False, True):
+            with self.subTest(dry_run=dry_run):
+                server.clear()
+                rc, out = self._apply(
+                    "workspaces:\n  - team: a\n  - name: prod\n", server.url, dry_run,
+                )
+                self._assert_output(out, dry_run, "  workspace: prod (exists on server)")
+                self.assertEqual(rc, 0)
+                self.assertEqual(server.requests(), [("GET", "/api/workspaces", None)])
+
     def test_listed_workspace_exists_and_the_others_are_posted(self):
         server = self._serve({"GET /api/workspaces": _json_reply([{"name": "prod"}])})
         for dry_run in (False, True):
