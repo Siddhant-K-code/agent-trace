@@ -19,7 +19,10 @@ Recorded availability goes into the SESSION_START event as
 with ``availability: "recorded"``.  A session that lists no skills has
 neither field, and the report falls back to skill directories on disk.
 A Copilot builtin skill path that a CLI upgrade deleted is replaced by the
-same skill in the newest installed package version.
+same skill in the newest installed package version.  Copilot
+``session.resume`` records become continuation SESSION_START events, so load
+timing is measured from the latest activation instead of the session's
+original creation time.
 """
 
 from __future__ import annotations
@@ -373,6 +376,20 @@ def import_copilot_session(
             start = _timestamp(data.get("startTime")) or _timestamp(raw_ts)
             if start is not None and session.started is None:
                 session.started = start
+        elif kind == "session.resume":
+            seen = True
+            context = _mapping(data.get("context"))
+            cwd = _text(context.get("cwd")) or _text(data.get("cwd"))
+            session.cwd = session.cwd or cwd
+            resume_data = {"source": "resume"}
+            if cwd:
+                resume_data["cwd"] = cwd
+            resume_time = _timestamp(data.get("resumeTime"))
+            session.add(
+                EventType.SESSION_START,
+                resume_time if resume_time is not None else raw_ts,
+                resume_data,
+            )
         elif kind == "system.message":
             _copilot_available(session, data)
         elif kind == "user.message":

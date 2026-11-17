@@ -1352,6 +1352,12 @@ def analyze_session(
     if meta_start:
         candidates.append(meta_start)
     start = min(candidates) if candidates else 0.0
+    resume_starts = [
+        (pos, event.timestamp)
+        for pos, (_, event) in enumerate(ordered)
+        if event.event_type == EventType.SESSION_START
+        and event.data.get("source") == "resume"
+    ]
     first_edit = next((pos for pos, (_, event) in enumerate(ordered) if _is_edit(event)), None)
     linked = _linked_results([event for _, event in ordered])
     position = {index: pos for pos, (index, _) in enumerate(ordered)}
@@ -1361,6 +1367,10 @@ def analyze_session(
     first_event: dict[str, TraceEvent] = {}
     for name, method, invoked_by, detail, index, event in _find_loads(ordered, catalog, base, basis == "recorded"):
         pos = position[index]
+        activation_start = next(
+            (timestamp for start_pos, timestamp in reversed(resume_starts) if start_pos <= pos),
+            start,
+        )
         load = SkillLoad(
             name=name,
             method=method,
@@ -1368,7 +1378,7 @@ def analyze_session(
             detail=detail,
             event_id=event.event_id,
             timestamp=event.timestamp,
-            seconds_since_start=max(0.0, event.timestamp - start),
+            seconds_since_start=max(0.0, event.timestamp - activation_start),
             loaded_before_first_edit=None if first_edit is None else pos < first_edit,
             load_succeeded=_load_succeeded(linked.get(event.event_id)) if method != "user_prompt" else None,
         )
@@ -1877,7 +1887,8 @@ def format_aggregate_text(report: Mapping[str, Any], out: TextIO | None = None) 
           f"{_fmt_seconds(skill['median_seconds_to_load']):>8} {_frac(skill['loaded_before_first_edit']):>8} "
           f"{_frac(skill['follow_signals']):>7} {_frac(skill['tests_after_load']):>6}\n")
     w("\nColumns: load rate = sessions loaded while available / sessions available; "
-      "user, model = load invocations by each (not sessions); median t = time from session start to first load; "
+      "user, model = load invocations by each (not sessions); "
+      "median t = time from latest session start or resume to first load; "
       "pre-edit = loaded before first edit (n = loaded sessions with an edit); "
       "follow = sessions with follow signals (n = measurable loads); "
       "tests = sessions with a test command after the load.\n")
