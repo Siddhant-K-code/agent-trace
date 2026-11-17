@@ -2220,6 +2220,9 @@ On Windows, `share --assignment` and `score` also refuse directory junctions in
 the trace store, session, output, submission, comparison directory, and rubric
 paths.
 
+On Windows, `compliance-report` also refuses directory junctions in the output
+path, the trace store directory, its session directories, and `.approvals`.
+
 These are still refused when they are symbolic links, even root-owned ones:
 the output file, the rubric, the submission bundle, the replay baseline file,
 and the trace store directory that `share --assignment` reads.

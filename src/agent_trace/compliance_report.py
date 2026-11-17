@@ -273,6 +273,27 @@ def _is_link_or_reparse_point(info: os.stat_result) -> bool:
     )
 
 
+def _is_link(path: Path) -> bool:
+    """Like ``Path.is_symlink``, but also True for a Windows junction."""
+    try:
+        return _is_link_or_reparse_point(os.lstat(path))
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+
+
+def _has_reparse_point_in_path(path: Path) -> bool:
+    # has_untrusted_symlink refuses every symlink in the path on Windows but
+    # misses junctions. POSIX has no reparse points, so this is False there.
+    for candidate in (path, *path.parents):
+        try:
+            info = os.lstat(candidate)
+        except OSError:
+            continue
+        if getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+            return True
+    return False
+
+
 def _read_regular_file(
     path: Path, *, label: str, max_bytes: int,
 ) -> bytes:
@@ -588,14 +609,14 @@ def _discover_snapshots(
     auxiliary = {".approvals", ".tenant-journal", "checkpoints", "datasets"}
     for store_index, store in enumerate(stores):
         base = store.base_dir
-        if base.is_symlink():
+        if _is_link(base):
             raise ComplianceReportError("trace store cannot be symlinked")
         if not base.exists():
             continue
         if not base.is_dir():
             raise ComplianceReportError("trace store must be a directory")
         for entry in sorted(base.iterdir(), key=lambda item: item.name):
-            if entry.is_symlink():
+            if _is_link(entry):
                 raise ComplianceReportError("trace store contains a symlinked entry")
             if not entry.is_dir():
                 continue
@@ -685,7 +706,7 @@ def _load_approvals(
     directory = store.base_dir / ".approvals"
     if not directory.exists():
         return {}, Counter(), 0
-    if directory.is_symlink() or not directory.is_dir():
+    if _is_link(directory) or not directory.is_dir():
         raise ComplianceReportError("approval storage is not a safe directory")
     linked: dict[tuple[str, str], list[ApprovalRequest]] = {}
     unlinked: Counter[str] = Counter()
@@ -693,7 +714,7 @@ def _load_approvals(
     total_bytes = 0
     record_count = 0
     for path in sorted(directory.iterdir(), key=lambda item: item.name):
-        if path.is_symlink():
+        if _is_link(path):
             raise ComplianceReportError("approval storage contains a symlink")
         if not path.is_file() or path.suffix != ".json":
             continue
@@ -1926,15 +1947,18 @@ def _atomic_write_private(path_value: str | Path, data: bytes) -> None:
     if path.name in {"", ".", ".."}:
         raise ComplianceReportError("--output must name a file")
     parent = path.parent
-    if has_untrusted_symlink(parent):
+    if has_untrusted_symlink(parent) or _has_reparse_point_in_path(parent):
         raise ComplianceReportError("refusing a symlinked output path")
     try:
         parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise ComplianceReportError("output directory could not be created") from exc
-    if has_untrusted_symlink(parent) or not parent.is_dir():
+    if (
+        has_untrusted_symlink(parent) or _has_reparse_point_in_path(parent)
+        or not parent.is_dir()
+    ):
         raise ComplianceReportError("output directory is not a safe directory")
-    if path.is_symlink() or (path.exists() and not path.is_file()):
+    if _is_link(path) or (path.exists() and not path.is_file()):
         raise ComplianceReportError("output must be a non-symlinked regular file")
     temporary_name = ""
     try:
@@ -1946,7 +1970,7 @@ def _atomic_write_private(path_value: str | Path, data: bytes) -> None:
             temporary.write(data)
             temporary.flush()
             os.fsync(temporary.fileno())
-        if path.is_symlink() or (path.exists() and not path.is_file()):
+        if _is_link(path) or (path.exists() and not path.is_file()):
             raise ComplianceReportError("output target changed during the write")
         os.replace(temporary_name, path)
         temporary_name = ""
