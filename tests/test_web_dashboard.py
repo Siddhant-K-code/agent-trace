@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+import shutil
 import sys
 import tempfile
 import threading
@@ -10,6 +12,7 @@ import unittest
 import urllib.error
 import urllib.request
 from http.server import HTTPServer
+from urllib.parse import quote
 
 sys.path.insert(0, "src")
 
@@ -30,6 +33,14 @@ from agent_trace.server import _make_handler
 from agent_trace.store import TraceStore
 from agent_trace.models import SessionMeta, TraceEvent, EventType
 from agent_trace.event_data import NonObjectEventDataError
+
+try:
+    from test_html_replay import LEGACY_ID, SKIP_LEGACY_ON_WINDOWS, write_legacy_session
+except ImportError:  # pragma: no cover - package-style test discovery
+    from tests.test_html_replay import LEGACY_ID, SKIP_LEGACY_ON_WINDOWS, write_legacy_session
+
+# The detail page title cuts the id at 12 characters, then escapes it.
+LEGACY_TITLE = "<title>Session L&lt;&quot;&amp;a #?%20&amp; | agent-trace</title>"
 
 
 def _start_server(tmp_dir, dashboard=True):
@@ -94,6 +105,52 @@ class TestRenderPages(unittest.TestCase):
             self.assertTrue(html.startswith("<!DOCTYPE html>"))
             self.assertIn("</html>", html)
             self.assertIn("<script>", html)
+
+    def test_detail_page_title_shows_legacy_id_as_text(self):
+        html = render_detail_page(LEGACY_ID)
+        self.assertIn(LEGACY_TITLE, html)
+        self.assertNotIn('L<"', html)
+
+
+class TestPageScriptsShowDataAsText(unittest.TestCase):
+    """No page script parses session or event data as HTML."""
+
+    @staticmethod
+    def _scripts() -> dict:
+        from agent_trace.replay import _DIFF_HTML_TEMPLATE, _HTML_TEMPLATE
+        pages = {
+            "sessions": render_sessions_page(),
+            "detail": render_detail_page("t"),
+            "cost": render_cost_page(),
+            "violations": render_violations_page(),
+            "health": render_health_page(),
+            "replay": _HTML_TEMPLATE,
+            "diff": _DIFF_HTML_TEMPLATE,
+        }
+        return {
+            name: "".join(re.findall(r"<script>(.*?)</script>", page, re.S))
+            for name, page in pages.items()
+        }
+
+    def test_no_html_parsing_except_clearing(self):
+        sinks = re.compile(r"innerHTML|outerHTML|insertAdjacentHTML|document\.write")
+        clearing = re.compile(r"\.innerHTML\s*=\s*(?:''|\"\")")
+        for name, script in self._scripts().items():
+            with self.subTest(page=name):
+                self.assertTrue(script.strip())
+                self.assertIsNone(sinks.search(clearing.sub("", script)))
+
+    def test_session_ids_in_urls_are_encoded(self):
+        scripts = self._scripts()
+        for name, script in scripts.items():
+            with self.subTest(page=name):
+                for match in re.finditer(r"/(?:session|api/sessions)/", script):
+                    self.assertEqual(
+                        script[match.end():match.end() + 21], "${encodeURIComponent(",
+                        script[match.start():match.end() + 40],
+                    )
+        self.assertIn("/session/${encodeURIComponent(", scripts["sessions"])
+        self.assertIn("/api/sessions/${encodeURIComponent(", scripts["violations"])
 
 
 class TestApiHelpers(unittest.TestCase):
@@ -316,6 +373,33 @@ class TestServerDashboardRoutes(unittest.TestCase):
             data = json.loads(r.read())
             self.assertEqual(len(data), 1)
             self.assertEqual(data[0]["event_type"], "tool_call")
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    @SKIP_LEGACY_ON_WINDOWS
+    def test_legacy_id_routes_decode_the_encoded_id(self):
+        self.addCleanup(shutil.rmtree, self._tmp, True)
+        server, port, store = _start_server(self._tmp)
+        try:
+            write_legacy_session(store, LEGACY_ID, [TraceEvent(
+                event_type=EventType.TOOL_CALL, session_id=LEGACY_ID,
+                event_id="legacy-call", data={"tool_name": "Bash"},
+            )])
+            # The second form is what encodeURIComponent sends: it keeps ' raw.
+            for encoded in (quote(LEGACY_ID, safe=""), quote(LEGACY_ID, safe="!'()*")):
+                with self.subTest(encoded=encoded):
+                    with urllib.request.urlopen(
+                            f"http://127.0.0.1:{port}/api/sessions/{encoded}/events") as r:
+                        self.assertEqual(r.status, 200)
+                        events = json.loads(r.read())
+                    self.assertEqual(
+                        [(e["event_id"], e["session_id"]) for e in events],
+                        [("legacy-call", LEGACY_ID)],
+                    )
+                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/session/{encoded}") as r:
+                        self.assertEqual(r.status, 200)
+                        self.assertIn(LEGACY_TITLE, r.read().decode())
         finally:
             server.shutdown()
             server.server_close()

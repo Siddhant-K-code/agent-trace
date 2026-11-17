@@ -166,18 +166,21 @@ count the usage once per line; import them again to correct their totals.
 ```
 agent-strace replay [session-id] [--format terminal|html] [--live] [--speed N]
                     [--filter TYPES] [--limit N] [--expand-subagents] [--tree]
-                    [-o FILE]
+                    [--diff SESSION_B] [-o FILE]
 ```
 
 | Flag | Description |
 |---|---|
 | `--format html` | Export self-contained HTML viewer |
+| `--diff SESSION_B` | Export side-by-side HTML diff against SESSION_B |
 | `--live` | Replay with real-time delays |
 | `--speed N` | Speed multiplier for `--live` (default: 1.0) |
 | `--filter TYPES` | Comma-separated event types to show |
 | `--limit N` | Cap at N events |
 | `--expand-subagents` | Inline subagent sessions under the parent tool_call that started them (the child's `parent_event_id`) |
 | `--tree` | Show session hierarchy without full replay |
+
+Both HTML outputs show event text and session ids as plain text.
 
 Codex runs subagents inside the parent session. Replay tags each of their
 tool events with `[subagent <agent_type> <last 8 characters of agent_id>]`,

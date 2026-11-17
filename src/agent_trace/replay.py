@@ -6,6 +6,8 @@ Supports filtering by event type and time range.
 
 from __future__ import annotations
 
+import html
+import json
 import sys
 import time
 from collections.abc import Mapping
@@ -514,6 +516,19 @@ def list_sessions(
 # HTML replay viewer (#40)
 # ---------------------------------------------------------------------------
 
+def _script_json(value: object) -> str:
+    """Return compact JSON to embed in an HTML <script> element.
+
+    The HTML parser ends a script at "</script" and treats "<!--" in it
+    specially, whatever the JavaScript says. Writing every <, > and & as a
+    Unicode escape keeps event text from doing either, and JavaScript reads
+    the same value. The default ensure_ascii=True already escapes U+2028 and
+    U+2029.
+    """
+    text = json.dumps(value, separators=(",", ":"))
+    return text.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+
+
 _HTML_TEMPLATE = """\
 <!DOCTYPE html>
 <html lang="en">
@@ -612,17 +627,24 @@ function renderEvent(ev, idx) {{
   div.className = 'event type-' + ev.event_type;
   div.id = 'ev-' + idx;
   const dur = ev.duration_ms ? (ev.duration_ms < 1000 ? ev.duration_ms.toFixed(0)+'ms' : (ev.duration_ms/1000).toFixed(1)+'s') : '';
-  div.innerHTML = `
-    <div class="event-header" onclick="toggle(${{idx}})">
-      <span class="ts">${{fmtTs(ev._offset||0)}}</span>
-      <span class="icon">${{icon(ev.event_type)}}</span>
-      <span class="type">${{ev.event_type}}</span>
-      <span class="summary">${{summary(ev)}}</span>
-      <span class="dur">${{dur}}</span>
-    </div>
-    <div class="event-body" id="body-${{idx}}">
-      <pre>${{JSON.stringify(ev.data||{{}}, null, 2)}}</pre>
-    </div>`;
+  // Event text is set with textContent, so markup in it shows as typed.
+  const header = document.createElement('div');
+  header.className = 'event-header';
+  header.addEventListener('click', () => toggle(idx));
+  [['ts', fmtTs(ev._offset||0)], ['icon', icon(ev.event_type)], ['type', ev.event_type],
+   ['summary', summary(ev)], ['dur', dur]].forEach(([cls, text]) => {{
+    const span = document.createElement('span');
+    span.className = cls;
+    span.textContent = text;
+    header.appendChild(span);
+  }});
+  const body = document.createElement('div');
+  body.className = 'event-body';
+  body.id = 'body-' + idx;
+  const pre = document.createElement('pre');
+  pre.textContent = JSON.stringify(ev.data||{{}}, null, 2);
+  body.appendChild(pre);
+  div.append(header, body);
   return div;
 }}
 
@@ -707,7 +729,6 @@ def replay_to_html(
 
     Returns the HTML string. If output_path is given, also writes to disk.
     """
-    import json as _json
     from .cost import DEFAULT_MODEL, TokenUsage, _usage_dollars, session_cost, session_event_usage
 
     meta = store.load_meta(session_id)
@@ -753,20 +774,20 @@ def replay_to_html(
         events_data.append(d_out)
         costs_data.append(_usage_dollars(running, DEFAULT_MODEL) if priced else None)
 
-    html = _HTML_TEMPLATE.format(
-        session_id=session_id[:16],
+    page = _HTML_TEMPLATE.format(
+        session_id=html.escape(session_id[:16]),
         event_count=len(events),
         duration=duration_str,
         max_idx=len(events) - 1,
-        events_json=_json.dumps(events_data, separators=(",", ":")),
-        costs_json=_json.dumps(costs_data, separators=(",", ":")),
+        events_json=_script_json(events_data),
+        costs_json=_script_json(costs_data),
         cost_initial="$0.0000" if priced else "n/a",
     )
 
     if output_path:
-        Path(output_path).write_text(html, encoding="utf-8")
+        Path(output_path).write_text(page, encoding="utf-8")
 
-    return html
+    return page
 
 
 # ---------------------------------------------------------------------------
@@ -866,7 +887,6 @@ def replay_to_html_diff(
     Events present in only one session are highlighted with a coloured outline.
     Returns the HTML string; writes to output_path if given.
     """
-    import json as _json
     from .cost import session_cost
     from .diff import diff_sessions
 
@@ -908,9 +928,9 @@ def replay_to_html_diff(
     except Exception:
         divergence_index = 0.0
 
-    html = _DIFF_HTML_TEMPLATE.format(
-        sid_a=session_a[:16],
-        sid_b=session_b[:16],
+    page = _DIFF_HTML_TEMPLATE.format(
+        sid_a=html.escape(session_a[:16]),
+        sid_b=html.escape(session_b[:16]),
         count_a=len(events_a),
         count_b=len(events_b),
         # Both streams passed the full object-data check above, so
@@ -918,13 +938,13 @@ def replay_to_html_diff(
         cost_a=session_cost(events_a, session_id=session_a),
         cost_b=session_cost(events_b, session_id=session_b),
         divergence_index=divergence_index,
-        events_a_json=_json.dumps(_build_event_data(events_a), separators=(",", ":")),
-        events_b_json=_json.dumps(_build_event_data(events_b), separators=(",", ":")),
-        only_a_json=_json.dumps(only_a_ids, separators=(",", ":")),
-        only_b_json=_json.dumps(only_b_ids, separators=(",", ":")),
+        events_a_json=_script_json(_build_event_data(events_a)),
+        events_b_json=_script_json(_build_event_data(events_b)),
+        only_a_json=_script_json(only_a_ids),
+        only_b_json=_script_json(only_b_ids),
     )
 
     if output_path:
-        Path(output_path).write_text(html, encoding="utf-8")
+        Path(output_path).write_text(page, encoding="utf-8")
 
-    return html
+    return page
