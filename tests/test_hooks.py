@@ -905,6 +905,13 @@ def _fake_key(label="RSA PRIVATE KEY", seed=1, size=1190):
     return "\n".join([f"-----BEGIN {label}-----", *lines, f"-----END {label}-----", ""])
 
 
+def _too_deep_to_walk(data, *args, **kwargs):
+    """Stand in for redact_data on output that nests too deep to walk."""
+    if not isinstance(data, str):
+        raise RecursionError("maximum recursion depth exceeded")
+    return redact_data(data, *args, **kwargs)
+
+
 class TestHooksRedactBeforeCut(unittest.TestCase):
     """PostToolUse redacts the raw tool output, then cuts it to 1000 or 500 characters."""
 
@@ -1144,19 +1151,29 @@ class TestHooksRedactBeforeCut(unittest.TestCase):
         self.assert_redacted_once(event, err)
 
     def test_output_too_deep_to_walk_is_redacted_as_text(self):
-        def shallow(data, *args, **kwargs):
-            if not isinstance(data, str):
-                raise RecursionError("maximum recursion depth exceeded")
-            return redact_data(data, *args, **kwargs)
-
         output = {"items": [{"token_value": GITHUB_TOKEN}]}
-        with patch("agent_trace.hooks.redact_data", side_effect=shallow):
+        with patch("agent_trace.hooks.redact_data", side_effect=_too_deep_to_walk):
             event, err = self.post(output)
         self.assertEqual(
             event.data["result"],
             str({"items": [{"token_value": redaction_marker("github-token")}]}),
         )
         self.assert_redacted_once(event, err)
+
+    def test_output_too_deep_to_walk_is_redacted_before_the_cut(self):
+        # The token crosses the cut. The 20 characters before the cut match
+        # no pattern, so only the hook's pass before the cut can hide them.
+        marker = redaction_marker("github-token")
+        for failed, limit, field, suffix in (
+            (False, 1000, "result", SUFFIX),
+            (True, 500, "error", ""),
+        ):
+            with self.subTest(failed=failed):
+                text = "x" * (limit - 20 - len("{'t': '"))
+                with patch("agent_trace.hooks.redact_data", side_effect=_too_deep_to_walk):
+                    event, err = self.post({"t": text + GITHUB_TOKEN}, failed=failed)
+                self.assertEqual(event.data[field], str({"t": text + marker})[:limit] + suffix)
+                self.assert_redacted_once(event, err)
 
 
 class TestMetadataOnlyData(unittest.TestCase):
