@@ -24,6 +24,7 @@ from typing import Any, TextIO
 
 from .budget_report import _parse_date
 from .event_data import require_object_event_data
+from .inert import inert
 from .models import EventType, SessionMeta, TraceEvent
 from .store import TraceStore, _write_atomic
 
@@ -803,7 +804,7 @@ def format_cognitive_debt_text(report: CognitiveDebtReport, out: TextIO = sys.st
         if session.agent_written_lines <= 0:
             continue
         w(
-            f"{session.session_id[:12]:<14}  {session.branch[:20]:<20}  "
+            f"{session.session_id[:12]:<14}  {inert(session.branch[:20]):<20}  "
             f"{session.agent_written_lines:>7}  {session.human_reviewed_lines:>8}  "
             f"{session.unreviewed_lines:>10}  {session.unknown_review_lines:>7}  "
             f"{session.status(report.threshold):<15}\n"
@@ -815,7 +816,7 @@ def format_cognitive_debt_text(report: CognitiveDebtReport, out: TextIO = sys.st
         w(f"\nBy {report.group_by}:\n")
         for row in report.rows.values():
             w(
-                f"  {row['group']}: {row['reviewed_lines']} reviewed, "
+                f"  {inert(row['group'])}: {row['reviewed_lines']} reviewed, "
                 f"{row['unreviewed_lines']} unreviewed, "
                 f"{row['unknown_review_lines']} unknown, {row['status']}\n"
             )
@@ -833,14 +834,14 @@ def format_cognitive_debt_text(report: CognitiveDebtReport, out: TextIO = sys.st
     if zero_review:
         w("\nFiles with zero human review:\n")
         for session, file_debt in zero_review[:10]:
-            w(f"  {file_debt.path} ({file_debt.agent_written_lines} lines, session {session.session_id[:12]})\n")
+            w(f"  {inert(file_debt.path)} ({file_debt.agent_written_lines} lines, session {session.session_id[:12]})\n")
 
     unknown_review = report.unknown_review_files
     if unknown_review:
         w("\nFiles with unknown review state:\n")
         for session, file_debt in unknown_review[:10]:
             w(
-                f"  {file_debt.path} "
+                f"  {inert(file_debt.path)} "
                 f"({file_debt.agent_written_lines} lines, workflow {session.session_id[:12]})\n"
             )
 

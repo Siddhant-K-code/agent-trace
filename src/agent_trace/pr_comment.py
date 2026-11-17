@@ -497,7 +497,7 @@ def _normalise_display_text(value: Any) -> str:
 def _safe_text(value: Any) -> str:
     """Escape trace-derived text for an inline GitHub/GitLab Markdown context."""
 
-    normalised = _normalise_display_text(value)
+    normalised = inert(_normalise_display_text(value))
     escaped = html.escape(normalised, quote=False)
     escaped = _INLINE_MARKDOWN_RE.sub(r"\\\1", escaped)
     # Prevent trace-derived text from creating bot-authored mentions or ending
@@ -509,7 +509,7 @@ def _safe_code_text(value: Any) -> str:
     """Escape text that will be wrapped in a single-backtick code span."""
 
     return (
-        html.escape(_normalise_display_text(value), quote=False)
+        html.escape(inert(_normalise_display_text(value)), quote=False)
         .replace("@", "&#64;")
         .replace("`", "&#96;")
     )

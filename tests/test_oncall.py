@@ -9,7 +9,13 @@ import time
 import unittest
 
 from agent_trace.models import EventType, SessionMeta, TraceEvent
+from agent_trace.oncall import OncallReport, UnreadFile, format_oncall
 from agent_trace.store import TraceStore
+
+try:
+    import _escapes
+except ImportError:
+    from tests import _escapes
 
 
 def _make_store(tmp_dir: str) -> TraceStore:
@@ -101,3 +107,38 @@ class TestOncallAnalysis(unittest.TestCase):
         self.assertEqual(args.scope, "src/**")
 
 
+def _report(path="plain"):
+    unread = UnreadFile(path=path, last_modified_by_agent=time.time(), session_id="s1",
+                        lines_changed=1, reading_minutes=1.0)
+    return OncallReport(rotation_start="2099-01-01", days_until_rotation=1,
+                        unread_files=[unread], total_reading_minutes=1.0,
+                        scope_glob="**", agent_sessions_scanned=1)
+
+
+def _render(report):
+    buf = io.StringIO()
+    format_oncall(report, out=buf)
+    return buf.getvalue()
+
+
+# (label, kind, build): build(value) returns a report with value in the place
+# the label names. The kinds are in tests/_escapes.py.
+FORMAT_ONCALL_CASES = [
+    ("file path", "text", lambda v: _report(path=v)),
+]
+
+
+class TestTraceTextShowsAsText(unittest.TestCase):
+    """A file path in a trace can hold escape codes and line breaks. oncall
+    shows them as text."""
+
+    def test_each_value_shows_escapes_as_text(self):
+        _escapes.check_each_value(self, FORMAT_ONCALL_CASES, _render)
+
+    def test_plain_text_prints_unchanged(self):
+        _escapes.check_plain_text_unchanged(self, FORMAT_ONCALL_CASES, _render)
+
+    def test_sgr_code_shows_as_text(self):
+        output = _render(_report(path="a\x1b[8mhidden"))
+        self.assertIn(r"a\x1b[8mhidden", output)
+        self.assertNotIn("\x1b", output)

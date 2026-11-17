@@ -23,6 +23,8 @@ from agent_trace.pr_comment import (
     _platform_token,
     _repo_from_remote,
     _request_json,
+    _safe_code_text,
+    _safe_text,
     cmd_pr_comment,
     post_or_update_comment,
     render_comment,
@@ -38,6 +40,11 @@ except ImportError:
     from tests._redirect_servers import (
         ALL_REDIRECTS, ORIGIN_NOTE, REDIRECT_NOTE, RedirectServers,
     )
+
+try:
+    import _escapes
+except ImportError:
+    from tests import _escapes
 
 
 class _Response:
@@ -1021,6 +1028,136 @@ class TestCommand(unittest.TestCase):
         self.assertIn("PR_HEAD_REPOSITORY", action)
         self.assertIn("No agent-trace sessions found; skipping PR comment", action)
         self.assertIn("pr-comment", action)
+
+
+# How _safe_text and _table_text show PAYLOAD. The Markdown escape puts a
+# backslash before each backslash and bracket, so GitHub shows PAYLOAD_FREE.
+PAYLOAD_MARKDOWN = r"A\\x1b\]52;c;aWQK\\x07B\\x1b\[2K C D\\x9bE\\u202eF"
+
+# (label, helper, expected): how each Markdown helper shows PAYLOAD.
+HELPER_CASES = [
+    ("_safe_text", _safe_text, PAYLOAD_MARKDOWN),
+    ("_safe_code_text", _safe_code_text, _escapes.PAYLOAD_FREE),
+]
+
+# (label, expected, build): build(value) returns the summaries for
+# render_comment(), with value in the place the label names and plain text
+# everywhere else.
+RENDER_COMMENT_CASES = [
+    ("model, one session", PAYLOAD_MARKDOWN, lambda v: [_summary(models=[v])]),
+    (
+        "model, two sessions",
+        PAYLOAD_MARKDOWN,
+        lambda v: [_summary("one", models=[v]), _summary("two")],
+    ),
+    ("modified path", _escapes.PAYLOAD_FREE, lambda v: [_summary(files_modified=[v])]),
+    ("redundant read", _escapes.PAYLOAD_FREE, lambda v: [_summary(redundant_reads={v: 3})]),
+]
+
+
+class TestTraceTextShowsAsText(unittest.TestCase):
+    """Model names and paths in a trace can hold escape codes and line breaks.
+    The comment shows the escapes as text and each line break as a space."""
+
+    def test_each_helper_shows_escapes_as_text(self):
+        for label, helper, expected in HELPER_CASES:
+            with self.subTest(label):
+                self.assertEqual(helper(_escapes.PAYLOAD), expected)
+
+    def test_each_value_shows_escapes_as_text(self):
+        for label, expected, build in RENDER_COMMENT_CASES:
+            with self.subTest(label):
+                _escapes.assert_shows_as_text(
+                    self,
+                    render_comment(build(_escapes.PAYLOAD)),
+                    expected,
+                    render_comment(build("plain")),
+                )
+
+    def test_plain_text_prints_unchanged(self):
+        for label, helper, _ in HELPER_CASES:
+            with self.subTest(label):
+                self.assertEqual(helper(_escapes.PLAIN), _escapes.PLAIN)
+        for label, _, build in RENDER_COMMENT_CASES:
+            with self.subTest(label):
+                self.assertIn(_escapes.PLAIN, render_comment(build(_escapes.PLAIN)))
+
+    def test_sgr_code_shows_as_text(self):
+        self.assertEqual(_safe_text("a\x1b[8mhidden"), r"a\\x1b\[8mhidden")
+        self.assertEqual(_safe_code_text("a\x1b[8mhidden"), r"a\x1b[8mhidden")
+
+
+class TestPayloadTrace(unittest.TestCase):
+    """pr-comment posts the body that --dry-run prints, with each escape from
+    the trace shown as text."""
+
+    SESSION = "payload"
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        store = TraceStore(self.temp.name, redact=False)
+        store.create_session(SessionMeta(
+            session_id=self.SESSION, started_at=100.0, ended_at=234.0
+        ))
+        sid = self.SESSION
+        events = [
+            _event(sid, EventType.SESSION_START, 100.0),
+            _event(sid, EventType.USER_PROMPT, 101.0, prompt="fix it"),
+            _event(sid, EventType.LLM_REQUEST, 102.0, model=_escapes.PAYLOAD, prompt="inspect"),
+        ]
+        # Three reads of one path make two redundant reads.
+        for timestamp in (103.0, 104.0, 105.0):
+            events.append(_event(
+                sid, EventType.TOOL_CALL, timestamp,
+                tool_name="Read", arguments={"file_path": "r" + _escapes.PAYLOAD},
+            ))
+        events.append(_event(
+            sid, EventType.TOOL_CALL, 106.0,
+            tool_name="Edit", arguments={"file_path": "e" + _escapes.PAYLOAD},
+        ))
+        events.append(_event(sid, EventType.SESSION_END, 234.0, exit_code=0))
+        for event in events:
+            store.append_event(sid, event)
+        # --review reads its config file from the working directory.
+        cwd = os.getcwd()
+        os.chdir(self.temp.name)
+        self.addCleanup(os.chdir, cwd)
+
+    def _run(self, *flags):
+        """Run pr-comment and return its stdout and the bodies it posted."""
+        args = build_parser().parse_args(
+            ["--trace-dir", self.temp.name, "pr-comment", self.SESSION, *flags]
+        )
+        stdout, posted = io.StringIO(), []
+
+        def post(_target, body, _token, **_kwargs):
+            posted.append(body)
+            return "created"
+
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "token"}), patch(
+            "agent_trace.pr_comment.current_branch", return_value="feature/trace"
+        ), patch("agent_trace.pr_comment.resolve_target") as resolve, patch(
+            "agent_trace.pr_comment.post_or_update_comment", side_effect=post
+        ), patch("sys.stdout", stdout), patch("sys.stderr", io.StringIO()):
+            resolve.return_value.number = 7
+            cmd_pr_comment(args)
+        return stdout.getvalue(), posted
+
+    def test_posted_body_is_the_dry_run_output(self):
+        for flags in ((), ("--review",)):
+            with self.subTest(flags=flags):
+                body, posted = self._run("--dry-run", *flags)
+                self.assertEqual(posted, [])
+                stdout, posted = self._run(*flags)
+                self.assertEqual(stdout, "Created agent-trace comment on PR #7.\n")
+                self.assertEqual(posted, [body])
+                self.assertEqual("### Reviewability" in body, bool(flags))
+                for line in body.split("\n"):
+                    self.assertTrue(line.isprintable(), ascii(line))
+                self.assertIn(f"| **Model** | {PAYLOAD_MARKDOWN} |", body)
+                self.assertIn(f"- Modified: `e{_escapes.PAYLOAD_FREE}`", body)
+                self.assertIn(f"(`r{_escapes.PAYLOAD_FREE}` read 3×)", body)
 
 
 if __name__ == "__main__":
