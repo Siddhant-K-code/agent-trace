@@ -29,7 +29,11 @@ not proof.
 `--behavior-diff` compares bounded windows before and after the boundary. It
 highlights file re-reads, repeated exploration, tool loops, context saturation,
 and increases in the normal lint rule set. `agent-strace lint` exposes the same
-signal as `post-compaction-regression` for CI use.
+signal as `post-compaction-regression` for CI use. A lint rule that raises in
+either window is shown as `could not run, not compared` rather than as zero
+findings, and with no other regression the verdict is `behavior not fully
+compared`; `post-compaction-regression` then reports itself as a rule that
+could not run.
 
 ## Imported Claude sessions
 

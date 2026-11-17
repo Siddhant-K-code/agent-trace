@@ -751,6 +751,29 @@ class CompactionLintAndCommandTests(unittest.TestCase):
         events = [_request(1, 180_000), _request(2, 10_000)]
         self.assertEqual(_rule_post_compaction_regression(events, {}), [])
 
+    def test_lint_rule_that_raises_is_not_compared_as_zero(self):
+        events = [_request(1, 180_000), _request(2, 10_000)]
+
+        def broken(events, cfg):
+            raise RuntimeError("boom")
+
+        with patch.dict("agent_trace.lint._RULES", {"error-retry-loop": broken}):
+            behavior = behavior_diff_for_compaction(events, detect_compactions(events)[0])
+            output = io.StringIO()
+            format_compaction_report(
+                analyze_compactions(events, "s"), output, show_behavior_diff=True,
+            )
+            with self.assertRaisesRegex(RuntimeError, "could not run .*: error-retry-loop$"):
+                _rule_post_compaction_regression(events, {})
+
+        self.assertEqual(behavior.lint_rules_not_run, ("error-retry-loop",))
+        self.assertNotIn("error-retry-loop", [rule for rule, _, _ in behavior.lint_deltas])
+        self.assertFalse(behavior.regressed)
+        self.assertIn("  error-retry-loop: could not run, not compared\n", output.getvalue())
+        self.assertIn(
+            "Verdict: behavior not fully compared after compaction #1\n", output.getvalue()
+        )
+
     def test_cmd_compaction_resolves_prefix_and_prints_report(self):
         temporary, _store_instance, _session_id = _store([
             _request(1, 180_000), _request(2, 10_000),

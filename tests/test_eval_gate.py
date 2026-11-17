@@ -7,6 +7,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from agent_trace.eval.config import EvalConfig, EvalCriterionConfig, load_gate_config
 from agent_trace.eval.runner import (
@@ -19,6 +20,7 @@ from agent_trace.eval.runner import (
     write_gate_github_summary,
 )
 from agent_trace.eval.scorers import (
+    MetricError,
     measure_context_fill_ratio,
     measure_cost_usd,
     measure_duration_seconds,
@@ -142,6 +144,14 @@ class TestBuiltInMetrics(GateTestCase):
 
     def test_lint_violations(self):
         self.assertIsInstance(measure_lint_violations(self.store, self.meta.session_id), int)
+
+    def test_lint_violations_is_not_a_count_when_a_rule_could_not_run(self):
+        def broken(events, cfg):
+            raise RuntimeError("boom")
+
+        with patch.dict("agent_trace.lint._RULES", {"no-output": broken}):
+            with self.assertRaisesRegex(MetricError, "^lint could not run rule\\(s\\): no-output$"):
+                measure_lint_violations(self.store, self.meta.session_id)
 
     def test_custom_python_callable(self):
         value = measure_metric(

@@ -119,6 +119,8 @@ class BehaviorMetrics:
     files_read: tuple[str, ...] = ()
     context_saturation_violations: int = 0
     lint_violations: tuple[tuple[str, int], ...] = ()
+    # Lint rules that raised; they are left out of lint_violations, not counted as 0.
+    lint_rules_not_run: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -128,6 +130,7 @@ class CompactionBehaviorDiff:
     reread_files: tuple[str, ...] = ()
     regressions: tuple[str, ...] = ()
     lint_deltas: tuple[tuple[str, int, int], ...] = ()
+    lint_rules_not_run: tuple[str, ...] = ()
 
     @property
     def regressed(self) -> bool:
@@ -628,6 +631,7 @@ def _behavior_metrics(
     from . import lint as lint_module
 
     lint_counts: dict[str, int] = {}
+    failed_rules: list[str] = []
     for rule_name, rule_fn in lint_module._RULES.items():
         if rule_name == "post-compaction-regression":
             continue
@@ -639,9 +643,9 @@ def _behavior_metrics(
         try:
             lint_counts[rule_name] = len(rule_fn(events, rule_config))
         except Exception:
-            # Match lint_session's rule isolation without printing repeatedly
-            # while generating a behavior diff.
-            lint_counts[rule_name] = 0
+            # Like lint_session, isolate the failure, but record the rule as
+            # not run rather than as zero findings.
+            failed_rules.append(rule_name)
 
     explicit_context = [
         context_fill_ratio(event)
@@ -667,6 +671,9 @@ def _behavior_metrics(
         files_read=tuple(dict.fromkeys(paths)),
         context_saturation_violations=lint_counts.get("context-saturation", 0),
         lint_violations=tuple(sorted(lint_counts.items())),
+        lint_rules_not_run=tuple(
+            sorted(rule for rule in failed_rules if rule not in lint_counts)
+        ),
     )
 
 
@@ -716,9 +723,10 @@ def behavior_diff_for_compaction(
 
     before_lint = dict(before.lint_violations)
     after_lint = dict(after.lint_violations)
+    # A rule that could not run on either side is not compared.
     lint_deltas = tuple(
-        (rule, before_lint.get(rule, 0), after_lint.get(rule, 0))
-        for rule in sorted(before_lint.keys() | after_lint.keys())
+        (rule, before_lint[rule], after_lint[rule])
+        for rule in sorted(before_lint.keys() & after_lint.keys())
     )
     for rule, before_count, after_count in lint_deltas:
         if after_count > before_count:
@@ -732,6 +740,9 @@ def behavior_diff_for_compaction(
         reread_files=reread_files,
         regressions=tuple(regressions),
         lint_deltas=lint_deltas,
+        lint_rules_not_run=tuple(
+            sorted(set(before.lint_rules_not_run) | set(after.lint_rules_not_run))
+        ),
     )
 
 
@@ -855,10 +866,17 @@ def format_compaction_report(
             )
             for rule, before_count, after_count in behavior.lint_deltas:
                 out.write(f"  {rule}: {before_count} -> {after_count}\n")
+            for rule in behavior.lint_rules_not_run:
+                out.write(f"  {rule}: could not run, not compared\n")
             for regression in behavior.regressions:
                 out.write(f"  - {regression}\n")
-            verdict = "regressed" if behavior.regressed else "no measurable regression"
-            out.write(f"Verdict: behavior {verdict} after compaction #{event.sequence}\n")
+            if behavior.regressed:
+                verdict = "behavior regressed"
+            elif behavior.lint_rules_not_run:
+                verdict = "behavior not fully compared"
+            else:
+                verdict = "behavior no measurable regression"
+            out.write(f"Verdict: {verdict} after compaction #{event.sequence}\n")
 
 
 def _context_limit(data: Mapping[str, Any]) -> int:
@@ -1109,6 +1127,7 @@ def _rule_post_compaction_regression(events: list[TraceEvent], cfg: dict) -> lis
     redundant_threshold = int(cfg.get("redundant_read_threshold", 3))
     tool_loop_threshold = int(cfg.get("tool_loop_threshold", 5))
     findings: list[LintResult] = []
+    not_run: set[str] = set()
     for compaction in detect_compactions(events, threshold):
         behavior = behavior_diff_for_compaction(
             events,
@@ -1117,6 +1136,7 @@ def _rule_post_compaction_regression(events: list[TraceEvent], cfg: dict) -> lis
             redundant_read_threshold=redundant_threshold,
             tool_loop_threshold=tool_loop_threshold,
         )
+        not_run.update(behavior.lint_rules_not_run)
         if not behavior.regressed:
             continue
         findings.append(LintResult(
@@ -1130,6 +1150,12 @@ def _rule_post_compaction_regression(events: list[TraceEvent], cfg: dict) -> lis
             ),
             line_start=compaction.event_index + 1,
         ))
+    if not_run:
+        # Report the rule as not run rather than as complete findings.
+        raise RuntimeError(
+            "lint rule(s) could not run in a compaction window: "
+            + ", ".join(sorted(not_run))
+        )
     return findings
 
 

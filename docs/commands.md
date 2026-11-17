@@ -1414,9 +1414,43 @@ after a detected compaction.
 default model, with the `budget_dollars` or `max_cost_dollars` in its
 `session_start` event, and fires at `threshold` (default 0.90) of the budget.
 Earlier versions estimated the cost from the size of prompts, model requests
-and responses at $9 per million tokens. For a session that `agent-strace cost`
-refuses, the rule prints `[lint] Rule 'budget-proximity' failed: ...` to stderr
-and adds no finding; the other rules still run.
+and responses at $9 per million tokens.
+
+`lint` refuses a session in which an event the enabled rules read has data
+that is not a JSON object, with the same `Error: session event data must be
+an object: ...` message on stderr and exit code 1 as `cost`, `stats` and the
+other commands in
+[Sessions with non-object event data](#sessions-with-non-object-event-data).
+It checks every event while `post-compaction-regression` is enabled, since
+that rule reads every event. With `--all`, `lint` still reports every other
+session, prints one `Error: session <id> event data must be an object: ...`
+line on stderr per refused session, and exits 1. Earlier versions printed
+`[lint] Rule '...' failed: ...` to stderr for such a session, then
+`✓  No issues found` and exit code 0.
+
+If a rule raises, the other rules still run, but the report is incomplete and
+never shows `✓  No issues found`. The text report lists each rule that could
+not run:
+
+```
+Could not run 1 rule(s) in session 3f9a2c1b7d4e, so these findings are incomplete:
+FAILED no-output               RuntimeError: boom
+
+0 error(s), 0 warning(s), 0 info(s). 1 rule(s) could not run. Exit code: 1
+```
+
+`--format json` prints one object per session (a list with `--all`) with
+`session_id`, `errors`, `warnings`, `infos`, `findings` (each with `rule`,
+`level`, `message`, `line_start` and `line_end`) and `rule_errors` (each with
+`rule`, `error_type` and `message`; empty when every rule ran). Refused
+sessions are left out of the JSON list and reported on stderr.
+
+Exit codes:
+
+| Code | Meaning |
+|---|---|
+| `0` | Every rule ran on every session, with no ERROR finding (and, with `--strict`, no WARN) |
+| `1` | An ERROR finding, a WARN with `--strict`, a rule that could not run (with or without `--strict`), a refused session, or no matching session |
 
 ### `eval`
 ```

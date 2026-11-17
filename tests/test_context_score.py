@@ -6,7 +6,6 @@ import sys
 import tempfile
 import time
 import unittest
-from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
@@ -22,6 +21,7 @@ from agent_trace.context_score import (
     format_context_score_text,
 )
 from agent_trace.cost import estimate_cost
+from agent_trace.lint import lint_session
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
 
@@ -281,11 +281,9 @@ class TestContextScoreUnpricedSessions(unittest.TestCase):
 
     def _report(self, **kwargs):
         kwargs.setdefault("min_sessions", 1)
-        # lint_session reports its rule failures on non-object data to stderr.
-        with redirect_stderr(io.StringIO()):
-            return build_context_score_report(
-                self.store, self.tmpdir, context_file="AGENTS.md", history_days=1, **kwargs
-            )
+        return build_context_score_report(
+            self.store, self.tmpdir, context_file="AGENTS.md", history_days=1, **kwargs
+        )
 
     def test_unpriceable_sessions_are_left_out_of_avg_cost(self):
         now = time.time()
@@ -350,6 +348,50 @@ class TestContextScoreUnpricedSessions(unittest.TestCase):
         with patch("agent_trace.context_score.session_cost", side_effect=TypeError("bug")):
             with self.assertRaises(TypeError):
                 self._report()
+
+
+class TestContextScoreUnlintedSessions(unittest.TestCase):
+    """Sessions lint could not fully check are not counted as 0 findings."""
+
+    def setUp(self):
+        self.tmpdir = Path(tempfile.mkdtemp())
+        self.store = TraceStore(self.tmpdir / ".agent-traces")
+        (self.tmpdir / "AGENTS.md").write_text("Scope:\n- src/**\n")
+
+    def _report(self):
+        report = build_context_score_report(
+            self.store, self.tmpdir, context_file="AGENTS.md", history_days=1, min_sessions=1
+        )
+        buf = io.StringIO()
+        format_context_score_text(report, buf)
+        return report, buf.getvalue(), json.loads(format_context_score_json(report))
+
+    def test_refused_session_is_left_out_of_lint_averages(self):
+        now = time.time()
+        linted = _codex_session(self.store, started_at=now - 20)
+        _codex_session(self.store, prompt_data=[], started_at=now - 10)
+        want = float(len(lint_session(self.store, linted).findings))
+
+        report, text, data = self._report()
+        self.assertEqual(report.current.linted_session_count, 1)
+        self.assertEqual(report.current.lint_per_session, want)
+        self.assertIn(f"  lint findings/session: {want:.1f} (1 not linted)\n", text)
+        self.assertEqual(data["current"]["unlinted_sessions"], 1)
+
+    def test_rule_that_could_not_run_makes_lint_unavailable(self):
+        _codex_session(self.store, started_at=time.time() - 10)
+
+        def broken(events, cfg):
+            raise RuntimeError("boom")
+
+        with patch.dict("agent_trace.lint._RULES", {"no-output": broken}):
+            report, text, data = self._report()
+        self.assertIsNone(report.current.lint_per_session)
+        self.assertIsNone(report.current.redundant_reads_per_session)
+        self.assertIsNone(report.current.context_saturation_rate)
+        self.assertIn("  lint findings/session: n/a (1 not linted)\n", text)
+        self.assertIsNone(data["current"]["lint_per_session"])
+        self.assertEqual(data["current"]["unlinted_sessions"], 1)
 
 
 if __name__ == "__main__":

@@ -24,7 +24,7 @@ from agent_trace.collector_client import (
     CollectorTraceStore,
     validate_collector_endpoint,
 )
-from agent_trace.lint import LintReport, LintResult
+from agent_trace.lint import LintReport, LintResult, RuleError
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.org_report import (
     MIN_ANOMALY_COVERAGE,
@@ -319,6 +319,37 @@ class TestMonthAndLocalReport(unittest.TestCase):
         self.assertEqual(team.lint_findings, 2)
         self.assertEqual(team.sessions_with_lint_signals, 1)
 
+    def test_lint_counts_exclude_sessions_whose_rules_could_not_run(self):
+        when = _timestamp(2026, 8, 2)
+        store = _MemoryStore([
+            SessionMeta(session_id="a", started_at=when, team="blue"),
+            SessionMeta(session_id="b", started_at=when, team="red"),
+        ])
+
+        def lint(_store, session_id):
+            if session_id == "a":
+                return LintReport(
+                    session_id,
+                    [LintResult("tool-loop", "WARN", "one")],
+                    [RuleError("no-output", "RuntimeError", "boom")],
+                )
+            return LintReport(session_id, [LintResult("tool-loop", "WARN", "one")])
+
+        with patch("agent_trace.org_report.session_cost", return_value=1.0), patch(
+            "agent_trace.org_report.lint_session", side_effect=lint
+        ):
+            report = build_org_report([store], "2026-08")
+        teams = {team.team: team for team in report.teams}
+        self.assertEqual(teams["blue"].lint_checked_sessions, 0)
+        self.assertIsNone(teams["blue"].lint_findings)
+        self.assertIsNone(teams["blue"].sessions_with_lint_signals)
+        self.assertEqual(teams["red"].lint_checked_sessions, 1)
+        self.assertEqual(teams["red"].lint_findings, 1)
+        payload = json.loads(format_org_report_json(report))
+        blue = next(team for team in payload["teams"] if team["team"] == "blue")
+        self.assertIsNone(blue["lint_findings"])
+        self.assertEqual(payload["lint_scope"], "lint-checked sessions only")
+
     def test_attribution_uses_persisted_fields_without_changing_legacy_fallback(self):
         explicit = SessionMeta(attribution={"actor_id": "stable-id"})
         composite = SessionMeta(attribution={"os_user": "alice", "hostname": "build-1"})
@@ -339,6 +370,7 @@ class TestAnomaliesAndFormats(unittest.TestCase):
             estimated_spend_usd=average * sessions,
             avg_estimated_cost_usd=average,
             active_attributed_identities=1,
+            lint_checked_sessions=sessions,
             lint_findings=0,
             sessions_with_lint_signals=0,
             lint_signals={},
