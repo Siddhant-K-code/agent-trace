@@ -114,7 +114,7 @@ from .backfill import cmd_backfill_meta
 from .health import cmd_health
 from .external_evidence import add_external_arguments
 from .sample import cmd_sample
-from .server import cmd_server
+from .server import allowed_host_name, cmd_server
 from .validation import cmd_validate
 from .watch import cmd_watch
 from .why import cmd_why
@@ -2923,6 +2923,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_server.add_argument("--auth-key", metavar="KEY", dest="auth_key",
                           help="require Authorization: Bearer <KEY> on all requests "
                                "(also read from AGENT_STRACE_AUTH_KEY env var)")
+    p_server.add_argument(
+        "--allow-host",
+        metavar="NAME",
+        dest="allow_host",
+        action="append",
+        type=allowed_host_name,
+        default=None,
+        help=(
+            "also accept GET requests whose Host is NAME, on any port "
+            "(repeatable). Use it for a tunnel or proxy that passes its own "
+            "name. Exact match, no wildcards. No effect with --auth-key or "
+            "when the server listens on a non-loopback address"
+        ),
+    )
     # The server has no SSO. These flags from #163 stay accepted but hidden, so
     # cmd_server can refuse them by name; None means the flag was not given.
     p_server.add_argument("--auth", choices=["oidc"], default=None,

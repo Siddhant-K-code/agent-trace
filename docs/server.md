@@ -70,6 +70,13 @@ agent-strace server --dashboard --host 0.0.0.0 --auth-key ast_<key>
 
 The collector without `--dashboard` keeps its existing `0.0.0.0` default.
 
+The server refuses two kinds of request that web pages can make:
+
+- A POST with an `Origin` header, on any address and with or without `--auth-key`. Browsers add `Origin` to every POST. The `agent-strace` clients never send it.
+- On a loopback address without `--auth-key`, a GET whose `Host` is not `localhost`, an IP address or a name given with `--allow-host`. The port is not checked.
+
+Both get 403. This stops other sites from writing sessions into the collector, and stops DNS rebinding pages from reading them. If a GET gets 403 because a tunnel, a forwarded port or a reverse proxy passes its own name as the `Host`, start the server with `--allow-host NAME` for that name, or with `--auth-key`. A collector on `0.0.0.0` or another non-loopback address does not check the `Host`, so DNS rebinding can still read it. Set `--auth-key` there.
+
 Use the event query parameter to target a recorded event:
 
 ```text
@@ -106,6 +113,11 @@ docker run -p 4317:4317 -v $(pwd)/traces:/data agent-strace-server
 | `GET` | `/sessions/<id>` | Read metadata for a session |
 | `GET` | `/sessions/<id>/events` | Stream events for a session |
 | `GET` | `/health` | Liveness check |
+
+Any POST with an `Origin` header gets `403`. On a loopback address without
+`--auth-key`, a GET whose `Host` is not `localhost`, an IP address or an
+`--allow-host` name gets `403` too. See
+[Local evidence review](#local-evidence-review).
 
 Events are accepted as NDJSON (`application/x-ndjson`), one event per line.
 Each line is stored or refused on its own. The collector refuses a line that is

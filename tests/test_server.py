@@ -1,6 +1,7 @@
 """Tests for the server-side event collector (issue #101)."""
 
 import io
+import http.client
 import json
 import os
 import sys
@@ -10,15 +11,19 @@ import time
 import unittest
 import urllib.request
 import urllib.error
+from contextlib import redirect_stderr
 from unittest import mock
 from urllib.parse import quote
 from pathlib import Path
 
 from agent_trace.audit import verify_chain
+from agent_trace.cli import build_parser
+from agent_trace.integrations._base import emit
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.server import (
     CollectorHandler,
     _make_handler,
+    cmd_server,
     resolve_server_host,
     send_event_to_endpoint,
     send_session_meta_to_endpoint,
@@ -596,6 +601,421 @@ class TestServerCLIRegistered(unittest.TestCase):
             sys.stdout = old_stdout
             sys.stderr = old_stderr
         self.assertIn("server", output)
+
+
+# ---------------------------------------------------------------------------
+# Requests from web pages: the Host and Origin rules
+# ---------------------------------------------------------------------------
+
+_HOST_REFUSED = json.dumps({
+    "error": (
+        "Host not allowed: use localhost or an IP address, "
+        "or start the server with --allow-host NAME or --auth-key"
+    )
+}).encode()
+_ORIGIN_REFUSED = json.dumps({
+    "error": "POST with an Origin header refused: browser requests are not accepted"
+}).encode()
+_RULE_KEY = "ast_" + "5" * 32
+_SEED = "seedsession001"
+_MARKER = "marker-7f3a"
+_READ_PATHS = (
+    "/",
+    "/api/sessions",
+    "/sessions",
+    "/health",
+    f"/session/{_SEED}",
+    f"/sessions/{_SEED}/events",
+    f"/api/sessions/{_SEED}/share?mode=minimized",
+    f"/api/sessions/{_SEED}/otlp",
+)
+
+
+def _forged(port, method, path, *, hosts=(), origin=None, key=None, body=None):
+    """Send one request with exactly these Host headers, none by default."""
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    try:
+        conn.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
+        for host in hosts:
+            conn.putheader("Host", host)
+        if origin is not None:
+            conn.putheader("Origin", origin)
+        if key is not None:
+            conn.putheader("Authorization", f"Bearer {key}")
+        if body is not None:
+            # What a no-cors fetch from a web page can send without a preflight.
+            conn.putheader("Content-Type", "text/plain")
+            conn.putheader("Content-Length", str(len(body)))
+        conn.endheaders(body)
+        response = conn.getresponse()
+        return response.status, response.read()
+    finally:
+        conn.close()
+
+
+def _session_body(session_id):
+    return json.dumps({"session_id": session_id, "agent_name": "probe"}).encode()
+
+
+def _event_body(session_id):
+    event = TraceEvent(
+        event_type=EventType.TOOL_CALL,
+        session_id=session_id,
+        data={"tool_name": "Bash"},
+    )
+    return event.to_json().encode() + b"\n"
+
+
+def _seed(store):
+    store.create_session(SessionMeta(session_id=_SEED, started_at=1, ended_at=2))
+    for event_id, event_type, timestamp in (
+        ("start", EventType.SESSION_START, 1),
+        ("end", EventType.SESSION_END, 2),
+    ):
+        store.append_event(_SEED, TraceEvent(
+            event_type=event_type,
+            timestamp=timestamp,
+            session_id=_SEED,
+            event_id=event_id,
+        ))
+
+
+class _RuleServerCase(unittest.TestCase):
+    """A dashboard server on 127.0.0.1 with one stored session."""
+
+    auth_key = ""
+    # Set to make the handler see another bound address without binding it.
+    fake_bound_address = ""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.store = TraceStore(tmp.name)
+        _seed(self.store)
+        handler = _make_handler(
+            self.store, threading.Lock(), auth_key=self.auth_key, dashboard=True
+        )
+        server = HTTPServer(("127.0.0.1", 0), handler)
+        self.port = server.server_address[1]
+        if self.fake_bound_address:
+            server.server_address = (self.fake_bound_address, self.port)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+
+    def request(self, method, path, **kwargs):
+        return _forged(self.port, method, path, **kwargs)
+
+    def stored(self):
+        return sorted(meta.session_id for meta in self.store.list_sessions())
+
+
+class TestHostRuleOnLoopbackWithoutKey(_RuleServerCase):
+    def allowed(self):
+        port = self.port
+        return (
+            ["localhost"],
+            [f"LOCALHOST:{port}"],
+            [f"127.0.0.1:{port}"],
+            ["127.0.0.2"],
+            [f"[::1]:{port}"],
+            [f"192.0.2.10:{port}"],
+            [f"localhost:{port + 1}"],
+            # Whitespace around a field value is not part of it.
+            [f"localhost:{port} \t"],
+            [],
+        )
+
+    def refused(self):
+        port = self.port
+        return (
+            ["attacker.test"],
+            [f"attacker.test:{port}"],
+            ["localhost."],
+            [f"localhost.:{port}"],
+            [f"foo.localhost:{port}"],
+            [""],
+            ["localhost:abc"],
+            ["localhost:"],
+            ["[::1"],
+            [f"127.0.0.1:{port}", "attacker.test"],
+        )
+
+    def test_allowed_hosts_read_every_route(self):
+        for hosts in self.allowed():
+            for path in _READ_PATHS:
+                with self.subTest(hosts=hosts, path=path):
+                    status, _ = self.request("GET", path, hosts=hosts)
+                    self.assertEqual(status, 200)
+
+    def test_refused_hosts_get_403_on_every_route(self):
+        for hosts in self.refused():
+            for path in (*_READ_PATHS, "/no-such-route"):
+                with self.subTest(hosts=hosts, path=path):
+                    reply = self.request("GET", path, hosts=hosts)
+                    self.assertEqual(reply, (403, _HOST_REFUSED))
+
+    def test_post_without_origin_is_stored_whatever_the_host(self):
+        # Hook senders in a container reach a loopback collector by another
+        # name, such as host.docker.internal.
+        hosts = (f"host.docker.internal:{self.port}", f"attacker.test:{self.port}")
+        for index, host in enumerate(hosts):
+            with self.subTest(host=host):
+                meta_session = f"meta{index}"
+                status, _ = self.request(
+                    "POST", "/sessions", hosts=[host], body=_session_body(meta_session)
+                )
+                self.assertEqual(status, 200)
+                events_session = f"events{index}"
+                status, _ = self.request(
+                    "POST", "/events", hosts=[host], body=_event_body(events_session)
+                )
+                self.assertEqual(status, 200)
+                self.assertTrue(self.store.session_exists(meta_session))
+                self.assertTrue(self.store.session_exists(events_session))
+
+
+class TestHostRuleOffOnNonLoopbackBind(_RuleServerCase):
+    fake_bound_address = "0.0.0.0"
+
+    def test_any_host_reads(self):
+        for path in _READ_PATHS:
+            with self.subTest(path=path):
+                status, _ = self.request("GET", path, hosts=["attacker.test"])
+                self.assertEqual(status, 200)
+
+
+class TestHostRuleOffWithKey(_RuleServerCase):
+    auth_key = _RULE_KEY
+
+    def test_any_host_reads_with_the_bearer(self):
+        for path in _READ_PATHS:
+            with self.subTest(path=path):
+                status, _ = self.request(
+                    "GET", path, hosts=["attacker.test"], key=_RULE_KEY
+                )
+                self.assertEqual(status, 200)
+
+    def test_any_host_without_the_bearer_gets_401(self):
+        status, _ = self.request("GET", "/sessions", hosts=["attacker.test"])
+        self.assertEqual(status, 401)
+
+
+class _OriginRuleTests:
+    """Every POST that carries Origin is refused before anything is stored."""
+
+    def bearer(self):
+        return self.auth_key or None
+
+    def test_post_with_origin_is_refused_and_stores_nothing(self):
+        port = self.port
+        cases = (
+            ([f"127.0.0.1:{port}"], "https://attacker.test"),
+            ([f"127.0.0.1:{port}"], f"http://127.0.0.1:{port}"),
+            ([f"attacker.test:{port}"], f"http://attacker.test:{port}"),
+            ([f"127.0.0.1:{port}"], "null"),
+            ([f"127.0.0.1:{port}"], ""),
+        )
+        for hosts, origin in cases:
+            for path, body in (
+                ("/sessions", _session_body("fromweb")),
+                ("/events", _event_body("fromweb")),
+            ):
+                with self.subTest(hosts=hosts, origin=origin, path=path):
+                    reply = self.request(
+                        "POST", path, hosts=hosts, origin=origin,
+                        key=self.bearer(), body=body,
+                    )
+                    self.assertEqual(reply, (403, _ORIGIN_REFUSED))
+                    self.assertEqual(self.stored(), [_SEED])
+
+    def test_post_with_origin_to_an_unknown_path_is_refused(self):
+        reply = self.request(
+            "POST", "/no-such-route", hosts=[f"127.0.0.1:{self.port}"],
+            origin="https://attacker.test", key=self.bearer(), body=b"{}",
+        )
+        self.assertEqual(reply, (403, _ORIGIN_REFUSED))
+
+    def test_origin_is_refused_before_the_body_is_read(self):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        try:
+            conn.putrequest("POST", "/sessions", skip_host=True)
+            conn.putheader("Host", f"127.0.0.1:{self.port}")
+            conn.putheader("Origin", "https://attacker.test")
+            if self.bearer():
+                conn.putheader("Authorization", f"Bearer {self.bearer()}")
+            conn.putheader("Content-Length", "100000")
+            conn.endheaders()
+            response = conn.getresponse()
+            self.assertEqual((response.status, response.read()), (403, _ORIGIN_REFUSED))
+        finally:
+            conn.close()
+
+    def test_post_without_origin_is_stored(self):
+        for path, body in (
+            ("/sessions", _session_body("fromclient")),
+            ("/events", _event_body("fromclient")),
+        ):
+            with self.subTest(path=path):
+                status, _ = self.request(
+                    "POST", path, hosts=[f"127.0.0.1:{self.port}"],
+                    key=self.bearer(), body=body,
+                )
+                self.assertEqual(status, 200)
+        self.assertEqual(self.stored(), ["fromclient", _SEED])
+
+
+class TestOriginRuleOnLoopbackWithoutKey(_OriginRuleTests, _RuleServerCase):
+    pass
+
+
+class TestOriginRuleOnNonLoopbackBind(_OriginRuleTests, _RuleServerCase):
+    fake_bound_address = "0.0.0.0"
+
+
+class TestOriginRuleWithKey(_OriginRuleTests, _RuleServerCase):
+    auth_key = _RULE_KEY
+
+    def test_origin_without_the_bearer_gets_403_not_401(self):
+        reply = self.request(
+            "POST", "/sessions", hosts=[f"127.0.0.1:{self.port}"],
+            origin="https://attacker.test", body=_session_body("fromweb"),
+        )
+        self.assertEqual(reply, (403, _ORIGIN_REFUSED))
+        self.assertEqual(self.stored(), [_SEED])
+
+
+class TestRefusalsDoNotEchoHeaders(_RuleServerCase):
+    def test_marker_is_in_neither_the_reply_nor_stderr(self):
+        stderr = io.StringIO()
+        with mock.patch("sys.stderr", stderr):
+            host_reply = self.request(
+                "GET", "/", hosts=[f"{_MARKER}.attacker.test:{self.port}"]
+            )
+            origin_reply = self.request(
+                "POST", "/sessions", hosts=[f"127.0.0.1:{self.port}"],
+                origin=f"https://{_MARKER}.attacker.test",
+                body=_session_body("fromweb"),
+            )
+        self.assertEqual(host_reply, (403, _HOST_REFUSED))
+        self.assertEqual(origin_reply, (403, _ORIGIN_REFUSED))
+        # The access log still records both requests.
+        self.assertIn('"GET / HTTP/1.1" 403', stderr.getvalue())
+        self.assertIn('"POST /sessions HTTP/1.1" 403', stderr.getvalue())
+        self.assertNotIn(_MARKER, stderr.getvalue())
+
+
+class TestShippedSendersStillDeliver(_RuleServerCase):
+    def test_hook_senders_and_emit(self):
+        endpoint = f"http://127.0.0.1:{self.port}"
+        self.assertTrue(send_session_meta_to_endpoint(
+            SessionMeta(session_id="hookmeta", agent_name="probe"), endpoint
+        ))
+        self.assertTrue(send_event_to_endpoint(TraceEvent(
+            event_type=EventType.TOOL_CALL,
+            session_id="hookevent",
+            data={"tool_name": "Bash"},
+        ), endpoint))
+        with tempfile.TemporaryDirectory() as local, \
+                mock.patch.dict(os.environ, {"AGENT_STRACE_ENDPOINT": endpoint}):
+            emit(EventType.TOOL_CALL, "emitted", TraceStore(local), tool_name="Bash")
+        self.assertEqual(self.stored(), ["emitted", "hookevent", "hookmeta", _SEED])
+
+
+class TestAllowHostFlag(unittest.TestCase):
+    """--allow-host through the parser, cmd_server and run_server."""
+
+    def _start(self, *argv):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        args = build_parser().parse_args(
+            ["server", "--port", "0", "--storage", tmp.name, *argv]
+        )
+        servers = []
+        started = threading.Event()
+
+        class RecordingServer(HTTPServer):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                servers.append(self)
+                started.set()
+
+        for patcher in (
+            mock.patch("agent_trace.server.HTTPServer", RecordingServer),
+            mock.patch.dict(os.environ),
+            mock.patch("sys.stderr", io.StringIO()),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        os.environ.pop("AGENT_STRACE_AUTH_KEY", None)
+        thread = threading.Thread(target=cmd_server, args=(args,), daemon=True)
+        thread.start()
+        self.assertTrue(started.wait(5))
+        server = servers[0]
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(server.shutdown)
+        _seed(TraceStore(tmp.name))
+        return server.server_address[1]
+
+    def _get(self, port, host, path="/api/sessions"):
+        return _forged(port, "GET", path, hosts=[host])
+
+    def test_allowed_names_match_whole_and_ignore_case_and_port(self):
+        port = self._start(
+            "--dashboard",
+            "--allow-host", "dash.example.test",
+            "--allow-host", "Second.Example.TEST",
+        )
+        for host in (
+            f"dash.example.test:{port}",
+            "DASH.example.test",
+            f"second.example.test:{port + 1}",
+            f"localhost:{port}",
+            f"127.0.0.1:{port}",
+        ):
+            with self.subTest(host=host):
+                self.assertEqual(self._get(port, host)[0], 200)
+        for host in (
+            "evildash.example.test",
+            f"www.dash.example.test:{port}",
+            f"dash.example.test.attacker.test:{port}",
+            f"attacker.test:{port}",
+        ):
+            with self.subTest(host=host):
+                self.assertEqual(self._get(port, host), (403, _HOST_REFUSED))
+
+    def test_loopback_comes_from_the_bound_socket(self):
+        # --host localhost is a name, but the socket is bound to 127.0.0.1.
+        port = self._start("--host", "localhost", "--dashboard")
+        self.assertEqual(self._get(port, f"localhost:{port}")[0], 200)
+        self.assertEqual(
+            self._get(port, f"attacker.test:{port}"), (403, _HOST_REFUSED)
+        )
+
+    def test_collector_without_dashboard_on_loopback(self):
+        port = self._start("--host", "127.0.0.1")
+        self.assertEqual(self._get(port, f"localhost:{port}", "/sessions")[0], 200)
+        self.assertEqual(
+            self._get(port, f"attacker.test:{port}", "/sessions"),
+            (403, _HOST_REFUSED),
+        )
+
+    def test_values_that_are_not_bare_names_exit_2(self):
+        for value in (
+            "https://dash.example.test/",
+            "dash.example.test:80",
+            "",
+            "dash.example.test/path",
+            "*.example.test",
+            "dash..example.test",
+            "dash.example.test.",
+        ):
+            with self.subTest(value=value):
+                err = io.StringIO()
+                with redirect_stderr(err), self.assertRaises(SystemExit) as ctx:
+                    build_parser().parse_args(["server", "--allow-host", value])
+                self.assertEqual(ctx.exception.code, 2)
+                self.assertIn("argument --allow-host: invalid host name", err.getvalue())
 
 
 if __name__ == "__main__":
