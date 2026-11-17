@@ -1148,7 +1148,7 @@ Authenticate with a hosted collector that has SSO enabled. `login` asks you to o
 ```
 agent-strace apply [--config FILE] [--server URL] [--auth-key KEY] [--dry-run] [--dir DIR]
 ```
-Apply `.agent-strace.yaml` to the local store, or to a hosted collector with `--server URL` (authenticated with `--auth-key KEY`). The POSTs to `--server` do not follow redirects, so pass the final URL. Use `--dry-run` to preview changes without writing. The local store is `--dir DIR` when given, else the global trace store (`--trace-dir`, else `$AGENT_TRACE_DIR`, else `.agent-traces`).
+Apply `.agent-strace.yaml` to the local store, or to a hosted collector with `--server URL` (authenticated with `--auth-key KEY`). The POSTs to `--server` do not follow redirects, so pass the final URL. The GET that lists the server's workspaces follows a redirect only to the same scheme, host and port. Use `--dry-run` to preview changes without writing. The local store is `--dir DIR` when given, else the global trace store (`--trace-dir`, else `$AGENT_TRACE_DIR`, else `.agent-traces`).
 
 ### `config-diff`
 ```
@@ -1880,7 +1880,8 @@ personal access token in `GITLAB_TOKEN`, `GITLAB_ACCESS_TOKEN`, or
 read only from the environment.
 
 The request that creates or updates the comment does not follow redirects, so
-pass the final API URL.
+pass the final API URL. The GETs that find the pull or merge request and list
+its comments follow a redirect only to the same scheme, host and port.
 
 ### `review`
 ```

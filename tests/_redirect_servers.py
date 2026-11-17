@@ -1,9 +1,11 @@
-"""Local servers and mocks for checking that a POST does not follow a redirect.
+"""Local servers and mocks for checking which redirects a request follows.
 
 ``RedirectServers`` starts two servers on 127.0.0.1. Server A answers the
-chosen methods with a redirect to the same path on server B, and any other
-method with 200. Server B answers every request with 200. Both record what
-they receive, so a followed redirect shows up as a request on B.
+chosen methods with a redirect, by default to the same path on server B,
+and any other method with 200. A never redirects a path under /moved, so a
+redirect to ``RedirectServers.moved`` stays on A's scheme, host and port.
+Server B answers every request with 200. Both record what they receive, so
+a followed redirect shows up as a request on B or under /moved on A.
 """
 
 from __future__ import annotations
@@ -21,6 +23,10 @@ from typing import Any
 from unittest import mock
 
 REDIRECT_NOTE = " (redirects are not followed; give the final URL)"
+ORIGIN_NOTE = (
+    " (redirects to another scheme, host or port are not followed; give the final URL)"
+)
+MOVED = "/moved"
 REDIRECTS = (301, 302, 303)
 ALL_REDIRECTS = (301, 302, 303, 307, 308)
 # An OpenAI-style chat reply. Every caller tested here reads it as success.
@@ -77,7 +83,7 @@ class _Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else b""
         server.record(Received(self.command, self.path, self.headers, body))
-        if self.command in server.redirect_methods:
+        if self.command in server.redirect_methods and not self.path.startswith(MOVED):
             self.send_response(server.status)
             self.send_header("Location", server.location + self.path)
             self.send_header("Content-Length", "0")
@@ -95,8 +101,9 @@ class _Handler(BaseHTTPRequestHandler):
 class RedirectServers:
     """Server A redirects *methods* to the same path on server B.
 
-    B answers with *reply*. A answers other methods with *a_reply*, or
-    *reply* when it is None. Call ``redirect`` to pick the status.
+    B answers with *reply*. A answers other methods, and paths under
+    /moved, with *a_reply*, or *reply* when it is None. Call ``redirect``
+    to pick the status and where it points.
     """
 
     def __init__(
@@ -116,6 +123,7 @@ class RedirectServers:
         self.a.redirect_methods = frozenset(methods)
         self.a.location = self.b.url
         self.url = self.a.url
+        self.moved = self.a.url + MOVED
 
     @staticmethod
     def _start(test: unittest.TestCase, reply: Any) -> _Server:
@@ -127,9 +135,15 @@ class RedirectServers:
         test.addCleanup(server.shutdown)
         return server
 
-    def redirect(self, status: int) -> None:
-        """Answer *methods* with *status* from now on and forget earlier requests."""
+    def redirect(self, status: int, to: str | None = None) -> None:
+        """Answer *methods* with *status* from now on and forget earlier requests.
+
+        The Location is *to*, or B's URL when it is None, followed by the
+        request's path. ``moved`` keeps the redirect on A. A's own URL
+        redirects every request to itself, a loop.
+        """
         self.a.status = status
+        self.a.location = self.b.url if to is None else to
         self.a.clear()
         self.b.clear()
 
