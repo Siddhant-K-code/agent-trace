@@ -41,6 +41,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from .inert import inert
 from .process_identity import PID_REUSED_REASON, pid_reused
 from .store import TraceStore, _write_atomic
 
@@ -466,9 +467,11 @@ def cmd_approval(args: argparse.Namespace) -> int:
         for req in requests:
             age = int(time.time() - req.created_at)
             age_str = f"{age//60}m{age%60}s" if age < 3600 else f"{age//3600}h"
+            # A stored request can hold any text, so show escapes as text.
             sys.stdout.write(
-                f"{req.request_id:<14} {req.state:<10} {req.rule_name[:24]:<24} "
-                f"{req.tool_name[:20]:<20} {age_str}\n"
+                f"{inert(req.request_id):<14} {inert(req.state):<10} "
+                f"{inert(req.rule_name[:24]):<24} "
+                f"{inert(req.tool_name[:20]):<20} {age_str}\n"
             )
         sys.stdout.write("\n")
         return 0

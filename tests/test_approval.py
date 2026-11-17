@@ -1,5 +1,7 @@
 """Tests for human-in-the-loop approval workflow (issue #137)."""
 
+import argparse
+import io
 import json
 import os
 import sys
@@ -12,6 +14,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
+try:
+    import _escapes
+except ImportError:
+    from tests import _escapes
 
 from agent_trace import approval as approval_mod
 from agent_trace.approval import (
@@ -619,6 +626,73 @@ class TestCreateApprovalRequest(unittest.TestCase):
         loaded = load_request(self.store, req.request_id)
         self.assertIsNotNone(loaded)
         self.assertEqual(loaded.request_id, req.request_id)
+
+
+def _request(**fields):
+    values = dict(request_id="plain", state=PENDING, rule_name="plain", tool_name="plain")
+    values.update(fields)
+    return ApprovalRequest(**values)
+
+
+# (label, kind, build): build(value) returns a request with value in the
+# column the label names. The kinds are in tests/_escapes.py.
+APPROVAL_LIST_CASES = [
+    ("ID", "text", lambda v: _request(request_id=v)),
+    ("State", "text", lambda v: _request(state=v)),
+    ("Rule", "mid", lambda v: _request(rule_name=v)),
+    ("Tool", "mid", lambda v: _request(tool_name=v)),
+]
+
+# (label, cut, build): approval list keeps cut characters of the value in the
+# column the label names.
+APPROVAL_LIST_CUTS = [
+    ("Rule", 24, lambda v: _request(rule_name=v)),
+    ("Tool", 20, lambda v: _request(tool_name=v)),
+]
+
+
+class TestApprovalListShowsEscapesAsText(unittest.TestCase):
+    """A tool name in an approval request comes from the agent or an MCP
+    server. approval list shows escape codes in it as text."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.trace_dir = tmp.name
+
+    def list_output(self):
+        args = argparse.Namespace(trace_dir=self.trace_dir, approval_cmd="list", state=None)
+        with patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(approval_mod.cmd_approval(args), 0)
+        return out.getvalue()
+
+    def render(self, request):
+        # The state is checked when a request is loaded, so pass the request
+        # in directly to cover every column.
+        with patch.object(approval_mod, "list_requests", return_value=[request]):
+            return self.list_output()
+
+    def test_each_column_shows_escapes_as_text(self):
+        _escapes.check_each_value(self, APPROVAL_LIST_CASES, self.render)
+
+    def test_plain_text_prints_unchanged(self):
+        _escapes.check_plain_text_unchanged(self, APPROVAL_LIST_CASES, self.render)
+
+    def test_value_as_long_as_the_cut_shows_in_full(self):
+        _escapes.check_each_cut(self, APPROVAL_LIST_CUTS, self.render)
+
+    def test_stored_tool_name_shows_as_text(self):
+        create_approval_request(TraceStore(self.trace_dir), "esc-a", "ask-before-shell",
+                                tool_name="x\x1b]52;c;aWQK\x07")
+        output = self.list_output()
+        self.assertIn(r"x\x1b]52;c;aWQK\x07", output)
+        self.assertNotIn("\x1b", output)
+        self.assertNotIn("\x07", output)
+
+    def test_sgr_code_shows_as_text(self):
+        output = self.render(_request(tool_name="a\x1b[8mhidden"))
+        self.assertIn(r"a\x1b[8mhidden", output)
+        self.assertNotIn("\x1b", output)
 
 
 if __name__ == "__main__":

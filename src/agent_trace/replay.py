@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import TextIO
 
 from .event_data import object_field, require_object_event_data, str_field, str_list_field
+from .inert import inert
 from .models import EventType, TraceEvent, SessionMeta
 from .store import TraceStore
 from .subagent import _returned_preview, _event_agent_id, subagent_label
@@ -143,8 +144,9 @@ def _tool_call_detail(tool_name: str, args: dict) -> str:
         path = args.get("file_path", "")
         old = args.get("old_string", args.get("old_text", ""))
         if path and old:
-            old_preview = str(old)[:60].replace("\n", " ")
-            if len(str(old)) > 60:
+            old = " ".join(str(old).split())
+            old_preview = old[:60]
+            if len(old) > 60:
                 old_preview += "..."
             return f"{path} (replacing: {old_preview})"
         if path:
@@ -167,7 +169,7 @@ def _tool_call_detail(tool_name: str, args: dict) -> str:
 
     # Agent: show the task
     if name == "agent" and "prompt" in args:
-        prompt = str(args["prompt"])
+        prompt = " ".join(str(args["prompt"]).split())
         if len(prompt) > 120:
             prompt = prompt[:120] + "..."
         return prompt
@@ -182,7 +184,12 @@ def _tool_call_detail(tool_name: str, args: dict) -> str:
 
 
 def format_event(event: TraceEvent, base_ts: float | None = None) -> str:
-    """Format a single event as a colored terminal line."""
+    """Format a single event as a colored terminal line.
+
+    Each value from the trace goes through inert() inside the colors, so an
+    escape code or a line break in it shows as text. In free text, such as a
+    prompt or a tool result, each run of whitespace becomes one space first.
+    """
     color = EVENT_COLORS.get(event.event_type, C.WHITE)
     icon = EVENT_ICONS.get(event.event_type, " ")
     ts = _format_timestamp(event.timestamp, base_ts)
@@ -196,12 +203,12 @@ def format_event(event: TraceEvent, base_ts: float | None = None) -> str:
     if event.event_type == EventType.TOOL_CALL:
         name = str_field(event.data, "tool_name", "?")
         args = object_field(event.data, "arguments", {})
-        parts.append(f"{color}{C.BOLD}tool_call{C.RESET} {C.WHITE}{name}{C.RESET}")
+        parts.append(f"{color}{C.BOLD}tool_call{C.RESET} {C.WHITE}{inert(name)}{C.RESET}")
         _append_subagent_tag(parts, event)
         # Show the most useful argument value inline
         detail = _tool_call_detail(name, args)
         if detail:
-            parts.append(f"\n{C.GRAY}{'':>14}  {detail}{C.RESET}")
+            parts.append(f"\n{C.GRAY}{'':>14}  {inert(detail)}{C.RESET}")
 
     elif event.event_type == EventType.TOOL_RESULT:
         name = event.data.get("tool_name", "")
@@ -211,49 +218,49 @@ def format_event(event: TraceEvent, base_ts: float | None = None) -> str:
         type_str = ",".join(types) if types else ""
         parts.append(f"{color}tool_result{C.RESET}")
         if name:
-            parts.append(f"{C.DIM}{name}{C.RESET}")
+            parts.append(f"{C.DIM}{inert(name)}{C.RESET}")
         _append_subagent_tag(parts, event)
         if type_str:
-            parts.append(f"{C.DIM}[{type_str}]{C.RESET}")
+            parts.append(f"{C.DIM}[{inert(type_str)}]{C.RESET}")
         parts.append(f"{duration}")
         # Show a preview of the result
         output = result or preview
         if output:
-            output = _strip_markdown(str(output))
+            output = " ".join(_strip_markdown(str(output)).split())
             output_preview = output[:120]
             if len(output) > 120:
                 output_preview += "..."
-            parts.append(f"\n{C.GRAY}{'':>14}  {output_preview}{C.RESET}")
+            parts.append(f"\n{C.GRAY}{'':>14}  {inert(output_preview)}{C.RESET}")
 
     elif event.event_type == EventType.LLM_REQUEST:
         model = event.data.get("model", "")
         count = event.data.get("message_count", 0)
         parts.append(f"{color}{C.BOLD}llm_request{C.RESET}")
         if model:
-            parts.append(f"{C.DIM}{model}{C.RESET}")
-        parts.append(f"{C.DIM}({count} messages){C.RESET}")
+            parts.append(f"{C.DIM}{inert(model)}{C.RESET}")
+        parts.append(f"{C.DIM}({inert(count)} messages){C.RESET}")
 
     elif event.event_type == EventType.LLM_RESPONSE:
         tokens = event.data.get("total_tokens", 0)
         parts.append(f"{color}llm_response{C.RESET}")
         if tokens:
-            parts.append(f"{C.DIM}({tokens} tokens){C.RESET}")
+            parts.append(f"{C.DIM}({inert(tokens)} tokens){C.RESET}")
         status = event.data.get("status")
         if status in ("failed", "cancelled"):
             parts.append(f"{C.RED}{status}{C.RESET}")
             error = event.data.get("error")
             if isinstance(error, str) and error.strip():
-                parts.append(f"{C.DIM}{' '.join(error.split())[:80]}{C.RESET}")
+                parts.append(f"{C.DIM}{inert(' '.join(error.split())[:80])}{C.RESET}")
         _append_subagent_tag(parts, event)
         parts.append(f"{duration}")
 
     elif event.event_type == EventType.FILE_READ:
         uri = event.data.get("uri", "")
-        parts.append(f"{color}file_read{C.RESET} {C.DIM}{uri}{C.RESET}")
+        parts.append(f"{color}file_read{C.RESET} {C.DIM}{inert(uri)}{C.RESET}")
 
     elif event.event_type == EventType.FILE_WRITE:
         uri = event.data.get("uri", "")
-        parts.append(f"{color}file_write{C.RESET} {C.DIM}{uri}{C.RESET}")
+        parts.append(f"{color}file_write{C.RESET} {C.DIM}{inert(uri)}{C.RESET}")
 
     elif event.event_type == EventType.ERROR:
         msg = event.data.get("message", "") or event.data.get("error", "")
@@ -261,71 +268,72 @@ def format_event(event: TraceEvent, base_ts: float | None = None) -> str:
         code = event.data.get("code", "")
         parts.append(f"{color}{C.BOLD}error{C.RESET}")
         if name:
-            parts.append(f"{C.RED}{name}{C.RESET}")
+            parts.append(f"{C.RED}{inert(name)}{C.RESET}")
         _append_subagent_tag(parts, event)
         if code:
-            parts.append(f"{C.DIM}(code: {code}){C.RESET}")
+            parts.append(f"{C.DIM}(code: {inert(code)}){C.RESET}")
         if msg:
-            msg = _strip_markdown(str(msg))
+            msg = " ".join(_strip_markdown(str(msg)).split())
             msg_preview = msg[:150]
             if len(msg) > 150:
                 msg_preview += "..."
-            parts.append(f"\n{C.GRAY}{'':>14}  {C.RED}{msg_preview}{C.RESET}")
+            parts.append(f"\n{C.GRAY}{'':>14}  {C.RED}{inert(msg_preview)}{C.RESET}")
 
     elif event.event_type == EventType.SESSION_START:
         cmd = str_list_field(event.data, "command", [])
         parts.append(f"{color}{C.BOLD}session_start{C.RESET}")
         if cmd:
-            parts.append(f"{C.DIM}{' '.join(cmd)}{C.RESET}")
+            parts.append(f"{C.DIM}{inert(' '.join(cmd))}{C.RESET}")
 
     elif event.event_type == EventType.SESSION_END:
         exit_code = event.data.get("exit_code", "?")
         parts.append(f"{color}{C.BOLD}session_end{C.RESET}")
-        parts.append(f"{C.DIM}exit={exit_code}{C.RESET}")
+        parts.append(f"{C.DIM}exit={inert(exit_code)}{C.RESET}")
         parts.append(f"{duration}")
 
     elif event.event_type == EventType.DECISION:
         choice = event.data.get("choice", "")
         reason = str_field(event.data, "reason", "")
-        parts.append(f"{color}{C.BOLD}decision{C.RESET} {C.WHITE}{choice}{C.RESET}")
+        parts.append(f"{color}{C.BOLD}decision{C.RESET} {C.WHITE}{inert(choice)}{C.RESET}")
         if reason:
-            parts.append(f"\n{C.GRAY}{'':>14}  reason: {reason[:120]}{C.RESET}")
+            reason = " ".join(reason.split())
+            parts.append(f"\n{C.GRAY}{'':>14}  reason: {inert(reason[:120])}{C.RESET}")
 
     elif event.event_type == EventType.USER_PROMPT:
-        prompt = str_field(event.data, "prompt", "")
+        prompt = " ".join(str_field(event.data, "prompt", "").split())
         preview = prompt[:150]
         if len(prompt) > 150:
             preview += "..."
         parts.append(f"{color}{C.BOLD}user_prompt{C.RESET}")
-        parts.append(f"\n{C.GRAY}{'':>14}  \"{preview}\"{C.RESET}")
+        parts.append(f"\n{C.GRAY}{'':>14}  \"{inert(preview)}\"{C.RESET}")
 
     elif event.event_type == EventType.ASSISTANT_RESPONSE:
         text = str_field(event.data, "text", "")
-        text = _strip_markdown(text)
+        text = " ".join(_strip_markdown(text).split())
         preview = text[:200]
         if len(text) > 200:
             preview += "..."
         parts.append(f"{color}{C.BOLD}assistant_response{C.RESET}")
         if preview:
-            parts.append(f"\n{C.GRAY}{'':>14}  \"{preview}\"{C.RESET}")
+            parts.append(f"\n{C.GRAY}{'':>14}  \"{inert(preview)}\"{C.RESET}")
 
     elif event.event_type in (EventType.SUBAGENT_START, EventType.SUBAGENT_STOP):
         parts.append(f"{color}{C.BOLD}{event.event_type.value}{C.RESET}")
         agent = event.data.get("agent_type") or event.data.get("agent_name") or ""
         if agent:
-            parts.append(f"{C.WHITE}{agent}{C.RESET}")
+            parts.append(f"{C.WHITE}{inert(agent)}{C.RESET}")
         child = event.data.get("child_session_id", "")
         if child:
-            parts.append(f"{C.DIM}child={child}{C.RESET}")
+            parts.append(f"{C.DIM}child={inert(child)}{C.RESET}")
         agent_id = _event_agent_id(event.data)
         if agent_id:
-            parts.append(f"{C.DIM}agent={agent_id}{C.RESET}")
+            parts.append(f"{C.DIM}agent={inert(agent_id)}{C.RESET}")
         stop_reason = event.data.get("stop_reason", "")
         if stop_reason:
-            parts.append(f"{C.DIM}({stop_reason}){C.RESET}")
+            parts.append(f"{C.DIM}({inert(stop_reason)}){C.RESET}")
         returned = _returned_preview(event, limit=200)
         if returned:
-            parts.append(f"\n{C.GRAY}{'':>14}  returned: \"{returned}\"{C.RESET}")
+            parts.append(f"\n{C.GRAY}{'':>14}  returned: \"{inert(returned)}\"{C.RESET}")
 
     return " ".join(parts)
 
@@ -334,7 +342,7 @@ def _append_subagent_tag(parts: list[str], event: TraceEvent) -> None:
     """Tag an event recorded inside an in-session subagent."""
     label = subagent_label(event.data)
     if label:
-        parts.append(f"{C.MAGENTA}[subagent {label}]{C.RESET}")
+        parts.append(f"{C.MAGENTA}[subagent {inert(label)}]{C.RESET}")
 
 
 def format_summary(meta: SessionMeta) -> str:
@@ -356,15 +364,15 @@ def format_summary(meta: SessionMeta) -> str:
         f"  Session:    {meta.session_id}",
         f"  Started:    {started.strftime('%Y-%m-%d %H:%M:%S %Z')}",
         f"  Duration:   {duration_str}",
-        f"  Tool calls: {meta.tool_calls}",
-        f"  LLM reqs:   {meta.llm_requests}",
-        f"  Errors:     {meta.errors}",
+        f"  Tool calls: {inert(meta.tool_calls)}",
+        f"  LLM reqs:   {inert(meta.llm_requests)}",
+        f"  Errors:     {inert(meta.errors)}",
     ]
 
     if meta.agent_name:
-        lines.insert(4, f"  Agent:      {meta.agent_name}")
+        lines.insert(4, f"  Agent:      {inert(meta.agent_name)}")
     if meta.command:
-        lines.insert(4, f"  Command:    {meta.command}")
+        lines.insert(4, f"  Command:    {inert(meta.command)}")
 
     lines.append(f"{C.GRAY}{'─' * 50}{C.RESET}")
     return "\n".join(lines)

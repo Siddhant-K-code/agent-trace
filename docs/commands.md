@@ -173,6 +173,14 @@ count the usage once per line; import them again to correct their totals.
 
 ## Replay and inspection
 
+Traces keep the raw text, which can hold escape codes and line breaks.
+`replay`, `record -v`, `record-http -v`, `explain`, `tree` and `approval list`
+show each character that Python's `str.isprintable()` rejects as its escape,
+such as `\x1b`, `\n` or `\u202e`, so recorded text cannot move the cursor,
+hide a command or write to the clipboard. In prompts, responses, tool output,
+error messages and reasons, each run of whitespace shows as one space instead.
+`inspect` and `approval show` print JSON with the raw text.
+
 ### `replay`
 ```
 agent-strace replay [session-id] [--format terminal|html] [--live] [--speed N]

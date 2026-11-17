@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, TextIO
 
 from .event_data import object_field, require_object_event_data, str_field
+from .inert import inert
 from .models import EventType, SessionMeta, TraceEvent
 from .store import TraceStore
 from .subagent import describe_subagent, in_session_subagents
@@ -189,7 +190,12 @@ def _fmt_duration(seconds: float) -> str:
 
 
 def format_explain(result: ExplainResult, out: TextIO = sys.stdout) -> None:
-    """Write a human-readable explain report to *out*."""
+    """Write a human-readable explain report to *out*.
+
+    Each value from the trace goes through inert(), so an escape code or a
+    line break in it shows as text. In the phase name, each run of whitespace
+    becomes one space first.
+    """
     w = out.write
 
     w(f"\nSession: {result.session_id} "
@@ -201,18 +207,19 @@ def format_explain(result: ExplainResult, out: TextIO = sys.stdout) -> None:
         time_range = (
             f"{_fmt_offset(phase.start_offset)}–{_fmt_offset(phase.end_offset)}"
         )
-        w(f"Phase {phase.index}: {phase.name}{status} "
+        name = inert(" ".join(phase.name.split()))
+        w(f"Phase {phase.index}: {name}{status} "
           f"({time_range}, {phase.event_count} events)\n")
 
         if phase.files_read:
             preview = phase.files_read[:5]
             suffix = f" +{len(phase.files_read) - 5} more" if len(phase.files_read) > 5 else ""
-            w(f"  Read: {', '.join(preview)}{suffix}\n")
+            w(f"  Read: {inert(', '.join(preview))}{suffix}\n")
 
         if phase.files_written:
             preview = phase.files_written[:5]
             suffix = f" +{len(phase.files_written) - 5} more" if len(phase.files_written) > 5 else ""
-            w(f"  Wrote: {', '.join(preview)}{suffix}\n")
+            w(f"  Wrote: {inert(', '.join(preview))}{suffix}\n")
 
         for i, cmd in enumerate(phase.commands[:8]):
             cmd_display = cmd[:100] + ("..." if len(cmd) > 100 else "")
@@ -224,13 +231,13 @@ def format_explain(result: ExplainResult, out: TextIO = sys.stdout) -> None:
                     suffix = "  ← retry"
                 elif phase.failed and i == len(phase.commands) - 1:
                     suffix = "  ← retry"
-            w(f"  Ran: {cmd_display}{suffix}\n")
+            w(f"  Ran: {inert(cmd_display)}{suffix}\n")
 
         if len(phase.commands) > 8:
             w(f"  ... and {len(phase.commands) - 8} more commands\n")
 
         for sub in in_session_subagents(phase.events):
-            w(f"  Subagent: {describe_subagent(sub)}\n")
+            w(f"  Subagent: {inert(describe_subagent(sub))}\n")
 
         w("\n")
 
