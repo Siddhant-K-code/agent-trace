@@ -6,6 +6,7 @@ fragment can carry tokens, so messages name only the URL's
 scheme://host[:port]. The remote collector senders, Langfuse and OTLP
 metrics export, apply --server, optimize, the llm_judge scorer and
 pr-comment's writes also open their POSTs with no_redirect_opener.
+apply --server and pr-comment open their GETs with same_origin_opener.
 """
 
 from __future__ import annotations
@@ -20,6 +21,10 @@ from .inert import inert
 
 # RFC 9110 token characters, the only ones an HTTP header name may contain.
 _TOKEN_CHARS = frozenset(string.ascii_letters + string.digits + "!#$%&'*+-.^_`|~")
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+_ORIGIN_NOTE = (
+    " (redirects to another scheme, host or port are not followed; give the final URL)"
+)
 
 
 def url_endpoint(url: str) -> str:
@@ -120,6 +125,28 @@ def parse_header(header: str) -> tuple[str, str]:
     return name, value
 
 
+def _http_opener(*extra: urllib.request.BaseHandler) -> urllib.request.OpenerDirector:
+    """Return an opener for http and https URLs with urlopen's proxy and error handlers.
+
+    It has no redirect handler unless *extra* adds one. Any other scheme
+    fails with "unknown url type".
+    """
+    opener = urllib.request.OpenerDirector()
+    handlers: list[urllib.request.BaseHandler] = [
+        urllib.request.ProxyHandler(),
+        urllib.request.UnknownHandler(),
+        urllib.request.HTTPHandler(),
+        urllib.request.HTTPDefaultErrorHandler(),
+        urllib.request.HTTPErrorProcessor(),
+        *extra,
+    ]
+    if hasattr(urllib.request, "HTTPSHandler"):
+        handlers.append(urllib.request.HTTPSHandler())
+    for handler in handlers:
+        opener.add_handler(handler)
+    return opener
+
+
 def no_redirect_opener() -> urllib.request.OpenerDirector:
     """Return an opener for POSTs that never follows a redirect.
 
@@ -129,19 +156,64 @@ def no_redirect_opener() -> urllib.request.OpenerDirector:
     every 3xx raises HTTPError instead. Only http and https URLs can be
     opened.
     """
-    opener = urllib.request.OpenerDirector()
-    handlers: list[urllib.request.BaseHandler] = [
-        urllib.request.ProxyHandler(),
-        urllib.request.UnknownHandler(),
-        urllib.request.HTTPHandler(),
-        urllib.request.HTTPDefaultErrorHandler(),
-        urllib.request.HTTPErrorProcessor(),
-    ]
-    if hasattr(urllib.request, "HTTPSHandler"):
-        handlers.append(urllib.request.HTTPSHandler())
-    for handler in handlers:
-        opener.add_handler(handler)
-    return opener
+    return _http_opener()
+
+
+def _origin(url: str) -> tuple[str, str, int | None] | None:
+    """Return the scheme, host name and port of *url*, or None.
+
+    urlsplit gives the scheme and the host name in lower case. A missing
+    port is the scheme's default. None means the URL has no host, a port
+    that does not parse, or user info. urlsplit takes the host after the
+    last @, and a proxy may not: it can read http://a.example\\@b.example/
+    as a.example.
+    """
+    try:
+        parts = urllib.parse.urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return None
+    if not parts.hostname or "@" in parts.netloc:
+        return None
+    if port is None:
+        port = _DEFAULT_PORTS.get(parts.scheme)
+    return parts.scheme, parts.hostname, port
+
+
+def _same_origin(url: str, other: str) -> bool:
+    origin = _origin(url)
+    return origin is not None and origin == _origin(other)
+
+
+class _CrossOriginRedirect(urllib.error.HTTPError):
+    """A redirect to another scheme, host or port that was not followed."""
+
+
+class _SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # http_error_302 has already made newurl absolute.
+        if not _same_origin(req.full_url, newurl):
+            raise _CrossOriginRedirect(req.full_url, code, f"{msg}{_ORIGIN_NOTE}", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+    # Python 3.10 has no 308 handler, so a 308 failed there without the
+    # note. With this, a 308 to another origin gets the note on 3.10 too.
+    # A 308 to the same origin still fails on 3.10, as urlopen does there.
+    http_error_308 = urllib.request.HTTPRedirectHandler.http_error_302
+
+
+def same_origin_opener() -> urllib.request.OpenerDirector:
+    """Return an opener for GETs that send a credential.
+
+    urlopen follows a redirect to any URL and keeps every header but
+    Content-Length and Content-Type, so a credential goes to the Location
+    host. This opener follows a redirect only when the new URL has the same
+    scheme, host name and port, with 80 for http and 443 for https when no
+    port is given. Any other redirect raises HTTPError with the redirect's
+    code, headers and body, and its reason ends with a note to give the
+    final URL. Only http and https URLs can be opened.
+    """
+    return _http_opener(_SameOriginRedirectHandler())
 
 
 def redirect_hint(exc: BaseException) -> str:
@@ -151,6 +223,17 @@ def redirect_hint(exc: BaseException) -> str:
     """
     if isinstance(exc, urllib.error.HTTPError) and 300 <= exc.code < 400:
         return " (redirects are not followed; give the final URL)"
+    return ""
+
+
+def origin_redirect_hint(exc: BaseException) -> str:
+    """Return the note for a redirect that same_origin_opener refused, or "".
+
+    The refusal's reason already ends with the note. This is for a message
+    that shows the status code but not the reason.
+    """
+    if isinstance(exc, _CrossOriginRedirect):
+        return _ORIGIN_NOTE
     return ""
 
 

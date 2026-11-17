@@ -26,7 +26,7 @@ from .cost import cost_inputs_captured, estimate_cost
 from .event_data import NonObjectEventDataError, require_object_event_data
 from .explain import explain_session
 from .failures import count_session_errors
-from .http_post import no_redirect_opener, redirect_hint
+from .http_post import no_redirect_opener, redirect_hint, same_origin_opener
 from .inert import inert
 from .lint import lint_session
 from .models import EventType, SessionMeta, TraceEvent
@@ -772,16 +772,18 @@ def _request_json(
             headers[token_header or "PRIVATE-TOKEN"] = token
 
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
-    # GETs follow redirects, since GitHub answers a GET for a renamed
-    # repository with 301. Other methods never do: urllib would re-send a
-    # redirected POST as a GET with no body, still carrying the token.
+    # GETs follow a redirect only to the same scheme, host and port, so the
+    # token stays on that host. GitHub answers a GET for a renamed
+    # repository with 301 to the same host. Other methods never follow one:
+    # urllib would re-send a redirected POST as a GET with no body, still
+    # carrying the token.
     no_redirect = opener is None and method != "GET"
     if opener is not None:
         open_url = opener
     elif no_redirect:
         open_url = no_redirect_opener().open
     else:
-        open_url = urllib.request.urlopen
+        open_url = same_origin_opener().open
     try:
         with open_url(request, timeout=_HTTP_TIMEOUT) as response:
             raw = response.read()

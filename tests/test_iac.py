@@ -21,6 +21,7 @@ from agent_trace.iac import (
     _apply_rbac,
     _apply_identities,
     _apply_team_budgets,
+    _http_get,
     cmd_apply,
     cmd_config_diff,
 )
@@ -33,9 +34,11 @@ except ImportError:
     from tests._concurrency import run_concurrently
 
 try:
-    from _redirect_servers import ALL_REDIRECTS, REDIRECT_NOTE, RedirectServers
+    from _redirect_servers import ALL_REDIRECTS, ORIGIN_NOTE, REDIRECT_NOTE, RedirectServers
 except ImportError:
-    from tests._redirect_servers import ALL_REDIRECTS, REDIRECT_NOTE, RedirectServers
+    from tests._redirect_servers import (
+        ALL_REDIRECTS, ORIGIN_NOTE, REDIRECT_NOTE, RedirectServers,
+    )
 
 
 def _run(cmd_fn, argv_dict: dict) -> tuple[int, str]:
@@ -312,6 +315,59 @@ class TestCLIApply(unittest.TestCase):
                 self.assertNotIn("+ workspace: prod", out)
                 self.assertEqual(servers.a.methods(), ["GET", "POST"])
                 self.assertEqual(servers.b.received(), [])
+
+    def test_apply_server_get_redirect_to_another_origin_is_refused(self):
+        # urlopen sent the key to B and read B's list, so prod was reported
+        # as already on the server.
+        servers = RedirectServers(
+            self, methods=("GET",), reply=[{"name": "prod"}], a_reply=[]
+        )
+        cfg_file = Path(self._tmp) / ".agent-strace.yaml"
+        cfg_file.write_text("workspaces:\n  - name: prod\n")
+        for status in ALL_REDIRECTS:
+            with self.subTest(status=status):
+                servers.redirect(status)
+                _, out = _run(cmd_apply, {"config": str(cfg_file), "dry_run": False,
+                                          "server": servers.url, "auth_key": "iac-key",
+                                          "dir": self._tmp})
+                self.assertNotIn("exists on server", out)
+                self.assertEqual(servers.a.methods(), ["GET", "POST"])
+                self.assertEqual(servers.b.received(), [])
+
+
+class TestHTTPGet(unittest.TestCase):
+    def setUp(self):
+        self.servers = RedirectServers(self, methods=("GET",), reply=[{"name": "prod"}])
+        self.url = self.servers.url + "/api/workspaces"
+
+    def test_redirect_to_another_origin_is_an_error(self):
+        # urlopen sent the key to the host in Location.
+        servers = self.servers
+        for status in ALL_REDIRECTS:
+            with self.subTest(status=status):
+                servers.redirect(status)
+                with self.assertRaises(RuntimeError) as caught:
+                    _http_get(self.url, "iac-key")
+                self.assertEqual(
+                    str(caught.exception), f"GET {self.url} → {status}{ORIGIN_NOTE}"
+                )
+                # Closed, so Python 3.14 prints no ResourceWarning for it.
+                self.assertTrue(caught.exception.__cause__.fp.closed)
+                self.assertEqual(servers.a.methods(), ["GET"])
+                self.assertEqual(servers.b.received(), [])
+
+    def test_redirect_to_the_same_origin_is_followed(self):
+        servers = self.servers
+        servers.redirect(301, servers.moved)
+        self.assertEqual(_http_get(self.url, "iac-key"), [{"name": "prod"}])
+        self.assertEqual(
+            [(r.path, r.headers["Authorization"]) for r in servers.a.received()],
+            [
+                ("/api/workspaces", "Bearer iac-key"),
+                ("/moved/api/workspaces", "Bearer iac-key"),
+            ],
+        )
+        self.assertEqual(servers.b.received(), [])
 
 
 class TestCLIConfigDiff(unittest.TestCase):

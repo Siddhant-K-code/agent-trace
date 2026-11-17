@@ -57,7 +57,7 @@ from pathlib import Path
 from typing import Any
 
 from .fileutil import file_lock, write_atomic
-from .http_post import no_redirect_opener, redirect_hint
+from .http_post import no_redirect_opener, origin_redirect_hint, redirect_hint, same_origin_opener
 from .store import resolve_trace_dir
 from .workspace import create_workspace, list_workspaces
 from .rbac import RBACStore
@@ -283,10 +283,11 @@ def _http_get(url: str, auth_key: str = "") -> Any:
         headers["Authorization"] = f"Bearer {auth_key}"
     req = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with same_origin_opener().open(req, timeout=10) as r:
             return json.loads(r.read())
     except urllib.error.HTTPError as e:
-        raise RuntimeError(f"GET {url} → {e.code}") from e
+        e.close()
+        raise RuntimeError(f"GET {url} → {e.code}{origin_redirect_hint(e)}") from e
 
 
 def _http_post(url: str, data: dict, auth_key: str = "") -> Any:
