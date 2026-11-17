@@ -799,6 +799,38 @@ class TestWaitForSigkill(unittest.TestCase):
         self.assertGreaterEqual(elapsed, 0.25)
         self.assertLess(elapsed, 1.0)
 
+    @unittest.skipUnless(os.name == "posix", "the SIGKILL step runs on POSIX only")
+    def test_sigkill_reaches_a_child_after_a_slow_listing(self):
+        # The SIGKILL step lists the processes again before it signals a
+        # child, and ps can take up to its 2s timeout. Here the listing takes
+        # 0.5s and no process exits. The wait uses the module's
+        # _SIGKILL_WAIT_AFTER_DUE, not a patched value.
+        signals: list[tuple[int, int]] = []
+
+        def os_kill(pid, sig):
+            signals.append((pid, sig))  # every PID stays in use
+
+        def list_processes():
+            time.sleep(0.5)
+            return {CHILD_A: ProcessEntry(AGENT, "id:a")}
+
+        with patch("os.kill", os_kill), \
+                patch.object(watch, "list_processes", list_processes), \
+                patch.object(watch, "_sigkill_steps", []), \
+                patch.object(watch, "_SIGKILL_DELAY", 0.1):
+            step = watch._SigkillStep(AGENT, None, [(CHILD_A, "id:a")], time.monotonic())
+            watch._sigkill_steps.append(step)
+            thread = threading.Thread(target=step.run, daemon=True)
+            thread.start()
+            try:
+                watch._wait_for_sigkill(io.StringIO())
+                done = step.done.is_set()
+                sigkills = [pid for pid, sig in signals if sig == signal.SIGKILL]
+            finally:
+                thread.join(5)
+        self.assertTrue(done)
+        self.assertEqual(sigkills, [AGENT, CHILD_A])
+
     def test_ctrl_c_ends_the_wait(self):
         step = _FakeStep(time.monotonic() + 5, [AGENT, CHILD_A], _Interrupted())
         output, elapsed = self.wait([step])
