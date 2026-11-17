@@ -1864,6 +1864,15 @@ class TestEventStreamParser(unittest.TestCase):
     def test_empty_data_field_is_an_event_and_no_data_field_is_not(self):
         self.assertEqual(self._events([b"data\n\nevent: x\nid: 1\n\n"]), [""])
 
+    def test_a_line_split_across_chunks(self):
+        self.assertEqual(self._events([b"da", b"ta: x", b"\n\n"]), ["x"])
+
+    def test_a_character_split_across_chunks(self):
+        self.assertEqual(self._events([b"data: \xc3", b"\xa9\n\n"]), ["\u00e9"])
+
+    def test_invalid_utf8_shows_as_a_replacement_character(self):
+        self.assertEqual(self._events([b"data: \xff\n\n"]), ["\ufffd"])
+
 
 class TestHTTPProxyStreamableHTTP(unittest.TestCase):
     """record-http works with Streamable HTTP servers.
