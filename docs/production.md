@@ -476,6 +476,12 @@ Verify the exported chain links with:
 agent-strace verify --from-export compliance-report.json
 ```
 
+This proves the package is complete and consistent with itself, not that it
+matches the source store. For that, compare each session's `root_hash` and
+`event_count` with `root_hash` and `total_events` from
+`agent-strace verify <session-id> --format json` on the source store. See
+[EU AI Act export package](commands.md#eu-ai-act-export-package).
+
 Before exporting a store for review, run:
 
 ```bash
