@@ -26,6 +26,10 @@ SHORT_TEXT = r"Z\x1b]\x07\r\n\x9b\u202e"
 PLAIN = "café ✓ 日本語 😀"
 PLAIN_SHORT = "café ✓😀"
 
+# Free text with a tab, two spaces and an ideographic space, and how it shows.
+SPACES = "one\ttwo  three\u3000four"
+SPACES_SHOWN = "one two three four"
+
 # The kind of a value -> (payload, how it shows, plain text that fits).
 KINDS = {
     "free": (PAYLOAD, PAYLOAD_FREE, PLAIN),
@@ -80,3 +84,31 @@ def check_plain_text_unchanged(case, cases, render):
         plain = KINDS[kind][2]
         with case.subTest(label):
             case.assertIn(plain, render(build(plain)))
+
+
+def check_whitespace_in_free_text(case, cases, render):
+    """Check that each run of whitespace in each free-text value shows as one space."""
+    for label, kind, build in cases:
+        if kind == "free":
+            with case.subTest(label):
+                case.assertIn(SPACES_SHOWN, render(build(SPACES)))
+
+
+def check_each_cut(case, cuts, render):
+    """Check that each cut counts the characters of the value, not of its escapes.
+
+    Each case is ``(label, cut, build)``. The formatter keeps *cut*
+    characters of the value the label names. A value of exactly *cut*
+    characters that ends in BEL characters must show in full, each BEL as
+    ``\\x07``, with no cut marker. If the cut came after inert(), it would
+    count the escapes and drop some of them. A value one character longer
+    must not show in full, which checks that *cut* is right.
+    """
+    for label, cut, build in cuts:
+        bels = min(10, cut)
+        prefix = "x" * (cut - bels)
+        with case.subTest(label):
+            output = render(build(prefix + "\x07" * bels))
+            case.assertIn(prefix + r"\x07" * bels, output)
+            case.assertNotIn("...", output)
+            case.assertNotIn("x" * (cut + 1), render(build("x" * (cut + 1))))

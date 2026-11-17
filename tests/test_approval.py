@@ -643,6 +643,13 @@ APPROVAL_LIST_CASES = [
     ("Tool", "mid", lambda v: _request(tool_name=v)),
 ]
 
+# (label, cut, build): approval list keeps cut characters of the value in the
+# column the label names.
+APPROVAL_LIST_CUTS = [
+    ("Rule", 24, lambda v: _request(rule_name=v)),
+    ("Tool", 20, lambda v: _request(tool_name=v)),
+]
+
 
 class TestApprovalListShowsEscapesAsText(unittest.TestCase):
     """A tool name in an approval request comes from the agent or an MCP
@@ -670,6 +677,9 @@ class TestApprovalListShowsEscapesAsText(unittest.TestCase):
 
     def test_plain_text_prints_unchanged(self):
         _escapes.check_plain_text_unchanged(self, APPROVAL_LIST_CASES, self.render)
+
+    def test_value_as_long_as_the_cut_shows_in_full(self):
+        _escapes.check_each_cut(self, APPROVAL_LIST_CUTS, self.render)
 
     def test_stored_tool_name_shows_as_text(self):
         create_approval_request(TraceStore(self.trace_dir), "esc-a", "ask-before-shell",

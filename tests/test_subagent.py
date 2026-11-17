@@ -653,6 +653,37 @@ FORMAT_SESSION_TREE_CASES = _SUMMARY_CASES + [
     ("command", "text", lambda v: _node(command=v)),
 ]
 
+# (label, cut, build): the formatter keeps cut characters of the value the
+# label names, the last ones for an agent ID.
+FORMAT_TREE_CUTS = [
+    ("Bash command", 80, lambda v: _node(_call("Bash", {"command": v}))),
+    ("Agent prompt", 60, lambda v: _node(_call("Agent", {"prompt": v}))),
+    ("Task prompt", 60, lambda v: _node(_call("Task", {"prompt": v}))),
+    ("tool_call agent_id", 8, lambda v: _node(_call("Bash", {"command": "plain"}, agent_id=v))),
+    ("tool_result result", 80, lambda v: _node(_ev(E.TOOL_RESULT, result=v))),
+    ("tool_result content_preview", 80, lambda v: _node(_ev(E.TOOL_RESULT, content_preview=v))),
+    ("tool_result agent_id", 8, lambda v: _node(_ev(E.TOOL_RESULT, result="plain", agent_id=v))),
+    ("error message", 80, lambda v: _node(_ev(E.ERROR, message=v))),
+    ("error error", 80, lambda v: _node(_ev(E.ERROR, error=v))),
+    ("error agent_id", 8, lambda v: _node(_ev(E.ERROR, message="plain", agent_id=v))),
+    ("user_prompt prompt", 80, lambda v: _node(_ev(E.USER_PROMPT, prompt=v))),
+    ("assistant_response text", 80, lambda v: _node(_ev(E.ASSISTANT_RESPONSE, text=v))),
+    ("subagent_start child_session_id", 12,
+     lambda v: _node(_ev(E.SUBAGENT_START, agent_type="plain", child_session_id=v,
+                         agent_id="plain"))),
+    ("subagent_start agent_id", 8,
+     lambda v: _node(_ev(E.SUBAGENT_START, agent_type="plain", child_session_id="plain",
+                         agent_id=v))),
+    ("subagent_stop text", 80, lambda v: _node(_ev(E.SUBAGENT_STOP, agent_type="plain", text=v))),
+]
+FORMAT_TREE_SUMMARY_CUTS = [
+    ("subagent agent_id", 8, lambda v: _node(_call("Bash", {"command": "plain"}, agent_id=v))),
+]
+FORMAT_SESSION_TREE_CUTS = FORMAT_TREE_SUMMARY_CUTS + [
+    ("agent_name", 28, lambda v: _node(agent_name=v)),
+    ("command", 28, lambda v: _node(command=v)),
+]
+
 
 class TestTraceTextShowsAsText(unittest.TestCase):
     """A command, a prompt or an agent name in a trace can hold escape codes
@@ -662,6 +693,11 @@ class TestTraceTextShowsAsText(unittest.TestCase):
         ("format_tree", FORMAT_TREE_CASES, _writes(format_tree)),
         ("format_tree_summary", FORMAT_TREE_SUMMARY_CASES, _writes(format_tree_summary)),
         ("format_session_tree", FORMAT_SESSION_TREE_CASES, _writes(format_session_tree)),
+    ]
+    CUTS = [
+        ("format_tree", FORMAT_TREE_CUTS, _writes(format_tree)),
+        ("format_tree_summary", FORMAT_TREE_SUMMARY_CUTS, _writes(format_tree_summary)),
+        ("format_session_tree", FORMAT_SESSION_TREE_CUTS, _writes(format_session_tree)),
     ]
 
     def test_each_value_shows_escapes_as_text(self):
@@ -705,12 +741,18 @@ class TestTraceTextShowsAsText(unittest.TestCase):
                     )
 
     def test_whitespace_in_free_text_shows_as_one_space(self):
+        _escapes.check_whitespace_in_free_text(self, FORMAT_TREE_CASES, _writes(format_tree))
         for node in (
             _node(_ev(E.TOOL_RESULT, result="one\ttwo\r\nthree")),
             _node(_ev(E.USER_PROMPT, prompt="one\u3000two\nthree")),
         ):
             with self.subTest(node.events[0].event_type.value):
                 self.assertIn("one two three", _writes(format_tree)(node))
+
+    def test_value_as_long_as_the_cut_shows_in_full(self):
+        for name, cuts, render in self.CUTS:
+            with self.subTest(name):
+                _escapes.check_each_cut(self, cuts, render)
 
     def test_cut_marker_uses_collapsed_length(self):
         output = _writes(format_tree)(_node(_call("Agent", {"prompt": "a" + " \t" * 50 + "b"})))

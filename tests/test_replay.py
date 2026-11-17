@@ -419,6 +419,27 @@ FORMAT_SUMMARY_CASES = [
     ("errors", "text", lambda v: _meta(errors=v)),
 ]
 
+# (label, cut, build): format_event keeps cut characters of the value the
+# label names, the last ones for an agent ID.
+FORMAT_EVENT_CUTS = [
+    ("Bash command", 120, lambda v: _call("Bash", {"command": v})),
+    ("Edit old_string", 60, lambda v: _call("Edit", {"file_path": "plain", "old_string": v})),
+    ("Agent prompt", 120, lambda v: _call("Agent", {"prompt": v})),
+    ("subagent tag agent_id", 8, lambda v: _call("Bash", {"command": "plain"}, agent_id=v)),
+    ("tool_result result", 120, lambda v: _event(E.TOOL_RESULT, tool_name="plain", result=v)),
+    ("tool_result content_preview", 120,
+     lambda v: _event(E.TOOL_RESULT, tool_name="plain", content_preview=v)),
+    ("llm_response error", 80,
+     lambda v: _event(E.LLM_RESPONSE, total_tokens=5, status="failed", error=v)),
+    ("error message", 150, lambda v: _event(E.ERROR, tool_name="plain", code="plain", message=v)),
+    ("error error", 150, lambda v: _event(E.ERROR, tool_name="plain", error=v)),
+    ("decision reason", 120, lambda v: _event(E.DECISION, choice="plain", reason=v)),
+    ("user_prompt prompt", 150, lambda v: _event(E.USER_PROMPT, prompt=v)),
+    ("assistant_response text", 200, lambda v: _event(E.ASSISTANT_RESPONSE, text=v)),
+    ("subagent_stop text", 200,
+     lambda v: _event(E.SUBAGENT_STOP, agent_type="plain", stop_reason="plain", text=v)),
+]
+
 
 class TestTraceTextShowsAsText(unittest.TestCase):
     """A tool output, a command or a tool name in a trace can hold escape
@@ -439,12 +460,16 @@ class TestTraceTextShowsAsText(unittest.TestCase):
         _escapes.check_plain_text_unchanged(self, FORMAT_SUMMARY_CASES, format_summary)
 
     def test_whitespace_in_free_text_shows_as_one_space(self):
+        _escapes.check_whitespace_in_free_text(self, FORMAT_EVENT_CASES, self.render)
         for event in (
             _event(E.TOOL_RESULT, tool_name="plain", result="one\ttwo\r\nthree"),
             _event(E.USER_PROMPT, prompt="one\u3000two\nthree"),
         ):
             with self.subTest(event.event_type.value):
                 self.assertIn("one two three", self.render(event))
+
+    def test_value_as_long_as_the_cut_shows_in_full(self):
+        _escapes.check_each_cut(self, FORMAT_EVENT_CUTS, self.render)
 
     def test_cut_marker_uses_collapsed_length(self):
         value = "a" + " \t" * 150 + "b"
