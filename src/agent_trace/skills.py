@@ -36,7 +36,6 @@ from .event_data import (
     PATH_KEYS as _PATH_KEYS,
     event_arguments,
 )
-from .evidence_health import is_continuation_source
 from .models import EventType, SessionMeta, TraceEvent
 from .review import is_test_argv
 from .shell_split import is_break, split_tokens
@@ -1352,11 +1351,11 @@ def analyze_session(
     if meta_start:
         candidates.append(meta_start)
     start = min(candidates) if candidates else 0.0
-    continuation_starts = [
+    resume_starts = [
         (pos, event.timestamp)
         for pos, (_, event) in enumerate(ordered)
         if event.event_type == EventType.SESSION_START
-        and is_continuation_source(event.data.get("source"))
+        and event.data.get("source") == "resume"
     ]
     first_edit = next((pos for pos, (_, event) in enumerate(ordered) if _is_edit(event)), None)
     linked = _linked_results([event for _, event in ordered])
@@ -1368,7 +1367,7 @@ def analyze_session(
     for name, method, invoked_by, detail, index, event in _find_loads(ordered, catalog, base, basis == "recorded"):
         pos = position[index]
         activation_start = next(
-            (timestamp for start_pos, timestamp in reversed(continuation_starts) if start_pos <= pos),
+            (timestamp for start_pos, timestamp in reversed(resume_starts) if start_pos <= pos),
             start,
         )
         load = SkillLoad(
