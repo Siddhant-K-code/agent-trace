@@ -7,12 +7,14 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from agent_trace import __version__
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.otlp import (
     _SEMCONV_SYSTEM,
     _SEMCONV_TOOL_NAME,
     _SEMCONV_OP,
     session_to_otlp,
+    session_to_otlp_genai,
     tree_to_otlp,
 )
 from agent_trace.store import TraceStore
@@ -119,6 +121,16 @@ class TestSessionToOtlpSemanticConventions(unittest.TestCase):
         spans = _get_spans(payload)
         root = spans[0]
         self.assertNotIn("parentSpanId", root)
+
+    def test_service_version_is_the_agent_trace_version(self):
+        meta = _make_session(self.store)
+        for payload in (
+            session_to_otlp(meta, []),
+            tree_to_otlp(self.store, meta.session_id),
+            session_to_otlp_genai(meta, []),
+        ):
+            resource = payload["resourceSpans"][0]["resource"]["attributes"]
+            self.assertEqual(_attr_value(resource, "service.version"), __version__)
 
 
 if __name__ == "__main__":

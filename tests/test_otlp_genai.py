@@ -42,6 +42,8 @@ def _get_attr(span: dict, key: str):
     for attr in span.get("attributes", []):
         if attr["key"] == key:
             v = attr["value"]
+            if "arrayValue" in v:
+                return [item["stringValue"] for item in v["arrayValue"]["values"]]
             return (
                 v.get("stringValue")
                 or v.get("intValue")
@@ -155,7 +157,21 @@ class TestGenAILLMSpan(unittest.TestCase):
         events = self._make_llm_pair()
         payload = session_to_otlp_genai(meta, events)
         llm_span = _get_spans(payload)[1]
-        self.assertEqual(_get_attr(llm_span, "gen_ai.response.finish_reasons"), "end_turn")
+        self.assertEqual(_get_attr(llm_span, "gen_ai.response.finish_reasons"), ["end_turn"])
+
+    def test_finish_reasons_is_a_string_array_in_recorded_order(self):
+        req, resp = self._make_llm_pair()
+        resp.data["stop_reason"] = ["stop", "length", 3]
+        llm_span = _get_spans(session_to_otlp_genai(_make_meta(), [req, resp]))[1]
+        (attr,) = [
+            a for a in llm_span["attributes"] if a["key"] == "gen_ai.response.finish_reasons"
+        ]
+        self.assertEqual(attr["value"], {"arrayValue": {"values": [
+            {"stringValue": "stop"}, {"stringValue": "length"}, {"stringValue": "3"},
+        ]}})
+        self.assertEqual(
+            _get_attr(llm_span, "agent.strace.finish_reason"), '["stop", "length", 3]'
+        )
 
     def test_llm_span_parented_to_root(self):
         meta = _make_meta()
@@ -225,6 +241,65 @@ class TestGenAIProviderName(unittest.TestCase):
                 self.assertEqual(_get_attr(span, "gen_ai.provider.name"), "gcp.gen_ai")
                 self.assertEqual(_get_attr(span, "gen_ai.system"), "gcp.gen_ai")
         self.assertEqual(_get_attr(spans[1], "llm.provider"), "gcp.gen_ai")
+
+
+class TestGenAIAgentProductProvider(unittest.TestCase):
+    """A multi-model agent product names no provider; the model decides."""
+
+    def _llm_span(self, meta: SessionMeta, **data) -> dict:
+        resp = TraceEvent(event_type=EventType.LLM_RESPONSE, data=data)
+        return _get_spans(session_to_otlp_genai(meta, [resp]))[1]
+
+    def _provider(self, span: dict) -> tuple:
+        return tuple(
+            _get_attr(span, key)
+            for key in (
+                "gen_ai.provider.name", "gen_ai.system", "llm.provider",
+                "agent.strace.provider",
+            )
+        )
+
+    def test_product_provider_uses_the_model(self):
+        cases = [
+            ("openai-codex", "codex", "gpt-5.3-codex", ("openai", "openai", "openai", "codex")),
+            ("github-copilot", "copilot", "claude-sonnet-4.5",
+             ("anthropic", "anthropic", "anthropic", "copilot")),
+            ("github-copilot", "copilot", "gpt-5", ("openai", "openai", "openai", "copilot")),
+            ("cursor-agent", "cursor", "gemini-2.5-pro",
+             ("gcp.gen_ai", "gcp.gen_ai", "gcp.gen_ai", "cursor")),
+        ]
+        for agent, provider, model, expected in cases:
+            with self.subTest(provider=provider, model=model):
+                span = self._llm_span(_make_meta(agent), provider=provider, model=model)
+                self.assertEqual(self._provider(span), expected)
+
+    def test_product_provider_without_a_known_model_is_unknown(self):
+        for provider, model in (("codex", "synthetic-model"), ("codex", ""), ("copilot", "")):
+            with self.subTest(provider=provider, model=model):
+                span = self._llm_span(_make_meta(), provider=provider, model=model)
+                self.assertEqual(
+                    self._provider(span), ("unknown", "unknown", provider, provider)
+                )
+
+    def test_recorded_model_provider_still_wins(self):
+        span = self._llm_span(_make_meta("openai-codex"), provider="azure", model="gpt-4o")
+        self.assertEqual(_get_attr(span, "gen_ai.provider.name"), "azure.ai.openai")
+
+    def test_product_root_is_unknown(self):
+        hook = {"agent_provider": "codex"}
+        for agent, attribution in (
+            ("openai-codex", {}), ("openai-codex", hook), ("github-copilot", {}),
+            ("github-copilot", {"agent_provider": "copilot"}), ("cursor-agent", {}),
+        ):
+            with self.subTest(agent=agent, attribution=attribution):
+                meta = _make_meta(agent)
+                meta.attribution = attribution
+                root = _get_spans(session_to_otlp_genai(meta, []))[0]
+                self.assertEqual(_get_attr(root, "gen_ai.provider.name"), "unknown")
+        claude = _make_meta("claude-code")
+        claude.attribution = {"agent_provider": "claude-code"}
+        root = _get_spans(session_to_otlp_genai(claude, []))[0]
+        self.assertEqual(_get_attr(root, "gen_ai.provider.name"), "anthropic")
 
 
 class TestGenAILLMPairingFallback(unittest.TestCase):
@@ -754,7 +829,7 @@ class TestGenAIFailedModelRequests(unittest.TestCase):
         span = self._span(status="failed", error="synthetic failure", token_usage=None)
         self.assertEqual(span["status"], {"code": 2, "message": "synthetic failure"})
         self.assertEqual(_get_attr(span, "error.type"), "_OTHER")
-        self.assertEqual(_get_attr(span, "gen_ai.response.finish_reasons"), "error")
+        self.assertEqual(_get_attr(span, "gen_ai.response.finish_reasons"), ["error"])
         self.assertIsNone(_get_attr(span, "agent.strace.finish_reason"))
         self.assertNotIn("events", span)
 
@@ -762,13 +837,13 @@ class TestGenAIFailedModelRequests(unittest.TestCase):
         span = self._span(status="failed", token_usage=None)
         self.assertEqual(span["status"], {"code": 2})
         self.assertEqual(_get_attr(span, "error.type"), "_OTHER")
-        self.assertEqual(_get_attr(span, "gen_ai.response.finish_reasons"), "error")
+        self.assertEqual(_get_attr(span, "gen_ai.response.finish_reasons"), ["error"])
 
     def test_cancelled(self):
         span = self._span(status="cancelled", token_usage=None)
         self.assertEqual(span["status"], {"code": 2})
         self.assertEqual(_get_attr(span, "error.type"), "cancelled")
-        self.assertEqual(_get_attr(span, "gen_ai.response.finish_reasons"), "error")
+        self.assertEqual(_get_attr(span, "gen_ai.response.finish_reasons"), ["error"])
 
     def test_status_is_case_insensitive_and_accepts_canceled(self):
         self.assertEqual(_get_attr(self._span(status="Canceled"), "error.type"), "cancelled")
@@ -797,7 +872,7 @@ class TestGenAIFailedModelRequests(unittest.TestCase):
 
     def test_recorded_finish_reason_is_kept(self):
         span = self._span(status="failed", finish_reason="length")
-        self.assertEqual(_get_attr(span, "gen_ai.response.finish_reasons"), "length")
+        self.assertEqual(_get_attr(span, "gen_ai.response.finish_reasons"), ["length"])
         self.assertEqual(_get_attr(span, "agent.strace.finish_reason"), "length")
         self.assertEqual(span["status"]["code"], 2)
 
@@ -853,7 +928,7 @@ class TestGenAIFailedModelRequests(unittest.TestCase):
         self.assertEqual(span["status"], {"code": 2, "message": "Rate limit reached"})
         self.assertEqual(_get_attr(span, "error.type"), "RateLimitError")
         self.assertEqual(_get_attr(span, "gen_ai.request.model"), "gpt-4o")
-        self.assertEqual(_get_attr(span, "gen_ai.response.finish_reasons"), "error")
+        self.assertEqual(_get_attr(span, "gen_ai.response.finish_reasons"), ["error"])
         (exc,) = span["events"]
         exc_attrs = {a["key"]: a["value"] for a in exc["attributes"]}
         self.assertEqual(exc["name"], "exception")

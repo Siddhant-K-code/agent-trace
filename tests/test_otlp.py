@@ -353,7 +353,8 @@ class TestFailedLLMResponse(unittest.TestCase):
         })
         self.assertEqual(attrs["error.type"], {"stringValue": "_OTHER"})
         self.assertEqual(attrs["error.message"], {"stringValue": "synthetic failure"})
-        self.assertEqual(attrs["gen_ai.response.finish_reasons"], {"stringValue": "error"})
+        self.assertEqual(attrs["gen_ai.response.finish_reasons"],
+                         {"arrayValue": {"values": [{"stringValue": "error"}]}})
 
     def test_failed_without_error_text(self):
         (attrs,) = self._response_attrs({"model": "gpt-5-codex", "status": "failed"})
@@ -363,7 +364,8 @@ class TestFailedLLMResponse(unittest.TestCase):
     def test_cancelled(self):
         (attrs,) = self._response_attrs({"model": "gpt-5-codex", "status": "cancelled"})
         self.assertEqual(attrs["error.type"], {"stringValue": "cancelled"})
-        self.assertEqual(attrs["gen_ai.response.finish_reasons"], {"stringValue": "error"})
+        self.assertEqual(attrs["gen_ai.response.finish_reasons"],
+                         {"arrayValue": {"values": [{"stringValue": "error"}]}})
         self.assertNotIn("error.message", attrs)
 
     def test_completed_is_unchanged(self):

@@ -17,6 +17,12 @@ token usage charts, or anomaly detection.
 
 ## Decision
 
+> **Amended 2026-11.** The span names, `gen_ai.agent.id`, `gen_ai.system`,
+> the scope version, the type of `gen_ai.response.finish_reasons` and the
+> resource `service.version` below have changed. The text below records the
+> original decision. See [Amendment (2026-11)](#amendment-2026-11) for the
+> current behavior.
+
 Add a `--format otlp-genai` flag to `agent-strace export` that applies the
 OTel GenAI semantic conventions mapping. The existing `--format otlp` output
 is unchanged for backwards compatibility.
@@ -110,3 +116,68 @@ CLI uses `gen_ai.agent.id` for the agent definition (for example
 - No new runtime dependencies — the mapping is pure Python stdlib.
 - The `gen_ai.system` attribute is derived heuristically from the model name;
   this may be incorrect for custom or fine-tuned models.
+
+## Amendment (2026-11)
+
+The original mapping followed the GenAI conventions as they stood in
+semantic conventions v1.27. The conventions have since moved to
+`open-telemetry/semantic-conventions-genai` and renamed the span names and
+several attributes, so the `otlp-genai` spans no longer matched what
+backends that follow the conventions expect. Two changes align the export
+with that repository at
+commit `e6658f1` (2026-11-06). The repository publishes no release or schema
+URL yet, so the payload sets no `schemaUrl` and the commit is the reference.
+
+### Span names and attributes (#450, merged as `db9f363`)
+
+| Original decision | Now | Spec at `e6658f1` |
+|---|---|---|
+| Root span `gen_ai.agent.session`, `gen_ai.operation.name` `agent.session` | `invoke_agent {gen_ai.agent.name}`, or `invoke_agent` without an agent name; kind `INTERNAL`; operation `invoke_agent` | `docs/gen-ai/gen-ai-agent-spans.md` (invoke agent internal span) |
+| Model request span `gen_ai.client.operation` | `chat {gen_ai.request.model}`, or `chat` without a model; kind `CLIENT`; operation `chat` | `docs/gen-ai/client-inference.md` |
+| Tool span `gen_ai.tool.call/<name>`, operation `execute`, kind `CLIENT` | `execute_tool {gen_ai.tool.name}`; kind `INTERNAL`; operation `execute_tool` | `docs/gen-ai/execute-tool.md` |
+| `gen_ai.agent.id` carries the local session ID | not emitted. The registry defines it as "the unique and stable identifier of the GenAI hosted agent resource", which a session ID is not. The session ID stays on `session.id` and `agent.session_id`. This replaces the last paragraph of the `gen_ai.conversation.id` section above. | `model/gen-ai/registry.yaml` (`gen_ai.agent.id`) |
+| `gen_ai.agent.name` `agent` when the session has no agent name | not emitted | |
+| `gen_ai.system`, with `google` for Gemini models | `gen_ai.provider.name` with the registry's well-known values (`gcp.gen_ai`, `gcp.vertex_ai` or `gcp.gemini` for Gemini) or `unknown`; `gen_ai.system` stays as a deprecated copy for older backends | `model/gen-ai/registry.yaml` (`gen_ai.provider.name`) |
+| no reasoning token count | `gen_ai.usage.reasoning.output_tokens` when recorded and not zero | `model/gen-ai/registry.yaml` (`gen_ai.usage.reasoning.output_tokens`) |
+| Scope version `genai-semconv-1.27` | the agent-strace version | |
+
+### Follow-ups before v0.115.0
+
+These land in the same release as #450, so `otlp-genai` consumers update
+once.
+
+- **`gen_ai.response.finish_reasons` is a string array.** The registry types
+  it `string[]`, one entry per generation, and the conformance scenario in
+  `reference/scenarios/agent-framework/conformance.yaml` flags a single
+  string as a type mismatch. Both `--format otlp` (on the
+  `gen_ai.assistant.message` event) and `--format otlp-genai` (on the `chat`
+  span) now emit an OTLP `arrayValue` of strings. A recorded list keeps its
+  order, and the recorded value stays on `agent.strace.finish_reason`. Other
+  list attributes are still JSON strings. The OpenInference attributes are
+  unchanged: OpenInference defines `llm.finish_reason` as a single string,
+  and agent-strace does not emit it.
+- **`service.version` is the agent-strace version.** It was the literal
+  `agent-trace`, which is the service name, not a version. This applies to
+  `--format otlp`, `otlp-genai` and the `tree_to_otlp` library function.
+- **An agent product is not a provider.** Codex, GitHub Copilot and Cursor
+  can run models from more than one provider, and the Codex hook records
+  `codex` as the provider of each model request, so `gen_ai.provider.name`
+  was `unknown` on every `chat` span the Codex hook recorded. The product names (`codex`,
+  `openai-codex`, `copilot`, `github-copilot`, `cursor`, `cursor-agent`) no
+  longer decide the provider: the model does, as it already did for an
+  unrecognized provider, and a model that names no provider gives `unknown`.
+  The raw value stays on `agent.strace.provider`.
+
+### Consequences of the amendment
+
+- Dashboards, alerts and queries on the original `otlp-genai` span names,
+  `gen_ai.agent.id`, `gen_ai.system` values or a string
+  `gen_ai.response.finish_reasons` need updating. `docs/production.md` lists
+  each rename.
+- `--format otlp` keeps its span and attribute names, but it is no longer
+  byte-for-byte unchanged: its `gen_ai.response.finish_reasons` type and its
+  `service.version` value change as above.
+- `gen_ai.provider.name` is still derived heuristically from the recorded
+  provider and model name, as the original consequences note.
+- When `semantic-conventions-genai` publishes a release, the export should set
+  its `schemaUrl` and this ADR should name the release instead of a commit.

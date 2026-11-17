@@ -35,6 +35,8 @@ def _spans(payload: dict) -> list[dict]:
 
 
 def _value(value: dict):
+    if "arrayValue" in value:
+        return [_value(item) for item in value["arrayValue"]["values"]]
     for key in ("stringValue", "intValue", "doubleValue", "boolValue"):
         if key in value:
             return value[key]
@@ -49,13 +51,17 @@ def _attributes(item: dict) -> dict[str, object]:
 
 
 def _load_otlp_fixture() -> dict:
-    """The checked-in payload, with the scope version of this build.
+    """The checked-in payload, with the version of this build.
 
-    The scope version is the agent-trace version, so the fixture is not
-    regenerated for each release.
+    The scope version and the service.version resource attribute are the
+    agent-trace version, so the fixture is not regenerated for each release.
     """
     payload = json.loads(OTLP_FIXTURE.read_text(encoding="utf-8"))
-    payload["resourceSpans"][0]["scopeSpans"][0]["scope"]["version"] = __version__
+    resource_spans = payload["resourceSpans"][0]
+    resource_spans["scopeSpans"][0]["scope"]["version"] = __version__
+    for attribute in resource_spans["resource"]["attributes"]:
+        if attribute["key"] == "service.version":
+            attribute["value"] = {"stringValue": __version__}
     return payload
 
 
@@ -96,6 +102,8 @@ class TestOTLPGenAIConformanceFixture(unittest.TestCase):
         tool_attrs = _attributes(tool)
 
         self.assertEqual(scope, {"name": "agent-trace", "version": __version__})
+        resource = _attributes(self.payload["resourceSpans"][0]["resource"])
+        self.assertEqual(resource["service.version"], __version__)
         self.assertEqual(root["name"], f"invoke_agent {self.meta.agent_name}")
         self.assertEqual(root_attrs["gen_ai.operation.name"], "invoke_agent")
         self.assertEqual(root_attrs["gen_ai.agent.name"], self.meta.agent_name)
@@ -107,7 +115,7 @@ class TestOTLPGenAIConformanceFixture(unittest.TestCase):
         self.assertEqual(llm_attrs["gen_ai.request.model"], "claude-3-5-sonnet")
         self.assertEqual(llm_attrs["gen_ai.usage.input_tokens"], "12")
         self.assertEqual(llm_attrs["gen_ai.usage.output_tokens"], "8")
-        self.assertEqual(llm_attrs["gen_ai.response.finish_reasons"], "end_turn")
+        self.assertEqual(llm_attrs["gen_ai.response.finish_reasons"], ["end_turn"])
         self.assertEqual(tool_attrs["gen_ai.tool.name"], "Read")
         self.assertEqual(tool_attrs["gen_ai.tool.call.id"], "tool-read-call")
         self.assertEqual(tool["name"], "execute_tool Read")
