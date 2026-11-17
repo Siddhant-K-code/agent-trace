@@ -870,8 +870,10 @@ class TestCommand(unittest.TestCase):
             api_url="https://api.github.com",
         )
         stderr = io.StringIO()
+        # Patch OpenerDirector.open, not urlopen, so a request through any
+        # opener fails here and none reaches api.github.com.
         with patch.dict(os.environ, {"GITHUB_TOKEN": "token"}, clear=True), patch(
-            "urllib.request.urlopen", side_effect=error
+            "urllib.request.OpenerDirector.open", side_effect=error
         ), patch("sys.stderr", stderr):
             result = cmd_pr_comment(args)
 

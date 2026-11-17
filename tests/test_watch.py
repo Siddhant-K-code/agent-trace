@@ -1433,6 +1433,8 @@ _NOTIFY_ENV = ("AGENT_STRACE_SLACK_WEBHOOK", "AGENT_STRACE_TEAMS_WEBHOOK")
 # Shown raw, this reason phrase sets the window title and clears the screen.
 _REASON = "Oops \x1b]0;PWNED\x07\x1b[2J\x9b31m end"
 _REASON_SHOWN = "Oops \\x1b]0;PWNED\\x07\\x1b[2J\\x9b31m end"
+# The agent writes the command, so an alert can quote escape codes and line breaks.
+_RAW_ALERT = "RetryWatcher: command ran 6 times: ls \x1b[2K\n2026-01-01T00:00:00Z  FORGED"
 
 
 def _closed_port() -> int:
@@ -1628,6 +1630,21 @@ class TestAlertWebhookFailures(_AlertServerTestCase):
                     self.assertEqual(self.server.methods(), [])
 
 
+class TestWebhookPayload(_AlertServerTestCase):
+    """The --webhook payload is JSON, which escapes the agent's text, so it
+    keeps the text raw."""
+
+    def test_payload_keeps_the_raw_text(self):
+        # Guard: unchanged from main.
+        err = io.StringIO()
+        with redirect_stderr(err):
+            _alert_webhook(_RAW_ALERT, self.url)
+        self.assertEqual(err.getvalue(), "")
+        [(method, _, body)] = self.server.requests
+        self.assertEqual(method, "POST")
+        self.assertEqual(json.loads(body), {"text": _RAW_ALERT, "source": "agent-strace"})
+
+
 class TestAlertLogFailures(unittest.TestCase):
     """An alert log that cannot be written prints one line and never raises,
     so the alert goes on to its pause or kill."""
@@ -1787,6 +1804,18 @@ class TestNetworkAlertsRunLast(unittest.TestCase):
             ("webhook", self._MSG),
             ("webhook", f"[slack:#ops] {self._MSG}"),
         ])
+
+    def test_legacy_slack_hint_posts_the_raw_text(self):
+        # Guard: unchanged from main. Both POSTs are JSON, which escapes the
+        # agent's text.
+        del os.environ["AGENT_STRACE_SLACK_WEBHOOK"]
+        _dispatch_alert(
+            _RAW_ALERT, WatcherConfig(webhook_url=self._URL), WatchState(), notify="slack:#ops",
+        )
+        self.assertEqual(
+            [entry[1] for entry in self.calls if entry[0] == "webhook"],
+            [_RAW_ALERT, f"[slack:#ops] {_RAW_ALERT}"],
+        )
 
     def test_require_approval_sends_nothing_over_the_network(self):
         # Guard: unchanged from main.
