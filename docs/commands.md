@@ -44,11 +44,13 @@ Capture an MCP stdio server session. Wraps `<command>` as a transparent proxy.
 ### `record-http`
 ```
 agent-strace record-http --url URL [--port N] [--name NAME] [--parent SESSION]
-                         [--ca-file FILE] [--no-redact]
+                         [--ca-file FILE] [--allow-host NAME] [--no-redact]
 ```
 Capture an MCP HTTP/SSE server session. Listens on `--port` (default: 5100) and proxies to `--url`. Requests are handled concurrently, so an open `GET /sse` stream does not block `POST /message`. On Ctrl-C the proxy closes open streams, including TLS handshakes still in progress, waits up to 5 seconds for in-flight requests, then records the session end.
 
 For an `https://` URL the proxy verifies the server certificate and host name with the system CA store, sends the URL host as SNI (none for an IP address) and in the `Host` header. To trust a private CA, pass `--ca-file` with its PEM file. The bundle replaces the system CA store, so include any public CAs the upstream also needs. Setting `SSL_CERT_FILE` to the PEM file also works; it replaces OpenSSL's default CA file for the whole process. There is no flag to turn verification off. A TLS failure, such as an untrusted certificate or a host name mismatch, returns 502 to the agent and records an `error` event.
+
+To refuse requests from web pages, the proxy answers 421 to a `Host` that is not `localhost`, an IP address or an `--allow-host` name, and 403 to an `Origin` that is not a page on `localhost`, a loopback address or an `--allow-host` name. It neither traces nor forwards these requests. If a client gets 421 because it connects by another name, such as `host.docker.internal` or a tunnel name, restart `record-http` with `--allow-host NAME` for that name.
 
 | Flag | Default | Description |
 |---|---|---|
@@ -57,6 +59,7 @@ For an `https://` URL the proxy verifies the server certificate and host name wi
 | `--name NAME` | none | Label for the session |
 | `--parent SESSION` | none | Link this session as a child of a parent session |
 | `--ca-file FILE` | system CA store | Trust a custom CA bundle for the HTTPS upstream. Replaces the system CA store. Requires an `https://` URL; a missing or unreadable file, or a file with no certificate, exits with code 2 before a session is created |
+| `--allow-host NAME` | none | Also accept requests whose `Host` is `NAME`, on any port, and requests from pages on `NAME`. Repeatable. For a client that connects by another name, such as `host.docker.internal` or a tunnel. Exact match, no wildcards |
 | `--redact` | on | Strip secrets before writing to disk; kept for compatibility because this is now the default |
 | `--no-redact` | off | Disable automatic secret redaction |
 | `--verbose` | off | Print events to stderr during recording |
