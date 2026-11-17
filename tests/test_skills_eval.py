@@ -13,8 +13,14 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+try:
+    import _no_telemetry  # noqa: F401
+except ImportError:  # pragma: no cover - run as a package module
+    from tests import _no_telemetry  # noqa: F401
+
 from agent_trace.cli import _normalise_eval_argv, _normalise_policy_argv, _normalise_skills_argv, build_parser
 from agent_trace.models import EventType, TraceEvent
+from agent_trace.skills import analyze_session, is_skills_eval_workspace
 from agent_trace.skills_eval import (
     APPROVE_ALL_FLAGS,
     PRESETS,
@@ -648,6 +654,12 @@ class LiveRunTests(_TempDirTest):
         ]
         prompts = [event.data["prompt"] for event in saved_events if event.event_type == EventType.USER_PROMPT]
         self.assertEqual(prompts, [tricky, tricky])
+        # skills --from-* leaves these runs out by the workspace they ran in.
+        for events_file in sorted((saved / "loads").glob("run-*/*/events.ndjson")):
+            events = [TraceEvent.from_json(line) for line in events_file.read_text().splitlines()]
+            run = analyze_session(events, user_dirs=())
+            self.assertEqual(run["workspace_source"], "session_start")
+            self.assertTrue(is_skills_eval_workspace(run["workspace"]), run["workspace"])
         self.assertEqual(json.loads((saved / "fails" / "run-1" / "run.json").read_text())["exit_code"], 3)
 
         code, out, err = _run_cli(["skills", "eval", str(cases), "--from-traces", str(saved), "--format", "json"])

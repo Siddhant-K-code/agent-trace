@@ -16,8 +16,19 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
+try:
+    import _no_telemetry  # noqa: F401
+except ImportError:  # pragma: no cover - run as a package module
+    from tests import _no_telemetry  # noqa: F401
+
 from agent_trace.cli import build_parser
-from agent_trace.skills import cmd_skills, format_session_text, load_codex_history, load_copilot_history
+from agent_trace.skills import (
+    cmd_skills,
+    format_session_text,
+    is_skills_eval_workspace,
+    load_codex_history,
+    load_copilot_history,
+)
 from agent_trace.transcript_import import skill_tokens
 
 PROMPT = "PROMPT_SENTINEL_9f2c"
@@ -163,7 +174,7 @@ class TestCopilot(TranscriptTestBase):
         home = self.tmp / "copilot"
         self._recorded_session(home)
 
-        store, counts = load_copilot_history(str(home), str(self.tmp / "imported"))
+        store, counts, _ = load_copilot_history(str(home), str(self.tmp / "imported"))
 
         self.assertEqual(counts["recorded"], 1)
         events = store.load_events(store.list_sessions()[0].session_id)
@@ -189,6 +200,136 @@ class TestCopilot(TranscriptTestBase):
         self.assertEqual(loaded["deploy-check"]["loads"][0]["method"], "skill_tool")
         self.assertTrue(loaded["deploy-check"]["loads"][0]["load_succeeded"])
         self.assertFalse(loaded["missing-skill"]["loads"][0]["load_succeeded"])
+
+    def _skill_file(self, skill_dir: Path, command: str) -> Path:
+        skill_dir.mkdir(parents=True)
+        path = skill_dir / "SKILL.md"
+        path.write_text(f"# Skill\n\n{BODY}\n\n```bash\n$ {command}\n```\n")
+        return path
+
+    def _listing(self, *skills) -> dict:
+        listing = "".join(f"<skill><name>{name}</name><description>d</description><location>{where}</location>"
+                          "</skill>" for name, where in skills)
+        return {"type": "system.message", "timestamp": _iso(1),
+                "data": {"content": f"{SYSTEM}\n<available_skills>{listing}</available_skills>"}}
+
+    def _start(self, cwd: Path, offset: float = 0) -> dict:
+        return {"type": "session.start", "timestamp": _iso(offset), "data": {"context": {"cwd": str(cwd)}}}
+
+    def _bash(self, call_id: str, offset: float, command: str) -> list:
+        return [
+            {"type": "tool.execution_start", "timestamp": _iso(offset),
+             "data": {"toolCallId": call_id, "toolName": "bash", "arguments": {"command": command}}},
+            {"type": "tool.execution_complete", "timestamp": _iso(offset + 1),
+             "data": {"toolCallId": call_id, "success": True, "shellExecution": {"exitCode": 0}}},
+        ]
+
+    def test_stale_builtin_path_uses_newest_installed_version(self):
+        home = self.tmp / "copilot"
+        pkg = self.tmp / "cache" / "pkg" / "test-platform"
+        self._skill_file(pkg / "1.0.9" / "builtin" / "pr-media", "make media-old")
+        self._skill_file(pkg / "1.0.10" / "builtin" / "pr-media", "make media-new")
+        stale = pkg / "1.0.1" / "builtin" / "pr-media" / "SKILL.md"
+        self._session(home, "eeee5555-0000-4000-8000-000000000005", [
+            self._start(self.repo),
+            self._listing(("pr-media", "builtin")),
+            {"type": "skill.invoked", "timestamp": _iso(2),
+             "data": {"name": "pr-media", "path": str(stale), "source": "builtin", "trigger": "agent-invoked"}},
+            *self._bash("t1", 3, "make media-new"),
+        ])
+
+        code, out, err = self.run_cli("--from-copilot", "--copilot-dir", str(home),
+                                      "--min-sessions", "1", "--format", "json")
+
+        self.assertEqual(code, 0, err)
+        media = self.skill(json.loads(out), "pr-media")
+        self.assertTrue(media["definition_found"])
+        # 1.0.10 sorts after 1.0.9, and only its command was run.
+        self.assertEqual(media["follow_signals"], {"count": 1, "n": 1})
+
+    def test_skill_listed_by_name_finds_definition_in_root_of_other_loads(self):
+        home = self.tmp / "copilot"
+        app = self.tmp / "app" / "app-skills"
+        canvas = self._skill_file(app / "canvas", "make canvas-open")
+        self._skill_file(app / "latex", "make latex-render")
+        self._session(home, "eeee5555-0000-4000-8000-000000000001", [
+            self._start(self.repo),
+            self._listing(("canvas", "custom"), ("latex", "custom")),
+            {"type": "skill.invoked", "timestamp": _iso(2),
+             "data": {"name": "canvas", "path": str(canvas), "source": "custom", "trigger": "agent-invoked"}},
+        ])
+        self._session(home, "eeee5555-0000-4000-8000-000000000002", [
+            self._start(self.repo, 10),
+            self._listing(("latex", "custom")),
+            {"type": "tool.execution_start", "timestamp": _iso(12),
+             "data": {"toolCallId": "t1", "toolName": "skill", "arguments": {"skill": "latex"}}},
+            {"type": "tool.execution_complete", "timestamp": _iso(13), "data": {"toolCallId": "t1", "success": True}},
+            *self._bash("t2", 14, "make latex-render"),
+        ])
+        self._session(home, "eeee5555-0000-4000-8000-000000000003", [self._start(self.repo, 20)])
+
+        code, out, err = self.run_cli("--from-copilot", "--copilot-dir", str(home),
+                                      "--min-sessions", "1", "--format", "json")
+
+        self.assertEqual(code, 0, err)
+        report = json.loads(out)
+        latex = self.skill(report, "latex")
+        self.assertTrue(latex["definition_found"])
+        self.assertEqual(latex["follow_signals"], {"count": 1, "n": 1})
+        # The session that recorded no skill list sees the same directory.
+        self.assertEqual(latex["sessions_available"], 3)
+        self.assertEqual(self.skill(report, "canvas")["sessions_available"], 2)
+
+    def test_sourced_user_messages_are_not_prompts(self):
+        home = self.tmp / "copilot"
+        self._session(home, "eeee5555-0000-4000-8000-000000000004", [
+            self._start(self.repo),
+            self._listing(("deploy-check", "project"), ("release-notes", "personal-copilot")),
+            {"type": "user.message", "timestamp": _iso(2), "data": {
+                "source": "skill-release-notes",
+                "content": f'<skill-context name="release-notes">\nrun $deploy-check {BODY}\n</skill-context>'}},
+            {"type": "user.message", "timestamp": _iso(3), "data": {"source": "system", "content": "/deploy-check"}},
+            {"type": "user.message", "timestamp": _iso(4),
+             "data": {"source": "autopilot", "content": "$deploy-check", "isAutopilotContinuation": True}},
+            {"type": "user.message", "timestamp": _iso(5), "data": {
+                "source": "agent-0f0e0d0c-0000-4000-8000-000000000000", "content": f"/deploy-check {PROMPT}"}},
+            {"type": "user.message", "timestamp": _iso(6), "data": {"content": f"/release-notes {PROMPT}"}},
+        ])
+
+        code, out, err = self.run_cli("--from-copilot", "--copilot-dir", str(home),
+                                      "--min-sessions", "1", "--format", "json")
+
+        self.assertEqual(code, 0, err)
+        report = json.loads(out)
+        self.assertEqual(self.skill(report, "release-notes")["invocations"], {"user": 1, "model": 0})
+        self.assertIn("deploy-check", [item["name"] for item in report["never_loaded"]])
+        self.assert_private(out + err)
+
+    def test_skills_eval_sessions_are_left_out(self):
+        home = self.tmp / "copilot"
+        self._recorded_session(home)
+        workspace = self.tmp / "agent-strace-skills-eval-notes-case-k3x9_q2a" / "workspace"
+        self._session(home, "eeee5555-0000-4000-8000-000000000006", [
+            self._start(workspace, 30),
+            self._listing(("release-notes", "project")),
+            {"type": "skill.invoked", "timestamp": _iso(32),
+             "data": {"name": "release-notes", "path": str(workspace / ".github/skills/release-notes/SKILL.md"),
+                      "source": "project", "trigger": "agent-invoked"}},
+        ])
+
+        code, out, err = self.run_cli("--from-copilot", "--copilot-dir", str(home),
+                                      "--min-sessions", "1", "--format", "json")
+        _, text, _ = self.run_cli("--from-copilot", "--copilot-dir", str(home), "--min-sessions", "1")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("Excluded 1 session(s) that agent-strace skills eval ran in its temporary workspaces.", err)
+        report = json.loads(out)
+        self.assertEqual((report["sessions"], report["sessions_total"]), (1, 2))
+        self.assertEqual(report["sessions_excluded"]["skills_eval"], 1)
+        notes = self.skill(report, "release-notes")
+        self.assertEqual((notes["sessions_available"], notes["invocations"]), (1, {"user": 1, "model": 0}))
+        self.assertIn("Skills across 1 of 2 sessions since ", text)
+        self.assertIn(" (1 from agent-strace skills eval). ", text)
 
     def test_defaults_to_copilot_home(self):
         home = self.tmp / "custom-copilot"
@@ -313,6 +454,24 @@ class TestCodex(TranscriptTestBase):
         self.assertIn("Availability is the skill list this session recorded.", out)
         self.assert_private(out + err)
 
+    def test_skills_eval_sessions_are_left_out(self):
+        home = self.tmp / "codex"
+        self._recorded_rollout(home)
+        workspace = self.tmp / "agent-strace-skills-eval-notes-k3x9_q2a" / "workspace"
+        self._rollout(home, "eval", [
+            self._meta("019a0000-0000-7000-8000-000000000004", 30, cwd=str(workspace)),
+            self._item(31, type="UserMessage", content=[{"type": "text", "text": "use $release-notes"}]),
+        ])
+
+        code, out, err = self.run_cli("--from-codex", "--codex-dir", str(home),
+                                      "--min-sessions", "1", "--format", "json")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("Excluded 1 session(s) that agent-strace skills eval ran", err)
+        report = json.loads(out)
+        self.assertEqual(report["sessions_excluded"]["skills_eval"], 1)
+        self.assertEqual(self.skill(report, "release-notes")["sessions_loaded"], 1)
+
     def test_only_skipped_files_fails_with_counts(self):
         home = self.tmp / "codex"
         self._rollout(home, "not-codex", [{"type": "message"}])
@@ -351,6 +510,17 @@ class TestCli(TranscriptTestBase):
     def test_skill_tokens_keep_only_mentions(self):
         self.assertEqual(skill_tokens(f"/deploy-check {PROMPT} $a-b and $c, cost $5"), "/deploy-check $a-b $c")
         self.assertEqual(skill_tokens(f"{PROMPT} /not-leading"), "")
+
+    def test_skills_eval_workspace_detection(self):
+        for path in ("/t/agent-strace-skills-eval-notes-k3x9_q2a/workspace",
+                     "/t/agent-strace-skills-eval-a.b-abcdefgh/workspace/sub/dir",
+                     "C:\\T\\agent-strace-skills-eval-notes-k3x9_q2a\\workspace"):
+            self.assertTrue(is_skills_eval_workspace(path), path)
+        for path in ("/t/agent-strace-skills-eval-notes-k3x9_q2a/traces",
+                     "/t/agent-strace-skills-eval-notes-k3x9_q2a",
+                     "/t/agent-strace-skills-eval-notes/workspace",
+                     "/t/probe/workspace", ""):
+            self.assertFalse(is_skills_eval_workspace(path), path)
 
 
 if __name__ == "__main__":

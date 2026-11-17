@@ -92,6 +92,12 @@ Each run gets a fresh temporary directory with:
 Runs are sequential. Progress goes to stderr. The directory is deleted after
 the run unless `--keep-workspaces` is set.
 
+The agent also keeps its own log of each run, for example in
+`~/.copilot/session-state`. `agent-strace skills --from-claude`,
+`--from-copilot` and `--from-codex` recognize these runs by their workspace,
+`agent-strace-skills-eval-<case>-<random>/workspace`, and leave them out of the
+report.
+
 ### Agent presets
 
 | Preset | Command |
