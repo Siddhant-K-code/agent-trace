@@ -1283,6 +1283,28 @@ def handle_file_write(input_data: dict, provider: str = "claude") -> None:
     )
 
 
+def _cut_tool_output(tool_output: object, failed: bool) -> str:
+    """Return tool output as a result event stores it.
+
+    A failure keeps the first 500 characters. A result longer than 1000
+    characters keeps the first 1000 and a truncation suffix.
+    """
+    if failed:
+        return str(tool_output)[:500] if tool_output else "tool call failed"
+    output_str = str(tool_output)
+    if len(output_str) > 1000:
+        output_str = output_str[:1000] + "... (truncated)"
+    return output_str
+
+
+def _redact_tool_output(tool_output: object) -> object:
+    """Redact raw tool output, or its text if it nests too deep to walk."""
+    try:
+        return redact_data(tool_output)
+    except RecursionError:
+        return redact_data(str(tool_output))
+
+
 def handle_post_tool(input_data: dict, failed: bool = False, provider: str = "claude") -> None:
     """Handle PostToolUse / PostToolUseFailure hook event."""
     store = _get_store()
@@ -1303,22 +1325,28 @@ def handle_post_tool(input_data: dict, failed: bool = False, provider: str = "cl
                 or (isinstance(exit_code, int) and exit_code != 0)
             )
 
+    output_text = _cut_tool_output(tool_output, failed)
+    # Redact the whole output before the cut: a key cut in half loses its END
+    # line, and str() hides the key names of a dict. Metadata-only mode drops
+    # the content anyway.
+    redacted_before_cut = False
+    if _redaction_mode(store) == REDACTION_ON and not _HOOK_METADATA_ONLY.get():
+        redacted_text = _cut_tool_output(_redact_tool_output(tool_output), failed)
+        if redacted_text != output_text:
+            output_text = redacted_text
+            redacted_before_cut = True
+
     if failed:
         event_type = EventType.ERROR
-        error_msg = str(tool_output)[:500] if tool_output else "tool call failed"
         event_data = {
             "tool_name": tool_name,
-            "error": error_msg,
+            "error": output_text,
         }
     else:
         event_type = EventType.TOOL_RESULT
-        # Truncate large outputs
-        output_str = str(tool_output)
-        if len(output_str) > 1000:
-            output_str = output_str[:1000] + "... (truncated)"
         event_data = {
             "tool_name": tool_name,
-            "result": output_str,
+            "result": output_text,
         }
     for key in ("tool_use_id", "turn_id", "permission_mode"):
         if input_data.get(key) not in (None, ""):
@@ -1350,6 +1378,11 @@ def handle_post_tool(input_data: dict, failed: bool = False, provider: str = "cl
             link_response(event, match_id, hook_call_timestamp(call_info))
 
     _ensure_session_meta(store, session_id, provider, input_data)
+    # Flag the event here. A cut inside a marker leaves no full marker for the
+    # store to find.
+    if redacted_before_cut:
+        event.redacted = True
+        sys.stderr.write("agent-strace: redacted secrets from trace event\n")
     _write_event(store, session_id, event)
 
     # Update meta on errors

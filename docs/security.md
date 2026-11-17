@@ -21,7 +21,7 @@ See [Product telemetry](telemetry.md) for the complete schemas and controls.
 
 ## Secret redaction
 
-Strips API keys, tokens, and credentials before they hit disk. The original data is never stored. Redaction is enabled by default for all trace writes.
+Strips API keys, tokens, and credentials before they hit disk. The original data is never stored. Redaction is enabled by default for all trace writes. A hook redacts a tool's output before it cuts the output to 1000 characters, or to 500 for a failed call.
 
 ```bash
 # Default: redact before writing traces
@@ -37,18 +37,20 @@ Detected patterns:
 
 | Secret type | Pattern |
 |---|---|
-| OpenAI API keys | `sk-*` |
-| GitHub tokens | `ghp_*`, `github_pat_*` |
+| OpenAI API keys | `sk-proj-*`, `sk-svcacct-*`, `sk-admin-*`, `sk-None-*`, and older `sk-*` keys |
+| GitHub tokens | `ghp_*`, `gho_*`, `ghu_*`, `ghs_*`, `ghr_*`, `github_pat_*` |
 | AWS credentials | `AKIA*`, `aws_secret_access_key` |
 | Anthropic API keys | `sk-ant-*` |
 | Slack tokens | `xox*` |
 | JWTs | Three base64 segments separated by `.` |
-| Bearer tokens | `Bearer [A-Za-z0-9+/=]{20,}` |
-| Connection strings | `postgres://`, `mysql://`, `mongodb://` |
+| Bearer tokens | `Bearer\s+[a-zA-Z0-9\-._~+/]+=*` |
+| Connection strings | `postgres://`, `mysql://`, `mongodb://`, `redis://`, `amqp://` |
 | Basic-auth URLs | `https://user:pass@example.com` |
-| Key-named values | Any value under keys: `password`, `secret`, `token`, `api_key`, `authorization` |
+| `key-` values | `key-` followed by 16 or more letters or digits |
+| `token-` values | `token-` followed by 16 or more letters or digits |
+| Key-named values | A string value under one of these keys: `password`, `passwd`, `secret`, `token`, `api_key`, `apikey`, `api-key`, `access_token`, `refresh_token`, `auth_token`, `authorization`, `credential`, `credentials`, `private_key`, `privatekey`, `client_secret`, `connection_string`, `database_url`, `db_url`, `aws_access_key_id`, `aws_secret_access_key`, `aws_session_token`. Key names match case-insensitively, and `-` counts as `_`. Only string values are replaced. That includes strings in a list under the key. |
 | Long lowercase hex strings | Any run of 40 or more characters from `[0-9a-f]`, anywhere in a string. This includes full 40-character git commit SHAs and SHA-256 digests (`sha256:<hex>` keeps the prefix). Uppercase hex is not matched. The only exception is the `policy_sha256` digest of a schema-validated `agent_trace_authorization` v1 record. |
-| Private keys | PEM blocks |
+| Private keys | PEM blocks whose label ends in `PRIVATE KEY`, such as `RSA PRIVATE KEY`, `ENCRYPTED PRIVATE KEY` or `OPENSSH PRIVATE KEY`, and `PGP PRIVATE KEY BLOCK` blocks. A block with no END line before the next BEGIN line, such as a key cut short, is redacted from its BEGIN line to the end of its base64 body. |
 
 Redacted values become typed markers such as `[REDACTED:openai-key]`, `[REDACTED:bearer-token]`, or `[REDACTED:sensitive]`. Events with redaction are marked with `"redacted": true`. See [ADR-0007](../ADRs/0007-heuristic-redaction.md) for design rationale.
 

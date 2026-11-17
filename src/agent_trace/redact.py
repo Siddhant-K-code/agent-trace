@@ -5,11 +5,14 @@ passwords, connection strings) and replaces them with typed redaction
 markers such as [REDACTED:api-key].
 
 Patterns detected:
-  - API keys: sk-*, ghp_*, gho_*, github_pat_*, xoxb-*, xoxp-*,
-    AKIA*, key-*, Bearer *, token-*
-  - Passwords and credentials in sensitive key names
-  - Connection strings: postgres://, mysql://, mongodb://, redis://
-  - Private key blocks, basic-auth URLs, AWS access keys, JWT tokens
+  - API keys: sk-*, sk-proj-*, sk-svcacct-*, sk-admin-*, sk-None-*,
+    sk-ant-*, ghp_*, gho_*, ghu_*, ghs_*, ghr_*, github_pat_*,
+    xox[bpras]-*, AKIA*, key-*, token-*, Bearer *
+  - Values under sensitive key names such as password or api_key
+  - Connection strings: postgres://, mysql://, mongodb://, redis://, amqp://
+  - Private key blocks: any label that ends in PRIVATE KEY, and PGP.
+    A block cut before its END line is redacted up to the end of its body.
+  - Basic-auth URLs, JWTs, and hex strings of 40 or more characters
 
 Works on nested dicts and lists. Redacts values, not keys.
 """
@@ -19,7 +22,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 REDACTED = "[REDACTED]"
 
@@ -52,30 +55,163 @@ SENSITIVE_KEYS = {
 }
 
 
-@dataclass(frozen=True)
-class SecretPattern:
-    kind: str
-    pattern: re.Pattern[str]
-
-
 def redaction_marker(kind: str) -> str:
     """Return a typed redaction marker."""
     return f"[REDACTED:{kind}]"
 
 
-# Regex patterns that match secret-looking values.
+@dataclass(frozen=True)
+class SecretPattern:
+    """A secret regex and how to replace its matches.
+
+    ``literal`` skips the regex when the value lacks that text. ``replace``
+    builds the replacement for one match. It returns the match unchanged
+    when the match holds no secret.
+    """
+
+    kind: str
+    pattern: re.Pattern[str]
+    literal: str = ""
+    replace: Callable[[re.Match[str], str], str] | None = None
+
+    def found_in(self, value: str) -> bool:
+        if self.literal and self.literal not in value:
+            return False
+        if self.replace is None:
+            return self.pattern.search(value) is not None
+        marker = redaction_marker(self.kind)
+        return any(
+            self.replace(match, marker) != match.group(0)
+            for match in self.pattern.finditer(value)
+        )
+
+    def redact(self, value: str) -> str:
+        if self.literal and self.literal not in value:
+            return value
+        marker = redaction_marker(self.kind)
+        replace = self.replace
+        if replace is None:
+            return self.pattern.sub(marker, value)
+        return self.pattern.sub(lambda match: replace(match, marker), value)
+
+
+# A PEM label is words of uppercase letters and digits that end in PRIVATE
+# KEY, or the PGP label. A label never holds "-", so a run of BEGIN lines
+# stays linear. At most 8 words come before PRIVATE KEY, so a long run of
+# words needs no extra memory.
+_PEM_LABEL = r"(?:PGP PRIVATE KEY BLOCK|(?:[A-Z0-9]+ ){0,8}PRIVATE KEY)"
+# Real line breaks, JSON-escaped ones, and ones escaped twice, as repr()
+# prints JSON text.
+_PEM_BREAK = r"(?:\r?\n|\\r\\n|\\n|\\\\r\\\\n|\\\\n)"
+# A header line runs to the next line break. A backslash that does not start
+# an escaped line break is part of the header.
+_PEM_HEADER = (
+    r"(?:Proc-Type|DEK-Info|Version|Comment):"
+    r"[^\r\n]*?(?=[\r\n]|\\(?:n|r\\n|\\n|\\r\\\\n)|\Z)"
+)
+_PEM_BASE64 = r"[A-Za-z0-9+/=]"
+_PEM_GAP = r"(?:" + _PEM_BREAK + r"[ \t]*)"
+_PEM_LINE = r"(?:" + _PEM_HEADER + r"|" + _PEM_BASE64 + r"+)"
+_PEM_FIRST_RUN = re.compile(_PEM_BASE64 + r"*")
+# Up to 64 steps. A step is up to 64 line breaks and then a header or a
+# base64 run, or a space and then a base64 run.
+_PEM_STEPS = re.compile(
+    r"(?:" + _PEM_GAP + r"{1,64}" + _PEM_LINE + r"| " + _PEM_BASE64 + r"+){0,64}"
+)
+_PEM_GAPS = re.compile(_PEM_GAP + r"{1,64}")
+_PEM_LINE_START = re.compile(_PEM_LINE)
+# A BEGIN line, then the text up to the first END line, the next BEGIN line,
+# or the end of the string. The scan moves one character at a time, so it
+# needs no memory per character.
+_PRIVATE_KEY = re.compile(
+    r"(?P<head>-----BEGIN " + _PEM_LABEL + r"-----)"
+    r"(?s:.)*?(?=-----(?:END " + _PEM_LABEL + r"-----|BEGIN )|\Z)"
+    r"(?P<end>-----END " + _PEM_LABEL + r"-----)?"
+)
+
+
+def _pem_body_end(text: str, pos: int, end: int) -> int:
+    """Return where the body of a key cut before its END line ends.
+
+    The body is base64 runs split by line breaks or single spaces, header
+    lines, blank lines and indentation. Each regex call reads a bounded
+    number of lines, so memory stays flat on long input.
+    """
+    pos = _PEM_FIRST_RUN.match(text, pos, end).end()
+    while True:
+        step_end = _PEM_STEPS.match(text, pos, end).end()
+        if step_end > pos:
+            pos = step_end
+            continue
+        # More than 64 line breaks in a row: skip them, then look for a line.
+        gap_end = pos
+        gaps = _PEM_GAPS.match(text, gap_end, end)
+        while gaps is not None:
+            gap_end = gaps.end()
+            gaps = _PEM_GAPS.match(text, gap_end, end)
+        line = _PEM_LINE_START.match(text, gap_end, end) if gap_end > pos else None
+        if line is None:
+            return pos
+        pos = line.end()
+
+
+def _replace_private_key(match: re.Match[str], marker: str) -> str:
+    if match.group("end") is not None:
+        return marker
+    # No END line before the next BEGIN line: redact the key body and keep
+    # the rest.
+    body_end = _pem_body_end(match.string, match.end("head"), match.end())
+    return marker + match.string[body_end : match.end()]
+
+
+# Each match takes the rest of its run, so the scan never starts again
+# inside a run. Only the first eyJ of a run can start a JWT.
+_JWT = re.compile(
+    r"eyJ(?:[a-zA-Z0-9_-]{10,}"
+    r"(\.eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,})?"
+    r"|[a-zA-Z0-9_-]*)"
+)
+
+
+def _replace_jwt(match: re.Match[str], marker: str) -> str:
+    return marker if match.group(1) is not None else match.group(0)
+
+
+# The match starts at the start of the scheme run. The replace function
+# redacts only when a URL scheme can start inside that run: an ASCII letter
+# at a word boundary, or an ASCII letter after "+", "." or "-".
+_BASIC_AUTH = re.compile(
+    r"(?<![a-zA-Z0-9+.-])([a-zA-Z0-9+.-]+)://[^/\s:@]+:[^/\s@]+@"
+)
+_WORD_CHAR = re.compile(r"\w")
+_INNER_SCHEME_START = re.compile(r"[+.-][a-zA-Z]")
+
+
+def _replace_basic_auth(match: re.Match[str], marker: str) -> str:
+    run = match.group(1)
+    start = match.start()
+    at_boundary = start == 0 or not _WORD_CHAR.match(match.string, start - 1)
+    if (run[0].isascii() and run[0].isalpha() and at_boundary) or (
+        _INNER_SCHEME_START.search(run)
+    ):
+        return f"{run}://{marker}@"
+    return match.group(0)
+
+
+# Regex patterns that match secret-looking values. Order matters: each one
+# runs on the output of the one before.
 SECRET_PATTERNS = [
+    SecretPattern("private-key", _PRIVATE_KEY, replace=_replace_private_key),
+    SecretPattern("anthropic-key", re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}")),
+    # The lookbehind sits after "sk-" so the regex keeps its literal prefix.
     SecretPattern(
-        "private-key",
+        "openai-key",
         re.compile(
-            r"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----"
-            r"[\s\S]*?"
-            r"-----END (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----"
+            r"sk-(?<![A-Za-z0-9_-]sk-)(?:proj|svcacct|admin|None)-[A-Za-z0-9_-]{20,}"
         ),
     ),
-    SecretPattern("anthropic-key", re.compile(r"sk-ant-[a-zA-Z0-9\-]{20,}")),
     SecretPattern("openai-key", re.compile(r"sk-[a-zA-Z0-9]{20,}")),
-    SecretPattern("github-token", re.compile(r"gh[ps]_[a-zA-Z0-9]{36,}")),
+    SecretPattern("github-token", re.compile(r"gh[pousr]_[A-Za-z0-9]{36,}")),
     SecretPattern("github-token", re.compile(r"github_pat_[a-zA-Z0-9_]{22,}")),
     SecretPattern("slack-token", re.compile(r"xox[bpras]-[a-zA-Z0-9\-]{10,}")),
     SecretPattern("aws-access-key", re.compile(r"AKIA[0-9A-Z]{16}")),
@@ -85,19 +221,11 @@ SECRET_PATTERNS = [
         re.compile(r"(postgres|mysql|mongodb|redis|amqp)://[^\s]+"),
     ),
     SecretPattern(
-        "basic-auth",
-        re.compile(r"\b([a-zA-Z][a-zA-Z0-9+.-]*://)([^/\s:@]+:[^/\s@]+)@"),
+        "basic-auth", _BASIC_AUTH, literal="://", replace=_replace_basic_auth
     ),
     SecretPattern("api-key", re.compile(r"key-[a-zA-Z0-9]{16,}")),
     SecretPattern("token", re.compile(r"token-[a-zA-Z0-9]{16,}")),
-    SecretPattern(
-        "jwt",
-        re.compile(
-            r"eyJ[a-zA-Z0-9_-]{10,}\."
-            r"eyJ[a-zA-Z0-9_-]{10,}\."
-            r"[a-zA-Z0-9_-]{10,}"
-        ),
-    ),
+    SecretPattern("jwt", _JWT, replace=_replace_jwt),
     SecretPattern("hex-token", re.compile(r"[0-9a-f]{40,}")),
 ]
 
@@ -110,10 +238,7 @@ def _is_sensitive_key(key: str) -> bool:
 
 def _contains_secret(value: str) -> bool:
     """Check if a string value matches any secret pattern."""
-    for secret in SECRET_PATTERNS:
-        if secret.pattern.search(value):
-            return True
-    return False
+    return any(secret.found_in(value) for secret in SECRET_PATTERNS)
 
 
 def redact_value(value: str) -> str:
@@ -123,14 +248,7 @@ def redact_value(value: str) -> str:
     """
     redacted = value
     for secret in SECRET_PATTERNS:
-        marker = redaction_marker(secret.kind)
-        if secret.kind == "basic-auth":
-            redacted = secret.pattern.sub(
-                lambda m: f"{m.group(1)}{marker}@",
-                redacted,
-            )
-        else:
-            redacted = secret.pattern.sub(marker, redacted)
+        redacted = secret.redact(redacted)
     return redacted
 
 

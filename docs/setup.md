@@ -535,6 +535,6 @@ cd your-sensitive-repo
 agent-strace setup
 ```
 
-Secret redaction is enabled by default for all capture paths. It redacts API keys, tokens, credentials, private keys, basic-auth URLs, and connection strings before they hit disk. Detected patterns include OpenAI (`sk-*`), GitHub (`ghp_*`, `github_pat_*`), AWS (`AKIA*` and AWS credential key names), Anthropic (`sk-ant-*`), Slack (`xox*`), JWTs, Bearer tokens, and any value under keys like `password`, `secret`, `token`, `api_key`, or `authorization`.
+Secret redaction is enabled by default for all capture paths. It redacts API keys, tokens, credentials, private keys, basic-auth URLs, and connection strings before they hit disk. Detected patterns include OpenAI (`sk-*`, `sk-proj-*`, `sk-svcacct-*`, `sk-admin-*`, `sk-None-*`), GitHub (`ghp_*`, `gho_*`, `ghu_*`, `ghs_*`, `ghr_*`, `github_pat_*`), AWS (`AKIA*` and AWS credential key names), Anthropic (`sk-ant-*`), Slack (`xox*`), JWTs, Bearer tokens, and any value under keys like `password`, `secret`, `token`, `api_key`, or `authorization`.
 
 See [security.md](security.md) for the full security guide.

@@ -1,16 +1,18 @@
 """Tests for Claude Code hooks integration."""
 
+import base64
 import contextlib
 import io
 import json
 import os
+import random
 import subprocess
 import sys
 import tempfile
 import time
 import traceback
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import patch
@@ -49,6 +51,7 @@ from agent_trace.hooks import (
     hook_main,
 )
 from agent_trace.models import EventType
+from agent_trace.redact import redact_data, redaction_marker
 from agent_trace.store import TraceStore
 
 try:
@@ -886,6 +889,274 @@ class TestHooksMetadataOnly(unittest.TestCase):
         self.assertEqual(sent.data["redaction"], "on")
         self.assertEqual(sent.data["capture"], "metadata-only")
         self.assertEqual(sent.data["cwd"], "[OMITTED]")
+
+
+SUFFIX = "." * 3 + " (truncated)"
+REDACTION_WARNING = "agent-strace: redacted secrets from trace event\n"
+KEY_MARKER = redaction_marker("private-key")
+SENSITIVE = redaction_marker("sensitive")
+GITHUB_TOKEN = "ghp_" + "A1b2" * 9
+
+
+def _fake_key(label="RSA PRIVATE KEY", seed=1, size=1190):
+    """Return a PEM block of random base64. The RSA default is 1675 characters."""
+    text = base64.b64encode(random.Random(seed).randbytes(size)).decode()
+    lines = [text[i : i + 64] for i in range(0, len(text), 64)]
+    return "\n".join([f"-----BEGIN {label}-----", *lines, f"-----END {label}-----", ""])
+
+
+class TestHooksRedactBeforeCut(unittest.TestCase):
+    """PostToolUse redacts the raw tool output, then cuts it to 1000 or 500 characters."""
+
+    KEY = _fake_key()
+    COPILOT_SESSION = "copi0001-0000-4000-8000-000000000001"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmpdir = tmp.name
+        env = patch.dict(os.environ, {"AGENT_TRACE_DIR": self.tmpdir})
+        env.start()
+        self.addCleanup(env.stop)
+        for name in (
+            *_PROVIDER_ENV.values(),
+            "AGENT_TRACE_REDACT",
+            "AGENT_TRACE_NO_REDACT",
+            "AGENT_STRACE_NO_REDACT",
+            "AGENT_STRACE_ENDPOINT",
+        ):
+            os.environ.pop(name, None)
+        handle_session_start({"session_id": "cutredact0000001", "source": "startup"})
+        self.session_id = _read_active_session()
+
+    def last_result(self, session_id):
+        events = TraceStore(self.tmpdir, redact=False).load_events(session_id)
+        return [e for e in events if e.event_type in (EventType.TOOL_RESULT, EventType.ERROR)][-1]
+
+    def post(self, output, failed=False, tool_name="Bash"):
+        err = io.StringIO()
+        with redirect_stderr(err):
+            handle_post_tool({"tool_name": tool_name, "tool_response": output}, failed=failed)
+        return self.last_result(self.session_id), err.getvalue()
+
+    def hook(self, args, payload):
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(sys, "stdin", io.StringIO(json.dumps(payload))), \
+                redirect_stdout(out), redirect_stderr(err):
+            hook_main(args)
+        return err.getvalue()
+
+    def assert_no_key_text(self, text, key=KEY):
+        body = [line for line in key.splitlines() if not line.startswith("-----")]
+        leaked = [
+            line[i : i + 16]
+            for line in body
+            for i in range(len(line) - 15)
+            if line[i : i + 16] in text
+        ]
+        self.assertEqual(leaked, [])
+
+    def assert_redacted_once(self, event, err):
+        self.assertTrue(event.redacted)
+        self.assertEqual(err, REDACTION_WARNING)
+
+    def test_key_in_bash_stdout(self):
+        output = {"stdout": self.KEY, "stderr": "", "interrupted": False, "isImage": False}
+        event, err = self.post(output)
+        self.assertEqual(event.data["result"], str({**output, "stdout": KEY_MARKER + "\n"}))
+        self.assert_redacted_once(event, err)
+
+    def test_key_in_read_file_content(self):
+        key = _fake_key("PRIVATE KEY", seed=3, size=1218)
+        file = {
+            "filePath": "/home/dev/.ssh/service.pem",
+            "content": key,
+            "numLines": 28,
+            "startLine": 1,
+            "totalLines": 28,
+        }
+        event, err = self.post({"type": "text", "file": file}, tool_name="Read")
+        self.assertEqual(
+            event.data["result"],
+            str({"type": "text", "file": {**file, "content": KEY_MARKER + "\n"}}),
+        )
+        self.assert_no_key_text(event.data["result"], key)
+        self.assert_redacted_once(event, err)
+
+    def test_key_in_failed_tool_output(self):
+        event, err = self.post(self.KEY + "\nerror: permission denied", failed=True)
+        self.assertEqual(event.event_type, EventType.ERROR)
+        self.assertEqual(event.data["error"], KEY_MARKER + "\n\nerror: permission denied")
+        self.assert_redacted_once(event, err)
+
+    def test_key_in_copilot_error(self):
+        sid = self.COPILOT_SESSION
+        self.hook(["--provider", "copilot", "sessionStart"], {"sessionId": sid, "source": "startup"})
+        tool = {"sessionId": sid, "toolName": "bash", "toolArgs": {"command": "cat id_rsa"}}
+        cases = (
+            ("message", "postToolUseFailure", {"error": {"message": self.KEY}},
+             KEY_MARKER + "\n"),
+            ("error dict", "postToolUseFailure", {"error": {"code": "EACCES", "detail": self.KEY}},
+             str({"code": "EACCES", "detail": KEY_MARKER + "\n"})),
+            ("failed result", "postToolUse",
+             {"toolResult": {"resultType": "failure", "error": self.KEY}},
+             str({"resultType": "failure", "error": KEY_MARKER + "\n"})),
+        )
+        for label, hook_event, payload, expected in cases:
+            with self.subTest(label):
+                err = self.hook(["--provider", "copilot", hook_event], {**tool, **payload})
+                event = self.last_result(sid[:16])
+                self.assertEqual(event.event_type, EventType.ERROR)
+                self.assertEqual(event.data["error"], expected)
+                self.assert_redacted_once(event, err)
+
+    def test_sensitive_key_names_in_tool_output_dict(self):
+        output = {"password": "hunter2-Rz2ArIYF", "api_key": "plainbLcOBXlE3A2P"}
+        event, err = self.post(output, tool_name="mcp__vault__get_secret")
+        self.assertEqual(event.data["result"], str({"password": SENSITIVE, "api_key": SENSITIVE}))
+        self.assert_redacted_once(event, err)
+
+    def test_first_lines_of_a_key(self):
+        head = "".join(self.KEY.splitlines(keepends=True)[:12])
+        output = {"stdout": head, "stderr": "", "interrupted": False, "isImage": False}
+        event, err = self.post(output)
+        self.assertEqual(event.data["result"], str({**output, "stdout": KEY_MARKER + "\n"}))
+        self.assert_redacted_once(event, err)
+
+    def test_key_in_json_text(self):
+        key = _fake_key("PRIVATE KEY", seed=4, size=1218)
+        account = {
+            "type": "service_account",
+            "project_id": "demo-project",
+            "private_key_id": "5f1c" * 10,
+            "private_key": key,
+            "client_email": "deploy@demo-project.iam.gserviceaccount.com",
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+        text = json.dumps(account, indent=2)
+        event, err = self.post([{"type": "text", "text": text}], tool_name="mcp__gcp__get_key")
+        expected = json.dumps({
+            **account,
+            "private_key_id": redaction_marker("hex-token"),
+            "private_key": KEY_MARKER + "\n",
+        }, indent=2)
+        self.assertEqual(event.data["result"], str([{"type": "text", "text": expected}]))
+        self.assert_no_key_text(event.data["result"], key)
+        self.assert_redacted_once(event, err)
+
+        # A JSON line cut inside the key by the tool itself has no END line.
+        line = json.dumps({"private_key": self.KEY})[:600]
+        event, err = self.post({"stdout": line, "stderr": ""})
+        self.assertEqual(
+            event.data["result"],
+            str({"stdout": '{"private_key": "' + KEY_MARKER, "stderr": ""}),
+        )
+        self.assert_redacted_once(event, err)
+
+    def test_secret_past_the_cut_stores_the_same_event(self):
+        event, err = self.post("x" * 1200 + self.KEY)
+        self.assertEqual(event.data, {"tool_name": "Bash", "result": "x" * 1000 + SUFFIX})
+        self.assertFalse(event.redacted)
+        self.assertEqual(err, "")
+
+    def test_text_after_a_key_fills_the_cut(self):
+        listing = "$ ls\n" + "notes.txt\n" * 100
+        event, err = self.post(self.KEY + listing)
+        self.assertEqual(event.data["result"], (KEY_MARKER + "\n" + listing)[:1000] + SUFFIX)
+        self.assert_redacted_once(event, err)
+
+    def test_cut_inside_a_marker_flags_the_event(self):
+        for failed, kept, field, tail in (
+            (False, 995, "result", "[REDA" + SUFFIX),
+            (True, 495, "error", "[REDA"),
+        ):
+            with self.subTest(failed=failed):
+                event, err = self.post("x" * kept + GITHUB_TOKEN, failed=failed)
+                self.assertEqual(event.data[field], "x" * kept + tail)
+                self.assert_redacted_once(event, err)
+
+    def test_output_without_a_secret_stores_the_same_event(self):
+        for output, failed in (
+            ("ok", False),
+            ("plain build output line\n" * 250, False),
+            ({"stdout": "built 3 targets", "stderr": "", "exit_code": 0}, False),
+            (["README.md", "setup.py"], False),
+            ("compile error on line 4\n" * 40, True),
+            ("", True),
+        ):
+            with self.subTest(output=str(output)[:24], failed=failed):
+                event, err = self.post(output, failed=failed)
+                text = str(output)
+                if failed:
+                    expected = {"tool_name": "Bash", "error": text[:500] if output else "tool call failed"}
+                else:
+                    expected = {"tool_name": "Bash", "result": text[:1000] + SUFFIX if len(text) > 1000 else text}
+                self.assertEqual(event.data, expected)
+                self.assertFalse(event.redacted)
+                self.assertEqual(err, "")
+
+    def test_redaction_off_stores_the_raw_cut(self):
+        with patch.dict(os.environ, {"AGENT_TRACE_NO_REDACT": "1"}):
+            event, err = self.post(self.KEY)
+        self.assertEqual(event.data, {"tool_name": "Bash", "result": self.KEY[:1000] + SUFFIX})
+        self.assertFalse(event.redacted)
+        self.assertEqual(err, "")
+
+    def test_metadata_only_writes_no_warning(self):
+        sid = "metaonlycutkey01"
+        self.hook(["--metadata-only", "session-start"], {"session_id": sid, "source": "startup"})
+        err = self.hook(["--metadata-only", "post-tool"], {
+            "session_id": sid,
+            "tool_name": "Bash",
+            "tool_response": self.KEY,
+        })
+        event = self.last_result(sid)
+        self.assertEqual(event.data["result"], "[OMITTED]")
+        self.assertTrue(event.redacted)
+        self.assertEqual(err, "")
+
+    def test_remote_endpoint_receives_the_redacted_output(self):
+        sid = "remotecutkey0001"
+        with patch.dict(os.environ, {"AGENT_STRACE_ENDPOINT": "https://collector.invalid"}), patch(
+            "agent_trace.server.send_session_meta_to_endpoint", return_value=True
+        ), patch(
+            "agent_trace.server.send_event_to_endpoint", return_value=True
+        ) as send_event:
+            handle_session_start({"session_id": sid, "source": "startup"})
+            err = io.StringIO()
+            with redirect_stderr(err):
+                handle_post_tool({"session_id": sid, "tool_name": "Bash", "tool_response": self.KEY})
+        sent = send_event.call_args.args[0]
+        self.assertEqual(sent.event_type, EventType.TOOL_RESULT)
+        self.assertEqual(sent.data["result"], KEY_MARKER + "\n")
+        self.assert_redacted_once(sent, err.getvalue())
+
+    def test_agent_trace_redact_flags_a_cut_key_once(self):
+        with patch.dict(os.environ, {"AGENT_TRACE_REDACT": "1"}):
+            event, err = self.post(self.KEY)
+        self.assertEqual(event.data["result"], KEY_MARKER + "\n")
+        self.assert_redacted_once(event, err)
+
+    def test_agent_trace_redact_flags_a_token_once(self):
+        with patch.dict(os.environ, {"AGENT_TRACE_REDACT": "1"}):
+            event, err = self.post("token " + GITHUB_TOKEN)
+        self.assertEqual(event.data["result"], "token " + redaction_marker("github-token"))
+        self.assert_redacted_once(event, err)
+
+    def test_output_too_deep_to_walk_is_redacted_as_text(self):
+        def shallow(data, *args, **kwargs):
+            if not isinstance(data, str):
+                raise RecursionError("maximum recursion depth exceeded")
+            return redact_data(data, *args, **kwargs)
+
+        output = {"items": [{"token_value": GITHUB_TOKEN}]}
+        with patch("agent_trace.hooks.redact_data", side_effect=shallow):
+            event, err = self.post(output)
+        self.assertEqual(
+            event.data["result"],
+            str({"items": [{"token_value": redaction_marker("github-token")}]}),
+        )
+        self.assert_redacted_once(event, err)
 
 
 class TestMetadataOnlyData(unittest.TestCase):
