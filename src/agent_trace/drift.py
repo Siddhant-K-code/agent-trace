@@ -23,6 +23,7 @@ from typing import TextIO
 from .cost import session_cost
 from .event_data import str_field
 from .failures import count_session_errors
+from .inert import inert
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -468,6 +469,11 @@ def _fmt_seconds(seconds: float) -> str:
 
 
 def print_fingerprint(fp: BehavioralFingerprint, out: TextIO = sys.stdout) -> None:
+    """Write a fingerprint as a table.
+
+    Tool names come from the trace, so each goes through inert() and an
+    escape code or a line break in it shows as text.
+    """
     w = out.write
     w("\nBehavioral fingerprint\n")
     w(f"ID:       {fp.fingerprint_id or '(none)'}\n")
@@ -482,7 +488,7 @@ def print_fingerprint(fp: BehavioralFingerprint, out: TextIO = sys.stdout) -> No
     w("Tool call profile:\n")
     if fp.tool_mix:
         for tool, frac in sorted(fp.tool_mix.items(), key=lambda item: item[1], reverse=True):
-            w(f"  {tool:<22} {frac:>6.0%}\n")
+            w(f"  {inert(tool):<22} {frac:>6.0%}\n")
     else:
         w("  (no tool calls)\n")
 
@@ -561,14 +567,21 @@ SUGGESTED_NEXT_STEPS = (
 
 
 def print_report(report: DriftReport, out: TextIO = sys.stdout) -> None:
+    """Write the drift report.
+
+    With --compare or --baseline, the periods, session counts and tool names
+    come from a fingerprint file that anyone can write. Each of these values
+    and each dimension goes through inert(), so an escape code or a line
+    break in it shows as text.
+    """
     w = out.write
     w("\nBehavioral drift report\n")
-    w(f"Baseline: {report.baseline_period} ({report.baseline_sessions} sessions)\n")
-    w(f"Current:  {report.current_period} ({report.current_sessions} sessions)\n")
+    w(f"Baseline: {inert(report.baseline_period)} ({inert(report.baseline_sessions)} sessions)\n")
+    w(f"Current:  {inert(report.current_period)} ({inert(report.current_sessions)} sessions)\n")
     if report.baseline_unpriced or report.current_unpriced:
         w(
-            f"Sessions not priced: {report.baseline_unpriced} baseline, "
-            f"{report.current_unpriced} current (left out of cost_usd)\n"
+            f"Sessions not priced: {inert(report.baseline_unpriced)} baseline, "
+            f"{inert(report.current_unpriced)} current (left out of cost_usd)\n"
         )
     w("─" * 70 + "\n")
 
@@ -581,16 +594,16 @@ def print_report(report: DriftReport, out: TextIO = sys.stdout) -> None:
     for d in report.dimensions:
         icon_d = ICON.get(d.label, "")
         score = f"{'n/a':>6}" if d.score is None else f"{d.score:>6.3f}"
-        w(f"  {d.name:<22} {score}  {icon_d}  {d.label}\n")
+        w(f"  {inert(d.name):<22} {score}  {icon_d}  {inert(d.label)}\n")
 
     w("\n")
     high = [d for d in report.dimensions if d.label == "high"]
     if high:
         w("High-drift dimensions:\n\n")
         for d in high:
-            w(f"  {d.name} ({d.score:.2f}):\n")
-            w(f"    Baseline: {d.baseline_summary}\n")
-            w(f"    Current:  {d.current_summary}\n\n")
+            w(f"  {inert(d.name)} ({d.score:.2f}):\n")
+            w(f"    Baseline: {inert(d.baseline_summary)}\n")
+            w(f"    Current:  {inert(d.current_summary)}\n\n")
 
     if report.exceeded:
         w("Suggested next step:\n")
@@ -692,7 +705,8 @@ def cmd_fingerprint(args: argparse.Namespace) -> int:
             first = BehavioralFingerprint.from_json(Path(compare_paths[0]).read_text())
             second = BehavioralFingerprint.from_json(Path(compare_paths[1]).read_text())
         except Exception as exc:
-            sys.stderr.write(f"Could not read fingerprint file: {exc}\n")
+            # Show escapes in the error message as text.
+            sys.stderr.write(f"Could not read fingerprint file: {inert(exc)}\n")
             return 1
         report = compute_drift(first, second, threshold=getattr(args, "threshold", 0.20))
         if fmt == "json":

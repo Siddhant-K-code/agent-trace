@@ -7,13 +7,17 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from functools import partial
 from unittest.mock import patch
 
 from agent_trace.cli import build_parser
 from agent_trace.drift import (
     BehavioralFingerprint,
+    DimensionDrift,
     DistStats,
+    DriftReport,
     SessionMetrics,
+    cmd_drift,
     cmd_fingerprint,
     _dist_stats,
     _js_divergence,
@@ -31,6 +35,11 @@ try:
     from test_dashboard import _codex_session
 except ImportError:  # pragma: no cover - package-style test discovery
     from tests.test_dashboard import _codex_session
+
+try:
+    import _escapes
+except ImportError:
+    from tests import _escapes
 
 
 # ---------------------------------------------------------------------------
@@ -545,6 +554,188 @@ class TestFingerprintUnpricedSessions(unittest.TestCase):
         with patch("agent_trace.drift.session_cost", side_effect=TypeError("bug")):
             with self.assertRaises(TypeError):
                 compute_fingerprint(self.store, [sid], "fp")
+
+
+def _drift_report(baseline_period="2026-01-01 to 2026-01-07",
+                  current_period="2026-01-08 to 2026-01-14",
+                  baseline_sessions=3, current_sessions=3,
+                  baseline_unpriced=0, current_unpriced=0,
+                  name="tool_mix", label="stable",
+                  baseline_summary="Read=100%", current_summary="Bash=100%"):
+    dimension = DimensionDrift(name, 0.1, label, baseline_summary, current_summary)
+    return DriftReport(0.1, 0.2, baseline_sessions, current_sessions, baseline_period,
+                       current_period, [dimension], baseline_unpriced, current_unpriced)
+
+
+def _render_fingerprint(fp):
+    out = io.StringIO()
+    print_fingerprint(fp, out)
+    return out.getvalue()
+
+
+def _render_drift(report):
+    out = io.StringIO()
+    print_report(report, out)
+    return out.getvalue()
+
+
+# (label, kind, build): build(value) returns a fingerprint or a report with
+# value in the place the label names. The kinds are in tests/_escapes.py. A
+# fingerprint file can hold a string where a count belongs.
+FINGERPRINT_CASES = [
+    ("tool name", "text", lambda v: BehavioralFingerprint(sessions=1, tool_mix={v: 1.0})),
+]
+
+DRIFT_REPORT_CASES = [
+    ("baseline period", "text", lambda v: _drift_report(baseline_period=v)),
+    ("current period", "text", lambda v: _drift_report(current_period=v)),
+    ("baseline sessions", "text", lambda v: _drift_report(baseline_sessions=v)),
+    ("current sessions", "text", lambda v: _drift_report(current_sessions=v)),
+    ("baseline sessions not priced", "text", lambda v: _drift_report(baseline_unpriced=v)),
+    ("current sessions not priced", "text", lambda v: _drift_report(current_unpriced=v)),
+    ("dimension name", "text", lambda v: _drift_report(name=v)),
+    ("high dimension name", "text", lambda v: _drift_report(name=v, label="high")),
+    ("dimension label", "text", lambda v: _drift_report(label=v)),
+    ("baseline summary", "text", lambda v: _drift_report(baseline_summary=v, label="high")),
+    ("current summary", "text", lambda v: _drift_report(current_summary=v, label="high")),
+]
+
+
+class TestTraceTextShowsAsText(unittest.TestCase):
+    """A tool name in a trace, or any value in a fingerprint file, can hold
+    escape codes and line breaks. fingerprint and drift show them as text. The
+    JSON and the fingerprint files they write keep the raw text."""
+
+    def setUp(self):
+        store_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(store_dir.cleanup)
+        self.tmp = store_dir.name
+        files_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(files_dir.cleanup)
+        self.files = Path(files_dir.name)
+
+    def test_each_value_shows_escapes_as_text(self):
+        _escapes.check_each_value(self, FINGERPRINT_CASES, _render_fingerprint)
+        _escapes.check_each_value(self, DRIFT_REPORT_CASES, _render_drift)
+
+    def test_plain_text_prints_unchanged(self):
+        _escapes.check_plain_text_unchanged(self, FINGERPRINT_CASES, _render_fingerprint)
+        _escapes.check_plain_text_unchanged(self, DRIFT_REPORT_CASES, _render_drift)
+
+    def test_sgr_code_shows_as_text(self):
+        outputs = (
+            _render_fingerprint(BehavioralFingerprint(sessions=1, tool_mix={"a\x1b[8mhidden": 1.0})),
+            _render_drift(_drift_report(current_period="a\x1b[8mhidden")),
+        )
+        for output in outputs:
+            self.assertIn(r"a\x1b[8mhidden", output)
+            self.assertNotIn("\x1b", output)
+
+    def _crafted(self, name, tool):
+        path = self.files / name
+        path.write_text(json.dumps({
+            "fingerprint_id": _escapes.PAYLOAD,
+            "sessions": _escapes.PAYLOAD,
+            "period": {"start": _escapes.PAYLOAD, "end": _escapes.PAYLOAD},
+            "tool_mix": {tool: 1.0},
+            "unpriced_sessions": _escapes.PAYLOAD,
+        }))
+        return str(path)
+
+    def _run(self, command, args):
+        # The commands call the printers without out, so the printers write to
+        # the sys.stdout that drift.py saw on import. Point them at the buffer.
+        captured = io.StringIO()
+        with patch("sys.stdout", captured), \
+                patch("agent_trace.drift.print_report", partial(print_report, out=captured)), \
+                patch("agent_trace.drift.print_fingerprint", partial(print_fingerprint, out=captured)):
+            command(args)
+        return captured.getvalue()
+
+    def _fingerprint(self, fmt="text", compare=None, output=None):
+        return self._run(cmd_fingerprint, argparse.Namespace(
+            trace_dir=self.tmp, sessions=20, output=output, id="",
+            compare=compare, threshold=0.20, format=fmt))
+
+    def _drift(self, fmt="table", baseline=None, save_baseline=None):
+        return self._run(cmd_drift, argparse.Namespace(
+            trace_dir=self.tmp, threshold=0.20, baseline=baseline, since="30d",
+            current=None, baseline_range=None, save_baseline=save_baseline, format=fmt))
+
+    def _add_sessions(self, tool):
+        store = _make_store(self.tmp)
+        now = time.time()
+        for i in range(2):
+            _add_session(store, f"s{i}", [_tool_call(tool, now - 100 + i)], started_at=now - 100 + i)
+
+    def _compare_files(self):
+        return [self._crafted("a.json", _escapes.PAYLOAD),
+                self._crafted("b.json", _escapes.PAYLOAD + "2")]
+
+    def _assert_printable(self, output):
+        self.assertNotIn("\x1b", output)
+        for line in output.split("\n"):
+            self.assertTrue(line.isprintable(), ascii(line))
+
+    def test_compare_shows_fingerprint_file_text_as_text(self):
+        output = self._fingerprint(compare=self._compare_files())
+        shown = _escapes.PAYLOAD_TEXT
+        self.assertIn(f"Baseline: {shown} to {shown} ({shown} sessions)", output)
+        self.assertIn(f"Current:  {shown} to {shown} ({shown} sessions)", output)
+        self.assertIn(f"Sessions not priced: {shown} baseline, {shown} current", output)
+        self.assertIn(f"    Baseline: {shown}=100%", output)
+        self.assertIn(f"    Current:  {shown}2=100%", output)
+        self._assert_printable(output)
+
+    def test_drift_shows_baseline_file_text_as_text(self):
+        self._add_sessions("Read")
+        output = self._drift(baseline=self._crafted("baseline.json", _escapes.PAYLOAD))
+        shown = _escapes.PAYLOAD_TEXT
+        self.assertIn(f"Baseline: {shown} to {shown} ({shown} sessions)", output)
+        self.assertIn(f"Sessions not priced: {shown} baseline,", output)
+        self.assertIn(f"    Baseline: {shown}=100%", output)
+        self._assert_printable(output)
+
+    def test_unreadable_file_error_shows_as_text(self):
+        path = self._crafted("a.json", "Read")
+        args = argparse.Namespace(trace_dir=self.tmp, sessions=20, output=None, id="",
+                                  compare=[path, path], threshold=0.20, format="text")
+        err = io.StringIO()
+        with patch("agent_trace.drift.BehavioralFingerprint.from_json",
+                   side_effect=ValueError(_escapes.PAYLOAD)):
+            with patch("sys.stderr", err):
+                self.assertEqual(cmd_fingerprint(args), 1)
+        self.assertIn(_escapes.PAYLOAD_TEXT, err.getvalue())
+        self._assert_printable(err.getvalue())
+
+    def test_tool_name_in_trace_shows_as_text(self):
+        self._add_sessions(_escapes.PAYLOAD)
+        output = self._fingerprint()
+        self.assertIn(f"  {_escapes.PAYLOAD_TEXT} ", output)
+        self._assert_printable(output)
+
+    def test_json_and_files_keep_the_raw_text(self):
+        self._add_sessions(_escapes.PAYLOAD)
+        data = json.loads(self._fingerprint(fmt="json"))
+        self.assertEqual(list(data["tool_mix"]), [_escapes.PAYLOAD])
+
+        saved = self.files / "fp.json"
+        self._fingerprint(output=str(saved))
+        self.assertEqual(list(json.loads(saved.read_text())["tool_mix"]), [_escapes.PAYLOAD])
+
+        baseline = self.files / "baseline.json"
+        self._drift(save_baseline=str(baseline))
+        self.assertEqual(list(json.loads(baseline.read_text())["tool_mix"]), [_escapes.PAYLOAD])
+
+        data = json.loads(self._fingerprint(fmt="json", compare=self._compare_files()))
+        self.assertEqual(data["baseline_sessions"], _escapes.PAYLOAD)
+        self.assertEqual(data["current_unpriced_sessions"], _escapes.PAYLOAD)
+        self.assertEqual(data["dimensions"][0]["first"], _escapes.PAYLOAD + "=100%")
+        self.assertEqual(data["dimensions"][0]["second"], _escapes.PAYLOAD + "2=100%")
+
+        data = json.loads(self._drift(fmt="json", baseline=self._crafted("b.json", "Read")))
+        self.assertEqual(data["baseline_sessions"], _escapes.PAYLOAD)
+        self.assertEqual(data["baseline_unpriced_sessions"], _escapes.PAYLOAD)
 
 
 if __name__ == "__main__":

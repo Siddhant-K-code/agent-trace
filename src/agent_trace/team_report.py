@@ -23,6 +23,7 @@ from typing import TextIO
 from .budget_report import _parse_date
 from .cost import session_cost
 from .event_data import require_object_event_data
+from .inert import inert
 from .models import EventType, SessionMeta, TraceEvent
 from .store import TraceStore
 
@@ -353,6 +354,12 @@ def _fmt_count(value: float) -> str:
 
 
 def format_team_report_text(report: TeamReport, out: TextIO = sys.stdout) -> None:
+    """Write the cost report grouped by author, branch or pull request.
+
+    Groups, branches and authors come from the session meta and git, so each
+    goes through inert() and an escape code or a line break in it shows as
+    text.
+    """
     w = out.write
     start = _fmt_date(report.window_start)
     end = _fmt_date(report.window_end)
@@ -366,7 +373,7 @@ def format_team_report_text(report: TeamReport, out: TextIO = sys.stdout) -> Non
     w("-" * 72 + "\n")
     for row in report.rows.values():
         w(
-            f"{row['group']:<28}  {_fmt_count(row['sessions']):>8}  "
+            f"{inert(row['group']):<28}  {_fmt_count(row['sessions']):>8}  "
             f"{_fmt_count(row['tool_calls']):>10}  {_fmt_cost(row['cost'], '>7.2f'):>8}  "
             f"{_fmt_cost(row['avg_session'])}\n"
         )
@@ -391,17 +398,17 @@ def format_team_report_text(report: TeamReport, out: TextIO = sys.stdout) -> Non
             w("\nTop cost drivers by branch:\n")
             for branch, stats in sorted(top_branches.items(), key=lambda item: _cost_key(item[1]["cost"]), reverse=True)[:5]:
                 if stats["cost"] is None:
-                    w(f"  {branch:<28}  n/a  {stats['sessions']} sessions\n")
+                    w(f"  {inert(branch):<28}  n/a  {stats['sessions']} sessions\n")
                     continue
                 pct = stats["cost"] / (report.total_cost or 1e-9) * 100
-                w(f"  {branch:<28}  ${stats['cost']:.2f}  ({pct:.0f}%)  {stats['sessions']} sessions\n")
+                w(f"  {inert(branch):<28}  ${stats['cost']:.2f}  ({pct:.0f}%)  {stats['sessions']} sessions\n")
 
     if report.outliers:
         w(f"\nEfficiency outliers (cost > {report.outlier_threshold:g}x average):\n")
         for session in report.outliers[:5]:
             w(
                 f"  {session.session_id[:12]}  ${session.cost:.2f}  "
-                f"{session.author}  {session.branch}  {_fmt_date(session.started_at)}\n"
+                f"{inert(session.author)}  {inert(session.branch)}  {_fmt_date(session.started_at)}\n"
             )
         w("  Run `agent-strace lint <id>` to check for waste patterns.\n")
 

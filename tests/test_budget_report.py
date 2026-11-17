@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import argparse
+import io
 import json
+import shutil
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from agent_trace.budget_report import (
     BudgetReport,
@@ -22,6 +26,11 @@ from agent_trace.budget_report import (
 )
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
+
+try:
+    import _escapes
+except ImportError:
+    from tests import _escapes
 
 
 # ---------------------------------------------------------------------------
@@ -493,6 +502,99 @@ class TestTeamBudgetFilter(unittest.TestCase):
         self.assertIn("Cost by team", output)
         self.assertIn("alpha", output)
         self.assertIn("beta", output)
+
+
+def _spend_report(name="agent", tool="Read", team=""):
+    spend = SessionSpend(session_id="s1", agent_name=name, started_at=0.0, cost=1.0,
+                         tool_breakdown={tool: 1.0}, team=team)
+    return BudgetReport(window_start=0.0, window_end=86400.0, sessions=[spend])
+
+
+def _render_text(report):
+    out = io.StringIO()
+    format_report_text(report, out)
+    return out.getvalue()
+
+
+def _render_markdown(report):
+    out = io.StringIO()
+    format_report_markdown(report, out)
+    return out.getvalue()
+
+
+# (label, kind, build): build(value) returns a report with value in the place
+# the label names. The kinds are in tests/_escapes.py.
+BUDGET_TEXT_CASES = [
+    ("agent name", "text", lambda v: _spend_report(name=v)),
+    ("tool name", "text", lambda v: _spend_report(tool=v)),
+    ("team name", "text", lambda v: _spend_report(team=v)),
+]
+
+BUDGET_MARKDOWN_CASES = [
+    ("agent name", "text", lambda v: _spend_report(name=v)),
+    ("tool name", "text", lambda v: _spend_report(tool=v)),
+]
+
+# (label, cut, build): the report keeps cut characters of the value the label
+# names.
+BUDGET_CUTS = [
+    ("agent name", 30, lambda v: _spend_report(name=v)),
+]
+
+
+class TestTraceTextShowsAsText(unittest.TestCase):
+    """An agent name, a tool name or a team name in a trace can hold escape
+    codes and line breaks. budget-report shows them as text. The JSON keeps the
+    raw text."""
+
+    def test_each_value_shows_escapes_as_text(self):
+        for render, cases in ((_render_text, BUDGET_TEXT_CASES),
+                              (_render_markdown, BUDGET_MARKDOWN_CASES)):
+            with self.subTest(render=render.__name__):
+                _escapes.check_each_value(self, cases, render)
+
+    def test_plain_text_prints_unchanged(self):
+        for render, cases in ((_render_text, BUDGET_TEXT_CASES),
+                              (_render_markdown, BUDGET_MARKDOWN_CASES)):
+            with self.subTest(render=render.__name__):
+                _escapes.check_plain_text_unchanged(self, cases, render)
+
+    def test_value_as_long_as_the_cut_shows_in_full(self):
+        for render in (_render_text, _render_markdown):
+            with self.subTest(render=render.__name__):
+                _escapes.check_each_cut(self, BUDGET_CUTS, render)
+
+    def test_sgr_code_shows_as_text(self):
+        for render in (_render_text, _render_markdown):
+            with self.subTest(render=render.__name__):
+                output = render(_spend_report(name="a\x1b[8mhidden"))
+                self.assertIn(r"a\x1b[8mhidden", output)
+                self.assertNotIn("\x1b", output)
+
+    def _run(self, fmt):
+        store, tmp = _make_store()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        _add_session(store, time.time() - 3600, agent_name=_escapes.PAYLOAD,
+                     tool_calls=[_escapes.PAYLOAD])
+        args = argparse.Namespace(trace_dir=tmp, format=fmt, since=None, until=None,
+                                  endpoint=None)
+        captured = io.StringIO()
+        with patch("sys.stdout", captured):
+            self.assertEqual(cmd_budget_report(args), 0)
+        return captured.getvalue()
+
+    def test_trace_text_shows_as_text_in_text_and_markdown(self):
+        for fmt in ("text", "markdown"):
+            with self.subTest(fmt=fmt):
+                output = self._run(fmt)
+                self.assertGreaterEqual(output.count(_escapes.PAYLOAD_TEXT), 2)
+                for line in output.split("\n"):
+                    self.assertTrue(line.isprintable(), ascii(line))
+
+    def test_json_keeps_the_raw_text(self):
+        data = json.loads(self._run("json"))
+        self.assertEqual(data["top_sessions"][0]["agent_name"], _escapes.PAYLOAD)
+        self.assertIn(_escapes.PAYLOAD, data["tool_totals"])
 
 
 if __name__ == "__main__":

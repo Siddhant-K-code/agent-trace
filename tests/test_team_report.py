@@ -6,6 +6,7 @@ import argparse
 import csv
 import io
 import json
+import shutil
 import tempfile
 import time
 import unittest
@@ -17,12 +18,19 @@ from agent_trace.cost import estimate_cost
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
 from agent_trace.team_report import (
+    SessionAttribution,
+    TeamReport,
     build_team_report,
     cmd_team_report,
     format_team_report_csv,
     format_team_report_json,
     format_team_report_text,
 )
+
+try:
+    import _escapes
+except ImportError:
+    from tests import _escapes
 
 
 try:
@@ -341,6 +349,95 @@ class TestTeamReportUnpricedSessions(unittest.TestCase):
         with patch("agent_trace.team_report.session_cost", side_effect=TypeError("bug")):
             with self.assertRaises(TypeError):
                 self._report()
+
+
+def _team_report(group="alice@example.com", branch="main", author="alice@example.com",
+                 cost=1.0, group_by="author", threshold=10.0):
+    session = SessionAttribution("s1", 0.0, branch, author, cost, 1)
+    row = {
+        "group": group,
+        "sessions": 1.0,
+        "tool_calls": 1.0,
+        "cost": cost,
+        "unpriced_sessions": 1.0 if cost is None else 0.0,
+        "avg_session": cost,
+        "authors": [author],
+        "branches": [branch],
+    }
+    return TeamReport(group_by, 0.0, 86400.0, {group: row}, [session],
+                      outlier_threshold=threshold)
+
+
+def _render_team(report):
+    out = io.StringIO()
+    format_team_report_text(report, out)
+    return out.getvalue()
+
+
+# (label, kind, build): build(value) returns a report with value in the place
+# the label names. The kinds are in tests/_escapes.py. A threshold of 0.5 makes
+# the only session an outlier.
+TEAM_TEXT_CASES = [
+    ("group", "text", lambda v: _team_report(group=v)),
+    ("top branch", "text", lambda v: _team_report(branch=v)),
+    ("top branch, not priced", "text", lambda v: _team_report(branch=v, cost=None)),
+    ("outlier author", "text", lambda v: _team_report(author=v, threshold=0.5)),
+    ("outlier branch", "text",
+     lambda v: _team_report(branch=v, group="main", group_by="branch", threshold=0.5)),
+]
+
+
+class TestTraceTextShowsAsText(unittest.TestCase):
+    """An author or a branch in the session meta or in git can hold escape
+    codes and line breaks. team-report shows them as text. The JSON and the CSV
+    keep the raw text."""
+
+    def test_each_value_shows_escapes_as_text(self):
+        _escapes.check_each_value(self, TEAM_TEXT_CASES, _render_team)
+
+    def test_plain_text_prints_unchanged(self):
+        _escapes.check_plain_text_unchanged(self, TEAM_TEXT_CASES, _render_team)
+
+    def test_sgr_code_shows_as_text(self):
+        output = _render_team(_team_report(group="a\x1b[8mhidden"))
+        self.assertIn(r"a\x1b[8mhidden", output)
+        self.assertNotIn("\x1b", output)
+
+    def _run(self, export, by="author"):
+        store, tmp = _make_store()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        _add_session(store, time.time() - 3600, branch=_escapes.PAYLOAD, files=["a.py"])
+        args = argparse.Namespace(trace_dir=tmp, by=by, export=export, since=None,
+                                  until=None, outlier_threshold=0.5)
+        captured = io.StringIO()
+        with patch("agent_trace.team_report._git", _fake_git({"a.py": _escapes.PAYLOAD})):
+            with patch("sys.stdout", captured):
+                self.assertEqual(cmd_team_report(args), 0)
+        return captured.getvalue()
+
+    def test_meta_and_git_text_shows_as_text(self):
+        for by in ("author", "branch", "pr"):
+            with self.subTest(by=by):
+                output = self._run("text", by)
+                self.assertIn(_escapes.PAYLOAD_TEXT, output)
+                self.assertNotIn("\x1b", output)
+                for line in output.split("\n"):
+                    self.assertTrue(line.isprintable(), ascii(line))
+
+    def test_json_keeps_the_raw_text(self):
+        data = json.loads(self._run("json"))
+        row = data["rows"][0]
+        self.assertEqual(row["group"], _escapes.PAYLOAD)
+        self.assertEqual(row["authors"], [_escapes.PAYLOAD])
+        self.assertEqual(row["branches"], [_escapes.PAYLOAD])
+        self.assertEqual(data["outliers"][0]["author"], _escapes.PAYLOAD)
+        self.assertEqual(data["outliers"][0]["branch"], _escapes.PAYLOAD)
+
+    def test_csv_keeps_the_raw_text(self):
+        rows = list(csv.DictReader(io.StringIO(self._run("csv"), newline="")))
+        self.assertEqual(rows[0]["group"], _escapes.PAYLOAD)
+        self.assertEqual(rows[0]["authors"], _escapes.PAYLOAD)
+        self.assertEqual(rows[0]["branches"], _escapes.PAYLOAD)
 
 
 if __name__ == "__main__":

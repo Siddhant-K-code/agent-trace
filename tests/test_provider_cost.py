@@ -5,6 +5,7 @@ import csv
 import datetime
 import io
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -26,6 +27,11 @@ from agent_trace.cost import (
 )
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
+
+try:
+    import _escapes
+except ImportError:
+    from tests import _escapes
 
 
 NOW = datetime.datetime(2026, 8, 16, tzinfo=datetime.timezone.utc).timestamp()
@@ -668,6 +674,76 @@ class TestPricingSnapshotModels(unittest.TestCase):
                 self.assertLessEqual(
                     set(rates), {"input", "output", "cache_read", "cache_write", "cache_write_long"},
                 )
+
+
+def _provider_report(provider="OpenAI", model="gpt-4o"):
+    return ProviderCostReport(
+        records=[ProviderCostRecord(provider, model, "s1", 1000, 100, 1.0)],
+        since="30d",
+        since_timestamp=NOW - 30 * 86400,
+        generated_at=NOW,
+    )
+
+
+def _render_provider(report):
+    output = io.StringIO()
+    format_provider_cost_report(report, output)
+    return output.getvalue()
+
+
+# (label, kind, build): build(value) returns a report with value in the place
+# the label names. The kinds are in tests/_escapes.py.
+PROVIDER_COST_CASES = [
+    ("provider", "text", lambda v: _provider_report(provider=v)),
+    ("model", "text", lambda v: _provider_report(model=v)),
+]
+
+# (label, cut, build): the dashboard keeps cut characters of the value the
+# label names.
+PROVIDER_COST_CUTS = [
+    ("model", 44, lambda v: _provider_report(model=v)),
+]
+
+
+class TestTraceTextShowsAsText(unittest.TestCase):
+    """A model name in a trace can hold escape codes and line breaks. The
+    provider dashboard shows them as text. The CSV keeps the raw text."""
+
+    def test_each_value_shows_escapes_as_text(self):
+        _escapes.check_each_value(self, PROVIDER_COST_CASES, _render_provider)
+
+    def test_plain_text_prints_unchanged(self):
+        _escapes.check_plain_text_unchanged(self, PROVIDER_COST_CASES, _render_provider)
+
+    def test_value_as_long_as_the_cut_shows_in_full(self):
+        _escapes.check_each_cut(self, PROVIDER_COST_CUTS, _render_provider)
+        self.assertNotIn("\u2026", _render_provider(_provider_report(model="x" * 34 + "\x07" * 10)))
+
+    def test_sgr_code_shows_as_text(self):
+        output = _render_provider(_provider_report(model="a\x1b[8mhidden"))
+        self.assertIn(r"a\x1b[8mhidden", output)
+        self.assertNotIn("\x1b", output)
+
+    def test_csv_keeps_the_raw_model_name(self):
+        fixture = ProviderCostStore()
+        self.addCleanup(fixture.close)
+        fixture.add_session(
+            "s1", time.time() - 60, _escapes.PAYLOAD,
+            response_data={"input_tokens": 1000, "output_tokens": 100},
+        )
+        args = argparse.Namespace(
+            trace_dir=fixture.temp_dir.name,
+            session_id=None,
+            breakdown="provider",
+            since="7d",
+            csv=True,
+            live_pricing=False,
+        )
+        stdout = io.StringIO()
+        with patch("sys.stdout", stdout):
+            self.assertEqual(cmd_cost(args), 0)
+        rows = list(csv.DictReader(io.StringIO(stdout.getvalue(), newline="")))
+        self.assertEqual([row["model"] for row in rows], [_escapes.PAYLOAD])
 
 
 if __name__ == "__main__":
