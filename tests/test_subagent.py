@@ -769,5 +769,63 @@ class TestTraceTextShowsAsText(unittest.TestCase):
         self.assertNotIn("\x1b", output)
 
 
+def _stats_text(events):
+    """Return what stats prints for a session of *events*."""
+    meta = SessionMeta(session_id=TREE_SESSION, started_at=0.0)
+    store, tmp = _make_store_with_sessions([(meta, events)])
+    try:
+        args = argparse.Namespace(
+            trace_dir=store.base_dir, session_id=TREE_SESSION, include_subagents=False
+        )
+        with patch("sys.stdout", new_callable=io.StringIO) as out:
+            cmd_stats(args)
+        return out.getvalue()
+    finally:
+        tmp.cleanup()
+
+
+# (label, kind, build): build(value) returns events with value in the place
+# the label names. The kinds are in tests/_escapes.py.
+STATS_CASES = [
+    ("tool_call tool_name", "text", lambda v: [_call(v, {})]),
+    ("subagent agent_type", "text",
+     lambda v: [_call("Bash", {"command": "plain"}, agent_id="plain", agent_type=v)]),
+    ("subagent agent_id", "short", lambda v: [_call("Bash", {"command": "plain"}, agent_id=v)]),
+    ("error message", "free", lambda v: [_ev(E.ERROR, message=v)]),
+    ("llm_response error", "free", lambda v: [_ev(E.LLM_RESPONSE, status="failed", error=v)]),
+]
+
+# (label, cut, build): stats keeps cut characters of the value the label
+# names, the last ones for an agent ID. A failed model request shows after
+# "model request failed: ", in a line cut at 80.
+STATS_CUTS = [
+    ("subagent agent_id", 8, lambda v: [_call("Bash", {"command": "plain"}, agent_id=v)]),
+    ("error message", 80, lambda v: [_ev(E.ERROR, message=v)]),
+    ("llm_response error", 58, lambda v: [_ev(E.LLM_RESPONSE, status="failed", error=v)]),
+]
+
+
+class TestStatsTraceTextShowsAsText(unittest.TestCase):
+    """A tool name, an agent type or an error message in a trace can hold
+    escape codes and line breaks. stats shows them as text."""
+
+    def test_each_value_shows_escapes_as_text(self):
+        _escapes.check_each_value(self, STATS_CASES, _stats_text)
+
+    def test_plain_text_prints_unchanged(self):
+        _escapes.check_plain_text_unchanged(self, STATS_CASES, _stats_text)
+
+    def test_whitespace_in_free_text_shows_as_one_space(self):
+        _escapes.check_whitespace_in_free_text(self, STATS_CASES, _stats_text)
+
+    def test_value_as_long_as_the_cut_shows_in_full(self):
+        _escapes.check_each_cut(self, STATS_CUTS, _stats_text)
+
+    def test_sgr_code_shows_as_text(self):
+        output = _stats_text([_call("a\x1b[8mhidden", {})])
+        self.assertIn(r"a\x1b[8mhidden", output)
+        self.assertNotIn("\x1b[8m", output)
+
+
 if __name__ == "__main__":
     unittest.main()

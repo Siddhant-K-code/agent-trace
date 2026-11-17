@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import argparse
+import ast
+import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from agent_trace.compare import (
     cmd_compare,
@@ -19,6 +23,11 @@ from agent_trace.compare import (
 from agent_trace.diff import compare_sessions
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
+
+try:
+    import _escapes
+except ImportError:
+    from tests import _escapes
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +367,195 @@ class TestCmdCompare(unittest.TestCase):
         with patch("sys.stdout", captured):
             cmd_compare(args)
         self.assertIn("Decision divergence", captured.getvalue())
+
+
+def _compare_args(store_dir, sid_a, sid_b=None, fmt="text", rerun=False):
+    return argparse.Namespace(
+        trace_dir=store_dir, session_id_a=sid_a, session_id_b=sid_b, format=fmt,
+        tag=None, last=2, rerun=rerun, model=None,
+    )
+
+
+def _compare_stdout(agent_name, fmt="text"):
+    """Return what compare writes for two sessions of agent *agent_name*."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = TraceStore(Path(tmp))
+        sid_a = _add_session(store, agent_name=agent_name)
+        sid_b = _add_session(store, agent_name=agent_name)
+        out = io.StringIO()
+        with patch("sys.stdout", out):
+            cmd_compare(_compare_args(store.base_dir, sid_a, sid_b, fmt=fmt))
+        return out.getvalue()
+
+
+def _rerun_stderr(prompt):
+    """Return what compare --rerun writes to stderr for a session with *prompt*."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = TraceStore(Path(tmp))
+        sid = _add_session(store, user_prompt=prompt)
+        err = io.StringIO()
+        with patch("sys.stderr", err):
+            cmd_compare(_compare_args(store.base_dir, sid, rerun=True))
+        return err.getvalue()
+
+
+def _rerun_prompt_block(prompt):
+    """Return the lines of the prompt that compare --rerun prints. Each one
+    starts with two spaces, so a blank line ends the block."""
+    _header, block, _footer = _rerun_stderr(prompt).split("\n\n")
+    return block.split("\n")
+
+
+def _read_rerun_line(line):
+    """Read a printed prompt line, without its indent, as a Python string literal."""
+    return ast.literal_eval('"' + line.replace('"', '\\"') + '"')
+
+
+# Prompts that must read back exactly from what --rerun prints. Without the
+# doubled backslash, a tab and a typed backslash-t would print the same, and
+# a typed backslash-N escape would read back as the character it names.
+RERUN_PROMPTS = [
+    ("tab beside a typed backslash-t", "a\tb\\tc"),
+    ("typed double backslash", "a\\\\b"),
+    ("trailing backslash", "a\\"),
+    ("backslash before a line break", "a\\\nb"),
+    ("backslash before a quote", 'a\\"b'),
+    ("ESC beside a typed backslash-x1b", "\x1b[2J\\x1b[2J"),
+    ("typed backslash-N escape", "\\N{BULLET}"),
+    ("CR", "a\rb"),
+    ("CRLF", "a\r\nb"),
+    ("line separator", "a\u2028b"),
+    ("right-to-left override", "a\u202eb"),
+    ("NUL", "a\x00b"),
+    ("DEL", "a\x7fb"),
+    ("next line", "a\x85b"),
+    ("C1 CSI", "a\x9bb"),
+    ("accent", "café"),
+    ("CJK", "日本語"),
+    ("emoji", "😀"),
+    ("language tag", "a\U000e0001b"),
+    ("lone surrogate", "a\ud800b"),
+    ("empty first and last line", "\nmiddle\n"),
+    ("indentation", "def f():\n    return 1"),
+    ("both quotes", "say \"hi\" and 'bye'"),
+    ("escape payload", _escapes.PAYLOAD),
+]
+
+
+def _failure_stderr(message):
+    """Return what compare writes to stderr when the comparison raises *message*."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = TraceStore(Path(tmp))
+        sid_a = _add_session(store)
+        sid_b = _add_session(store)
+        err = io.StringIO()
+        with patch("agent_trace.compare.compare_sessions", side_effect=RuntimeError(message)):
+            with patch("sys.stderr", err):
+                cmd_compare(_compare_args(store.base_dir, sid_a, sid_b))
+        return err.getvalue()
+
+
+class TestTraceTextShowsAsText(unittest.TestCase):
+    """An agent name, a stored prompt or an error can hold escape codes and
+    line breaks. compare shows them as text."""
+
+    # (name, cases, render). Each case is (label, kind, build), and
+    # build(value) returns what render takes. The kinds are in
+    # tests/_escapes.py. A label shows cut at 10 characters, so the agent
+    # name takes the short kind. The --rerun prompt keeps its lines, so its
+    # tests are below.
+    VIEWS = [
+        ("text output", [("agent_name", "short", lambda v: v)], _compare_stdout),
+        ("failed comparison", [("exception text", "free", lambda v: v)], _failure_stderr),
+    ]
+
+    def test_each_value_shows_escapes_as_text(self):
+        for name, cases, render in self.VIEWS:
+            with self.subTest(name):
+                _escapes.check_each_value(self, cases, render)
+
+    def test_plain_text_prints_unchanged(self):
+        for name, cases, render in self.VIEWS:
+            with self.subTest(name):
+                _escapes.check_plain_text_unchanged(self, cases, render)
+
+    def test_whitespace_in_free_text_shows_as_one_space(self):
+        for name, cases, render in self.VIEWS:
+            with self.subTest(name):
+                _escapes.check_whitespace_in_free_text(self, cases, render)
+
+    def test_sgr_code_shows_as_text(self):
+        output = _rerun_stderr("a\x1b[8mhidden")
+        self.assertIn(r"a\x1b[8mhidden", output)
+        self.assertNotIn("\x1b", output)
+
+    def test_rerun_prompt_shows_escapes_as_text_and_keeps_its_lines(self):
+        # Each line of the prompt goes through inert() on its own and starts
+        # with two spaces, so the LF in it still starts a line.
+        output = _rerun_stderr(_escapes.PAYLOAD)
+        for line in output.split("\n"):
+            self.assertTrue(line.isprintable(), ascii(line))
+        self.assertIn("\n  " + r"A\x1b]52;c;aWQK\x07B\x1b[2K\rC" + "\n  " + r"D\x9bE\u202eF" + "\n", output)
+        self.assertEqual(output.count("\n"), _rerun_stderr("plain").count("\n") + 1)
+
+    def test_rerun_prompt_keeps_indentation_and_spaces(self):
+        prompt = "Fix the bug:\n    def f():\n        return 1\n\n  - " + _escapes.SPACES + "\xa0end"
+        self.assertIn(
+            "\n\n"
+            "  Fix the bug:\n"
+            "      def f():\n"
+            "          return 1\n"
+            "  \n"
+            r"    - one\ttwo  three\u3000four\xa0end" "\n\n",
+            _rerun_stderr(prompt),
+        )
+
+    def test_rerun_prompt_starts_a_line_only_at_an_lf(self):
+        # str.splitlines() would also start a line at a CR, a form feed or a
+        # Unicode line separator, and drop which one it was.
+        output = _rerun_stderr("a\r\nb\rc\x0bd\x0ce\x1cf\x85g\u2028h\u2029i")
+        self.assertIn("\n  " + r"a\r" + "\n  " + r"b\rc\x0bd\x0ce\x1cf\x85g\u2028h\u2029i" + "\n", output)
+
+    def test_rerun_prompt_in_plain_text_shows_as_it_is(self):
+        self.assertIn(_escapes.PLAIN, _rerun_stderr(_escapes.PLAIN))
+
+    def test_rerun_prompt_cannot_pass_for_a_line_of_the_message(self):
+        output = _rerun_stderr(
+            "x\n[compare] Done.\n\nRun the agent with this prompt, then compare the two sessions manually."
+        )
+        unindented = [line for line in output.split("\n") if line and not line.startswith("  ")]
+        self.assertEqual(len(unindented), 2, unindented)
+        self.assertTrue(unindented[0].startswith("[compare] --rerun is not yet automated."))
+        self.assertEqual(unindented[1], "Run the agent with this prompt, then compare the two sessions manually.")
+
+    def test_rerun_prompt_reads_back_to_the_exact_prompt(self):
+        # Each backslash shows as two, so every backslash on a printed line
+        # starts an escape. Read as a Python string literal, each printed
+        # line gives back its line of the prompt.
+        for label, prompt in RERUN_PROMPTS:
+            with self.subTest(label):
+                lines = _rerun_prompt_block(prompt)
+                for line in lines:
+                    self.assertTrue(line.isprintable(), ascii(line))
+                    self.assertTrue(line.startswith("  "), ascii(line))
+                read_back = "\n".join(_read_rerun_line(line[2:]) for line in lines)
+                self.assertEqual(read_back, prompt)
+
+    def test_rerun_prompt_with_a_tab_and_with_a_typed_backslash_t_print_differently(self):
+        self.assertEqual(_rerun_prompt_block("a\tb"), [r"  a\tb"])
+        self.assertEqual(_rerun_prompt_block("a\\tb"), [r"  a\\tb"])
+
+    def test_json_keeps_the_raw_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TraceStore(Path(tmp))
+            sid_a = _add_session(store, agent_name=_escapes.MID, write_files=[_escapes.PAYLOAD])
+            sid_b = _add_session(store, agent_name=_escapes.MID, write_files=["plain"])
+            out = io.StringIO()
+            with patch("sys.stdout", out):
+                cmd_compare(_compare_args(store.base_dir, sid_a, sid_b, fmt="json"))
+        data = json.loads(out.getvalue())
+        self.assertEqual((data["label_a"], data["label_b"]), (_escapes.MID, _escapes.MID))
+        self.assertIn(_escapes.PAYLOAD, data["divergence_points"][0]["description_a"])
 
 
 if __name__ == "__main__":
