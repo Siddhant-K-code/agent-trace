@@ -22,10 +22,12 @@ and redaction controls.
 agent-strace record-http --url http://127.0.0.1:8000/mcp --port 5100 --name local-mcp
 ```
 
-Point the MCP client at `http://127.0.0.1:5100`. The proxy forwards traffic to
-the upstream URL. It refuses requests from web pages on other sites, and
-requests to a host name other than `localhost` or an IP address. To allow
-another name, start it with [`--allow-host NAME`](commands.md#record-http).
+Point the MCP client at `http://127.0.0.1:5100`. The proxy sends requests for
+its root to the `--url` path, here `/mcp`, and any other path, such as a legacy
+SSE server's message path, to the same path on the server. It refuses requests
+from web pages on other sites, and requests to a host name other than
+`localhost` or an IP address. To allow another name, start it with
+[`--allow-host NAME`](commands.md#record-http).
 
 ## Query traces through MCP
 

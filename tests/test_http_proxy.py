@@ -96,6 +96,12 @@ class FakeMCPHandler(BaseHTTPRequestHandler):
         self.wfile.write(f"data: {notification}\n\n".encode("utf-8"))
         self.wfile.flush()
 
+    def do_DELETE(self):
+        """End the session, as a Streamable HTTP server does."""
+        self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def log_message(self, format, *args):
         pass
 
@@ -1563,18 +1569,10 @@ class TestHTTPProxyRefusesWebPages(unittest.TestCase):
         self.assertIn(EventType.TOOL_RESULT, types)
 
     def test_allowed_hosts_are_forwarded(self):
-        for method in ("GET", "POST"):
+        for method in ("GET", "POST", "DELETE"):
             for headers in self._allowed_host_headers():
                 with self.subTest(method=method, headers=headers):
                     self._assert_forwarded(method, headers)
-
-    def test_delete_with_an_allowed_host_gets_501(self):
-        for headers in self._allowed_host_headers():
-            with self.subTest(headers=headers):
-                status, _, _, stderr = self._request("DELETE", headers)
-                self.assertEqual(status, 501)
-                self.assertEqual(stderr, "")
-        self._assert_nothing_traced_or_forwarded()
 
     def test_refused_hosts_get_421(self):
         for method in ("GET", "POST", "DELETE"):
@@ -1586,17 +1584,10 @@ class TestHTTPProxyRefusesWebPages(unittest.TestCase):
         self._assert_nothing_traced_or_forwarded()
 
     def test_loopback_origins_are_forwarded(self):
-        for method in ("GET", "POST"):
+        for method in ("GET", "POST", "DELETE"):
             for origin in LOOPBACK_ORIGINS:
                 with self.subTest(method=method, origin=origin):
                     self._assert_forwarded(method, [self.local_host, ("Origin", origin)])
-        for origin in LOOPBACK_ORIGINS:
-            with self.subTest(method="DELETE", origin=origin):
-                status, _, _, stderr = self._request(
-                    "DELETE", [self.local_host, ("Origin", origin)]
-                )
-                self.assertEqual(status, 501)
-                self.assertEqual(stderr, "")
 
     def test_refused_origins_get_403(self):
         cases = [[self.local_host, ("Origin", origin)] for origin in REFUSED_ORIGINS]
@@ -1735,6 +1726,499 @@ class TestRecordHTTPAllowHostFlag(unittest.TestCase):
         # --quiet keeps the refusal lines.
         refusals = [line + "\n" for line in stderr.getvalue().splitlines() if "refused" in line]
         self.assertEqual(refusals, [HOST_REFUSED_LOG, HOST_REFUSED_LOG, ORIGIN_REFUSED_LOG])
+
+
+class _ScriptedHandler(BaseHTTPRequestHandler):
+    """Records each request, then lets the server's reply function answer."""
+
+    protocol_version = "HTTP/1.1"
+
+    def _record_and_reply(self):
+        length = int(self.headers.get("Content-Length", 0))
+        request = {
+            "method": self.command,
+            "target": self.path,
+            "headers": self.headers,
+            "body": self.rfile.read(length) if length > 0 else b"",
+        }
+        self.server.record(request)
+        self.server.reply(self, request)
+
+    do_GET = do_POST = do_DELETE = _record_and_reply
+
+    def log_message(self, format, *args):
+        pass
+
+
+def _reply(handler, status=200, body=b"", headers=()):
+    """Answer with a whole body, then close the connection."""
+    handler.send_response(status)
+    for name, value in headers:
+        handler.send_header(name, value)
+    handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("Connection", "close")
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+def _reply_json(handler, request):
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {}}).encode()
+    _reply(handler, body=body, headers=[("Content-Type", "application/json")])
+
+
+class _ScriptedUpstream(ThreadingHTTPServer):
+    """A fake MCP upstream that records requests and answers as a test says.
+
+    Each request is recorded with its method, target, headers and body.
+    Then ``reply(handler, request)`` answers it. The default is a JSON result.
+    """
+
+    daemon_threads = True
+
+    def __init__(self):
+        super().__init__(("127.0.0.1", 0), _ScriptedHandler)
+        self.reply = _reply_json
+        self._lock = threading.Lock()
+        self._requests = []
+
+    @property
+    def requests(self):
+        with self._lock:
+            return list(self._requests)
+
+    def record(self, request):
+        with self._lock:
+            self._requests.append(request)
+
+
+def _event(message):
+    return f"event: message\ndata: {json.dumps(message)}\n\n".encode()
+
+
+class _EventStream:
+    """An event stream reply, sent in chunks the way HTTP/1.1 servers do."""
+
+    def __init__(self, handler, content_type="text/event-stream", headers=()):
+        self._wfile = handler.wfile
+        handler.send_response(200)
+        handler.send_header("Content-Type", content_type)
+        for name, value in headers:
+            handler.send_header(name, value)
+        handler.send_header("Transfer-Encoding", "chunked")
+        handler.send_header("Connection", "close")
+        handler.end_headers()
+
+    def send(self, message):
+        data = _event(message)
+        self._wfile.write(b"%x\r\n%s\r\n" % (len(data), data))
+
+    def end(self):
+        self._wfile.write(b"0\r\n\r\n")
+
+
+def _next_message(resp):
+    """Read up to the next data line of an event stream. None at its end."""
+    while True:
+        line = resp.readline()
+        if not line:
+            return None
+        if line.startswith(b"data: "):
+            return json.loads(line[6:])
+
+
+def _progress(value):
+    return {
+        "jsonrpc": "2.0",
+        "method": "notifications/progress",
+        "params": {"progressToken": 1, "progress": value},
+    }
+
+
+def _text_result(req_id, text):
+    return {
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "result": {"content": [{"type": "text", "text": text}]},
+    }
+
+
+# What a Streamable HTTP client sends with every POST.
+STREAMABLE_POST_HEADERS = {
+    "Accept": "application/json, text/event-stream",
+    "Content-Type": "application/json",
+}
+
+
+class TestHTTPProxyStreamableHTTP(unittest.TestCase):
+    """record-http works with Streamable HTTP servers.
+
+    --url names the server's endpoint and the client connects to the proxy
+    root. POST, GET and DELETE carry the headers the transport needs, and an
+    event stream reply to a POST reaches the client as it arrives.
+
+    Every client read times out after 5 seconds, so a reply the proxy holds
+    back fails the test instead of hanging it.
+    """
+
+    def setUp(self):
+        self.upstream = _ScriptedUpstream()
+        threading.Thread(
+            target=self.upstream.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
+        ).start()
+        self.addCleanup(self.upstream.server_close)
+        self.addCleanup(self.upstream.shutdown)
+        self.upstream_url = f"http://127.0.0.1:{self.upstream.server_address[1]}"
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.store = TraceStore(tmp.name)
+        self.meta = SessionMeta(command="test", agent_name="test-agent")
+        self.store.create_session(self.meta)
+        self.events = []
+
+    def _proxy(self, url_rest="/mcp"):
+        """Start a proxy whose --url is the upstream's URL plus url_rest."""
+        proxy = HTTPProxyServer(
+            remote_url=self.upstream_url + url_rest,
+            local_port=0,
+            store=self.store,
+            session_meta=self.meta,
+            on_event=self.events.append,
+        )
+        server = proxy.make_server()
+        threading.Thread(
+            target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
+        ).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server
+
+    def _hold(self):
+        """Return an Event that a held upstream reply waits on. Cleanup sets it."""
+        event = threading.Event()
+        self.addCleanup(event.set)
+        return event
+
+    def _open(self, port, method, target="/", headers=None, body=None):
+        """Send one request through the proxy and return the reply unread."""
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        self.addCleanup(conn.close)
+        conn.request(method, target, body=body, headers=headers or {})
+        return conn.getresponse()
+
+    def _forward(self, port, method, target="/", headers=None, body=None):
+        """Send one request through the proxy and read the whole reply.
+
+        Returns the reply, its body and the one request the upstream got.
+        """
+        before = len(self.upstream.requests)
+        resp = self._open(port, method, target, headers, body)
+        data = resp.read()
+        requests = self.upstream.requests[before:]
+        self.assertEqual(
+            len(requests), 1, f"{method} {target} reached the upstream {len(requests)} times"
+        )
+        return resp, data, requests[0]
+
+    def _of_type(self, event_type):
+        return [event for event in self.events if event.event_type == event_type]
+
+    def _assert_sent_once(self, request, headers):
+        for name, value in headers.items():
+            with self.subTest(header=name):
+                self.assertEqual(request["headers"].get_all(name), [value])
+
+    def _child_session(self):
+        child = SessionMeta(command="child", agent_name="child-agent")
+        self.store.create_session(child)
+        self.assertEqual(self.store.load_meta(child.session_id).parent_session_id, "")
+        return child.session_id
+
+    def _child_trace_headers(self, child_id):
+        """Headers a downstream agent that runs agent-trace adds to its reply."""
+        return [
+            ("traceparent", f"00-{'a' * 32}-{'b' * 16}-01"),
+            ("tracestate", f"agent-trace={child_id}"),
+        ]
+
+    def _assert_linked(self, child_id):
+        child = self.store.load_meta(child_id)
+        self.assertEqual(child.parent_session_id, self.meta.session_id)
+        self.assertEqual(child.depth, 1)
+
+    def test_request_target_follows_the_url(self):
+        cases = {
+            "/mcp": [
+                ("/", "/mcp"),
+                ("/?a=1", "/mcp?a=1"),
+                ("/mcp", "/mcp"),
+                ("/messages/?session_id=S", "/messages/?session_id=S"),
+            ],
+            "/mcp/": [("/", "/mcp/")],
+            "": [("/", "/"), ("/mcp", "/mcp")],
+            "/mcp?key=K": [
+                ("/", "/mcp?key=K"),
+                ("/?a=1", "/mcp?key=K&a=1"),
+                ("/messages/?session_id=S", "/messages/?key=K&session_id=S"),
+            ],
+            "?key=K": [("/mcp", "/mcp?key=K")],
+        }
+        for url_rest, targets in cases.items():
+            port = self._proxy(url_rest).server_address[1]
+            for target, expected in targets:
+                for method in ("GET", "POST", "DELETE"):
+                    with self.subTest(url=f"http://U{url_rest}", target=target, method=method):
+                        body = PING if method == "POST" else None
+                        _, _, request = self._forward(port, method, target, body=body)
+                        self.assertEqual(request["target"], expected)
+
+    def test_post_forwards_the_streamable_http_headers(self):
+        port = self._proxy().server_address[1]
+        headers = {
+            "Accept": "application/json, text/event-stream",
+            "Authorization": "Bearer token-1",
+            "Content-Type": "application/json",
+            "Mcp-Session-Id": "session-1",
+            "Mcp-Protocol-Version": "2025-06-18",
+        }
+        _, _, request = self._forward(port, "POST", "/", headers, PING)
+        self._assert_sent_once(request, headers)
+
+    def test_get_forwards_the_streamable_http_headers(self):
+        port = self._proxy().server_address[1]
+        headers = {
+            "Accept": "text/event-stream",
+            "Authorization": "Bearer token-1",
+            "Mcp-Session-Id": "session-1",
+            "Mcp-Protocol-Version": "2025-06-18",
+            "Last-Event-ID": "event-7",
+        }
+        _, _, request = self._forward(port, "GET", "/", headers)
+        self._assert_sent_once(request, headers)
+
+    def test_delete_is_forwarded_and_its_reply_relayed(self):
+        def reply(handler, request):
+            _reply(handler, 202, b'{"ended": true}', [
+                ("Content-Type", "application/json"),
+                ("Mcp-Session-Id", "session-1"),
+            ])
+
+        self.upstream.reply = reply
+        port = self._proxy().server_address[1]
+        headers = {
+            "Authorization": "Bearer token-1",
+            "Mcp-Session-Id": "session-1",
+            "Mcp-Protocol-Version": "2025-06-18",
+        }
+        resp, data, request = self._forward(port, "DELETE", "/", headers)
+        self.assertEqual(request["method"], "DELETE")
+        self._assert_sent_once(request, headers)
+        self.assertEqual(resp.status, 202)
+        self.assertEqual(resp.getheader("Mcp-Session-Id"), "session-1")
+        self.assertEqual(data, b'{"ended": true}')
+        self.assertEqual(self.events, [])
+
+    def test_headers_the_client_did_not_send_are_not_sent(self):
+        port = self._proxy().server_address[1]
+        for method in ("GET", "POST", "DELETE"):
+            with self.subTest(method=method):
+                body = PING if method == "POST" else None
+                _, _, request = self._forward(port, method, "/", {}, body)
+                for name in (
+                    "Accept", "Authorization", "Mcp-Session-Id",
+                    "Mcp-Protocol-Version", "Last-Event-ID",
+                ):
+                    self.assertIsNone(request["headers"].get(name), name)
+
+    def test_origin_cookie_and_accept_encoding_are_not_forwarded(self):
+        port = self._proxy().server_address[1]
+        headers = {
+            "Origin": "http://localhost:6274",
+            "Cookie": "sid=secret",
+            "Accept-Encoding": "gzip",
+        }
+        for method in ("GET", "POST", "DELETE"):
+            with self.subTest(method=method):
+                body = PING if method == "POST" else None
+                _, _, request = self._forward(port, method, "/", headers, body)
+                self.assertIsNone(request["headers"].get("Origin"))
+                self.assertIsNone(request["headers"].get("Cookie"))
+                # The proxy's own HTTP client asks for an unencoded reply.
+                self.assertEqual(request["headers"].get_all("Accept-Encoding"), ["identity"])
+
+    def test_streamed_reply_reaches_the_client_as_it_arrives(self):
+        for content_type in ("text/event-stream", "Text/Event-Stream; charset=utf-8"):
+            with self.subTest(content_type=content_type):
+                port = self._proxy().server_address[1]
+                first_read = self._hold()
+
+                def reply(handler, request, content_type=content_type, first_read=first_read):
+                    stream = _EventStream(handler, content_type)
+                    stream.send(_progress(1))
+                    first_read.wait(10)
+                    stream.send(_progress(2))
+                    stream.end()
+
+                self.upstream.reply = reply
+                resp = self._open(port, "POST", "/", STREAMABLE_POST_HEADERS, PING)
+                self.assertEqual(resp.status, 200)
+                self.assertEqual(resp.getheader("Content-Type"), content_type)
+                self.assertEqual(_next_message(resp), _progress(1))
+                first_read.set()
+                self.assertEqual(_next_message(resp), _progress(2))
+                self.assertIsNone(_next_message(resp))
+
+    def test_client_answers_the_server_during_a_streamed_reply(self):
+        # A tool that asks the user something, as MCP elicitation does.
+        question = {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "elicitation/create",
+            "params": {"message": "Your name?", "requestedSchema": {"type": "object"}},
+        }
+        answer = {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": {"action": "accept", "content": {"name": "bob"}},
+        }
+        answered = self._hold()
+
+        def reply(handler, request):
+            msg = json.loads(request["body"])
+            if msg.get("method") != "tools/call":
+                answered.set()
+                _reply(handler, 202)
+                return
+            stream = _EventStream(handler)
+            stream.send(question)
+            answered.wait(10)
+            stream.send(_text_result(msg["id"], "hello bob"))
+            stream.end()
+
+        self.upstream.reply = reply
+        port = self._proxy().server_address[1]
+        call = json.dumps(_tool_call(12, name="ask"))
+        resp = self._open(port, "POST", "/", STREAMABLE_POST_HEADERS, call)
+        self.assertEqual(_next_message(resp), question)
+
+        answer_resp, _, _ = self._forward(
+            port, "POST", "/", STREAMABLE_POST_HEADERS, json.dumps(answer)
+        )
+        self.assertEqual(answer_resp.status, 202)
+        self.assertEqual(_next_message(resp), _text_result(12, "hello bob"))
+        self.assertIsNone(_next_message(resp))
+
+    def test_streamed_tool_result_is_traced_and_linked_to_its_call(self):
+        def reply(handler, request):
+            stream = _EventStream(handler)
+            stream.send(_progress(1))
+            stream.send(_text_result(json.loads(request["body"])["id"], "streamed output"))
+            stream.end()
+
+        self.upstream.reply = reply
+        server = self._proxy()
+        resp, data, _ = self._forward(
+            server.server_address[1], "POST", "/", STREAMABLE_POST_HEADERS,
+            json.dumps(_tool_call(9)),
+        )
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(data, _event(_progress(1)) + _event(_text_result(9, "streamed output")))
+        (call,) = self._of_type(EventType.TOOL_CALL)
+        (result,) = self._of_type(EventType.TOOL_RESULT)
+        self.assertEqual(result.parent_id, call.event_id)
+        self.assertEqual(result.data["content_preview"], "streamed output")
+        self.assertEqual(server.pending_calls, {})
+        self.assertEqual(
+            [event.event_type for event in self.store.load_events(self.meta.session_id)],
+            [EventType.TOOL_CALL, EventType.TOOL_RESULT],
+        )
+
+    def test_close_streams_ends_an_open_streamed_reply(self):
+        server = self._proxy()
+        held = self._hold()
+
+        def reply(handler, request):
+            stream = _EventStream(handler)
+            stream.send(_progress(1))
+            held.wait(10)
+            stream.end()
+
+        self.upstream.reply = reply
+        resp = self._open(
+            server.server_address[1], "POST", "/", STREAMABLE_POST_HEADERS,
+            json.dumps(_tool_call(11)),
+        )
+        self.assertEqual(_next_message(resp), _progress(1))
+
+        start = time.monotonic()
+        server.shutdown()
+        self.assertTrue(server.close_streams(timeout=3))
+        self.assertLess(time.monotonic() - start, 3)
+        # The proxy closed the stream, so the read ends instead of timing out.
+        self.assertEqual(resp.read().strip(), b"")
+        self.assertEqual(self._of_type(EventType.ERROR), [])
+
+    def test_json_reply_is_relayed_whole_and_traced(self):
+        body = json.dumps(_text_result(4, "json output"), indent=2).encode()
+
+        def reply(handler, request):
+            _reply(handler, 200, body, [("Content-Type", "application/json")])
+
+        self.upstream.reply = reply
+        server = self._proxy()
+        resp, data, _ = self._forward(
+            server.server_address[1], "POST", "/", STREAMABLE_POST_HEADERS,
+            json.dumps(_tool_call(4)),
+        )
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(resp.getheader("Content-Type"), "application/json")
+        self.assertEqual(resp.getheader("Content-Length"), str(len(body)))
+        self.assertEqual(data, body)
+        (call,) = self._of_type(EventType.TOOL_CALL)
+        (result,) = self._of_type(EventType.TOOL_RESULT)
+        self.assertEqual(result.parent_id, call.event_id)
+        self.assertEqual(server.pending_calls, {})
+
+    def test_json_reply_links_the_sub_session(self):
+        child_id = self._child_session()
+        headers = [("Content-Type", "application/json")] + self._child_trace_headers(child_id)
+
+        def reply(handler, request):
+            _reply(handler, 200, json.dumps(_text_result(5, "ok")).encode(), headers)
+
+        self.upstream.reply = reply
+        port = self._proxy().server_address[1]
+        self._forward(port, "POST", "/", STREAMABLE_POST_HEADERS, json.dumps(_tool_call(5)))
+        self._assert_linked(child_id)
+
+    def test_streamed_reply_links_the_sub_session(self):
+        child_id = self._child_session()
+        headers = self._child_trace_headers(child_id)
+
+        def reply(handler, request):
+            stream = _EventStream(handler, headers=headers)
+            stream.send(_text_result(6, "ok"))
+            stream.end()
+
+        self.upstream.reply = reply
+        port = self._proxy().server_address[1]
+        self._forward(port, "POST", "/", STREAMABLE_POST_HEADERS, json.dumps(_tool_call(6)))
+        self._assert_linked(child_id)
+
+    def test_delete_with_a_refused_host_never_reaches_the_upstream(self):
+        port = self._proxy().server_address[1]
+        stderr = io.StringIO()
+        with mock.patch("sys.stderr", stderr):
+            status, _, data = _send(
+                port, "DELETE", [("Host", "attacker.test"), ("Mcp-Session-Id", "session-1")]
+            )
+        self.assertEqual(status, 421)
+        self.assertEqual(json.loads(data), HOST_REFUSED)
+        self.assertEqual(stderr.getvalue(), HOST_REFUSED_LOG)
+        # A forwarded request goes last. Once its reply is back, the upstream
+        # has seen every earlier request that was forwarded.
+        self._forward(port, "GET", "/")
+        self.assertEqual([request["method"] for request in self.upstream.requests], ["GET"])
+        self.assertEqual(self.events, [])
 
 
 if __name__ == "__main__":
