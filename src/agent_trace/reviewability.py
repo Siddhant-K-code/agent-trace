@@ -30,6 +30,7 @@ from .external_evidence import (
     signal_lines,
 )
 from .health import CaptureMatrix, assess_session, detect_provider, load_capture_matrix
+from .inert import inert
 from .models import EventType, SessionMeta, TraceEvent
 from .pr_comment import (
     PRCommentError,
@@ -1308,7 +1309,7 @@ def _scope_paths(finding: Finding) -> list[str]:
 def format_text(report: ReviewReport, out: TextIO) -> None:
     w = out.write
     w(f"Reviewability: {'pass' if report.passed else 'fail'}\n")
-    w(f"Branch:    {report.branch or 'unknown'}\n")
+    w(f"Branch:    {inert(report.branch or 'unknown')}\n")
     if report.sessions:
         for linked in report.sessions:
             w(f"Session:   {linked.session_id} ({LINK_LABELS[linked.link]})\n")
@@ -1318,12 +1319,12 @@ def format_text(report: ReviewReport, out: TextIO) -> None:
     for finding in report.findings:
         mark = "  FAIL" if report.threshold.fails(finding) else ""
         w(f"{finding.label:<16} {finding.status:<13} {finding.confidence:<7}{mark}\n")
-        w(f"  {finding.detail}\n")
+        w(f"  {inert(finding.detail)}\n")
         paths = _scope_paths(finding)
         if paths:
             shown = paths[:_PATH_PREVIEW]
             more = f" (+{len(paths) - len(shown)} more)" if len(paths) > len(shown) else ""
-            w(f"  Not named or read: {', '.join(shown)}{more}\n")
+            w(f"  Not named or read: {', '.join(inert(path) for path in shown)}{more}\n")
         w(f"  Source: {finding.source}\n")
     if report.external is not None:
         w(f"\nExternal evidence ({report.external.inputs()}):\n")

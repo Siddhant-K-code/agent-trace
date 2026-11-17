@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import TextIO
 
 from .event_data import object_field, require_object_event_data, str_field
+from .inert import inert
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -326,22 +327,23 @@ def format_standup(report: StandupReport, out: TextIO = sys.stdout) -> None:
     w(f"  - Read {report.files_read} file(s), modified {report.files_modified}\n")
     if report.files_modified_list:
         for path in report.files_modified_list[:6]:
-            w(f"      {path}\n")
+            w(f"      {inert(path)}\n")
         if len(report.files_modified_list) > 6:
             w(f"      ... and {len(report.files_modified_list) - 6} more\n")
 
     for approach in report.approaches:
+        description = inert(approach.description)
         if approach.abandoned:
-            w(f"  - Tried and abandoned: {approach.description} "
-              f"({approach.failure_reason})\n")
+            w(f"  - Tried and abandoned: {description} "
+              f"({inert(approach.failure_reason)})\n")
         elif approach.retries > 0:
-            w(f"  - {approach.description} ({approach.retries} retries)\n")
+            w(f"  - {description} ({approach.retries} retries)\n")
         else:
-            w(f"  - {approach.description}\n")
+            w(f"  - {description}\n")
 
     if report.new_dependencies:
         w(f"  - Added {len(report.new_dependencies)} new dependency(ies): "
-          f"{', '.join(report.new_dependencies[:4])}\n")
+          f"{', '.join(inert(dep) for dep in report.new_dependencies[:4])}\n")
 
     w("\n")
 
@@ -349,8 +351,9 @@ def format_standup(report: StandupReport, out: TextIO = sys.stdout) -> None:
     if report.uncertainties:
         w("What it was uncertain about:\n")
         for u in report.uncertainties[:4]:
-            loc = f"  [{u.location}]" if u.location else ""
-            w(f"  - {u.description[:80]}{loc}\n")
+            loc = f"  [{inert(u.location)}]" if u.location else ""
+            # A line of written content: show each run of whitespace as one space.
+            w(f"  - {inert(' '.join(u.description.split())[:80])}{loc}\n")
         w("\n")
 
     # What to review
@@ -358,7 +361,7 @@ def format_standup(report: StandupReport, out: TextIO = sys.stdout) -> None:
         w("What to review carefully:\n")
         for item in report.review_items:
             icon = "❗" if item.severity == "high" else "  "
-            w(f"  {icon} {item.description}\n")
+            w(f"  {icon} {inert(item.description)}\n")
         w("\n")
 
     # Stats

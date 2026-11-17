@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import TextIO
 
 from .event_data import object_field, require_object_event_data, str_field
+from .inert import inert
 from .models import EventType
 from .store import TraceStore
 
@@ -225,7 +226,7 @@ def format_oncall(report: OncallReport, out: TextIO = sys.stdout) -> None:
         age_days = int((time.time() - f.last_modified_by_agent) / 86400)
         age_str = f"{age_days}d ago" if age_days > 0 else "today"
         icon = "❌" if f.lines_changed > 200 else "⚠️ "
-        w(f"  {icon} {f.path}\n")
+        w(f"  {icon} {inert(f.path)}\n")
         w(f"       modified {age_str} · {f.lines_changed} lines · "
           f"~{f.reading_minutes:.0f} min to read\n")
 

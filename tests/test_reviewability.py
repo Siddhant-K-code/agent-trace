@@ -34,6 +34,7 @@ from agent_trace.reviewability import (
     Artifacts,
     LinkedSession,
     ReviewConfigError,
+    ReviewReport,
     Threshold,
     Finding,
     artifacts_from_args,
@@ -48,6 +49,11 @@ from agent_trace.reviewability import (
     runner_summaries,
 )
 from agent_trace.store import TraceStore
+
+try:
+    import _escapes
+except ImportError:
+    from tests import _escapes
 
 SECRET_PROMPT = "Refactor src/auth.py for the zebra-quartz-77 rollout"
 BRANCH = "feature/review"
@@ -1467,6 +1473,135 @@ class TestActionScript(unittest.TestCase):
         self.assertEqual(out["cognitive-debt-result"], "unavailable")
         self.assertIn("Evidence packet: not generated.",
                       Path(out["review-markdown-path"]).read_text())
+
+
+# How _safe_text shows PAYLOAD in a finding's detail or source. The Markdown
+# escape puts a backslash before each backslash and bracket.
+PAYLOAD_MARKDOWN = r"A\\x1b\]52;c;aWQK\\x07B\\x1b\[2K C D\\x9bE\\u202eF"
+
+
+def _report(branch: str = "plain", detail: str = "plain", source: str = "plain") -> ReviewReport:
+    finding = Finding("scope", "partial", "medium", source, detail)
+    return ReviewReport(branch, (), (finding,), Threshold())
+
+
+def _edited_report(path: str) -> ReviewReport:
+    """Return the report on a session that edits *path* and never names or reads it."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = TraceStore(tmp)
+        b = _Builder(store, "edit00000001")
+        b.prompt("do it")
+        b.tool("Edit", file_path=path)
+        b.save()
+        linked = [LinkedSession("edit00000001", "branch")]
+        return build_report(store, linked, Threshold(), branch=BRANCH)
+
+
+def _text(report: ReviewReport) -> str:
+    out = io.StringIO()
+    format_text(report, out)
+    return out.getvalue()
+
+
+# (label, expected, build): build(value) returns a report with value in the
+# place the label names and plain text everywhere else. The report stores a
+# path as _display_path() gives it, with CR and LF as spaces.
+FORMAT_TEXT_CASES = [
+    ("branch", _escapes.PAYLOAD_TEXT, lambda v: _report(branch=v)),
+    ("finding detail", _escapes.PAYLOAD_TEXT, lambda v: _report(detail=v)),
+    ("path not named or read", _escapes.PAYLOAD_FREE, _edited_report),
+]
+RENDER_MARKDOWN_CASES = [
+    ("finding detail", PAYLOAD_MARKDOWN, lambda v: _report(detail=v)),
+    ("path not named or read", _escapes.PAYLOAD_FREE, _edited_report),
+    ("finding source", PAYLOAD_MARKDOWN, lambda v: _report(source=v)),
+]
+
+
+class TestTraceTextShowsAsText(unittest.TestCase):
+    """A branch, a path or a finding can hold escape codes and line breaks
+    from a trace. review shows the escapes as text."""
+
+    def _check_each_value(self, cases, render):
+        for label, expected, build in cases:
+            with self.subTest(label):
+                _escapes.assert_shows_as_text(
+                    self, render(build(_escapes.PAYLOAD)), expected, render(build("plain"))
+                )
+
+    def test_each_value_shows_escapes_as_text(self):
+        self._check_each_value(FORMAT_TEXT_CASES, _text)
+
+    def test_each_markdown_value_shows_escapes_as_text(self):
+        self._check_each_value(RENDER_MARKDOWN_CASES, render_markdown)
+
+    def test_plain_text_prints_unchanged(self):
+        for cases, render in ((FORMAT_TEXT_CASES, _text), (RENDER_MARKDOWN_CASES, render_markdown)):
+            for label, _, build in cases:
+                with self.subTest(label):
+                    self.assertIn(_escapes.PLAIN, render(build(_escapes.PLAIN)))
+
+    def test_sgr_code_shows_as_text(self):
+        output = _text(_report(branch="a\x1b[8mhidden"))
+        self.assertIn(r"a\x1b[8mhidden", output)
+        self.assertNotIn("\x1b", output)
+
+
+class TestPayloadTrace(_StoreCase):
+    """review shows a branch and a path from a trace as escapes in text and
+    Markdown, and keeps them raw in JSON."""
+
+    def setUp(self):
+        super().setUp()
+        b = _Builder(self.store, "edit00000001")
+        b.prompt("do it")
+        b.tool("Edit", file_path=_escapes.PAYLOAD)
+        b.save()
+
+    def _review(self, *argv: str, head_ref: str = "") -> str:
+        args = build_parser().parse_args(
+            ["--trace-dir", self.tmp.name, "review", "edit00000001", *argv]
+        )
+        # Without --branch, review reads the branch from these, in this order.
+        env = {
+            "GITHUB_HEAD_REF": head_ref,
+            "CI_MERGE_REQUEST_SOURCE_BRANCH_NAME": "",
+            "CI_COMMIT_REF_NAME": "",
+        }
+        out = io.StringIO()
+        with patch.dict(os.environ, env), redirect_stdout(out), redirect_stderr(io.StringIO()):
+            cmd_review(args)
+        return out.getvalue()
+
+    def assert_printable(self, output: str) -> None:
+        for line in output.split("\n"):
+            self.assertTrue(line.isprintable(), ascii(line))
+
+    def test_branch_flag_shows_as_escapes(self):
+        output = self._review("--branch", _escapes.PAYLOAD)
+        self.assertIn(f"Branch:    {_escapes.PAYLOAD_TEXT}\n", output)
+        self.assert_printable(output)
+
+    def test_github_head_ref_shows_as_escapes(self):
+        # The author of a pull request picks the branch name. Git refuses ESC
+        # and BEL in it, but allows a C1 CSI and a right-to-left override.
+        output = self._review(head_ref="fix/\x9b2J\u202eexe.txt")
+        self.assertIn(r"Branch:    fix/\x9b2J\u202eexe.txt" + "\n", output)
+        self.assert_printable(output)
+
+    def test_markdown_shows_path_as_escapes(self):
+        output = self._review("--branch", _escapes.PAYLOAD, "--format", "markdown")
+        self.assertIn(f"Not named or read: `{_escapes.PAYLOAD_FREE}`", output)
+        self.assert_printable(output)
+
+    def test_json_keeps_raw_text(self):
+        output = self._review("--branch", _escapes.PAYLOAD, "--format", "json")
+        report = json.loads(output)
+        self.assertEqual(report["branch"], "A\x1b]52;c;aWQK\x07B\x1b[2K\rC\nD\x9bE\u202eF")
+        scope = next(f for f in report["findings"] if f["name"] == "scope")
+        self.assertEqual(
+            scope["facts"]["ungrounded"], ["A\x1b]52;c;aWQK\x07B\x1b[2K C D\x9bE\u202eF"]
+        )
 
 
 if __name__ == "__main__":

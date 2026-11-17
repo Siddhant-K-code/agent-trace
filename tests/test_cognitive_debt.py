@@ -1,4 +1,5 @@
 import argparse
+import io
 import json
 import os
 import subprocess
@@ -14,15 +15,23 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from agent_trace.cli import build_parser
 from agent_trace.cognitive_debt import (
     CognitiveDebtInputError,
+    CognitiveDebtReport,
+    FileDebt,
     SessionDebt,
     build_cognitive_debt_report,
     cmd_cognitive_debt,
     format_cognitive_debt_badge,
     format_cognitive_debt_json,
+    format_cognitive_debt_text,
     modified_file_lines,
 )
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
+
+try:
+    import _escapes
+except ImportError:
+    from tests import _escapes
 
 
 def _git(cwd, *args):
@@ -351,6 +360,155 @@ class TestCognitiveDebtScoring(unittest.TestCase):
         self.assertAlmostEqual(args.threshold, 0.8)
         self.assertEqual(args.format, "badge")
         self.assertEqual(args.output, "badge.json")
+
+
+def _debt_report(branch="plain", group="plain", path="plain", review_state="known"):
+    """Return a report with one workflow that wrote one file."""
+    file_debt = FileDebt(path=path, agent_written_lines=4, review_state=review_state)
+    session = SessionDebt(session_id="s1", started_at=0.0, branch=branch, author="plain",
+                          agent_written_lines=4, human_reviewed_lines=0, files=[file_debt])
+    row = {"group": group, "reviewed_lines": 0, "unreviewed_lines": 4,
+           "unknown_review_lines": 0, "status": "above_threshold"}
+    return CognitiveDebtReport(window_start=0.0, window_end=0.0, group_by="repository",
+                               threshold=0.7, sessions=[session], rows={group: row},
+                               git_available=True)
+
+
+def _render(report):
+    buf = io.StringIO()
+    format_cognitive_debt_text(report, out=buf)
+    return buf.getvalue()
+
+
+# A payload that fits in the 20 characters of the branch column, and how it shows.
+BRANCH = "A\x1b[2K\x07\rB\nC\x9bD\u202eE"
+BRANCH_TEXT = r"A\x1b[2K\x07\rB\nC\x9bD\u202eE"
+
+# (label, payload, how it shows, build): build(value) returns a report with
+# value in the place the label names.
+FORMAT_TEXT_CASES = [
+    ("branch column", BRANCH, BRANCH_TEXT, lambda v: _debt_report(branch=v)),
+    ("group", _escapes.PAYLOAD, _escapes.PAYLOAD_TEXT, lambda v: _debt_report(group=v)),
+    ("zero-review path", _escapes.PAYLOAD, _escapes.PAYLOAD_TEXT,
+     lambda v: _debt_report(path=v)),
+    ("unknown-review path", _escapes.PAYLOAD, _escapes.PAYLOAD_TEXT,
+     lambda v: _debt_report(path=v, review_state="unknown")),
+]
+
+# (label, cut, build): the text report keeps cut characters of the value the
+# label names.
+FORMAT_TEXT_CUTS = [
+    ("branch column", 20, lambda v: _debt_report(branch=v)),
+]
+
+
+class TestTraceTextShowsAsText(unittest.TestCase):
+    """A branch, a repository or a path in a trace can hold escape codes and
+    line breaks. The text report shows them as text."""
+
+    def test_each_value_shows_escapes_as_text(self):
+        for label, payload, expected, build in FORMAT_TEXT_CASES:
+            with self.subTest(label):
+                _escapes.assert_shows_as_text(
+                    self, _render(build(payload)), expected, _render(build("plain"))
+                )
+
+    def test_plain_text_prints_unchanged(self):
+        for label, _, _, build in FORMAT_TEXT_CASES:
+            with self.subTest(label):
+                self.assertIn(_escapes.PLAIN, _render(build(_escapes.PLAIN)))
+
+    def test_value_as_long_as_the_cut_shows_in_full(self):
+        _escapes.check_each_cut(self, FORMAT_TEXT_CUTS, _render)
+
+    def test_sgr_code_shows_as_text(self):
+        output = _render(_debt_report(branch="a\x1b[8mhidden"))
+        self.assertIn(r"a\x1b[8mhidden", output)
+        self.assertNotIn("\x1b", output)
+
+
+# The repository and the path in the payload trace, as stored.
+REPOSITORY = "o/A\x1b]52;c;aWQK\x07B\x1b[2K\rC\nD\x9bE\u202eF"
+PATH = "src/A\x1b]52;c;aWQK\x07B\x1b[2K\rC\nD\x9bE\u202eF"
+
+BADGE = """{
+  "color": "orange",
+  "label": "cognitive debt",
+  "message": "0% reviewed, 100% unreviewed",
+  "schemaVersion": 1
+}
+"""
+
+
+class TestPayloadTrace(unittest.TestCase):
+    """A trace whose branch, repository and path hold a payload. The text
+    report shows them as text. The JSON and the badge print as before."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = tmp.name
+        self.trace_dir = str(Path(tmp.name) / "traces")
+        store = TraceStore(self.trace_dir)
+        meta = SessionMeta(
+            agent_name="codex",
+            attribution={
+                "working_dir": tmp.name,
+                "git_branch": _escapes.PAYLOAD,
+                "git_repo": REPOSITORY,
+                "git_author": "dev@example.com",
+            },
+        )
+        meta.started_at = time.time() - 10
+        store.create_session(meta)
+        _append_write(store, meta, PATH, 4)
+        review = patch(
+            "agent_trace.cognitive_debt._review_for_file", return_value=(0, [], True)
+        )
+        review.start()
+        self.addCleanup(review.stop)
+
+    def run_command(self, output_format, by="repository", output=""):
+        args = argparse.Namespace(
+            trace_dir=self.trace_dir,
+            since="2000-01-01",
+            until="2099-01-01",
+            threshold=0.7,
+            by=by,
+            session="",
+            github_token="",
+            format=output_format,
+            output=output,
+        )
+        with patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(cmd_cognitive_debt(args), 0)
+        return out.getvalue()
+
+    def test_text_report_shows_escapes_in_stdout_and_output_file(self):
+        stdout = self.run_command("text", by="branch")
+        report = Path(self.tmp) / "report.txt"
+        self.assertEqual(self.run_command("text", by="branch", output=str(report)), "")
+        self.assertEqual(report.read_text(encoding="utf-8"), stdout)
+        for line in stdout.split("\n"):
+            self.assertTrue(line.isprintable(), ascii(line))
+        self.assertIn(f"\n  {_escapes.PAYLOAD_TEXT}: 0 reviewed", stdout)
+        self.assertIn(f"\n  src/{_escapes.PAYLOAD_TEXT} (4 lines", stdout)
+
+    def test_json_keeps_the_raw_text(self):
+        for by, group in (("repository", REPOSITORY), ("branch", _escapes.PAYLOAD)):
+            with self.subTest(by):
+                payload = json.loads(self.run_command("json", by=by))
+                workflow = payload["workflows"][0]
+                session = payload["sessions"][0]
+                self.assertEqual(workflow["branch"], _escapes.PAYLOAD)
+                self.assertEqual(workflow["repository"], REPOSITORY)
+                self.assertEqual(workflow["files"][0]["path"], PATH)
+                self.assertEqual(session["branch"], _escapes.PAYLOAD)
+                self.assertEqual(session["files"][0]["path"], PATH)
+                self.assertEqual([row["group"] for row in payload["groups"]], [group])
+
+    def test_badge_prints_as_before(self):
+        self.assertEqual(self.run_command("badge"), BADGE)
 
 
 if __name__ == "__main__":
