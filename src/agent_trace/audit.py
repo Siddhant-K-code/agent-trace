@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Literal, TextIO
 
 from .event_data import object_field, require_object_event_data, str_field
+from .inert import inert
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -385,6 +386,11 @@ def audit_session(
 # ---------------------------------------------------------------------------
 
 def format_audit(report: AuditReport, out: TextIO = sys.stdout) -> None:
+    """Write a human-readable audit report to *out*.
+
+    Each action and reason goes through inert(), so an escape code or a line
+    break from the trace or the policy file shows as text.
+    """
     w = out.write
     policy_note = "" if report.policy_loaded else " (no policy file)"
     w(f"\nAUDIT: Session {report.session_id[:12]}"
@@ -394,7 +400,7 @@ def format_audit(report: AuditReport, out: TextIO = sys.stdout) -> None:
     if report.allowed:
         w(f"✅ Allowed ({len(report.allowed)}):\n")
         for e in report.allowed[:20]:
-            w(f"  {e.action}\n")
+            w(f"  {inert(e.action)}\n")
         if len(report.allowed) > 20:
             w(f"  ... and {len(report.allowed) - 20} more\n")
         w("\n")
@@ -402,7 +408,7 @@ def format_audit(report: AuditReport, out: TextIO = sys.stdout) -> None:
     if report.no_policy:
         w(f"⚠️  No policy ({len(report.no_policy)}):\n")
         for e in report.no_policy[:20]:
-            w(f"  {e.action}  ({e.reason})\n")
+            w(f"  {inert(e.action)}  ({inert(e.reason)})\n")
         if len(report.no_policy) > 20:
             w(f"  ... and {len(report.no_policy) - 20} more\n")
         w("\n")
@@ -410,13 +416,13 @@ def format_audit(report: AuditReport, out: TextIO = sys.stdout) -> None:
     if report.denied:
         w(f"❌ Violations ({len(report.denied)}):\n")
         for e in report.denied:
-            w(f"  {e.action}  ← {e.reason}\n")
+            w(f"  {inert(e.action)}  ← {inert(e.reason)}\n")
         w("\n")
 
     if report.sensitive_accesses:
         w(f"🔐 Sensitive files accessed ({len(report.sensitive_accesses)}):\n")
         for e in report.sensitive_accesses:
-            w(f"  {e.action}  (event #{e.event_index})\n")
+            w(f"  {inert(e.action)}  (event #{e.event_index})\n")
         w("\n")
 
     if not report.denied and not report.sensitive_accesses:
@@ -436,12 +442,17 @@ class ChainVerifyResult:
     broken_event_id: str = ""
 
     def format(self, out: TextIO = sys.stdout) -> None:
+        """Write the result to *out*.
+
+        The event ID comes from the event line and can be any JSON value, so
+        it goes through inert() and an escape code in it shows as text.
+        """
         if self.ok:
             out.write(f"✅ Chain intact — {self.total_events} events verified\n")
         else:
             out.write(
                 f"❌ Chain broken at event #{self.broken_at} "
-                f"(id={self.broken_event_id})\n"
+                f"(id={inert(self.broken_event_id)})\n"
                 f"   {self.total_events} events checked — session may have been tampered with\n"
             )
 

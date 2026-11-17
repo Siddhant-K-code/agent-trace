@@ -26,6 +26,7 @@ from .audit import (
     _extract_urls,
     _glob_match,
 )
+from .inert import inert
 from .models import EventType, SessionMeta, TraceEvent
 from .store import TraceStore
 
@@ -683,22 +684,27 @@ def format_backtest(
     out: TextIO = sys.stdout,
     show_sessions: bool = False,
 ) -> None:
-    """Render a human-readable policy backtest."""
+    """Render a human-readable policy backtest.
+
+    Each rule label goes through inert(), so an escape code or a line break
+    from the policy file shows as text. The Rule column fits the shown labels.
+    """
     period = "all history" if report.days is None else f"last {report.days} days"
     out.write(
         f"Policy backtest — {period} "
         f"({report.session_count:,} sessions, {report.total_tool_calls:,} tool calls)\n"
     )
-    width = max(28, *(len(stats.rule.label) for stats in report.rules))
+    labels = [inert(stats.rule.label) for stats in report.rules]
+    width = max(28, *(len(label) for label in labels))
     divider = "─" * (width + 43)
     out.write(f"{divider}\n")
     out.write(
         f"{'Rule':<{width}}  {'Matched':>9}  {'Would block':>13}  {'Would allow':>13}\n"
     )
     out.write(f"{divider}\n")
-    for stats in report.rules:
+    for label, stats in zip(labels, report.rules):
         out.write(
-            f"{stats.rule.label:<{width}}  {stats.matched:>9,}  "
+            f"{label:<{width}}  {stats.matched:>9,}  "
             f"{stats.would_block:>13,}  {stats.would_allow:>13,}\n"
         )
     out.write(f"{divider}\n")
@@ -720,7 +726,11 @@ def _signed(value: int) -> str:
 
 
 def format_policy_diff(report: PolicyDiffReport, out: TextIO = sys.stdout) -> None:
-    """Render a human-readable comparison of two policy simulations."""
+    """Render a human-readable comparison of two policy simulations.
+
+    Each rule label goes through inert(), so an escape code or a line break
+    from a policy file shows as text.
+    """
     period = "all history" if report.old.days is None else f"last {report.old.days} days"
     out.write(f"Policy diff — old vs new ({period})\n")
     out.write("─" * 72 + "\n")
@@ -737,10 +747,10 @@ def format_policy_diff(report: PolicyDiffReport, out: TextIO = sys.stdout) -> No
     )
     out.write(f"{'New blocks introduced':<34} {'—':>11} {len(report.introduced):>12,} {_signed(len(report.introduced)):>9}\n")
     for item in PolicyDiffReport._by_rule(report.introduced):
-        out.write(f"  → {item['rule']:<52} {item['tool_calls']:>8,} new\n")
+        out.write(f"  → {inert(item['rule']):<52} {item['tool_calls']:>8,} new\n")
     out.write(f"{'Blocks removed':<34} {len(report.removed):>11,} {'—':>12} {_signed(-len(report.removed)):>9}\n")
     for item in PolicyDiffReport._by_rule(report.removed):
-        out.write(f"  → {item['rule']:<52} {item['tool_calls']:>8,} removed\n")
+        out.write(f"  → {inert(item['rule']):<52} {item['tool_calls']:>8,} removed\n")
     out.write("─" * 72 + "\n")
     if report.introduced:
         out.write(
@@ -755,7 +765,11 @@ def format_coverage(
     out: TextIO = sys.stdout,
     show_uncovered: bool = False,
 ) -> None:
-    """Render a human-readable explicit-rule coverage report."""
+    """Render a human-readable explicit-rule coverage report.
+
+    Each action goes through inert(), so an escape code or a line break from
+    the trace shows as text.
+    """
     backtest = report.backtest
     period = "all history" if backtest.days is None else f"last {backtest.days} days"
     out.write(
@@ -770,7 +784,7 @@ def format_coverage(
         out.write("Uncovered tool calls:\n")
         for call in report.uncovered:
             out.write(
-                f"  {call.session_id} event #{call.event_index}: {call.action}\n"
+                f"  {call.session_id} event #{call.event_index}: {inert(call.action)}\n"
             )
 
 

