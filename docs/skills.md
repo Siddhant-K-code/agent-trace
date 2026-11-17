@@ -365,7 +365,7 @@ sequenceDiagram
     participant T as Trace
     U->>A: prompt
     A->>T: load skill
-    Note over T: seconds_since_start<br/>loaded_before_first_edit, load_succeeded
+    Note over T: seconds_since_start<br/>(latest start or resume)<br/>loaded_before_first_edit, load_succeeded
     A->>T: first matching command
     Note over T: seconds_to_first_signal<br/>first_signal_before_next_prompt = true
     A->>T: test command and result
@@ -392,7 +392,7 @@ Outcome facts sit next to the load. They do not mean the skill caused them.
 
 ```mermaid
 flowchart TD
-    W["Sessions in window<br/>--since, default 30d"] --> P["Per skill<br/>available · loaded<br/>load rate · user, model loads<br/>median time to load<br/>pre-edit · follow<br/>tests after load"]:::fact
+    W["Sessions in window<br/>--since, default 30d"] --> P["Per skill<br/>available · loaded<br/>load rate · user, model loads<br/>median time from start/resume to load<br/>pre-edit · follow<br/>tests after load"]:::fact
     P --> N["Never loaded<br/>available: N+ sessions<br/>loaded: 0"]:::none
     P --> UO["User-only, never invoked<br/>disable-model-invocation: true<br/>available: N+ · invoked: 0"]:::nm
     P --> C["Loaded vs not loaded<br/>tests, errors,<br/>session_end<br/>N+ in both groups"]:::signal

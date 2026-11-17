@@ -515,6 +515,16 @@ class TestLoads(SkillsTestBase):
         load = self.loaded(self.analyze(ev.events), "deploy-check")["loads"][0]
         self.assertIsNone(load["loaded_before_first_edit"])
 
+    def test_resume_resets_load_timing(self):
+        ev = _Events(str(self.repo))
+        ev.t += 100
+        ev.add(EventType.SESSION_START, source="resume", cwd=str(self.repo))
+        ev.tool("skill", {"skill": "deploy-check"})
+
+        load = self.loaded(self.analyze(ev.events), "deploy-check")["loads"][0]
+
+        self.assertAlmostEqual(load["seconds_since_start"], 1.0)
+
     def test_workspace_fallback_without_session_start(self):
         ev = _Events()
         ev.tool("skill", {"skill": "deploy-check"})

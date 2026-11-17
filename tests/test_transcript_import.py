@@ -201,6 +201,67 @@ class TestCopilot(TranscriptTestBase):
         self.assertTrue(loaded["deploy-check"]["loads"][0]["load_succeeded"])
         self.assertFalse(loaded["missing-skill"]["loads"][0]["load_succeeded"])
 
+    def test_resume_resets_skill_load_timing(self):
+        home = self.tmp / "copilot"
+        self._session(home, "cccc3333-0000-4000-8000-000000000004", [
+            {"type": "session.start", "timestamp": _iso(0),
+             "data": {"startTime": _iso(0), "context": {"cwd": str(self.repo)}}},
+            self._listing(("deploy-check", "project")),
+            {"type": "session.resume", "timestamp": _iso(100),
+             "data": {"resumeTime": _iso(100), "context": {"cwd": str(self.repo)}}},
+            {"type": "skill.invoked", "timestamp": _iso(102),
+             "data": {"name": "deploy-check", "path": str(self.deploy_file),
+                      "source": "project", "trigger": "agent-invoked"}},
+        ])
+
+        code, out, err = self.run_cli(
+            "--from-copilot",
+            "--copilot-dir",
+            str(home),
+            "--min-sessions",
+            "1",
+            "--format",
+            "json",
+        )
+
+        self.assertEqual(code, 0, err)
+        deploy = self.skill(json.loads(out), "deploy-check")
+        self.assertAlmostEqual(deploy["median_seconds_to_load"], 2.0, places=3)
+
+        store, _, _ = load_copilot_history(str(home), str(self.tmp / "imported-resume"))
+        starts = [
+            event
+            for event in store.load_events(store.list_sessions()[0].session_id)
+            if event.event_type.value == "session_start"
+        ]
+        self.assertEqual(len(starts), 2)
+        self.assertEqual(starts[1].data["source"], "resume")
+
+    def test_resume_without_start_keeps_workspace(self):
+        home = self.tmp / "copilot"
+        self._session(home, "cccc3333-0000-4000-8000-000000000005", [
+            {"type": "session.resume", "timestamp": _iso(100),
+             "data": {"resumeTime": _iso(100), "context": {"cwd": str(self.repo)}}},
+            {"type": "skill.invoked", "timestamp": _iso(102),
+             "data": {"name": "deploy-check", "path": str(self.deploy_file),
+                      "source": "project", "trigger": "agent-invoked"}},
+        ])
+
+        code, out, err = self.run_cli(
+            "--from-copilot",
+            "--copilot-dir",
+            str(home),
+            "--min-sessions",
+            "1",
+            "--format",
+            "json",
+        )
+
+        self.assertEqual(code, 0, err)
+        report = json.loads(out)
+        self.assertEqual(report["sessions"], 1)
+        self.assertEqual(self.skill(report, "deploy-check")["median_seconds_to_load"], 2.0)
+
     def _skill_file(self, skill_dir: Path, command: str) -> Path:
         skill_dir.mkdir(parents=True)
         path = skill_dir / "SKILL.md"
