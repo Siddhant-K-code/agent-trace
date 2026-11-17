@@ -264,12 +264,30 @@ def _validate_manifest(manifest: Any, requested_framework: str) -> dict[str, Any
     return manifest
 
 
+def _is_link_or_reparse_point(info: os.stat_result) -> bool:
+    # Windows lstat does not follow symlinks or junctions and marks both as
+    # reparse points.
+    attributes = getattr(info, "st_file_attributes", 0)
+    return stat.S_ISLNK(info.st_mode) or bool(
+        attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+    )
+
+
 def _read_regular_file(
     path: Path, *, label: str, max_bytes: int,
 ) -> bytes:
-    flags = os.O_RDONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
+    # Windows has no O_NOFOLLOW, so refuse a link before the open and check
+    # that the open file is the one lstat saw.
+    try:
+        expected = os.lstat(path)
+    except OSError as exc:
+        raise ComplianceReportError(f"{label} could not be opened safely") from exc
+    if _is_link_or_reparse_point(expected):
+        raise ComplianceReportError(f"{label} could not be opened safely")
+    if not stat.S_ISREG(expected.st_mode):
+        raise ComplianceReportError(f"{label} must be a regular file")
+    # Without O_BINARY, Windows turns CRLF into LF and stops at a Ctrl-Z byte.
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
     except OSError as exc:
@@ -278,6 +296,8 @@ def _read_regular_file(
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode):
             raise ComplianceReportError(f"{label} must be a regular file")
+        if (info.st_dev, info.st_ino) != (expected.st_dev, expected.st_ino):
+            raise ComplianceReportError(f"{label} changed while it was read")
         if info.st_size > max_bytes:
             raise ComplianceReportError(f"{label} exceeds the supported size limit")
         chunks: list[bytes] = []

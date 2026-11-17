@@ -37,9 +37,9 @@ jobs:
     # Exercises the msvcrt file-lock and atomic-replace paths in fileutil.py,
     # the trace store lock, and LF line endings in trace-store files and the
     # configs, fixtures and baselines agent-strace reads back, and the by-path
-    # trace reads behind `agent-strace validate`, which the Linux jobs never
-    # run natively. Only these tests run here: the full
-    # suite does not yet pass on Windows (POSIX signals and file modes, CRLF
+    # trace reads behind `agent-strace validate` and `compliance-report`,
+    # which the Linux jobs never run natively. Only these tests run here: the
+    # full suite does not yet pass on Windows (POSIX signals and file modes, CRLF
     # in CLI and report output, cp1252 stdout).
     runs-on: windows-latest
     strategy:
@@ -68,6 +68,7 @@ jobs:
           tests.test_iac
           tests.test_config_watch
           tests.test_trace_validation
+          tests.test_compliance_report.TestReadRegularFile
           tests.test_store.TestTraceStore
           tests.test_store.TestStoreWriteLock
         env:
