@@ -523,7 +523,7 @@ Live session monitor with kill-switch rules.
 
 | Flag | Description |
 |---|---|
-| `--agent-pid PID` | Agent process that pause, kill and approval actions signal. Watch exits with an error if the PID does not exist or cannot be signalled. Watch records the process start time and checks it before each signal, so it never signals a process that reused the PID (see below). Not supported on Windows |
+| `--agent-pid PID` | Agent process that pause, kill and approval actions signal. A kill also signals the processes the agent started (see below). Watch exits with an error if the PID does not exist or cannot be signalled. Watch records the process start time and checks it before each signal, so it never signals a process that reused the PID (see below). Not supported on Windows |
 | `--timeout DURATION` | Kill the agent once this much time has passed since watch started, whatever `--on-violation` says. Checked on every poll cycle, so an agent that writes no events is still killed. Needs `--agent-pid`; without it watch alerts and warns once. DURATION is a number of seconds, such as `90`, or one or more groups of a number and a unit, with optional spaces, such as `30m`, `2h`, `1h30m`, `1h 30m` or `5 minutes`. The units, case-insensitive, are `s`, `sec`, `secs`, `second`, `seconds`, `m`, `min`, `mins`, `minute`, `minutes`, `h`, `hr`, `hrs`, `hour`, `hours`, `d`, `day` and `days`. Watch refuses at startup, with one line and exit 1, an empty value, any other text, such as `1w`, `1h30`, `1e3m` or `-5m`, and a value that is not a finite number of seconds more than 0, such as `0`, `-5`, `nan` or `inf` |
 | `--budget DOLLARS` | Kill the agent when spend exceeds this many dollars, whatever `--on-violation` says. Needs `--agent-pid`; without it watch alerts and warns once. Pass a plain number such as `5`, not `$5`; `0` kills at any spend. A negative, infinite or NaN value is refused at startup with one line and exit 1 |
 | `--loop-threshold N` | Alert when the same tool call and arguments repeat N times; default is 3 |
@@ -602,6 +602,50 @@ PID no other signal. A later
 usual, plus the line `Agent pid PID was already killed; no signal sent`, and
 a `require_approval` alert creates no approval request. VS Code Pause and
 Resume are ignored after the kill.
+
+A kill also ends the processes the agent started, such as a hung test or a
+dev server. Just before the agent's `SIGTERM`, watch lists every process whose
+parent chain leads to the agent, in any process group or session, so a
+command run in its own session or pty is included. It reads `/proc` on Linux
+and runs `ps` once on macOS and other POSIX systems. Watch sends `SIGTERM` to
+the agent and then to each listed process, parents first, and then `SIGCONT`
+to all of them in the same order, so a stopped process acts on `SIGTERM`. Five
+seconds after `SIGTERM`, watch sends `SIGKILL` to the agent and to each listed
+process that still runs. If the agent's `SIGTERM` cannot be sent, no other
+process gets a signal. Watch lists only once: a process the agent starts
+after `SIGTERM`, such as a hook that records the end of the session, is left
+to finish. Apart from the agent, watch never signals PID 1, watch itself, a
+process below watch (such as its `ps` or `--on-death` command), the processes
+between the agent and watch when watch runs under the agent, or a listed
+process whose PID now belongs to another process. After `Killing agent
+process PID`, watch names the child processes it signalled:
+
+```
+[watch] ⚠️  Killing agent process 4120
+[watch] ⚠️  Killing 3 child processes: 4121, 4122, 4130
+```
+
+The line names at most 10 PIDs, then `and N more`, and is left out when the
+agent has no child process. A process that watch is not allowed to signal is
+named in `Child process PID not killed: not allowed to signal it`. A process
+that has already exited needs no line. If watch cannot list the processes,
+for example because `ps` did not finish within 2 seconds, it kills the agent
+as before and prints `Could not list the agent's child processes, so they
+were not killed:` and the reason. No line shows a command line or its
+arguments, since they can hold secrets.
+
+Watch does not exit before that `SIGKILL`. If watch is about to exit less
+than 5 seconds after a kill, for example because the session ended or you
+pressed Ctrl-C, it waits until it has sent `SIGKILL` or every process it
+signalled has exited, for at most 7 seconds after `SIGTERM`. A wait longer
+than a second prints `Waiting Ns to send SIGKILL to processes that did not
+exit on SIGTERM; press Ctrl-C to stop waiting.` Ctrl-C ends the wait and names
+the signalled PIDs that still run.
+
+A kill does not reach a process that left the agent's tree before the kill,
+such as a daemon that forked twice, or a process the agent started through
+another service, such as a container run by a container runtime. To stop
+those too, run a command for them with `--on-death`.
 
 Watch does not guess the agent PID. Capture hooks run as children of a
 shell, so their parent is not reliably the agent, and signalling the wrong
@@ -814,7 +858,9 @@ position and name, but never a `notify` value:
 A `pause` rule keeps the agent stopped until a human resumes it: send
 `SIGCONT`, or run Pause Agent and then Resume Agent in VS Code. A
 `require_approval` rule keeps it stopped until the request is decided; the
-VS Code Resume command does not release it. Approving releases the pause.
+VS Code Resume command does not release it. Both rules stop only the agent
+process, and a command the agent is running goes on until it ends.
+Approving releases the pause.
 Denying leaves the agent stopped like a `pause` rule, because an agent that
 handles `SIGTERM` only acts on it after `SIGCONT`. A kill ends any pause, since
 it sends `SIGCONT` right after `SIGTERM`; a pending request stays pending.
@@ -1079,9 +1125,10 @@ Human-in-the-loop approval queue. A policy rule with
 `action=require_approval` pauses the agent while it waits for a decision.
 `watch` can only pause the agent when it was started with `--agent-pid`.
 Approving resumes the agent with `SIGCONT` by default; denying terminates it
-with `SIGTERM` by default. A request created by a `watch` without
-`--agent-pid` has no agent PID: `approve` and `deny` still record the decision
-and exit 0, but signal nothing and say so.
+with `SIGTERM` by default. Both signal only the agent process, and a command
+the agent is running goes on until it ends. A request created by a `watch`
+without `--agent-pid` has no agent PID: `approve` and `deny` still record the
+decision and exit 0, but signal nothing and say so.
 
 A request made by `watch --agent-pid` also stores the agent's start time in
 `agent_start_time`. Before `approve` or `deny` signals the PID, it reads the

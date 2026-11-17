@@ -4,21 +4,35 @@ Watchers and --rules rules kill through one path. SIGCONT follows SIGTERM,
 so a stopped agent can act on it. The post-mortem and --on-death follow
 only a SIGTERM that watch sent, and after it watch does not kill, pause or
 resume the agent again.
+
+On POSIX a kill also reaches the processes the agent started. They are
+listed once, before the agent's SIGTERM, and get SIGTERM, SIGCONT and the
+SIGKILL 5 seconds later. watch_session waits for that SIGKILL before it
+returns.
 """
 
 import io
 import json
 import os
 import signal
+import subprocess
+import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+try:  # keeps product telemetry off in this process and its children
+    from _no_telemetry import without_telemetry
+except ImportError:  # pragma: no cover - run as a package module
+    from tests._no_telemetry import without_telemetry
+
 from agent_trace import watch
 from agent_trace.approval import approve_request, deny_request, list_requests, load_request
 from agent_trace.models import EventType, SessionMeta, TraceEvent
+from agent_trace.process_identity import ProcessEntry, ProcessListError, process_identity
 from agent_trace.store import TraceStore
 from agent_trace.watch import (
     NannyRule,
@@ -56,9 +70,10 @@ def _dollars3() -> TraceEvent:
 class KillTestCase(unittest.TestCase):
     """Record each signal, post-mortem, --on-death run, line and alert, in order.
 
-    os.kill is stubbed, so no process is signalled, and the thread that
-    sends SIGKILL 5 seconds after SIGTERM is never started. The post-mortem
-    is written to a real store.
+    os.kill is stubbed, so no process is signalled. The agent has no child
+    processes. The thread that sends SIGKILL 5 seconds after SIGTERM is
+    never started, and watch_session's wait for it is recorded, not run.
+    The post-mortem is written to a real store.
     """
 
     def setUp(self):
@@ -115,6 +130,8 @@ class KillTestCase(unittest.TestCase):
             "os.kill": os_kill,
             "agent_trace.watch.pid_reused": pid_reused,
             "agent_trace.watch.process_identity": lambda pid: "proc:1",
+            "agent_trace.watch.list_processes": lambda: {},
+            "agent_trace.watch._wait_for_sigkill": lambda out: record(("sigkill-wait",)),
             "agent_trace.watch._alert_terminal": lambda msg, *a, **k: record(("line", msg)),
             "agent_trace.watch._alert_file": lambda msg, *a, **k: record(("alert-log", msg)),
             "agent_trace.watch._alert_webhook": lambda msg, url: record(("webhook", msg)),
@@ -126,9 +143,11 @@ class KillTestCase(unittest.TestCase):
             patcher = patch(target, side_effect=stub)
             patcher.start()
             self.addCleanup(patcher.stop)
-        patcher = patch("threading.Thread", SigkillTimer)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        for target, new in (("threading.Thread", SigkillTimer),
+                            ("agent_trace.watch._sigkill_steps", [])):
+            patcher = patch(target, new)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def reset(self, agent_pid: int | None = PID) -> None:
         """Start again with an agent that watch has not signalled."""
@@ -342,6 +361,7 @@ class TestKillOnce(KillTestCase):
             ("alert-log", rule_msg),
             ("line", ALREADY),
             ("webhook", rule_msg),
+            ("sigkill-wait",),
         ])
         self.assertEqual(self.reason(), COST_MSG)
 
@@ -353,6 +373,7 @@ class TestKillOnce(KillTestCase):
             ("alert-log", cost_msg),
             ("line", ALREADY),
             ("webhook", cost_msg),
+            ("sigkill-wait",),
         ])
         self.assertEqual(self.reason(), _rule_msg())
 
@@ -472,6 +493,667 @@ class TestDryRunKill(KillTestCase):
                 # A dry run is not the kill: a pause still stops the agent.
                 self.watcher(RETRY_MSG, action="pause")
                 self.assertEqual(self.recorded("signal"), [signal.SIGSTOP])
+
+
+# ---------------------------------------------------------------------------
+# The agent's child processes, with a fake process table
+# ---------------------------------------------------------------------------
+
+# Fake PIDs. Linux and macOS never assign a PID above 2**22, so none of
+# them is this test's own PID.
+AGENT = 5_000_000
+CHILD_A = 5_000_001
+CHILD_B = 5_000_002
+GRANDCHILD = 5_000_011
+NEW_A = 5_000_021
+NEW_B = 5_000_022
+
+
+def _table(*rows: tuple[int, int], changed: tuple = ()) -> dict:
+    """PID → (parent PID, identity). Each identity is "id:PID", or "id:other" if changed."""
+    return {
+        pid: ProcessEntry(ppid, "id:other" if pid in changed else f"id:{pid}")
+        for pid, ppid in rows
+    }
+
+
+def _tree() -> dict:
+    """The agent, its two children and a grandchild. Watch runs elsewhere."""
+    return _table(
+        (1, 0), (AGENT, 1), (CHILD_A, AGENT), (CHILD_B, AGENT), (GRANDCHILD, CHILD_A),
+        (os.getpid(), 1),
+    )
+
+
+@unittest.skipUnless(os.name == "posix", "a kill reaches child processes on POSIX only")
+class TestKillChildProcesses(unittest.TestCase):
+    """_kill_process with a fake process table. No process is signalled.
+
+    os.kill is stubbed. The SIGKILL step is run at once, in the test.
+    """
+
+    def setUp(self):
+        self.calls: list[tuple] = []
+        self.lines: list[str] = []
+        self.errors: dict[tuple[int, int], OSError] = {}
+        self.reused: set[int] = set()
+        self.tables: list = [_tree()]
+        self.steps: list = []
+        record = self.calls.append
+
+        def os_kill(pid, sig):
+            record(("signal", pid, sig))
+            if (pid, sig) in self.errors:
+                raise self.errors[(pid, sig)]
+
+        def pid_reused(pid, start_time=None):
+            record(("reused?", pid))
+            return pid in self.reused
+
+        def list_processes():
+            record(("list",))
+            table = self.tables.pop(0)
+            if isinstance(table, Exception):
+                raise table
+            return table
+
+        class Thread:
+            """The SIGKILL step's thread, never started."""
+
+            def __init__(self, target, daemon):
+                pass
+
+            def start(self):
+                pass
+
+        for target, new in (
+            ("os.kill", os_kill),
+            ("agent_trace.watch.pid_reused", pid_reused),
+            ("agent_trace.watch.list_processes", list_processes),
+            ("agent_trace.watch._alert_terminal", self.lines.append),
+            ("agent_trace.watch._sigkill_steps", self.steps),
+            ("agent_trace.watch.time.sleep", lambda seconds: None),
+            ("threading.Thread", Thread),
+        ):
+            patcher = patch(target, new)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def kill(self) -> bool:
+        return watch._kill_process(AGENT, "id:agent")
+
+    def run_step(self, table: dict) -> list[tuple]:
+        """Run the SIGKILL step with *table* as the new listing; return its calls."""
+        [step] = self.steps
+        self.tables.append(table)
+        self.calls.clear()
+        step.run()
+        return self.calls
+
+    def sent(self, sig: int) -> list[int]:
+        return [call[1] for call in self.calls if call[0] == "signal" and call[2] == sig]
+
+    def not_killed(self, line: str, calls: list[tuple]) -> None:
+        self.assertFalse(self.kill())
+        self.assertEqual(self.calls, calls)
+        self.assertEqual(self.lines, [line])
+        self.assertEqual(self.steps, [])
+
+    def test_each_signal_goes_to_the_agent_then_its_child_processes(self):
+        children = [CHILD_A, CHILD_B, GRANDCHILD]
+        self.assertTrue(self.kill())
+        self.assertEqual(self.calls, [
+            ("reused?", AGENT),
+            ("signal", AGENT, 0),
+            ("list",),
+            ("signal", AGENT, signal.SIGTERM),
+            *[("signal", pid, signal.SIGTERM) for pid in children],
+            ("reused?", AGENT),
+            ("signal", AGENT, signal.SIGCONT),
+            *[("signal", pid, signal.SIGCONT) for pid in children],
+        ])
+        self.assertEqual(
+            self.lines, [f"Killing 3 child processes: {CHILD_A}, {CHILD_B}, {GRANDCHILD}"],
+        )
+        self.assertEqual(self.run_step(_tree()), [
+            ("reused?", AGENT),
+            ("signal", AGENT, signal.SIGKILL),
+            ("list",),
+            *[("signal", pid, signal.SIGKILL) for pid in children],
+        ])
+        self.assertEqual(len(self.lines), 1)
+
+    def test_sigkill_goes_only_to_a_listed_process_that_is_unchanged(self):
+        self.kill()
+        # CHILD_A's PID now names another process and CHILD_B is gone. NEW_A
+        # and NEW_B started after the kill's listing.
+        table = _table(
+            (1, 0), (AGENT, 1), (CHILD_A, 1), (GRANDCHILD, 1), (NEW_A, AGENT),
+            (NEW_B, GRANDCHILD), changed=(CHILD_A,),
+        )
+        self.assertEqual(self.run_step(table), [
+            ("reused?", AGENT),
+            ("signal", AGENT, signal.SIGKILL),
+            ("list",),
+            ("signal", GRANDCHILD, signal.SIGKILL),
+        ])
+
+    def test_a_child_process_that_cannot_be_signalled(self):
+        # One is not ours to signal and one exited: only the first gets a line.
+        self.errors[(CHILD_B, signal.SIGTERM)] = PermissionError()
+        self.errors[(GRANDCHILD, signal.SIGTERM)] = ProcessLookupError()
+        self.assertTrue(self.kill())
+        self.assertEqual(self.sent(signal.SIGTERM), [AGENT, CHILD_A, CHILD_B, GRANDCHILD])
+        self.assertEqual(self.sent(signal.SIGCONT), [AGENT, CHILD_A])
+        self.assertEqual(self.lines, [
+            f"Killing 1 child process: {CHILD_A}",
+            f"Child process {CHILD_B} not killed: not allowed to signal it",
+        ])
+        self.run_step(_tree())
+        self.assertEqual(self.sent(signal.SIGKILL), [AGENT, CHILD_A])
+
+    def test_child_processes_that_cannot_be_signalled(self):
+        for pid in (CHILD_A, CHILD_B):
+            self.errors[(pid, signal.SIGTERM)] = PermissionError()
+        self.assertTrue(self.kill())
+        self.assertEqual(self.lines, [
+            f"Killing 1 child process: {GRANDCHILD}",
+            f"Child processes {CHILD_A}, {CHILD_B} not killed: not allowed to signal them",
+        ])
+
+    def test_the_line_names_ten_pids_at_most(self):
+        children = [AGENT + n for n in range(1, 13)]
+        self.tables = [_table((AGENT, 1), *[(pid, AGENT) for pid in children])]
+        self.assertTrue(self.kill())
+        shown = ", ".join(str(pid) for pid in children[:10])
+        self.assertEqual(self.lines, [f"Killing 12 child processes: {shown} and 2 more"])
+
+    def test_listing_fails(self):
+        self.tables = [ProcessListError("ps did not finish within 2s")]
+        self.assertTrue(self.kill())
+        self.assertEqual(self.calls, [
+            ("reused?", AGENT),
+            ("signal", AGENT, 0),
+            ("list",),
+            ("signal", AGENT, signal.SIGTERM),
+            ("reused?", AGENT),
+            ("signal", AGENT, signal.SIGCONT),
+        ])
+        self.assertEqual(self.lines, [
+            "Could not list the agent's child processes, so they were not killed: "
+            "ps did not finish within 2s",
+        ])
+        self.assertEqual(self.run_step(_tree()), [
+            ("reused?", AGENT), ("signal", AGENT, signal.SIGKILL),
+        ])
+
+    def test_reused_pid_lists_nothing(self):
+        self.reused.add(AGENT)
+        self.not_killed(
+            f"Agent pid {AGENT} was not killed: the PID now belongs to another process",
+            [("reused?", AGENT)],
+        )
+
+    def test_agent_that_cannot_be_signalled_lists_nothing(self):
+        for error, reason in (
+            (PermissionError(), "not allowed to signal it"),
+            (ProcessLookupError(), "no process has that PID"),
+        ):
+            with self.subTest(reason=reason):
+                self.calls.clear()
+                self.lines.clear()
+                for sig in (0, signal.SIGTERM, signal.SIGCONT, signal.SIGKILL):
+                    self.errors[(AGENT, sig)] = error
+                self.assertFalse(self.kill())
+                self.assertEqual(self.lines, [f"Agent pid {AGENT} was not killed: {reason}"])
+                self.assertNotIn(("list",), self.calls)
+                # One attempt, at the agent, and nothing after it.
+                self.assertEqual([c[1] for c in self.calls if c[0] == "signal"], [AGENT])
+                self.assertEqual(self.steps, [])
+
+    def test_failed_sigterm_signals_no_child_process(self):
+        # The agent exited between the check and SIGTERM.
+        self.errors[(AGENT, signal.SIGTERM)] = ProcessLookupError()
+        self.assertFalse(self.kill())
+        self.assertEqual(
+            self.lines, [f"Agent pid {AGENT} was not killed: no process has that PID"],
+        )
+        sent = [c for c in self.calls if c[0] == "signal" and c[2] != 0]
+        self.assertEqual(sent, [("signal", AGENT, signal.SIGTERM)])
+        self.assertEqual(self.steps, [])
+
+    def test_watch_and_the_processes_above_it_are_left_out(self):
+        # Watch runs under a shell the agent started, and has a child of its own.
+        shell, watch_child = AGENT + 3, AGENT + 4
+        me = os.getpid()
+        self.tables = [_table(
+            (1, 0), (AGENT, 1), (shell, AGENT), (me, shell), (watch_child, me), (CHILD_B, AGENT),
+        )]
+        self.assertTrue(self.kill())
+        self.assertEqual(self.sent(signal.SIGTERM), [AGENT, CHILD_B])
+        self.assertEqual(self.lines, [f"Killing 1 child process: {CHILD_B}"])
+
+
+class _FakeStep:
+    def __init__(self, due: float, pids: list[int], done=None):
+        self.due = due
+        self.done = done or threading.Event()
+        self.pids = pids
+
+    def settled(self) -> bool:
+        return self.done.is_set()
+
+    def running(self) -> list[int]:
+        return self.pids
+
+
+class _Interrupted:
+    """A SIGKILL step's done event whose wait gets Ctrl-C."""
+
+    def is_set(self) -> bool:
+        return False
+
+    def wait(self, timeout=None):
+        raise KeyboardInterrupt
+
+
+class TestWaitForSigkill(unittest.TestCase):
+    """watch_session does not return before a kill's SIGKILL step."""
+
+    def wait(self, steps: list, notice_after: float = 1.0, after_due: float = 2.0):
+        """Run the wait for *steps*; return its output and how long it took."""
+        registry = list(steps)
+        out = io.StringIO()
+        with patch.object(watch, "_sigkill_steps", registry), \
+                patch.object(watch, "_SIGKILL_WAIT_NOTICE_AFTER", notice_after), \
+                patch.object(watch, "_SIGKILL_WAIT_AFTER_DUE", after_due):
+            start = time.monotonic()
+            watch._wait_for_sigkill(out)
+            elapsed = time.monotonic() - start
+        self.assertEqual(registry, [])
+        return out.getvalue(), elapsed
+
+    def test_no_kill_no_wait(self):
+        output, elapsed = self.wait([])
+        self.assertEqual(output, "")
+        self.assertLess(elapsed, 0.1)
+
+    def test_waits_for_sigkill_and_says_why(self):
+        step = _FakeStep(time.monotonic() + 0.6, [AGENT])
+        timer = threading.Timer(0.3, step.done.set)
+        timer.start()
+        self.addCleanup(timer.cancel)
+        output, elapsed = self.wait([step], notice_after=0.1)
+        self.assertEqual(
+            output,
+            "[watch] Waiting 1s to send SIGKILL to processes that did not exit on SIGTERM; "
+            "press Ctrl-C to stop waiting.\n",
+        )
+        self.assertGreaterEqual(elapsed, 0.25)
+        self.assertLess(elapsed, 0.6)
+
+    def test_the_wait_ends_after_the_due_time(self):
+        step = _FakeStep(time.monotonic() + 0.1, [AGENT])
+        output, elapsed = self.wait([step], after_due=0.2)
+        self.assertEqual(output, "")
+        self.assertGreaterEqual(elapsed, 0.25)
+        self.assertLess(elapsed, 1.0)
+
+    @unittest.skipUnless(os.name == "posix", "the SIGKILL step runs on POSIX only")
+    def test_sigkill_reaches_a_child_after_a_slow_listing(self):
+        # The SIGKILL step lists the processes again before it signals a
+        # child, and ps can take up to its 2s timeout. Here the listing takes
+        # 0.5s and no process exits. The wait uses the module's
+        # _SIGKILL_WAIT_AFTER_DUE, not a patched value.
+        signals: list[tuple[int, int]] = []
+
+        def os_kill(pid, sig):
+            signals.append((pid, sig))  # every PID stays in use
+
+        def list_processes():
+            time.sleep(0.5)
+            return {CHILD_A: ProcessEntry(AGENT, "id:a")}
+
+        with patch("os.kill", os_kill), \
+                patch.object(watch, "list_processes", list_processes), \
+                patch.object(watch, "_sigkill_steps", []), \
+                patch.object(watch, "_SIGKILL_DELAY", 0.1):
+            step = watch._SigkillStep(AGENT, None, [(CHILD_A, "id:a")], time.monotonic())
+            watch._sigkill_steps.append(step)
+            thread = threading.Thread(target=step.run, daemon=True)
+            thread.start()
+            try:
+                watch._wait_for_sigkill(io.StringIO())
+                done = step.done.is_set()
+                sigkills = [pid for pid, sig in signals if sig == signal.SIGKILL]
+            finally:
+                thread.join(5)
+        self.assertTrue(done)
+        self.assertEqual(sigkills, [AGENT, CHILD_A])
+
+    def test_ctrl_c_ends_the_wait(self):
+        step = _FakeStep(time.monotonic() + 5, [AGENT, CHILD_A], _Interrupted())
+        output, elapsed = self.wait([step])
+        self.assertEqual(
+            output, f"\n[watch] Stopped waiting before SIGKILL. Still running: {AGENT}, {CHILD_A}\n",
+        )
+        self.assertLess(elapsed, 1.0)
+
+    def test_a_kill_is_settled_once_its_processes_are_gone(self):
+        step = watch._SigkillStep(AGENT, "id:agent", [(CHILD_A, "id:a")], time.monotonic())
+        alive = {AGENT, CHILD_A}
+
+        def os_kill(pid, sig):
+            if pid not in alive:
+                raise ProcessLookupError
+
+        with patch("os.kill", os_kill):
+            self.assertFalse(step.settled())
+            alive.discard(AGENT)
+            self.assertEqual(step.running(), [CHILD_A])
+            self.assertFalse(step.settled())
+            alive.clear()
+            self.assertTrue(step.settled())
+
+
+# ---------------------------------------------------------------------------
+# The agent's child processes, live
+# ---------------------------------------------------------------------------
+
+_TREE_SCRIPT = '''\
+"""A fake agent and the processes it starts, for tests/test_watch_kill.py.
+
+Usage: python tree.py FOLDER ROLE [ARGS]
+Each process writes its PID to FOLDER/ROLE once it is ready. None of them
+runs for more than 30 seconds.
+"""
+import os
+import signal
+import subprocess
+import sys
+import time
+
+FOLDER, ROLE, ARGS = sys.argv[1], sys.argv[2], sys.argv[3:]
+
+
+def write(name, text):
+    tmp = os.path.join(FOLDER, name + ".tmp")
+    with open(tmp, "w") as f:
+        f.write(text)
+    os.replace(tmp, os.path.join(FOLDER, name))
+
+
+def start(role, *args, **kwargs):
+    return subprocess.Popen([sys.executable, __file__, FOLDER, role, *args], **kwargs)
+
+
+def wait_for(names):
+    deadline = time.monotonic() + 20
+    while not all(os.path.exists(os.path.join(FOLDER, name)) for name in names):
+        if time.monotonic() > deadline:
+            sys.exit(1)
+        time.sleep(0.01)
+
+
+def write_mark(signum, frame):
+    write("mark", "SIGTERM")
+    os._exit(0)
+
+
+def exit_slowly(signum, frame):
+    # Like a server that shuts down: it still runs while watch prints its lines.
+    time.sleep(1)
+    os._exit(0)
+
+
+def run_hook(signum, frame):
+    # Like a SessionEnd hook: the agent starts it on SIGTERM and waits.
+    start("hook").wait()
+    os._exit(0)
+
+
+if ROLE == "launcher":
+    # Start the agent and exit, so the agent's parent is not the test.
+    start(*ARGS)
+    sys.exit(0)
+if ROLE == "hook":
+    write("hook", str(os.getpid()))
+    time.sleep(1)
+    write("hook-mark", "done")
+    sys.exit(0)
+if ROLE in ("agent", "hooked-agent"):
+    if ROLE == "hooked-agent":
+        signal.signal(signal.SIGTERM, run_hook)
+    for child in ARGS:
+        start(child, *(["--token", "secret-token-123"] if child == "secret" else []))
+    wait_for(ARGS + (["own-session"] if "middle" in ARGS else []))
+    write("agent", str(os.getpid()))
+else:
+    if ROLE == "ignores-term":
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    elif ROLE == "stopped":
+        signal.signal(signal.SIGTERM, write_mark)
+    elif ROLE == "secret":
+        signal.signal(signal.SIGTERM, exit_slowly)
+    elif ROLE == "middle":
+        start("own-session", start_new_session=True)
+    write(ROLE, str(os.getpid()))
+time.sleep(30)
+'''
+
+
+def _wait_until(check, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while not check():
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
+    return True
+
+
+def _state(pid: int) -> str:
+    """Return the state letter of *pid*, such as S, T or Z, or "" once it is gone."""
+    if os.path.exists("/proc/self/stat"):
+        try:
+            with open(f"/proc/{pid}/stat") as f:
+                return f.read().rpartition(")")[2].split()[0]
+        except (OSError, IndexError):
+            return ""
+    result = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, timeout=5,
+    )
+    return result.stdout.strip()[:1]
+
+
+def _stop(proc: subprocess.Popen) -> None:
+    if proc.poll() is None:
+        proc.kill()
+    proc.wait()
+
+
+class _Tree:
+    """Processes started from _TREE_SCRIPT, by role.
+
+    Cleanup sends SIGKILL to each one that still has the identity it had
+    when it started, so a failed test leaves no process behind and signals
+    no process it did not start.
+    """
+
+    def __init__(self, test: unittest.TestCase):
+        tmp = tempfile.TemporaryDirectory()
+        test.addCleanup(tmp.cleanup)
+        self.folder = Path(tmp.name)
+        self.script = self.folder / "tree.py"
+        self.script.write_text(_TREE_SCRIPT)
+        self.pids: dict[str, int] = {}
+        self.identities: dict[str, str] = {}
+        test.addCleanup(self.kill_leftovers)
+
+    def command(self, role: str, *args: str) -> list[str]:
+        return [sys.executable, str(self.script), str(self.folder), role, *args]
+
+    def start(self, agent_role: str, *children: str) -> None:
+        """Start an agent whose parent is not this test; wait until all of it runs."""
+        launcher = subprocess.Popen(
+            self.command("launcher", agent_role, *children), start_new_session=True,
+        )
+        launcher.wait(timeout=20)
+        self.read("agent")
+        for role in children + (("own-session",) if "middle" in children else ()):
+            self.read(role)
+
+    def read(self, role: str, timeout: float = 20.0) -> int:
+        path = self.folder / role
+        if not _wait_until(path.exists, timeout):
+            raise AssertionError(f"the {role} process did not start")
+        pid = int(path.read_text())
+        identity = process_identity(pid)
+        if identity is None:
+            raise AssertionError(f"no identity for the {role} process {pid}")
+        self.pids[role] = pid
+        self.identities[role] = identity
+        return pid
+
+    def gone(self, role: str) -> bool:
+        pid = self.pids[role]
+        return process_identity(pid) != self.identities[role] or _state(pid) in ("", "Z")
+
+    def kill_leftovers(self) -> None:
+        for role, pid in self.pids.items():
+            if process_identity(pid) == self.identities[role]:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+
+
+@unittest.skipUnless(os.name == "posix", "a kill reaches child processes on POSIX only")
+class TestKillProcessTreeLive(unittest.TestCase):
+    """Real kills of a fake agent and the processes it started."""
+
+    def test_kill_ends_every_process_the_agent_started(self):
+        tree = _Tree(self)
+        tree.start("agent", "ignores-term", "middle", "stopped")
+        pids = tree.pids
+        # The grandchild has its own session, as a command run in a pty does.
+        own = pids["own-session"]
+        self.assertEqual(os.getsid(own), own)
+        self.assertNotEqual(os.getsid(own), os.getsid(pids["agent"]))
+        os.kill(pids["stopped"], signal.SIGSTOP)
+        self.assertTrue(_wait_until(lambda: _state(pids["stopped"]) == "T", 5))
+
+        lines: list[str] = []
+        steps: list = []
+        with patch.object(watch, "_SIGKILL_DELAY", 3.0), \
+                patch.object(watch, "_sigkill_steps", steps), \
+                patch.object(watch, "_alert_terminal", lines.append):
+            self.assertTrue(watch._kill_process(pids["agent"], tree.identities["agent"]))
+            [step] = steps
+            # The stopped child ran its SIGTERM handler before SIGKILL was
+            # due, so it got SIGCONT.
+            self.assertTrue(_wait_until((tree.folder / "mark").exists, 2))
+            self.assertFalse(step.done.is_set())
+            ended = ("agent", "middle", "own-session", "stopped")
+            self.assertTrue(_wait_until(lambda: all(tree.gone(role) for role in ended), 2))
+            # Only SIGKILL ends the child that ignores SIGTERM.
+            self.assertFalse(tree.gone("ignores-term"))
+            self.assertFalse(step.done.is_set())
+            self.assertTrue(step.done.wait(10))
+            self.assertTrue(_wait_until(lambda: tree.gone("ignores-term"), 2))
+        first = sorted(pids[role] for role in ("ignores-term", "middle", "stopped"))
+        listed = ", ".join(str(pid) for pid in first + [own])
+        self.assertEqual(lines, [f"Killing 4 child processes: {listed}"])
+
+    def test_a_process_the_agent_starts_on_sigterm_is_not_signalled(self):
+        # Watch lists the processes once, before SIGTERM. The hook the agent
+        # starts on SIGTERM runs to its end, even after the agent's SIGKILL.
+        tree = _Tree(self)
+        tree.start("hooked-agent", "plain")
+        lines: list[str] = []
+        steps: list = []
+        with patch.object(watch, "_SIGKILL_DELAY", 0.5), \
+                patch.object(watch, "_sigkill_steps", steps), \
+                patch.object(watch, "_alert_terminal", lines.append):
+            self.assertTrue(watch._kill_process(tree.pids["agent"], tree.identities["agent"]))
+            tree.read("hook", 5)
+            self.assertTrue(steps[0].done.wait(10))
+            self.assertTrue(_wait_until(lambda: tree.gone("agent"), 2))
+            self.assertTrue(_wait_until((tree.folder / "hook-mark").exists, 5))
+        self.assertEqual(lines, [f"Killing 1 child process: {tree.pids['plain']}"])
+
+    def test_watch_sends_sigkill_before_it_returns_on_session_end(self):
+        tree = _Tree(self)
+        tree.start("agent", "ignores-term")
+        store = TraceStore(tree.folder / "traces", redact=False)
+        store.create_session(SessionMeta(session_id=SESSION, started_at=time.time()))
+        config = WatcherConfig(
+            on_violation="kill", alert_log=str(tree.folder / "alerts.log"),
+        )
+        rule = NannyRule(name="cost cap", condition="cost_usd > 0.5", action="kill")
+        end = TraceEvent(
+            event_type=EventType.SESSION_END, timestamp=time.time(), session_id=SESSION,
+        )
+        out = io.StringIO()
+        lines: list[str] = []
+        with patch.dict(os.environ), \
+                patch.object(watch, "_SIGKILL_DELAY", 1.5), \
+                patch.object(watch, "_sigkill_steps", []), \
+                patch.object(watch, "_alert_terminal", lines.append), \
+                patch.object(watch, "_tail_events", return_value=iter([_dollars3(), end])):
+            for name in ("AGENT_STRACE_SLACK_WEBHOOK", "AGENT_STRACE_TEAMS_WEBHOOK"):
+                os.environ.pop(name, None)
+            watch_session(
+                store, SESSION, config, out=out, nanny_rules=[rule],
+                agent_pid=tree.pids["agent"],
+            )
+            # The session ended right after the kill, and SIGKILL still came first.
+            self.assertTrue(_wait_until(lambda: tree.gone("ignores-term"), 0.5))
+        self.assertIn(f"Killing 1 child process: {tree.pids['ignores-term']}", lines)
+        self.assertIn("[watch] Session ended", out.getvalue())
+
+    def test_no_command_line_in_the_output_or_the_alert_log(self):
+        # The real CLI, with an agent whose child has a token in its arguments.
+        # The child takes 1s to exit on SIGTERM, so it still runs while watch
+        # prints its lines.
+        tree = _Tree(self)
+        agent = subprocess.Popen(tree.command("agent", "secret"))
+        self.addCleanup(_stop, agent)
+        tree.read("agent")
+        secret = tree.read("secret")
+        trace_dir = tree.folder / "traces"
+        TraceStore(trace_dir, redact=False).create_session(
+            SessionMeta(session_id=SESSION, started_at=time.time()),
+        )
+        env = without_telemetry(dict(
+            os.environ,
+            PYTHONPATH=str(Path(watch.__file__).resolve().parents[1]),
+            HOME=str(tree.folder),
+            PYTHONUNBUFFERED="1",
+        ))
+        for name in (
+            "AGENT_STRACE_TENANT_ID", "AGENT_STRACE_SLACK_WEBHOOK", "AGENT_STRACE_TEAMS_WEBHOOK",
+        ):
+            env.pop(name, None)
+        log = tree.folder / "watch.log"
+        with open(log, "wb") as log_file:
+            proc = subprocess.Popen(
+                [
+                    sys.executable, "-m", "agent_trace.entry", "--trace-dir", str(trace_dir),
+                    "watch", SESSION, "--agent-pid", str(agent.pid), "--timeout", "1s",
+                ],
+                cwd=tree.folder, env=env, stdout=log_file, stderr=subprocess.STDOUT,
+            )
+        self.addCleanup(_stop, proc)
+        self.assertEqual(agent.wait(timeout=15), -signal.SIGTERM)
+        self.assertTrue(_wait_until(lambda: tree.gone("secret"), 5))
+        proc.send_signal(signal.SIGINT)
+        proc.wait(timeout=15)
+        output = log.read_text(errors="replace")
+        alerts = (tree.folder / ".agent-traces" / "alerts.log").read_text(errors="replace")
+        self.assertIn(f"Killing 1 child process: {secret}", output)
+        self.assertIn("DurationWatcher", alerts)
+        for text in (output, alerts):
+            self.assertNotIn("secret-token-123", text)
 
 
 if __name__ == "__main__":

@@ -70,7 +70,14 @@ from .http_post import (
 from .inert import inert
 from .models import EventType, TraceEvent
 from .postmortem import clear_heartbeat, write_heartbeat
-from .process_identity import PID_REUSED_REASON, pid_reused, process_identity
+from .process_identity import (
+    PID_REUSED_REASON,
+    ProcessListError,
+    descendants,
+    list_processes,
+    pid_reused,
+    process_identity,
+)
 from .project_budget import (
     ProjectBudgetConfig,
     ProjectBudgetConfigError,
@@ -279,6 +286,80 @@ def _alert_webhook(message: str, url: str) -> None:
         sys.stderr.flush()
 
 
+_SIGKILL_DELAY = 5.0
+"""Seconds from a kill's SIGTERM to its SIGKILL. Tests shorten it."""
+
+# How long watch_session waits past a due SIGKILL for it to be sent: the
+# step lists the processes first, and ps may take up to its 2s timeout.
+_SIGKILL_WAIT_AFTER_DUE = 2.0
+# A wait that lasts this long gets one line that says why and how to stop it.
+_SIGKILL_WAIT_NOTICE_AFTER = 1.0
+# How many PIDs one line names before "and N more".
+_PIDS_SHOWN = 10
+
+
+class _SigkillStep:
+    """The SIGKILL that follows a kill's SIGTERM by _SIGKILL_DELAY seconds.
+
+    It goes to the agent unless its PID was reused, as before, and to each
+    child process that got SIGTERM and whose identity in a new listing is
+    still the recorded one. It prints nothing.
+    """
+
+    def __init__(
+        self, pid: int, start_time: str | None, children: list[tuple[int, str]],
+        sigterm_at: float,
+    ):
+        self.pid = pid
+        self.start_time = start_time
+        self.children = children
+        self.due = sigterm_at + _SIGKILL_DELAY
+        self.done = threading.Event()
+
+    def run(self) -> None:
+        try:
+            time.sleep(max(0.0, self.due - time.monotonic()))
+            self._send()
+        finally:
+            self.done.set()
+
+    def _send(self) -> None:
+        if not pid_reused(self.pid, self.start_time):
+            try:
+                os.kill(self.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        if not self.children:
+            return
+        try:
+            table = list_processes()
+        except ProcessListError:
+            return
+        for pid, identity in self.children:
+            entry = table.get(pid)
+            if entry is not None and entry.identity == identity:
+                _send_signal(pid, signal.SIGKILL)
+
+    def running(self) -> list[int]:
+        """Return the PIDs this kill signalled that some process still has."""
+        pids = [self.pid] + [pid for pid, _ in self.children]
+        return [pid for pid in pids if _send_signal(pid, 0) != _NO_SUCH_PROCESS]
+
+    def settled(self) -> bool:
+        """Return True once SIGKILL was sent or every signalled process is gone."""
+        return self.done.is_set() or not self.running()
+
+
+# Kills whose SIGKILL step watch_session waits for before it returns.
+_sigkill_steps: list[_SigkillStep] = []
+
+
+def _pid_list(pids: list[int]) -> str:
+    shown = ", ".join(str(pid) for pid in pids[:_PIDS_SHOWN])
+    more = len(pids) - _PIDS_SHOWN
+    return f"{shown} and {more} more" if more > 0 else shown
+
+
 def _kill_process(pid: int, start_time: str | None = None) -> bool:
     """Send SIGTERM, then SIGCONT, and SIGKILL 5s later from a background thread.
 
@@ -290,52 +371,129 @@ def _kill_process(pid: int, start_time: str | None = None) -> bool:
     (Ctrl-Z, kill -STOP), so SIGCONT follows every SIGTERM, as in systemd
     and daemontools.
 
-    Return True if SIGTERM was sent. If it was not, print one line that
-    says why, send no other signal and return False. A SIGCONT that fails
-    is ignored and does not change the result.
+    The agent's child processes get the same signals: every process whose
+    parent chain leads to *pid*, in any process group or session. They are
+    listed once, just before the agent's SIGTERM, and get SIGTERM and
+    SIGCONT right after the agent. SIGKILL goes only to a listed process
+    whose identity is still the listed one. A process started after the
+    listing, such as one the agent starts to shut down, is never
+    signalled. Neither is PID 1, watch itself, a process watch started, or
+    a process between the agent and watch when watch runs under the
+    agent. One line names the child processes that got SIGTERM, one names
+    those it could not reach, and one says when they could not be listed.
+    Their command lines are never printed. Without POSIX signals only
+    *pid* is signalled.
+
+    Return True if SIGTERM was sent to the agent. If it was not, print one
+    line that says why, list nothing, send no other signal and return
+    False. A SIGCONT that fails is ignored and does not change the result.
 
     ``start_time`` is the agent's identity from :func:`process_identity`.
     No signal is sent once the PID belongs to another process, so an
     agent that exits on SIGTERM cannot have its PID reused and then
     continued or SIGKILLed.
-    """
-    import threading
 
-    reason = ""
-    if pid_reused(pid, start_time):
-        reason = PID_REUSED_REASON
-    else:
+    watch_session waits for the SIGKILL step before it returns; see
+    _wait_for_sigkill.
+    """
+    posix = os.name == "posix"
+    reason = PID_REUSED_REASON if pid_reused(pid, start_time) else None
+    if reason is None and posix:
+        # Signal 0 makes the checks SIGTERM would make, so a kill that
+        # cannot reach the agent does not list its child processes.
+        reason = _send_signal(pid, 0)
+    children: list[tuple[int, str]] = []
+    list_error = ""
+    if reason is None and posix:
         try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            reason = "no process has that PID"
-        except PermissionError:
-            reason = "not allowed to signal it"
-    if reason:
+            children = descendants(list_processes(), pid, os.getpid())
+        except ProcessListError as exc:
+            list_error = str(exc)
+    if reason is None:
+        reason = _send_signal(pid, signal.SIGTERM)
+    sigterm_at = time.monotonic()
+    if reason is not None:
         _alert_terminal(f"Agent pid {pid} was not killed: {reason}")
         return False
 
-    # After SIGTERM, never before, so the agent handles the pending SIGTERM
-    # as soon as it runs again.
+    termed: list[tuple[int, str]] = []
+    refused: list[int] = []
+    for child, identity in children:
+        child_reason = _send_signal(child, signal.SIGTERM)
+        if child_reason is None:
+            termed.append((child, identity))
+        elif child_reason != _NO_SUCH_PROCESS:
+            refused.append(child)
+
+    # After SIGTERM, never before, so each process handles the pending
+    # SIGTERM as soon as it runs again.
     sigcont = getattr(signal, "SIGCONT", None)
-    if sigcont is not None and not pid_reused(pid, start_time):
-        try:
-            os.kill(pid, sigcont)
-        except (ProcessLookupError, PermissionError):
-            pass
+    if sigcont is not None:
+        if not pid_reused(pid, start_time):
+            _send_signal(pid, sigcont)
+        for child, _ in termed:
+            _send_signal(child, sigcont)
 
-    def _escalate() -> None:
-        time.sleep(5)
-        if pid_reused(pid, start_time):
-            return
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
+    if termed:
+        noun = "child process" if len(termed) == 1 else "child processes"
+        _alert_terminal(f"Killing {len(termed)} {noun}: {_pid_list([c for c, _ in termed])}")
+    if refused:
+        if len(refused) == 1:
+            _alert_terminal(f"Child process {refused[0]} not killed: {_NOT_ALLOWED}")
+        else:
+            _alert_terminal(
+                f"Child processes {_pid_list(refused)} not killed: not allowed to signal them"
+            )
+    if list_error:
+        _alert_terminal(
+            f"Could not list the agent's child processes, so they were not killed: {list_error}"
+        )
 
-    t = threading.Thread(target=_escalate, daemon=True)
-    t.start()
+    step = _SigkillStep(pid, start_time, termed, sigterm_at)
+    if posix:
+        _sigkill_steps.append(step)
+    threading.Thread(target=step.run, daemon=True).start()
     return True
+
+
+def _wait_for_sigkill(out: TextIO) -> None:
+    """Wait for the SIGKILL step of each kill, so watch does not end first.
+
+    Once watch exits, the thread that sends SIGKILL is gone. The wait ends
+    when SIGKILL was sent, when every process the kill signalled is gone,
+    or _SIGKILL_WAIT_AFTER_DUE seconds after SIGKILL was due. If it lasts
+    _SIGKILL_WAIT_NOTICE_AFTER seconds, one line says why and that Ctrl-C
+    stops it. Ctrl-C ends the wait without a traceback, and one line names
+    the signalled PIDs that are still in use.
+    """
+    steps = list(_sigkill_steps)
+    _sigkill_steps.clear()
+    if not steps:
+        return
+    deadline = max(step.due for step in steps) + _SIGKILL_WAIT_AFTER_DUE
+    notice_at: float | None = time.monotonic() + _SIGKILL_WAIT_NOTICE_AFTER
+    try:
+        while True:
+            steps = [step for step in steps if not step.settled()]
+            now = time.monotonic()
+            if not steps or now >= deadline:
+                return
+            if notice_at is not None and now >= notice_at:
+                seconds = max(1, math.ceil(max(step.due for step in steps) - now))
+                out.write(
+                    f"[watch] Waiting {seconds}s to send SIGKILL to processes that did "
+                    "not exit on SIGTERM; press Ctrl-C to stop waiting.\n"
+                )
+                out.flush()
+                notice_at = None
+            steps[0].done.wait(min(0.1, deadline - now))
+    except KeyboardInterrupt:
+        running = [pid for step in steps if not step.done.is_set() for pid in step.running()]
+        line = "\n[watch] Stopped waiting before SIGKILL."
+        if running:
+            line += f" Still running: {_pid_list(running)}"
+        out.write(line + "\n")
+        out.flush()
 
 
 _NO_SUCH_PROCESS = "no process has that PID"
@@ -2685,6 +2843,10 @@ def watch_session(
     stop waits while the agent process runs, until _TIMEOUT_KILL_GRACE
     seconds after the deadline.
 
+    After a kill, watch does not return before the SIGKILL that follows
+    SIGTERM was sent, or nothing it signalled is left; see
+    _wait_for_sigkill.
+
     stream_config: when set, events are pushed in real-time to the configured
     URL as they arrive (push-based streaming). The startup line names only
     the URL's scheme://host[:port]. When watching ends, EventStreamer.stop()
@@ -2886,6 +3048,7 @@ def watch_session(
     finally:
         if streamer:
             streamer.stop()
+        _wait_for_sigkill(out)
         if clean_session_end:
             clear_heartbeat(store, session_id)
 

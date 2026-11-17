@@ -491,7 +491,11 @@ class TestKillProcessIdentity(unittest.TestCase):
     and returns whether it sent SIGTERM."""
 
     def _kill(self, reused, kill_error=None, cont_error=None):
-        """Return the signals sent, the result and the lines printed."""
+        """Return the signals sent, the result and the lines printed.
+
+        Signal 0 sends nothing, so it is not in the list. The agent has no
+        child processes.
+        """
         class SyncThread:
             def __init__(self, target, daemon):
                 self.target = target
@@ -507,12 +511,15 @@ class TestKillProcessIdentity(unittest.TestCase):
 
         with patch("agent_trace.watch.pid_reused", side_effect=reused), \
              patch("os.kill", side_effect=os_kill) as kill, \
+             patch("agent_trace.watch.list_processes", return_value={}), \
+             patch("agent_trace.watch._sigkill_steps", []), \
              patch("threading.Thread", SyncThread), \
              patch("agent_trace.watch.time.sleep"), \
              patch("agent_trace.watch._alert_terminal") as terminal:
             result = _kill_process(PID, "proc:100")
         lines = [c.args[0] for c in terminal.call_args_list]
-        return [c.args for c in kill.call_args_list], result, lines
+        signals = [c.args for c in kill.call_args_list if c.args[1] != 0]
+        return signals, result, lines
 
     def test_reused_pid_gets_no_signal(self):
         self.assertEqual(self._kill([True]), (
