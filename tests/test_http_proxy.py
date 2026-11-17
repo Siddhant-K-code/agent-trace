@@ -20,7 +20,7 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from agent_trace.cli import build_parser, cmd_record_http
-from agent_trace.http_proxy import HTTPProxyServer, _ProxyHTTPServer
+from agent_trace.http_proxy import HTTPProxyServer, _EventStreamParser, _ProxyHTTPServer
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
 
@@ -1850,6 +1850,21 @@ STREAMABLE_POST_HEADERS = {
 }
 
 
+class TestEventStreamParser(unittest.TestCase):
+    def _events(self, chunks):
+        parser = _EventStreamParser()
+        return [data for chunk in chunks for data in parser.feed(chunk)]
+
+    def test_bom_and_a_crlf_split_across_chunks(self):
+        # The LF after a chunk that ends in CR is part of that CRLF, not a
+        # blank line, so the event ends only at the second CRLF.
+        chunks = [b"\xef\xbb\xbfdata: a\r", b"\ndata:b\r", b"\n\r", b"\n"]
+        self.assertEqual(self._events(chunks), ["a\nb"])
+
+    def test_empty_data_field_is_an_event_and_no_data_field_is_not(self):
+        self.assertEqual(self._events([b"data\n\nevent: x\nid: 1\n\n"]), [""])
+
+
 class TestHTTPProxyStreamableHTTP(unittest.TestCase):
     """record-http works with Streamable HTTP servers.
 
@@ -2249,6 +2264,58 @@ class TestHTTPProxyStreamableHTTP(unittest.TestCase):
         port = self._proxy().server_address[1]
         self._forward(port, "POST", "/", STREAMABLE_POST_HEADERS, json.dumps(_tool_call(6)))
         self._assert_linked(child_id)
+
+    def _relay_raw_stream(self, req_id, stream):
+        """POST a tool call whose reply is the given event stream bytes.
+
+        Checks the client gets the bytes unchanged and returns the texts of
+        the traced tool results.
+        """
+        def reply(handler, request):
+            _reply(handler, 200, stream, [("Content-Type", "text/event-stream")])
+
+        self.upstream.reply = reply
+        self.events.clear()
+        port = self._proxy().server_address[1]
+        resp, data, _ = self._forward(
+            port, "POST", "/", STREAMABLE_POST_HEADERS, json.dumps(_tool_call(req_id))
+        )
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(data, stream)
+        self.assertEqual(self._of_type(EventType.ERROR), [])
+        return [event.data["content_preview"] for event in self._of_type(EventType.TOOL_RESULT)]
+
+    def test_event_data_without_a_space_after_the_colon_is_traced(self):
+        message = json.dumps(_text_result(21, "no space"))
+        texts = self._relay_raw_stream(21, f"data:{message}\n\n".encode())
+        self.assertEqual(texts, ["no space"])
+
+    def test_event_data_split_over_several_lines_is_traced_as_one_message(self):
+        message = json.dumps(_text_result(22, "split"), indent=1)
+        lines = "".join(f"data: {line}\n" for line in message.split("\n"))
+        texts = self._relay_raw_stream(22, f"event: message\nid: 1\n{lines}\n".encode())
+        self.assertEqual(texts, ["split"])
+
+    def test_event_lines_may_end_in_crlf_or_a_lone_cr(self):
+        message = json.dumps(_text_result(23, "crlf"), indent=1)
+        lines = "".join(f"data: {line}\r\n" for line in message.split("\n"))
+        texts = self._relay_raw_stream(23, f": comment\r\n{lines}\r\n".encode())
+        self.assertEqual(texts, ["crlf"])
+
+        message = json.dumps(_text_result(24, "lone cr"))
+        texts = self._relay_raw_stream(24, f"data: {message}\r\r".encode())
+        self.assertEqual(texts, ["lone cr"])
+
+    def test_events_that_are_not_json_objects_or_never_end_are_not_traced(self):
+        stream = (
+            b"event: endpoint\ndata: /messages/?session_id=S\n\n"
+            b"data: [1, 2]\n\n"
+            b"data\n\n"
+            b": " + json.dumps(_text_result(25, "comment")).encode() + b"\n\n"
+            # The stream ends before the blank line that would end this event.
+            b"data: " + json.dumps(_text_result(25, "unended")).encode() + b"\n"
+        )
+        self.assertEqual(self._relay_raw_stream(25, stream), [])
 
     def test_delete_with_a_refused_host_never_reaches_the_upstream(self):
         port = self._proxy().server_address[1]

@@ -21,8 +21,10 @@ The proxy forwards:
 - GET, for the server's event stream.
 - DELETE, which ends a Streamable HTTP session.
 
-Every JSON-RPC message in a POST body, a JSON reply or a ``data: `` line
-of an event stream is traced.
+Every JSON-RPC message in a POST body, a JSON reply or an event of an event
+stream is traced. An event's data is read the way the HTML standard's event
+stream rules say: its ``data`` lines, with or without a space after the
+colon, joined with a newline, and the event ends at a blank line.
 
 Requests are served on separate threads, so a long-lived stream does not
 block other requests. Closing the server shuts down open streams and waits
@@ -43,6 +45,7 @@ A refused request is not traced and never reaches the upstream.
 
 from __future__ import annotations
 
+import codecs
 import contextlib
 import http.client
 import ipaddress
@@ -85,6 +88,55 @@ def _is_event_stream(content_type: str | None) -> bool:
     """Return True for a text/event-stream Content-Type, in any case."""
     media_type = (content_type or "").split(";", 1)[0]
     return media_type.strip().lower() == "text/event-stream"
+
+
+# Ends a line of an event stream: CRLF, LF or a lone CR.
+_EVENT_STREAM_EOL = re.compile(r"\r\n|\r|\n")
+
+
+class _EventStreamParser:
+    """Read the data of each event in a text/event-stream.
+
+    Follows the event stream interpretation rules of the HTML standard. The
+    stream is UTF-8, less one leading BOM. A line ends in CRLF, LF or a lone
+    CR. A line that starts with a colon is a comment. A field's value is the
+    text after the first colon, less one leading space. The values of an
+    event's ``data`` fields are joined with a newline. A blank line ends the
+    event; an event with no ``data`` field is dropped. Other fields, such as
+    ``event`` and ``id``, are ignored. An event still open when the stream
+    ends is dropped.
+    """
+
+    def __init__(self) -> None:
+        self._decoder = codecs.getincrementaldecoder("utf-8-sig")(errors="replace")
+        self._line = ""
+        self._data: list[str] = []
+        # The last chunk ended in CR, so an LF that starts the next one
+        # belongs to that CRLF and ends no line.
+        self._after_cr = False
+
+    def feed(self, chunk: bytes) -> list[str]:
+        """Read a chunk of the stream. Return the data of each event it ends."""
+        text = self._decoder.decode(chunk)
+        if not text:
+            return []
+        if self._after_cr and text.startswith("\n"):
+            text = text[1:]
+        self._after_cr = text.endswith("\r")
+        *lines, self._line = _EVENT_STREAM_EOL.split(self._line + text)
+        events = []
+        for line in lines:
+            if not line:
+                if self._data:
+                    events.append("\n".join(self._data))
+                    self._data = []
+                continue
+            if line.startswith(":"):
+                continue
+            field, _, value = line.partition(":")
+            if field == "data":
+                self._data.append(value[1:] if value.startswith(" ") else value)
+        return events
 
 
 def _refusal_body(message: str) -> bytes:
@@ -549,30 +601,36 @@ class _ProxyHandler(BaseHTTPRequestHandler):
     def _relay_events(self, resp: http.client.HTTPResponse) -> None:
         """Send an event stream to the client line by line as it arrives.
 
-        Each ``data: `` line is one JSON-RPC message from the server. It is
-        traced before it is sent.
+        The data of each event is one JSON-RPC message from the server. It
+        is traced when the blank line that ends the event arrives, before
+        that line is sent. Data that is not a JSON object, such as a legacy
+        SSE server's ``endpoint`` event, is not traced. The bytes sent are
+        the upstream's, unchanged.
         """
+        parser = _EventStreamParser()
         while True:
             line = resp.readline()
             if not line:
                 break
 
-            line_str = line.decode("utf-8", errors="replace")
-            if line_str.startswith("data: "):
-                data_str = line_str[6:].strip()
-                if data_str:
-                    try:
-                        msg = json.loads(data_str)
-                        event = _classify_message(msg, "server_to_agent")
-                        if event:
-                            if event.event_type in TOOL_RESPONSE_TYPES:
-                                self.server.match_result(event)
-                            self._emit(event)
-                    except json.JSONDecodeError:
-                        pass
+            for data in parser.feed(line):
+                self._trace_event_data(data)
 
             self.wfile.write(line)
             self.wfile.flush()
+
+    def _trace_event_data(self, data: str) -> None:
+        try:
+            msg = json.loads(data)
+        except json.JSONDecodeError:
+            return
+        if not isinstance(msg, dict):
+            return
+        event = _classify_message(msg, "server_to_agent")
+        if event:
+            if event.event_type in TOOL_RESPONSE_TYPES:
+                self.server.match_result(event)
+            self._emit(event)
 
     def _link_sub_session(self, resp: http.client.HTTPResponse) -> None:
         """Link the downstream agent's session to this one.
