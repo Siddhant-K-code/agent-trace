@@ -8,16 +8,26 @@ import io
 import json
 import os
 import stat
+import shutil
 import struct
+import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 import zipfile
+import zlib
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
+try:
+    from _no_telemetry import without_telemetry
+except ImportError:  # pragma: no cover - run as a package module
+    from tests._no_telemetry import without_telemetry
+
+import agent_trace
 from agent_trace import fileutil
 from agent_trace.assignment import (
     AssignmentError,
@@ -31,6 +41,7 @@ from agent_trace.assignment import (
     _atomic_write_private,
     _canonical_json_bytes,
     _inflate_exact_member,
+    _load_submission_inputs,
     _open_directory_chain,
     _parse_trace,
     _read_regular_nofollow,
@@ -48,7 +59,29 @@ from agent_trace.assignment import (
 from agent_trace.cli import build_parser
 from agent_trace.fileutil import MAX_TRUSTED_SYMLINKS, trusted_symlink_target
 from agent_trace.models import EventType, SessionMeta, TraceEvent
-from agent_trace.store import TraceStore
+from agent_trace.store import TraceStore, _store_write_lock
+
+
+SRC_ROOT = Path(agent_trace.__file__).resolve().parent.parent
+# Windows has no dir_fd, so it only has the by-path helpers.
+FS_MODES = ("dir_fd", "by_path") if os.open in os.supports_dir_fd else ("by_path",)
+
+
+def fs_mode(mode: str):
+    return patch("agent_trace.assignment._USE_DIR_FD", mode == "dir_fd")
+
+
+def _symlink_or_skip(test: unittest.TestCase, link: Path, target: Path, *, directory=False):
+    try:
+        link.symlink_to(target, target_is_directory=directory)
+    except (OSError, NotImplementedError) as exc:
+        test.skipTest(f"cannot create symlinks here: {exc}")
+
+
+def _assert_private_mode(test: unittest.TestCase, path: Path) -> None:
+    # Windows maps a mode only to the read-only flag; its ACL decides access.
+    if os.name != "nt":
+        test.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
 
 def _event(kind: EventType, timestamp: float, event_id: str, **data) -> TraceEvent:
@@ -241,11 +274,11 @@ class AssignmentBundleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "submission.zip"
             _atomic_write_private(output, b"first")
-            self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
+            _assert_private_mode(self, output)
             output.unlink()
             target = Path(directory) / "target"
             target.write_bytes(b"untouched")
-            output.symlink_to(target)
+            _symlink_or_skip(self, output, target)
             with self.assertRaises(AssignmentError):
                 _atomic_write_private(output, b"replacement")
             self.assertEqual(target.read_bytes(), b"untouched")
@@ -256,7 +289,7 @@ class AssignmentBundleTests(unittest.TestCase):
             with patch("agent_trace.assignment.os.chmod") as chmod:
                 _atomic_write_private(output, b"private")
             chmod.assert_not_called()
-            self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
+            _assert_private_mode(self, output)
 
     def test_source_and_output_component_symlinks_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -265,14 +298,14 @@ class AssignmentBundleTests(unittest.TestCase):
             meta = SessionMeta(session_id="assignment-session")
             store.create_session(meta)
             linked_store = Path(directory) / "linked-store"
-            linked_store.symlink_to(real_store, target_is_directory=True)
+            _symlink_or_skip(self, linked_store, real_store, directory=True)
             with self.assertRaises(AssignmentError):
                 build_assignment_bundle(TraceStore(linked_store), meta.session_id)
 
             real_output = Path(directory) / "real-output"
             real_output.mkdir()
             linked_output = Path(directory) / "linked-output"
-            linked_output.symlink_to(real_output, target_is_directory=True)
+            _symlink_or_skip(self, linked_output, real_output, directory=True)
             with self.assertRaises(AssignmentError):
                 _atomic_write_private(linked_output / "submission.zip", b"private")
 
@@ -347,6 +380,7 @@ class StrictInputTests(unittest.TestCase):
             with self.assertRaises(AssignmentError):
                 _strict_json_bytes(raw, label="hostile", max_bytes=10_000)
 
+    @unittest.skipIf(os.name == "nt", "Windows has no change time, only a creation time")
     def test_read_stability_detects_same_size_rewrite_with_restored_mtime(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "input.json"
@@ -410,7 +444,7 @@ class StrictInputTests(unittest.TestCase):
             target = Path(directory) / "target.yaml"
             target.write_text(_valid_rubric(), encoding="utf-8")
             path.unlink()
-            path.symlink_to(target)
+            _symlink_or_skip(self, path, target)
             with self.assertRaises(AssignmentError):
                 load_assignment_rubric(path)
 
@@ -531,8 +565,395 @@ class AssignmentScoringTests(unittest.TestCase):
             )
             with redirect_stderr(io.StringIO()):
                 self.assertEqual(cmd_share_assignment(args), 0)
-            self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
+            _assert_private_mode(self, output)
             load_assignment_bundle(output.read_bytes())
+
+
+# The bundle of the session ``ByPathParityTests.make_store`` records, with the
+# producer version pinned to GOLDEN_VERSION so a release does not change it.
+GOLDEN_VERSION = "0.0.0"
+GOLDEN_BUNDLE_DIGEST = "sha256:56d90e7f6735f89e215ce75e3c0cfab1848ee964a3a6c32c3143a16a63a8720a"
+GOLDEN_ARCHIVE_SHA256 = "b176d75c233b1f0cc76cae5088d2ce64f5c80486003397ed75dc2d3c0efb42c9"
+
+
+class ByPathParityTests(unittest.TestCase):
+    """The by-path helpers that Windows uses must act like the dir_fd ones."""
+
+    SESSION = "assignment-session"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        # Resolve the temp dir: the by-path helpers refuse links such as macOS /var.
+        self.root = Path(tmp.name).resolve()
+
+    def make_store(self, name: str = "traces") -> Path:
+        store_dir = self.root / name
+        store = TraceStore(store_dir, redact=False, use_workspace_env=False)
+        store.create_session(SessionMeta(
+            session_id=self.SESSION,
+            started_at=1_000.0,
+            agent_name="Candidate Name",
+            command="run --token META_SECRET",
+            attribution={"email": "candidate@example.test"},
+        ))
+        for item in _sample_events():
+            store.append_event(self.SESSION, item)
+        return store_dir
+
+    def share(self, store_dir: Path, output: Path) -> None:
+        args = argparse.Namespace(
+            trace_dir=str(store_dir), session_id=self.SESSION, output=str(output),
+            stdout=False, open=False, postmortem=False, assignment=True,
+        )
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            self.assertEqual(cmd_share_assignment(args), 0, stderr.getvalue())
+
+    def score(self, submission: Path, rubric: Path, *, compare: bool) -> str:
+        args = argparse.Namespace(
+            submission=str(submission), rubric=str(rubric), compare=compare, format="json"
+        )
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            self.assertEqual(cmd_score(args), 0, stderr.getvalue())
+        return stdout.getvalue()
+
+    def error(self, call) -> str:
+        with self.assertRaises(AssignmentError) as caught:
+            call()
+        return str(caught.exception)
+
+    def test_share_and_score_outputs_match_across_modes(self):
+        store_dir = self.make_store()
+        rubric = _write_rubric(str(self.root), _valid_rubric())
+        results = {}
+        for mode in FS_MODES:
+            with self.subTest(mode=mode), fs_mode(mode), patch(
+                "agent_trace.assignment.__version__", GOLDEN_VERSION
+            ):
+                output = self.root / mode / "bundles" / "submission.zip"
+                self.share(store_dir, output)
+                self.assertEqual([item.name for item in output.parent.iterdir()], ["submission.zip"])
+                _assert_private_mode(self, output)
+                results[mode] = (
+                    output.read_bytes(),
+                    self.score(output, rubric, compare=False),
+                    self.score(output.parent, rubric, compare=True),
+                )
+        self.assertEqual(len(set(results.values())), 1)
+        raw, single, compared = results[FS_MODES[0]]
+        self.assertEqual(load_assignment_bundle(raw).bundle_digest, GOLDEN_BUNDLE_DIGEST)
+        self.assertEqual(
+            json.loads(single)["submissions"][0]["bundle_digest"], GOLDEN_BUNDLE_DIGEST
+        )
+        self.assertEqual(json.loads(compared)["submission_count"], 1)
+        # Compressed bytes depend on the zlib build; zlib-ng deflates differently.
+        if "ng" not in zlib.ZLIB_RUNTIME_VERSION:
+            self.assertEqual(hashlib.sha256(raw).hexdigest(), GOLDEN_ARCHIVE_SHA256)
+
+    def test_errors_match_across_modes(self):
+        rubric = _write_rubric(str(self.root), _valid_rubric())
+        gone_dir = self.make_store("gone")
+        gone = TraceStore(gone_dir, use_workspace_env=False)
+        shutil.rmtree(gone_dir)
+        file_session = TraceStore(self.make_store("file-session"), use_workspace_env=False)
+        shutil.rmtree(file_session.base_dir / self.SESSION)
+        (file_session.base_dir / self.SESSION).write_bytes(b"x")
+        no_meta = TraceStore(self.make_store("no-meta"), use_workspace_env=False)
+        (no_meta.base_dir / self.SESSION / "meta.json").unlink()
+        plain_file = self.root / "plain-file"
+        plain_file.write_bytes(b"x")
+        taken = self.root / "out" / "taken.zip"
+        taken.mkdir(parents=True)
+        rubric_dir = self.root / "rubric-dir.yaml"
+        rubric_dir.mkdir()
+        empty_rubric = self.root / "empty.yaml"
+        empty_rubric.write_bytes(b"")
+        folder_zip = self.root / "folder-zip"
+        (folder_zip / "folder.zip").mkdir(parents=True)
+        no_zip = self.root / "no-zip"
+        no_zip.mkdir()
+
+        def score(submission, *, compare=True, rubric_path=rubric):
+            def call():
+                bundles = _load_submission_inputs(submission, compare=compare)
+                load_assignment_rubric(rubric_path)
+                return bundles
+            return call
+
+        cases = {
+            "missing store": (
+                lambda: build_assignment_bundle(gone, self.SESSION),
+                "directory does not exist",
+            ),
+            "session is a file": (
+                lambda: build_assignment_bundle(file_session, self.SESSION),
+                "session directory could not be opened safely",
+            ),
+            "missing session": (
+                lambda: build_assignment_bundle(no_meta, "other-session"),
+                "session directory could not be opened safely",
+            ),
+            "missing meta.json": (
+                lambda: build_assignment_bundle(no_meta, self.SESSION),
+                "session metadata could not be opened safely",
+            ),
+            "output parent is a file": (
+                lambda: _atomic_write_private(plain_file / "out.zip", b"x"),
+                "directory has an unsafe component",
+            ),
+            "output target is a directory": (
+                lambda: _atomic_write_private(taken, b"x"),
+                "output must be a non-symlinked regular file",
+            ),
+            "missing rubric": (
+                lambda: load_assignment_rubric(self.root / "missing.yaml"),
+                "rubric file could not be opened safely",
+            ),
+            "rubric is a directory": (
+                lambda: load_assignment_rubric(rubric_dir),
+                "rubric file size or type is invalid",
+            ),
+            "empty rubric": (
+                lambda: load_assignment_rubric(empty_rubric),
+                "rubric file size or type is invalid",
+            ),
+            "missing submission": (
+                score(self.root / "missing.zip", compare=False),
+                "submission archive could not be opened safely",
+            ),
+            "missing compare directory": (
+                score(self.root / "missing"),
+                "directory does not exist",
+            ),
+            "compare directory has no ZIP": (
+                score(no_zip),
+                "submission directory ZIP count is invalid",
+            ),
+            "directory named .zip": (
+                score(folder_zip),
+                "submission directory contains an unsafe ZIP entry",
+            ),
+        }
+        if self._can_symlink():
+            cases.update(self._symlink_cases(rubric, score))
+        for mode in FS_MODES:
+            for name, (call, message) in cases.items():
+                with self.subTest(mode=mode, case=name), fs_mode(mode):
+                    self.assertEqual(self.error(call), message)
+        self.assertEqual(plain_file.read_bytes(), b"x")
+
+    def _can_symlink(self) -> bool:
+        probe = self.root / "probe-link"
+        try:
+            probe.symlink_to(self.root / "plain-file")
+        except (OSError, NotImplementedError):
+            return False
+        probe.unlink()
+        return True
+
+    def _symlink_cases(self, rubric: Path, score) -> dict:
+        linked_meta = TraceStore(self.make_store("linked-meta"), use_workspace_env=False)
+        meta = linked_meta.base_dir / self.SESSION / "meta.json"
+        real_meta = self.root / "real-meta.json"
+        real_meta.write_bytes(meta.read_bytes())
+        meta.unlink()
+        meta.symlink_to(real_meta)
+
+        linked_session = TraceStore(self.make_store("linked-session"), use_workspace_env=False)
+        real_session = self.root / "real-session"
+        (linked_session.base_dir / self.SESSION).rename(real_session)
+        (linked_session.base_dir / self.SESSION).symlink_to(real_session, target_is_directory=True)
+
+        linked_lock = TraceStore(self.make_store("linked-lock"), use_workspace_env=False)
+        lock_target = self.root / "lock-target"
+        lock_target.write_bytes(b"")
+        (linked_lock.base_dir / ".store.lock").unlink()
+        (linked_lock.base_dir / ".store.lock").symlink_to(lock_target)
+
+        linked_rubric = self.root / "linked-rubric.yaml"
+        linked_rubric.symlink_to(rubric)
+        output_target = self.root / "output-target"
+        output_target.write_bytes(b"untouched")
+        linked_output = self.root / "linked-output.zip"
+        linked_output.symlink_to(output_target)
+        linked_zip = self.root / "linked-zip"
+        linked_zip.mkdir()
+        (linked_zip / "a.zip").symlink_to(self.root / "plain-file")
+
+        return {
+            "meta.json is a symlink": (
+                lambda: build_assignment_bundle(linked_meta, self.SESSION),
+                "session metadata could not be opened safely",
+            ),
+            "session is a symlink": (
+                lambda: build_assignment_bundle(linked_session, self.SESSION),
+                "session directory could not be opened safely",
+            ),
+            ".store.lock is a symlink": (
+                lambda: build_assignment_bundle(linked_lock, self.SESSION),
+                "trace store lock could not be opened safely",
+            ),
+            "rubric is a symlink": (
+                lambda: load_assignment_rubric(linked_rubric),
+                "rubric file could not be opened safely",
+            ),
+            "output is a symlink": (
+                lambda: _atomic_write_private(linked_output, b"x"),
+                "output must be a non-symlinked regular file",
+            ),
+            "symlinked .zip": (
+                score(linked_zip),
+                "submission directory contains an unsafe ZIP entry",
+            ),
+        }
+
+    def test_snapshot_waits_for_the_store_write_lock(self):
+        store_dir = self.make_store()
+        for mode in FS_MODES:
+            with self.subTest(mode=mode), fs_mode(mode):
+                store = TraceStore(store_dir, use_workspace_env=False)
+                done = threading.Event()
+                result = {}
+
+                def build():
+                    try:
+                        result["raw"] = build_assignment_bundle(store, self.SESSION)
+                    except BaseException as exc:  # reported below
+                        result["error"] = exc
+                    finally:
+                        done.set()
+
+                with _store_write_lock(store_dir):
+                    thread = threading.Thread(target=build)
+                    thread.start()
+                    self.assertFalse(done.wait(0.3))
+                thread.join(30)
+                self.assertTrue(done.is_set())
+                self.assertNotIn("error", result)
+                load_assignment_bundle(result["raw"])
+
+    def test_output_write_replaces_exact_bytes_and_cleans_up(self):
+        payload = b"second\r\n\x1a\n"
+        for mode in FS_MODES:
+            with self.subTest(mode=mode), fs_mode(mode):
+                output = self.root / mode / "made" / "here" / "submission.zip"
+                _atomic_write_private(output, b"first")
+                _atomic_write_private(output, payload)
+                self.assertEqual(output.read_bytes(), payload)
+                with patch("agent_trace.assignment.os.write", side_effect=OSError("disk full")):
+                    with self.assertRaises(OSError):
+                        _atomic_write_private(output, b"third")
+                self.assertEqual(output.read_bytes(), payload)
+                self.assertEqual([item.name for item in output.parent.iterdir()], ["submission.zip"])
+                _assert_private_mode(self, output)
+
+    def test_rubric_accepts_crlf_but_not_a_lone_cr(self):
+        lf = _valid_rubric().encode()
+        path = self.root / "rubric.yaml"
+        path.write_bytes(lf)
+        expected = load_assignment_rubric(path)
+        path.write_bytes(lf.replace(b"\n", b"\r\n"))
+        self.assertEqual(load_assignment_rubric(path), expected)
+        for hostile in (lf.replace(b"\n", b"\r"), lf.replace(b"\n", b"\r\r\n", 1)):
+            with self.subTest(hostile=hostile[:40]):
+                path.write_bytes(hostile)
+                with self.assertRaises(AssignmentError):
+                    load_assignment_rubric(path)
+
+    @unittest.skipUnless(os.name == "nt", "Windows junctions")
+    def test_junctions_are_refused(self):
+        import _winapi
+
+        store_dir = self.make_store()
+        rubric = _write_rubric(str(self.root), _valid_rubric())
+        bundles = self.root / "bundles"
+        self.share(store_dir, bundles / "submission.zip")
+
+        def junction(target: Path, name: str) -> Path:
+            path = self.root / name
+            _winapi.CreateJunction(str(target), str(path))
+            return path
+
+        store_junction = junction(store_dir, "store-junction")
+        output_junction = junction(bundles, "output-junction")
+        compare_junction = junction(bundles, "compare-junction")
+        rubric_junction = junction(self.root, "rubric-junction")
+        session_junction = store_dir / "junction-session"
+        _winapi.CreateJunction(str(store_dir / self.SESSION), str(session_junction))
+        cases = {
+            "store": lambda: build_assignment_bundle(
+                TraceStore(store_junction, use_workspace_env=False), self.SESSION
+            ),
+            "output": lambda: _atomic_write_private(output_junction / "new.zip", b"x"),
+            "compare": lambda: _load_submission_inputs(compare_junction, compare=True),
+            "submission": lambda: _load_submission_inputs(
+                compare_junction / "submission.zip", compare=False
+            ),
+            "rubric": lambda: load_assignment_rubric(rubric_junction / rubric.name),
+        }
+        for name, call in cases.items():
+            with self.subTest(case=name):
+                self.assertEqual(self.error(call), "directory has an unsafe component")
+        self.assertEqual(
+            self.error(lambda: build_assignment_bundle(
+                TraceStore(store_dir, use_workspace_env=False), "junction-session"
+            )),
+            "session directory could not be opened safely",
+        )
+        self.assertEqual([item.name for item in bundles.iterdir()], ["submission.zip"])
+
+    def test_cli_shares_and_scores_end_to_end(self):
+        store_dir = self.make_store()
+        rubric = _write_rubric(str(self.root), _valid_rubric())
+        output = self.root / "bundles" / "submission.zip"
+        env = without_telemetry({
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("AGENT_STRACE_") and key != "AGENT_TRACE_DIR"
+        })
+        env["PYTHONPATH"] = os.pathsep.join(
+            item for item in (str(SRC_ROOT), env.get("PYTHONPATH", "")) if item
+        )
+        # The text report has characters that cp1252 stdout on Windows lacks.
+        env["PYTHONIOENCODING"] = "utf-8"
+        command = [
+            sys.executable, "-c", "from agent_trace.entry import main; main()",
+            "--trace-dir", str(store_dir),
+        ]
+
+        def run(*args: str) -> subprocess.CompletedProcess:
+            result = subprocess.run(
+                command + list(args),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                env=env,
+                timeout=120,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return result
+
+        shared = run("share", self.SESSION, "--assignment", "-o", str(output))
+        self.assertIn("Created assignment bundle", shared.stderr)
+        in_process = self.root / "in-process" / "submission.zip"
+        self.share(store_dir, in_process)
+        self.assertEqual(output.read_bytes(), in_process.read_bytes())
+        digest = load_assignment_bundle(output.read_bytes()).bundle_digest
+        _assert_private_mode(self, output)
+        single = json.loads(
+            run("score", str(output), "--rubric", str(rubric), "--format", "json").stdout
+        )
+        compared = json.loads(run(
+            "score", str(output.parent), "--compare", "--rubric", str(rubric), "--format", "json"
+        ).stdout)
+        text = run("score", str(output), "--rubric", str(rubric)).stdout
+        self.assertEqual(single["submission_count"], 1)
+        self.assertEqual(single["submissions"][0]["bundle_digest"], digest)
+        self.assertEqual(compared["submission_count"], 1)
+        self.assertEqual(compared["submissions"], single["submissions"])
+        self.assertIn("not a hiring decision", text)
 
 
 def _same_directory(test: unittest.TestCase, fd: int, expected: str | Path) -> None:
