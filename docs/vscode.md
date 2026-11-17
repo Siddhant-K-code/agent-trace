@@ -71,7 +71,7 @@ agent-strace watch --agent-pid "$(pgrep -n claude)"
 # or run: agent-trace: Pause Agent from the command palette
 ```
 
-When paused, the agent process receives SIGSTOP and freezes. Resume with the Resume command or SIGCONT.
+When paused, the agent process receives SIGSTOP and freezes. Resume with the Resume command or SIGCONT. Pause and Resume signal only the agent process, and a command the agent is running goes on until it ends.
 
 Pause shows a warning and does nothing if `agent-strace watch` is not running for the session (no heartbeat in the last 15 seconds), or if it was started without `--agent-pid` or has found that the agent's PID now belongs to another process, and so cannot signal the agent. The pause request file holds the session ID, so Resume and session end never clear another session's pause.
 
