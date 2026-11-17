@@ -569,9 +569,11 @@ class AssignmentScoringTests(unittest.TestCase):
             load_assignment_bundle(output.read_bytes())
 
 
-# The bundle of the session ``ByPathParityTests.make_store`` records.
-GOLDEN_BUNDLE_DIGEST = "sha256:b0703104f801945200277d3addc8f4b68666c2019ee2478cf51cd56d9554e2d2"
-GOLDEN_ARCHIVE_SHA256 = "969c5a3288559209c22d2bab5af0b6d46fa03fc201905e71351ef811f9e87884"
+# The bundle of the session ``ByPathParityTests.make_store`` records, with the
+# producer version pinned to GOLDEN_VERSION so a release does not change it.
+GOLDEN_VERSION = "0.0.0"
+GOLDEN_BUNDLE_DIGEST = "sha256:56d90e7f6735f89e215ce75e3c0cfab1848ee964a3a6c32c3143a16a63a8720a"
+GOLDEN_ARCHIVE_SHA256 = "b176d75c233b1f0cc76cae5088d2ce64f5c80486003397ed75dc2d3c0efb42c9"
 
 
 class ByPathParityTests(unittest.TestCase):
@@ -627,7 +629,9 @@ class ByPathParityTests(unittest.TestCase):
         rubric = _write_rubric(str(self.root), _valid_rubric())
         results = {}
         for mode in FS_MODES:
-            with self.subTest(mode=mode), fs_mode(mode):
+            with self.subTest(mode=mode), fs_mode(mode), patch(
+                "agent_trace.assignment.__version__", GOLDEN_VERSION
+            ):
                 output = self.root / mode / "bundles" / "submission.zip"
                 self.share(store_dir, output)
                 self.assertEqual([item.name for item in output.parent.iterdir()], ["submission.zip"])
@@ -933,7 +937,10 @@ class ByPathParityTests(unittest.TestCase):
 
         shared = run("share", self.SESSION, "--assignment", "-o", str(output))
         self.assertIn("Created assignment bundle", shared.stderr)
-        self.assertEqual(load_assignment_bundle(output.read_bytes()).bundle_digest, GOLDEN_BUNDLE_DIGEST)
+        in_process = self.root / "in-process" / "submission.zip"
+        self.share(store_dir, in_process)
+        self.assertEqual(output.read_bytes(), in_process.read_bytes())
+        digest = load_assignment_bundle(output.read_bytes()).bundle_digest
         _assert_private_mode(self, output)
         single = json.loads(
             run("score", str(output), "--rubric", str(rubric), "--format", "json").stdout
@@ -943,7 +950,7 @@ class ByPathParityTests(unittest.TestCase):
         ).stdout)
         text = run("score", str(output), "--rubric", str(rubric)).stdout
         self.assertEqual(single["submission_count"], 1)
-        self.assertEqual(single["submissions"][0]["bundle_digest"], GOLDEN_BUNDLE_DIGEST)
+        self.assertEqual(single["submissions"][0]["bundle_digest"], digest)
         self.assertEqual(compared["submission_count"], 1)
         self.assertEqual(compared["submissions"], single["submissions"])
         self.assertIn("not a hiring decision", text)
