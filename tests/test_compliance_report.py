@@ -7,6 +7,7 @@ import io
 import json
 import os
 import secrets
+import stat
 import sys
 import tempfile
 import unittest
@@ -20,6 +21,7 @@ from agent_trace.compliance_report import (
     ComplianceReportError,
     _atomic_write_private,
     _pdf_safe_text,
+    _read_regular_file,
     build_compliance_report,
     cmd_compliance_report,
     compliance_report_to_sarif,
@@ -275,6 +277,85 @@ class TestWindowSnapshotAndCorrelation(unittest.TestCase):
             event_path.symlink_to(target)
             with self.assertRaises(ComplianceReportError):
                 _report(store)
+
+
+class TestReadRegularFile(unittest.TestCase):
+    """Run on Windows CI too: reads must return the exact bytes on disk."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+
+    def _read(self, path: Path) -> bytes:
+        return _read_regular_file(path, label="test file", max_bytes=1024)
+
+    def test_crlf_and_ctrl_z_bytes_are_read_unchanged(self):
+        raw = b'{"a":"one\x1atwo"}\r\n{"b":"three"}\r\n\x1a{"c":"four"}\r\n'
+        path = self.root / "events.ndjson"
+        path.write_bytes(raw)
+        self.assertEqual(self._read(path), raw)
+
+    def test_open_asks_for_binary_mode(self):
+        path = self.root / "meta.json"
+        path.write_bytes(b"{}")
+        binary = 0x40000000
+        real_open = os.open
+        seen: list[int] = []
+
+        def recording_open(name, flags, *args, **kwargs):
+            seen.append(flags)
+            return real_open(name, flags & ~binary, *args, **kwargs)
+
+        with patch.object(os, "O_BINARY", binary, create=True), \
+                patch("os.open", recording_open):
+            self.assertEqual(self._read(path), b"{}")
+        self.assertEqual(len(seen), 1)
+        self.assertTrue(seen[0] & binary)
+
+    def test_symlink_is_refused(self):
+        target = self.root / "target.json"
+        target.write_bytes(b"{}")
+        link = self.root / "link.json"
+        try:
+            link.symlink_to(target)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+        with self.assertRaisesRegex(ComplianceReportError, "could not be opened safely"):
+            self._read(link)
+
+    def test_reparse_point_is_refused(self):
+        path = self.root / "meta.json"
+        path.write_bytes(b"{}")
+        real = os.lstat(path)
+        reparse = SimpleNamespace(
+            st_mode=real.st_mode, st_dev=real.st_dev, st_ino=real.st_ino,
+            st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
+        )
+        with patch("os.lstat", return_value=reparse):
+            with self.assertRaisesRegex(ComplianceReportError, "could not be opened safely"):
+                self._read(path)
+
+    def test_file_swapped_after_lstat_is_refused(self):
+        path = self.root / "meta.json"
+        path.write_bytes(b"{}")
+        other = self.root / "other.json"
+        other.write_bytes(b"[]")
+        real_open = os.open
+
+        def swapped_open(name, flags, *args, **kwargs):
+            if Path(name) == path:
+                name = other
+            return real_open(name, flags, *args, **kwargs)
+
+        with patch("os.open", swapped_open):
+            with self.assertRaisesRegex(ComplianceReportError, "changed while it was read"):
+                self._read(path)
+
+    def test_directory_is_refused_before_open(self):
+        with patch("os.open", side_effect=AssertionError("opened")):
+            with self.assertRaisesRegex(ComplianceReportError, "must be a regular file"):
+                self._read(self.root)
 
 
 class TestAuthorizationPrivacyAndDetectors(unittest.TestCase):
