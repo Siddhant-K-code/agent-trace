@@ -373,6 +373,124 @@ class TestTokenPrefixes(unittest.TestCase):
         self.assertEqual(redact_value("x" + token), "x" + redaction_marker("anthropic-key"))
 
 
+# Fake keys, built in parts so no full key appears in the source.
+STRIPE_BODY = "A1b2" * 6
+GOOGLE_KEY = "AI" + "za" + "Sy" + "B-_c" * 8 + "Q"
+GITLAB_BODY = "Ab_-" * 7
+NPM_KEY = "npm" + "_" + "A1b2" * 9
+HF_KEY = "hf" + "_" + "A1b2" * 8
+
+
+class TestProviderKeys(unittest.TestCase):
+    def assert_redacted(self, text, expected):
+        self.assertEqual(redact_value(text), expected)
+        self.assertTrue(_contains_secret(text))
+
+    def assert_kept(self, text):
+        self.assertEqual(redact_value(text), text)
+        self.assertFalse(_contains_secret(text))
+
+    def test_stripe_secret_and_restricted_keys(self):
+        marker = redaction_marker("stripe-key")
+        for prefix in ("sk_", "rk_"):
+            for mode in ("live_", "test_"):
+                for body in (STRIPE_BODY, "A1b2" * 25):
+                    with self.subTest(prefix + mode, length=len(body)):
+                        text = "STRIPE_SECRET_KEY=" + prefix + mode + body + "\n"
+                        self.assert_redacted(text, "STRIPE_SECRET_KEY=" + marker + "\n")
+
+    def test_stripe_publishable_keys_are_kept(self):
+        for mode in ("live_", "test_"):
+            with self.subTest(mode):
+                self.assert_kept("STRIPE_PUBLISHABLE_KEY=" + "pk_" + mode + STRIPE_BODY)
+
+    def test_stripe_webhook_secret(self):
+        text = "endpoint secret: " + "wh" + "sec_" + "A1b2" * 8
+        self.assert_redacted(text, "endpoint secret: " + redaction_marker("stripe-webhook-secret"))
+
+    def test_google_api_key(self):
+        self.assertEqual(len(GOOGLE_KEY), 39)
+        marker = redaction_marker("google-api-key")
+        self.assert_redacted("https://maps.example/api?key=" + GOOGLE_KEY + "&q=1",
+                             "https://maps.example/api?key=" + marker + "&q=1")
+
+    def test_gitlab_token_formats(self):
+        marker = redaction_marker("gitlab-token")
+        prefix = "gl" + "pat-"
+        cases = {
+            "legacy": prefix + "Ab_-" * 5,
+            "routable": prefix + GITLAB_BODY + ".x1" + "abcdefg",
+            "versioned": prefix + GITLAB_BODY + ".01.x1" + "abcdefg",
+        }
+        for name, token in cases.items():
+            with self.subTest(name):
+                self.assert_redacted("token " + token + ".", "token " + marker + ".")
+        with self.subTest("instance prefix"):
+            self.assert_redacted("acme-" + cases["legacy"], "acme-" + marker)
+
+    def test_npm_token(self):
+        self.assert_redacted("//registry.npmjs.org/:_authToken=" + NPM_KEY,
+                             "//registry.npmjs.org/:_authToken=" + redaction_marker("npm-token"))
+
+    def test_huggingface_token(self):
+        marker = redaction_marker("huggingface-token")
+        self.assert_redacted("HF_TOKEN=" + HF_KEY, "HF_TOKEN=" + marker)
+        self.assert_redacted("Bearer " + HF_KEY, "Bearer " + marker)
+
+    def test_prefix_inside_a_longer_identifier_is_kept(self):
+        cases = (
+            "risk_" + "live_" + STRIPE_BODY,
+            "task_" + "test_" + STRIPE_BODY,
+            "disk_" + "live_" + STRIPE_BODY,
+            "work_" + "test_" + STRIPE_BODY,
+            "x" + "wh" + "sec_" + "A1b2" * 8,
+            "x" + GOOGLE_KEY,
+            "x" + "gl" + "pat-" + "Ab_-" * 5,
+            "x" + NPM_KEY,
+            "a" + HF_KEY,
+        )
+        for text in cases:
+            with self.subTest(text):
+                self.assert_kept(text)
+
+    def test_wrong_lengths_are_kept(self):
+        cases = {
+            "stripe 23": "sk_" + "live_" + "A1b2" * 5 + "Q23",
+            "webhook 31": "wh" + "sec_" + "A1b2" * 7 + "Q2Z",
+            "google 34": GOOGLE_KEY[:-1],
+            "google 36": GOOGLE_KEY + "Z",
+            "gitlab 19": "gl" + "pat-" + "Ab_-" * 4 + "Q23",
+            "npm 35": NPM_KEY[:-1],
+            "npm 37": NPM_KEY + "Z",
+            "huggingface 29": HF_KEY[:-3],
+        }
+        for name, text in cases.items():
+            with self.subTest(name):
+                self.assert_kept(text)
+
+    def test_generic_patterns_do_not_cut_a_provider_key(self):
+        # sk-, key- and token- have no left boundary and would match inside
+        # these bodies if they ran first.
+        cases = {
+            "google-api-key": "AI" + "za" + "Sy" + "key-" + "A1b2" * 7 + "Q",
+            "gitlab-token": "gl" + "pat-" + "sk-" + "A1b2" * 6,
+        }
+        for kind, token in cases.items():
+            with self.subTest(kind):
+                self.assertEqual(redact_value(token), redaction_marker(kind))
+
+    def test_redact_data_by_pattern_under_any_key(self):
+        stripe = "sk_" + "live_" + STRIPE_BODY
+        data = {"output": [stripe, {"log": "using " + GOOGLE_KEY}], "count": 2}
+        self.assertEqual(redact_data(data), {
+            "output": [
+                redaction_marker("stripe-key"),
+                {"log": "using " + redaction_marker("google-api-key")},
+            ],
+            "count": 2,
+        })
+
+
 # Main's patterns before this change. On the inputs main handled, the new
 # patterns must give the same result.
 MAIN_PRIVATE_KEY = re.compile(
@@ -571,6 +689,31 @@ class TestPatternCost(unittest.TestCase):
             "base64 lines": self.BEGIN + ("\n" + "A" * 64) * 5_000,
             "spaced words": self.BEGIN + "\n" + "a " * 160_000,
             "header backslashes": self.BEGIN + "\nComment: " + "\\x" * 160_000,
+        }
+        for name, text in shapes.items():
+            with self.subTest(name):
+                for check in (_contains_secret, redact_value):
+                    start = time.perf_counter()
+                    check(text)
+                    self.assertLess(time.perf_counter() - start, 1.0, check.__name__)
+
+    def test_provider_key_near_misses_finish_fast(self):
+        # About 1 MB each: prefixes with no body, prefixes inside a word, and
+        # bodies one character short.
+        n = 1_000_000
+        shapes = {
+            "sk_live_ run": "sk_" + "live_" * (n // 5),
+            "risk_live_ words": ("risk_" + "live_" + "a" * 30 + " ") * (n // 41),
+            "short Stripe keys": ("sk_" + "live_" + "a" * 23 + " ") * (n // 32),
+            "whsec_ run": ("wh" + "sec_") * (n // 6),
+            "AIza run": ("AI" + "za") * (n // 4),
+            "short Google keys": (" AI" + "za" + "a" * 34) * (n // 39),
+            "glpat- run": ("-gl" + "pat-") * (n // 7),
+            "short GitLab tokens": ("gl" + "pat-" + "a" * 19 + ".") * (n // 26),
+            "GitLab dots": ("gl" + "pat-" + "a" * 20 + ".ab.") * (n // 30),
+            "short npm tokens": ("npm" + "_" + "a" * 35 + "_") * (n // 40),
+            "xhf_ words": ("xhf" + "_" + "a" * 29) * (n // 33),
+            "hf_ run": ("hf" + "_") * (n // 3),
         }
         for name, text in shapes.items():
             with self.subTest(name):

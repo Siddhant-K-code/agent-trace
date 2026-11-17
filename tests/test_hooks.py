@@ -1109,6 +1109,32 @@ class TestHooksRedactBeforeCut(unittest.TestCase):
         self.assertFalse(event.redacted)
         self.assertEqual(err, "")
 
+    def test_provider_keys_in_claude_hook_output(self):
+        stripe = "sk_" + "live_" + "A1b2" * 6
+        google = "AI" + "za" + "Sy" + "B-_c" * 8 + "Q"
+        output = {
+            "stdout": "STRIPE_SECRET_KEY=" + stripe + "\nGOOGLE_API_KEY=" + google + "\n",
+            "stderr": "",
+            "interrupted": False,
+            "isImage": False,
+        }
+        err = self.hook(["post-tool"], {
+            "session_id": self.session_id,
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "cat .env"},
+            "tool_response": output,
+        })
+        event = self.last_result(self.session_id)
+        stdout = (
+            "STRIPE_SECRET_KEY=" + redaction_marker("stripe-key")
+            + "\nGOOGLE_API_KEY=" + redaction_marker("google-api-key") + "\n"
+        )
+        self.assertEqual(event.data["result"], str({**output, "stdout": stdout}))
+        self.assertNotIn(stripe[8:], event.data["result"])
+        self.assertNotIn(google[4:], event.data["result"])
+        self.assert_redacted_once(event, err)
+
     def test_metadata_only_writes_no_warning(self):
         sid = "metaonlycutkey01"
         self.hook(["--metadata-only", "session-start"], {"session_id": sid, "source": "startup"})

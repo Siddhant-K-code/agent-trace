@@ -8,6 +8,9 @@ Patterns detected:
   - API keys: sk-*, sk-proj-*, sk-svcacct-*, sk-admin-*, sk-None-*,
     sk-ant-*, ghp_*, gho_*, ghu_*, ghs_*, ghr_*, github_pat_*,
     xox[bpras]-*, AKIA*, key-*, token-*, Bearer *
+  - Provider keys: Stripe sk_live_*, sk_test_*, rk_live_*, rk_test_*,
+    whsec_* (not the public pk_*), Google AIza*, GitLab glpat-*,
+    npm_*, Hugging Face hf_*
   - Values under sensitive key names such as password or api_key
   - Connection strings: postgres://, mysql://, mongodb://, redis://, amqp://
   - Private key blocks: any label that ends in PRIVATE KEY, and PGP.
@@ -202,6 +205,39 @@ def _replace_basic_auth(match: re.Match[str], marker: str) -> str:
 # runs on the output of the one before.
 SECRET_PATTERNS = [
     SecretPattern("private-key", _PRIVATE_KEY, replace=_replace_private_key),
+    # Provider keys with a left boundary. They run before the patterns
+    # without one (sk-, key-, token-), which could otherwise match inside
+    # their bodies. Each lookbehind sits after the prefix so the regex keeps
+    # its literal prefix. Stripe publishable keys (pk_) are public.
+    SecretPattern(
+        "stripe-key",
+        re.compile(r"[rs]k_(?<![A-Za-z0-9_-][rs]k_)(?:live|test)_[0-9A-Za-z]{24,}"),
+    ),
+    SecretPattern(
+        "stripe-webhook-secret",
+        re.compile(r"whsec_(?<![A-Za-z0-9_-]whsec_)[0-9A-Za-z]{32,}"),
+    ),
+    SecretPattern(
+        "google-api-key",
+        re.compile(r"AIza(?<![A-Za-z0-9_-]AIza)[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])"),
+    ),
+    # "-" may come before glpat- so instance prefixes such as acme-glpat-
+    # match. Routable tokens end in .<9>, versioned ones in .<2>.<9>.
+    SecretPattern(
+        "gitlab-token",
+        re.compile(
+            r"glpat-(?<![A-Za-z0-9_]glpat-)[0-9A-Za-z_-]{20,}"
+            r"(?:(?:\.[0-9a-z]{2})?\.[0-9a-z]{9}(?![0-9A-Za-z_-]))?"
+        ),
+    ),
+    SecretPattern(
+        "npm-token",
+        re.compile(r"npm_(?<![A-Za-z0-9_-]npm_)[0-9A-Za-z]{36}(?![0-9A-Za-z])"),
+    ),
+    SecretPattern(
+        "huggingface-token",
+        re.compile(r"hf_(?<![A-Za-z0-9_-]hf_)[0-9A-Za-z]{30,}"),
+    ),
     SecretPattern("anthropic-key", re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}")),
     # The lookbehind sits after "sk-" so the regex keeps its literal prefix.
     SecretPattern(
