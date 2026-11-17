@@ -1503,7 +1503,8 @@ Built-in scorers are `cost_usd`, `error_count`, `session_status`,
 `redundant_read_ratio`, `tool_call_count`, `context_fill_ratio`,
 `duration_seconds`, and `lint_violations`. A custom Python callable can be
 referenced as `package.module:function` and receives session events plus any
-criterion-specific parameters it declares.
+criterion-specific parameters it declares. When a lint rule could not run, a
+`lint_violations` criterion fails with no score, and its reason names the rule.
 
 | Flag | Default | Description |
 |---|---|---|
@@ -1609,6 +1610,7 @@ Read with care:
 - Baseline is the oldest version, or the previous version with `--compare`.
 - Sessions that start before the first `config-watch` snapshot count as the current version.
 - Cost is the `agent-strace cost` total at the default model. Sessions it refuses are reported as `N not priced` and left out of cost averages (`avg_cost` is `null` in JSON when none is priced), and the cost dimension needs `--min-sessions` priced sessions per version.
+- Lint findings, redundant reads and context saturation come from `agent-strace lint`. Sessions it refuses or where a lint rule could not run are reported as `N not linted` (`unlinted_sessions` in JSON) and left out of those averages, which show `n/a` in text and `null` in JSON when no session is linted. The lint dimension needs `--min-sessions` linted sessions per version.
 - Ignores skills and whether the agent read the context file. For adoption, see [skills.md](skills.md). For controlled instruction evidence, see [instruction-compliance.md](instruction-compliance.md).
 
 | Flag | Description |
@@ -2290,13 +2292,13 @@ These commands refuse such sessions: `a2a-tree`, `audit`, `budget-report`,
 `cognitive-debt`, `compaction`, `compare`, `compliance export`,
 `context-score --file`, `cost`, `dashboard --trend`, `diff`, `explain`,
 `export` with `--format otlp`, `otlp-genai`, `temporal`, or `eu-ai-act` or with
-`--backend`, `inflation`, `mcp-scan --session`, `oncall`, `optimize`,
+`--backend`, `inflation`, `lint`, `mcp-scan --session`, `oncall`, `optimize`,
 `policy generate`, `postmortem`, `pr-comment`, `replay`, `sample`, `share`,
 `standup`, `stats`, `team-report`, `tenant report`, `timeline`, `token-budget`,
 and `why`. A command refuses only when it reads an event whose data is not an
 object, so the same session keeps working with commands that never read that
 event. When only the cost calculation reads such an event, `context-score`,
-`dashboard`, `drift`, `export --metrics --backend otlp`, `fingerprint`, `lint`,
+`dashboard`, `drift`, `export --metrics --backend otlp`, `fingerprint`,
 `replay --format html`, `sample`, `team-report` and `eval dataset auto --filter
 cost-above:N` show the session as not priced instead of refusing it, as
 described for each command. For example, `export --format otlp-genai` and
