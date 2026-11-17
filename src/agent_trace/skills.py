@@ -36,6 +36,7 @@ from .event_data import (
     PATH_KEYS as _PATH_KEYS,
     event_arguments,
 )
+from .inert import inert
 from .models import EventType, SessionMeta, TraceEvent
 from .review import is_test_argv
 from .shell_split import is_break, split_tokens
@@ -1728,16 +1729,26 @@ def _invocation_label(model_invocable: object, user_invocable: object) -> str:
 
 def _write_hints(out: TextIO, hints: Iterable[Mapping[str, Any]], indent: str, scope: str) -> None:
     for hint in hints:
-        phrase = _HINT_PHRASES.get(str(hint["kind"]), str(hint["kind"]))
+        kind = str(hint["kind"])
+        # An unknown kind is its own phrase, and a phrase is free text.
+        phrase = inert(" ".join(_HINT_PHRASES.get(kind, kind).split()))
+        target = inert(hint["target"])
         loaded = "was loaded" if hint["target_loaded"] else "was not loaded"
-        out.write(f"{indent}hint ({hint['kind']}): {phrase} {hint['target']}; {hint['target']} {loaded} {scope}\n")
+        out.write(f"{indent}hint ({inert(kind)}): {phrase} {target}; {target} {loaded} {scope}\n")
 
 
 def format_session_text(report: Mapping[str, Any], out: TextIO | None = None) -> None:
+    """Write the skills report for one session.
+
+    Paths, skill names, load details and signals come from the trace and
+    from skill files, so each goes through inert() and an escape code or a
+    line break in it shows as text. In a follow reason, a hint phrase and a
+    test result, each run of whitespace becomes one space first.
+    """
     out = out or sys.stdout
     w = out.write
     w(f"Skills - session {str(report['session_id'])[:16]}\n")
-    w(f"Workspace: {report['workspace']} (from {report['workspace_source']})\n")
+    w(f"Workspace: {inert(report['workspace'])} (from {inert(report['workspace_source'])})\n")
     if report.get("events_skipped_malformed"):
         w(f"Skipped {report['events_skipped_malformed']} event(s) without a usable timestamp.\n")
     existing = [d for d in report["scanned_dirs"] if d["exists"]]
@@ -1750,12 +1761,12 @@ def format_session_text(report: Mapping[str, Any], out: TextIO | None = None) ->
 
     w("Context files (auto-injected by most agents; load not observable from hooks):\n")
     for item in report["context_files"]:
-        w(f"  {item['path']:<34} {'present' if item['present'] else 'absent'}\n")
+        w(f"  {inert(item['path']):<34} {'present' if item['present'] else 'absent'}\n")
 
     w(f"\nAvailable skills ({len(report['available'])}):\n")
     for entry in report["available"]:
         label = _invocation_label(entry.get("model_invocable"), entry.get("user_invocable"))
-        w(f"  {entry['name']:<28} {entry['dir']}{'  [' + label + ']' if label else ''}\n")
+        w(f"  {inert(entry['name']):<28} {inert(entry['dir'])}{'  [' + label + ']' if label else ''}\n")
         _write_hints(out, entry.get("hints", ()), "    ", "in this session")
     if not report["available"]:
         w("  (none found)\n")
@@ -1764,35 +1775,39 @@ def format_session_text(report: Mapping[str, Any], out: TextIO | None = None) ->
     if not report["loaded"]:
         w("  (no load recorded)\n")
     for entry in report["loaded"]:
-        w(f"  {entry['name']}\n")
+        w(f"  {inert(entry['name'])}\n")
         for load in entry["loads"]:
-            w(f"    load: {load['method']} by {load['invoked_by']} ({load['detail']}) at +{_fmt_seconds(load['seconds_since_start'])}"
+            w(f"    load: {inert(load['method'])} by {inert(load['invoked_by'])} ({inert(load['detail'])}) "
+              f"at +{_fmt_seconds(load['seconds_since_start'])}"
               f"; before first edit: {_yes_no(load['loaded_before_first_edit'], 'no edit recorded')}"
               f"; load result: {_yes_no(load['load_succeeded'], 'not recorded')}\n")
         if not entry["definition_found"]:
             w("    definition: not found in scanned directories (use --skills-dir)\n")
         follow = entry["follow"]
-        reason = f" ({follow['reason']})" if follow.get("reason") else ""
+        reason = f" ({inert(' '.join(str(follow['reason']).split()))})" if follow.get("reason") else ""
         timing = ""
         if follow.get("seconds_to_first_signal") is not None:
             turn = "same turn" if follow["first_signal_before_next_prompt"] else "after a later prompt"
             timing = f"; first signal +{_fmt_seconds(follow['seconds_to_first_signal'])} after load ({turn})"
-        w(f"    follow: {follow['status']}{reason}{timing}\n")
+        w(f"    follow: {inert(follow['status'])}{reason}{timing}\n")
         signals = follow["signals"]
         if signals["resource_read"]["count"]:
-            w(f"      resource_read x{signals['resource_read']['count']}: {', '.join(signals['resource_read']['paths'])}\n")
+            paths = ", ".join(inert(path) for path in signals["resource_read"]["paths"])
+            w(f"      resource_read x{signals['resource_read']['count']}: {paths}\n")
         if signals["script_run"]["count"]:
-            w(f"      script_run x{signals['script_run']['count']}: {', '.join(signals['script_run']['paths'])}\n")
+            paths = ", ".join(inert(path) for path in signals["script_run"]["paths"])
+            w(f"      script_run x{signals['script_run']['count']}: {paths}\n")
         if signals["command_match"]["count"]:
-            matched = ", ".join(f"{sig} x{n}" for sig, n in signals["command_match"]["by_signature"].items())
+            matched = ", ".join(f"{inert(sig)} x{n}" for sig, n in signals["command_match"]["by_signature"].items())
             w(f"      command_match in {signals['command_match']['count']} command(s): {matched}\n")
         outcome = entry["outcome_after_load"]
-        last = _describe_result(outcome["last_test"]) if outcome["last_test"] else "n/a"
+        last = inert(" ".join(_describe_result(outcome["last_test"]).split())) if outcome["last_test"] else "n/a"
         w(f"    after load: tests run {outcome['tests_run']} (last: {last}); "
           f"errors {outcome['errors']}; session_end recorded: {_yes_no(outcome['session_end_recorded'])}\n")
 
     not_loaded = report["available_not_loaded"]
-    w(f"\nAvailable but not loaded ({len(not_loaded)}): {', '.join(not_loaded) if not_loaded else '-'}\n")
+    names = ", ".join(inert(name) for name in not_loaded) if not_loaded else "-"
+    w(f"\nAvailable but not loaded ({len(not_loaded)}): {names}\n")
     _write_not_measurable(report, out)
 
 
@@ -1815,6 +1830,13 @@ def _session_count(report: Mapping[str, Any], window: str) -> str:
 
 
 def format_aggregate_text(report: Mapping[str, Any], out: TextIO | None = None) -> None:
+    """Write the skills report across sessions.
+
+    Skill names and hints come from skill files and the trace, so each goes
+    through inert() after the cut and an escape code or a line break in it
+    shows as text. In a hint phrase, each run of whitespace becomes one space
+    first.
+    """
     import datetime
 
     out = out or sys.stdout
@@ -1850,7 +1872,7 @@ def format_aggregate_text(report: Mapping[str, Any], out: TextIO | None = None) 
         unfound = skill["sessions_loaded"] > 0 and not skill["definition_found"]
         label = skill["name"] + "*" if unfound else skill["name"]
         missing = missing or unfound
-        w(f"{label[:width]:<{width}} {skill['sessions_available']:>5} {skill['sessions_loaded']:>6} "
+        w(f"{inert(label[:width]):<{width}} {skill['sessions_available']:>5} {skill['sessions_loaded']:>6} "
           f"{_frac(skill['load_rate']):>9} {inv['user']:>5} {inv['model']:>5} "
           f"{_fmt_seconds(skill['median_seconds_to_load']):>8} {_frac(skill['loaded_before_first_edit']):>8} "
           f"{_frac(skill['follow_signals']):>7} {_frac(skill['tests_after_load']):>6}\n")
@@ -1868,7 +1890,7 @@ def format_aggregate_text(report: Mapping[str, Any], out: TextIO | None = None) 
         w("\nFollow signal kinds (sessions with each kind / measurable loads):\n")
         for skill in with_kinds:
             kinds = skill["follow_signal_kinds"]
-            w(f"  {skill['name']:<{width}} resource_read {_frac(kinds['resource_read']):>7}  "
+            w(f"  {inert(skill['name']):<{width}} resource_read {_frac(kinds['resource_read']):>7}  "
               f"script_run {_frac(kinds['script_run']):>7}  command_match {_frac(kinds['command_match']):>7}\n")
 
     w(f"\nNever loaded (available in >= {report['min_sessions']} sessions, loaded in 0):\n")
@@ -1885,7 +1907,7 @@ def format_aggregate_text(report: Mapping[str, Any], out: TextIO | None = None) 
               "reflects today's filesystem, so sessions before install are over-counted. Pair with a trigger "
               "eval on tasks where the skill applies.\n")
         for item in report["never_loaded"]:
-            w(f"  {item['name']} (available in {item['sessions_available']} sessions)\n")
+            w(f"  {inert(item['name'])} (available in {item['sessions_available']} sessions)\n")
             _write_hints(out, item.get("hints", ()), "    ", "in the window")
     else:
         w("  (none)\n")
@@ -1897,7 +1919,7 @@ def format_aggregate_text(report: Mapping[str, Any], out: TextIO | None = None) 
         w("  The model cannot load these skills, so they are not trigger misses. Only the user can invoke them.\n")
         for item in user_only:
             extra = "; user-invocable: false, so nobody can invoke it" if item.get("user_invocable") is False else ""
-            w(f"  {item['name']} (available in {item['sessions_available']} sessions{extra})\n")
+            w(f"  {inert(item['name'])} (available in {item['sessions_available']} sessions{extra})\n")
             _write_hints(out, item.get("hints", ()), "    ", "in the window")
 
     listed = {item["name"] for item in report["never_loaded"]} | {item["name"] for item in user_only}
@@ -1905,7 +1927,7 @@ def format_aggregate_text(report: Mapping[str, Any], out: TextIO | None = None) 
     if hinted:
         w("\nOther skills with alias or forwarder hints:\n")
         for skill in hinted:
-            w(f"  {skill['name']} (available in {skill['sessions_available']}, loaded in {skill['sessions_loaded']})\n")
+            w(f"  {inert(skill['name'])} (available in {skill['sessions_available']}, loaded in {skill['sessions_loaded']})\n")
             _write_hints(out, skill["hints"], "    ", "in the window")
 
     compared = [skill for skill in report["skills"] if not skill["comparison"]["suppressed"]]
@@ -1914,7 +1936,7 @@ def format_aggregate_text(report: Mapping[str, Any], out: TextIO | None = None) 
         w(f"  suppressed: needs n >= {report['min_sessions']} in both groups for a skill\n")
     for skill in compared:
         comp = skill["comparison"]
-        w(f"  {skill['name']}: loaded n={comp['loaded_n']}, not loaded n={comp['available_not_loaded_n']}\n")
+        w(f"  {inert(skill['name'])}: loaded n={comp['loaded_n']}, not loaded n={comp['available_not_loaded_n']}\n")
         for fact in ("tests_run", "errors", "session_end_recorded"):
             w(f"    {fact:<22} {_frac(comp[fact]['loaded']):>8} vs {_frac(comp[fact]['available_not_loaded']):>8}\n")
     _write_not_measurable(report, out)

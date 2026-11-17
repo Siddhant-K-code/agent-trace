@@ -29,6 +29,11 @@ from agent_trace.event_data import NonObjectEventDataError
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
 
+try:
+    import _escapes
+except ImportError:
+    from tests import _escapes
+
 
 def _make_event(event_type: EventType, ts: float, session_id: str = "s1", **data) -> TraceEvent:
     return TraceEvent(event_type=event_type, timestamp=ts, session_id=session_id, data=data)
@@ -552,6 +557,67 @@ class TestCachedTokenCost(unittest.TestCase):
         buf = io.StringIO()
         format_tenant_cost(report, out=buf)
         self.assertIn("Tokens: 12,000 input (6,000 cache read), 120 output", buf.getvalue())
+
+
+def _cost_result(model="sonnet", phase="plain"):
+    return CostResult(session_id="s1", model=model, total_cost=1.0, input_tokens=1000,
+                      output_tokens=100, phase_costs=[PhaseCost(1, phase, 1000, 100, 1.0)],
+                      wasted_cost=0.0)
+
+
+def _render_cost(result):
+    buf = io.StringIO()
+    format_cost(result, out=buf)
+    return buf.getvalue()
+
+
+# (label, kind, build): build(value) returns a cost result with value in the
+# place the label names. The kinds are in tests/_escapes.py.
+FORMAT_COST_CASES = [
+    ("model", "text", lambda v: _cost_result(model=v)),
+    ("phase name", "free", lambda v: _cost_result(phase=v)),
+]
+
+# (label, cut, build): format_cost keeps cut characters of the value the label
+# names.
+FORMAT_COST_CUTS = [
+    ("phase name", 40, lambda v: _cost_result(phase=v)),
+]
+
+
+class TestTraceTextShowsAsText(unittest.TestCase):
+    """A prompt or a tool name in a trace can hold escape codes and line
+    breaks. cost shows them as text."""
+
+    def test_each_value_shows_escapes_as_text(self):
+        _escapes.check_each_value(self, FORMAT_COST_CASES, _render_cost)
+
+    def test_plain_text_prints_unchanged(self):
+        _escapes.check_plain_text_unchanged(self, FORMAT_COST_CASES, _render_cost)
+
+    def test_whitespace_in_free_text_shows_as_one_space(self):
+        _escapes.check_whitespace_in_free_text(self, FORMAT_COST_CASES, _render_cost)
+
+    def test_value_as_long_as_the_cut_shows_in_full(self):
+        _escapes.check_each_cut(self, FORMAT_COST_CUTS, _render_cost)
+
+    def test_sgr_code_shows_as_text(self):
+        output = _render_cost(_cost_result(model="a\x1b[8mhidden"))
+        self.assertIn(r"Model: a\x1b[8mhidden", output)
+        self.assertNotIn("\x1b", output)
+
+    def test_prompt_in_trace_shows_on_one_line(self):
+        events = [
+            _make_event(EventType.SESSION_START, 0.0),
+            _make_event(EventType.USER_PROMPT, 1.0, prompt=_escapes.PAYLOAD),
+            _make_event(EventType.ASSISTANT_RESPONSE, 2.0, text="done"),
+        ]
+        store, tmp = _make_store(events)
+        self.addCleanup(tmp.cleanup)
+        output = _render_cost(estimate_cost(store, "s1"))
+        self.assertIn(f": {_escapes.PAYLOAD_FREE}  $", output)
+        for line in output.split("\n"):
+            self.assertTrue(line.isprintable(), ascii(line))
 
 
 if __name__ == "__main__":

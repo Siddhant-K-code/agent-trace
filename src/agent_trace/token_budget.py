@@ -16,6 +16,7 @@ from typing import TextIO
 
 from .cost import _estimate_tokens
 from .event_data import number_field, require_object_event_data, str_field
+from .inert import inert
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -207,9 +208,14 @@ def _fmt_offset(s: float) -> str:
 
 
 def format_token_budget(report: TokenBudgetReport, out: TextIO = sys.stdout) -> None:
+    """Write the per-request context window table for one session.
+
+    The model goes through inert(), so an escape code or a line break in it
+    shows as text.
+    """
     w = out.write
     limit_str = f"{report.context_limit:,}" if report.context_limit else "unknown"
-    w(f"\nSession: {report.session_id[:12]}  Model: {report.model}  "
+    w(f"\nSession: {report.session_id[:12]}  Model: {inert(report.model)}  "
       f"Context limit: {limit_str} tokens\n")
     w("─" * 72 + "\n")
     w(f"  {'Req':>4}  {'Offset':>7}  {'Input tok':>10}  {'Output tok':>10}  "

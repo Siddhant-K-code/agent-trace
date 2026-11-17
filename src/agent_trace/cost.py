@@ -18,6 +18,7 @@ from typing import Any, Mapping, TextIO
 
 from .event_data import require_object_event_data
 from .explain import PHASE_DATA_EVENT_TYPES, ExplainResult, explain_session
+from .inert import inert
 from .models import EventType, TraceEvent
 from .pairing import Pairer, event_model, llm_pairer
 from .store import TraceStore
@@ -1286,10 +1287,16 @@ def _cache_note(read_tokens: int, write_tokens: int) -> str:
 
 
 def format_cost(result: CostResult, out: TextIO = sys.stdout) -> None:
+    """Write the estimated cost of one session, phase by phase.
+
+    The model and each phase name go through inert(), so an escape code or a
+    line break in them shows as text. In the phase name, each run of
+    whitespace becomes one space first.
+    """
     w = out.write
     w(f"\nSession: {result.session_id} — Estimated cost: ${result.total_cost:.4f}\n")
     cache = _cache_note(result.cache_read_tokens, result.cache_write_tokens)
-    w(f"Model: {result.model}  |  "
+    w(f"Model: {inert(result.model)}  |  "
       f"{result.input_tokens:,} input tokens{cache}, "
       f"{result.output_tokens:,} output tokens\n\n")
 
@@ -1298,7 +1305,9 @@ def format_cost(result: CostResult, out: TextIO = sys.stdout) -> None:
         for pc in result.phase_costs:
             pct = pc.cost_dollars / total * 100
             wasted_tag = "  ← wasted" if pc.failed else ""
-            w(f"  Phase {pc.phase_index}: {pc.phase_name[:40]:<40}  "
+            # The phase name is a prompt or a tool name from the trace.
+            name = inert(" ".join(pc.phase_name.split())[:40])
+            w(f"  Phase {pc.phase_index}: {name:<40}  "
               f"${pc.cost_dollars:.4f}  ({pct:.0f}%)  "
               f"{pc.input_tokens:,}in {pc.output_tokens:,}out"
               f"{wasted_tag}\n")
@@ -1338,7 +1347,11 @@ def format_provider_cost_report(
     report: ProviderCostReport,
     out: TextIO = sys.stdout,
 ) -> None:
-    """Write the offline provider/model cost dashboard."""
+    """Write the offline provider/model cost dashboard.
+
+    Each provider and model goes through inert() after the cut, so an escape
+    code or a line break in it shows as text.
+    """
     summaries = report.summaries
     models = [row.model or UNRECORDED_MODEL_LABEL for row in summaries]
     provider_width = max([len("Provider"), *(len(row.provider) for row in summaries)])
@@ -1357,7 +1370,7 @@ def format_provider_cost_report(
         if len(model) > model_width:
             model = model[:model_width - 1] + "…"
         out.write(
-            f"{row.provider:<{provider_width}}  {model:<{model_width}}  "
+            f"{inert(row.provider):<{provider_width}}  {inert(model):<{model_width}}  "
             f"{row.sessions:>8}  ${row.cost_usd:>9.2f}\n"
         )
     out.write(f"{divider}\n")

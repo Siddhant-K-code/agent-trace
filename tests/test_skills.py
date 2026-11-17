@@ -1,3 +1,4 @@
+import copy
 import io
 import json
 import os
@@ -16,6 +17,11 @@ try:
     import _no_telemetry  # noqa: F401
 except ImportError:  # pragma: no cover - run as a package module
     from tests import _no_telemetry  # noqa: F401
+
+try:
+    import _escapes
+except ImportError:  # pragma: no cover - run as a package module
+    from tests import _escapes
 
 from agent_trace.cli import _codex_config_dir, build_parser
 from agent_trace.models import EventType, SessionMeta, TraceEvent
@@ -1408,6 +1414,226 @@ class TestCli(SkillsTestBase):
         self.assertIn("not found in scanned directories", text)
         self.assertIn("Not measurable here", text)
         self.assertNotIn("score", text.lower())
+
+
+def _skills_reports():
+    """Return a session report and an aggregate report that show every value
+    the text prints: hints, loads, follow signals, a test result and a
+    comparison."""
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        repo = tmp / "repo"
+        repo.mkdir()
+        root = repo / ".github" / "skills"
+        deploy_dir = _write_skill(root, "deploy-check", DEPLOY_BODY,
+                                  resources={"reference.md": "ref", "scripts/check.sh": "#!/bin/sh\n"})
+        _write_skill(root, "deploy-alias", "Use the deploy-check skill.\n")
+        _write_skill(root, "never-used", "```sh\nmake never\n```\n")
+        reports = []
+        for index in range(3):
+            ev = _Events(str(repo))
+            if index < 2:
+                ev.tool("skill", {"skill": "deploy-check"})
+                ev.tool("Read", {"file_path": str(deploy_dir / "reference.md")}, key="tool_input")
+                ev.bash("make deploy-check")
+                ev.bash("pytest -q", result={"exit_code": 0})
+            ev.add(EventType.SESSION_END)
+            reports.append(analyze_session(ev.events, session_id=f"s{index}", user_dirs=()))
+        return reports[0], aggregate_reports(reports, min_sessions=1)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _built(base, cases):
+    """Turn each (label, kind or cut, set_value) into (label, kind or cut, build).
+    build(value) returns a copy of base with value set where the label says."""
+    def build(set_value):
+        def make(value):
+            report = copy.deepcopy(base)
+            set_value(report, value)
+            return report
+        return make
+    return [(label, second, build(set_value)) for label, second, set_value in cases]
+
+
+def _named(entries, name):
+    return next(entry for entry in entries if entry["name"] == name)
+
+
+def _hint_to(target):
+    return {"kind": "forwarder", "target": target, "target_loaded": False}
+
+
+def _user_only(name, target):
+    return {"name": name, "sessions_available": 3, "hints": [_hint_to(target)]}
+
+
+def _session_hint(report):
+    return _named(report["available"], "deploy-alias")["hints"][0]
+
+
+def _session_load(report):
+    return report["loaded"][0]["loads"][0]
+
+
+def _session_follow(report):
+    return report["loaded"][0]["follow"]
+
+
+def _aggregate_hint(report):
+    return _named(report["never_loaded"], "deploy-alias")["hints"][0]
+
+
+def _render_session(report):
+    out = io.StringIO()
+    format_session_text(report, out)
+    return out.getvalue()
+
+
+def _render_aggregate(report):
+    out = io.StringIO()
+    format_aggregate_text(report, out)
+    return out.getvalue()
+
+
+# (label, kind, set_value): set_value(report, value) puts value in the place
+# the label names. The kinds are in tests/_escapes.py.
+SESSION_CASES = [
+    ("workspace", "text", lambda r, v: r.update(workspace=v)),
+    ("workspace source", "text", lambda r, v: r.update(workspace_source=v)),
+    ("context file path", "text", lambda r, v: r["context_files"][0].update(path=v)),
+    ("available skill name", "text", lambda r, v: _named(r["available"], "never-used").update(name=v)),
+    ("available skill directory", "text", lambda r, v: _named(r["available"], "never-used").update(dir=v)),
+    ("hint kind", "text", lambda r, v: _session_hint(r).update(kind=v)),
+    ("hint phrase", "free", lambda r, v: _session_hint(r).update(kind=v)),
+    ("hint target", "text", lambda r, v: _session_hint(r).update(target=v)),
+    ("loaded skill name", "text", lambda r, v: r["loaded"][0].update(name=v)),
+    ("load method", "text", lambda r, v: _session_load(r).update(method=v)),
+    ("load invoker", "text", lambda r, v: _session_load(r).update(invoked_by=v)),
+    ("load detail", "text", lambda r, v: _session_load(r).update(detail=v)),
+    ("follow status", "text", lambda r, v: _session_follow(r).update(status=v)),
+    ("follow reason", "free", lambda r, v: _session_follow(r).update(reason=v)),
+    ("resource path", "text", lambda r, v: _session_follow(r)["signals"]["resource_read"].update(paths=[v])),
+    ("script path", "text",
+     lambda r, v: _session_follow(r)["signals"]["script_run"].update(count=1, paths=[v])),
+    ("command signature", "text",
+     lambda r, v: _session_follow(r)["signals"]["command_match"].update(by_signature={v: 1})),
+    ("test result", "free",
+     lambda r, v: r["loaded"][0]["outcome_after_load"]["last_test"].update(runner_summary={v: "passed"})),
+    ("available but not loaded", "text", lambda r, v: r.update(available_not_loaded=[v])),
+]
+
+AGGREGATE_CASES = [
+    ("skill name in the table", "text", lambda r, v: _named(r["skills"], "never-used").update(name=v)),
+    ("skill name in follow kinds and comparison", "text",
+     lambda r, v: _named(r["skills"], "deploy-check").update(name=v)),
+    ("never loaded skill name", "text", lambda r, v: _named(r["never_loaded"], "never-used").update(name=v)),
+    ("user-only skill name", "text", lambda r, v: r.update(user_only_not_invoked=[_user_only(v, "t")])),
+    ("skill name with hints", "text",
+     lambda r, v: _named(r["skills"], "never-used").update(name=v, hints=[_hint_to("t")])),
+    ("hint kind", "text", lambda r, v: _aggregate_hint(r).update(kind=v)),
+    ("hint phrase", "free", lambda r, v: _aggregate_hint(r).update(kind=v)),
+    ("hint target, never loaded", "text", lambda r, v: _aggregate_hint(r).update(target=v)),
+    ("hint target, user-only", "text", lambda r, v: r.update(user_only_not_invoked=[_user_only("u", v)])),
+    ("hint target, other hints", "text",
+     lambda r, v: _named(r["skills"], "deploy-check").update(hints=[_hint_to(v)])),
+]
+
+# (label, cut, set_value): the table cuts a skill name to the column width,
+# at most 48 characters, with no marker.
+AGGREGATE_CUTS = [
+    ("skill name in the table", 48, lambda r, v: _named(r["skills"], "never-used").update(name=v)),
+]
+
+
+class TestTraceTextShowsAsText(SkillsTestBase):
+    """Skill names, paths, hints and load details come from skill files and
+    the trace, and can hold escape codes and line breaks. The text reports show
+    them as text. The JSON keeps the raw text."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.session, cls.aggregate = _skills_reports()
+
+    def setUp(self):
+        super().setUp()
+        home = self.tmp / "home"
+        home.mkdir()
+        patcher = mock.patch.dict(os.environ, {"HOME": str(home), "AGENT_STRACE_TELEMETRY": "0"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.trace_dir = self.tmp / ".agent-traces"
+
+    def test_base_reports_show_each_section(self):
+        session = _render_session(self.session)
+        aggregate = _render_aggregate(self.aggregate)
+        self.assertIn("hint (forwarder)", session)
+        self.assertIn("command_match in", session)
+        self.assertIn("Follow signal kinds", aggregate)
+        self.assertIn("  deploy-check: loaded n=2, not loaded n=1", aggregate)
+
+    def test_each_value_shows_escapes_as_text(self):
+        _escapes.check_each_value(self, _built(self.session, SESSION_CASES), _render_session)
+        _escapes.check_each_value(self, _built(self.aggregate, AGGREGATE_CASES), _render_aggregate)
+
+    def test_plain_text_prints_unchanged(self):
+        _escapes.check_plain_text_unchanged(self, _built(self.session, SESSION_CASES), _render_session)
+        _escapes.check_plain_text_unchanged(self, _built(self.aggregate, AGGREGATE_CASES), _render_aggregate)
+
+    def test_whitespace_in_free_text_shows_as_one_space(self):
+        _escapes.check_whitespace_in_free_text(self, _built(self.session, SESSION_CASES), _render_session)
+        _escapes.check_whitespace_in_free_text(self, _built(self.aggregate, AGGREGATE_CASES), _render_aggregate)
+
+    def test_cut_counts_characters_not_escapes(self):
+        _escapes.check_each_cut(self, _built(self.aggregate, AGGREGATE_CUTS), _render_aggregate)
+
+    def test_sgr_code_shows_as_text(self):
+        session = copy.deepcopy(self.session)
+        session["loaded"][0]["name"] = "a\x1b[8mhidden"
+        aggregate = copy.deepcopy(self.aggregate)
+        _named(aggregate["skills"], "never-used")["name"] = "a\x1b[8mhidden"
+        for output in (_render_session(session), _render_aggregate(aggregate)):
+            self.assertIn(r"a\x1b[8mhidden", output)
+            self.assertNotIn("\x1b", output)
+
+    def _run(self, *argv):
+        args = build_parser().parse_args(["--trace-dir", str(self.trace_dir), "skills", *argv])
+        out = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(io.StringIO()):
+            cmd_skills(args)
+        return out.getvalue()
+
+    def _seed(self, skill):
+        now = time.time()
+        ev = _Events(str(self.repo))
+        for event in ev.events:
+            event.timestamp = now - 60
+        ev.t = now - 50
+        ev.tool("skill", {"skill": skill})
+        meta = SessionMeta(agent_name="claude-code")
+        meta.session_id = "esc00001"
+        meta.started_at = now - 60
+        store = TraceStore(self.trace_dir)
+        store.create_session(meta)
+        for event in ev.events:
+            store.append_event(meta.session_id, event)
+        return meta.session_id
+
+    def test_skill_name_in_trace_shows_as_text(self):
+        sid = self._seed(_escapes.PAYLOAD)
+        for argv in ((sid,), ("--since", "1d", "--min-sessions", "1")):
+            with self.subTest(argv=argv):
+                output = self._run(*argv)
+                self.assertIn(_escapes.PAYLOAD_TEXT, output)
+                for line in output.split("\n"):
+                    self.assertTrue(line.isprintable(), ascii(line))
+
+    def test_json_keeps_the_raw_skill_name(self):
+        sid = self._seed(_escapes.PAYLOAD)
+        report = json.loads(self._run(sid, "--format", "json"))
+        self.assertEqual(report["loaded"][0]["name"], _escapes.PAYLOAD)
+        report = json.loads(self._run("--since", "1d", "--min-sessions", "1", "--format", "json"))
+        self.assertIn(_escapes.PAYLOAD, [skill["name"] for skill in report["skills"]])
 
 
 if __name__ == "__main__":

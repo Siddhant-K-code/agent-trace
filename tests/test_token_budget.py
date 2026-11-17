@@ -1,6 +1,8 @@
 """Tests for token budget tracking (issue #27)."""
 
+import io
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -10,10 +12,17 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
 from agent_trace.token_budget import (
+    TokenBudgetReport,
     TokenBudgetWatcher,
     _resolve_limit,
     analyse_token_budget,
+    format_token_budget,
 )
+
+try:
+    import _escapes
+except ImportError:
+    from tests import _escapes
 
 
 def _make_store_with_llm_events(input_tokens_per_req, model="claude-sonnet-4"):
@@ -128,6 +137,48 @@ class TestTokenBudgetWatcher(unittest.TestCase):
         )
         result = watcher.update(event)
         self.assertIsNone(result)
+
+
+def _budget_report(model="claude-sonnet-4"):
+    return TokenBudgetReport(session_id="s1", model=model, context_limit=None, requests=[],
+                             final_cumulative=0, final_pct=None, warning_threshold=0.9)
+
+
+def _render_budget(report):
+    out = io.StringIO()
+    format_token_budget(report, out)
+    return out.getvalue()
+
+
+# (label, kind, build): build(value) returns a report with value in the place
+# the label names. The kinds are in tests/_escapes.py.
+TOKEN_BUDGET_CASES = [
+    ("model", "text", lambda v: _budget_report(model=v)),
+]
+
+
+class TestTraceTextShowsAsText(unittest.TestCase):
+    """A model name in a trace can hold escape codes and line breaks.
+    token-budget shows them as text."""
+
+    def test_each_value_shows_escapes_as_text(self):
+        _escapes.check_each_value(self, TOKEN_BUDGET_CASES, _render_budget)
+
+    def test_plain_text_prints_unchanged(self):
+        _escapes.check_plain_text_unchanged(self, TOKEN_BUDGET_CASES, _render_budget)
+
+    def test_sgr_code_shows_as_text(self):
+        output = _render_budget(_budget_report(model="a\x1b[8mhidden"))
+        self.assertIn(r"Model: a\x1b[8mhidden", output)
+        self.assertNotIn("\x1b", output)
+
+    def test_model_in_trace_shows_as_text(self):
+        store, sid = _make_store_with_llm_events([1000], model=_escapes.PAYLOAD)
+        self.addCleanup(shutil.rmtree, store.base_dir, True)
+        output = _render_budget(analyse_token_budget(store, sid))
+        self.assertIn(f"Model: {_escapes.PAYLOAD_TEXT}  ", output)
+        for line in output.split("\n"):
+            self.assertTrue(line.isprintable(), ascii(line))
 
 
 if __name__ == "__main__":

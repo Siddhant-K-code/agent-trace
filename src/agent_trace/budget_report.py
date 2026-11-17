@@ -17,6 +17,7 @@ from typing import TextIO
 
 from .cost import estimate_cost, DEFAULT_MODEL
 from .event_data import require_object_event_data, str_field
+from .inert import inert
 from .models import EventType, SessionMeta
 from .store import TraceStore
 
@@ -251,6 +252,11 @@ def team_summary(sessions: list[SessionSpend]) -> dict[str, dict]:
 
 
 def format_report_text(report: BudgetReport, out: TextIO = sys.stdout) -> None:
+    """Write the spend digest as plain text.
+
+    Agent, tool and team names go through inert() after the cut, so an escape
+    code or a line break in them shows as text.
+    """
     w = out.write
     start = _fmt_date(report.window_start)
     end = _fmt_date(report.window_end)
@@ -277,7 +283,7 @@ def format_report_text(report: BudgetReport, out: TextIO = sys.stdout) -> None:
     for i, s in enumerate(top, 1):
         tag = "  ⚠ watchdog" if s.watchdog_terminated else ""
         name = (s.agent_name or s.session_id[:12])[:30]
-        w(f"  {i}. {s.session_id[:12]}  ${s.cost:.2f}  {name:<30}  {_fmt_date(s.started_at)}{tag}\n")
+        w(f"  {i}. {s.session_id[:12]}  ${s.cost:.2f}  {inert(name):<30}  {_fmt_date(s.started_at)}{tag}\n")
     w("\n")
 
     # Cost by tool
@@ -287,7 +293,7 @@ def format_report_text(report: BudgetReport, out: TextIO = sys.stdout) -> None:
         total_tool_cost = sum(tool_totals.values()) or 1e-9
         for tool, cost in list(tool_totals.items())[:8]:
             pct = cost / report.total_cost * 100
-            w(f"  {tool:<20}  ${cost:.2f}  ({pct:.0f}%)\n")
+            w(f"  {inert(tool):<20}  ${cost:.2f}  ({pct:.0f}%)\n")
         w("\n")
 
     # Team breakdown (only shown when at least one session has a team set)
@@ -296,7 +302,7 @@ def format_report_text(report: BudgetReport, out: TextIO = sys.stdout) -> None:
         w("Cost by team:\n")
         for team_name, stats in teams.items():
             pct = stats["cost"] / report.total_cost * 100 if report.total_cost else 0
-            w(f"  {team_name:<24}  ${stats['cost']:.2f}  ({pct:.0f}%)  "
+            w(f"  {inert(team_name):<24}  ${stats['cost']:.2f}  ({pct:.0f}%)  "
               f"{stats['sessions']} sessions  {stats['agents']} agents\n")
         w("\n")
 
@@ -311,6 +317,11 @@ def format_report_text(report: BudgetReport, out: TextIO = sys.stdout) -> None:
 
 
 def format_report_markdown(report: BudgetReport, out: TextIO = sys.stdout) -> None:
+    """Write the spend digest as Markdown.
+
+    Agent and tool names go through inert() after the cut, so an escape code
+    or a line break in them shows as text.
+    """
     w = out.write
     start = _fmt_date(report.window_start)
     end = _fmt_date(report.window_end)
@@ -335,7 +346,7 @@ def format_report_markdown(report: BudgetReport, out: TextIO = sys.stdout) -> No
     for i, s in enumerate(report.top_sessions, 1):
         tag = " ⚠" if s.watchdog_terminated else ""
         name = (s.agent_name or s.session_id[:12])[:30]
-        w(f"| {i} | `{s.session_id[:12]}` | ${s.cost:.2f}{tag} | {name} | {_fmt_date(s.started_at)} |\n")
+        w(f"| {i} | `{s.session_id[:12]}` | ${s.cost:.2f}{tag} | {inert(name)} | {_fmt_date(s.started_at)} |\n")
     w("\n")
 
     # Cost by tool
@@ -346,7 +357,7 @@ def format_report_markdown(report: BudgetReport, out: TextIO = sys.stdout) -> No
         w("|------|------|---|\n")
         for tool, cost in list(tool_totals.items())[:8]:
             pct = cost / report.total_cost * 100
-            w(f"| {tool} | ${cost:.2f} | {pct:.0f}% |\n")
+            w(f"| {inert(tool)} | ${cost:.2f} | {pct:.0f}% |\n")
         w("\n")
 
     # Watchdog
