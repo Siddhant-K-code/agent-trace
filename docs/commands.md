@@ -1932,7 +1932,7 @@ ranked and compared on its other scores only.
 ### `server`
 ```
 agent-strace server [--port N] [--host HOST] [--storage DIR] [--auth-key KEY]
-                     [--dashboard]
+                     [--allow-host NAME] [--dashboard]
 agent-strace server keygen
 ```
 Start a server-side event collector. See [server.md](server.md).
@@ -1944,6 +1944,9 @@ Start a server-side event collector. See [server.md](server.md).
 | `--storage DIR` | Trace storage directory (default: `$AGENT_STRACE_STORAGE` or `.agent-traces`) |
 | `--dashboard` | Serve the session list and evidence review at `/`; non-loopback binding requires `--auth-key` |
 | `--auth-key KEY` | Require `Authorization: Bearer KEY` on all requests (also read from `AGENT_STRACE_AUTH_KEY`) |
+| `--allow-host NAME` | Also accept GET requests whose `Host` is `NAME`, on any port. Repeatable. For a tunnel, forwarded port or reverse proxy that passes its own name. Exact match, no wildcards. No effect with `--auth-key` or on a non-loopback bind |
+
+To refuse requests from web pages, the server answers 403 to any POST with an `Origin` header and, on a loopback bind without `--auth-key`, to any GET whose `Host` is not `localhost`, an IP address or an `--allow-host` name ([server.md](server.md#local-evidence-review)).
 
 The server has no SSO, so it refuses to start with `--auth`, `--oidc-issuer`, `--oidc-client-id`, `--oidc-client-secret` or `--enforce-sso`; use `--auth-key` to require authentication.
 

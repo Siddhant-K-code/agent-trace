@@ -39,11 +39,12 @@ import argparse
 import ipaddress
 import json
 import os
+import re
 import secrets
 import sys
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
@@ -178,6 +179,58 @@ def send_session_meta_to_endpoint(meta: SessionMeta, endpoint: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Requests from web pages
+# ---------------------------------------------------------------------------
+
+# Any web page can POST to the collector without a CORS preflight. After DNS
+# rebinding, a page can also read a loopback collector under its own name.
+# Browsers send Origin on every POST and the page's name as the Host, so the
+# handler refuses both. The replies never echo a header value.
+_HOST_REFUSED = {
+    "error": (
+        "Host not allowed: use localhost or an IP address, "
+        "or start the server with --allow-host NAME or --auth-key"
+    )
+}
+_ORIGIN_REFUSED = {
+    "error": "POST with an Origin header refused: browser requests are not accepted"
+}
+
+# A Host value: a bracketed IPv6 literal or a name without brackets or
+# colons, then an optional port of digits.
+_HOST_VALUE = re.compile(r"(\[[^\]]*\]|[^\[\]:]*)(?::[0-9]+)?")
+_HOST_LABEL = re.compile(r"[A-Za-z0-9-]+")
+
+
+def allowed_host_name(value: str) -> str:
+    """Check one ``--allow-host`` value: a bare host name."""
+    if not all(_HOST_LABEL.fullmatch(label) for label in value.split(".")):
+        raise argparse.ArgumentTypeError(
+            f"invalid host name {value!r}: give a bare name such as "
+            "dash.example.test, with no scheme, port or path"
+        )
+    return value
+
+
+def _host_header_name(value: str) -> str | None:
+    """Return the lower-case name in a Host value, or None if it is malformed."""
+    match = _HOST_VALUE.fullmatch(value.strip(" \t"))
+    return match.group(1).lower() if match else None
+
+
+def _is_ip_literal(name: str) -> bool:
+    """Return True for an IPv4 address or a bracketed IPv6 address."""
+    try:
+        if name.startswith("[") and name.endswith("]"):
+            ipaddress.IPv6Address(name[1:-1])
+        else:
+            ipaddress.IPv4Address(name)
+    except ValueError:
+        return False
+    return True
+
+
+# ---------------------------------------------------------------------------
 # HTTP request handler
 # ---------------------------------------------------------------------------
 
@@ -189,10 +242,36 @@ class CollectorHandler(BaseHTTPRequestHandler):
     _lock: threading.Lock
     _auth_key: str  # empty string = no auth required
     _dashboard: bool = False  # serve web dashboard UI
+    _allowed_hosts: frozenset[str] = frozenset()  # --allow-host names, lower case
 
     def log_message(self, fmt: str, *args: Any) -> None:
         # Suppress default access log; write to stderr with our prefix
         sys.stderr.write(f"[server] {fmt % args}\n")
+
+    def _bound_to_loopback(self) -> bool:
+        return ipaddress.ip_address(self.server.server_address[0]).is_loopback
+
+    def _host_allowed(self) -> bool:
+        """Return False for a GET that a DNS rebinding page could send.
+
+        Only a server on a loopback bind without a key checks the Host. A key
+        already stops rebinding, and other binds are reached by any name.
+        """
+        if self._auth_key or not self._bound_to_loopback():
+            return True
+        values = self.headers.get_all("Host") or []
+        if not values:
+            return True
+        if len(values) > 1:
+            return False
+        name = _host_header_name(values[0])
+        if not name:
+            return False
+        return (
+            name == "localhost"
+            or name in self._allowed_hosts
+            or _is_ip_literal(name)
+        )
 
     def _check_auth(self) -> bool:
         """Return True if the request is authorised (or auth is disabled)."""
@@ -252,6 +331,9 @@ class CollectorHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:
+        if not self._host_allowed():
+            self._send_json(403, _HOST_REFUSED)
+            return
         if not self._check_auth():
             self._send_json(401, {"error": "Unauthorized"})
             return
@@ -462,6 +544,12 @@ class CollectorHandler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------------
 
     def do_POST(self) -> None:
+        # Browsers send Origin on every POST and the clients we ship never do.
+        # Checked before the key, so a proxy that adds the bearer to browser
+        # requests does not let web pages write.
+        if "Origin" in self.headers:
+            self._send_json(403, _ORIGIN_REFUSED)
+            return
         if not self._check_auth():
             self._send_json(401, {"error": "Unauthorized"})
             return
@@ -559,14 +647,16 @@ def _make_handler(
     lock: threading.Lock,
     auth_key: str = "",
     dashboard: bool = False,
+    allowed_hosts: Iterable[str] = (),
 ) -> type:
-    """Return a CollectorHandler subclass with store, lock, auth key, and dashboard flag injected."""
+    """Return a CollectorHandler subclass with store, lock, auth key, dashboard flag and allowed Host names injected."""
     class Handler(CollectorHandler):
         pass
     Handler.store = store
     Handler._lock = lock
     Handler._auth_key = auth_key
     Handler._dashboard = dashboard
+    Handler._allowed_hosts = frozenset(name.lower() for name in allowed_hosts)
     return Handler
 
 
@@ -580,17 +670,26 @@ def run_server(
     host: str | None = None,
     auth_key: str = "",
     dashboard: bool = False,
+    allowed_hosts: Iterable[str] = (),
 ) -> None:
     """Start the collector server and block until interrupted.
 
     When *auth_key* is non-empty, all requests must include
     ``Authorization: Bearer <auth_key>`` or receive 401.
     When *dashboard* is True, the server also serves a browser-based UI at ``/``.
+    *allowed_hosts* are the extra Host names a loopback server without a key
+    accepts on a GET.
     """
     host = resolve_server_host(host, dashboard=dashboard, auth_key=auth_key)
     store = TraceStore(storage_dir)
     lock = threading.Lock()
-    handler_class = _make_handler(store, lock, auth_key=auth_key, dashboard=dashboard)
+    handler_class = _make_handler(
+        store,
+        lock,
+        auth_key=auth_key,
+        dashboard=dashboard,
+        allowed_hosts=allowed_hosts,
+    )
 
     server = HTTPServer((host, port), handler_class)
     auth_note = " (auth enabled)" if auth_key else " (no auth)"
@@ -673,5 +772,6 @@ def cmd_server(args: argparse.Namespace) -> int:
         host=host,
         auth_key=auth_key,
         dashboard=dashboard,
+        allowed_hosts=getattr(args, "allow_host", None) or (),
     )
     return 0
