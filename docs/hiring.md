@@ -58,7 +58,8 @@ Comparison reads only direct lowercase `.zip` children and reports anonymous
 
 Rubrics use a deliberately small YAML subset parsed with the standard library.
 Keys, indentation, scalar types, duplicates, Unicode controls, and bounds are
-strictly checked. Weights must be positive whole numbers. Every criterion is
+strictly checked. Lines may end with LF or CRLF; a lone carriage return is
+rejected. Weights must be positive whole numbers. Every criterion is
 binary: it receives its full weight when met and zero otherwise. The displayed
 percentage is `100 × awarded weight / total weight`; comparison ranking uses
 the exact fraction, then the bundle digest for stable ordering. Displayed

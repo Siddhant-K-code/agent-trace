@@ -1818,7 +1818,8 @@ manifest. It cannot be combined with `--stdout`, `--open`, `--postmortem`, or
 `--dry-run`. It also cannot be combined with `--include-content`. Assignment
 bundles keep their separate privacy format and are not evidence packets. The
 output name must have a lowercase `.zip` suffix and is atomically written with
-owner-only permissions. The trace store and the output path may pass through
+owner-only permissions. On Windows the file instead gets the access rules of
+its folder. The trace store and the output path may pass through
 root-owned operating system links such as `/tmp` on macOS. Other symlinks in
 their parent directories are refused; see
 [Symlinked parent directories](#symlinked-parent-directories). See the
@@ -2198,6 +2199,10 @@ latest session under `--trace-dir` or `AGENT_TRACE_DIR`. It also covers the
 directories that hold the `--replay-baseline` file. On Windows, `validate`
 also refuses directory junctions on these paths. When this rule refuses a
 path, `validate` reports the session as `invalid` and exits 1.
+
+On Windows, `share --assignment` and `score` also refuse directory junctions in
+the trace store, session, output, submission, comparison directory, and rubric
+paths.
 
 These are still refused when they are symbolic links, even root-owned ones:
 the output file, the rubric, the submission bundle, the replay baseline file,

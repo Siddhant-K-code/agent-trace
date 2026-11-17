@@ -36,6 +36,8 @@ from . import __version__
 from .eval.config import _parse_yaml_value
 from .fileutil import (
     MAX_TRUSTED_SYMLINKS,
+    _replace as _replace_with_retry,
+    fsync_directory,
     has_untrusted_symlink,
     lock_descriptor,
     trusted_symlink_target,
@@ -381,6 +383,105 @@ def _validate_no_symlink_ancestors(path: Path) -> None:
             raise AssignmentError("path ancestor is not a directory")
 
 
+# POSIX reads and writes through open directory fds. Windows can neither open a
+# directory nor pass dir_fd, so there the by-path helpers below are used.
+_USE_DIR_FD = os.open in os.supports_dir_fd
+_BINARY = getattr(os, "O_BINARY", 0)
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
+
+def _is_link_or_reparse_point(info: os.stat_result) -> bool:
+    # Windows lstat does not follow symlinks or junctions and marks both as
+    # reparse points.
+    attributes = getattr(info, "st_file_attributes", 0)
+    return stat.S_ISLNK(info.st_mode) or bool(
+        attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+    )
+
+
+def _check_directory_path(path: Path, *, create: bool = False) -> None:
+    """Refuse *path* unless every component is a real directory.
+
+    The by-path counterpart of ``_open_directory_chain``. It follows no
+    symlink or junction, since Windows trusts no symlink (see fileutil).
+    With *create*, missing components are made with mode 0700.
+    """
+    path = path.absolute()
+    if ".." in path.parts:
+        raise AssignmentError("directory path contains an unsafe component")
+    for candidate in (*reversed(path.parents), path):
+        try:
+            info = os.lstat(candidate)
+        except FileNotFoundError:
+            if not create:
+                raise AssignmentError("directory does not exist") from None
+            try:
+                os.mkdir(candidate, 0o700)
+                info = os.lstat(candidate)
+            except OSError as exc:
+                raise AssignmentError("directory could not be created safely") from exc
+        except OSError as exc:
+            raise AssignmentError("directory has an unsafe component") from exc
+        if _is_link_or_reparse_point(info) or not stat.S_ISDIR(info.st_mode):
+            raise AssignmentError("directory has an unsafe component")
+
+
+def _lstat_or_none(path: Path) -> os.stat_result | None:
+    try:
+        return os.lstat(path)
+    except FileNotFoundError:
+        return None
+
+
+def _read_file_by_path(
+    path: Path,
+    *,
+    max_bytes: int,
+    label: str,
+    min_size: int,
+) -> bytes:
+    """Read one regular file by path, refusing a link as the last component.
+
+    The by-path counterpart of ``_read_child_file``. The file is opened only
+    after ``lstat`` shows a regular file, and the open file must be that file.
+    """
+    try:
+        expected = os.lstat(path)
+    except OSError as exc:
+        raise AssignmentError(f"{label} could not be opened safely") from exc
+    if _is_link_or_reparse_point(expected):
+        raise AssignmentError(f"{label} could not be opened safely")
+    if not stat.S_ISREG(expected.st_mode):
+        raise AssignmentError(f"{label} size or type is invalid")
+    # Without O_BINARY, Windows turns CRLF into LF and stops at a Ctrl-Z byte.
+    try:
+        descriptor = os.open(path, os.O_RDONLY | _BINARY | _NOFOLLOW)
+    except OSError as exc:
+        raise AssignmentError(f"{label} could not be opened safely") from exc
+    try:
+        before = os.fstat(descriptor)
+        if (before.st_dev, before.st_ino) != (expected.st_dev, expected.st_ino):
+            raise AssignmentError(f"{label} changed while it was read")
+        return _read_open_regular(
+            descriptor, before, max_bytes=max_bytes, label=label, min_size=min_size
+        )
+    finally:
+        os.close(descriptor)
+
+
+def _read_regular_by_path(path_value: str | Path, *, max_bytes: int, label: str) -> bytes:
+    """The by-path counterpart of ``_read_regular_nofollow``."""
+    path = Path(path_value)
+    if path.name in {"", ".", ".."}:
+        raise AssignmentError(f"{label} path is invalid")
+    path = path.absolute()
+    _check_directory_path(path.parent)
+    raw = _read_file_by_path(path, max_bytes=max_bytes, label=label, min_size=1)
+    # Check again: a directory swapped for a junction during the read shows.
+    _check_directory_path(path.parent)
+    return raw
+
+
 def _open_directory_chain(path_value: str | Path, *, create: bool = False) -> int:
     """Open every absolute path component relative to its anchored parent fd.
 
@@ -473,10 +574,56 @@ def _locked_store_directory(store: TraceStore):
         os.close(base_fd)
 
 
+@contextlib.contextmanager
+def _locked_store_path(store: TraceStore):
+    """The by-path counterpart of ``_locked_store_directory``.
+
+    Takes the same ``.store.lock`` lock as the trace store writers, so a
+    snapshot never sees a half-appended event.
+    """
+    _validate_no_symlink_ancestors(store.base_dir)
+    base = store.base_dir.absolute()
+    _check_directory_path(base)
+    lock_path = base / ".store.lock"
+    try:
+        expected = _lstat_or_none(lock_path)
+    except OSError as exc:
+        raise AssignmentError("trace store lock could not be opened safely") from exc
+    if expected is not None and _is_link_or_reparse_point(expected):
+        raise AssignmentError("trace store lock could not be opened safely")
+    try:
+        lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | _BINARY | _NOFOLLOW, 0o600)
+    except OSError as exc:
+        raise AssignmentError("trace store lock could not be opened safely") from exc
+    try:
+        opened = os.fstat(lock_fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise AssignmentError("trace store lock is not a regular file")
+        # The open follows a link made after the lstat, so check the name
+        # still holds the file that was opened.
+        try:
+            current = os.lstat(lock_path)
+        except OSError as exc:
+            raise AssignmentError("trace store lock could not be opened safely") from exc
+        if _is_link_or_reparse_point(current) or (current.st_dev, current.st_ino) != (
+            opened.st_dev, opened.st_ino
+        ):
+            raise AssignmentError("trace store lock could not be opened safely")
+        lock_descriptor(lock_fd, description=".store.lock")
+        try:
+            yield base
+        finally:
+            unlock_descriptor(lock_fd)
+    finally:
+        os.close(lock_fd)
+
+
 def _read_regular_nofollow(path_value: str | Path, *, max_bytes: int, label: str) -> bytes:
     path = Path(path_value)
     if path.name in {"", ".", ".."}:
         raise AssignmentError(f"{label} path is invalid")
+    if not _USE_DIR_FD:
+        return _read_regular_by_path(path, max_bytes=max_bytes, label=label)
     parent_fd = _open_directory_chain(path.parent)
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
@@ -553,11 +700,7 @@ def _read_child_file(
         os.close(descriptor)
 
 
-def _snapshot_session(store: TraceStore, session_id: str) -> tuple[SessionMeta, list[TraceEvent]]:
-    """Read one bounded source snapshot under the store lock without following links."""
-    session_id = validate_stored_id(session_id, "stored session ID")
-    if store.base_dir.is_symlink():
-        raise AssignmentError("refusing a symlinked trace store")
+def _read_session_files(store: TraceStore, session_id: str) -> tuple[bytes, bytes]:
     directory_flags = os.O_RDONLY
     if hasattr(os, "O_DIRECTORY"):
         directory_flags |= os.O_DIRECTORY
@@ -584,6 +727,45 @@ def _snapshot_session(store: TraceStore, session_id: str) -> tuple[SessionMeta, 
             )
         finally:
             os.close(session_fd)
+    return meta_raw, events_raw
+
+
+def _read_session_files_by_path(store: TraceStore, session_id: str) -> tuple[bytes, bytes]:
+    with _locked_store_path(store) as base:
+        session_dir = base / session_id
+        try:
+            _check_directory_path(session_dir)
+        except AssignmentError as exc:
+            raise AssignmentError("session directory could not be opened safely") from exc
+        meta_raw = _read_file_by_path(
+            session_dir / "meta.json",
+            max_bytes=MAX_SOURCE_META_BYTES,
+            label="session metadata",
+            min_size=0,
+        )
+        events_raw = _read_file_by_path(
+            session_dir / "events.ndjson",
+            max_bytes=MAX_SOURCE_TRACE_BYTES,
+            label="session event stream",
+            min_size=0,
+        )
+        # Check again: a directory swapped for a junction during the reads shows.
+        try:
+            _check_directory_path(session_dir)
+        except AssignmentError as exc:
+            raise AssignmentError("session directory changed while it was read") from exc
+    return meta_raw, events_raw
+
+
+def _snapshot_session(store: TraceStore, session_id: str) -> tuple[SessionMeta, list[TraceEvent]]:
+    """Read one bounded source snapshot under the store lock without following links."""
+    session_id = validate_stored_id(session_id, "stored session ID")
+    if store.base_dir.is_symlink():
+        raise AssignmentError("refusing a symlinked trace store")
+    if _USE_DIR_FD:
+        meta_raw, events_raw = _read_session_files(store, session_id)
+    else:
+        meta_raw, events_raw = _read_session_files_by_path(store, session_id)
 
     meta_value = _strict_json_bytes(
         meta_raw,
@@ -634,6 +816,9 @@ def _atomic_write_private(path_value: str | Path, data: bytes) -> None:
     path = Path(path_value)
     if path.name in {"", ".", ".."}:
         raise AssignmentError("--output must name a file")
+    if not _USE_DIR_FD:
+        _atomic_write_private_by_path(path, data)
+        return
     parent_fd = _open_directory_chain(path.parent, create=True)
 
     temporary_name = f".{path.name}.{secrets.token_hex(12)}.tmp"
@@ -688,6 +873,68 @@ def _atomic_write_private(path_value: str | Path, data: bytes) -> None:
             except OSError:
                 pass
         os.close(parent_fd)
+
+
+def _is_regular_file(info: os.stat_result | None) -> bool:
+    return info is not None and not _is_link_or_reparse_point(info) and stat.S_ISREG(info.st_mode)
+
+
+def _atomic_write_private_by_path(path: Path, data: bytes) -> None:
+    """The by-path counterpart of ``_atomic_write_private``.
+
+    On Windows the 0600 mode only clears the read-only flag: the file gets
+    the access rules its directory passes on.
+    """
+    parent = path.parent.absolute()
+    _check_directory_path(parent, create=True)
+    target = parent / path.name
+    temporary = parent / f".{path.name}.{secrets.token_hex(12)}.tmp"
+    temporary_fd = -1
+    created = False
+    try:
+        existing = _lstat_or_none(target)
+        if existing is not None and not _is_regular_file(existing):
+            raise AssignmentError("output must be a non-symlinked regular file")
+
+        # O_EXCL never opens an existing name, link or not.
+        create_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _BINARY | _NOFOLLOW
+        temporary_fd = os.open(temporary, create_flags, 0o600)
+        created = True
+        view = memoryview(data)
+        while view:
+            written = os.write(temporary_fd, view)
+            if written <= 0:
+                raise OSError("short write")
+            view = view[written:]
+        os.fsync(temporary_fd)
+        written_file = os.fstat(temporary_fd)
+        os.close(temporary_fd)
+        temporary_fd = -1
+
+        current = _lstat_or_none(target)
+        if current is not None and not _is_regular_file(current):
+            raise AssignmentError("output target changed during the write")
+        # The parent must still be the checked directory holding this file.
+        try:
+            _check_directory_path(parent)
+        except AssignmentError as exc:
+            raise AssignmentError("output target changed during the write") from exc
+        staged = _lstat_or_none(temporary)
+        if not _is_regular_file(staged) or (staged.st_dev, staged.st_ino) != (
+            written_file.st_dev, written_file.st_ino
+        ):
+            raise AssignmentError("output target changed during the write")
+        _replace_with_retry(str(temporary), target)
+        created = False
+        fsync_directory(parent)
+    finally:
+        if temporary_fd >= 0:
+            os.close(temporary_fd)
+        if created:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
 
 
 def _tool_category(value: Any) -> str:
@@ -2021,6 +2268,8 @@ def _parse_rubric_yaml(raw: bytes) -> dict[str, Any]:
         text = raw.decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
         raise AssignmentError("rubric must be UTF-8") from exc
+    # Windows editors and checkouts end lines with CRLF. A lone CR is refused.
+    text = text.replace("\r\n", "\n")
     if "\r" in text or "\t" in text or "\x00" in text:
         raise AssignmentError("rubric contains unsupported whitespace or control characters")
     lines = text.split("\n")
@@ -2384,24 +2633,42 @@ def format_score_text(report: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _load_submission_inputs(path_value: str | Path, *, compare: bool) -> list[LoadedAssignment]:
-    path = Path(path_value)
-    if compare:
-        directory_fd = _open_directory_chain(path)
+def _submission_zip_names(names: Iterable[str]) -> list[str]:
+    zip_names = sorted(
+        (name for name in names if name.endswith(".zip")),
+        key=lambda name: name.encode("utf-8", errors="strict"),
+    )
+    if not zip_names or len(zip_names) > MAX_SUBMISSIONS:
+        raise AssignmentError("submission directory ZIP count is invalid")
+    return zip_names
+
+
+def _load_submission_archives(archives: Iterable[bytes]) -> list[LoadedAssignment]:
+    bundles: list[LoadedAssignment] = []
+    total_archive_bytes = 0
+    total_events = 0
+    for raw in archives:
+        total_archive_bytes += len(raw)
+        if total_archive_bytes > MAX_COMPARISON_ARCHIVE_BYTES:
+            raise AssignmentError("comparison archives exceed the aggregate size limit")
+        bundle = load_assignment_bundle(raw)
+        total_events += len(bundle.events)
+        if total_events > MAX_COMPARISON_EVENTS:
+            raise AssignmentError("comparison traces exceed the aggregate event limit")
+        bundles.append(bundle)
+    return bundles
+
+
+def _load_submission_directory(path: Path) -> list[LoadedAssignment]:
+    directory_fd = _open_directory_chain(path)
+    try:
         try:
-            try:
-                names = os.listdir(directory_fd)
-            except OSError as exc:
-                raise AssignmentError("submission directory could not be read safely") from exc
-            zip_names = sorted(
-                (name for name in names if name.endswith(".zip")),
-                key=lambda name: name.encode("utf-8", errors="strict"),
-            )
-            if not zip_names or len(zip_names) > MAX_SUBMISSIONS:
-                raise AssignmentError("submission directory ZIP count is invalid")
-            bundles: list[LoadedAssignment] = []
-            total_archive_bytes = 0
-            total_events = 0
+            names = os.listdir(directory_fd)
+        except OSError as exc:
+            raise AssignmentError("submission directory could not be read safely") from exc
+        zip_names = _submission_zip_names(names)
+
+        def archives() -> Iterable[bytes]:
             for name in zip_names:
                 try:
                     metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
@@ -2409,23 +2676,54 @@ def _load_submission_inputs(path_value: str | Path, *, compare: bool) -> list[Lo
                     raise AssignmentError("submission directory contains an unreadable ZIP entry") from exc
                 if not stat.S_ISREG(metadata.st_mode):
                     raise AssignmentError("submission directory contains an unsafe ZIP entry")
-                raw = _read_child_file(
+                yield _read_child_file(
                     directory_fd,
                     name,
                     max_bytes=MAX_ARCHIVE_BYTES,
                     label="submission archive",
                 )
-                total_archive_bytes += len(raw)
-                if total_archive_bytes > MAX_COMPARISON_ARCHIVE_BYTES:
-                    raise AssignmentError("comparison archives exceed the aggregate size limit")
-                bundle = load_assignment_bundle(raw)
-                total_events += len(bundle.events)
-                if total_events > MAX_COMPARISON_EVENTS:
-                    raise AssignmentError("comparison traces exceed the aggregate event limit")
-                bundles.append(bundle)
-            return bundles
-        finally:
-            os.close(directory_fd)
+
+        return _load_submission_archives(archives())
+    finally:
+        os.close(directory_fd)
+
+
+def _load_submission_directory_by_path(path: Path) -> list[LoadedAssignment]:
+    path = path.absolute()
+    _check_directory_path(path)
+    try:
+        names = os.listdir(path)
+    except OSError as exc:
+        raise AssignmentError("submission directory could not be read safely") from exc
+    zip_names = _submission_zip_names(names)
+
+    def archives() -> Iterable[bytes]:
+        for name in zip_names:
+            try:
+                metadata = os.lstat(path / name)
+            except OSError as exc:
+                raise AssignmentError("submission directory contains an unreadable ZIP entry") from exc
+            if not _is_regular_file(metadata):
+                raise AssignmentError("submission directory contains an unsafe ZIP entry")
+            yield _read_file_by_path(
+                path / name,
+                max_bytes=MAX_ARCHIVE_BYTES,
+                label="submission archive",
+                min_size=0,
+            )
+
+    bundles = _load_submission_archives(archives())
+    # Check again: a directory swapped for a junction during the reads shows.
+    _check_directory_path(path)
+    return bundles
+
+
+def _load_submission_inputs(path_value: str | Path, *, compare: bool) -> list[LoadedAssignment]:
+    path = Path(path_value)
+    if compare:
+        if _USE_DIR_FD:
+            return _load_submission_directory(path)
+        return _load_submission_directory_by_path(path)
     if path.suffix != ".zip":
         raise AssignmentError("submission archive must use a .zip suffix")
     raw = _read_regular_nofollow(path, max_bytes=MAX_ARCHIVE_BYTES, label="submission archive")

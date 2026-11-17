@@ -7,7 +7,6 @@ import json
 import math
 import os
 import re
-import stat
 import sys
 from dataclasses import asdict, dataclass, field
 from importlib import resources
@@ -21,9 +20,11 @@ from .assignment import (
     MAX_SOURCE_EVENT_BYTES,
     MAX_SOURCE_META_BYTES,
     MAX_SOURCE_TRACE_BYTES,
+    _check_directory_path,
     _open_directory_chain,
     _read_child_file,
-    _read_open_regular,
+    _read_file_by_path,
+    _read_regular_by_path,
     _read_regular_nofollow,
     _strict_json_bytes,
 )
@@ -249,72 +250,6 @@ def _schema_errors(
     return errors
 
 
-def _is_link_or_reparse_point(info: os.stat_result) -> bool:
-    # Windows lstat does not follow symlinks or junctions and marks both as
-    # reparse points.
-    attributes = getattr(info, "st_file_attributes", 0)
-    return stat.S_ISLNK(info.st_mode) or bool(
-        attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
-    )
-
-
-def _check_directory_path(path: Path) -> None:
-    """Refuse *path* unless every component is a real directory.
-
-    The by-path counterpart of ``_open_directory_chain``. It follows no
-    symlink or junction, since Windows trusts no symlink (see fileutil).
-    """
-    path = path.absolute()
-    if ".." in path.parts:
-        raise AssignmentError("directory path contains an unsafe component")
-    for candidate in (*reversed(path.parents), path):
-        try:
-            info = os.lstat(candidate)
-        except FileNotFoundError:
-            raise AssignmentError("directory does not exist") from None
-        except OSError as exc:
-            raise AssignmentError("directory has an unsafe component") from exc
-        if _is_link_or_reparse_point(info) or not stat.S_ISDIR(info.st_mode):
-            raise AssignmentError("directory has an unsafe component")
-
-
-def _read_file_by_path(
-    path: Path,
-    *,
-    max_bytes: int,
-    label: str,
-    min_size: int,
-) -> bytes:
-    """Read one regular file by path, refusing a link as the last component.
-
-    The by-path counterpart of ``_read_child_file``. The file is opened only
-    after ``lstat`` shows a regular file, and the open file must be that file.
-    """
-    try:
-        expected = os.lstat(path)
-    except OSError as exc:
-        raise AssignmentError(f"{label} could not be opened safely") from exc
-    if _is_link_or_reparse_point(expected):
-        raise AssignmentError(f"{label} could not be opened safely")
-    if not stat.S_ISREG(expected.st_mode):
-        raise AssignmentError(f"{label} size or type is invalid")
-    # Without O_BINARY, Windows turns CRLF into LF and stops at a Ctrl-Z byte.
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(path, flags)
-    except OSError as exc:
-        raise AssignmentError(f"{label} could not be opened safely") from exc
-    try:
-        before = os.fstat(descriptor)
-        if (before.st_dev, before.st_ino) != (expected.st_dev, expected.st_ino):
-            raise AssignmentError(f"{label} changed while it was read")
-        return _read_open_regular(
-            descriptor, before, max_bytes=max_bytes, label=label, min_size=min_size
-        )
-    finally:
-        os.close(descriptor)
-
-
 def _read_trace_files_by_path(root: Path) -> tuple[bytes, bytes]:
     _check_directory_path(root)
     meta_raw = _read_file_by_path(
@@ -341,18 +276,11 @@ def _read_replay_baseline(path: Path) -> bytes:
             max_bytes=MAX_JSON_BYTES,
             label="replay baseline",
         )
-    path = path.absolute()
-    if path.name in {"", ".", ".."}:
-        raise AssignmentError("replay baseline path is invalid")
-    _check_directory_path(path.parent)
-    raw = _read_file_by_path(
+    return _read_regular_by_path(
         path,
         max_bytes=MAX_JSON_BYTES,
         label="replay baseline",
-        min_size=1,
     )
-    _check_directory_path(path.parent)
-    return raw
 
 
 def _read_trace_files(root: Path) -> tuple[bytes, bytes]:
