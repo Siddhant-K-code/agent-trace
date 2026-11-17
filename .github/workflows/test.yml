@@ -70,6 +70,7 @@ jobs:
           tests.test_config_watch
           tests.test_trace_validation
           tests.test_compliance_report.TestReadRegularFile
+          tests.test_compliance_report.TestJunctionsAreRefused
           tests.test_assignment
           tests.test_store.TestTraceStore
           tests.test_store.TestStoreWriteLock

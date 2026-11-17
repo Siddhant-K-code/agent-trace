@@ -20,6 +20,8 @@ from agent_trace.cli import build_parser
 from agent_trace.compliance_report import (
     ComplianceReportError,
     _atomic_write_private,
+    _discover_snapshots,
+    _load_approvals,
     _pdf_safe_text,
     _read_regular_file,
     build_compliance_report,
@@ -356,6 +358,134 @@ class TestReadRegularFile(unittest.TestCase):
         with patch("os.open", side_effect=AssertionError("opened")):
             with self.assertRaisesRegex(ComplianceReportError, "must be a regular file"):
                 self._read(self.root)
+
+
+class TestJunctionsAreRefused(unittest.TestCase):
+    """Run on Windows CI too: a junction is refused where a symlink is."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(os.path.realpath(temp.name))
+        self.store = _store(str(self.root / "store"))
+
+    @staticmethod
+    def _mark_reparse_point(*marked: Path):
+        # Windows lstat reports a junction as a directory with this attribute.
+        real_lstat = os.lstat
+        names = {os.path.normcase(str(path)) for path in marked}
+
+        def fake_lstat(path, *args, **kwargs):
+            info = real_lstat(path, *args, **kwargs)
+            if os.path.normcase(os.fspath(path)) not in names:
+                return info
+            return SimpleNamespace(
+                st_mode=info.st_mode, st_dev=info.st_dev, st_ino=info.st_ino,
+                st_size=info.st_size,
+                st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
+            )
+
+        return patch("os.lstat", fake_lstat)
+
+    def _junction(self, link: Path, target: Path) -> None:
+        if os.name != "nt":
+            self.skipTest("directory junctions are Windows only")
+        import _winapi
+
+        _winapi.CreateJunction(str(target), str(link))
+        # Remove the junction before the tree, so cleanup never follows it.
+        self.addCleanup(os.rmdir, link)
+
+    def test_plain_store_and_output_are_accepted(self):
+        snapshots = _discover_snapshots([self.store])
+        self.assertEqual([item[2].session_id for item in snapshots], ["session"])
+        (self.root / "store" / ".approvals").mkdir()
+        self.assertEqual(_load_approvals(self.store)[2], 0)
+        output = self.root / "new" / "report.json"
+        _atomic_write_private(output, b"report")
+        self.assertEqual(output.read_bytes(), b"report")
+
+    def test_reparse_point_store_is_refused(self):
+        with self._mark_reparse_point(self.root / "store"):
+            with self.assertRaisesRegex(
+                ComplianceReportError, "trace store cannot be symlinked"
+            ):
+                _discover_snapshots([self.store])
+
+    def test_reparse_point_above_store_is_followed_like_a_symlink(self):
+        with self._mark_reparse_point(self.root):
+            self.assertEqual(len(_discover_snapshots([self.store])), 1)
+
+    def test_reparse_point_session_entry_is_refused(self):
+        with self._mark_reparse_point(self.root / "store" / "session"):
+            with self.assertRaisesRegex(
+                ComplianceReportError, "trace store contains a symlinked entry"
+            ):
+                _discover_snapshots([self.store])
+
+    def test_reparse_point_approval_directory_is_refused(self):
+        approvals = self.root / "store" / ".approvals"
+        approvals.mkdir()
+        with self._mark_reparse_point(approvals):
+            with self.assertRaisesRegex(
+                ComplianceReportError, "approval storage is not a safe directory"
+            ):
+                _load_approvals(self.store)
+
+    def test_reparse_point_approval_record_is_refused(self):
+        approvals = self.root / "store" / ".approvals"
+        approvals.mkdir()
+        record = approvals / "request.json"
+        record.write_bytes(b"{}")
+        with self._mark_reparse_point(record):
+            with self.assertRaisesRegex(
+                ComplianceReportError, "approval storage contains a symlink"
+            ):
+                _load_approvals(self.store)
+
+    def test_reparse_point_output_directory_is_refused(self):
+        directory = self.root / "out"
+        directory.mkdir()
+        with self._mark_reparse_point(directory):
+            with self.assertRaisesRegex(
+                ComplianceReportError, "refusing a symlinked output path"
+            ):
+                _atomic_write_private(directory / "new" / "report.json", b"unsafe")
+        self.assertFalse((directory / "new").exists())
+
+    def test_reparse_point_output_file_is_refused(self):
+        output = self.root / "report.json"
+        output.write_bytes(b"safe")
+        with self._mark_reparse_point(output):
+            with self.assertRaisesRegex(
+                ComplianceReportError, "output must be a non-symlinked regular file"
+            ):
+                _atomic_write_private(output, b"unsafe")
+        self.assertEqual(output.read_bytes(), b"safe")
+
+    def test_real_junction_store_is_refused(self):
+        link = self.root / "linked-store"
+        self._junction(link, self.root / "store")
+        store = TraceStore(link, use_workspace_env=False, read_only=True)
+        with self.assertRaisesRegex(ComplianceReportError, "trace store cannot be symlinked"):
+            _discover_snapshots([store])
+
+    def test_real_junction_session_is_refused(self):
+        other = TraceStore(self.root / "elsewhere", use_workspace_env=False)
+        other.create_session(SessionMeta(session_id="other", started_at=1))
+        self._junction(self.root / "store" / "other", self.root / "elsewhere" / "other")
+        with self.assertRaisesRegex(
+            ComplianceReportError, "trace store contains a symlinked entry"
+        ):
+            _discover_snapshots([self.store])
+
+    def test_real_junction_output_directory_is_refused(self):
+        real = self.root / "real"
+        real.mkdir()
+        self._junction(self.root / "link", real)
+        with self.assertRaisesRegex(ComplianceReportError, "refusing a symlinked output path"):
+            _atomic_write_private(self.root / "link" / "report.json", b"unsafe")
+        self.assertFalse((real / "report.json").exists())
 
 
 class TestAuthorizationPrivacyAndDetectors(unittest.TestCase):
