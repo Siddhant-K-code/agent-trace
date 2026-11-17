@@ -22,6 +22,7 @@ from typing import TextIO
 
 from .event_data import require_object_event_data, str_field
 from .http_post import no_redirect_opener
+from .inert import inert
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -396,6 +397,14 @@ def run_optimize(
 # ---------------------------------------------------------------------------
 
 def print_proposal(proposal: OptimizeProposal, out: TextIO = sys.stdout) -> None:
+    """Write the proposal as terminal text to *out*.
+
+    The cluster name, the description and the proposed addition can come
+    from the LLM's reply, which trace text can steer. So each goes through
+    inert() and an escape code shows as text. In the description, each run
+    of whitespace becomes one space first. The proposed addition keeps one
+    line per line of Markdown, and each line keeps its indentation.
+    """
     w = out.write
     n_sessions = sum(len(p.session_ids) for p in proposal.patterns)
     w(f"\nagent-strace optimize — {len(proposal.patterns)} cluster(s) from {n_sessions} session(s)\n")
@@ -407,13 +416,14 @@ def print_proposal(proposal: OptimizeProposal, out: TextIO = sys.stdout) -> None
         return
 
     for i, p in enumerate(proposal.patterns, 1):
-        w(f"\nCluster {i}: {p.name} ({len(p.session_ids)} session(s))\n")
-        w(f"  {p.description}\n")
+        w(f"\nCluster {i}: {inert(p.name)} ({len(p.session_ids)} session(s))\n")
+        w(f"  {inert(' '.join(p.description.split()))}\n")
+        # Only the heuristics add examples, and they quote tool names with !r.
         for ex in p.example_events[:2]:
             w(f"  Example: {ex}\n")
         w("\n  Proposed addition:\n")
         for line in p.proposed_instruction.splitlines():
-            w(f"  + {line}\n")
+            w(f"  + {inert(line)}\n")
 
     w("\n─" * 60 + "\n")
     w(f"Apply? Run with --apply to write changes to {proposal.target_file}\n\n")

@@ -24,6 +24,11 @@ try:
 except ImportError:
     from tests._redirect_servers import ALL_REDIRECTS, RedirectServers
 
+try:
+    import _escapes
+except ImportError:
+    from tests import _escapes
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -329,6 +334,70 @@ class TestCallLlmRefusesRedirects(unittest.TestCase):
                 self.assertIsNone(_call_llm("prompt", servers.url, "model", "llm-key"))
                 self.assertEqual(servers.a.methods(), ["POST"])
                 self.assertEqual(servers.b.received(), [])
+
+
+def _proposal(name="plain", description="plain", addition="plain"):
+    pattern = FailurePattern(name=name, description=description, session_ids=["s1"],
+                             example_events=[], proposed_instruction=addition)
+    return OptimizeProposal(target_file="AGENTS.md", patterns=[pattern], existing_content="")
+
+
+def _render(proposal):
+    buf = io.StringIO()
+    print_proposal(proposal, out=buf)
+    return buf.getvalue()
+
+
+def _added_lines(output):
+    return [line for line in output.split("\n") if line.startswith("  + ")]
+
+
+# (label, kind, build): build(value) returns a proposal with value in the
+# place the label names. The kinds are in tests/_escapes.py. The proposed
+# addition keeps its lines, so it has its own tests.
+PRINT_PROPOSAL_CASES = [
+    ("cluster name", "text", lambda v: _proposal(name=v)),
+    ("description", "free", lambda v: _proposal(description=v)),
+]
+
+
+class TestPrintProposalShowsEscapesAsText(unittest.TestCase):
+    """optimize sends tool names and error text from traces to the LLM, so a
+    trace can steer its reply. The preview shows escape codes in the cluster
+    name, the description and the proposed addition as text."""
+
+    def test_each_value_shows_escapes_as_text(self):
+        _escapes.check_each_value(self, PRINT_PROPOSAL_CASES, _render)
+
+    def test_plain_text_prints_unchanged(self):
+        _escapes.check_plain_text_unchanged(self, PRINT_PROPOSAL_CASES, _render)
+        self.assertIn("  + " + _escapes.PLAIN + "\n", _render(_proposal(addition=_escapes.PLAIN)))
+
+    def test_whitespace_in_free_text_shows_as_one_space(self):
+        _escapes.check_whitespace_in_free_text(self, PRINT_PROPOSAL_CASES, _render)
+
+    def test_sgr_code_shows_as_text(self):
+        sgr = "a\x1b[8mhidden"
+        output = _render(_proposal(name=sgr, description=sgr, addition=sgr))
+        self.assertEqual(output.count(r"a\x1b[8mhidden"), 3)
+        self.assertNotIn("\x1b", output)
+
+    def test_proposed_addition_line_keeps_its_indentation(self):
+        output = _render(_proposal(addition="  A\x1b]52;c;aWQK\x07B\x1b[2K\x9bC\u202eD\tE"))
+        self.assertEqual(_added_lines(output), [r"  +   A\x1b]52;c;aWQK\x07B\x1b[2K\x9bC\u202eD\tE"])
+
+    def test_proposed_addition_keeps_its_lines(self):
+        output = _render(_proposal(addition=_escapes.PAYLOAD))
+        self.assertEqual(_added_lines(output), [
+            r"  + A\x1b]52;c;aWQK\x07B\x1b[2K",
+            "  + C",
+            r"  + D\x9bE\u202eF",
+        ])
+        for line in output.split("\n"):
+            self.assertTrue(line.isprintable(), ascii(line))
+
+    def test_apply_keeps_the_raw_text(self):
+        self.assertEqual(_proposal(addition=_escapes.PAYLOAD).apply(), _escapes.PAYLOAD + "\n")
 
 
 if __name__ == "__main__":

@@ -12,15 +12,23 @@ from unittest.mock import patch
 
 from agent_trace.cli import build_parser
 from agent_trace.freeze import (
+    RegressionChange,
     RegressionFixture,
+    RegressionReport,
     cmd_freeze,
     cmd_regression,
     compare_fixtures,
     extract_steps,
     freeze_session,
+    print_regression_report,
 )
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
+
+try:
+    import _escapes
+except ImportError:
+    from tests import _escapes
 
 
 def _make_store() -> TraceStore:
@@ -212,6 +220,72 @@ class TestFreezeCommands(unittest.TestCase):
         regression_args = parser.parse_args(["regression", "fixture.json", "abc", "--threshold", "0.25"])
         self.assertEqual(regression_args.command, "regression")
         self.assertEqual(regression_args.threshold, 0.25)
+
+
+def _report(fixture="plain", reordered="plain", changed_input="plain", removed="plain", added="plain"):
+    """Return a report with one change of each kind, each named by its tool."""
+    return RegressionReport(
+        fixture=fixture, actual="actual", expected_steps=3, actual_steps=3,
+        edit_distance=3, divergence_score=1.0, threshold=0.0, exceeded=True,
+        changes=[
+            RegressionChange(kind="reordered", expected_seq=1, actual_seq=2, tool=reordered),
+            RegressionChange(kind="changed_input", expected_seq=2, actual_seq=1, tool=changed_input),
+            RegressionChange(kind="removed", expected_seq=3, tool=removed),
+            RegressionChange(kind="added", actual_seq=3, tool=added),
+        ],
+    )
+
+
+def _render(report):
+    buf = io.StringIO()
+    print_regression_report(report, out=buf)
+    return buf.getvalue()
+
+
+# (label, kind, build): build(value) returns a report with value in the place
+# the label names. The kinds are in tests/_escapes.py.
+REGRESSION_REPORT_CASES = [
+    ("Fixture", "text", lambda v: _report(fixture=v)),
+    ("reordered", "text", lambda v: _report(reordered=v)),
+    ("changed input", "text", lambda v: _report(changed_input=v)),
+    ("removed", "text", lambda v: _report(removed=v)),
+    ("added", "text", lambda v: _report(added=v)),
+]
+
+
+class TestRegressionReportShowsEscapesAsText(unittest.TestCase):
+    """A fixture file sets the session and each tool name, and an MCP server
+    names its own tools. regression shows escape codes in them as text."""
+
+    def test_each_value_shows_escapes_as_text(self):
+        _escapes.check_each_value(self, REGRESSION_REPORT_CASES, _render)
+
+    def test_plain_text_prints_unchanged(self):
+        _escapes.check_plain_text_unchanged(self, REGRESSION_REPORT_CASES, _render)
+
+    def test_sgr_code_shows_as_text(self):
+        sgr = "a\x1b[8mhidden"
+        output = _render(_report(fixture=sgr, reordered=sgr, changed_input=sgr, removed=sgr, added=sgr))
+        self.assertEqual(output.count(r"a\x1b[8mhidden"), 5)
+        self.assertNotIn("\x1b", output)
+
+    def test_json_output_keeps_the_raw_text(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        payload = _escapes.PAYLOAD
+        _add_session(TraceStore(tmp.name), "esc-actual", [("B" + payload, {"q": "x"})])
+        fixture = Path(tmp.name) / "fixture.json"
+        fixture.write_text(json.dumps({
+            "session": payload,
+            "steps": [{"seq": 1, "tool": payload, "input_hash": "abc"}],
+        }))
+        args = argparse.Namespace(trace_dir=tmp.name, fixture_file=str(fixture),
+                                  session_id="esc-actual", threshold=0.0, format="json")
+        with patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(cmd_regression(args), 1)
+        data = json.loads(out.getvalue())
+        self.assertEqual(data["fixture"], payload)
+        self.assertEqual({change["tool"] for change in data["changes"]}, {payload, "B" + payload})
 
 
 if __name__ == "__main__":

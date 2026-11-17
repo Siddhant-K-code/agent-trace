@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, TextIO
 
+from .inert import inert
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -302,11 +303,17 @@ def compare_fixtures(
 
 
 def print_regression_report(report: RegressionReport, out: TextIO = sys.stdout) -> None:
+    """Write a human-readable regression report to *out*.
+
+    The fixture's session and each tool name come from the fixture file or
+    the trace, so each goes through inert() and an escape code or a line
+    break in it shows as text.
+    """
     w = out.write
     status = "FAIL" if report.exceeded else "PASS"
     w("\nTool-call regression report\n")
     w(f"Status:    {status}\n")
-    w(f"Fixture:   {report.fixture}\n")
+    w(f"Fixture:   {inert(report.fixture)}\n")
     w(f"Actual:    {report.actual}\n")
     w(f"Steps:     {report.expected_steps} expected, {report.actual_steps} actual\n")
     w(f"Divergence: {report.divergence_score:.3f} (threshold {report.threshold:.3f})\n")
@@ -316,13 +323,13 @@ def print_regression_report(report: RegressionReport, out: TextIO = sys.stdout) 
     w("Changes:\n")
     for change in report.changes:
         if change.kind == "reordered":
-            w(f"  reordered: {change.tool} expected #{change.expected_seq}, actual #{change.actual_seq}\n")
+            w(f"  reordered: {inert(change.tool)} expected #{change.expected_seq}, actual #{change.actual_seq}\n")
         elif change.kind == "changed_input":
-            w(f"  changed input: {change.tool} expected #{change.expected_seq}, actual #{change.actual_seq}\n")
+            w(f"  changed input: {inert(change.tool)} expected #{change.expected_seq}, actual #{change.actual_seq}\n")
         elif change.kind == "removed":
-            w(f"  removed: {change.tool} expected #{change.expected_seq}\n")
+            w(f"  removed: {inert(change.tool)} expected #{change.expected_seq}\n")
         elif change.kind == "added":
-            w(f"  added: {change.tool} actual #{change.actual_seq}\n")
+            w(f"  added: {inert(change.tool)} actual #{change.actual_seq}\n")
     w("\n")
 
 
