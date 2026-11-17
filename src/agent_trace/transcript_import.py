@@ -10,12 +10,16 @@ skills each session listed as available, skill loads, tool names, file
 paths, shell commands, and exit status.  Prompt text, model output, and
 reasoning are not stored.  A user prompt is reduced to its skill mention
 tokens (``/name`` at the start, ``$name`` anywhere) so user loads can be
-counted.
+counted.  Copilot ``user.message`` records the user did not type (skill
+bodies, runtime continuations, messages from other sessions) are not
+prompts and are dropped.
 
 Recorded availability goes into the SESSION_START event as
 ``available_skills`` (a list of ``{"name", "source", "path"}``) together
 with ``availability: "recorded"``.  A session that lists no skills has
 neither field, and the report falls back to skill directories on disk.
+A Copilot builtin skill path that a CLI upgrade deleted is replaced by the
+same skill in the newest installed package version.
 """
 
 from __future__ import annotations
@@ -45,6 +49,14 @@ _SHELL_FLAGS = frozenset({"-c", "-lc", "-cl", "-ic", "-ilc", "-lic"})
 _COPILOT_BLOCK = re.compile(r"<available_skills>(.*?)</available_skills>", re.DOTALL)
 _COPILOT_SKILL = re.compile(r"<skill>\s*<name>\s*(.*?)\s*</name>(.*?)</skill>", re.DOTALL)
 _COPILOT_LOCATION = re.compile(r"<location>\s*(.*?)\s*</location>", re.DOTALL)
+_COPILOT_PKG_BUILTIN = re.compile(
+    r"^(?P<pkg>.*[\\/]pkg[\\/][^\\/]+)[\\/](?P<version>[^\\/]+)[\\/]builtin[\\/](?P<rest>.+)$"
+)
+_DIGIT_RUN = re.compile(r"([0-9]+)")
+# user.message sources that mark text the user did not type: a skill body
+# (skill-<name>), a runtime continuation (system, autopilot), or a message
+# from another session (agent-<id>).  A typed prompt has no source.
+_COPILOT_NOT_PROMPT = re.compile(r"^(?:skill-|agent-|system$|autopilot$)")
 
 _CODEX_BLOCK = re.compile(r"<skills_instructions>(.*?)</skills_instructions>", re.DOTALL)
 _CODEX_ROOT = re.compile(r"^- `([^`]+)` = `([^`]+)`\s*$")
@@ -239,13 +251,54 @@ def discover_copilot_sessions(copilot_dir: str) -> list[Path]:
     return found
 
 
-def copilot_skill_paths(paths: Iterable[Path]) -> dict[str, str]:
-    """Map skill name to the SKILL.md path ``skill.invoked`` recorded for it.
+def _version_key(name: str) -> list[object]:
+    # re.split with a group alternates text and digit runs, so list items compare by type.
+    return [int(part) if index % 2 else part for index, part in enumerate(_DIGIT_RUN.split(name))]
 
-    Copilot lists available skills by name only.  A name is mapped only when
-    every recorded load of it, across all sessions, used the same path.
+
+def _copilot_newest_builtin(path: str) -> str:
+    """Return ``path`` in the newest Copilot package version that has it, else ``""``.
+
+    Copilot CLI records a builtin skill as
+    ``<cache>/pkg/<platform>/<version>/builtin/<name>/SKILL.md`` and deletes
+    old version directories when it upgrades, so recorded paths go stale.
+    """
+    match = _COPILOT_PKG_BUILTIN.match(path)
+    if not match:
+        return ""
+    pkg = match.group("pkg")
+    try:
+        versions = [entry.name for entry in os.scandir(pkg) if "0" <= entry.name[:1] <= "9"]
+    except OSError:
+        return ""
+    for version in sorted(versions, key=_version_key, reverse=True):
+        candidate = os.path.join(pkg, version, "builtin", match.group("rest"))
+        if os.path.isfile(candidate):
+            return candidate
+    return ""
+
+
+def _copilot_current_path(path: str) -> str:
+    """Return where a recorded SKILL.md is now: the path itself, a newer package version, or ``""``."""
+    if not path:
+        return ""
+    if os.path.isfile(path):
+        return path
+    return _copilot_newest_builtin(path)
+
+
+def copilot_skill_index(paths: Iterable[Path]) -> tuple[dict[str, str], list[str]]:
+    """Read the recorded skill loads of every session once.
+
+    Returns ``(known_paths, roots)``.  ``known_paths`` maps a skill name to its
+    SKILL.md when every load of it that still resolves to a file resolves to
+    the same one.  ``roots`` are the skill directories those files are in (the
+    directory holding ``<name>/SKILL.md``); builtin skills use the newest
+    Copilot package version.  Project loads are left out because a project
+    skill belongs to one workspace.
     """
     seen: dict[str, set[str]] = {}
+    roots: dict[str, None] = {}
     for path in paths:
         try:
             with open(path, encoding="utf-8", errors="replace") as handle:
@@ -258,11 +311,23 @@ def copilot_skill_paths(paths: Iterable[Path]) -> dict[str, str]:
                         continue
                     data = _mapping(record.get("data")) if isinstance(record, dict) else {}
                     name, skill_path = _text(data.get("name")).strip(), _text(data.get("path")).strip()
-                    if name and skill_path:
-                        seen.setdefault(name, set()).add(skill_path)
+                    if not name or not skill_path or _text(data.get("source")) == "project":
+                        continue
+                    current = _copilot_current_path(skill_path)
+                    if not current:
+                        continue
+                    seen.setdefault(name, set()).add(current)
+                    newest = _copilot_newest_builtin(current) or current
+                    roots.setdefault(os.path.dirname(os.path.dirname(newest)), None)
         except OSError:
             continue
-    return {name: next(iter(found)) for name, found in seen.items() if len(found) == 1}
+    known = {name: next(iter(found)) for name, found in seen.items() if len(found) == 1}
+    return known, list(roots)
+
+
+def copilot_skill_paths(paths: Iterable[Path]) -> dict[str, str]:
+    """Map skill name to the SKILL.md its recorded loads resolve to; see ``copilot_skill_index``."""
+    return copilot_skill_index(paths)[0]
 
 
 def _copilot_available(session: _Session, data: Mapping[str, Any]) -> None:
@@ -312,6 +377,8 @@ def import_copilot_session(
             _copilot_available(session, data)
         elif kind == "user.message":
             seen = True
+            if _COPILOT_NOT_PROMPT.match(_text(data.get("source")).strip()):
+                continue
             session.add(EventType.USER_PROMPT, raw_ts, {"prompt": skill_tokens(_text(data.get("content")))})
         elif kind == "tool.execution_start":
             seen = True
@@ -341,7 +408,9 @@ def import_copilot_session(
             name = _text(data.get("name")).strip()
             if not name:
                 continue
-            session.make_available(name, _text(data.get("source")) or "copilot", _text(data.get("path")), listed=False)
+            recorded = _text(data.get("path"))
+            session.make_available(name, _text(data.get("source")) or "copilot",
+                                   _copilot_current_path(recorded) or recorded, listed=False)
             match = next((i for i in range(len(pending_skill_calls) - 1, -1, -1)
                           if _same_skill(pending_skill_calls[i][0], name)), None)
             if match is not None:
@@ -358,7 +427,7 @@ def import_copilot_session(
     if not seen:
         return "empty"
     for name, entry in session.available.items():
-        if not entry["path"] and known_paths and name in known_paths:
+        if not entry["path"] and entry["source"] != "project" and known_paths and name in known_paths:
             entry["path"] = known_paths[name]
     return session.write(store, _mtime(path))
 
@@ -544,6 +613,7 @@ def import_codex_rollout(path: str | os.PathLike[str], store: TraceStore) -> str
 
 
 __all__ = [
+    "copilot_skill_index",
     "copilot_skill_paths",
     "default_codex_dir",
     "default_copilot_dir",

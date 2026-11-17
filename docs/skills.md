@@ -30,9 +30,13 @@ Skills across 2 of 7 sessions since 2026-10-16 (5 started before the window). Av
 ```
 
 Sessions are left out when they started before the `--since` window or are
-unreadable or malformed. Transcripts that share a session ID
-are merged into one session, and the `Read` line says so. Widen the window with
-`--since 90d`.
+unreadable or malformed. With `--from-claude`, `--from-copilot` and
+`--from-codex`, sessions that [`skills eval`](skills-eval.md) ran in its
+temporary workspaces (`agent-strace-skills-eval-<case>-<random>/workspace`) are
+left out too: their prompts are written to trigger skills, and the skill copies
+they load are deleted afterwards. A stderr line gives the count. Transcripts
+that share a session ID are merged into one session, and the `Read` line says
+so. Widen the window with `--since 90d`.
 
 **GitHub Copilot and Codex, no setup.** Read the session logs these agents
 already keep:
@@ -68,13 +72,23 @@ What each reader counts:
 |---|---|---|
 | Available | `<available_skills>` in the system message | `<skills_instructions>` or `world_state` skills list |
 | Model load | `skill` tool call, or a `skill.invoked` event | read of a listed `SKILL.md` (Codex has no load event) |
-| User load | prompt starts `/name` or mentions `$name` | prompt mentions `$name`, or a `<skill>` block injected for the user |
+| User load | typed prompt starts `/name` or mentions `$name` | prompt mentions `$name`, or a `<skill>` block injected for the user |
 | Skipped | session directories with no `events.jsonl` | files whose first record is not `session_meta`; approval review threads |
 
 - Copilot lists skills by name only. A skill's path comes from a
   `skill.invoked` event in any session, when that name always had the same
   path. Otherwise the definition is looked up by name in the skill directories,
   and a skill found nowhere is reported with `definition_found: false`.
+- Skill directories that recorded `skill.invoked` paths point to, such as the
+  Copilot app's skills or a plugin's, are scanned like `--skills-dir`, if they
+  still exist. Project skills are left out. Copilot CLI keeps builtin skills in
+  a versioned package directory and deletes old versions when it upgrades, so
+  a recorded builtin path that is gone resolves to the newest installed
+  version that has the skill.
+- Copilot `user.message` events with a `source` of `skill-<name>`, `system`,
+  `autopilot` or `agent-<id>` are not prompts: they are injected skill bodies,
+  runtime continuations, and messages from another session. Only typed prompts
+  count as user loads.
 - Codex archived sessions are included, because the report is about history.
   Approval review threads (`thread_source: guardian_review`) are excluded:
   they are reviewer runs, not user sessions.
@@ -450,7 +464,8 @@ This command cannot measure:
 Malformed events and unreadable sessions are skipped and counted in
 `events_skipped_malformed` and `sessions_skipped_unreadable`. In aggregate
 mode, `sessions_total` counts sessions in the store and `sessions_excluded`
-counts those left out, by reason: `before_window` and `unreadable`.
+counts those left out, by reason: `before_window` and `unreadable`, plus
+`skills_eval` with `--from-claude`, `--from-copilot` and `--from-codex`.
 
 **Older stores:** stores captured before the subagent capture fix can hold
 many Copilot CLI subagent sessions with `events.ndjson` but no `meta.json`.

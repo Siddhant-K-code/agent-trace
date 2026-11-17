@@ -43,6 +43,24 @@ from .store import TraceStore
 
 SCHEMA_VERSION = 1
 
+# ``skills eval`` runs each case in ``<tmp>/<prefix><case id>-<random>/workspace``.
+# The agent records that directory as the session's working directory, which
+# is how ``skills --from-*`` tells eval runs from real use.
+SKILLS_EVAL_DIR_PREFIX = "agent-strace-skills-eval-"
+_SKILLS_EVAL_DIR = re.compile(
+    "^" + re.escape(SKILLS_EVAL_DIR_PREFIX) + r"[A-Za-z0-9][A-Za-z0-9._-]*-[a-z0-9_]{8}$"
+)
+
+
+def is_skills_eval_workspace(path: str) -> bool:
+    """True when ``path`` is, or is inside, a ``skills eval`` run workspace."""
+    parts = re.split(r"[\\/]+", path or "")
+    return any(
+        _SKILLS_EVAL_DIR.match(part) and parts[index + 1] == "workspace"
+        for index, part in enumerate(parts[:-1])
+    )
+
+
 REPO_SKILL_DIRS = (
     ".github/skills",
     ".claude/skills",
@@ -1609,12 +1627,18 @@ def build_aggregate_report(
     extra_dirs: Iterable[str] = (),
     user_dirs: Iterable[str] = USER_SKILL_DIRS,
     min_sessions: int = 5,
+    exclude_skills_eval: bool = False,
 ) -> dict[str, Any]:
+    """Aggregate the sessions that started at or after ``since``.
+
+    With ``exclude_skills_eval``, sessions that ran in a ``skills eval``
+    workspace are left out and counted in ``sessions_excluded``.
+    """
     catalogs: dict[str, SkillCatalog] = {}
     definitions: dict[str, SkillDefinition | None] = {}
     extra = list(extra_dirs)
     reports = []
-    skipped = before_window = 0
+    skipped = before_window = eval_runs = 0
     listed = store.list_sessions()
     for meta in listed:
         try:
@@ -1622,13 +1646,18 @@ def build_aggregate_report(
             if started is not None and started < since:
                 before_window += 1
                 continue
-            reports.append(build_session_report(
+            report = build_session_report(
                 store, meta.session_id, workspace=workspace, extra_dirs=extra,
                 user_dirs=user_dirs, catalogs=catalogs, definition_cache=definitions,
-            ))
+            )
         except Exception:  # one unreadable or malformed session must not abort the report
             skipped += 1
             continue
+        if (exclude_skills_eval and report.get("workspace_source") == "session_start"
+                and is_skills_eval_workspace(str(report.get("workspace") or ""))):
+            eval_runs += 1
+            continue
+        reports.append(report)
     report = aggregate_reports(reports, min_sessions=min_sessions)
     report["since"] = since
     report["sessions_skipped_unreadable"] = skipped
@@ -1637,6 +1666,8 @@ def build_aggregate_report(
         "before_window": before_window,
         "unreadable": skipped,
     }
+    if exclude_skills_eval:
+        report["sessions_excluded"]["skills_eval"] = eval_runs
     return report
 
 
@@ -1768,6 +1799,7 @@ def format_session_text(report: Mapping[str, Any], out: TextIO | None = None) ->
 _EXCLUSION_LABELS = (
     ("before_window", "started before the window"),
     ("unreadable", "unreadable or malformed"),
+    ("skills_eval", "from agent-strace skills eval"),
 )
 
 
@@ -1935,19 +1967,23 @@ def load_claude_history(claude_dir: str, trace_dir: str) -> tuple[TraceStore, in
 _IMPORT_ERRORS = (OSError, ValueError, AttributeError, TypeError, KeyError)
 
 
-def load_copilot_history(copilot_dir: str, trace_dir: str) -> tuple[TraceStore, dict[str, int]]:
+def load_copilot_history(copilot_dir: str, trace_dir: str) -> tuple[TraceStore, dict[str, int], list[str]]:
     """Import every GitHub Copilot session under ``copilot_dir/session-state``.
 
-    Returns ``(store, counts)``; ``counts`` has ``recorded``, ``unrecorded``,
-    ``duplicate``, ``empty``, and ``failed``.
+    Returns ``(store, counts, skill_roots)``; ``counts`` has ``recorded``,
+    ``unrecorded``, ``duplicate``, ``empty``, and ``failed``.  ``skill_roots``
+    are the skill directories that recorded loads point to and that exist
+    now; scan them so a skill listed by name alone still finds its SKILL.md.
     """
     import functools
 
-    from .transcript_import import copilot_skill_paths, discover_copilot_sessions, import_copilot_session
+    from .transcript_import import copilot_skill_index, discover_copilot_sessions, import_copilot_session
 
     paths = discover_copilot_sessions(copilot_dir)
-    importer = functools.partial(import_copilot_session, known_paths=copilot_skill_paths(paths))
-    return _load_history(paths, importer, trace_dir)
+    known_paths, skill_roots = copilot_skill_index(paths)
+    importer = functools.partial(import_copilot_session, known_paths=known_paths)
+    store, counts = _load_history(paths, importer, trace_dir)
+    return store, counts, skill_roots
 
 
 def load_codex_history(codex_dir: str, trace_dir: str) -> tuple[TraceStore, dict[str, int]]:
@@ -2057,14 +2093,16 @@ def _cmd_skills_transcripts(args: argparse.Namespace, min_sessions: int) -> int:
         agent, flag = "GitHub Copilot", "--copilot-dir"
         home = getattr(args, "copilot_dir", None) or default_copilot_dir()
         where = str(Path(home).expanduser() / "session-state")
-        loader = load_copilot_history
     else:
         agent, flag = "Codex", "--codex-dir"
         home = getattr(args, "codex_dir", None) or default_codex_dir()
         where = str(Path(home) / "sessions")
-        loader = load_codex_history
+    skill_roots: list[str] = []
     with tempfile.TemporaryDirectory(prefix="agent-strace-skills-") as tmp:
-        store, counts = loader(home, tmp)
+        if getattr(args, "from_copilot", False):
+            store, counts, skill_roots = load_copilot_history(home, tmp)
+        else:
+            store, counts = load_codex_history(home, tmp)
         summary = _transcript_summary(agent, where, counts)
         if summary is None:
             note = _skip_note(counts)
@@ -2073,12 +2111,19 @@ def _cmd_skills_transcripts(args: argparse.Namespace, min_sessions: int) -> int:
                              "another config directory.\n")
             return 1
         sys.stderr.write(summary)
-        return _run_skills(store, args, min_sessions, from_history=True)
+        return _run_skills(store, args, min_sessions, from_history=True, skill_roots=skill_roots)
 
 
-def _run_skills(store: TraceStore, args: argparse.Namespace, min_sessions: int, from_history: bool) -> int:
+def _run_skills(
+    store: TraceStore,
+    args: argparse.Namespace,
+    min_sessions: int,
+    from_history: bool,
+    skill_roots: Iterable[str] = (),
+) -> int:
     workspace = getattr(args, "workspace", "") or ""
     extra_dirs = list(getattr(args, "skills_dirs", None) or [])
+    extra_dirs += [root for root in skill_roots if root not in extra_dirs]
     as_json = getattr(args, "format", "text") == "json"
 
     raw_session = getattr(args, "session_id", None)
@@ -2110,7 +2155,12 @@ def _run_skills(store: TraceStore, args: argparse.Namespace, min_sessions: int, 
         workspace=workspace,
         extra_dirs=extra_dirs,
         min_sessions=min_sessions,
+        exclude_skills_eval=from_history,
     )
+    eval_runs = report["sessions_excluded"].get("skills_eval", 0)
+    if eval_runs:
+        sys.stderr.write(f"Excluded {eval_runs} session(s) that agent-strace skills eval ran in its "
+                         "temporary workspaces.\n")
     if as_json:
         sys.stdout.write(json.dumps(report, indent=2) + "\n")
         if not report["sessions"]:
@@ -2127,6 +2177,7 @@ __all__ = [
     "HINT_KINDS",
     "NOT_MEASURABLE",
     "REPO_SKILL_DIRS",
+    "SKILLS_EVAL_DIR_PREFIX",
     "USER_SKILL_DIRS",
     "SkillCatalog",
     "SkillDefinition",
@@ -2140,6 +2191,7 @@ __all__ = [
     "discover_skills",
     "event_arguments",
     "extract_skill_commands",
+    "is_skills_eval_workspace",
     "load_claude_history",
     "load_codex_history",
     "load_copilot_history",

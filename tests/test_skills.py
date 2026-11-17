@@ -12,6 +12,11 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+try:
+    import _no_telemetry  # noqa: F401
+except ImportError:  # pragma: no cover - run as a package module
+    from tests import _no_telemetry  # noqa: F401
+
 from agent_trace.cli import _codex_config_dir, build_parser
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.review import is_test_command
@@ -1318,6 +1323,26 @@ class TestCli(SkillsTestBase):
         self.assertIn("; 1 shared a session ID with another file and were merged into it.", err)
         self.assertIn("Skills across 1 of 2 sessions since ", out)
         self.assertIn(" (1 started before the window). ", out)
+
+    def test_from_claude_leaves_out_skills_eval_runs(self):
+        claude_dir = self.tmp / "claude"
+        path = self._claude_transcript(claude_dir)
+        workspace = self.tmp / "agent-strace-skills-eval-deploy-k3x9_q2a" / "workspace"
+        lines = [json.loads(line) for line in path.read_text().splitlines()]
+        for line in lines:
+            line.update(sessionId="c1a0de00-0000-4000-8000-000000000003", cwd=str(workspace))
+        (path.parent / "c1a0de00-0000-4000-8000-000000000003.jsonl").write_text(
+            "\n".join(json.dumps(line) for line in lines) + "\n")
+
+        code, out, err = self._run_both("--from-claude", "--claude-dir", str(claude_dir),
+                                        "--min-sessions", "1", "--format", "json")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("Excluded 1 session(s) that agent-strace skills eval ran", err)
+        report = json.loads(out)
+        self.assertEqual((report["sessions"], report["sessions_excluded"]["skills_eval"]), (1, 1))
+        skill = next(item for item in report["skills"] if item["name"] == "deploy-check")
+        self.assertEqual(skill["invocations"], {"user": 1, "model": 1})
 
     def test_from_claude_defaults_to_claude_config_dir(self):
         claude_dir = self.tmp / "custom-claude"

@@ -38,7 +38,14 @@ from .instruction_compliance import (
     summarize_compliance_runs,
 )
 from .models import EventType, TraceEvent
-from .skills import CONTEXT_FILES, USER_SKILL_DIRS, _prompt_loads, analyze_session, discover_skills
+from .skills import (
+    CONTEXT_FILES,
+    SKILLS_EVAL_DIR_PREFIX,
+    USER_SKILL_DIRS,
+    _prompt_loads,
+    analyze_session,
+    discover_skills,
+)
 
 SCHEMA_VERSION = 1
 DEFAULT_RUNS = 3
@@ -753,7 +760,7 @@ def run_case_live(
     keep_workspaces: bool = False,
     save_root: Path | None = None,
 ) -> dict[str, Any]:
-    root = Path(tempfile.mkdtemp(prefix=f"agent-strace-skills-eval-{case.id}-"))
+    root = Path(tempfile.mkdtemp(prefix=f"{SKILLS_EVAL_DIR_PREFIX}{case.id}-"))
     workspace = root / "workspace"
     traces = root / "traces"
     try:
