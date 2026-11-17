@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -16,6 +17,47 @@ try:
     from test_dashboard import _codex_session
 except ImportError:  # pragma: no cover - package-style test discovery
     from tests.test_dashboard import _codex_session
+
+
+# Text that ends a script, opens a script comment or runs as markup if a page
+# parses it as HTML. The entity and the line separator must stay as typed.
+PAYLOAD = "</script><script>x()</script> <!--<script> <img src=x onerror=y()> &amp; \u2028"
+
+# Older stores kept ids that create_session now refuses. The 12- and the
+# 16-character cuts of this one both hold <, " and &, and both end on &.
+LEGACY_ID = "L<\"&a #?%20&>'b&tail"
+
+SKIP_LEGACY_ON_WINDOWS = unittest.skipIf(
+    sys.platform == "win32", "Windows file names cannot hold <, \" or ?"
+)
+
+
+def write_legacy_session(store: TraceStore, session_id: str, events=()) -> None:
+    """Write a session the way an older store did, before ids were checked."""
+    session_dir = store.base_dir / session_id
+    session_dir.mkdir(parents=True)
+    (session_dir / "meta.json").write_text(
+        SessionMeta(session_id=session_id).to_json(), encoding="utf-8"
+    )
+    (session_dir / "events.ndjson").write_text(
+        "".join(event.to_json() + "\n" for event in events), encoding="utf-8"
+    )
+
+
+def check_script_json(test: unittest.TestCase, page: str, expected: dict) -> None:
+    """Check that each JSON value a page script embeds is inert and unchanged.
+
+    `expected` maps a pattern that captures each embedded JSON text to the
+    value it must parse to. The text must hold no <, > or &, and the page
+    must hold exactly one script element.
+    """
+    for pattern, value in expected.items():
+        text = re.search(pattern, page, re.M).group(1)
+        test.assertEqual(json.loads(text), value)
+        test.assertNotRegex(text, "[<>&]")
+    test.assertNotIn("\u2028", page)
+    test.assertEqual(len(re.findall("<script", page, re.I)), 1)
+    test.assertEqual(len(re.findall("</script", page, re.I)), 1)
 
 
 def _make_store(tmp_dir: str) -> TraceStore:
@@ -164,3 +206,52 @@ class TestHTMLReplayCost(unittest.TestCase):
         with patch("agent_trace.cost.session_cost", side_effect=TypeError("bug")):
             with self.assertRaises(TypeError):
                 replay_to_html(self.store, sid)
+
+
+class TestHTMLReplayShowsTextAsText(unittest.TestCase):
+    """Event text and session ids reach the replay page as text, not markup."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.store = _make_store(tmp.name)
+
+    def test_embedded_events_are_inert_and_unchanged(self):
+        from agent_trace.replay import replay_to_html
+        meta = SessionMeta(agent_name="payload-agent")
+        self.store.create_session(meta)
+        rows = [
+            (EventType.USER_PROMPT, 1000.0, None, {"content": PAYLOAD}),
+            (EventType.TOOL_CALL, 1000.5, None,
+             {"tool_name": "Bash", "arguments": {"command": PAYLOAD}}),
+            (EventType.TOOL_RESULT, 1001.25, 12.5, {"content": PAYLOAD}),
+            (EventType.ASSISTANT_RESPONSE, 1002.0, None, {"content": PAYLOAD}),
+        ]
+        for n, (event_type, ts, duration_ms, data) in enumerate(rows):
+            self.store.append_event(meta.session_id, TraceEvent(
+                event_type=event_type, session_id=meta.session_id, timestamp=ts,
+                event_id=f"e{n} {PAYLOAD}", duration_ms=duration_ms, data=dict(data),
+            ))
+
+        page = replay_to_html(self.store, meta.session_id)
+
+        check_script_json(self, page, {r"^const EVENTS = (.*);$": [
+            {"event_type": event_type.value, "event_id": f"e{n} {PAYLOAD}",
+             "_offset": ts - 1000.0, "duration_ms": duration_ms, "data": data}
+            for n, (event_type, ts, duration_ms, data) in enumerate(rows)
+        ]})
+
+    @SKIP_LEGACY_ON_WINDOWS
+    def test_legacy_session_id_shows_as_text(self):
+        from agent_trace.replay import replay_to_html
+        write_legacy_session(self.store, LEGACY_ID, [TraceEvent(
+            event_type=EventType.TOOL_CALL, session_id=LEGACY_ID,
+            data={"tool_name": "Bash"},
+        )])
+
+        page = replay_to_html(self.store, LEGACY_ID)
+
+        shown = "L&lt;&quot;&amp;a #?%20&amp;&gt;&#x27;b&amp;"
+        self.assertIn(f"<title>agent-strace: {shown}</title>", page)
+        self.assertIn(f'<div class="meta">{shown} &nbsp;', page)
+        self.assertNotIn('L<"', page)

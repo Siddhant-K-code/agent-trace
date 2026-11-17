@@ -16,6 +16,7 @@ Routes added when dashboard=True:
 
 from __future__ import annotations
 
+import html
 import json
 from dataclasses import asdict
 from typing import TYPE_CHECKING
@@ -159,7 +160,21 @@ tr:hover td{{background:#252a3a}}
 def _page(title: str, active: str, body: str, script: str) -> str:
     nav = {f"n_{p}": ("active" if p == active else "")
            for p in ("sessions", "cost", "violations", "health")}
-    return _SHELL.format(title=title, body=body, script=script, **nav)
+    return _SHELL.format(title=html.escape(title), body=body, script=script, **nav)
+
+
+# Table rows on the list pages are built from DOM nodes. Every value goes in
+# with textContent, so markup in session fields or event data shows as typed.
+_ROW_HELPERS = r"""
+function textEl(tag,cls,text){const e=document.createElement(tag);e.className=cls;e.textContent=String(text);return e;}
+function cell(content,cls){
+  const td=document.createElement('td');
+  if(cls)td.className=cls;
+  if(content instanceof Node)td.appendChild(content);else td.textContent=String(content);
+  return td;
+}
+function sessionLink(id){const a=textEl('a','mono',id.slice(0,12));a.href=`/session/${encodeURIComponent(id)}`;return a;}
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +212,7 @@ _SESSIONS_BODY = """\
   <div class="empty" id="empty" style="display:none">No sessions match the filter.</div>
 </div>"""
 
-_SESSIONS_SCRIPT = r"""
+_SESSIONS_SCRIPT = _ROW_HELPERS + r"""
 let _all = [];
 async function load() {
   const r = await fetch('/api/sessions');
@@ -217,7 +232,7 @@ async function load() {
 }
 function fmtDur(ms){if(!ms)return'—';if(ms<1000)return ms.toFixed(0)+'ms';if(ms<60000)return(ms/1000).toFixed(1)+'s';return(ms/60000).toFixed(1)+'m';}
 function fmtTs(ts){return ts?new Date(ts*1000).toLocaleString():'—';}
-function badge(s){if(s.errors>0)return'<span class="badge err">errors</span>';if(!s.ended_at)return'<span class="badge warn">running</span>';return'<span class="badge ok">done</span>';}
+function badge(s){const [cls,text]=s.errors>0?['err','errors']:!s.ended_at?['warn','running']:['ok','done'];return textEl('span','badge '+cls,text);}
 function render(){
   const q=document.getElementById('q').value.toLowerCase();
   const ws=document.getElementById('ws-f').value;
@@ -240,10 +255,9 @@ function render(){
   rows.forEach(s=>{
     const dur=s.ended_at?fmtDur((s.ended_at-s.started_at)*1000):'—';
     const tr=document.createElement('tr');
-    tr.innerHTML=`<td><a href="/session/${s.session_id}" class="mono">${s.session_id.slice(0,12)}</a></td>
-      <td>${s.agent_name||'—'}</td><td>${s.workspace_id||'—'}</td><td>${s.team||'—'}</td>
-      <td class="mono">${fmtTs(s.started_at)}</td><td>${dur}</td>
-      <td>${s.tool_calls||0}</td><td>${s.errors||0}</td><td>${badge(s)}</td>`;
+    tr.append(cell(sessionLink(s.session_id)),cell(s.agent_name||'\u2014'),cell(s.workspace_id||'\u2014'),cell(s.team||'\u2014'),
+      cell(fmtTs(s.started_at),'mono'),cell(dur),
+      cell(s.tool_calls||0),cell(s.errors||0),cell(badge(s)));
     tbody.appendChild(tr);
   });
   document.getElementById('empty').style.display=rows.length?'none':'';
@@ -603,7 +617,7 @@ _COST_BODY = """\
   </table>
 </div>"""
 
-_COST_SCRIPT = r"""
+_COST_SCRIPT = _ROW_HELPERS + r"""
 async function load(){
   const r=await fetch('/api/sessions');
   const sessions=await r.json();
@@ -619,14 +633,14 @@ async function load(){
   const tb=document.getElementById('team-tbody');
   Object.entries(teams).sort((a,b)=>b[1].tools-a[1].tools).forEach(([t,d])=>{
     const tr=document.createElement('tr');
-    tr.innerHTML=`<td>${t}</td><td>${d.n}</td><td>${d.tools}</td><td>${d.llm}</td><td>${d.tokens}</td>`;
+    tr.append(cell(t),cell(d.n),cell(d.tools),cell(d.llm),cell(d.tokens));
     tb.appendChild(tr);
   });
   document.getElementById('team-tbl').style.display='';
   const ab=document.getElementById('agent-tbody');
   Object.entries(agents).sort((a,b)=>b[1].tools-a[1].tools).forEach(([a,d])=>{
     const tr=document.createElement('tr');
-    tr.innerHTML=`<td>${a}</td><td>${d.n}</td><td>${d.tools}</td><td>${d.errors}</td>`;
+    tr.append(cell(a),cell(d.n),cell(d.tools),cell(d.errors));
     ab.appendChild(tr);
   });
   document.getElementById('agent-tbl').style.display='';
@@ -655,13 +669,13 @@ _VIOLATIONS_BODY = """\
   <div class="empty" id="empty" style="display:none">No policy violations recorded.</div>
 </div>"""
 
-_VIOLATIONS_SCRIPT = r"""
+_VIOLATIONS_SCRIPT = _ROW_HELPERS + r"""
 async function load(){
   const r=await fetch('/api/sessions');
   const sessions=await r.json();
   const rows=[];
   await Promise.all(sessions.map(async s=>{
-    const er=await fetch(`/api/sessions/${s.session_id}/events`);
+    const er=await fetch(`/api/sessions/${encodeURIComponent(s.session_id)}/events`);
     const events=await er.json();
     events.forEach(e=>{
       if(e.event_type==='policy_violation'||(e.data&&e.data.policy_action)){
@@ -677,10 +691,9 @@ async function load(){
   const tbody=document.getElementById('tbody');
   rows.forEach(row=>{
     const tr=document.createElement('tr');
-    tr.innerHTML=`<td><a href="/session/${row.sid}" class="mono">${row.sid.slice(0,12)}</a></td>
-      <td>${row.agent}</td><td>${row.tool}</td>
-      <td><span class="badge err">${row.action}</span></td>
-      <td class="mono">${new Date(row.ts*1000).toLocaleString()}</td>`;
+    tr.append(cell(sessionLink(row.sid)),cell(row.agent),cell(row.tool),
+      cell(textEl('span','badge err',row.action)),
+      cell(new Date(row.ts*1000).toLocaleString(),'mono'));
     tbody.appendChild(tr);
   });
   document.getElementById('tbl').style.display='';
@@ -713,7 +726,7 @@ _HEALTH_BODY = """\
   </table>
 </div>"""
 
-_HEALTH_SCRIPT = r"""
+_HEALTH_SCRIPT = _ROW_HELPERS + r"""
 async function load(){
   const [hr,sr]=await Promise.all([fetch('/health'),fetch('/api/sessions')]);
   const health=await hr.json();
@@ -735,7 +748,7 @@ async function load(){
   const tbody=document.getElementById('tbody');
   rows.forEach(([k,v])=>{
     const tr=document.createElement('tr');
-    tr.innerHTML=`<td>${k}</td><td>${v}</td>`;
+    tr.append(cell(k),cell(v));
     tbody.appendChild(tr);
   });
   document.getElementById('tbl').style.display='';
