@@ -50,8 +50,11 @@ class TeamBreakdown:
     estimated_spend_usd: float
     avg_estimated_cost_usd: float | None
     active_attributed_identities: int
-    lint_findings: int
-    sessions_with_lint_signals: int
+    # Lint numbers count only sessions whose lint rules all ran; they are None
+    # when no session of the team could be fully linted.
+    lint_checked_sessions: int
+    lint_findings: int | None
+    sessions_with_lint_signals: int | None
     lint_signals: dict[str, int]
 
 
@@ -111,7 +114,8 @@ class _SessionMetric:
     identity_confidence: str
     task_type: str
     cost: float | None
-    lint_rules: tuple[str, ...]
+    # None when a lint rule could not run, so the findings are incomplete.
+    lint_rules: tuple[str, ...] | None
 
 
 class _SessionSnapshotStore:
@@ -341,7 +345,7 @@ def _group_metrics(metrics: list[_SessionMetric], field: str) -> dict[str, list[
 def _lint_counts(rows: list[_SessionMetric]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for row in rows:
-        for rule in row.lint_rules:
+        for rule in row.lint_rules or ():
             counts[rule] = counts.get(rule, 0) + 1
     return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
 
@@ -504,7 +508,10 @@ def build_org_report(
             identity_confidence=confidence,
             task_type=task_type,
             cost=cost,
-            lint_rules=tuple(finding.rule for finding in lint.findings),
+            lint_rules=(
+                None if lint.rule_errors
+                else tuple(finding.rule for finding in lint.findings)
+            ),
         ))
 
     costs = [metric.cost for metric in metrics if metric.cost is not None]
@@ -517,6 +524,7 @@ def build_org_report(
         priced = [row.cost for row in rows if row.cost is not None]
         team_cost = sum(priced)
         identities = {row.engineer for row in rows if row.engineer != "(unknown)"}
+        linted = [row.lint_rules for row in rows if row.lint_rules is not None]
         team_rows.append(TeamBreakdown(
             team=name,
             sessions=len(rows),
@@ -525,8 +533,11 @@ def build_org_report(
             estimated_spend_usd=team_cost,
             avg_estimated_cost_usd=team_cost / len(priced) if priced else None,
             active_attributed_identities=len(identities),
-            lint_findings=sum(len(row.lint_rules) for row in rows),
-            sessions_with_lint_signals=sum(bool(row.lint_rules) for row in rows),
+            lint_checked_sessions=len(linted),
+            lint_findings=sum(len(rules) for rules in linted) if linted else None,
+            sessions_with_lint_signals=(
+                sum(bool(rules) for rules in linted) if linted else None
+            ),
             lint_signals=_lint_counts(rows),
         ))
     team_rows.sort(key=lambda row: (-row.estimated_spend_usd, row.team))
@@ -561,6 +572,7 @@ def build_org_report(
                 estimated_spend_usd=row.estimated_spend_usd,
                 avg_estimated_cost_usd=row.avg_estimated_cost_usd,
                 active_attributed_identities=row.active_attributed_identities,
+                lint_checked_sessions=row.lint_checked_sessions,
                 lint_findings=row.lint_findings,
                 sessions_with_lint_signals=row.sessions_with_lint_signals,
                 lint_signals=row.lint_signals,
@@ -645,6 +657,7 @@ def org_report_payload(report: OrgReport) -> dict:
     payload["anomaly_detection_is_structural"] = True
     payload["spend_scope"] = "cost-estimated sessions only"
     payload["average_cost_denominator"] = "cost_estimated_sessions"
+    payload["lint_scope"] = "lint-checked sessions only"
     return payload
 
 

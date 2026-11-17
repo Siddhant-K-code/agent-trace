@@ -188,6 +188,14 @@ class TestSessionSummary(unittest.TestCase):
         self.store.update_meta(meta)
         self.assertEqual(summarize_session(self.store, "abc123").status, "failed")
 
+    def test_records_lint_rules_that_could_not_run(self):
+        def broken(events, cfg):
+            raise RuntimeError("boom")
+
+        with patch.dict("agent_trace.lint._RULES", {"no-output": broken}):
+            summary = summarize_session(self.store, "abc123")
+        self.assertEqual(summary.lint_rules_not_run, ["no-output"])
+
 
 # Shape of the public demo session recorded by GitHub Copilot CLI 1.0.103
 # (Siddhant-K-code/agent-trace-demo#1): hooks carry no model or token usage,
@@ -466,6 +474,14 @@ class TestRenderComment(unittest.TestCase):
         self.assertIn("No lint violations", body)
         self.assertIn("No errors", body)
         self.assertIn("agent-strace replay abc123", body)
+
+    def test_lint_rules_that_could_not_run_are_not_reported_as_clean(self):
+        body = render_comment([
+            _summary("one", lint_rules_not_run=["no-output"]),
+            _summary("two", lint_rules_not_run=["tool-loop", "no-output"]),
+        ])
+        self.assertNotIn("No lint violations", body)
+        self.assertIn("- ⚠️ Lint could not run 2 rules: `no-output`, `tool-loop`\n", body)
 
     def test_multiple_sessions_have_individual_cost_status_rows(self):
         body = render_comment([

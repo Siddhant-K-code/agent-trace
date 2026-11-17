@@ -253,11 +253,19 @@ def measure_duration_seconds(events: list[TraceEvent], meta: object | None = Non
 
 
 def measure_lint_violations(store: TraceStore, session_id: str) -> int:
-    """Return the total number of findings from all enabled lint rules."""
+    """Return the total number of findings from all enabled lint rules.
+
+    Raises MetricError when a rule could not run, since the count would be
+    incomplete.
+    """
 
     from ..lint import lint_session
 
-    return len(lint_session(store, session_id).findings)
+    report = lint_session(store, session_id)
+    if report.rule_errors:
+        rules = ", ".join(sorted({error.rule for error in report.rule_errors}))
+        raise MetricError(f"lint could not run rule(s): {rules}")
+    return len(report.findings)
 
 
 BUILTIN_METRICS = {

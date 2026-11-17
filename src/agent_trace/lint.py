@@ -17,10 +17,18 @@ import json
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, TextIO
+from typing import Callable, Collection, TextIO
 
 from .cost import session_cost
-from .event_data import number_field, object_field, str_field
+from .event_data import (
+    NonObjectEventDataError,
+    number_field,
+    object_field,
+    require_object_event_data,
+    str_field,
+)
+from .explain import PHASE_DATA_EVENT_TYPES
+from .inert import inert
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -45,9 +53,24 @@ class LintResult:
 
 
 @dataclass
+class RuleError:
+    """A rule that raised, so its findings are missing from the report."""
+
+    rule: str
+    error_type: str     # exception class name
+    message: str        # str() of the exception
+
+
+@dataclass
 class LintReport:
     session_id: str
     findings: list[LintResult] = field(default_factory=list)
+    rule_errors: list[RuleError] = field(default_factory=list)
+
+    @property
+    def complete(self) -> bool:
+        """True when every enabled rule ran."""
+        return not self.rule_errors
 
     @property
     def errors(self) -> int:
@@ -144,7 +167,7 @@ def _rule_tool_loop(events: list[TraceEvent], cfg: dict) -> list[LintResult]:
             run_len = 0
             continue
 
-        tool = ev.data.get("tool_name", "")
+        tool = str_field(ev.data, "tool_name", "")
         if tool == run_tool:
             run_len += 1
         else:
@@ -247,7 +270,8 @@ def _rule_budget_proximity(events: list[TraceEvent], cfg: dict) -> list[LintResu
         return []
 
     # The `agent-strace cost` total. A session that command refuses raises
-    # NonObjectEventDataError, which lint_session reports as a rule failure.
+    # NonObjectEventDataError; lint_session refuses such a session before any
+    # rule runs, and a direct caller of this rule gets the error.
     estimated_cost = session_cost(events, session_id=events[0].session_id or None)
 
     if estimated_cost >= budget * threshold:
@@ -308,11 +332,12 @@ def _rule_redundant_read(events: list[TraceEvent], cfg: dict) -> list[LintResult
             continue
         tool = str_field(ev.data, "tool_name", "").lower()
         if tool in ("read", "read_file", "file_read") or ev.event_type == EventType.FILE_READ:
+            arguments = object_field(ev.data, "arguments", {})
             path = (
-                object_field(ev.data, "arguments", {}).get("file_path")
-                or object_field(ev.data, "arguments", {}).get("path")
-                or ev.data.get("path")
-                or ev.data.get("file_path")
+                str_field(arguments, "file_path", "")
+                or str_field(arguments, "path", "")
+                or str_field(ev.data, "path", "")
+                or str_field(ev.data, "file_path", "")
             )
             if path:
                 read_counts[str(path)] += 1
@@ -347,8 +372,9 @@ def _rule_error_retry_loop(events: list[TraceEvent], cfg: dict) -> list[LintResu
             if last_tool:
                 error_counts[last_tool] += 1
         elif ev.event_type == EventType.TOOL_RESULT:
-            # tool_result with is_error flag
-            if ev.data.get("is_error") and last_tool:
+            # tool_result with is_error flag; a non-bool value reads as absent,
+            # as the event_data readers do.
+            if ev.data.get("is_error") is True and last_tool:
                 error_counts[last_tool] += 1
 
     results: list[LintResult] = []
@@ -416,6 +442,25 @@ _RULES: dict[str, Callable[[list[TraceEvent], dict], list[LintResult]]] = {
     "no-output": _rule_no_output,
 }
 
+# Event types whose data each rule reads keys from; None means every event.
+# lint_session refuses a session when an event of these types, for the enabled
+# rules, has data that is not an object. A rule missing here (one a caller
+# registers in _RULES) is treated as reading every event.
+_RULE_DATA_EVENT_TYPES: dict[str, frozenset[EventType] | None] = {
+    "tool-loop": frozenset({EventType.TOOL_CALL}),
+    "reasoning-spiral": frozenset(),
+    # session_start for the budget, then session_cost, which reads what
+    # `agent-strace cost` reads.
+    "budget-proximity": frozenset({EventType.SESSION_START}) | PHASE_DATA_EVENT_TYPES,
+    # Measures the JSON size of data and reads no keys.
+    "context-saturation": frozenset(),
+    # Compaction detection reads the stream keys of every event.
+    "post-compaction-regression": None,
+    "redundant-read": frozenset({EventType.TOOL_CALL, EventType.FILE_READ}),
+    "error-retry-loop": frozenset({EventType.TOOL_CALL, EventType.TOOL_RESULT}),
+    "no-output": frozenset({EventType.TOOL_CALL}),
+}
+
 
 # ---------------------------------------------------------------------------
 # Config loading
@@ -449,27 +494,66 @@ def _load_config(config_path: str | None) -> dict:
 # Core lint function
 # ---------------------------------------------------------------------------
 
+def _enabled_rules(config: dict) -> list[str]:
+    return [
+        rule_name for rule_name in _RULES
+        if config.get(rule_name, {}).get("enabled", True)
+    ]
+
+
+def _checked_event_types(rule_names: list[str]) -> Collection[EventType] | None:
+    """Return the event types the given rules read data from; None means all."""
+    types: set[EventType] = set()
+    for rule_name in rule_names:
+        reads = _RULE_DATA_EVENT_TYPES.get(rule_name)
+        if reads is None:
+            return None
+        types |= reads
+    return types
+
+
 def lint_session(
     store: TraceStore,
     session_id: str,
     config: dict | None = None,
+    *,
+    name_session: bool = True,
 ) -> LintReport:
-    """Run all enabled rules against a session. Returns a LintReport."""
+    """Run all enabled rules against a session. Returns a LintReport.
+
+    Raises :class:`~agent_trace.event_data.NonObjectEventDataError` before
+    any rule runs when an event the enabled rules read has data that is not
+    an object, as other commands refuse such a session. The message names the
+    session unless ``name_session`` is False. A rule that raises anything else
+    is recorded in ``report.rule_errors`` and the other rules still run, so
+    callers can tell an incomplete report from a clean one.
+    """
     if config is None:
         config = DEFAULT_CONFIG
 
     events = store.load_events(session_id)
+    rule_names = _enabled_rules(config)
+    checked = _checked_event_types(rule_names)
+    if checked is None or checked:
+        require_object_event_data(
+            events,
+            event_types=checked,
+            session_id=session_id if name_session else None,
+        )
     report = LintReport(session_id=session_id)
 
-    for rule_name, rule_fn in _RULES.items():
+    for rule_name in rule_names:
+        rule_fn = _RULES[rule_name]
         rule_cfg = config.get(rule_name, {})
-        if not rule_cfg.get("enabled", True):
-            continue
         try:
             findings = rule_fn(events, rule_cfg)
             report.findings.extend(findings)
         except Exception as exc:
-            sys.stderr.write(f"[lint] Rule {rule_name!r} failed: {exc}\n")
+            report.rule_errors.append(RuleError(
+                rule=rule_name,
+                error_type=type(exc).__name__,
+                message=str(exc),
+            ))
 
     return report
 
@@ -483,9 +567,20 @@ _LEVEL_ORDER = {LintLevel.ERROR: 0, LintLevel.WARN: 1, LintLevel.INFO: 2}
 
 def format_report(report: LintReport, out: TextIO = sys.stdout) -> None:
     """Print a lint report in human-readable form."""
-    if not report.findings:
+    if not report.findings and not report.rule_errors:
         out.write(f"✓  No issues found in session {report.session_id[:12]}\n")
         return
+
+    if report.rule_errors:
+        count = len(report.rule_errors)
+        out.write(
+            f"Could not run {count} rule(s) in session {report.session_id[:12]}, "
+            "so these findings are incomplete:\n"
+        )
+        for err in report.rule_errors:
+            out.write(f"FAILED {err.rule:<22}  {err.error_type}: {inert(err.message)}\n")
+        if report.findings:
+            out.write("\n")
 
     # Sort: ERROR first, then WARN, then INFO
     sorted_findings = sorted(report.findings, key=lambda f: _LEVEL_ORDER.get(f.level, 99))
@@ -500,7 +595,9 @@ def format_report(report: LintReport, out: TextIO = sys.stdout) -> None:
         f"\n{report.errors} error(s), {report.warnings} warning(s), "
         f"{report.infos} info(s)."
     )
-    if report.errors == 0 and report.warnings == 0:
+    if report.rule_errors:
+        out.write(f" {len(report.rule_errors)} rule(s) could not run. Exit code: 1\n")
+    elif report.errors == 0 and report.warnings == 0:
         out.write(" Exit code: 0\n")
     else:
         out.write(" Use --strict for non-zero exit on warnings.\n")
@@ -521,6 +618,14 @@ def format_report_json(report: LintReport) -> str:
                 "line_end": f.line_end,
             }
             for f in report.findings
+        ],
+        "rule_errors": [
+            {
+                "rule": err.rule,
+                "error_type": err.error_type,
+                "message": err.message,
+            }
+            for err in report.rule_errors
         ],
     }, indent=2)
 
@@ -565,11 +670,21 @@ def cmd_lint(args: argparse.Namespace) -> int:
         session_ids = [full_id]
 
     reports: list[LintReport] = []
+    refusals: list[NonObjectEventDataError] = []
     for sid in session_ids:
-        reports.append(lint_session(store, sid, config))
+        if not lint_all:
+            # Same message and exit code (via the CLI handler) as other
+            # single-session commands.
+            reports.append(lint_session(store, sid, config, name_session=False))
+            continue
+        try:
+            reports.append(lint_session(store, sid, config))
+        except NonObjectEventDataError as exc:
+            # One refused session must not hide the others' results.
+            refusals.append(exc)
 
     if fmt == "json":
-        if len(reports) == 1:
+        if len(session_ids) == 1 and reports:
             sys.stdout.write(format_report_json(reports[0]) + "\n")
         else:
             sys.stdout.write(json.dumps([
@@ -577,14 +692,18 @@ def cmd_lint(args: argparse.Namespace) -> int:
             ], indent=2) + "\n")
     else:
         for report in reports:
-            if len(reports) > 1:
+            if len(session_ids) > 1:
                 sys.stdout.write(f"\n── Session {report.session_id[:12]} ──\n")
             format_report(report, sys.stdout)
+    for exc in refusals:
+        sys.stderr.write(f"Error: {exc}\n")
 
     # Exit code
     total_errors = sum(r.errors for r in reports)
     total_warnings = sum(r.warnings for r in reports)
 
+    if refusals or any(r.rule_errors for r in reports):
+        return 1
     if strict and (total_errors > 0 or total_warnings > 0):
         return 1
     if total_errors > 0:

@@ -74,7 +74,10 @@ was available; they are not roster coverage.
 
 Task types are keyword heuristics. Anomaly callouts compare group averages only
 when the subject and at least three other eligible peers meet the minimum
-session and cost-coverage floors. Lint signals are structural heuristics. The
+session and cost-coverage floors. Lint signals are structural heuristics. Lint
+counts cover only sessions where every lint rule ran (`lint_checked_sessions`
+per team); with none, `lint_findings` and `sessions_with_lint_signals` are
+`null` in JSON rather than 0. The
 report does not infer task completion, productivity, efficiency, or causes.
 
 Remote collector reports first read session metadata and then one event stream per

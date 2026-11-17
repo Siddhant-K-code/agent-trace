@@ -52,9 +52,10 @@ class SessionContextMetrics:
     started_at: float
     cost: float | None
     tool_calls: int
-    lint_findings: int
-    redundant_reads: int
-    context_saturation: int
+    # None when lint refused the session or a lint rule could not run.
+    lint_findings: int | None
+    redundant_reads: int | None
+    context_saturation: int | None
     scope_violations: int
     instruction_violations: int
 
@@ -90,22 +91,37 @@ class VersionScore:
         return _avg([s.tool_calls for s in self.sessions])
 
     @property
-    def lint_per_session(self) -> float:
-        return _avg([s.lint_findings for s in self.sessions])
+    def linted_session_count(self) -> int:
+        return sum(1 for s in self.sessions if s.lint_findings is not None)
+
+    @property
+    def unlinted_sessions(self) -> int:
+        return self.session_count - self.linted_session_count
+
+    def _linted(self) -> list[SessionContextMetrics]:
+        return [s for s in self.sessions if s.lint_findings is not None]
+
+    @property
+    def lint_per_session(self) -> float | None:
+        """Average over linted sessions, or None when none was linted."""
+        linted = self._linted()
+        return _avg([s.lint_findings for s in linted]) if linted else None
 
     @property
     def scope_violations_per_session(self) -> float:
         return _avg([s.scope_violations for s in self.sessions])
 
     @property
-    def redundant_reads_per_session(self) -> float:
-        return _avg([s.redundant_reads for s in self.sessions])
+    def redundant_reads_per_session(self) -> float | None:
+        linted = self._linted()
+        return _avg([s.redundant_reads for s in linted]) if linted else None
 
     @property
-    def context_saturation_rate(self) -> float:
-        if not self.sessions:
-            return 0.0
-        return sum(1 for s in self.sessions if s.context_saturation > 0) / len(self.sessions)
+    def context_saturation_rate(self) -> float | None:
+        linted = self._linted()
+        if not linted:
+            return None
+        return sum(1 for s in linted if s.context_saturation > 0) / len(linted)
 
     @property
     def instruction_violation_rate(self) -> float:
@@ -282,11 +298,16 @@ def _session_cost(events: list[TraceEvent], session_id: str) -> float | None:
         return None
 
 
-def _session_lint(store: TraceStore, session_id: str) -> tuple[int, int, int]:
+def _session_lint(
+    store: TraceStore, session_id: str,
+) -> tuple[int, int, int] | None:
+    """Return lint totals, or None when lint refuses the session or a rule fails."""
     try:
         report = lint_session(store, session_id)
     except Exception:
-        return 0, 0, 0
+        return None
+    if report.rule_errors:
+        return None
     redundant = sum(1 for finding in report.findings if finding.rule == "redundant-read")
     saturation = sum(1 for finding in report.findings if finding.rule == "context-saturation")
     return len(report.findings), redundant, saturation
@@ -324,7 +345,8 @@ def _session_metrics(
         event_types=_metrics_data_event_types(scope_globs, instruction_lines),
         session_id=meta.session_id,
     )
-    lint_count, redundant_reads, context_saturation = _session_lint(store, meta.session_id)
+    lint = _session_lint(store, meta.session_id)
+    lint_count, redundant_reads, context_saturation = lint if lint else (None, None, None)
     return SessionContextMetrics(
         session_id=meta.session_id,
         version_hash=version_hash,
@@ -368,7 +390,7 @@ def _suggestions(current: VersionScore | None, context_file: Path) -> list[str]:
         return []
     suggestions: list[str] = []
     token_estimate = len(context_file.read_text(errors="replace")) // 4 if context_file.exists() else 0
-    if current.context_saturation_rate > 0.20 or token_estimate > 800:
+    if (current.context_saturation_rate or 0.0) > 0.20 or token_estimate > 800:
         suggestions.append(
             f"{context_file.name} may be too long; consider splitting scope and conventions."
         )
@@ -376,7 +398,7 @@ def _suggestions(current: VersionScore | None, context_file: Path) -> list[str]:
         suggestions.append(
             "Some instructions appear to be ignored; rephrase them as explicit prohibitions."
         )
-    if current.redundant_reads_per_session >= 1.0:
+    if (current.redundant_reads_per_session or 0.0) >= 1.0:
         suggestions.append(
             "High redundant-read rate; add specific file path exclusions or reading order guidance."
         )
@@ -445,12 +467,20 @@ def build_context_score_report(
         and current.priced_session_count >= min_sessions
         and baseline.priced_session_count >= min_sessions
     )
+    # Lint compares only linted sessions, the same way.
+    lint_sufficient = bool(
+        sufficient
+        and baseline is not None
+        and current is not None
+        and current.linted_session_count >= min_sessions
+        and baseline.linted_session_count >= min_sessions
+    )
     dimensions: list[DimensionScore] = []
     if current:
         dimensions = [
             _dimension("Cost efficiency", current.avg_cost, baseline.avg_cost if baseline else None, cost_sufficient),
             _dimension("Tool efficiency", current.avg_tool_calls, baseline.avg_tool_calls if baseline else None, sufficient and baseline is not None),
-            _dimension("Lint violations", current.lint_per_session, baseline.lint_per_session if baseline else None, sufficient and baseline is not None),
+            _dimension("Lint violations", current.lint_per_session, baseline.lint_per_session if baseline else None, lint_sufficient),
             _dimension("Scope adherence", current.scope_violations_per_session, baseline.scope_violations_per_session if baseline else None, sufficient and baseline is not None),
         ]
 
@@ -487,6 +517,13 @@ def _fmt_avg_cost(version: VersionScore) -> str:
     return cost
 
 
+def _fmt_lint(version: VersionScore) -> str:
+    lint = "n/a" if version.lint_per_session is None else f"{version.lint_per_session:.1f}"
+    if version.unlinted_sessions:
+        lint += f" ({version.unlinted_sessions} not linted)"
+    return lint
+
+
 def format_context_score_text(report: ContextScoreReport, out: TextIO = sys.stdout) -> None:
     w = out.write
     current = report.current
@@ -516,7 +553,7 @@ def format_context_score_text(report: ContextScoreReport, out: TextIO = sys.stdo
     w(f"  sessions: {current.session_count}\n")
     w(f"  cost/session: {_fmt_avg_cost(current)}\n")
     w(f"  tool calls/session: {current.avg_tool_calls:.1f}\n")
-    w(f"  lint findings/session: {current.lint_per_session:.1f}\n")
+    w(f"  lint findings/session: {_fmt_lint(current)}\n")
     w(f"  scope violations/session: {current.scope_violations_per_session:.1f}\n")
 
     if report.baseline:
@@ -525,7 +562,7 @@ def format_context_score_text(report: ContextScoreReport, out: TextIO = sys.stdo
         w(f"  sessions: {base.session_count}\n")
         w(f"  cost/session: {_fmt_avg_cost(base)}\n")
         w(f"  tool calls/session: {base.avg_tool_calls:.1f}\n")
-        w(f"  lint findings/session: {base.lint_per_session:.1f}\n")
+        w(f"  lint findings/session: {_fmt_lint(base)}\n")
         w(f"  scope violations/session: {base.scope_violations_per_session:.1f}\n")
 
     if report.suggestions:
@@ -548,6 +585,7 @@ def format_context_score_json(report: ContextScoreReport) -> str:
             "unpriced_sessions": version.unpriced_sessions,
             "avg_tool_calls": version.avg_tool_calls,
             "lint_per_session": version.lint_per_session,
+            "unlinted_sessions": version.unlinted_sessions,
             "scope_violations_per_session": version.scope_violations_per_session,
             "redundant_reads_per_session": version.redundant_reads_per_session,
             "context_saturation_rate": version.context_saturation_rate,

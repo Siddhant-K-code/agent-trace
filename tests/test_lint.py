@@ -14,6 +14,7 @@ from agent_trace.lint import (
     LintLevel,
     LintReport,
     LintResult,
+    RuleError,
     _rule_budget_proximity,
     _rule_context_saturation,
     _rule_error_retry_loop,
@@ -27,7 +28,9 @@ from agent_trace.lint import (
     format_report_json,
     cmd_lint,
 )
+from agent_trace.cli import _run_handler
 from agent_trace.cost import estimate_cost
+from agent_trace.event_data import NonObjectEventDataError
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
 
@@ -221,22 +224,15 @@ class TestRuleBudgetProximity(unittest.TestCase):
         events[0].data["budget_dollars"] = cost / 0.85
         self.assertEqual(_rule_budget_proximity(events, self._cfg()), [])
 
-    def test_unpriceable_session_is_reported_not_flagged(self):
+    def test_unpriceable_session_is_refused(self):
         store, sid = self._budgeted(0.000001, prompt_data=["list the files"])
-        for _ in range(6):
-            call = _tool_call("Read")
-            call.session_id = sid
-            store.append_event(sid, call)
-        with patch("sys.stderr", new_callable=io.StringIO) as err:
-            report = lint_session(store, sid)
-        self.assertIn(
-            f"[lint] Rule 'budget-proximity' failed: session {sid} event data "
-            "must be an object",
-            err.getvalue(),
+        with self.assertRaises(NonObjectEventDataError) as caught:
+            lint_session(store, sid)
+        self.assertEqual(
+            str(caught.exception),
+            f"session {sid} event data must be an object: "
+            "event 2 of 11 (user_prompt) has array data",
         )
-        rules = {f.rule for f in report.findings}
-        self.assertNotIn("budget-proximity", rules)
-        self.assertIn("tool-loop", rules)
 
     def test_not_priced_without_budget(self):
         with patch("agent_trace.lint.session_cost") as priced:
@@ -514,9 +510,41 @@ class TestLintSession(unittest.TestCase):
             # no-output should still fire
             rules_fired = {f.rule for f in report.findings}
             self.assertIn("no-output", rules_fired)
+            self.assertEqual(report.rule_errors, [RuleError("tool-loop", "RuntimeError", "boom")])
         finally:
             if original:
                 lint_mod._RULES["tool-loop"] = original
+
+    def test_wrong_field_types_read_as_absent(self):
+        # As in the event_data readers, a non-string path or a non-bool
+        # is_error is ignored rather than counted.
+        reads = [_ev(EventType.FILE_READ, path=["a.py"]) for _ in range(5)]
+        reads += [_tool_call("Read", file_path={"nested": "a.py"}) for _ in range(5)]
+        self.assertEqual(
+            _rule_redundant_read(reads, dict(DEFAULT_CONFIG["redundant-read"])), [],
+        )
+        retries = []
+        for _ in range(5):
+            retries += [_tool_call("Bash"), _ev(EventType.TOOL_RESULT, is_error="false")]
+        self.assertEqual(
+            _rule_error_retry_loop(retries, dict(DEFAULT_CONFIG["error-retry-loop"])), [],
+        )
+
+    def test_check_covers_only_event_types_the_enabled_rules_read(self):
+        decision = TraceEvent(
+            event_type=EventType.DECISION, timestamp=1.0, session_id="s1", data="text",
+        )
+        store, sid = _make_store_with_events(
+            [_tool_call("Write", file_path="a.py"), decision, _session_end()],
+        )
+        with self.assertRaises(NonObjectEventDataError):
+            lint_session(store, sid)
+        # post-compaction-regression reads every event; without it no rule
+        # reads decision data.
+        config = {k: dict(v) for k, v in DEFAULT_CONFIG.items()}
+        config["post-compaction-regression"]["enabled"] = False
+        report = lint_session(store, sid, config=config)
+        self.assertEqual((report.findings, report.rule_errors), ([], []))
 
 
 # ---------------------------------------------------------------------------
@@ -643,6 +671,98 @@ class TestCmdLint(unittest.TestCase):
         args = self._make_args(store.base_dir, session_id="nonexistent")
         result = cmd_lint(args)
         self.assertEqual(result, 1)
+
+    @staticmethod
+    def _non_object_session(store: TraceStore | None = None) -> tuple[TraceStore, str]:
+        events = [
+            TraceEvent(event_type=event_type, timestamp=1.0, session_id="s1", data=data)
+            for event_type, data in (
+                (EventType.SESSION_START, {}),
+                (EventType.TOOL_CALL, "just a string"),
+                (EventType.TOOL_RESULT, ["a", "b"]),
+                (EventType.ERROR, None),
+                (EventType.SESSION_END, {}),
+            )
+        ]
+        if store is None:
+            store, sid = _make_store_with_events(events)
+        else:
+            sid = store.create_session(SessionMeta(agent_name="test", command="test")).name
+            for event in events:
+                event.session_id = sid
+                store.append_event(sid, event)
+        # append_event stores None data as an empty object; store null as
+        # older collectors did.
+        path = Path(store.base_dir) / sid / "events.ndjson"
+        lines = path.read_text(encoding="utf-8").splitlines()
+        error = json.loads(lines[3])
+        error["data"] = None
+        lines[3] = json.dumps(error, separators=(",", ":"))
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return store, sid
+
+    def _run(self, args) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with patch("sys.stdout", out), patch("sys.stderr", err):
+            code = _run_handler(args, cmd_lint)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_non_object_data_is_refused_like_other_commands(self):
+        store, sid = self._non_object_session()
+        for options in ({}, {"strict": True}, {"fmt": "json"}):
+            with self.subTest(**options):
+                result = self._run(self._make_args(store.base_dir, session_id=sid, **options))
+                self.assertEqual(result, (
+                    1,
+                    "",
+                    "Error: session event data must be an object: event 2 of 5 "
+                    "(tool_call) has string data; 2 more events have non-object data\n",
+                ))
+
+    def test_all_reports_other_sessions_and_names_the_refused_one(self):
+        store, good = _make_store_with_events(
+            [_tool_call("Write", file_path="a.py"), _session_end()],
+        )
+        _, bad = self._non_object_session(store)
+        error = (
+            f"Error: session {bad} event data must be an object: event 2 of 5 "
+            "(tool_call) has string data; 2 more events have non-object data\n"
+        )
+        code, out, err = self._run(self._make_args(store.base_dir, lint_all=True))
+        self.assertEqual((code, err), (1, error))
+        self.assertIn(f"Session {good[:12]}", out)
+        self.assertIn(f"No issues found in session {good[:12]}", out)
+        self.assertNotIn(bad[:12], out)
+
+        code, out, err = self._run(self._make_args(store.base_dir, lint_all=True, fmt="json"))
+        self.assertEqual((code, err), (1, error))
+        self.assertEqual([report["session_id"] for report in json.loads(out)], [good])
+
+    def test_rule_that_raises_is_not_reported_as_clean(self):
+        def broken(events, cfg):
+            raise RuntimeError("boom")
+
+        store, sid = _make_store_with_events(
+            [_tool_call("Write", file_path="a.py"), _session_end()],
+        )
+        with patch.dict("agent_trace.lint._RULES", {"no-output": broken}):
+            code, out, err = self._run(self._make_args(store.base_dir, session_id=sid))
+            self.assertEqual((code, err), (1, ""))
+            self.assertNotIn("No issues found", out)
+            self.assertIn(f"Could not run 1 rule(s) in session {sid[:12]}", out)
+            self.assertIn("FAILED no-output", out)
+            self.assertIn("RuntimeError: boom", out)
+
+            code, out, err = self._run(
+                self._make_args(store.base_dir, session_id=sid, fmt="json"),
+            )
+        self.assertEqual((code, err), (1, ""))
+        data = json.loads(out)
+        self.assertEqual(data["findings"], [])
+        self.assertEqual(
+            data["rule_errors"],
+            [{"rule": "no-output", "error_type": "RuntimeError", "message": "boom"}],
+        )
 
 
 if __name__ == "__main__":

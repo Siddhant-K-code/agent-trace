@@ -88,6 +88,8 @@ class SessionSummary:
     lint_violations: int = 0
     lint_errors: int = 0
     lint_warnings: int = 0
+    # Lint rules that raised, so the lint counts above are incomplete.
+    lint_rules_not_run: list[str] = field(default_factory=list)
     redundant_reads: dict[str, int] = field(default_factory=dict)
     errors: int = 0
 
@@ -334,6 +336,7 @@ def summarize_session(store: TraceStore, session_id: str) -> SessionSummary:
         lint_violations=len(non_redundant_findings),
         lint_errors=sum(1 for finding in non_redundant_findings if finding.level == "ERROR"),
         lint_warnings=sum(1 for finding in non_redundant_findings if finding.level == "WARN"),
+        lint_rules_not_run=[error.rule for error in lint.rule_errors],
         redundant_reads=activity.redundant,
         errors=max(meta.errors, error_events),
     )
@@ -662,6 +665,9 @@ def render_comment(
     lint_count = sum(summary.lint_violations for summary in summaries)
     lint_errors = sum(summary.lint_errors for summary in summaries)
     lint_warnings = sum(summary.lint_warnings for summary in summaries)
+    lint_not_run = sorted({
+        rule for summary in summaries for rule in summary.lint_rules_not_run
+    })
     error_count = sum(summary.errors for summary in summaries)
 
     lines.extend(["", "### Flags"])
@@ -685,8 +691,14 @@ def render_comment(
         lines.append(
             f"- ⚠️ {lint_count} lint {_plural(lint_count, 'violation')}{suffix}"
         )
-    else:
+    elif not lint_not_run:
         lines.append("- ✅ No lint violations")
+    if lint_not_run:
+        names = ", ".join(f"`{_safe_code_text(rule)}`" for rule in lint_not_run)
+        lines.append(
+            f"- ⚠️ Lint could not run {len(lint_not_run)} "
+            f"{_plural(len(lint_not_run), 'rule')}: {names}"
+        )
     if error_count:
         lines.append(f"- ❌ {error_count} {_plural(error_count, 'error')}")
     else:

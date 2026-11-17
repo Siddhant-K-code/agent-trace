@@ -1417,9 +1417,43 @@ after a detected compaction.
 default model, with the `budget_dollars` or `max_cost_dollars` in its
 `session_start` event, and fires at `threshold` (default 0.90) of the budget.
 Earlier versions estimated the cost from the size of prompts, model requests
-and responses at $9 per million tokens. For a session that `agent-strace cost`
-refuses, the rule prints `[lint] Rule 'budget-proximity' failed: ...` to stderr
-and adds no finding; the other rules still run.
+and responses at $9 per million tokens.
+
+`lint` refuses a session in which an event the enabled rules read has data
+that is not a JSON object, with the same `Error: session event data must be
+an object: ...` message on stderr and exit code 1 as `cost`, `stats` and the
+other commands in
+[Sessions with non-object event data](#sessions-with-non-object-event-data).
+It checks every event while `post-compaction-regression` is enabled, since
+that rule reads every event. With `--all`, `lint` still reports every other
+session, prints one `Error: session <id> event data must be an object: ...`
+line on stderr per refused session, and exits 1. Earlier versions printed
+`[lint] Rule '...' failed: ...` to stderr for such a session, then
+`✓  No issues found` and exit code 0.
+
+If a rule raises, the other rules still run, but the report is incomplete and
+never shows `✓  No issues found`. The text report lists each rule that could
+not run:
+
+```
+Could not run 1 rule(s) in session 3f9a2c1b7d4e, so these findings are incomplete:
+FAILED no-output               RuntimeError: boom
+
+0 error(s), 0 warning(s), 0 info(s). 1 rule(s) could not run. Exit code: 1
+```
+
+`--format json` prints one object per session (a list with `--all`) with
+`session_id`, `errors`, `warnings`, `infos`, `findings` (each with `rule`,
+`level`, `message`, `line_start` and `line_end`) and `rule_errors` (each with
+`rule`, `error_type` and `message`; empty when every rule ran). Refused
+sessions are left out of the JSON list and reported on stderr.
+
+Exit codes:
+
+| Code | Meaning |
+|---|---|
+| `0` | Every rule ran on every session, with no ERROR finding (and, with `--strict`, no WARN) |
+| `1` | An ERROR finding, a WARN with `--strict`, a rule that could not run (with or without `--strict`), a refused session, or no matching session |
 
 ### `eval`
 ```
@@ -1472,7 +1506,8 @@ Built-in scorers are `cost_usd`, `error_count`, `session_status`,
 `redundant_read_ratio`, `tool_call_count`, `context_fill_ratio`,
 `duration_seconds`, and `lint_violations`. A custom Python callable can be
 referenced as `package.module:function` and receives session events plus any
-criterion-specific parameters it declares.
+criterion-specific parameters it declares. When a lint rule could not run, a
+`lint_violations` criterion fails with no score, and its reason names the rule.
 
 | Flag | Default | Description |
 |---|---|---|
@@ -1578,6 +1613,7 @@ Read with care:
 - Baseline is the oldest version, or the previous version with `--compare`.
 - Sessions that start before the first `config-watch` snapshot count as the current version.
 - Cost is the `agent-strace cost` total at the default model. Sessions it refuses are reported as `N not priced` and left out of cost averages (`avg_cost` is `null` in JSON when none is priced), and the cost dimension needs `--min-sessions` priced sessions per version.
+- Lint findings, redundant reads and context saturation come from `agent-strace lint`. Sessions it refuses or where a lint rule could not run are reported as `N not linted` (`unlinted_sessions` in JSON) and left out of those averages, which show `n/a` in text and `null` in JSON when no session is linted. The lint dimension needs `--min-sessions` linted sessions per version.
 - Ignores skills and whether the agent read the context file. For adoption, see [skills.md](skills.md). For controlled instruction evidence, see [instruction-compliance.md](instruction-compliance.md).
 
 | Flag | Description |
@@ -2267,13 +2303,13 @@ These commands refuse such sessions: `a2a-tree`, `audit`, `budget-report`,
 `cognitive-debt`, `compaction`, `compare`, `compliance export`,
 `context-score --file`, `cost`, `dashboard --trend`, `diff`, `explain`,
 `export` with `--format otlp`, `otlp-genai`, `temporal`, or `eu-ai-act` or with
-`--backend`, `inflation`, `mcp-scan --session`, `oncall`, `optimize`,
+`--backend`, `inflation`, `lint`, `mcp-scan --session`, `oncall`, `optimize`,
 `policy generate`, `postmortem`, `pr-comment`, `replay`, `sample`, `share`,
 `standup`, `stats`, `team-report`, `tenant report`, `timeline`, `token-budget`,
 and `why`. A command refuses only when it reads an event whose data is not an
 object, so the same session keeps working with commands that never read that
 event. When only the cost calculation reads such an event, `context-score`,
-`dashboard`, `drift`, `export --metrics --backend otlp`, `fingerprint`, `lint`,
+`dashboard`, `drift`, `export --metrics --backend otlp`, `fingerprint`,
 `replay --format html`, `sample`, `team-report` and `eval dataset auto --filter
 cost-above:N` show the session as not priced instead of refusing it, as
 described for each command. For example, `export --format otlp-genai` and
