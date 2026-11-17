@@ -828,6 +828,9 @@ class TestWatchSessionOtlpStreamNonObjectData(_ReceiverTestCase):
 # No stream or watch line may show these parts of a URL.
 _MARKERS = ("SECRET", "token")
 _NOT_FOLLOWED = " (redirects are not followed; give the final URL)"
+# Shown raw, this reason phrase sets the window title and clears the screen.
+_REASON = "Oops \x1b]0;PWNED\x07\x1b[2J\x9b31m end"
+_REASON_SHOWN = "Oops \\x1b]0;PWNED\\x07\\x1b[2J\\x9b31m end"
 _NOTICE = (
     r"\[stream\] Waiting up to \d+s more for the last events to be sent; "
     r"press Ctrl-C to stop waiting\.\n"
@@ -862,7 +865,8 @@ class _ScriptedServer(ThreadingHTTPServer):
 
     A reply waits *hold* seconds, or until ``release`` is set, before it is
     sent. A 3xx reply points Location at a URL with markers in it, and every
-    GET gets 200.
+    GET gets 200. Each reply has the standard reason phrase, or ``reason``
+    when it is set.
     """
 
     daemon_threads = True
@@ -874,6 +878,7 @@ class _ScriptedServer(ThreadingHTTPServer):
         self.requests: list[tuple[str, str, bytes]] = []
         self.replies: list[tuple[int, float]] = []
         self.release = threading.Event()
+        self.reason: str | None = None
 
     def handle_error(self, request, client_address) -> None:
         pass  # the client timed out and closed the connection
@@ -902,7 +907,7 @@ class _ScriptedHandler(BaseHTTPRequestHandler):
             status, hold = server.replies.pop(0) if server.replies else (200, 0.0)
         if hold:
             server.release.wait(hold)
-        self.send_response(status)
+        self.send_response(status, server.reason)
         if 300 <= status < 400:
             self.send_header("Location", "/SECRET-LOCATION?token=SECRET-QUERY")
         self.send_header("Content-Length", "0")
@@ -1003,6 +1008,14 @@ class TestStreamLinesNameOnlyTheEndpoint(_ScriptedReceiverTestCase):
                         stderr, label, f"failed: HTTP Error {status}: {reason}{_NOT_FOLLOWED}",
                     )
                     self.assertEqual(self.server.methods(), ["POST"])
+
+    def test_reason_phrase_is_inert(self) -> None:
+        self.server.reason = _REASON
+        for otlp, label in _MODES:
+            with self.subTest(otlp=otlp):
+                self.server.script((500, 0.0))
+                stderr = self._stream(self._marked_url(), otlp=otlp)
+                self._assert_line(stderr, label, f"failed: HTTP Error 500: {_REASON_SHOWN}")
 
     def test_timeout(self) -> None:
         for otlp, label in _MODES:

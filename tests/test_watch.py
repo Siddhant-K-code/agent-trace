@@ -1354,6 +1354,9 @@ _MARKERS = ("SECRET", "token")
 _USER_INFO = "SECRET-USER:SECRET-PASS@"
 _NOT_FOLLOWED = " (redirects are not followed; give the final URL)"
 _NOTIFY_ENV = ("AGENT_STRACE_SLACK_WEBHOOK", "AGENT_STRACE_TEAMS_WEBHOOK")
+# Shown raw, this reason phrase sets the window title and clears the screen.
+_REASON = "Oops \x1b]0;PWNED\x07\x1b[2J\x9b31m end"
+_REASON_SHOWN = "Oops \\x1b]0;PWNED\\x07\\x1b[2J\\x9b31m end"
 
 
 def _closed_port() -> int:
@@ -1377,7 +1380,8 @@ class _AlertServer(ThreadingHTTPServer):
 
     A reply waits *hold* seconds, or until ``release`` is set, before it is
     sent. A 3xx reply points Location at a URL with markers in it, and every
-    GET gets 200. ``on_post`` is called when a POST arrives.
+    GET gets 200. ``on_post`` is called when a POST arrives. Each reply has
+    the standard reason phrase, or ``reason`` when it is set.
     """
 
     daemon_threads = True
@@ -1390,6 +1394,7 @@ class _AlertServer(ThreadingHTTPServer):
         self.replies: list[tuple[int, float]] = []
         self.release = threading.Event()
         self.on_post = None
+        self.reason: str | None = None
 
     def handle_error(self, request, client_address) -> None:
         pass  # the client timed out and closed the connection
@@ -1416,7 +1421,7 @@ class _AlertHandler(BaseHTTPRequestHandler):
             server.on_post()
         if hold:
             server.release.wait(hold)
-        self.send_response(status)
+        self.send_response(status, server.reason)
         if 300 <= status < 400:
             self.send_header("Location", "/SECRET-LOCATION?token=SECRET-QUERY")
         self.send_header("Content-Length", "0")
@@ -1499,6 +1504,14 @@ class TestAlertWebhookFailures(_AlertServerTestCase):
                     f"HTTP Error {status}: {HTTPStatus(status).phrase}{_NOT_FOLLOWED}\n",
                 )
                 self.assertEqual(self.server.methods(), ["POST"])
+
+    def test_reason_phrase_is_inert(self):
+        self.server.reason = _REASON
+        self.server.script((500, 0.0))
+        self.assertEqual(
+            self._post(),
+            f"[watch] Webhook POST to {self.endpoint} failed: HTTP Error 500: {_REASON_SHOWN}\n",
+        )
 
     def test_refused_connection_prints_one_line(self):
         port = _closed_port()

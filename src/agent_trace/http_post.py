@@ -16,6 +16,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from .inert import inert
+
 # RFC 9110 token characters, the only ones an HTTP header name may contain.
 _TOKEN_CHARS = frozenset(string.ascii_letters + string.digits + "!#$%&'*+-.^_`|~")
 
@@ -156,11 +158,13 @@ def post_error_detail(exc: BaseException) -> str:
     """Describe why a POST failed without quoting its URL.
 
     Keeps the status and reason of an HTTP error and the reason of a network
-    error. Other exceptions (InvalidURL, ValueError, UnicodeEncodeError and
-    more) can repeat the URL, so only their class name is given.
+    error. A server or a proxy writes the reason, so each unprintable
+    character in it is shown as an escape. Other exceptions (InvalidURL,
+    ValueError, UnicodeEncodeError and more) can repeat the URL, so only
+    their class name is given.
     """
     if isinstance(exc, urllib.error.HTTPError):
-        return f"HTTP Error {exc.code}: {exc.reason}{redirect_hint(exc)}"
+        return f"HTTP Error {exc.code}: {inert(exc.reason)}{redirect_hint(exc)}"
     if isinstance(exc, urllib.error.URLError):
-        return str(exc.reason)
+        return inert(exc.reason)
     return type(exc).__name__

@@ -579,9 +579,9 @@ Each alert is one line on the terminal and one line in the alert log
 an alert can quote escape codes or line breaks. Watch shows each character
 that Python's `str.isprintable()` rejects as its escape, such as `\x1b`, `\n`
 or `\u202e`, so the agent cannot hide an alert or forge a log entry. Other
-`[watch]` lines that quote the session or a server reply do the same. The
-`--webhook` payload, `--stream-to` and the post-mortem are JSON and keep the
-raw text.
+`[watch]`, `[stream]` and `[notify]` lines that quote the session or a server
+reply do the same. The `--webhook` payload, `--stream-to` and the post-mortem
+are JSON and keep the raw text.
 
 A kill sends the agent `SIGTERM`, then `SIGCONT`, and `SIGKILL` 5 seconds
 later. `SIGCONT` lets a stopped agent act on `SIGTERM`: a process stopped by a
@@ -1671,12 +1671,13 @@ The lines never repeat the URL or a header, which can carry a token.
 The POST does not follow redirects, so pass the final URL. Any 2xx answer is
 success: export prints `Exported N events to scheme://host[:port] (HTTP code)`
 and exits 0. Any other answer, a network error, or no answer within 30 seconds
-prints `OTLP export to scheme://host[:port] failed: <reason>` and exits 1. When
-the collector sent an error body, its first 200 characters follow on a second,
-indented line, with each line break, ESC or other unprintable character
-replaced by a space, so the rest of an escape code, such as `[31m`, still
-shows. These lines name only the URL's `scheme://host[:port]`, never its path,
-query or user info, or a header value.
+prints `OTLP export to scheme://host[:port] failed: <reason>` and exits 1. The
+collector or a proxy writes the reason, so each unprintable character in it
+shows as its escape, such as `\x1b`. When the collector sent an error body,
+its first 200 characters follow on a second, indented line, with each line
+break, ESC or other unprintable character replaced by a space, so the rest of
+an escape code, such as `[31m`, still shows. These lines name only the URL's
+`scheme://host[:port]`, never its path, query or user info, or a header value.
 
 `--format otlp` and `otlp-genai` emit `gen_ai.conversation.id` with the
 agent's own session ID when the session has one (hook payloads that carry
