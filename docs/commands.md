@@ -1198,7 +1198,7 @@ Authenticate with a hosted collector that has SSO enabled. `login` asks you to o
 ```
 agent-strace apply [--config FILE] [--server URL] [--auth-key KEY] [--dry-run] [--dir DIR]
 ```
-Apply `.agent-strace.yaml` to the local store, or to a hosted collector with `--server URL` (authenticated with `--auth-key KEY`). The POSTs to `--server` do not follow redirects, so pass the final URL. The GET that lists the server's workspaces follows a redirect only to the same scheme, host and port. Use `--dry-run` to preview changes without writing. The local store is `--dir DIR` when given, else the global trace store (`--trace-dir`, else `$AGENT_TRACE_DIR`, else `.agent-traces`).
+Apply `.agent-strace.yaml` to the local store, or to a hosted collector with `--server URL` (authenticated with `--auth-key KEY`). The POSTs to `--server` do not follow redirects, so pass the final URL. The GET that lists the server's workspaces follows a redirect only to the same scheme, host and port. `apply` makes that GET only when the config declares a workspace with a name. If it fails, or its reply is not a list of workspaces with names, `apply` prints one `!` line, sends nothing else and exits 1, also with `--dry-run`. Use `--dry-run` to preview changes without writing. The local store is `--dir DIR` when given, else the global trace store (`--trace-dir`, else `$AGENT_TRACE_DIR`, else `.agent-traces`).
 
 ### `config-diff`
 ```

@@ -4,14 +4,22 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
+import socket
 import sys
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import StringIO
 from pathlib import Path
+from typing import Any
+from unittest import mock
 
 sys.path.insert(0, "src")
 
+from agent_trace import iac
 from agent_trace.iac import (
     _parse_yaml,
     _coerce,
@@ -318,7 +326,8 @@ class TestCLIApply(unittest.TestCase):
 
     def test_apply_server_get_redirect_to_another_origin_is_refused(self):
         # urlopen sent the key to B and read B's list, so prod was reported
-        # as already on the server.
+        # as already on the server. Then the refusal counted as an empty
+        # list, and prod was POSTed to A.
         servers = RedirectServers(
             self, methods=("GET",), reply=[{"name": "prod"}], a_reply=[]
         )
@@ -327,12 +336,293 @@ class TestCLIApply(unittest.TestCase):
         for status in ALL_REDIRECTS:
             with self.subTest(status=status):
                 servers.redirect(status)
-                _, out = _run(cmd_apply, {"config": str(cfg_file), "dry_run": False,
-                                          "server": servers.url, "auth_key": "iac-key",
-                                          "dir": self._tmp})
+                rc, out = _run(cmd_apply, {"config": str(cfg_file), "dry_run": False,
+                                           "server": servers.url, "auth_key": "iac-key",
+                                           "dir": self._tmp})
+                self.assertEqual(rc, 1)
+                self.assertIn(
+                    f"  {_LIST_FAILED}GET {servers.url}/api/workspaces → "
+                    f"{status}{ORIGIN_NOTE}\n",
+                    out,
+                )
                 self.assertNotIn("exists on server", out)
-                self.assertEqual(servers.a.methods(), ["GET", "POST"])
+                self.assertEqual(servers.a.methods(), ["GET"])
                 self.assertEqual(servers.b.received(), [])
+
+
+# A server's raw status line. Shown raw, it erases the line, writes to the
+# clipboard (OSC 52), rings the bell and moves the cursor back.
+_BAD_STATUS_LINE = "\x1b[2K\x1b]52;c;aWQK\x07EVIL 200 OK\r\n"
+_BAD_STATUS_LINE_SHOWN = "\\x1b[2K\\x1b]52;c;aWQK\\x07EVIL 200 OK\\r\\n"
+_LIST_FAILED = "! workspaces: could not list them on the server, so nothing was applied: "
+_NOT_A_LIST = "the reply is not a list of workspaces with names"
+_RBAC = "rbac:\n  - user: alice@example.com\n    role: admin\n"
+_PROD_AND_RBAC = "workspaces:\n  - name: prod\n" + _RBAC
+_PROD_AND_STAGING = "workspaces:\n  - name: prod\n  - name: staging\n"
+_ALICE = "alice@example.com → admin"
+_ALICE_POST = {
+    "principal": "alice@example.com", "principal_type": "user",
+    "role": "admin", "workspace_id": "",
+}
+
+
+def _http_reply(status: str, body: bytes = b"") -> bytes:
+    """Return a whole HTTP/1.0 response with *status* and *body*."""
+    return f"HTTP/1.0 {status}\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body
+
+
+def _json_reply(value: Any) -> bytes:
+    return _http_reply("200 OK", json.dumps(value).encode())
+
+
+class _ScriptedServer(ThreadingHTTPServer):
+    """Answer each request with the bytes scripted for its method and path.
+
+    An entry in *script* is the whole response, status line included, so it
+    can be a bad status line or a body that is not JSON. Empty bytes close
+    the connection with no reply. A request with no entry gets 200 and {}.
+    """
+
+    daemon_threads = True
+    block_on_close = False
+
+    def __init__(self, script: dict[str, bytes]) -> None:
+        super().__init__(("127.0.0.1", 0), _ScriptedHandler)
+        self.url = f"http://127.0.0.1:{self.server_address[1]}"
+        self.script = script
+        self.lock = threading.Lock()
+        self._received: list[tuple[str, str, Any]] = []
+
+    def handle_error(self, request, client_address) -> None:
+        pass  # the client gave up and closed the connection
+
+    def record(self, method: str, path: str, body: bytes) -> None:
+        with self.lock:
+            self._received.append((method, path, json.loads(body) if body else None))
+
+    def requests(self) -> list[tuple[str, str, Any]]:
+        """Return the method, path and JSON body of each request, in order."""
+        with self.lock:
+            return list(self._received)
+
+    def clear(self) -> None:
+        with self.lock:
+            self._received.clear()
+
+
+class _ScriptedHandler(BaseHTTPRequestHandler):
+    def log_message(self, *args: Any) -> None:
+        pass
+
+    def _answer(self) -> None:
+        length = int(self.headers.get("Content-Length") or 0)
+        self.server.record(self.command, self.path, self.rfile.read(length))
+        key = f"{self.command} {self.path}"
+        self.wfile.write(self.server.script.get(key, _json_reply({})))
+
+    do_GET = do_POST = _answer
+
+
+class TestApplyServerListing(unittest.TestCase):
+    """apply --server lists the server's workspaces before it sends anything."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self._tmp = tmp.name
+        self._config = Path(self._tmp) / ".agent-strace.yaml"
+        # A proxy from the environment or the system must not see these.
+        environ = mock.patch.dict(os.environ, {"no_proxy": "*"})
+        environ.start()
+        self.addCleanup(environ.stop)
+
+    def _serve(self, script: dict[str, bytes]) -> _ScriptedServer:
+        server = _ScriptedServer(script)
+        thread = threading.Thread(
+            target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True,
+        )
+        thread.start()
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server
+
+    def _apply(self, config: str, server: str, dry_run: bool) -> tuple[int, str]:
+        self._config.write_text(config)
+        return _run(cmd_apply, {"config": str(self._config), "dry_run": dry_run,
+                                "server": server, "auth_key": "iac-key", "dir": self._tmp})
+
+    def _assert_output(
+        self, out: str, dry_run: bool, *changes: str, added: int = 0, errors: int = 0,
+    ) -> None:
+        """Check that apply printed its header, *changes* and the summary, and nothing else."""
+        prefix = "[dry-run] " if dry_run else ""
+        header, _, rest = out.partition("\n")
+        self.assertEqual(header.rstrip("."), f"{prefix}Applying {self._config}")
+        lines = "".join(f"  {change}\n" for change in changes)
+        self.assertEqual(
+            rest, f"{lines}\n{prefix}Done. +{added} added, ~0 updated, !{errors} errors\n"
+        )
+
+    def _assert_no_raw_controls(self, out: str) -> None:
+        for char in ("\x1b", "\x07", "\r"):
+            self.assertNotIn(char, out)
+
+    def test_failed_listing_sends_nothing_and_exits_1(self):
+        # Each failure counted as a server with no workspaces. --dry-run
+        # showed prod as new and exited 0, and a real run POSTed prod and
+        # the RBAC entry.
+        server = self._serve({})
+        url = f"{server.url}/api/workspaces"
+        replies = [
+            ("500", _http_reply("500 Internal Server Error"), f"GET {url} → 500"),
+            ("no reply", b"", "Remote end closed connection without response"),
+            ("bad status line", b"NOT HTTP\r\n", "NOT HTTP\\r\\n"),
+            ("invalid JSON", _http_reply("200 OK", b"not json"),
+             "Expecting value: line 1 column 1 (char 0)"),
+        ]
+        for shape in ({}, {"name": "prod"}, None, ["prod"], [{"id": 1}], [{"name": 5}],
+                      [{"name": "prod"}, {"id": 1}]):
+            replies.append((json.dumps(shape), _json_reply(shape), _NOT_A_LIST))
+        for label, reply, reason in replies:
+            for dry_run in (False, True):
+                with self.subTest(reply=label, dry_run=dry_run):
+                    server.script["GET /api/workspaces"] = reply
+                    server.clear()
+                    rc, out = self._apply(_PROD_AND_RBAC, server.url, dry_run)
+                    self._assert_output(out, dry_run, _LIST_FAILED + reason, errors=1)
+                    self.assertEqual(rc, 1)
+                    self.assertEqual(server.requests(), [("GET", "/api/workspaces", None)])
+
+    def test_refused_connection_sends_nothing_and_exits_1(self):
+        # A port that was listening a moment ago and is now closed. A bound
+        # socket that never listens is not enough: macOS drops the SYN.
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen()
+            url = f"http://127.0.0.1:{listener.getsockname()[1]}"
+        for dry_run in (False, True):
+            with self.subTest(dry_run=dry_run), \
+                    mock.patch.object(iac, "_http_get", wraps=iac._http_get) as get, \
+                    mock.patch.object(iac, "_http_post", wraps=iac._http_post) as post:
+                rc, out = self._apply(_PROD_AND_RBAC, url, dry_run)
+                reason = re.search(r"<urlopen error [^\n]+>", out)
+                self.assertIsNotNone(reason, out)
+                self._assert_output(out, dry_run, _LIST_FAILED + reason.group(), errors=1)
+                self.assertEqual(rc, 1)
+                get.assert_called_once_with(f"{url}/api/workspaces", "iac-key")
+                post.assert_not_called()
+
+    def test_failed_listing_shows_the_reason_as_escapes(self):
+        # http.client gives the server's raw status line as the error text.
+        server = self._serve({"GET /api/workspaces": _BAD_STATUS_LINE.encode("latin-1")})
+        for dry_run in (False, True):
+            with self.subTest(dry_run=dry_run):
+                server.clear()
+                rc, out = self._apply(_PROD_AND_RBAC, server.url, dry_run)
+                self._assert_output(out, dry_run, _LIST_FAILED + _BAD_STATUS_LINE_SHOWN, errors=1)
+                self._assert_no_raw_controls(out)
+                self.assertEqual(rc, 1)
+                self.assertEqual(server.requests(), [("GET", "/api/workspaces", None)])
+
+    def test_failed_workspace_post_shows_the_reason_as_escapes(self):
+        server = self._serve({
+            "GET /api/workspaces": _json_reply([]),
+            "POST /api/workspaces": _BAD_STATUS_LINE.encode("latin-1"),
+        })
+        rc, out = self._apply("workspaces:\n  - name: prod\n", server.url, False)
+        self._assert_output(out, False, f"! workspace: prod: {_BAD_STATUS_LINE_SHOWN}", errors=1)
+        self._assert_no_raw_controls(out)
+        self.assertEqual(rc, 1)
+        self.assertEqual(server.requests(), [
+            ("GET", "/api/workspaces", None),
+            ("POST", "/api/workspaces", {"name": "prod"}),
+        ])
+
+    def test_failed_rbac_post_shows_the_reason_as_escapes(self):
+        server = self._serve({
+            "GET /api/workspaces": _json_reply([{"name": "prod"}]),
+            "POST /api/rbac": _BAD_STATUS_LINE.encode("latin-1"),
+        })
+        rc, out = self._apply(_PROD_AND_RBAC, server.url, False)
+        self._assert_output(
+            out,
+            False,
+            "  workspace: prod (exists on server)",
+            f"! rbac: {_ALICE}: {_BAD_STATUS_LINE_SHOWN}",
+            errors=1,
+        )
+        self._assert_no_raw_controls(out)
+        self.assertEqual(rc, 1)
+        self.assertEqual(server.requests(), [
+            ("GET", "/api/workspaces", None),
+            ("POST", "/api/rbac", _ALICE_POST),
+        ])
+
+    def test_rbac_only_config_makes_no_get(self):
+        # The listing only matters for workspaces with names, so an apply
+        # without them does not depend on it.
+        server = self._serve({"GET /api/workspaces": _http_reply("500 Internal Server Error")})
+        configs = {"rbac only": _RBAC, "no workspace name": "workspaces:\n  - team: a\n" + _RBAC}
+        for label, config in configs.items():
+            for dry_run in (False, True):
+                with self.subTest(config=label, dry_run=dry_run):
+                    server.clear()
+                    rc, out = self._apply(config, server.url, dry_run)
+                    self._assert_output(out, dry_run, f"+ rbac: {_ALICE}", added=1)
+                    self.assertEqual(rc, 0)
+                    posts = [] if dry_run else [("POST", "/api/rbac", _ALICE_POST)]
+                    self.assertEqual(server.requests(), posts)
+
+    def test_get_is_made_when_a_later_workspace_has_a_name(self):
+        # The first workspace has no name. The GET must still be made for prod.
+        server = self._serve({"GET /api/workspaces": _json_reply([{"name": "prod"}])})
+        for dry_run in (False, True):
+            with self.subTest(dry_run=dry_run):
+                server.clear()
+                rc, out = self._apply(
+                    "workspaces:\n  - team: a\n  - name: prod\n", server.url, dry_run,
+                )
+                self._assert_output(out, dry_run, "  workspace: prod (exists on server)")
+                self.assertEqual(rc, 0)
+                self.assertEqual(server.requests(), [("GET", "/api/workspaces", None)])
+
+    def test_listed_workspace_exists_and_the_others_are_posted(self):
+        server = self._serve({"GET /api/workspaces": _json_reply([{"name": "prod"}])})
+        for dry_run in (False, True):
+            with self.subTest(dry_run=dry_run):
+                server.clear()
+                rc, out = self._apply(_PROD_AND_STAGING + _RBAC, server.url, dry_run)
+                self._assert_output(
+                    out,
+                    dry_run,
+                    "  workspace: prod (exists on server)",
+                    "+ workspace: staging",
+                    f"+ rbac: {_ALICE}",
+                    added=2,
+                )
+                self.assertEqual(rc, 0)
+                posts = [] if dry_run else [
+                    ("POST", "/api/workspaces", {"name": "staging"}),
+                    ("POST", "/api/rbac", _ALICE_POST),
+                ]
+                self.assertEqual(server.requests(), [("GET", "/api/workspaces", None)] + posts)
+
+    def test_empty_listing_posts_every_workspace(self):
+        server = self._serve({"GET /api/workspaces": _json_reply([])})
+        for dry_run in (False, True):
+            with self.subTest(dry_run=dry_run):
+                server.clear()
+                rc, out = self._apply(_PROD_AND_STAGING, server.url, dry_run)
+                self._assert_output(
+                    out, dry_run, "+ workspace: prod", "+ workspace: staging", added=2,
+                )
+                self.assertEqual(rc, 0)
+                posts = [] if dry_run else [
+                    ("POST", "/api/workspaces", {"name": "prod"}),
+                    ("POST", "/api/workspaces", {"name": "staging"}),
+                ]
+                self.assertEqual(server.requests(), [("GET", "/api/workspaces", None)] + posts)
 
 
 class TestHTTPGet(unittest.TestCase):
