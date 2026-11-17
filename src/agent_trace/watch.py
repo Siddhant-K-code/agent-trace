@@ -2700,7 +2700,7 @@ def watch_session(
     """
     events_file = store._session_file(session_id, "events.ndjson", "event stream")
     if not events_file.exists():
-        out.write(f"[watch] events file not found: {events_file}\n")
+        out.write(f"[watch] events file not found: {inert(events_file)}\n")
         return
 
     # Temporal's OTel interceptor can pass the activity's W3C traceparent to
@@ -2725,7 +2725,7 @@ def watch_session(
     )
 
     mode = " [dry-run]" if dry_run else ""
-    out.write(f"[watch] Monitoring session {session_id[:12]}...{mode}\n")
+    out.write(f"[watch] Monitoring session {inert(session_id[:12])}...{mode}\n")
     if agent_pid:
         out.write(f"[watch] Agent pid {agent_pid}: pause, kill and approval actions will signal it\n")
     if nanny_rules:
@@ -2738,7 +2738,7 @@ def watch_session(
         try:
             checkpoint_path = checkpoint_watcher.checkpoint_current()
             if checkpoint_path:
-                out.write(f"[watch] Compaction checkpoint written to {checkpoint_path}\n")
+                out.write(f"[watch] Compaction checkpoint written to {inert(checkpoint_path)}\n")
         except OSError as exc:
             out.write(f"[watch] Could not write compaction checkpoint: {exc}\n")
     out.flush()
@@ -2829,7 +2829,7 @@ def watch_session(
                     checkpoint_path = checkpoint_watcher.update(event)
                     if checkpoint_path:
                         out.write(
-                            f"[watch] Compaction checkpoint written to {checkpoint_path}\n"
+                            f"[watch] Compaction checkpoint written to {inert(checkpoint_path)}\n"
                         )
                         out.flush()
                 except OSError as exc:

@@ -15,6 +15,7 @@ import time
 import unittest
 from collections import deque
 from contextlib import redirect_stderr, redirect_stdout
+from functools import partial
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -375,8 +376,8 @@ class TestAgentTextInAlerts(unittest.TestCase):
 
 class TestWatchLinesAreInert(unittest.TestCase):
     """Lines that watch writes with its own [watch] prefix are made inert
-    like alerts. Their text is watch's own today. The tests feed in escape
-    codes to check the sink, so later text is covered too."""
+    like alerts. Most of their text is watch's own today. The tests feed in
+    escape codes to check the sink, so later text is covered too."""
 
     _FORGED = "\x1b[2K\n2026-01-01T00:00:00Z  FORGED"
     _SHOWN = "\\x1b[2K\\n2026-01-01T00:00:00Z  FORGED"
@@ -444,6 +445,81 @@ class TestWatchLinesAreInert(unittest.TestCase):
         self._assert_budget_line(
             self._watch_budget(ProjectBudgetConfig(weekly=0.01, warn_at=0.5), [response])
         )
+
+    _SID = "abc\u202edef"
+
+    def _watch_stored_session(
+        self, *argv: str, stored: list[TraceEvent] | None, tailed: tuple = (),
+    ) -> str:
+        """Run watch with no session ID and return what it wrote. The only
+        stored session has an ID with U+202E. *stored* None means it has no
+        events file."""
+        # A session directory from an old store may hold any character but a
+        # control code (Cc). The agent can write one with the latest start
+        # time, and watch with no session ID picks it.
+        traces = self.root / "traces"
+        session = traces / self._SID
+        session.mkdir(parents=True)
+        meta = SessionMeta(session_id=self._SID, started_at=time.time())
+        (session / "meta.json").write_text(meta.to_json(), encoding="utf-8")
+        if stored is not None:
+            (session / "events.ndjson").touch()
+            store = TraceStore(traces, redact=False)
+            for event in stored:
+                store.append_event(self._SID, event)
+        os.environ.pop("AGENT_STRACE_TENANT_ID", None)
+
+        def tail(_path, poll_interval=0.5):
+            yield from tailed
+            yield _make_event(EventType.SESSION_END, time.time(), self._SID)
+
+        out = io.StringIO()
+        args = build_parser().parse_args(["--trace-dir", str(traces), "watch", *argv])
+        # The real watch_session, with its output sent to out.
+        with patch("agent_trace.watch.watch_session", partial(watch_session, out=out)), \
+                patch("agent_trace.watch._tail_events", tail), \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.assertEqual(cmd_watch(args), 0)
+        _assert_inert_lines(self, out.getvalue(), out.getvalue().count("\n"))
+        return out.getvalue()
+
+    def _full_context(self) -> TraceEvent:
+        # 170k input tokens fill 85% of the model's 200k window. The default
+        # checkpoint threshold is 80%.
+        return _make_event(
+            EventType.LLM_REQUEST, time.time(), self._SID,
+            model="claude-sonnet-4", input_tokens=170_000,
+        )
+
+    def _assert_checkpoint_line(self, out: str) -> None:
+        lines = [line for line in out.split("\n") if "Compaction checkpoint" in line]
+        self.assertEqual(len(lines), 1, ascii(out))
+        self.assertTrue(
+            lines[0].startswith("[watch] Compaction checkpoint written to "), ascii(out),
+        )
+        self.assertTrue(lines[0].endswith("abc\\u202edef.md"), ascii(out))
+
+    def test_stored_session_id_in_the_monitoring_line(self):
+        out = self._watch_stored_session(stored=[])
+        self.assertTrue(out.startswith("[watch] Monitoring session abc\\u202edef"), ascii(out))
+
+    def test_stored_session_id_in_the_events_file_line(self):
+        out = self._watch_stored_session(stored=None)
+        self.assertTrue(out.startswith("[watch] events file not found: "), ascii(out))
+        self.assertIn("abc\\u202edef", out)
+        _assert_inert_lines(self, out, 1)
+
+    def test_stored_session_id_in_the_checkpoint_line_at_startup(self):
+        out = self._watch_stored_session(
+            "--compaction-checkpoint", stored=[self._full_context()],
+        )
+        self._assert_checkpoint_line(out)
+
+    def test_stored_session_id_in_the_checkpoint_line_while_watching(self):
+        out = self._watch_stored_session(
+            "--compaction-checkpoint", stored=[], tailed=(self._full_context(),),
+        )
+        self._assert_checkpoint_line(out)
 
 
 # ---------------------------------------------------------------------------
