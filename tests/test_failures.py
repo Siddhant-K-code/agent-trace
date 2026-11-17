@@ -191,7 +191,7 @@ class TestExportsAgree(unittest.TestCase):
             for scope in resource["scopeSpans"]
             for span in scope["spans"]
         ]
-        return [span for span in spans if span["name"] == "gen_ai.client.operation"]
+        return [span for span in spans if span["name"].split(" ")[0] == "chat"]
 
     @staticmethod
     def _error_type(span):

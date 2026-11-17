@@ -944,6 +944,62 @@ def usage_detail(data: Any) -> tuple[TokenUsage, bool, bool]:
     return _usage_detail(data)
 
 
+def _reasoning_shape(data: Mapping[str, Any]) -> int | None:
+    """Return the reasoning tokens one usage mapping counts in its output."""
+    _, input_key = _token_entry(data, _INPUT_TOKEN_KEYS)
+    _, output_key = _token_entry(data, _OUTPUT_TOKEN_KEYS)
+    if input_key in _GEMINI_INPUT_KEYS or output_key in _GEMINI_OUTPUT_KEYS:
+        return _first_count(data, "thoughtsTokenCount", "thoughts_token_count")
+    count = _first_count(data, "reasoning_output_tokens")
+    if count is not None:
+        return count
+    for key in ("output_tokens_details", "completion_tokens_details"):
+        count = _first_count(data.get(key), "reasoning_tokens")
+        if count is not None:
+            return count
+    return None
+
+
+def reasoning_output_tokens(data: Any) -> int:
+    """Return the reasoning tokens included in the output count of *data*.
+
+    It reads the usage mapping :func:`usage_detail` reads: Codex
+    ``reasoning_output_tokens``, OpenAI ``output_tokens_details`` or
+    ``completion_tokens_details`` ``reasoning_tokens``, and Gemini
+    ``thoughtsTokenCount``.  Each is already part of the output count
+    :func:`usage_detail` returns, so it must not be added to it.  Data that
+    records none returns 0.
+    """
+    if not isinstance(data, Mapping):
+        return 0
+    counters = (
+        _token_value(data, _INPUT_TOKEN_KEYS),
+        _token_value(data, _OUTPUT_TOKEN_KEYS),
+    )
+    if counters[0][1] or counters[1][1]:
+        count = _reasoning_shape(data)
+        if count is not None:
+            return count
+        # Codex hooks copy the counters from ``token_usage`` but not the
+        # reasoning count, so a nested object with the same counters has it.
+        for nested in _nested_usage(data):
+            if (
+                _token_value(nested, _INPUT_TOKEN_KEYS),
+                _token_value(nested, _OUTPUT_TOKEN_KEYS),
+            ) == counters:
+                count = _reasoning_shape(nested)
+                if count is not None:
+                    return count
+        return 0
+    for nested in _nested_usage(data):
+        if (
+            _token_value(nested, _INPUT_TOKEN_KEYS)[1]
+            or _token_value(nested, _OUTPUT_TOKEN_KEYS)[1]
+        ):
+            return _reasoning_shape(nested) or 0
+    return 0
+
+
 @dataclass
 class _UsageSample:
     model: str

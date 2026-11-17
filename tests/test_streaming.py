@@ -397,8 +397,8 @@ _QUERY = "token=SECRET-QUERY"
 _SESSION = "otlp-session"
 _USER = "gen_ai.user.message"
 _ASSISTANT = "gen_ai.assistant.message"
-_LLM_SPAN = "gen_ai.client.operation"
-_BASH_SPAN = "gen_ai.tool.call/Bash"
+_LLM_SPAN = "chat m"
+_BASH_SPAN = "execute_tool Bash"
 # Event types whose data session_to_otlp_genai never reads.
 _UNREAD_TYPES = (
     "session_start", "session_end", "file_read", "file_write", "decision",
@@ -602,7 +602,7 @@ class TestOtlpStreamNonObjectData(_ReceiverTestCase):
                         _event("tool_call", data, "c1", ts=2.0),
                         _event("error", {"error": "boom"}, "e1", parent_id="c1", ts=3.0),
                     ],
-                    ["gen_ai.tool.call/error"],
+                    ["execute_tool error"],
                 ),
                 **{
                     event_type: ([_event(event_type, data, "u1", ts=2.0)], [])
@@ -663,7 +663,7 @@ class TestOtlpStreamNonObjectData(_ReceiverTestCase):
         self.assertEqual(stderr, "")
         self.assertEqual(
             self._sent(posts),
-            [(_SESSION, [_USER, _ASSISTANT], ["gen_ai.tool.call/5", _LLM_SPAN])],
+            [(_SESSION, [_USER, _ASSISTANT], ["execute_tool 5", "chat"])],
         )
 
     def test_ndjson_stream_sends_non_object_data_as_stored(self) -> None:

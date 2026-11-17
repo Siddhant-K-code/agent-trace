@@ -274,7 +274,8 @@ The implementation follows [W3C Trace Context Level 1](https://www.w3.org/TR/tra
 Phoenix/OpenInference, Langfuse, Honeycomb, Datadog, and standard OTel
 collectors. It does not install an OpenTelemetry SDK or add a gRPC path.
 
-The payload carries both the project's `gen_ai.*` attributes and additive
+The payload carries both OpenTelemetry GenAI semantic convention attributes
+(see [Spans and attributes](production.md#spans-and-attributes)) and additive
 OpenInference attributes. Root, LLM, and tool spans map to `AGENT`, `LLM`, and
 `TOOL`. Parent span IDs, exceptions, token counts (prompt cache reads and
 writes included), recorded cost, redaction

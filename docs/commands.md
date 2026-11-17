@@ -1699,8 +1699,13 @@ agent-strace export <session-id> [--format json|csv|ndjson|otlp|otlp-genai|tempo
 ```
 Export a session. See [production.md](production.md) for per-backend OTLP setup.
 
-`--format otlp-genai` writes OTLP/HTTP JSON with the project's
-`gen_ai.*` convention and additive OpenInference attributes.
+`--format otlp-genai` writes OTLP/HTTP JSON that follows the OpenTelemetry
+GenAI semantic conventions, with additive OpenInference attributes: an
+`invoke_agent {agent}` root span, `chat {model}` model request spans and
+`execute_tool {tool}` tool spans, with `gen_ai.provider.name` (and the
+deprecated `gen_ai.system`). These names replaced `gen_ai.agent.session`,
+`gen_ai.client.operation` and `gen_ai.tool.call/{tool}`. See
+[Spans and attributes](production.md#spans-and-attributes).
 
 `--format otlp`, `otlp-genai` and `temporal` write the payload to `--output`
 or to `trace-<12-character session ID>-<format>.json`. With `--endpoint URL`
@@ -1762,7 +1767,8 @@ source NDJSON hash-chain verification. See
 [OpenInference compatibility](production.md#openinference-compatibility).
 
 The OTLP formats and `--backend langfuse` export each model request's whole
-input, output and prompt cache read and write token counts. See
+input, output and prompt cache read and write token counts. `otlp-genai` also
+exports the recorded reasoning output tokens. See
 [Token usage and prompt caching](production.md#token-usage-and-prompt-caching).
 
 `--format temporal` emits OTLP/HTTP JSON using the upstream W3C trace ID and
