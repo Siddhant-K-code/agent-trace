@@ -26,7 +26,7 @@ Strips API keys, tokens, and credentials before they hit disk. The original data
 ```bash
 # Default: redact before writing traces
 agent-strace record -- npx -y @modelcontextprotocol/server-filesystem /tmp
-agent-strace record-http --url https://mcp.example.com
+agent-strace record-http --url https://mcp.example.com/mcp
 
 # Trusted local traces only
 agent-strace record --no-redact -- npx -y @modelcontextprotocol/server-filesystem /tmp

@@ -46,7 +46,15 @@ Capture an MCP stdio server session. Wraps `<command>` as a transparent proxy.
 agent-strace record-http --url URL [--port N] [--name NAME] [--parent SESSION]
                          [--ca-file FILE] [--allow-host NAME] [--no-redact]
 ```
-Capture an MCP HTTP/SSE server session. Listens on `--port` (default: 5100) and proxies to `--url`. Requests are handled concurrently, so an open `GET /sse` stream does not block `POST /message`. On Ctrl-C the proxy closes open streams, including TLS handshakes still in progress, waits up to 5 seconds for in-flight requests, then records the session end.
+Capture an MCP server session over HTTP. Works with Streamable HTTP servers and with legacy SSE servers. Listens on `--port` (default: 5100) and proxies to `--url`.
+
+Pass the server's endpoint URL as `--url`, such as `http://127.0.0.1:8000/mcp` or `https://mcp.example.com/sse`, and point the client at the proxy root, such as `http://127.0.0.1:5100`. A request for the root goes to the `--url` path. A request for any other path goes to the same path on the server, such as the message path a legacy SSE server gives the client. A query in `--url`, such as an API key, is sent with every request, before the client's own query.
+
+The trace saves `--url` as given, and redaction removes a key in it only if the key matches a [detected pattern](security.md#secret-redaction). To keep a key out of the trace, send it from the client, in its `Authorization` header or in its URL query. The proxy forwards both and records neither.
+
+The proxy forwards `GET`, `POST` and `DELETE`. Of the client's headers it forwards only `Authorization`, `Accept`, `Content-Type`, `Mcp-Session-Id`, `Mcp-Protocol-Version` and `Last-Event-ID`, so a server that needs another header, such as `X-API-Key`, can't be reached through it. When the server answers with an event stream, each event reaches the client as it arrives, so progress and server requests such as elicitation are not held back.
+
+Requests are handled concurrently, so an open stream does not block other requests. On Ctrl-C the proxy closes open streams, including TLS handshakes still in progress, waits up to 5 seconds for in-flight requests, then records the session end.
 
 For an `https://` URL the proxy verifies the server certificate and host name with the system CA store, sends the URL host as SNI (none for an IP address) and in the `Host` header. To trust a private CA, pass `--ca-file` with its PEM file. The bundle replaces the system CA store, so include any public CAs the upstream also needs. Setting `SSL_CERT_FILE` to the PEM file also works; it replaces OpenSSL's default CA file for the whole process. There is no flag to turn verification off. A TLS failure, such as an untrusted certificate or a host name mismatch, returns 502 to the agent and records an `error` event.
 
@@ -54,7 +62,7 @@ To refuse requests from web pages, the proxy answers 421 to a `Host` that is not
 
 | Flag | Default | Description |
 |---|---|---|
-| `--url URL` | required | Remote MCP server URL (`http://` or `https://`) |
+| `--url URL` | required | The MCP server's endpoint URL (`http://` or `https://`), such as `http://127.0.0.1:8000/mcp` |
 | `--port N` | `5100` | Local proxy port |
 | `--name NAME` | none | Label for the session |
 | `--parent SESSION` | none | Link this session as a child of a parent session |

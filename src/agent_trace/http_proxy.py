@@ -1,22 +1,32 @@
-"""HTTP/SSE MCP proxy.
+"""HTTP MCP proxy for Streamable HTTP and legacy SSE servers.
 
 Proxies HTTP-based MCP servers. The agent connects to the proxy on
 a local port. The proxy forwards requests to the remote MCP server,
-captures tool calls and results, and streams SSE responses back.
+captures tool calls and results, and streams replies back.
 
-MCP over HTTP/SSE uses:
-  - POST /message for JSON-RPC requests (agent -> server)
-  - GET /sse for server-sent events (server -> agent)
+The remote URL is the server's endpoint, such as ``http://host/mcp`` for
+Streamable HTTP or ``http://host/sse`` for legacy SSE. The agent connects
+to the proxy root:
 
-The proxy:
-1. Listens on a local port
-2. Forwards POST /message to the remote server
-3. Forwards GET /sse from the remote server
-4. Captures every JSON-RPC message as a trace event
+- A request for ``/`` goes to the endpoint path.
+- Any other path goes to the same host unchanged, such as the
+  ``/messages/`` path a legacy SSE server gives the agent.
+- The query is the remote URL's query, then the agent's.
 
-Requests are served on separate threads, so a long-lived GET /sse stream
-does not block POST /message. Closing the server shuts down open streams
-and waits for in-flight requests before the session end is recorded.
+The proxy forwards:
+
+- POST, with a JSON-RPC message. A JSON reply is read in full, then sent.
+  An event stream reply is sent line by line as it arrives, so a server
+  can report progress or ask the agent something while a tool runs.
+- GET, for the server's event stream.
+- DELETE, which ends a Streamable HTTP session.
+
+Every JSON-RPC message in a POST body, a JSON reply or a ``data: `` line
+of an event stream is traced.
+
+Requests are served on separate threads, so a long-lived stream does not
+block other requests. Closing the server shuts down open streams and waits
+for in-flight requests before the session end is recorded.
 
 Pages on other sites cannot use the proxy. The proxy sends the upstream's
 own host as Host and drops Origin, so the upstream's checks never see the
@@ -46,7 +56,7 @@ import time
 from collections.abc import Iterable
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from typing import Any, Callable
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 from .models import EventType, SessionMeta, TraceEvent
 from .proxy import MAX_PENDING_CALLS, _classify_message, _rpc_id
@@ -60,6 +70,21 @@ from .store import TraceStore
 # How long server_close waits for in-flight requests after shutting down
 # their sockets.
 SHUTDOWN_TIMEOUT = 5.0
+
+# Request headers each method forwards when the client sends them. POST
+# also sends Content-Type, Content-Length and traceparent. Nothing else is
+# forwarded: not Origin, Cookie or Accept-Encoding.
+_POST_HEADERS = ("Authorization", "Accept", "Mcp-Session-Id", "Mcp-Protocol-Version")
+_GET_HEADERS = (
+    "Authorization", "Accept", "Mcp-Session-Id", "Mcp-Protocol-Version", "Last-Event-ID",
+)
+_DELETE_HEADERS = ("Authorization", "Mcp-Session-Id", "Mcp-Protocol-Version")
+
+
+def _is_event_stream(content_type: str | None) -> bool:
+    """Return True for a text/event-stream Content-Type, in any case."""
+    media_type = (content_type or "").split(";", 1)[0]
+    return media_type.strip().lower() == "text/event-stream"
 
 
 def _refusal_body(message: str) -> bytes:
@@ -489,9 +514,85 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             pass
 
     def _remote_path(self, path: str) -> str:
-        parsed = urlparse(self.remote_url)
-        base = parsed.path.rstrip("/")
-        return f"{base}{path}"
+        """Return the upstream request target for the client's target.
+
+        A request for ``/`` goes to the remote URL's path, or to ``/`` if it
+        has none. Any other path goes unchanged. The query is the remote
+        URL's query, then the client's.
+        """
+        remote = urlsplit(self.remote_url)
+        request = urlsplit(path)
+        if request.path in ("", "/"):
+            target = remote.path or "/"
+        else:
+            target = request.path
+        query = "&".join(part for part in (remote.query, request.query) if part)
+        return f"{target}?{query}" if query else target
+
+    def _client_headers(self, names: Iterable[str]) -> dict[str, str]:
+        """Return the named request headers the client sent, and no others."""
+        headers = {}
+        for name in names:
+            value = self.headers.get(name)
+            if value:
+                headers[name] = value
+        return headers
+
+    def _relay_head(self, resp: http.client.HTTPResponse) -> None:
+        """Send the upstream's status and headers, less hop-by-hop ones."""
+        self.send_response(resp.status)
+        for key, value in resp.getheaders():
+            if key.lower() not in ("transfer-encoding", "connection"):
+                self.send_header(key, value)
+        self.end_headers()
+
+    def _relay_events(self, resp: http.client.HTTPResponse) -> None:
+        """Send an event stream to the client line by line as it arrives.
+
+        Each ``data: `` line is one JSON-RPC message from the server. It is
+        traced before it is sent.
+        """
+        while True:
+            line = resp.readline()
+            if not line:
+                break
+
+            line_str = line.decode("utf-8", errors="replace")
+            if line_str.startswith("data: "):
+                data_str = line_str[6:].strip()
+                if data_str:
+                    try:
+                        msg = json.loads(data_str)
+                        event = _classify_message(msg, "server_to_agent")
+                        if event:
+                            if event.event_type in TOOL_RESPONSE_TYPES:
+                                self.server.match_result(event)
+                            self._emit(event)
+                    except json.JSONDecodeError:
+                        pass
+
+            self.wfile.write(line)
+            self.wfile.flush()
+
+    def _link_sub_session(self, resp: http.client.HTTPResponse) -> None:
+        """Link the downstream agent's session to this one.
+
+        A downstream agent that runs agent-trace names its session in the
+        reply's tracestate. Only the headers are read, so this works for a
+        streamed reply before its body arrives.
+        """
+        resp_ctx = extract_traceparent(dict(resp.getheaders()))
+        if resp_ctx and resp_ctx.get("at_session_id") and self.meta:
+            child_sid = resp_ctx["at_session_id"]
+            if child_sid != self.meta.session_id and self.store:
+                from .a2a import link_sub_session
+                with self.server.state_lock:
+                    link_sub_session(
+                        self.store,
+                        parent_session_id=self.meta.session_id,
+                        parent_event_id="",
+                        child_session_id=child_sid,
+                    )
 
     def do_POST(self):
         """Forward POST requests (agent -> server) and trace them."""
@@ -531,10 +632,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             "Content-Type": self.headers.get("Content-Type", "application/json"),
             "Content-Length": str(len(body)),
         }
-        # forward auth headers
-        auth = self.headers.get("Authorization")
-        if auth:
-            headers["Authorization"] = auth
+        headers.update(self._client_headers(_POST_HEADERS))
 
         # Inject W3C traceparent so downstream agents can correlate back
         if self.meta:
@@ -550,24 +648,17 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             sock = self._connect(conn)
             conn.request("POST", self._remote_path(self.path), body=body, headers=headers)
             resp = conn.getresponse()
-            resp_body = resp.read()
+            self._link_sub_session(resp)
 
-            # Extract traceparent from response — if the downstream agent
-            # runs agent-trace it will echo its session ID in tracestate,
-            # letting us auto-link the sub-session without manual wiring.
-            resp_headers = dict(resp.getheaders())
-            resp_ctx = extract_traceparent(resp_headers)
-            if resp_ctx and resp_ctx.get("at_session_id") and self.meta:
-                child_sid = resp_ctx["at_session_id"]
-                if child_sid != self.meta.session_id and self.store:
-                    from .a2a import link_sub_session
-                    with self.server.state_lock:
-                        link_sub_session(
-                            self.store,
-                            parent_session_id=self.meta.session_id,
-                            parent_event_id="",
-                            child_session_id=child_sid,
-                        )
+            if _is_event_stream(resp.getheader("Content-Type")):
+                # A Streamable HTTP server can hold this stream open while a
+                # tool runs, to report progress or ask the agent something.
+                self._relay_head(resp)
+                headers_sent = True
+                self._relay_events(resp)
+                return
+
+            resp_body = resp.read()
 
             # trace the response
             try:
@@ -581,11 +672,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                 pass
 
             # send response to agent
-            self.send_response(resp.status)
-            for key, value in resp.getheaders():
-                if key.lower() not in ("transfer-encoding", "connection"):
-                    self.send_header(key, value)
-            self.end_headers()
+            self._relay_head(resp)
             headers_sent = True
             self.wfile.write(resp_body)
 
@@ -604,13 +691,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
 
     def _forward_get(self):
         conn = self._get_connection()
-        headers = {}
-        auth = self.headers.get("Authorization")
-        if auth:
-            headers["Authorization"] = auth
-        accept = self.headers.get("Accept")
-        if accept:
-            headers["Accept"] = accept
+        headers = self._client_headers(_GET_HEADERS)
 
         sock = None
         headers_sent = False
@@ -618,40 +699,40 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             sock = self._connect(conn)
             conn.request("GET", self._remote_path(self.path), headers=headers)
             resp = conn.getresponse()
-
-            self.send_response(resp.status)
-            for key, value in resp.getheaders():
-                if key.lower() not in ("transfer-encoding", "connection"):
-                    self.send_header(key, value)
-            self.end_headers()
+            self._relay_head(resp)
             headers_sent = True
-
-            # stream SSE events
-            while True:
-                line = resp.readline()
-                if not line:
-                    break
-
-                # trace SSE data lines
-                line_str = line.decode("utf-8", errors="replace")
-                if line_str.startswith("data: "):
-                    data_str = line_str[6:].strip()
-                    if data_str:
-                        try:
-                            msg = json.loads(data_str)
-                            event = _classify_message(msg, "server_to_agent")
-                            if event:
-                                if event.event_type in TOOL_RESPONSE_TYPES:
-                                    self.server.match_result(event)
-                                self._emit(event)
-                        except json.JSONDecodeError:
-                            pass
-
-                self.wfile.write(line)
-                self.wfile.flush()
+            self._relay_events(resp)
 
         except Exception as e:
             self._report_failure("SSE proxy error", e, headers_sent)
+        finally:
+            if sock is not None:
+                self.server.unwatch_socket(sock)
+            conn.close()
+
+    def do_DELETE(self):
+        """Forward DELETE requests, which end a Streamable HTTP session."""
+        with self.server.request_scope(self.connection) as accepted:
+            if accepted:
+                self._forward_delete()
+
+    def _forward_delete(self):
+        conn = self._get_connection()
+        headers = self._client_headers(_DELETE_HEADERS)
+
+        sock = None
+        headers_sent = False
+        try:
+            sock = self._connect(conn)
+            conn.request("DELETE", self._remote_path(self.path), headers=headers)
+            resp = conn.getresponse()
+            resp_body = resp.read()
+            self._relay_head(resp)
+            headers_sent = True
+            self.wfile.write(resp_body)
+
+        except Exception as e:
+            self._report_failure("Proxy error", e, headers_sent)
         finally:
             if sock is not None:
                 self.server.unwatch_socket(sock)
@@ -664,6 +745,9 @@ class _ProxyHandler(BaseHTTPRequestHandler):
 
 class HTTPProxyServer:
     """HTTP/SSE proxy for remote MCP servers.
+
+    ``remote_url`` is the server's endpoint URL. It is used as given, with
+    any trailing slash.
 
     ``ca_file`` trusts a PEM CA bundle for an HTTPS upstream instead of the
     system store. It is loaded here, so a bad file or a non-HTTPS URL raises
@@ -685,7 +769,7 @@ class HTTPProxyServer:
         ca_file: str = "",
         allowed_hosts: Iterable[str] = (),
     ):
-        self.remote_url = remote_url.rstrip("/")
+        self.remote_url = remote_url
         self.upstream_tls = upstream_tls_context(self.remote_url, ca_file)
         self.local_port = local_port
         self.store = store
