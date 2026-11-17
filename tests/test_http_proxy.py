@@ -1328,5 +1328,414 @@ class TestRecordHTTPCAFileFlag(unittest.TestCase):
         self.assertEqual(TraceStore(self.trace_dir).list_sessions(), [])
 
 
+HOST_REFUSED = {
+    "jsonrpc": "2.0",
+    "id": None,
+    "error": {
+        "code": -32600,
+        "message": (
+            "Host not allowed: connect to localhost or an IP address, "
+            "or start record-http with --allow-host NAME"
+        ),
+    },
+}
+ORIGIN_REFUSED = {
+    "jsonrpc": "2.0",
+    "id": None,
+    "error": {
+        "code": -32600,
+        "message": (
+            "Origin not allowed: only pages on localhost, a loopback address "
+            "or an --allow-host name can use this proxy"
+        ),
+    },
+}
+HOST_REFUSED_LOG = (
+    "agent-strace: refused a request (421 Host not allowed). Connect to "
+    "localhost or an IP address, or restart record-http with --allow-host NAME.\n"
+)
+ORIGIN_REFUSED_LOG = (
+    "agent-strace: refused a request (403 Origin not allowed). Only pages on "
+    "localhost, a loopback address or an --allow-host name can use this proxy. "
+    "To allow pages on another name, restart record-http with --allow-host NAME.\n"
+)
+
+# Origins of pages served by this machine.
+LOOPBACK_ORIGINS = [
+    "http://localhost",
+    "http://localhost:6274",
+    "https://localhost:8443",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.2",
+    "http://[::1]:5173",
+    "HTTP://LOCALHOST:6274",
+]
+REFUSED_ORIGINS = [
+    "null",
+    "",
+    "http://192.0.2.10",
+    "http://attacker.test",
+    "http://localhost.attacker.test",
+    "http://foo.localhost",
+    "http://localhost.",
+    "chrome-extension://abc",
+    "file://",
+    "ws://localhost:6274",
+    "http://localhost:6274/",
+    "http://user@localhost",
+    "http://[::ffff:127.0.0.1]",
+]
+
+PING = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}).encode()
+
+
+class _CountingUpstream(ThreadingHTTPServer):
+    """A fake MCP upstream that counts the connections it accepts."""
+
+    daemon_threads = True
+
+    def __init__(self):
+        super().__init__(("127.0.0.1", 0), FakeMCPHandler)
+        self._lock = threading.Lock()
+        self._connections = 0
+
+    @property
+    def connections(self):
+        with self._lock:
+            return self._connections
+
+    def process_request(self, request, client_address):
+        with self._lock:
+            self._connections += 1
+        super().process_request(request, client_address)
+
+
+def _start_counting_upstream(test):
+    upstream = _CountingUpstream()
+    threading.Thread(
+        target=upstream.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
+    ).start()
+    test.addCleanup(upstream.server_close)
+    test.addCleanup(upstream.shutdown)
+    return upstream
+
+
+def _send(port, method, headers, body=None):
+    """Send one request with exactly ``headers``, in order.
+
+    No Host is sent unless ``headers`` has one. A body gets a Content-Length
+    and, unless ``headers`` sets one, a JSON Content-Type. Returns the
+    status, Content-Type and body of the reply.
+    """
+    path = "/message" if method == "POST" else "/sse"
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    try:
+        conn.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
+        for name, value in headers:
+            conn.putheader(name, value)
+        if body is not None:
+            if not any(name.lower() == "content-type" for name, _ in headers):
+                conn.putheader("Content-Type", "application/json")
+            conn.putheader("Content-Length", str(len(body)))
+        conn.endheaders(body)
+        resp = conn.getresponse()
+        return resp.status, resp.getheader("Content-Type"), resp.read()
+    finally:
+        conn.close()
+
+
+def _read_all(sock):
+    chunks = []
+    while True:
+        try:
+            chunk = sock.recv(65536)
+        except ConnectionResetError:
+            chunk = b""
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+
+
+class TestHTTPProxyRefusesWebPages(unittest.TestCase):
+    """The proxy refuses a DNS rebinding Host or a cross-site Origin.
+
+    The check covers every method and runs before the body is read, so a
+    refused request never reaches the upstream and adds nothing to the trace.
+    """
+
+    def setUp(self):
+        self.upstream = _start_counting_upstream(self)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.store = TraceStore(tmp.name)
+        self.meta = SessionMeta(command="test", agent_name="test-agent")
+        self.store.create_session(self.meta)
+        self.events = []
+        proxy = HTTPProxyServer(
+            remote_url=f"http://127.0.0.1:{self.upstream.server_address[1]}",
+            local_port=0,
+            store=self.store,
+            session_meta=self.meta,
+            on_event=self.events.append,
+        )
+        self.server = proxy.make_server()
+        threading.Thread(
+            target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
+        ).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.port = self.server.server_address[1]
+        self.local_host = ("Host", f"127.0.0.1:{self.port}")
+
+    def _request(self, method, headers, body=None):
+        """Send one request. Returns status, Content-Type, body and stderr."""
+        if body is None and method == "POST":
+            body = PING
+        stderr = io.StringIO()
+        with mock.patch("sys.stderr", stderr):
+            status, content_type, data = _send(self.port, method, headers, body)
+        return status, content_type, data, stderr.getvalue()
+
+    def _assert_forwarded(self, method, headers):
+        status, _, data, stderr = self._request(method, headers)
+        self.assertEqual(status, 200)
+        if method == "POST":
+            self.assertEqual(json.loads(data), {"jsonrpc": "2.0", "id": 1, "result": {}})
+        self.assertEqual(stderr, "")
+
+    def _assert_refused(self, method, headers, status, reply, log, body=None):
+        got_status, content_type, data, stderr = self._request(method, headers, body)
+        self.assertEqual(got_status, status)
+        self.assertEqual(content_type, "application/json")
+        self.assertEqual(json.loads(data), reply)
+        self.assertEqual(stderr, log)
+
+    def _assert_nothing_traced_or_forwarded(self):
+        """Check that no request so far was traced or reached the upstream.
+
+        A request that is forwarded goes last. Once its reply is back, the
+        upstream has accepted every earlier connection, so the count is final.
+        """
+        self.assertEqual(self.events, [])
+        self.assertEqual(self.store.load_events(self.meta.session_id), [])
+        status, _, _ = _send(self.port, "GET", [self.local_host])
+        self.assertEqual(status, 200)
+        self.assertEqual(self.upstream.connections, 1)
+
+    def _allowed_host_headers(self):
+        other_port = self.port + 1 if self.port < 65535 else self.port - 1
+        return [
+            [("Host", "localhost")],
+            [("Host", f"LOCALHOST:{self.port}")],
+            [("Host", f"127.0.0.1:{self.port}")],
+            [("Host", "127.0.0.2")],
+            [("Host", f"[::1]:{self.port}")],
+            [("Host", f"192.0.2.10:{self.port}")],
+            [("Host", f"localhost:{other_port}")],
+            [],
+        ]
+
+    def _refused_host_headers(self):
+        return [
+            [("Host", "attacker.test")],
+            [("Host", f"attacker.test:{self.port}")],
+            [("Host", "localhost.")],
+            [("Host", f"localhost.:{self.port}")],
+            [("Host", f"foo.localhost:{self.port}")],
+            [("Host", "")],
+            [("Host", "localhost:abc")],
+            [("Host", "[::1")],
+            [self.local_host, ("Host", "attacker.test")],
+            [("Host", "attacker.test"), self.local_host],
+        ]
+
+    def test_local_requests_without_origin_are_forwarded_and_traced(self):
+        status, _, _, get_stderr = self._request("GET", [self.local_host])
+        self.assertEqual(status, 200)
+        status, _, data, post_stderr = self._request(
+            "POST", [self.local_host], json.dumps(_tool_call(3)).encode()
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(data)["result"]["content"][0]["text"], "tool output")
+        self.assertEqual(get_stderr + post_stderr, "")
+        types = [event.event_type for event in self.events]
+        self.assertIn(EventType.TOOL_CALL, types)
+        self.assertIn(EventType.TOOL_RESULT, types)
+
+    def test_allowed_hosts_are_forwarded(self):
+        for method in ("GET", "POST"):
+            for headers in self._allowed_host_headers():
+                with self.subTest(method=method, headers=headers):
+                    self._assert_forwarded(method, headers)
+
+    def test_delete_with_an_allowed_host_gets_501(self):
+        for headers in self._allowed_host_headers():
+            with self.subTest(headers=headers):
+                status, _, _, stderr = self._request("DELETE", headers)
+                self.assertEqual(status, 501)
+                self.assertEqual(stderr, "")
+        self._assert_nothing_traced_or_forwarded()
+
+    def test_refused_hosts_get_421(self):
+        for method in ("GET", "POST", "DELETE"):
+            for headers in self._refused_host_headers():
+                with self.subTest(method=method, headers=headers):
+                    self._assert_refused(
+                        method, headers, 421, HOST_REFUSED, HOST_REFUSED_LOG
+                    )
+        self._assert_nothing_traced_or_forwarded()
+
+    def test_loopback_origins_are_forwarded(self):
+        for method in ("GET", "POST"):
+            for origin in LOOPBACK_ORIGINS:
+                with self.subTest(method=method, origin=origin):
+                    self._assert_forwarded(method, [self.local_host, ("Origin", origin)])
+        for origin in LOOPBACK_ORIGINS:
+            with self.subTest(method="DELETE", origin=origin):
+                status, _, _, stderr = self._request(
+                    "DELETE", [self.local_host, ("Origin", origin)]
+                )
+                self.assertEqual(status, 501)
+                self.assertEqual(stderr, "")
+
+    def test_refused_origins_get_403(self):
+        cases = [[self.local_host, ("Origin", origin)] for origin in REFUSED_ORIGINS]
+        loopback, attacker = ("Origin", "http://localhost:6274"), ("Origin", "http://attacker.test")
+        cases.append([self.local_host, loopback, attacker])
+        cases.append([self.local_host, attacker, loopback])
+        for method in ("GET", "POST", "DELETE"):
+            for headers in cases:
+                with self.subTest(method=method, headers=headers):
+                    self._assert_refused(
+                        method, headers, 403, ORIGIN_REFUSED, ORIGIN_REFUSED_LOG
+                    )
+        self._assert_nothing_traced_or_forwarded()
+
+    def test_host_is_checked_before_origin(self):
+        headers = [("Host", "attacker.test"), ("Origin", "http://attacker.test")]
+        for method in ("GET", "POST", "DELETE"):
+            with self.subTest(method=method):
+                self._assert_refused(method, headers, 421, HOST_REFUSED, HOST_REFUSED_LOG)
+        self._assert_nothing_traced_or_forwarded()
+
+    def test_refused_post_records_no_tool_call(self):
+        # Any page can send a text/plain POST without a CORS preflight.
+        body = json.dumps(_tool_call(7, name="delete_repo")).encode()
+        plain = ("Content-Type", "text/plain")
+        cases = [
+            ([("Host", f"attacker.test:{self.port}"), plain], 421, HOST_REFUSED, HOST_REFUSED_LOG),
+            ([self.local_host, ("Origin", "http://attacker.test"), plain],
+             403, ORIGIN_REFUSED, ORIGIN_REFUSED_LOG),
+        ]
+        for headers, status, reply, log in cases:
+            with self.subTest(status=status):
+                self._assert_refused("POST", headers, status, reply, log, body)
+        self.assertEqual(self.meta.tool_calls, 0)
+        self._assert_nothing_traced_or_forwarded()
+
+    def test_refusals_never_echo_header_values(self):
+        marker = "marker-7f3a"
+        cases = [
+            (421, f"Host: {marker}.attacker.test:{self.port}\r\n"),
+            (403, f"Host: 127.0.0.1:{self.port}\r\nOrigin: http://{marker}.attacker.test\r\n"),
+        ]
+        for method in ("GET", "POST"):
+            for status, headers in cases:
+                with self.subTest(method=method, status=status):
+                    body = PING if method == "POST" else b""
+                    request = (
+                        f"{method} /message HTTP/1.1\r\n{headers}"
+                        f"Content-Length: {len(body)}\r\n\r\n"
+                    ).encode() + body
+                    stderr = io.StringIO()
+                    with mock.patch("sys.stderr", stderr):
+                        with socket.create_connection(("127.0.0.1", self.port), timeout=10) as sock:
+                            sock.sendall(request)
+                            reply = _read_all(sock)
+                    self.assertTrue(reply.startswith(f"HTTP/1.0 {status} ".encode()), reply)
+                    self.assertNotIn(marker.encode(), reply)
+                    self.assertNotIn(marker, stderr.getvalue())
+                    self.assertEqual(stderr.getvalue().count("\n"), 1)
+
+
+class TestRecordHTTPAllowHostFlag(unittest.TestCase):
+    """record-http --allow-host accepts more names as a Host or an Origin host."""
+
+    def test_flag_is_parsed(self):
+        args = build_parser().parse_args([
+            "record-http", "--url", "http://127.0.0.1:1",
+            "--allow-host", "tunnel.test", "--allow-host", "Second.Test",
+        ])
+        self.assertEqual(args.allow_host, ["tunnel.test", "Second.Test"])
+        args = build_parser().parse_args(["record-http", "--url", "http://127.0.0.1:1"])
+        self.assertIsNone(args.allow_host)
+
+    def test_a_value_that_is_not_a_bare_name_exits_2(self):
+        for value in ("https://tunnel.test/", "tunnel.test:80", ""):
+            with self.subTest(value=value):
+                stderr = io.StringIO()
+                with mock.patch("sys.stderr", stderr), self.assertRaises(SystemExit) as raised:
+                    build_parser().parse_args([
+                        "record-http", "--url", "http://127.0.0.1:1", "--allow-host", value,
+                    ])
+                self.assertEqual(raised.exception.code, 2)
+                self.assertIn("invalid host name", stderr.getvalue())
+
+    def test_live_proxy_accepts_the_names_and_nothing_else(self):
+        upstream = _start_counting_upstream(self)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        args = build_parser().parse_args([
+            "--trace-dir", tmp.name, "record-http",
+            "--url", f"http://127.0.0.1:{upstream.server_address[1]}",
+            "--port", "0", "--quiet",
+            "--allow-host", "tunnel.test", "--allow-host", "Second.Test",
+        ])
+        servers = queue.Queue()
+        real_make_server = HTTPProxyServer.make_server
+
+        def make_server(proxy):
+            server = real_make_server(proxy)
+            servers.put(server)
+            return server
+
+        stderr = io.StringIO()
+        exit_codes = []
+        with mock.patch.object(HTTPProxyServer, "make_server", make_server), \
+                mock.patch("sys.stderr", stderr):
+            thread = threading.Thread(target=lambda: exit_codes.append(cmd_record_http(args)))
+            thread.start()
+            server = servers.get(timeout=10)
+            try:
+                port = server.server_address[1]
+                local = ("Host", f"127.0.0.1:{port}")
+                forwarded = [
+                    ("GET", [("Host", f"tunnel.test:{port}")], None),
+                    ("GET", [("Host", "TUNNEL.test")], None),
+                    ("GET", [("Host", "second.test")], None),
+                    ("POST", [local, ("Origin", "https://tunnel.test")], PING),
+                ]
+                refused = [
+                    ("GET", [("Host", "eviltunnel.test")], 421),
+                    ("GET", [("Host", "tunnel.test.attacker.test")], 421),
+                    ("POST", [local, ("Origin", "https://eviltunnel.test")], 403),
+                ]
+                for method, headers, body in forwarded:
+                    with self.subTest(headers=headers):
+                        self.assertEqual(_send(port, method, headers, body)[0], 200)
+                for method, headers, status in refused:
+                    with self.subTest(headers=headers):
+                        body = PING if method == "POST" else None
+                        self.assertEqual(_send(port, method, headers, body)[0], status)
+            finally:
+                server.shutdown()
+                thread.join(timeout=10)
+
+        self.assertEqual(exit_codes, [0])
+        # --quiet keeps the refusal lines.
+        refusals = [line + "\n" for line in stderr.getvalue().splitlines() if "refused" in line]
+        self.assertEqual(refusals, [HOST_REFUSED_LOG, HOST_REFUSED_LOG, ORIGIN_REFUSED_LOG])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2,7 +2,7 @@
 
 Usage:
     agent-strace record [--no-redact] -- <server-command> [args...]
-    agent-strace record-http [--no-redact] --url <remote-url> [--port <local-port>] [--ca-file <file>]
+    agent-strace record-http [--no-redact] --url <remote-url> [--port <local-port>] [--ca-file <file>] [--allow-host <name>]
     agent-strace setup [--no-redact] [--global]
     agent-strace hook <event>
     agent-strace replay [session-id]
@@ -276,6 +276,7 @@ def cmd_record_http(args: argparse.Namespace) -> int:
             on_event=on_event,
             redact=args.redact,
             ca_file=args.ca_file or "",
+            allowed_hosts=args.allow_host or (),
         )
     except ValueError as exc:
         sys.stderr.write(f"record-http: {exc}\n")
@@ -1748,6 +1749,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_record_http.add_argument(
         "--ca-file", metavar="FILE",
         help="custom CA bundle for an HTTPS upstream; replaces the system CA store",
+    )
+    p_record_http.add_argument(
+        "--allow-host",
+        metavar="NAME",
+        dest="allow_host",
+        action="append",
+        type=allowed_host_name,
+        default=None,
+        help=(
+            "also accept requests whose Host is NAME, on any port, and "
+            "requests from pages on NAME (repeatable). Use it for a client "
+            "that connects by another name, such as host.docker.internal or "
+            "a tunnel. Exact match, no wildcards"
+        ),
     )
 
     # replay

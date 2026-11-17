@@ -17,18 +17,33 @@ The proxy:
 Requests are served on separate threads, so a long-lived GET /sse stream
 does not block POST /message. Closing the server shuts down open streams
 and waits for in-flight requests before the session end is recorded.
+
+Pages on other sites cannot use the proxy. The proxy sends the upstream's
+own host as Host and drops Origin, so the upstream's checks never see the
+browser's values. The proxy checks them itself, on every method, before it
+reads the body:
+
+- A Host that is not localhost, an IP address or an ``--allow-host`` name
+  gets 421. This stops DNS rebinding pages.
+- An Origin that is not a page on localhost, a loopback address or an
+  ``--allow-host`` name gets 403. This stops other sites.
+
+A refused request is not traced and never reaches the upstream.
 """
 
 from __future__ import annotations
 
 import contextlib
 import http.client
+import ipaddress
 import json
+import re
 import socket
 import ssl
 import sys
 import threading
 import time
+from collections.abc import Iterable
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from typing import Any, Callable
 from urllib.parse import urlparse
@@ -38,12 +53,63 @@ from .proxy import MAX_PENDING_CALLS, _classify_message, _rpc_id
 from .masking import MaskingConfig, mask_event_data
 from .pairing import TOOL_RESPONSE_TYPES, KeyedPairer, link_response
 from .propagation import extract_traceparent, inject_traceparent
+from .server import _host_header_name, _is_ip_literal
 from .store import TraceStore
 
 
 # How long server_close waits for in-flight requests after shutting down
 # their sockets.
 SHUTDOWN_TIMEOUT = 5.0
+
+
+def _refusal_body(message: str) -> bytes:
+    return json.dumps({
+        "jsonrpc": "2.0",
+        "id": None,
+        "error": {"code": -32600, "message": message},
+    }).encode("utf-8")
+
+
+# Replies and log lines for refused requests. They are constant so that no
+# header value is ever echoed.
+_HOST_REFUSED = _refusal_body(
+    "Host not allowed: connect to localhost or an IP address, "
+    "or start record-http with --allow-host NAME"
+)
+_ORIGIN_REFUSED = _refusal_body(
+    "Origin not allowed: only pages on localhost, a loopback address "
+    "or an --allow-host name can use this proxy"
+)
+_HOST_REFUSED_LOG = (
+    "agent-strace: refused a request (421 Host not allowed). Connect to "
+    "localhost or an IP address, or restart record-http with --allow-host NAME.\n"
+)
+_ORIGIN_REFUSED_LOG = (
+    "agent-strace: refused a request (403 Origin not allowed). Only pages on "
+    "localhost, a loopback address or an --allow-host name can use this proxy. "
+    "To allow pages on another name, restart record-http with --allow-host NAME.\n"
+)
+
+# An Origin value: http or https, a host as in a Host value, then an
+# optional port of digits. Nothing may follow, not even "/".
+_ORIGIN_VALUE = re.compile(
+    r"https?://(\[[^\]]*\]|[^\[\]:]*)(?::[0-9]+)?", re.IGNORECASE
+)
+_IPV4_LOOPBACK = ipaddress.IPv4Network("127.0.0.0/8")
+_IPV6_LOOPBACK = ipaddress.IPv6Address("::1")
+
+
+def _is_loopback_ip(name: str) -> bool:
+    """Return True for an address in 127.0.0.0/8 or a bracketed ::1.
+
+    ``is_loopback`` is not used: it also accepts ::ffff:127.0.0.1.
+    """
+    try:
+        if name.startswith("[") and name.endswith("]"):
+            return ipaddress.IPv6Address(name[1:-1]) == _IPV6_LOOPBACK
+        return ipaddress.IPv4Address(name) in _IPV4_LOOPBACK
+    except ValueError:
+        return False
 
 
 def _shutdown_socket(sock: socket.socket) -> None:
@@ -136,6 +202,7 @@ class _ProxyHTTPServer(ThreadingHTTPServer):
         masking_config: MaskingConfig | None = None,
         max_pending_calls: int = MAX_PENDING_CALLS,
         upstream_tls: ssl.SSLContext | None = None,
+        allowed_hosts: Iterable[str] = (),
     ):
         if upstream_tls is None:
             upstream_tls = upstream_tls_context(remote_url)
@@ -143,6 +210,8 @@ class _ProxyHTTPServer(ThreadingHTTPServer):
         self.remote_url = remote_url
         # Shared by every upstream HTTPS connection; None for plain HTTP.
         self.upstream_tls = upstream_tls
+        # --allow-host names, lower case.
+        self.allowed_hosts = frozenset(name.lower() for name in allowed_hosts)
         self.store = store
         self.meta = meta
         self.on_event = on_event
@@ -300,6 +369,85 @@ class _ProxyHandler(BaseHTTPRequestHandler):
 
     def _emit(self, event: TraceEvent) -> None:
         self.server.emit(event)
+
+    def parse_request(self) -> bool:
+        """Parse the request line and headers, then refuse web page requests.
+
+        The stdlib calls this before it looks up ``do_<METHOD>``, so the check
+        covers every method, including ones the proxy does not implement. It
+        runs before the body is read, so a refused request is neither traced
+        nor forwarded.
+        """
+        if not super().parse_request():
+            return False
+        if not self._host_allowed():
+            self._refuse(421, _HOST_REFUSED, _HOST_REFUSED_LOG)
+            return False
+        if not self._origin_allowed():
+            self._refuse(403, _ORIGIN_REFUSED, _ORIGIN_REFUSED_LOG)
+            return False
+        return True
+
+    def _host_allowed(self) -> bool:
+        """Return False for a Host that a DNS rebinding page could send.
+
+        No Host is allowed. Otherwise there must be one, and it must name
+        localhost, an IP address or an ``--allow-host`` name. The port is not
+        checked.
+        """
+        values = self.headers.get_all("Host") or []
+        if not values:
+            return True
+        if len(values) > 1:
+            return False
+        name = _host_header_name(values[0])
+        if not name:
+            return False
+        return (
+            name == "localhost"
+            or name in self.server.allowed_hosts
+            or _is_ip_literal(name)
+        )
+
+    def _origin_allowed(self) -> bool:
+        """Return False for an Origin other than a page this machine serves.
+
+        No Origin is allowed. Otherwise there must be one, of the form
+        ``http(s)://host[:port]``, and the host must be localhost, a loopback
+        address or an ``--allow-host`` name.
+        """
+        values = self.headers.get_all("Origin") or []
+        if not values:
+            return True
+        if len(values) > 1:
+            return False
+        match = _ORIGIN_VALUE.fullmatch(values[0].strip(" \t"))
+        if not match:
+            return False
+        name = match.group(1).lower()
+        return (
+            name == "localhost"
+            or name in self.server.allowed_hosts
+            or _is_loopback_ip(name)
+        )
+
+    def _refuse(self, status: int, body: bytes, log_line: str) -> None:
+        """Log the refusal, send a constant JSON-RPC error and close.
+
+        The request body is left unread. A large one can reach the client as
+        a connection reset instead of this reply.
+        """
+        sys.stderr.write(log_line)
+        self.close_connection = True
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+        except OSError:
+            pass
 
     def _get_connection(self) -> http.client.HTTPConnection | http.client.HTTPSConnection:
         parsed = urlparse(self.remote_url)
@@ -520,6 +668,10 @@ class HTTPProxyServer:
     ``ca_file`` trusts a PEM CA bundle for an HTTPS upstream instead of the
     system store. It is loaded here, so a bad file or a non-HTTPS URL raises
     ValueError before the proxy starts.
+
+    ``allowed_hosts`` are extra names a request may give as its Host or as
+    its Origin host, beside localhost and IP addresses. Each must match a
+    whole name. Case is ignored.
     """
 
     def __init__(
@@ -531,6 +683,7 @@ class HTTPProxyServer:
         on_event: Callable[[TraceEvent], None] | None = None,
         redact: bool = False,
         ca_file: str = "",
+        allowed_hosts: Iterable[str] = (),
     ):
         self.remote_url = remote_url.rstrip("/")
         self.upstream_tls = upstream_tls_context(self.remote_url, ca_file)
@@ -539,6 +692,7 @@ class HTTPProxyServer:
         self.meta = session_meta
         self.on_event = on_event
         self.redact = redact
+        self.allowed_hosts = frozenset(name.lower() for name in allowed_hosts)
 
     def make_server(self) -> _ProxyHTTPServer:
         """Bind a server with its own config and pending call state."""
@@ -550,6 +704,7 @@ class HTTPProxyServer:
             on_event=self.on_event,
             redact=self.redact,
             upstream_tls=self.upstream_tls,
+            allowed_hosts=self.allowed_hosts,
         )
 
     def run(self) -> None:

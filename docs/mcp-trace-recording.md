@@ -23,7 +23,9 @@ agent-strace record-http --url http://127.0.0.1:8000/mcp --port 5100 --name loca
 ```
 
 Point the MCP client at `http://127.0.0.1:5100`. The proxy forwards traffic to
-the upstream URL.
+the upstream URL. It refuses requests from web pages on other sites, and
+requests to a host name other than `localhost` or an IP address. To allow
+another name, start it with [`--allow-host NAME`](commands.md#record-http).
 
 ## Query traces through MCP
 
