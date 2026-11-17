@@ -58,6 +58,7 @@ from typing import Any
 
 from .fileutil import file_lock, write_atomic
 from .http_post import no_redirect_opener, origin_redirect_hint, redirect_hint, same_origin_opener
+from .inert import inert
 from .store import resolve_trace_dir
 from .workspace import create_workspace, list_workspaces
 from .rbac import RBACStore
@@ -304,16 +305,36 @@ def _http_post(url: str, data: dict, auth_key: str = "") -> Any:
         raise RuntimeError(f"POST {url} → {e.code}{redirect_hint(e)}") from e
 
 
+_LIST_FAILED = "! workspaces: could not list them on the server, so nothing was applied: "
+
+
+def _is_workspace_list(reply: Any) -> bool:
+    """Tell whether *reply* is a list of objects that each have a string name."""
+    return isinstance(reply, list) and all(
+        isinstance(item, dict) and isinstance(item.get("name"), str) for item in reply
+    )
+
+
 def _apply_remote(cfg: dict, server: str, auth_key: str, dry_run: bool) -> list[str]:
-    """Push config sections to a hosted collector via HTTP."""
+    """Push config sections to a hosted collector via HTTP.
+
+    When the config declares a workspace, the server's workspaces are listed
+    first. If that GET fails, or its reply is not a list of workspaces with
+    names, no POST is sent and the only change is one ``!`` line.
+    """
     changes = []
     base = server.rstrip("/")
 
     # Workspaces
-    try:
-        remote_ws = {w["name"] for w in _http_get(f"{base}/api/workspaces", auth_key)}
-    except Exception:
-        remote_ws = set()
+    remote_ws: set[str] = set()
+    if any(ws.get("name", "") for ws in cfg.get("workspaces", [])):
+        try:
+            listing = _http_get(f"{base}/api/workspaces", auth_key)
+        except Exception as exc:
+            return [f"{_LIST_FAILED}{inert(exc)}"]
+        if not _is_workspace_list(listing):
+            return [f"{_LIST_FAILED}the reply is not a list of workspaces with names"]
+        remote_ws = {item["name"] for item in listing}
 
     for ws in cfg.get("workspaces", []):
         name = ws.get("name", "")
@@ -326,7 +347,7 @@ def _apply_remote(cfg: dict, server: str, auth_key: str, dry_run: bool) -> list[
                 try:
                     _http_post(f"{base}/api/workspaces", {"name": name}, auth_key)
                 except Exception as exc:
-                    changes.append(f"! workspace: {name}: {exc}")
+                    changes.append(f"! workspace: {name}: {inert(exc)}")
                     continue
             changes.append(f"+ workspace: {name}")
 
@@ -346,7 +367,7 @@ def _apply_remote(cfg: dict, server: str, auth_key: str, dry_run: bool) -> list[
                     "workspace_id": workspace_id,
                 }, auth_key)
             except Exception as exc:
-                changes.append(f"! rbac: {principal} → {role}: {exc}")
+                changes.append(f"! rbac: {principal} → {role}: {inert(exc)}")
                 continue
         changes.append(f"+ rbac: {principal} → {role}")
 
