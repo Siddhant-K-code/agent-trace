@@ -37,6 +37,9 @@ SECRET = "SECRET-SENTINEL"
 TRACE_ID = "a" * 32
 PARENT_SPAN_ID = "b" * 16
 REDIRECT_NOTE = " (redirects are not followed; give the final URL)"
+# Shown raw, this reason phrase sets the window title and clears the screen.
+REASON = "Oops \x1b]0;PWNED-TITLE\x07\x1b[2J\x1b[31mRED\x1b[0m \x9b31m end"
+REASON_SHOWN = "Oops \\x1b]0;PWNED-TITLE\\x07\\x1b[2J\\x1b[31mRED\\x1b[0m \\x9b31m end"
 FORMATS_HINT = "use --format otlp, otlp-genai or temporal"
 NAME_RULE = "its name may only contain ASCII letters, digits and !#$%&'*+-.^_`|~"
 VALUE_RULE = "its value must contain only printable ASCII"
@@ -67,7 +70,8 @@ class _Collector(ThreadingHTTPServer):
     A reply is (status, body, hold). It waits up to *hold* seconds, or until
     ``release`` is set, before it is sent. A 3xx reply points Location at
     another host name for this server, so a followed redirect shows up as a
-    GET.
+    GET. Each reply has the standard reason phrase, or ``reason`` when it is
+    set.
     """
 
     daemon_threads = True
@@ -79,6 +83,7 @@ class _Collector(ThreadingHTTPServer):
         self.requests: list[_Request] = []
         self.replies: list[tuple[int, bytes, float]] = []
         self.release = threading.Event()
+        self.reason: str | None = None
 
     def handle_error(self, request, client_address) -> None:
         pass  # the client timed out and closed the connection
@@ -103,7 +108,7 @@ class _CollectorHandler(BaseHTTPRequestHandler):
             status, reply, hold = server.replies.pop(0) if server.replies else (200, b"", 0.0)
         if hold:
             server.release.wait(hold)
-        self.send_response(status)
+        self.send_response(status, server.reason)
         if 300 <= status < 400:
             self.send_header("Location", f"http://localhost:{server.server_address[1]}/landing")
         self.send_header("Content-Length", str(len(reply)))
@@ -115,6 +120,29 @@ class _CollectorHandler(BaseHTTPRequestHandler):
             self.server.requests.append(_Request("GET", self.path, list(self.headers.items()), b""))
         self.send_response(200)
         self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *args: object) -> None:
+        pass
+
+
+class _RefusingProxy(ThreadingHTTPServer):
+    """An HTTPS proxy that answers every CONNECT with 403 and *reason*."""
+
+    daemon_threads = True
+    block_on_close = False
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(("127.0.0.1", 0), _RefusingProxyHandler)
+        self.reason = reason
+
+    def handle_error(self, request, client_address) -> None:
+        pass  # the client closed the connection first
+
+
+class _RefusingProxyHandler(BaseHTTPRequestHandler):
+    def do_CONNECT(self) -> None:  # noqa: N802
+        self.send_response(403, self.server.reason)
         self.end_headers()
 
     def log_message(self, *args: object) -> None:
@@ -316,6 +344,47 @@ class TestNoRedirectOpener(unittest.TestCase):
         )
 
 
+class TestPostErrorDetail(unittest.TestCase):
+    """The reason comes from a server or a proxy, so it is shown inert."""
+
+    def _http_error(self, code, reason):
+        exc = urllib.error.HTTPError("http://h/", code, reason, {}, None)
+        self.addCleanup(exc.close)
+        return exc
+
+    def test_http_error_reason(self):
+        for code, note in ((500, ""), (302, REDIRECT_NOTE)):
+            with self.subTest(code=code):
+                exc = self._http_error(code, f"{REASON}\nforged")
+                self.assertEqual(
+                    http_post.post_error_detail(exc),
+                    f"HTTP Error {code}: {REASON_SHOWN}\\nforged{note}",
+                )
+
+    def test_url_error_reason(self):
+        cases = (
+            ("bad \x1b[2K\nforged", "bad \\x1b[2K\\nforged"),
+            (OSError(f"Tunnel connection failed: 403 {REASON}"),
+             f"Tunnel connection failed: 403 {REASON_SHOWN}"),
+        )
+        for reason, shown in cases:
+            with self.subTest(reason=reason):
+                exc = urllib.error.URLError(reason)
+                self.assertEqual(http_post.post_error_detail(exc), shown)
+
+    def test_printable_reason_is_unchanged(self):
+        cases = (
+            (self._http_error(404, "Not Found"), "HTTP Error 404: Not Found"),
+            (self._http_error(503, "Busy: café → 日本"), "HTTP Error 503: Busy: café → 日本"),
+            (urllib.error.URLError(ConnectionRefusedError(61, "Connection refused")),
+             "[Errno 61] Connection refused"),
+            (urllib.error.URLError("café → 日本"), "café → 日本"),
+        )
+        for exc, detail in cases:
+            with self.subTest(detail=detail):
+                self.assertEqual(http_post.post_error_detail(exc), detail)
+
+
 class TestExportSends(_CollectorCase):
     def test_any_2xx_is_success(self):
         # E01 to E04. main exited 1 on 201 and 204, and otlp-genai printed
@@ -427,6 +496,36 @@ class TestExportFailures(_CollectorCase):
                 with self.subTest(format=fmt, body=body):
                     result = self.send(fmt, (404, body, 0.0))
                     self.assertEqual(result, (1, "", self.failure("HTTP Error 404: Not Found")))
+
+    def test_reason_phrase_is_inert(self):
+        # e500, e302. main printed the reason raw, so it set the window
+        # title and cleared the screen.
+        self.collector.reason = REASON
+        for fmt in FORMATS:
+            for status, note in ((500, ""), (302, REDIRECT_NOTE)):
+                with self.subTest(format=fmt, status=status):
+                    result = self.send(fmt, (status, b"", 0.0))
+                    detail = f"HTTP Error {status}: {REASON_SHOWN}{note}"
+                    self.assertEqual(result, (1, "", self.failure(detail)))
+
+    def test_proxy_reason_phrase_is_inert(self):
+        # http.client puts the reason of a refused CONNECT in an OSError and
+        # urllib wraps that in a URLError. main printed it raw.
+        proxy = _RefusingProxy(REASON)
+        threading.Thread(
+            target=proxy.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True,
+        ).start()
+        self.addCleanup(proxy.server_close)
+        self.addCleanup(proxy.shutdown)
+        endpoint = "https://collector.test"
+        env = {"https_proxy": f"http://127.0.0.1:{proxy.server_address[1]}", "no_proxy": ""}
+        with patch.dict(os.environ, env):
+            for fmt in FORMATS:
+                with self.subTest(format=fmt):
+                    result = self.send(fmt, endpoint=endpoint)
+                    detail = f"Tunnel connection failed: 403 {REASON_SHOWN}"
+                    self.assertEqual(result, (1, "", self.failure(detail, endpoint)))
+        self.assertEqual(self.collector.received(), [])
 
     def test_timeout_is_one_line(self):
         # E09. main printed a TimeoutError traceback for otlp and temporal.

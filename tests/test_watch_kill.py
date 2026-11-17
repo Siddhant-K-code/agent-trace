@@ -36,6 +36,8 @@ WEBHOOK = "http://hooks.example/x"
 ON_DEATH = "restart-agent --from {post_mortem_path}"
 COST_MSG = "CostWatcher: $3.00 (threshold: $2.0)"
 RETRY_MSG = "RetryWatcher: command ran 6 times: pytest"
+# The agent writes the command, so an alert can quote escape codes and line breaks.
+RAW_MSG = "RetryWatcher: command ran 6 times: ls \x1b[2K\n2026-01-01T00:00:00Z  FORGED"
 ALREADY = f"Agent pid {PID} was already killed; no signal sent"
 
 
@@ -197,6 +199,14 @@ class TestKill(KillTestCase):
                 self.reset()
                 message = self.kill(path)
                 self.assertEqual(self.calls, self.killed_steps(message))
+
+    def test_post_mortem_keeps_the_raw_text(self):
+        # Guard: unchanged from main. The post-mortem is JSON, which escapes
+        # the agent's text.
+        self.watcher(RAW_MSG)
+        post_mortem = json.loads(self.post_mortem.read_text())
+        self.assertEqual(post_mortem["reason"], RAW_MSG)
+        self.assertIn(f" Reason: {RAW_MSG}. Resume ", post_mortem["recovery_context"])
 
 
 class TestNotKilled(KillTestCase):

@@ -67,6 +67,7 @@ from .http_post import (
     url_endpoint as _stream_endpoint,
     url_problem as _stream_to_problem,
 )
+from .inert import inert
 from .models import EventType, TraceEvent
 from .postmortem import clear_heartbeat, write_heartbeat
 from .process_identity import PID_REUSED_REASON, pid_reused, process_identity
@@ -212,24 +213,34 @@ def _read_limit_flags(args: argparse.Namespace) -> tuple[float | None, float | N
 # Alert actions
 # ---------------------------------------------------------------------------
 
-def _alert_terminal(message: str, out: TextIO = sys.stderr) -> None:
-    out.write(f"[watch] ⚠️  {message}\n")
+def _alert_terminal(message: str, out: TextIO = sys.stderr, *, hint: str = "") -> None:
+    """Show *message* as one alert line on *out*, and *hint* on the next line.
+
+    The message can hold the agent's text, so it goes through inert(): an
+    escape code or line break shows as an escape and cannot hide or split
+    the alert.
+    """
+    out.write(f"[watch] ⚠️  {inert(message)}\n")
+    if hint:
+        out.write(f"  {inert(hint)}\n")
     out.flush()
 
 
 def _alert_file(message: str, log_path: str = ".agent-traces/alerts.log") -> None:
-    """Append *message* to the alert log. Never raises.
+    """Append *message* to the alert log as one line. Never raises.
 
-    A failed write prints one line to stderr and the alert goes on, so an
-    unwritable log cannot stop a pause or kill.
+    The message goes through inert(), so a line break in the agent's text
+    cannot forge a log entry. A failed write prints one line to stderr and
+    the alert goes on, so an unwritable log cannot stop a pause or kill.
     """
     try:
         Path(log_path).parent.mkdir(parents=True, exist_ok=True)
         with open(log_path, "a", encoding="utf-8", newline="\n") as f:
             ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            f.write(f"{ts}  {message}\n")
+            f.write(f"{ts}  {inert(message)}\n")
     except (OSError, ValueError) as exc:
-        # ValueError covers a lone surrogate in the message and a NUL in the path.
+        # ValueError covers a NUL in the path. inert() already wrote a lone
+        # surrogate in the message as \ud800, so it no longer raises here.
         sys.stderr.write(f"[watch] Could not write alert log: {exc}\n")
         sys.stderr.flush()
 
@@ -353,11 +364,14 @@ def _resume_process(pid: int) -> str | None:
 
 
 def _report(msg: str, out: TextIO | None = None, alert_log: str | None = None) -> None:
-    """Show *msg* on *out* (the terminal when None) and add it to *alert_log*."""
+    """Show *msg* on *out* (the terminal when None) and add it to *alert_log*.
+
+    Each output is one line, with *msg* made inert like an alert.
+    """
     if out is None:
         _alert_terminal(msg)
     else:
-        out.write(f"[watch] {msg}\n")
+        out.write(f"[watch] {inert(msg)}\n")
         out.flush()
     if alert_log:
         _alert_file(msg, alert_log)
@@ -451,13 +465,7 @@ def _agent_pid_reused(
     )
     if state.paused:
         msg += " Pause cleared."
-    if out is None:
-        _alert_terminal(msg)
-    else:
-        out.write(f"[watch] {msg}\n")
-        out.flush()
-    if alert_log:
-        _alert_file(msg, alert_log)
+    _report(msg, out, alert_log)
     state.agent_pid = None
     state.agent_start_time = None
     state.pause_owner = None
@@ -472,12 +480,7 @@ def _warn_no_agent_pid(state: "WatchState", what: str, out: TextIO | None = None
     if state.warned_no_agent_pid:
         return
     state.warned_no_agent_pid = True
-    msg = f"Cannot {what}: {NO_AGENT_PID_HINT}"
-    if out is None:
-        _alert_terminal(msg)
-    else:
-        out.write(f"[watch] {msg}\n")
-        out.flush()
+    _report(f"Cannot {what}: {NO_AGENT_PID_HINT}", out)
 
 
 # ---------------------------------------------------------------------------
@@ -1939,8 +1942,8 @@ def _dispatch_alert(
                 )
                 _alert_terminal(
                     f"[HITL] Approval required for rule '{rule_name}'. "
-                    f"Request ID: {req.request_id}\n"
-                    f"  Run: agent-strace approval approve {req.request_id}"
+                    f"Request ID: {req.request_id}",
+                    hint=f"Run: agent-strace approval approve {req.request_id}",
                 )
             except Exception as exc:
                 _alert_terminal(f"[HITL] Could not create approval request: {exc}")
@@ -2417,14 +2420,16 @@ def _check_approval_decision(store: "TraceStore", state: "WatchState", out: "Tex
     if req is None or req.state == "pending":
         return
     state.approval_request_id = None
+    # The request file is in the trace directory, which the agent can write.
+    request_id = inert(req.request_id)
     if req.state == "denied":
         out.write(
-            f"[watch] Approval {req.request_id} denied; agent stays stopped. "
+            f"[watch] Approval {request_id} denied; agent stays stopped. "
             f"Run 'kill -CONT {state.agent_pid}' or Pause then Resume in the editor to release it\n"
         )
         state.pause_owner = PAUSE_RULE
     else:
-        out.write(f"[watch] Approval {req.request_id} {req.state}; pause released\n")
+        out.write(f"[watch] Approval {request_id} {req.state}; pause released\n")
         state.pause_owner = None
     out.flush()
 
@@ -2695,7 +2700,7 @@ def watch_session(
     """
     events_file = store._session_file(session_id, "events.ndjson", "event stream")
     if not events_file.exists():
-        out.write(f"[watch] events file not found: {events_file}\n")
+        out.write(f"[watch] events file not found: {inert(events_file)}\n")
         return
 
     # Temporal's OTel interceptor can pass the activity's W3C traceparent to
@@ -2706,7 +2711,7 @@ def watch_session(
 
         temporal_context = attach_temporal_trace_context(store, session_id)
     except ValueError as exc:
-        out.write(f"[watch] Invalid Temporal trace context: {exc}\n")
+        out.write(f"[watch] Invalid Temporal trace context: {inert(exc)}\n")
         temporal_context = None
     if temporal_context is not None:
         out.write(
@@ -2720,7 +2725,7 @@ def watch_session(
     )
 
     mode = " [dry-run]" if dry_run else ""
-    out.write(f"[watch] Monitoring session {session_id[:12]}...{mode}\n")
+    out.write(f"[watch] Monitoring session {inert(session_id[:12])}...{mode}\n")
     if agent_pid:
         out.write(f"[watch] Agent pid {agent_pid}: pause, kill and approval actions will signal it\n")
     if nanny_rules:
@@ -2733,7 +2738,7 @@ def watch_session(
         try:
             checkpoint_path = checkpoint_watcher.checkpoint_current()
             if checkpoint_path:
-                out.write(f"[watch] Compaction checkpoint written to {checkpoint_path}\n")
+                out.write(f"[watch] Compaction checkpoint written to {inert(checkpoint_path)}\n")
         except OSError as exc:
             out.write(f"[watch] Could not write compaction checkpoint: {exc}\n")
     out.flush()
@@ -2749,9 +2754,7 @@ def watch_session(
         if budget_status.should_warn:
             msg = format_project_budget_status(budget_status)
             state.fired.add("project-budget")
-            out.write(f"[watch] {msg}\n")
-            out.flush()
-            _alert_file(msg, config.alert_log)
+            _report(msg, out, config.alert_log)
 
     streamer: EventStreamer | None = None
     if stream_config and stream_config.url:
@@ -2826,7 +2829,7 @@ def watch_session(
                     checkpoint_path = checkpoint_watcher.update(event)
                     if checkpoint_path:
                         out.write(
-                            f"[watch] Compaction checkpoint written to {checkpoint_path}\n"
+                            f"[watch] Compaction checkpoint written to {inert(checkpoint_path)}\n"
                         )
                         out.flush()
                 except OSError as exc:
@@ -2855,9 +2858,7 @@ def watch_session(
                 if budget_status.should_warn and "project-budget" not in state.fired:
                     state.fired.add("project-budget")
                     msg = format_project_budget_status(budget_status)
-                    out.write(f"[watch] {msg}\n")
-                    out.flush()
-                    _alert_file(msg, config.alert_log)
+                    _report(msg, out, config.alert_log)
                     if config.webhook_url:
                         _alert_webhook(msg, config.webhook_url)
 
@@ -3058,7 +3059,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
         try:
             tagged_events = store.tag_session(full_id, tenant_id)
         except (OSError, ValueError, json.JSONDecodeError) as exc:
-            sys.stderr.write(f"[watch] could not assign tenant: {exc}\n")
+            # The error can quote an event ID from the session's events file.
+            sys.stderr.write(f"[watch] could not assign tenant: {inert(exc)}\n")
             return 1
         sys.stderr.write(
             f"[watch] Tenant {tenant_id.strip()} assigned to "

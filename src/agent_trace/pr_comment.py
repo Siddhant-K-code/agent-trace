@@ -27,6 +27,7 @@ from .event_data import NonObjectEventDataError, require_object_event_data
 from .explain import explain_session
 from .failures import count_session_errors
 from .http_post import no_redirect_opener, redirect_hint
+from .inert import inert
 from .lint import lint_session
 from .models import EventType, SessionMeta, TraceEvent
 from .session_paths import normalise_path, session_cwd, shell_reads, shell_writes
@@ -788,10 +789,12 @@ def _request_json(
         exc.close()
         hint = redirect_hint(exc) if no_redirect else ""
         raise PRCommentError(
-            f"{platform.title()} API request failed with HTTP {exc.code}: {exc.reason}{hint}"
+            f"{platform.title()} API request failed with HTTP {exc.code}: "
+            f"{inert(exc.reason)}{hint}"
         ) from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise PRCommentError(f"{platform.title()} API request failed: {exc}") from exc
+        # A proxy that refuses CONNECT puts its own reason phrase in exc.
+        raise PRCommentError(f"{platform.title()} API request failed: {inert(exc)}") from exc
 
     if not raw:
         return None

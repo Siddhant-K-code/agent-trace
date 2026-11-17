@@ -5,6 +5,7 @@ import errno
 import io
 import json
 import os
+import re
 import signal
 import socket
 import sys
@@ -14,6 +15,7 @@ import time
 import unittest
 from collections import deque
 from contextlib import redirect_stderr, redirect_stdout
+from functools import partial
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -33,6 +35,7 @@ from agent_trace.watch import (
     _alert_terminal,
     _alert_file,
     _alert_webhook,
+    _agent_pid_reused,
     _apply_builtin_rules_spec,
     _check_pause_file,
     _detect_loop,
@@ -40,6 +43,7 @@ from agent_trace.watch import (
     _dispatch_alert,
     _dispatch_nanny_rule,
     _event_key,
+    _warn_no_agent_pid,
     cmd_watch,
     watch_session,
 )
@@ -235,6 +239,22 @@ class TestAlertTerminal(unittest.TestCase):
         self.assertIn("test alert", buf.getvalue())
         self.assertIn("[watch]", buf.getvalue())
 
+    def test_printable_message_is_unchanged(self):
+        buf = io.StringIO()
+        _alert_terminal("RetryWatcher: command ran 6 times: ls café → 日本 \\x1b", out=buf)
+        self.assertEqual(
+            buf.getvalue(),
+            "[watch] ⚠️  RetryWatcher: command ran 6 times: ls café → 日本 \\x1b\n",
+        )
+
+    def test_message_and_hint_are_one_inert_line_each(self):
+        buf = io.StringIO()
+        _alert_terminal("cmd \x1b[2K\nforged", out=buf, hint="Run: x\x1b]0;t\x07")
+        self.assertEqual(
+            buf.getvalue(),
+            "[watch] ⚠️  cmd \\x1b[2K\\nforged\n  Run: x\\x1b]0;t\\x07\n",
+        )
+
     def test_dispatch_always_writes_terminal(self):
         from agent_trace.watch import _dispatch_alert, WatcherConfig, WatchState
         import unittest.mock as mock
@@ -259,6 +279,247 @@ class TestAlertFile(unittest.TestCase):
             log_path = os.path.join(tmp, "subdir", "alerts.log")
             _alert_file("msg", log_path=log_path)
             self.assertTrue(Path(log_path).exists())
+
+
+# An alerts.log line starts with a UTC timestamp and two spaces.
+_STAMP = r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ  "
+
+
+def _assert_inert_lines(test: unittest.TestCase, text: str, count: int) -> None:
+    """Check *text* is *count* lines with no unprintable character."""
+    lines = text.split("\n")
+    test.assertEqual((len(lines) - 1, lines[-1]), (count, ""), ascii(text))
+    for line in lines[:-1]:
+        test.assertTrue(line.isprintable(), ascii(line))
+
+
+class TestAgentTextInAlerts(unittest.TestCase):
+    """The agent writes the text of its tool calls, and alerts quote it.
+    Each unprintable character shows as an escape, so an escape code cannot
+    hide an alert and a line break cannot forge one. Each alert is one line
+    on the terminal and one line in alerts.log."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.store = TraceStore(self.root / "traces", redact=False)
+        _clear_notify_env(self)
+
+    def _watch(self, command: str) -> tuple[str, str, str]:
+        """Watch six identical Bash calls of *command* with the default
+        rules. Return the terminal, alerts.log and stderr."""
+        session_id = "inert-session"
+        self.store.create_session(SessionMeta(session_id=session_id, started_at=time.time()))
+        call = {"tool_name": "Bash", "arguments": {"command": command}}
+        events = [_make_event(EventType.TOOL_CALL, time.time(), session_id, **call) for _ in range(6)]
+        events.append(_make_event(EventType.SESSION_END, time.time(), session_id))
+
+        def tail(_path, poll_interval=0.5):
+            yield from events
+
+        log = self.root / "alerts.log"
+        terminal, err = io.StringIO(), io.StringIO()
+        with patch("agent_trace.watch._tail_events", tail), \
+                patch("agent_trace.watch._alert_terminal",
+                      side_effect=lambda msg, *a, **k: _alert_terminal(msg, terminal, **k)), \
+                redirect_stderr(err):
+            watch_session(
+                self.store, session_id,
+                WatcherConfig(on_violation="file", alert_log=str(log)), out=io.StringIO(),
+            )
+        logged = log.read_text(encoding="utf-8") if log.exists() else ""
+        return terminal.getvalue(), logged, err.getvalue()
+
+    def _check(self, command: str, shown: str, preview: str | None = None) -> None:
+        """Check both alerts show *command* as *shown*. LoopWatcher shows
+        its first 40 characters as *preview*."""
+        alerts = [
+            "LoopWatcher: identical tool call repeated 3 times in last 10 events "
+            f"(Bash:{shown if preview is None else preview})",
+            f"RetryWatcher: command ran 6 times: {shown}",
+        ]
+        terminal, log, err = self._watch(command)
+        self.assertEqual(terminal, "".join(f"[watch] ⚠️  {alert}\n" for alert in alerts))
+        self.assertRegex(log, "".join(["\\A", *(f"{_STAMP}{re.escape(a)}\n" for a in alerts), "\\Z"]))
+        self.assertEqual(err, "")
+        _assert_inert_lines(self, terminal, 2)
+        _assert_inert_lines(self, log, 2)
+
+    def test_escape_codes_cannot_hide_an_alert(self):
+        # Erase the line, go to column 1, conceal the text after it.
+        self._check("ls \x1b[2K\x1b[1G\x1b[8m", r"ls \x1b[2K\x1b[1G\x1b[8m")
+
+    def test_line_break_cannot_forge_a_log_entry(self):
+        self._check(
+            "true\n2026-01-01T00:00:00Z  FORGED: all clear",
+            r"true\n2026-01-01T00:00:00Z  FORGED: all clear",
+            preview=r"true\n2026-01-01T00:00:00Z  FORGED: all c",
+        )
+
+    def test_c1_control_is_escaped(self):
+        # U+009B starts an escape code on a terminal that reads 8-bit controls.
+        self._check("ls \x9b31m red", r"ls \x9b31m red")
+
+    def test_bidi_control_is_escaped(self):
+        # U+202E shows the text after it right to left.
+        self._check("ls \u202eexe.txt", r"ls \u202eexe.txt")
+
+    def test_lone_surrogate_is_logged_as_an_escape(self):
+        # A JSON "\ud800" escape in a tool argument reaches watch as a lone
+        # surrogate. UTF-8 cannot encode it, so a raw write drops the log line.
+        self._check("ls \ud800", r"ls \ud800")
+
+    def test_printable_text_is_unchanged(self):
+        self._check("ls café → 日本", "ls café → 日本")
+
+
+class TestWatchLinesAreInert(unittest.TestCase):
+    """Lines that watch writes with its own [watch] prefix are made inert
+    like alerts. Most of their text is watch's own today. The tests feed in
+    escape codes to check the sink, so later text is covered too."""
+
+    _FORGED = "\x1b[2K\n2026-01-01T00:00:00Z  FORGED"
+    _SHOWN = "\\x1b[2K\\n2026-01-01T00:00:00Z  FORGED"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.log = self.root / "alerts.log"
+        _clear_notify_env(self)
+
+    def test_reused_pid_line(self):
+        out = io.StringIO()
+        state = WatchState(agent_pid=424242, agent_start_time="proc:1")
+        with patch("agent_trace.watch.pid_reused", return_value=True), \
+                patch("agent_trace.watch.PID_REUSED_REASON", self._FORGED):
+            self.assertTrue(_agent_pid_reused(state, out, str(self.log)))
+        self.assertTrue(
+            out.getvalue().startswith(f"[watch] Agent pid 424242: {self._SHOWN} (the agent exited"),
+            ascii(out.getvalue()),
+        )
+        _assert_inert_lines(self, out.getvalue(), 1)
+        _assert_inert_lines(self, self.log.read_text(encoding="utf-8"), 1)
+
+    def test_no_agent_pid_line(self):
+        out = io.StringIO()
+        _warn_no_agent_pid(WatchState(), f"pause for rule '{self._FORGED}'", out)
+        self.assertTrue(
+            out.getvalue().startswith(f"[watch] Cannot pause for rule '{self._SHOWN}': no agent PID"),
+            ascii(out.getvalue()),
+        )
+        _assert_inert_lines(self, out.getvalue(), 1)
+
+    def _watch_budget(self, budget: ProjectBudgetConfig, events: list[TraceEvent]) -> str:
+        store = TraceStore(self.root / "traces", redact=False)
+        store.create_session(SessionMeta(session_id="budget-session", started_at=time.time()))
+        events = [*events, _make_event(EventType.SESSION_END, time.time(), "budget-session")]
+
+        def tail(_path, poll_interval=0.5):
+            yield from events
+
+        out = io.StringIO()
+        with patch("agent_trace.watch._tail_events", tail), \
+                patch("agent_trace.watch.format_project_budget_status",
+                      return_value=f"ProjectBudget: {self._FORGED}"):
+            watch_session(
+                store, "budget-session", WatcherConfig(alert_log=str(self.log)), out=out,
+                project_budget_config=budget,
+            )
+        return out.getvalue()
+
+    def _assert_budget_line(self, out: str) -> None:
+        self.assertEqual(out.count(f"[watch] ProjectBudget: {self._SHOWN}\n"), 1, ascii(out))
+        _assert_inert_lines(self, out, out.count("\n"))
+        log = self.log.read_text(encoding="utf-8")
+        self.assertRegex(log, rf"\A{_STAMP}ProjectBudget: {re.escape(self._SHOWN)}\n\Z")
+
+    def test_project_budget_line_at_startup(self):
+        self._assert_budget_line(self._watch_budget(ProjectBudgetConfig(weekly=1.0, warn_at=0.0), []))
+
+    def test_project_budget_line_while_watching(self):
+        response = _make_event(
+            EventType.ASSISTANT_RESPONSE, time.time(), "budget-session", text="x" * 10000,
+        )
+        self._assert_budget_line(
+            self._watch_budget(ProjectBudgetConfig(weekly=0.01, warn_at=0.5), [response])
+        )
+
+    _SID = "abc\u202edef"
+
+    def _watch_stored_session(
+        self, *argv: str, stored: list[TraceEvent] | None, tailed: tuple = (),
+    ) -> str:
+        """Run watch with no session ID and return what it wrote. The only
+        stored session has an ID with U+202E. *stored* None means it has no
+        events file."""
+        # A session directory from an old store may hold any character but a
+        # control code (Cc). The agent can write one with the latest start
+        # time, and watch with no session ID picks it.
+        traces = self.root / "traces"
+        session = traces / self._SID
+        session.mkdir(parents=True)
+        meta = SessionMeta(session_id=self._SID, started_at=time.time())
+        (session / "meta.json").write_text(meta.to_json(), encoding="utf-8")
+        if stored is not None:
+            (session / "events.ndjson").touch()
+            store = TraceStore(traces, redact=False)
+            for event in stored:
+                store.append_event(self._SID, event)
+        os.environ.pop("AGENT_STRACE_TENANT_ID", None)
+
+        def tail(_path, poll_interval=0.5):
+            yield from tailed
+            yield _make_event(EventType.SESSION_END, time.time(), self._SID)
+
+        out = io.StringIO()
+        args = build_parser().parse_args(["--trace-dir", str(traces), "watch", *argv])
+        # The real watch_session, with its output sent to out.
+        with patch("agent_trace.watch.watch_session", partial(watch_session, out=out)), \
+                patch("agent_trace.watch._tail_events", tail), \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.assertEqual(cmd_watch(args), 0)
+        _assert_inert_lines(self, out.getvalue(), out.getvalue().count("\n"))
+        return out.getvalue()
+
+    def _full_context(self) -> TraceEvent:
+        # 170k input tokens fill 85% of the model's 200k window. The default
+        # checkpoint threshold is 80%.
+        return _make_event(
+            EventType.LLM_REQUEST, time.time(), self._SID,
+            model="claude-sonnet-4", input_tokens=170_000,
+        )
+
+    def _assert_checkpoint_line(self, out: str) -> None:
+        lines = [line for line in out.split("\n") if "Compaction checkpoint" in line]
+        self.assertEqual(len(lines), 1, ascii(out))
+        self.assertTrue(
+            lines[0].startswith("[watch] Compaction checkpoint written to "), ascii(out),
+        )
+        self.assertTrue(lines[0].endswith("abc\\u202edef.md"), ascii(out))
+
+    def test_stored_session_id_in_the_monitoring_line(self):
+        out = self._watch_stored_session(stored=[])
+        self.assertTrue(out.startswith("[watch] Monitoring session abc\\u202edef"), ascii(out))
+
+    def test_stored_session_id_in_the_events_file_line(self):
+        out = self._watch_stored_session(stored=None)
+        self.assertTrue(out.startswith("[watch] events file not found: "), ascii(out))
+        self.assertIn("abc\\u202edef", out)
+        _assert_inert_lines(self, out, 1)
+
+    def test_stored_session_id_in_the_checkpoint_line_at_startup(self):
+        out = self._watch_stored_session(
+            "--compaction-checkpoint", stored=[self._full_context()],
+        )
+        self._assert_checkpoint_line(out)
+
+    def test_stored_session_id_in_the_checkpoint_line_while_watching(self):
+        out = self._watch_stored_session(
+            "--compaction-checkpoint", stored=[], tailed=(self._full_context(),),
+        )
+        self._assert_checkpoint_line(out)
 
 
 # ---------------------------------------------------------------------------
@@ -1169,6 +1430,11 @@ _MARKERS = ("SECRET", "token")
 _USER_INFO = "SECRET-USER:SECRET-PASS@"
 _NOT_FOLLOWED = " (redirects are not followed; give the final URL)"
 _NOTIFY_ENV = ("AGENT_STRACE_SLACK_WEBHOOK", "AGENT_STRACE_TEAMS_WEBHOOK")
+# Shown raw, this reason phrase sets the window title and clears the screen.
+_REASON = "Oops \x1b]0;PWNED\x07\x1b[2J\x9b31m end"
+_REASON_SHOWN = "Oops \\x1b]0;PWNED\\x07\\x1b[2J\\x9b31m end"
+# The agent writes the command, so an alert can quote escape codes and line breaks.
+_RAW_ALERT = "RetryWatcher: command ran 6 times: ls \x1b[2K\n2026-01-01T00:00:00Z  FORGED"
 
 
 def _closed_port() -> int:
@@ -1192,7 +1458,8 @@ class _AlertServer(ThreadingHTTPServer):
 
     A reply waits *hold* seconds, or until ``release`` is set, before it is
     sent. A 3xx reply points Location at a URL with markers in it, and every
-    GET gets 200. ``on_post`` is called when a POST arrives.
+    GET gets 200. ``on_post`` is called when a POST arrives. Each reply has
+    the standard reason phrase, or ``reason`` when it is set.
     """
 
     daemon_threads = True
@@ -1205,6 +1472,7 @@ class _AlertServer(ThreadingHTTPServer):
         self.replies: list[tuple[int, float]] = []
         self.release = threading.Event()
         self.on_post = None
+        self.reason: str | None = None
 
     def handle_error(self, request, client_address) -> None:
         pass  # the client timed out and closed the connection
@@ -1231,7 +1499,7 @@ class _AlertHandler(BaseHTTPRequestHandler):
             server.on_post()
         if hold:
             server.release.wait(hold)
-        self.send_response(status)
+        self.send_response(status, server.reason)
         if 300 <= status < 400:
             self.send_header("Location", "/SECRET-LOCATION?token=SECRET-QUERY")
         self.send_header("Content-Length", "0")
@@ -1315,6 +1583,14 @@ class TestAlertWebhookFailures(_AlertServerTestCase):
                 )
                 self.assertEqual(self.server.methods(), ["POST"])
 
+    def test_reason_phrase_is_inert(self):
+        self.server.reason = _REASON
+        self.server.script((500, 0.0))
+        self.assertEqual(
+            self._post(),
+            f"[watch] Webhook POST to {self.endpoint} failed: HTTP Error 500: {_REASON_SHOWN}\n",
+        )
+
     def test_refused_connection_prints_one_line(self):
         port = _closed_port()
         self.assertRegex(
@@ -1354,6 +1630,21 @@ class TestAlertWebhookFailures(_AlertServerTestCase):
                     self.assertEqual(self.server.methods(), [])
 
 
+class TestWebhookPayload(_AlertServerTestCase):
+    """The --webhook payload is JSON, which escapes the agent's text, so it
+    keeps the text raw."""
+
+    def test_payload_keeps_the_raw_text(self):
+        # Guard: unchanged from main.
+        err = io.StringIO()
+        with redirect_stderr(err):
+            _alert_webhook(_RAW_ALERT, self.url)
+        self.assertEqual(err.getvalue(), "")
+        [(method, _, body)] = self.server.requests
+        self.assertEqual(method, "POST")
+        self.assertEqual(json.loads(body), {"text": _RAW_ALERT, "source": "agent-strace"})
+
+
 class TestAlertLogFailures(unittest.TestCase):
     """An alert log that cannot be written prints one line and never raises,
     so the alert goes on to its pause or kill."""
@@ -1379,10 +1670,10 @@ class TestAlertLogFailures(unittest.TestCase):
     def test_unwritable_log_prints_one_line(self):
         self._assert_one_line(self._write("alert message", self.blocked_log))
 
-    def test_unencodable_message_prints_one_line(self):
-        # A JSON "\ud800" escape in a tool argument reaches the message as a
-        # lone surrogate, which UTF-8 cannot encode.
-        self._assert_one_line(self._write("RetryWatcher: 'echo \ud800' repeated", self.log))
+    def test_nul_in_the_path_prints_one_line(self):
+        # open() raises ValueError for it. A lone surrogate in the message no
+        # longer fails: TestAgentTextInAlerts covers it.
+        self._assert_one_line(self._write("alert message", self.log + "\x00"))
 
     def test_pause_and_kill_run_when_the_alert_log_fails(self):
         for action, target in (("kill", "_kill_process"), ("pause", "_pause_process")):
@@ -1513,6 +1804,18 @@ class TestNetworkAlertsRunLast(unittest.TestCase):
             ("webhook", self._MSG),
             ("webhook", f"[slack:#ops] {self._MSG}"),
         ])
+
+    def test_legacy_slack_hint_posts_the_raw_text(self):
+        # Guard: unchanged from main. Both POSTs are JSON, which escapes the
+        # agent's text.
+        del os.environ["AGENT_STRACE_SLACK_WEBHOOK"]
+        _dispatch_alert(
+            _RAW_ALERT, WatcherConfig(webhook_url=self._URL), WatchState(), notify="slack:#ops",
+        )
+        self.assertEqual(
+            [entry[1] for entry in self.calls if entry[0] == "webhook"],
+            [_RAW_ALERT, f"[slack:#ops] {_RAW_ALERT}"],
+        )
 
     def test_require_approval_sends_nothing_over_the_network(self):
         # Guard: unchanged from main.
@@ -1892,7 +2195,7 @@ class TestPauseSignalFailures(unittest.TestCase):
     def setUp(self):
         for target, effect in (
             ("agent_trace.watch.os.kill", self._kill),
-            ("agent_trace.watch._alert_terminal", lambda msg, *a: self.terminal.append(msg)),
+            ("agent_trace.watch._alert_terminal", lambda msg, *a, **k: self.terminal.append(msg)),
             ("agent_trace.watch.pid_reused", lambda *a: False),
         ):
             p = patch(target, side_effect=effect)

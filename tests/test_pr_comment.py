@@ -724,6 +724,43 @@ class TestCommentPosting(unittest.TestCase):
             )
         self.assertNotIn("top-secret-token", str(raised.exception))
 
+    def _request_error(self, error):
+        with self.assertRaises(PRCommentError) as raised:
+            _request_json(
+                "GET",
+                "https://api.github.com/repos/owner/repo",
+                "token",
+                platform="github",
+                opener=_Opener(error),
+            )
+        return str(raised.exception)
+
+    def test_network_error_reason_is_inert(self):
+        # urllib raises this when an HTTPS proxy refuses CONNECT.
+        error = urllib.error.URLError(
+            OSError("Tunnel connection failed: 403 Denied\x1b[2K\nforged: ok\x9b8m")
+        )
+        self.assertEqual(
+            self._request_error(error),
+            "Github API request failed: <urlopen error Tunnel connection failed: "
+            "403 Denied\\x1b[2K\\nforged: ok\\x9b8m>",
+        )
+
+    def test_printable_error_reason_is_unchanged(self):
+        url = "https://api.github.com"
+        cases = [
+            (urllib.error.HTTPError(url, 404, "Not Found", {}, None),
+             "Github API request failed with HTTP 404: Not Found"),
+            (urllib.error.HTTPError(url, 503, "Busy: café → 日本", {}, None),
+             "Github API request failed with HTTP 503: Busy: café → 日本"),
+            (urllib.error.URLError(ConnectionRefusedError(61, "Connection refused")),
+             "Github API request failed: <urlopen error [Errno 61] Connection refused>"),
+            (TimeoutError("timed out"), "Github API request failed: timed out"),
+        ]
+        for error, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(self._request_error(error), expected)
+
 
 class TestRequestRedirects(unittest.TestCase):
     """urllib re-sent a redirected POST as a GET with no body and the token."""
@@ -816,6 +853,36 @@ class TestCommand(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIn(COMMENT_MARKER, stdout.getvalue())
         self.assertIn("dry-run", stdout.getvalue())
+
+    def test_api_error_reason_is_one_inert_line(self):
+        # The API server writes the reason phrase that pr-comment prints.
+        error = urllib.error.HTTPError(
+            "https://api.github.com", 500, "Oops\x1b[2J\r\nforged: ok\x9b8m\u202e", {}, None
+        )
+        args = argparse.Namespace(
+            trace_dir=self.temp.name,
+            session_id="dry-run",
+            platform="github",
+            dry_run=False,
+            share_url="",
+            repo="owner/repo",
+            pr=7,
+            api_url="https://api.github.com",
+        )
+        stderr = io.StringIO()
+        # Patch OpenerDirector.open, not urlopen, so a request through any
+        # opener fails here and none reaches api.github.com.
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "token"}, clear=True), patch(
+            "urllib.request.OpenerDirector.open", side_effect=error
+        ), patch("sys.stderr", stderr):
+            result = cmd_pr_comment(args)
+
+        self.assertEqual(result, 1)
+        self.assertEqual(
+            stderr.getvalue(),
+            "pr-comment: Github API request failed with HTTP 500: "
+            "Oops\\x1b[2J\\r\\nforged: ok\\x9b8m\\u202e\n",
+        )
 
     def test_no_sessions_returns_nonzero(self):
         empty = tempfile.TemporaryDirectory()

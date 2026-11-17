@@ -91,6 +91,9 @@ class TestGenericPayload(unittest.TestCase):
 # No failure line may show these parts of a URL: the token lives there.
 _MARKERS = ("SECRET", "token")
 _NOT_FOLLOWED = " (redirects are not followed; give the final URL)"
+# Shown raw, this reason phrase sets the window title and clears the screen.
+_REASON = "Oops \x1b]0;PWNED\x07\x1b[2J\x9b31m end"
+_REASON_SHOWN = "Oops \\x1b]0;PWNED\\x07\\x1b[2J\\x9b31m end"
 
 
 def _closed_port() -> int:
@@ -105,7 +108,8 @@ class _PostServer(ThreadingHTTPServer):
 
     A reply waits *hold* seconds, or until ``release`` is set, before it is
     sent. A 3xx reply points Location at a URL with markers in it, and every
-    GET gets 200.
+    GET gets 200. Each reply has the standard reason phrase, or ``reason``
+    when it is set.
     """
 
     daemon_threads = True
@@ -117,6 +121,7 @@ class _PostServer(ThreadingHTTPServer):
         self.requests: list[tuple[str, str, bytes]] = []
         self.replies: list[tuple[int, float]] = []
         self.release = threading.Event()
+        self.reason: str | None = None
 
     def handle_error(self, request, client_address) -> None:
         pass  # the client timed out and closed the connection
@@ -141,7 +146,7 @@ class _PostHandler(BaseHTTPRequestHandler):
             status, hold = server.replies.pop(0) if server.replies else (200, 0.0)
         if hold:
             server.release.wait(hold)
-        self.send_response(status)
+        self.send_response(status, server.reason)
         if 300 <= status < 400:
             self.send_header("Location", "/SECRET-LOCATION?token=SECRET-QUERY")
         self.send_header("Content-Length", "0")
@@ -264,6 +269,14 @@ class TestPostFailureReports(_PostServerTestCase):
             "HTTP Error 503: Service Unavailable\n",
         ))
         self.sleep.assert_not_called()
+
+    def test_reason_phrase_is_inert(self):
+        self.server.reason = _REASON
+        self.server.script((404, 0.0))
+        self.assertEqual(self._post(), (
+            False,
+            f"[notify] Webhook POST to {self.endpoint} failed: HTTP Error 404: {_REASON_SHOWN}\n",
+        ))
 
     def test_refused_connection_is_reported_after_the_retries(self):
         port = _closed_port()
