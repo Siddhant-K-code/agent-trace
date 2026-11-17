@@ -83,6 +83,13 @@ _MISTRAL_MARKERS = (
     "mistral", "mixtral", "codestral", "devstral", "magistral", "ministral",
     "pixtral",
 )
+# Agent products that can run models from more than one provider: the hook
+# ``--provider`` keys and agent names of Codex, Copilot and Cursor. They name
+# no gen_ai.provider.name, so the model decides instead.
+_AGENT_PRODUCTS = frozenset({
+    "codex", "openai-codex", "copilot", "github-copilot", "cursor",
+    "cursor-agent",
+})
 _SEMCONV_CACHE_READ_TOKENS = "gen_ai.usage.cache_read.input_tokens"
 _SEMCONV_CACHE_WRITE_TOKENS = "gen_ai.usage.cache_write.input_tokens"
 _SEMCONV_TOOL_NAME = "gen_ai.tool.name"
@@ -163,6 +170,28 @@ def _duration_to_nanos(ms: float | None) -> int:
     return int(ms * 1_000_000)
 
 
+class _StringArray(tuple):
+    """An attribute value that OTLP carries as an array of strings.
+
+    ``_make_attributes`` writes other lists as one JSON string.
+    """
+
+
+def _finish_reasons(value: object) -> _StringArray:
+    """Return a recorded finish reason as ``gen_ai.response.finish_reasons``.
+
+    The GenAI conventions type the attribute as string[], one entry per
+    generation. A single recorded reason becomes a one-item array, and a
+    recorded list keeps its order; an entry that is not a string is kept as
+    its JSON text.
+    """
+    items = value if isinstance(value, (list, tuple)) else (value,)
+    return _StringArray(
+        item if isinstance(item, str) else json.dumps(item, default=str)
+        for item in items
+    )
+
+
 def _make_attributes(data: dict) -> list[dict]:
     """Convert a flat dict to OTel attribute format."""
     attrs = []
@@ -175,6 +204,9 @@ def _make_attributes(data: dict) -> list[dict]:
             attrs.append({"key": key, "value": {"doubleValue": value}})
         elif isinstance(value, str):
             attrs.append({"key": key, "value": {"stringValue": value}})
+        elif isinstance(value, _StringArray):
+            values = [{"stringValue": item} for item in value]
+            attrs.append({"key": key, "value": {"arrayValue": {"values": values}}})
         elif isinstance(value, dict):
             attrs.append({"key": key, "value": {"stringValue": json.dumps(value)}})
         elif isinstance(value, list):
@@ -256,18 +288,32 @@ def _provider_value(
     model: str = "",
     *event_data: Mapping[str, Any],
 ) -> tuple[str, str]:
-    """Return the raw provider evidence and its canonical GenAI value."""
+    """Return the raw provider evidence and its canonical GenAI value.
+
+    A recorded provider wins over the model, unless it names a multi-model
+    agent product (``_AGENT_PRODUCTS``), as the Codex hook does on every
+    model request. Then the model decides, and the product stays the raw
+    evidence; with no recognizable model the value is ``unknown``.
+    """
+    product = ""
     for data in event_data:
         for key in ("provider", "model_provider", "system"):
             value = data.get(key)
             if isinstance(value, str) and value.strip():
+                if value.strip().lower() in _AGENT_PRODUCTS:
+                    product = product or value.strip()
+                    continue
                 return value.strip(), _canonical_provider(value)
     if model:
         canonical = _canonical_provider(model)
         if canonical != "unknown":
-            return canonical, canonical
+            return product or canonical, canonical
+    if product:
+        return product, "unknown"
     attribution = meta.attribution if isinstance(meta.attribution, dict) else {}
     raw = attribution.get("agent_provider") or meta.agent_name
+    if isinstance(raw, str) and raw.strip().lower() in _AGENT_PRODUCTS:
+        return raw, "unknown"
     return str(raw or "unknown"), _canonical_provider(raw)
 
 
@@ -786,13 +832,13 @@ def session_to_otlp(
                 llm_attrs[_SEMCONV_OUTPUT_TOKENS] = usage.output_tokens
             finish = event.data.get("stop_reason", event.data.get("finish_reason", ""))
             if finish:
-                llm_attrs[_SEMCONV_FINISH_REASON] = finish
+                llm_attrs[_SEMCONV_FINISH_REASON] = _finish_reasons(finish)
             failure = llm_failure(event)
             if failure is not None:
                 # The classic export has no span per model request, so a
                 # failed or cancelled one is marked on its event instead.
                 if not finish:
-                    llm_attrs[_SEMCONV_FINISH_REASON] = _FINISH_REASON_ERROR
+                    llm_attrs[_SEMCONV_FINISH_REASON] = _finish_reasons(_FINISH_REASON_ERROR)
                 llm_attrs[_SEMCONV_ERROR_TYPE] = failure.error_type
                 if failure.message:
                     llm_attrs["error.message"] = failure.message
@@ -844,7 +890,7 @@ def session_to_otlp(
             "resource": {
                 "attributes": _make_attributes({
                     "service.name": service_name,
-                    "service.version": "agent-trace",
+                    "service.version": __version__,
                     "agent.session_id": meta.session_id,
                     **({"tenant_id": meta.tenant_id} if meta.tenant_id else {}),
                 }),
@@ -906,7 +952,7 @@ def tree_to_otlp(
             "resource": {
                 "attributes": _make_attributes({
                     "service.name": service_name,
-                    "service.version": "agent-trace",
+                    "service.version": __version__,
                     "agent.session_id": root_session_id,
                     **({"tenant_id": root_meta.tenant_id} if root_meta.tenant_id else {}),
                 }),
@@ -976,14 +1022,14 @@ def _genai_llm_span(
     llm_attrs.update(_reasoning_attributes(output_data, usage, has_output))
     finish = event.data.get("stop_reason") or event.data.get("finish_reason", "")
     if finish:
-        llm_attrs[_SEMCONV_FINISH_REASON] = finish
+        llm_attrs[_SEMCONV_FINISH_REASON] = _finish_reasons(finish)
         llm_attrs["agent.strace.finish_reason"] = finish
     failure = llm_failure(event)
     if failure is not None:
         if not finish:
             # The GenAI conventions report "error" when a failed or
             # cancelled generation returned no finish reason.
-            llm_attrs[_SEMCONV_FINISH_REASON] = _FINISH_REASON_ERROR
+            llm_attrs[_SEMCONV_FINISH_REASON] = _finish_reasons(_FINISH_REASON_ERROR)
         llm_attrs[_SEMCONV_ERROR_TYPE] = failure.error_type
     llm_attrs.update(_cost_attributes(req_data, event.data))
     if req_event:
@@ -1361,7 +1407,7 @@ def session_to_otlp_genai(
             "resource": {
                 "attributes": _make_attributes({
                     "service.name": service_name,
-                    "service.version": "agent-trace",
+                    "service.version": __version__,
                     "agent.session_id": meta.session_id,
                     **({"tenant_id": meta.tenant_id} if meta.tenant_id else {}),
                 }),

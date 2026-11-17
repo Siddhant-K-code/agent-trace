@@ -32,6 +32,14 @@ from agent_trace.timeline import build_timeline, format_timeline
 from agent_trace.validation import validate_trace_directory
 
 
+def _otlp_spans(payload):
+    return payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
+
+
+def _otlp_attrs(span):
+    return {a["key"]: next(iter(a["value"].values())) for a in span["attributes"]}
+
+
 class TestCodexHooks(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
@@ -1085,6 +1093,26 @@ class TestCodexPostModelRequest(unittest.TestCase):
             self.assertNotIn(key, scalar.data)
         self.assertNotIn("token_usage", scalar.data)
         self.assertEqual(self.store().load_meta(self.SESSION[:16]).total_tokens, 0)
+
+    def test_otlp_genai_provider_comes_from_the_model(self):
+        self.dispatch("SessionStart", source="startup", model="gpt-5.3-codex")
+        self.model_request(model="gpt-5.3-codex")
+        self.model_request()
+
+        session_id = self.SESSION[:16]
+        meta = self.store().load_meta(session_id)
+        self.assertEqual(meta.attribution["agent_provider"], "codex")
+        root, known, synthetic = _otlp_spans(
+            session_to_otlp_genai(meta, self.store().load_events(session_id))
+        )
+        self.assertEqual(known["name"], "chat gpt-5.3-codex")
+        for span, expected in ((root, "unknown"), (known, "openai"), (synthetic, "unknown")):
+            with self.subTest(span=span["name"]):
+                attrs = _otlp_attrs(span)
+                self.assertEqual(attrs["gen_ai.provider.name"], expected)
+                self.assertEqual(attrs["gen_ai.system"], expected)
+        self.assertEqual(_otlp_attrs(known)["llm.provider"], "openai")
+        self.assertEqual(_otlp_attrs(known)["agent.strace.provider"], "codex")
 
     def test_error_text_is_redacted(self):
         secret = "sk-" + "a" * 48

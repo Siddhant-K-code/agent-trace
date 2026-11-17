@@ -12,7 +12,7 @@
           {
             "key": "service.version",
             "value": {
-              "stringValue": "agent-trace"
+              "stringValue": "0.114.2"
             }
           },
           {
@@ -357,7 +357,13 @@
                 {
                   "key": "gen_ai.response.finish_reasons",
                   "value": {
-                    "stringValue": "end_turn"
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "end_turn"
+                        }
+                      ]
+                    }
                   }
                 },
                 {

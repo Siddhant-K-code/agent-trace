@@ -227,6 +227,8 @@ def _attrs(item: dict) -> dict:
         value = attr["value"]
         if "intValue" in value:
             out[attr["key"]] = int(value["intValue"])
+        elif "arrayValue" in value:
+            out[attr["key"]] = [v["stringValue"] for v in value["arrayValue"]["values"]]
         else:
             out[attr["key"]] = next(iter(value.values()))
     return out
@@ -466,7 +468,7 @@ class TestUnchangedWithoutCache(unittest.TestCase):
         self.assertEqual(response_attrs, {
             "gen_ai.operation.name": "chat",
             OUTPUT: 7,
-            "gen_ai.response.finish_reasons": "stop",
+            "gen_ai.response.finish_reasons": ["stop"],
         })
 
     def test_langfuse_request_input(self):

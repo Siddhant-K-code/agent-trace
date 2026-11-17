@@ -42,7 +42,9 @@ agent-strace export <session-id> --format otlp-genai \
 | `gen_ai.conversation.id` | Root span | Root, LLM and tool spans |
 | Token usage | `gen_ai.usage.*` on the LLM events | `gen_ai.usage.*` and `llm.token_count.*` on the LLM spans; see [Token usage and prompt caching](#token-usage-and-prompt-caching) |
 
-`--format otlp` is unchanged for backwards compatibility. See [ADR-0011](../ADRs/0011-otlp-genai-semantic-conventions.md) for design rationale.
+`--format otlp` keeps its span and attribute names for backwards compatibility.
+Two of its values change in this release, as in `otlp-genai`: see
+[Changed values](#changed-values). See [ADR-0011](../ADRs/0011-otlp-genai-semantic-conventions.md) for design rationale.
 
 ### Spans and attributes
 
@@ -52,7 +54,8 @@ follow the GenAI conventions in
 [open-telemetry/semantic-conventions-genai](https://github.com/open-telemetry/semantic-conventions-genai)
 at commit `e6658f1` (2026-11-06). That repository publishes no release or
 schema URL yet, so the payload sets no `schemaUrl`. The instrumentation scope
-is `agent-trace` with the agent-strace version.
+is `agent-trace` with the agent-strace version, and the `service.version`
+resource attribute is the agent-strace version.
 
 | Span | Name | Kind | `gen_ai.operation.name` | Spec |
 |---|---|---|---|---|
@@ -76,6 +79,16 @@ is `agent-trace` with the agent-strace version.
   the recorded provider or model says Vertex AI (`gcp.vertex_ai`) or the
   Gemini API (`gcp.gemini`), for example a LiteLLM `vertex_ai/` or `gemini/`
   model prefix. The raw recorded provider stays on `agent.strace.provider`.
+- Codex, GitHub Copilot and Cursor can run models from more than one
+  provider, so their product name names none. The Codex hook records `codex`
+  as the provider of each model request; for such a request, and for the
+  product names `openai-codex`, `copilot`, `github-copilot`, `cursor` and
+  `cursor-agent`, the model decides: `gpt-5.3-codex` is `openai`, and a model
+  that names no provider is `unknown`. The root span has no model, so the root
+  of a Codex, Copilot or Cursor session is `unknown`.
+- `gen_ai.response.finish_reasons` is a string array (an OTLP `arrayValue`),
+  one entry per generation, such as `["end_turn"]`. A recorded list keeps its
+  order. The recorded value stays on `agent.strace.finish_reason`.
 - `gen_ai.system` repeats `gen_ai.provider.name` for backends that still read
   it. It is deprecated, since the conventions renamed it to
   `gen_ai.provider.name` in semantic conventions v1.37.0, and will be removed
@@ -84,7 +97,8 @@ is `agent-trace` with the agent-strace version.
 #### Renamed in this release
 
 Dashboards, alerts and queries on the earlier `otlp-genai` names need
-updating. `--format otlp` keeps its names.
+updating. `--format otlp` keeps its names, but two of its values change; see
+[Changed values](#changed-values).
 
 | Earlier | Now |
 |---|---|
@@ -96,6 +110,18 @@ updating. `--format otlp` keeps its names.
 | `gen_ai.system` `google` | `gcp.gen_ai` (or `gcp.vertex_ai`, `gcp.gemini`) |
 | `gen_ai.system` only | `gen_ai.provider.name`, with `gen_ai.system` kept as a deprecated copy |
 | Scope version `genai-semconv-1.27` | the agent-strace version |
+| `gen_ai.provider.name` `unknown` on a Codex `chat` span | from the model, such as `openai` for `gpt-5.3-codex`; `unknown` when the model names no provider |
+| `gen_ai.provider.name` `openai` on the root of an `openai-codex` session recorded without hook attribution | `unknown`, as for a hook-recorded Codex session |
+
+#### Changed values
+
+Both `--format otlp` and `--format otlp-genai` change these values in this
+release:
+
+| Attribute | Earlier | Now |
+|---|---|---|
+| `gen_ai.response.finish_reasons`, on the `chat` span (`otlp-genai`) or the `gen_ai.assistant.message` event (`otlp`) | a string, such as `"end_turn"` or `"error"` | a string array, such as `["end_turn"]` or `["error"]`, as the conventions type it (`string[]`) |
+| `service.version` resource attribute | `agent-trace` | the agent-strace version |
 
 ### Joining with native agent telemetry
 
@@ -644,7 +670,7 @@ conventions and
 `error.type` is the recorded `error_type` or `exception_type`, else the `type`
 or `code` of an `error` object, else `cancelled` for a cancelled request and
 `_OTHER`, the conventions' fallback value, for a failed one. When no finish
-reason was recorded, `gen_ai.response.finish_reasons` is `error`, which the
+reason was recorded, `gen_ai.response.finish_reasons` is `["error"]`, which the
 conventions specify for a generation that failed or was cancelled.
 
 The GenAI conventions name no span status for a cancelled request, but they
