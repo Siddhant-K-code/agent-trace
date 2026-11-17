@@ -18,6 +18,7 @@ from typing import TextIO
 
 from .event_data import object_field, require_object_event_data, str_field
 from .failures import session_errors
+from .inert import inert
 from .models import EventType, SessionMeta, TraceEvent
 from .store import TraceStore
 
@@ -307,6 +308,10 @@ def format_tree(
         If True, inline subagent events under their parent tool_call.
     last_child : bool
         Whether this node is the last child of its parent (affects tree chars).
+
+    Each value from the trace goes through inert(), so an escape code or a
+    line break in it shows as text. In prompts, responses, tool results and
+    errors, each run of whitespace becomes one space first.
     """
     if base_ts is None:
         base_ts = node.meta.started_at
@@ -316,7 +321,7 @@ def format_tree(
 
     # Session header
     w(f"{indent}▶ session_start  {node.meta.session_id[:12]}"
-      f"  agent={node.meta.agent_name or 'unknown'}"
+      f"  agent={inert(node.meta.agent_name or 'unknown')}"
       f"  depth={node.depth}\n")
 
     # Build a lookup of child sessions by the parent_event_id that spawned them
@@ -334,23 +339,23 @@ def format_tree(
             detail = ""
             if tool_name.lower() == "bash":
                 cmd = str(args.get("command", ""))
-                detail = f"  $ {cmd[:80]}{'...' if len(cmd) > 80 else ''}"
+                detail = f"  $ {inert(cmd[:80])}{'...' if len(cmd) > 80 else ''}"
             elif tool_name.lower() in ("read", "write", "edit"):
-                detail = f"  {args.get('file_path', '')}"
+                detail = f"  {inert(args.get('file_path', ''))}"
             elif tool_name.lower() in ("agent", "task"):
-                prompt = str(args.get("prompt", ""))
-                detail = f"  \"{prompt[:60]}{'...' if len(prompt) > 60 else ''}\""
+                prompt = " ".join(str(args.get("prompt", "")).split())
+                detail = f"  \"{inert(prompt[:60])}{'...' if len(prompt) > 60 else ''}\""
 
             subagent_tag = ""
             if event.data.get("is_sidechain"):
                 subagent_tag = "  [sidechain]"
             if event.data.get("subagent_type"):
-                subagent_tag += f"  [{event.data['subagent_type']}]"
+                subagent_tag += f"  [{inert(event.data['subagent_type'])}]"
             label = subagent_label(event.data)
             if label:
-                subagent_tag += f"  [subagent {label}]"
+                subagent_tag += f"  [subagent {inert(label)}]"
 
-            w(f"{indent}{ts_str}  → tool_call  {tool_name}{subagent_tag}{detail}\n")
+            w(f"{indent}{ts_str}  → tool_call  {inert(tool_name)}{subagent_tag}{detail}\n")
 
             # Inline expand subagent if this tool_call spawned one
             if expand and event.event_id in children_by_event:
@@ -360,27 +365,27 @@ def format_tree(
                             last_child=is_last)
 
         elif event.event_type == EventType.TOOL_RESULT:
-            preview = (str_field(event.data, "result", "") or
-                       str_field(event.data, "content_preview", ""))[:80]
+            preview = " ".join((str_field(event.data, "result", "") or
+                                str_field(event.data, "content_preview", "")).split())[:80]
             label = subagent_label(event.data)
             w(f"{indent}{ts_str}  ← tool_result"
-              f"{'  [subagent ' + label + ']' if label else ''}"
-              f"{'  ' + preview if preview else ''}\n")
+              f"{'  [subagent ' + inert(label) + ']' if label else ''}"
+              f"{'  ' + inert(preview) if preview else ''}\n")
 
         elif event.event_type == EventType.ERROR:
-            msg = (str_field(event.data, "message", "") or
-                   str_field(event.data, "error", ""))[:80]
+            msg = " ".join((str_field(event.data, "message", "") or
+                            str_field(event.data, "error", "")).split())[:80]
             label = subagent_label(event.data)
             w(f"{indent}{ts_str}  ✗ error"
-              f"{'  [subagent ' + label + ']' if label else ''}  {msg}\n")
+              f"{'  [subagent ' + inert(label) + ']' if label else ''}  {inert(msg)}\n")
 
         elif event.event_type == EventType.USER_PROMPT:
-            prompt = str_field(event.data, "prompt", "")[:80]
-            w(f"{indent}{ts_str}  👤 \"{prompt}\"\n")
+            prompt = " ".join(str_field(event.data, "prompt", "").split())[:80]
+            w(f"{indent}{ts_str}  👤 \"{inert(prompt)}\"\n")
 
         elif event.event_type == EventType.ASSISTANT_RESPONSE:
-            text = str_field(event.data, "text", "")[:80]
-            w(f"{indent}{ts_str}  🤖 \"{text}\"\n")
+            text = " ".join(str_field(event.data, "text", "").split())[:80]
+            w(f"{indent}{ts_str}  🤖 \"{inert(text)}\"\n")
 
         elif event.event_type in (EventType.SUBAGENT_START, EventType.SUBAGENT_STOP):
             agent = str_field(event.data, "agent_type", "") or str_field(event.data, "agent_name", "")
@@ -388,12 +393,12 @@ def format_tree(
             agent_id = _event_agent_id(event.data)
             icon = "⤷" if event.event_type == EventType.SUBAGENT_START else "⤶"
             w(f"{indent}{ts_str}  {icon} {event.event_type.value}"
-              f"{'  ' + agent if agent else ''}"
-              f"{'  child=' + child if child else ''}"
-              f"{'  agent=' + short_agent_id(agent_id) if agent_id else ''}\n")
+              f"{'  ' + inert(agent) if agent else ''}"
+              f"{'  child=' + inert(child) if child else ''}"
+              f"{'  agent=' + inert(short_agent_id(agent_id)) if agent_id else ''}\n")
             returned = _returned_preview(event)
             if returned:
-                w(f"{indent}{' ' * len(ts_str)}    returned: \"{returned}\"\n")
+                w(f"{indent}{' ' * len(ts_str)}    returned: \"{inert(returned)}\"\n")
 
         elif event.event_type == EventType.SESSION_END:
             w(f"{indent}{ts_str}  ■ session_end\n")
@@ -413,9 +418,9 @@ def format_tree_summary(
     duration = node.meta.total_duration_ms / 1000 if node.meta.total_duration_ms else 0
     w(f"{indent}{node.meta.session_id[:12]}"
       f"  {duration:.1f}s"
-      f"  {node.meta.tool_calls} tools"
+      f"  {inert(node.meta.tool_calls)} tools"
       f"  {node.meta.total_tokens:,} tokens"
-      f"{'  ✗ ' + str(node.meta.errors) + ' errors' if node.meta.errors else ''}\n")
+      f"{'  ✗ ' + inert(node.meta.errors) + ' errors' if node.meta.errors else ''}\n")
 
     _write_subagent_lines(node, out)
     for i, child in enumerate(node.children):
@@ -427,7 +432,8 @@ def _write_subagent_lines(node: SessionNode, out: TextIO) -> None:
     subagents = in_session_subagents(node.events)
     for i, sub in enumerate(subagents):
         last = i == len(subagents) - 1 and not node.children
-        out.write(f"{_indent(node.depth + 1, last_child=last)}{_subagent_summary_line(sub)}\n")
+        line = inert(_subagent_summary_line(sub))
+        out.write(f"{_indent(node.depth + 1, last_child=last)}{line}\n")
 
 
 def _status(meta: SessionMeta) -> str:
@@ -498,14 +504,14 @@ def format_session_tree(
     agent = node.meta.agent_name or node.meta.command or "session"
     out.write(
         f"{indent}{node.meta.session_id[:12]}  "
-        f"{agent[:28]:<28}  "
+        f"{inert(agent[:28]):<28}  "
         f"${costs.get(node.meta.session_id, 0.0):.4f}  "
-        f"{node.meta.tool_calls} tools  "
+        f"{inert(node.meta.tool_calls)} tools  "
         f"{duration:.1f}s  "
         f"{status}"
     )
     if node.meta.errors:
-        out.write(f"  {node.meta.errors} errors")
+        out.write(f"  {inert(node.meta.errors)} errors")
     out.write("\n")
 
     _write_subagent_lines(node, out)
@@ -545,10 +551,10 @@ def cmd_replay_tree(args: argparse.Namespace) -> int:
         format_tree_summary(tree)
         sys.stdout.write(
             f"\nTotal: {stats.session_count} sessions, "
-            f"{stats.tool_calls} tool calls, "
-            f"{stats.llm_requests} LLM requests, "
+            f"{inert(stats.tool_calls)} tool calls, "
+            f"{inert(stats.llm_requests)} LLM requests, "
             f"{stats.total_tokens:,} tokens"
-            f"{', ' + str(stats.errors) + ' errors' if stats.errors else ''}\n\n"
+            f"{', ' + inert(stats.errors) + ' errors' if stats.errors else ''}\n\n"
         )
     else:
         require_tree_event_data(tree, expand=expand)
@@ -576,10 +582,10 @@ def cmd_stats_tree(args: argparse.Namespace) -> int:
 
     sys.stdout.write(f"\nAggregated stats for {full_id[:12]} (including subagents)\n\n")
     sys.stdout.write(f"  Sessions:      {stats.session_count}\n")
-    sys.stdout.write(f"  Tool calls:    {stats.tool_calls}\n")
-    sys.stdout.write(f"  LLM requests:  {stats.llm_requests}\n")
+    sys.stdout.write(f"  Tool calls:    {inert(stats.tool_calls)}\n")
+    sys.stdout.write(f"  LLM requests:  {inert(stats.llm_requests)}\n")
     sys.stdout.write(f"  Total tokens:  {stats.total_tokens:,}\n")
-    sys.stdout.write(f"  Errors:        {stats.errors}\n")
+    sys.stdout.write(f"  Errors:        {inert(stats.errors)}\n")
     sys.stdout.write(f"  Duration:      {stats.total_duration_ms / 1000:.1f}s\n\n")
 
     if tree.children:
@@ -628,8 +634,8 @@ def cmd_tree(args: argparse.Namespace) -> int:
     sys.stdout.write(
         f"\nTotal: {stats.session_count} sessions, "
         f"${sum(costs.values()):.4f}, "
-        f"{stats.tool_calls} tool calls, "
-        f"{stats.llm_requests} LLM requests"
-        f"{', ' + str(stats.errors) + ' errors' if stats.errors else ''}\n\n"
+        f"{inert(stats.tool_calls)} tool calls, "
+        f"{inert(stats.llm_requests)} LLM requests"
+        f"{', ' + inert(stats.errors) + ' errors' if stats.errors else ''}\n\n"
     )
     return 0
