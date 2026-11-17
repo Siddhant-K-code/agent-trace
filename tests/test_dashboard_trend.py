@@ -5,9 +5,11 @@ import json
 import tempfile
 import time
 import unittest
+from html import escape as html_escape
 from pathlib import Path
 
 from agent_trace.dashboard import (
+    EvalScorePoint,
     TrendAnnotation,
     TrendPoint,
     TrendReport,
@@ -27,6 +29,14 @@ try:
     from test_cost import _codex_events
 except ImportError:  # pragma: no cover - package-style test discovery
     from tests.test_cost import _codex_events
+
+try:
+    import _escapes
+except ImportError:  # pragma: no cover - package-style test discovery
+    from tests import _escapes
+
+# Markup that ends the cell and runs script if it goes into the page raw.
+HTML_PAYLOAD = "</td><script>alert(1)</script><img src=x onerror=alert(1)>"
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +73,45 @@ def _add_session(
 def _write_eval_json(store: TraceStore, session_id: str, results: list[dict]) -> None:
     path = store.base_dir / session_id / "eval.json"
     path.write_text(json.dumps({"results": results}))
+
+
+def _trend(judge="plain", date="2026-05-10", note="plain", n=2) -> TrendReport:
+    """A report built directly: *n* sessions, each scored by *judge*, and one annotation.
+
+    With one session the terminal prints the judge with "(no eval scores)",
+    and with two it prints the judge with a pass rate.
+    """
+    points = [
+        TrendPoint(
+            session_id=f"s{i}", started_at=1_700_000_000.0 + i * 100, error_rate=0.0,
+            retry_rate=0.0, cost=0.01, duration_s=60.0,
+            eval_scores=[EvalScorePoint(judge=judge, score=1.0, passed=True)],
+        )
+        for i in range(n)
+    ]
+    return TrendReport(
+        points=points,
+        annotations=[TrendAnnotation(date=date, note=note)],
+        judge_names=[judge],
+    )
+
+
+def _format_trend(report: TrendReport) -> str:
+    buf = io.StringIO()
+    format_trend_terminal(report, out=buf)
+    return buf.getvalue()
+
+
+# (label, kind, build): build(value) returns a report with value in the place
+# the label names. A judge name comes from eval.json and an annotation from
+# annotations.jsonl, so each can be any JSON value. The kinds are in
+# tests/_escapes.py.
+TREND_TERMINAL_CASES = [
+    ("judge with no scores", "text", lambda v: _trend(judge=v, n=1)),
+    ("judge with a pass rate", "text", lambda v: _trend(judge=v)),
+    ("annotation date", "text", lambda v: _trend(date=v)),
+    ("annotation note", "free", lambda v: _trend(note=v)),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +311,32 @@ class TestFormatTrendTerminal(unittest.TestCase):
         format_trend_terminal(report, out=buf)
         self.assertIn("no_errors", buf.getvalue())
 
+    def test_each_value_shows_escapes_as_text(self):
+        _escapes.check_each_value(self, TREND_TERMINAL_CASES, _format_trend)
+
+    def test_plain_text_prints_unchanged(self):
+        _escapes.check_plain_text_unchanged(self, TREND_TERMINAL_CASES, _format_trend)
+
+    def test_whitespace_in_free_text_shows_as_one_space(self):
+        _escapes.check_whitespace_in_free_text(self, TREND_TERMINAL_CASES, _format_trend)
+
+    def test_whitespace_in_judge_name_shows_as_escapes(self):
+        output = _format_trend(_trend(judge=_escapes.SPACES))
+        self.assertIn(r"one\ttwo  three\u3000four", output)
+
+    def test_sgr_code_shows_as_text(self):
+        for label, _, build in TREND_TERMINAL_CASES:
+            with self.subTest(label):
+                output = _format_trend(build("a\x1b[8mhidden"))
+                self.assertIn(r"a\x1b[8mhidden", output)
+                self.assertNotIn("\x1b", output)
+
+    def test_plain_lines_print_as_before(self):
+        plain = _escapes.PLAIN
+        self.assertIn(f"  {plain:<30} (no eval scores)\n", _format_trend(_trend(judge=plain, n=1)))
+        self.assertIn(f"  {plain:<30} 100% → 100%  → +0pp\n", _format_trend(_trend(judge=plain)))
+        self.assertIn(f"  {plain}  {plain}\n", _format_trend(_trend(date=plain, note=plain)))
+
 
 # ---------------------------------------------------------------------------
 # HTML rendering
@@ -317,6 +392,20 @@ class TestRenderHtmlTrend(unittest.TestCase):
     def test_self_contained_no_link_tags(self):
         html_out = render_html_trend(self._make_report())
         self.assertNotIn('<link rel="stylesheet"', html_out)
+
+    def test_judge_name_in_session_table_is_escaped(self):
+        page = render_html_trend(_trend(judge=HTML_PAYLOAD, n=1))
+        self.assertNotIn(HTML_PAYLOAD, page)
+        # Once in the chart label, which was already escaped, and once in the table.
+        self.assertEqual(page.count(html_escape(HTML_PAYLOAD)), 2)
+
+    def test_judge_names_in_session_table_render_as_before(self):
+        page = render_html_trend(_trend(judge=_escapes.PLAIN, n=1))
+        self.assertIn(f"<td>{_escapes.PLAIN}=1.00</td>", page)
+        # The chart label needs a str judge, so the number goes in the table only.
+        report = _trend(judge=7, n=1)
+        report.judge_names = []
+        self.assertIn("<td>7=1.00</td>", render_html_trend(report))
 
 
 class TestTrendCost(unittest.TestCase):

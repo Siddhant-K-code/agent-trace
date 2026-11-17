@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from html import escape as html_escape
 from pathlib import Path
 from unittest import mock
 
@@ -29,7 +30,9 @@ from agent_trace.share import (
     render_html,
     _event_summary,
     _esc,
+    _render_subagent_tree_html,
 )
+from agent_trace.subagent import AggregatedStats, SessionNode
 from agent_trace.postmortem import (
     analyze_session,
     format_postmortem,
@@ -90,6 +93,35 @@ def _failed_events(session_id: str = "s1") -> list[TraceEvent]:
     ]
 
 
+# Markup that ends the element and runs script if it goes into the page raw.
+HTML_PAYLOAD = "</td><script>alert(1)</script><img src=x onerror=alert(1)>"
+
+
+def _tree(errors=3, depth=1, tool_calls=5, session_count=2, total_tool_calls=7, total_errors=1):
+    """A root with one child, and totals set apart from the nodes."""
+    root = SessionNode(meta=SessionMeta(session_id="root", tool_calls=2), events=[])
+    root.children.append(SessionNode(
+        meta=SessionMeta(session_id="child", parent_session_id="root", depth=depth,
+                         tool_calls=tool_calls, errors=errors),
+        events=[],
+    ))
+    stats = AggregatedStats(session_count=session_count, tool_calls=total_tool_calls,
+                            errors=total_errors)
+    return root, stats
+
+
+# (label, build): build(value) returns a tree and its totals with value in the
+# place the label names. A session's meta.json can hold any JSON value there.
+SUBAGENT_TREE_CASES = [
+    ("node errors", lambda v: _tree(errors=v)),
+    ("node depth", lambda v: _tree(depth=v)),
+    ("node tool calls", lambda v: _tree(tool_calls=v)),
+    ("total sessions", lambda v: _tree(session_count=v)),
+    ("total tool calls", lambda v: _tree(total_tool_calls=v)),
+    ("total errors", lambda v: _tree(total_errors=v)),
+]
+
+
 # ---------------------------------------------------------------------------
 # share.py tests
 # ---------------------------------------------------------------------------
@@ -99,6 +131,20 @@ class TestEscaping(unittest.TestCase):
         self.assertEqual(_esc("<script>"), "&lt;script&gt;")
         self.assertEqual(_esc('"hello"'), "&quot;hello&quot;")
         self.assertEqual(_esc("a & b"), "a &amp; b")
+
+    def test_each_subagent_tree_value_is_escaped(self):
+        for label, build in SUBAGENT_TREE_CASES:
+            with self.subTest(label):
+                section = _render_subagent_tree_html(*build(HTML_PAYLOAD))
+                self.assertNotIn(HTML_PAYLOAD, section)
+                self.assertIn(html_escape(HTML_PAYLOAD), section)
+
+    def test_subagent_tree_numbers_render_as_before(self):
+        section = _render_subagent_tree_html(*_tree())
+        for text in ("depth=1", "5 tools", "✗ 3 err", "2 sessions", "7 total tool calls",
+                     ">1 errors<"):
+            with self.subTest(text):
+                self.assertIn(text, section)
 
 
 class TestEventSummary(unittest.TestCase):
@@ -191,6 +237,26 @@ class TestRenderHtml(unittest.TestCase):
             include_content=True,
         )
         self.assertIn("POSTMORTEM", html)
+
+    def test_string_tool_calls_in_meta_show_as_text_in_subagent_tree(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store = TraceStore(tmp.name)
+        for sid, parent, depth in (("root", "", 0), ("child", "root", 1)):
+            store.create_session(SessionMeta(session_id=sid, parent_session_id=parent, depth=depth))
+            store.append_event(sid, _make_event(EventType.SESSION_START, 0.0, sid))
+            meta_path = store.base_dir / sid / "meta.json"
+            meta = json.loads(meta_path.read_text())
+            meta["tool_calls"] = HTML_PAYLOAD
+            meta_path.write_text(json.dumps(meta))
+
+        html = render_html(store, "root", include_content=True)
+
+        # The section is left out without a message if rendering it raises.
+        self.assertIn("<h2>Subagent Tree</h2>", html)
+        self.assertNotIn(HTML_PAYLOAD, html)
+        self.assertNotIn("<img src=x", html)
+        self.assertIn(html_escape(HTML_PAYLOAD) + " tools", html)
 
 
 class TestPacketCost(unittest.TestCase):

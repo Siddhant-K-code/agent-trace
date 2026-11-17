@@ -174,11 +174,11 @@ count the usage once per line; import them again to correct their totals.
 ## Replay and inspection
 
 Traces keep the raw text, which can hold escape codes and line breaks.
-`replay`, `record -v`, `record-http -v`, `explain`, `tree` and `approval list`
+`replay`, `record -v`, `record-http -v`, `explain`, `tree`, `approval list` and `dashboard`
 show each character that Python's `str.isprintable()` rejects as its escape,
 such as `\x1b`, `\n` or `\u202e`, so recorded text cannot move the cursor,
 hide a command or write to the clipboard. In prompts, responses, tool output,
-error messages and reasons, each run of whitespace shows as one space instead.
+error messages, reasons and annotation notes, each run of whitespace shows as one space instead.
 `inspect` and `approval show` print JSON with the raw text.
 
 ### `replay`
@@ -1320,6 +1320,9 @@ of the total and the cost trend, and the total says how many sessions were not
 priced (`--trend` prints a `Sessions not priced` line, and its HTML report
 marks the cost chart). It is never counted as $0.
 
+Values from the trace are escaped in the HTML from `-o` and `--trend --html`,
+so markup in them shows as text.
+
 ```bash
 # Add a timeline annotation (appears as a vertical marker on trend charts)
 agent-strace dashboard annotate --date 2026-05-10 --note "Added retry policy"
@@ -1787,6 +1790,8 @@ effect categories, provider and capture provenance, evidence health and known
 gaps, failures, retries, recovery, redaction state, and annotations explicitly
 marked shareable. It omits prompts, responses, commands, paths, tool input and
 result values, and other content-rich values.
+
+Values from the trace are escaped in the HTML, so markup in them shows as text.
 
 The packet's `Est. cost` and its estimated cost breakdown appear only when the
 trace records a model name or token usage. Otherwise `Est. cost` says `not

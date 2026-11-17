@@ -25,6 +25,7 @@ from typing import TextIO
 from .cost import session_cost
 from .event_data import require_object_event_data
 from .failures import count_session_errors
+from .inert import inert
 from .models import EventType, SessionMeta, TraceEvent
 from .store import TraceStore
 
@@ -258,6 +259,13 @@ def build_trend_report(
 # ---------------------------------------------------------------------------
 
 def format_trend_terminal(report: TrendReport, out: TextIO = sys.stdout) -> None:
+    """Print the trend summary.
+
+    Judge names come from eval.json and annotations from annotations.jsonl,
+    so each goes through inert(), and an escape code or a line break in it
+    shows as text. In an annotation note, each run of whitespace becomes one
+    space first.
+    """
     w = out.write
     n = len(report.points)
     if n == 0:
@@ -286,11 +294,11 @@ def format_trend_terminal(report: TrendReport, out: TextIO = sys.stdout) -> None
             late = _pass_rate(report.points[mid:]) if mid < n else float("nan")
 
             if early != early or late != late:  # nan check
-                w(f"  {judge:<30} (no eval scores)\n")
+                w(f"  {inert(judge):<30} (no eval scores)\n")
             else:
                 delta = late - early
                 arrow = "↑" if delta > 0.01 else ("↓" if delta < -0.01 else "→")
-                w(f"  {judge:<30} {early*100:.0f}% → {late*100:.0f}%  {arrow} {delta*100:+.0f}pp\n")
+                w(f"  {inert(judge):<30} {early*100:.0f}% → {late*100:.0f}%  {arrow} {delta*100:+.0f}pp\n")
         w("\n")
 
     # Behavioral trends
@@ -321,7 +329,8 @@ def format_trend_terminal(report: TrendReport, out: TextIO = sys.stdout) -> None
     if report.annotations:
         w("Annotations:\n")
         for ann in report.annotations:
-            w(f"  {ann.date}  {ann.note}\n")
+            note = " ".join(str(ann.note).split())
+            w(f"  {inert(ann.date)}  {inert(note)}\n")
         w("\n")
 
 
@@ -458,8 +467,9 @@ def render_html_trend(report: TrendReport) -> str:
     table_rows = ""
     for p in reversed(pts[-20:]):
         dt = datetime.fromtimestamp(p.started_at, tz=timezone.utc).strftime("%m-%d %H:%M")
+        # A judge name in eval.json can be any JSON value, so escape it as text.
         scores_str = ", ".join(
-            f"{e.judge}={e.score:.2f}" for e in p.eval_scores
+            f"{html.escape(str(e.judge))}={e.score:.2f}" for e in p.eval_scores
         ) or "—"
         table_rows += (
             f"<tr>"
@@ -641,6 +651,12 @@ def _fmt_ts(ts: float) -> str:
 
 
 def format_dashboard(report: DashboardReport, out: TextIO = sys.stdout) -> None:
+    """Print the dashboard table.
+
+    The counts can come from a session's meta.json, which can hold any JSON
+    value, so each goes through inert(), and an escape code or a line break
+    in it shows as text.
+    """
     w = out.write
     n = len(report.summaries)
 
@@ -653,7 +669,7 @@ def format_dashboard(report: DashboardReport, out: TextIO = sys.stdout) -> None:
     w(f"  Total cost:    ~${report.total_cost:.4f}{unpriced}\n")
     w(f"  Total tokens:  {report.total_tokens:,}\n")
     w(f"  Tool calls:    {report.total_tool_calls:,}\n")
-    w(f"  Errors:        {report.total_errors}\n")
+    w(f"  Errors:        {inert(report.total_errors)}\n")
     w(f"  Avg duration:  {_fmt_dur(report.avg_duration_s)}\n")
     w(f"  Success rate:  {report.success_rate*100:.0f}%\n\n")
 
@@ -670,8 +686,8 @@ def format_dashboard(report: DashboardReport, out: TextIO = sys.stdout) -> None:
         cost = "n/a".rjust(8) if s.estimated_cost is None else f"${s.estimated_cost:>7.4f}"
         w(
             f"  {s.session_id[:12]:<14}  {_fmt_ts(s.started_at):<12}  "
-            f"{_fmt_dur(s.duration_s):>7}  {s.tool_calls:>5}  "
-            f"{s.llm_requests:>4}  {s.errors:>3}  "
+            f"{_fmt_dur(s.duration_s):>7}  {inert(s.tool_calls):>5}  "
+            f"{inert(s.llm_requests):>4}  {inert(s.errors):>3}  "
             f"{s.total_tokens:>8,}  {cost}  {status}\n"
         )
 
@@ -696,7 +712,11 @@ def format_dashboard(report: DashboardReport, out: TextIO = sys.stdout) -> None:
 # ---------------------------------------------------------------------------
 
 def render_html_dashboard(report: DashboardReport) -> str:
-    """Produce a self-contained HTML dashboard page."""
+    """Produce a self-contained HTML dashboard page.
+
+    The counts can come from a session's meta.json, which can hold any JSON
+    value, so each is escaped as text.
+    """
     rows_html = ""
     for s in report.summaries:
         status_cls = "ok" if s.succeeded else "err"
@@ -706,9 +726,9 @@ def render_html_dashboard(report: DashboardReport) -> str:
             f"<td>{html.escape(s.session_id[:12])}</td>"
             f"<td>{html.escape(_fmt_ts(s.started_at))}</td>"
             f"<td>{html.escape(_fmt_dur(s.duration_s))}</td>"
-            f"<td>{s.tool_calls}</td>"
-            f"<td>{s.llm_requests}</td>"
-            f"<td>{s.errors}</td>"
+            f"<td>{html.escape(str(s.tool_calls))}</td>"
+            f"<td>{html.escape(str(s.llm_requests))}</td>"
+            f"<td>{html.escape(str(s.errors))}</td>"
             f"<td>{s.total_tokens:,}</td>"
             f"<td>{_fmt_cost(s.estimated_cost)}</td>"
             f"<td>{status_sym}</td>"
@@ -764,7 +784,7 @@ polyline{{fill:none;stroke:#58a6ff;stroke-width:1.5}}
   <div class="stat"><div class="label">Est. cost</div><div class="value">${report.total_cost:.4f}{unpriced_note}</div></div>
   <div class="stat"><div class="label">Total tokens</div><div class="value">{report.total_tokens:,}</div></div>
   <div class="stat"><div class="label">Tool calls</div><div class="value">{report.total_tool_calls:,}</div></div>
-  <div class="stat"><div class="label">Errors</div><div class="value">{report.total_errors}</div></div>
+  <div class="stat"><div class="label">Errors</div><div class="value">{html.escape(str(report.total_errors))}</div></div>
   <div class="stat"><div class="label">Success rate</div><div class="value">{report.success_rate*100:.0f}%</div></div>
   <div class="stat"><div class="label">Avg duration</div><div class="value">{_fmt_dur(report.avg_duration_s)}</div></div>
 </div>

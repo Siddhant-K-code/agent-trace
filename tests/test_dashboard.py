@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
+from html import escape as html_escape
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -24,6 +25,44 @@ try:
     from test_cost import _codex_events
 except ImportError:  # pragma: no cover - package-style test discovery
     from tests.test_cost import _codex_events
+
+try:
+    import _escapes
+except ImportError:  # pragma: no cover - package-style test discovery
+    from tests import _escapes
+
+# Markup that ends the cell and runs script if it goes into the page raw.
+HTML_PAYLOAD = "</td><script>alert(1)</script><img src=x onerror=alert(1)>"
+
+
+def _report(tool_calls=5, llm_requests=3, errors=1, total_errors=2) -> DashboardReport:
+    """A one-session report built directly, so each count can be any value."""
+    summary = SessionSummary(
+        session_id="abc123def4567890", started_at=1_700_000_000.0, duration_s=12.0,
+        tool_calls=tool_calls, llm_requests=llm_requests, errors=errors,
+        total_tokens=1234, estimated_cost=0.0123, agent_name="agent", succeeded=False,
+    )
+    return DashboardReport(
+        summaries=[summary], total_cost=0.0123, total_tokens=1234, total_tool_calls=5,
+        total_errors=total_errors, avg_duration_s=12.0, success_rate=0.0,
+    )
+
+
+def _format(report: DashboardReport) -> str:
+    buf = io.StringIO()
+    format_dashboard(report, out=buf)
+    return buf.getvalue()
+
+
+# (label, kind, build): build(value) returns a report with value in the count
+# the label names. A session's meta.json can hold any JSON value there. The
+# kinds are in tests/_escapes.py.
+DASHBOARD_COUNT_CASES = [
+    ("total_errors", "text", lambda v: _report(total_errors=v)),
+    ("tool_calls", "text", lambda v: _report(tool_calls=v)),
+    ("llm_requests", "text", lambda v: _report(llm_requests=v)),
+    ("errors", "text", lambda v: _report(errors=v)),
+]
 
 
 def _make_store_with_sessions(n: int) -> TraceStore:
@@ -98,6 +137,27 @@ class TestFormatDashboard(unittest.TestCase):
         format_dashboard(report, out=buf)
         self.assertIn("0 session", buf.getvalue())
 
+    def test_each_count_shows_escapes_as_text(self):
+        _escapes.check_each_value(self, DASHBOARD_COUNT_CASES, _format)
+
+    def test_plain_text_prints_unchanged(self):
+        _escapes.check_plain_text_unchanged(self, DASHBOARD_COUNT_CASES, _format)
+
+    def test_sgr_code_shows_as_text(self):
+        for label, _, build in DASHBOARD_COUNT_CASES:
+            with self.subTest(label):
+                output = _format(build("a\x1b[8mhidden"))
+                self.assertIn(r"a\x1b[8mhidden", output)
+                self.assertNotIn("\x1b", output)
+
+    def test_int_counts_print_as_before(self):
+        output = _format(_report())
+        self.assertIn("  Errors:        2\n", output)
+        self.assertIn(
+            "  abc123def456    11-14 22:13       12s      5     3    1     1,234  $ 0.0123  ✗\n",
+            output,
+        )
+
 
 class TestRenderHtmlDashboard(unittest.TestCase):
     def test_renders_html(self):
@@ -113,6 +173,18 @@ class TestRenderHtmlDashboard(unittest.TestCase):
         report = build_dashboard(store)
         html = render_html_dashboard(report)
         self.assertIn("<tr", html)
+
+    def test_each_count_is_escaped(self):
+        for label, _, build in DASHBOARD_COUNT_CASES:
+            with self.subTest(label):
+                page = render_html_dashboard(build(HTML_PAYLOAD))
+                self.assertNotIn(HTML_PAYLOAD, page)
+                self.assertIn(html_escape(HTML_PAYLOAD), page)
+
+    def test_int_counts_render_as_before(self):
+        page = render_html_dashboard(_report())
+        self.assertIn("<td>5</td><td>3</td><td>1</td>", page)
+        self.assertIn('<div class="label">Errors</div><div class="value">2</div>', page)
 
 
 def _codex_session(store: TraceStore, prompt_data=None, started_at: float = 1000.0) -> str:

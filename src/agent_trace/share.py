@@ -507,14 +507,18 @@ _JS = r"""
 # ---------------------------------------------------------------------------
 
 def _render_subagent_tree_html(tree: "SessionNode", stats: object) -> str:
-    """Render a collapsible subagent hierarchy section for the share HTML."""
+    """Render a collapsible subagent hierarchy section for the share HTML.
+
+    The counts and the depth come from each session's meta.json, which can
+    hold any JSON value, so each goes through _esc().
+    """
 
     def _node_html(node: "SessionNode", depth: int = 0) -> str:
         indent = depth * 20
         sid = node.meta.session_id[:12]
         dur = node.meta.total_duration_ms / 1000 if node.meta.total_duration_ms else 0
         err_badge = (
-            f'<span style="color:#f85149;margin-left:8px">✗ {node.meta.errors} err</span>'
+            f'<span style="color:#f85149;margin-left:8px">✗ {_esc(node.meta.errors)} err</span>'
             if node.meta.errors else ""
         )
         children_html = "".join(_node_html(c, depth + 1) for c in node.children)
@@ -524,9 +528,9 @@ def _render_subagent_tree_html(tree: "SessionNode", stats: object) -> str:
   <span class="tree-toggle">{toggle}</span>
   <span class="tree-sid">{_esc(sid)}</span>
   <span class="tree-meta">
-    depth={node.meta.depth}
+    depth={_esc(node.meta.depth)}
     &nbsp;·&nbsp;{dur:.1f}s
-    &nbsp;·&nbsp;{node.meta.tool_calls} tools
+    &nbsp;·&nbsp;{_esc(node.meta.tool_calls)} tools
     &nbsp;·&nbsp;{node.meta.total_tokens:,} tok
     {err_badge}
   </span>
@@ -539,10 +543,10 @@ def _render_subagent_tree_html(tree: "SessionNode", stats: object) -> str:
 <h2>Subagent Tree</h2>
 <div style="background:#161b22;border:1px solid #30363d;border-radius:6px;padding:16px;margin-bottom:20px;font-size:.85em">
   <div style="color:#8b949e;margin-bottom:12px">
-    {getattr(agg,'session_count',1)} sessions &nbsp;·&nbsp;
-    {getattr(agg,'tool_calls',0)} total tool calls &nbsp;·&nbsp;
+    {_esc(getattr(agg,'session_count',1))} sessions &nbsp;·&nbsp;
+    {_esc(getattr(agg,'tool_calls',0))} total tool calls &nbsp;·&nbsp;
     {getattr(agg,'total_tokens',0):,} total tokens
-    {f'&nbsp;·&nbsp;<span style="color:#f85149">{agg.errors} errors</span>' if getattr(agg,'errors',0) else ''}
+    {f'&nbsp;·&nbsp;<span style="color:#f85149">{_esc(agg.errors)} errors</span>' if getattr(agg,'errors',0) else ''}
   </div>
   <div class="subagent-tree">{tree_body}</div>
 </div>
