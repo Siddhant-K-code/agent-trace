@@ -20,15 +20,13 @@ from dataclasses import replace
 import hashlib
 import json
 import math
-import os
-import struct
 import sys
-import time
 import urllib.error
 import urllib.request
 from typing import Any
 
-from .cost import TokenUsage, usage_detail
+from . import __version__
+from .cost import TokenUsage, reasoning_output_tokens, usage_detail
 from .event_data import object_field, str_field
 # ERROR_TYPE_* and LLMFailure stay importable from here.
 from .failures import (
@@ -54,15 +52,37 @@ from .store import TraceStore
 
 
 # ---------------------------------------------------------------------------
-# OTel semantic conventions for GenAI (opentelemetry-semantic-conventions 1.27+)
-# https://opentelemetry.io/docs/specs/semconv/gen-ai/
+# OTel semantic conventions for GenAI. ``session_to_otlp_genai`` follows
+# https://github.com/open-telemetry/semantic-conventions-genai at commit
+# e6658f1 (2026-11-06); see docs/production.md.
 # ---------------------------------------------------------------------------
 
+# Deprecated: renamed to gen_ai.provider.name in semantic-conventions v1.37.0.
+# The GenAI format still emits it beside gen_ai.provider.name.
 _SEMCONV_SYSTEM = "gen_ai.system"
+_SEMCONV_PROVIDER = "gen_ai.provider.name"
 _SEMCONV_OP = "gen_ai.operation.name"
 _SEMCONV_MODEL = "gen_ai.request.model"
 _SEMCONV_INPUT_TOKENS = "gen_ai.usage.input_tokens"
 _SEMCONV_OUTPUT_TOKENS = "gen_ai.usage.output_tokens"
+_SEMCONV_REASONING_TOKENS = "gen_ai.usage.reasoning.output_tokens"
+_SEMCONV_AGENT_NAME = "gen_ai.agent.name"
+
+_OP_CHAT = "chat"
+_OP_EXECUTE_TOOL = "execute_tool"
+_OP_INVOKE_AGENT = "invoke_agent"
+
+# Well-known gen_ai.provider.name values.
+_WELL_KNOWN_PROVIDERS = frozenset({
+    "anthropic", "aws.bedrock", "azure.ai.inference", "azure.ai.openai",
+    "cohere", "deepseek", "gcp.gemini", "gcp.gen_ai", "gcp.vertex_ai", "groq",
+    "ibm.watsonx.ai", "mistral", "moonshot_ai", "ollama", "openai",
+    "perplexity", "x_ai",
+})
+_MISTRAL_MARKERS = (
+    "mistral", "mixtral", "codestral", "devstral", "magistral", "ministral",
+    "pixtral",
+)
 _SEMCONV_CACHE_READ_TOKENS = "gen_ai.usage.cache_read.input_tokens"
 _SEMCONV_CACHE_WRITE_TOKENS = "gen_ai.usage.cache_write.input_tokens"
 _SEMCONV_TOOL_NAME = "gen_ai.tool.name"
@@ -174,16 +194,60 @@ def _make_event(name: str, timestamp: float, data: dict) -> dict:
 
 
 def _canonical_provider(value: object) -> str:
-    """Return the provider name used by the project's GenAI convention."""
+    """Return the well-known ``gen_ai.provider.name`` value for *value*.
+
+    *value* is a provider name or a model name, such as a LiteLLM model
+    string. A serving platform (Bedrock, Azure, Vertex AI, Groq, Ollama) wins
+    over the model family, so ``bedrock/anthropic.claude-3`` is
+    ``aws.bedrock``. Google values that name neither Vertex AI nor the Gemini
+    API are ``gcp.gen_ai``. Anything else is ``unknown``.
+    """
     raw = str(value or "").strip().lower()
-    if "bedrock" in raw or raw.startswith("aws"):
+    if raw in _WELL_KNOWN_PROVIDERS:
+        return raw
+    if "bedrock" in raw or raw.startswith(("aws", "amazon.")):
         return "aws.bedrock"
+    if raw.startswith("azure_ai") or ("azure" in raw and "inference" in raw):
+        return "azure.ai.inference"
+    if raw == "azure" or raw.startswith("azure/") or ("azure" in raw and "openai" in raw):
+        return "azure.ai.openai"
+    if "vertex" in raw or "aiplatform" in raw:
+        return "gcp.vertex_ai"
+    if (
+        raw.startswith("gemini/")
+        or "generativelanguage" in raw
+        or "aistudio" in raw
+        or "ai studio" in raw
+    ):
+        return "gcp.gemini"
+    if "watsonx" in raw:
+        return "ibm.watsonx.ai"
+    if "groq" in raw:
+        return "groq"
+    if "ollama" in raw:
+        return "ollama"
+    if "gemini" in raw or "google" in raw:
+        return "gcp.gen_ai"
     if "claude" in raw or "anthropic" in raw:
         return "anthropic"
     if "gpt" in raw or "openai" in raw or raw.startswith(("o1", "o3", "o4")):
         return "openai"
-    if "gemini" in raw or "google" in raw:
-        return "google"
+    if any(marker in raw for marker in _MISTRAL_MARKERS):
+        return "mistral"
+    if "deepseek" in raw:
+        return "deepseek"
+    if (
+        "grok" in raw
+        or raw in {"xai", "x-ai", "x.ai"}
+        or raw.startswith(("xai/", "xai-", "x-ai/", "x-ai-", "x.ai/"))
+    ):
+        return "x_ai"
+    if "cohere" in raw:
+        return "cohere"
+    if "perplexity" in raw:
+        return "perplexity"
+    if "moonshot" in raw or "kimi" in raw:
+        return "moonshot_ai"
     return "unknown"
 
 
@@ -267,6 +331,28 @@ def _token_attributes(
     if has_input or has_output:
         attrs[_OI_TOTAL_TOKENS] = usage.input_tokens + usage.output_tokens
     return attrs
+
+
+def _reasoning_attributes(output_data: Any, usage: TokenUsage, has_output: bool) -> dict[str, int]:
+    """Return ``gen_ai.usage.reasoning.output_tokens`` when it is not zero.
+
+    *output_data* is the event the output count was read from. The reasoning
+    count is part of ``gen_ai.usage.output_tokens``, not added to it.
+    """
+    if not has_output:
+        return {}
+    reasoning = min(reasoning_output_tokens(output_data), usage.output_tokens)
+    return {_SEMCONV_REASONING_TOKENS: reasoning} if reasoning else {}
+
+
+def _model_span_name(model: object) -> str:
+    """``{gen_ai.operation.name} {gen_ai.request.model}``, or the operation."""
+    return f"{_OP_CHAT} {model}" if isinstance(model, str) and model else _OP_CHAT
+
+
+def _tool_span_name(tool_name: object) -> str:
+    """``execute_tool {gen_ai.tool.name}``."""
+    return f"{_OP_EXECUTE_TOOL} {tool_name}"
 
 
 def _float_value(data: Mapping[str, Any], keys: tuple[str, ...]) -> float | None:
@@ -840,7 +926,7 @@ def _genai_llm_span(
     req_event: TraceEvent | None,
     event: TraceEvent,
 ) -> dict:
-    """Build the gen_ai.client.operation span for one model request.
+    """Build the ``chat`` model request span for one model request.
 
     ``event`` ends the request: an ``llm_response``, or an ``error`` linked
     to ``req_event``. A failed or cancelled request (see :func:`llm_failure`)
@@ -861,8 +947,9 @@ def _genai_llm_span(
     )
 
     llm_attrs: dict = {
+        _SEMCONV_PROVIDER: system,
         _SEMCONV_SYSTEM: system,
-        _SEMCONV_OP: "chat",
+        _SEMCONV_OP: _OP_CHAT,
         _OI_SPAN_KIND: "LLM",
         _OI_SESSION_ID: meta.session_id,
         **_conversation_attributes(meta),
@@ -882,7 +969,11 @@ def _genai_llm_span(
                 separators=(",", ":"),
             )
 
-    llm_attrs.update(_token_attributes(*model_request_usage(req_data, event.data)))
+    usage, has_input, has_output = model_request_usage(req_data, event.data)
+    llm_attrs.update(_token_attributes(usage, has_input, has_output))
+    # model_request_usage reads the output from the response when it has one.
+    output_data = event.data if usage_detail(event.data)[2] else req_data
+    llm_attrs.update(_reasoning_attributes(output_data, usage, has_output))
     finish = event.data.get("stop_reason") or event.data.get("finish_reason", "")
     if finish:
         llm_attrs[_SEMCONV_FINISH_REASON] = finish
@@ -904,7 +995,7 @@ def _genai_llm_span(
         "traceId": trace_id,
         "spanId": _to_span_id(req_event.event_id if req_event else event.event_id),
         "parentSpanId": root_span_id,
-        "name": "gen_ai.client.operation",
+        "name": _model_span_name(model),
         "kind": 3,  # SPAN_KIND_CLIENT
         "startTimeUnixNano": _ts_to_nanos(span_start),
         "endTimeUnixNano": _ts_to_nanos(max(span_end, span_start + 0.001)),
@@ -938,21 +1029,25 @@ def session_to_otlp_genai(
     parent_span_id: str = "",
     parent_trace_id: str = "",
 ) -> dict:
-    """Convert a session to OTLP JSON using strict OTel GenAI semantic conventions.
+    """Convert a session to OTLP JSON using the OTel GenAI semantic conventions.
 
-    Differences from session_to_otlp():
-    - LLM request/response pairs become gen_ai.client.operation child spans
+    Follows the semantic-conventions-genai repository at commit e6658f1
+    (2026-11-06). Differences from session_to_otlp():
+    - LLM request/response pairs become ``chat {model}`` CLIENT child spans
       (not just events on the root span). A failed or cancelled model
       request, or an error linked to an llm_request, gets ERROR status and
       error.type
-    - Root span carries gen_ai.agent.id and gen_ai.agent.name
+    - Tool calls become ``execute_tool {tool}`` INTERNAL spans with
+      gen_ai.tool.name and gen_ai.tool.call.id; a failed one gets error.type
+    - The root is an ``invoke_agent`` INTERNAL span with gen_ai.agent.name
+      when the session names its agent
     - Root, LLM and tool spans carry gen_ai.conversation.id when the agent
       supplied its own session ID
     - Error events use the OTel exception event format
-    - Tool calls carry gen_ai.tool.name and gen_ai.tool.call.id
-    - gen_ai.system is derived from the model name when possible
+    - gen_ai.provider.name is derived from the provider or model name when
+      possible; the deprecated gen_ai.system repeats it
 
-    See: https://opentelemetry.io/docs/specs/semconv/gen-ai/
+    See: https://github.com/open-telemetry/semantic-conventions-genai
     """
     trace_id = parent_trace_id if parent_trace_id else _to_trace_id(meta.session_id)
     root_span_id = _to_span_id(f"root-{meta.session_id}")
@@ -964,10 +1059,10 @@ def session_to_otlp_genai(
     raw_provider, gen_ai_system = _provider_value(meta)
     root_attr_values: dict[str, Any] = {
         # GenAI agent attributes
-        "gen_ai.agent.id": meta.session_id,
-        "gen_ai.agent.name": meta.agent_name or "agent",
+        _SEMCONV_OP: _OP_INVOKE_AGENT,
+        **({_SEMCONV_AGENT_NAME: meta.agent_name} if meta.agent_name else {}),
+        _SEMCONV_PROVIDER: gen_ai_system,
         _SEMCONV_SYSTEM: gen_ai_system,
-        _SEMCONV_OP: "agent.session",
         # OpenInference compatibility attributes
         _OI_SPAN_KIND: "AGENT",
         _OI_SESSION_ID: meta.session_id,
@@ -1050,7 +1145,7 @@ def session_to_otlp_genai(
 
             tool_attrs: dict = {
                 _SEMCONV_TOOL_NAME: tool_name,
-                _SEMCONV_OP: "execute",
+                _SEMCONV_OP: _OP_EXECUTE_TOOL,
                 _SEMCONV_TOOL_CALL_ID: (
                     call_event.event_id if call_event else event.event_id
                 ),
@@ -1084,8 +1179,8 @@ def session_to_otlp_genai(
                     call_event.event_id if call_event else event.event_id
                 ),
                 "parentSpanId": root_span_id,
-                "name": f"gen_ai.tool.call/{tool_name}",
-                "kind": 3,  # SPAN_KIND_CLIENT
+                "name": _tool_span_name(tool_name),
+                "kind": 1,  # SPAN_KIND_INTERNAL
                 "startTimeUnixNano": _ts_to_nanos(span_start),
                 "endTimeUnixNano": _ts_to_nanos(
                     span_start + duration_ns / 1_000_000_000
@@ -1118,12 +1213,18 @@ def session_to_otlp_genai(
                 **_event_trace_attributes(event, "response"),
             })
 
+            error_type = (
+                str_field(event.data, "error_type").strip()
+                or str_field(event.data, "exception_type").strip()
+                or ERROR_TYPE_OTHER
+            )
             error_attrs: dict[str, Any] = {
                 _SEMCONV_TOOL_NAME: tool_name,
-                _SEMCONV_OP: "execute",
+                _SEMCONV_OP: _OP_EXECUTE_TOOL,
                 _SEMCONV_TOOL_CALL_ID: (
                     call_event.event_id if call_event else event.event_id
                 ),
+                _SEMCONV_ERROR_TYPE: error_type,
                 _OI_SPAN_KIND: "TOOL",
                 _OI_SESSION_ID: meta.session_id,
                 **_conversation_attributes(meta),
@@ -1148,8 +1249,8 @@ def session_to_otlp_genai(
                     call_event.event_id if call_event else event.event_id
                 ),
                 "parentSpanId": root_span_id,
-                "name": f"gen_ai.tool.call/{tool_name}",
-                "kind": 3,
+                "name": _tool_span_name(tool_name),
+                "kind": 1,  # SPAN_KIND_INTERNAL
                 "startTimeUnixNano": _ts_to_nanos(span_start),
                 "endTimeUnixNano": _ts_to_nanos(
                     span_start + duration_ns / 1_000_000_000
@@ -1168,8 +1269,9 @@ def session_to_otlp_genai(
             req_event.data,
         )
         llm_attrs: dict[str, Any] = {
+            _SEMCONV_PROVIDER: system,
             _SEMCONV_SYSTEM: system,
-            _SEMCONV_OP: "chat",
+            _SEMCONV_OP: _OP_CHAT,
             _OI_SPAN_KIND: "LLM",
             _OI_SESSION_ID: meta.session_id,
             **_conversation_attributes(meta),
@@ -1180,14 +1282,16 @@ def session_to_otlp_genai(
         if model:
             llm_attrs[_SEMCONV_MODEL] = model
             llm_attrs[_OI_LLM_MODEL] = model
-        llm_attrs.update(_token_attributes(*usage_detail(req_event.data)))
+        usage, has_input, has_output = usage_detail(req_event.data)
+        llm_attrs.update(_token_attributes(usage, has_input, has_output))
+        llm_attrs.update(_reasoning_attributes(req_event.data, usage, has_output))
         llm_attrs.update(_cost_attributes(req_event.data, {}))
         llm_attrs["metadata"] = _openinference_metadata(llm_attrs)
         child_spans.append({
             "traceId": trace_id,
             "spanId": _to_span_id(req_event.event_id),
             "parentSpanId": root_span_id,
-            "name": "gen_ai.client.operation",
+            "name": _model_span_name(model),
             "kind": 3,
             "startTimeUnixNano": _ts_to_nanos(req_event.timestamp),
             "endTimeUnixNano": _ts_to_nanos(req_event.timestamp + 0.001),
@@ -1200,7 +1304,7 @@ def session_to_otlp_genai(
         tool_name = call_event.data.get("tool_name", "tool")
         tool_attrs: dict[str, Any] = {
             _SEMCONV_TOOL_NAME: tool_name,
-            _SEMCONV_OP: "execute",
+            _SEMCONV_OP: _OP_EXECUTE_TOOL,
             _SEMCONV_TOOL_CALL_ID: call_event.event_id,
             _OI_SPAN_KIND: "TOOL",
             _OI_SESSION_ID: meta.session_id,
@@ -1221,8 +1325,8 @@ def session_to_otlp_genai(
             "traceId": trace_id,
             "spanId": _to_span_id(call_event.event_id),
             "parentSpanId": root_span_id,
-            "name": f"gen_ai.tool.call/{tool_name}",
-            "kind": 3,
+            "name": _tool_span_name(tool_name),
+            "kind": 1,  # SPAN_KIND_INTERNAL
             "startTimeUnixNano": _ts_to_nanos(call_event.timestamp),
             "endTimeUnixNano": _ts_to_nanos(call_event.timestamp + 0.001),
             "attributes": _make_attributes(tool_attrs),
@@ -1232,7 +1336,11 @@ def session_to_otlp_genai(
     root_span: dict = {
         "traceId": trace_id,
         "spanId": root_span_id,
-        "name": f"gen_ai.agent.session ({meta.agent_name or 'agent'})",
+        "name": (
+            f"{_OP_INVOKE_AGENT} {meta.agent_name}"
+            if meta.agent_name
+            else _OP_INVOKE_AGENT
+        ),
         "kind": 1,  # SPAN_KIND_INTERNAL
         "startTimeUnixNano": root_start,
         "endTimeUnixNano": root_end,
@@ -1259,7 +1367,7 @@ def session_to_otlp_genai(
                 }),
             },
             "scopeSpans": [{
-                "scope": {"name": "agent-trace", "version": "genai-semconv-1.27"},
+                "scope": {"name": "agent-trace", "version": __version__},
                 "spans": [root_span] + child_spans,
             }],
         }],

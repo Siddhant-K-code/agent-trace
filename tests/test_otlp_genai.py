@@ -7,8 +7,15 @@ import tempfile
 import time
 import unittest
 
+from agent_trace import __version__
 from agent_trace.models import EventType, SessionMeta, TraceEvent
-from agent_trace.otlp import _to_span_id, _ts_to_nanos, session_to_otlp, session_to_otlp_genai
+from agent_trace.otlp import (
+    _canonical_provider,
+    _to_span_id,
+    _ts_to_nanos,
+    session_to_otlp,
+    session_to_otlp_genai,
+)
 from agent_trace.store import TraceStore
 
 
@@ -49,12 +56,16 @@ def _get_attr(span: dict, key: str):
 # ---------------------------------------------------------------------------
 
 class TestGenAIRootSpan(unittest.TestCase):
-    def test_root_span_has_gen_ai_agent_id(self):
+    def test_root_span_is_invoke_agent_without_agent_id(self):
         meta = _make_meta()
         payload = session_to_otlp_genai(meta, [])
-        spans = _get_spans(payload)
-        root = spans[0]
-        self.assertEqual(_get_attr(root, "gen_ai.agent.id"), meta.session_id)
+        root = _get_spans(payload)[0]
+        self.assertEqual(root["name"], "invoke_agent claude-code")
+        self.assertEqual(root["kind"], 1)
+        self.assertEqual(_get_attr(root, "gen_ai.operation.name"), "invoke_agent")
+        # gen_ai.agent.id names a hosted agent resource, not a session.
+        self.assertIsNone(_get_attr(root, "gen_ai.agent.id"))
+        self.assertEqual(_get_attr(root, "agent.session_id"), meta.session_id)
 
     def test_root_span_has_gen_ai_agent_name(self):
         meta = _make_meta("my-agent")
@@ -63,28 +74,29 @@ class TestGenAIRootSpan(unittest.TestCase):
         root = spans[0]
         self.assertEqual(_get_attr(root, "gen_ai.agent.name"), "my-agent")
 
-    def test_root_span_has_gen_ai_system(self):
+    def test_unnamed_agent_has_no_agent_name(self):
+        payload = session_to_otlp_genai(_make_meta(""), [])
+        root = _get_spans(payload)[0]
+        self.assertEqual(root["name"], "invoke_agent")
+        self.assertIsNone(_get_attr(root, "gen_ai.agent.name"))
+
+    def test_root_span_has_provider_name_and_deprecated_system(self):
         meta = _make_meta("claude-code")
         payload = session_to_otlp_genai(meta, [])
         spans = _get_spans(payload)
         root = spans[0]
+        self.assertEqual(_get_attr(root, "gen_ai.provider.name"), "anthropic")
         self.assertEqual(_get_attr(root, "gen_ai.system"), "anthropic")
 
-    def test_root_span_name_contains_agent_session(self):
-        meta = _make_meta()
-        payload = session_to_otlp_genai(meta, [])
-        spans = _get_spans(payload)
-        self.assertIn("gen_ai.agent.session", spans[0]["name"])
-
-    def test_scope_name_includes_semconv_version(self):
+    def test_scope_version_is_agent_trace_version(self):
         meta = _make_meta()
         payload = session_to_otlp_genai(meta, [])
         scope = payload["resourceSpans"][0]["scopeSpans"][0]["scope"]
-        self.assertIn("genai-semconv", scope.get("version", ""))
+        self.assertEqual(scope, {"name": "agent-trace", "version": __version__})
 
 
 # ---------------------------------------------------------------------------
-# LLM request/response → gen_ai.client.operation child span
+# LLM request/response → chat {model} child span
 # ---------------------------------------------------------------------------
 
 class TestGenAILLMSpan(unittest.TestCase):
@@ -108,7 +120,20 @@ class TestGenAILLMSpan(unittest.TestCase):
         # root + 1 LLM span
         self.assertEqual(len(spans), 2)
         llm_span = spans[1]
-        self.assertEqual(llm_span["name"], "gen_ai.client.operation")
+        self.assertEqual(llm_span["name"], "chat claude-3-5-sonnet")
+        self.assertEqual(llm_span["kind"], 3)
+        self.assertEqual(_get_attr(llm_span, "gen_ai.operation.name"), "chat")
+
+    def test_llm_span_without_model_is_named_by_operation(self):
+        req = TraceEvent(event_type=EventType.LLM_REQUEST, data={"input_tokens": 1})
+        resp = TraceEvent(
+            event_type=EventType.LLM_RESPONSE,
+            parent_id=req.event_id,
+            data={"output_tokens": 1},
+        )
+        unmatched = TraceEvent(event_type=EventType.LLM_REQUEST, data={})
+        spans = _get_spans(session_to_otlp_genai(_make_meta(), [req, resp, unmatched]))
+        self.assertEqual([span["name"] for span in spans[1:]], ["chat", "chat"])
 
     def test_llm_span_has_model_attribute(self):
         meta = _make_meta()
@@ -151,7 +176,55 @@ class TestGenAILLMSpan(unittest.TestCase):
         )
         payload = session_to_otlp_genai(meta, [req, resp])
         llm_span = _get_spans(payload)[1]
+        self.assertEqual(_get_attr(llm_span, "gen_ai.provider.name"), "openai")
         self.assertEqual(_get_attr(llm_span, "gen_ai.system"), "openai")
+
+
+class TestGenAIProviderName(unittest.TestCase):
+    def test_well_known_provider_values(self):
+        cases = {
+            "gemini": "gcp.gen_ai",
+            "gemini-2.5-pro": "gcp.gen_ai",
+            "google": "gcp.gen_ai",
+            "vertex_ai/gemini-2.5-pro": "gcp.vertex_ai",
+            "gemini/gemini-2.5-flash": "gcp.gemini",
+            "gcp.gemini": "gcp.gemini",
+            "bedrock/anthropic.claude-3-5-sonnet": "aws.bedrock",
+            "amazon.nova-pro-v1:0": "aws.bedrock",
+            "azure/gpt-4o": "azure.ai.openai",
+            "azure": "azure.ai.openai",
+            "azure_ai/mistral-large": "azure.ai.inference",
+            "claude-sonnet-4": "anthropic",
+            "gpt-4o": "openai",
+            "o3-mini": "openai",
+            "mistral-large-latest": "mistral",
+            "codestral-latest": "mistral",
+            "deepseek-chat": "deepseek",
+            "grok-4": "x_ai",
+            "xai/grok-2": "x_ai",
+            "groq/llama-3.1-70b": "groq",
+            "ollama/llama3": "ollama",
+            "kimi-k2": "moonshot_ai",
+            "copilot": "unknown",
+            "": "unknown",
+        }
+        for value, expected in cases.items():
+            with self.subTest(value=value):
+                self.assertEqual(_canonical_provider(value), expected)
+
+    def test_gemini_session_uses_gcp_gen_ai(self):
+        req = TraceEvent(event_type=EventType.LLM_REQUEST, data={"model": "gemini-2.5-pro"})
+        resp = TraceEvent(
+            event_type=EventType.LLM_RESPONSE,
+            parent_id=req.event_id,
+            data={"model": "gemini-2.5-pro", "output_tokens": 1},
+        )
+        spans = _get_spans(session_to_otlp_genai(_make_meta("gemini"), [req, resp]))
+        for span in spans:
+            with self.subTest(span=span["name"]):
+                self.assertEqual(_get_attr(span, "gen_ai.provider.name"), "gcp.gen_ai")
+                self.assertEqual(_get_attr(span, "gen_ai.system"), "gcp.gen_ai")
+        self.assertEqual(_get_attr(spans[1], "llm.provider"), "gcp.gen_ai")
 
 
 class TestGenAILLMPairingFallback(unittest.TestCase):
@@ -283,7 +356,7 @@ class TestGenAIEventsBeforeStart(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Tool call/result → gen_ai.tool.call/<name> child span
+# Tool call/result → execute_tool {name} child span
 # ---------------------------------------------------------------------------
 
 class TestGenAIToolSpan(unittest.TestCase):
@@ -307,8 +380,17 @@ class TestGenAIToolSpan(unittest.TestCase):
         spans = _get_spans(payload)
         self.assertEqual(len(spans), 2)
         tool_span = spans[1]
-        self.assertIn("gen_ai.tool.call", tool_span["name"])
-        self.assertIn("Bash", tool_span["name"])
+        self.assertEqual(tool_span["name"], "execute_tool Bash")
+        self.assertEqual(tool_span["kind"], 1)
+        self.assertEqual(_get_attr(tool_span, "gen_ai.operation.name"), "execute_tool")
+        self.assertIsNone(_get_attr(tool_span, "error.type"))
+
+    def test_unmatched_tool_call_is_execute_tool(self):
+        call = TraceEvent(event_type=EventType.TOOL_CALL, data={"tool_name": "Open"})
+        span = _get_spans(session_to_otlp_genai(_make_meta(), [call]))[1]
+        self.assertEqual(span["name"], "execute_tool Open")
+        self.assertEqual(span["kind"], 1)
+        self.assertEqual(_get_attr(span, "gen_ai.operation.name"), "execute_tool")
 
     def test_tool_span_has_gen_ai_tool_name(self):
         meta = _make_meta()
@@ -364,9 +446,9 @@ class TestGenAISpanStatus(unittest.TestCase):
     def test_successful_tool_llm_and_root_spans_leave_status_unset(self):
         meta = SessionMeta(session_id="s1", agent_name="claude-code", errors=0)
         self.assertEqual(self._statuses(meta, self._session()), {
-            "gen_ai.agent.session (claude-code)": {"code": 0},
-            "gen_ai.tool.call/Bash": {"code": 0},
-            "gen_ai.client.operation": {"code": 0},
+            "invoke_agent claude-code": {"code": 0},
+            "execute_tool Bash": {"code": 0},
+            "chat gpt-4o": {"code": 0},
         })
 
     def test_root_with_errors_and_error_spans_are_unchanged(self):
@@ -375,10 +457,10 @@ class TestGenAISpanStatus(unittest.TestCase):
             event_type=EventType.ERROR, data={"tool_name": "Read", "error": "missing"},
         )]
         statuses = self._statuses(meta, events)
-        self.assertEqual(statuses["gen_ai.agent.session (claude-code)"], {"code": 2})
-        self.assertEqual(statuses["gen_ai.tool.call/Read"], {"code": 2, "message": "missing"})
-        self.assertEqual(statuses["gen_ai.tool.call/Bash"], {"code": 0})
-        self.assertEqual(statuses["gen_ai.client.operation"], {"code": 0})
+        self.assertEqual(statuses["invoke_agent claude-code"], {"code": 2})
+        self.assertEqual(statuses["execute_tool Read"], {"code": 2, "message": "missing"})
+        self.assertEqual(statuses["execute_tool Bash"], {"code": 0})
+        self.assertEqual(statuses["chat gpt-4o"], {"code": 0})
 
     def test_no_span_sets_status_ok(self):
         events = self._session() + [
@@ -416,6 +498,27 @@ class TestGenAIErrorSpan(unittest.TestCase):
         # Should have an exception event
         events = error_span.get("events", [])
         self.assertTrue(any(e["name"] == "exception" for e in events))
+        self.assertEqual(error_span["name"], "execute_tool Bash")
+        self.assertEqual(error_span["kind"], 1)
+        self.assertEqual(_get_attr(error_span, "error.type"), "ShellError")
+
+    def test_decorator_exception_type_is_the_error_type(self):
+        error = TraceEvent(
+            event_type=EventType.ERROR,
+            data={"message": "boom", "exception_type": "ValueError"},
+        )
+        span = _get_spans(session_to_otlp_genai(_make_meta(), [error]))[1]
+        self.assertEqual(_get_attr(span, "error.type"), "ValueError")
+
+    def test_error_without_type_uses_other(self):
+        for error_type in (None, "", "  ", 3):
+            data = {"tool_name": "Bash", "error": "fail"}
+            if error_type is not None:
+                data["error_type"] = error_type
+            with self.subTest(error_type=error_type):
+                error = TraceEvent(event_type=EventType.ERROR, data=data)
+                span = _get_spans(session_to_otlp_genai(_make_meta(), [error]))[1]
+                self.assertEqual(_get_attr(span, "error.type"), "_OTHER")
 
     def test_error_span_has_error_status(self):
         meta = _make_meta()
@@ -512,8 +615,8 @@ class TestConversationId(unittest.TestCase):
         for span in spans:
             with self.subTest(span=span["name"]):
                 self.assertEqual(_get_attr(span, "gen_ai.conversation.id"), self.NATIVE_ID)
-        # The local session ID stays on gen_ai.agent.id and session.id.
-        self.assertEqual(_get_attr(spans[0], "gen_ai.agent.id"), meta.session_id)
+        # The local session ID stays on agent.session_id and session.id.
+        self.assertEqual(_get_attr(spans[0], "agent.session_id"), meta.session_id)
         self.assertEqual(_get_attr(spans[0], "session.id"), meta.session_id)
 
     def test_genai_omits_conversation_id_without_native_id(self):
@@ -563,9 +666,9 @@ class TestOTLPBackwardsCompat(unittest.TestCase):
         )
         payload = session_to_otlp(meta, [call, result])
         spans = _get_spans(payload)
-        # Legacy: tool spans use plain tool name, not gen_ai.tool.call/<name>
+        # Legacy: tool spans use tool/<name>, not execute_tool <name>
         tool_span = spans[1]
-        self.assertNotIn("gen_ai.tool.call", tool_span["name"])
+        self.assertEqual(tool_span["name"], "tool/Bash")
 
     def test_genai_and_legacy_produce_different_span_names(self):
         meta = _make_meta()
@@ -641,7 +744,7 @@ class TestGenAIFailedModelRequests(unittest.TestCase):
             session_id="s1", agent_name="codex", started_at=1000.0, ended_at=1100.0,
         )
         spans = _get_spans(session_to_otlp_genai(meta, events))
-        return [s for s in spans if s["name"] == "gen_ai.client.operation"]
+        return [s for s in spans if _get_attr(s, "gen_ai.operation.name") == "chat"]
 
     def _span(self, **data) -> dict:
         (span,) = self._llm_spans([_codex_response(**data)])
@@ -742,7 +845,7 @@ class TestGenAIFailedModelRequests(unittest.TestCase):
         spans = self._linked_error_spans({
             "error": "Rate limit reached", "error_type": "RateLimitError",
         })
-        self.assertEqual([s["name"] for s in spans], ["gen_ai.client.operation"])
+        self.assertEqual([s["name"] for s in spans], ["chat gpt-4o"])
         (span,) = spans
         self.assertEqual(span["spanId"], _to_span_id("req1"))
         self.assertEqual(span["startTimeUnixNano"], _ts_to_nanos(1001.0))
@@ -776,8 +879,8 @@ class TestGenAIFailedModelRequests(unittest.TestCase):
         meta = SessionMeta(session_id="s1", agent_name="openai", started_at=1000.0, ended_at=1100.0)
         spans = _get_spans(session_to_otlp_genai(meta, [request, error]))[1:]
         names = sorted(s["name"] for s in spans)
-        self.assertEqual(names, ["gen_ai.client.operation", "gen_ai.tool.call/error"])
-        llm = next(s for s in spans if s["name"] == "gen_ai.client.operation")
+        self.assertEqual(names, ["chat gpt-4o", "execute_tool error"])
+        llm = next(s for s in spans if s["name"] == "chat gpt-4o")
         self.assertEqual(llm["status"], {"code": 0})
         self.assertIsNone(_get_attr(llm, "error.type"))
 
@@ -792,8 +895,9 @@ class TestGenAIFailedModelRequests(unittest.TestCase):
         )
         meta = SessionMeta(session_id="s1", agent_name="claude-code", started_at=1000.0, ended_at=1100.0)
         (span,) = _get_spans(session_to_otlp_genai(meta, [call, error]))[1:]
-        self.assertEqual(span["name"], "gen_ai.tool.call/Bash")
-        self.assertIsNone(_get_attr(span, "error.type"))
+        self.assertEqual(span["name"], "execute_tool Bash")
+        self.assertEqual(_get_attr(span, "gen_ai.operation.name"), "execute_tool")
+        self.assertEqual(_get_attr(span, "error.type"), "_OTHER")
 
 
 if __name__ == "__main__":

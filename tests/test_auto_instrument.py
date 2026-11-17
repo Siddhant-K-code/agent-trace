@@ -296,7 +296,9 @@ class TestSDKModelCallFailure(unittest.TestCase):
                 spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"][1:]
                 (span,) = spans
                 attrs = {a["key"]: a["value"] for a in span["attributes"]}
-                self.assertEqual(span["name"], "gen_ai.client.operation")
+                model = events[0].data.get("model")
+                self.assertEqual(span["name"], f"chat {model}" if model else "chat")
+                self.assertEqual(attrs["gen_ai.operation.name"], {"stringValue": "chat"})
                 self.assertEqual(span["status"], {"code": 2, "message": "Rate limit reached"})
                 self.assertEqual(attrs["error.type"], {"stringValue": "RateLimitError"})
                 (generation,) = _events_to_langfuse_observations(meta.session_id, events)

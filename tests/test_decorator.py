@@ -123,7 +123,7 @@ class TestDecorator(unittest.TestCase):
 
         spans = session_to_otlp_genai(meta, events)["resourceSpans"][0][
             "scopeSpans"][0]["spans"]
-        llm = [s for s in spans if s["name"] == "gen_ai.client.operation"]
+        llm = [s for s in spans if s["name"] == "chat gpt-4"]
         self.assertEqual(len(llm), 1)
         self.assertEqual(llm[0]["spanId"], _to_span_id(request.event_id))
         self.assertEqual(
@@ -131,7 +131,7 @@ class TestDecorator(unittest.TestCase):
         attrs = {a["key"]: a["value"] for a in llm[0]["attributes"]}
         self.assertEqual(attrs["error.type"], {"stringValue": "TimeoutError"})
         self.assertFalse(
-            [s for s in spans if s["name"] == "gen_ai.tool.call/error"])
+            [s for s in spans if s["name"] == "execute_tool error"])
 
     def test_log_decision(self):
         session_id = start_session(name="test", trace_dir=self.tmpdir)

@@ -1,12 +1,12 @@
 """Token usage, cache reads and writes included, in the OTLP and Langfuse exports.
 
 Each provider shape is checked in the three exports: OTLP with the GenAI
-semantic conventions (``--genai-semconv``), classic OTLP and Langfuse.
+semantic conventions (``--format otlp-genai``), classic OTLP and Langfuse.
 """
 
 import unittest
 
-from agent_trace.cost import TokenUsage, usage_detail
+from agent_trace.cost import TokenUsage, reasoning_output_tokens, usage_detail
 from agent_trace.langfuse_export import _events_to_langfuse_observations
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.otlp import model_request_usage, session_to_otlp, session_to_otlp_genai
@@ -21,6 +21,7 @@ OI_COMPLETION = "llm.token_count.completion"
 OI_TOTAL = "llm.token_count.total"
 OI_CACHE_READ = "llm.token_count.prompt_details.cache_read"
 OI_CACHE_WRITE = "llm.token_count.prompt_details.cache_write"
+REASONING = "gen_ai.usage.reasoning.output_tokens"
 TOKEN_KEYS = (
     INPUT, OUTPUT, CACHE_READ, CACHE_WRITE,
     OI_PROMPT, OI_COMPLETION, OI_TOTAL, OI_CACHE_READ, OI_CACHE_WRITE,
@@ -237,7 +238,10 @@ def _spans(payload: dict) -> list[dict]:
 
 def _genai_llm_spans(events: list[TraceEvent]) -> list[dict]:
     spans = _spans(session_to_otlp_genai(_meta(), events))
-    return [_attrs(s) for s in spans if s["name"] == "gen_ai.client.operation"]
+    return [
+        attrs for attrs in map(_attrs, spans)
+        if attrs.get("gen_ai.operation.name") == "chat"
+    ]
 
 
 def _classic_llm_events(events: list[TraceEvent]) -> list[dict]:
@@ -489,6 +493,92 @@ class TestUnchangedWithoutCache(unittest.TestCase):
         (generation,) = _generations(events)
         self.assertEqual(generation["usage"], {"input": 0, "output": 0, "total": 0})
         self.assertNotIn("usageDetails", generation)
+
+
+class TestReasoningTokens(unittest.TestCase):
+    """Reasoning tokens are reported as part of the output, never added to it."""
+
+    def _span(self, request, response) -> dict:
+        (span,) = _genai_llm_spans(_events(request, response))
+        return span
+
+    def test_recorded_reasoning_is_part_of_the_output(self):
+        openai_responses = {
+            "model": "gpt-5",
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 800,
+                "output_tokens_details": {"reasoning_tokens": 300},
+            },
+        }
+        openai_chat = {
+            "model": "o3",
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 50,
+                "completion_tokens_details": {"reasoning_tokens": 40},
+            },
+        }
+        for name, response, output, reasoning in (
+            ("codex", CASES["codex"][1], 100, 20),
+            ("gemini", CASES["gemini"][1], 100, 70),
+            ("openai_responses", openai_responses, 800, 300),
+            ("openai_chat", openai_chat, 50, 40),
+        ):
+            with self.subTest(name=name):
+                span = self._span(None, response)
+                self.assertEqual((span[OUTPUT], span[REASONING]), (output, reasoning))
+                self.assertEqual(span[OI_COMPLETION], output)
+
+    def test_reasoning_follows_the_output_side(self):
+        request = {"model": "gpt-5", "input_tokens": 5, "reasoning_output_tokens": 9}
+        span = self._span(request, {"model": "gpt-5", "output_tokens": 30})
+        self.assertNotIn(REASONING, span)
+        request = {"model": "gpt-5", "output_tokens": 30, "reasoning_output_tokens": 9}
+        span = self._span(request, {"model": "gpt-5", "text": "hi"})
+        self.assertEqual((span[OUTPUT], span[REASONING]), (30, 9))
+
+    def test_reasoning_is_capped_at_the_output(self):
+        response = {"model": "gpt-5", "output_tokens": 4, "reasoning_output_tokens": 9}
+        self.assertEqual(self._span(None, response)[REASONING], 4)
+
+    def test_zero_or_missing_reasoning_is_omitted(self):
+        for name, response in (
+            ("zero", CASES["codex"][1] | {"token_usage": {
+                **CASES["codex"][1]["token_usage"], "reasoning_output_tokens": 0,
+            }}),
+            ("anthropic", CASES["anthropic_sdk"][1]),
+            ("no output", {"model": "gpt-5", "reasoning_output_tokens": 9}),
+        ):
+            with self.subTest(name=name):
+                self.assertNotIn(REASONING, self._span(None, response))
+
+    def test_unanswered_request_reports_its_reasoning(self):
+        request = TraceEvent(
+            event_type=EventType.LLM_REQUEST,
+            event_id="req1",
+            data={"model": "gpt-5", "output_tokens": 30, "reasoning_output_tokens": 9},
+        )
+        (span,) = _genai_llm_spans([request])
+        self.assertEqual((span[OUTPUT], span[REASONING]), (30, 9))
+
+    def test_classic_otlp_does_not_report_reasoning(self):
+        for attrs in _classic_llm_events(_events(None, CASES["codex"][1])):
+            self.assertNotIn(REASONING, attrs)
+
+    def test_helper_ignores_counts_outside_the_usage_it_reads(self):
+        self.assertEqual(reasoning_output_tokens(None), 0)
+        # Top-level counters that differ from the nested ones are not Codex
+        # mirrors, so the nested reasoning count is not theirs.
+        self.assertEqual(reasoning_output_tokens({
+            "output_tokens": 5,
+            "token_usage": {"output_tokens": 100, "reasoning_output_tokens": 20},
+        }), 0)
+        # Gemini thoughts only count in a Gemini usage object.
+        self.assertEqual(
+            reasoning_output_tokens({"output_tokens": 5, "thoughtsTokenCount": 3}),
+            0,
+        )
 
 
 class TestUsageHelpers(unittest.TestCase):

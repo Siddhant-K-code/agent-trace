@@ -15,14 +15,14 @@
     },
     {
       "scope": "tool",
-      "otlp_span_kind": 3,
+      "otlp_span_kind": 1,
       "openinference_span_kind": "TOOL"
     }
   ],
   "attribute_mappings": [
     {
       "scope": "root",
-      "source_attribute": "gen_ai.agent.id",
+      "source_attribute": "agent.session_id",
       "destination_attribute": "session.id",
       "representation": "renamed",
       "loss": "none"
@@ -50,7 +50,7 @@
     },
     {
       "scope": "llm",
-      "source_attribute": "gen_ai.system",
+      "source_attribute": "gen_ai.provider.name",
       "destination_attribute": "llm.provider",
       "representation": "renamed",
       "loss": "unknown and custom providers remain heuristic"

@@ -179,8 +179,8 @@ class TestTemporalOtlp(unittest.TestCase):
         self.assertEqual(root["traceId"], TRACE_ID)
         self.assertEqual(root["parentSpanId"], PARENT_SPAN_ID)
         self.assertEqual(root["flags"], 1)
-        self.assertTrue(any(s["name"] == "gen_ai.client.operation" for s in spans))
-        self.assertTrue(any(s["name"] == "gen_ai.tool.call/read" for s in spans))
+        self.assertTrue(any(s["name"].startswith("chat ") for s in spans))
+        self.assertTrue(any(s["name"] == "execute_tool read" for s in spans))
         self.assertTrue(all(s["traceId"] == TRACE_ID for s in spans))
         self.assertTrue(all(s["flags"] == 1 for s in spans))
         self.assertTrue(all(

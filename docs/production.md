@@ -25,7 +25,7 @@ Export sessions as OpenTelemetry spans to your existing observability stack. Ses
 
 ## OTel GenAI semantic conventions
 
-Use `--format otlp-genai` to export with [OTel GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/). This produces AI-native spans that populate token usage charts, cost views, and LLM dashboards automatically.
+Use `--format otlp-genai` to export with the [OTel GenAI semantic conventions](https://github.com/open-telemetry/semantic-conventions-genai). This produces AI-native spans that populate token usage charts, cost views, and LLM dashboards automatically.
 
 ```bash
 agent-strace export <session-id> --format otlp-genai \
@@ -34,15 +34,68 @@ agent-strace export <session-id> --format otlp-genai \
 
 | Aspect | `--format otlp` | `--format otlp-genai` |
 |---|---|---|
-| LLM calls | Events on root span | `gen_ai.client.operation` child spans |
-| Tool calls | `tool/<name>` spans | `gen_ai.tool.call/<name>` spans |
-| Root span | `agent.name` attribute | `gen_ai.agent.id` + `gen_ai.agent.name` |
-| Errors | Custom error span | OTel `exception` event format |
-| Failed or cancelled model request | `error.type` on the `gen_ai.assistant.message` event | ERROR status and `error.type` on the `gen_ai.client.operation` span |
+| LLM calls | Events on root span | `chat {model}` child spans |
+| Tool calls | `tool/<name>` spans | `execute_tool {name}` spans |
+| Root span | `agent.name` attribute | `invoke_agent {agent}` span with `gen_ai.agent.name` |
+| Errors | Custom error span | OTel `exception` event format and `error.type` |
+| Failed or cancelled model request | `error.type` on the `gen_ai.assistant.message` event | ERROR status and `error.type` on the `chat` span |
 | `gen_ai.conversation.id` | Root span | Root, LLM and tool spans |
 | Token usage | `gen_ai.usage.*` on the LLM events | `gen_ai.usage.*` and `llm.token_count.*` on the LLM spans; see [Token usage and prompt caching](#token-usage-and-prompt-caching) |
 
 `--format otlp` is unchanged for backwards compatibility. See [ADR-0011](../ADRs/0011-otlp-genai-semantic-conventions.md) for design rationale.
+
+### Spans and attributes
+
+`--format otlp-genai`, Temporal, `watch --stream-otlp`, the SDK
+auto-instrumentation and the `@trace_*` decorators all build these spans. They
+follow the GenAI conventions in
+[open-telemetry/semantic-conventions-genai](https://github.com/open-telemetry/semantic-conventions-genai)
+at commit `e6658f1` (2026-11-06). That repository publishes no release or
+schema URL yet, so the payload sets no `schemaUrl`. The instrumentation scope
+is `agent-trace` with the agent-strace version.
+
+| Span | Name | Kind | `gen_ai.operation.name` | Spec |
+|---|---|---|---|---|
+| Session root | `invoke_agent {gen_ai.agent.name}`, or `invoke_agent` when the session has no agent name | `INTERNAL` (`1`) | `invoke_agent` | [Invoke agent internal span](https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-agent-spans.md) |
+| Model request | `chat {gen_ai.request.model}`, or `chat` when no model was recorded | `CLIENT` (`3`) | `chat` | [Inference](https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/client-inference.md) |
+| Tool call, including a failed one | `execute_tool {gen_ai.tool.name}` | `INTERNAL` (`1`) | `execute_tool` | [Execute tool](https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/execute-tool.md) |
+
+- The root carries `gen_ai.agent.name` only when the session has an agent
+  name. It carries no `gen_ai.agent.id`: the conventions reserve that for the
+  stable ID of a hosted agent resource, and the agent-strace session ID is
+  neither. The session ID is on `session.id` and `agent.session_id`, and the
+  agent's own session ID on `gen_ai.conversation.id`.
+- A failed tool call carries `error.type`: the recorded `error_type` or
+  `exception_type`, else `_OTHER`.
+- `gen_ai.provider.name` names the provider on the root and model request
+  spans, using the conventions' well-known values: `anthropic`, `openai`,
+  `aws.bedrock`, `azure.ai.openai`, `azure.ai.inference`, `gcp.gen_ai`,
+  `gcp.vertex_ai`, `gcp.gemini`, `mistral`, `deepseek`, `x_ai`, `groq`,
+  `ollama`, `cohere`, `perplexity`, `ibm.watsonx.ai` and `moonshot_ai`. A
+  provider it cannot name is `unknown`. Gemini and Google models are `gcp.gen_ai` unless
+  the recorded provider or model says Vertex AI (`gcp.vertex_ai`) or the
+  Gemini API (`gcp.gemini`), for example a LiteLLM `vertex_ai/` or `gemini/`
+  model prefix. The raw recorded provider stays on `agent.strace.provider`.
+- `gen_ai.system` repeats `gen_ai.provider.name` for backends that still read
+  it. It is deprecated, since the conventions renamed it to
+  `gen_ai.provider.name` in semantic conventions v1.37.0, and will be removed
+  in a later release. Read `gen_ai.provider.name` instead.
+
+#### Renamed in this release
+
+Dashboards, alerts and queries on the earlier `otlp-genai` names need
+updating. `--format otlp` keeps its names.
+
+| Earlier | Now |
+|---|---|
+| `gen_ai.agent.session ({agent})` root span, `gen_ai.operation.name` `agent.session` | `invoke_agent {agent}` (or `invoke_agent`), `invoke_agent` |
+| `gen_ai.client.operation` model request span | `chat {model}` (or `chat`) |
+| `gen_ai.tool.call/{tool}` tool span, `gen_ai.operation.name` `execute`, kind `CLIENT` (`3`) | `execute_tool {tool}`, `execute_tool`, kind `INTERNAL` (`1`) |
+| `gen_ai.agent.id` on the root (the agent-strace session ID) | not emitted; use `session.id` |
+| `gen_ai.agent.name` `agent` when the session had no agent name | not emitted |
+| `gen_ai.system` `google` | `gcp.gen_ai` (or `gcp.vertex_ai`, `gcp.gemini`) |
+| `gen_ai.system` only | `gen_ai.provider.name`, with `gen_ai.system` kept as a deprecated copy |
+| Scope version `genai-semconv-1.27` | the agent-strace version |
 
 ### Joining with native agent telemetry
 
@@ -86,7 +139,7 @@ Phoenix and other OpenInference consumers. The OTLP span kind stays unchanged.
 |---|---:|---|---|
 | Session root | `INTERNAL` (`1`) | `AGENT` | `session.id`, `metadata` |
 | LLM call | `CLIENT` (`3`) | `LLM` | `llm.provider`, `llm.model_name`, token counts, recorded cost |
-| Tool call | `CLIENT` (`3`) | `TOOL` | `tool.name`, `input.value`, `output.value` |
+| Tool call | `INTERNAL` (`1`) | `TOOL` | `tool.name`, `input.value`, `output.value` |
 
 `agent.strace.*` attributes preserve redaction state, persisted provenance,
 event IDs, previous hashes, recorded cost, and observed structural evidence
@@ -123,6 +176,7 @@ input.
 | Cache reads | `gen_ai.usage.cache_read.input_tokens`, `llm.token_count.prompt_details.cache_read` | `gen_ai.usage.cache_read.input_tokens` | `input_cached_tokens` |
 | Cache writes | `gen_ai.usage.cache_write.input_tokens`, `llm.token_count.prompt_details.cache_write` | `gen_ai.usage.cache_write.input_tokens` | `input_cache_creation`, and `input_cache_creation_1h` for Anthropic and Bedrock 1-hour writes |
 | Output | `gen_ai.usage.output_tokens`, `llm.token_count.completion` | `gen_ai.usage.output_tokens` | `output` |
+| Reasoning output | `gen_ai.usage.reasoning.output_tokens` | not exported | not exported |
 | Total | `llm.token_count.total` | not exported | `total` |
 
 - The cache read and write attributes appear only when they are not zero, as
@@ -130,6 +184,14 @@ input.
   conventions recommend. They are part of `gen_ai.usage.input_tokens`, not
   added to it. The OpenInference `prompt_details` counts are part of
   `llm.token_count.prompt` in the same way.
+- `gen_ai.usage.reasoning.output_tokens` appears only when the side that
+  supplied the output recorded a reasoning count that is not zero: Codex
+  `reasoning_output_tokens`, OpenAI `output_tokens_details.reasoning_tokens`
+  or `completion_tokens_details.reasoning_tokens`, or Gemini
+  `thoughtsTokenCount`. It is part of `gen_ai.usage.output_tokens`, as the
+  conventions require, not added to it, and never exceeds it. Anthropic
+  reports no separate thinking count, so its thinking stays in the output
+  only.
 - The input and its cache counts come from the request when it recorded an
   input count, otherwise from the response. The output comes from the
   response, otherwise from the request. In `--format otlp` they go on the
@@ -525,7 +587,7 @@ A failed or cancelled request records no usage.
 
 A response that pairs with no request is treated as the whole model request:
 
-- `--format otlp-genai` and Temporal: the response is its own `chat` span with
+- `--format otlp-genai` and Temporal: the response is its own `chat {model}` span with
   its model and token counts. The root span's `agent.strace.evidence.*`
   attributes read the same capture matrix declaration as `validate`, so
   declared Codex responses are one `declared_results_without_requests`
@@ -575,7 +637,7 @@ conventions and
 
 | Export | Failed or cancelled request |
 |---|---|
-| `--format otlp-genai`, Temporal, `watch --stream-otlp` | The `gen_ai.client.operation` span has status ERROR with the recorded error text (at most 200 characters) as its description, and `error.type`. A request ended by an `error` is one span with the request's span ID and an `exception` event, with no separate error span. |
+| `--format otlp-genai`, Temporal, `watch --stream-otlp` | The `chat` span has status ERROR with the recorded error text (at most 200 characters) as its description, and `error.type`. A request ended by an `error` is one span with the request's span ID and an `exception` event, with no separate error span. |
 | `--format otlp` | There is no span per request, so the `gen_ai.assistant.message` event carries `error.type` and, when recorded, `error.message`. |
 | `export --scores --backend langfuse` | The generation has level `ERROR`, `statusMessage` set to the error text (`failed` or `cancelled` when none was recorded), and `error.type` in its metadata. A request ended by an `error` is exported as a generation too. |
 

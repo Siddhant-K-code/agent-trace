@@ -6,6 +6,7 @@ import json
 import unittest
 from pathlib import Path
 
+from agent_trace import __version__
 from agent_trace.langfuse_export import (
     _events_to_langfuse_observations,
     _session_to_langfuse_trace,
@@ -47,6 +48,17 @@ def _attributes(item: dict) -> dict[str, object]:
     }
 
 
+def _load_otlp_fixture() -> dict:
+    """The checked-in payload, with the scope version of this build.
+
+    The scope version is the agent-trace version, so the fixture is not
+    regenerated for each release.
+    """
+    payload = json.loads(OTLP_FIXTURE.read_text(encoding="utf-8"))
+    payload["resourceSpans"][0]["scopeSpans"][0]["scope"]["version"] = __version__
+    return payload
+
+
 def _span_for_kind(payload: dict, kind: str) -> dict:
     for span in _spans(payload):
         if _attributes(span).get("openinference.span.kind") == kind:
@@ -64,8 +76,7 @@ class TestOTLPGenAIConformanceFixture(unittest.TestCase):
         )
 
     def test_payload_matches_checked_in_http_json_fixture(self):
-        expected = json.loads(OTLP_FIXTURE.read_text(encoding="utf-8"))
-        self.assertEqual(self.payload, expected)
+        self.assertEqual(self.payload, _load_otlp_fixture())
 
     def test_payload_generation_is_deterministic(self):
         second = session_to_otlp_genai(
@@ -84,10 +95,14 @@ class TestOTLPGenAIConformanceFixture(unittest.TestCase):
         llm_attrs = _attributes(llm)
         tool_attrs = _attributes(tool)
 
-        self.assertEqual(scope["version"], "genai-semconv-1.27")
-        self.assertEqual(root_attrs["gen_ai.agent.id"], self.meta.session_id)
-        self.assertEqual(root_attrs["gen_ai.operation.name"], "agent.session")
-        self.assertEqual(llm["name"], "gen_ai.client.operation")
+        self.assertEqual(scope, {"name": "agent-trace", "version": __version__})
+        self.assertEqual(root["name"], f"invoke_agent {self.meta.agent_name}")
+        self.assertEqual(root_attrs["gen_ai.operation.name"], "invoke_agent")
+        self.assertEqual(root_attrs["gen_ai.agent.name"], self.meta.agent_name)
+        self.assertNotIn("gen_ai.agent.id", root_attrs)
+        self.assertEqual(llm["name"], "chat claude-3-5-sonnet")
+        self.assertEqual(llm_attrs["gen_ai.operation.name"], "chat")
+        self.assertEqual(llm_attrs["gen_ai.provider.name"], "anthropic")
         self.assertEqual(llm_attrs["gen_ai.system"], "anthropic")
         self.assertEqual(llm_attrs["gen_ai.request.model"], "claude-3-5-sonnet")
         self.assertEqual(llm_attrs["gen_ai.usage.input_tokens"], "12")
@@ -95,6 +110,8 @@ class TestOTLPGenAIConformanceFixture(unittest.TestCase):
         self.assertEqual(llm_attrs["gen_ai.response.finish_reasons"], "end_turn")
         self.assertEqual(tool_attrs["gen_ai.tool.name"], "Read")
         self.assertEqual(tool_attrs["gen_ai.tool.call.id"], "tool-read-call")
+        self.assertEqual(tool["name"], "execute_tool Read")
+        self.assertEqual(tool_attrs["gen_ai.operation.name"], "execute_tool")
 
     def test_http_json_types_and_parenting_are_stable(self):
         spans = _spans(self.payload)
@@ -105,7 +122,9 @@ class TestOTLPGenAIConformanceFixture(unittest.TestCase):
         self.assertEqual(len(root["traceId"]), 32)
         self.assertEqual(len(root["spanId"]), 16)
         for child in spans[1:]:
-            self.assertEqual(child["kind"], 3)
+            # Model requests are CLIENT spans; tool executions are INTERNAL.
+            is_llm = _attributes(child)["gen_ai.operation.name"] == "chat"
+            self.assertEqual(child["kind"], 3 if is_llm else 1)
             self.assertEqual(child["traceId"], root["traceId"])
             self.assertEqual(child["parentSpanId"], root["spanId"])
             self.assertEqual(
@@ -160,6 +179,7 @@ class TestOTLPGenAIConformanceFixture(unittest.TestCase):
         )
         attrs = _attributes(error)
         self.assertEqual(attrs["gen_ai.tool.call.id"], "tool-bash-call")
+        self.assertEqual(attrs["error.type"], "ShellError")
         self.assertEqual(attrs["input.value"], '{"command":"false"}')
         self.assertEqual(error["events"][0]["name"], "exception")
         exception_attrs = _attributes(error["events"][0])
@@ -169,10 +189,7 @@ class TestOTLPGenAIConformanceFixture(unittest.TestCase):
     def test_successful_spans_leave_status_unset(self):
         # Recording Errors (semconv v1.45.0): status MUST be left unset on
         # success, and a description is only allowed with ERROR.
-        for payload in (
-            self.payload,
-            json.loads(OTLP_FIXTURE.read_text(encoding="utf-8")),
-        ):
+        for payload in (self.payload, _load_otlp_fixture()):
             spans = _spans(payload)
             self.assertEqual(
                 sorted({span["status"]["code"] for span in spans}), [0, 2],
