@@ -43,6 +43,14 @@ def _raise(kwargs):
     raise RateLimitError("Rate limit reached")
 
 
+def _interrupt(kwargs):
+    raise KeyboardInterrupt
+
+
+def _exit(kwargs):
+    raise SystemExit(3)
+
+
 def _run(coroutine):
     return asyncio.run(coroutine)
 
@@ -208,6 +216,18 @@ class TestOpenAIChat(SDKCase):
         _run(cancel())
         self.assertCancelled(*self.pair(), "gpt-4o")
 
+    def test_interrupted_sync_call_is_recorded_as_cancelled(self):
+        sync, _ = self.instrument_chat(_interrupt)
+        with self.assertRaises(KeyboardInterrupt):
+            sync.create(model="gpt-4o", messages=HI)
+        self.assertCancelled(*self.pair(), "gpt-4o")
+
+    def test_async_call_ended_by_system_exit_is_recorded_as_cancelled(self):
+        _, client = self.instrument_chat(_exit)
+        with self.assertRaises(SystemExit):
+            _run(client.create(model="gpt-4o", messages=HI))
+        self.assertCancelled(*self.pair(), "gpt-4o")
+
     def test_arguments_left_out_are_recorded_as_absent(self):
         sync, _ = self.instrument_chat(lambda kw: _completion())
         sync.create(model="gpt-4o", messages=HI, max_tokens=stubs.NotGiven(),
@@ -309,6 +329,22 @@ class TestOpenAIChat(SDKCase):
         self.assertEqual(received, chunks)
         self.assertError(*self.pair())
 
+    def test_interrupted_stream_is_recorded_as_cancelled(self):
+        sync, _ = self.instrument_chat(
+            lambda kw: stubs.Stream([_chunk()], error=KeyboardInterrupt()))
+        stream = sync.create(model="gpt-4o", messages=HI, stream=True)
+        with self.assertRaises(KeyboardInterrupt):
+            list(stream)
+        self.assertCancelled(*self.pair(), "gpt-4o")
+
+    def test_closed_stream_records_only_the_request(self):
+        sync, _ = self.instrument_chat(lambda kw: stubs.Stream([_chunk(), _chunk("stop")]))
+        stream = sync.create(model="gpt-4o", messages=HI, stream=True)
+        self.assertIsNotNone(next(stream))
+        stream._iterator.close()
+        (request,) = self.events()
+        self.assertEqual(request.event_type, EventType.LLM_REQUEST)
+
     def test_dropped_stream_records_only_the_request(self):
         sync, _ = self.instrument_chat(lambda kw: stubs.Stream([_chunk(), _chunk("stop")]))
         stream = sync.create(model="gpt-4o", messages=HI, stream=True)
@@ -369,6 +405,18 @@ class TestOpenAIChat(SDKCase):
                 await task
 
         _run(read())
+        self.assertCancelled(*self.pair(), "gpt-4o")
+
+    def test_async_stream_ended_by_system_exit_is_recorded_as_cancelled(self):
+        _, client = self.instrument_chat(lambda kw: stubs.AsyncStream(
+            [_chunk()], error=SystemExit(3)))
+
+        async def read():
+            stream = await client.create(model="gpt-4o", messages=HI, stream=True)
+            await _drain(stream)
+
+        with self.assertRaises(SystemExit):
+            _run(read())
         self.assertCancelled(*self.pair(), "gpt-4o")
 
 
