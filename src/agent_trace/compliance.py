@@ -582,7 +582,7 @@ def build_audit_readiness(
     missing_hash = [
         result.session_id
         for result in chain_results
-        if result.state in ("legacy", "partial")
+        if result.state in ("legacy", "partial", "empty")
     ]
 
     retention_days_present = ((now - oldest) / 86400) if oldest else 0.0

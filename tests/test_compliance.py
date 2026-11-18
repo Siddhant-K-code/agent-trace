@@ -778,9 +778,13 @@ class TestAuditReadinessChain(_CliCase):
         intact, intact_checks, _ = self.readiness("a-intact")
         self.assertEqual(intact_checks, _readiness_checks("a-intact"))
         self.assertEqual((intact["compliance_score"], intact["ready"]), (90, True))
-        for sid, change in (("a-partial", _edit_strip_rest), ("a-upgrade", _upgrade_prefix)):
+        for sid, change, count in (
+            ("a-partial", _edit_strip_rest, 7),
+            ("a-upgrade", _upgrade_prefix, 7),
+            ("a-empty", None, 0),
+        ):
             with self.subTest(sid):
-                report, checks, text = self.readiness(sid, change)
+                report, checks, text = self.readiness(sid, change, count)
                 self.assertEqual(checks, _readiness_checks(sid, missing_links=True))
                 self.assertEqual((report["compliance_score"], report["ready"]), (70, False))
                 self.assertIn("OK Hash chain integrity: 1 sessions checked\n", text)
@@ -791,15 +795,10 @@ class TestAuditReadinessChain(_CliCase):
         self.assertEqual(checks, _readiness_checks("a-legacy", missing_links=True))
         self.assertEqual((report["compliance_score"], report["ready"]), (70, False))
 
-    def test_broken_and_empty_sessions(self):
-        for sid, change, count, broken, score in (
-            ("a-edit-hole", _edit_hole, 7, True, 55),
-            ("a-empty", None, 0, False, 90),
-        ):
-            with self.subTest(sid):
-                report, checks, _ = self.readiness(sid, change, count)
-                self.assertEqual(checks, _readiness_checks(sid, broken=broken))
-                self.assertEqual((report["compliance_score"], report["ready"]), (score, not broken))
+    def test_broken_session_fails_integrity(self):
+        report, checks, _ = self.readiness("a-edit-hole", _edit_hole)
+        self.assertEqual(checks, _readiness_checks("a-edit-hole", broken=True))
+        self.assertEqual((report["compliance_score"], report["ready"]), (55, False))
 
     def test_unreadable_stream_fails_integrity_without_a_traceback(self):
         for sid, change, after in (
