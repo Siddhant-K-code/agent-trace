@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import TextIO
 
 from .event_data import object_field, require_object_event_data, str_field
+from .inert import inert
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -248,6 +249,11 @@ def format_suggestion(
     out: TextIO = sys.stdout,
     dry_run: bool = False,
 ) -> None:
+    """Write a human-readable policy suggestion to *out*.
+
+    Each pattern and host goes through inert(), so an escape code or a line
+    break from a trace shows as text. The dry-run JSON escapes them already.
+    """
     w = out.write
     n = len(suggestion.session_ids)
     w(f"\nPolicy suggestion from {n} session{'s' if n != 1 else ''}:\n\n")
@@ -255,25 +261,25 @@ def format_suggestion(
     if suggestion.file_read_patterns:
         w("  Files read (allow):\n")
         for p in suggestion.file_read_patterns:
-            w(f"    {p}\n")
+            w(f"    {inert(p)}\n")
         w("\n")
 
     if suggestion.file_write_patterns:
         w("  Files written (allow):\n")
         for p in suggestion.file_write_patterns:
-            w(f"    {p}\n")
+            w(f"    {inert(p)}\n")
         w("\n")
 
     if suggestion.cmd_patterns:
         w("  Commands (allow):\n")
         for p in suggestion.cmd_patterns:
-            w(f"    {p}\n")
+            w(f"    {inert(p)}\n")
         w("\n")
 
     if suggestion.network_hosts:
         w("  Network hosts (allow):\n")
         for h in sorted(set(suggestion.network_hosts)):
-            w(f"    {h}\n")
+            w(f"    {inert(h)}\n")
         w("\n")
 
     if dry_run:

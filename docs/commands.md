@@ -177,21 +177,22 @@ Traces keep the raw text, which can hold escape codes and line breaks.
 `replay`, `record -v`, `record-http -v`, `explain`, `tree`, `approval list`,
 `dashboard`, `review`, `pr-comment`, `standup`, `oncall`, `cognitive-debt`,
 `cost`, `fingerprint`, `drift`, `skills`, `token-budget`, `budget-report`,
-`team-report`, `regression`, `annotate --list` and `optimize` show each
-character that Python's `str.isprintable()` rejects as its escape, such as
-`\x1b`, `\n` or `\u202e`, so recorded text cannot move the cursor, hide a
-command or write to the clipboard. `pr-comment` posts the same escapes, so a
-bidi control cannot make one path look like another on the pull request. In
-the Markdown from `review --format markdown` and `pr-comment`, CR and LF show
-as spaces. In prompts, responses, tool output, error messages, reasons,
-annotation notes, cluster descriptions, `standup` uncertainty lines, phase
-names, hint phrases and test results, each run of whitespace shows as one
-space instead. The `optimize` preview keeps each line of the proposed addition
-on its own `+` line. `inspect`, `approval show`, `review --format json`,
-`cognitive-debt --format json`, `regression --format json` and
-`annotate --list --export-format json` print JSON with the raw text. Every
-JSON and CSV output keeps the raw text, and so do the fingerprint files that
-`fingerprint --output` and `drift --save-baseline` write.
+`team-report`, `regression`, `annotate --list`, `optimize`, `audit`, `verify`,
+`policy generate`, `policy backtest`, `policy diff`, `policy coverage`,
+`mcp-scan` and `a2a-tree` show each character that Python's `str.isprintable()`
+rejects as its escape, such as `\x1b`, `\n` or `\u202e`, so recorded text cannot
+move the cursor, hide a command or write to the clipboard. `pr-comment` posts
+the same escapes, so a bidi control cannot make one path look like another on
+the pull request. In the Markdown from `review --format markdown` and
+`pr-comment`, CR and LF show as spaces. In prompts, responses, tool output,
+error messages, reasons, annotation notes, cluster descriptions, `standup`
+uncertainty lines, phase names, hint phrases, test results and A2A tasks, each
+run of whitespace shows as one space instead. The `optimize` preview keeps each
+line of the proposed addition on its own `+` line. `inspect`, `approval show`,
+`review --format json`, `cognitive-debt --format json`,
+`regression --format json` and `annotate --list --export-format json` print JSON
+with the raw text. Every JSON and CSV output keeps the raw text, and so do the
+fingerprint files that `fingerprint --output` and `drift --save-baseline` write.
 
 ### `replay`
 ```

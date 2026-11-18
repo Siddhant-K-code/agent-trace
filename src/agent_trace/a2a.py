@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any, TextIO
 
 from .event_data import require_object_event_data
+from .inert import inert
 from .models import EventType, SessionMeta, TraceEvent
 from .store import TraceStore
 
@@ -302,6 +303,12 @@ def build_a2a_tree(store: TraceStore, root_session_id: str) -> A2ATreeReport:
 # ---------------------------------------------------------------------------
 
 def format_a2a_tree(report: A2ATreeReport, out: TextIO = sys.stdout) -> None:
+    """Write the agent call graph to *out*.
+
+    Each value from a trace or a session goes through inert(), so an escape
+    code or a line break in it shows as text. In a task, each run of
+    whitespace becomes one space first.
+    """
     w = out.write
     sep = "─" * 55
 
@@ -313,8 +320,8 @@ def format_a2a_tree(report: A2ATreeReport, out: TextIO = sys.stdout) -> None:
     def _render(node: AgentNode, prefix: str = "", is_last: bool = True) -> None:
         connector = "└── " if is_last else "├── "
         dur = f"{node.duration_ms/1000:.1f}s" if node.duration_ms else "?"
-        w(f"{prefix}{connector}{node.agent_id}  "
-          f"[{node.tool_calls} calls · ${node.cost_usd:.4f} · {dur}]\n")
+        w(f"{prefix}{connector}{inert(node.agent_id)}  "
+          f"[{inert(node.tool_calls)} calls · ${node.cost_usd:.4f} · {dur}]\n")
 
         child_prefix = prefix + ("    " if is_last else "│   ")
 
@@ -322,11 +329,12 @@ def format_a2a_tree(report: A2ATreeReport, out: TextIO = sys.stdout) -> None:
             is_last_call = (i == len(node.a2a_calls) - 1) and not node.children
             call_connector = "└── " if is_last_call else "├── "
             status = "✅" if call.success else "❌"
-            w(f"{child_prefix}{call_connector}a2a → {call.agent_id}  "
+            w(f"{child_prefix}{call_connector}a2a → {inert(call.agent_id)}  "
               f"{status}  ${call.cost_usd:.4f}  {call.duration_ms:.0f}ms\n")
             if call.task:
+                task = " ".join(str(call.task).split())
                 w(f"{child_prefix}{'    ' if is_last_call else '│   '}"
-                  f"task: {call.task[:60]}\n")
+                  f"task: {inert(task[:60])}\n")
 
         for i, child in enumerate(node.children):
             _render(child, child_prefix, is_last=(i == len(node.children) - 1))

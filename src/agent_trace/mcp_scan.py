@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from .event_data import require_object_event_data, skipped_event_warning
+from .inert import inert
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -515,6 +516,11 @@ def finding_to_dict(finding: McpScanFinding) -> dict[str, Any]:
 
 
 def format_report(report: McpScanReport) -> str:
+    """Return a human-readable scan report.
+
+    Each tool name, message and detail goes through inert(), so an escape
+    code or a line break from the trace shows as text.
+    """
     lines = [
         "MCP tool scan",
         f"Sessions scanned: {len(report.session_ids)}",
@@ -526,14 +532,15 @@ def format_report(report: McpScanReport) -> str:
 
     for finding in report.findings:
         location = f"event {finding.event_index}" if finding.event_index else "session"
-        tool = f" {finding.tool_name}" if finding.tool_name else ""
+        tool = f" {inert(finding.tool_name)}" if finding.tool_name else ""
         lines.append(
-            f"[{finding.severity.upper()}] {finding.session_id[:12]} {location}{tool}: {finding.message}"
+            f"[{finding.severity.upper()}] {finding.session_id[:12]} {location}{tool}: "
+            f"{inert(finding.message)}"
         )
         for key, value in finding.details.items():
             if key.endswith("hash") and isinstance(value, str):
                 value = value[:12]
-            lines.append(f"  {key}: {value}")
+            lines.append(f"  {inert(key)}: {inert(value)}")
     return "\n".join(lines)
 
 
