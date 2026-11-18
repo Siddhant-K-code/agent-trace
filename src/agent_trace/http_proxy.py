@@ -667,11 +667,13 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         upstream_trace_id = inbound_ctx["trace_id"] if inbound_ctx else ""
 
         # If the upstream agent carries an agent-trace session ID in tracestate,
-        # record it as the parent session for cross-agent correlation.
-        if inbound_ctx and inbound_ctx.get("at_session_id") and self.meta:
+        # record it as the parent session for cross-agent correlation. The
+        # link is kept only if this store accepts it. After close_streams the
+        # final save owns the meta, so no link is tried then.
+        if inbound_ctx and inbound_ctx.get("at_session_id") and self.meta and self.store:
             with self.server.state_lock:
-                if not self.meta.parent_session_id:
-                    self.meta.parent_session_id = inbound_ctx["at_session_id"]
+                if not self.meta.parent_session_id and not self.server._closed:
+                    _link_parent(self.store, self.meta, inbound_ctx["at_session_id"])
 
         # trace the request
         try:
@@ -801,6 +803,47 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         pass
 
 
+def _link_parent(store: TraceStore, meta: SessionMeta, parent_session_id: str) -> None:
+    """Save meta with parent_session_id as its parent, if the store accepts it.
+
+    The store refuses a parent that is not in it, is this session, or fails
+    its tenant check. Then, or if the save fails, meta keeps no parent.
+    """
+    meta.parent_session_id = parent_session_id
+    try:
+        store.update_meta(meta)
+    except (ValueError, OSError):
+        meta.parent_session_id = ""
+
+
+def _save_without_parent(
+    store: TraceStore, meta: SessionMeta, refusal: ValueError
+) -> bool:
+    """Save meta without the parent link that the store refused.
+
+    Writes one line to stderr when the link is dropped. Returns False, with
+    meta unchanged, if there is no link or the save fails anyway.
+    """
+    from .inert import inert
+
+    parent_session_id = meta.parent_session_id
+    parent_event_id = meta.parent_event_id
+    if not parent_session_id:
+        return False
+    meta.parent_session_id = meta.parent_event_id = ""
+    try:
+        store.update_meta(meta)
+    except (ValueError, OSError):
+        meta.parent_session_id = parent_session_id
+        meta.parent_event_id = parent_event_id
+        return False
+    sys.stderr.write(
+        f"agent-strace: dropped the link to parent session "
+        f"{inert(parent_session_id)}: {inert(refusal)}\n"
+    )
+    return True
+
+
 class HTTPProxyServer:
     """HTTP/SSE proxy for remote MCP servers.
 
@@ -890,4 +933,10 @@ class HTTPProxyServer:
                     },
                 ),
             )
-            self.store.update_meta(self.meta)
+            # A parent the store refuses now, such as one deleted while the
+            # proxy ran, must not cost the end time and counters.
+            try:
+                self.store.update_meta(self.meta)
+            except ValueError as exc:
+                if not _save_without_parent(self.store, self.meta, exc):
+                    raise

@@ -23,6 +23,8 @@ from __future__ import annotations
 import re
 import uuid
 
+from .store import validate_session_id
+
 # W3C traceparent regex: version-traceid-parentid-flags
 _TRACEPARENT_RE = re.compile(
     r"^([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$"
@@ -86,7 +88,8 @@ def extract_traceparent(headers: dict[str, str]) -> dict[str, str] | None:
         trace_id        — 32-hex W3C trace ID
         parent_id       — 16-hex parent span ID
         flags           — 2-hex trace flags
-        at_session_id   — agent-trace session ID from tracestate (may be "")
+        at_session_id   — agent-trace session ID from tracestate, or "" if
+                          there is none or it is not a valid session ID
 
     Returns None if no valid traceparent header is present.
     """
@@ -108,6 +111,13 @@ def extract_traceparent(headers: dict[str, str]) -> dict[str, str] | None:
         if entry.startswith(f"{_TRACESTATE_KEY}="):
             at_session_id = entry[len(_TRACESTATE_KEY) + 1:]
             break
+    # The header comes from the caller, so a path, an escape code or a bidi
+    # control must not reach a caller that stores or prints the ID.
+    if at_session_id:
+        try:
+            validate_session_id(at_session_id)
+        except ValueError:
+            at_session_id = ""
 
     return {
         "version": version,
