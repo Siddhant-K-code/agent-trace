@@ -263,6 +263,32 @@ class TestRunSession(unittest.TestCase):
             self.assertEqual(self.session_in_fresh_thread(), sid)
         self.assertEqual(self.marker(), None)
 
+    def test_events_another_process_records_into_the_run_are_counted(self):
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+        with _base.run_session(self.store, "agent") as sid:
+            _base.emit(EventType.TOOL_CALL, sid, self.store, tool_name="here")
+            subprocess.run(
+                [sys.executable, "-c",
+                 "import sys\n"
+                 "from agent_trace.integrations import _base\n"
+                 "from agent_trace.models import EventType\n"
+                 "from agent_trace.store import TraceStore\n"
+                 "store = TraceStore(sys.argv[1])\n"
+                 "sid = _base._get_or_create_session(store, 'agent')\n"
+                 "assert sid == sys.argv[2], sid\n"
+                 "for kind in (EventType.TOOL_CALL, EventType.LLM_REQUEST, EventType.ERROR):\n"
+                 "    _base.emit(kind, sid, store)\n",
+                 self.trace_dir, sid],
+                env=env, check=True, timeout=60,
+            )
+        meta = self.store.load_meta(sid)
+        kinds = self.kinds(sid)
+        self.assertEqual((meta.tool_calls, meta.llm_requests, meta.errors), (
+            kinds.count(EventType.TOOL_CALL), kinds.count(EventType.LLM_REQUEST),
+            kinds.count(EventType.ERROR)))
+        self.assertEqual((meta.tool_calls, meta.llm_requests, meta.errors), (2, 1, 1))
+
     def test_run_of_a_process_that_died_is_dropped(self):
         child, child_sid = self.run_in_child("import os\nos._exit(0)\n")
         child.wait(timeout=60)

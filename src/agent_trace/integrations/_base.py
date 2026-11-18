@@ -306,14 +306,41 @@ def _unregister_run(store: TraceStore, name: str, sid: str) -> None:
         _point_marker(active_path, registered + [(sid, os.getpid(), "")], live)
 
 
+def _stored_counts(store: TraceStore, sid: str) -> dict[str, int] | None:
+    """The session's event counts from its stored events.
+
+    None when events go to a remote endpoint instead of the store.
+    """
+    if os.environ.get("AGENT_STRACE_ENDPOINT", "").rstrip("/"):
+        return None
+    try:
+        events = store.load_events(sid)
+    except Exception:
+        return None
+    counts = dict.fromkeys(_COUNTED.values(), 0)
+    for event in events:
+        field_name = _COUNTED.get(event.event_type)
+        if field_name is not None:
+            counts[field_name] += 1
+    return counts
+
+
 def _end_run(store: TraceStore, name: str, sid: str, started: float) -> None:
-    """Record ``session_end``, close the session's metadata and unregister the run."""
+    """Record ``session_end``, close the session's metadata and unregister the run.
+
+    The counts come from the stored events, so events that other processes
+    recorded into the run's session are counted too. With a remote endpoint
+    only this process's events are counted.
+    """
     try:
         emit(EventType.SESSION_END, sid, store,
              duration_ms=(time.time() - started) * 1000)
     finally:
         with _RUN_COUNTS_LOCK:
             counts = _RUN_COUNTS.pop(sid, {})
+        stored = _stored_counts(store, sid)
+        if stored is not None:
+            counts = stored
 
         def close(meta: SessionMeta) -> None:
             meta.ended_at = time.time()
