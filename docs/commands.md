@@ -2316,6 +2316,24 @@ limit accounts for space freed by sessions already selected by the age/count
 limits, including their compaction checkpoints, before selecting additional
 sessions from oldest to newest. Use `retention clean --dry-run` to preview.
 
+Retention never deletes an open session, and open sessions do not count toward
+`max_sessions` or `max_size_mb`. A session is open when its metadata has no end
+time, or when a hook `.active-session*` marker in the trace store names it. An
+open session with no writes to its directory for 7 days is treated as abandoned
+(for example, the agent crashed before its session end hook ran) and is handled
+like a finished session. `status` and `clean` print how many open sessions were
+kept.
+
+`max_size_mb` measures only what retention can free: each finished session
+directory plus its compaction checkpoint. Datasets, approval records, logs and
+other files in the store are not counted. `status` reports the same measure for
+all sessions as `Size`.
+
+`clean` deletes under the store write lock and checks again that each session is
+still finished, so a session resumed after selection is kept. Deleting a session
+also removes its compaction checkpoint, its approval records, its entries in
+`datasets/*.jsonl`, and any hook marker or pending-call state that names it.
+
 ### `tenant`
 ```
 agent-strace tenant report [--month YYYY-MM] [--model MODEL] [--format text|json]
