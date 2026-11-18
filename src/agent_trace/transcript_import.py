@@ -520,6 +520,24 @@ def _codex_message_texts(payload: Mapping[str, Any]) -> list[str]:
     return [_text(_mapping(item).get("text")) for item in payload.get("content") or ()]
 
 
+def _codex_fork_start(path: Path, meta: Mapping[str, Any]) -> int:
+    """Index of the first record a subagent fork wrote itself, or 0.
+
+    A fork rollout's ``session_meta`` has ``forked_from_id`` and
+    ``subagent_history_start_ordinal``.  The ordinal is a 0-based record
+    index that counts the fork's own ``session_meta`` as 0; records 1 to
+    ordinal - 1 are the parent's history copied into the fork.  A missing,
+    non-integer, or out-of-range ordinal returns 0, so every record counts.
+    """
+    ordinal = meta.get("subagent_history_start_ordinal")
+    if not _text(meta.get("forked_from_id")) or not isinstance(ordinal, int) or isinstance(ordinal, bool) \
+            or ordinal < 1:
+        return 0
+    if ordinal > sum(1 for _ in _records(path)):
+        return 0
+    return ordinal
+
+
 def import_codex_rollout(path: str | os.PathLike[str], store: TraceStore) -> str:
     """Import one Codex rollout.
 
@@ -528,6 +546,11 @@ def import_codex_rollout(path: str | os.PathLike[str], store: TraceStore) -> str
     (other tools also write ``rollout-*.jsonl`` files there); ``review``
     for an approval review thread (``thread_source: guardian_review``),
     which Codex starts to review a tool call and which never loads skills.
+
+    In a subagent fork, the parent history copied before
+    ``subagent_history_start_ordinal`` only adds skills to the fork's
+    available list; its prompts, skill loads, and tool calls are the
+    parent's and are not counted again.
     """
     path = Path(path)
     session = _Session(agent="codex")
@@ -535,6 +558,7 @@ def import_codex_rollout(path: str | os.PathLike[str], store: TraceStore) -> str
     turn_prompt: TraceEvent | None = None
     turn_prompt_from_user = False
     first = True
+    fork_start = 0
 
     def mention(name: str, raw_ts: object) -> None:
         nonlocal turn_prompt
@@ -544,7 +568,7 @@ def import_codex_rollout(path: str | os.PathLike[str], store: TraceStore) -> str
         elif token not in turn_prompt.data["prompt"].split():
             turn_prompt.data["prompt"] = (turn_prompt.data["prompt"] + " " + token).strip()
 
-    for record in _records(path):
+    for index, record in enumerate(_records(path)):
         kind = _text(record.get("type"))
         payload = _mapping(record.get("payload"))
         raw_ts = record.get("timestamp")
@@ -557,6 +581,12 @@ def import_codex_rollout(path: str | os.PathLike[str], store: TraceStore) -> str
             session.session_id = validate_session_id(_text(payload.get("id")))
             session.cwd = _text(payload.get("cwd"))
             session.started = _timestamp(payload.get("timestamp")) or _timestamp(raw_ts)
+            fork_start = _codex_fork_start(path, payload)
+            continue
+        if index < fork_start and kind != "world_state" and not (
+                kind == "response_item" and _text(payload.get("type")) == "message"
+                and _text(payload.get("role")) == "developer"):
+            # Copied parent history: keep only the skills the fork was offered.
             continue
         if kind == "turn_context":
             turn_prompt, turn_prompt_from_user = None, False

@@ -92,6 +92,10 @@ What each reader counts:
 - Codex archived sessions are included, because the report is about history.
   Approval review threads (`thread_source: guardian_review`) are excluded:
   they are reviewer runs, not user sessions.
+- A Codex subagent fork starts with a copy of its parent's history, up to the
+  record its `subagent_history_start_ordinal` names (a 0-based index that
+  counts the fork's own `session_meta` as 0). The copy only adds to the fork's
+  available skills; loads in it count for the parent, not again for the fork.
 - Definitions (commands, resources, invocation settings) are always read from
   `SKILL.md` on disk now. Add plugin or app-bundled directories with
   `--skills-dir`.

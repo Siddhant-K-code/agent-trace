@@ -555,6 +555,80 @@ class TestCodex(TranscriptTestBase):
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out)["sessions"], 1)
 
+    FORK_ID = "019a0000-0000-7000-8000-0000000000f0"
+
+    def _parent_and_fork(self, home: Path, **fork_meta) -> None:
+        """Write a parent that loads deploy-check three ways and a fork that copies it."""
+        instructions = (
+            "<skills_instructions>\n## Skills\n### Skill roots\n"
+            f"- `r0` = `{self.skills_root}`\n"
+            "### Available skills\n"
+            "- deploy-check: Run deploy checks. (file: r0/deploy-check/SKILL.md)\n"
+            "</skills_instructions>"
+        )
+        parent = [
+            self._meta(self.SESSION_ID),
+            {"type": "response_item", "timestamp": _iso(1), "payload": {
+                "type": "message", "role": "developer", "content": [{"type": "input_text", "text": instructions}]}},
+            {"type": "turn_context", "timestamp": _iso(2), "payload": {}},
+            {"type": "response_item", "timestamp": _iso(30), "payload": {
+                "type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": f"<skill>\n<name>deploy-check</name>\n{BODY}\n</skill>"}]}},
+            {"type": "response_item", "timestamp": _iso(31), "payload": {
+                "type": "function_call", "namespace": "skills", "name": "read",
+                "arguments": json.dumps({"package": "deploy-check"})}},
+            self._item(32, type="CommandExecution", exit_code=0, status="completed",
+                       command=["/bin/zsh", "-lc", f"cat {self.deploy_file}"]),
+        ]
+        self._rollout(home, "parent", parent)
+        copied = [dict(record, timestamp=_iso(100)) for record in parent]
+        own = [
+            {"type": "turn_context", "timestamp": _iso(101), "payload": {}},
+            self._item(102, type="UserMessage", content=[{"type": "text", "text": PROMPT}]),
+        ]
+        meta = {"forked_from_id": self.SESSION_ID, "subagent_history_start_ordinal": 1 + len(copied),
+                "thread_source": "subagent", **fork_meta}
+        meta = {key: value for key, value in meta.items() if value is not None}
+        self._rollout(home, "fork", [self._meta(self.FORK_ID, 100, **meta), *copied, *own])
+
+    def test_subagent_fork_skips_copied_parent_loads(self):
+        home = self.tmp / "codex"
+        self._parent_and_fork(home)
+
+        code, out, err = self.run_cli("--from-codex", "--codex-dir", str(home),
+                                      "--min-sessions", "1", "--format", "json")
+
+        self.assertEqual(code, 0, err)
+        report = json.loads(out)
+        self.assertEqual(report["availability_basis_sessions"], {"recorded": 2})
+        deploy = self.skill(report, "deploy-check")
+        self.assertEqual(deploy["sessions_available"], 2)
+        self.assertEqual(deploy["sessions_loaded"], 1)
+        self.assertEqual(deploy["invocations"], {"user": 1, "model": 2})
+        self.assertEqual(deploy["median_seconds_to_load"], 30.0)
+        store, _ = load_codex_history(str(home), str(self.tmp / "imported"))
+        fork_events = store.load_events(self.FORK_ID)
+        self.assertEqual([event.event_type.value for event in fork_events], ["session_start", "user_prompt"])
+        self.assertEqual([item["name"] for item in fork_events[0].data["available_skills"]], ["deploy-check"])
+        self.assert_private(out + err)
+
+    def test_subagent_fork_with_unusable_ordinal_counts_every_record(self):
+        for name, extra in (("missing", {"subagent_history_start_ordinal": None}),
+                            ("string", {"subagent_history_start_ordinal": "7"}),
+                            ("bool", {"subagent_history_start_ordinal": True}),
+                            ("negative", {"subagent_history_start_ordinal": -1}),
+                            ("past-end", {"subagent_history_start_ordinal": 99}),
+                            ("not-a-fork", {"forked_from_id": None})):
+            with self.subTest(name):
+                home = self.tmp / f"codex-{name}"
+                self._parent_and_fork(home, **extra)
+
+                store, _ = load_codex_history(str(home), str(self.tmp / f"imported-{name}"))
+
+                kinds = [event.event_type.value for event in store.load_events(self.FORK_ID)]
+                self.assertIn("tool_call", kinds)
+                self.assertEqual(kinds.count("user_prompt"), 2)
+
 
 class TestCli(TranscriptTestBase):
     def test_from_flags_are_mutually_exclusive(self):
