@@ -527,9 +527,19 @@ Compare two sessions structurally.
 
 ### `compare`
 ```
-agent-strace compare [session-id-a] [session-id-b] [--tag TAG] [--format text|json]
+agent-strace compare <session-id-a> <session-id-b> [--format text|json]
+agent-strace compare --tag TAG [--last N] [--format text|json]
+agent-strace compare <session-id> --rerun [--model MODEL]
 ```
-Regression report with verdict. `--tag` compares the last two sessions whose name contains the tag.
+Regression report with verdict. The first session is the baseline and the second is the candidate.
+
+| Flag | Description |
+|---|---|
+| `--tag TAG` | Compare the two newest sessions whose name or command contains TAG, ignoring case. The older one is the baseline. Fewer than 2 matches exits 1. |
+| `--last N` | With `--tag`, take the N newest matches (default: `2`). Only the two newest are compared, so an N above 2 changes nothing, and an N of 0 or 1 always exits 1. |
+| `--rerun` | Takes one session ID. Prints that session's first recorded user prompt to stderr, says the rerun is not automated yet, and exits 1. It does not run the agent or compare sessions. A session with no recorded prompt also exits 1. |
+| `--model MODEL` | Accepted for `--rerun`, but not used yet, so it has no effect. |
+| `--format text\|json` | Output format (default: `text`) |
 
 ### `token-budget`
 ```
