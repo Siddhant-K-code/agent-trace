@@ -52,7 +52,7 @@ class Omit(NotGiven):
 class Stream:
     """An OpenAI SDK ``Stream``: ``_iterator`` is set in ``__init__``."""
 
-    def __init__(self, items: list[Any], error: Exception | None = None) -> None:
+    def __init__(self, items: list[Any], error: BaseException | None = None) -> None:
         self._items = items
         self._error = error
         self.closed = False
@@ -103,7 +103,7 @@ class AsyncStream:
 class CachedStream(Stream):
     """An Anthropic SDK ``Stream``: ``_iterator`` is made on first use."""
 
-    def __init__(self, items: list[Any], error: Exception | None = None) -> None:
+    def __init__(self, items: list[Any], error: BaseException | None = None) -> None:
         self._items = items
         self._error = error
         self.closed = False

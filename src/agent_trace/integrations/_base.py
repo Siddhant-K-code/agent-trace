@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import contextvars
 import functools
@@ -175,7 +174,9 @@ def wrap_model_call(
     ``start(args, kwargs)`` records the request and returns its
     :class:`ModelCall`; ``finish(call, kwargs, result)`` records the
     response. An exception from the call is recorded as an error linked to
-    the request, and a cancelled async call as a cancelled response. A call
+    the request. A call ended by any other ``BaseException``, such as a
+    cancelled async call, ``KeyboardInterrupt`` or ``SystemExit``, is
+    recorded as a cancelled response, so its request is always closed. A call
     made inside another recorded call is passed through unrecorded. A
     failure to record never reaches the caller.
     """
@@ -188,11 +189,11 @@ def wrap_model_call(
             try:
                 with _model_call_scope():
                     result = await original(*args, **kwargs)
-            except asyncio.CancelledError:
-                _quietly(call.cancel)
-                raise
             except Exception as exc:
                 _quietly(call.fail, exc)
+                raise
+            except BaseException:
+                _quietly(call.cancel)
                 raise
             _quietly(finish, call, kwargs, result)
             return result
@@ -209,6 +210,9 @@ def wrap_model_call(
                 result = original(*args, **kwargs)
         except Exception as exc:
             _quietly(call.fail, exc)
+            raise
+        except BaseException:
+            _quietly(call.cancel)
             raise
         _quietly(finish, call, kwargs, result)
         return result
@@ -238,9 +242,11 @@ def record_stream(stream: Any, call: ModelCall, accumulator: Any) -> bool:
     have got. Each item is passed to ``accumulator.add(item)``; at the end
     of the stream ``accumulator.fields()`` is recorded as the
     ``llm_response``. An exception raised by the stream is recorded as an
-    error linked to the request, and cancelling the task that reads an
-    async stream as a cancelled response. Nothing is recorded for a stream
-    dropped before its end, because it is closed by the garbage collector,
+    error linked to the request. Any other ``BaseException`` raised while
+    reading the next item, such as cancelling the task that reads an async
+    stream or a ``KeyboardInterrupt``, is recorded as a cancelled response.
+    Nothing is recorded for a stream dropped before its end (its generator
+    gets ``GeneratorExit``), because it is closed by the garbage collector,
     where writing to the trace store is not safe. A failure to record never
     reaches the caller.
 
@@ -319,8 +325,13 @@ def _recorded_items(inner: Any, call: ModelCall, accumulator: Any) -> Any:
         for item in inner:
             _quietly(accumulator.add, item)
             yield item
+    except GeneratorExit:
+        raise
     except Exception as exc:
         _quietly(call.fail, exc)
+        raise
+    except BaseException:
+        _quietly(call.cancel)
         raise
     _quietly(_respond_from, call, accumulator)
 
@@ -330,11 +341,13 @@ async def _recorded_async_items(inner: Any, call: ModelCall, accumulator: Any) -
         async for item in inner:
             _quietly(accumulator.add, item)
             yield item
-    except asyncio.CancelledError:
-        _quietly(call.cancel)
+    except GeneratorExit:
         raise
     except Exception as exc:
         _quietly(call.fail, exc)
+        raise
+    except BaseException:
+        _quietly(call.cancel)
         raise
     _quietly(_respond_from, call, accumulator)
 
