@@ -113,6 +113,17 @@ class TestTokenBudgetInWatch(unittest.TestCase):
         # Should not raise; token budget watcher is optional
         self.assertFalse(any("TokenBudgetWatcher" in v for v in violations))
 
+    def test_token_budget_follows_context_fill_through_compaction(self):
+        # Each request's input tokens are its whole context; the fifth
+        # request follows a compaction.
+        config = WatcherConfig(max_context_pct=90)
+        state = WatchState()
+        fired = []
+        for tokens in (60_000, 120_000, 185_000, 30_000, 186_000):
+            violations = check_event(_make_llm_request(input_tokens=tokens), config, state)
+            fired.append(any(v.startswith("TokenBudgetWatcher:") for v in violations))
+        self.assertEqual(fired, [False, False, True, False, True])
+
 
 if __name__ == "__main__":
     unittest.main()

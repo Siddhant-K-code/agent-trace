@@ -1,10 +1,20 @@
-"""Token budget tracking: context window usage and early warning.
+"""Token budget tracking: context window fill and early warning.
 
-Analyses LLM request events to track cumulative input token usage against
-the model's context window limit. Provides:
+Each LLM request's input token count is the whole prompt the model received,
+so it is the context fill at that request. This module compares that count
+with the model's context window limit; it never adds requests together.
+Provides:
 
-  - `token-budget` command: per-request accumulation table
-  - `TokenBudgetWatcher`: fires when context usage crosses a threshold
+  - `token-budget` command: per-request context fill table, with the peak
+  - `TokenBudgetWatcher`: fires when one request's context fill crosses a
+    threshold, and re-arms when the fill drops below it again (for example
+    after compaction)
+
+The input token count comes from the request data, read the same way as the
+`compaction` command reads it (provider usage keys, nested usage objects and
+Anthropic cache tokens). When a request has no count, the fill is estimated
+from the size of that request's own data. The recorded data may not hold the
+whole prompt, so an estimated fill can be lower than the real one.
 """
 
 from __future__ import annotations
@@ -79,11 +89,12 @@ def _resolve_limit(model: str) -> int | None:
 class RequestBudget:
     request_index: int
     offset_seconds: float
-    input_tokens: int
+    input_tokens: int        # context tokens of this request
     output_tokens: int
-    cumulative_input: int
+    cumulative_input: int    # input tokens sent so far, summed over requests
     context_limit: int | None
-    pct_used: float | None   # None when limit unknown
+    pct_used: float | None   # this request's context fill; None when limit unknown
+    estimated: bool = False  # input_tokens estimated from the request data
 
 
 @dataclass
@@ -92,9 +103,25 @@ class TokenBudgetReport:
     model: str
     context_limit: int | None
     requests: list[RequestBudget]
-    final_cumulative: int
-    final_pct: float | None
-    warning_threshold: float  # 0.0–1.0
+    final_cumulative: int     # input tokens sent, summed over all requests
+    final_pct: float | None   # context fill of the last request
+    warning_threshold: float  # 0.0 to 1.0
+    final_context_tokens: int = 0
+    peak_context_tokens: int = 0
+    peak_pct: float | None = None
+    peak_request_index: int | None = None
+
+
+def _request_context_tokens(data) -> tuple[int, bool]:
+    """Return (context tokens, estimated) for one LLM request's data."""
+    # compaction imports this module, so its helper is imported here.
+    from .compaction import _input_token_count
+
+    explicit = _input_token_count(data)
+    if explicit is not None:
+        return explicit, False
+    import json
+    return _estimate_tokens(json.dumps(data)), True
 
 
 # ---------------------------------------------------------------------------
@@ -143,12 +170,7 @@ def analyse_token_budget(
             req_idx += 1
             offset = event.timestamp - base_ts
 
-            # Try to get explicit token count from event data
-            inp_tok = number_field(event.data, "input_tokens", 0)
-            if not inp_tok:
-                # Fall back to estimation from payload size
-                import json
-                inp_tok = _estimate_tokens(json.dumps(event.data))
+            inp_tok, estimated = _request_context_tokens(event.data)
 
             out_tok = number_field(event.data, "output_tokens", 0)
 
@@ -159,7 +181,7 @@ def analyse_token_budget(
                     context_limit = _resolve_limit(model)
 
             cumulative_input += inp_tok
-            pct = (cumulative_input / context_limit) if context_limit else None
+            pct = (inp_tok / context_limit) if context_limit else None
 
             requests.append(RequestBudget(
                 request_index=req_idx,
@@ -169,6 +191,7 @@ def analyse_token_budget(
                 cumulative_input=cumulative_input,
                 context_limit=context_limit,
                 pct_used=pct,
+                estimated=estimated,
             ))
 
         elif event.event_type == EventType.LLM_RESPONSE:
@@ -178,7 +201,11 @@ def analyse_token_budget(
                 if out_tok:
                     requests[-1].output_tokens = out_tok
 
-    final_pct = (cumulative_input / context_limit) if context_limit else None
+    final_context = requests[-1].input_tokens if requests else 0
+    peak = max(requests, key=lambda r: r.input_tokens) if requests else None
+
+    def _fill(tokens: int) -> float | None:
+        return (tokens / context_limit) if context_limit and requests else None
 
     return TokenBudgetReport(
         session_id=session_id,
@@ -186,8 +213,12 @@ def analyse_token_budget(
         context_limit=context_limit,
         requests=requests,
         final_cumulative=cumulative_input,
-        final_pct=final_pct,
+        final_pct=_fill(final_context),
         warning_threshold=warning_threshold,
+        final_context_tokens=final_context,
+        peak_context_tokens=peak.input_tokens if peak else 0,
+        peak_pct=_fill(peak.input_tokens) if peak else None,
+        peak_request_index=peak.request_index if peak else None,
     )
 
 
@@ -208,7 +239,7 @@ def _fmt_offset(s: float) -> str:
 
 
 def format_token_budget(report: TokenBudgetReport, out: TextIO = sys.stdout) -> None:
-    """Write the per-request context window table for one session.
+    """Write the per-request context fill table for one session.
 
     The model goes through inert(), so an escape code or a line break in it
     shows as text.
@@ -218,27 +249,35 @@ def format_token_budget(report: TokenBudgetReport, out: TextIO = sys.stdout) -> 
     w(f"\nSession: {report.session_id[:12]}  Model: {inert(report.model)}  "
       f"Context limit: {limit_str} tokens\n")
     w("─" * 72 + "\n")
-    w(f"  {'Req':>4}  {'Offset':>7}  {'Input tok':>10}  {'Output tok':>10}  "
-      f"{'Cumulative':>11}  {'% limit':>7}\n")
+    w(f"  {'Req':>4}  {'Offset':>7}  {'Context tok':>12}  {'Output tok':>10}  "
+      f"{'Fill':>7}\n")
     w("─" * 72 + "\n")
 
     for r in report.requests:
         warn = ""
         if r.pct_used is not None and r.pct_used >= report.warning_threshold:
             warn = "  ← warning"
+        context = f"{'~' if r.estimated else ''}{r.input_tokens:,}"
         w(f"  {r.request_index:>4}  {_fmt_offset(r.offset_seconds):>7}  "
-          f"{r.input_tokens:>10,}  {r.output_tokens:>10,}  "
-          f"{r.cumulative_input:>11,}  {_fmt_pct(r.pct_used):>7}{warn}\n")
+          f"{context:>12}  {r.output_tokens:>10,}  "
+          f"{_fmt_pct(r.pct_used):>7}{warn}\n")
 
     w("─" * 72 + "\n")
-    final_pct_str = _fmt_pct(report.final_pct)
-    w(f"Current: {report.final_cumulative:,} tokens  ({final_pct_str} of limit)\n")
-
-    if report.context_limit and report.final_cumulative > 0:
-        remaining = report.context_limit - report.final_cumulative
-        avg_per_req = report.final_cumulative / max(len(report.requests), 1)
-        est_remaining = int(remaining / avg_per_req) if avg_per_req > 0 else 0
-        w(f"Est. remaining: ~{est_remaining} request(s)\n")
+    w(f"Current: {report.final_context_tokens:,} tokens  "
+      f"({_fmt_pct(report.final_pct).strip()} of limit)\n")
+    if report.peak_request_index is not None:
+        w(f"Peak:    {report.peak_context_tokens:,} tokens  "
+          f"({_fmt_pct(report.peak_pct).strip()} of limit) at request "
+          f"{report.peak_request_index}\n")
+    if report.context_limit and report.requests:
+        headroom = max(report.context_limit - report.final_context_tokens, 0)
+        w(f"Headroom: {headroom:,} tokens\n")
+    if report.requests:
+        w(f"Input sent: {report.final_cumulative:,} tokens over "
+          f"{len(report.requests)} request(s), summed\n")
+    if any(r.estimated for r in report.requests):
+        w("~ estimated from the size of the request data, which may not hold "
+          "the whole prompt\n")
     w("\n")
 
 
@@ -248,12 +287,17 @@ def format_token_budget(report: TokenBudgetReport, out: TextIO = sys.stdout) -> 
 
 @dataclass
 class TokenBudgetWatcher:
-    """Stateful watcher that fires when context usage crosses a threshold."""
-    threshold: float = 0.9      # 0.0–1.0
+    """Stateful watcher that fires when one request's context fill crosses a threshold.
+
+    It fires once per crossing: a request whose fill is below the threshold
+    re-arms it, so it can fire again after compaction.
+    """
+    threshold: float = 0.9      # 0.0 to 1.0
     model: str = ""
     context_limit: int | None = None
-    cumulative_input: int = 0
+    cumulative_input: int = 0   # input tokens sent, summed over requests
     fired: bool = False
+    context_tokens: int = 0     # context tokens of the latest request
 
     def update(self, event: TraceEvent) -> str | None:
         """Process one event. Returns a violation message or None."""
@@ -269,23 +313,23 @@ class TokenBudgetWatcher:
         if self.context_limit is None:
             return None  # unknown model — watcher disabled
 
-        inp_tok = number_field(event.data, "input_tokens", 0)
-        if not inp_tok:
-            import json
-            inp_tok = _estimate_tokens(json.dumps(event.data))
-
+        inp_tok, _estimated = _request_context_tokens(event.data)
+        self.context_tokens = inp_tok
         self.cumulative_input += inp_tok
-        pct = self.cumulative_input / self.context_limit
+        pct = inp_tok / self.context_limit
 
-        if pct >= self.threshold and not self.fired:
-            self.fired = True
-            return (
-                f"TokenBudgetWatcher: {self.cumulative_input:,} / "
-                f"{self.context_limit:,} tokens "
-                f"({pct*100:.1f}%) — context window "
-                f"{self.threshold*100:.0f}% full"
-            )
-        return None
+        if pct < self.threshold:
+            self.fired = False
+            return None
+        if self.fired:
+            return None
+        self.fired = True
+        return (
+            f"TokenBudgetWatcher: {inp_tok:,} / "
+            f"{self.context_limit:,} tokens "
+            f"({pct*100:.1f}%): context window "
+            f"{self.threshold*100:.0f}% full"
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -545,7 +545,11 @@ Regression report with verdict. The first session is the baseline and the second
 ```
 agent-strace token-budget [session-id] [--warning-threshold FRACTION]
 ```
-Check token usage against the model context limit. The model is detected from the session (default: latest). Warns at `--warning-threshold` of the limit (default: `0.9`).
+Show how full the model's context window is at each LLM request. The model is detected from the session (default: latest). A request's input tokens are the whole prompt it sent, so each request's fill is its own input tokens divided by the context limit; requests are not added together. A request at or above `--warning-threshold` of the limit (default: `0.9`) is marked `← warning`.
+
+The input tokens are read the way [`compaction`](#compaction) reads them: provider keys such as `input_tokens` or `prompt_tokens`, nested `usage` objects, and Anthropic cache read and write tokens. A request with no count is estimated from the size of its own recorded data and shown with `~`. That data may not hold the whole prompt, so an estimated fill can be lower than the real one.
+
+Below the table: the last request's fill (`Current`), the highest fill and the request it came from (`Peak`, which can be higher than `Current` after compaction), the tokens left at the last request (`Headroom`), and the input tokens sent over all requests added together (`Input sent`, a volume figure, not a fill).
 
 ### `compaction`
 ```
@@ -591,7 +595,7 @@ Live session monitor with kill-switch rules.
 | `--on-violation terminal\|file\|kill` | Action when a rule fires (default: `terminal`) |
 | `--webhook URL` | POST each alert as JSON to this `http://` or `https://` URL. Watch refuses at startup, with one line and exit 1, a URL with any other scheme or none, no host, a bad port, spaces or control characters, or a user name or password; when `--webhook` is not given, the same check applies to `webhook.url` in the `--config` file. Redirects are not followed, so pass the final URL. Any answer other than 2xx is a failure |
 | `--config FILE` | JSON file that sets watch limits and actions; see **Config file** below. Watch refuses a file it cannot use, with one line and exit 1, before it reads the session or writes anything. Flags given on the command line override the file |
-| `--max-context-pct N` | Alert when the session's input tokens reach N percent of the model's context window (default: `90`). N must be from 1 to 100; any other value is refused at startup |
+| `--max-context-pct N` | Alert when one LLM request's input tokens, its whole context, reach N percent of the model's context window (default: `90`). Read as for [`token-budget`](#token-budget). The alert fires once per crossing: a later request below N percent, such as one after compaction, re-arms it. N must be from 1 to 100; any other value is refused at startup |
 | `--on-death CMD` | Shell command that watch runs once, after it sends the agent `SIGTERM`, and only if it sent it: not on `--dry-run`, without `--agent-pid`, or when the signal could not be sent (see below). `{post_mortem_path}` is replaced with the path of the post-mortem JSON file, or with nothing if watch could not write it |
 | `--compaction-checkpoint` | Write a recovery checkpoint before context saturation |
 | `--checkpoint-at RATIO` | Context fill ratio that triggers a checkpoint (default: `0.80`) |
