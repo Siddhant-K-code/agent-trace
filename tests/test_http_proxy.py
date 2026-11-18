@@ -1993,6 +1993,48 @@ def _text_result(req_id, text):
     }
 
 
+# POST bodies and replies that are not one well-formed message: a field with
+# the wrong JSON type, a batch, or a value that is not an object. Each one
+# failed the request or cut the stream before the proxy read fields by type.
+ODD_POSTS = [
+    [_tool_call(1)],
+    {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": None},
+    {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": ["x"]},
+    {"jsonrpc": "2.0", "id": 1, "method": "resources/read", "params": ["x"]},
+    {"jsonrpc": "2.0", "id": 1, "method": "sampling/createMessage", "params": {"messages": "hi"}},
+    5,
+]
+ODD_REPLIES = [
+    {"jsonrpc": "2.0", "id": 1, "result": "x"},
+    {"jsonrpc": "2.0", "id": 1, "result": {"content": "text"}},
+    {"jsonrpc": "2.0", "id": 1, "error": "boom"},
+    {"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": 5}]}},
+    {"jsonrpc": "2.0", "id": 1, "result": {"content": ["a"]}},
+    [{"jsonrpc": "2.0", "id": 1, "result": "x"}],
+    "x",
+]
+
+# Error values that are present but falsy. Each still means the call failed.
+FALSY_ERRORS = [0, False, "", [], {}]
+
+# json.loads cannot read a list nested this deep on Python 3.10 and 3.11,
+# and no Python can store an event that holds one.
+DEEP = 2000
+
+UNTRACED_LOG = "agent-strace: could not trace a message ({}). It was still forwarded.\n"
+
+
+def _deep_text(depth):
+    """JSON text of a list nested depth deep, as json.dumps writes it."""
+    return "[" * depth + "]" * depth
+
+
+def _too_long_int():
+    """JSON text of an integer longer than int() converts. None if unlimited."""
+    limit = getattr(sys, "get_int_max_str_digits", lambda: 0)()
+    return "1" * (limit + 1) if limit else None
+
+
 # What a Streamable HTTP client sends with every POST.
 STREAMABLE_POST_HEADERS = {
     "Accept": "application/json, text/event-stream",
@@ -2505,6 +2547,263 @@ class TestHTTPProxyStreamableHTTP(unittest.TestCase):
         self.assertEqual(
             [event.event_type for event in self.store.load_events(self.meta.session_id)],
             [EventType.ERROR],
+        )
+
+    def _answer(self, body, content_type="application/json"):
+        """Have the upstream answer each request with these bytes."""
+        def reply(handler, request):
+            _reply(handler, 200, body, [("Content-Type", content_type)])
+
+        self.upstream.reply = reply
+
+    def _links(self):
+        """Map the id of each traced response to the id of the call it links to."""
+        calls = {event.event_id: event.data["request_id"] for event in self._of_type(EventType.TOOL_CALL)}
+        return {
+            event.data.get("request_id"): calls.get(event.parent_id)
+            for event in self.events
+            if event.event_type in (EventType.TOOL_RESULT, EventType.ERROR)
+        }
+
+    def _call_ids(self):
+        return [event.data["request_id"] for event in self._of_type(EventType.TOOL_CALL)]
+
+    def test_post_bodies_with_wrong_typed_fields_are_forwarded(self):
+        port = self._proxy().server_address[1]
+        upstream_reply = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {}}).encode()
+        stderr = io.StringIO()
+        with mock.patch("sys.stderr", stderr):
+            for n, odd in enumerate(ODD_POSTS, start=100):
+                with self.subTest(body=odd):
+                    for body in (json.dumps(odd).encode(), json.dumps(_tool_call(n)).encode()):
+                        resp, data, request = self._forward(
+                            port, "POST", "/", STREAMABLE_POST_HEADERS, body
+                        )
+                        self.assertEqual(
+                            (resp.status, request["body"], data), (200, body, upstream_reply)
+                        )
+                    self.assertIn(n, self._call_ids())
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_json_replies_with_wrong_typed_fields_reach_the_client(self):
+        port = self._proxy().server_address[1]
+        stderr = io.StringIO()
+        with mock.patch("sys.stderr", stderr):
+            for n, odd in enumerate(ODD_REPLIES, start=100):
+                with self.subTest(reply=odd):
+                    exchanges = [
+                        (PING, json.dumps(odd).encode()),
+                        (json.dumps(_tool_call(n)), json.dumps(_text_result(n, "after")).encode()),
+                    ]
+                    for body, reply in exchanges:
+                        self._answer(reply)
+                        resp, data, _ = self._forward(
+                            port, "POST", "/", STREAMABLE_POST_HEADERS, body
+                        )
+                        self.assertEqual((resp.status, data), (200, reply))
+                    self.assertEqual(self._links().get(n), n)
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_event_data_with_wrong_typed_fields_reaches_the_client(self):
+        port = self._proxy().server_address[1]
+        odd_events = [b"data: " + json.dumps(odd).encode() + b"\n\n" for odd in ODD_REPLIES]
+        stderr = io.StringIO()
+        with mock.patch("sys.stderr", stderr):
+            for n, (odd, odd_event) in enumerate(zip(ODD_REPLIES, odd_events), start=100):
+                with self.subTest(data=odd):
+                    stream = odd_event + _event(_text_result(n, "after"))
+                    self._answer(stream, "text/event-stream")
+                    resp, data, _ = self._forward(
+                        port, "POST", "/", STREAMABLE_POST_HEADERS, json.dumps(_tool_call(n))
+                    )
+                    self.assertEqual((resp.status, data), (200, stream))
+                    self.assertEqual(self._links().get(n), n)
+
+            # A GET stream is relayed the same way.
+            stream = b"".join(odd_events) + _event(_text_result(200, "after"))
+            self._answer(stream, "text/event-stream")
+            resp, data, _ = self._forward(port, "GET", "/", {"Accept": "text/event-stream"})
+            self.assertEqual((resp.status, data), (200, stream))
+            self.assertIn(200, self._links())
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_a_batch_and_its_json_reply_are_traced_one_message_at_a_time(self):
+        body = json.dumps([
+            _tool_call(31, "a"),
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            _tool_call(32, "b"),
+        ]).encode()
+        reply = json.dumps([
+            _text_result(32, "b done"),
+            {"jsonrpc": "2.0", "id": 31, "error": {"code": -1, "message": "no"}},
+        ]).encode()
+        self._answer(reply)
+        server = self._proxy()
+        resp, data, request = self._forward(
+            server.server_address[1], "POST", "/", STREAMABLE_POST_HEADERS, body
+        )
+        self.assertEqual((resp.status, request["body"], data), (200, body, reply))
+        self.assertEqual([call.data["tool_name"] for call in self._of_type(EventType.TOOL_CALL)], ["a", "b"])
+        self.assertEqual(self._links(), {32: 32, 31: 31})
+        self.assertEqual(server.pending_calls, {})
+
+    def test_event_data_that_is_a_batch_is_traced_one_message_at_a_time(self):
+        body = json.dumps([_tool_call(33, "a"), _tool_call(34, "b")]).encode()
+        stream = _event(_progress(1)) + _event([_text_result(34, "b"), _text_result(33, "a")])
+        self._answer(stream, "text/event-stream")
+        server = self._proxy()
+        resp, data, request = self._forward(
+            server.server_address[1], "POST", "/", STREAMABLE_POST_HEADERS, body
+        )
+        self.assertEqual((resp.status, request["body"], data), (200, body, stream))
+        self.assertEqual(self._links(), {34: 34, 33: 33})
+        self.assertEqual(server.pending_calls, {})
+
+    def test_a_post_body_the_tracer_cannot_read_is_forwarded(self):
+        # Arguments this deep cannot be stored, and on Python 3.10 and 3.11
+        # json.loads cannot read them.
+        bodies = [(
+            "RecursionError",
+            '{"jsonrpc": "2.0", "id": 41, "method": "tools/call", "params": {"name": "deep", '
+            '"arguments": {"rows": ' + _deep_text(DEEP) + "}}}",
+        )]
+        digits = _too_long_int()
+        if digits:
+            bodies.append((
+                "ValueError",
+                '{"jsonrpc": "2.0", "id": 42, "method": "tools/call", "params": {"name": "big", '
+                '"arguments": {"n": ' + digits + "}}}",
+            ))
+        server = self._proxy()
+        port = server.server_address[1]
+        for n, (error, text) in enumerate(bodies, start=43):
+            with self.subTest(error=error):
+                stderr = io.StringIO()
+                with mock.patch("sys.stderr", stderr):
+                    for body in (text.encode(), json.dumps(_tool_call(n)).encode()):
+                        resp, _, request = self._forward(
+                            port, "POST", "/", STREAMABLE_POST_HEADERS, body
+                        )
+                        self.assertEqual((resp.status, request["body"]), (200, body))
+                self.assertEqual(stderr.getvalue(), UNTRACED_LOG.format(error))
+        expected = list(range(43, 43 + len(bodies)))
+        self.assertEqual(self._call_ids(), expected)
+        self.assertEqual(list(server.pending_calls), expected)
+
+    def _unreadable_results(self, deep_id, big_id):
+        """Tool results the tracer cannot read, with the notes each may give.
+
+        Python 3.12 and later read and trace the deep one.
+        """
+        results = [(
+            ("", UNTRACED_LOG.format("RecursionError")),
+            '{"jsonrpc": "2.0", "id": ' + str(deep_id) + ', "result": {"content": '
+            '[{"type": "text", "text": "deep"}], "structuredContent": {"rows": '
+            + _deep_text(DEEP) + "}}}",
+        )]
+        digits = _too_long_int()
+        if digits:
+            results.append((
+                (UNTRACED_LOG.format("ValueError"),),
+                '{"jsonrpc": "2.0", "id": ' + str(big_id) + ', "result": {"content": [], "n": '
+                + digits + "}}",
+            ))
+        return results
+
+    def test_a_json_reply_the_tracer_cannot_read_reaches_the_client(self):
+        port = self._proxy().server_address[1]
+        for n, (notes, text) in enumerate(self._unreadable_results(51, 52), start=53):
+            with self.subTest(note=notes[-1]):
+                stderr = io.StringIO()
+                with mock.patch("sys.stderr", stderr):
+                    exchanges = [
+                        (PING, text.encode()),
+                        (json.dumps(_tool_call(n)), json.dumps(_text_result(n, "after")).encode()),
+                    ]
+                    for body, reply in exchanges:
+                        self._answer(reply)
+                        resp, data, _ = self._forward(
+                            port, "POST", "/", STREAMABLE_POST_HEADERS, body
+                        )
+                        self.assertEqual((resp.status, data), (200, reply))
+                self.assertIn(stderr.getvalue(), notes)
+                self.assertEqual(self._links().get(n), n)
+
+    def test_event_data_the_tracer_cannot_read_reaches_the_client(self):
+        results = self._unreadable_results(61, 62)
+        stream = b"".join(b"data: " + text.encode() + b"\n\n" for _, text in results)
+        stream += _event(_text_result(63, "after"))
+        self._answer(stream, "text/event-stream")
+        port = self._proxy().server_address[1]
+        stderr = io.StringIO()
+        with mock.patch("sys.stderr", stderr):
+            resp, data, _ = self._forward(
+                port, "POST", "/", STREAMABLE_POST_HEADERS, json.dumps(_tool_call(63))
+            )
+        self.assertEqual((resp.status, data), (200, stream))
+        self.assertEqual(self._links().get(63), 63)
+        notes = {line + "\n" for line in stderr.getvalue().splitlines()}
+        self.assertLessEqual(notes, {note for note_set, _ in results for note in note_set if note})
+        if _too_long_int():
+            self.assertIn(UNTRACED_LOG.format("ValueError"), notes)
+
+    def test_a_message_the_store_cannot_take_is_still_forwarded(self):
+        append_event = self.store.append_event
+        failures = [OSError("No space left on device")]
+
+        def fail_once(session_id, event):
+            if failures:
+                raise failures.pop()
+            append_event(session_id, event)
+
+        server = self._proxy()
+        port = server.server_address[1]
+        stderr = io.StringIO()
+        with mock.patch.object(self.store, "append_event", side_effect=fail_once), \
+                mock.patch("sys.stderr", stderr):
+            for n in (71, 72):
+                body = json.dumps(_tool_call(n)).encode()
+                reply = json.dumps(_text_result(n, "done")).encode()
+                self._answer(reply)
+                resp, data, request = self._forward(
+                    port, "POST", "/", STREAMABLE_POST_HEADERS, body
+                )
+                self.assertEqual((resp.status, request["body"], data), (200, body, reply))
+        self.assertEqual(stderr.getvalue(), UNTRACED_LOG.format("OSError"))
+        self.assertEqual(self._call_ids(), [72])
+        # The result of a call the trace lacks is kept, with no link.
+        self.assertEqual(self._links(), {71: None, 72: 72})
+        self.assertEqual(server.pending_calls, {})
+
+    def _assert_falsy_errors_close_their_calls(self, reply_body, content_type):
+        """Answer one call per falsy error, with reply_body(message) as the reply."""
+        server = self._proxy()
+        port = server.server_address[1]
+        ids = list(range(81, 81 + len(FALSY_ERRORS)))
+        for n, error in zip(ids, FALSY_ERRORS):
+            with self.subTest(error=error):
+                body = json.dumps(_tool_call(n)).encode()
+                reply = reply_body({"jsonrpc": "2.0", "id": n, "error": error})
+                self._answer(reply, content_type)
+                resp, data, request = self._forward(
+                    port, "POST", "/", STREAMABLE_POST_HEADERS, body
+                )
+                self.assertEqual((resp.status, request["body"], data), (200, body, reply))
+        self.assertEqual(
+            [(e.data["request_id"], e.data["code"], e.data["message"]) for e in self._of_type(EventType.ERROR)],
+            [(n, None, "") for n in ids],
+        )
+        self.assertEqual(self._links(), {n: n for n in ids})
+        self.assertEqual(server.pending_calls, {})
+
+    def test_a_json_reply_with_a_falsy_error_closes_its_call(self):
+        self._assert_falsy_errors_close_their_calls(
+            lambda message: json.dumps(message).encode(), "application/json"
+        )
+
+    def test_event_data_with_a_falsy_error_closes_its_call(self):
+        self._assert_falsy_errors_close_their_calls(
+            lambda message: _event(_progress(1)) + _event(message), "text/event-stream"
         )
 
 
