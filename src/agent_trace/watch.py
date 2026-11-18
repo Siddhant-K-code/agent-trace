@@ -603,27 +603,32 @@ NO_AGENT_PID_HINT = (
 
 def _agent_pid_reused(
     state: "WatchState", out: TextIO | None = None, alert_log: str | None = None,
+    *, signalling: bool = True,
 ) -> bool:
     """Return True, and stop using the agent PID, if another process now has it.
 
     Call before signalling the agent. When the start time recorded at watch
     startup can be read and differs, the agent has exited and the OS gave
     its PID to another process: watch says so, records it in *alert_log*,
-    drops the PID and any pause it held, and never signals that PID again.
+    marks the agent exited, drops the PID and any pause it held, and never
+    signals that PID again.
     When either start time is unknown this returns False and watch signals
-    as before.
+    as before. Pass *signalling* False when watch was not about to signal,
+    so the message does not say a signal was held back.
     """
     pid = state.agent_pid
     if not pid or not pid_reused(pid, state.agent_start_time):
         return False
+    held_back = ", so no agent was signalled" if signalling else ""
     msg = (
         f"Agent pid {pid}: {PID_REUSED_REASON} (the agent exited and its PID "
-        f"was reused), so no agent was signalled. Watch will not signal PID "
+        f"was reused){held_back}. Watch will not signal PID "
         f"{pid} again; restart watch with --agent-pid PID for a new agent."
     )
     if state.paused:
         msg += " Pause cleared."
     _report(msg, out, alert_log)
+    state.agent_exited = True
     state.agent_pid = None
     state.agent_start_time = None
     state.pause_owner = None
@@ -1784,8 +1789,10 @@ class WatchState:
     # other signal and creates no approval request, so the post-mortem and
     # --on-death happen once.
     agent_killed: bool = False
-    # True once signal 0 found the agent PID gone (see _agent_exited)
+    # True once the agent PID is gone or names another process (see _agent_exited)
     agent_exited: bool = False
+    # time.monotonic() of the last identity check in _agent_exited, or None
+    agent_identity_checked_at: float | None = None
     # Token budget watcher (lazy-initialised on first LLM_REQUEST)
     token_budget_watcher: object | None = None
     # Nanny rule metrics
@@ -2609,6 +2616,49 @@ def _check_agent_alive(state: "WatchState", out: "TextIO") -> None:
     _agent_pid_reused(state, out)
 
 
+def _report_pause_left_held(
+    store: "TraceStore", state: "WatchState", out: "TextIO", alert_log: str | None,
+) -> None:
+    """Say how to release the pause watch holds as it exits.
+
+    Watch never resumes the agent on its own: a pause is a safety stop that
+    only a human releases. VS Code Resume works only while watch runs, so on
+    every exit with a pause still held, watch prints and logs the PID, who
+    paused it and how to resume it. Nothing is said when watch killed the
+    agent, the agent has exited, or its PID now names another process.
+    """
+    if not state.paused or state.agent_killed or not state.agent_pid:
+        return
+    _check_approval_decision(store, state, out)
+    if not state.paused:
+        return
+    pid = state.agent_pid
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError):
+        # PermissionError: the PID now belongs to another user's process.
+        return
+    except OSError:
+        pass
+    if _agent_pid_reused(state, out, alert_log, signalling=False):
+        return
+    if state.pause_owner == PAUSE_APPROVAL:
+        request_id = state.approval_request_id
+        msg = (
+            f"Watch stopped while agent pid {pid} is paused for approval "
+            f"{request_id}. It stays stopped until the request is decided: "
+            f"run 'agent-strace approval approve {request_id}' to resume it."
+        )
+    else:
+        who = "the editor" if state.pause_owner == PAUSE_EDITOR else "a watch rule"
+        msg = (
+            f"Watch stopped while agent pid {pid} is paused by {who}. It stays "
+            f"stopped, and VS Code Resume needs a running watch: run "
+            f"'kill -CONT {pid}' to resume it."
+        )
+    _report(msg, out, alert_log)
+
+
 def _check_pause_file(store: "TraceStore", state: "WatchState", out: "TextIO") -> None:
     """Apply approval decisions and the editor's .pause-request marker.
 
@@ -2674,13 +2724,24 @@ def _check_pause_file(store: "TraceStore", state: "WatchState", out: "TextIO") -
 # would otherwise stop for lack of events.
 _TIMEOUT_KILL_GRACE = 10.0
 
+# Seconds between the identity checks of a live agent PID in _agent_exited.
+# On macOS each check runs ps.
+_IDENTITY_RECHECK_SECONDS = 5.0
 
-def _agent_exited(state: WatchState) -> bool:
+
+def _agent_exited(
+    state: WatchState, out: TextIO | None = None, alert_log: str | None = None,
+    *, recheck_identity: bool = False,
+) -> bool:
     """Return True once the agent process is known to have exited.
 
     Signal 0 tests for the process without affecting it. A zombie still
     answers it, so an agent that exited but was not yet reaped counts as
-    running. Once the PID is gone the answer is kept.
+    running. When signal 0 finds a process, its start time is compared with
+    the one recorded at startup, at most every _IDENTITY_RECHECK_SECONDS
+    unless *recheck_identity* is True: a PID the OS gave to another process
+    counts as exited, and watch says so once (see _agent_pid_reused) and
+    drops the PID. Once the agent has exited the answer is kept.
     """
     if state.agent_exited:
         return True
@@ -2693,11 +2754,18 @@ def _agent_exited(state: WatchState) -> bool:
         state.agent_exited = True
         return True
     except OSError:
-        pass
-    return False
+        return False
+    now = time.monotonic()
+    last = state.agent_identity_checked_at
+    if not recheck_identity and last is not None and now - last < _IDENTITY_RECHECK_SECONDS:
+        return False
+    state.agent_identity_checked_at = now
+    return _agent_pid_reused(state, out, alert_log, signalling=False)
 
 
-def _check_timeout(config: WatcherConfig, state: WatchState) -> str | None:
+def _check_timeout(
+    config: WatcherConfig, state: WatchState, out: TextIO | None = None,
+) -> str | None:
     """Return the DurationWatcher violation once a deadline that kills passes.
 
     The deadline is that of a duration limit that kills: --timeout, or
@@ -2712,12 +2780,15 @@ def _check_timeout(config: WatcherConfig, state: WatchState) -> str | None:
         return None
     if time.time() - state.start_time <= config.max_duration_seconds:
         return None
-    if _agent_exited(state):
+    # Check the identity now, so a reused PID gets no stale alert.
+    if _agent_exited(state, out, config.alert_log, recheck_identity=True):
         return None
     return _check_duration(config, state)
 
 
-def _timeout_holds_watch(config: WatcherConfig, state: WatchState, now: float) -> bool:
+def _timeout_holds_watch(
+    config: WatcherConfig, state: WatchState, now: float, out: TextIO | None = None,
+) -> bool:
     """Return True while the idle stop must wait for a deadline that kills.
 
     With a duration limit that kills (see _duration_limit_kills) and
@@ -2730,7 +2801,7 @@ def _timeout_holds_watch(config: WatcherConfig, state: WatchState, now: float) -
     deadline = state.start_time + config.max_duration_seconds
     if now > deadline + _TIMEOUT_KILL_GRACE:
         return False
-    return not _agent_exited(state)
+    return not _agent_exited(state, out, config.alert_log)
 
 
 def _limit_action(
@@ -2934,6 +3005,9 @@ def watch_session(
     stop waits while the agent process runs, until _TIMEOUT_KILL_GRACE
     seconds after the deadline.
 
+    Watch never resumes the agent as it exits. If it still holds a pause,
+    it says how to release it (see _report_pause_left_held).
+
     After a kill, watch does not return before the SIGKILL that follows
     SIGTERM was sent, or nothing it signalled is left; see
     _wait_for_sigkill.
@@ -3032,7 +3106,7 @@ def watch_session(
             # A duration limit that kills, such as --timeout, is wall-clock
             # time, so check it on every poll cycle: an agent that hangs and
             # writes nothing is still killed.
-            timeout_msg = _check_timeout(config, state)
+            timeout_msg = _check_timeout(config, state, out)
             if timeout_msg:
                 _dispatch_alert(
                     timeout_msg, config, state, action="kill", dry_run=dry_run,
@@ -3049,7 +3123,7 @@ def watch_session(
             if state.paused:
                 last_event_time = now
             elif now - last_event_time > max_idle_seconds and not _timeout_holds_watch(
-                config, state, now,
+                config, state, now, out,
             ):
                 out.write(f"[watch] No events for {max_idle_seconds:.0f}s - stopping\n")
                 break
@@ -3137,6 +3211,7 @@ def watch_session(
     except KeyboardInterrupt:
         out.write("\n[watch] Stopped.\n")
     finally:
+        _report_pause_left_held(store, state, out, config.alert_log)
         if streamer:
             streamer.stop()
         _wait_for_sigkill(out)
