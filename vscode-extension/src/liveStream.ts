@@ -24,7 +24,7 @@ function _nonce(): string {
   return text;
 }
 
-function _renderHtml(endpoint: string, nonce: string): string {
+export function renderLiveStreamHtml(endpoint: string, nonce: string): string {
   const sseUrl = endpoint ? `${endpoint.replace(/\/$/, "")}/events/stream` : "";
 
   return `<!DOCTYPE html>
@@ -103,16 +103,16 @@ function _renderHtml(endpoint: string, nonce: string): string {
 ${sseUrl ? `
   <div id="toolbar">
     <span id="status">Connecting…</span>
-    <input id="filter" type="text" placeholder="Filter by type…" oninput="applyFilter()">
-    <button onclick="clearEvents()">Clear</button>
-    <button onclick="togglePause()" id="pauseBtn">Pause</button>
+    <input id="filter" type="text" placeholder="Filter by type…">
+    <button id="clearBtn">Clear</button>
+    <button id="pauseBtn">Pause</button>
   </div>
   <div id="events"></div>
 ` : `
   <div id="no-endpoint">
     <p>No collector endpoint configured.</p>
     <p>Set <code>agentTrace.collectorEndpoint</code> in VS Code settings to connect to an agent-strace server.</p>
-    <button onclick="openSettings()">Open Settings</button>
+    <button id="settingsBtn">Open Settings</button>
   </div>
 `}
 
@@ -180,22 +180,31 @@ ${sseUrl ? `
         row.style.display = 'none';
       }
 
-      const sessionId = ev.session_id || '';
-      const sessionLink = sessionId
-        ? '<span class="session-link" onclick="jumpToSession(' + JSON.stringify(sessionId) + ')">' + sessionId.slice(0, 8) + '</span>'
-        : '';
+      const tsEl = document.createElement('span');
+      tsEl.className = 'ts';
+      tsEl.textContent = ts;
 
-      row.innerHTML =
-        '<span class="ts">' + ts + '</span>' +
-        '<span class="type ' + type + '">' + type + '</span>' +
-        '<span class="data">' + sessionLink + (sessionLink ? '  ' : '') + escHtml(summary) + '</span>';
+      const typeEl = document.createElement('span');
+      typeEl.className = 'type ' + type;
+      typeEl.textContent = type;
+
+      const dataEl = document.createElement('span');
+      dataEl.className = 'data';
+      const sessionId = typeof ev.session_id === 'string' ? ev.session_id : '';
+      if (sessionId) {
+        // Clicks are handled by the delegated listener on #events.
+        const link = document.createElement('span');
+        link.className = 'session-link';
+        link.dataset.sessionId = sessionId;
+        link.textContent = sessionId.slice(0, 8);
+        dataEl.append(link, '  ');
+      }
+      dataEl.append(summary);
+
+      row.append(tsEl, typeEl, dataEl);
 
       container.appendChild(row);
       container.scrollTop = container.scrollHeight;
-    }
-
-    function escHtml(s) {
-      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     }
 
     function jumpToSession(sessionId) {
@@ -233,6 +242,20 @@ ${sseUrl ? `
       };
     }
 
+    function on(id, type, handler) {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener(type, handler);
+    }
+
+    on('filter', 'input', applyFilter);
+    on('clearBtn', 'click', clearEvents);
+    on('pauseBtn', 'click', togglePause);
+    on('settingsBtn', 'click', openSettings);
+    on('events', 'click', (e) => {
+      const link = e.target && e.target.closest ? e.target.closest('.session-link') : null;
+      if (link && link.dataset.sessionId) jumpToSession(link.dataset.sessionId);
+    });
+
     if (SSE_URL) { connect(); }
   </script>
 </body>
@@ -269,7 +292,7 @@ export class LiveStreamPanel extends vscode.Disposable {
     );
 
     const nonce = _nonce();
-    panel.webview.html = _renderHtml(endpoint, nonce);
+    panel.webview.html = renderLiveStreamHtml(endpoint, nonce);
 
     panel.webview.onDidReceiveMessage((msg) => {
       if (msg.command === "openSettings") {
