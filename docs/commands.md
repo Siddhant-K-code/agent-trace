@@ -1416,9 +1416,13 @@ EU AI Act audit package.
 Hash chain integrity fails when a session's chain is `broken` or its
 `events.ndjson` is missing. Hash chain presence warns when a session's chain is
 `empty`, `legacy` or `partial`, and lists it in `sessions_missing_prev_hashes`.
-See the states under [`verify`](#verify). Missing links cost 20 points. `ready`
-needs a score of 80 or more and no broken chain, so a store whose only problem
-is missing links is still `ready`.
+See the states under [`verify`](#verify). Missing links cost 20 points.
+
+`ready` needs a score of 80 or more, no broken chain and no missing links. A
+session with missing links makes the store not `ready` even when retention and
+continuity pass, because an EU AI Act export of that session fails
+`verify --from-export`. The command exits 0 when the store is `ready` and 1
+when it is not.
 
 ---
 

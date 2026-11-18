@@ -625,7 +625,7 @@ def build_audit_readiness(
         "session_count": len(sessions),
         "checks": checks,
         "compliance_score": max(0, score),
-        "ready": score >= 80 and not broken,
+        "ready": score >= 80 and not broken and not missing_hash,
     }
 
 

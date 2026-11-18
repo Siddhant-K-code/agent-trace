@@ -756,7 +756,7 @@ def _readiness_checks(sid, *, broken=False, missing_links=False):
 class TestAuditReadinessChain(_CliCase):
     """One session per store. A new store has no retention, which costs 10 points."""
 
-    def readiness(self, sid, change=None, count=7, after=None):
+    def readiness(self, sid, change=None, count=7, after=None, age_days=None):
         store = TraceStore(str(self.root / sid), use_workspace_env=False)
         path = _make_probe_session(store, sid, count)
         if change is not None:
@@ -765,6 +765,9 @@ class TestAuditReadinessChain(_CliCase):
             _write_lines(path, lines)
         if after is not None:
             after(path)
+        if age_days is not None:
+            started_at = time.time() - age_days * 86400
+            store.mutate_meta(sid, lambda meta: setattr(meta, "started_at", started_at))
         report = build_audit_readiness(store)
         chain_checks = {
             key: report["checks"][key]
@@ -794,6 +797,33 @@ class TestAuditReadinessChain(_CliCase):
         report, checks, _ = self.readiness("a-legacy", _strip_all)
         self.assertEqual(checks, _readiness_checks("a-legacy", missing_links=True))
         self.assertEqual((report["compliance_score"], report["ready"]), (70, False))
+
+    def test_missing_links_are_not_ready_with_full_retention(self):
+        # A session that started 91 days ago passes retention and continuity,
+        # so missing links alone leave a score of 80.
+        report, _, _ = self.readiness("b-intact", age_days=91)
+        self.assertEqual((report["compliance_score"], report["ready"]), (100, True))
+        intact_run = self.cli("audit-readiness", trace_dir=self.root / "b-intact")
+        self.assertEqual(intact_run.returncode, 0, intact_run.stdout)
+        for sid, change, count in (
+            ("b-partial", _edit_strip_rest, 7),
+            ("b-legacy", _strip_all, 7),
+            ("b-empty", None, 0),
+        ):
+            with self.subTest(sid):
+                report, checks, text = self.readiness(sid, change, count, age_days=91)
+                self.assertEqual(checks, _readiness_checks(sid, missing_links=True))
+                self.assertTrue(report["checks"]["retention_coverage"]["ok"])
+                self.assertTrue(report["checks"]["timestamp_continuity"]["ok"])
+                self.assertEqual((report["compliance_score"], report["ready"]), (80, False))
+                self.assertIn("WARN Hash chain presence: 1 sessions with missing links\n", text)
+                trace_dir = self.root / sid
+                text_run = self.cli("audit-readiness", trace_dir=trace_dir)
+                json_run = self.cli("audit-readiness", "--format", "json", trace_dir=trace_dir)
+                for run in (text_run, json_run):
+                    self.assertEqual(run.returncode, 1, run.stdout)
+                    self.assertEqual(run.stderr, "")
+                self.assertIs(json.loads(json_run.stdout)["ready"], False)
 
     def test_broken_session_fails_integrity(self):
         report, checks, _ = self.readiness("a-edit-hole", _edit_hole)
