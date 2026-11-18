@@ -38,7 +38,11 @@ from agent_trace.validation import (
 )
 
 
-CORPUS_ROOT = Path(agent_trace.__file__).parent / "corpus" / "v1"
+# Lexical, as in _corpus_root(): agent_trace may be imported through
+# tests/../src, and validate_trace_directory refuses a ".." component.
+CORPUS_ROOT = Path(
+    os.path.abspath(Path(agent_trace.__file__).parent / "corpus" / "v1")
+)
 SRC_ROOT = Path(agent_trace.__file__).resolve().parent.parent
 
 # Windows cannot open directories or use dir_fd, so it only reads by path.
@@ -151,6 +155,44 @@ class TestAgentEvidenceCorpus(unittest.TestCase):
         self.assertTrue(result["matched"])
         self.assertEqual(result["case_count"], 12)
         self.assertTrue(all(case["matched"] for case in result["cases"]))
+
+    def test_corpus_root_drops_dotdot_from_import_path(self):
+        # Test modules put tests/../src on sys.path. When one of them imports
+        # agent_trace first, the packaged corpus must still validate.
+        dotted = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "src"
+        )
+        code = (
+            "import json, sys\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "import agent_trace\n"
+            "from agent_trace.validation import _corpus_root, validate_packaged_corpus\n"
+            "print(json.dumps({\n"
+            "    'file': agent_trace.__file__,\n"
+            "    'root': str(_corpus_root()),\n"
+            "    'matched': validate_packaged_corpus()['matched'],\n"
+            "}))\n"
+        )
+        env = without_telemetry({
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("AGENT_STRACE_")
+            and key not in ("AGENT_TRACE_DIR", "PYTHONPATH")
+        })
+        # -S: no site-packages or .pth file can import agent_trace first.
+        result = subprocess.run(
+            [sys.executable, "-S", "-c", code, dotted],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            env=env,
+            timeout=120,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(result.stdout)
+        self.assertIn("..", Path(data["file"]).parts)
+        self.assertNotIn("..", Path(data["root"]).parts)
+        self.assertTrue(data["matched"])
 
     def test_corpus_covers_required_evidence_states(self):
         result = validate_packaged_corpus()

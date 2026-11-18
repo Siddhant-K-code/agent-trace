@@ -792,7 +792,11 @@ def validate_trace_directory(
 
 
 def _corpus_root() -> Path:
-    return Path(str(resources.files("agent_trace").joinpath("corpus/v1")))
+    # A sys.path entry such as tests/../src keeps its ".." in the package
+    # path, and the trace readers refuse a ".." component. abspath drops it
+    # lexically, so no symlink is followed.
+    corpus = resources.files("agent_trace").joinpath("corpus/v1")
+    return Path(os.path.abspath(str(corpus)))
 
 
 def validate_packaged_corpus() -> dict[str, Any]:
