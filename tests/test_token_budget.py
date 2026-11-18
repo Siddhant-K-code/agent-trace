@@ -26,18 +26,37 @@ except ImportError:
 
 
 def _make_store_with_llm_events(input_tokens_per_req, model="claude-sonnet-4"):
+    return _make_store_with_request_data(
+        [{"model": model, "input_tokens": tok} for tok in input_tokens_per_req]
+    )
+
+
+def _make_store_with_request_data(data_per_req):
     tmpdir = tempfile.mkdtemp()
     store = TraceStore(tmpdir)
     meta = SessionMeta(agent_name="test")
     store.create_session(meta)
-    for tok in input_tokens_per_req:
+    for data in data_per_req:
         e = TraceEvent(
             event_type=EventType.LLM_REQUEST,
             session_id=meta.session_id,
-            data={"model": model, "input_tokens": tok},
+            data=data,
         )
         store.append_event(meta.session_id, e)
     return store, meta.session_id
+
+
+# Each request's input tokens are its whole context. Request 4 follows a
+# compaction. Of claude-sonnet-4's 200,000 tokens, request 3 fills 40% and
+# request 6 fills 92.5%; the running sum passes 90% at request 3.
+COMPACTED_SESSION = [40_000, 60_000, 80_000, 20_000, 120_000, 185_000]
+
+
+def _request(tokens, model="claude-sonnet-4"):
+    return TraceEvent(
+        event_type=EventType.LLM_REQUEST,
+        data={"model": model, "input_tokens": tokens},
+    )
 
 
 class TestResolveLimit(unittest.TestCase):
@@ -88,6 +107,66 @@ class TestAnalyseTokenBudget(unittest.TestCase):
         self.assertGreater(report.final_pct, report.warning_threshold)
 
 
+class TestContextFill(unittest.TestCase):
+    """The fill is the current request's input tokens, not a running sum."""
+
+    def _report(self, data_per_req, **kwargs):
+        store, sid = _make_store_with_request_data(data_per_req)
+        self.addCleanup(shutil.rmtree, store.base_dir, True)
+        return analyse_token_budget(store, sid, **kwargs)
+
+    def test_fill_is_per_request(self):
+        report = self._report(
+            [{"model": "claude-sonnet-4", "input_tokens": t} for t in COMPACTED_SESSION]
+        )
+        self.assertEqual(
+            [r.pct_used for r in report.requests],
+            [t / 200_000 for t in COMPACTED_SESSION],
+        )
+        self.assertAlmostEqual(report.final_pct, 0.925)
+        self.assertEqual(report.final_context_tokens, 185_000)
+        self.assertEqual(report.final_cumulative, sum(COMPACTED_SESSION))
+
+    def test_peak_and_final_after_compaction(self):
+        report = self._report([
+            {"model": "claude-sonnet-4", "input_tokens": 180_000},
+            {"model": "claude-sonnet-4", "input_tokens": 20_000},
+        ])
+        self.assertAlmostEqual(report.final_pct, 0.1)
+        self.assertEqual(report.peak_context_tokens, 180_000)
+        self.assertAlmostEqual(report.peak_pct, 0.9)
+        self.assertEqual(report.peak_request_index, 1)
+
+    def test_cache_and_nested_usage_tokens_count(self):
+        report = self._report([
+            {"model": "claude-sonnet-4", "input_tokens": 1_000,
+             "cache_read_input_tokens": 149_000},
+            {"model": "claude-sonnet-4", "usage": {"prompt_tokens": 60_000}},
+        ])
+        self.assertEqual([r.input_tokens for r in report.requests], [150_000, 60_000])
+        self.assertEqual([r.estimated for r in report.requests], [False, False])
+        self.assertAlmostEqual(report.peak_pct, 0.75)
+
+    def test_estimate_covers_only_the_request_itself(self):
+        data = {"model": "claude-sonnet-4", "messages": ["x" * 4_000]}
+        report = self._report([data, data])
+        first, second = report.requests
+        self.assertTrue(first.estimated and second.estimated)
+        self.assertEqual(first.input_tokens, second.input_tokens)
+        self.assertEqual(second.pct_used, second.input_tokens / 200_000)
+
+    def test_text_shows_fill_peak_and_estimate_marker(self):
+        report = self._report([
+            {"model": "claude-sonnet-4", "input_tokens": 185_000},
+            {"model": "claude-sonnet-4", "messages": ["x" * 400]},
+        ])
+        output = _render_budget(report)
+        self.assertIn("Peak:    185,000 tokens  (92.5% of limit) at request 1", output)
+        self.assertIn(f"~{report.requests[1].input_tokens:,}", output)
+        self.assertIn("~ estimated", output)
+        self.assertNotIn("Cumulative", output)
+
+
 class TestTokenBudgetWatcher(unittest.TestCase):
     def test_no_fire_below_threshold(self):
         watcher = TokenBudgetWatcher(threshold=0.9)
@@ -119,6 +198,19 @@ class TestTokenBudgetWatcher(unittest.TestCase):
         second = watcher.update(event)
         self.assertIsNotNone(first)
         self.assertIsNone(second)
+
+    def test_fires_on_current_fill_not_running_sum(self):
+        watcher = TokenBudgetWatcher(threshold=0.9)
+        fired = [watcher.update(_request(t)) is not None for t in COMPACTED_SESSION]
+        self.assertEqual(fired, [False] * 5 + [True])
+        self.assertEqual(watcher.context_tokens, 185_000)
+
+    def test_rearms_after_fill_drops_below_threshold(self):
+        watcher = TokenBudgetWatcher(threshold=0.9)
+        results = [watcher.update(_request(t))
+                   for t in (185_000, 190_000, 20_000, 182_000)]
+        self.assertEqual([r is not None for r in results], [True, False, False, True])
+        self.assertIn("182,000 / 200,000 tokens (91.0%)", results[3])
 
     def test_unknown_model_no_fire(self):
         watcher = TokenBudgetWatcher(threshold=0.9)
