@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import contextvars
 import os
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -13,6 +16,11 @@ from unittest.mock import patch
 from agent_trace.integrations import _base
 from agent_trace.models import EventType
 from agent_trace.store import TraceStore
+
+try:  # keeps product telemetry off in this process and its children
+    import _no_telemetry  # noqa: F401
+except ImportError:  # pragma: no cover - run as a package module
+    from tests import _no_telemetry  # noqa: F401
 
 try:
     from _concurrency import run_concurrently
@@ -168,6 +176,100 @@ class TestRunSession(unittest.TestCase):
         self.assertEqual(marker.read_text(encoding="utf-8"), first_sid)
         first.__exit__(None, None, None)
         self.assertEqual(self.markers(), [])
+
+    def marker(self):
+        path = Path(self.trace_dir) / ".active-session.agent"
+        return path.read_text(encoding="utf-8") if path.exists() else None
+
+    def start_run_in_new_context(self):
+        """Start a run in a context of its own; return its ID and a function that ends it."""
+        context = contextvars.Context()
+        run = _base.run_session(self.store, "agent")
+        sid = context.run(run.__enter__)
+        return sid, lambda: context.run(run.__exit__, None, None, None)
+
+    def session_in_fresh_thread(self):
+        """The session an event from a thread outside any run goes to."""
+        found = []
+        thread = threading.Thread(
+            target=lambda: found.append(_base._get_or_create_session(self.store, "agent")))
+        thread.start()
+        thread.join(timeout=60)
+        return found[0]
+
+    def test_three_overlapping_runs_finishing_out_of_order_restore_oldest_marker(self):
+        first, end_first = self.start_run_in_new_context()
+        second, end_second = self.start_run_in_new_context()
+        third, end_third = self.start_run_in_new_context()
+        self.assertEqual(self.marker(), third)
+        end_second()
+        self.assertEqual(self.marker(), third)
+        end_third()
+        self.assertEqual(self.marker(), first)
+        self.assertEqual(self.session_in_fresh_thread(), first)
+        end_first()
+        self.assertEqual(self.marker(), None)
+        self.assertEqual(list(Path(self.trace_dir).glob(".integration-runs*")), [])
+        for sid in (first, second, third):
+            self.assertIsNotNone(self.store.load_meta(sid).ended_at)
+
+    def run_in_child(self, script):
+        env = dict(os.environ)
+        src = str(Path(__file__).resolve().parents[1] / "src")
+        env["PYTHONPATH"] = src + os.pathsep + env.get("PYTHONPATH", "")
+        child = subprocess.Popen(
+            [sys.executable, "-c",
+             "import sys\n"
+             "from agent_trace.integrations import _base\n"
+             "from agent_trace.store import TraceStore\n"
+             "run = _base.run_session(TraceStore(sys.argv[1]), 'agent')\n"
+             "print(run.__enter__(), flush=True)\n" + script,
+             self.trace_dir],
+            env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+        )
+
+        def stop():
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=60)
+            for pipe in (child.stdin, child.stdout):
+                if not pipe.closed:
+                    pipe.close()
+
+        self.addCleanup(stop)
+        sid = child.stdout.readline().strip()
+        self.assertTrue(sid)
+        return child, sid
+
+    def test_run_in_another_process_keeps_the_marker_while_it_runs(self):
+        child, child_sid = self.run_in_child(
+            "sys.stdin.readline()\nrun.__exit__(None, None, None)\n")
+        with _base.run_session(self.store, "agent") as sid:
+            self.assertEqual(self.marker(), sid)
+        self.assertEqual(self.marker(), child_sid)
+        self.assertIsNone(self.store.load_meta(child_sid).ended_at)
+        child.communicate("\n", timeout=60)
+        self.assertEqual(child.returncode, 0)
+        self.assertEqual(self.marker(), None)
+        self.assertIsNotNone(self.store.load_meta(child_sid).ended_at)
+
+    def test_subprocess_run_restores_parent_process_marker(self):
+        with _base.run_session(self.store, "agent") as sid:
+            child, child_sid = self.run_in_child("run.__exit__(None, None, None)\n")
+            child.communicate(timeout=60)
+            self.assertEqual(child.returncode, 0)
+            self.assertIsNotNone(self.store.load_meta(child_sid).ended_at)
+            self.assertEqual(self.marker(), sid)
+            self.assertEqual(self.session_in_fresh_thread(), sid)
+        self.assertEqual(self.marker(), None)
+
+    def test_run_of_a_process_that_died_is_dropped(self):
+        child, child_sid = self.run_in_child("import os\nos._exit(0)\n")
+        child.wait(timeout=60)
+        self.assertEqual(self.marker(), child_sid)
+        with _base.run_session(self.store, "agent"):
+            pass
+        self.assertEqual(self.marker(), None)
 
     def test_failure_to_record_the_end_never_reaches_the_caller(self):
         with patch.object(TraceStore, "mutate_meta", side_effect=OSError("disk full")):

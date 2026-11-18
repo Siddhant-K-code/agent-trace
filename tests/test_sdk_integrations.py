@@ -11,6 +11,7 @@ import csv
 import gc
 import importlib
 import io
+import json
 import os
 import sys
 import tempfile
@@ -1029,22 +1030,34 @@ class TestCrewAISessions(FrameworkCase):
 
 
 class TestOpenAIAgentsSessions(FrameworkCase):
+    """Tools run through FunctionTool.on_invoke_tool inside a function span."""
+
+    def setUp(self):
+        super().setUp()
+        self.tools = {}
+        self.modules = stubs.agents_modules(self.run_agent)
+        self.agents = self.modules["agents"]
+
+    def run_agent(self, agent, prompt):
+        if prompt == "fail":
+            raise RuntimeError("run failed")
+        return self.call_tool("search", prompt)
+
+    def call_tool(self, name, query):
+        functions = {"search": lambda query: "found " + query, "broken": self.broken}
+        tool = self.agents.FunctionTool(name, functions[name])
+        return self.agents.run_tool(tool, json.dumps({"query": query}))
+
+    @staticmethod
+    def broken(query):
+        raise ValueError("bad input")
+
     def test_each_run_is_its_own_finished_session(self):
-        tools = []
-
-        def run(agent, prompt):
-            if prompt == "fail":
-                raise RuntimeError("run failed")
-            return tools[0](query=prompt)
-
-        modules = stubs.agents_modules(run)
-        self.instrument("openai_agents", modules)
-        agents = modules["agents"]
-        tools.append(agents.FunctionTool("search", lambda **kwargs: "found"))
-        self.assertEqual(agents.Runner.run_sync("agent", "a"), "found")
+        self.instrument("openai_agents", self.modules)
+        self.assertEqual(self.agents.Runner.run_sync("agent", "a"), "found a")
         with self.assertRaises(RuntimeError):
-            agents.Runner.run_sync("agent", "fail")
-        agents.Runner.run_sync("agent", "b")
+            self.agents.Runner.run_sync("agent", "fail")
+        self.agents.Runner.run_sync("agent", "b")
 
         ok, failed, last = self.sessions()
         done = [E.SESSION_START, E.TOOL_CALL, E.TOOL_RESULT, E.SESSION_END]
@@ -1052,69 +1065,124 @@ class TestOpenAIAgentsSessions(FrameworkCase):
         self.assertRun(*last, done, (1, 0, 0))
         self.assertRun(*failed, [E.SESSION_START, E.ERROR, E.SESSION_END], (0, 0, 1))
         self.assertLinkedTo(ok[1], 2, 1)
+        self.assertEqual(ok[1][2].data["arguments"], {"query": "a"})
         self.assertNoMarkers()
 
+    def test_tool_result_is_linked_to_its_call(self):
+        self.instrument("openai_agents", self.modules)
+        self.call_tool("search", "x")
+        call, result = self.events()
+        self.assertEqual((call.event_type, result.event_type), (E.TOOL_CALL, E.TOOL_RESULT))
+        self.assertEqual(result.parent_id, call.event_id)
+        self.assertEqual(call.data["tool_name"], "search")
+        self.assertEqual(result.data["result"], "found x")
+
     def test_tool_error_is_linked_to_its_call(self):
-        modules = stubs.agents_modules(lambda agent, prompt: None)
-        self.instrument("openai_agents", modules)
-
-        def fail(**kwargs):
-            raise ValueError("bad input")
-
-        with self.assertRaises(ValueError):
-            modules["agents"].FunctionTool("search", fail)(query="x")
+        self.instrument("openai_agents", self.modules)
+        self.call_tool("broken", "x")
         call, error = self.events()
-        self.assertEqual(error.event_type, E.ERROR)
+        self.assertEqual((call.event_type, error.event_type), (E.TOOL_CALL, E.ERROR))
         self.assertEqual(error.parent_id, call.event_id)
-        self.assertEqual(error.data["error_type"], "ValueError")
+        self.assertIn("bad input", error.data["error"])
 
     def test_uninstrument_restores_and_reinstrumenting_records_once(self):
-        modules = stubs.agents_modules(lambda agent, prompt: prompt)
-        agents = modules["agents"]
-        originals = self.originals(agents.Runner, "run_sync") + self.originals(
-            agents.FunctionTool, "__call__")
-        integration = self.instrument("openai_agents", modules)
+        originals = self.originals(self.agents.Runner, "run_sync")
+        integration = self.instrument("openai_agents", self.modules)
         integration.uninstrument_openai_agents()
-        self.assertEqual(self.originals(agents.Runner, "run_sync")
-                         + self.originals(agents.FunctionTool, "__call__"), originals)
+        self.assertEqual(self.originals(self.agents.Runner, "run_sync"), originals)
+        self.agents.Runner.run_sync("agent", "a")
+        self.assertEqual(self.events(), [])
         integration.instrument_openai_agents(agent_name="openai_agents-test")
         integration._PATCHED = False
         integration.instrument_openai_agents(agent_name="openai_agents-test")
-        agents.FunctionTool("search", lambda **kwargs: "found")(query="x")
-        self.assertEqual([e.event_type for e in self.events()], [E.TOOL_CALL, E.TOOL_RESULT])
-        self.assertEqual(agents.Runner.run_sync("agent", "hi"), "hi")
-        (_, _), (meta, events) = self.sessions()
-        self.assertRun(meta, events, [E.SESSION_START, E.SESSION_END], (0, 0, 0))
+        self.assertEqual(len(self.modules["agents.tracing"].processors), 1)
+        self.agents.Runner.run_sync("agent", "b")
+        (meta, events), = self.sessions()
+        self.assertRun(meta, events, [E.SESSION_START, E.TOOL_CALL, E.TOOL_RESULT,
+                                      E.SESSION_END], (1, 0, 0))
 
 
 class TestStrandsSessions(FrameworkCase):
+    """Tools run through the executor's tool hooks around tool.stream()."""
+
+    def setUp(self):
+        super().setUp()
+        self.modules = stubs.strands_modules()
+        self.strands = self.modules["strands"]
+
+    def tool(self, name, function):
+        def tool_func(tool_use, **invocation_state):
+            value = function(tool_use["input"]["prompt"])
+            if isinstance(value, dict):
+                return value
+            return {"toolUseId": tool_use["toolUseId"], "status": "success",
+                    "content": [{"text": value}]}
+
+        return self.modules["strands.tools"].PythonAgentTool(name, {"name": name}, tool_func)
+
+    def search_agent(self):
+        return self.strands.Agent([self.tool("search", lambda prompt: "found " + prompt)])
+
     def test_each_call_is_its_own_finished_session(self):
-        modules = stubs.strands_modules()
-        strands = modules["strands"]
-        tool_class = modules["strands.tools"].BaseTool
-        original_invoke = vars(tool_class)["invoke"]
-        integration = self.instrument("strands", modules)
-
-        def search(prompt):
-            if prompt == "fail":
-                raise RuntimeError("tool failed")
-            return "found"
-
-        agent = strands.Agent([tool_class("search", search)])
+        self.instrument("strands", self.modules)
+        agent = self.search_agent()
         agent("a")
         with self.assertRaises(RuntimeError):
-            agent("fail")
+            agent("crash")
+        _run(agent.invoke_async("b"))
 
-        ok, failed = self.sessions()
-        self.assertRun(*ok, [E.SESSION_START, E.TOOL_CALL, E.TOOL_RESULT, E.SESSION_END],
-                       (1, 0, 0))
-        self.assertRun(*failed, [E.SESSION_START, E.TOOL_CALL, E.ERROR, E.ERROR,
-                                 E.SESSION_END], (1, 0, 2))
+        ok, failed, last = self.sessions()
+        done = [E.SESSION_START, E.TOOL_CALL, E.TOOL_RESULT, E.SESSION_END]
+        self.assertRun(*ok, done, (1, 0, 0))
+        self.assertRun(*last, done, (1, 0, 0))
+        self.assertRun(*failed, [E.SESSION_START, E.ERROR, E.SESSION_END], (0, 0, 1))
         self.assertLinkedTo(ok[1], 2, 1)
-        self.assertLinkedTo(failed[1], 2, 1)
+        self.assertEqual(ok[1][1].data["arguments"], {"prompt": "a"})
+        self.assertEqual(ok[1][2].data["result"], "found a")
         self.assertNoMarkers()
+
+    def test_tool_errors_are_linked_to_their_calls(self):
+        def broken(prompt):
+            raise ValueError("bad input")
+
+        def refused(prompt):
+            return {"toolUseId": "tooluse_1", "status": "error",
+                    "content": [{"text": "not allowed"}]}
+
+        self.instrument("strands", self.modules)
+        self.strands.Agent([self.tool("broken", broken), self.tool("refused", refused)])("x")
+        (meta, events), = self.sessions()
+        self.assertRun(meta, events, [E.SESSION_START, E.TOOL_CALL, E.ERROR, E.TOOL_CALL,
+                                      E.ERROR, E.SESSION_END], (2, 0, 2))
+        self.assertLinkedTo(events, 2, 1)
+        self.assertLinkedTo(events, 4, 3)
+        self.assertEqual((events[2].data["error"], events[2].data["error_type"]),
+                         ("bad input", "ValueError"))
+        self.assertEqual(events[4].data["error"], "not allowed")
+
+    def test_uninstrument_restores_and_reinstrumenting_records_once(self):
+        agent_class = self.strands.Agent
+        names = ("__init__", "__call__", "invoke_async")
+        originals = self.originals(agent_class, *names)
+        made_before = self.search_agent()
+        integration = self.instrument("strands", self.modules)
+        made_before("a")
         integration.uninstrument_strands()
-        self.assertIs(vars(tool_class)["invoke"], original_invoke)
+        self.assertEqual(self.originals(agent_class, *names), originals)
+        made_before("b")
+        self.assertEqual(len(self.sessions()), 1)
+        integration.instrument_strands(agent_name="strands-test")
+        integration._PATCHED = False
+        integration.instrument_strands(agent_name="strands-test")
+        made_after = self.search_agent()
+        made_before("c")
+        made_after("d")
+        self.assertEqual(len(made_before.hooks.callbacks), 2)
+        self.assertEqual(len(made_after.hooks.callbacks), 2)
+        done = [E.SESSION_START, E.TOOL_CALL, E.TOOL_RESULT, E.SESSION_END]
+        for meta, events in self.sessions():
+            self.assertRun(meta, events, done, (1, 0, 0))
+        self.assertEqual(len(self.sessions()), 3)
 
 
 class TestLangChainTools(FrameworkCase):

@@ -98,28 +98,116 @@ def _count_run_event(session_id: str, event_type: EventType) -> None:
             counts[field_name] += 1
 
 
-def _start_run(store: TraceStore, name: str) -> tuple[str, str]:
-    """Create the run's session and point the agent's marker at it.
+def _runs_path(active_path: Any) -> Any:
+    """The registry of the agent's runs in progress, next to its marker."""
+    return active_path.with_name(".integration-runs" + active_path.name[len(".active-session"):])
 
-    Returns the session ID and the session the marker named before.
+
+def _read_runs(path: Any) -> list[tuple[str, int]]:
+    """``(session ID, PID)`` of each registered run, oldest first."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return []
+    runs = []
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1].isdigit():
+            runs.append((parts[0], int(parts[1])))
+    return runs
+
+
+def _pid_alive(pid: int) -> bool:
+    """Return False only when no process has this PID."""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            handle = kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+            if not handle:
+                return ctypes.get_last_error() == 5  # ERROR_ACCESS_DENIED: it exists
+            try:
+                code = wintypes.DWORD()
+                if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                    return True
+                return code.value == 259  # STILL_ACTIVE
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def _run_is_live(store: TraceStore, sid: str, pid: int) -> bool:
+    """Whether a registered run is still in progress."""
+    if pid == os.getpid():
+        with _RUN_COUNTS_LOCK:
+            return sid in _RUN_COUNTS
+    if not _pid_alive(pid):
+        return False
+    try:
+        return store.load_meta(sid).ended_at is None
+    except Exception:
+        return False
+
+
+def _start_run(store: TraceStore, name: str) -> str:
+    """Create the run's session, register it and point the agent's marker at it."""
+    with _session_marker(store, name) as active_path:
+        path = _runs_path(active_path)
+        runs = [run for run in _read_runs(path) if _run_is_live(store, *run)]
+        sid = _new_session(store, name, active_path)
+        with _RUN_COUNTS_LOCK:
+            _RUN_COUNTS[sid] = dict.fromkeys(_COUNTED.values(), 0)
+        runs.append((sid, os.getpid()))
+        path.write_text("".join(f"{s} {pid}\n" for s, pid in runs),
+                        encoding="utf-8", newline="\n")
+    return sid
+
+
+def _unregister_run(store: TraceStore, name: str, sid: str) -> None:
+    """Drop the run from the registry and point the marker at the newest run left.
+
+    Runs can end in any order and in any process, so the marker is moved
+    only to a run that is still in progress, and removed when none is.
     """
     with _session_marker(store, name) as active_path:
-        previous = _read_marker(active_path)
-        sid = _new_session(store, name, active_path)
-    with _RUN_COUNTS_LOCK:
-        _RUN_COUNTS[sid] = dict.fromkeys(_COUNTED.values(), 0)
-    return sid, previous
+        path = _runs_path(active_path)
+        registered = _read_runs(path)
+        runs = [run for run in registered if run[0] != sid and _run_is_live(store, *run)]
+        if runs:
+            path.write_text("".join(f"{s} {pid}\n" for s, pid in runs),
+                            encoding="utf-8", newline="\n")
+            active_path.write_text(runs[-1][0], encoding="utf-8", newline="\n")
+            return
+        path.unlink(missing_ok=True)
+        ended = {s for s, _ in registered} | {sid}
+        if _read_marker(active_path) in ended:
+            active_path.unlink(missing_ok=True)
 
 
-def _end_run(store: TraceStore, name: str, sid: str, previous: str, started: float) -> None:
-    """Record ``session_end``, close the session's metadata and clear its marker."""
+def _end_run(store: TraceStore, name: str, sid: str, started: float) -> None:
+    """Record ``session_end``, close the session's metadata and unregister the run."""
     try:
         emit(EventType.SESSION_END, sid, store,
              duration_ms=(time.time() - started) * 1000)
     finally:
         with _RUN_COUNTS_LOCK:
             counts = _RUN_COUNTS.pop(sid, {})
-            previous_running = previous in _RUN_COUNTS
 
         def close(meta: SessionMeta) -> None:
             meta.ended_at = time.time()
@@ -130,12 +218,7 @@ def _end_run(store: TraceStore, name: str, sid: str, previous: str, started: flo
         try:
             store.mutate_meta(sid, close)
         finally:
-            with _session_marker(store, name) as active_path:
-                if _read_marker(active_path) == sid:
-                    if previous_running:
-                        active_path.write_text(previous, encoding="utf-8", newline="\n")
-                    else:
-                        active_path.unlink(missing_ok=True)
+            _unregister_run(store, name, sid)
 
 
 @contextlib.contextmanager
@@ -146,18 +229,20 @@ def run_session(store: TraceStore, name: str, **start: Any) -> Iterator[str]:
     and when the run ends emits ``session_end`` (also after an exception,
     which is first recorded as an ``error``). The session's ``ended_at``,
     ``total_duration_ms``, ``tool_calls``, ``llm_requests`` and ``errors``
-    are then set and the agent's marker is cleared. While the run is in
-    progress, :func:`_get_or_create_session` returns its session for this
-    agent. A run started inside another run of the same agent, in the same
-    context, records into the outer run's session. A failure to record the
-    end of the run never reaches the caller.
+    are then set. While the run is in progress, :func:`_get_or_create_session`
+    returns its session for this agent, and the agent's marker names the
+    newest run still in progress in any process, so threads that do not
+    inherit the run's context record into it. A run started inside another
+    run of the same agent, in the same context, records into the outer
+    run's session. A failure to record the end of the run never reaches
+    the caller.
     """
     key = _run_key(store, name)
     current = _RUN.get()
     if current is not None and current[0] == key:
         yield current[1]
         return
-    sid, previous = _start_run(store, name)
+    sid = _start_run(store, name)
     started = time.time()
     token = _RUN.set((key, sid))
     try:
@@ -180,7 +265,7 @@ def run_session(store: TraceStore, name: str, **start: Any) -> Iterator[str]:
             # Exited in another context than the one it was entered in.
             pass
         try:
-            _end_run(store, name, sid, previous, started)
+            _end_run(store, name, sid, started)
         except Exception:
             pass
 
