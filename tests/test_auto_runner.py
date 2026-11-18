@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -278,11 +279,22 @@ class TestAutoStopSignals(AutoTestCase):
         self.assertEqual(self.leftover_bootstrap_dirs(), [])
 
 
-@unittest.skipUnless(POSIX and hasattr(os, "openpty"), "POSIX terminals")
-class TestAutoOnTerminal(AutoTestCase):
-    """agent-strace auto in the foreground of a real (pseudo) terminal."""
+# Writes its pid to $CHILD_READY and sleeps, with the default SIGINT action.
+SLEEPER = (
+    "import os, signal, time\n"
+    "signal.signal(signal.SIGINT, signal.SIG_DFL)\n"
+    "ready = os.environ['CHILD_READY']\n"
+    "open(ready + '.tmp', 'w').write(str(os.getpid()))\n"
+    "os.replace(ready + '.tmp', ready)\n"
+    "time.sleep(30)\n"
+)
 
-    def start_auto(self, prelude: str = "", **extra: str) -> tuple[subprocess.Popen, int]:
+
+class TerminalTestCase(AutoTestCase):
+    """Runs programs as the session leader of a new pseudo terminal."""
+
+    def start_on_terminal(self, argv: list[str], env: dict[str, str]) -> tuple[subprocess.Popen, int]:
+        """Start *argv* as the session leader of a new pseudo terminal."""
         import fcntl
         import termios
 
@@ -294,15 +306,13 @@ class TestAutoOnTerminal(AutoTestCase):
 
         def preexec():
             _reset_sigint()
-            # Make the pty agent-strace's controlling terminal; agent-strace
-            # leads the new session, so its group is in the foreground.
+            # Make the pty the controlling terminal; the new session's
+            # leader is in its foreground group.
             fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 
         try:
             proc = subprocess.Popen(
-                [sys.executable, "-c", _wrapper_code(prelude),
-                 "auto", "--", sys.executable, str(self.child)],
-                env=self.env(**extra), cwd=str(self.tmp),
+                argv, env=env, cwd=str(self.tmp),
                 stdin=slave, stdout=slave, stderr=slave,
                 start_new_session=True, preexec_fn=preexec,
             )
@@ -333,10 +343,30 @@ class TestAutoOnTerminal(AutoTestCase):
         self.addCleanup(close)
         return proc, master
 
+    def wait_for_foreground_change(self, proc: subprocess.Popen, master: int) -> None:
+        """Wait until agent-strace has handed the terminal to the command."""
+        deadline = time.monotonic() + 30
+        while os.tcgetpgrp(master) == proc.pid:
+            if proc.poll() is not None or time.monotonic() > deadline:
+                raise AssertionError(f"the terminal was not handed over\n{bytes(self.output)!r}")
+            time.sleep(0.02)
+
     def finish(self, proc: subprocess.Popen) -> int:
         code = proc.wait(timeout=60)
         self.assertNotIn(b"Traceback", bytes(self.output), bytes(self.output))
         return code
+
+
+@unittest.skipUnless(POSIX and hasattr(os, "openpty"), "POSIX terminals")
+class TestAutoOnTerminal(TerminalTestCase):
+    """agent-strace auto in the foreground of a real (pseudo) terminal."""
+
+    def start_auto(self, prelude: str = "", **extra: str) -> tuple[subprocess.Popen, int]:
+        return self.start_on_terminal(
+            [sys.executable, "-c", _wrapper_code(prelude),
+             "auto", "--", sys.executable, str(self.child)],
+            self.env(**extra),
+        )
 
     def test_signal_sent_to_agent_strace_reaches_the_command(self):
         for signum, code in ((signal.SIGINT, 130), (signal.SIGHUP, 129), (signal.SIGTERM, 143)):
@@ -352,15 +382,30 @@ class TestAutoOnTerminal(AutoTestCase):
     def test_ctrl_c_reaches_the_command_once(self):
         proc, master = self.start_auto(CHILD_EXIT="5")
         _wait_for_file(self.child_ready, proc)
-        # The command's group holds the terminal once it is running.
-        deadline = time.monotonic() + 30
-        pid = int(self.child_ready.read_text())
-        while os.tcgetpgrp(master) != pid and time.monotonic() < deadline:
-            time.sleep(0.05)
+        self.wait_for_foreground_change(proc, master)
         os.write(master, b"\x03")
         # The command handled Ctrl-C and chose its own exit code.
         self.assertEqual(self.finish(proc), 5, bytes(self.output))
         self.assert_stopped_cleanly([signal.SIGINT])
+
+    def test_ctrl_c_runs_the_handler_agent_strace_started_with(self):
+        handled = self.tmp / "handled"
+        prelude = (
+            "import os, signal\n"
+            "signal.signal(signal.SIGINT, lambda signum, frame: open("
+            f"{str(handled)!r}, 'a').write(str(signum)))\n"
+        )
+        argv = [sys.executable, "-c", _wrapper_code(prelude),
+                "auto", "--", sys.executable, "-c", SLEEPER]
+        proc, master = self.start_on_terminal(argv, self.env())
+        _wait_for_file(self.child_ready, proc)
+        self.wait_for_foreground_change(proc, master)
+        os.write(master, b"\x03")
+        # The command died of Ctrl-C; agent-strace passes the interrupt on to
+        # its own group, where the embedding program's handler takes it.
+        self.assertEqual(self.finish(proc), 130, bytes(self.output))
+        self.assertEqual(handled.read_text(), str(int(signal.SIGINT)))
+        self.assertEqual(self.leftover_bootstrap_dirs(), [])
 
     def test_ctrl_c_while_the_command_starts_reaches_it_once(self):
         spawned = self.tmp / "spawned"
@@ -376,8 +421,124 @@ class TestAutoOnTerminal(AutoTestCase):
         self.assert_stopped_cleanly([signal.SIGINT])
 
 
+# Runs ``agent-strace auto`` twice in a loop, as a shell script would.
+SHELL_LOOP = (
+    'for i in 1 2; do "$PYTHON" "$AUTO" auto -- "$@"; echo "rc=$?"; '
+    'export CHILD_WAIT=0; done; echo LOOP-END'
+)
+
+
+@unittest.skipUnless(POSIX and hasattr(os, "openpty"), "POSIX terminals")
+@unittest.skipUnless(shutil.which("bash"), "bash is not installed")
+class TestAutoInShellScriptOnTerminal(TerminalTestCase):
+    """A shell script running agent-strace auto, interrupted from its terminal."""
+
+    def start_loop(self, *command: str, **extra: str) -> tuple[subprocess.Popen, int]:
+        auto = self.tmp / "auto.py"
+        auto.write_text(_wrapper_code())
+        env = self.env(PYTHON=sys.executable, AUTO=str(auto), **extra)
+        return self.start_on_terminal(
+            [shutil.which("bash"), "-c", SHELL_LOOP, "loop", *command], env)
+
+    def loop_output(self) -> str:
+        return bytes(self.output).decode(errors="replace")
+
+    # Only Ctrl-C here: on macOS a process that dies of SIGQUIT (Ctrl-\)
+    # opens a crash report. TestTerminalInterrupt covers SIGQUIT.
+    def test_ctrl_c_stops_the_script(self):
+        proc, master = self.start_loop(sys.executable, "-c", SLEEPER)
+        _wait_for_file(self.child_ready, proc)
+        self.wait_for_foreground_change(proc, master)
+        os.write(master, b"\x03")
+        proc.wait(timeout=60)
+        time.sleep(0.2)
+        self.assertEqual(proc.returncode, -signal.SIGINT, self.loop_output())
+        self.assertNotIn("LOOP-END", self.loop_output())
+        self.assertEqual(self.leftover_bootstrap_dirs(), [])
+
+    def test_command_that_handles_ctrl_c_lets_the_script_go_on(self):
+        proc, master = self.start_loop(sys.executable, str(self.child), CHILD_CLEANUP="0")
+        _wait_for_file(self.child_ready, proc)
+        self.wait_for_foreground_change(proc, master)
+        os.write(master, b"\x03")
+        self.assertEqual(self.finish(proc), 0, self.loop_output())
+        time.sleep(0.2)
+        self.assertEqual(self.loop_output().count("rc=0"), 2, self.loop_output())
+        self.assertIn("LOOP-END", self.loop_output())
+        self.assertEqual(self.leftover_bootstrap_dirs(), [])
+
+    def test_command_that_signals_itself_lets_the_script_go_on(self):
+        proc, _ = self.start_loop(
+            sys.executable, "-c",
+            "import os, signal\n"
+            "signal.signal(signal.SIGINT, signal.SIG_DFL)\n"
+            "os.kill(os.getpid(), signal.SIGINT)\n",
+        )
+        self.assertEqual(proc.wait(timeout=60), 0, self.loop_output())
+        time.sleep(0.2)
+        self.assertEqual(self.loop_output().count("rc=130"), 2, self.loop_output())
+        self.assertIn("LOOP-END", self.loop_output())
+        self.assertEqual(self.leftover_bootstrap_dirs(), [])
+
+
+@unittest.skipUnless(POSIX, "POSIX signals")
+class TestTerminalInterrupt(unittest.TestCase):
+    """Which interrupts agent-strace passes on to its own process group.
+
+    These cover SIGQUIT without letting any process die of it.
+    """
+
+    def test_observer_reports_interrupts_sent_to_its_group(self):
+        observer = auto_runner._SignalObserver.start(0)
+        self.assertIsNotNone(observer)
+        self.addCleanup(observer.close)
+        # The observer handles both signals, so neither kills it.
+        os.killpg(observer._proc.pid, signal.SIGINT)
+        os.killpg(observer._proc.pid, signal.SIGQUIT)
+        self.assertEqual(observer.interrupts(), {signal.SIGINT, signal.SIGQUIT})
+
+    def test_only_an_observed_interrupt_that_killed_the_command_is_passed_on(self):
+        both = {signal.SIGINT, signal.SIGQUIT}
+        for signum in (signal.SIGINT, signal.SIGQUIT):
+            with self.subTest(signal=signum.name):
+                # A wait status for "killed by signal N" is N.
+                self.assertEqual(auto_runner._terminal_interrupt(signum, both, []), signum)
+                # The command signalled itself: the observer saw nothing.
+                self.assertIsNone(auto_runner._terminal_interrupt(signum, set(), []))
+                # agent-strace forwarded a signal, which the observer also saw.
+                self.assertIsNone(auto_runner._terminal_interrupt(signum, both, [signal.SIGHUP]))
+                # The command handled the interrupt and exited.
+                self.assertIsNone(auto_runner._terminal_interrupt(0, both, []))
+        self.assertIsNone(auto_runner._terminal_interrupt(signal.SIGTERM, {signal.SIGTERM}, []))
+
+    def test_interrupt_goes_to_agent_strace_group_with_its_handler_kept(self):
+        for signum in (signal.SIGINT, signal.SIGQUIT):
+            with self.subTest(signal=signum.name):
+                previous = signal.signal(signum, signal.SIG_IGN)
+                self.addCleanup(signal.signal, signum, previous)
+                with mock.patch.object(auto_runner.os, "killpg") as killpg:
+                    auto_runner._interrupt_own_group(signum)
+                killpg.assert_called_once_with(os.getpgrp(), signum)
+                self.assertIs(signal.getsignal(signum), signal.SIG_IGN)
+
+    def test_python_keyboard_interrupt_handler_becomes_the_default_action(self):
+        previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+        self.addCleanup(signal.signal, signal.SIGINT, previous)
+        with mock.patch.object(auto_runner.os, "killpg") as killpg:
+            auto_runner._interrupt_own_group(signal.SIGINT)
+        killpg.assert_called_once_with(os.getpgrp(), signal.SIGINT)
+        self.assertIs(signal.getsignal(signal.SIGINT), signal.SIG_DFL)
+
+
 @unittest.skipUnless(POSIX, "POSIX signals")
 class TestCommandRunner(AutoTestCase):
+    def setUp(self):
+        super().setUp()
+        # The test runner may be in the foreground of a terminal; keep it.
+        patcher = mock.patch.object(auto_runner._Terminal, "open", return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_signal_before_the_command_starts_skips_it(self):
         marker = self.tmp / "started"
         before = signal.getsignal(signal.SIGTERM)

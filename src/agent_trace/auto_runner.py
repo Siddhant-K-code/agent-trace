@@ -13,7 +13,11 @@ delivered once:
   starts a job. Ctrl-C, Ctrl-\\ and Ctrl-Z then go to the command alone.
   When the command stops, agent-strace takes the terminal back and stops
   with the same signal, so the shell sees its job stop; ``fg`` and ``bg``
-  resume both.
+  resume both. When Ctrl-C or Ctrl-\\ kills the command, agent-strace
+  removes the hook directory and sends the same signal to its own group,
+  so a calling shell script is interrupted as it would be without
+  agent-strace. A small observer process in the command's group tells the
+  terminal's signal apart from one the command sent itself.
 
 The handlers are installed before the hook directory is created and before
 the command starts. A stop signal agent-strace was started with ignored
@@ -28,6 +32,7 @@ installed, the command is run with :func:`subprocess.run` as before.
 from __future__ import annotations
 
 import os
+import select
 import signal
 import subprocess
 import sys
@@ -40,6 +45,13 @@ from typing import Any
 STOP_SIGNALS = ("SIGTERM", "SIGINT", "SIGHUP")
 # Seconds between checks on the command while agent-strace waits for it.
 POLL_INTERVAL = 0.05
+# Seconds to wait for the observer to start, and to report.
+OBSERVER_TIMEOUT = 10
+# Signals the terminal sends that agent-strace passes on to its own group
+# when they kill the command.
+_INTERRUPTS = frozenset(
+    getattr(signal, name) for name in ("SIGINT", "SIGQUIT") if hasattr(signal, name)
+)
 # Stops a shell follows: agent-strace stops along with the command.
 _JOB_CONTROL_STOPS = frozenset(
     getattr(signal, name) for name in ("SIGTSTP", "SIGTTIN", "SIGTTOU") if hasattr(signal, name)
@@ -97,6 +109,95 @@ class _Terminal:
             self.set_foreground(os.getpgrp())
 
 
+# Run in the command's process group. It reports each SIGINT and SIGQUIT the
+# group gets, and on SIGUSR1 reports "done" and exits. Python runs signal
+# handlers in signal-number order, so a SIGINT or SIGQUIT already pending
+# when SIGUSR1 arrives is reported before "done".
+_OBSERVER = """\
+import os, signal
+def report(signum, frame):
+    os.write(1, b"%d\\n" % signum)
+def done(signum, frame):
+    os.write(1, b"done\\n")
+    os._exit(0)
+for signum in (signal.SIGINT, signal.SIGQUIT):
+    signal.signal(signum, report)
+signal.signal(signal.SIGUSR1, done)
+os.write(1, b"ready\\n")
+while True:
+    signal.pause()
+"""
+
+
+class _SignalObserver:
+    """Tells which interrupts the terminal sent to the command's group.
+
+    A terminal signals every process in its foreground group, so the
+    observer gets Ctrl-C and Ctrl-\\ along with the command, and not a
+    signal the command sends itself.
+    """
+
+    def __init__(self, proc: subprocess.Popen) -> None:
+        self._proc = proc
+        self._output = b""
+
+    @classmethod
+    def start(cls, pgid: int) -> _SignalObserver | None:
+        if not sys.executable:
+            return None
+        if sys.version_info >= (3, 11):
+            group: dict[str, Any] = {"process_group": pgid}
+        else:
+            group = {"preexec_fn": lambda: os.setpgid(0, pgid)}
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, "-I", "-S", "-c", _OBSERVER],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, **group,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        observer = cls(proc)
+        if b"ready" not in observer._read_until(b"ready"):
+            observer.close()
+            return None
+        return observer
+
+    def _read_until(self, marker: bytes) -> list[bytes]:
+        assert self._proc.stdout is not None
+        fd = self._proc.stdout.fileno()
+        deadline = time.monotonic() + OBSERVER_TIMEOUT
+        while marker not in self._output.split(b"\n"):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([fd], [], [], remaining)[0]:
+                break
+            data = os.read(fd, 1024)
+            if not data:
+                break
+            self._output += data
+        return self._output.split(b"\n")
+
+    def interrupts(self) -> set[int]:
+        """Stop the observer and return the interrupts it got."""
+        try:
+            self._proc.send_signal(signal.SIGUSR1)
+        except OSError:
+            pass
+        lines = self._read_until(b"done")
+        self.close()
+        return {int(line) for line in lines if line.isdigit()}
+
+    def close(self) -> None:
+        if self._proc.poll() is None:
+            try:
+                self._proc.kill()
+            except OSError:
+                pass
+        self._proc.wait()
+        if self._proc.stdout is not None:
+            self._proc.stdout.close()
+
+
 class CommandRunner:
     """Runs the command and passes on the stop signals agent-strace gets.
 
@@ -114,6 +215,8 @@ class CommandRunner:
         self._forwarded: list[int] = []
         self._pgid: int | None = None
         self._stopped = False
+        # The terminal interrupt that killed the command, if any.
+        self._interrupt: int | None = None
 
     def __enter__(self) -> CommandRunner:
         if os.name != "posix" or threading.current_thread() is not threading.main_thread():
@@ -136,6 +239,8 @@ class CommandRunner:
             except (OSError, TypeError, ValueError):
                 pass
         self._previous = {}
+        if self._interrupt is not None:
+            _interrupt_own_group(self._interrupt)
 
     def _on_signal(self, signum: int, frame: Any) -> None:
         self._received.append(signum)
@@ -168,6 +273,7 @@ class CommandRunner:
             return 128 + self._received[0]
         terminal = _Terminal.open()
         proc: subprocess.Popen | None = None
+        observer: _SignalObserver | None = None
         try:
             proc = _spawn_in_own_group(command, env)
             self._pgid = proc.pid
@@ -175,9 +281,16 @@ class CommandRunner:
             # command is in its own group, so none of them reached it.
             while self._pending:
                 self._forward(self._pending.pop(0))
-            if terminal is not None:
+            if terminal is not None and terminal.foreground() == os.getpgrp():
+                observer = _SignalObserver.start(proc.pid)
                 terminal.give(proc.pid)
             status = self._wait(proc, terminal)
+            if observer is not None:
+                # The command has exited, so a signal the terminal sent to
+                # its group is already pending in the observer.
+                interrupts = observer.interrupts()
+                observer = None
+                self._interrupt = _terminal_interrupt(status, interrupts, self._forwarded)
             if self._forwarded:
                 self._wait_for_group(proc.pid)
         except BaseException:
@@ -185,6 +298,8 @@ class CommandRunner:
                 _kill_group(proc)
             raise
         finally:
+            if observer is not None:
+                observer.close()
             if terminal is not None:
                 if proc is not None:
                     terminal.take_back(proc.pid)
@@ -267,6 +382,38 @@ def _spawn_in_own_group(command: list[str], env: Mapping[str, str]) -> subproces
     if sys.version_info >= (3, 11):
         return subprocess.Popen(command, env=env, process_group=0)
     return subprocess.Popen(command, env=env, preexec_fn=os.setpgrp)
+
+
+def _terminal_interrupt(status: int, observed: set[int], forwarded: list[int]) -> int | None:
+    """Return the interrupt from the terminal that killed the command, if any.
+
+    *status* is the command's wait status and *observed* the interrupts the
+    observer saw. A signal agent-strace forwarded also reaches the observer,
+    so after a forwarded signal there is no terminal interrupt to pass on.
+    """
+    if forwarded or not os.WIFSIGNALED(status):
+        return None
+    signum = os.WTERMSIG(status)
+    return signum if signum in observed & _INTERRUPTS else None
+
+
+def _interrupt_own_group(signum: int) -> None:
+    """Send the terminal's interrupt on to agent-strace's own group.
+
+    A shell running agent-strace in a script stops the script only if it
+    got the interrupt itself, as it would have if agent-strace had not
+    handed the terminal to the command. The handler agent-strace started
+    with decides what happens to agent-strace itself: an ignored signal
+    stays ignored and a handler set by the embedding program runs.
+    Python's own KeyboardInterrupt handler is replaced by the default
+    action, so agent-strace dies of the signal without a traceback.
+    """
+    try:
+        if signal.getsignal(signum) is signal.default_int_handler:
+            signal.signal(signum, signal.SIG_DFL)
+        os.killpg(os.getpgrp(), signum)
+    except (OSError, ValueError):
+        pass
 
 
 def _kill_group(proc: subprocess.Popen) -> None:
