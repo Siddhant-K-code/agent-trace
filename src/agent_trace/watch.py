@@ -2783,6 +2783,93 @@ def _duration_limit_kills(config: WatcherConfig) -> bool:
     )
 
 
+def _file_identity(stat: os.stat_result) -> tuple[int, int]:
+    return stat.st_dev, stat.st_ino
+
+
+class _EventsTail:
+    """Reads the complete lines appended to an events file since the last read.
+
+    The file is opened for each read and closed before the lines are
+    returned, so a tag_session rewrite can replace it on Windows too.
+
+    tag_session replaces the file with one that holds the same lines in the
+    same order, each rewritten with the tenant, so byte offsets move. The
+    tail therefore counts the non-blank lines it has read. When the path
+    names another file (device or inode changed), or the bytes just before
+    the read offset are no longer the last line read, it skips that many
+    non-blank lines from the start of the file and reads on from there.
+    When the file holds fewer lines than were read, as after a truncation,
+    it starts after the last complete line and replays nothing, so no rule
+    counts an event twice.
+
+    Only newline-terminated lines are read. A line still being written stays
+    in the file until its newline arrives.
+    """
+
+    def __init__(self, path: Path, identity: tuple[int, int]) -> None:
+        self.path = path
+        self.identity = identity
+        self.offset = 0
+        self.lines = 0
+        self.last_line = b""
+
+    def skip_to(self, f, end: int | None = None, lines: int | None = None) -> None:
+        """Move past complete lines from the start of *f*.
+
+        Stops at *end* bytes or after *lines* non-blank lines, whichever is
+        given, and never inside a line without its newline.
+        """
+        f.seek(0)
+        offset = count = 0
+        last = b""
+        for line in f:
+            if lines is not None and count >= lines:
+                break
+            if not line.endswith(b"\n") or (end is not None and offset + len(line) > end):
+                break
+            offset += len(line)
+            last = line
+            if line.strip():
+                count += 1
+        self.offset, self.lines, self.last_line = offset, count, last
+
+    def _unchanged(self, f) -> bool:
+        if not self.last_line:
+            return True
+        start = self.offset - len(self.last_line)
+        if start < 0:
+            return False
+        f.seek(start)
+        return f.read(len(self.last_line)) == self.last_line
+
+    def read(self) -> list[bytes]:
+        """Return the non-blank complete lines added since the last read."""
+        try:
+            f = open(self.path, "rb")
+        except OSError:
+            # The path may be missing for a moment while it is replaced.
+            return []
+        with f:
+            identity = _file_identity(os.fstat(f.fileno()))
+            if identity != self.identity or not self._unchanged(f):
+                self.identity = identity
+                self.skip_to(f, lines=self.lines)
+            f.seek(self.offset)
+            data = f.read()
+        complete = data[: data.rfind(b"\n") + 1]
+        if not complete:
+            return []
+        self.offset += len(complete)
+        found = []
+        for line in complete.split(b"\n")[:-1]:
+            self.last_line = line + b"\n"
+            if line.strip():
+                self.lines += 1
+                found.append(line)
+        return found
+
+
 def _tail_events(events_file: Path, poll_interval: float = 0.5):
     """Generator that yields TraceEvent objects or _IDLE_SENTINEL each poll cycle.
 
@@ -2792,26 +2879,30 @@ def _tail_events(events_file: Path, poll_interval: float = 0.5):
     Events already in the file are not yielded. When one of them is a
     SESSION_START with an absolute cwd, the first item is a _StartupCwd with
     the latest such cwd. It is read up to the offset the tail starts from, so
-    no event falls between the two.
+    no event falls between the two. A last line without its newline yet is
+    not read at startup; the tail yields it once it is complete.
+
+    The tail keeps reading when the file is replaced, as tag_session does;
+    see _EventsTail.
     """
-    with open(events_file, "r", encoding="utf-8") as f:
-        # Skip existing content — start from the end of the file
+    with open(events_file, "rb") as f:
         end = f.seek(0, 2)
+        tail = _EventsTail(events_file, _file_identity(os.fstat(f.fileno())))
         cwd = _startup_session_cwd(events_file, end)
-        if cwd:
-            yield _StartupCwd(cwd)
-        while True:
-            line = f.readline()
-            if line:
-                line = line.strip()
-                if line:
-                    try:
-                        yield TraceEvent.from_json(line)
-                    except Exception:
-                        pass
-            else:
-                time.sleep(poll_interval)
-                yield _IDLE_SENTINEL
+        tail.skip_to(f, end=end)
+    if cwd:
+        yield _StartupCwd(cwd)
+    while True:
+        lines = tail.read()
+        if not lines:
+            time.sleep(poll_interval)
+            yield _IDLE_SENTINEL
+            continue
+        for line in lines:
+            try:
+                yield TraceEvent.from_json(line.decode("utf-8").strip())
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
