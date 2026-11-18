@@ -1537,6 +1537,21 @@ upgrading.
 missing or unreadable baseline, so it can be used as a CI gate. See
 [production.md](production.md#baseline-anomaly-detection) for an example.
 
+`check` also scores a session with no end time, such as one that is still
+running or was crashed or killed (an agent that `watch` kills usually never
+records an end time). Its tool calls and LLM requests are the larger of the metadata
+counter and the matching events, its duration runs from the start to its last
+event, and its cost is priced from its events. These four only grow as a
+session runs, so for an open session they count only when above the mean; a
+value at or below the mean scores 0. Error rate is compared both ways. The
+header shows `open session`, and the exit status follows the same rule as for
+an ended session. Open sessions never go into a profile.
+
+A session that cannot be measured at all, because its metadata is missing,
+unreadable, or has non-numeric counters, is reported as `[UNSCORED]` with the
+reason, and `check` exits 1. Earlier versions reported it as `[OK]` and
+exited 0.
+
 ### `fingerprint`
 ```
 agent-strace fingerprint [--sessions N] [--output FILE] [--format text|json]

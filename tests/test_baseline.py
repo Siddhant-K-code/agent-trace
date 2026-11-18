@@ -343,6 +343,122 @@ class TestBaselineCost(unittest.TestCase):
         self.assertGreater(result.deviations["cost_usd"], result.sigma_threshold)
 
 
+class TestOpenSessions(unittest.TestCase):
+    """A session with no end time is scored on what it recorded so far."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.trace_dir = tmp.name
+        self.store = TraceStore(tmp.name)
+        for i, calls in enumerate((10, 11, 12, 13, 14)):
+            meta = SessionMeta(agent_name="normal")
+            meta.tool_calls = calls
+            meta.llm_requests = 2
+            meta.started_at = time.time() - 3600 * (i + 2)
+            meta.ended_at = meta.started_at + 60 + i
+            meta.total_duration_ms = (60 + i) * 1000.0
+            self.store.create_session(meta)
+            self.store.update_meta(meta)
+        self.profile = build_baseline(self.store, since_days=30)
+
+    def _open_session(self, tool_calls=0, tool_call_events=0, span_s=30.0) -> str:
+        meta = SessionMeta(agent_name="killed")
+        meta.tool_calls = tool_calls
+        meta.started_at = time.time() - 600
+        self.store.create_session(meta)
+        sid = meta.session_id
+        self.store.append_event(sid, TraceEvent(
+            event_type=EventType.SESSION_START, session_id=sid,
+            timestamp=meta.started_at,
+        ))
+        for n in range(tool_call_events):
+            self.store.append_event(sid, TraceEvent(
+                event_type=EventType.TOOL_CALL, session_id=sid,
+                timestamp=meta.started_at + 1 + n * 0.001,
+                data={"tool_name": "Bash", "arguments": {"command": "ls"}},
+            ))
+        self.store.append_event(sid, TraceEvent(
+            event_type=EventType.ASSISTANT_RESPONSE, session_id=sid,
+            timestamp=meta.started_at + span_s, data={"text": "working"},
+        ))
+        self.store.update_meta(meta)
+        return sid
+
+    def _cli_check(self, sid: str) -> tuple[int, AnomalyResult, str]:
+        path = os.path.join(self.trace_dir, "baseline.json")
+        save_baseline(self.profile, path)
+        args = build_parser().parse_args(
+            ["--trace-dir", self.trace_dir, "baseline", "check", sid, "--baseline", path]
+        )
+        with patch.object(AnomalyResult, "format", autospec=True) as fmt:
+            rc = cmd_baseline(args)
+        result = fmt.call_args.args[0]
+        out = io.StringIO()
+        result.format(out=out)
+        return rc, result, out.getvalue()
+
+    def test_runaway_open_session_is_flagged(self):
+        self.assertEqual(self.profile.session_count, 5)
+        sid = self._open_session(tool_calls=5000)
+        result = check_session(self.store, sid, self.profile, sigma=2.0)
+        self.assertTrue(result.scored)
+        self.assertTrue(result.open_session)
+        self.assertTrue(result.anomalous)
+        self.assertGreater(result.deviations["tool_calls"], 2.0)
+
+    def test_tool_call_events_count_when_counters_were_never_written(self):
+        # A proxy killed mid-run never writes its in-memory counters.
+        sid = self._open_session(tool_calls=0, tool_call_events=200)
+        result = check_session(self.store, sid, self.profile, sigma=2.0)
+        self.assertTrue(result.anomalous)
+        self.assertGreater(result.deviations["tool_calls"], 2.0)
+
+    def test_duration_runs_to_last_event(self):
+        sid = self._open_session(tool_calls=12, span_s=3600.0)
+        result = check_session(self.store, sid, self.profile, sigma=2.0)
+        self.assertTrue(result.anomalous)
+        self.assertGreater(result.deviations["duration_ms"], 2.0)
+        self.assertEqual(result.deviations["tool_calls"], 0.0)
+
+    def test_session_below_the_mean_so_far_is_not_flagged(self):
+        sid = self._open_session(tool_calls=1, span_s=5.0)
+        result = check_session(self.store, sid, self.profile, sigma=2.0)
+        self.assertTrue(result.scored)
+        self.assertTrue(result.open_session)
+        self.assertFalse(result.anomalous)
+        self.assertEqual(result.deviations["tool_calls"], 0.0)
+        self.assertEqual(result.deviations["duration_ms"], 0.0)
+
+    def test_cli_exits_1_and_marks_open_session(self):
+        sid = self._open_session(tool_calls=5000)
+        rc, result, text = self._cli_check(sid)
+        self.assertEqual(rc, 1)
+        self.assertIn("[ANOMALOUS]", text)
+        self.assertIn("open session", text)
+
+    def test_cli_marks_typical_open_session(self):
+        sid = self._open_session(tool_calls=1, span_s=5.0)
+        rc, result, text = self._cli_check(sid)
+        self.assertEqual(rc, 0)
+        self.assertIn("[OK]  open session", text)
+        self.assertIn("No end time recorded", text)
+
+    def test_unmeasurable_session_is_unscored_not_ok(self):
+        sid = self._open_session(tool_calls=5000)
+        meta_path = Path(self.trace_dir) / sid / "meta.json"
+        raw = json.loads(meta_path.read_text())
+        raw["tool_calls"] = "many"
+        meta_path.write_text(json.dumps(raw))
+        rc, result, text = self._cli_check(sid)
+        self.assertEqual(rc, 1)
+        self.assertFalse(result.scored)
+        self.assertFalse(result.anomalous)
+        self.assertIn("[UNSCORED]", text)
+        self.assertIn("non-numeric counters", text)
+        self.assertNotIn("[OK]", text)
+
+
 class TestBaselineFromCodexFixture(unittest.TestCase):
     """A baseline of replayed Codex hook recordings prices their recorded usage."""
 
