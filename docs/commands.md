@@ -209,7 +209,8 @@ read back to the exact prompt. `inspect`, `approval show`,
 `regression --format json`, `annotate --list --export-format json`,
 `timeline --format json` and `compare --format json` print JSON with the raw
 text. Every JSON and CSV output keeps the raw text, and so do the fingerprint
-files that `fingerprint --output` and `drift --save-baseline` write.
+files that `fingerprint --output` and `drift --save-baseline` write, and the
+`postmortem.md` file that `postmortem` writes.
 
 ### `replay`
 ```
