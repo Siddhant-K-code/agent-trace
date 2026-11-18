@@ -18,6 +18,7 @@ from typing import TextIO
 
 from .diff import compare_sessions, format_compare, CompareReport
 from .event_data import require_object_event_data
+from .inert import inert
 from .models import EventType, SessionMeta
 from .store import TraceStore
 
@@ -159,6 +160,18 @@ def _get_user_prompt(store: TraceStore, session_id: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 def cmd_compare(args: argparse.Namespace) -> int:
+    """Compare two sessions and write the report.
+
+    The stored prompt that --rerun prints goes through inert() one line at a
+    time, and each of its lines starts with two spaces, so no line of it can
+    pass for a line of the message. Its lines, spaces and indentation stay,
+    and an escape code, a tab or a CR in it shows as text. Each backslash in
+    it shows as two first, so every backslash on a printed line starts an
+    escape, and a tab and a typed backslash-t print differently. Read as a
+    Python string literal, each printed line gives back its line of the
+    prompt. The text of a failed comparison goes through inert() after each
+    run of whitespace becomes one space.
+    """
     store = TraceStore(args.trace_dir)
     fmt = getattr(args, "format", "text")
     tag = getattr(args, "tag", None)
@@ -213,9 +226,14 @@ def cmd_compare(args: argparse.Namespace) -> int:
                     "Cannot --rerun without a recorded prompt.\n"
                 )
                 return 1
+            shown = "\n".join(
+                "  " + inert(line.replace("\\", "\\\\"))
+                for line in str(prompt).split("\n")
+            )
             sys.stderr.write(
                 f"[compare] --rerun is not yet automated. "
-                f"Original prompt for {session_a[:12]}:\n\n{prompt}\n\n"
+                f"Original prompt for {session_a[:12]}:\n\n"
+                f"{shown}\n\n"
                 "Run the agent with this prompt, then compare the two sessions manually.\n"
             )
             return 1
@@ -234,7 +252,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
     try:
         report = compare_sessions(store, session_a, session_b)
     except Exception as exc:
-        sys.stderr.write(f"[compare] Failed: {exc}\n")
+        sys.stderr.write(f"[compare] Failed: {inert(' '.join(str(exc).split()))}\n")
         return 1
 
     for session_id in (session_a, session_b):

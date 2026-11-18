@@ -27,6 +27,7 @@ from .cost import (
 from .event_data import object_field, require_object_event_data, str_field
 from .explain import PHASE_DATA_EVENT_TYPES, ExplainResult, Phase, explain_session
 from .failures import SessionErrors, response_failure, session_errors
+from .inert import inert
 from .models import EventType, TraceEvent
 from .pairing import Pairer, tool_pairer
 from .store import TraceStore
@@ -408,8 +409,31 @@ def _status_icon(status: str) -> str:
     return {"ok": "✓", "fail": "✗", "cancelled": "⊘", "info": "·"}.get(status, "·")
 
 
+# Entries whose detail is free text: a prompt, a response, an error message
+# or a decision reason. Every other detail holds a command, a path, a model
+# or a count, so a line break in it shows as an escape.
+_FREE_TEXT_DETAIL_LABELS = frozenset({
+    "User prompt",
+    "Response",
+    "Error",
+    "LLM response failed",
+    "LLM response cancelled",
+})
+_FREE_TEXT_DETAIL_PREFIXES = ("Error: ", "Decision: ")
+
+
+def _detail_is_free_text(label: str) -> bool:
+    return label in _FREE_TEXT_DETAIL_LABELS or label.startswith(_FREE_TEXT_DETAIL_PREFIXES)
+
+
 def format_timeline(result: TimelineResult, out: TextIO = sys.stdout) -> None:
-    """Write a human-readable timeline to *out*."""
+    """Write a human-readable timeline to *out*.
+
+    Each value from the trace goes through inert(), so an escape code or a
+    line break in it shows as text. In free text, such as a phase name, a
+    prompt or an error message, each run of whitespace becomes one space
+    first.
+    """
     w = out.write
 
     started = datetime.fromtimestamp(result.started_at, tz=timezone.utc)
@@ -429,15 +453,19 @@ def format_timeline(result: TimelineResult, out: TextIO = sys.stdout) -> None:
         time_range = f"{_fmt_offset(phase.start_offset)}–{_fmt_offset(phase.end_offset)}"
         failed_tag = " — FAILED" if phase.failed else ""
         cost_tag = f"  ${phase.total_cost:.4f}" if phase.total_cost else ""
-        w(f"Phase {phase.index}: {phase.name}{failed_tag} ({time_range}){cost_tag}\n")
+        name = inert(" ".join(phase.name.split()))
+        w(f"Phase {phase.index}: {name}{failed_tag} ({time_range}){cost_tag}\n")
 
         for entry in phase.entries:
             icon = _status_icon(entry.status)
             dur = _fmt_duration(entry.duration_ms)
             cost = f"  ${entry.cost:.4f}" if entry.cost >= 0.0001 else ""
-            w(f"  {icon} {entry.label}{dur}{cost}\n")
+            w(f"  {icon} {inert(entry.label)}{dur}{cost}\n")
             if entry.detail:
-                w(f"      {entry.detail}\n")
+                detail = entry.detail
+                if _detail_is_free_text(entry.label):
+                    detail = " ".join(detail.split())
+                w(f"      {inert(detail)}\n")
 
         if phase.retry_count:
             w(f"\n  ⚠ {phase.retry_count} retr{'ies' if phase.retry_count != 1 else 'y'} in this phase\n")

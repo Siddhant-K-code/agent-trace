@@ -121,6 +121,7 @@ from .why import cmd_why
 from .event_data import NonObjectEventDataError, require_object_event_data, str_field
 from .failures import llm_failure, session_errors
 from .http_post import parse_header, url_problem
+from .inert import inert
 from .models import EventType, SessionMeta, TraceEvent
 from .proxy import MCPProxy
 from .replay import format_event, format_summary, list_sessions, replay_session
@@ -703,13 +704,13 @@ def cmd_stats(args: argparse.Namespace) -> int:
                 durations = tool_durations[name]
                 avg = sum(durations) / len(durations)
                 avg_ms = f"  avg: {avg:.0f}ms"
-            print(f"    {name:<30} {count:>4}x{avg_ms}")
+            print(f"    {inert(name):<30} {count:>4}x{avg_ms}")
 
     subagents = [sub for sub in in_session_subagents(events) if sub.tool_calls or sub.errors]
     if subagents:
         print(f"\n  Subagent Tool Calls:")
         for sub in subagents:
-            label = f"{sub.agent_type} {short_agent_id(sub.agent_id)}".strip()
+            label = f"{inert(sub.agent_type)} {inert(short_agent_id(sub.agent_id))}".strip()
             errors_str = f"  {sub.errors} errors" if sub.errors else ""
             print(f"    {label:<30} {sub.tool_calls:>4}x{errors_str}")
 
@@ -728,7 +729,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
                 failure = llm_failure(e)
                 detail = failure.message if failure else ""
                 msg = f"model request failed: {detail or 'no message'}"
-            print(f"    {msg[:80]}")
+            print(f"    {inert(' '.join(msg.split())[:80])}")
 
     print()
     return 0

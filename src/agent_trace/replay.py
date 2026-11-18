@@ -500,12 +500,14 @@ def list_sessions(
 
         err_color = C.RED if meta.errors > 0 else C.DIM
 
+        # meta.json may hold text where a count belongs, so the counts go
+        # through inert() like any other recorded value.
         out.write(
             f"  {meta.session_id:<18} "
             f"{started_str:<26} "
             f"{duration_str} "
-            f"{meta.tool_calls:>6} "
-            f"{meta.llm_requests:>5} "
+            f"{inert(meta.tool_calls):>6} "
+            f"{inert(meta.llm_requests):>5} "
             f"{err_color}{meta.errors:>4}{C.RESET}\n"
         )
 

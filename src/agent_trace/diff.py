@@ -19,6 +19,7 @@ from typing import TextIO
 
 from .event_data import object_field, require_object_event_data, str_field
 from .explain import PHASE_DATA_EVENT_TYPES, Phase, build_phases, explain_session
+from .inert import inert
 from .models import EventType
 from .store import TraceStore
 
@@ -190,6 +191,12 @@ def _fmt_duration(s: float) -> str:
 
 
 def format_diff(result: SessionDiff, out: TextIO = sys.stdout) -> None:
+    """Write the structural diff to *out*.
+
+    Each value from the trace goes through inert(), so an escape code or a
+    line break in it shows as text. In the phase name, each run of whitespace
+    becomes one space first.
+    """
     w = out.write
     a = result.session_a[:12]
     b = result.session_b[:12]
@@ -209,7 +216,7 @@ def format_diff(result: SessionDiff, out: TextIO = sys.stdout) -> None:
                 or pd.a_failed != pd.b_failed):
             continue
 
-        w(f"  Phase {pd.index + 1}: {pd.label_a}\n")
+        w(f"  Phase {pd.index + 1}: {inert(' '.join(pd.label_a.split()))}\n")
 
         if pd.a_failed and not pd.b_failed:
             w(f"    {a}: FAILED    {b}: passed\n")
@@ -217,22 +224,22 @@ def format_diff(result: SessionDiff, out: TextIO = sys.stdout) -> None:
             w(f"    {a}: passed    {b}: FAILED\n")
 
         for f in pd.cmds_only_a:
-            w(f"    {a} only:  $ {f[:70]}\n")
+            w(f"    {a} only:  $ {inert(f[:70])}\n")
         for f in pd.cmds_only_b:
-            w(f"    {b} only:  $ {f[:70]}\n")
+            w(f"    {b} only:  $ {inert(f[:70])}\n")
         for f in pd.files_only_a:
-            w(f"    {a} only:  {f}\n")
+            w(f"    {a} only:  {inert(f)}\n")
         for f in pd.files_only_b:
-            w(f"    {b} only:  {f}\n")
+            w(f"    {b} only:  {inert(f)}\n")
         w("\n")
 
     w(f"  {a}: {_fmt_duration(result.duration_a)}, "
       f"{result.events_a} events, "
-      f"{result.tool_calls_a} tools, "
+      f"{inert(result.tool_calls_a)} tools, "
       f"{result.retries_a} retries\n")
     w(f"  {b}: {_fmt_duration(result.duration_b)}, "
       f"{result.events_b} events, "
-      f"{result.tool_calls_b} tools, "
+      f"{inert(result.tool_calls_b)} tools, "
       f"{result.retries_b} retries\n\n")
 
 
@@ -393,6 +400,11 @@ def _pct_change(a: float, b: float) -> str:
 
 
 def format_semantic_diff(report: SemanticDiffReport, out: TextIO = sys.stdout) -> None:
+    """Write the semantic diff to *out*.
+
+    Each value from the trace, the session meta or the eval config goes
+    through inert(), so an escape code or a line break in it shows as text.
+    """
     w = out.write
     a = report.session_a[:12]
     b = report.session_b[:12]
@@ -404,7 +416,7 @@ def format_semantic_diff(report: SemanticDiffReport, out: TextIO = sys.stdout) -
 
     def _row(label: str, va, vb, fmt=str, lower_better: bool = True) -> None:
         change = _pct_change(float(va), float(vb)) if isinstance(va, (int, float)) else ""
-        w(f"  {label:<30}  {fmt(va):>12}  {fmt(vb):>12}  {change:>8}\n")
+        w(f"  {label:<30}  {inert(fmt(va)):>12}  {inert(fmt(vb)):>12}  {change:>8}\n")
 
     _row("Duration", _fmt_duration(report.duration_a), _fmt_duration(report.duration_b), fmt=str)
     _row("Cost", f"${report.cost_a:.4f}", f"${report.cost_b:.4f}", fmt=str)
@@ -416,11 +428,11 @@ def format_semantic_diff(report: SemanticDiffReport, out: TextIO = sys.stdout) -
 
     def _file_rows(label: str, both: list, a_only: list, b_only: list) -> None:
         if both:
-            w(f"  {label} (both)    {', '.join(both[:3])}{'...' if len(both)>3 else ''}\n")
+            w(f"  {label} (both)    {inert(', '.join(both[:3]))}{'...' if len(both)>3 else ''}\n")
         for f in a_only[:3]:
-            w(f"  {label} (A only)  {f}\n")
+            w(f"  {label} (A only)  {inert(f)}\n")
         for f in b_only[:3]:
-            w(f"  {label} (B only)  {f}\n")
+            w(f"  {label} (B only)  {inert(f)}\n")
 
     _file_rows("Files read", report.files_read_both, report.files_read_a_only, report.files_read_b_only)
     _file_rows("Files written", report.files_written_both, report.files_written_a_only, report.files_written_b_only)
@@ -432,10 +444,10 @@ def format_semantic_diff(report: SemanticDiffReport, out: TextIO = sys.stdout) -
         for scorer in all_scorers:
             sa = report.eval_scores_a.get(scorer, "n/a")
             sb = report.eval_scores_b.get(scorer, "n/a")
-            w(f"  Eval {scorer:<25}  {str(sa):>12}  {str(sb):>12}\n")
+            w(f"  Eval {inert(scorer):<25}  {inert(sa):>12}  {inert(sb):>12}\n")
 
     w("─" * 69 + "\n")
-    w(f"  Verdict: {report.verdict}\n\n")
+    w(f"  Verdict: {inert(report.verdict)}\n\n")
 
 
 # ---------------------------------------------------------------------------
@@ -630,9 +642,14 @@ def compare_sessions(
 
 
 def format_compare(report: CompareReport, out: TextIO = sys.stdout) -> None:
+    """Write the side-by-side comparison to *out*.
+
+    Each value from the trace or the session meta goes through inert(), so
+    an escape code or a line break in it shows as text.
+    """
     w = out.write
-    la = report.label_a[:18]
-    lb = report.label_b[:18]
+    la = inert(report.label_a[:18])
+    lb = inert(report.label_b[:18])
     sep = "─" * 65
 
     w(f"\nSession Comparison\n{sep}\n")
@@ -650,7 +667,7 @@ def format_compare(report: CompareReport, out: TextIO = sys.stdout) -> None:
              same_note: str = "") -> None:
         change = _pct(raw_a, raw_b) if raw_a or raw_b else ""
         note = f"  ({same_note})" if same_note else ""
-        w(f"  {label:<30}  {va:>16}  {vb:>16}  {change:>8}{note}\n")
+        w(f"  {label:<30}  {inert(va):>16}  {inert(vb):>16}  {change:>8}{note}\n")
 
     def _fmt_dur(s: float) -> str:
         if s < 60:
@@ -683,11 +700,11 @@ def format_compare(report: CompareReport, out: TextIO = sys.stdout) -> None:
     if report.divergence_points:
         w("Approach divergence:\n")
         for step, da, db in report.divergence_points:
-            w(f"  Step {step}: {report.label_a[:10]} — {da[:50]}\n")
-            w(f"         {report.label_b[:10]} — {db[:50]}\n")
+            w(f"  Step {step}: {inert(report.label_a[:10])} — {inert(da[:50])}\n")
+            w(f"         {inert(report.label_b[:10])} — {inert(db[:50])}\n")
         w(f"{sep}\n")
 
-    w(f"Verdict: {report.verdict}\n{sep}\n\n")
+    w(f"Verdict: {inert(report.verdict)}\n{sep}\n\n")
 
 
 # ---------------------------------------------------------------------------

@@ -19,6 +19,7 @@ from typing import TextIO
 from .cost import estimate_cost
 from .event_data import object_field, require_object_event_data, str_field
 from .explain import explain_session
+from .inert import inert
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -57,6 +58,10 @@ class PostmortemReport:
     crash_reason: str = ""
     crash_detail: str = ""
     recovery_context: str = ""
+    # The lines of recovery_context as analyze_session made them. A line
+    # break in a value stays inside its line, so format_postmortem shows it
+    # as an escape instead of a new line.
+    recovery_lines: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -498,7 +503,9 @@ def _build_recovery_context(
     session_id: str,
     events: list[TraceEvent],
     crash: CrashInfo | None,
-) -> str:
+) -> list[str]:
+    """Return the recovery context, one line per item. A value from the
+    trace stays inside its line, even when it holds a line break."""
     reason = crash.reason if crash else "failure"
     detail = crash.detail if crash else "See the root cause and timeline above."
     last_action = _last_action(events)
@@ -522,7 +529,7 @@ def _build_recovery_context(
         "Resume by inspecting the files above, checking for partial writes, "
         "then continue from the last recorded action."
     )
-    return "\n".join(lines)
+    return lines
 
 
 def write_crash_postmortem(
@@ -717,7 +724,7 @@ def analyze_session(
         "root_cause": root_cause_desc,
         "retry_count": retry_count,
     })
-    recovery_context = _build_recovery_context(session_id, events, crash) if failed else ""
+    recovery_lines = _build_recovery_context(session_id, events, crash) if failed else []
 
     return PostmortemReport(
         session_id=session_id,
@@ -734,7 +741,8 @@ def analyze_session(
         agents_md_violations=violations,
         crash_reason=crash.reason if crash else "",
         crash_detail=crash.detail if crash else "",
-        recovery_context=recovery_context,
+        recovery_context="\n".join(recovery_lines),
+        recovery_lines=recovery_lines,
     )
 
 
@@ -749,12 +757,24 @@ def _fmt_offset(seconds: float) -> str:
 
 
 def format_postmortem(report: PostmortemReport, out: TextIO = sys.stdout) -> None:
+    """Write the postmortem to *out*.
+
+    Each value from the trace or AGENTS.md goes through inert(), so an
+    escape code or a line break in it shows as text. In free text, such as
+    the root cause or a recommendation, each run of whitespace becomes one
+    space first. The recovery context goes through inert() one line at a
+    time, as _build_recovery_context made the lines, so a line break in a
+    value there cannot start a line of its own. When recovery_context does
+    not match recovery_lines, for example because a caller set it, only an
+    LF in it starts a line.
+    """
     w = out.write
     w(f"\nPOSTMORTEM: Session {report.session_id}\n")
-    w(f"Status:     {report.status_summary}\n")
-    w(f"Root cause: {report.root_cause}\n\n")
+    w(f"Status:     {inert(' '.join(report.status_summary.split()))}\n")
+    w(f"Root cause: {inert(' '.join(report.root_cause.split()))}\n\n")
     if report.crash_reason:
-        w(f"Crash:      {report.crash_reason} — {report.crash_detail}\n\n")
+        detail = inert(" ".join(report.crash_detail.split()))
+        w(f"Crash:      {inert(report.crash_reason)} — {detail}\n\n")
 
     w("Timeline:\n")
     for entry in report.timeline:
@@ -766,7 +786,7 @@ def format_postmortem(report: PostmortemReport, out: TextIO = sys.stdout) -> Non
             suffix = "  ← retry"
         elif entry.is_failure:
             suffix = "  ← failure"
-        w(f"  {ts:>6}  {entry.description}{suffix}\n")
+        w(f"  {ts:>6}  {inert(entry.description)}{suffix}\n")
 
     w("\n")
 
@@ -779,21 +799,30 @@ def format_postmortem(report: PostmortemReport, out: TextIO = sys.stdout) -> Non
     if report.agents_md_violations:
         w("\nAGENTS.md violations:\n")
         for v in report.agents_md_violations:
-            w(f"  - {v}\n")
+            w(f"  - {inert(v)}\n")
 
     if report.recovery_context:
+        lines = report.recovery_lines
+        if "\n".join(lines) != report.recovery_context:
+            lines = report.recovery_context.split("\n")
         w("\nRecovery context:\n")
-        for line in report.recovery_context.splitlines():
-            w(f"  {line}\n" if line else "\n")
+        for line in lines:
+            w(f"  {inert(line)}\n" if line else "\n")
 
     w("\nRecommendations:\n")
     for i, rec in enumerate(report.recommendations, 1):
-        w(f"  {i}. {rec}\n")
+        w(f"  {i}. {inert(' '.join(rec.split()))}\n")
 
     w("\n")
 
 
 def format_crash_list(crashes: list[CrashInfo], out: TextIO = sys.stdout) -> None:
+    """Write the crashed sessions to *out*.
+
+    The reason and the detail go through inert(), so an escape code in them
+    shows as text. In the detail, each run of whitespace becomes one space
+    first.
+    """
     w = out.write
     if not crashes:
         w("No crashed sessions found.\n")
@@ -805,8 +834,8 @@ def format_crash_list(crashes: list[CrashInfo], out: TextIO = sys.stdout) -> Non
     for crash in crashes:
         stale = f"{crash.stale_seconds:.0f}s" if crash.stale_seconds else "-"
         w(
-            f"{crash.session_id:<18} {crash.reason:<22} {stale:>8}  "
-            f"{crash.detail[:70]}\n"
+            f"{crash.session_id:<18} {inert(crash.reason):<22} {stale:>8}  "
+            f"{inert(' '.join(crash.detail.split())[:70])}\n"
         )
     w("\n")
 

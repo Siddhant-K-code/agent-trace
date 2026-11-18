@@ -191,20 +191,25 @@ Traces keep the raw text, which can hold escape codes and line breaks.
 `cost`, `fingerprint`, `drift`, `skills`, `token-budget`, `budget-report`,
 `team-report`, `regression`, `annotate --list`, `optimize`, `audit`, `verify`,
 `policy generate`, `policy backtest`, `policy diff`, `policy coverage`,
-`mcp-scan` and `a2a-tree` show each character that Python's `str.isprintable()`
+`mcp-scan`, `a2a-tree`, `why`, `timeline`, `diff`, `compare`, `postmortem`,
+`stats` and `list` show each character that Python's `str.isprintable()`
 rejects as its escape, such as `\x1b`, `\n` or `\u202e`, so recorded text cannot
 move the cursor, hide a command or write to the clipboard. `pr-comment` posts
 the same escapes, so a bidi control cannot make one path look like another on
 the pull request. In the Markdown from `review --format markdown` and
 `pr-comment`, CR and LF show as spaces. In prompts, responses, tool output,
 error messages, reasons, annotation notes, cluster descriptions, `standup`
-uncertainty lines, phase names, hint phrases, test results and A2A tasks, each
-run of whitespace shows as one space instead. The `optimize` preview keeps each
-line of the proposed addition on its own `+` line. `inspect`, `approval show`,
+uncertainty lines, phase names, hint phrases, test results, A2A tasks and the
+`postmortem` root cause and recommendations, each run of whitespace shows as
+one space instead. The `optimize` preview keeps each line of the proposed
+addition on its own `+` line. The prompt that `compare --rerun` prints keeps
+its lines and indentation, and shows each backslash as `\\`, so its escapes
+read back to the exact prompt. `inspect`, `approval show`,
 `review --format json`, `cognitive-debt --format json`,
-`regression --format json` and `annotate --list --export-format json` print JSON
-with the raw text. Every JSON and CSV output keeps the raw text, and so do the
-fingerprint files that `fingerprint --output` and `drift --save-baseline` write.
+`regression --format json`, `annotate --list --export-format json`,
+`timeline --format json` and `compare --format json` print JSON with the raw
+text. Every JSON and CSV output keeps the raw text, and so do the fingerprint
+files that `fingerprint --output` and `drift --save-baseline` write.
 
 ### `replay`
 ```
