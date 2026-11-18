@@ -182,6 +182,14 @@ def _parent_depth(store: TraceStore, parent_session_id: str) -> int:
 
 def cmd_record(args: argparse.Namespace) -> int:
     """Record an MCP server session."""
+    server_cmd = args.server_cmd
+    # Strip leading '--' separator added by argparse REMAINDER
+    if server_cmd and server_cmd[0] == "--":
+        server_cmd = server_cmd[1:]
+    if not server_cmd:
+        sys.stderr.write("agent-strace: record needs a server command, as in: record -- <command>\n")
+        return 2
+
     # Read the budget before the store is opened: a budget config that
     # cannot be used is refused, and nothing is written, not even the trace
     # directory's .gitignore.
@@ -195,11 +203,6 @@ def cmd_record(args: argparse.Namespace) -> int:
         store, budget_config, sys.stderr
     ):
         return 1
-
-    server_cmd = args.server_cmd
-    # Strip leading '--' separator added by argparse REMAINDER
-    if server_cmd and server_cmd[0] == "--":
-        server_cmd = server_cmd[1:]
 
     parent_session_id = _resolve_parent_session_id(store, args)
     meta = SessionMeta(

@@ -23,7 +23,9 @@ forwarded, and the next one is traced as usual.
 
 from __future__ import annotations
 
+import io
 import json
+import signal
 import subprocess
 import sys
 import threading
@@ -328,6 +330,34 @@ def _trace_message(
         _note_untraced(type(exc).__name__)
 
 
+def _save_without_parent(
+    store: TraceStore, meta: SessionMeta, refusal: ValueError
+) -> bool:
+    """Save meta without the parent link that the store refused.
+
+    Writes one line to stderr when the link is dropped. Returns False, with
+    meta unchanged, if there is no link or the save fails anyway.
+    """
+    from .inert import inert
+
+    parent_session_id = meta.parent_session_id
+    parent_event_id = meta.parent_event_id
+    if not parent_session_id:
+        return False
+    meta.parent_session_id = meta.parent_event_id = ""
+    try:
+        store.update_meta(meta)
+    except (ValueError, OSError):
+        meta.parent_session_id = parent_session_id
+        meta.parent_event_id = parent_event_id
+        return False
+    sys.stderr.write(
+        f"agent-strace: dropped the link to parent session "
+        f"{inert(parent_session_id)}: {inert(refusal)}\n"
+    )
+    return True
+
+
 class MCPProxy:
     """Proxies stdio between agent and MCP server, capturing traces."""
 
@@ -375,17 +405,18 @@ class MCPProxy:
         dest: IO[bytes],
         direction: str,
         stop_event: threading.Event,
-    ) -> None:
+    ) -> bool:
         """Read messages from source, trace them, forward to dest.
 
         Tracing never stops the relay: a message that cannot be traced is
-        still forwarded.
+        still forwarded. Sets ``stop_event`` when the relay ends. Returns
+        True when source ran out, False when dest could not take a message.
         """
         while not stop_event.is_set():
             message = _read_message(source)
             if message is None:
                 stop_event.set()
-                break
+                return True
 
             # trace the message, or each message of a batch
             if message.error:
@@ -397,63 +428,13 @@ class MCPProxy:
             # forward the message
             try:
                 _write_message(dest, message)
-            except (BrokenPipeError, OSError):
+            except (OSError, ValueError):
                 stop_event.set()
-                break
+                return False
+        return True
 
-    def run(self) -> int:
-        """Start the proxy. Blocks until the server exits."""
-        # emit session start
-        self._emit(
-            TraceEvent(
-                event_type=EventType.SESSION_START,
-                data={"command": self.server_command},
-            )
-        )
-
-        proc = subprocess.Popen(
-            self.server_command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-
-        stop = threading.Event()
-
-        # agent stdin -> server stdin
-        t_in = threading.Thread(
-            target=self._forward_and_trace,
-            args=(sys.stdin.buffer, proc.stdin, "agent_to_server", stop),
-            daemon=True,
-        )
-
-        # server stdout -> agent stdout
-        t_out = threading.Thread(
-            target=self._forward_and_trace,
-            args=(proc.stdout, sys.stdout.buffer, "server_to_agent", stop),
-            daemon=True,
-        )
-
-        # server stderr -> agent stderr (passthrough, no tracing)
-        def forward_stderr():
-            while not stop.is_set():
-                line = proc.stderr.readline()
-                if not line:
-                    break
-                sys.stderr.buffer.write(line)
-                sys.stderr.buffer.flush()
-
-        t_err = threading.Thread(target=forward_stderr, daemon=True)
-
-        t_in.start()
-        t_out.start()
-        t_err.start()
-
-        # wait for server to exit
-        returncode = proc.wait()
-        stop.set()
-
-        # finalize session
+    def _end_session(self, returncode: int) -> int:
+        """Record the session end and save the final metadata."""
         self.meta.ended_at = time.time()
         self.meta.total_duration_ms = (self.meta.ended_at - self.meta.started_at) * 1000
 
@@ -467,5 +448,225 @@ class MCPProxy:
             )
         )
 
-        self.store.update_meta(self.meta)
+        # A parent the store refuses now, such as one deleted while the
+        # proxy ran, must not cost the end time and counters.
+        try:
+            self.store.update_meta(self.meta)
+        except ValueError as exc:
+            if not _save_without_parent(self.store, self.meta, exc):
+                raise
         return returncode
+
+    def _start_failed(self, exc: Exception) -> int:
+        """Report a server that could not start and end the session."""
+        if isinstance(exc, FileNotFoundError):
+            returncode = 127
+        elif isinstance(exc, PermissionError):
+            returncode = 126
+        else:
+            returncode = 1
+        message = f"could not start the MCP server: {exc}"
+        try:
+            sys.stderr.write(f"agent-strace: {message}\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+        self._emit(TraceEvent(event_type=EventType.ERROR, data={"message": message}))
+        return self._end_session(returncode)
+
+    def run(self) -> int:
+        """Start the proxy. Blocks until the server exits.
+
+        The session ends when the server exits, or when the proxy stops the
+        server because the agent stopped reading or record got SIGTERM or
+        SIGINT. When the agent closes its side of stdin, the server's stdin
+        is closed too, so the server sees the end of input. Server output is
+        relayed until the server closes it, before the session end is
+        recorded.
+        """
+        # emit session start
+        self._emit(
+            TraceEvent(
+                event_type=EventType.SESSION_START,
+                data={"command": self.server_command},
+            )
+        )
+
+        try:
+            proc = subprocess.Popen(
+                self.server_command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except (OSError, ValueError) as exc:
+            return self._start_failed(exc)
+
+        agent_in, agent_out, agent_err = _agent_streams()
+        # Set when the agent stops reading or record is asked to stop.
+        stop_server = threading.Event()
+        signals: list[int] = []
+
+        def on_signal(signum: int, frame: Any) -> None:
+            signals.append(signum)
+            stop_server.set()
+
+        # agent stdin -> server stdin. When the agent's input ends, or the
+        # server stops taking it, the server's stdin is closed so the server
+        # sees the end of input.
+        def forward_in() -> None:
+            self._forward_and_trace(agent_in, proc.stdin, "agent_to_server", threading.Event())
+            try:
+                proc.stdin.close()
+            except (OSError, ValueError):
+                pass
+
+        # server stdout -> agent stdout, until the server closes it.
+        def forward_out() -> None:
+            if not self._forward_and_trace(
+                proc.stdout, agent_out, "server_to_agent", threading.Event()
+            ):
+                stop_server.set()
+
+        # server stderr -> agent stderr (passthrough, no tracing). Read to the
+        # end even if the agent's stderr is gone, so the server never blocks.
+        def forward_stderr() -> None:
+            writable = True
+            while True:
+                line = proc.stderr.readline()
+                if not line:
+                    break
+                if writable:
+                    try:
+                        agent_err.write(line)
+                        agent_err.flush()
+                    except (OSError, ValueError):
+                        writable = False
+
+        previous_handlers = _handle_stop_signals(on_signal)
+        try:
+            t_in = threading.Thread(target=forward_in, daemon=True)
+            t_out = threading.Thread(target=forward_out, daemon=True)
+            t_err = threading.Thread(target=forward_stderr, daemon=True)
+            t_in.start()
+            t_out.start()
+            t_err.start()
+
+            returncode = _wait_for_server(proc, stop_server)
+
+            # A server that exited has closed its output, unless a child it
+            # started still holds it, so the wait is bounded.
+            t_out.join(DRAIN_TIMEOUT)
+            t_err.join(DRAIN_TIMEOUT)
+
+            self._end_session(returncode)
+        finally:
+            _restore_signal_handlers(previous_handlers)
+        # Like a shell, report the signal that stopped record.
+        if signals:
+            return 128 + signals[0]
+        return returncode
+
+
+# Seconds to wait for server output after the server exits, and for a server
+# to exit after it is asked to stop.
+DRAIN_TIMEOUT = 5.0
+STOP_TIMEOUT = 5.0
+
+
+# Signals that stop record. The server is stopped and the session ended.
+STOP_SIGNALS = ("SIGTERM", "SIGINT")
+
+
+def _handle_stop_signals(handler: Callable[[int, Any], None]) -> dict[int, Any]:
+    """Install handler for the stop signals. Returns the handlers it replaced.
+
+    A signal record was started with ignored stays ignored. Signal handlers
+    can only be set in the main thread. Elsewhere nothing is installed.
+    """
+    previous: dict[int, Any] = {}
+    if threading.current_thread() is not threading.main_thread():
+        return previous
+    for name in STOP_SIGNALS:
+        signum = getattr(signal, name, None)
+        if signum is None:
+            continue
+        try:
+            if signal.getsignal(signum) == signal.SIG_IGN:
+                continue
+            previous[signum] = signal.signal(signum, handler)
+        except (OSError, ValueError):
+            pass
+    return previous
+
+
+def _restore_signal_handlers(previous: dict[int, Any]) -> None:
+    for signum, handler in previous.items():
+        try:
+            signal.signal(signum, handler)
+        except (OSError, TypeError, ValueError):
+            pass
+
+
+def _wait_for_server(proc: subprocess.Popen, stop_server: threading.Event) -> int:
+    """Wait for the server to exit, or stop it once stop_server is set.
+
+    A server asked to stop gets STOP_TIMEOUT seconds to exit before it is
+    killed.
+    """
+    while True:
+        try:
+            return proc.wait(timeout=0.1)
+        except subprocess.TimeoutExpired:
+            if stop_server.is_set():
+                break
+    proc.terminate()
+    try:
+        return proc.wait(timeout=STOP_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        return proc.wait()
+
+
+class _FdWriter:
+    """Writes straight to a file descriptor, with no buffer.
+
+    Nothing is left buffered for interpreter shutdown to flush after the
+    agent closes the pipe, and no lock is held that shutdown would wait on.
+    """
+
+    def __init__(self, fd: int):
+        self._raw = io.FileIO(fd, "wb", closefd=False)
+
+    def write(self, data: bytes) -> None:
+        view = memoryview(data)
+        while view:
+            written = self._raw.write(view)
+            if written is None:
+                raise BlockingIOError("write would block")
+            view = view[written:]
+
+    def flush(self) -> None:
+        pass
+
+
+def _agent_streams() -> tuple[IO[bytes], Any, Any]:
+    """Return the streams the proxy reads from and writes to the agent.
+
+    These are private to the proxy, not sys.stdin and sys.stdout. A thread
+    still blocked reading the agent's input when the session ends would
+    otherwise hold sys.stdin's lock, and Python aborts at shutdown when it
+    cannot take that lock.
+    """
+    try:
+        agent_in: IO[bytes] = open(sys.stdin.fileno(), "rb", closefd=False)
+    except (AttributeError, OSError, ValueError):
+        agent_in = sys.stdin.buffer
+    streams: list[Any] = []
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+            streams.append(_FdWriter(stream.fileno()))
+        except (AttributeError, OSError, ValueError):
+            streams.append(stream.buffer)
+    return agent_in, streams[0], streams[1]

@@ -40,6 +40,10 @@ agent-strace: could not trace a message (RecursionError). It was still forwarded
 
 A message that Python cannot read, or cannot write back out, is forwarded as the text it arrived as, on one line.
 
+When the agent closes its side of stdin, `record` closes the server's stdin, so the server sees the end of input. Everything the server writes before it exits reaches the agent and the trace before the session ends, and `record` exits with the server's exit code. If the agent stops reading the server's output, `record` stops the server. On SIGTERM or SIGINT, `record` stops the server too and exits with 128 plus the signal number (143 or 130). To stop the server it sends SIGTERM (TerminateProcess on Windows), waits up to 5 seconds, then kills it. Each of these ends the session with a `session_end` event and an end time.
+
+If the server cannot start, `record` prints `agent-strace: could not start the MCP server: <reason>`, records an `error` event and ends the session. It exits 127 when the command is not found, 126 when it cannot be run and 1 otherwise. If the `--parent` session is deleted while `record` runs, the link is dropped at the end, with a note on stderr, so the end time is still saved.
+
 | Flag | Description |
 |---|---|
 | `--name NAME` | Label for the session |
