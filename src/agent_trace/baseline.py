@@ -29,7 +29,7 @@ from .cost import estimate_cost
 from .event_data import require_object_event_data
 from .explain import PHASE_DATA_EVENT_TYPES
 from .failures import count_session_errors
-from .models import TraceEvent
+from .models import EventType, TraceEvent
 from .store import TraceStore
 
 
@@ -107,10 +107,29 @@ class AnomalyResult:
     anomalous: bool
     deviations: dict[str, float] = field(default_factory=dict)   # metric → z-score
     sigma_threshold: float = DEFAULT_SIGMA
+    # The session has no end time (still running, crashed, or killed), so it
+    # was scored on the events recorded so far.
+    open_session: bool = False
+    # False when the session could not be measured at all. Such a result is
+    # neither OK nor anomalous, and ``baseline check`` exits 1 for it.
+    scored: bool = True
+    reason: str = ""
 
     def format(self, out: TextIO = sys.stdout) -> None:
+        if not self.scored:
+            out.write(f"\nBaseline check: {self.session_id[:12]}  [UNSCORED]\n\n")
+            out.write(f"  Could not score this session: {self.reason}\n")
+            out.write("  This is not a pass.\n\n")
+            return
         status = "ANOMALOUS" if self.anomalous else "OK"
-        out.write(f"\nBaseline check: {self.session_id[:12]}  [{status}]\n\n")
+        suffix = "  open session" if self.open_session else ""
+        out.write(f"\nBaseline check: {self.session_id[:12]}  [{status}]{suffix}\n\n")
+        if self.open_session:
+            out.write(
+                "  No end time recorded (still running, crashed, or killed).\n"
+                "  Scored on the events so far: tool calls, LLM requests,\n"
+                "  duration and cost count only when above the mean.\n\n"
+            )
         if not self.deviations:
             out.write("  No metrics to compare.\n")
             return
@@ -147,8 +166,39 @@ def _session_cost(
         return None
 
 
-def _session_metrics(store: TraceStore, session_id: str) -> dict[str, float] | None:
-    """Extract scalar metrics from a single session. Returns None if unusable.
+# For an open session these only grow as it runs, so the values so far are
+# lower bounds. error_rate is a ratio and can move either way.
+LOWER_BOUND_METRICS = frozenset({"tool_calls", "llm_requests", "duration_ms", "cost_usd"})
+
+
+def _is_number(value: object) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
+def _open_duration_ms(started_at: object, events: list[TraceEvent]) -> float | None:
+    """Milliseconds from the session start to its last event, or None if unknown."""
+    stamps = [e.timestamp for e in events if _is_number(e.timestamp)]
+    if not stamps or not _is_number(started_at):
+        return None
+    duration = (max(stamps) - started_at) * 1000
+    return duration if duration >= 0 else None
+
+
+def _measure_session(
+    store: TraceStore, session_id: str, *, allow_open: bool = False
+) -> tuple[dict[str, float] | None, bool, str]:
+    """Return ``(metrics, open_session, reason)`` for one session.
+
+    ``metrics`` is None when the session cannot be measured, and ``reason``
+    says why. A session with no ``ended_at`` is measured only when
+    *allow_open* is set: its tool calls and LLM requests are the larger of
+    the metadata counter and the matching events, since a recorder killed
+    mid-run may never write its counters, and its duration runs to its last
+    event.
 
     ``cost_usd`` is left out when the session cannot be priced, so it adds no
     cost sample to a baseline and ``check`` does not compare its cost, rather
@@ -157,27 +207,53 @@ def _session_metrics(store: TraceStore, session_id: str) -> dict[str, float] | N
     try:
         meta = store.load_meta(session_id)
     except Exception:
-        return None
-    if not meta or not meta.ended_at:
-        return None
+        return None, False, "its metadata cannot be read"
+    if not meta:
+        return None, False, "it has no metadata"
+    open_session = not meta.ended_at
+    if open_session and not allow_open:
+        return None, True, "it has no end time"
     try:
         events: list[TraceEvent] | None = store.load_events(session_id)
     except Exception:
         events = None
     errors = count_session_errors(events or [])
     try:
-        metrics = {
-            "tool_calls": float(meta.tool_calls),
-            "duration_ms": float(meta.total_duration_ms or 0.0),
-            "error_rate": errors / max(meta.tool_calls, 1),
-            "llm_requests": float(meta.llm_requests),
-        }
+        tool_calls = float(meta.tool_calls)
+        llm_requests = float(meta.llm_requests)
+        duration_ms: float | None = float(meta.total_duration_ms or 0.0)
+        error_rate = errors / max(meta.tool_calls, 1)
     except (TypeError, ValueError):
-        return None  # hand-edited metadata with non-numeric counters
+        # hand-edited metadata with non-numeric counters
+        return None, open_session, "its metadata has non-numeric counters"
+    if open_session:
+        duration_ms = None
+        if events is not None:
+            tool_calls = max(tool_calls, float(sum(
+                1 for e in events if e.event_type == EventType.TOOL_CALL
+            )))
+            llm_requests = max(llm_requests, float(sum(
+                1 for e in events if e.event_type == EventType.LLM_REQUEST
+            )))
+            duration_ms = _open_duration_ms(meta.started_at, events)
+        error_rate = errors / max(tool_calls, 1)
+    metrics = {
+        "tool_calls": tool_calls,
+        "error_rate": error_rate,
+        "llm_requests": llm_requests,
+    }
+    if duration_ms is not None:
+        metrics["duration_ms"] = duration_ms
     if events is not None:
         cost_usd = _session_cost(store, session_id, events)
         if cost_usd is not None:
             metrics["cost_usd"] = cost_usd
+    return metrics, open_session, ""
+
+
+def _session_metrics(store: TraceStore, session_id: str) -> dict[str, float] | None:
+    """Extract scalar metrics from a single ended session. Returns None if unusable."""
+    metrics, _open, _reason = _measure_session(store, session_id)
     return metrics
 
 
@@ -234,17 +310,29 @@ def check_session(
     profile: BaselineProfile,
     sigma: float = DEFAULT_SIGMA,
 ) -> AnomalyResult:
-    """Compare a session's metrics against the baseline profile."""
-    metrics = _session_metrics(store, session_id)
+    """Compare a session's metrics against the baseline profile.
+
+    A session with no end time is scored on what it has recorded so far.
+    Its lower-bound metrics count only when above the mean, because being
+    below the mean says nothing about a session that has not finished. A
+    session that cannot be measured gives a result with ``scored=False``.
+    """
+    metrics, open_session, reason = _measure_session(
+        store, session_id, allow_open=True
+    )
     if metrics is None:
         return AnomalyResult(session_id=session_id, anomalous=False,
-                             sigma_threshold=sigma)
+                             sigma_threshold=sigma, open_session=open_session,
+                             scored=False, reason=reason)
 
     deviations: dict[str, float] = {}
     for metric, value in metrics.items():
         stats: MetricStats = getattr(profile, metric)
         if stats.count < 3:
             continue  # not enough data to be meaningful
+        if open_session and metric in LOWER_BOUND_METRICS and value <= stats.mean:
+            deviations[metric] = 0.0
+            continue
         z = _z_score(value, stats.mean, stats.stddev)
         deviations[metric] = z
 
@@ -254,6 +342,7 @@ def check_session(
         anomalous=anomalous,
         deviations=deviations,
         sigma_threshold=sigma,
+        open_session=open_session,
     )
 
 
@@ -318,7 +407,7 @@ def cmd_baseline(args: argparse.Namespace) -> int:
 
         result = check_session(store, full_id, profile, sigma=sigma)
         result.format()
-        return 1 if result.anomalous else 0
+        return 1 if result.anomalous or not result.scored else 0
 
     elif sub == "show":
         baseline_path = getattr(args, "baseline_path", DEFAULT_BASELINE_PATH)
