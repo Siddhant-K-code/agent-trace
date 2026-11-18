@@ -74,7 +74,7 @@ For an `https://` URL the proxy verifies the server certificate and host name wi
 
 To refuse requests from web pages, the proxy answers 421 to a `Host` that is not `localhost`, an IP address or an `--allow-host` name, and 403 to an `Origin` that is not a page on `localhost`, a loopback address or an `--allow-host` name. It neither traces nor forwards these requests. If a client gets 421 because it connects by another name, such as `host.docker.internal` or a tunnel name, restart `record-http` with `--allow-host NAME` for that name.
 
-A `tracestate` header from the calling agent links this session as its child only when the caller's session is in the same trace store, and is ignored otherwise. If the parent session is gone when the proxy stops, the session is saved without the link and stderr says so.
+A `tracestate` header from the calling agent links this session as its child only when the caller's session is in the same trace store, and is ignored otherwise. If the parent session is gone when the proxy stops, the session is saved without the link and stderr says so. A linked session's depth is one more than its parent's, and a session linked later moves the sessions below it down with it. When the proxy stops it saves only its own counters and end time, so a link another proxy wrote to this session while it ran is kept.
 
 | Flag | Default | Description |
 |---|---|---|

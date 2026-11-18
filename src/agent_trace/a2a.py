@@ -206,18 +206,16 @@ def link_sub_session(
 ) -> None:
     """Update child session meta to link it to its parent A2A call.
 
-    The child's meta is changed under the store's write lock, so updates the
-    child agent writes to its own meta at the same time are kept. *depth*
-    defaults to the parent's depth plus one. Does nothing if the store
-    refuses the link.
+    *depth* defaults to the parent's depth plus one. The parent's depth is
+    read and the child's meta is changed under one store lock (see
+    ``TraceStore.link_parent``), so updates the child agent writes to its
+    own meta at the same time are kept. Does nothing if the store refuses
+    the link.
     """
     try:
         if depth is None:
-            parent_depth = store.load_meta(parent_session_id).depth
-            # Stored meta can hold any JSON value here.
-            if not isinstance(parent_depth, int) or isinstance(parent_depth, bool) or parent_depth < 0:
-                parent_depth = 0
-            depth = parent_depth + 1
+            store.link_parent(child_session_id, parent_session_id, parent_event_id)
+            return
 
         def _link(meta: SessionMeta) -> None:
             meta.parent_session_id = parent_session_id

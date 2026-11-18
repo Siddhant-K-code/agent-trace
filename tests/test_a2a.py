@@ -377,6 +377,76 @@ class TestLinkSubSession(unittest.TestCase):
         self.assertEqual(linked.total_duration_ms, 4500.0)
         self.assertEqual(linked.depth, 1)
 
+    def test_nested_reply_before_parent_reply_keeps_absolute_depth(self):
+        from agent_trace.a2a import link_sub_session
+        from agent_trace.http_proxy import _link_parent
+        store = TraceStore(self.trace_dir)
+        root = SessionMeta(agent_name="root")
+        child = SessionMeta(agent_name="child")
+        grand = SessionMeta(agent_name="grandchild")
+        for meta in (root, child, grand):
+            store.create_session(meta)
+        # Each proxy links its inbound tracestate parent first. Replies then
+        # come back innermost first.
+        _link_parent(store, child, root.session_id)
+        _link_parent(store, grand, child.session_id)
+        link_sub_session(store, child.session_id, "", grand.session_id)
+        link_sub_session(store, root.session_id, "", child.session_id)
+        c = store.load_meta(child.session_id)
+        g = store.load_meta(grand.session_id)
+        self.assertEqual((c.parent_session_id, c.depth), (root.session_id, 1))
+        self.assertEqual((g.parent_session_id, g.depth), (child.session_id, 2))
+
+    def test_linking_a_parent_later_moves_its_sub_sessions_down(self):
+        # No tracestate came in, so the grandchild is linked before its
+        # parent is.
+        from agent_trace.a2a import link_sub_session
+        store = TraceStore(self.trace_dir)
+        root = SessionMeta(agent_name="root", depth=2)
+        child = SessionMeta(agent_name="child")
+        grand = SessionMeta(agent_name="grandchild")
+        for meta in (root, child, grand):
+            store.create_session(meta)
+        link_sub_session(store, child.session_id, "", grand.session_id)
+        self.assertEqual(store.load_meta(grand.session_id).depth, 1)
+        link_sub_session(store, root.session_id, "", child.session_id)
+        self.assertEqual(store.load_meta(child.session_id).depth, 3)
+        self.assertEqual(store.load_meta(grand.session_id).depth, 4)
+
+    def test_parent_linked_while_its_depth_is_read_still_counts(self):
+        import threading
+        from agent_trace.a2a import link_sub_session
+        root = SessionMeta(agent_name="root")
+        parent = SessionMeta(agent_name="parent")
+        child = SessionMeta(agent_name="child")
+        for meta in (root, parent, child):
+            TraceStore(self.trace_dir).create_session(meta)
+
+        # The root's proxy, in another process, links the parent.
+        parent_linker = threading.Thread(
+            target=link_sub_session,
+            args=(TraceStore(self.trace_dir), root.session_id, "", parent.session_id),
+        )
+
+        class RacingStore(TraceStore):
+            def load_meta(self, session_id):
+                meta = super().load_meta(session_id)
+                if session_id == parent.session_id and parent_linker.ident is None:
+                    # The parent's link lands after its depth is read. It
+                    # waits for the store lock if this link holds it.
+                    parent_linker.start()
+                    parent_linker.join(timeout=0.5)
+                return meta
+
+        link_sub_session(RacingStore(self.trace_dir), parent.session_id, "", child.session_id)
+        self.assertIsNotNone(parent_linker.ident)
+        parent_linker.join(timeout=10)
+        self.assertFalse(parent_linker.is_alive())
+
+        store = TraceStore(self.trace_dir)
+        self.assertEqual(store.load_meta(parent.session_id).depth, 1)
+        self.assertEqual(store.load_meta(child.session_id).depth, 2)
+
 
 def _a2a_session(trace_dir: str, fields: dict) -> str:
     """Write a session with one A2A call and return its ID.

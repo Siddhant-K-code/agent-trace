@@ -20,6 +20,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from agent_trace.a2a import link_sub_session
 from agent_trace.cli import build_parser, cmd_record_http
 from agent_trace.http_proxy import HTTPProxyServer, _EventStreamParser, _ProxyHTTPServer
 from agent_trace.models import EventType, SessionMeta, TraceEvent
@@ -1750,7 +1751,10 @@ class TestRecordHTTPTracestateParent(unittest.TestCase):
         return meta.session_id
 
     def _record(self, *argv, tracestate=None, before_stop=None):
-        """Return the exit codes, the POST status, the saved meta and stderr."""
+        """Return the exit codes, the POST status, the saved meta and stderr.
+
+        before_stop, if given, is called with the live server after the POST.
+        """
         args = build_parser().parse_args([
             "--trace-dir", self.trace_dir, "record-http",
             "--url", f"http://127.0.0.1:{self.upstream.server_address[1]}",
@@ -1781,7 +1785,7 @@ class TestRecordHTTPTracestateParent(unittest.TestCase):
                     headers.append(("tracestate", tracestate))
                 status = _send(port, "POST", headers, json.dumps(_tool_call(1)).encode())[0]
                 if before_stop:
-                    before_stop()
+                    before_stop(server)
             finally:
                 server.shutdown()
                 thread.join(timeout=10)
@@ -1831,7 +1835,7 @@ class TestRecordHTTPTracestateParent(unittest.TestCase):
 
                 exit_codes, status, meta, stderr = self._record(
                     *argv,
-                    before_stop=lambda: shutil.rmtree(self.store.base_dir / parent_id),
+                    before_stop=lambda _server: shutil.rmtree(self.store.base_dir / parent_id),
                     **kwargs,
                 )
 
@@ -1845,19 +1849,19 @@ class TestRecordHTTPTracestateParent(unittest.TestCase):
 
     def test_save_failure_not_about_the_parent_still_fails(self):
         parent_id = self._parent()
-        real_update_meta = TraceStore.update_meta
+        real_mutate_meta = TraceStore.mutate_meta
         failing = threading.Event()
         refused = []
 
-        def update_meta(store, meta):
+        def mutate_meta(store, session_id, fn):
             if failing.is_set():
-                refused.append(meta.parent_session_id)
+                refused.append(store.load_meta(session_id).parent_session_id)
                 raise ValueError("refusing symlinked session directory")
-            return real_update_meta(store, meta)
+            return real_mutate_meta(store, session_id, fn)
 
-        with mock.patch.object(TraceStore, "update_meta", update_meta):
+        with mock.patch.object(TraceStore, "mutate_meta", mutate_meta):
             exit_codes, status, _, stderr = self._record(
-                tracestate=f"agent-trace={parent_id}", before_stop=failing.set
+                tracestate=f"agent-trace={parent_id}", before_stop=lambda _server: failing.set()
             )
 
         self.assertEqual(status, 200)
@@ -1866,6 +1870,37 @@ class TestRecordHTTPTracestateParent(unittest.TestCase):
         self.assertNotEqual(exit_codes, [0])
         self.assertIn("refusing symlinked session directory", stderr)
         self.assertNotIn("dropped", stderr)
+
+    def test_link_written_while_recording_is_kept_at_the_end(self):
+        # Another proxy links this session as its sub-session while it
+        # records. The final save must not write back the meta it loaded.
+        for inbound in (True, False):
+            with self.subTest(inbound_tracestate=inbound):
+                parent_id = self._parent()
+                linked = []
+
+                def link(server):
+                    other = TraceStore(self.trace_dir)
+                    link_sub_session(other, parent_id, "evt", server.meta.session_id)
+                    linked.append(other.load_meta(server.meta.session_id))
+
+                exit_codes, status, meta, stderr = self._record(
+                    tracestate=f"agent-trace={parent_id}" if inbound else None,
+                    before_stop=link,
+                )
+
+                self.assertEqual(status, 200)
+                self.assertEqual(exit_codes, [0])
+                self.assertEqual(
+                    (linked[0].parent_session_id, linked[0].depth), (parent_id, 1)
+                )
+                self.assertEqual(meta.parent_session_id, parent_id)
+                self.assertEqual(meta.parent_event_id, "evt")
+                self.assertEqual(meta.depth, 1)
+                self.assertEqual(meta.tool_calls, 1)
+                self.assertIsNotNone(meta.ended_at)
+                self.assertGreater(meta.total_duration_ms, 0)
+                self.assertNotIn("dropped", stderr)
 
     def test_parent_in_this_store_is_linked(self):
         parent_id = self._parent()
@@ -2467,6 +2502,36 @@ class TestHTTPProxyStreamableHTTP(unittest.TestCase):
         child = self.store.load_meta(child_id)
         self.assertEqual(child.parent_session_id, self.meta.session_id)
         self.assertEqual(child.depth, 2)
+
+    def test_nested_sub_session_links_below_the_inbound_parent(self):
+        # root -> this session -> grandchild, live. The grandchild's reply
+        # reaches this proxy before this session's reply reaches the root's
+        # proxy, so this session's depth must be known from its inbound
+        # tracestate before it delegates.
+        root = SessionMeta(agent_name="root")
+        self.store.create_session(root)
+        grandchild_id = self._child_session()
+        headers = [("Content-Type", "application/json")] + self._child_trace_headers(grandchild_id)
+
+        def reply(handler, request):
+            _reply(handler, 200, json.dumps(_text_result(5, "ok")).encode(), headers)
+
+        self.upstream.reply = reply
+        port = self._proxy().server_address[1]
+        self._forward(
+            port, "POST", "/",
+            {**STREAMABLE_POST_HEADERS, **dict(self._child_trace_headers(root.session_id))},
+            json.dumps(_tool_call(5)),
+        )
+        # Then the root's proxy links this session from its reply.
+        link_sub_session(self.store, root.session_id, "", self.meta.session_id)
+
+        this = self.store.load_meta(self.meta.session_id)
+        grandchild = self.store.load_meta(grandchild_id)
+        self.assertEqual((this.parent_session_id, this.depth), (root.session_id, 1))
+        self.assertEqual(
+            (grandchild.parent_session_id, grandchild.depth), (self.meta.session_id, 2)
+        )
 
     def test_streamed_reply_links_the_sub_session(self):
         child_id = self._child_session()

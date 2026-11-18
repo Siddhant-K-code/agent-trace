@@ -71,7 +71,6 @@ from .proxy import (
     _note_untraced,
     _rpc_id,
     _rpc_messages,
-    _save_without_parent,
     _trace_message,
 )
 from .masking import MaskingConfig, mask_event_data
@@ -812,16 +811,66 @@ class _ProxyHandler(BaseHTTPRequestHandler):
 
 
 def _link_parent(store: TraceStore, meta: SessionMeta, parent_session_id: str) -> None:
-    """Save meta with parent_session_id as its parent, if the store accepts it.
+    """Link meta's session to parent_session_id, if the store accepts it.
 
-    The store refuses a parent that is not in it, is this session, or fails
-    its tenant check. Then, or if the save fails, meta keeps no parent.
+    The parent's depth is read and the link is written under one store lock,
+    with the depth one below the parent's. This runs before the request is
+    forwarded, so a sub-session this session links later gets its depth
+    from this one. The store refuses a parent that is not in it, is this
+    session, or fails its tenant check. Then, or if the save fails, meta
+    keeps no parent.
     """
-    meta.parent_session_id = parent_session_id
     try:
-        store.update_meta(meta)
+        linked = store.link_parent(meta.session_id, parent_session_id)
     except (ValueError, OSError):
-        meta.parent_session_id = ""
+        return
+    meta.parent_session_id = linked.parent_session_id
+    meta.parent_event_id = linked.parent_event_id
+    meta.depth = linked.depth
+
+
+# The meta fields the proxy owns. The final save writes only these, so a
+# link another proxy wrote to this session while it ran is kept.
+_PROXY_META_FIELDS = ("ended_at", "total_duration_ms", "tool_calls", "llm_requests", "errors")
+
+
+def _save_final_meta(store: TraceStore, meta: SessionMeta) -> None:
+    """Write the proxy's own fields of meta onto the stored meta.
+
+    A stored parent the store refuses now, such as one deleted while the
+    proxy ran, is dropped with one line to stderr, so it does not cost the
+    end time and counters. Any other refusal is raised. meta gets the link
+    fields that were saved.
+    """
+    from .inert import inert
+
+    def _apply(stored: SessionMeta) -> None:
+        for name in _PROXY_META_FIELDS:
+            setattr(stored, name, getattr(meta, name))
+
+    try:
+        saved = store.mutate_meta(meta.session_id, _apply)
+    except ValueError as refusal:
+        dropped: list[str] = []
+
+        def _apply_unlinked(stored: SessionMeta) -> None:
+            if not stored.parent_session_id:
+                raise refusal  # not about a parent: write nothing
+            _apply(stored)
+            dropped.append(stored.parent_session_id)
+            stored.parent_session_id = stored.parent_event_id = ""
+
+        try:
+            saved = store.mutate_meta(meta.session_id, _apply_unlinked)
+        except (ValueError, OSError):
+            raise refusal from None
+        sys.stderr.write(
+            f"agent-strace: dropped the link to parent session "
+            f"{inert(dropped[0])}: {inert(refusal)}\n"
+        )
+    meta.parent_session_id = saved.parent_session_id
+    meta.parent_event_id = saved.parent_event_id
+    meta.depth = saved.depth
 
 
 class HTTPProxyServer:
@@ -913,10 +962,4 @@ class HTTPProxyServer:
                     },
                 ),
             )
-            # A parent the store refuses now, such as one deleted while the
-            # proxy ran, must not cost the end time and counters.
-            try:
-                self.store.update_meta(self.meta)
-            except ValueError as exc:
-                if not _save_without_parent(self.store, self.meta, exc):
-                    raise
+            _save_final_meta(self.store, self.meta)

@@ -173,6 +173,17 @@ def _carry_parent_link(meta: SessionMeta, existing: SessionMeta) -> bool:
     return changed
 
 
+def _depth_below(parent_depth: object) -> int:
+    """Return the depth of a child of a session at ``parent_depth``.
+
+    Stored meta can hold any JSON value as its depth. One that is not a
+    non-negative integer counts as 0.
+    """
+    if not isinstance(parent_depth, int) or isinstance(parent_depth, bool) or parent_depth < 0:
+        parent_depth = 0
+    return parent_depth + 1
+
+
 def _lock_file(file_obj) -> None:
     """Exclusive lock shared by event append and tenant tagging.
 
@@ -1131,6 +1142,72 @@ class TraceStore:
                 meta, preserve_parent_link=preserve_parent_link
             )
         return meta
+
+    def link_parent(
+        self,
+        session_id: str,
+        parent_session_id: str,
+        parent_event_id: str | None = None,
+    ) -> SessionMeta:
+        """Link a session to its parent at the parent's depth plus one.
+
+        The parent's depth is read and the session's meta is rewritten under
+        one store lock, so the link never uses a depth another link is
+        changing. When the session's depth changes, the sessions below it
+        get their depth from it, so a child linked before its parent's own
+        link landed still ends one level below it. ``parent_event_id=None``
+        keeps the stored event ID. Returns the written metadata. Raises
+        ``ValueError`` for a parent the store refuses, as ``update_meta``
+        does, and ``FileNotFoundError`` for a missing session.
+        """
+        with self.write_lock():
+            try:
+                parent = self.load_meta(parent_session_id)
+            except FileNotFoundError as exc:
+                raise ValueError(
+                    "parent session must exist in the same scoped store"
+                ) from exc
+            meta = self.load_meta(session_id)
+            depth = _depth_below(parent.depth)
+            before = (meta.parent_session_id, meta.parent_event_id, meta.depth)
+            meta.parent_session_id = parent_session_id
+            if parent_event_id is not None:
+                meta.parent_event_id = parent_event_id
+            meta.depth = depth
+            if (meta.parent_session_id, meta.parent_event_id, meta.depth) == before:
+                return meta
+            _validate_meta_ids(meta)
+            self._replace_meta_locked(meta, preserve_parent_link=False)
+            if before[2] != depth:
+                self._redepth_descendants_locked(meta)
+        return meta
+
+    def _redepth_descendants_locked(self, root: SessionMeta) -> None:
+        """Set each session below ``root`` one level below its parent.
+
+        Best effort: a descendant the store cannot rewrite keeps its depth.
+        The caller holds the write lock.
+        """
+        children: dict[str, list[SessionMeta]] = {}
+        for meta in self.list_sessions():
+            if meta.parent_session_id:
+                children.setdefault(meta.parent_session_id, []).append(meta)
+        seen = {root.session_id}
+        queue = [(root.session_id, root.depth)]
+        while queue:
+            parent_id, parent_depth = queue.pop()
+            for child in children.get(parent_id, []):
+                if child.session_id in seen:
+                    continue
+                seen.add(child.session_id)
+                depth = _depth_below(parent_depth)
+                if child.depth != depth:
+                    child.depth = depth
+                    try:
+                        self._replace_meta_locked(child, preserve_parent_link=False)
+                    except (ValueError, OSError):
+                        continue
+                queue.append((child.session_id, depth))
 
     def _replace_meta_locked(
         self, meta: SessionMeta, *, preserve_parent_link: bool
