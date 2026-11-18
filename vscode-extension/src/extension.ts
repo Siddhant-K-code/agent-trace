@@ -13,7 +13,7 @@ import { EventStreamPanel } from "./panel";
 import { PauseManager } from "./pauseAgent";
 import { LiveStreamPanel } from "./liveStream";
 import { PostMortemManager } from "./postMortem";
-import { SessionTreeProvider } from "./sessionTree";
+import { sessionIdFromArg, SessionTreeProvider } from "./sessionTree";
 import { StatusBarManager, WatchdogStatusBar } from "./statusBar";
 import { ExtensionTelemetry } from "./telemetry";
 import { TraceWatcher } from "./traceStore";
@@ -69,7 +69,9 @@ export function activate(context: vscode.ExtensionContext): void {
     pauseManager.syncState(state);
     statusBar.update(state);
     watchdogBar.onSessionStart(traceDir, state);
-    decorations.update(state);
+    if (config.get<boolean>("showGutterAnnotations", true)) {
+      decorations.update(state);
+    }
     panel.onSessionStart(state);
   });
 
@@ -217,8 +219,9 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
     vscode.commands.registerCommand(
       "agentTrace.openPostMortem",
-      telemetry.trackCommand("open_post_mortem", (sessionId?: unknown) => {
-        if (typeof sessionId === "string" && sessionId) {
+      telemetry.trackCommand("open_post_mortem", (arg?: unknown) => {
+        const sessionId = sessionIdFromArg(arg);
+        if (sessionId) {
           postMortem.openForSession(sessionId);
         } else {
           // Prompt user to pick a session
