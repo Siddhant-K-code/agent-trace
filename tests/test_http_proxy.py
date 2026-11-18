@@ -1843,6 +1843,30 @@ class TestRecordHTTPTracestateParent(unittest.TestCase):
                     "parent session must exist in the same scoped store"
                 ])
 
+    def test_save_failure_not_about_the_parent_still_fails(self):
+        parent_id = self._parent()
+        real_update_meta = TraceStore.update_meta
+        failing = threading.Event()
+        refused = []
+
+        def update_meta(store, meta):
+            if failing.is_set():
+                refused.append(meta.parent_session_id)
+                raise ValueError("refusing symlinked session directory")
+            return real_update_meta(store, meta)
+
+        with mock.patch.object(TraceStore, "update_meta", update_meta):
+            exit_codes, status, _, stderr = self._record(
+                tracestate=f"agent-trace={parent_id}", before_stop=failing.set
+            )
+
+        self.assertEqual(status, 200)
+        # The link was in place when the final save ran.
+        self.assertEqual(refused[:1], [parent_id])
+        self.assertNotEqual(exit_codes, [0])
+        self.assertIn("refusing symlinked session directory", stderr)
+        self.assertNotIn("dropped", stderr)
+
     def test_parent_in_this_store_is_linked(self):
         parent_id = self._parent()
 
