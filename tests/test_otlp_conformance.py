@@ -154,6 +154,7 @@ class TestOTLPGenAIConformanceFixture(unittest.TestCase):
         self.assertEqual(llm_attrs["llm.token_count.completion"], "8")
         self.assertEqual(llm_attrs["llm.token_count.total"], "20")
         self.assertAlmostEqual(llm_attrs["llm.cost.total"], 0.000156)
+        self.assertEqual(llm_attrs["llm.finish_reason"], "end_turn")
         self.assertEqual(tool_attrs["tool.name"], "Read")
         self.assertEqual(tool_attrs["input.value"], '{"file_path":"README.md"}')
         self.assertEqual(tool_attrs["output.value"], "fixture content")
@@ -255,7 +256,7 @@ class TestOpenInferenceMappingRecipe(unittest.TestCase):
                 self.assertIn(recipe["destination_attribute"], attrs)
                 self.assertIn(
                     recipe["representation"],
-                    {"renamed", "packed_json"},
+                    {"renamed", "packed_json", "first_item"},
                 )
                 self.assertTrue(recipe["loss"])
 

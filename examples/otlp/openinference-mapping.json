@@ -91,6 +91,13 @@
       "loss": "none for max_tokens"
     },
     {
+      "scope": "llm",
+      "source_attribute": "gen_ai.response.finish_reasons",
+      "destination_attribute": "llm.finish_reason",
+      "representation": "first_item",
+      "loss": "llm.finish_reason is one string, so only the first recorded reason is copied; it is omitted when no finish reason was recorded"
+    },
+    {
       "scope": "tool",
       "source_attribute": "gen_ai.tool.name",
       "destination_attribute": "tool.name",
@@ -126,7 +133,7 @@
     },
     {
       "field": "gen_ai.response.finish_reasons",
-      "reason": "The original attribute is retained and copied into metadata because this recipe has no dedicated OpenInference field."
+      "reason": "OpenInference types llm.finish_reason as one string, so it carries only the first recorded reason. The full array is retained, and the recorded value is copied into metadata. A failed or cancelled request with no recorded reason reports [\"error\"] in the array and has no llm.finish_reason."
     },
     {
       "field": "provider capture blind spots",
