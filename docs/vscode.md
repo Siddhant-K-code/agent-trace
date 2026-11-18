@@ -51,7 +51,7 @@ All commands are available from the Command Palette (`Cmd/Ctrl+Shift+P`):
 | `agent-trace: Refresh Session Browser` | Reload the session list in the Explorer sidebar |
 | `agent-trace: Reveal Session` | Jump to a session in the browser |
 | `agent-trace: Pause Agent` | Send SIGSTOP to the agent process (requires `watch --agent-pid` running) |
-| `agent-trace: Resume Agent` | Send SIGCONT to resume a paused agent |
+| `agent-trace: Resume Agent` | Send SIGCONT to resume a paused agent (requires `watch` running) |
 | `agent-trace: Open Evidence Review` | Open the review panel for the active or selected session |
 | `agent-trace: Clear Decorations` | Remove all gutter annotations from the editor |
 | `agent-trace: Enable Product Telemetry` | Enable anonymous extension usage telemetry |
@@ -71,7 +71,9 @@ agent-strace watch --agent-pid "$(pgrep -n claude)"
 # or run: agent-trace: Pause Agent from the command palette
 ```
 
-When paused, the agent process receives SIGSTOP and freezes. Resume with the Resume command or SIGCONT. Pause and Resume signal only the agent process, and a command the agent is running goes on until it ends.
+When paused, the agent process receives SIGSTOP and freezes. Resume it with the Resume command while `agent-strace watch` runs. Pause and Resume signal only the agent process, and a command the agent is running goes on until it ends.
+
+The Resume command only removes the pause request, and `watch` sends SIGCONT on its next poll. Without a running `watch`, the agent stays stopped, even though the status bar shows "resume requested". If `watch` stopped while it held a pause, it printed and wrote to the alert log (`.agent-traces/alerts.log`) how to resume the agent: `kill -CONT PID`, or `agent-strace approval approve REQUEST_ID` while an approval request is pending.
 
 Pause shows a warning and does nothing if `agent-strace watch` is not running for the session (no heartbeat in the last 15 seconds), or if it was started without `--agent-pid` or has found that the agent's PID now belongs to another process, and so cannot signal the agent. The pause request file holds the session ID, so Resume and session end never clear another session's pause.
 

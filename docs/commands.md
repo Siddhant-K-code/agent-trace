@@ -209,7 +209,8 @@ read back to the exact prompt. `inspect`, `approval show`,
 `regression --format json`, `annotate --list --export-format json`,
 `timeline --format json` and `compare --format json` print JSON with the raw
 text. Every JSON and CSV output keeps the raw text, and so do the fingerprint
-files that `fingerprint --output` and `drift --save-baseline` write.
+files that `fingerprint --output` and `drift --save-baseline` write, and the
+`postmortem.md` file that `postmortem` writes.
 
 ### `replay`
 ```
@@ -615,9 +616,9 @@ and `--agent-pid`, watch does not stop for lack of events before the
 deadline while the agent process runs, and it waits up to 10 seconds past
 the deadline so the `SIGKILL` that follows `SIGTERM` after 5 seconds is
 still sent. Once the agent process has exited, or its PID now belongs to
-another process (see below), the limit kills nothing and the deadline sends
-no alert: the idle timeout (5 minutes without events) applies again, and a
-later event past the deadline acts with `--on-violation`. Without `--agent-pid`, the
+another process (see below), the limit kills nothing and the deadline sends no
+alert: the idle timeout (5 minutes without events) applies again, and a later
+event past the deadline acts with `--on-violation`. Without `--agent-pid`, the
 deadline still alerts on time, and the idle timeout is unchanged.
 
 Alert channels never stop or delay the alert's pause or kill: watch writes the
@@ -717,20 +718,17 @@ If the agent exits, the OS can give its PID to an unrelated process. At
 startup watch records the agent's start time (field 22 of `/proc/PID/stat` on
 Linux, `ps -o lstart=` on macOS and other POSIX systems). Before a pause,
 resume or kill, while it holds a pause, and as it exits with a pause held,
-watch reads the start time again. While a duration limit that kills keeps
-watch running, it reads it at the deadline and at most every 5 seconds
-otherwise.
-If it differs, watch sends no signal, prints and writes to the alert log
+watch reads the start time again. While a duration limit that kills keeps watch
+running, it reads it at the deadline and at most every 5 seconds otherwise. If
+it differs, watch sends no signal, prints and writes to the alert log
 `Agent pid PID: the PID now belongs to another process ..., so no agent was
 signalled` (without `, so no agent was signalled` when watch was not about
 to signal), treats the agent as exited, clears any pause it held, and never
-signals that PID again; the
-heartbeat then reports no agent PID, so VS Code Pause is refused. Later
-`require_approval` rules create requests with no agent PID, and `kill` writes
-no post-mortem and runs no `--on-death`. If either start time cannot be read,
-watch signals as before.
-`ps` reports start times to the second, so on macOS a PID reused within the
-same second is not detected.
+signals that PID again; the heartbeat then reports no agent PID, so VS Code
+Pause is refused. Later `require_approval` rules create requests with no agent
+PID, and `kill` writes no post-mortem and runs no `--on-death`. If either start
+time cannot be read, watch signals as before. `ps` reports start times to the
+second, so on macOS a PID reused within the same second is not detected.
 
 **Project budget config** (`.agent-strace.yaml`):
 ```yaml
@@ -912,27 +910,24 @@ position and name, but never a `notify` value:
 
 A `pause` rule keeps the agent stopped until a human resumes it: send
 `SIGCONT`, or, while watch runs, run Pause Agent and then Resume Agent in
-VS Code. A
-`require_approval` rule keeps it stopped until the request is decided; the
-VS Code Resume command does not release it. Both rules stop only the agent
-process, and a command the agent is running goes on until it ends.
-Approving releases the pause.
-Denying leaves the agent stopped like a `pause` rule, because an agent that
-handles `SIGTERM` only acts on it after `SIGCONT`. A kill ends any pause, since
-it sends `SIGCONT` right after `SIGTERM`; a pending request stays pending.
-While watch holds a pause,
-the idle timeout does not count; the pause is dropped if the agent process
-exits. If watch cannot send `SIGSTOP` (the PID is gone or watch may not
-signal it), it prints and logs `Agent pid PID was not paused: REASON` and
-holds no pause; a `require_approval` request is still created. If it cannot
-send `SIGCONT` for a VS Code Resume, it prints `was not resumed` and drops
-the pause, since it could never release it. `--dry-run` reports a `require_approval` rule without pausing or
+VS Code. A `require_approval` rule keeps it stopped until the request is
+decided; the VS Code Resume command does not release it. Both rules stop only
+the agent process, and a command the agent is running goes on until it ends.
+Approving releases the pause. Denying leaves the agent stopped like a `pause`
+rule, because an agent that handles `SIGTERM` only acts on it after `SIGCONT`.
+A kill ends any pause, since it sends `SIGCONT` right after `SIGTERM`; a
+pending request stays pending. While watch holds a pause, the idle timeout does
+not count; the pause is dropped if the agent process exits. If watch cannot
+send `SIGSTOP` (the PID is gone or watch may not signal it), it prints and logs
+`Agent pid PID was not paused: REASON` and holds no pause; a `require_approval`
+request is still created. If it cannot send `SIGCONT` for a VS Code Resume, it
+prints `was not resumed` and drops the pause, since it could never release it.
+`--dry-run` reports a `require_approval` rule without pausing or
 creating a request.
 
 Watch never resumes the agent when it exits, whether on Ctrl-C, the end of
 the session or an error. VS Code Resume needs a running watch, so if watch
-still holds a pause, it prints and writes to the alert log how to release
-it:
+still holds a pause, it prints and writes to the alert log how to release it:
 
 ```
 [watch] Watch stopped while agent pid 4120 is paused by a watch rule. It stays stopped, and VS Code Resume needs a running watch: run 'kill -CONT 4120' to resume it.
