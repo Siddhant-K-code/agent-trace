@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from io import StringIO
+from pathlib import Path
 
 sys.path.insert(0, "src")
 
 from agent_trace.rbac import (
+    RBACFileError,
     RBACStore,
     RoleAssignment,
     can,
@@ -198,6 +202,86 @@ class TestRBACStoreConcurrency(unittest.TestCase):
         run_concurrently(_ASSIGN_SCRIPT, [[tmp, *group] for group in groups])
         principals = {a.principal for a in RBACStore(tmp).list_assignments()}
         self.assertEqual(principals, {p for group in groups for p in group})
+
+
+class TestRBACStoreBadData(unittest.TestCase):
+    """A bad entry or a corrupt file must never lose or hide valid assignments."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self._path = Path(self._tmp) / "rbac.json"
+        store = RBACStore(self._tmp)
+        store.assign("alice@x", "user", "owner")
+        store.assign("bob@x", "user", "admin")
+
+    def _append_raw(self, entry):
+        data = json.loads(self._path.read_text())
+        data.append(entry)
+        self._path.write_text(json.dumps(data))
+
+    def test_bad_entry_is_skipped_with_warning(self):
+        self._append_raw({"principal": "carol@x", "role": "viewer"})
+        err = StringIO()
+        with redirect_stderr(err):
+            store = RBACStore(self._tmp)
+            self.assertTrue(can(store, "alice@x", "manage_rbac"))
+            principals = {a.principal for a in store.list_assignments()}
+        self.assertEqual(principals, {"alice@x", "bob@x"})
+        self.assertIn("missing principal_type", err.getvalue())
+
+    def test_assign_after_bad_entry_keeps_others(self):
+        bad = {"principal": "carol@x", "role": "viewer"}
+        self._append_raw(bad)
+        with redirect_stderr(StringIO()):
+            RBACStore(self._tmp).assign("dave@x", "user", "viewer")
+            principals = {a.principal for a in RBACStore(self._tmp).list_assignments()}
+        self.assertEqual(principals, {"alice@x", "bob@x", "dave@x"})
+        self.assertIn(bad, json.loads(self._path.read_text()))
+
+    def test_assign_replaces_bad_entry_for_same_principal(self):
+        self._append_raw({"principal": "carol@x", "role": "viewer"})
+        with redirect_stderr(StringIO()):
+            RBACStore(self._tmp).assign("carol@x", "user", "viewer")
+        err = StringIO()
+        with redirect_stderr(err):
+            principals = sorted(a.principal for a in RBACStore(self._tmp).list_assignments())
+        self.assertEqual(principals, ["alice@x", "bob@x", "carol@x"])
+        self.assertEqual(err.getvalue(), "")
+
+    def test_wrong_type_role_is_skipped(self):
+        self._append_raw({"principal": "carol@x", "principal_type": "user",
+                          "role": {"name": "owner"}})
+        with redirect_stderr(StringIO()):
+            store = RBACStore(self._tmp)
+            self.assertFalse(can(store, "carol@x", "read_sessions"))
+            self.assertTrue(can(store, "alice@x", "manage_rbac"))
+
+    def test_corrupt_file_refuses_writes_and_denies(self):
+        for content in ("{not json", '{"alice@x": "owner"}'):
+            with self.subTest(content=content):
+                self._path.write_text(content)
+                store = RBACStore(self._tmp)
+                with redirect_stderr(StringIO()):
+                    with self.assertRaises(RBACFileError):
+                        store.assign("dave@x", "user", "viewer")
+                    with self.assertRaises(RBACFileError):
+                        store.revoke("alice@x")
+                    self.assertFalse(can(store, "alice@x", "read_sessions"))
+                self.assertEqual(self._path.read_text(), content)
+
+    def test_cli_reports_corrupt_file(self):
+        self._path.write_text("{not json")
+        err = StringIO()
+        with redirect_stderr(err):
+            rc_assign, _ = _run_cmd(["assign", "--user", "dave@x", "--role", "viewer",
+                                     "--dir", self._tmp], self._tmp)
+            rc_revoke, _ = _run_cmd(["revoke", "--user", "alice@x",
+                                     "--dir", self._tmp], self._tmp)
+            rc_list, out = _run_cmd(["list", "--dir", self._tmp], self._tmp)
+        self.assertEqual((rc_assign, rc_revoke, rc_list), (1, 1, 1))
+        self.assertIn("refusing to write", err.getvalue())
+        self.assertNotIn("No role assignments", out)
+        self.assertEqual(self._path.read_text(), "{not json")
 
 
 class TestCan(unittest.TestCase):

@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import TextIO
 
 from .fileutil import file_lock, write_atomic
+from .inert import inert
 from .store import TraceStore
 
 
@@ -175,15 +176,80 @@ def _snapshot_path(workspace_root: Path) -> Path:
     return workspace_root / _SNAPSHOT_FILE
 
 
-def _load_snapshots(workspace_root: Path) -> list[ConfigSnapshot]:
+class SnapshotFileError(ValueError):
+    """The snapshot file exists but cannot be read or parsed as a JSON list."""
+
+
+def _is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _snapshot_problem(d: object) -> str:
+    """Return why *d* is not a usable snapshot entry, or '' if it is."""
+    if not isinstance(d, dict):
+        return "not a JSON object"
+    if not isinstance(d.get("snapshot_id"), str):
+        return "snapshot_id is missing or not a string"
+    if not _is_number(d.get("timestamp")):
+        return "timestamp is missing or not a number"
+    for name in ("session_id", "label"):
+        if not isinstance(d.get(name, ""), str):
+            return f"{name} is not a string"
+    files = d.get("files", [])
+    if not isinstance(files, list):
+        return "files is not a list"
+    for f in files:
+        if not isinstance(f, dict) or not isinstance(f.get("path"), str):
+            return "a files item has no string path"
+        if not isinstance(f.get("sha256", ""), str):
+            return "a files item has a non-string sha256"
+        if not _is_number(f.get("mtime", 0.0)):
+            return "a files item has a non-number mtime"
+        if not isinstance(f.get("exists", False), bool):
+            return "a files item has a non-boolean exists"
+    return ""
+
+
+def _read_snapshot_entries(workspace_root: Path) -> list:
+    """Return the raw entries of the snapshot file ([] if it does not exist).
+
+    Raises SnapshotFileError if the file exists but is not a readable JSON list.
+    """
     p = _snapshot_path(workspace_root)
-    if not p.exists():
-        return []
     try:
-        data = json.loads(p.read_text())
-        return [ConfigSnapshot.from_dict(d) for d in data]
-    except Exception:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except FileNotFoundError:
         return []
+    except (OSError, UnicodeDecodeError, ValueError, RecursionError) as exc:
+        raise SnapshotFileError(
+            f"cannot parse {inert(p)}: {inert(type(exc).__name__)}"
+        ) from exc
+    if not isinstance(data, list):
+        raise SnapshotFileError(f"cannot parse {inert(p)}: top level is not a JSON list")
+    return data
+
+
+def _load_snapshots(workspace_root: Path) -> list[ConfigSnapshot]:
+    """Return valid snapshots, skipping (with a warning) entries that do not parse.
+
+    An unreadable file yields no snapshots and a warning on stderr.
+    """
+    try:
+        data = _read_snapshot_entries(workspace_root)
+    except SnapshotFileError as exc:
+        sys.stderr.write(f"warning: {exc}; treating as no snapshots\n")
+        return []
+    snapshots: list[ConfigSnapshot] = []
+    for index, d in enumerate(data):
+        problem = _snapshot_problem(d)
+        if problem:
+            sys.stderr.write(
+                f"warning: skipping snapshot {index} in "
+                f"{inert(_snapshot_path(workspace_root))}: {problem}\n"
+            )
+            continue
+        snapshots.append(ConfigSnapshot.from_dict(d))
+    return snapshots
 
 
 def _save_snapshots(workspace_root: Path, snapshots: list[ConfigSnapshot]) -> None:
@@ -230,7 +296,12 @@ def take_snapshot(
     session_id: str = "",
     label: str = "",
 ) -> ConfigSnapshot:
-    """Hash all watched files and append a new snapshot."""
+    """Hash all watched files and append a new snapshot.
+
+    Existing entries are kept as they are, including ones that do not parse.
+    Raises SnapshotFileError, without writing, if the snapshot file exists but
+    is not a readable JSON list.
+    """
     import uuid
     snap_id = uuid.uuid4().hex[:12]
     files = [_snapshot_file(workspace_root, p) for p in watch_paths]
@@ -241,10 +312,17 @@ def take_snapshot(
         label=label,
         files=files,
     )
-    with file_lock(_snapshot_path(workspace_root)):
-        existing = _load_snapshots(workspace_root)
-        existing.append(snapshot)
-        _save_snapshots(workspace_root, existing)
+    path = _snapshot_path(workspace_root)
+    with file_lock(path):
+        try:
+            entries = _read_snapshot_entries(workspace_root)
+        except SnapshotFileError as exc:
+            raise SnapshotFileError(
+                f"{exc}; refusing to write so existing snapshots are not lost. "
+                "Fix or remove the file and retry."
+            ) from exc
+        entries.append(snapshot.to_dict())
+        write_atomic(path, json.dumps(entries, indent=2), allow_symlinks=True)
     return snapshot
 
 
@@ -403,7 +481,11 @@ def cmd_config_watch(args: argparse.Namespace) -> int:
 
     if subcommand == "snapshot" or subcommand is None:
         label = getattr(args, "label", "") or ""
-        snap = take_snapshot(workspace_root, watch_paths, label=label)
+        try:
+            snap = take_snapshot(workspace_root, watch_paths, label=label)
+        except SnapshotFileError as exc:
+            sys.stderr.write(f"error: {exc}\n")
+            return 1
         existing = _load_snapshots(workspace_root)
         sys.stdout.write(
             f"Snapshot {snap.snapshot_id[:8]} recorded "
