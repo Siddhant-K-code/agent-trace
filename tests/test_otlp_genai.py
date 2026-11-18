@@ -173,6 +173,57 @@ class TestGenAILLMSpan(unittest.TestCase):
             _get_attr(llm_span, "agent.strace.finish_reason"), '["stop", "length", 3]'
         )
 
+    def test_openinference_finish_reason_is_one_string(self):
+        llm_span = _get_spans(session_to_otlp_genai(_make_meta(), self._make_llm_pair()))[1]
+        (attr,) = [a for a in llm_span["attributes"] if a["key"] == "llm.finish_reason"]
+        self.assertEqual(attr["value"], {"stringValue": "end_turn"})
+        self.assertEqual(_get_attr(llm_span, "gen_ai.response.finish_reasons"), ["end_turn"])
+        self.assertEqual(_get_attr(llm_span, "agent.strace.finish_reason"), "end_turn")
+
+    def test_openinference_finish_reason_is_the_first_recorded_reason(self):
+        for recorded, expected in (
+            (["length", "stop"], "length"),
+            ([3, "stop"], "3"),
+        ):
+            with self.subTest(recorded=recorded):
+                req, resp = self._make_llm_pair()
+                del resp.data["stop_reason"]
+                resp.data["finish_reason"] = recorded
+                llm_span = _get_spans(session_to_otlp_genai(_make_meta(), [req, resp]))[1]
+                self.assertEqual(_get_attr(llm_span, "llm.finish_reason"), expected)
+                self.assertEqual(
+                    _get_attr(llm_span, "gen_ai.response.finish_reasons"),
+                    [str(item) for item in recorded],
+                )
+                self.assertEqual(
+                    _get_attr(llm_span, "agent.strace.finish_reason"), json.dumps(recorded)
+                )
+
+    def test_openinference_finish_reason_only_when_recorded(self):
+        meta = SessionMeta(session_id="s1", agent_name="codex", started_at=1000.0, ended_at=1100.0)
+        events = [
+            _codex_response("a", 1001.0, status="completed", stop_reason="stop"),
+            _codex_response("b", 1002.0, status="completed", output_tokens=2),
+            _codex_response("c", 1003.0, status="failed", error="boom"),
+            _codex_response("d", 1004.0, status="completed", stop_reason=[""]),
+            TraceEvent(
+                event_type=EventType.LLM_REQUEST, event_id="e", timestamp=1005.0,
+                data={"model": "gpt-5-codex", "input_tokens": 3},
+            ),
+        ]
+        spans = [
+            span for span in _get_spans(session_to_otlp_genai(meta, events))
+            if _get_attr(span, "openinference.span.kind") == "LLM"
+        ]
+        self.assertEqual(
+            [_get_attr(span, "llm.finish_reason") for span in spans],
+            ["stop", None, None, None, None],
+        )
+        self.assertEqual(
+            [_get_attr(span, "gen_ai.response.finish_reasons") for span in spans],
+            [["stop"], None, ["error"], [""], None],
+        )
+
     def test_llm_span_parented_to_root(self):
         meta = _make_meta()
         events = self._make_llm_pair()
@@ -874,6 +925,7 @@ class TestGenAIFailedModelRequests(unittest.TestCase):
         span = self._span(status="failed", finish_reason="length")
         self.assertEqual(_get_attr(span, "gen_ai.response.finish_reasons"), ["length"])
         self.assertEqual(_get_attr(span, "agent.strace.finish_reason"), "length")
+        self.assertEqual(_get_attr(span, "llm.finish_reason"), "length")
         self.assertEqual(span["status"]["code"], 2)
 
     def test_completed_and_unknown_statuses_leave_status_unset(self):

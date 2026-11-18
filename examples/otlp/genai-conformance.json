@@ -373,6 +373,12 @@
                   }
                 },
                 {
+                  "key": "llm.finish_reason",
+                  "value": {
+                    "stringValue": "end_turn"
+                  }
+                },
+                {
                   "key": "agent.strace.cost.input_usd",
                   "value": {
                     "doubleValue": 3.6e-05

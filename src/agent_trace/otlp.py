@@ -107,6 +107,7 @@ _OI_LLM_MODEL = "llm.model_name"
 _OI_INPUT_TOKENS = "llm.token_count.prompt"
 _OI_OUTPUT_TOKENS = "llm.token_count.completion"
 _OI_TOTAL_TOKENS = "llm.token_count.total"
+_OI_FINISH_REASON = "llm.finish_reason"
 _OI_CACHE_READ_TOKENS = "llm.token_count.prompt_details.cache_read"
 _OI_CACHE_WRITE_TOKENS = "llm.token_count.prompt_details.cache_write"
 _OI_TOOL_NAME = "tool.name"
@@ -1022,8 +1023,13 @@ def _genai_llm_span(
     llm_attrs.update(_reasoning_attributes(output_data, usage, has_output))
     finish = event.data.get("stop_reason") or event.data.get("finish_reason", "")
     if finish:
-        llm_attrs[_SEMCONV_FINISH_REASON] = _finish_reasons(finish)
+        reasons = _finish_reasons(finish)
+        llm_attrs[_SEMCONV_FINISH_REASON] = reasons
         llm_attrs["agent.strace.finish_reason"] = finish
+        if reasons and reasons[0]:
+            # OpenInference types llm.finish_reason as one string. Its
+            # instrumentations and GenAI converter take the first choice's.
+            llm_attrs[_OI_FINISH_REASON] = reasons[0]
     failure = llm_failure(event)
     if failure is not None:
         if not finish:

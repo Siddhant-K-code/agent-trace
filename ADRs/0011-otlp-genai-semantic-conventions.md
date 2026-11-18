@@ -153,9 +153,10 @@ once.
   `gen_ai.assistant.message` event) and `--format otlp-genai` (on the `chat`
   span) now emit an OTLP `arrayValue` of strings. A recorded list keeps its
   order, and the recorded value stays on `agent.strace.finish_reason`. Other
-  list attributes are still JSON strings. The OpenInference attributes are
-  unchanged: OpenInference defines `llm.finish_reason` as a single string,
-  and agent-strace does not emit it.
+  list attributes are still JSON strings. OpenInference defines
+  `llm.finish_reason` as a single string. Since #468, `otlp-genai` chat
+  spans carry it as the first recorded reason, and omit it when no reason
+  was recorded.
 - **`service.version` is the agent-strace version.** It was the literal
   `agent-trace`, which is the service name, not a version. This applies to
   `--format otlp`, `otlp-genai` and the `tree_to_otlp` library function.

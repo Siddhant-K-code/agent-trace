@@ -164,16 +164,26 @@ Phoenix and other OpenInference consumers. The OTLP span kind stays unchanged.
 | Span | OTLP kind | OpenInference kind | Key attributes |
 |---|---:|---|---|
 | Session root | `INTERNAL` (`1`) | `AGENT` | `session.id`, `metadata` |
-| LLM call | `CLIENT` (`3`) | `LLM` | `llm.provider`, `llm.model_name`, token counts, recorded cost |
+| LLM call | `CLIENT` (`3`) | `LLM` | `llm.provider`, `llm.model_name`, `llm.finish_reason`, token counts, recorded cost |
 | Tool call | `INTERNAL` (`1`) | `TOOL` | `tool.name`, `input.value`, `output.value` |
 
 `agent.strace.*` attributes preserve redaction state, persisted provenance,
 event IDs, previous hashes, recorded cost, and observed structural evidence
 gaps. `session.id` is copied to every span for backend filtering.
 
+`llm.finish_reason` is the OpenInference finish reason, added in OpenInference
+semantic conventions 0.1.29. It appears only when the model request recorded a
+finish reason, and is the first entry of `gen_ai.response.finish_reasons`,
+such as `"end_turn"`.
+
 The mapping is not fully lossless:
 
 - Multi-turn user and assistant messages remain root span events.
+- OpenInference types `llm.finish_reason` as one string, so when a request
+  recorded several finish reasons it carries only the first, as OpenInference's
+  own instrumentations and GenAI converter do. `gen_ai.response.finish_reasons`
+  keeps them all. A failed or cancelled request with no recorded reason has
+  `gen_ai.response.finish_reasons` `["error"]` and no `llm.finish_reason`.
 - Tool input is capped at 1000 characters and tool output at 500 characters.
 - Only recorded cost is exported. Missing cost is not estimated.
 - Redaction markers and flags survive, but removed secret values do not.
