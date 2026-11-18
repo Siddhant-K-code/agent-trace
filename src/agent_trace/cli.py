@@ -3195,9 +3195,7 @@ def cmd_auto(args: argparse.Namespace) -> int:
 
     See :mod:`agent_trace.auto_bootstrap` for how the child is instrumented.
     """
-    import subprocess
-
-    from . import auto_bootstrap
+    from . import auto_bootstrap, auto_runner
 
     command = getattr(args, "server_cmd", [])
     # Strip leading '--' separator
@@ -3215,17 +3213,19 @@ def cmd_auto(args: argparse.Namespace) -> int:
     else:
         env_val = "detect"
 
-    bootstrap_dir = auto_bootstrap.create_bootstrap_dir()
-    try:
-        env = auto_bootstrap.child_env(os.environ, bootstrap_dir, env_val)
-        # The global --trace-dir names the store the child's events go to.
-        trace_dir = getattr(args, "trace_dir", None)
-        if trace_dir and trace_dir != default_trace_dir():
-            env["AGENT_TRACE_DIR"] = os.path.abspath(trace_dir)
-        result = subprocess.run(command, env=env)
-        return result.returncode
-    finally:
-        auto_bootstrap.remove_bootstrap_dir(bootstrap_dir)
+    # The stop-signal handlers go in before the hook directory exists, so a
+    # signal cannot kill agent-strace before the directory is removed.
+    with auto_runner.CommandRunner() as runner:
+        bootstrap_dir = auto_bootstrap.create_bootstrap_dir()
+        try:
+            env = auto_bootstrap.child_env(os.environ, bootstrap_dir, env_val)
+            # The global --trace-dir names the store the child's events go to.
+            trace_dir = getattr(args, "trace_dir", None)
+            if trace_dir and trace_dir != default_trace_dir():
+                env["AGENT_TRACE_DIR"] = os.path.abspath(trace_dir)
+            return runner.run(command, env)
+        finally:
+            auto_bootstrap.remove_bootstrap_dir(bootstrap_dir)
 
 
 _TELEMETRY_SUBCOMMAND_ATTRS = (

@@ -2271,7 +2271,7 @@ The server has no SSO, so it refuses to start with `--auth`, `--oidc-issuer`, `-
 ```
 agent-strace auto [--framework NAME] [--detect] -- <command>
 ```
-Run a command with every Python interpreter it starts auto-instrumented: `python script.py`, `python -m module`, and console or shebang scripts that run Python. Exits with the command's exit code. How it works and its limits: [integrations.md](integrations.md#how-agent-strace-auto-works).
+Run a command with every Python interpreter it starts auto-instrumented: `python script.py`, `python -m module`, and console or shebang scripts that run Python. Exits with the command's exit code, or 128 plus the signal number when a signal killed the command. How it works and its limits: [integrations.md](integrations.md#how-agent-strace-auto-works).
 
 | Flag | Description |
 |---|---|
@@ -2279,6 +2279,12 @@ Run a command with every Python interpreter it starts auto-instrumented: `python
 | `--detect` | Instrument every installed framework (the default when `--framework` is not given) |
 
 Events go to `$AGENT_TRACE_DIR` or `.agent-traces`. Use the global `--trace-dir` (`agent-strace --trace-dir DIR auto -- <command>`) to choose the store.
+
+On Linux and macOS the command runs in a process group of its own. SIGTERM, SIGINT and SIGHUP sent to `agent-strace auto`, by PID or to its process group, are passed on to the command's whole process group once. agent-strace then waits until every process in that group has exited, deletes its temporary directory and exits 143, 130 or 129 (128 plus the signal number). A signal agent-strace was started with ignored, for example SIGHUP under `nohup`, stays ignored. A signal that arrives before the command starts stops agent-strace without starting it.
+
+When agent-strace runs in the foreground of a terminal, it hands the terminal to the command's process group, as a shell does for a job. Ctrl-C and Ctrl-\ then go to the command alone, and agent-strace exits with the command's code. When Ctrl-Z stops the command, agent-strace takes the terminal back and stops too; `fg` and `bg` resume both.
+
+Limits: a process that leaves the command's process group (with `setsid` or `setpgid`, as daemons do) is not signalled or waited for. SIGKILL sent to agent-strace or to its process group does not reach the command. After a normal exit, agent-strace does not wait for background processes the command left running.
 
 ### `mcp`
 ```

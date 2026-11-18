@@ -85,7 +85,7 @@ Not recorded: OpenAI `chat.completions.parse` and `responses.parse`; Anthropic `
 `agent-strace auto [--framework NAME | --detect] -- <command>` runs `<command>` with two changes to its environment:
 
 - `AGENT_STRACE_AUTO_INSTRUMENT` is set to the `--framework` value (one name or a comma-separated list), or to `detect` when `--detect` is given or no framework is named.
-- A private temporary directory holding a `sitecustomize.py` is put first on `PYTHONPATH`. Existing `PYTHONPATH` entries are kept after it. The directory is deleted when the command exits.
+- A private temporary directory holding a `sitecustomize.py` is put first on `PYTHONPATH`. Existing `PYTHONPATH` entries are kept after it. The directory is deleted when the command exits, including when agent-strace is stopped by SIGTERM, SIGINT or SIGHUP on Linux and macOS: it passes the signal on to the command's process group and deletes the directory once every process in that group has exited ([commands.md](commands.md#auto)). SIGKILL cannot be caught, so it leaves the directory behind.
 
 Python imports `sitecustomize` while it starts, before any user code. So every Python interpreter the command starts is instrumented: `python my_agent.py`, `python -m my_package`, console scripts and shebang scripts that run Python, and Python subprocesses those start while the command runs. In each interpreter the hook:
 
@@ -93,7 +93,7 @@ Python imports `sitecustomize` while it starts, before any user code. So every P
 2. Imports `agent_trace.auto`, which instruments the frameworks named in `AGENT_STRACE_AUTO_INSTRUMENT`. If the interpreter has agent-strace installed, that copy is used. Otherwise the package is loaded from the agent-strace installation that ran `auto`, without adding that directory to `sys.path`, so the interpreter's own packages are never shadowed. A venv Python therefore needs no extra install. agent-strace supports Python 3.10 and newer; an older interpreter may fail to load it.
 3. If `agent_trace` cannot be imported, prints one `[agent-strace] auto-instrumentation disabled ...` line on stderr and lets the program run uninstrumented.
 
-`agent-strace auto` exits with the command's exit code. Events go to `$AGENT_TRACE_DIR`, or to `.agent-traces` in the program's working directory. `agent-strace --trace-dir DIR auto -- <command>` sets `AGENT_TRACE_DIR` for the command.
+`agent-strace auto` exits with the command's exit code, or 128 plus the signal number when a signal killed the command or stopped agent-strace ([commands.md](commands.md#auto)). Events go to `$AGENT_TRACE_DIR`, or to `.agent-traces` in the program's working directory. `agent-strace --trace-dir DIR auto -- <command>` sets `AGENT_TRACE_DIR` for the command.
 
 Limits:
 
