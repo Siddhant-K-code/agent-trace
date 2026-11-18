@@ -1,7 +1,7 @@
 """Auto-instrumentation for LangChain / LangGraph.
 
 Patches:
-  - langchain_core.tools.BaseTool._run             → tool_call / tool_result
+  - langchain_core.tools.BaseTool.run and .arun    → tool_call / tool_result
   - chat models' ``_generate`` and ``_agenerate``  → llm_request / llm_response
   - langgraph.graph.StateGraph.compile             → wraps each node with
                                                      decision / tool_call events
@@ -20,6 +20,7 @@ Install:
 from __future__ import annotations
 
 import functools
+import json
 import threading
 import time
 from typing import Any
@@ -27,8 +28,8 @@ from typing import Any
 from ._base import Patches, count as _count, message_count
 
 _PATCHED = False
-_orig_tool_run = None
 _orig_compile = None
+_TOOL_PATCHES = Patches()
 _MODEL_PATCHES = Patches()
 _MODEL_CLASSES: set[type] = set()
 _MODEL_CLASSES_LOCK = threading.Lock()
@@ -83,7 +84,7 @@ def _usage_fields(result: Any) -> dict[str, Any]:
 
 def instrument_langchain(agent_name: str = "langchain") -> None:
     """Patch LangChain (and LangGraph if installed) to emit agent-trace events. Idempotent."""
-    global _PATCHED, _orig_tool_run, _orig_compile
+    global _PATCHED, _orig_compile
     if _PATCHED:
         return
 
@@ -100,33 +101,15 @@ def instrument_langchain(agent_name: str = "langchain") -> None:
 
     store = _get_store()
 
-    # --- Patch BaseTool._run ---
+    # --- Patch BaseTool.run / BaseTool.arun ---
+    # Tool classes such as StructuredTool override _run, but not run and
+    # arun, which invoke and ainvoke call.
     try:
         from langchain_core.tools import BaseTool
-
-        _orig_tool_run = BaseTool._run
-
-        def _patched_run(self, *args, **kwargs):
-            sid = _get_or_create_session(store, agent_name)
-            tool_name = getattr(self, "name", str(self))
-            t0 = time.time()
-            emit(EventType.TOOL_CALL, sid, store,
-                 tool_name=tool_name, arguments={"args": str(args)[:200], **kwargs})
-            try:
-                result = _orig_tool_run(self, *args, **kwargs)
-                emit(EventType.TOOL_RESULT, sid, store,
-                     tool_name=tool_name,
-                     result=str(result)[:500],
-                     duration_ms=(time.time() - t0) * 1000)
-                return result
-            except Exception as exc:
-                emit(EventType.ERROR, sid, store,
-                     tool_name=tool_name, error=str(exc))
-                raise
-
-        BaseTool._run = _patched_run
     except (ImportError, AttributeError):
-        pass
+        BaseTool = None
+    if BaseTool is not None:
+        _instrument_tools(BaseTool, store, agent_name)
 
     # --- Patch chat models ---
     try:
@@ -152,6 +135,71 @@ def instrument_langchain(agent_name: str = "langchain") -> None:
         pass  # LangGraph not installed — skip silently
 
     _PATCHED = True
+
+
+def _tool_arguments(tool_input: Any) -> Any:
+    """The recorded arguments of a tool's input, which must be JSON."""
+    try:
+        json.dumps(tool_input)
+    except (TypeError, ValueError):
+        return {"input": str(tool_input)[:200]}
+    return tool_input if isinstance(tool_input, dict) else {"input": tool_input}
+
+
+def _instrument_tools(base: type, store: Any, agent_name: str) -> None:
+    """Record tool calls made through ``base.run`` and ``base.arun``."""
+    from ._base import _get_or_create_session, emit
+    from ..models import EventType
+
+    def begin(tool: Any, tool_input: Any) -> tuple[str, Any, Any, float]:
+        sid = _get_or_create_session(store, agent_name)
+        tool_name = getattr(tool, "name", str(tool))
+        call = emit(EventType.TOOL_CALL, sid, store,
+                    tool_name=tool_name, arguments=_tool_arguments(tool_input))
+        return sid, tool_name, call, time.time()
+
+    def succeed(started: tuple[str, Any, Any, float], result: Any) -> None:
+        sid, tool_name, call, t0 = started
+        emit(EventType.TOOL_RESULT, sid, store, parent=call,
+             tool_name=tool_name,
+             result=str(result)[:500],
+             duration_ms=(time.time() - t0) * 1000)
+
+    def fail(started: tuple[str, Any, Any, float], exc: BaseException) -> None:
+        sid, tool_name, call, _ = started
+        emit(EventType.ERROR, sid, store, parent=call,
+             tool_name=tool_name, error=str(exc), error_type=type(exc).__name__)
+
+    def wrap_run(original: Any) -> Any:
+        @functools.wraps(original)
+        def run(self: Any, tool_input: Any, *args: Any, **kwargs: Any) -> Any:
+            started = begin(self, tool_input)
+            try:
+                result = original(self, tool_input, *args, **kwargs)
+            except Exception as exc:
+                fail(started, exc)
+                raise
+            succeed(started, result)
+            return result
+
+        return run
+
+    def wrap_arun(original: Any) -> Any:
+        @functools.wraps(original)
+        async def arun(self: Any, tool_input: Any, *args: Any, **kwargs: Any) -> Any:
+            started = begin(self, tool_input)
+            try:
+                result = await original(self, tool_input, *args, **kwargs)
+            except Exception as exc:
+                fail(started, exc)
+                raise
+            succeed(started, result)
+            return result
+
+        return arun
+
+    _TOOL_PATCHES.wrap(base, "run", wrap_run)
+    _TOOL_PATCHES.wrap(base, "arun", wrap_arun)
 
 
 def _instrument_chat_models(base: type, store: Any, agent_name: str) -> None:
@@ -206,7 +254,7 @@ def _instrument_chat_models(base: type, store: Any, agent_name: str) -> None:
 
 
 def _wrap_langgraph_nodes(compiled_graph, store, agent_name: str) -> None:
-    """Wrap each node in a compiled LangGraph graph to emit decision events."""
+    """Wrap each node in a compiled LangGraph graph to emit decision and tool events."""
     from ._base import _get_or_create_session, emit
     from ..models import EventType
 
@@ -222,19 +270,21 @@ def _wrap_langgraph_nodes(compiled_graph, store, agent_name: str) -> None:
             def _wrapped(state, *args, **kwargs):
                 sid = _get_or_create_session(store, agent_name)
                 t0 = time.time()
+                tool_name = f"langgraph.node.{name}"
                 emit(EventType.DECISION, sid, store,
                      choice=name,
                      reason=f"LangGraph node: {name}")
+                call = emit(EventType.TOOL_CALL, sid, store, tool_name=tool_name)
                 try:
                     result = fn(state, *args, **kwargs)
-                    emit(EventType.TOOL_RESULT, sid, store,
-                         tool_name=f"langgraph.node.{name}",
+                    emit(EventType.TOOL_RESULT, sid, store, parent=call,
+                         tool_name=tool_name,
                          duration_ms=(time.time() - t0) * 1000)
                     return result
                 except Exception as exc:
-                    emit(EventType.ERROR, sid, store,
-                         tool_name=f"langgraph.node.{name}",
-                         error=str(exc))
+                    emit(EventType.ERROR, sid, store, parent=call,
+                         tool_name=tool_name, error=str(exc),
+                         error_type=type(exc).__name__)
                     raise
             return _wrapped
 
@@ -243,13 +293,8 @@ def _wrap_langgraph_nodes(compiled_graph, store, agent_name: str) -> None:
 
 def uninstrument_langchain() -> None:
     """Remove patches (for testing)."""
-    global _PATCHED, _orig_tool_run, _orig_compile
-    if _orig_tool_run is not None:
-        try:
-            from langchain_core.tools import BaseTool
-            BaseTool._run = _orig_tool_run
-        except ImportError:
-            pass
+    global _PATCHED, _orig_compile
+    _TOOL_PATCHES.restore()
     _MODEL_PATCHES.restore()
     with _MODEL_CLASSES_LOCK:
         _MODEL_CLASSES.clear()
@@ -260,5 +305,4 @@ def uninstrument_langchain() -> None:
         except ImportError:
             pass
     _PATCHED = False
-    _orig_tool_run = None
     _orig_compile = None

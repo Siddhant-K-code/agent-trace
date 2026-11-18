@@ -1,9 +1,9 @@
 """Auto-instrumentation for the OpenAI Agents SDK.
 
 Patches:
-  - agents.Runner.run / Runner.run_sync  → session start/end
+  - agents.Runner.run_sync               → one session per run:
+                                           session_start / session_end
   - agents.FunctionTool.__call__         → tool_call / tool_result
-  - openai.chat.completions.create       → llm_request / llm_response
 
 Install:
     pip install agent-strace[openai-agents]
@@ -12,10 +12,14 @@ Install:
 
 from __future__ import annotations
 
+import functools
 import time
 from typing import Any
 
+from ._base import Patches, is_wrapped
+
 _PATCHED = False
+_PATCHES = Patches()
 
 
 def instrument_openai_agents(agent_name: str = "openai-agents") -> None:
@@ -35,7 +39,7 @@ def instrument_openai_agents(agent_name: str = "openai-agents") -> None:
             "Install it with: pip install openai-agents"
         ) from exc
 
-    from ._base import _get_store, _get_or_create_session, emit
+    from ._base import _get_store, _get_or_create_session, emit, run_session
     from ..models import EventType
 
     store = _get_store()
@@ -44,23 +48,20 @@ def instrument_openai_agents(agent_name: str = "openai-agents") -> None:
     try:
         from agents import Runner
 
-        _orig_run_sync = Runner.run_sync.__func__ if hasattr(Runner.run_sync, "__func__") else Runner.run_sync
+        def wrap_run_sync(original: Any) -> Any:
+            function = getattr(original, "__func__", original)
 
-        def _patched_run_sync(cls_or_self, *args, **kwargs):
-            sid = _get_or_create_session(store, agent_name)
-            emit(EventType.SESSION_START, sid, store, agent_name=agent_name)
-            t0 = time.time()
-            try:
-                result = _orig_run_sync(cls_or_self, *args, **kwargs)
-                emit(EventType.SESSION_END, sid, store,
-                     duration_ms=(time.time() - t0) * 1000)
-                return result
-            except Exception as exc:
-                emit(EventType.ERROR, sid, store,
-                     error=str(exc), error_type=type(exc).__name__)
-                raise
+            @functools.wraps(function)
+            def _patched_run_sync(cls, *args, **kwargs):
+                with run_session(store, agent_name, agent_name=agent_name):
+                    return function(cls, *args, **kwargs)
 
-        Runner.run_sync = classmethod(_patched_run_sync).__get__(Runner)
+            return classmethod(_patched_run_sync)
+
+        # Runner.run_sync is a classmethod, so the attribute read from the
+        # class is a bound method that Patches cannot recognise as a wrapper.
+        if not is_wrapped(vars(Runner).get("run_sync")):
+            _PATCHES.wrap(Runner, "run_sync", wrap_run_sync)
     except (ImportError, AttributeError):
         pass
 
@@ -68,27 +69,31 @@ def instrument_openai_agents(agent_name: str = "openai-agents") -> None:
     try:
         from agents import FunctionTool
 
-        _orig_call = FunctionTool.__call__
+        def wrap_call(original: Any) -> Any:
+            @functools.wraps(original)
+            def _patched_call(self, *args, **kwargs):
+                sid = _get_or_create_session(store, agent_name)
+                tool_name = getattr(self, "name", str(self))
+                t0 = time.time()
+                call = emit(EventType.TOOL_CALL, sid, store,
+                            tool_name=tool_name,
+                            arguments=kwargs or (args[0] if args else {}))
+                try:
+                    result = original(self, *args, **kwargs)
+                    emit(EventType.TOOL_RESULT, sid, store, parent=call,
+                         tool_name=tool_name,
+                         result=str(result)[:500],
+                         duration_ms=(time.time() - t0) * 1000)
+                    return result
+                except Exception as exc:
+                    emit(EventType.ERROR, sid, store, parent=call,
+                         tool_name=tool_name, error=str(exc),
+                         error_type=type(exc).__name__)
+                    raise
 
-        def _patched_call(self, *args, **kwargs):
-            sid = _get_or_create_session(store, agent_name)
-            tool_name = getattr(self, "name", str(self))
-            t0 = time.time()
-            emit(EventType.TOOL_CALL, sid, store,
-                 tool_name=tool_name, arguments=kwargs or (args[0] if args else {}))
-            try:
-                result = _orig_call(self, *args, **kwargs)
-                emit(EventType.TOOL_RESULT, sid, store,
-                     tool_name=tool_name,
-                     result=str(result)[:500],
-                     duration_ms=(time.time() - t0) * 1000)
-                return result
-            except Exception as exc:
-                emit(EventType.ERROR, sid, store,
-                     tool_name=tool_name, error=str(exc))
-                raise
+            return _patched_call
 
-        FunctionTool.__call__ = _patched_call
+        _PATCHES.wrap(FunctionTool, "__call__", wrap_call)
     except (ImportError, AttributeError):
         pass
 
@@ -98,4 +103,5 @@ def instrument_openai_agents(agent_name: str = "openai-agents") -> None:
 def uninstrument_openai_agents() -> None:
     """Remove patches (for testing)."""
     global _PATCHED
+    _PATCHES.restore()
     _PATCHED = False

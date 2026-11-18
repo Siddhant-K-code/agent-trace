@@ -332,3 +332,140 @@ def _unexpected(kwargs: dict) -> Any:
 def ns(**kwargs: Any) -> types.SimpleNamespace:
     """A plain object with the given attributes, like an SDK response model."""
     return types.SimpleNamespace(**kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Agent frameworks
+# ---------------------------------------------------------------------------
+
+def crewai_modules() -> dict[str, Any]:
+    """``sys.modules`` entries for a CrewAI whose crews run their tasks.
+
+    ``Crew.kickoff`` runs each task's ``execute_sync``, which has its agent
+    ``execute_task``. A task whose description is ``"fail"`` raises.
+    """
+    class Agent:
+        role = "researcher"
+
+        def execute_task(self, task: Any, *args: Any, **kwargs: Any) -> Any:
+            if task.description == "fail":
+                raise RuntimeError("task failed")
+            return f"done: {task.description}"
+
+    class Task:
+        def __init__(self, description: str, agent: Any) -> None:
+            self.description = description
+            self.agent = agent
+
+        def execute_sync(self, *args: Any, **kwargs: Any) -> Any:
+            return self.agent.execute_task(self)
+
+    class Crew:
+        name = "crew"
+
+        def __init__(self, agents: list, tasks: list) -> None:
+            self.agents = agents
+            self.tasks = tasks
+
+        def kickoff(self, *args: Any, **kwargs: Any) -> Any:
+            return [task.execute_sync() for task in self.tasks]
+
+    return {"crewai": _module("crewai", Agent=Agent, Task=Task, Crew=Crew)}
+
+
+def agents_modules(run: Callable[..., Any]) -> dict[str, Any]:
+    """``sys.modules`` entries for an OpenAI Agents SDK.
+
+    ``Runner.run_sync`` is a classmethod that returns ``run(agent, input)``.
+    """
+    class Runner:
+        @classmethod
+        def run_sync(cls, starting_agent: Any, input: Any, **kwargs: Any) -> Any:
+            return run(starting_agent, input)
+
+    class FunctionTool:
+        def __init__(self, name: str, function: Callable[..., Any]) -> None:
+            self.name = name
+            self.function = function
+
+        def __call__(self, *args: Any, **kwargs: Any) -> Any:
+            return self.function(*args, **kwargs)
+
+    return {"agents": _module("agents", Runner=Runner, FunctionTool=FunctionTool)}
+
+
+def strands_modules() -> dict[str, Any]:
+    """``sys.modules`` entries for AWS Strands Agents.
+
+    Calling an ``Agent`` invokes each of its tools with ``prompt``.
+    """
+    class BaseTool:
+        def __init__(self, name: str, function: Callable[..., Any]) -> None:
+            self.name = name
+            self.function = function
+
+        def invoke(self, **kwargs: Any) -> Any:
+            return self.function(**kwargs)
+
+    class Agent:
+        name = "strands-agent"
+
+        def __init__(self, tools: list) -> None:
+            self.tools = tools
+
+        def __call__(self, prompt: str) -> Any:
+            return [tool.invoke(prompt=prompt) for tool in self.tools]
+
+    tools = _module("strands.tools", BaseTool=BaseTool)
+    return {"strands": _module("strands", Agent=Agent, tools=tools), "strands.tools": tools}
+
+
+def langchain_tool_modules() -> tuple[dict[str, Any], type, type]:
+    """``sys.modules`` entries for LangChain Core tools and LangGraph.
+
+    Like LangChain's, ``BaseTool.invoke`` and ``ainvoke`` call ``run`` and
+    ``arun``, which call the ``_run`` and ``_arun`` that tool classes such
+    as ``StructuredTool`` override. ``StateGraph.compile`` returns a graph
+    whose ``nodes`` maps each node name to its function.
+    """
+    modules, _ = langchain_modules()
+
+    class BaseTool:
+        name = "tool"
+
+        def _run(self, *args: Any, **kwargs: Any) -> Any:
+            raise NotImplementedError
+
+        async def _arun(self, *args: Any, **kwargs: Any) -> Any:
+            return self._run(*args, **kwargs)
+
+        def run(self, tool_input: Any, callbacks: Any = None, **kwargs: Any) -> Any:
+            return self._run(**tool_input) if isinstance(tool_input, dict) else self._run(tool_input)
+
+        async def arun(self, tool_input: Any, callbacks: Any = None, **kwargs: Any) -> Any:
+            if isinstance(tool_input, dict):
+                return await self._arun(**tool_input)
+            return await self._arun(tool_input)
+
+        def invoke(self, tool_input: Any, **kwargs: Any) -> Any:
+            return self.run(tool_input, callbacks=object(), **kwargs)
+
+        async def ainvoke(self, tool_input: Any, **kwargs: Any) -> Any:
+            return await self.arun(tool_input, callbacks=object(), **kwargs)
+
+    class StateGraph:
+        def __init__(self, nodes: dict[str, Callable[..., Any]]) -> None:
+            self._nodes = nodes
+
+        def compile(self) -> Any:
+            return types.SimpleNamespace(nodes=dict(self._nodes, __start__=None))
+
+    tools = _module("langchain_core.tools", BaseTool=BaseTool)
+    graph = _module("langgraph.graph", StateGraph=StateGraph)
+    modules.update({
+        "langchain_core.tools": tools,
+        "langgraph": _module("langgraph", graph=graph),
+        "langgraph.graph": graph,
+    })
+    modules["langchain_core"].tools = tools
+    return modules, BaseTool, StateGraph

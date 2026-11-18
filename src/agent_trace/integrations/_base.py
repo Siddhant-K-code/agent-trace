@@ -21,29 +21,168 @@ def _get_store() -> TraceStore:
     return TraceStore(default_trace_dir())
 
 
-def _get_or_create_session(store: TraceStore, name: str) -> str:
-    """Return the active session ID for this agent, creating one if needed.
+@contextlib.contextmanager
+def _session_marker(store: TraceStore, name: str) -> Iterator[Any]:
+    """Hold the per-name lock and yield the path of the agent's session marker.
 
-    The state file is scoped by agent name so concurrent agents sharing the
-    same AGENT_TRACE_DIR don't overwrite each other's active session. The
-    check and the create run under a per-name file lock, so concurrent first
-    calls from threads or processes share one session.
+    The marker is scoped by agent name so concurrent agents sharing the same
+    AGENT_TRACE_DIR don't overwrite each other's active session.
     """
     safe_name = name.replace("/", "_").replace(" ", "_") or "default"
-    active_path = store.base_dir / f".active-session.{safe_name}"
     # The lock file name does not start with ".active-session" because hook
     # and store cleanup code treats every such file as a session marker.
     store.base_dir.mkdir(parents=True, exist_ok=True)
     with file_lock(store.base_dir / f".integration-session.{safe_name}"):
-        if active_path.exists():
-            sid = active_path.read_text().strip()
-            if sid and store.session_exists(sid):
-                return sid
-        meta = SessionMeta(agent_name=name)
-        store.create_session(meta)
-        active_path.parent.mkdir(parents=True, exist_ok=True)
-        active_path.write_text(meta.session_id, encoding="utf-8", newline="\n")
-        return meta.session_id
+        yield store.base_dir / f".active-session.{safe_name}"
+
+
+def _read_marker(path: Any) -> str:
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def _new_session(store: TraceStore, name: str, active_path: Any) -> str:
+    meta = SessionMeta(agent_name=name)
+    store.create_session(meta)
+    active_path.write_text(meta.session_id, encoding="utf-8", newline="\n")
+    return meta.session_id
+
+
+# The run (see run_session) active in this context: ((trace dir, agent
+# name), session ID).
+_RUN: contextvars.ContextVar[tuple[tuple[str, str], str] | None] = contextvars.ContextVar(
+    "agent_strace_integration_run", default=None,
+)
+# Event counts of the runs in progress in this process, by session ID.
+_RUN_COUNTS: dict[str, dict[str, int]] = {}
+_RUN_COUNTS_LOCK = threading.Lock()
+_COUNTED = {
+    EventType.TOOL_CALL: "tool_calls",
+    EventType.LLM_REQUEST: "llm_requests",
+    EventType.ERROR: "errors",
+}
+
+
+def _run_key(store: TraceStore, name: str) -> tuple[str, str]:
+    return (str(store.base_dir), name)
+
+
+def _get_or_create_session(store: TraceStore, name: str) -> str:
+    """Return the active session ID for this agent, creating one if needed.
+
+    Inside a :func:`run_session` for this agent, that run's session is
+    returned. Otherwise the session named by the agent's marker file is
+    returned, so threads that do not inherit the run's context still find
+    it. The check and the create run under a per-name file lock, so
+    concurrent first calls from threads or processes share one session.
+    """
+    run = _RUN.get()
+    if run is not None and run[0] == _run_key(store, name):
+        return run[1]
+    with _session_marker(store, name) as active_path:
+        sid = _read_marker(active_path)
+        if sid and store.session_exists(sid):
+            return sid
+        return _new_session(store, name, active_path)
+
+
+def _count_run_event(session_id: str, event_type: EventType) -> None:
+    field_name = _COUNTED.get(event_type)
+    if field_name is None:
+        return
+    with _RUN_COUNTS_LOCK:
+        counts = _RUN_COUNTS.get(session_id)
+        if counts is not None:
+            counts[field_name] += 1
+
+
+def _start_run(store: TraceStore, name: str) -> tuple[str, str]:
+    """Create the run's session and point the agent's marker at it.
+
+    Returns the session ID and the session the marker named before.
+    """
+    with _session_marker(store, name) as active_path:
+        previous = _read_marker(active_path)
+        sid = _new_session(store, name, active_path)
+    with _RUN_COUNTS_LOCK:
+        _RUN_COUNTS[sid] = dict.fromkeys(_COUNTED.values(), 0)
+    return sid, previous
+
+
+def _end_run(store: TraceStore, name: str, sid: str, previous: str, started: float) -> None:
+    """Record ``session_end``, close the session's metadata and clear its marker."""
+    try:
+        emit(EventType.SESSION_END, sid, store,
+             duration_ms=(time.time() - started) * 1000)
+    finally:
+        with _RUN_COUNTS_LOCK:
+            counts = _RUN_COUNTS.pop(sid, {})
+            previous_running = previous in _RUN_COUNTS
+
+        def close(meta: SessionMeta) -> None:
+            meta.ended_at = time.time()
+            meta.total_duration_ms = (meta.ended_at - meta.started_at) * 1000
+            for field_name, value in counts.items():
+                setattr(meta, field_name, value)
+
+        try:
+            store.mutate_meta(sid, close)
+        finally:
+            with _session_marker(store, name) as active_path:
+                if _read_marker(active_path) == sid:
+                    if previous_running:
+                        active_path.write_text(previous, encoding="utf-8", newline="\n")
+                    else:
+                        active_path.unlink(missing_ok=True)
+
+
+@contextlib.contextmanager
+def run_session(store: TraceStore, name: str, **start: Any) -> Iterator[str]:
+    """Record one framework run, such as a crew kickoff, as its own session.
+
+    Emits ``session_start`` with *start* as its data, yields the session ID,
+    and when the run ends emits ``session_end`` (also after an exception,
+    which is first recorded as an ``error``). The session's ``ended_at``,
+    ``total_duration_ms``, ``tool_calls``, ``llm_requests`` and ``errors``
+    are then set and the agent's marker is cleared. While the run is in
+    progress, :func:`_get_or_create_session` returns its session for this
+    agent. A run started inside another run of the same agent, in the same
+    context, records into the outer run's session. A failure to record the
+    end of the run never reaches the caller.
+    """
+    key = _run_key(store, name)
+    current = _RUN.get()
+    if current is not None and current[0] == key:
+        yield current[1]
+        return
+    sid, previous = _start_run(store, name)
+    started = time.time()
+    token = _RUN.set((key, sid))
+    try:
+        try:
+            emit(EventType.SESSION_START, sid, store, **start)
+        except Exception:
+            pass
+        yield sid
+    except BaseException as exc:
+        try:
+            emit(EventType.ERROR, sid, store,
+                 error=str(exc), error_type=type(exc).__name__)
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            _RUN.reset(token)
+        except ValueError:
+            # Exited in another context than the one it was entered in.
+            pass
+        try:
+            _end_run(store, name, sid, previous, started)
+        except Exception:
+            pass
 
 
 def emit(
@@ -69,6 +208,7 @@ def emit(
         send_event_to_endpoint(ev, endpoint)
     else:
         store.append_event(session_id, ev)
+    _count_run_event(session_id, event_type)
     return ev
 
 

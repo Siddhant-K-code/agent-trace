@@ -46,8 +46,8 @@ instrument_langchain()
 
 | Framework | Install | What's traced |
 |---|---|---|
-| OpenAI Agents SDK | `pip install agent-strace[openai-agents]` | `Runner.run`, `FunctionTool` calls |
-| LangChain / LangGraph | `pip install agent-strace[langchain]` | `BaseTool._run`, chat model `_generate` and `_agenerate`, LangGraph nodes |
+| OpenAI Agents SDK | `pip install agent-strace[openai-agents]` | `Runner.run_sync`, `FunctionTool` calls |
+| LangChain / LangGraph | `pip install agent-strace[langchain]` | `BaseTool.run` and `BaseTool.arun`, chat model `_generate` and `_agenerate`, LangGraph nodes |
 | CrewAI | `pip install agent-strace[crewai]` | `Crew.kickoff`, `Agent.execute_task`, `Task.execute_sync` |
 | LiteLLM | `pip install agent-strace[litellm]` | `litellm.completion`, `litellm.acompletion` |
 | Anthropic SDK | `pip install anthropic` | `messages.create` (sync and async clients, streams) |
@@ -63,6 +63,14 @@ pip install agent-strace[all-integrations]
 Each integration is an optional extra. The core package stays dependency-free. See [ADR-0003](../ADRs/0003-zero-runtime-dependencies.md).
 
 When a model call raises, the OpenAI, Anthropic, LiteLLM, LangChain chat model and CrewAI `Agent.execute_task` integrations record an `error` event whose `parent_id` names the call's `llm_request`, so the exports report that call as failed. See [Failed and cancelled model requests](production.md#failed-and-cancelled-model-requests).
+
+### Sessions
+
+The CrewAI, OpenAI Agents SDK and Strands integrations record each run as its own session: each `Crew.kickoff`, `Runner.run_sync` or Strands `Agent.__call__`. The session starts with `session_start` and ends with `session_end`, which is also recorded when the run raises, after an `error` event for the exception. When the run ends, the session's `ended_at`, total duration and its `tool_calls`, `llm_requests` and `errors` counts are set, so `agent-strace list` shows them and retention treats the session as finished. A run started inside another run of the same integration, in the same thread or task, records into the outer run's session.
+
+Events recorded outside a run, such as a LangChain tool call or a model call through the OpenAI, Anthropic or LiteLLM integration, go to one session per integration, which stays open while the program records into it.
+
+Each tool `tool_result`, and each `error` a tool raises, names its `tool_call` in its `parent_id`, so the exports pair them.
 
 ### Model calls
 
@@ -138,7 +146,7 @@ agent = Agent(name="my-agent", instructions="...")
 result = Runner.run_sync(agent, "Do the task")
 ```
 
-Traces: `Runner.run`, `Runner.run_sync`, `Runner.run_streamed`, all `FunctionTool` calls.
+Traces: `Runner.run_sync` (one session per run), all `FunctionTool` calls. `Runner.run` and `Runner.run_streamed` do not start a session; see [Sessions](#sessions).
 
 ---
 
@@ -153,9 +161,9 @@ from langchain_anthropic import ChatAnthropic
 llm = ChatAnthropic(model="claude-3-5-sonnet-20241022")
 ```
 
-Traces: `BaseTool._run`, and the `_generate` and `_agenerate` methods of each chat model class, so `invoke`, `ainvoke`, `batch` and `abatch` are recorded with the token counts in the message's `usage_metadata`. A model class is patched the first time one of its models is called. `stream` and `astream` are not recorded; see [Model calls](#model-calls).
+Traces: `BaseTool.run` and `BaseTool.arun`, which `invoke`, `ainvoke` and every tool class (including `StructuredTool`) go through, and the `_generate` and `_agenerate` methods of each chat model class, so `invoke`, `ainvoke`, `batch` and `abatch` are recorded with the token counts in the message's `usage_metadata`. A model class is patched the first time one of its models is called. `stream` and `astream` are not recorded; see [Model calls](#model-calls).
 
-LangGraph node-level tracing is included — each node execution appears as a separate `tool_call` span with the node name and input/output.
+LangGraph node-level tracing is included: each node execution records a `decision` naming the node, then a `tool_call` named `langgraph.node.<name>` and its `tool_result`, or an `error` if the node raises.
 
 ---
 
@@ -171,7 +179,7 @@ crew = Crew(agents=[...], tasks=[...])
 result = crew.kickoff()
 ```
 
-Traces: `Crew.kickoff` (session start/end), `Agent.execute_task` (LLM request/response), `Task.execute_sync` (tool call/result).
+Traces: `Crew.kickoff` (one session per kickoff), `Agent.execute_task` (LLM request/response), `Task.execute_sync` (tool call/result).
 
 ---
 
@@ -230,7 +238,7 @@ agent = Agent(tools=[...])
 result = agent("Do the task")
 ```
 
-Traces: `Agent.__call__`, `BaseTool.invoke`.
+Traces: `Agent.__call__` (one session per call), `BaseTool.invoke`.
 
 ---
 
