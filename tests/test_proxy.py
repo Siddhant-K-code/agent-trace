@@ -2,12 +2,20 @@
 
 import io
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import threading
 import unittest
 from unittest.mock import patch
 
+try:
+    import _no_telemetry
+except ImportError:  # pragma: no cover - run as a package module
+    from tests import _no_telemetry
+
+import agent_trace
 from agent_trace import proxy as proxy_module
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.proxy import MCPProxy, _classify_message
@@ -549,6 +557,291 @@ class StdioProxyRelayTest(unittest.TestCase):
         self.assertEqual(len(call_ids), 2)
         self.assertEqual(parents, call_ids)
         self.assertEqual(self.proxy._calls.pending(), {})
+
+
+SRC = os.path.dirname(os.path.dirname(os.path.abspath(agent_trace.__file__)))
+
+# Fake MCP servers. Each reply is _result(id).
+_REPLY = (
+    "import json, os, sys, time\n"
+    "def reply(i):\n"
+    "    return json.dumps({'jsonrpc': '2.0', 'id': i,\n"
+    "        'result': {'content': [{'type': 'text', 'text': 'ok'}]}}) + '\\n'\n"
+)
+
+# Answers each request, then says on stderr that its stdin closed.
+ECHO_SERVER = _REPLY + (
+    "for line in sys.stdin:\n"
+    "    sys.stdout.write(reply(json.loads(line)['id']))\n"
+    "    sys.stdout.flush()\n"
+    "sys.stderr.write('server saw EOF\\n')\n"
+)
+
+# Writes 200 replies without reading stdin, then exits with code 3.
+BURST_SERVER = _REPLY + (
+    "for i in range(200):\n"
+    "    sys.stdout.write(reply(i))\n"
+    "sys.stdout.flush()\n"
+    "sys.stderr.write('burst done\\n')\n"
+    "sys.exit(3)\n"
+)
+
+# Writes replies until it is stopped.
+ENDLESS_SERVER = _REPLY + (
+    "i = 0\n"
+    "while True:\n"
+    "    sys.stdout.write(reply(i))\n"
+    "    sys.stdout.flush()\n"
+    "    i += 1\n"
+    "    time.sleep(0.01)\n"
+)
+
+# Writes its pid to the file named by its argument, then idles.
+IDLE_SERVER = (
+    "import os, sys, time\n"
+    "with open(sys.argv[1] + '.tmp', 'w') as f:\n"
+    "    f.write(str(os.getpid()))\n"
+    "os.replace(sys.argv[1] + '.tmp', sys.argv[1])\n"
+    "time.sleep(60)\n"
+)
+
+# Deletes the session directory named by its argument, then exits.
+PARENT_DELETING_SERVER = "import shutil, sys\nshutil.rmtree(sys.argv[1])\n"
+
+# Runs agent-strace with SIGINT handled by Python, even when the test
+# process was started with SIGINT ignored, which a child would inherit.
+_SIGINT_DEFAULT = [
+    sys.executable, "-c",
+    "import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); "
+    "os.execv(sys.executable, [sys.executable] + sys.argv[1:])",
+]
+
+
+class StdioProxyLifecycleTest(unittest.TestCase):
+    """`record` ends when either side goes away and loses no server output."""
+
+    TIMEOUT = 30
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = tmp.name
+        self.trace_dir = os.path.join(self.root, "traces")
+        home = os.path.join(self.root, "home")
+        os.makedirs(home)
+        self.env = _no_telemetry.without_telemetry(
+            {**os.environ, "PYTHONPATH": SRC, "HOME": home, "USERPROFILE": home}
+        )
+
+    def _record(self, server, stdin, *server_args, server_cmd=None, record_args=(),
+                launcher=(sys.executable,)):
+        """Start `agent-strace record` on a fake server script."""
+        if server_cmd is None:
+            script = os.path.join(self.root, "server.py")
+            with open(script, "w", encoding="utf-8") as f:
+                f.write(server)
+            server_cmd = [sys.executable, script, *server_args]
+        return subprocess.Popen(
+            [*launcher, "-m", "agent_trace.entry", "--trace-dir", self.trace_dir,
+             "record", "--quiet", *record_args, "--", *server_cmd],
+            cwd=self.root, env=self.env,
+            stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+
+    def _finish(self, proc, data=b"", keep_stdin_open=False, before_wait=None):
+        """Send data, wait for record to exit and return (code, stdout, stderr).
+
+        With keep_stdin_open, the agent's side of stdin stays open until
+        record exits, like an agent that is still running.
+        """
+        out, err = [], []
+        readers = [
+            threading.Thread(target=lambda s=s, b=b: b.append(s.read()), daemon=True)
+            for s, b in ((proc.stdout, out), (proc.stderr, err))
+            if s is not None and not s.closed
+        ]
+        for reader in readers:
+            reader.start()
+        try:
+            if proc.stdin is not None:
+                proc.stdin.write(data)
+                proc.stdin.flush()
+                if not keep_stdin_open:
+                    proc.stdin.close()
+            if before_wait is not None:
+                before_wait()
+            try:
+                code = proc.wait(timeout=self.TIMEOUT)
+            except subprocess.TimeoutExpired:
+                self.fail(f"record did not exit within {self.TIMEOUT}s")
+        except BaseException:
+            proc.kill()
+            proc.wait()
+            raise
+        finally:
+            for reader in readers:
+                reader.join(5)
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                if stream is not None and not stream.closed:
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
+        return code, b"".join(out), b"".join(err)
+
+    def _session(self, session_id=None):
+        store = TraceStore(self.trace_dir)
+        if session_id is None:
+            (meta,) = store.list_sessions()
+        else:
+            meta = store.load_meta(session_id)
+        return meta, store.load_events(meta.session_id)
+
+    def _replies(self, out):
+        return [json.loads(line) for line in out.splitlines()]
+
+    def test_agent_eof_closes_the_server_stdin(self):
+        proc = self._record(ECHO_SERVER, subprocess.PIPE)
+        code, out, err = self._finish(proc, _line(_call(1)))
+
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self._replies(out), [_result(1)])
+        self.assertIn(b"server saw EOF", err)
+        meta, events = self._session()
+        self.assertIsNotNone(meta.ended_at)
+        self.assertEqual(
+            [e.event_type for e in events],
+            [EventType.SESSION_START, EventType.TOOL_CALL, EventType.TOOL_RESULT,
+             EventType.SESSION_END],
+        )
+        self.assertEqual(events[-1].data["exit_code"], 0)
+
+    def test_all_server_output_reaches_the_agent_before_session_end(self):
+        # Held open, the agent's stdin is still being read when the server
+        # exits. record must still exit with the server's code.
+        for name, stdin, keep_open in (
+            ("agent stdin closed", subprocess.DEVNULL, False),
+            ("agent stdin held open", subprocess.PIPE, True),
+        ):
+            with self.subTest(name):
+                self.trace_dir = os.path.join(self.root, name.replace(" ", "-"))
+                proc = self._record(BURST_SERVER, stdin)
+                code, out, err = self._finish(proc, keep_stdin_open=keep_open)
+
+                self.assertEqual(code, 3, err)
+                self.assertEqual(self._replies(out), [_result(i) for i in range(200)])
+                self.assertEqual(err.splitlines(), [b"burst done"])
+                meta, events = self._session()
+                self.assertIsNotNone(meta.ended_at)
+                self.assertEqual(
+                    [e.data["request_id"] for e in events
+                     if e.event_type == EventType.TOOL_RESULT],
+                    list(range(200)),
+                )
+                self.assertEqual(events[-1].event_type, EventType.SESSION_END)
+                self.assertEqual(events[-1].data["exit_code"], 3)
+
+    def test_an_agent_that_stops_reading_ends_the_session(self):
+        proc = self._record(ENDLESS_SERVER, subprocess.PIPE)
+        proc.stdout.close()
+        code, _, err = self._finish(proc, keep_stdin_open=True)
+
+        self.assertNotIn(b"Traceback", err)
+        self.assertNotIn(b"Exception ignored", err)
+        meta, events = self._session()
+        self.assertIsNotNone(meta.ended_at)
+        self.assertEqual(events[-1].event_type, EventType.SESSION_END)
+        # The exit status holds the server's code modulo 256: -15 exits as 241.
+        self.assertEqual(events[-1].data["exit_code"] % 256, code % 256)
+
+    def test_a_server_that_cannot_start_ends_the_session(self):
+        missing = os.path.join(self.root, "no-such-server")
+        proc = self._record("", subprocess.DEVNULL, server_cmd=[missing])
+        code, out, err = self._finish(proc)
+
+        self.assertEqual(code, 127)
+        self.assertEqual(out, b"")
+        self.assertNotIn(b"Traceback", err)
+        self.assertTrue(
+            err.decode().startswith("agent-strace: could not start the MCP server: "), err
+        )
+        meta, events = self._session()
+        self.assertIsNotNone(meta.ended_at)
+        self.assertEqual(
+            [e.event_type for e in events],
+            [EventType.SESSION_START, EventType.ERROR, EventType.SESSION_END],
+        )
+        self.assertEqual(events[-1].data["exit_code"], 127)
+
+    def test_a_parent_deleted_while_recording_is_dropped_at_the_end(self):
+        store = TraceStore(self.trace_dir)
+        parent = SessionMeta()
+        store.create_session(parent)
+        parent_dir = str(store.base_dir / parent.session_id)
+
+        proc = self._record(
+            PARENT_DELETING_SERVER, subprocess.DEVNULL, parent_dir,
+            record_args=("--parent", parent.session_id),
+        )
+        code, _, err = self._finish(proc)
+
+        self.assertEqual(code, 0, err)
+        self.assertIn(
+            f"agent-strace: dropped the link to parent session {parent.session_id}: ".encode(),
+            err,
+        )
+        self.assertNotIn(b"Traceback", err)
+        meta, events = self._session()
+        self.assertIsNotNone(meta.ended_at)
+        self.assertEqual(meta.parent_session_id, "")
+        self.assertEqual(events[-1].event_type, EventType.SESSION_END)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX signals")
+    def test_a_stop_signal_stops_the_server_and_ends_the_session(self):
+        import signal
+        import time
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            with self.subTest(sig.name):
+                self.trace_dir = os.path.join(self.root, sig.name)
+                pid_file = os.path.join(self.root, f"{sig.name}.pid")
+                proc = self._record(
+                    IDLE_SERVER, subprocess.PIPE, pid_file, launcher=_SIGINT_DEFAULT
+                )
+                server_pid = []
+                orphaned = False
+
+                def send_signal():
+                    deadline = time.monotonic() + self.TIMEOUT
+                    while not os.path.exists(pid_file):
+                        if time.monotonic() > deadline or proc.poll() is not None:
+                            self.fail("the server did not start")
+                        time.sleep(0.05)
+                    with open(pid_file, encoding="utf-8") as f:
+                        server_pid.append(int(f.read()))
+                    proc.send_signal(sig)
+
+                try:
+                    code, _, err = self._finish(
+                        proc, keep_stdin_open=True, before_wait=send_signal
+                    )
+                finally:
+                    for pid in server_pid:
+                        try:
+                            os.kill(pid, signal.SIGKILL)
+                            orphaned = True
+                        except ProcessLookupError:
+                            orphaned = False
+                self.assertFalse(orphaned, "the server outlived record")
+                self.assertEqual(code, 128 + sig, err)
+                self.assertNotIn(b"Traceback", err)
+                meta, events = self._session()
+                self.assertIsNotNone(meta.ended_at)
+                self.assertEqual(
+                    [e.event_type for e in events],
+                    [EventType.SESSION_START, EventType.SESSION_END],
+                )
+                self.assertEqual(events[-1].data["exit_code"], -signal.SIGTERM)
 
 
 if __name__ == "__main__":

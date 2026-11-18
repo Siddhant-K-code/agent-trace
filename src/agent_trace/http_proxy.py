@@ -66,7 +66,14 @@ from typing import Any, Callable
 from urllib.parse import urlparse, urlsplit
 
 from .models import EventType, SessionMeta, TraceEvent
-from .proxy import MAX_PENDING_CALLS, _note_untraced, _rpc_id, _rpc_messages, _trace_message
+from .proxy import (
+    MAX_PENDING_CALLS,
+    _note_untraced,
+    _rpc_id,
+    _rpc_messages,
+    _save_without_parent,
+    _trace_message,
+)
 from .masking import MaskingConfig, mask_event_data
 from .pairing import KeyedPairer, link_response
 from .propagation import extract_traceparent, inject_traceparent
@@ -815,34 +822,6 @@ def _link_parent(store: TraceStore, meta: SessionMeta, parent_session_id: str) -
         store.update_meta(meta)
     except (ValueError, OSError):
         meta.parent_session_id = ""
-
-
-def _save_without_parent(
-    store: TraceStore, meta: SessionMeta, refusal: ValueError
-) -> bool:
-    """Save meta without the parent link that the store refused.
-
-    Writes one line to stderr when the link is dropped. Returns False, with
-    meta unchanged, if there is no link or the save fails anyway.
-    """
-    from .inert import inert
-
-    parent_session_id = meta.parent_session_id
-    parent_event_id = meta.parent_event_id
-    if not parent_session_id:
-        return False
-    meta.parent_session_id = meta.parent_event_id = ""
-    try:
-        store.update_meta(meta)
-    except (ValueError, OSError):
-        meta.parent_session_id = parent_session_id
-        meta.parent_event_id = parent_event_id
-        return False
-    sys.stderr.write(
-        f"agent-strace: dropped the link to parent session "
-        f"{inert(parent_session_id)}: {inert(refusal)}\n"
-    )
-    return True
 
 
 class HTTPProxyServer:
