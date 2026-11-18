@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import signal
 import subprocess
 import sys
@@ -377,27 +378,36 @@ class MCPProxy:
         self.redact = redact
         self.masking_config = masking_config
         self._calls: KeyedPairer[TraceEvent] = KeyedPairer(MAX_PENDING_CALLS)
+        # Relay threads emit concurrently. Once the session end is written
+        # the trace is sealed: nothing is appended and no counter changes.
+        self._emit_lock = threading.Lock()
+        self._sealed = False
 
-    def _emit(self, event: TraceEvent) -> None:
-        event.session_id = self.meta.session_id
-        if self.redact or self.masking_config:
-            event.data = mask_event_data(
-                event.data,
-                config=self.masking_config,
-                redact_secrets=self.redact,
-            )
-        self.store.append_event(self.meta.session_id, event)
+    def _emit(self, event: TraceEvent, final: bool = False) -> None:
+        with self._emit_lock:
+            if self._sealed:
+                return
+            event.session_id = self.meta.session_id
+            if self.redact or self.masking_config:
+                event.data = mask_event_data(
+                    event.data,
+                    config=self.masking_config,
+                    redact_secrets=self.redact,
+                )
+            if final:
+                self._sealed = True
+            self.store.append_event(self.meta.session_id, event)
 
-        # update counters
-        if event.event_type == EventType.TOOL_CALL:
-            self.meta.tool_calls += 1
-        elif event.event_type == EventType.LLM_REQUEST:
-            self.meta.llm_requests += 1
-        elif event.event_type == EventType.ERROR:
-            self.meta.errors += 1
+            # update counters
+            if event.event_type == EventType.TOOL_CALL:
+                self.meta.tool_calls += 1
+            elif event.event_type == EventType.LLM_REQUEST:
+                self.meta.llm_requests += 1
+            elif event.event_type == EventType.ERROR:
+                self.meta.errors += 1
 
-        if self.on_event:
-            self.on_event(event)
+            if self.on_event:
+                self.on_event(event)
 
     def _forward_and_trace(
         self,
@@ -411,6 +421,7 @@ class MCPProxy:
         Tracing never stops the relay: a message that cannot be traced is
         still forwarded. Sets ``stop_event`` when the relay ends. Returns
         True when source ran out, False when dest could not take a message.
+        Nothing is forwarded once the session has ended.
         """
         while not stop_event.is_set():
             message = _read_message(source)
@@ -426,6 +437,9 @@ class MCPProxy:
                     _trace_message(msg, direction, self._calls, self._emit)
 
             # forward the message
+            if self._sealed:
+                stop_event.set()
+                return True
             try:
                 _write_message(dest, message)
             except (OSError, ValueError):
@@ -433,20 +447,18 @@ class MCPProxy:
                 return False
         return True
 
-    def _end_session(self, returncode: int) -> int:
-        """Record the session end and save the final metadata."""
+    def _end_session(self, returncode: int, output_truncated: bool = False) -> int:
+        """Record the session end, seal the trace and save the final metadata."""
         self.meta.ended_at = time.time()
         self.meta.total_duration_ms = (self.meta.ended_at - self.meta.started_at) * 1000
 
-        self._emit(
-            TraceEvent(
-                event_type=EventType.SESSION_END,
-                data={
-                    "exit_code": returncode,
-                    "duration_ms": self.meta.total_duration_ms,
-                },
-            )
-        )
+        data: dict[str, Any] = {
+            "exit_code": returncode,
+            "duration_ms": self.meta.total_duration_ms,
+        }
+        if output_truncated:
+            data["output_truncated"] = True
+        self._emit(TraceEvent(event_type=EventType.SESSION_END, data=data), final=True)
 
         # A parent the store refuses now, such as one deleted while the
         # proxy ran, must not cost the end time and counters.
@@ -482,8 +494,28 @@ class MCPProxy:
         SIGINT. When the agent closes its side of stdin, the server's stdin
         is closed too, so the server sees the end of input. Server output is
         relayed until the server closes it, before the session end is
-        recorded.
+        recorded. Stopping the server stops every process it started.
         """
+        stop_server = threading.Event()
+        signals: list[int] = []
+
+        def on_signal(signum: int, frame: Any) -> None:
+            signals.append(signum)
+            stop_server.set()
+
+        # The handlers go in before the server starts, so a stop signal at
+        # any point after it starts reaches on_signal.
+        previous_handlers = _handle_stop_signals(on_signal)
+        try:
+            returncode = self._run(stop_server, signals)
+        finally:
+            _restore_signal_handlers(previous_handlers)
+        # Like a shell, report the signal that stopped record.
+        if signals:
+            return 128 + signals[0]
+        return returncode
+
+    def _run(self, stop_server: threading.Event, signals: list[int]) -> int:
         # emit session start
         self._emit(
             TraceEvent(
@@ -491,25 +523,31 @@ class MCPProxy:
                 data={"command": self.server_command},
             )
         )
+        if signals:
+            return self._end_session(-signals[0])
 
         try:
-            proc = subprocess.Popen(
-                self.server_command,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
+            server = _Server(self.server_command)
         except (OSError, ValueError) as exc:
             return self._start_failed(exc)
 
-        agent_in, agent_out, agent_err = _agent_streams()
-        # Set when the agent stops reading or record is asked to stop.
-        stop_server = threading.Event()
-        signals: list[int] = []
+        # Until the server has exited, any way out of here stops it and
+        # every process it started, and ends the session.
+        try:
+            return self._relay(server, stop_server)
+        finally:
+            if server.proc.poll() is None:
+                server.stop()
+            server.close()
+            if not self._sealed:
+                try:
+                    self._end_session(server.proc.returncode)
+                except Exception:
+                    pass
 
-        def on_signal(signum: int, frame: Any) -> None:
-            signals.append(signum)
-            stop_server.set()
+    def _relay(self, server: _Server, stop_server: threading.Event) -> int:
+        proc = server.proc
+        agent_in, agent_out, agent_err = _agent_streams()
 
         # agent stdin -> server stdin. When the agent's input ends, or the
         # server stops taking it, the server's stdin is closed so the server
@@ -523,9 +561,11 @@ class MCPProxy:
 
         # server stdout -> agent stdout, until the server closes it.
         def forward_out() -> None:
-            if not self._forward_and_trace(
+            if self._forward_and_trace(
                 proc.stdout, agent_out, "server_to_agent", threading.Event()
             ):
+                _close(proc.stdout)
+            else:
                 stop_server.set()
 
         # server stderr -> agent stderr (passthrough, no tracing). Read to the
@@ -536,36 +576,48 @@ class MCPProxy:
                 line = proc.stderr.readline()
                 if not line:
                     break
-                if writable:
+                if writable and not self._sealed:
                     try:
                         agent_err.write(line)
                         agent_err.flush()
                     except (OSError, ValueError):
                         writable = False
+            _close(proc.stderr)
 
-        previous_handlers = _handle_stop_signals(on_signal)
-        try:
-            t_in = threading.Thread(target=forward_in, daemon=True)
-            t_out = threading.Thread(target=forward_out, daemon=True)
-            t_err = threading.Thread(target=forward_stderr, daemon=True)
-            t_in.start()
-            t_out.start()
-            t_err.start()
+        t_in = threading.Thread(target=forward_in, daemon=True)
+        t_out = threading.Thread(target=forward_out, daemon=True)
+        t_err = threading.Thread(target=forward_stderr, daemon=True)
+        t_in.start()
+        t_out.start()
+        t_err.start()
 
-            returncode = _wait_for_server(proc, stop_server)
+        returncode = _wait_for_server(server, stop_server)
 
-            # A server that exited has closed its output, unless a child it
-            # started still holds it, so the wait is bounded.
-            t_out.join(DRAIN_TIMEOUT)
-            t_err.join(DRAIN_TIMEOUT)
+        # A server that exited has closed its output, unless a process it
+        # started still holds it open. Those processes are stopped after
+        # DRAIN_TIMEOUT, and the output they held is recorded as cut short.
+        relays = (t_out, t_err)
+        truncated = not _join_all(relays, DRAIN_TIMEOUT)
+        if truncated:
+            server.stop()
+            _join_all(relays, DRAIN_TIMEOUT)
+            message = (
+                f"server output was cut short: a process the server started "
+                f"still held it open {DRAIN_TIMEOUT:g}s after the server exited"
+            )
+            try:
+                agent_err.write(f"agent-strace: {message}\n".encode())
+            except (OSError, ValueError):
+                pass
+            self._emit(TraceEvent(event_type=EventType.ERROR, data={"message": message}))
 
-            self._end_session(returncode)
-        finally:
-            _restore_signal_handlers(previous_handlers)
-        # Like a shell, report the signal that stopped record.
-        if signals:
-            return 128 + signals[0]
-        return returncode
+        if not t_out.is_alive():
+            _close(proc.stdout)
+
+        # The session end seals the trace: a relay still running after this
+        # (one held by a process that left the server's process group)
+        # neither records nor forwards anything more.
+        return self._end_session(returncode, output_truncated=truncated)
 
 
 # Seconds to wait for server output after the server exits, and for a server
@@ -608,24 +660,177 @@ def _restore_signal_handlers(previous: dict[int, Any]) -> None:
             pass
 
 
-def _wait_for_server(proc: subprocess.Popen, stop_server: threading.Event) -> int:
-    """Wait for the server to exit, or stop it once stop_server is set.
+def _close(stream: IO[bytes]) -> None:
+    try:
+        stream.close()
+    except (OSError, ValueError):
+        pass
 
-    A server asked to stop gets STOP_TIMEOUT seconds to exit before it is
-    killed.
-    """
+
+def _join_all(threads: tuple[threading.Thread, ...], timeout: float) -> bool:
+    """Join threads within timeout seconds in all. True if all ended."""
+    deadline = time.monotonic() + timeout
+    for thread in threads:
+        thread.join(max(0.0, deadline - time.monotonic()))
+    return not any(thread.is_alive() for thread in threads)
+
+
+def _wait_for_server(server: _Server, stop_server: threading.Event) -> int:
+    """Wait for the server to exit, or stop it once stop_server is set."""
     while True:
         try:
-            return proc.wait(timeout=0.1)
+            return server.proc.wait(timeout=0.1)
         except subprocess.TimeoutExpired:
             if stop_server.is_set():
-                break
-    proc.terminate()
+                return server.stop()
+
+
+class _Server:
+    """The MCP server process and every process it starts.
+
+    On POSIX the server leads a new process group. On Windows it is put in
+    a job object. Stopping the server signals the whole group or job, so a
+    process the server started is not left running.
+    """
+
+    def __init__(self, command: list[str]):
+        posix = os.name == "posix"
+        self.proc = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=posix,
+            # On Windows the server starts suspended and runs only once it
+            # is in the job, so every process it starts is in the job too.
+            creationflags=0 if posix else _CREATE_SUSPENDED,
+        )
+        self._job = None
+        if not posix:
+            try:
+                self._job = _windows_job_and_resume(self.proc.pid)
+            except OSError:
+                self.proc.kill()
+                self.proc.wait()
+                for stream in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
+                    _close(stream)
+                raise
+
+    def _signal(self, kill: bool) -> None:
+        if os.name == "posix":
+            sig = signal.SIGKILL if kill else signal.SIGTERM  # type: ignore[attr-defined]
+            try:
+                os.killpg(self.proc.pid, sig)  # type: ignore[attr-defined]
+            except OSError:
+                pass
+            return
+        # Windows has no polite stop: terminate the job, or the server alone
+        # if it could not be put in one.
+        if self._job is not None and _windows_terminate_job(self._job):
+            return
+        try:
+            self.proc.kill()
+        except OSError:
+            pass
+
+    def _group_alive(self) -> bool:
+        if os.name != "posix":
+            return False
+        try:
+            os.killpg(self.proc.pid, 0)  # type: ignore[attr-defined]
+        except OSError:
+            return False
+        return True
+
+    def stop(self) -> int:
+        """Stop the server and the processes it started. Returns its exit code.
+
+        They get STOP_TIMEOUT seconds after SIGTERM to exit before they are
+        killed.
+        """
+        deadline = time.monotonic() + STOP_TIMEOUT
+        self._signal(kill=False)
+        try:
+            returncode = self.proc.wait(timeout=STOP_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            self._signal(kill=True)
+            return self.proc.wait()
+        while self._group_alive() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if self._group_alive():
+            self._signal(kill=True)
+        return returncode
+
+    def close(self) -> None:
+        if self._job is not None:
+            _windows_close(self._job)
+            self._job = None
+
+
+_CREATE_SUSPENDED = 0x00000004
+
+
+def _windows_job_and_resume(pid: int) -> Any:
+    """Put the suspended process pid in a new job object, then resume it.
+
+    Returns the job, or None if the process could not be put in one. Raises
+    OSError if the process could not be resumed.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    ntdll = ctypes.WinDLL("ntdll")  # type: ignore[attr-defined]
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel32.CreateJobObjectW.argtypes = (ctypes.c_void_p, wintypes.LPCWSTR)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    ntdll.NtResumeProcess.restype = ctypes.c_long
+    ntdll.NtResumeProcess.argtypes = (wintypes.HANDLE,)
+
+    # PROCESS_SUSPEND_RESUME | PROCESS_SET_QUOTA | PROCESS_TERMINATE
+    handle = kernel32.OpenProcess(0x0800 | 0x0100 | 0x0001, False, pid)
+    if not handle:
+        raise ctypes.WinError(ctypes.get_last_error())  # type: ignore[attr-defined]
     try:
-        return proc.wait(timeout=STOP_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        return proc.wait()
+        job = kernel32.CreateJobObjectW(None, None)
+        if job and not kernel32.AssignProcessToJobObject(job, handle):
+            kernel32.CloseHandle(job)
+            job = None
+        status = ntdll.NtResumeProcess(handle)
+        if status < 0:
+            if job:
+                kernel32.CloseHandle(job)
+            raise OSError(f"could not resume the server process (NTSTATUS {status & 0xFFFFFFFF:#x})")
+        return job or None
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _windows_terminate_job(job: Any) -> bool:
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        kernel32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
+        return bool(kernel32.TerminateJobObject(job, 1))
+    except (AttributeError, ImportError, OSError):
+        return False
+
+
+def _windows_close(job: Any) -> None:
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle(job)
+    except (AttributeError, ImportError, OSError):
+        pass
 
 
 class _FdWriter:

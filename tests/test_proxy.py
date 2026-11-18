@@ -605,6 +605,117 @@ IDLE_SERVER = (
     "time.sleep(60)\n"
 )
 
+# Started by HOLDING_SERVER with its stdout. Writes its pid, then a reply and
+# a heartbeat every 0.05s: 40 times if told to leave the server's process
+# group (POSIX), else for a minute. Touches <pid file>.done when it ends.
+HOLDING_CHILD = _REPLY + (
+    "pid_file, beat_file, escape = sys.argv[1:4]\n"
+    "if escape == '1':\n"
+    "    os.setsid()\n"
+    "with open(pid_file + '.tmp', 'w') as f:\n"
+    "    f.write(str(os.getpid()))\n"
+    "os.replace(pid_file + '.tmp', pid_file)\n"
+    "for i in range(40 if escape == '1' else 1200):\n"
+    "    with open(beat_file, 'a') as f:\n"
+    "        f.write('x')\n"
+    "    try:\n"
+    "        sys.stdout.write(reply(1000 + i))\n"
+    "        sys.stdout.flush()\n"
+    "    except OSError:\n"
+    "        pass\n"
+    "    time.sleep(0.05)\n"
+    "open(pid_file + '.done', 'w').close()\n"
+)
+
+# Starts HOLDING_CHILD with its own stdout, writes one reply once the child
+# is running, then exits 0 while the child still holds stdout open.
+HOLDING_SERVER = _REPLY + (
+    "import subprocess\n"
+    "child, pid_file = sys.argv[1:3]\n"
+    "subprocess.Popen([sys.executable, *sys.argv[1:]], stdin=subprocess.DEVNULL,\n"
+    "                 stdout=sys.stdout, stderr=subprocess.DEVNULL)\n"
+    "while not os.path.exists(pid_file):\n"
+    "    time.sleep(0.01)\n"
+    "sys.stdout.write(reply(0))\n"
+    "sys.stdout.flush()\n"
+)
+
+# Starts a child that writes its pid to the file named by its argument and
+# sleeps, then idles itself.
+TREE_SERVER = (
+    "import subprocess, sys, time\n"
+    "child = ('import os, sys, time\\n'\n"
+    "         'with open(sys.argv[1] + \".tmp\", \"w\") as f: f.write(str(os.getpid()))\\n'\n"
+    "         'os.replace(sys.argv[1] + \".tmp\", sys.argv[1])\\n'\n"
+    "         'time.sleep(60)\\n')\n"
+    "subprocess.Popen([sys.executable, '-c', child, sys.argv[1]],\n"
+    "                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,\n"
+    "                 stderr=subprocess.DEVNULL)\n"
+    "time.sleep(60)\n"
+)
+
+# Runs agent-strace with a stop signal sent to itself as soon as the server
+# process exists, before record has done anything else with it.
+# argv: signal name, marker argument of the server command, agent-strace argv.
+_SIGNAL_AT_SPAWN = (
+    "import os, signal, subprocess, sys\n"
+    "signal.signal(signal.SIGINT, signal.default_int_handler)\n"
+    "sig, marker = getattr(signal, sys.argv[1]), sys.argv[2]\n"
+    "class Popen(subprocess.Popen):\n"
+    "    def __init__(self, args, *a, **k):\n"
+    "        super().__init__(args, *a, **k)\n"
+    "        if isinstance(args, list) and marker in args:\n"
+    "            with open(marker + '.popen', 'w') as f:\n"
+    "                f.write(str(self.pid))\n"
+    "            os.kill(os.getpid(), sig)\n"
+    "subprocess.Popen = Popen\n"
+    "from agent_trace.entry import main\n"
+    "sys.argv = ['agent-strace'] + sys.argv[3:]\n"
+    "sys.exit(main())\n"
+)
+
+
+def _pid_gone(pid, timeout=5.0):
+    """True once no process has this pid (POSIX), polling up to timeout."""
+    import time
+
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.05)
+
+
+def _kill_pid(pid):
+    import signal
+
+    try:
+        os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+    except OSError:
+        pass
+
+
+class _Sink:
+    """A stand-in for the agent's stdout or stderr."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.data = b""
+
+    def write(self, data):
+        with self.lock:
+            self.data += bytes(data)
+
+    def flush(self):
+        pass
+
+
 # Deletes the session directory named by its argument, then exits.
 PARENT_DELETING_SERVER = "import shutil, sys\nshutil.rmtree(sys.argv[1])\n"
 
@@ -842,6 +953,158 @@ class StdioProxyLifecycleTest(unittest.TestCase):
                     [EventType.SESSION_START, EventType.SESSION_END],
                 )
                 self.assertEqual(events[-1].data["exit_code"], -signal.SIGTERM)
+
+
+    def _wait_for_file(self, path):
+        import time
+
+        deadline = time.monotonic() + self.TIMEOUT
+        while not os.path.exists(path):
+            if time.monotonic() > deadline:
+                self.fail(f"{os.path.basename(path)} never appeared")
+            time.sleep(0.02)
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+
+    def _run_holding_server(self, escape):
+        """Run the proxy in this process on HOLDING_SERVER, with short timeouts."""
+        child = os.path.join(self.root, "child.py")
+        server = os.path.join(self.root, "server.py")
+        for path, text in ((child, HOLDING_CHILD), (server, HOLDING_SERVER)):
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+        self.pid_file = os.path.join(self.root, "child.pid")
+        self.beat_file = os.path.join(self.root, "beat")
+
+        store = TraceStore(self.trace_dir)
+        meta = SessionMeta()
+        store.create_session(meta)
+        read_fd, write_fd = os.pipe()
+        os.close(write_fd)
+        agent_in = open(read_fd, "rb")
+        self.addCleanup(agent_in.close)
+        self.agent_out, agent_err = _Sink(), _Sink()
+
+        proxy = MCPProxy(
+            [sys.executable, server, child, self.pid_file, self.beat_file, escape],
+            store, meta,
+        )
+        try:
+            with patch.object(proxy_module, "DRAIN_TIMEOUT", 0.5), \
+                    patch.object(proxy_module, "STOP_TIMEOUT", 1.0), \
+                    patch.object(proxy_module, "_agent_streams",
+                                 return_value=(agent_in, self.agent_out, agent_err)):
+                code = proxy.run()
+        finally:
+            if os.path.exists(self.pid_file):
+                pid = int(self._wait_for_file(self.pid_file))
+                self.addCleanup(_kill_pid, pid)
+        return code, agent_err.data, store, meta
+
+    def _assert_final(self, store, meta):
+        """session_end is the last event and the saved counters match the trace."""
+        events = store.load_events(meta.session_id)
+        saved = store.load_meta(meta.session_id)
+        self.assertEqual(events[-1].event_type, EventType.SESSION_END)
+        self.assertEqual(
+            [e for e in events if e.event_type == EventType.SESSION_END], [events[-1]]
+        )
+        for counter, event_type in (("tool_calls", EventType.TOOL_CALL),
+                                    ("errors", EventType.ERROR)):
+            count = sum(e.event_type == event_type for e in events)
+            self.assertEqual(getattr(saved, counter), count, counter)
+            self.assertEqual(getattr(meta, counter), count, counter)
+        return events
+
+    def test_output_held_past_the_drain_timeout_is_stopped_and_recorded(self):
+        import time
+
+        code, err, store, meta = self._run_holding_server("0")
+
+        self.assertEqual(code, 0)
+        self.assertIn(b"agent-strace: server output was cut short", err)
+        events = self._assert_final(store, meta)
+        self.assertTrue(events[-1].data.get("output_truncated"))
+        self.assertEqual(events[-2].event_type, EventType.ERROR)
+        self.assertIn("cut short", events[-2].data["message"])
+        self.assertIn(_line(_result(0)), self.agent_out.data)
+        # The child holding the output was stopped with the server.
+        beats = os.path.getsize(self.beat_file)
+        time.sleep(0.5)
+        self.assertEqual(os.path.getsize(self.beat_file), beats, "the child kept running")
+        self.assertEqual(len(store.load_events(meta.session_id)), len(events))
+
+    @unittest.skipIf(os.name != "posix", "a child leaving the process group needs setsid")
+    def test_nothing_is_relayed_or_recorded_after_session_end(self):
+        import time
+
+        code, _, store, meta = self._run_holding_server("1")
+        relayed = self.agent_out.data
+        events = self._assert_final(store, meta)
+
+        # The child left the server's process group, so it outlives the
+        # stop and keeps writing after the session has ended.
+        self._wait_for_file(self.pid_file + ".done")
+        time.sleep(0.3)
+        self.assertEqual(code, 0)
+        self.assertTrue(events[-1].data.get("output_truncated"))
+        self.assertEqual(self.agent_out.data, relayed)
+        self.assertEqual(self._assert_final(store, meta), events)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX signals")
+    def test_a_stop_signal_stops_every_process_the_server_started(self):
+        import signal
+
+        pid_file = os.path.join(self.root, "child.pid")
+        proc = self._record(TREE_SERVER, subprocess.PIPE, pid_file)
+        child_pid = []
+
+        def send_signal():
+            child_pid.append(int(self._wait_for_file(pid_file)))
+            proc.send_signal(signal.SIGTERM)
+
+        try:
+            code, _, err = self._finish(proc, keep_stdin_open=True, before_wait=send_signal)
+            self.assertEqual(code, 128 + signal.SIGTERM, err)
+            self.assertTrue(_pid_gone(child_pid[0]), "the server's child outlived record")
+        finally:
+            for pid in child_pid:
+                _kill_pid(pid)
+        meta, events = self._session()
+        self.assertIsNotNone(meta.ended_at)
+        self.assertEqual(events[-1].event_type, EventType.SESSION_END)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX signals")
+    def test_a_stop_signal_right_after_the_server_starts_stops_it(self):
+        import signal
+
+        script = os.path.join(self.root, "server.py")
+        with open(script, "w", encoding="utf-8") as f:
+            f.write(IDLE_SERVER)
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            with self.subTest(sig.name):
+                self.trace_dir = os.path.join(self.root, sig.name)
+                marker = os.path.join(self.root, f"{sig.name}.pid")
+                proc = subprocess.Popen(
+                    [sys.executable, "-c", _SIGNAL_AT_SPAWN, sig.name, marker,
+                     "--trace-dir", self.trace_dir, "record", "--quiet", "--",
+                     sys.executable, script, marker],
+                    cwd=self.root, env=self.env, stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+                server_pid = []
+                try:
+                    code, _, err = self._finish(proc, keep_stdin_open=True)
+                    server_pid.append(int(self._wait_for_file(marker + ".popen")))
+                    self.assertTrue(_pid_gone(server_pid[0]), "the server outlived record")
+                finally:
+                    for pid in server_pid:
+                        _kill_pid(pid)
+                self.assertEqual(code, 128 + sig, err)
+                self.assertNotIn(b"Traceback", err)
+                meta, events = self._session()
+                self.assertIsNotNone(meta.ended_at)
+                self.assertEqual(events[-1].event_type, EventType.SESSION_END)
 
 
 if __name__ == "__main__":
