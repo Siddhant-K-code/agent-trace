@@ -674,5 +674,134 @@ class TestWatchSessionLoop(PauseTestCase):
         self.assertIn("stopping", self.out.getvalue())
 
 
+class TestExitWithPauseHeld(PauseTestCase):
+    """Watch exits while it holds a pause: the agent stays stopped, and watch
+    says how to release it on the terminal and in the alert log."""
+
+    _run = TestWatchSessionLoop._run
+
+    def edit(self) -> TraceEvent:
+        return TraceEvent(
+            event_type=EventType.TOOL_CALL, timestamp=time.time(), session_id=SESSION,
+            data={"tool_name": "Write", "arguments": {"file_path": "a.py"}},
+        )
+
+    def session_end(self) -> TraceEvent:
+        return TraceEvent(
+            event_type=EventType.SESSION_END, timestamp=time.time(), session_id=SESSION, data={},
+        )
+
+    @staticmethod
+    def ctrl_c(items):
+        yield from items
+        raise KeyboardInterrupt
+
+    def alert_log(self) -> str:
+        path = Path(self.config.alert_log)
+        return path.read_text() if path.exists() else ""
+
+    def assert_said(self, text: str) -> None:
+        self.assertIn(text, self.out.getvalue())
+        self.assertIn(text, self.alert_log())
+
+    def assert_not_said(self, text: str) -> None:
+        self.assertNotIn(text, self.out.getvalue())
+        self.assertNotIn(text, self.alert_log())
+
+    def test_ctrl_c_during_rule_pause_says_how_to_resume(self):
+        rule = NannyRule(name="stop", condition="files_modified > 0", action="pause")
+        self._run(self.ctrl_c([self.edit(), _IDLE_SENTINEL]), nanny_rules=[rule])
+        self.mocks["resume"].assert_not_called()
+        self.assertIn("[watch] Stopped.", self.out.getvalue())
+        self.assert_said(
+            f"Watch stopped while agent pid {PID} is paused by a watch rule. It stays "
+            f"stopped, and VS Code Resume needs a running watch: run 'kill -CONT {PID}' "
+            "to resume it."
+        )
+
+    def test_session_end_during_editor_pause_says_how_to_resume(self):
+        self.marker.write_text(SESSION)
+        self._run([_IDLE_SENTINEL, self.session_end()])
+        self.mocks["pause"].assert_called_once_with(PID)
+        self.mocks["resume"].assert_not_called()
+        self.assertIn("Session ended", self.out.getvalue())
+        self.assert_said(f"agent pid {PID} is paused by the editor")
+        self.assert_said(f"run 'kill -CONT {PID}' to resume it")
+
+    def test_error_during_rule_pause_says_how_to_resume(self):
+        rule = NannyRule(name="stop", condition="files_modified > 0", action="pause")
+
+        def items():
+            yield self.edit()
+            raise RuntimeError("disk gone")
+
+        with self.assertRaises(RuntimeError):
+            self._run(items(), nanny_rules=[rule])
+        self.assert_said(f"run 'kill -CONT {PID}' to resume it")
+
+    def test_ctrl_c_during_pending_approval_names_the_request(self):
+        rule = NannyRule(name="gate", condition="files_modified > 0", action="require_approval")
+        self._run(self.ctrl_c([self.edit()]), nanny_rules=[rule])
+        (req,) = list_requests(self.store)
+        self.assertEqual(req.state, "pending")
+        self.mocks["resume"].assert_not_called()
+        self.assert_said(
+            f"Watch stopped while agent pid {PID} is paused for approval {req.request_id}. "
+            "It stays stopped until the request is decided: run "
+            f"'agent-strace approval approve {req.request_id}' to resume it."
+        )
+
+    def test_decided_approval_says_nothing(self):
+        rule = NannyRule(name="gate", condition="files_modified > 0", action="require_approval")
+
+        def items():
+            yield self.edit()
+            (req,) = list_requests(self.store)
+            approve_request(self.store, req.request_id, resume_agent=False)
+            raise KeyboardInterrupt
+
+        self._run(items(), nanny_rules=[rule])
+        self.assert_not_said("Watch stopped while")
+
+    def test_exited_agent_says_nothing(self):
+        rule = NannyRule(name="stop", condition="files_modified > 0", action="pause")
+
+        def items():
+            yield self.edit()
+            self.mocks["os_kill"].side_effect = ProcessLookupError
+            raise KeyboardInterrupt
+
+        self._run(items(), nanny_rules=[rule])
+        self.assert_not_said("Watch stopped while")
+
+    def test_reused_pid_says_so_instead(self):
+        rule = NannyRule(name="stop", condition="files_modified > 0", action="pause")
+        reused = patch("agent_trace.watch.pid_reused", return_value=False)
+        self.addCleanup(reused.stop)
+        reused = reused.start()
+
+        def items():
+            yield self.edit()
+            reused.return_value = True
+            raise KeyboardInterrupt
+
+        self._run(items(), nanny_rules=[rule])
+        self.assert_not_said("Watch stopped while")
+        self.assert_said(f"Agent pid {PID}: the PID now belongs to another process")
+        self.assert_not_said("no agent was signalled")
+
+    def test_kill_says_nothing(self):
+        rule = NannyRule(name="stop", condition="files_modified > 0", action="pause")
+        cap = NannyRule(name="cap", condition="cost_usd > 0.5", action="kill")
+        self.mocks["kill"].return_value = True
+        spend = TraceEvent(
+            event_type=EventType.LLM_RESPONSE, timestamp=time.time(), session_id=SESSION,
+            data={"input_tokens": 1_000_000, "output_tokens": 0},
+        )
+        self._run(self.ctrl_c([self.edit(), spend]), nanny_rules=[rule, cap])
+        self.mocks["kill"].assert_called_once()
+        self.assert_not_said("Watch stopped while")
+
+
 if __name__ == "__main__":
     unittest.main()

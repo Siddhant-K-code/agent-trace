@@ -486,6 +486,57 @@ class TestTimeoutKills(WatchdogLimitTest):
         self.mocks["kill"].assert_not_called()
 
 
+class TestReusedAgentPidUnderTimeout(WatchdogLimitTest):
+    """The agent exits without SESSION_END and another process gets its PID,
+    so signal 0 still finds a process. Its start time shows it is not the
+    agent."""
+
+    def setUp(self):
+        super().setUp()
+        self.mocks["identity"].return_value = "proc:7"
+        self.reused = False
+        p = patch("agent_trace.watch.pid_reused", side_effect=lambda pid, start: self.reused)
+        self.mocks["pid_reused"] = p.start()
+        self.addCleanup(p.stop)
+
+    def pid_now_names_another_process(self):
+        self.reused = True
+
+    def test_idle_stop_applies_again(self):
+        out = self.watch("--timeout", "1m", max_idle_seconds=0.05, steps=(
+            _IDLE_SENTINEL, self.pid_now_names_another_process,
+            self.idle, _IDLE_SENTINEL, _IDLE_SENTINEL,
+        ))
+        self.assertIn("stopping", out)
+        self.assertEqual(self.yielded, 2)
+        self.assertTrue(self.loop_state.agent_exited)
+        self.assertIsNone(self.loop_state.agent_pid)
+        self.assertIn(
+            f"Agent pid {PID}: the PID now belongs to another process (the agent exited "
+            f"and its PID was reused). Watch will not signal PID {PID} again", out,
+        )
+        self.assertIn("now belongs to another process", (self.root / ".agent-traces" / "alerts.log").read_text())
+
+    def test_deadline_fires_no_alert_and_kills_nothing(self):
+        self.watch("--timeout", "1m", steps=(
+            _IDLE_SENTINEL, self.pid_now_names_another_process, self.pass_deadline,
+            _IDLE_SENTINEL, _IDLE_SENTINEL,
+        ))
+        self.assertEqual(self.count("DurationWatcher:"), 0)
+        self.mocks["kill"].assert_not_called()
+
+    def test_identity_is_checked_at_most_every_few_seconds(self):
+        state = WatchState(agent_pid=PID, agent_start_time="proc:7")
+        out = io.StringIO()
+        self.assertFalse(watch_mod._agent_exited(state, out))
+        self.assertFalse(watch_mod._agent_exited(state, out))
+        self.assertEqual(self.mocks["pid_reused"].call_count, 1)
+        self.reused = True
+        self.assertFalse(watch_mod._agent_exited(state, out))
+        self.assertTrue(watch_mod._agent_exited(state, out, recheck_identity=True))
+        self.assertEqual(self.mocks["pid_reused"].call_count, 2)
+
+
 class TestTimeoutIdleStop(WatchdogLimitTest):
     def test_idle_stop_waits_for_the_deadline_while_the_agent_runs(self):
         out = self.watch("--timeout", "1m", max_idle_seconds=0.05, steps=(
