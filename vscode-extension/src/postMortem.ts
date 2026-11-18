@@ -13,7 +13,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 
-interface PostMortemData {
+export interface PostMortemData {
   session_id: string;
   reason?: string;
   elapsed_seconds?: number;
@@ -29,7 +29,7 @@ function _fmtDuration(seconds: number): string {
   return m > 0 ? `${m}m ${s.toString().padStart(2, "0")}s` : `${s}s`;
 }
 
-function _renderHtml(data: PostMortemData, nonce: string): string {
+export function renderPostMortemHtml(data: PostMortemData, nonce: string): string {
   const reason = data.reason?.replace(/_/g, " ") ?? "unknown";
   const elapsed = data.elapsed_seconds != null ? _fmtDuration(data.elapsed_seconds) : "—";
   const cost = data.cost_at_death != null ? `$${data.cost_at_death.toFixed(4)}` : "—";
@@ -48,7 +48,7 @@ function _renderHtml(data: PostMortemData, nonce: string): string {
     : "<p class='muted'>No recovery context available.</p>";
 
   const copyBtn = data.recovery_context
-    ? `<button id="copyBtn" onclick="copyRecovery()">Copy recovery context</button>`
+    ? `<button id="copyBtn">Copy recovery context</button>`
     : "";
 
   const recoveryJson = data.recovery_context
@@ -121,6 +121,9 @@ function _renderHtml(data: PostMortemData, nonce: string): string {
     function copyRecovery() {
       vscode.postMessage({ command: 'copyRecovery', text: recoveryContext });
     }
+
+    const copyBtn = document.getElementById('copyBtn');
+    if (copyBtn) copyBtn.addEventListener('click', copyRecovery);
   </script>
 </body>
 </html>`;
@@ -232,7 +235,7 @@ export class PostMortemManager extends vscode.Disposable {
     );
 
     const nonce = _nonce();
-    panel.webview.html = _renderHtml(data, nonce);
+    panel.webview.html = renderPostMortemHtml(data, nonce);
 
     panel.webview.onDidReceiveMessage((msg) => {
       if (msg.command === "copyRecovery" && msg.text) {
