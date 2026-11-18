@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import argparse
+import contextlib
+import io
 import json
 import tempfile
 import time
@@ -13,6 +16,7 @@ from agent_trace.config_watch import (
     FileDiff,
     FileSnapshot,
     SnapshotDiff,
+    SnapshotFileError,
     _hash_file,
     _load_snapshots,
     _load_watch_paths,
@@ -170,6 +174,36 @@ for _ in range(10):
         loaded = _load_snapshots(root)
         self.assertEqual(loaded[0].files[0].path, "AGENTS.md")
         self.assertTrue(loaded[0].files[0].exists)
+
+    def test_bad_entry_is_skipped_and_kept_on_write(self):
+        root = Path(tempfile.mkdtemp())
+        (root / ".agent-traces").mkdir()
+        first = take_snapshot(root, ["AGENTS.md"])
+        path = root / ".agent-traces" / ".config-snapshots.json"
+        bad = {"snapshot_id": "broken"}
+        path.write_text(json.dumps(json.loads(path.read_text()) + [bad]))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            second = take_snapshot(root, ["AGENTS.md"])
+            loaded = _load_snapshots(root)
+        self.assertEqual([s.snapshot_id for s in loaded],
+                         [first.snapshot_id, second.snapshot_id])
+        self.assertIn(bad, json.loads(path.read_text()))
+        self.assertIn("timestamp", err.getvalue())
+
+    def test_corrupt_file_refuses_snapshot(self):
+        root, _ = _make_workspace()
+        path = root / ".agent-traces" / ".config-snapshots.json"
+        path.write_text("[{not json")
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SnapshotFileError):
+                take_snapshot(root, ["AGENTS.md"])
+            rc = cmd_config_watch(argparse.Namespace(
+                trace_dir=str(root / ".agent-traces"),
+                config_watch_command="snapshot", label="", watch=None,
+            ))
+        self.assertEqual(rc, 1)
+        self.assertEqual(path.read_text(), "[{not json")
 
 
 # ---------------------------------------------------------------------------

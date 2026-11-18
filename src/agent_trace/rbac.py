@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Optional
 
 from .fileutil import file_lock, write_atomic
+from .inert import inert
 from .store import DEFAULT_TRACE_DIR, resolve_trace_dir
 
 # ---------------------------------------------------------------------------
@@ -91,26 +92,115 @@ class RoleAssignment:
 # Storage
 # ---------------------------------------------------------------------------
 
+class RBACFileError(ValueError):
+    """rbac.json exists but cannot be read or parsed as a list of entries."""
+
+
+_STR_FIELDS = ("principal", "principal_type", "role", "workspace_id", "assigned_by")
+
+
+def _entry_problem(d: object) -> str:
+    """Return why *d* is not a usable assignment entry, or '' if it is."""
+    if not isinstance(d, dict):
+        return "not a JSON object"
+    for name in ("principal", "principal_type", "role"):
+        if name not in d:
+            return f"missing {name}"
+    for name in _STR_FIELDS:
+        if name in d and not isinstance(d[name], str):
+            return f"{name} is not a string"
+    assigned_at = d.get("assigned_at", 0.0)
+    if isinstance(assigned_at, bool) or not isinstance(assigned_at, (int, float)):
+        return "assigned_at is not a number"
+    return ""
+
+
+def _same_key(d: object, principal: str, workspace_id: str) -> bool:
+    """True if raw entry *d* names *principal* in *workspace_id*."""
+    return (
+        isinstance(d, dict)
+        and d.get("principal") == principal
+        and d.get("workspace_id", "") == workspace_id
+    )
+
+
 class RBACStore:
-    """Persist role assignments to a JSON file in the trace store directory."""
+    """Persist role assignments to a JSON file in the trace store directory.
+
+    An entry that cannot be parsed is skipped with a warning on stderr and is
+    written back unchanged by ``assign`` and ``revoke``, unless the call
+    replaces or revokes the same principal and workspace. If the file itself
+    cannot be read or parsed, reads see no assignments (so every permission
+    check denies) and ``assign`` / ``revoke`` raise :class:`RBACFileError`
+    instead of overwriting it.
+    """
 
     def __init__(self, base_dir: str | Path = DEFAULT_TRACE_DIR) -> None:
         self._path = Path(base_dir) / _RBAC_FILE
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._warned: set[str] = set()
+
+    def _warn(self, message: str) -> None:
+        if message not in self._warned:
+            self._warned.add(message)
+            sys.stderr.write(f"warning: {message}\n")
+
+    def _read(self) -> tuple[list[RoleAssignment], list[object]]:
+        """Return (valid assignments, raw entries that failed to parse).
+
+        Raises RBACFileError if the file exists but is not a readable JSON list.
+        """
+        where = inert(self._path)
+        try:
+            data = json.loads(self._path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return [], []
+        except (OSError, UnicodeDecodeError, ValueError, RecursionError) as exc:
+            raise RBACFileError(
+                f"cannot parse {where}: {inert(type(exc).__name__)}"
+            ) from exc
+        if not isinstance(data, list):
+            raise RBACFileError(f"cannot parse {where}: top level is not a JSON list")
+        assignments: list[RoleAssignment] = []
+        bad: list[object] = []
+        for index, d in enumerate(data):
+            problem = _entry_problem(d)
+            if problem:
+                bad.append(d)
+                self._warn(f"skipping entry {index} in {where}: {problem}")
+            else:
+                assignments.append(RoleAssignment.from_dict(d))
+        return assignments, bad
 
     def _load(self) -> list[RoleAssignment]:
-        if not self._path.exists():
-            return []
+        """Return valid assignments; an unreadable file yields none (fail closed)."""
         try:
-            data = json.loads(self._path.read_text())
-            return [RoleAssignment.from_dict(d) for d in data]
-        except Exception:
+            return self._read()[0]
+        except RBACFileError as exc:
+            self._warn(f"{exc}; treating as no role assignments")
             return []
 
-    def _save(self, assignments: list[RoleAssignment]) -> None:
+    def read_error(self) -> str | None:
+        """Return why rbac.json cannot be parsed, or None if it can (or is absent)."""
+        try:
+            self._read()
+        except RBACFileError as exc:
+            return str(exc)
+        return None
+
+    def _read_for_update(self) -> tuple[list[RoleAssignment], list[object]]:
+        try:
+            return self._read()
+        except RBACFileError as exc:
+            raise RBACFileError(
+                f"{exc}; refusing to write so existing assignments are not lost. "
+                "Fix or remove the file and retry."
+            ) from exc
+
+    def _save(self, assignments: list[RoleAssignment], bad: list[object] = ()) -> None:
         write_atomic(
             self._path,
-            json.dumps([a.to_dict() for a in assignments], indent=2),
+            json.dumps([a.to_dict() for a in assignments] + list(bad), indent=2),
             allow_symlinks=True,
         )
 
@@ -149,12 +239,13 @@ class RBACStore:
             )
 
         with file_lock(self._path):
-            assignments = self._load()
+            assignments, bad = self._read_for_update()
             # Remove any existing assignment for this principal+workspace
             assignments = [
                 a for a in assignments
                 if not (a.principal == principal and a.workspace_id == workspace_id)
             ]
+            bad = [d for d in bad if not _same_key(d, principal, workspace_id)]
             new = RoleAssignment(
                 principal=principal,
                 principal_type=principal_type,
@@ -163,20 +254,21 @@ class RBACStore:
                 assigned_by=assigned_by,
             )
             assignments.append(new)
-            self._save(assignments)
+            self._save(assignments, bad)
         return new
 
     def revoke(self, principal: str, workspace_id: str = "") -> bool:
         """Remove a role assignment. Returns True if something was removed."""
         with file_lock(self._path):
-            assignments = self._load()
-            before = len(assignments)
+            assignments, bad = self._read_for_update()
+            before = len(assignments) + len(bad)
             assignments = [
                 a for a in assignments
                 if not (a.principal == principal and a.workspace_id == workspace_id)
             ]
-            if len(assignments) < before:
-                self._save(assignments)
+            bad = [d for d in bad if not _same_key(d, principal, workspace_id)]
+            if len(assignments) + len(bad) < before:
+                self._save(assignments, bad)
                 return True
             return False
 
@@ -270,7 +362,11 @@ def cmd_rbac(args: argparse.Namespace) -> int:
             sys.stderr.write("error: --user or --group required\n")
             return 1
         workspace_id = getattr(args, "workspace", "") or ""
-        removed = store.revoke(principal, workspace_id)
+        try:
+            removed = store.revoke(principal, workspace_id)
+        except RBACFileError as exc:
+            sys.stderr.write(f"error: {exc}\n")
+            return 1
         if removed:
             scope = f" (workspace: {workspace_id})" if workspace_id else " (org-level)"
             sys.stdout.write(f"Revoked role for {principal}{scope}\n")
@@ -280,6 +376,10 @@ def cmd_rbac(args: argparse.Namespace) -> int:
 
     if sub == "list":
         workspace_id = getattr(args, "workspace", "") or ""
+        error = store.read_error()
+        if error:
+            sys.stderr.write(f"error: {error}\n")
+            return 1
         assignments = store.list_assignments(workspace_id=workspace_id)
         if not assignments:
             sys.stdout.write("No role assignments found.\n")
