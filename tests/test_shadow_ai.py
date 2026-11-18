@@ -78,6 +78,46 @@ class TestShadowAIDetection(unittest.TestCase):
         claude = next(d for d in report.detections if d.tool_name == "Claude Code")
         self.assertEqual(claude.confidence, "confirmed")
 
+    def _commit(self, files: dict[str, str]) -> None:
+        for rel, text in files.items():
+            path = os.path.join(self._tmp, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write(text)
+        git = ["git", "-C", self._tmp, "-c", "user.name=t", "-c", "user.email=t@t",
+               "-c", "commit.gpgsign=false"]
+        subprocess.run(git + ["add", "-A"], check=True, capture_output=True)
+        subprocess.run(git + ["commit", "-q", "--no-verify", "-m", "env"],
+                       check=True, capture_output=True)
+
+    def test_approved_endpoint_does_not_hide_unapproved_one(self):
+        from agent_trace.shadow_ai import detect_ai_tools, format_audit_tools
+        self._commit({".env": "A=https://api.anthropic.com\nB=https://openrouter.ai/api/v1\n"})
+        report = detect_ai_tools(repo_path=self._tmp, since="1 day ago")
+        self.assertEqual(report.unknown_endpoints, ["openrouter.ai"])
+        buf = io.StringIO()
+        format_audit_tools(report, out=buf)
+        self.assertIn("openrouter.ai", buf.getvalue())
+        self.assertNotIn("No unapproved tools", buf.getvalue())
+
+    def test_approved_endpoints_alone_are_not_unknown(self):
+        from agent_trace.shadow_ai import detect_ai_tools
+        self._commit({".env": "A=https://api.anthropic.com\nB=https://api.openai.com/v1\n"})
+        report = detect_ai_tools(repo_path=self._tmp, since="1 day ago")
+        self.assertEqual(report.unknown_endpoints, [])
+
+    def test_every_env_file_in_a_commit_is_scanned(self):
+        from agent_trace.shadow_ai import detect_ai_tools
+        self._commit({
+            ".env": "A=https://api.anthropic.com\n",
+            ".env.example": "B=https://api.mistral.ai\n",
+            ".env.local": "C=https://api.cohere.ai\n",
+            "config/prod.env": "D=https://openrouter.ai/api/v1\n",
+        })
+        report = detect_ai_tools(repo_path=self._tmp, since="1 day ago")
+        self.assertEqual(report.unknown_endpoints,
+                         ["api.cohere.ai", "api.mistral.ai", "openrouter.ai"])
+
     def test_cli_has_audit_tools_command(self):
         from agent_trace.cli import build_parser
         parser = build_parser()

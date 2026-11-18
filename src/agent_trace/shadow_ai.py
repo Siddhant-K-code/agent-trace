@@ -193,30 +193,38 @@ def _scan_commit_messages(repo: Path, since: str, patterns: list[re.Pattern]) ->
     return hits
 
 
+_ENV_PATHSPECS = ["*.env", ".env", ".env.*"]
+
+
 def _scan_env_history(repo: Path, since: str) -> tuple[list[str], list[str]]:
     """Scan git history of .env files for LLM endpoint references.
 
+    Reads every file matching ``_ENV_PATHSPECS`` that each commit touched, and
+    classifies each matched endpoint against ``APPROVED_ENDPOINTS`` on its own.
+
     Returns (known_endpoints, unknown_endpoints).
     """
-    # Get all commits that touched .env files
-    log = _git_log(repo, since, "%H", ["--", "*.env", ".env", ".env.*"])
-    known: list[str] = []
-    unknown: list[str] = []
+    log = _git_log(repo, since, "%H", ["--", *_ENV_PATHSPECS])
+    known: set[str] = set()
+    unknown: set[str] = set()
 
     for sha in log[:50]:  # cap at 50 commits for performance
-        diff = _git(repo, "show", "--stat", sha)
-        content = _git(repo, "show", f"{sha}:.env") or _git(repo, "show", f"{sha}:.env.example")
-        if not content:
-            continue
-        for pat in LLM_ENDPOINT_PATTERNS:
-            if pat.search(content):
-                endpoint = pat.pattern.replace("\\.", ".").replace("\\b", "").replace("(", "").replace(")", "").split("|")[0]
-                if any(ep in content for ep in APPROVED_ENDPOINTS):
-                    known.append(endpoint)
-                else:
-                    unknown.append(endpoint)
+        names = _git(repo, "show", "--name-only", "-z", "--format=", sha, "--", *_ENV_PATHSPECS)
+        for path in names.split("\0"):
+            if not path:
+                continue
+            content = _git(repo, "show", f"{sha}:{path}")
+            if not content:
+                continue
+            for pat in LLM_ENDPOINT_PATTERNS:
+                if pat.search(content):
+                    endpoint = pat.pattern.replace("\\.", ".").replace("\\b", "").replace("(", "").replace(")", "").split("|")[0]
+                    if endpoint in APPROVED_ENDPOINTS:
+                        known.add(endpoint)
+                    else:
+                        unknown.add(endpoint)
 
-    return list(set(known)), list(set(unknown))
+    return sorted(known), sorted(unknown)
 
 
 def _scan_pii_in_commits(repo: Path, since: str) -> list[DataRiskIndicator]:

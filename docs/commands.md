@@ -1228,8 +1228,10 @@ agent-strace audit-tools [--repo PATH] [--since DATE] [--approved TOOLS]
 Detect which AI coding tools are used in a repository: Claude Code, Cursor,
 GitHub Copilot, Codex / ChatGPT, Windsurf, and Aider. Detection uses config
 file signals and, for some tools, commit message patterns. The report also
-flags unrecognized LLM endpoints in committed `.env` files and PII-like
-patterns in recent commits. Reads local files and git history only: no network
+flags known LLM provider endpoints other than Anthropic, OpenAI and Gemini
+(such as OpenRouter or Mistral) in committed `.env`, `.env.*` and `*.env`
+files, each endpoint judged on its own, and PII-like patterns in recent
+commits. Reads local files and git history only: no network
 calls, no API keys. `--since` takes a git date (default: `90 days ago`).
 `--approved` is a comma-separated list of the tool names above
 (case-insensitive); any other detected tool is reported as unapproved.
