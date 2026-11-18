@@ -38,7 +38,8 @@ jobs:
     # the trace store lock, and LF line endings in trace-store files and the
     # configs, fixtures and baselines agent-strace reads back, and the by-path
     # reads and writes behind `agent-strace validate`, `compliance-report`,
-    # `share --assignment` and `score`, which the Linux jobs never run
+    # `share --assignment` and `score`, and the watch tail reading on across a
+    # tag_session rewrite, which the Linux jobs never run
     # natively. Only these tests run here: the full suite does not yet pass
     # on Windows (POSIX signals and file modes, CRLF in CLI and report
     # output, cp1252 stdout).
@@ -74,6 +75,7 @@ jobs:
           tests.test_assignment
           tests.test_store.TestTraceStore
           tests.test_store.TestStoreWriteLock
+          tests.test_watch_paths.TestTailFollowsReplacedFile
         env:
           PYTHONPATH: src
           # Redirected stdout defaults to cp1252, which cannot print the

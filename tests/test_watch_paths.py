@@ -156,7 +156,7 @@ class _WatchCase(unittest.TestCase):
         self.assertIn("[watch] Session ended (", out.getvalue())
         return [entry.args[0] for entry in alert.call_args_list]
 
-    def run_watch(self, store, conditions=(), during=None, session_id=SESSION):
+    def run_watch(self, store, conditions=(), during=None, session_id=SESSION, config=None):
         """Run watch_session on the real events file; return the alerts and output.
 
         Once watch reaches the end of the file, *during* writes events while
@@ -186,7 +186,7 @@ class _WatchCase(unittest.TestCase):
             "agent_trace.watch._dispatch_alert",
         ) as alert:
             watch_session(
-                store, session_id, self.config(), out=out, poll_interval=0.01,
+                store, session_id, config or self.config(), out=out, poll_interval=0.01,
                 nanny_rules=[_rule(c) for c in conditions],
             )
         self.assertIn("[watch] Session ended (", out.getvalue())
@@ -730,6 +730,112 @@ class TestStartupCwd(_WatchCase):
         alerts, out = self.run_watch(store, [SECRETS, "files_modified > 0"])
         self.assertEqual(alerts, [])
         self.assertIn("[watch] Session ended (1 events,", out)
+
+
+def _bash(command: str) -> TraceEvent:
+    return _call("bash", {"command": command})
+
+
+class TestTailFollowsReplacedFile(_WatchCase):
+    """The tail reads on when the events file is replaced or rewritten.
+
+    These tests drive _tail_events directly, so they also run on Windows.
+    """
+
+    def events_file(self, store) -> Path:
+        return store._session_file(SESSION, "events.ndjson", "event stream")
+
+    def tail(self, store):
+        tail = watch_mod._tail_events(self.events_file(store), poll_interval=0.01)
+        self.addCleanup(tail.close)
+        return tail
+
+    def commands(self, tail, count: int) -> list:
+        """Read *count* items; return the command of each event, None for idle."""
+        items = []
+        for _ in range(count):
+            item = next(tail)
+            items.append(None if item is watch_mod._IDLE_SENTINEL else item.data["arguments"]["command"])
+        return items
+
+    def test_tag_session_does_not_blind_the_tail(self):
+        store = self.new_store()
+        store.append_event(SESSION, _bash("before"))
+        tail = self.tail(store)
+        self.assertEqual(self.commands(tail, 1), [None])
+        store.append_event(SESSION, _bash("read"))
+        self.assertEqual(self.commands(tail, 2), ["read", None])
+
+        store.tag_session(SESSION, "acme")
+        store.append_event(SESSION, _bash("after tag"))
+        store.append_event(SESSION, _bash("next"))
+        item = next(tail)
+        self.assertEqual(item.data["arguments"]["command"], "after tag")
+        self.assertEqual(item.tenant_id, "acme")
+        self.assertEqual(self.commands(tail, 2), ["next", None])
+
+    def test_a_retag_with_the_same_tenant_does_not_replay(self):
+        store = self.new_store()
+        store.tag_session(SESSION, "acme")
+        store.append_event(SESSION, _bash("before"))
+        tail = self.tail(store)
+        self.assertEqual(self.commands(tail, 1), [None])
+        store.append_event(SESSION, _bash("read"))
+        self.assertEqual(self.commands(tail, 2), ["read", None])
+        store.tag_session(SESSION, "acme")
+        self.assertEqual(self.commands(tail, 1), [None])
+        store.append_event(SESSION, _bash("after"))
+        self.assertEqual(self.commands(tail, 2), ["after", None])
+
+    def test_a_line_is_read_once_its_newline_arrives(self):
+        store = self.new_store()
+        path = self.events_file(store)
+        first = _bash("written before watch").to_json().encode("utf-8")
+        with open(path, "ab") as f:
+            f.write(first[:10])
+        tail = self.tail(store)
+        self.assertEqual(self.commands(tail, 1), [None])
+        second = _bash("written during watch").to_json().encode("utf-8")
+        with open(path, "ab") as f:
+            f.write(first[10:] + b"\n" + second[:10])
+        self.assertEqual(self.commands(tail, 2), ["written before watch", None])
+        with open(path, "ab") as f:
+            f.write(second[10:] + b"\n")
+        self.assertEqual(self.commands(tail, 2), ["written during watch", None])
+
+    def test_a_truncated_file_replays_nothing(self):
+        store = self.new_store()
+        path = self.events_file(store)
+        store.append_event(SESSION, _bash("one"))
+        tail = self.tail(store)
+        self.assertEqual(self.commands(tail, 1), [None])
+        store.append_event(SESSION, _bash("two"))
+        store.append_event(SESSION, _bash("three"))
+        self.assertEqual(self.commands(tail, 3), ["two", "three", None])
+        with open(path, "r+b") as f:
+            f.truncate(len(path.read_bytes().splitlines(keepends=True)[0]))
+        self.assertEqual(self.commands(tail, 1), [None])
+        store.append_event(SESSION, _bash("four"))
+        self.assertEqual(self.commands(tail, 2), ["four", None])
+
+
+class TestWatchAfterTagSession(_WatchCase):
+    """A tenant assigned mid-watch does not stop watch from checking events."""
+
+    def test_retries_after_tag_session_still_fire(self):
+        store = self.new_store()
+        store.append_event(SESSION, _start("/app"))
+
+        def during():
+            store.tag_session(SESSION, "acme")
+            for _ in range(3):
+                store.append_event(SESSION, _bash("make test"))
+
+        alerts, out = self.run_watch(
+            store, during=during, config=self.config(max_retries=1, loop_threshold=99),
+        )
+        self.assertIn("RetryWatcher: command ran 2 times: make test", alerts)
+        self.assertIn("[watch] Session ended (4 events,", out)
 
 
 class TestCapturedCopilotHooks(_WatchCase):
