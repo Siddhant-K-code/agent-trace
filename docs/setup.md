@@ -524,6 +524,17 @@ print(f"Replay with: agent-strace replay {meta.session_id}")
 
 `start_session()` writes to `$AGENT_TRACE_DIR` when it is set and non-empty, else `.agent-traces`, so the CLI reads the same store. An explicit `start_session(trace_dir=...)` wins.
 
+`@trace_tool` and `@trace_llm_call` also work on `async def` functions. The decorated function stays a coroutine function. The result, error and duration are recorded when the call is awaited, not when the coroutine is created.
+
+```python
+@trace_tool
+async def fetch(url: str) -> str:
+    async with session.get(url) as resp:
+        return await resp.text()
+```
+
+Sessions are per thread and do not nest. Calling `start_session()` while the thread already has an active session ends that session first, exactly as `end_session()` would, then starts the new one. Concurrent asyncio tasks on one event loop run on one thread, so they share its active session.
+
 ---
 
 ## Security-sensitive repos

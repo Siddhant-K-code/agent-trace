@@ -1,5 +1,7 @@
 """Tests for the Python decorator API."""
 
+import asyncio
+import inspect
 import os
 import sys
 import tempfile
@@ -178,6 +180,112 @@ class TestDecorator(unittest.TestCase):
 
         result = safe_tool()
         self.assertEqual(result, "ok")
+
+
+class TestDecoratorAsync(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def _events(self, session_id, event_type):
+        events = TraceStore(self.tmpdir).load_events(session_id)
+        return [e for e in events if e.event_type == event_type]
+
+    def test_async_tool_records_awaited_result_and_duration(self):
+        session_id = start_session(name="test", trace_dir=self.tmpdir)
+
+        @trace_tool
+        async def fetch(url: str) -> str:
+            await asyncio.sleep(0.05)
+            return f"body of {url}"
+
+        self.assertTrue(inspect.iscoroutinefunction(fetch))
+        self.assertEqual(asyncio.run(fetch("x")), "body of x")
+        meta = end_session()
+        self.assertEqual(meta.tool_calls, 1)
+
+        call = self._events(session_id, EventType.TOOL_CALL)[0]
+        results = self._events(session_id, EventType.TOOL_RESULT)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].parent_id, call.event_id)
+        self.assertEqual(results[0].data["content_preview"], "'body of x'")
+        self.assertGreaterEqual(results[0].duration_ms, 40)
+
+    def test_async_tool_error_is_recorded(self):
+        session_id = start_session(name="test", trace_dir=self.tmpdir)
+
+        @trace_tool
+        async def fetch() -> str:
+            await asyncio.sleep(0)
+            raise RuntimeError("upstream down")
+
+        with self.assertRaises(RuntimeError):
+            asyncio.run(fetch())
+        meta = end_session()
+        self.assertEqual(meta.errors, 1)
+
+        call = self._events(session_id, EventType.TOOL_CALL)[0]
+        self.assertEqual(self._events(session_id, EventType.TOOL_RESULT), [])
+        errors = self._events(session_id, EventType.ERROR)
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(errors[0].parent_id, call.event_id)
+        self.assertEqual(errors[0].data["message"], "upstream down")
+        self.assertEqual(errors[0].data["exception_type"], "RuntimeError")
+
+    def test_async_llm_call_records_awaited_response_and_error(self):
+        session_id = start_session(name="test", trace_dir=self.tmpdir)
+
+        @trace_llm_call
+        async def call_llm(messages: list, model: str = "gpt-4") -> str:
+            await asyncio.sleep(0)
+            if messages[0]["content"] == "fail":
+                raise TimeoutError("model timed out")
+            return "Hello"
+
+        self.assertEqual(
+            asyncio.run(call_llm([{"role": "user", "content": "hi"}])), "Hello")
+        with self.assertRaises(TimeoutError):
+            asyncio.run(call_llm([{"role": "user", "content": "fail"}]))
+        meta = end_session()
+        self.assertEqual(meta.llm_requests, 2)
+        self.assertEqual(meta.errors, 1)
+
+        requests = self._events(session_id, EventType.LLM_REQUEST)
+        responses = self._events(session_id, EventType.LLM_RESPONSE)
+        errors = self._events(session_id, EventType.ERROR)
+        self.assertEqual(len(responses), 1)
+        self.assertEqual(responses[0].data["content_preview"], "'Hello'")
+        self.assertEqual(responses[0].parent_id, requests[0].event_id)
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(errors[0].parent_id, requests[1].event_id)
+
+
+class TestStartSessionWhileActive(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def test_second_start_ends_the_first_session(self):
+        first = start_session(name="first", trace_dir=self.tmpdir)
+
+        @trace_tool
+        def work() -> str:
+            return "ok"
+
+        work()
+        second = start_session(name="second", trace_dir=self.tmpdir)
+        work()
+        meta = end_session()
+        self.assertEqual(meta.session_id, second)
+        self.assertEqual(meta.tool_calls, 1)
+
+        store = TraceStore(self.tmpdir)
+        first_meta = store.load_meta(first)
+        self.assertIsNotNone(first_meta.ended_at)
+        self.assertEqual(first_meta.tool_calls, 1)
+        first_types = [e.event_type for e in store.load_events(first)]
+        self.assertEqual(first_types[-1], EventType.SESSION_END)
+        self.assertEqual(first_types.count(EventType.TOOL_CALL), 1)
+        self.assertIsNotNone(store.load_meta(second).ended_at)
+        self.assertIsNone(end_session())
 
 
 class TestDecoratorThreadSafety(unittest.TestCase):

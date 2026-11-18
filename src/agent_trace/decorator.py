@@ -53,7 +53,12 @@ def start_session(
 
     Without ``trace_dir`` the session goes to ``$AGENT_TRACE_DIR`` when it is
     set and non-empty, else ``.agent-traces``. An explicit ``trace_dir`` wins.
+
+    Sessions are per thread and do not nest. If this thread already has an
+    active session, it is ended first (as ``end_session()`` would) so it is
+    not left open with no end time.
     """
+    end_session()
     _local.store = TraceStore(resolve_trace_dir(trace_dir), redact=redact)
     _local.session = SessionMeta(agent_name=name)
     _local.redact = _local.store.redact
@@ -116,68 +121,130 @@ def _emit_event(event: TraceEvent) -> None:
             session.errors += 1
 
 
+def _begin_tool_call(func: Callable, tool_name: str, args: Any, kwargs: Any) -> TraceEvent:
+    sig = inspect.signature(func)
+    bound = sig.bind(*args, **kwargs)
+    bound.apply_defaults()
+    arg_data = {k: _safe_repr(v) for k, v in bound.arguments.items()}
+
+    call_event = TraceEvent(
+        event_type=EventType.TOOL_CALL,
+        data={
+            "tool_name": tool_name,
+            "arguments": arg_data,
+        },
+    )
+    _emit_event(call_event)
+    return call_event
+
+
+def _begin_llm_call(func: Callable, llm_name: str, args: Any, kwargs: Any) -> TraceEvent:
+    sig = inspect.signature(func)
+    bound = sig.bind(*args, **kwargs)
+    bound.apply_defaults()
+
+    # try to extract message count
+    messages = bound.arguments.get("messages", [])
+    message_count = len(messages) if isinstance(messages, list) else 0
+
+    req_event = TraceEvent(
+        event_type=EventType.LLM_REQUEST,
+        data={
+            "method": llm_name,
+            "message_count": message_count,
+            "model": bound.arguments.get("model", ""),
+        },
+    )
+    _emit_event(req_event)
+
+    session = _get_active_session()
+    if session:
+        session.llm_requests += 1
+    return req_event
+
+
+def _emit_success(
+    event_type: EventType, parent: TraceEvent, start: float, result: Any
+) -> None:
+    _emit_event(
+        TraceEvent(
+            event_type=event_type,
+            parent_id=parent.event_id,
+            duration_ms=(time.time() - start) * 1000,
+            data={
+                "content_preview": _safe_repr(result)[:200],
+            },
+        )
+    )
+
+
+def _emit_failure(parent: TraceEvent, start: float, exc: Exception) -> None:
+    _emit_event(
+        TraceEvent(
+            event_type=EventType.ERROR,
+            parent_id=parent.event_id,
+            duration_ms=(time.time() - start) * 1000,
+            data={
+                "message": str(exc),
+                "exception_type": type(exc).__name__,
+            },
+        )
+    )
+
+
+def _wrap(
+    func: Callable,
+    begin: Callable[[Callable, str, Any, Any], TraceEvent],
+    label: str,
+    success_type: EventType,
+) -> Callable:
+    # An async def function returns a coroutine at call time and runs only
+    # when awaited, so the result, error and duration must be taken after
+    # the await, not when the coroutine object is created.
+    if inspect.iscoroutinefunction(func):
+
+        @functools.wraps(func)
+        async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+            parent = begin(func, label, args, kwargs)
+            start = time.time()
+            try:
+                result = await func(*args, **kwargs)
+            except Exception as e:
+                _emit_failure(parent, start, e)
+                raise
+            _emit_success(success_type, parent, start, result)
+            return result
+
+        return async_wrapper
+
+    @functools.wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        parent = begin(func, label, args, kwargs)
+        start = time.time()
+        try:
+            result = func(*args, **kwargs)
+        except Exception as e:
+            _emit_failure(parent, start, e)
+            raise
+        _emit_success(success_type, parent, start, result)
+        return result
+
+    return wrapper
+
+
 def trace_tool(_func: Callable | None = None, *, name: str = ""):
-    """Decorator to trace a tool function.
+    """Decorator to trace a tool function, sync or ``async def``.
 
     Usage:
         @trace_tool
         def my_tool(x): ...
 
         @trace_tool(name="custom")
-        def my_tool(x): ...
+        async def my_async_tool(x): ...
     """
 
     def decorator(func: Callable) -> Callable:
-        tool_name = name or func.__name__
-
-        @functools.wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> Any:
-            # build argument map
-            sig = inspect.signature(func)
-            bound = sig.bind(*args, **kwargs)
-            bound.apply_defaults()
-            arg_data = {k: _safe_repr(v) for k, v in bound.arguments.items()}
-
-            call_event = TraceEvent(
-                event_type=EventType.TOOL_CALL,
-                data={
-                    "tool_name": tool_name,
-                    "arguments": arg_data,
-                },
-            )
-            _emit_event(call_event)
-
-            start = time.time()
-            try:
-                result = func(*args, **kwargs)
-                duration_ms = (time.time() - start) * 1000
-
-                result_event = TraceEvent(
-                    event_type=EventType.TOOL_RESULT,
-                    parent_id=call_event.event_id,
-                    duration_ms=duration_ms,
-                    data={
-                        "content_preview": _safe_repr(result)[:200],
-                    },
-                )
-                _emit_event(result_event)
-                return result
-
-            except Exception as e:
-                duration_ms = (time.time() - start) * 1000
-                error_event = TraceEvent(
-                    event_type=EventType.ERROR,
-                    parent_id=call_event.event_id,
-                    duration_ms=duration_ms,
-                    data={
-                        "message": str(e),
-                        "exception_type": type(e).__name__,
-                    },
-                )
-                _emit_event(error_event)
-                raise
-
-        return wrapper
+        return _wrap(func, _begin_tool_call, name or func.__name__, EventType.TOOL_RESULT)
 
     if _func is not None:
         return decorator(_func)
@@ -185,7 +252,7 @@ def trace_tool(_func: Callable | None = None, *, name: str = ""):
 
 
 def trace_llm_call(_func: Callable | None = None, *, name: str = ""):
-    """Decorator to trace an LLM call function.
+    """Decorator to trace an LLM call function, sync or ``async def``.
 
     Usage:
         @trace_llm_call
@@ -193,63 +260,7 @@ def trace_llm_call(_func: Callable | None = None, *, name: str = ""):
     """
 
     def decorator(func: Callable) -> Callable:
-        llm_name = name or func.__name__
-
-        @functools.wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> Any:
-            sig = inspect.signature(func)
-            bound = sig.bind(*args, **kwargs)
-            bound.apply_defaults()
-
-            # try to extract message count
-            messages = bound.arguments.get("messages", [])
-            message_count = len(messages) if isinstance(messages, list) else 0
-
-            req_event = TraceEvent(
-                event_type=EventType.LLM_REQUEST,
-                data={
-                    "method": llm_name,
-                    "message_count": message_count,
-                    "model": bound.arguments.get("model", ""),
-                },
-            )
-            _emit_event(req_event)
-
-            session = _get_active_session()
-            if session:
-                session.llm_requests += 1
-
-            start = time.time()
-            try:
-                result = func(*args, **kwargs)
-                duration_ms = (time.time() - start) * 1000
-
-                resp_event = TraceEvent(
-                    event_type=EventType.LLM_RESPONSE,
-                    parent_id=req_event.event_id,
-                    duration_ms=duration_ms,
-                    data={
-                        "content_preview": _safe_repr(result)[:200],
-                    },
-                )
-                _emit_event(resp_event)
-                return result
-
-            except Exception as e:
-                duration_ms = (time.time() - start) * 1000
-                error_event = TraceEvent(
-                    event_type=EventType.ERROR,
-                    parent_id=req_event.event_id,
-                    duration_ms=duration_ms,
-                    data={
-                        "message": str(e),
-                        "exception_type": type(e).__name__,
-                    },
-                )
-                _emit_event(error_event)
-                raise
-
-        return wrapper
+        return _wrap(func, _begin_llm_call, name or func.__name__, EventType.LLM_RESPONSE)
 
     if _func is not None:
         return decorator(_func)
