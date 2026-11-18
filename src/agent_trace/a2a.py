@@ -108,6 +108,13 @@ class AgentNode:
     tool_calls: int
     children: list["AgentNode"] = field(default_factory=list)
     a2a_calls: list[A2ACallEvent] = field(default_factory=list)
+    # A2A calls in the parent session that name this session as their
+    # sub-session. 0 for the root and for a child linked only by its meta.
+    delegations: int = 0
+    # "" for a node shown in full. "cycle" for a session that is already on
+    # the path from the root, "shared" for one already shown in full under
+    # another parent. A reference has no children and is not counted twice.
+    ref: str = ""
 
 
 @dataclass
@@ -195,15 +202,29 @@ def link_sub_session(
     parent_session_id: str,
     parent_event_id: str,
     child_session_id: str,
-    depth: int = 1,
+    depth: int | None = None,
 ) -> None:
-    """Update child session meta to link it to its parent A2A call."""
+    """Update child session meta to link it to its parent A2A call.
+
+    The child's meta is changed under the store's write lock, so updates the
+    child agent writes to its own meta at the same time are kept. *depth*
+    defaults to the parent's depth plus one. Does nothing if the store
+    refuses the link.
+    """
     try:
-        meta = store.load_meta(child_session_id)
-        meta.parent_session_id = parent_session_id
-        meta.parent_event_id = parent_event_id
-        meta.depth = depth
-        store.update_meta(meta)
+        if depth is None:
+            parent_depth = store.load_meta(parent_session_id).depth
+            # Stored meta can hold any JSON value here.
+            if not isinstance(parent_depth, int) or isinstance(parent_depth, bool) or parent_depth < 0:
+                parent_depth = 0
+            depth = parent_depth + 1
+
+        def _link(meta: SessionMeta) -> None:
+            meta.parent_session_id = parent_session_id
+            meta.parent_event_id = parent_event_id
+            meta.depth = depth
+
+        store.mutate_meta(child_session_id, _link)
     except Exception:
         pass
 
@@ -227,20 +248,43 @@ def build_a2a_tree(store: TraceStore, root_session_id: str) -> A2ATreeReport:
     Raises NonObjectEventDataError, naming the session, when an event in a
     session of the tree has data that is not an object.
     """
-    visited: set[str] = set()
+    # A session already on the path from the root is a cycle. A session
+    # already shown in full elsewhere (a diamond) is a shared reference.
+    on_path: set[str] = set()
+    built: dict[str, AgentNode] = {}
 
-    def _build_node(sid: str, depth: int) -> AgentNode:
-        if sid in visited:
-            return AgentNode(session_id=sid, agent_id="[cycle]", depth=depth,
-                             cost_usd=0, duration_ms=0, tool_calls=0)
-        visited.add(sid)
+    def _child_ids(sid: str, a2a_calls: list[A2ACallEvent]) -> dict[str, int]:
+        """Return each child session once, in first-seen order, with the
+        number of A2A calls that name it."""
+        counts: dict[str, int] = {}
+        for call in a2a_calls:
+            if call.sub_session_id:
+                counts[call.sub_session_id] = counts.get(call.sub_session_id, 0) + 1
+        # Also find sessions that declare this as parent
+        for m in store.list_sessions():
+            if m.parent_session_id == sid and m.session_id not in counts:
+                counts[m.session_id] = 0
+        return counts
+
+    def _build_node(sid: str, depth: int, delegations: int) -> AgentNode:
+        if sid in on_path or sid in built:
+            target = built[sid]
+            return AgentNode(
+                session_id=sid, agent_id=target.agent_id, depth=depth,
+                cost_usd=0, duration_ms=0, tool_calls=0,
+                delegations=delegations,
+                ref="cycle" if sid in on_path else "shared",
+            )
 
         try:
             meta = store.load_meta(sid)
             events = store.load_events(sid)
         except Exception:
-            return AgentNode(session_id=sid, agent_id="[not found]", depth=depth,
-                             cost_usd=0, duration_ms=0, tool_calls=0)
+            node = AgentNode(session_id=sid, agent_id="[not found]", depth=depth,
+                             cost_usd=0, duration_ms=0, tool_calls=0,
+                             delegations=delegations)
+            built[sid] = node
+            return node
 
         # _extract_a2a_calls reads the data of every event.
         require_object_event_data(events, session_id=sid)
@@ -260,35 +304,32 @@ def build_a2a_tree(store: TraceStore, root_session_id: str) -> A2ATreeReport:
             duration_ms=meta.total_duration_ms,
             tool_calls=meta.tool_calls,
             a2a_calls=a2a_calls,
+            delegations=delegations,
         )
+        built[sid] = node
 
-        # Recurse into linked sub-sessions
-        for call in a2a_calls:
-            if call.sub_session_id:
-                child = _build_node(call.sub_session_id, depth + 1)
-                node.children.append(child)
-
-        # Also find sessions that declare this as parent
-        all_metas = store.list_sessions()
-        for m in all_metas:
-            if m.parent_session_id == sid and m.session_id not in visited:
-                child = _build_node(m.session_id, depth + 1)
-                node.children.append(child)
+        on_path.add(sid)
+        try:
+            for child_id, count in _child_ids(sid, a2a_calls).items():
+                node.children.append(_build_node(child_id, depth + 1, count))
+        finally:
+            on_path.discard(sid)
 
         return node
 
-    root = _build_node(root_session_id, 0)
+    root = _build_node(root_session_id, 0, 0)
 
+    # References add nothing: their session is counted where it is in full.
     def _total_cost(node: AgentNode) -> float:
         return node.cost_usd + sum(_total_cost(c) for c in node.children)
 
     def _total_agents(node: AgentNode) -> int:
+        if node.ref:
+            return 0
         return 1 + sum(_total_agents(c) for c in node.children)
 
     def _max_depth(node: AgentNode) -> int:
-        if not node.children:
-            return node.depth
-        return max(_max_depth(c) for c in node.children)
+        return max([node.depth] + [_max_depth(c) for c in node.children if not c.ref])
 
     return A2ATreeReport(
         root=root,
@@ -319,9 +360,19 @@ def format_a2a_tree(report: A2ATreeReport, out: TextIO = sys.stdout) -> None:
 
     def _render(node: AgentNode, prefix: str = "", is_last: bool = True) -> None:
         connector = "└── " if is_last else "├── "
-        dur = f"{node.duration_ms/1000:.1f}s" if node.duration_ms else "?"
-        w(f"{prefix}{connector}{inert(node.agent_id)}  "
-          f"[{inert(node.tool_calls)} calls · ${node.cost_usd:.4f} · {dur}]\n")
+        times = [f"{node.delegations} delegations"] if node.delegations > 1 else []
+        if node.ref == "cycle":
+            label, details = f"[cycle] → {inert(node.agent_id)}", times
+        elif node.ref == "shared":
+            label, details = inert(node.agent_id), ["shown above"] + times
+        else:
+            dur = f"{node.duration_ms/1000:.1f}s" if node.duration_ms else "?"
+            label = inert(node.agent_id)
+            details = [f"{inert(node.tool_calls)} calls", f"${node.cost_usd:.4f}", dur] + times
+        w(f"{prefix}{connector}{label}"
+          f"{'  [' + ' · '.join(details) + ']' if details else ''}\n")
+        if node.ref:
+            return
 
         child_prefix = prefix + ("    " if is_last else "│   ")
 
@@ -351,13 +402,31 @@ def a2a_calls_to_otlp_spans(
     report: A2ATreeReport,
     service_name: str = "agent-trace",
 ) -> list[dict]:
-    """Convert A2A call graph to OTLP-compatible span dicts."""
+    """Convert A2A call graph to OTLP-compatible span dicts.
+
+    Each session gets one span. A cycle or a shared sub-session adds a link
+    on its session's span to the span of the agent that called it, with
+    ``agent.link`` set to ``cycle`` or ``shared``.
+    """
     spans = []
+    trace_id = report.root.session_id[:32].ljust(32, "0")
+    span_by_session: dict[str, dict] = {}
+    links: list[tuple[str, dict]] = []
 
     def _node_to_spans(node: AgentNode, parent_span_id: str = "") -> None:
+        if node.ref:
+            links.append((node.session_id, {
+                "traceId": trace_id,
+                "spanId": parent_span_id,
+                "attributes": [
+                    {"key": "agent.link", "value": {"stringValue": node.ref}},
+                    {"key": "agent.delegations", "value": {"intValue": node.delegations}},
+                ],
+            }))
+            return
         span_id = node.session_id[:16]
         span: dict = {
-            "traceId": report.root.session_id[:32].ljust(32, "0"),
+            "traceId": trace_id,
             "spanId": span_id,
             "name": f"agent:{node.agent_id}",
             "kind": 3,  # CLIENT
@@ -369,16 +438,18 @@ def a2a_calls_to_otlp_spans(
                 {"key": "agent.cost_usd", "value": {"doubleValue": node.cost_usd}},
                 {"key": "agent.tool_calls", "value": {"intValue": node.tool_calls}},
                 {"key": "agent.depth", "value": {"intValue": node.depth}},
+                {"key": "agent.delegations", "value": {"intValue": node.delegations}},
             ],
         }
         if parent_span_id:
             span["parentSpanId"] = parent_span_id
         spans.append(span)
+        span_by_session[node.session_id] = span
 
         for call in node.a2a_calls:
             call_span_id = call.event_id[:16]
             spans.append({
-                "traceId": report.root.session_id[:32].ljust(32, "0"),
+                "traceId": trace_id,
                 "spanId": call_span_id,
                 "parentSpanId": span_id,
                 "name": f"a2a_call:{call.agent_id}",
@@ -399,6 +470,8 @@ def a2a_calls_to_otlp_spans(
             _node_to_spans(child, span_id)
 
     _node_to_spans(report.root)
+    for session_id, link in links:
+        span_by_session[session_id].setdefault("links", []).append(link)
     return spans
 
 

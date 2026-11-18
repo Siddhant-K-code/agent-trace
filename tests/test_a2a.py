@@ -185,6 +185,199 @@ class TestA2ATree(unittest.TestCase):
         self.assertEqual(args.format, "json")
 
 
+class TestA2ATreeSharedAndCyclicSessions(unittest.TestCase):
+    """A session reached twice is shown in full once. Only a session already
+    on the path from the root is a cycle."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.store = _make_store(tmp.name)
+
+    def _session(self, name):
+        meta = SessionMeta(agent_name=name)
+        self.store.create_session(meta)
+        return meta.session_id
+
+    def _call(self, sid, sub_sid, name, task="t"):
+        from agent_trace.a2a import make_a2a_event
+        self.store.append_event(sid, make_a2a_event(
+            session_id=sid, agent_id=name, agent_url="http://agent",
+            task=task, response={}, sub_session_id=sub_sid,
+        ))
+
+    def _render(self, report):
+        from agent_trace.a2a import format_a2a_tree
+        out = io.StringIO()
+        format_a2a_tree(report, out=out)
+        return out.getvalue()
+
+    def _spans(self, report):
+        from agent_trace.a2a import a2a_calls_to_otlp_spans
+        spans = a2a_calls_to_otlp_spans(report)
+        ids = [span["spanId"] for span in spans]
+        self.assertEqual(len(ids), len(set(ids)), ids)
+        return {span["name"]: span for span in spans}
+
+    def _link(self, span):
+        (link,) = span["links"]
+        return {a["key"]: next(iter(a["value"].values())) for a in link["attributes"]}, link
+
+    def test_two_calls_to_one_sub_session_show_it_once_with_a_count(self):
+        from agent_trace.a2a import build_a2a_tree
+        planner = self._session("planner")
+        researcher = self._session("researcher")
+        self._call(planner, researcher, "researcher", "first")
+        self._call(planner, researcher, "researcher", "second")
+
+        report = build_a2a_tree(self.store, planner)
+        self.assertEqual(report.total_agents, 2)
+        self.assertEqual(report.max_depth, 1)
+        (child,) = report.root.children
+        self.assertEqual((child.session_id, child.ref, child.delegations), (researcher, "", 2))
+
+        text = self._render(report)
+        self.assertNotIn("[cycle]", text)
+        self.assertIn("Total agents: 2 ", text)
+        self.assertIn("└── researcher  [0 calls · $0.0000 · ? · 2 delegations]", text)
+        self.assertEqual(text.count("a2a → researcher"), 2)
+
+        spans = self._spans(report)
+        self.assertEqual(
+            spans["agent:researcher"]["parentSpanId"], spans["agent:planner"]["spanId"],
+        )
+        delegations = {
+            a["key"]: a["value"] for a in spans["agent:researcher"]["attributes"]
+        }["agent.delegations"]
+        self.assertEqual(delegations, {"intValue": 2})
+        self.assertNotIn("links", spans["agent:researcher"])
+
+    def test_diamond_shows_the_shared_session_in_full_once(self):
+        from agent_trace.a2a import build_a2a_tree
+        root, left, right, shared = (self._session(n) for n in ("root", "left", "right", "shared"))
+        self._call(root, left, "left")
+        self._call(root, right, "right")
+        self._call(left, shared, "shared")
+        self._call(right, shared, "shared")
+
+        report = build_a2a_tree(self.store, root)
+        self.assertEqual(report.total_agents, 4)
+        self.assertEqual(report.max_depth, 2)
+        left_node, right_node = report.root.children
+        self.assertEqual(left_node.children[0].ref, "")
+        self.assertEqual(right_node.children[0].ref, "shared")
+
+        text = self._render(report)
+        self.assertNotIn("[cycle]", text)
+        self.assertIn("└── shared  [0 calls", text)
+        self.assertIn("└── shared  [shown above]", text)
+
+        spans = self._spans(report)
+        self.assertEqual(
+            spans["agent:shared"]["parentSpanId"], spans["agent:left"]["spanId"],
+        )
+        attributes, link = self._link(spans["agent:shared"])
+        self.assertEqual(link["spanId"], spans["agent:right"]["spanId"])
+        self.assertEqual(attributes, {"agent.link": "shared", "agent.delegations": 1})
+
+    def test_real_cycle_is_still_reported(self):
+        from agent_trace.a2a import build_a2a_tree
+        a = self._session("alpha")
+        b = self._session("beta")
+        self._call(a, b, "beta")
+        self._call(b, a, "alpha")
+
+        report = build_a2a_tree(self.store, a)
+        self.assertEqual(report.total_agents, 2)
+        self.assertEqual(report.max_depth, 1)
+        (cycle,) = report.root.children[0].children
+        self.assertEqual((cycle.session_id, cycle.ref), (a, "cycle"))
+
+        text = self._render(report)
+        self.assertIn("└── [cycle] → alpha\n", text)
+
+        spans = self._spans(report)
+        self.assertEqual(len([n for n in spans if n.startswith("agent:")]), 2)
+        attributes, link = self._link(spans["agent:alpha"])
+        self.assertEqual(link["spanId"], spans["agent:beta"]["spanId"])
+        self.assertEqual(attributes, {"agent.link": "cycle", "agent.delegations": 1})
+
+
+class TestLinkSubSession(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.trace_dir = os.path.join(tmp.name, "traces")
+
+    def test_depth_is_one_more_than_the_parents(self):
+        from agent_trace.a2a import link_sub_session
+        store = TraceStore(self.trace_dir)
+        parent = SessionMeta(agent_name="parent", depth=1)
+        child = SessionMeta(agent_name="child")
+        store.create_session(parent)
+        store.create_session(child)
+        link_sub_session(store, parent.session_id, "evt", child.session_id)
+        linked = store.load_meta(child.session_id)
+        self.assertEqual(linked.parent_session_id, parent.session_id)
+        self.assertEqual(linked.parent_event_id, "evt")
+        self.assertEqual(linked.depth, 2)
+
+    def test_parent_depth_that_is_not_a_count_still_links_at_depth_one(self):
+        from agent_trace.a2a import link_sub_session
+        store = TraceStore(self.trace_dir)
+        for bad in ("2", -3, True, None):
+            with self.subTest(depth=bad):
+                parent = SessionMeta(agent_name="parent", depth=bad)
+                child = SessionMeta(agent_name="child")
+                store.create_session(parent)
+                store.create_session(child)
+                link_sub_session(store, parent.session_id, "", child.session_id)
+                linked = store.load_meta(child.session_id)
+                self.assertEqual(linked.parent_session_id, parent.session_id)
+                self.assertEqual(linked.depth, 1)
+
+    def test_keeps_the_childs_own_update_written_during_the_link(self):
+        import threading
+        from agent_trace.a2a import link_sub_session
+        parent = SessionMeta(agent_name="parent")
+        child = SessionMeta(agent_name="child")
+        TraceStore(self.trace_dir).create_session(parent)
+        TraceStore(self.trace_dir).create_session(child)
+
+        def child_update(meta):
+            meta.tool_calls += 4
+            meta.ended_at = 123.0
+            meta.total_duration_ms = 4500.0
+
+        # The child agent's own process, with its own store.
+        child_writer = threading.Thread(
+            target=TraceStore(self.trace_dir).mutate_meta,
+            args=(child.session_id, child_update),
+        )
+
+        class RacingStore(TraceStore):
+            def load_meta(self, session_id):
+                meta = super().load_meta(session_id)
+                if session_id == child.session_id and child_writer.ident is None:
+                    # The child writes after this read. It waits for the
+                    # store lock if the link holds it.
+                    child_writer.start()
+                    child_writer.join(timeout=0.5)
+                return meta
+
+        store = RacingStore(self.trace_dir)
+        link_sub_session(store, parent.session_id, "", child.session_id)
+        child_writer.join(timeout=10)
+        self.assertFalse(child_writer.is_alive())
+
+        linked = store.load_meta(child.session_id)
+        self.assertEqual(linked.parent_session_id, parent.session_id)
+        self.assertEqual(linked.tool_calls, 4)
+        self.assertEqual(linked.ended_at, 123.0)
+        self.assertEqual(linked.total_duration_ms, 4500.0)
+        self.assertEqual(linked.depth, 1)
+
+
 def _a2a_session(trace_dir: str, fields: dict) -> str:
     """Write a session with one A2A call and return its ID.
 

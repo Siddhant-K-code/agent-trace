@@ -2280,6 +2280,8 @@ agent-strace a2a-tree [session-id] [--format text|json]
 ```
 Visualise the A2A agent call graph. Exports as OTLP spans for Jaeger, Tempo, or any OpenTelemetry backend. A failed call span has status ERROR; a successful one leaves status UNSET (see [Span status](production.md#span-status)).
 
+Each sub-session is shown once under the agent that called it. When an agent calls the same sub-session more than once, every call is listed and the sub-session line ends with `N delegations`. A sub-session that another agent in the tree also calls (a diamond) is shown in full under its first caller and as `name  [shown above]` under the others. Only a session that is already on the path from the root is shown as `[cycle] → name`. References are not counted again in `Total agents`, the total cost, or `Max depth`. In the JSON output each session has one span with an `agent.delegations` attribute; a shared or cyclic reference adds a span link to the calling agent's span, with `agent.link` set to `shared` or `cycle`.
+
 ### `identity`
 ```
 agent-strace identity show

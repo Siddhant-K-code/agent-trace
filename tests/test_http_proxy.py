@@ -2452,6 +2452,22 @@ class TestHTTPProxyStreamableHTTP(unittest.TestCase):
         self._forward(port, "POST", "/", STREAMABLE_POST_HEADERS, json.dumps(_tool_call(5)))
         self._assert_linked(child_id)
 
+    def test_sub_session_depth_is_one_more_than_this_sessions(self):
+        self.meta.depth = 1
+        self.store.update_meta(self.meta)
+        child_id = self._child_session()
+        headers = [("Content-Type", "application/json")] + self._child_trace_headers(child_id)
+
+        def reply(handler, request):
+            _reply(handler, 200, json.dumps(_text_result(5, "ok")).encode(), headers)
+
+        self.upstream.reply = reply
+        port = self._proxy().server_address[1]
+        self._forward(port, "POST", "/", STREAMABLE_POST_HEADERS, json.dumps(_tool_call(5)))
+        child = self.store.load_meta(child_id)
+        self.assertEqual(child.parent_session_id, self.meta.session_id)
+        self.assertEqual(child.depth, 2)
+
     def test_streamed_reply_links_the_sub_session(self):
         child_id = self._child_session()
         headers = self._child_trace_headers(child_id)
