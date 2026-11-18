@@ -22,9 +22,13 @@ The proxy forwards:
 - DELETE, which ends a Streamable HTTP session.
 
 Every JSON-RPC message in a POST body, a JSON reply or an event of an event
-stream is traced. An event's data is read the way the HTML standard's event
-stream rules say: its ``data`` lines, with or without a space after the
-colon, joined with a newline, and the event ends at a blank line.
+stream is traced. Each message of a batch is traced as if it came alone. An
+event's data is read the way the HTML standard's event stream rules say: its
+``data`` lines, with or without a space after the colon, joined with a
+newline, and the event ends at a blank line.
+
+Tracing cannot stop or change forwarding. A message the proxy cannot trace
+is still forwarded byte for byte.
 
 Requests are served on separate threads, so a long-lived stream does not
 block other requests. Closing the server shuts down open streams and waits
@@ -62,9 +66,9 @@ from typing import Any, Callable
 from urllib.parse import urlparse, urlsplit
 
 from .models import EventType, SessionMeta, TraceEvent
-from .proxy import MAX_PENDING_CALLS, _classify_message, _rpc_id
+from .proxy import MAX_PENDING_CALLS, _note_untraced, _rpc_id, _rpc_messages, _trace_message
 from .masking import MaskingConfig, mask_event_data
-from .pairing import TOOL_RESPONSE_TYPES, KeyedPairer, link_response
+from .pairing import KeyedPairer, link_response
 from .propagation import extract_traceparent, inject_traceparent
 from .server import _host_header_name, _is_ip_literal
 from .store import TraceStore
@@ -397,6 +401,13 @@ class _ProxyHTTPServer(ThreadingHTTPServer):
         """A copy of the calls waiting for a response, by JSON-RPC id."""
         return self.calls.pending()
 
+    def trace(self, msg: Any, direction: str) -> None:
+        """Trace one JSON-RPC message and link a response to its call.
+
+        Never raises, so tracing cannot stop a request or a stream.
+        """
+        _trace_message(msg, direction, self.calls, self.emit)
+
     def track_call(self, event: TraceEvent) -> None:
         """Remember a tool_call so its response can be linked later."""
         self.calls.add(_rpc_id(event.data), event)
@@ -601,11 +612,11 @@ class _ProxyHandler(BaseHTTPRequestHandler):
     def _relay_events(self, resp: http.client.HTTPResponse) -> None:
         """Send an event stream to the client line by line as it arrives.
 
-        The data of each event is one JSON-RPC message from the server. It
-        is traced when the blank line that ends the event arrives, before
-        that line is sent. Data that is not a JSON object, such as a legacy
-        SSE server's ``endpoint`` event, is not traced. The bytes sent are
-        the upstream's, unchanged.
+        The data of each event is one JSON-RPC message or batch from the
+        server. It is traced when the blank line that ends the event
+        arrives, before that line is sent. Data that is not JSON, such as a
+        legacy SSE server's ``endpoint`` event, is not traced. The bytes
+        sent are the upstream's, unchanged.
         """
         parser = _EventStreamParser()
         while True:
@@ -614,23 +625,29 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                 break
 
             for data in parser.feed(line):
-                self._trace_event_data(data)
+                self._trace_json(data, "server_to_agent")
 
             self.wfile.write(line)
             self.wfile.flush()
 
-    def _trace_event_data(self, data: str) -> None:
+    def _trace_json(self, data: bytes | str, direction: str) -> None:
+        """Trace the message or batch in a POST body, a JSON reply or an event.
+
+        Each message of a batch is traced as if it came alone. Data that is
+        not JSON is not traced. Never raises, so the caller always forwards
+        the bytes it read.
+        """
         try:
-            msg = json.loads(data)
-        except json.JSONDecodeError:
+            value = json.loads(data.decode("utf-8") if isinstance(data, bytes) else data)
+        except (json.JSONDecodeError, UnicodeDecodeError):
             return
-        if not isinstance(msg, dict):
+        except Exception as exc:
+            # JSON that json.loads gives up on, such as a value nested deeper
+            # than the recursion limit allows.
+            _note_untraced(type(exc).__name__)
             return
-        event = _classify_message(msg, "server_to_agent")
-        if event:
-            if event.event_type in TOOL_RESPONSE_TYPES:
-                self.server.match_result(event)
-            self._emit(event)
+        for msg in _rpc_messages(value):
+            self.server.trace(msg, direction)
 
     def _link_sub_session(self, resp: http.client.HTTPResponse) -> None:
         """Link the downstream agent's session to this one.
@@ -676,15 +693,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                     _link_parent(self.store, self.meta, inbound_ctx["at_session_id"])
 
         # trace the request
-        try:
-            msg = json.loads(body.decode("utf-8"))
-            event = _classify_message(msg, "agent_to_server")
-            if event:
-                if event.event_type == EventType.TOOL_CALL:
-                    self.server.track_call(event)
-                self._emit(event)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            pass
+        self._trace_json(body, "agent_to_server")
 
         # forward to remote
         conn = self._get_connection()
@@ -721,15 +730,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             resp_body = resp.read()
 
             # trace the response
-            try:
-                resp_msg = json.loads(resp_body.decode("utf-8"))
-                resp_event = _classify_message(resp_msg, "server_to_agent")
-                if resp_event:
-                    if resp_event.event_type in TOOL_RESPONSE_TYPES:
-                        self.server.match_result(resp_event)
-                    self._emit(resp_event)
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                pass
+            self._trace_json(resp_body, "server_to_agent")
 
             # send response to agent
             self._relay_head(resp)

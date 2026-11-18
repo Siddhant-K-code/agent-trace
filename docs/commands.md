@@ -32,6 +32,14 @@ agent-strace record [--name NAME] [--parent SESSION] [--no-redact] -- <command>
 ```
 Capture an MCP stdio server session. Wraps `<command>` as a transparent proxy.
 
+Tracing never stops the relay. A field with an unexpected JSON type is traced as if it were missing. A response with any `error` but null, even `0`, `""` or `{}`, is traced as an `error` event. If that `error` is not an object, the event has no code. With `Content-Length` framing, a JSON-RPC batch is traced one message at a time. If the proxy cannot trace a message, for example JSON nested too deep for Python to read or a full disk, it forwards the message anyway, records no event for it and prints a note to stderr. The note names only the exception type:
+
+```
+agent-strace: could not trace a message (RecursionError). It was still forwarded.
+```
+
+A message that Python cannot read, or cannot write back out, is forwarded as the text it arrived as, on one line.
+
 | Flag | Description |
 |---|---|
 | `--name NAME` | Label for the session |
@@ -52,7 +60,9 @@ Pass the server's endpoint URL as `--url`, such as `http://127.0.0.1:8000/mcp` o
 
 The trace saves `--url` as given, and redaction removes a key in it only if the key matches a [detected pattern](security.md#secret-redaction). To keep a key out of the trace, send it from the client, in its `Authorization` header or in its URL query. The proxy forwards both and records neither.
 
-The proxy forwards `GET`, `POST` and `DELETE`. Of the client's headers it forwards only `Authorization`, `Accept`, `Content-Type`, `Mcp-Session-Id`, `Mcp-Protocol-Version` and `Last-Event-ID`, so a server that needs another header, such as `X-API-Key`, can't be reached through it. When the server answers with an event stream, each event reaches the client as it arrives, so progress and server requests such as elicitation are not held back. Each event's data is traced as one JSON-RPC message, read by the event stream rules of the HTML standard: `data:` lines with or without a space after the colon, several `data:` lines joined with a newline, CRLF, LF or CR line endings, and the event ends at a blank line.
+The proxy forwards `GET`, `POST` and `DELETE`. Of the client's headers it forwards only `Authorization`, `Accept`, `Content-Type`, `Mcp-Session-Id`, `Mcp-Protocol-Version` and `Last-Event-ID`, so a server that needs another header, such as `X-API-Key`, can't be reached through it. When the server answers with an event stream, each event reaches the client as it arrives, so progress and server requests such as elicitation are not held back. Each event's data is traced as a JSON-RPC message or batch, read by the event stream rules of the HTML standard: `data:` lines with or without a space after the colon, several `data:` lines joined with a newline, CRLF, LF or CR line endings, and the event ends at a blank line.
+
+A request body, JSON reply or event that holds a JSON-RPC batch is forwarded unchanged. Each message in the batch is traced as if it came alone, so a tool call in a batch still links to its result. Tracing never stops or changes forwarding. A message the proxy cannot trace is handled as in `record`: it reaches the other side as it arrived, and stderr gets the same note.
 
 Requests are handled concurrently, so an open stream does not block other requests. On Ctrl-C the proxy closes open streams, including TLS handshakes still in progress, waits up to 5 seconds for in-flight requests, then records the session end.
 
