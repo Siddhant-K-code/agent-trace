@@ -9,7 +9,8 @@ Patterns detected:
     sk-ant-*, ghp_*, gho_*, ghu_*, ghs_*, ghr_*, github_pat_*,
     xox[bpras]-*, AKIA*, key-*, token-*, Bearer *
   - Provider keys: Stripe sk_live_*, sk_test_*, rk_live_*, rk_test_*,
-    whsec_* (not the public pk_*), Google AIza*, GitLab glpat-*,
+    sk_org_*, whsec_* (not the public pk_*), Google AIza*, GitLab glpat-*,
+    glptt-*, gldt-*, glrt-*, glcbt-* and the other documented gl*- prefixes,
     npm_*, Hugging Face hf_*
   - Values under sensitive key names such as password or api_key
   - Connection strings: postgres://, mysql://, mongodb://, redis://, amqp://
@@ -209,25 +210,40 @@ SECRET_PATTERNS = [
     # without one (sk-, key-, token-), which could otherwise match inside
     # their bodies. Each lookbehind sits after the prefix so the regex keeps
     # its literal prefix. Stripe publishable keys (pk_) are public.
+    # A letter, digit or "_" before the prefix stops a match. A "-" stops it
+    # only before the short prefixes AIza, npm_ and hf_: the longer ones
+    # match after "-", as in x-sk_live_ or a removed diff line.
     SecretPattern(
         "stripe-key",
-        re.compile(r"[rs]k_(?<![A-Za-z0-9_-][rs]k_)(?:live|test)_[0-9A-Za-z]{24,}"),
+        re.compile(r"[rs]k_(?<![A-Za-z0-9_][rs]k_)(?:live|test)_[0-9A-Za-z]{24,}"),
     ),
+    # Stripe documents only the sk_org prefix of organization keys, so one
+    # short segment such as live_ may come before the body.
+    SecretPattern(
+        "stripe-key",
+        re.compile(
+            r"sk_org_(?<![A-Za-z0-9_]sk_org_)(?:[0-9A-Za-z]{1,10}_)?[0-9A-Za-z]{24,}"
+        ),
+    ),
+    # Some webhook secrets are base64, so "+", "/" and "=" are part of them.
     SecretPattern(
         "stripe-webhook-secret",
-        re.compile(r"whsec_(?<![A-Za-z0-9_-]whsec_)[0-9A-Za-z]{32,}"),
+        re.compile(r"whsec_(?<![A-Za-z0-9_]whsec_)[0-9A-Za-z+/]{32,}={0,2}"),
     ),
     SecretPattern(
         "google-api-key",
         re.compile(r"AIza(?<![A-Za-z0-9_-]AIza)[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])"),
     ),
-    # "-" may come before glpat- so instance prefixes such as acme-glpat-
-    # match. Routable tokens end in .<9>, versioned ones in .<2>.<9>.
+    # The prefixes in GitLab's token prefix table. "-" may come before them
+    # so instance prefixes such as acme-glpat- match. CI/CD job tokens can be
+    # JWTs. Routable tokens end in .<9>, versioned ones in .<2>.<9>.
     SecretPattern(
         "gitlab-token",
         re.compile(
-            r"glpat-(?<![A-Za-z0-9_]glpat-)[0-9A-Za-z_-]{20,}"
-            r"(?:(?:\.[0-9a-z]{2})?\.[0-9a-z]{9}(?![0-9A-Za-z_-]))?"
+            r"gl(?<![A-Za-z0-9_]gl)"
+            r"(?:pat|ptt|dt|rtr?|rct|cbt|ft|imt|agent|oas|soat|ffct|wt)-"
+            r"(?:eyJ[0-9A-Za-z_-]{10,}\.eyJ[0-9A-Za-z_-]{10,}\.[0-9A-Za-z_-]{20,}"
+            r"|[0-9A-Za-z_-]{20,}(?:(?:\.[0-9a-z]{2})?\.[0-9a-z]{9}(?![0-9A-Za-z_]))?)"
         ),
     ),
     SecretPattern(

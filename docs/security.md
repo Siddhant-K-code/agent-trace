@@ -42,11 +42,11 @@ Detected patterns:
 | AWS credentials | `AKIA*`, `aws_secret_access_key` |
 | Anthropic API keys | `sk-ant-*` |
 | Slack tokens | `xox*` |
-| Stripe keys | Secret and restricted keys `sk_live_*`, `sk_test_*`, `rk_live_*`, `rk_test_*` with 24 or more letters or digits after the prefix, and webhook signing secrets `whsec_*` with 32 or more. Publishable keys (`pk_live_*`, `pk_test_*`) are public and are kept. |
+| Stripe keys | Secret and restricted keys `sk_live_*`, `sk_test_*`, `rk_live_*`, `rk_test_*` with 24 or more letters or digits after the prefix. Organization keys `sk_org_*` with 24 or more letters or digits, after an optional short segment such as `live_`. Webhook signing secrets `whsec_*` with 32 or more letters, digits, `+` or `/`, and up to two `=`. Publishable keys (`pk_live_*`, `pk_test_*`) are public and are kept. |
 | Google API keys | `AIza` followed by exactly 35 letters, digits, `_` or `-` |
-| GitLab tokens | `glpat-*` access tokens with 20 or more characters, including routable and versioned tokens and an instance prefix such as `acme-glpat-*`. A custom token prefix is not matched. |
+| GitLab tokens | Tokens with 20 or more characters after a prefix GitLab documents: `glpat-` (personal, project and group access), `glptt-` (pipeline trigger), `gldt-` (deploy), `glrt-` and `glrtr-` (runner authentication), `glrct-` (runner controller), `glcbt-` (CI/CD job, including JWT job tokens), `glft-` (feed), `glimt-` (incoming email), `glagent-` (Kubernetes agent), `gloas-` (OAuth application secret), `glsoat-` (SCIM), `glffct-` (feature flags client) and `glwt-` (workspace). Includes routable and versioned tokens and an instance prefix such as `acme-glrt-*`. Not matched: a custom personal access token prefix, legacy runner registration tokens (`GR1348941*`), and prefixes GitLab does not document, such as `glsat-` and `gliamat-`. |
 | npm tokens | `npm_` followed by exactly 36 letters or digits |
-| Hugging Face tokens | `hf_` followed by 30 or more letters or digits |
+| Hugging Face tokens | `hf_` followed by 30 or more letters or digits. Organization tokens (`api_org_*`) are not matched, because Hugging Face does not document their format. |
 | JWTs | Three base64 segments separated by `.` |
 | Bearer tokens | `Bearer\s+[a-zA-Z0-9\-._~+/]+=*` |
 | Connection strings | `postgres://`, `mysql://`, `mongodb://`, `redis://`, `amqp://` |
@@ -57,7 +57,7 @@ Detected patterns:
 | Long lowercase hex strings | Any run of 40 or more characters from `[0-9a-f]`, anywhere in a string. This includes full 40-character git commit SHAs and SHA-256 digests (`sha256:<hex>` keeps the prefix). Uppercase hex is not matched. The only exception is the `policy_sha256` digest of a schema-validated `agent_trace_authorization` v1 record. |
 | Private keys | PEM blocks whose label ends in `PRIVATE KEY`, such as `RSA PRIVATE KEY`, `ENCRYPTED PRIVATE KEY` or `OPENSSH PRIVATE KEY`, and `PGP PRIVATE KEY BLOCK` blocks. A block with no END line before the next BEGIN line, such as a key cut short, is redacted from its BEGIN line to the end of its base64 body. |
 
-Redacted values become typed markers such as `[REDACTED:openai-key]`, `[REDACTED:bearer-token]`, or `[REDACTED:sensitive]`. The provider keys above use `stripe-key`, `stripe-webhook-secret`, `google-api-key`, `gitlab-token`, `npm-token` and `huggingface-token`. A provider prefix inside a longer word, such as `risk_live_` or `xnpm_`, is not matched. Events with redaction are marked with `"redacted": true`. See [ADR-0007](../ADRs/0007-heuristic-redaction.md) for design rationale.
+Redacted values become typed markers such as `[REDACTED:openai-key]`, `[REDACTED:bearer-token]`, or `[REDACTED:sensitive]`. The provider keys above use `stripe-key`, `stripe-webhook-secret`, `google-api-key`, `gitlab-token`, `npm-token` and `huggingface-token`. A provider prefix inside a longer word, such as `risk_live_` or `xnpm_`, is not matched. A `-` before a prefix does not stop a match, as in `x-sk_live_*` or a removed diff line, except before the short prefixes `AIza`, `npm_` and `hf_`, which can appear by chance after a `-` inside other tokens. Events with redaction are marked with `"redacted": true`. See [ADR-0007](../ADRs/0007-heuristic-redaction.md) for design rationale.
 
 For capture without prompts, responses, or tool input and output, use `agent-strace hook --metadata-only`, which `setup --managed` configures. See [Platform-team install](platform-install.md).
 

@@ -404,9 +404,39 @@ class TestProviderKeys(unittest.TestCase):
             with self.subTest(mode):
                 self.assert_kept("STRIPE_PUBLISHABLE_KEY=" + "pk_" + mode + STRIPE_BODY)
 
+    def test_stripe_organization_keys(self):
+        marker = redaction_marker("stripe-key")
+        for mode in ("", "live_", "test_"):
+            with self.subTest(mode=mode):
+                text = "STRIPE_ORG_KEY=" + "sk_" + "org_" + mode + STRIPE_BODY + "\n"
+                self.assert_redacted(text, "STRIPE_ORG_KEY=" + marker + "\n")
+
+    def test_stripe_organization_near_misses_are_kept(self):
+        cases = (
+            "sk_" + "org_settings_page_controller_name",
+            "sk_" + "org_" + "A1b2" * 5 + "Q23",
+            "sk_" + "org_" + "live_" + "A1b2" * 5 + "Q23",
+            "ask_" + "org_" + STRIPE_BODY,
+        )
+        for text in cases:
+            with self.subTest(text):
+                self.assert_kept(text)
+
     def test_stripe_webhook_secret(self):
         text = "endpoint secret: " + "wh" + "sec_" + "A1b2" * 8
         self.assert_redacted(text, "endpoint secret: " + redaction_marker("stripe-webhook-secret"))
+
+    def test_stripe_webhook_secret_in_base64_leaves_no_tail(self):
+        marker = redaction_marker("stripe-webhook-secret")
+        bodies = {
+            "padded tail": "A1b2" * 8 + "+/aB=",
+            "two pad characters": "A1b2" * 8 + "+/aB==",
+            "early plus and slash": "A1b2+/" * 6,
+        }
+        for name, body in bodies.items():
+            with self.subTest(name):
+                text = "secret: " + "wh" + "sec_" + body + " end"
+                self.assert_redacted(text, "secret: " + marker + " end")
 
     def test_google_api_key(self):
         self.assertEqual(len(GOOGLE_KEY), 39)
@@ -427,6 +457,85 @@ class TestProviderKeys(unittest.TestCase):
                 self.assert_redacted("token " + token + ".", "token " + marker + ".")
         with self.subTest("instance prefix"):
             self.assert_redacted("acme-" + cases["legacy"], "acme-" + marker)
+
+    def test_gitlab_token_types(self):
+        marker = redaction_marker("gitlab-token")
+        routable = GITLAB_BODY + ".01.x1" + "abcdefg"
+        jwt = "eyJ" + "a1B2c3D4e5" + ".eyJ" + "f6G7h8I9j0" + "." + "K1l2M3n4O5p6Q7r8S9t0"
+        cases = {
+            "pipeline trigger": ("ptt", "A1b2" * 10),
+            "deploy": ("dt", "Ab_-" * 5),
+            "routable deploy": ("dt", routable),
+            "runner": ("rt", "t1_" + "Ab_-" * 5),
+            "routable runner": ("rt", routable),
+            "runner, rtr": ("rtr", "Ab_-" * 5),
+            "runner controller": ("rct", "Ab_-" * 5),
+            "CI/CD job": ("cbt", "64_" + "Ab_-" * 5),
+            "CI/CD job JWT": ("cbt", jwt),
+            "feed": ("ft", "Ab_-" * 5),
+            "path-dependent feed": ("ft", "0123456789abcdef" * 4 + "-42"),
+            "incoming email": ("imt", "a1b2c3" * 4),
+            "Kubernetes agent": ("agent", "Ab_-" * 12 + "Q7"),
+            "routable Kubernetes agent": ("agent", routable),
+            "OAuth application secret": ("oas", "Ab_-" * 16),
+            "SCIM": ("soat", "Ab_-" * 5),
+            "feature flags client": ("ffct", "Ab_-" * 5),
+            "workspace": ("wt", routable),
+        }
+        for name, (kind, body) in cases.items():
+            with self.subTest(name):
+                token = "gl" + kind + "-" + body
+                self.assert_redacted("token " + token + ".", "token " + marker + ".")
+        with self.subTest("instance prefix"):
+            self.assert_redacted("acme-" + "gl" + "rt-" + GITLAB_BODY, "acme-" + marker)
+
+    def test_gitlab_routable_token_before_a_hyphen(self):
+        token = "gl" + "pat-" + GITLAB_BODY + ".01.x1" + "abcdefg"
+        self.assert_redacted(token + "-backup", redaction_marker("gitlab-token") + "-backup")
+
+    def test_gitlab_near_misses_are_kept(self):
+        cases = [
+            "x" + "gl" + "rt-" + GITLAB_BODY,
+            "_" + "gl" + "ft-" + GITLAB_BODY,
+            "9" + "gl" + "dt-" + GITLAB_BODY,
+            "gl" + "ob-pattern-matching-for-the-file-tree",
+            "Runner authentication tokens have the prefix " + "gl" + "rt-.",
+        ]
+        for kind in ("ptt", "dt", "rt", "rct", "cbt", "ft", "imt", "agent", "oas",
+                     "soat", "ffct", "wt"):
+            cases.append("gl" + kind + "-" + "Ab_-" * 4 + "Q23")
+        for text in cases:
+            with self.subTest(text):
+                self.assert_kept(text)
+
+    def test_long_prefixes_match_after_a_hyphen(self):
+        cases = {
+            "header": ("x-", "sk_" + "live_" + STRIPE_BODY, "stripe-key"),
+            "flag": ("--", "sk_" + "test_" + STRIPE_BODY, "stripe-key"),
+            "removed diff line": ("-", "rk_" + "live_" + STRIPE_BODY, "stripe-key"),
+            "joined to a word": ("key-", "sk_" + "live_" + STRIPE_BODY, "stripe-key"),
+            "organization key": ("x-", "sk_" + "org_" + STRIPE_BODY, "stripe-key"),
+            "webhook secret": ("-", "wh" + "sec_" + "A1b2" * 8, "stripe-webhook-secret"),
+        }
+        for name, (lead, token, kind) in cases.items():
+            with self.subTest(name):
+                self.assert_redacted(lead + token, lead + redaction_marker(kind))
+
+    def test_short_prefixes_after_a_hyphen_are_kept(self):
+        # A "-" can sit inside a base64url body such as a JWT, so the short
+        # prefixes still need a separator before them.
+        cases = (
+            "-" + HF_KEY,
+            "Llama-2-7b-" + HF_KEY,
+            "x-" + NPM_KEY,
+            "-" + GOOGLE_KEY,
+            "x-risk_" + "live_" + STRIPE_BODY,
+            "x-disk_" + "test_" + STRIPE_BODY,
+            "risk-admin-panel-configuration-file",
+        )
+        for text in cases:
+            with self.subTest(text):
+                self.assert_kept(text)
 
     def test_npm_token(self):
         self.assert_redacted("//registry.npmjs.org/:_authToken=" + NPM_KEY,
@@ -457,6 +566,7 @@ class TestProviderKeys(unittest.TestCase):
         cases = {
             "stripe 23": "sk_" + "live_" + "A1b2" * 5 + "Q23",
             "webhook 31": "wh" + "sec_" + "A1b2" * 7 + "Q2Z",
+            "base64 webhook 31": "wh" + "sec_" + "A1b2+/" * 5 + "Q",
             "google 34": GOOGLE_KEY[:-1],
             "google 36": GOOGLE_KEY + "Z",
             "gitlab 19": "gl" + "pat-" + "Ab_-" * 4 + "Q23",
@@ -714,6 +824,18 @@ class TestPatternCost(unittest.TestCase):
             "short npm tokens": ("npm" + "_" + "a" * 35 + "_") * (n // 40),
             "xhf_ words": ("xhf" + "_" + "a" * 29) * (n // 33),
             "hf_ run": ("hf" + "_") * (n // 3),
+            "-sk_live_ run": ("-sk_" + "live_") * (n // 9),
+            "-sk_org_ run": ("-sk_" + "org_") * (n // 8),
+            "short Stripe org keys": (
+                "-sk_" + "org_" + "a" * 10 + "_" + "a" * 23 + " "
+            ) * (n // 43),
+            "short base64 webhook secrets": ("-wh" + "sec_" + "+/" * 15 + " ") * (n // 38),
+            "-gl run": "-gl" * (n // 3),
+            "-glrtr- run": ("-gl" + "rtr-") * (n // 7),
+            "short GitLab JWTs": (
+                "-gl" + "cbt-eyJ" + "a" * 10 + ".eyJ" + "a" * 10 + "." + "a" * 19 + " "
+            ) * (n // 55),
+            "GitLab JWT headers": ("-gl" + "cbt-eyJ" + "a" * 10 + ".") * (n // 21),
         }
         for name, text in shapes.items():
             with self.subTest(name):
