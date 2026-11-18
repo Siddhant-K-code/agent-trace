@@ -74,7 +74,7 @@ For an `https://` URL the proxy verifies the server certificate and host name wi
 
 To refuse requests from web pages, the proxy answers 421 to a `Host` that is not `localhost`, an IP address or an `--allow-host` name, and 403 to an `Origin` that is not a page on `localhost`, a loopback address or an `--allow-host` name. It neither traces nor forwards these requests. If a client gets 421 because it connects by another name, such as `host.docker.internal` or a tunnel name, restart `record-http` with `--allow-host NAME` for that name.
 
-A `tracestate` header from the calling agent links this session as its child only when the caller's session is in the same trace store, and is ignored otherwise. If the parent session is gone when the proxy stops, the session is saved without the link and stderr says so.
+A `tracestate` header from the calling agent links this session as its child only when the caller's session is in the same trace store, and is ignored otherwise. If the parent session is gone when the proxy stops, the session is saved without the link and stderr says so. A linked session's depth is one more than its parent's, and a session linked later moves the sessions below it down with it. When the proxy stops it saves only its own counters and end time, so a link another proxy wrote to this session while it ran is kept.
 
 | Flag | Default | Description |
 |---|---|---|
@@ -2291,6 +2291,8 @@ Start an MCP server that exposes your session store as queryable tools for a deb
 agent-strace a2a-tree [session-id] [--format text|json]
 ```
 Visualise the A2A agent call graph. Exports as OTLP spans for Jaeger, Tempo, or any OpenTelemetry backend. A failed call span has status ERROR; a successful one leaves status UNSET (see [Span status](production.md#span-status)).
+
+Each sub-session is shown once under the agent that called it. When an agent calls the same sub-session more than once, every call is listed and the sub-session line ends with `N delegations`. A sub-session that another agent in the tree also calls (a diamond) is shown in full under its first caller and as `name  [shown above]` under the others. Only a session that is already on the path from the root is shown as `[cycle] → name`. References are not counted again in `Total agents`, the total cost, or `Max depth`. In the JSON output each session has one span with an `agent.delegations` attribute; a shared or cyclic reference adds a span link to the calling agent's span, with `agent.link` set to `shared` or `cycle`.
 
 ### `identity`
 ```
