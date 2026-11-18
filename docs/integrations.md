@@ -244,7 +244,9 @@ When one agent calls another over HTTP, inject a `traceparent` header so both se
 from agent_trace.propagation import inject_traceparent
 
 headers = inject_traceparent({}, session_id="abc123", event_id="evt456")
-# headers now contains: {"traceparent": "00-<trace-id>-<span-id>-01"}
+# headers now contains:
+#   "traceparent": "00-<trace-id>-<span-id>-01"
+#   "tracestate":  "agent-trace=abc123"
 
 response = requests.post("https://other-agent/run", headers=headers, json={...})
 ```
@@ -256,13 +258,21 @@ from agent_trace.propagation import extract_traceparent
 
 ctx = extract_traceparent(request.headers)
 if ctx:
-    # ctx["trace_id"]   — 32-hex W3C trace ID from upstream
-    # ctx["parent_id"]  — span ID of the calling agent
-    # ctx["sampled"]    — sampling flag
+    # ctx["version"]        2-hex traceparent version, such as "00"
+    # ctx["trace_id"]       32-hex W3C trace ID from upstream
+    # ctx["parent_id"]      16-hex parent span ID from the caller
+    # ctx["flags"]          2-hex W3C trace flags, such as "01"
+    # ctx["at_session_id"]  the caller's agent-trace session ID from
+    #                       tracestate, or "" if there is none or it is
+    #                       not a valid session ID
     pass
 ```
 
+`extract_traceparent` returns `None` when there is no valid `traceparent` header.
+
 Pass `trace_id` from the extracted context into `inject_traceparent` on any further outbound calls to propagate the same trace ID through the full call chain.
+
+The W3C sampled flag is the lowest bit of `flags`, so `int(ctx["flags"], 16) & 1` is `1` when the caller marked the trace as sampled. agent-strace records a session whether or not this bit is set. `inject_traceparent` always sends `01`, which marks the trace as sampled.
 
 The implementation follows [W3C Trace Context Level 1](https://www.w3.org/TR/trace-context/). No third-party dependencies required.
 
