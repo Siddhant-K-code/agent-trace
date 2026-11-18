@@ -1038,9 +1038,13 @@ Custom patterns are read from `~/.agent-strace/mcp-patterns.txt` by default. Add
 
 ### `audit`
 ```
-agent-strace audit [session-id] [--policy FILE]
+agent-strace audit [session-id] [--policy FILE] [--verify-chain]
 ```
 Check tool calls against a policy file. Flags sensitive file access even without a policy. Exits 1 on violations.
+
+`--verify-chain` checks the session's hash chain first, as [`verify`](#verify)
+does. If the chain is not intact, it prints the `verify` message, skips the
+policy audit and exits 1.
 
 **Policy file** (`.agent-scope.json`):
 ```json
@@ -1062,8 +1066,47 @@ Check tool calls against a policy file. Flags sensitive file access even without
 agent-strace verify [session-id] [--format text|json]
 agent-strace verify --from-export FILE [--format text|json]
 ```
-Verify a session hash chain, or verify the chain links embedded in an EU AI Act
-export package.
+Verify a session hash chain, or check an EU AI Act export package.
+
+Each event after the first stores `prev_hash`, the SHA-256 of the exact
+previous line of `events.ndjson`. `verify` reports one state and exits 0 only
+for `unanchored`:
+
+| State | Meaning | Exit |
+|---|---|---|
+| `unanchored` | Every event after the first links to the exact previous line. A single event is `unanchored` | 0 |
+| `partial` | Some events after the first have no `prev_hash`. Every link that is present matches | 1 |
+| `legacy` | Two or more events and no links. Sessions recorded before v0.62.0 look like this | 1 |
+| `empty` | No events | 1 |
+| `missing` | The session has no `events.ndjson` | 1 |
+| `broken` | A link does not match, the first event has a `prev_hash`, a `prev_hash` is not a string, or a line is not a UTF-8 JSON object | 1 |
+
+A missing link means an edit to the event before it can't be detected, so
+`partial` and `legacy` fail. These are the states `validate` reports. See
+[Hash-chain states](trace-schema.md#hash-chain-states). Only `verify` reports
+`missing`.
+
+`--format json` prints these keys:
+
+| Key | Value |
+|---|---|
+| `session_id` | Full session ID |
+| `ok` | `true` only for `unanchored`, the same as exit 0 |
+| `total_events` | Number of non-blank lines in `events.ndjson` |
+| `broken_at` | 0-based index of the line that breaks the chain, or `null` |
+| `broken_event_id` | `event_id` of that line, or `""` when it has none or can't be parsed |
+| `state` | One of the states above |
+| `links_verified` | Links that are present and match, counted up to a broken line |
+| `first_unlinked_at` | 0-based index of the first event after the first with no `prev_hash`, or `null` |
+| `root_hash` | SHA-256 of the last line, or `""` with no events. The EU AI Act export uses the same value |
+
+The chain is not keyed or anchored. It can't detect events deleted from the
+end, or an edit followed by a rebuild of every later hash. To catch those, keep
+`root_hash` and `total_events` from `verify --format json` somewhere the agent
+can't write, and compare them later.
+
+`--from-export FILE` checks an EU AI Act package. See
+[EU AI Act export package](#eu-ai-act-export-package).
 
 ### `validate`
 ```
@@ -1272,6 +1315,47 @@ agent-strace verify --from-export compliance-report.json
 agent-strace audit-readiness [--format text|json]
 ```
 
+#### EU AI Act export package
+
+Each session's `article_12.trace_integrity` holds:
+
+| Key | Value |
+|---|---|
+| `hash_chain_valid` | `true` only when the session's chain is `unanchored` |
+| `hash_chain_state` | The session's [`verify`](#verify) state |
+| `root_hash` | SHA-256 of the last event line |
+| `event_count` | Number of events |
+
+`compliance_metadata.tamper_evident` is `true` only when the package has at
+least one session and every session's `hash_chain_valid` is `true`. Sessions
+that fail are still exported.
+
+`verify --from-export FILE` exits 0 only when all of these hold:
+
+- Every session has events, and each event's `seq` is its position, counting from 1.
+- The first event has no `prev_hash`. Every later `prev_hash` and every
+  `line_hash` is 64 lowercase hex characters. Each `prev_hash` equals the
+  previous event's `line_hash`.
+- `hash_chain_valid` is `true`. `hash_chain_state` is `unanchored`, or absent
+  as in exports from earlier versions.
+- `root_hash` equals the last event's `line_hash`, and `event_count` equals the
+  number of events.
+- `compliance_metadata.session_count` equals the number of sessions, and
+  `tamper_evident` is `true`.
+- `article_12.logging_obligations` holds the same records as the sessions.
+
+A package with a session that has missing links or no events fails. A fully
+linked session exported by an earlier version still passes. With
+`--format json`, each entry in `failures` has `session_id`, `seq` (the
+event's position), `event_id` and `reason`. `session_id` is `null` for a
+problem with the whole package.
+
+The check reads only the package. It can't compare summaries or Article 13
+with the source store. It can't see a deleted event when the editor also fixed
+`seq`, the links, `event_count` and `root_hash`. To catch that, compare each
+session's `root_hash` and `event_count` with `root_hash` and `total_events`
+from `agent-strace verify <session-id> --format json` on the source store.
+
 ### `compliance-report`
 
 ```
@@ -1307,6 +1391,13 @@ agent-strace audit-readiness [--retention-days N] [--format text|json]
 Check whether the local trace store has hash-chain integrity, retention
 coverage, timestamp continuity, and hash-chain presence before generating an
 EU AI Act audit package.
+
+Hash chain integrity fails when a session's chain is `broken` or its
+`events.ndjson` is missing. Hash chain presence warns when a session's chain is
+`empty`, `legacy` or `partial`, and lists it in `sessions_missing_prev_hashes`.
+See the states under [`verify`](#verify). Missing links cost 20 points. `ready`
+needs a score of 80 or more and no broken chain, so a store whose only problem
+is missing links is still `ready`.
 
 ---
 
@@ -1830,7 +1921,8 @@ to a file or sent directly with `--endpoint`. See
 
 `--format eu-ai-act` writes a structured JSON package with Article 12 logging
 evidence, Article 13 transparency documentation, hash-chain integrity metadata,
-and event-level line hashes for `agent-strace verify --from-export`.
+and event-level line hashes for `agent-strace verify --from-export`. See
+[EU AI Act export package](#eu-ai-act-export-package).
 
 ### `share`
 ```

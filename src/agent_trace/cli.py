@@ -638,6 +638,10 @@ def cmd_verify(args: argparse.Namespace) -> int:
             "total_events": result.total_events,
             "broken_at": result.broken_at,
             "broken_event_id": result.broken_event_id,
+            "state": result.state,
+            "links_verified": result.links_verified,
+            "first_unlinked_at": result.first_unlinked_at,
+            "root_hash": result.root_hash,
         }, indent=2) + "\n")
     else:
         result.format(sys.stdout)

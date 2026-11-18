@@ -65,6 +65,10 @@ The validator uses the packaged JSON Schemas for record shape, then reuses the b
 | `unanchored` | Every available link is valid, but the terminal digest is not externally signed or anchored |
 | `broken` | A stored link does not match the previous exact NDJSON line |
 
+`agent-strace verify` and `audit --verify-chain` use the same states and pass
+only `unanchored`. `verify` also reports `missing` for a session with no
+`events.ndjson`. See [`verify`](commands.md#verify).
+
 JSON key order and whitespace affect line hashes. A producer that intentionally reserializes events must rebuild the chain as one explicit storage operation. The validator never does this.
 
 A line hash covers the line's bytes without its line ending. agent-strace writes `\n` line endings on every OS. Older versions wrote `\r\n` on Windows; those files still verify, and new events appended to them end in `\n`.

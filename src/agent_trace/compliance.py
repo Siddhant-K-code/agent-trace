@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 import time
 from dataclasses import asdict, dataclass, field
@@ -34,6 +35,7 @@ from . import __version__
 from .audit import verify_chain
 from .cost import _usage_dollars, session_event_usage
 from .event_data import require_object_event_data, str_field
+from .inert import inert
 from .models import EventType, TraceEvent
 from .store import TraceStore
 
@@ -409,6 +411,7 @@ def _eu_ai_act_session_record(
         "generation_timestamp": _iso(time.time()),
         "trace_integrity": {
             "hash_chain_valid": chain.ok,
+            "hash_chain_state": chain.state,
             "root_hash": _root_hash(lines),
             "event_count": len(events),
             "broken_at": chain.broken_at,
@@ -494,6 +497,10 @@ def export_eu_ai_act(
         }
         for session in sessions
     ]
+    tamper_evident = bool(sessions) and all(
+        session["article_12"]["trace_integrity"]["hash_chain_valid"] is True
+        for session in sessions
+    )
 
     return {
         "compliance_metadata": {
@@ -502,7 +509,7 @@ def export_eu_ai_act(
             "export_tool": "agent-strace",
             "export_version": __version__,
             "exported_at": _iso(time.time()),
-            "tamper_evident": True,
+            "tamper_evident": tamper_evident,
             "session_count": len(sessions),
         },
         "article_12": {
@@ -557,7 +564,7 @@ def build_audit_readiness(
 ) -> dict:
     sessions = store.list_sessions()
     chain_results = [verify_chain(store, meta.session_id) for meta in sessions]
-    broken = [result for result in chain_results if not result.ok]
+    broken = [result for result in chain_results if result.broken]
     now = time.time()
     oldest = min((meta.started_at for meta in sessions), default=None)
 
@@ -572,11 +579,11 @@ def build_audit_readiness(
                 "gap_hours": round(gap / 3600, 2),
             })
 
-    missing_hash = []
-    for meta in sessions:
-        events = store.load_events(meta.session_id)
-        if len(events) > 1 and not any(event.prev_hash for event in events[1:]):
-            missing_hash.append(meta.session_id)
+    missing_hash = [
+        result.session_id
+        for result in chain_results
+        if result.state in ("legacy", "partial", "empty")
+    ]
 
     retention_days_present = ((now - oldest) / 86400) if oldest else 0.0
     checks = {
@@ -642,7 +649,7 @@ def format_audit_readiness(report: dict, out: TextIO = sys.stdout) -> None:
     )
     out.write(
         f"{'OK' if checks['hash_chain_presence']['ok'] else 'WARN'} "
-        f"Hash chain presence: {len(checks['hash_chain_presence']['sessions_missing_prev_hashes'])} legacy sessions\n"
+        f"Hash chain presence: {len(checks['hash_chain_presence']['sessions_missing_prev_hashes'])} sessions with missing links\n"
     )
     out.write(f"\nCompliance score: {report['compliance_score']}/100\n")
 
@@ -660,31 +667,193 @@ def cmd_audit_readiness(args: argparse.Namespace) -> int:
     return 0 if report["ready"] else 1
 
 
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+
+
+def _is_sha256_hex(value: Any) -> bool:
+    return isinstance(value, str) and _SHA256_HEX.fullmatch(value) is not None
+
+
+def _check_export_events(events: list, session_id: Any, fail) -> None:
+    previous_line_hash: str | None = None
+    for position, event in enumerate(events, start=1):
+        if not isinstance(event, dict):
+            fail("event is not an object", session_id, position, "")
+            previous_line_hash = None
+            continue
+        event_id = event.get("event_id", "")
+        seq = event.get("seq")
+        if type(seq) is not int or seq != position:
+            fail("seq is not the event's position", session_id, position, event_id)
+        prev_hash = event.get("prev_hash", "")
+        if position == 1:
+            if prev_hash != "":
+                fail("first event has a prev_hash", session_id, position, event_id)
+        elif prev_hash == "":
+            fail("prev_hash is missing", session_id, position, event_id)
+        elif not _is_sha256_hex(prev_hash):
+            fail("prev_hash is not a SHA-256 hex digest", session_id, position, event_id)
+        elif previous_line_hash is not None and prev_hash != previous_line_hash:
+            fail(
+                "prev_hash does not match the previous event's line_hash",
+                session_id, position, event_id,
+            )
+        line_hash = event.get("line_hash")
+        if _is_sha256_hex(line_hash):
+            previous_line_hash = line_hash
+        else:
+            fail("line_hash is not a SHA-256 hex digest", session_id, position, event_id)
+            previous_line_hash = None
+
+
+def _check_export_trace_integrity(
+    trace_integrity: dict, events: list, session_id: Any, fail,
+) -> None:
+    if trace_integrity.get("hash_chain_valid") is not True:
+        fail("hash_chain_valid is not true", session_id)
+    # Exports made before hash_chain_state was added don't have it.
+    if (
+        "hash_chain_state" in trace_integrity
+        and trace_integrity["hash_chain_state"] != "unanchored"
+    ):
+        fail("hash_chain_state is not unanchored", session_id)
+    if events and isinstance(events[-1], dict):
+        if trace_integrity.get("root_hash") != events[-1].get("line_hash"):
+            fail("root_hash does not match the last event's line_hash", session_id)
+    event_count = trace_integrity.get("event_count")
+    if type(event_count) is not int or event_count != len(events):
+        fail("event_count does not match the number of events", session_id)
+
+
 def verify_eu_ai_act_export(path: str | Path) -> dict:
-    data = json.loads(Path(path).read_text())
-    sessions = data.get("sessions", [])
-    failures = []
+    """Check that an EU AI Act export holds complete, consistent hash chains.
+
+    Each failure names the ``session_id``, the event's position in the session
+    as ``seq`` (counting from 1, so an honest export has the same number in
+    the event's own ``seq``) and its ``event_id``, and gives a ``reason``.
+    ``session_id`` is None for a problem with the whole package. ``seq`` and
+    ``event_id`` are None for a problem that is not about one event. The
+    check reads only the package, so it can't compare it with the source
+    store.
+    """
+    failures: list[dict[str, Any]] = []
+
+    def fail(
+        reason: str,
+        session_id: Any = None,
+        seq: int | None = None,
+        event_id: Any = None,
+    ) -> None:
+        failures.append({
+            "session_id": session_id,
+            "seq": seq,
+            "event_id": event_id,
+            "reason": reason,
+        })
+
+    def result(checked_sessions: int = 0, checked_events: int = 0) -> dict:
+        return {
+            "ok": not failures,
+            "checked_sessions": checked_sessions,
+            "checked_events": checked_events,
+            "failures": failures,
+        }
+
+    try:
+        data = json.loads(Path(path).read_text())
+    except (OSError, UnicodeDecodeError):
+        fail("export file can't be read")
+        return result()
+    except (ValueError, RecursionError):
+        fail("export can't be parsed as JSON")
+        return result()
+    if not isinstance(data, dict):
+        fail("export is not a JSON object")
+        return result()
+
+    metadata = data.get("compliance_metadata")
+    if not isinstance(metadata, dict):
+        fail("compliance_metadata is missing or not an object")
+
+    sessions = data.get("sessions")
+    if "sessions" not in data:
+        fail("sessions is missing")
+    elif not isinstance(sessions, list):
+        fail("sessions is not a list")
+    elif not sessions:
+        fail("export has no sessions")
+    session_list = sessions if isinstance(sessions, list) else []
+    # logging_obligations can be rebuilt only from well-formed sessions.
+    comparable = isinstance(sessions, list)
+
     checked_events = 0
-    for session in sessions:
-        events = session.get("article_12", {}).get("events", [])
+    for position, session in enumerate(session_list, start=1):
+        if not isinstance(session, dict):
+            fail(f"session {position} is not an object")
+            comparable = False
+            continue
+        session_id = session.get("session_id", "")
+        article_12 = session.get("article_12")
+        if not isinstance(article_12, dict):
+            fail("article_12 is missing or not an object", session_id)
+            comparable = False
+            continue
+        events = article_12.get("events", [])
+        if not isinstance(events, list):
+            fail("events is not a list", session_id)
+            continue
         checked_events += len(events)
-        for idx, event in enumerate(events):
-            if idx == 0:
-                continue
-            prev_hash = event.get("prev_hash", "")
-            previous_line_hash = events[idx - 1].get("line_hash", "")
-            if prev_hash and previous_line_hash and prev_hash != previous_line_hash:
-                failures.append({
-                    "session_id": session.get("session_id", ""),
-                    "seq": event.get("seq"),
-                    "event_id": event.get("event_id", ""),
-                })
-    return {
-        "ok": not failures,
-        "checked_sessions": len(sessions),
-        "checked_events": checked_events,
-        "failures": failures,
-    }
+        if not events:
+            fail("session has no events", session_id)
+        _check_export_events(events, session_id, fail)
+        trace_integrity = article_12.get("trace_integrity")
+        if not isinstance(trace_integrity, dict):
+            fail("trace_integrity is missing or not an object", session_id)
+            continue
+        _check_export_trace_integrity(trace_integrity, events, session_id, fail)
+
+    if isinstance(metadata, dict):
+        session_count = metadata.get("session_count")
+        if isinstance(sessions, list) and (
+            type(session_count) is not int or session_count != len(sessions)
+        ):
+            fail("session_count does not match the number of sessions")
+        if metadata.get("tamper_evident") is not True:
+            fail("tamper_evident is not true")
+
+    # export_eu_ai_act writes each session's Article 12 record twice. Both
+    # copies must match, or a reader of logging_obligations sees events this
+    # check never read. Compare JSON text, because == treats true as 1 and
+    # 1 as 1.0.
+    package_article_12 = data.get("article_12")
+    if not isinstance(package_article_12, dict):
+        fail("article_12 is missing or not an object")
+    elif comparable:
+        expected = [
+            {"session_id": session.get("session_id"), **session["article_12"]}
+            for session in session_list
+        ]
+        try:
+            same = json.dumps(
+                package_article_12.get("logging_obligations"), sort_keys=True,
+            ) == json.dumps(expected, sort_keys=True)
+        except RecursionError:
+            same = False
+        if not same:
+            fail("article_12.logging_obligations does not match the sessions")
+
+    return result(len(session_list), checked_events)
+
+
+def _export_failure_location(failure: dict) -> str:
+    if failure["seq"] is not None:
+        return (
+            f"session {inert(failure['session_id'])}, event {failure['seq']} "
+            f"(id={inert(failure['event_id'])})"
+        )
+    if failure["session_id"] is not None:
+        return f"session {inert(failure['session_id'])}"
+    return "export"
 
 
 def cmd_verify_export(args: argparse.Namespace) -> int:
@@ -696,9 +865,13 @@ def cmd_verify_export(args: argparse.Namespace) -> int:
             f"Export hash chain intact - {result['checked_events']} events checked\n"
         )
     else:
-        sys.stdout.write(
-            f"Export hash chain failed - {len(result['failures'])} broken links\n"
-        )
+        failures = result["failures"]
+        noun = "problem" if len(failures) == 1 else "problems"
+        sys.stdout.write(f"Export hash chain failed - {len(failures)} {noun}\n")
+        for failure in failures:
+            sys.stdout.write(
+                f"  {_export_failure_location(failure)}: {failure['reason']}\n"
+            )
     return 0 if result["ok"] else 1
 
 

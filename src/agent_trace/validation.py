@@ -679,7 +679,7 @@ def validate_trace_directory(
     ]
     chain = verify_chain_lines(event_lines, session_id=meta.session_id)
     findings: list[ValidationFinding] = []
-    if not chain.ok or chain_state == "broken":
+    if chain.broken or chain_state == "broken":
         findings.append(
             ValidationFinding(
                 "hash_chain_broken",
@@ -757,7 +757,7 @@ def validate_trace_directory(
     labels.update(reason_codes.intersection(_DECLARED_LIMITATION_CODES))
     if "duplicate_tool_outcome" in reason_codes or "duplicate_llm_outcome" in reason_codes:
         labels.add("duplicate_outcomes")
-    if chain_state == "broken" or not chain.ok:
+    if chain_state == "broken" or chain.broken:
         labels.add("tampered")
     if summary["state"] == "contradictory":
         labels.add("summary_contradiction")
@@ -780,7 +780,7 @@ def validate_trace_directory(
         findings=tuple(findings),
         hash_chain={
             "state": chain_state,
-            "valid": chain.ok and chain_state != "broken",
+            "valid": not chain.broken and chain_state != "broken",
             "event_count": len(events),
             "broken_at": chain.broken_at,
             "broken_event_id": chain.broken_event_id,
