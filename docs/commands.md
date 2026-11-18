@@ -179,11 +179,21 @@ agent-strace import <path.jsonl> [--discover]
 ```
 Import a Claude Code JSONL session log. `--discover` lists available sessions in `~/.claude/projects/`. The imported session starts with a `session_start` event, which holds the `cwd` when the log records a working directory.
 
+The session ID is the log's Claude `sessionId`, or the file name when the log
+has none. If the trace directory already holds a session with that ID,
+`import` writes nothing, prints `Session <id> is already imported; nothing
+written.` with the session's directory, and exits 0, so importing the same
+file twice does not duplicate its events. To import a log again, for example
+after the Claude session continued, delete that directory first. Nothing is
+written until the whole log has been converted, so a log that fails to import
+leaves no partial session behind.
+
 Claude Code writes one log line per content block of a model response and
 repeats the response's token usage on each. The import keeps that usage once,
 on the response's last line, so token totals, request counts and
 [`cost`](#cost) count each response once. Sessions imported by earlier versions
-count the usage once per line; import them again to correct their totals.
+count the usage once per line; delete the session's directory and import the
+log again to correct their totals.
 
 ---
 
