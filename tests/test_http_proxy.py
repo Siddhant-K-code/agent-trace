@@ -7,6 +7,7 @@ import json
 import os
 import queue
 import select
+import shutil
 import socket
 import ssl
 import sys
@@ -1727,6 +1728,155 @@ class TestRecordHTTPAllowHostFlag(unittest.TestCase):
         # --quiet keeps the refusal lines.
         refusals = [line + "\n" for line in stderr.getvalue().splitlines() if "refused" in line]
         self.assertEqual(refusals, [HOST_REFUSED_LOG, HOST_REFUSED_LOG, ORIGIN_REFUSED_LOG])
+
+
+class TestRecordHTTPTracestateParent(unittest.TestCase):
+    """record-http links a tracestate parent only if its store accepts it.
+
+    Each test records one tools/call, stops the proxy as Ctrl-C does and
+    reads the session's meta.json.
+    """
+
+    def setUp(self):
+        self.upstream = _start_counting_upstream(self)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.trace_dir = tmp.name
+        self.store = TraceStore(self.trace_dir)
+
+    def _parent(self, store=None):
+        meta = SessionMeta(command="parent agent")
+        (store or self.store).create_session(meta)
+        return meta.session_id
+
+    def _record(self, *argv, tracestate=None, before_stop=None):
+        """Return the exit codes, the POST status, the saved meta and stderr."""
+        args = build_parser().parse_args([
+            "--trace-dir", self.trace_dir, "record-http",
+            "--url", f"http://127.0.0.1:{self.upstream.server_address[1]}",
+            "--port", "0", "--quiet", *argv,
+        ])
+        servers = queue.Queue()
+        real_make_server = HTTPProxyServer.make_server
+
+        def make_server(proxy):
+            server = real_make_server(proxy)
+            servers.put(server)
+            return server
+
+        stderr = io.StringIO()
+        exit_codes = []
+        with mock.patch.object(HTTPProxyServer, "make_server", make_server), \
+                mock.patch("sys.stderr", stderr):
+            thread = threading.Thread(target=lambda: exit_codes.append(cmd_record_http(args)))
+            thread.start()
+            server = servers.get(timeout=10)
+            try:
+                port = server.server_address[1]
+                headers = [
+                    ("Host", f"127.0.0.1:{port}"),
+                    ("traceparent", f"00-{'a' * 32}-{'b' * 16}-01"),
+                ]
+                if tracestate is not None:
+                    headers.append(("tracestate", tracestate))
+                status = _send(port, "POST", headers, json.dumps(_tool_call(1)).encode())[0]
+                if before_stop:
+                    before_stop()
+            finally:
+                server.shutdown()
+                thread.join(timeout=10)
+        self.assertFalse(thread.is_alive())
+        meta = self.store.load_meta(server.meta.session_id)
+        return exit_codes, status, meta, stderr.getvalue()
+
+    def _assert_saved_without_parent(self, exit_codes, status, meta):
+        self.assertEqual(status, 200)
+        self.assertEqual(exit_codes, [0])
+        self.assertIsNotNone(meta.ended_at)
+        self.assertGreater(meta.total_duration_ms, 0)
+        self.assertEqual(meta.tool_calls, 1)
+        self.assertEqual(meta.parent_session_id, "")
+
+    def test_parent_from_another_store_is_ignored(self):
+        other = tempfile.TemporaryDirectory()
+        self.addCleanup(other.cleanup)
+        parent_id = self._parent(TraceStore(other.name))
+
+        exit_codes, status, meta, stderr = self._record(tracestate=f"agent-trace={parent_id}")
+
+        self._assert_saved_without_parent(exit_codes, status, meta)
+        self.assertNotIn("dropped", stderr)
+
+    def test_malformed_parent_id_is_ignored(self):
+        for value in ("a/b", "..", "x\x1b[2Jy"):
+            with self.subTest(value=value):
+                exit_codes, status, meta, stderr = self._record(
+                    tracestate=f"agent-trace={value}"
+                )
+
+                self._assert_saved_without_parent(exit_codes, status, meta)
+                self.assertNotIn("dropped", stderr)
+
+    def test_parent_deleted_while_recording_is_dropped_at_the_end(self):
+        for link in ("--parent", "tracestate"):
+            with self.subTest(link=link), \
+                    mock.patch.dict(os.environ, {"AGENT_STRACE_PARENT_EVENT": "evt-1"}):
+                parent_id = self._parent()
+                if link == "--parent":
+                    kwargs = {}
+                    argv = ("--parent", parent_id)
+                else:
+                    kwargs = {"tracestate": f"agent-trace={parent_id}"}
+                    argv = ()
+
+                exit_codes, status, meta, stderr = self._record(
+                    *argv,
+                    before_stop=lambda: shutil.rmtree(self.store.base_dir / parent_id),
+                    **kwargs,
+                )
+
+                self._assert_saved_without_parent(exit_codes, status, meta)
+                self.assertEqual(meta.parent_event_id, "")
+                dropped = [line for line in stderr.splitlines() if "dropped" in line]
+                self.assertEqual(dropped, [
+                    f"agent-strace: dropped the link to parent session {parent_id}: "
+                    "parent session must exist in the same scoped store"
+                ])
+
+    def test_save_failure_not_about_the_parent_still_fails(self):
+        parent_id = self._parent()
+        real_update_meta = TraceStore.update_meta
+        failing = threading.Event()
+        refused = []
+
+        def update_meta(store, meta):
+            if failing.is_set():
+                refused.append(meta.parent_session_id)
+                raise ValueError("refusing symlinked session directory")
+            return real_update_meta(store, meta)
+
+        with mock.patch.object(TraceStore, "update_meta", update_meta):
+            exit_codes, status, _, stderr = self._record(
+                tracestate=f"agent-trace={parent_id}", before_stop=failing.set
+            )
+
+        self.assertEqual(status, 200)
+        # The link was in place when the final save ran.
+        self.assertEqual(refused[:1], [parent_id])
+        self.assertNotEqual(exit_codes, [0])
+        self.assertIn("refusing symlinked session directory", stderr)
+        self.assertNotIn("dropped", stderr)
+
+    def test_parent_in_this_store_is_linked(self):
+        parent_id = self._parent()
+
+        exit_codes, status, meta, _ = self._record(tracestate=f"agent-trace={parent_id}")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(exit_codes, [0])
+        self.assertIsNotNone(meta.ended_at)
+        self.assertEqual(meta.tool_calls, 1)
+        self.assertEqual(meta.parent_session_id, parent_id)
 
 
 class _ScriptedHandler(BaseHTTPRequestHandler):

@@ -75,6 +75,22 @@ class TestExtractTraceparent(unittest.TestCase):
         ctx = extract_traceparent(self._valid_headers("sess-abc"))
         self.assertEqual(ctx["at_session_id"], "sess-abc")
 
+    def test_invalid_session_id_in_tracestate_is_dropped(self):
+        no_tracestate = extract_traceparent(
+            {"traceparent": self._valid_headers()["traceparent"]}
+        )
+        for session_id in ("a/b", ".", "..", "a" * 129, "x\x1by", "ab\u202ecd"):
+            with self.subTest(session_id=session_id):
+                ctx = extract_traceparent(self._valid_headers(session_id))
+                self.assertEqual(ctx["at_session_id"], "")
+                self.assertEqual(ctx, no_tracestate)
+
+    def test_valid_session_ids_in_tracestate_are_kept(self):
+        for session_id in ("a" * 128, "Sess_1.2-x"):
+            with self.subTest(session_id=session_id):
+                ctx = extract_traceparent(self._valid_headers(session_id))
+                self.assertEqual(ctx["at_session_id"], session_id)
+
     def test_returns_none_when_no_header(self):
         ctx = extract_traceparent({"Content-Type": "application/json"})
         self.assertIsNone(ctx)

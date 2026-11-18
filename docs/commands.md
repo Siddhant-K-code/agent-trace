@@ -60,6 +60,8 @@ For an `https://` URL the proxy verifies the server certificate and host name wi
 
 To refuse requests from web pages, the proxy answers 421 to a `Host` that is not `localhost`, an IP address or an `--allow-host` name, and 403 to an `Origin` that is not a page on `localhost`, a loopback address or an `--allow-host` name. It neither traces nor forwards these requests. If a client gets 421 because it connects by another name, such as `host.docker.internal` or a tunnel name, restart `record-http` with `--allow-host NAME` for that name.
 
+A `tracestate` header from the calling agent links this session as its child only when the caller's session is in the same trace store, and is ignored otherwise. If the parent session is gone when the proxy stops, the session is saved without the link and stderr says so.
+
 | Flag | Default | Description |
 |---|---|---|
 | `--url URL` | required | The MCP server's endpoint URL (`http://` or `https://`), such as `http://127.0.0.1:8000/mcp` |
