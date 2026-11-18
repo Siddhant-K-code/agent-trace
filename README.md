@@ -280,7 +280,7 @@ Supported: OpenAI Agents SDK, LangChain, LangGraph, CrewAI, LiteLLM, Anthropic S
 
 **MCP HTTP/SSE proxy**: same idea, different transport. Listens on a local port, forwards POST and SSE requests to the remote server, captures every JSON-RPC message in both directions.
 
-**Python decorator**: `@trace_tool` logs a `tool_call` event before execution and a `tool_result` after. Errors and timing are captured automatically. `@trace_llm_call` does the same for LLM calls.
+**Python decorator**: `@trace_tool` logs a `tool_call` event before execution and a `tool_result` after. Errors and timing are captured automatically. `@trace_llm_call` does the same for LLM calls. Both work on `async def` functions too.
 
 ## Running tests
 
