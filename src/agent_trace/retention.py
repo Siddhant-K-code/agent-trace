@@ -9,6 +9,12 @@ Config is read from .agent-strace.yaml (optional). All limits are applied
 in order: age first, then count, then size. Deletions are logged to
 .agent-traces/retention.log when on_delete=log.
 
+Open sessions are never deleted and do not count toward any limit. A session
+is open when its metadata has no end time or a hook ``.active-session*``
+marker names it. An open session with no writes for OPEN_SESSION_IDLE_DAYS
+is treated as abandoned (for example, its agent crashed) and is handled like
+a closed session.
+
 Usage:
     agent-strace retention status
     agent-strace retention clean --dry-run
@@ -27,7 +33,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
 
+from .models import SessionMeta
 from .store import TraceStore, DEFAULT_TRACE_DIR
+
+
+# An open session with no writes for this long is treated as abandoned.
+OPEN_SESSION_IDLE_DAYS = 7
 
 
 # ---------------------------------------------------------------------------
@@ -139,15 +150,19 @@ def _session_size_bytes(session_dir: Path) -> int:
     return total
 
 
-def _store_size_bytes(store: TraceStore) -> int:
-    """Return total bytes used by all sessions in the store."""
-    total = 0
-    if not store.base_dir.exists():
-        return 0
-    for d in store.base_dir.iterdir():
-        if d.is_dir():
-            total += _session_size_bytes(d)
-    return total
+def _store_size_bytes(
+    store: TraceStore, sessions: list[SessionMeta] | None = None,
+) -> int:
+    """Return bytes used by listed sessions plus their checkpoints.
+
+    Other store content (datasets, approvals, logs, unlisted directories) is
+    not counted: retention cannot free it, so it must not drive the size limit.
+    """
+    if sessions is None:
+        sessions = store.list_sessions()
+    return sum(
+        _retained_session_size_bytes(store, meta.session_id) for meta in sessions
+    )
 
 
 def _retained_session_size_bytes(store: TraceStore, session_id: str) -> int:
@@ -165,6 +180,70 @@ def _retained_session_size_bytes(store: TraceStore, session_id: str) -> int:
 # Retention logic
 # ---------------------------------------------------------------------------
 
+def _active_marker_session_ids(store: TraceStore) -> set[str]:
+    """Return session IDs named by hook ``.active-session*`` markers."""
+    roots = [store.base_dir]
+    if store.storage_root != store.base_dir:
+        roots.append(store.storage_root)
+    session_ids: set[str] = set()
+    for root in roots:
+        try:
+            markers = list(root.glob(".active-session*"))
+        except OSError:
+            continue
+        for marker in markers:
+            try:
+                if marker.is_symlink() or not marker.is_file():
+                    continue
+                session_id = marker.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeDecodeError):
+                continue
+            if session_id:
+                session_ids.add(session_id)
+    return session_ids
+
+
+def _last_write_time(store: TraceStore, meta: SessionMeta) -> float:
+    """Return the newest file modification time in the session directory."""
+    latest = meta.started_at
+    try:
+        for f in store._session_dir(meta.session_id).iterdir():
+            if f.is_symlink() or not f.is_file():
+                continue
+            latest = max(latest, f.stat().st_mtime)
+    except (OSError, ValueError):
+        pass
+    return latest
+
+
+def _is_open(
+    store: TraceStore,
+    meta: SessionMeta,
+    marker_ids: set[str],
+    now: float,
+) -> bool:
+    """Return True when retention must keep the session because it may be running."""
+    if meta.ended_at is not None and meta.session_id not in marker_ids:
+        return False
+    idle_seconds = now - _last_write_time(store, meta)
+    return idle_seconds < OPEN_SESSION_IDLE_DAYS * 86400
+
+
+def _split_open_sessions(
+    store: TraceStore, sessions: list[SessionMeta], now: float,
+) -> tuple[list[SessionMeta], list[SessionMeta]]:
+    """Return (eligible, open) sessions, preserving order."""
+    marker_ids = _active_marker_session_ids(store)
+    eligible: list[SessionMeta] = []
+    open_sessions: list[SessionMeta] = []
+    for meta in sessions:
+        if _is_open(store, meta, marker_ids, now):
+            open_sessions.append(meta)
+        else:
+            eligible.append(meta)
+    return eligible, open_sessions
+
+
 @dataclass
 class RetentionStatus:
     session_count: int
@@ -173,6 +252,7 @@ class RetentionStatus:
     total_size_bytes: int
     sessions_to_delete: list[str] = field(default_factory=list)
     bytes_to_free: int = 0
+    open_session_count: int = 0
 
     @property
     def total_size_mb(self) -> float:
@@ -190,17 +270,19 @@ def compute_sessions_to_delete(
     """Return session IDs that should be deleted under the given policy.
 
     Sessions are sorted oldest-first. Policies are applied in order:
-    age → count → size. A session marked for deletion by any policy is
-    included once in the result.
+    age, count, size. A session marked for deletion by any policy is
+    included once in the result. Open sessions are never selected and do
+    not count toward the count or size limits.
     """
     sessions = store.list_sessions()
     if not sessions:
         return []
 
-    # list_sessions() returns newest-first; reverse for oldest-first processing
-    sessions_oldest_first = list(reversed(sessions))
-    to_delete: set[str] = set()
     now = time.time()
+    eligible, _ = _split_open_sessions(store, sessions, now)
+    # list_sessions() returns newest-first; reverse for oldest-first processing
+    sessions_oldest_first = list(reversed(eligible))
+    to_delete: set[str] = set()
 
     # --- Age policy ---
     if config.max_age_days is not None:
@@ -221,17 +303,22 @@ def compute_sessions_to_delete(
     # --- Size policy ---
     if config.max_size_mb is not None:
         max_bytes = config.max_size_mb * 1024 * 1024
-        total = _store_size_bytes(store)
-        # Age/count deletions already free this space, including checkpoints.
-        total -= sum(_retained_session_size_bytes(store, sid) for sid in to_delete)
+        # Measure only what this policy can free: the same per-session
+        # measure the loop below subtracts.
+        sizes = {
+            meta.session_id: _retained_session_size_bytes(store, meta.session_id)
+            for meta in sessions_oldest_first
+        }
+        total = sum(
+            size for sid, size in sizes.items() if sid not in to_delete
+        )
         if total > max_bytes:
             surviving = [m for m in sessions_oldest_first if m.session_id not in to_delete]
             for meta in surviving:
                 if total <= max_bytes:
                     break
-                size = _retained_session_size_bytes(store, meta.session_id)
                 to_delete.add(meta.session_id)
-                total -= size
+                total -= sizes[meta.session_id]
 
     # Return in oldest-first order for deterministic output
     ordered = [m.session_id for m in sessions_oldest_first if m.session_id in to_delete]
@@ -251,7 +338,8 @@ def get_retention_status(store: TraceStore, config: RetentionConfig) -> Retentio
     oldest = min(sessions, key=lambda m: m.started_at)
     now = time.time()
     age_days = (now - oldest.started_at) / 86400
-    total_bytes = _store_size_bytes(store)
+    total_bytes = _store_size_bytes(store, sessions)
+    _, open_sessions = _split_open_sessions(store, sessions, now)
     to_delete = compute_sessions_to_delete(store, config)
     bytes_to_free = sum(
         _retained_session_size_bytes(store, sid) for sid in to_delete
@@ -264,7 +352,74 @@ def get_retention_status(store: TraceStore, config: RetentionConfig) -> Retentio
         total_size_bytes=total_bytes,
         sessions_to_delete=to_delete,
         bytes_to_free=bytes_to_free,
+        open_session_count=len(open_sessions),
     )
+
+
+@dataclass
+class _DeletionResult:
+    deleted: list[str] = field(default_factory=list)
+    kept_open: list[str] = field(default_factory=list)
+    bytes_freed: int = 0
+
+
+def _delete_sessions(
+    store: TraceStore,
+    session_ids: list[str],
+    config: RetentionConfig,
+    log_path: str = "",
+) -> _DeletionResult:
+    """Delete sessions under the store write lock, rechecking each is closed."""
+    result = _DeletionResult()
+    effective_log = log_path or config.log_path or str(store.base_dir / "retention.log")
+
+    with store.write_lock():
+        try:
+            # Validate shared record files before deleting any trace data.
+            store.external_session_records(set(session_ids))
+        except (OSError, ValueError) as exc:
+            sys.stderr.write(f"[retention] refusing to delete sessions: {exc}\n")
+            return result
+
+        # A session selected earlier may have been resumed since; recheck
+        # under the lock that hooks also take before they write.
+        now = time.time()
+        marker_ids = _active_marker_session_ids(store)
+        for sid in session_ids:
+            try:
+                session_dir = store._session_dir(sid)
+                checkpoint_path = store.checkpoint_path(sid)
+                if session_dir.exists():
+                    store._session_file(sid, "events.ndjson", "event stream")
+                    meta_path = store._session_file(sid, "meta.json", "session metadata")
+                    if meta_path.exists():
+                        meta = store.load_meta(sid)
+                        if _is_open(store, meta, marker_ids, now):
+                            result.kept_open.append(sid)
+                            continue
+                size = _retained_session_size_bytes(store, sid)
+                checkpoint_path.unlink(missing_ok=True)
+                if not session_dir.exists():
+                    continue
+                shutil.rmtree(session_dir)
+                result.deleted.append(sid)
+                result.bytes_freed += size
+            except (OSError, ValueError) as exc:
+                sys.stderr.write(f"[retention] failed to delete {sid}: {exc}\n")
+
+        if not result.deleted:
+            return result
+        deleted_ids = set(result.deleted)
+        try:
+            store._delete_external_session_records_locked(deleted_ids)
+        except (OSError, ValueError) as exc:
+            sys.stderr.write(f"[retention] failed to remove session records: {exc}\n")
+        store._cleanup_deleted_hook_state(deleted_ids)
+        if config.on_delete == "log":
+            for sid in result.deleted:
+                _log_deletion(sid, effective_log)
+
+    return result
 
 
 def delete_sessions(
@@ -273,25 +428,12 @@ def delete_sessions(
     config: RetentionConfig,
     log_path: str = "",
 ) -> int:
-    """Delete the given sessions. Returns count of sessions deleted."""
-    deleted = 0
-    effective_log = log_path or config.log_path or str(store.base_dir / "retention.log")
+    """Delete the given closed sessions. Returns count of sessions deleted.
 
-    for sid in session_ids:
-        session_dir = store._session_dir(sid)
-        checkpoint_path = store.checkpoint_path(sid)
-        try:
-            checkpoint_path.unlink(missing_ok=True)
-            if not session_dir.exists():
-                continue
-            shutil.rmtree(session_dir)
-            deleted += 1
-            if config.on_delete == "log":
-                _log_deletion(sid, effective_log)
-        except OSError as exc:
-            sys.stderr.write(f"[retention] failed to delete {sid}: {exc}\n")
-
-    return deleted
+    Open sessions are skipped. Each deleted session's checkpoint, approval
+    records, dataset entries and hook state are removed with it.
+    """
+    return len(_delete_sessions(store, session_ids, config, log_path).deleted)
 
 
 def _log_deletion(session_id: str, log_path: str) -> None:
@@ -320,6 +462,9 @@ def cmd_retention_status(args: argparse.Namespace, out: TextIO = sys.stdout) -> 
     out.write(f"Oldest:      {status.oldest_session_id[:16]} "
               f"({status.oldest_session_age_days:.1f} days ago)\n")
     out.write(f"Size:        {status.total_size_mb:.1f} MB\n")
+    if status.open_session_count:
+        out.write(f"Open:        {status.open_session_count} session(s), "
+                  "kept and not counted by limits\n")
 
     if status.sessions_to_delete:
         out.write(f"\nPolicy would delete: {len(status.sessions_to_delete)} session(s) "
@@ -344,25 +489,34 @@ def cmd_retention_clean(args: argparse.Namespace, out: TextIO = sys.stdout) -> i
         config.max_size_mb = args.max_size_mb
 
     to_delete = compute_sessions_to_delete(store, config)
+    _, open_sessions = _split_open_sessions(store, store.list_sessions(), time.time())
+    open_note = (
+        f"Kept: {len(open_sessions)} open session(s)\n" if open_sessions else ""
+    )
 
     if not to_delete:
         out.write("Nothing to delete — all sessions are within retention limits.\n")
+        out.write(open_note)
         return 0
-
-    bytes_to_free = sum(
-        _retained_session_size_bytes(store, sid) for sid in to_delete
-    )
-    mb_to_free = bytes_to_free / (1024 * 1024)
 
     dry_run = getattr(args, "dry_run", False)
     if dry_run:
+        bytes_to_free = sum(
+            _retained_session_size_bytes(store, sid) for sid in to_delete
+        )
+        mb_to_free = bytes_to_free / (1024 * 1024)
         out.write(f"Would delete: {len(to_delete)} session(s) ({mb_to_free:.1f} MB)\n")
         for sid in to_delete:
             out.write(f"  {sid}\n")
+        out.write(open_note)
         return 0
 
-    deleted = delete_sessions(store, to_delete, config)
-    out.write(f"Deleted: {deleted} session(s) ({mb_to_free:.1f} MB freed)\n")
+    result = _delete_sessions(store, to_delete, config)
+    mb_freed = result.bytes_freed / (1024 * 1024)
+    out.write(f"Deleted: {len(result.deleted)} session(s) ({mb_freed:.1f} MB freed)\n")
+    kept = len({m.session_id for m in open_sessions} | set(result.kept_open))
+    if kept:
+        out.write(f"Kept: {kept} open session(s)\n")
     return 0
 
 

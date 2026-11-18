@@ -10,6 +10,7 @@ from pathlib import Path
 
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.retention import (
+    OPEN_SESSION_IDLE_DAYS,
     RetentionConfig,
     RetentionStatus,
     _parse_simple_yaml,
@@ -33,10 +34,14 @@ def _make_store() -> tuple[TraceStore, str]:
     return TraceStore(tmpdir), tmpdir
 
 
-def _add_session(store: TraceStore, age_days: float = 0.0, name: str = "") -> SessionMeta:
+def _add_session(
+    store: TraceStore, age_days: float = 0.0, name: str = "", ended: bool = True,
+) -> SessionMeta:
     """Add a session with started_at set to `age_days` days ago."""
     meta = SessionMeta(agent_name=name)
     meta.started_at = time.time() - age_days * 86400
+    if ended:
+        meta.ended_at = meta.started_at + 60
     store.create_session(meta)
     # Write a small event so the session has non-zero size
     ev = TraceEvent(
@@ -410,6 +415,160 @@ class TestCmdRetentionClean(unittest.TestCase):
         rc = cmd_retention_clean(args, out=out)
         self.assertEqual(rc, 0)
         self.assertIn("Nothing to delete", out.getvalue())
+
+
+# ---------------------------------------------------------------------------
+# Open sessions and the size measure
+# ---------------------------------------------------------------------------
+
+def _claude_marker(store: TraceStore, session_id: str) -> Path:
+    """Write a provider-scoped hook marker the way hooks.py names it."""
+    import hashlib
+    raw = session_id + "-conversation"
+    digest = hashlib.sha256(f"claude\0{raw}".encode()).hexdigest()
+    suffix = f".v2.claude.{raw[:16].encode().hex()}.{digest}"
+    marker = store.base_dir / f".active-session{suffix}"
+    marker.write_text(session_id, encoding="utf-8")
+    (store.base_dir / f".pending-calls{suffix}.json").write_text("{}")
+    return marker
+
+
+def _make_idle(store: TraceStore, session_id: str, days: float) -> None:
+    stamp = time.time() - days * 86400
+    for f in store._session_dir(session_id).iterdir():
+        os.utime(f, (stamp, stamp))
+
+
+def _clean_args(store: TraceStore, **overrides) -> object:
+    import argparse
+    args = argparse.Namespace(
+        trace_dir=str(store.base_dir), config=None, dry_run=False,
+        max_age_days=None, max_sessions=None, max_size_mb=None,
+    )
+    for key, value in overrides.items():
+        setattr(args, key, value)
+    return args
+
+
+class TestOpenSessionsAreKept(unittest.TestCase):
+    def test_clean_keeps_running_session_usable(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = TraceStore(tmpdir)
+            running = _add_session(store, age_days=2, ended=False)
+            finished = _add_session(store, age_days=1)
+            out = io.StringIO()
+
+            cmd_retention_clean(_clean_args(store, max_sessions=1), out=out)
+
+            self.assertIn("Nothing to delete", out.getvalue())
+            self.assertIn("Kept: 1 open session(s)", out.getvalue())
+            store.append_event(running.session_id, TraceEvent(
+                event_type=EventType.TOOL_CALL, session_id=running.session_id,
+                data={"tool_name": "Read"},
+            ))
+            meta = store.load_meta(running.session_id)
+            meta.ended_at = time.time()
+            store.update_meta(meta)
+            listed = {m.session_id for m in store.list_sessions()}
+            self.assertEqual(listed, {running.session_id, finished.session_id})
+            self.assertEqual(len(store.load_events(running.session_id)), 2)
+
+    def test_ended_session_named_by_hook_marker_is_kept(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = TraceStore(tmpdir)
+            resumed = _add_session(store, age_days=40)
+            marker = _claude_marker(store, resumed.session_id)
+
+            self.assertEqual(
+                compute_sessions_to_delete(store, RetentionConfig(max_age_days=30)), [],
+            )
+            self.assertTrue(marker.exists())
+
+    def test_abandoned_open_session_is_deleted_with_its_hook_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = TraceStore(tmpdir)
+            crashed = _add_session(store, age_days=40, ended=False)
+            marker = _claude_marker(store, crashed.session_id)
+            pending = Path(str(marker).replace(".active-session", ".pending-calls") + ".json")
+            _make_idle(store, crashed.session_id, days=OPEN_SESSION_IDLE_DAYS + 1)
+            out = io.StringIO()
+
+            cmd_retention_clean(_clean_args(store, max_age_days=30), out=out)
+
+            self.assertIn("Deleted: 1 session(s)", out.getvalue())
+            self.assertFalse(store._session_dir(crashed.session_id).exists())
+            self.assertFalse(marker.exists())
+            self.assertFalse(pending.exists())
+
+    def test_session_resumed_after_selection_is_not_deleted(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = TraceStore(tmpdir)
+            old = _add_session(store, age_days=40)
+            selected = compute_sessions_to_delete(store, RetentionConfig(max_age_days=30))
+            self.assertEqual(selected, [old.session_id])
+            meta = store.load_meta(old.session_id)
+            meta.ended_at = None
+            store.update_meta(meta)
+
+            deleted = delete_sessions(store, selected, RetentionConfig(on_delete="silent"))
+
+            self.assertEqual(deleted, 0)
+            self.assertTrue(store._session_dir(old.session_id).exists())
+
+    def test_delete_removes_session_approval_and_dataset_records(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = TraceStore(tmpdir)
+            old = _add_session(store, age_days=40)
+            kept = _add_session(store, age_days=1)
+            approvals = store.base_dir / ".approvals"
+            approvals.mkdir()
+            (approvals / "a1.json").write_text(json.dumps({"session_id": old.session_id}))
+            dataset = store.base_dir / "datasets" / "golden.jsonl"
+            dataset.parent.mkdir()
+            dataset.write_text(
+                json.dumps({"session_id": old.session_id}) + "\n"
+                + json.dumps({"session_id": kept.session_id}) + "\n"
+            )
+
+            delete_sessions(store, [old.session_id], RetentionConfig(on_delete="silent"))
+
+            self.assertFalse((approvals / "a1.json").exists())
+            self.assertEqual(
+                [json.loads(line)["session_id"] for line in dataset.read_text().splitlines()],
+                [kept.session_id],
+            )
+
+
+class TestSizePolicyMeasure(unittest.TestCase):
+    def test_non_session_data_does_not_trigger_size_deletions(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = TraceStore(tmpdir)
+            for age in (3, 2, 1):
+                _add_session(store, age_days=age)
+            dataset = store.base_dir / "datasets" / "golden.jsonl"
+            dataset.parent.mkdir()
+            dataset.write_text("x" * (2 * 1024 * 1024))
+            out = io.StringIO()
+
+            cmd_retention_clean(_clean_args(store, max_size_mb=1), out=out)
+
+            self.assertIn("Nothing to delete", out.getvalue())
+            self.assertEqual(len(store.list_sessions()), 3)
+            self.assertLess(_store_size_bytes(store), 1024 * 1024)
+
+    def test_open_session_size_does_not_trigger_size_deletions(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = TraceStore(tmpdir)
+            running = _add_session(store, age_days=2, ended=False)
+            (store._session_dir(running.session_id) / "events.ndjson").write_text(
+                "x" * (2 * 1024 * 1024)
+            )
+            finished = _add_session(store, age_days=1)
+
+            self.assertEqual(
+                compute_sessions_to_delete(store, RetentionConfig(max_size_mb=1)), [],
+            )
+            self.assertTrue(store._session_dir(finished.session_id).exists())
 
 
 # ---------------------------------------------------------------------------
