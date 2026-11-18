@@ -1,5 +1,8 @@
 """Tests for Claude Code JSONL import."""
 
+import argparse
+import contextlib
+import io
 import json
 import os
 import sys
@@ -9,7 +12,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from agent_trace.cost import build_provider_cost_report
-from agent_trace.jsonl_import import import_jsonl
+from agent_trace.jsonl_import import cmd_import, import_jsonl
 from agent_trace.models import EventType
 from agent_trace.store import TraceStore
 from agent_trace.validation import validate_trace_directory
@@ -423,6 +426,63 @@ class TestJSONLImport(unittest.TestCase):
         session_id = import_jsonl(path, store=self.store)
         self.assertEqual(session_id, "session")
         self.assertEqual(self.store.load_meta(session_id).conversation_id, "")
+
+    def _reimport_log(self):
+        return self._write_jsonl([
+            {"type": "user", "sessionId": "again1", "timestamp": "2025-01-01T00:00:00Z",
+             "message": {"role": "user", "content": "list files"}, "uuid": "u1"},
+            {"type": "assistant", "sessionId": "again1", "timestamp": "2025-01-01T00:00:05Z",
+             "message": {"role": "assistant", "model": "claude-sonnet-4", "content": [
+                 {"type": "text", "text": "ok"},
+                 {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}},
+             ], "usage": {"input_tokens": 10, "output_tokens": 5}}, "uuid": "u2"},
+        ])
+
+    def test_reimport_writes_nothing(self):
+        path = self._reimport_log()
+        session_id = import_jsonl(path, store=self.store)
+        session_dir = self.store.base_dir / session_id
+        events_before = (session_dir / "events.ndjson").read_bytes()
+        meta_before = (session_dir / "meta.json").read_bytes()
+
+        self.assertEqual(import_jsonl(path, store=self.store), session_id)
+
+        self.assertEqual((session_dir / "events.ndjson").read_bytes(), events_before)
+        self.assertEqual((session_dir / "meta.json").read_bytes(), meta_before)
+        types = [e.event_type for e in self.store.load_events(session_id)]
+        self.assertEqual(types.count(EventType.SESSION_START), 1)
+        self.assertEqual(types.count(EventType.TOOL_CALL), 1)
+
+    def test_cli_reimport_reports_existing_session_and_exits_zero(self):
+        path = self._reimport_log()
+        args = argparse.Namespace(trace_dir=self.tmpdir, discover=False, path=path)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cmd_import(args), 0)
+        events_before = (self.store.base_dir / "again1" / "events.ndjson").read_bytes()
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(cmd_import(args), 0)
+
+        self.assertIn("Session again1 is already imported; nothing written.", err.getvalue())
+        self.assertNotIn("Imported session", err.getvalue())
+        self.assertEqual((self.store.base_dir / "again1" / "events.ndjson").read_bytes(), events_before)
+
+    def test_log_that_fails_to_convert_leaves_no_partial_session(self):
+        good = {"type": "user", "sessionId": "half1", "timestamp": "2025-01-01T00:00:00Z",
+                "message": {"role": "user", "content": "hi"}, "uuid": "u1"}
+        bad = {"type": "assistant", "sessionId": "half1", "timestamp": "2025-01-01T00:00:01Z",
+               "message": {"role": "assistant", "content": "ok", "usage": [1]}, "uuid": "u2"}
+        path = self._write_jsonl([good, bad])
+
+        with self.assertRaises(AttributeError):
+            import_jsonl(path, store=self.store)
+        self.assertFalse(self.store.session_exists("half1"))
+
+        # The fixed log then imports in full instead of being reported as present.
+        path = self._write_jsonl([good])
+        self.assertEqual(import_jsonl(path, store=self.store), "half1")
+        self.assertEqual(self.store.load_events("half1")[-1].event_type, EventType.SESSION_END)
 
 
 if __name__ == "__main__":

@@ -1987,7 +1987,7 @@ def load_claude_history(claude_dir: str, trace_dir: str) -> tuple[TraceStore, in
         try:
             # Silences the per-event redaction notices.
             with contextlib.redirect_stderr(io.StringIO()):
-                import_jsonl(found["path"], store=store)
+                import_jsonl(found["path"], store=store, merge=True)
             imported += 1
         # Read and parse errors only. UnicodeDecodeError and JSONDecodeError
         # are ValueErrors; AttributeError and TypeError come from JSON lines

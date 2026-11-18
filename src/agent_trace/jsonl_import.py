@@ -47,10 +47,17 @@ def cmd_import(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        session_id = import_jsonl(args.path, store=store)
+        session_id, written = _import_jsonl(args.path, store)
     except FileNotFoundError as e:
         sys.stderr.write(f"{e}\n")
         return 1
+
+    if not written:
+        sys.stderr.write(
+            f"Session {session_id} is already imported; nothing written.\n"
+            f"  To import it again, delete {store.base_dir / session_id} first.\n"
+        )
+        return 0
 
     meta = store.load_meta(session_id)
     events = store.load_events(session_id)
@@ -162,8 +169,17 @@ def import_jsonl(
     path: str | Path,
     store: TraceStore | None = None,
     trace_dir: str | None = None,
+    *,
+    merge: bool = False,
 ) -> str:
     """Import a Claude Code JSONL session log into agent-trace format.
+
+    If the store already holds a session with the log's ID, nothing is
+    written and that ID is returned, so importing a file again does not
+    duplicate its events. With ``merge=True`` the existing session's
+    metadata is replaced and this log's events are appended to it instead;
+    ``skills --from-claude`` uses this to merge transcripts that share a
+    session ID.
 
     Parameters
     ----------
@@ -180,12 +196,22 @@ def import_jsonl(
     str
         The session ID of the imported session.
     """
+    if store is None:
+        store = TraceStore(resolve_trace_dir(trace_dir))
+    return _import_jsonl(path, store, merge=merge)[0]
+
+
+def _import_jsonl(
+    path: str | Path, store: TraceStore, *, merge: bool = False
+) -> tuple[str, bool]:
+    """Import ``path`` into ``store``; returns ``(session_id, written)``.
+
+    Events are built in memory and written only after the whole log has been
+    converted, so a log that fails to parse leaves no partial session behind.
+    """
     path = Path(path).expanduser().resolve()
     if not path.exists():
         raise FileNotFoundError(f"Session log not found: {path}")
-
-    if store is None:
-        store = TraceStore(resolve_trace_dir(trace_dir))
 
     # First pass: extract metadata from first entry
     session_id = ""
@@ -239,14 +265,13 @@ def import_jsonl(
         command=f"imported from {path.name} (branch: {extra_meta.get('git_branch', '')}, v{extra_meta.get('version', '')})",
         conversation_id=conversation_id,
     )
-    store.create_session(meta)
+    events: list[TraceEvent] = []
 
     # Always open the session, since a session_end is always written below.
     start_data: dict[str, Any] = {"mode": "claude-jsonl-import", "provider": "claude"}
     if cwd:
         start_data["cwd"] = cwd
-    store.append_event(
-        meta.session_id,
+    events.append(
         TraceEvent(
             event_type=EventType.SESSION_START,
             timestamp=first_ts,
@@ -338,7 +363,7 @@ def import_jsonl(
                             **provenance,
                         },
                     )
-                    store.append_event(meta.session_id, event)
+                    events.append(event)
 
                 # Also check toolUseResult — only if no content-block tool_results
                 # were already emitted to avoid duplicate TOOL_RESULT events.
@@ -360,7 +385,7 @@ def import_jsonl(
                                 **provenance,
                             },
                         )
-                        store.append_event(meta.session_id, event)
+                        events.append(event)
 
             if text and not text.startswith("{"):
                 is_summary = _is_compaction_summary(
@@ -383,7 +408,7 @@ def import_jsonl(
                     session_id=meta.session_id,
                     data=prompt_data,
                 )
-                store.append_event(meta.session_id, event)
+                events.append(event)
 
         # Assistant entry
         elif entry_type == "assistant":
@@ -414,7 +439,7 @@ def import_jsonl(
                         session_id=meta.session_id,
                         data=tool_data,
                     )
-                    store.append_event(meta.session_id, event)
+                    events.append(event)
                     meta.tool_calls += 1
 
             # Log assistant text whenever present, including messages that also
@@ -441,7 +466,7 @@ def import_jsonl(
                     session_id=meta.session_id,
                     data=response_data,
                 )
-                store.append_event(meta.session_id, event)
+                events.append(event)
 
             # Track token usage
             if usage:
@@ -478,8 +503,7 @@ def import_jsonl(
         meta.total_duration_ms = (meta.ended_at - meta.started_at) * 1000
 
     # Add session end event
-    store.append_event(
-        meta.session_id,
+    events.append(
         TraceEvent(
             event_type=EventType.SESSION_END,
             timestamp=meta.ended_at,
@@ -493,9 +517,12 @@ def import_jsonl(
             },
         ),
     )
-    store.update_meta(meta)
-
-    return meta.session_id
+    if merge:
+        store.create_session(meta)
+    elif store.create_session(meta, if_missing=True) is None:
+        return meta.session_id, False
+    store.append_events(meta.session_id, events)
+    return meta.session_id, True
 
 
 def discover_claude_sessions(
