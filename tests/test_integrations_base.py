@@ -271,6 +271,149 @@ class TestRunSession(unittest.TestCase):
             pass
         self.assertEqual(self.marker(), None)
 
+    def registry(self):
+        return Path(self.trace_dir) / ".integration-runs.agent"
+
+    def test_dead_process_marker_is_not_reused_without_starting_another_run(self):
+        child, child_sid = self.run_in_child("import os\nos._exit(0)\n")
+        child.wait(timeout=60)
+        self.assertEqual(self.marker(), child_sid)
+        sid = _base._get_or_create_session(self.store, "agent")
+        self.assertNotEqual(sid, child_sid)
+        self.assertEqual(self.marker(), sid)
+        self.assertFalse(self.registry().exists())
+
+    def test_run_whose_pid_was_reused_is_dropped(self):
+        child, child_sid = self.run_in_child("sys.stdin.readline()\n")
+        sid, pid, recorded = _base._read_runs(self.registry())[0]
+        self.assertEqual((sid, pid), (child_sid, child.pid))
+        if not recorded:
+            self.skipTest("no process start identity on this platform")
+        self.assertEqual(_base._get_or_create_session(self.store, "agent"), child_sid)
+
+        # The process now holding the PID started at another time.
+        real = _base._process_identity
+
+        def identity(p):
+            return recorded + "0" if p == child.pid else real(p)
+
+        with patch.object(_base, "_process_identity", identity):
+            sid = _base._get_or_create_session(self.store, "agent")
+        self.assertNotEqual(sid, child_sid)
+        self.assertEqual(self.marker(), sid)
+        self.assertFalse(self.registry().exists())
+
+    def test_run_whose_process_dies_right_after_a_lookup_is_not_reused(self):
+        child, child_sid = self.run_in_child("sys.stdin.readline()\n")
+        self.assertEqual(_base._get_or_create_session(self.store, "agent"), child_sid)
+        child.kill()
+        child.wait(timeout=60)
+        self.assertNotEqual(_base._get_or_create_session(self.store, "agent"), child_sid)
+
+    def start_run_stopping_in_child(self, stop):
+        """Start a run in a child process that stops at ``stop(path, text)``.
+
+        ``stop`` replaces ``_base._replace_file`` for the marker or for the
+        registry; it prints the run's session ID first. Returns the child and
+        that ID.
+        """
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+        child = subprocess.Popen(
+            [sys.executable, "-c",
+             "import os, sys\n"
+             "from agent_trace.integrations import _base\n"
+             "from agent_trace.store import TraceStore\n"
+             "replace_file = _base._replace_file\n" + stop +
+             "_base.run_session(TraceStore(sys.argv[1]), 'agent').__enter__()\n",
+             self.trace_dir],
+            env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+        )
+
+        def cleanup():
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=60)
+            for pipe in (child.stdin, child.stdout):
+                pipe.close()
+
+        self.addCleanup(cleanup)
+        sid = child.stdout.readline().strip()
+        self.assertTrue(sid)
+        return child, sid
+
+    def test_process_dying_before_its_run_is_registered_leaves_no_marker(self):
+        child, child_sid = self.start_run_stopping_in_child(
+            "def stop(path, text):\n"
+            "    print(text.splitlines()[-1].split()[0], flush=True)\n"
+            "    os._exit(0)\n"
+            "_base._replace_file = stop\n")
+        child.wait(timeout=60)
+        self.assertTrue(self.store.session_exists(child_sid))
+        self.assertNotEqual(_base._get_or_create_session(self.store, "agent"), child_sid)
+
+    marker_stop = (
+        "def stop(path, text):\n"
+        "    if not path.name.startswith('.active-session'):\n"
+        "        return replace_file(path, text)\n"
+        "    print(text, flush=True)\n"
+        "    {}\n"
+        "_base._replace_file = stop\n"
+    )
+
+    def test_registered_run_without_its_marker_is_found(self):
+        # The state a run leaves when its process registered it but did not
+        # write the marker: the marker still names an older session.
+        standalone = _base._get_or_create_session(self.store, "agent")
+        child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"],
+                                 stdin=subprocess.PIPE)
+        self.addCleanup(lambda: (child.kill(), child.wait(timeout=60), child.stdin.close()))
+        run = _base.SessionMeta(agent_name="agent")
+        self.store.create_session(run)
+        identity = _base._process_identity(child.pid) or ""
+        _base._write_runs(self.registry(), [(run.session_id, child.pid, identity)])
+        self.assertEqual(self.marker(), standalone)
+        self.assertEqual(_base._get_or_create_session(self.store, "agent"), run.session_id)
+        self.assertEqual(self.marker(), run.session_id)
+
+    def test_failure_to_write_the_marker_unregisters_the_run(self):
+        standalone = _base._get_or_create_session(self.store, "agent")
+        real = _base._replace_file
+
+        def fail_marker(path, text):
+            if path.name.startswith(".active-session"):
+                raise OSError("disk full")
+            real(path, text)
+
+        with patch.object(_base, "_replace_file", fail_marker):
+            with self.assertRaises(OSError):
+                with _base.run_session(self.store, "agent"):
+                    pass
+        self.assertFalse(self.registry().exists())
+        self.assertEqual(_base._get_or_create_session(self.store, "agent"), standalone)
+        failed, = [m for m in self.store.list_sessions() if m.session_id != standalone]
+        self.assertIsNotNone(failed.ended_at)
+
+    def test_dead_registered_run_without_its_marker_is_not_used(self):
+        standalone = _base._get_or_create_session(self.store, "agent")
+        child, child_sid = self.start_run_stopping_in_child(
+            self.marker_stop.format("os._exit(0)"))
+        child.wait(timeout=60)
+        sid = _base._get_or_create_session(self.store, "agent")
+        self.assertNotEqual(sid, child_sid)
+        self.assertEqual(sid, standalone)
+        self.assertFalse(self.registry().exists())
+
+    def test_symlinked_registry_is_refused(self):
+        outside = Path(self.trace_dir) / "outside"
+        outside.write_text("", encoding="utf-8")
+        self.registry().symlink_to(outside)
+        with self.assertRaises(ValueError):
+            with _base.run_session(self.store, "agent"):
+                pass
+        self.assertEqual(outside.read_text(encoding="utf-8"), "")
+        self.assertEqual(self.marker(), None)
+
     def test_failure_to_record_the_end_never_reaches_the_caller(self):
         with patch.object(TraceStore, "mutate_meta", side_effect=OSError("disk full")):
             with _base.run_session(self.store, "agent") as sid:

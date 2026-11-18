@@ -15,6 +15,7 @@ import json
 import os
 import sys
 import tempfile
+import types
 import unittest
 from argparse import Namespace
 from contextlib import redirect_stdout
@@ -1084,6 +1085,22 @@ class TestOpenAIAgentsSessions(FrameworkCase):
         self.assertEqual((call.event_type, error.event_type), (E.TOOL_CALL, E.ERROR))
         self.assertEqual(error.parent_id, call.event_id)
         self.assertIn("bad input", error.data["error"])
+
+    def test_tool_call_is_recorded_while_the_tool_runs_and_kept_if_abandoned(self):
+        integration = self.instrument("openai_agents", self.modules)
+        processor, = self.modules["agents.tracing"].processors
+        span = types.SimpleNamespace(
+            span_id="span_hung", error=None,
+            span_data=types.SimpleNamespace(type="function", name="search",
+                                            input=None, output=None))
+        processor.on_span_start(span)
+        call, = self.events()
+        self.assertEqual(call.event_type, E.TOOL_CALL)
+        self.assertEqual(call.data["arguments"], {})
+        integration.uninstrument_openai_agents()
+        span.span_data.input = json.dumps({"query": "x"})
+        processor.on_span_end(span)
+        self.assertEqual([e.event_id for e in self.events()], [call.event_id])
 
     def test_uninstrument_restores_and_reinstrumenting_records_once(self):
         originals = self.originals(self.agents.Runner, "run_sync")

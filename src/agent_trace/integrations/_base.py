@@ -11,9 +11,10 @@ import threading
 import time
 from typing import Any, Callable, Iterator
 
-from ..fileutil import file_lock
+from ..fileutil import file_lock, write_atomic
 from ..models import EventType, SessionMeta, TraceEvent
 from ..pairing import link_response
+from ..process_identity import process_identity
 from ..store import TraceStore, default_trace_dir
 
 
@@ -75,14 +76,18 @@ def _get_or_create_session(store: TraceStore, name: str) -> str:
     Inside a :func:`run_session` for this agent, that run's session is
     returned. Otherwise the session named by the agent's marker file is
     returned, so threads that do not inherit the run's context still find
-    it. The check and the create run under a per-name file lock, so
-    concurrent first calls from threads or processes share one session.
+    it. A marker naming a run that is over (its process exited without
+    ending it) moves to the newest run still in progress, or, without one,
+    is replaced by a new session. The check and the create run under a
+    per-name file lock, so concurrent first calls from threads or processes
+    share one session.
     """
     run = _RUN.get()
     if run is not None and run[0] == _run_key(store, name):
         return run[1]
     with _session_marker(store, name) as active_path:
-        sid = _read_marker(active_path)
+        registered, live = _prune_runs(store, _runs_path(active_path))
+        sid = _point_marker(active_path, registered, live)
         if sid and store.session_exists(sid):
             return sid
         return _new_session(store, name, active_path)
@@ -103,18 +108,72 @@ def _runs_path(active_path: Any) -> Any:
     return active_path.with_name(".integration-runs" + active_path.name[len(".active-session"):])
 
 
-def _read_runs(path: Any) -> list[tuple[str, int]]:
-    """``(session ID, PID)`` of each registered run, oldest first."""
+# A registered run is ``(session ID, PID, process start identity)``; the
+# identity is "" when it is unknown.
+_Run = tuple[str, int, str]
+
+
+def _read_runs(path: Any) -> list[_Run]:
+    """Each registered run, oldest first."""
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return []
     runs = []
     for line in text.splitlines():
-        parts = line.split()
-        if len(parts) == 2 and parts[1].isdigit():
-            runs.append((parts[0], int(parts[1])))
+        parts = line.split(" ", 2)
+        if len(parts) >= 2 and parts[0] and parts[1].isdigit():
+            runs.append((parts[0], int(parts[1]), parts[2].strip() if len(parts) == 3 else ""))
     return runs
+
+
+def _replace_file(path: Any, text: str) -> None:
+    """Replace a file of the trace directory atomically.
+
+    A symlinked file is refused. The trace directory itself may be a
+    symlink, as it may for the store.
+    """
+    write_atomic(path.parent.resolve() / path.name, text)
+
+
+def _write_runs(path: Any, runs: list[_Run]) -> None:
+    """Replace the registry atomically, or remove it when no run is left."""
+    if not runs:
+        path.unlink(missing_ok=True)
+        return
+    _replace_file(path, "".join(f"{sid} {pid} {identity}".rstrip() + "\n"
+                                for sid, pid, identity in runs))
+
+
+def _windows_process(pid: int) -> tuple[bool, str | None]:
+    """Whether a Windows process has this PID, and its creation time identity."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [
+            ctypes.POINTER(wintypes.FILETIME)] * 4
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.get_last_error() == 5, None  # ERROR_ACCESS_DENIED: it exists
+        try:
+            code = wintypes.DWORD()
+            if kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) and code.value != 259:
+                return False, None  # not STILL_ACTIVE
+            times = [wintypes.FILETIME() for _ in range(4)]
+            if not kernel32.GetProcessTimes(handle, *(ctypes.byref(t) for t in times)):
+                return True, None
+            created = times[0]
+            return True, f"win:{(created.dwHighDateTime << 32) | created.dwLowDateTime}"
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return True, None
 
 
 def _pid_alive(pid: int) -> bool:
@@ -122,27 +181,7 @@ def _pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
     if os.name == "nt":
-        try:
-            import ctypes
-            from ctypes import wintypes
-
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            kernel32.OpenProcess.restype = wintypes.HANDLE
-            kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-            kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
-            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-            handle = kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
-            if not handle:
-                return ctypes.get_last_error() == 5  # ERROR_ACCESS_DENIED: it exists
-            try:
-                code = wintypes.DWORD()
-                if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
-                    return True
-                return code.value == 259  # STILL_ACTIVE
-            finally:
-                kernel32.CloseHandle(handle)
-        except Exception:
-            return True
+        return _windows_process(pid)[0]
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -152,31 +191,108 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def _run_is_live(store: TraceStore, sid: str, pid: int) -> bool:
-    """Whether a registered run is still in progress."""
+def _process_identity(pid: int) -> str | None:
+    """The start time identity of a process, or None when it is unknown."""
+    if os.name == "nt":
+        return _windows_process(pid)[1]
+    try:
+        return process_identity(pid)
+    except Exception:
+        return None
+
+
+_OWN_IDENTITY: dict[int, str] = {}
+
+
+def _own_identity() -> str:
+    pid = os.getpid()
+    if pid not in _OWN_IDENTITY:
+        _OWN_IDENTITY[pid] = _process_identity(pid) or ""
+    return _OWN_IDENTITY[pid]
+
+
+def _run_is_live(store: TraceStore, sid: str, pid: int, identity: str = "") -> bool:
+    """Whether a registered run is still in progress.
+
+    A run of another process is over when no process has its PID, when the
+    process with that PID started at another time than the one that
+    registered it (the PID was reused), or when its session has ended.
+    """
     if pid == os.getpid():
         with _RUN_COUNTS_LOCK:
             return sid in _RUN_COUNTS
     if not _pid_alive(pid):
         return False
+    if identity:
+        current = _process_identity(pid)
+        if current and current.split(":", 1)[0] == identity.split(":", 1)[0] \
+                and current != identity:
+            return False
     try:
         return store.load_meta(sid).ended_at is None
     except Exception:
         return False
 
 
+def _prune_runs(store: TraceStore, path: Any, drop: str = "") -> tuple[list[_Run], list[_Run]]:
+    """Remove ended runs, and the run ``drop``, from the registry.
+
+    Returns the runs registered before and the runs left.
+    """
+    registered = _read_runs(path)
+    live = [run for run in registered if run[0] != drop and _run_is_live(store, *run)]
+    if live != registered:
+        _write_runs(path, live)
+    return registered, live
+
+
 def _start_run(store: TraceStore, name: str) -> str:
-    """Create the run's session, register it and point the agent's marker at it."""
+    """Create the run's session, register it and point the agent's marker at it.
+
+    The marker names the run only once the registry holds it, so a process
+    that dies in between never leaves a marker that looks like a session
+    outside any run.
+    """
     with _session_marker(store, name) as active_path:
         path = _runs_path(active_path)
-        runs = [run for run in _read_runs(path) if _run_is_live(store, *run)]
-        sid = _new_session(store, name, active_path)
+        _, runs = _prune_runs(store, path)
+        meta = SessionMeta(agent_name=name)
+        store.create_session(meta)
+        sid = meta.session_id
         with _RUN_COUNTS_LOCK:
             _RUN_COUNTS[sid] = dict.fromkeys(_COUNTED.values(), 0)
-        runs.append((sid, os.getpid()))
-        path.write_text("".join(f"{s} {pid}\n" for s, pid in runs),
-                        encoding="utf-8", newline="\n")
+        try:
+            _write_runs(path, runs + [(sid, os.getpid(), _own_identity())])
+            _replace_file(active_path, sid)
+        except BaseException:
+            with _RUN_COUNTS_LOCK:
+                _RUN_COUNTS.pop(sid, None)
+            with contextlib.suppress(Exception):
+                _prune_runs(store, path)
+            with contextlib.suppress(Exception):
+                store.mutate_meta(sid, lambda meta: setattr(meta, "ended_at", time.time()))
+            raise
     return sid
+
+
+def _point_marker(active_path: Any, registered: list[_Run], live: list[_Run]) -> str:
+    """Point the marker at the newest run in progress.
+
+    Without a run in progress, a marker naming a run that is over is
+    removed, and a marker naming a session outside any run is kept. Returns
+    the session the marker names afterwards, or "".
+    """
+    marker = _read_marker(active_path)
+    if live:
+        # It can differ when the process of that run failed to write the
+        # marker after registering the run.
+        if marker != live[-1][0]:
+            _replace_file(active_path, live[-1][0])
+        return live[-1][0]
+    if marker in {run[0] for run in registered}:
+        active_path.unlink(missing_ok=True)
+        return ""
+    return marker
 
 
 def _unregister_run(store: TraceStore, name: str, sid: str) -> None:
@@ -186,18 +302,8 @@ def _unregister_run(store: TraceStore, name: str, sid: str) -> None:
     only to a run that is still in progress, and removed when none is.
     """
     with _session_marker(store, name) as active_path:
-        path = _runs_path(active_path)
-        registered = _read_runs(path)
-        runs = [run for run in registered if run[0] != sid and _run_is_live(store, *run)]
-        if runs:
-            path.write_text("".join(f"{s} {pid}\n" for s, pid in runs),
-                            encoding="utf-8", newline="\n")
-            active_path.write_text(runs[-1][0], encoding="utf-8", newline="\n")
-            return
-        path.unlink(missing_ok=True)
-        ended = {s for s, _ in registered} | {sid}
-        if _read_marker(active_path) in ended:
-            active_path.unlink(missing_ok=True)
+        registered, live = _prune_runs(store, _runs_path(active_path), drop=sid)
+        _point_marker(active_path, registered + [(sid, os.getpid(), "")], live)
 
 
 def _end_run(store: TraceStore, name: str, sid: str, started: float) -> None:
