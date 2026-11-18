@@ -88,6 +88,18 @@ export class SessionItem extends vscode.TreeItem {
   }
 }
 
+/**
+ * Session id from a command argument: a plain id from command palette or
+ * code callers, or the SessionItem an inline tree action passes.
+ */
+export function sessionIdFromArg(arg: unknown): string | undefined {
+  if (typeof arg === "string") {
+    return arg || undefined;
+  }
+  const id = (arg as SessionItem | undefined)?.entry?.info?.session_id;
+  return typeof id === "string" && id ? id : undefined;
+}
+
 function _statusIcon(status: SessionStatus): string {
   switch (status) {
     case "completed":   return "✓";

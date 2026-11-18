@@ -122,7 +122,9 @@ export class WatchdogStatusBar extends vscode.Disposable {
 
     const cfg = this._readWatchdogConfig(state);
     if (!cfg) {
-      // No watchdog config — stay hidden
+      // A direct switch from a watchdog session fires no onSessionEnd, so
+      // hide the previous session's text here.
+      this.item.hide();
       return;
     }
     this.watchdogCfg = cfg;
@@ -165,34 +167,38 @@ export class WatchdogStatusBar extends vscode.Disposable {
     }
   }
 
+  /** Switches to the dead display once the post-mortem file exists. */
+  private _checkPostMortem(): boolean {
+    if (this.dead) { return true; }
+    if (!this.traceDir || !this.sessionId) { return false; }
+    const pmPath = path.join(this.traceDir, this.sessionId, "watchdog-postmortem.json");
+    if (!fs.existsSync(pmPath)) { return false; }
+    try {
+      const pm = JSON.parse(fs.readFileSync(pmPath, "utf8"));
+      this.dead = true;
+      this.deathReason = pm.reason ?? "terminated";
+      this._renderDead();
+    } catch { /* ignore */ }
+    return this.dead;
+  }
+
   private _watchPostMortem(): void {
     if (!this.traceDir || !this.sessionId) { return; }
-    const pmPath = path.join(this.traceDir, this.sessionId, "watchdog-postmortem.json");
     const sessionDir = path.join(this.traceDir, this.sessionId);
 
-    const checkPm = () => {
-      if (!fs.existsSync(pmPath)) { return; }
-      try {
-        const pm = JSON.parse(fs.readFileSync(pmPath, "utf8"));
-        this.dead = true;
-        this.deathReason = pm.reason ?? "terminated";
-        this._renderDead();
-      } catch { /* ignore */ }
-    };
-
     // Check immediately (may already exist)
-    checkPm();
+    this._checkPostMortem();
 
     // Watch the session directory for new files
     try {
       this.pmWatcher = fs.watch(sessionDir, (_evt, filename) => {
-        if (filename === "watchdog-postmortem.json") { checkPm(); }
+        if (filename === "watchdog-postmortem.json") { this._checkPostMortem(); }
       });
-    } catch { /* ignore — polling covers this */ }
+    } catch { /* ignore: _tick polls for the file */ }
   }
 
   private _tick(state: SessionState): void {
-    if (this.dead) { return; }
+    if (this._checkPostMortem()) { return; }
     this._render(state.estimatedCostUsd);
   }
 

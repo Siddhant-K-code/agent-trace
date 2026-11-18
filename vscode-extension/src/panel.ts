@@ -117,7 +117,17 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
   }
 
   async showSession(sessionId: string): Promise<void> {
+    if (this.selectedSessionId !== sessionId) {
+      this.view?.webview.postMessage({ type: "reset" });
+    }
     this.selectedSessionId = sessionId;
+    // The live session keeps its pause and resume controls when it is picked
+    // from the session browser; the stored review would drop them.
+    if (this.currentState?.sessionId === sessionId) {
+      this._postLiveReview(this.currentState);
+      await this._refreshHealth(sessionId);
+      return;
+    }
     try {
       const structural = loadStoredReview(
         this.traceDir,
@@ -128,6 +138,10 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
       const health = await this._loadHealth(sessionId);
       this.exactHealth.set(sessionId, health);
       if (this.selectedSessionId !== sessionId) {
+        return;
+      }
+      if (this.currentState?.sessionId === sessionId) {
+        this._postLiveReview(this.currentState);
         return;
       }
       this._postReview(loadStoredReview(this.traceDir, sessionId, health), null);
