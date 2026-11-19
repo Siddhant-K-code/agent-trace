@@ -212,28 +212,17 @@ def cmd_record(args: argparse.Namespace) -> int:
         parent_event_id=_parent_event_id(),
         depth=_parent_depth(store, parent_session_id),
     )
-    store.create_session(meta)
 
-    if not args.quiet:
-        sys.stderr.write(
-            f"agent-strace: recording session {meta.session_id}\n"
-            f"agent-strace: command: {' '.join(server_cmd)}\n"
-        )
+    def start() -> None:
+        store.create_session(meta)
+        if not args.quiet:
+            sys.stderr.write(
+                f"agent-strace: recording session {meta.session_id}\n"
+                f"agent-strace: command: {' '.join(server_cmd)}\n"
+            )
 
-    on_event = _print_live_event if args.verbose else None
-
-    proxy = MCPProxy(
-        server_command=server_cmd,
-        store=store,
-        session_meta=meta,
-        on_event=on_event,
-        redact=args.redact,
-    )
-
-    returncode = proxy.run()
-
-    if not args.quiet:
-        sys.stderr.write(
+    def summary(meta: SessionMeta) -> str:
+        return (
             f"\nagent-strace: session {meta.session_id} complete\n"
             f"agent-strace: {meta.tool_calls} tool calls, "
             f"{meta.llm_requests} llm requests, "
@@ -241,7 +230,20 @@ def cmd_record(args: argparse.Namespace) -> int:
             f"agent-strace: replay with: agent-trace replay {meta.session_id}\n"
         )
 
-    return returncode
+    # The proxy writes these to the agent's stderr, never after session_end.
+    proxy = MCPProxy(
+        server_command=server_cmd,
+        store=store,
+        session_meta=meta,
+        redact=args.redact,
+        summary=None if args.quiet else summary,
+    )
+    if args.verbose:
+        proxy.on_event = lambda event: proxy.notice(f"\r{format_event(event)}\n")
+
+    # The session is created once the stop signal handlers are in, so a stop
+    # signal never leaves it without an end.
+    return proxy.run(prepare=start)
 
 
 def cmd_record_http(args: argparse.Namespace) -> int:

@@ -1,5 +1,6 @@
 """Tests for the stdio MCP proxy: pairing, and relaying what it cannot trace."""
 
+import contextlib
 import io
 import json
 import os
@@ -605,6 +606,237 @@ IDLE_SERVER = (
     "time.sleep(60)\n"
 )
 
+# Started by HOLDING_SERVER with its stdout. Writes its pid, then a reply and
+# a heartbeat every 0.05s for a minute.
+HOLDING_CHILD = _REPLY + (
+    "pid_file, beat_file = sys.argv[1:3]\n"
+    "with open(pid_file + '.tmp', 'w') as f:\n"
+    "    f.write(str(os.getpid()))\n"
+    "os.replace(pid_file + '.tmp', pid_file)\n"
+    "for i in range(1200):\n"
+    "    with open(beat_file, 'a') as f:\n"
+    "        f.write('x')\n"
+    "    try:\n"
+    "        sys.stdout.write(reply(1000 + i))\n"
+    "        sys.stdout.flush()\n"
+    "    except OSError:\n"
+    "        pass\n"
+    "    time.sleep(0.05)\n"
+)
+
+# Starts HOLDING_CHILD with its own stdout, writes one reply once the child
+# is running, then exits 0 while the child still holds stdout open.
+HOLDING_SERVER = _REPLY + (
+    "import subprocess\n"
+    "pid_file = sys.argv[2]\n"
+    "subprocess.Popen([sys.executable, *sys.argv[1:]], stdin=subprocess.DEVNULL,\n"
+    "                 stdout=sys.stdout, stderr=subprocess.DEVNULL)\n"
+    "while not os.path.exists(pid_file):\n"
+    "    time.sleep(0.01)\n"
+    "sys.stdout.write(reply(0))\n"
+    "sys.stdout.flush()\n"
+)
+
+# argv: pid file, beat file, how to start the child, whether to stay.
+# Starts a child with no stdio that writes its pid, then a heartbeat every
+# 0.05s for a minute. The child is started in the server's process group
+# ("plain"), detached from its console and process group on Windows
+# ("detach"), or in a new session on POSIX ("setsid"). Once the child is
+# running the server exits 0, or with stay == "1" idles for a minute.
+DETACHING_SERVER = (
+    "import os, subprocess, sys, time\n"
+    "pid_file, beat_file, how, stay = sys.argv[1:5]\n"
+    "child = ('import os, sys, time\\n'\n"
+    "         'pid_file, beat_file = sys.argv[1:3]\\n'\n"
+    "         'with open(pid_file + \".tmp\", \"w\") as f: f.write(str(os.getpid()))\\n'\n"
+    "         'os.replace(pid_file + \".tmp\", pid_file)\\n'\n"
+    "         'for _ in range(1200):\\n'\n"
+    "         '    with open(beat_file, \"a\") as f: f.write(\"x\")\\n'\n"
+    "         '    time.sleep(0.05)\\n')\n"
+    "kwargs = {}\n"
+    "if how == 'setsid':\n"
+    "    kwargs['start_new_session'] = True\n"
+    "elif how == 'detach' and os.name == 'nt':\n"
+    "    # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP\n"
+    "    kwargs['creationflags'] = 0x00000008 | 0x00000200\n"
+    "subprocess.Popen([sys.executable, '-c', child, pid_file, beat_file],\n"
+    "                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,\n"
+    "                 stderr=subprocess.DEVNULL, **kwargs)\n"
+    "while not os.path.exists(pid_file):\n"
+    "    time.sleep(0.01)\n"
+    "if stay == '1':\n"
+    "    time.sleep(60)\n"
+)
+
+# Writes the file named by its argument, then exits.
+MARKING_SERVER = "import sys\nopen(sys.argv[1], 'w').close()\n"
+
+# Starts a child that writes its pid to the file named by its argument and
+# sleeps, then idles itself.
+TREE_SERVER = (
+    "import subprocess, sys, time\n"
+    "child = ('import os, sys, time\\n'\n"
+    "         'with open(sys.argv[1] + \".tmp\", \"w\") as f: f.write(str(os.getpid()))\\n'\n"
+    "         'os.replace(sys.argv[1] + \".tmp\", sys.argv[1])\\n'\n"
+    "         'time.sleep(60)\\n')\n"
+    "subprocess.Popen([sys.executable, '-c', child, sys.argv[1]],\n"
+    "                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,\n"
+    "                 stderr=subprocess.DEVNULL)\n"
+    "time.sleep(60)\n"
+)
+
+# Runs agent-strace with a stop signal sent to itself as soon as the server
+# process exists, before record has done anything else with it.
+# argv: signal name, marker argument of the server command, agent-strace argv.
+_SIGNAL_AT_SPAWN = (
+    "import os, signal, subprocess, sys\n"
+    "signal.signal(signal.SIGINT, signal.default_int_handler)\n"
+    "sig, marker = getattr(signal, sys.argv[1]), sys.argv[2]\n"
+    "class Popen(subprocess.Popen):\n"
+    "    def __init__(self, args, *a, **k):\n"
+    "        super().__init__(args, *a, **k)\n"
+    "        if isinstance(args, list) and marker in args:\n"
+    "            with open(marker + '.popen', 'w') as f:\n"
+    "                f.write(str(self.pid))\n"
+    "            os.kill(os.getpid(), sig)\n"
+    "subprocess.Popen = Popen\n"
+    "from agent_trace.entry import main\n"
+    "sys.argv = ['agent-strace'] + sys.argv[3:]\n"
+    "sys.exit(main())\n"
+)
+
+
+def _pid_gone(pid, timeout=5.0):
+    """True once no process has this pid (POSIX), polling up to timeout."""
+    import time
+
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.05)
+
+
+def _beats_stopped(beat_file, timeout=5.0):
+    """True once beat_file stops growing for 0.5s, polling up to timeout."""
+    import time
+
+    deadline = time.monotonic() + timeout
+    size = os.path.getsize(beat_file)
+    while time.monotonic() < deadline:
+        time.sleep(0.5)
+        now = os.path.getsize(beat_file)
+        if now == size:
+            return True
+        size = now
+    return False
+
+
+def _kill_pid(pid):
+    import signal
+
+    try:
+        os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+    except OSError:
+        pass
+
+
+@contextlib.contextmanager
+def _without_waitid():
+    """Run as on a Python without os.waitid, like macOS before 3.13."""
+    saved = getattr(os, "waitid", None)
+    if saved is not None:
+        del os.waitid
+    try:
+        with patch.object(proxy_module, "_WAITID", None, create=True):
+            yield
+    finally:
+        if saved is not None:
+            os.waitid = saved
+
+
+# Runs agent-strace with a stop signal sent to itself as soon as the session
+# is created, before the server is started.
+# argv: signal name, agent-strace argv.
+_SIGNAL_AT_CREATE = (
+    "import os, signal, sys\n"
+    "signal.signal(signal.SIGINT, signal.default_int_handler)\n"
+    "signal.signal(signal.SIGTERM, signal.SIG_DFL)\n"
+    "sig = getattr(signal, sys.argv[1])\n"
+    "from agent_trace.store import TraceStore\n"
+    "create = TraceStore.create_session\n"
+    "def create_then_signal(self, *args, **kwargs):\n"
+    "    result = create(self, *args, **kwargs)\n"
+    "    os.kill(os.getpid(), sig)\n"
+    "    return result\n"
+    "TraceStore.create_session = create_then_signal\n"
+    "from agent_trace.entry import main\n"
+    "sys.argv = ['agent-strace'] + sys.argv[2:]\n"
+    "sys.exit(main())\n"
+)
+
+
+class _Sink:
+    """A stand-in for the agent's stdout or stderr."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.data = b""
+
+    def write(self, data):
+        with self.lock:
+            self.data += bytes(data)
+
+    def flush(self):
+        pass
+
+
+class _PausedSink(_Sink):
+    """An agent stdout whose first write waits until released."""
+
+    def __init__(self, log):
+        super().__init__()
+        self.log = log
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def write(self, data):
+        if not self.entered.is_set():
+            self.entered.set()
+            self.release.wait(10)
+        super().write(data)
+        self.log.append(("write", bytes(data)))
+
+
+class _GateSpy:
+    """Wraps a lock and notes when the main thread asks for it."""
+
+    def __init__(self, lock, asked):
+        self.lock = lock
+        self.asked = asked
+
+    def acquire(self, *args, **kwargs):
+        if threading.current_thread() is threading.main_thread():
+            self.asked.set()
+        return self.lock.acquire(*args, **kwargs)
+
+    def release(self):
+        self.lock.release()
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc):
+        self.release()
+
+
 # Deletes the session directory named by its argument, then exits.
 PARENT_DELETING_SERVER = "import shutil, sys\nshutil.rmtree(sys.argv[1])\n"
 
@@ -842,6 +1074,715 @@ class StdioProxyLifecycleTest(unittest.TestCase):
                     [EventType.SESSION_START, EventType.SESSION_END],
                 )
                 self.assertEqual(events[-1].data["exit_code"], -signal.SIGTERM)
+
+
+    def _wait_for_file(self, path):
+        import time
+
+        deadline = time.monotonic() + self.TIMEOUT
+        while not os.path.exists(path):
+            if time.monotonic() > deadline:
+                self.fail(f"{os.path.basename(path)} never appeared")
+            time.sleep(0.02)
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+
+    def _run_in_process(self, server_text, *server_args, agent_out=None,
+                        agent_err=None, on_event=None, before_run=None,
+                        agent_in_fd=None):
+        """Run the proxy in this process, with short timeouts.
+
+        The agent's stdin is at its end, or reads agent_in_fd.
+        """
+        server = os.path.join(self.root, "server.py")
+        with open(server, "w", encoding="utf-8") as f:
+            f.write(server_text)
+        store = TraceStore(self.trace_dir)
+        meta = SessionMeta()
+        store.create_session(meta)
+        if agent_in_fd is None:
+            agent_in_fd, write_fd = os.pipe()
+            os.close(write_fd)
+        agent_in = open(agent_in_fd, "rb")
+        self.addCleanup(agent_in.close)
+        self.agent_out = agent_out if agent_out is not None else _Sink()
+        if agent_err is None:
+            agent_err = _Sink()
+
+        proxy = MCPProxy([sys.executable, server, *server_args], store, meta,
+                         on_event=on_event)
+        if before_run is not None:
+            before_run(proxy)
+        with patch.object(proxy_module, "DRAIN_TIMEOUT", 0.5), \
+                patch.object(proxy_module, "STOP_TIMEOUT", 1.0), \
+                patch.object(proxy_module, "_agent_streams",
+                             return_value=(agent_in, self.agent_out, agent_err)):
+            code = proxy.run()
+        return code, getattr(agent_err, "data", b""), store, meta
+
+    def _child_pid(self, pid_file):
+        """The pid in pid_file, killed when the test ends."""
+        pid = int(self._wait_for_file(pid_file))
+        self.addCleanup(_kill_pid, pid)
+        return pid
+
+    def _assert_final(self, store, meta):
+        """session_end is the last event and the saved counters match the trace."""
+        events = store.load_events(meta.session_id)
+        saved = store.load_meta(meta.session_id)
+        self.assertEqual(events[-1].event_type, EventType.SESSION_END)
+        self.assertEqual(
+            [e for e in events if e.event_type == EventType.SESSION_END], [events[-1]]
+        )
+        for counter, event_type in (("tool_calls", EventType.TOOL_CALL),
+                                    ("errors", EventType.ERROR)):
+            count = sum(e.event_type == event_type for e in events)
+            self.assertEqual(getattr(saved, counter), count, counter)
+            self.assertEqual(getattr(meta, counter), count, counter)
+        return events
+
+    def test_output_held_past_the_drain_timeout_is_stopped_and_recorded(self):
+        child = os.path.join(self.root, "child.py")
+        with open(child, "w", encoding="utf-8") as f:
+            f.write(HOLDING_CHILD)
+        pid_file = os.path.join(self.root, "child.pid")
+        beat_file = os.path.join(self.root, "beat")
+        try:
+            code, err, store, meta = self._run_in_process(
+                HOLDING_SERVER, child, pid_file, beat_file
+            )
+        finally:
+            if os.path.exists(pid_file):
+                self._child_pid(pid_file)
+
+        self.assertEqual(code, 0)
+        self.assertIn(b"agent-strace: server output was cut short", err)
+        events = self._assert_final(store, meta)
+        self.assertTrue(events[-1].data.get("output_truncated"))
+        self.assertEqual(events[-2].event_type, EventType.ERROR)
+        self.assertIn("cut short", events[-2].data["message"])
+        self.assertIn(_line(_result(0)), self.agent_out.data)
+        # The child holding the output was stopped with the server.
+        self.assertTrue(_beats_stopped(beat_file, timeout=1.0), "the child kept running")
+        self.assertEqual(len(store.load_events(meta.session_id)), len(events))
+
+    def test_no_write_to_the_agent_happens_after_session_end(self):
+        # The relay passes the check that the session is open, then its write
+        # to the agent stalls. The session end must wait for that write.
+        log = []
+        agent_out = _PausedSink(log)
+        asked = threading.Event()
+
+        def on_event(event):
+            log.append(("event", event.event_type))
+            if event.event_type == EventType.SESSION_END:
+                asked.set()
+
+        def spy(proxy):
+            if hasattr(proxy, "_out_gate"):
+                proxy._out_gate = _GateSpy(proxy._out_gate, asked)
+
+        def release_once_sealing():
+            agent_out.entered.wait(10)
+            asked.wait(5)
+            agent_out.release.set()
+
+        releaser = threading.Thread(target=release_once_sealing, daemon=True)
+        releaser.start()
+        try:
+            code, _, store, meta = self._run_in_process(
+                "import sys\nsys.stdout.write('{\"jsonrpc\": \"2.0\", \"id\": 0, "
+                "\"result\": {}}\\n')\n",
+                agent_out=agent_out, on_event=on_event, before_run=spy,
+            )
+        finally:
+            agent_out.release.set()
+            releaser.join(10)
+
+        self.assertEqual(code, 0)
+        self.assertTrue(agent_out.entered.is_set())
+        self.assertIn(b'"id": 0', agent_out.data)
+        events = self._assert_final(store, meta)
+        self.assertTrue(events[-1].data.get("output_truncated"))
+        end = log.index(("event", EventType.SESSION_END))
+        self.assertEqual(
+            [entry for entry in log[end:] if entry[0] == "write"], [],
+            "the agent was written to after session_end",
+        )
+
+    def test_a_write_the_agent_does_not_take_ends_before_session_end(self):
+        # The agent never reads its stdout, so the relay blocks writing a
+        # message bigger than the pipe holds. The write must have ended
+        # before the session end: reading the pipe afterwards gets no more.
+        size = 4 * 1024 * 1024
+        read_fd, write_fd = os.pipe()
+        self.addCleanup(os.close, read_fd)
+        self.addCleanup(os.close, write_fd)
+        agent_out = proxy_module._FdWriter(write_fd)
+        server = (
+            "import json, sys\n"
+            "sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'id': 0,\n"
+            f"    'result': 'x' * {size}}}) + '\\n')\n"
+            "sys.stdout.flush()\n"
+        )
+        result = []
+        runner = threading.Thread(
+            target=lambda: result.append(self._run_in_process(server, agent_out=agent_out)),
+            daemon=True,
+        )
+        runner.start()
+        runner.join(self.TIMEOUT)
+        received = []
+
+        def drain():
+            while True:
+                chunk = os.read(read_fd, 65536)
+                if not chunk:
+                    return
+                received.append(chunk)
+
+        threading.Thread(target=drain, daemon=True).start()
+        if runner.is_alive():
+            runner.join(self.TIMEOUT)
+            self.fail("the session did not end while the agent was not reading")
+        import time
+
+        time.sleep(1.0)
+
+        code, _, store, meta = result[0]
+        self.assertEqual(code, 0)
+        events = self._assert_final(store, meta)
+        self.assertTrue(events[-1].data.get("output_truncated"))
+        self.assertIn("cancelled", events[-2].data["message"])
+        self.assertLess(sum(map(len, received)), size, "the write went on after session_end")
+
+    def test_a_notice_still_reaches_stderr_when_stdout_is_stuck(self):
+        # Cancelling the stuck stdout write must leave stderr usable, so the
+        # summary written before session_end still reaches the agent.
+        read_fd, write_fd = os.pipe()
+        self.addCleanup(os.close, read_fd)
+        self.addCleanup(os.close, write_fd)
+        agent_out = proxy_module._FdWriter(write_fd)
+        agent_err = _Sink()
+        size = 4 * 1024 * 1024
+        server = (
+            "import json, sys\n"
+            "sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'id': 0,\n"
+            f"    'result': 'x' * {size}}}) + '\\n')\n"
+        )
+
+        def with_summary(proxy):
+            proxy.summary = lambda meta: "summary-line\n"
+
+        result = []
+        runner = threading.Thread(
+            target=lambda: result.append(self._run_in_process(
+                server, agent_out=agent_out, agent_err=agent_err, before_run=with_summary)),
+            daemon=True,
+        )
+        runner.start()
+        runner.join(self.TIMEOUT)
+        self.assertFalse(runner.is_alive(), "the session did not end")
+        code, err, store, meta = result[0]
+        self.assertEqual(code, 0)
+        self.assertIn(b"summary-line", err)
+        self._assert_final(store, meta)
+
+    def test_verbose_lines_are_not_written_after_session_end(self):
+        log = []
+
+        class LoggingSink(_Sink):
+            def write(self, data):
+                log.append(("write", bytes(data)))
+                super().write(data)
+
+        def verbose(proxy):
+            def on_event(event):
+                log.append(("event", event.event_type))
+                proxy.notice(f"{event.event_type.value}\n")
+            proxy.on_event = on_event
+
+        code, err, store, meta = self._run_in_process(
+            "import sys\nsys.stdout.write('{\"jsonrpc\": \"2.0\", \"id\": 0, "
+            "\"error\": {\"code\": 1, \"message\": \"no\"}}\\n')\n",
+            agent_err=LoggingSink(), before_run=verbose,
+        )
+        self.assertEqual(code, 0)
+        self._assert_final(store, meta)
+        end = log.index(("event", EventType.SESSION_END))
+        self.assertEqual([entry for entry in log[end:] if entry[0] == "write"], [])
+        self.assertTrue(err, "no verbose line reached the agent's stderr")
+        self.assertNotIn(b"session_end", err)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX processes")
+    def test_a_process_record_did_not_start_from_the_server_survives(self):
+        # A process another thread starts during the run is no part of the
+        # server's tree and must outlive the cleanup.
+        import time
+
+        bystander = []
+
+        def start_bystander(proxy):
+            def start():
+                time.sleep(0.2)
+                bystander.append(subprocess.Popen(
+                    [sys.executable, "-c", "import time; time.sleep(30)"]))
+            threading.Thread(target=start, daemon=True).start()
+
+        try:
+            code, err, store, meta = self._run_in_process(
+                "import time\ntime.sleep(2.5)\n", before_run=start_bystander)
+            self.assertEqual(code, 0, err)
+            self.assertEqual(len(bystander), 1)
+            self.assertIsNone(bystander[0].poll(), "record stopped a process it did not own")
+        finally:
+            for proc in bystander:
+                proc.kill()
+                proc.wait(10)
+        self._assert_final(store, meta)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX sessions")
+    def test_a_detached_child_is_stopped_after_the_server_is_gone(self):
+        # The server starts a child in a new session and exits at once. Its
+        # PID no longer has the start time record saw, and the process table
+        # is not polled during the run, so only the token finds the child.
+        files = os.path.join(self.root, "gone-files")
+        os.makedirs(files)
+        pid_file = os.path.join(files, "child.pid")
+        beat_file = os.path.join(files, "beat")
+        try:
+            with patch.object(proxy_module, "TREE_POLL_INTERVAL", 60), \
+                    patch("agent_trace.process_identity.process_identity",
+                          return_value="gone"):
+                code, err, store, meta = self._run_in_process(
+                    DETACHING_SERVER, pid_file, beat_file, "setsid", "0"
+                )
+        finally:
+            if os.path.exists(pid_file):
+                self._child_pid(pid_file)
+        self.assertEqual(code, 0, err)
+        self.assertTrue(_beats_stopped(beat_file), "the server's child outlived record")
+        self._assert_final(store, meta)
+
+    def test_a_closing_summary_the_agent_does_not_take_is_recorded(self):
+        # The agent never reads its stderr, so the closing summary blocks.
+        # Its cancellation must still be recorded before session_end.
+        read_fd, write_fd = os.pipe()
+        self.addCleanup(os.close, read_fd)
+        self.addCleanup(os.close, write_fd)
+        agent_err = proxy_module._FdWriter(write_fd)
+        self.addCleanup(agent_err.restore)
+
+        def with_summary(proxy):
+            proxy.summary = lambda meta: "x" * (4 * 1024 * 1024)
+
+        result = []
+        runner = threading.Thread(
+            target=lambda: result.append(self._run_in_process(
+                "import sys\n", agent_err=agent_err, before_run=with_summary)),
+            daemon=True,
+        )
+        runner.start()
+        runner.join(self.TIMEOUT)
+        self.assertFalse(runner.is_alive(), "the session did not end")
+        code, _, store, meta = result[0]
+        self.assertEqual(code, 0)
+        events = self._assert_final(store, meta)
+        self.assertTrue(events[-1].data.get("output_truncated"))
+        self.assertEqual(events[-2].event_type, EventType.ERROR)
+        self.assertIn("agent's stderr", events[-2].data["message"])
+        self.assertEqual(store.load_meta(meta.session_id).errors, 1)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX processes")
+    def test_a_reused_server_pid_is_not_taken_as_the_server(self):
+        from agent_trace.process_identity import ProcessEntry
+
+        tracker = proxy_module._TreeTracker()
+        tracker._pid = 999990
+        tracker._identity = "started-first"
+        # The server exited, and a new process with its PID has a child.
+        table = {
+            999990: ProcessEntry(1, "started-later"),
+            999991: ProcessEntry(999990, "child-of-new"),
+        }
+        signalled = []
+        with patch("agent_trace.process_identity.list_processes", return_value=table), \
+                patch.object(proxy_module, "_tree_members", return_value=[]) as members, \
+                patch.object(proxy_module.os, "kill",
+                             side_effect=lambda pid, sig: signalled.append(pid)):
+            self.assertEqual(tracker.alive(), {})
+            tracker.signal(15)
+        self.assertEqual(signalled, [])
+        # The token is still looked for, but not the reused PID's group.
+        members.assert_called_with(proxy_module.TREE_ENV, tracker.token, None)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX nonblocking writes")
+    def test_cancel_ends_a_write_even_when_select_says_writable(self):
+        # The pipe is full, yet select() reports it writable, as when room
+        # frees and fills again between select() and write(). The write must
+        # not block, so cancel() ends it.
+        read_fd, write_fd = os.pipe()
+        self.addCleanup(os.close, read_fd)
+        self.addCleanup(os.close, write_fd)
+        writer = proxy_module._FdWriter(write_fd)
+        self.addCleanup(writer.restore)
+        failure = []
+
+        def write():
+            try:
+                writer.write(b"x" * (4 * 1024 * 1024))
+            except proxy_module._WriteCancelled as e:
+                failure.append(e)
+
+        with patch.object(proxy_module.select, "select",
+                          side_effect=lambda r, w, x, t=None: (r, w, x)):
+            thread = threading.Thread(target=write, daemon=True)
+            thread.start()
+            import time
+
+            deadline = time.monotonic() + 5
+            while not writer.busy() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            time.sleep(0.2)
+            writer.cancel()
+            thread.join(5)
+        self.assertFalse(thread.is_alive(), "the write did not end")
+        self.assertEqual(len(failure), 1)
+        self.assertFalse(writer.busy())
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX reads")
+    def test_the_agent_input_is_read_when_it_is_nonblocking(self):
+        # The agent's stdin can share its open file with stdout, which the
+        # proxy makes nonblocking.
+        read_fd, write_fd = os.pipe()
+        self.addCleanup(os.close, read_fd)
+        os.set_blocking(read_fd, False)
+        reader = proxy_module._FdReader(read_fd)
+
+        def feed():
+            import time
+
+            time.sleep(0.2)
+            os.write(write_fd, b"first\nsec")
+            time.sleep(0.2)
+            os.write(write_fd, b"ond\nbody")
+            os.close(write_fd)
+
+        threading.Thread(target=feed, daemon=True).start()
+        self.assertEqual(reader.readline(), b"first\n")
+        self.assertEqual(reader.readline(), b"second\n")
+        self.assertEqual(reader.read(10), b"body")
+        self.assertEqual(reader.readline(), b"")
+
+    def _run_leaving_a_child(self, how, label=None):
+        files = os.path.join(self.root, f"{label or how}-files")
+        os.makedirs(files, exist_ok=True)
+        pid_file = os.path.join(files, "child.pid")
+        beat_file = os.path.join(files, "beat")
+        try:
+            code, err, store, meta = self._run_in_process(
+                DETACHING_SERVER, pid_file, beat_file, how, "0"
+            )
+        finally:
+            if os.path.exists(pid_file):
+                self._child_pid(pid_file)
+
+        self.assertEqual(code, 0, err)
+        self.assertTrue(_beats_stopped(beat_file), "the server's child outlived record")
+        events = self._assert_final(store, meta)
+        self.assertEqual(events[-1].data["exit_code"], 0)
+        self.assertNotIn("output_truncated", events[-1].data)
+
+    def test_a_child_left_running_by_a_server_that_exits_is_stopped(self):
+        for how in ("plain", "detach"):
+            with self.subTest(how):
+                self.trace_dir = os.path.join(self.root, how)
+                self._run_leaving_a_child(how)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX sessions")
+    def test_a_child_that_left_the_process_group_is_stopped(self):
+        self._run_leaving_a_child("setsid")
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows job objects")
+    def test_killing_record_stops_every_process_the_server_started(self):
+        pid_file = os.path.join(self.root, "child.pid")
+        beat_file = os.path.join(self.root, "beat")
+        proc = self._record(DETACHING_SERVER, subprocess.PIPE,
+                            pid_file, beat_file, "detach", "1")
+        try:
+            self._child_pid(pid_file)
+        finally:
+            proc.kill()
+            self._finish(proc, keep_stdin_open=True)
+        self.assertTrue(_beats_stopped(beat_file), "the server's child outlived record")
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows job objects")
+    def test_a_server_that_cannot_be_put_in_a_job_is_not_run(self):
+        import ctypes
+
+        real_windll = ctypes.WinDLL
+
+        def refuse(*args):
+            return 0
+
+        class NoAssign:
+            def __init__(self, lib):
+                self._lib = lib
+
+            def __getattr__(self, name):
+                if name == "AssignProcessToJobObject":
+                    return refuse
+                return getattr(self._lib, name)
+
+        def windll(name, *args, **kwargs):
+            lib = real_windll(name, *args, **kwargs)
+            return NoAssign(lib) if name == "kernel32" else lib
+
+        marker = os.path.join(self.root, "ran")
+        with patch.object(ctypes, "WinDLL", windll):
+            code, _, store, meta = self._run_in_process(MARKING_SERVER, marker)
+
+        self.assertNotEqual(code, 0)
+        self.assertFalse(os.path.exists(marker), "the server ran outside a job")
+        events = self._assert_final(store, meta)
+        self.assertEqual(
+            [e.event_type for e in events],
+            [EventType.SESSION_START, EventType.ERROR, EventType.SESSION_END],
+        )
+        self.assertIn("job object", events[1].data["message"])
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX signals")
+    def test_a_stop_signal_stops_every_process_the_server_started(self):
+        import signal
+
+        pid_file = os.path.join(self.root, "child.pid")
+        proc = self._record(TREE_SERVER, subprocess.PIPE, pid_file)
+        child_pid = []
+
+        def send_signal():
+            child_pid.append(int(self._wait_for_file(pid_file)))
+            proc.send_signal(signal.SIGTERM)
+
+        try:
+            code, _, err = self._finish(proc, keep_stdin_open=True, before_wait=send_signal)
+            self.assertEqual(code, 128 + signal.SIGTERM, err)
+            self.assertTrue(_pid_gone(child_pid[0]), "the server's child outlived record")
+        finally:
+            for pid in child_pid:
+                _kill_pid(pid)
+        meta, events = self._session()
+        self.assertIsNotNone(meta.ended_at)
+        self.assertEqual(events[-1].event_type, EventType.SESSION_END)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX signals")
+    def test_a_stop_signal_right_after_the_server_starts_stops_it(self):
+        import signal
+
+        script = os.path.join(self.root, "server.py")
+        with open(script, "w", encoding="utf-8") as f:
+            f.write(IDLE_SERVER)
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            with self.subTest(sig.name):
+                self.trace_dir = os.path.join(self.root, sig.name)
+                marker = os.path.join(self.root, f"{sig.name}.pid")
+                proc = subprocess.Popen(
+                    [sys.executable, "-c", _SIGNAL_AT_SPAWN, sig.name, marker,
+                     "--trace-dir", self.trace_dir, "record", "--quiet", "--",
+                     sys.executable, script, marker],
+                    cwd=self.root, env=self.env, stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+                server_pid = []
+                try:
+                    code, _, err = self._finish(proc, keep_stdin_open=True)
+                    server_pid.append(int(self._wait_for_file(marker + ".popen")))
+                    self.assertTrue(_pid_gone(server_pid[0]), "the server outlived record")
+                finally:
+                    for pid in server_pid:
+                        _kill_pid(pid)
+                self.assertEqual(code, 128 + sig, err)
+                self.assertNotIn(b"Traceback", err)
+                meta, events = self._session()
+                self.assertIsNotNone(meta.ended_at)
+                self.assertEqual(events[-1].event_type, EventType.SESSION_END)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX signals")
+    def test_a_stop_signal_before_the_server_starts_ends_the_session(self):
+        # The signal comes once the session is created and before record has
+        # started the server. The session is ended and the server never runs.
+        import signal
+
+        script = os.path.join(self.root, "server.py")
+        with open(script, "w", encoding="utf-8") as f:
+            f.write(MARKING_SERVER)
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            with self.subTest(sig.name):
+                self.trace_dir = os.path.join(self.root, sig.name)
+                marker = os.path.join(self.root, f"{sig.name}.ran")
+                proc = subprocess.Popen(
+                    [sys.executable, "-c", _SIGNAL_AT_CREATE, sig.name,
+                     "--trace-dir", self.trace_dir, "record", "--",
+                     sys.executable, script, marker],
+                    cwd=self.root, env=self.env, stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+                code, _, err = self._finish(proc, keep_stdin_open=True)
+                self.assertEqual(code, 128 + sig, err)
+                self.assertNotIn(b"Traceback", err)
+                self.assertFalse(os.path.exists(marker), "the server was started")
+                meta, events = self._session()
+                self.assertIsNotNone(meta.ended_at)
+                self.assertEqual(
+                    [e.event_type for e in events],
+                    [EventType.SESSION_START, EventType.SESSION_END],
+                )
+                self.assertEqual(events[-1].data["exit_code"], -sig)
+
+    def test_the_agent_input_does_not_change_the_counts_once_they_are_saved(self):
+        # A tools/call from the agent is traced right after the final
+        # metadata save. It must not be recorded: the saved counts are final.
+        read_fd, write_fd = os.pipe()
+        self.addCleanup(os.close, write_fd)
+        traced = threading.Event()
+        real_trace = proxy_module._trace_message
+
+        def trace(msg, direction, *args, **kwargs):
+            try:
+                return real_trace(msg, direction, *args, **kwargs)
+            finally:
+                if direction == "agent_to_server":
+                    traced.set()
+
+        def save_then_call(proxy):
+            real_save = proxy._save_meta
+
+            def save(note):
+                real_save(note)
+                if not traced.is_set():
+                    os.write(write_fd, _line(_call(7, "late_tool")))
+                    self.assertTrue(traced.wait(self.TIMEOUT), "the call was not relayed")
+
+            proxy._save_meta = save
+
+        with patch.object(proxy_module, "_trace_message", trace):
+            code, err, store, meta = self._run_in_process(
+                "import time\ntime.sleep(0.3)\n", agent_in_fd=read_fd,
+                before_run=save_then_call,
+            )
+        self.assertEqual(code, 0, err)
+        self.assertTrue(traced.is_set())
+        events = self._assert_final(store, meta)
+        self.assertEqual(meta.tool_calls, 0)
+        self.assertNotIn(EventType.TOOL_CALL, [e.event_type for e in events])
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX processes")
+    def test_a_server_is_followed_without_waitid(self):
+        # Python on macOS before 3.13 has no os.waitid. There a kqueue sees
+        # the server exit, and elsewhere the server is reaped when it exits.
+        cases = [("default", contextlib.nullcontext)]
+        if sys.platform == "darwin":
+            class Refused:
+                def control(self, *args):
+                    import errno
+
+                    raise ProcessLookupError(errno.ESRCH, "exited already")
+
+                def close(self):
+                    pass
+
+            cases.append(("exited-before-kqueue",
+                          lambda: patch.object(proxy_module.select, "kqueue", Refused)))
+        for name, context in cases:
+            for how in ("plain", "setsid"):
+                with self.subTest(name, how=how), _without_waitid(), context():
+                    self.trace_dir = os.path.join(self.root, name, how)
+                    self._run_leaving_a_child(how, label=f"{name}-{how}")
+            with self.subTest(name, how="exit code"), _without_waitid(), context():
+                self.trace_dir = os.path.join(self.root, name, "code")
+                code, err, store, meta = self._run_in_process("import sys\nsys.exit(3)\n")
+                self.assertEqual(code, 3, err)
+                events = self._assert_final(store, meta)
+                self.assertEqual(events[-1].data["exit_code"], 3)
+
+    def _close_after(self, server):
+        """Stop and reap the server, and close its pipes, when the test ends."""
+        for stream in (server.proc.stdin, server.proc.stdout, server.proc.stderr):
+            self.addCleanup(stream.close)
+        self.addCleanup(server.close)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX signals")
+    def test_an_ignored_sigchld_does_not_cost_the_exit_code(self):
+        # record was started with SIGCHLD ignored, so the system would reap
+        # the server. record sets it back to the default for the run.
+        import signal
+
+        previous = signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+        self.addCleanup(signal.signal, signal.SIGCHLD, previous)
+        code, err, store, meta = self._run_in_process("import sys\nsys.exit(3)\n")
+        self.assertEqual(signal.getsignal(signal.SIGCHLD), signal.SIG_IGN)
+        self.assertEqual(code, 3, err)
+        events = self._assert_final(store, meta)
+        self.assertEqual(events[-1].data["exit_code"], 3)
+        self.trace_dir = os.path.join(self.root, "child")
+        self._run_leaving_a_child("plain")
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX processes")
+    def test_a_server_reaped_by_the_system_is_not_signalled_by_its_pid(self):
+        # With SIGCHLD ignored the system reaps the server as it exits, so
+        # its PID and process group ID can name another process. Its exit
+        # code is unknown, and nothing is sent to its process group.
+        import signal
+
+        previous = signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+        try:
+            server = proxy_module._Server([sys.executable, "-c", "import sys; sys.exit(3)"])
+            self._close_after(server)
+            try:
+                server.proc.wait(timeout=self.TIMEOUT)
+            except subprocess.TimeoutExpired:
+                self.fail("the server did not exit")
+        finally:
+            signal.signal(signal.SIGCHLD, previous)
+        with patch.object(proxy_module.os, "killpg") as killpg:
+            self.assertEqual(server.stop(), 255)
+        killpg.assert_not_called()
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX processes")
+    def test_a_running_server_is_stopped_when_sigchld_is_ignored(self):
+        # As when record runs off the main thread, where SIGCHLD cannot be
+        # set back to the default: the server still runs, so it is signalled.
+        import signal
+
+        previous = signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+        try:
+            server = proxy_module._Server([sys.executable, "-c", "import time; time.sleep(60)"])
+        finally:
+            signal.signal(signal.SIGCHLD, previous)
+        self._close_after(server)
+        result = []
+        with patch.object(proxy_module, "STOP_TIMEOUT", 1.0):
+            stopper = threading.Thread(target=lambda: result.append(server.stop()), daemon=True)
+            stopper.start()
+            stopper.join(self.TIMEOUT)
+        if stopper.is_alive():
+            server.proc.kill()
+            self.fail("the server was not stopped")
+        self.assertEqual(result, [255])
+        self.assertIsNotNone(server.proc.poll())
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX processes")
+    def test_a_server_reaped_elsewhere_is_not_signalled_by_its_pid(self):
+        # Something else in record's process reaped the server, so waitid
+        # finds no child. Its PID can name another process from then on.
+        server = proxy_module._Server([sys.executable, "-c", "import time; time.sleep(60)"])
+        self._close_after(server)
+        gone = ChildProcessError(10, "No child processes")
+        with patch.object(proxy_module, "_WAITID", side_effect=gone, create=True), \
+                patch.object(proxy_module.os, "waitid", side_effect=gone, create=True), \
+                patch.object(proxy_module.os, "killpg") as killpg:
+            self.assertEqual(server.poll(), 255)
+            server._signal(kill=True)
+        killpg.assert_not_called()
 
 
 if __name__ == "__main__":
