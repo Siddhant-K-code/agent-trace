@@ -9,8 +9,13 @@ generator in ``_iterator``, as the OpenAI and Anthropic SDK streams do.
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
+import contextvars
 import functools
 import inspect
+import itertools
+import json
 import types
 from copy import copy
 from functools import cached_property
@@ -332,3 +337,283 @@ def _unexpected(kwargs: dict) -> Any:
 def ns(**kwargs: Any) -> types.SimpleNamespace:
     """A plain object with the given attributes, like an SDK response model."""
     return types.SimpleNamespace(**kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Agent frameworks
+# ---------------------------------------------------------------------------
+
+def crewai_modules() -> dict[str, Any]:
+    """``sys.modules`` entries for a CrewAI whose crews run their tasks.
+
+    ``Crew.kickoff`` runs each task's ``execute_sync``, which has its agent
+    ``execute_task``. A task whose description is ``"fail"`` raises.
+    """
+    class Agent:
+        role = "researcher"
+
+        def execute_task(self, task: Any, *args: Any, **kwargs: Any) -> Any:
+            if task.description == "fail":
+                raise RuntimeError("task failed")
+            return f"done: {task.description}"
+
+    class Task:
+        def __init__(self, description: str, agent: Any) -> None:
+            self.description = description
+            self.agent = agent
+
+        def execute_sync(self, *args: Any, **kwargs: Any) -> Any:
+            return self.agent.execute_task(self)
+
+    class Crew:
+        name = "crew"
+
+        def __init__(self, agents: list, tasks: list) -> None:
+            self.agents = agents
+            self.tasks = tasks
+
+        def kickoff(self, *args: Any, **kwargs: Any) -> Any:
+            return [task.execute_sync() for task in self.tasks]
+
+    return {"crewai": _module("crewai", Agent=Agent, Task=Task, Crew=Crew)}
+
+
+def agents_modules(run: Callable[..., Any]) -> dict[str, Any]:
+    """``sys.modules`` entries for an OpenAI Agents SDK.
+
+    ``Runner.run_sync`` is a classmethod that returns ``run(agent, input)``.
+    ``run_tool(tool, arguments)`` runs a ``FunctionTool`` as the SDK does:
+    inside a function span that each processor added with
+    ``agents.tracing.add_trace_processor`` sees, through the tool's async
+    ``on_invoke_tool`` instance attribute. The span's input is set after it
+    starts. A tool exception becomes the output and the span's error, as with
+    the SDK's default failure handler.
+    """
+    processors: list = []
+    span_ids = itertools.count(1)
+
+    class TracingProcessor:
+        pass
+
+    def add_trace_processor(processor: Any) -> None:
+        processors.append(processor)
+
+    class FunctionSpanData:
+        type = "function"
+
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.input: Any = None
+            self.output: Any = None
+
+    class Span:
+        def __init__(self, span_data: Any) -> None:
+            self.span_id = f"span_{next(span_ids)}"
+            self.span_data = span_data
+            self.error: Any = None
+
+    class FunctionTool:
+        def __init__(self, name: str, function: Callable[..., Any]) -> None:
+            self.name = name
+
+            async def on_invoke_tool(ctx: Any, input: str) -> Any:
+                return function(**json.loads(input))
+
+            self.on_invoke_tool = on_invoke_tool
+
+    def run_tool(tool: Any, arguments: str) -> Any:
+        span = Span(FunctionSpanData(tool.name))
+        for processor in processors:
+            processor.on_span_start(span)
+        span.span_data.input = arguments
+        try:
+            output = asyncio.run(tool.on_invoke_tool(None, arguments))
+        except Exception as exc:
+            output = f"An error occurred while running the tool. Error: {exc}"
+            span.error = {"message": "Error running tool (non-fatal)",
+                          "data": {"tool_name": tool.name, "error": str(exc)}}
+        span.span_data.output = output
+        for processor in processors:
+            processor.on_span_end(span)
+        return output
+
+    class Runner:
+        @classmethod
+        def run_sync(cls, starting_agent: Any, input: Any, **kwargs: Any) -> Any:
+            return run(starting_agent, input)
+
+    tracing = _module("agents.tracing", TracingProcessor=TracingProcessor,
+                      add_trace_processor=add_trace_processor, processors=processors)
+    return {
+        "agents": _module("agents", Runner=Runner, FunctionTool=FunctionTool,
+                          run_tool=run_tool, tracing=tracing),
+        "agents.tracing": tracing,
+    }
+
+
+def strands_modules() -> dict[str, Any]:
+    """``sys.modules`` entries for AWS Strands Agents.
+
+    Tools run as in the SDK: ``Agent.invoke_async(prompt)`` hands each tool
+    to ``SequentialToolExecutor._stream``, which invokes the agent's
+    ``hooks`` with a ``BeforeToolCallEvent``, iterates the async generator
+    ``tool.stream(tool_use, invocation_state)`` and then invokes them with an
+    ``AfterToolCallEvent``. A tool exception becomes an error result and the
+    after event's ``exception``. ``PythonAgentTool`` calls
+    ``tool_func(tool_use, **invocation_state)``, which returns a ToolResult
+    dict. The prompt ``"crash"`` makes the agent raise. Calling the agent runs
+    ``invoke_async`` on another thread in a copy of the context, as the SDK
+    does.
+    """
+    class HookRegistry:
+        def __init__(self) -> None:
+            self.callbacks: list = []
+
+        def add_callback(self, event_type: type, callback: Callable[..., Any]) -> None:
+            self.callbacks.append((event_type, callback))
+
+        def invoke_callbacks(self, event: Any) -> None:
+            for event_type, callback in self.callbacks:
+                if isinstance(event, event_type):
+                    callback(event)
+
+    class BeforeToolCallEvent:
+        def __init__(self, agent: Any, selected_tool: Any, tool_use: dict,
+                     invocation_state: dict) -> None:
+            self.agent = agent
+            self.selected_tool = selected_tool
+            self.tool_use = tool_use
+            self.invocation_state = invocation_state
+
+    class AfterToolCallEvent:
+        def __init__(self, agent: Any, selected_tool: Any, tool_use: dict,
+                     invocation_state: dict, result: dict, exception: Any = None) -> None:
+            self.agent = agent
+            self.selected_tool = selected_tool
+            self.tool_use = tool_use
+            self.invocation_state = invocation_state
+            self.result = result
+            self.exception = exception
+
+    class AgentTool:
+        async def stream(self, tool_use: dict, invocation_state: dict, **kwargs: Any) -> Any:
+            raise NotImplementedError
+            yield
+
+    class PythonAgentTool(AgentTool):
+        def __init__(self, tool_name: str, tool_spec: dict,
+                     tool_func: Callable[..., Any]) -> None:
+            self.tool_name = tool_name
+            self.tool_spec = tool_spec
+            self._tool_func = tool_func
+
+        async def stream(self, tool_use: dict, invocation_state: dict, **kwargs: Any) -> Any:
+            yield self._tool_func(tool_use, **invocation_state)
+
+    class SequentialToolExecutor:
+        async def _stream(self, agent: Any, tool_use: dict, tool_results: list,
+                          invocation_state: dict) -> Any:
+            tool = agent.tool_registry[tool_use["name"]]
+            agent.hooks.invoke_callbacks(
+                BeforeToolCallEvent(agent, tool, tool_use, invocation_state))
+            exception = None
+            result: Any = None
+            try:
+                async for event in tool.stream(tool_use, invocation_state):
+                    result = event
+                    yield event
+            except Exception as exc:
+                exception = exc
+                result = {"toolUseId": tool_use["toolUseId"], "status": "error",
+                          "content": [{"text": f"Error: {exc}"}]}
+            agent.hooks.invoke_callbacks(AfterToolCallEvent(
+                agent, tool, tool_use, invocation_state, result, exception))
+            tool_results.append(result)
+
+    class Agent:
+        name = "strands-agent"
+
+        def __init__(self, tools: Any = None) -> None:
+            self.tool_registry = {tool.tool_name: tool for tool in tools or []}
+            self.tool_executor = SequentialToolExecutor()
+            self.hooks = HookRegistry()
+
+        async def invoke_async(self, prompt: str) -> Any:
+            if prompt == "crash":
+                raise RuntimeError("model failed")
+            tool_results: list = []
+            for index, name in enumerate(self.tool_registry):
+                tool_use = {"toolUseId": f"tooluse_{index}", "name": name,
+                            "input": {"prompt": prompt}}
+                async for _ in self.tool_executor._stream(self, tool_use, tool_results, {}):
+                    pass
+            return tool_results
+
+        def __call__(self, prompt: str) -> Any:
+            context = contextvars.copy_context()
+            with concurrent.futures.ThreadPoolExecutor(1) as executor:
+                return executor.submit(context.run, asyncio.run,
+                                       self.invoke_async(prompt)).result()
+
+    hooks = _module("strands.hooks", BeforeToolCallEvent=BeforeToolCallEvent,
+                    AfterToolCallEvent=AfterToolCallEvent, HookRegistry=HookRegistry)
+    executors = _module("strands.tools.executors", SequentialToolExecutor=SequentialToolExecutor)
+    tools = _module("strands.tools", PythonAgentTool=PythonAgentTool, AgentTool=AgentTool,
+                    executors=executors)
+    return {
+        "strands": _module("strands", Agent=Agent, hooks=hooks, tools=tools),
+        "strands.hooks": hooks,
+        "strands.tools": tools,
+        "strands.tools.executors": executors,
+    }
+
+
+def langchain_tool_modules() -> tuple[dict[str, Any], type, type]:
+    """``sys.modules`` entries for LangChain Core tools and LangGraph.
+
+    Like LangChain's, ``BaseTool.invoke`` and ``ainvoke`` call ``run`` and
+    ``arun``, which call the ``_run`` and ``_arun`` that tool classes such
+    as ``StructuredTool`` override. ``StateGraph.compile`` returns a graph
+    whose ``nodes`` maps each node name to its function.
+    """
+    modules, _ = langchain_modules()
+
+    class BaseTool:
+        name = "tool"
+
+        def _run(self, *args: Any, **kwargs: Any) -> Any:
+            raise NotImplementedError
+
+        async def _arun(self, *args: Any, **kwargs: Any) -> Any:
+            return self._run(*args, **kwargs)
+
+        def run(self, tool_input: Any, callbacks: Any = None, **kwargs: Any) -> Any:
+            return self._run(**tool_input) if isinstance(tool_input, dict) else self._run(tool_input)
+
+        async def arun(self, tool_input: Any, callbacks: Any = None, **kwargs: Any) -> Any:
+            if isinstance(tool_input, dict):
+                return await self._arun(**tool_input)
+            return await self._arun(tool_input)
+
+        def invoke(self, tool_input: Any, **kwargs: Any) -> Any:
+            return self.run(tool_input, callbacks=object(), **kwargs)
+
+        async def ainvoke(self, tool_input: Any, **kwargs: Any) -> Any:
+            return await self.arun(tool_input, callbacks=object(), **kwargs)
+
+    class StateGraph:
+        def __init__(self, nodes: dict[str, Callable[..., Any]]) -> None:
+            self._nodes = nodes
+
+        def compile(self) -> Any:
+            return types.SimpleNamespace(nodes=dict(self._nodes, __start__=None))
+
+    tools = _module("langchain_core.tools", BaseTool=BaseTool)
+    graph = _module("langgraph.graph", StateGraph=StateGraph)
+    modules.update({
+        "langchain_core.tools": tools,
+        "langgraph": _module("langgraph", graph=graph),
+        "langgraph.graph": graph,
+    })
+    modules["langchain_core"].tools = tools
+    return modules, BaseTool, StateGraph

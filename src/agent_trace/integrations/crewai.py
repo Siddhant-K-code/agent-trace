@@ -1,7 +1,8 @@
 """Auto-instrumentation for CrewAI.
 
 Patches:
-  - crewai.Crew.kickoff          → session_start / session_end
+  - crewai.Crew.kickoff          → one session per kickoff:
+                                   session_start / session_end
   - crewai.Agent.execute_task    → llm_request / llm_response
   - crewai.Task.execute_sync     → tool_call / tool_result
 
@@ -34,7 +35,7 @@ def instrument_crewai(agent_name: str = "crewai") -> None:
             "Install it with: pip install crewai"
         ) from exc
 
-    from ._base import _get_store, _get_or_create_session, emit
+    from ._base import _get_store, _get_or_create_session, emit, run_session
     from ..models import EventType
 
     store = _get_store()
@@ -46,22 +47,12 @@ def instrument_crewai(agent_name: str = "crewai") -> None:
         _orig_kickoff = Crew.kickoff
 
         def _patched_kickoff(self, *args, **kwargs):
-            sid = _get_or_create_session(store, agent_name)
             crew_name = getattr(self, "name", None) or agent_name
-            emit(EventType.SESSION_START, sid, store,
-                 agent_name=crew_name,
-                 agent_count=len(getattr(self, "agents", [])),
-                 task_count=len(getattr(self, "tasks", [])))
-            t0 = time.time()
-            try:
-                result = _orig_kickoff(self, *args, **kwargs)
-                emit(EventType.SESSION_END, sid, store,
-                     duration_ms=(time.time() - t0) * 1000)
-                return result
-            except Exception as exc:
-                emit(EventType.ERROR, sid, store,
-                     error=str(exc), error_type=type(exc).__name__)
-                raise
+            with run_session(store, agent_name,
+                             agent_name=crew_name,
+                             agent_count=len(getattr(self, "agents", [])),
+                             task_count=len(getattr(self, "tasks", []))):
+                return _orig_kickoff(self, *args, **kwargs)
 
         Crew.kickoff = _patched_kickoff
     except (ImportError, AttributeError):
@@ -83,7 +74,7 @@ def instrument_crewai(agent_name: str = "crewai") -> None:
                            task=task_desc)
             try:
                 result = _orig_execute_task(self, task, *args, **kwargs)
-                emit(EventType.LLM_RESPONSE, sid, store,
+                emit(EventType.LLM_RESPONSE, sid, store, parent=request,
                      agent_role=agent_role,
                      duration_ms=(time.time() - t0) * 1000,
                      result_preview=str(result)[:300])
@@ -108,19 +99,20 @@ def instrument_crewai(agent_name: str = "crewai") -> None:
             sid = _get_or_create_session(store, agent_name)
             task_desc = getattr(self, "description", str(self))[:200]
             t0 = time.time()
-            emit(EventType.TOOL_CALL, sid, store,
-                 tool_name="crewai.task",
-                 task=task_desc)
+            call = emit(EventType.TOOL_CALL, sid, store,
+                        tool_name="crewai.task",
+                        task=task_desc)
             try:
                 result = _orig_task_execute(self, *args, **kwargs)
-                emit(EventType.TOOL_RESULT, sid, store,
+                emit(EventType.TOOL_RESULT, sid, store, parent=call,
                      tool_name="crewai.task",
                      duration_ms=(time.time() - t0) * 1000,
                      result_preview=str(result)[:300])
                 return result
             except Exception as exc:
-                emit(EventType.ERROR, sid, store,
-                     tool_name="crewai.task", error=str(exc))
+                emit(EventType.ERROR, sid, store, parent=call,
+                     tool_name="crewai.task", error=str(exc),
+                     error_type=type(exc).__name__)
                 raise
 
         Task.execute_sync = _patched_task_execute

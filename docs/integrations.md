@@ -46,13 +46,13 @@ instrument_langchain()
 
 | Framework | Install | What's traced |
 |---|---|---|
-| OpenAI Agents SDK | `pip install agent-strace[openai-agents]` | `Runner.run`, `FunctionTool` calls |
-| LangChain / LangGraph | `pip install agent-strace[langchain]` | `BaseTool._run`, chat model `_generate` and `_agenerate`, LangGraph nodes |
+| OpenAI Agents SDK | `pip install agent-strace[openai-agents]` | `Runner.run_sync`, function tool calls (from tracing spans) |
+| LangChain / LangGraph | `pip install agent-strace[langchain]` | `BaseTool.run` and `BaseTool.arun`, chat model `_generate` and `_agenerate`, LangGraph nodes |
 | CrewAI | `pip install agent-strace[crewai]` | `Crew.kickoff`, `Agent.execute_task`, `Task.execute_sync` |
 | LiteLLM | `pip install agent-strace[litellm]` | `litellm.completion`, `litellm.acompletion` |
 | Anthropic SDK | `pip install anthropic` | `messages.create` (sync and async clients, streams) |
 | OpenAI SDK | `pip install openai` | `chat.completions.create`, `responses.create` (sync and async clients, streams) |
-| AWS Strands | `pip install agent-strace[strands]` | `Agent.__call__`, `BaseTool.invoke` |
+| AWS Strands | `pip install agent-strace[strands]` | `Agent.__call__` and `invoke_async`, tool calls (from tool hooks) |
 
 Install all integrations at once:
 
@@ -63,6 +63,16 @@ pip install agent-strace[all-integrations]
 Each integration is an optional extra. The core package stays dependency-free. See [ADR-0003](../ADRs/0003-zero-runtime-dependencies.md).
 
 When a model call raises, the OpenAI, Anthropic, LiteLLM, LangChain chat model and CrewAI `Agent.execute_task` integrations record an `error` event whose `parent_id` names the call's `llm_request`, so the exports report that call as failed. See [Failed and cancelled model requests](production.md#failed-and-cancelled-model-requests).
+
+### Sessions
+
+The CrewAI, OpenAI Agents SDK and Strands integrations record each run as its own session: each `Crew.kickoff`, `Runner.run_sync`, or Strands `Agent.__call__` or `invoke_async`. The session starts with `session_start` and ends with `session_end`, which is also recorded when the run raises, after an `error` event for the exception. When the run ends, the session's `ended_at`, total duration and its `tool_calls`, `llm_requests` and `errors` counts are set, so `agent-strace list` shows them and retention treats the session as finished. The counts are taken from the session's stored events, so they include events other processes recorded into it; with `AGENT_STRACE_ENDPOINT` set, only the run's own process's events are counted. A run started inside another run of the same integration, in the same thread or task, records into the outer run's session.
+
+Events from a thread or task that is not inside a run, such as a thread the program started itself, go to the session named by the `.active-session.<name>` marker in the trace directory. Runs that overlap, in one process or in several processes sharing the trace directory, are kept in a locked registry (`.integration-runs.<name>`), and the marker names the newest run still in progress. When a run ends, the marker moves back to the newest run still going, so runs may finish in any order. A run is dropped from the registry, and the marker no longer names it, once its process has exited without ending it; each run records its process's start time when the platform reports it (Linux, macOS and Windows do), so a new process that reuses the PID does not keep it alive. A new run is written to the registry before the marker names it. When no run is left, the marker and registry are removed, and the next event outside a run starts a new session. Such events can only be told apart by run when the thread or task is inside the run, so with overlapping runs they go to the newest one. `session_end` is always the last event of a run: the end is recorded and the session closed under a lock (`.integration-seal.lock`) that every integration event append also takes, and an event for a session that has already ended, such as one a process looked up before the run finished, goes to the agent's current session instead. This holds with `AGENT_STRACE_ENDPOINT` set too. A moved event keeps the session it was recorded for in `data.original_session_id`; a moved `tool_result` or `error` does not name its `tool_call` in `parent_id`, which would point into the ended session, but in `data.original_parent_id`.
+
+Events recorded outside a run, such as a LangChain tool call or a model call through the OpenAI, Anthropic or LiteLLM integration, go to one session per integration, which stays open while the program records into it.
+
+Each tool `tool_result`, and each `error` a tool raises, names its `tool_call` in its `parent_id`, so the exports pair them.
 
 ### Model calls
 
@@ -138,7 +148,7 @@ agent = Agent(name="my-agent", instructions="...")
 result = Runner.run_sync(agent, "Do the task")
 ```
 
-Traces: `Runner.run`, `Runner.run_sync`, `Runner.run_streamed`, all `FunctionTool` calls.
+Traces: `Runner.run_sync` (one session per run), and function tool calls. The SDK runs a function tool by awaiting its `on_invoke_tool` inside a function span, so the integration adds a trace processor with `agents.tracing.add_trace_processor` and records each function span as a `tool_call` and its `tool_result`, or an `error` when the span has one. Tool calls are therefore recorded only while the SDK's tracing is enabled (not with `set_tracing_disabled(True)`, `RunConfig(tracing_disabled=True)` or `OPENAI_AGENTS_DISABLE_TRACING=1`), and their arguments only when the run includes sensitive data in traces (the default). The SDK sets a function span's input only after the span starts, so the `tool_call` is written when the tool starts, with empty `arguments`, and the arguments are on its `tool_result` or `error`. A tool that never returns still leaves its `tool_call`. `Runner.run` and `Runner.run_streamed` do not start a session, but their tool calls are recorded; see [Sessions](#sessions).
 
 ---
 
@@ -153,9 +163,9 @@ from langchain_anthropic import ChatAnthropic
 llm = ChatAnthropic(model="claude-3-5-sonnet-20241022")
 ```
 
-Traces: `BaseTool._run`, and the `_generate` and `_agenerate` methods of each chat model class, so `invoke`, `ainvoke`, `batch` and `abatch` are recorded with the token counts in the message's `usage_metadata`. A model class is patched the first time one of its models is called. `stream` and `astream` are not recorded; see [Model calls](#model-calls).
+Traces: `BaseTool.run` and `BaseTool.arun`, which `invoke`, `ainvoke` and every tool class (including `StructuredTool`) go through, and the `_generate` and `_agenerate` methods of each chat model class, so `invoke`, `ainvoke`, `batch` and `abatch` are recorded with the token counts in the message's `usage_metadata`. A model class is patched the first time one of its models is called. `stream` and `astream` are not recorded; see [Model calls](#model-calls).
 
-LangGraph node-level tracing is included — each node execution appears as a separate `tool_call` span with the node name and input/output.
+LangGraph node-level tracing is included: each node execution records a `decision` naming the node, then a `tool_call` named `langgraph.node.<name>` and its `tool_result`, or an `error` if the node raises.
 
 ---
 
@@ -171,7 +181,7 @@ crew = Crew(agents=[...], tasks=[...])
 result = crew.kickoff()
 ```
 
-Traces: `Crew.kickoff` (session start/end), `Agent.execute_task` (LLM request/response), `Task.execute_sync` (tool call/result).
+Traces: `Crew.kickoff` (one session per kickoff), `Agent.execute_task` (LLM request/response), `Task.execute_sync` (tool call/result).
 
 ---
 
@@ -230,7 +240,7 @@ agent = Agent(tools=[...])
 result = agent("Do the task")
 ```
 
-Traces: `Agent.__call__`, `BaseTool.invoke`.
+Traces: `Agent.__call__` and `Agent.invoke_async` (one session per call), and tool calls. The SDK's tool executor invokes the agent's `BeforeToolCallEvent` and `AfterToolCallEvent` hooks around each tool's `stream`, for `@tool` functions, `PythonAgentTool` and MCP tools alike, so the integration adds callbacks for them to each agent's hook registry, when the agent is created or on its first call. Each tool records a `tool_call` and its `tool_result`, or an `error` when the tool raised or returned an error result. Calling `stream_async` directly does not start a session.
 
 ---
 

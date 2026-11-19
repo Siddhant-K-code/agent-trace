@@ -11,9 +11,10 @@ import threading
 import time
 from typing import Any, Callable, Iterator
 
-from ..fileutil import file_lock
+from ..fileutil import file_lock, write_atomic
 from ..models import EventType, SessionMeta, TraceEvent
 from ..pairing import link_response
+from ..process_identity import process_identity
 from ..store import TraceStore, default_trace_dir
 
 
@@ -21,29 +22,393 @@ def _get_store() -> TraceStore:
     return TraceStore(default_trace_dir())
 
 
-def _get_or_create_session(store: TraceStore, name: str) -> str:
-    """Return the active session ID for this agent, creating one if needed.
+@contextlib.contextmanager
+def _session_marker(store: TraceStore, name: str) -> Iterator[Any]:
+    """Hold the per-name lock and yield the path of the agent's session marker.
 
-    The state file is scoped by agent name so concurrent agents sharing the
-    same AGENT_TRACE_DIR don't overwrite each other's active session. The
-    check and the create run under a per-name file lock, so concurrent first
-    calls from threads or processes share one session.
+    The marker is scoped by agent name so concurrent agents sharing the same
+    AGENT_TRACE_DIR don't overwrite each other's active session.
     """
     safe_name = name.replace("/", "_").replace(" ", "_") or "default"
-    active_path = store.base_dir / f".active-session.{safe_name}"
     # The lock file name does not start with ".active-session" because hook
     # and store cleanup code treats every such file as a session marker.
     store.base_dir.mkdir(parents=True, exist_ok=True)
     with file_lock(store.base_dir / f".integration-session.{safe_name}"):
-        if active_path.exists():
-            sid = active_path.read_text().strip()
-            if sid and store.session_exists(sid):
-                return sid
+        yield store.base_dir / f".active-session.{safe_name}"
+
+
+def _read_marker(path: Any) -> str:
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def _new_session(store: TraceStore, name: str, active_path: Any) -> str:
+    meta = SessionMeta(agent_name=name)
+    store.create_session(meta)
+    active_path.write_text(meta.session_id, encoding="utf-8", newline="\n")
+    return meta.session_id
+
+
+# The run (see run_session) active in this context: ((trace dir, agent
+# name), session ID).
+_RUN: contextvars.ContextVar[tuple[tuple[str, str], str] | None] = contextvars.ContextVar(
+    "agent_strace_integration_run", default=None,
+)
+# Event counts of the runs in progress in this process, by session ID.
+_RUN_COUNTS: dict[str, dict[str, int]] = {}
+_RUN_COUNTS_LOCK = threading.Lock()
+_COUNTED = {
+    EventType.TOOL_CALL: "tool_calls",
+    EventType.LLM_REQUEST: "llm_requests",
+    EventType.ERROR: "errors",
+}
+
+
+def _run_key(store: TraceStore, name: str) -> tuple[str, str]:
+    return (str(store.base_dir), name)
+
+
+def _get_or_create_session(store: TraceStore, name: str) -> str:
+    """Return the active session ID for this agent, creating one if needed.
+
+    Inside a :func:`run_session` for this agent, that run's session is
+    returned. Otherwise the session named by the agent's marker file is
+    returned, so threads that do not inherit the run's context still find
+    it. A marker naming a run that is over (its process exited without
+    ending it) moves to the newest run still in progress, or, without one,
+    is replaced by a new session, as is a marker naming a session that has
+    ended. The check and the create run under a
+    per-name file lock, so concurrent first calls from threads or processes
+    share one session.
+    """
+    run = _RUN.get()
+    if run is not None and run[0] == _run_key(store, name):
+        return run[1]
+    with _session_marker(store, name) as active_path:
+        registered, live = _prune_runs(store, _runs_path(active_path))
+        sid = _point_marker(active_path, registered, live)
+        if sid and store.session_exists(sid) and not _session_ended(store, sid):
+            return sid
+        return _new_session(store, name, active_path)
+
+
+def _count_run_event(session_id: str, event_type: EventType) -> None:
+    field_name = _COUNTED.get(event_type)
+    if field_name is None:
+        return
+    with _RUN_COUNTS_LOCK:
+        counts = _RUN_COUNTS.get(session_id)
+        if counts is not None:
+            counts[field_name] += 1
+
+
+def _runs_path(active_path: Any) -> Any:
+    """The registry of the agent's runs in progress, next to its marker."""
+    return active_path.with_name(".integration-runs" + active_path.name[len(".active-session"):])
+
+
+# A registered run is ``(session ID, PID, process start identity)``; the
+# identity is "" when it is unknown.
+_Run = tuple[str, int, str]
+
+
+def _read_runs(path: Any) -> list[_Run]:
+    """Each registered run, oldest first."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return []
+    runs = []
+    for line in text.splitlines():
+        parts = line.split(" ", 2)
+        if len(parts) >= 2 and parts[0] and parts[1].isdigit():
+            runs.append((parts[0], int(parts[1]), parts[2].strip() if len(parts) == 3 else ""))
+    return runs
+
+
+def _replace_file(path: Any, text: str) -> None:
+    """Replace a file of the trace directory atomically.
+
+    A symlinked file is refused. The trace directory itself may be a
+    symlink, as it may for the store.
+    """
+    write_atomic(path.parent.resolve() / path.name, text)
+
+
+def _write_runs(path: Any, runs: list[_Run]) -> None:
+    """Replace the registry atomically, or remove it when no run is left."""
+    if not runs:
+        path.unlink(missing_ok=True)
+        return
+    _replace_file(path, "".join(f"{sid} {pid} {identity}".rstrip() + "\n"
+                                for sid, pid, identity in runs))
+
+
+def _windows_process(pid: int) -> tuple[bool, str | None]:
+    """Whether a Windows process has this PID, and its creation time identity."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [
+            ctypes.POINTER(wintypes.FILETIME)] * 4
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.get_last_error() == 5, None  # ERROR_ACCESS_DENIED: it exists
+        try:
+            code = wintypes.DWORD()
+            if kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) and code.value != 259:
+                return False, None  # not STILL_ACTIVE
+            times = [wintypes.FILETIME() for _ in range(4)]
+            if not kernel32.GetProcessTimes(handle, *(ctypes.byref(t) for t in times)):
+                return True, None
+            created = times[0]
+            return True, f"win:{(created.dwHighDateTime << 32) | created.dwLowDateTime}"
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return True, None
+
+
+def _pid_alive(pid: int) -> bool:
+    """Return False only when no process has this PID."""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        return _windows_process(pid)[0]
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def _process_identity(pid: int) -> str | None:
+    """The start time identity of a process, or None when it is unknown."""
+    if os.name == "nt":
+        return _windows_process(pid)[1]
+    try:
+        return process_identity(pid)
+    except Exception:
+        return None
+
+
+_OWN_IDENTITY: dict[int, str] = {}
+
+
+def _own_identity() -> str:
+    pid = os.getpid()
+    if pid not in _OWN_IDENTITY:
+        _OWN_IDENTITY[pid] = _process_identity(pid) or ""
+    return _OWN_IDENTITY[pid]
+
+
+def _run_is_live(store: TraceStore, sid: str, pid: int, identity: str = "") -> bool:
+    """Whether a registered run is still in progress.
+
+    A run of another process is over when no process has its PID, when the
+    process with that PID started at another time than the one that
+    registered it (the PID was reused), or when its session has ended.
+    """
+    if pid == os.getpid():
+        with _RUN_COUNTS_LOCK:
+            return sid in _RUN_COUNTS
+    if not _pid_alive(pid):
+        return False
+    if identity:
+        current = _process_identity(pid)
+        if current and current.split(":", 1)[0] == identity.split(":", 1)[0] \
+                and current != identity:
+            return False
+    try:
+        return store.load_meta(sid).ended_at is None
+    except Exception:
+        return False
+
+
+def _prune_runs(store: TraceStore, path: Any, drop: str = "") -> tuple[list[_Run], list[_Run]]:
+    """Remove ended runs, and the run ``drop``, from the registry.
+
+    Returns the runs registered before and the runs left.
+    """
+    registered = _read_runs(path)
+    live = [run for run in registered if run[0] != drop and _run_is_live(store, *run)]
+    if live != registered:
+        _write_runs(path, live)
+    return registered, live
+
+
+def _start_run(store: TraceStore, name: str) -> str:
+    """Create the run's session, register it and point the agent's marker at it.
+
+    The marker names the run only once the registry holds it, so a process
+    that dies in between never leaves a marker that looks like a session
+    outside any run.
+    """
+    with _session_marker(store, name) as active_path:
+        path = _runs_path(active_path)
+        _, runs = _prune_runs(store, path)
         meta = SessionMeta(agent_name=name)
         store.create_session(meta)
-        active_path.parent.mkdir(parents=True, exist_ok=True)
-        active_path.write_text(meta.session_id, encoding="utf-8", newline="\n")
-        return meta.session_id
+        sid = meta.session_id
+        with _RUN_COUNTS_LOCK:
+            _RUN_COUNTS[sid] = dict.fromkeys(_COUNTED.values(), 0)
+        try:
+            _write_runs(path, runs + [(sid, os.getpid(), _own_identity())])
+            _replace_file(active_path, sid)
+        except BaseException:
+            with _RUN_COUNTS_LOCK:
+                _RUN_COUNTS.pop(sid, None)
+            with contextlib.suppress(Exception):
+                _prune_runs(store, path)
+            with contextlib.suppress(Exception):
+                store.mutate_meta(sid, lambda meta: setattr(meta, "ended_at", time.time()))
+            raise
+    return sid
+
+
+def _point_marker(active_path: Any, registered: list[_Run], live: list[_Run]) -> str:
+    """Point the marker at the newest run in progress.
+
+    Without a run in progress, a marker naming a run that is over is
+    removed, and a marker naming a session outside any run is kept. Returns
+    the session the marker names afterwards, or "".
+    """
+    marker = _read_marker(active_path)
+    if live:
+        # It can differ when the process of that run failed to write the
+        # marker after registering the run.
+        if marker != live[-1][0]:
+            _replace_file(active_path, live[-1][0])
+        return live[-1][0]
+    if marker in {run[0] for run in registered}:
+        active_path.unlink(missing_ok=True)
+        return ""
+    return marker
+
+
+def _unregister_run(store: TraceStore, name: str, sid: str) -> None:
+    """Drop the run from the registry and point the marker at the newest run left.
+
+    Runs can end in any order and in any process, so the marker is moved
+    only to a run that is still in progress, and removed when none is.
+    """
+    with _session_marker(store, name) as active_path:
+        registered, live = _prune_runs(store, _runs_path(active_path), drop=sid)
+        _point_marker(active_path, registered + [(sid, os.getpid(), "")], live)
+
+
+def _stored_counts(store: TraceStore, sid: str) -> dict[str, int] | None:
+    """The session's event counts from its stored events.
+
+    None when events go to a remote endpoint instead of the store.
+    """
+    if os.environ.get("AGENT_STRACE_ENDPOINT", "").rstrip("/"):
+        return None
+    try:
+        events = store.load_events(sid)
+    except Exception:
+        return None
+    counts = dict.fromkeys(_COUNTED.values(), 0)
+    for event in events:
+        field_name = _COUNTED.get(event.event_type)
+        if field_name is not None:
+            counts[field_name] += 1
+    return counts
+
+
+def _end_run(store: TraceStore, name: str, sid: str, started: float) -> None:
+    """Record ``session_end``, close the session's metadata and unregister the run.
+
+    The counts come from the stored events, so events that other processes
+    recorded into the run's session are counted too. With a remote endpoint
+    only this process's events are counted. The end is recorded and the
+    session closed under the seal :func:`emit` takes, so no event can be
+    appended to the session after its ``session_end``.
+    """
+    try:
+        with _session_seal(store):
+            try:
+                _write(TraceEvent(
+                    event_type=EventType.SESSION_END, session_id=sid,
+                    data={"duration_ms": (time.time() - started) * 1000},
+                ), store)
+            finally:
+                with _RUN_COUNTS_LOCK:
+                    counts = _RUN_COUNTS.pop(sid, {})
+                stored = _stored_counts(store, sid)
+                if stored is not None:
+                    counts = stored
+
+                def close(meta: SessionMeta) -> None:
+                    meta.ended_at = time.time()
+                    meta.total_duration_ms = (meta.ended_at - meta.started_at) * 1000
+                    for field_name, value in counts.items():
+                        setattr(meta, field_name, value)
+
+                store.mutate_meta(sid, close)
+    finally:
+        with _RUN_COUNTS_LOCK:
+            _RUN_COUNTS.pop(sid, None)
+        _unregister_run(store, name, sid)
+
+
+@contextlib.contextmanager
+def run_session(store: TraceStore, name: str, **start: Any) -> Iterator[str]:
+    """Record one framework run, such as a crew kickoff, as its own session.
+
+    Emits ``session_start`` with *start* as its data, yields the session ID,
+    and when the run ends emits ``session_end`` (also after an exception,
+    which is first recorded as an ``error``). The session's ``ended_at``,
+    ``total_duration_ms``, ``tool_calls``, ``llm_requests`` and ``errors``
+    are then set. While the run is in progress, :func:`_get_or_create_session`
+    returns its session for this agent, and the agent's marker names the
+    newest run still in progress in any process, so threads that do not
+    inherit the run's context record into it. A run started inside another
+    run of the same agent, in the same context, records into the outer
+    run's session. A failure to record the end of the run never reaches
+    the caller.
+    """
+    key = _run_key(store, name)
+    current = _RUN.get()
+    if current is not None and current[0] == key:
+        yield current[1]
+        return
+    sid = _start_run(store, name)
+    started = time.time()
+    token = _RUN.set((key, sid))
+    try:
+        try:
+            emit(EventType.SESSION_START, sid, store, **start)
+        except Exception:
+            pass
+        yield sid
+    except BaseException as exc:
+        try:
+            emit(EventType.ERROR, sid, store,
+                 error=str(exc), error_type=type(exc).__name__)
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            _RUN.reset(token)
+        except ValueError:
+            # Exited in another context than the one it was entered in.
+            pass
+        try:
+            _end_run(store, name, sid, started)
+        except Exception:
+            pass
 
 
 def emit(
@@ -58,18 +423,82 @@ def emit(
 
     With ``parent``, the event records that it answers that request: its
     ``parent_id`` and ``duration_ms`` are set (see pairing.link_response).
-    Returns the event.
+    An event for a session that has ended, such as a run another process
+    finished after this one looked the session up, goes to the agent's
+    current session instead (see :func:`_append_to_open_session`), so
+    ``session_end`` stays the last event of the run, in the store and at a
+    remote endpoint alike. Returns the event; its ``session_id`` is the
+    session it was written to.
     """
     ev = TraceEvent(event_type=event_type, session_id=session_id, data=dict(data))
     if parent is not None:
         link_response(ev, parent.event_id, parent.timestamp)
-    endpoint = os.environ.get("AGENT_STRACE_ENDPOINT", "").rstrip("/")
+    if _append_to_open_session(ev, store):
+        _count_run_event(ev.session_id, event_type)
+    return ev
+
+
+def _endpoint() -> str:
+    return os.environ.get("AGENT_STRACE_ENDPOINT", "").rstrip("/")
+
+
+def _write(ev: TraceEvent, store: TraceStore) -> None:
+    endpoint = _endpoint()
     if endpoint:
         from ..server import send_event_to_endpoint
         send_event_to_endpoint(ev, endpoint)
     else:
-        store.append_event(session_id, ev)
-    return ev
+        store.append_event(ev.session_id, ev)
+
+
+@contextlib.contextmanager
+def _session_seal(store: TraceStore) -> Iterator[None]:
+    """Hold the lock under which events are appended to open integration
+    sessions and runs are closed."""
+    store.base_dir.mkdir(parents=True, exist_ok=True)
+    with file_lock(store.base_dir / ".integration-seal"):
+        yield
+
+
+def _session_ended(store: TraceStore, sid: str) -> bool:
+    try:
+        return store.load_meta(sid).ended_at is not None
+    except Exception:
+        return False
+
+
+def _append_to_open_session(ev: TraceEvent, store: TraceStore) -> bool:
+    """Write *ev* to its session, or, if that session has ended, to the
+    current session of the same agent. Returns False if it was not written.
+
+    A moved event keeps the session it was recorded for in
+    ``data["original_session_id"]``. A moved response, such as the
+    ``tool_result`` of a ``tool_call`` recorded before the run ended, no
+    longer names that request in ``parent_id``, which would point into
+    another session; the request's ID is kept in
+    ``data["original_parent_id"]`` instead.
+    """
+    for _ in range(3):
+        with _session_seal(store):
+            if not _session_ended(store, ev.session_id):
+                _write(ev, store)
+                return True
+        try:
+            name = store.load_meta(ev.session_id).agent_name
+        except Exception:
+            return False
+        if not name:
+            return False
+        sid = _get_or_create_session(store, name)
+        if sid == ev.session_id:
+            return False
+        ev.data.setdefault("original_session_id", ev.session_id)
+        if ev.parent_id:
+            ev.data["original_parent_id"] = ev.parent_id
+            ev.parent_id = ""
+            ev.duration_ms = None
+        ev.session_id = sid
+    return False
 
 
 def count(value: Any) -> int | None:
