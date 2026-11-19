@@ -482,14 +482,15 @@ class _LlmHandler(BaseHTTPRequestHandler):
         pass
 
     def do_POST(self):
-        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        self.server.bodies.append(self.rfile.read(int(self.headers.get("Content-Length", 0))))
         if self.server.reply is not None:
             self.wfile.write(self.server.reply)
 
 
 class _LlmServer(ThreadingHTTPServer):
     """Answers each request with the raw bytes in ``reply``. With a reply of
-    None it resets the connection instead."""
+    None it resets the connection instead. ``bodies`` holds the body of each
+    POST."""
 
     daemon_threads = True
     block_on_close = False
@@ -497,6 +498,7 @@ class _LlmServer(ThreadingHTTPServer):
     def __init__(self, reply: bytes | None):
         super().__init__(("127.0.0.1", 0), _LlmHandler)
         self.reply = reply
+        self.bodies: list[bytes] = []
         self.url = f"http://127.0.0.1:{self.server_address[1]}"
 
     def handle_error(self, request, client_address):
@@ -515,6 +517,11 @@ class _LlmServer(ThreadingHTTPServer):
 
 def _serve(test: unittest.TestCase, reply: bytes | None) -> str:
     """Start an LLM server for the test and return its base URL."""
+    return _start(test, reply).url
+
+
+def _start(test: unittest.TestCase, reply: bytes | None) -> _LlmServer:
+    """Start an LLM server for the test and return it."""
     env = mock.patch.dict(os.environ, {"no_proxy": "*"})
     env.start()
     test.addCleanup(env.stop)
@@ -524,7 +531,7 @@ def _serve(test: unittest.TestCase, reply: bytes | None) -> str:
     test.addCleanup(thread.join)
     test.addCleanup(server.server_close)
     test.addCleanup(server.shutdown)
-    return server.url
+    return server
 
 
 class TestCallLlmReturnsNoneOnABadReply(unittest.TestCase):
@@ -684,6 +691,30 @@ class _OptimizeCommandCase(unittest.TestCase):
             cwd=str(self.root), timeout=120,
         )
         return result.returncode, result.stdout, result.stderr
+
+
+class TestModelComesFromFlagThenEnvironment(_OptimizeCommandCase):
+    """--model defaulted to gpt-4o-mini, so AGENT_STRACE_LLM_MODEL was never read."""
+
+    def models_sent(self, *args, **env):
+        """Run optimize --dry-run against an LLM server. Return the model of each POST."""
+        server = _start(self, _patterns())
+        env = self.child_env(AGENT_STRACE_LLM_URL=server.url, AGENT_STRACE_LLM_KEY="k", **env)
+        code, _, err = self.run_cli("--dry-run", *args, env=env)
+        self.assertEqual((code, err), (0, ""))
+        return [json.loads(body)["model"] for body in server.bodies]
+
+    def test_environment_model_is_sent_without_the_flag(self):
+        self.assertEqual(self.models_sent(AGENT_STRACE_LLM_MODEL="llama3"), ["llama3"])
+
+    def test_flag_overrides_the_environment(self):
+        self.assertEqual(
+            self.models_sent("--model", "qwen2", AGENT_STRACE_LLM_MODEL="llama3"), ["qwen2"])
+
+    def test_unset_or_empty_gives_the_default(self):
+        for label, env in [("unset", {}), ("empty", {"AGENT_STRACE_LLM_MODEL": ""})]:
+            with self.subTest(label):
+                self.assertEqual(self.models_sent(**env), ["gpt-4o-mini"])
 
 
 class TestDryRunNeverWrites(_OptimizeCommandCase):

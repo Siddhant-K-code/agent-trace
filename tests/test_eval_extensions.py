@@ -1,6 +1,7 @@
 """Tests for eval extensions: LLM judge scorer, dataset auto-sampling, eval --ci baseline."""
 
 import json
+import os
 import tempfile
 import time
 import unittest
@@ -223,6 +224,33 @@ class TestScoreLlmJudge(unittest.TestCase):
             )
         self.assertEqual(result.scorer, "llm_judge")
         self.assertAlmostEqual(result.score, 0.9)
+
+    def _model_sent(self, config: dict, env: dict) -> object:
+        """Run llm_judge through run_scorer. Return the model in the POST body."""
+        config = {"base_url": "http://localhost:11434/v1", "api_key": "key", **config}
+        with patch.dict(os.environ, env), post_opener(_OPENER, return_value=self._mock_urlopen()) as opened:
+            if "AGENT_STRACE_LLM_MODEL" not in env:
+                os.environ.pop("AGENT_STRACE_LLM_MODEL", None)
+            result = run_scorer("llm_judge", config, self._events())
+        self.assertAlmostEqual(result.score, 0.9)
+        return json.loads(opened.call_args[0][0].data)["model"]
+
+    def test_run_scorer_model_comes_from_config_then_environment(self):
+        """run_scorer took the model from the config only. It never read
+        AGENT_STRACE_LLM_MODEL, and sent an empty or null model as it was."""
+        llama = {"AGENT_STRACE_LLM_MODEL": "llama3"}
+        cases = [
+            ("config", {"model": "qwen2"}, llama, "qwen2"),
+            ("environment", {}, llama, "llama3"),
+            ("empty config model", {"model": ""}, llama, "llama3"),
+            ("null config model", {"model": None}, llama, "llama3"),
+            ("neither", {}, {}, "gpt-4o-mini"),
+            ("empty environment", {}, {"AGENT_STRACE_LLM_MODEL": ""}, "gpt-4o-mini"),
+            ("empty config model, no environment", {"model": ""}, {}, "gpt-4o-mini"),
+        ]
+        for label, config, env, expected in cases:
+            with self.subTest(label):
+                self.assertEqual(self._model_sent(config, env), expected)
 
     def test_redirect_is_a_failed_request(self):
         # urlopen re-sent the POST as a GET with no body and the key, and the
