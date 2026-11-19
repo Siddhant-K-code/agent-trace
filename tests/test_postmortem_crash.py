@@ -296,6 +296,13 @@ def _pm_report_text(report):
     return buf.getvalue()
 
 
+def _pm_recovery_block(report):
+    """Return the text from "Recovery context:" up to "Recommendations:".
+    Unlike _pm_section, it keeps every blank line."""
+    text = _pm_report_text(report)
+    return text[text.index("Recovery context:"):text.index("Recommendations:")]
+
+
 def _crash_list_text(crash):
     buf = io.StringIO()
     format_crash_list([crash], out=buf)
@@ -601,6 +608,35 @@ class TestRecoveryContextField(unittest.TestCase):
                 for line in output.split("\n"):
                     self.assertTrue(line.isprintable(), ascii(line))
                 self.assertEqual(_pm_section(output, "Recovery context:").split("\n"), shown)
+
+    def test_caller_text_ending_in_lf_prints_no_extra_blank_line(self):
+        # The bytes v0.115.2 printed. One LF at the end ends the last line.
+        cases = [
+            ("a\nb\n", "Recovery context:\n  a\n  b\n\n"),
+            ("a\nb", "Recovery context:\n  a\n  b\n\n"),
+            ("a\n\nb\n\n", "Recovery context:\n  a\n\n  b\n\n\n"),
+        ]
+        for value, block in cases:
+            with self.subTest(value=value):
+                report = _pm_report(recovery_context=value)
+                self.assertEqual(_pm_recovery_block(report), block)
+
+    def test_caller_crlf_text_prints_like_lf_text(self):
+        # One CR at the end of each line is dropped, even at the end of the
+        # text. Any other CR shows as an escape.
+        cases = [
+            ("a\r\nb\r\n", "Recovery context:\n  a\n  b\n\n"),
+            ("a\r\r\n", "Recovery context:\n  a\\r\n\n"),
+            ("a\r", "Recovery context:\n  a\n\n"),
+        ]
+        for value, block in cases:
+            with self.subTest(value=value):
+                report = _pm_report(recovery_context=value)
+                self.assertEqual(_pm_recovery_block(report), block)
+
+    def test_caller_text_starts_a_line_only_at_lf(self):
+        report = _pm_report(recovery_context="a\u2028b")
+        self.assertEqual(_pm_recovery_block(report), "Recovery context:\n  a\\u2028b\n\n")
 
     def test_positional_construction_in_main_field_order(self):
         report = PostmortemReport(

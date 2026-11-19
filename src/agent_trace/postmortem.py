@@ -766,7 +766,9 @@ def format_postmortem(report: PostmortemReport, out: TextIO = sys.stdout) -> Non
     time, as _build_recovery_context made the lines, so a line break in a
     value there cannot start a line of its own. When recovery_context does
     not match recovery_lines, for example because a caller set it, only an
-    LF in it starts a line.
+    LF in it starts a line. One LF at its end adds no blank line, and one
+    CR at the end of each line is dropped, so LF and CRLF text print the
+    same. Any other CR shows as an escape.
     """
     w = out.write
     w(f"\nPOSTMORTEM: Session {report.session_id}\n")
@@ -804,7 +806,10 @@ def format_postmortem(report: PostmortemReport, out: TextIO = sys.stdout) -> Non
     if report.recovery_context:
         lines = report.recovery_lines
         if "\n".join(lines) != report.recovery_context:
-            lines = report.recovery_context.split("\n")
+            lines = [
+                line.removesuffix("\r")
+                for line in report.recovery_context.removesuffix("\n").split("\n")
+            ]
         w("\nRecovery context:\n")
         for line in lines:
             w(f"  {inert(line)}\n" if line else "\n")
