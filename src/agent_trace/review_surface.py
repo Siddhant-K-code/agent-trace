@@ -15,7 +15,7 @@ from collections import Counter
 
 from .annotate import Annotation, load_annotations
 from .disclosure import build_disclosure_preview
-from .event_data import require_object_event_data
+from .event_data import require_object_event_data, require_usable_timestamps
 from .health import CaptureMatrix, assess_session, load_capture_matrix
 from .live_verify import LiveCaptureError, inspect_live_capture
 from .models import EventType, SessionMeta, TraceEvent, usable_text
@@ -323,10 +323,16 @@ def build_session_review(
     *,
     matrix: CaptureMatrix | None = None,
 ) -> dict[str, object]:
-    """Build the complete local review payload for one stored session."""
+    """Build the complete local review payload for one stored session.
+
+    Raises NonObjectEventDataError when an event's data is not an object, and
+    UnusableTimestampError when an event's timestamp is not a Unix time in
+    seconds.
+    """
     meta = store.load_meta(session_id)
     events = store.load_events(session_id)
     require_object_event_data(events, session_id=session_id)
+    require_usable_timestamps(events, session_id=session_id)
     annotations = load_annotations(store, session_id)
     health = assess_session(
         store,

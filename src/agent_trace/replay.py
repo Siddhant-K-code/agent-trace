@@ -15,7 +15,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TextIO
 
-from .event_data import object_field, require_object_event_data, str_field, str_list_field
+from .event_data import (
+    object_field,
+    require_object_event_data,
+    require_usable_timestamps,
+    str_field,
+    str_list_field,
+)
 from .inert import inert
 from .models import EventType, TraceEvent, SessionMeta, usable_number, usable_text, usable_time
 from .store import TraceStore
@@ -460,6 +466,9 @@ def replay_session(
         session_events,
         indexes=[i for i, event in enumerate(session_events) if id(event) in shown],
     )
+    # The offsets and the summary read timestamps. Check every event, also
+    # the ones --filter and --limit hide.
+    require_usable_timestamps(session_events)
 
     base_ts = events[0].timestamp if events else None
 
@@ -793,6 +802,7 @@ def replay_to_html(
     # The loop below copies each event's data with dict(), which accepts an
     # empty array or an array of pairs, so only refuse what dict() rejects.
     require_object_event_data(events, indexes=_dict_rejected_indexes(events))
+    require_usable_timestamps(events)
 
     base_ts = events[0].timestamp
     duration_s = events[-1].timestamp - base_ts
@@ -948,6 +958,8 @@ def replay_to_html_diff(
     # _event_key reads the data of every event in both sessions.
     require_object_event_data(events_a, session_id=session_a)
     require_object_event_data(events_b, session_id=session_b)
+    require_usable_timestamps(events_a, session_id=session_a)
+    require_usable_timestamps(events_b, session_id=session_b)
 
     def _build_event_data(events: list) -> list[dict]:
         base_ts = events[0].timestamp if events else 0.0

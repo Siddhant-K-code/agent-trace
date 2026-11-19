@@ -24,7 +24,12 @@ from .cost import (
     _usage_dollars,
     session_event_usage,
 )
-from .event_data import object_field, require_object_event_data, str_field
+from .event_data import (
+    object_field,
+    require_object_event_data,
+    require_usable_timestamps,
+    str_field,
+)
 from .explain import PHASE_DATA_EVENT_TYPES, ExplainResult, Phase, explain_session
 from .failures import SessionErrors, response_failure, session_errors
 from .inert import inert
@@ -539,9 +544,9 @@ def cmd_timeline(args: argparse.Namespace) -> int:
     model = getattr(args, "model", DEFAULT_MODEL) or DEFAULT_MODEL
     fmt = getattr(args, "format", "text") or "text"
 
-    require_object_event_data(
-        store.load_events(full_id), event_types=TIMELINE_DATA_EVENT_TYPES
-    )
+    events = store.load_events(full_id)
+    require_object_event_data(events, event_types=TIMELINE_DATA_EVENT_TYPES)
+    require_usable_timestamps(events)
     result = build_timeline(store, full_id, model=model)
 
     if fmt == "json":

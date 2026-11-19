@@ -24,7 +24,7 @@ import urllib.request
 from dataclasses import dataclass, field
 
 from .cost import TokenUsage, infer_provider
-from .event_data import require_object_event_data, str_field
+from .event_data import require_object_event_data, require_usable_timestamps, str_field
 from .models import EventType, SessionMeta, TraceEvent, usable_text
 from .failures import llm_failure, session_errors
 from .http_post import no_redirect_opener, post_error_detail
@@ -150,6 +150,20 @@ def _session_to_langfuse_trace(
         "tags": ["agent-strace"],
         **({"duration": duration_s} if duration_s else {}),
     }
+
+
+# The Langfuse export turns the timestamps of these events into span and
+# generation times: each tool result with its paired call, each LLM response
+# with its paired request, and each error linked to a request. The check
+# covers every event of these types, also an unpaired call or request and an
+# error that is not exported.
+LANGFUSE_TIMESTAMP_EVENT_TYPES = frozenset({
+    EventType.TOOL_CALL,
+    EventType.TOOL_RESULT,
+    EventType.LLM_REQUEST,
+    EventType.LLM_RESPONSE,
+    EventType.ERROR,
+})
 
 
 def langfuse_data_indexes(events: list[TraceEvent]) -> list[int]:
@@ -620,6 +634,11 @@ def cmd_export_scores(args) -> int:
             require_object_event_data(
                 events,
                 indexes=langfuse_data_indexes(events),
+                session_id=sid if multi else None,
+            )
+            require_usable_timestamps(
+                events,
+                event_types=LANGFUSE_TIMESTAMP_EVENT_TYPES,
                 session_id=sid if multi else None,
             )
         success = 0

@@ -16,7 +16,7 @@ import time as _time
 from dataclasses import dataclass, field, replace as _replace
 from typing import Any, Mapping, TextIO
 
-from .event_data import require_object_event_data
+from .event_data import require_object_event_data, require_usable_timestamps
 from .explain import PHASE_DATA_EVENT_TYPES, ExplainResult, explain_session
 from .inert import inert
 from .models import EventType, TraceEvent
@@ -1244,6 +1244,7 @@ def build_tenant_cost_report(
         require_object_event_data(
             events, event_types=PHASE_DATA_EVENT_TYPES, session_id=meta.session_id
         )
+        require_usable_timestamps(events, session_id=meta.session_id)
         try:
             result = estimate_cost(
                 store,
@@ -1488,9 +1489,9 @@ def cmd_cost(args: argparse.Namespace) -> int:
         )
         return 1
 
-    require_object_event_data(
-        store.load_events(full_id), event_types=PHASE_DATA_EVENT_TYPES
-    )
+    events = store.load_events(full_id)
+    require_object_event_data(events, event_types=PHASE_DATA_EVENT_TYPES)
+    require_usable_timestamps(events)
     result = estimate_cost(
         store, full_id,
         model=model,

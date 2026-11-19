@@ -20,7 +20,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TextIO
 
-from .event_data import object_field, require_object_event_data, str_field
+from .event_data import (
+    object_field,
+    require_object_event_data,
+    require_usable_timestamps,
+    str_field,
+)
 from .inert import inert
 from .models import EventType
 from .store import TraceStore
@@ -142,6 +147,10 @@ def analyse_oncall(
         except Exception:
             continue
         require_object_event_data(
+            events, event_types=ONCALL_DATA_EVENT_TYPES, session_id=meta.session_id
+        )
+        # The newest write of each path wins, and its time goes to git log.
+        require_usable_timestamps(
             events, event_types=ONCALL_DATA_EVENT_TYPES, session_id=meta.session_id
         )
         for event in events:

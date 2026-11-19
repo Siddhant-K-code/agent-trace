@@ -25,6 +25,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TextIO
 
+from .event_data import UnusableTimestampError, require_usable_timestamps
 from .inert import inert
 from .store import TraceStore
 
@@ -245,9 +246,11 @@ def _find_event_by_offset(
 
     Returns "" when that event_id is not a string, so the annotation is
     offset-based. load_annotations skips a line whose event_id is not a
-    string.
+    string. Raises UnusableTimestampError when an event's timestamp is not a
+    Unix time in seconds, because the offsets read every one.
     """
     events = store.load_events(session_id)
+    require_usable_timestamps(events)
     if not events:
         return ""
     base_ts = events[0].timestamp
@@ -389,6 +392,8 @@ def cmd_annotate(args: argparse.Namespace) -> int:
         try:
             offset_seconds = _parse_offset(at_str)
             event_id = _find_event_by_offset(store, full_id, offset_seconds)
+        except UnusableTimestampError:
+            raise
         except ValueError as e:
             sys.stderr.write(f"{e}\n")
             return 1

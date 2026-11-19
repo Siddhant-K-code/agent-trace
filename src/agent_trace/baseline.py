@@ -26,10 +26,10 @@ from pathlib import Path
 from typing import TextIO
 
 from .cost import estimate_cost
-from .event_data import require_object_event_data
+from .event_data import require_object_event_data, require_usable_timestamps
 from .explain import PHASE_DATA_EVENT_TYPES
 from .failures import count_session_errors
-from .models import EventType, TraceEvent
+from .models import EventType, TraceEvent, usable_time
 from .store import TraceStore
 
 
@@ -153,14 +153,16 @@ def _session_cost(
     This is ``estimate_cost`` with its default model, so sessions that record
     token usage (such as Codex model requests) are priced from that usage and
     other sessions from event sizes. Returns None when the session cannot be
-    priced: its events cannot be read, or a tool call or prompt has data that
-    is not a JSON object, which ``agent-strace cost`` refuses. Other errors
+    priced: its events cannot be read, a tool call or prompt has data that
+    is not a JSON object, or an event timestamp is not a Unix time in
+    seconds. ``agent-strace cost`` refuses the last two. Other errors
     propagate so that a bug cannot pass for a $0 session.
     """
     try:
         require_object_event_data(
             events, event_types=PHASE_DATA_EVENT_TYPES, session_id=session_id
         )
+        require_usable_timestamps(events, session_id=session_id)
         return estimate_cost(store, session_id).total_cost
     except (OSError, ValueError):
         return None
@@ -171,18 +173,14 @@ def _session_cost(
 LOWER_BOUND_METRICS = frozenset({"tool_calls", "llm_requests", "duration_ms", "cost_usd"})
 
 
-def _is_number(value: object) -> bool:
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(value)
-    )
-
-
 def _open_duration_ms(started_at: object, events: list[TraceEvent]) -> float | None:
-    """Milliseconds from the session start to its last event, or None if unknown."""
-    stamps = [e.timestamp for e in events if _is_number(e.timestamp)]
-    if not stamps or not _is_number(started_at):
+    """Milliseconds from the session start to its last event, or None if unknown.
+
+    Event stamps that are not a Unix time in seconds are skipped. An unusable
+    started_at gives None.
+    """
+    stamps = [e.timestamp for e in events if usable_time(e.timestamp) is not None]
+    if not stamps or usable_time(started_at) is None:
         return None
     duration = (max(stamps) - started_at) * 1000
     return duration if duration >= 0 else None

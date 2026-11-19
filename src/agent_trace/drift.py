@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import TextIO
 
 from .cost import session_cost
-from .event_data import str_field
+from .event_data import require_usable_timestamps, str_field
 from .failures import count_session_errors
 from .inert import inert
 from .models import EventType, TraceEvent
@@ -247,6 +247,14 @@ def _extract_metrics(
     meta_started: float,
     cost_usd: float | None = None,
 ) -> SessionMetrics:
+    """Measure one session.
+
+    Raises UnusableTimestampError when the first or last event's timestamp is
+    not a Unix time in seconds, since the duration reads both.
+    compute_fingerprint then skips the session.
+    """
+    if events:
+        require_usable_timestamps(events, indexes={0, len(events) - 1})
     tool_mix: dict[str, int] = {}
     error_count = count_session_errors(events)
     total_tool_calls = 0

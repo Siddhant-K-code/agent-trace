@@ -17,7 +17,12 @@ import sys
 from dataclasses import dataclass, field
 from typing import TextIO
 
-from .event_data import object_field, require_object_event_data, str_field
+from .event_data import (
+    object_field,
+    require_object_event_data,
+    require_usable_timestamps,
+    str_field,
+)
 from .explain import PHASE_DATA_EVENT_TYPES, Phase, build_phases, explain_session
 from .inert import inert
 from .models import EventType, usable_text
@@ -726,11 +731,13 @@ def cmd_diff(args: argparse.Namespace) -> int:
 
     # Every diff mode builds explain phases for both sessions.
     for full_id in (id_a, id_b):
+        events = store.load_events(full_id)
         require_object_event_data(
-            store.load_events(full_id),
+            events,
             event_types=PHASE_DATA_EVENT_TYPES,
             session_id=full_id,
         )
+        require_usable_timestamps(events, session_id=full_id)
 
     if getattr(args, "compare", False):
         report = compare_sessions(store, id_a, id_b)

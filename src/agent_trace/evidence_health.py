@@ -418,7 +418,12 @@ def _structural_reasons(
     previous_timestamp: float | None = None
     for event in events:
         timestamp = event.timestamp
-        if not isinstance(timestamp, (int, float)) or not math.isfinite(float(timestamp)):
+        try:
+            finite = isinstance(timestamp, (int, float)) and math.isfinite(float(timestamp))
+        except OverflowError:
+            # An int too large for a float is refused like infinity.
+            finite = False
+        if not finite:
             reasons.append(
                 _reason(
                     "invalid_timestamp",

@@ -493,7 +493,13 @@ def resolve_report_window(
 def _finite_timestamp(value: Any, field: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ComplianceReportError(f"{field} must be a number")
-    result = float(value)
+    try:
+        result = float(value)
+    except OverflowError as exc:
+        # An int too large for a float gets the message of a float that size.
+        if value < 0:
+            raise ComplianceReportError(f"{field} must be finite and non-negative") from exc
+        raise ComplianceReportError(f"{field} is outside the supported UTC range") from exc
     if not math.isfinite(result) or result < 0:
         raise ComplianceReportError(f"{field} must be finite and non-negative")
     if result > 253402300799:

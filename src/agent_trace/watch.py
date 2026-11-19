@@ -55,6 +55,7 @@ from .event_data import (
     NonObjectEventDataError,
     event_arguments,
     left_out_event_warning,
+    left_out_timestamp_warning,
     patch_paths,
     skipped_event_warning,
     str_field,
@@ -68,7 +69,7 @@ from .http_post import (
     url_problem as _stream_to_problem,
 )
 from .inert import inert
-from .models import EventType, TraceEvent
+from .models import EventType, TraceEvent, usable_time
 from .postmortem import clear_heartbeat, write_heartbeat
 from .process_identity import (
     PID_REUSED_REASON,
@@ -1496,9 +1497,9 @@ class EventStreamer:
 
     NDJSON mode sends every event with its data as stored. OTLP mode
     converts each session's events to spans. It leaves out each event whose
-    data is not a JSON object when the converter would read that data, with
-    one line on stderr per event, and still sends the other events of the
-    batch.
+    timestamp is not a Unix time in seconds, or whose data is not a JSON
+    object, when the converter would read it, with one line on stderr per
+    event, and still sends the other events of the batch.
     """
 
     def __init__(self, config: StreamConfig) -> None:
@@ -1662,8 +1663,9 @@ class EventStreamer:
         """Convert events to OTLP GenAI spans and POST them to the traces URL.
 
         Each session in the batch is converted and sent on its own. Events
-        whose non-object data the converter would read are left out (see
-        :func:`_otlp_readable_events`), and a session with no event left
+        whose timestamp the converter would read and that is not a Unix time
+        in seconds, and events whose non-object data it would read, are left
+        out (see :func:`_otlp_readable_events`), and a session with no event left
         sends nothing. If the conversion still fails, one line on stderr
         gives the number of events not sent and the exception class, never
         its message, and later batches are still sent.
@@ -1713,17 +1715,28 @@ class EventStreamer:
 def _otlp_readable_events(events: list[TraceEvent]) -> tuple[list[TraceEvent], str]:
     """Return the events of one session that the OTLP converter can read.
 
-    ``session_to_otlp_genai`` reads the data of the events that
-    ``otlp_genai_data_indexes`` names. Each of those whose data is not a JSON
-    object is left out. Leaving an event out changes how the others pair,
-    which can make the converter read another event, so the check repeats on
-    the events that are left. Events whose data the converter never reads
-    are kept. The second value is the stderr text for the events left out:
-    one line per event, in batch order.
+    ``session_to_otlp_genai`` reads the timestamps of the events of the
+    ``OTLP_GENAI_TIMESTAMP_EVENT_TYPES`` types. Each of those whose timestamp
+    is not a Unix time in seconds is left out first. The converter also reads
+    the data of the events that ``otlp_genai_data_indexes`` names. Each of
+    those whose data is not a JSON object is left out. Leaving an event out
+    changes how the others pair, which can make the converter read another
+    event, so the data check repeats on the events that are left. Events
+    whose data the converter never reads are kept. The second value is the
+    stderr text for the events left out: one line per event, in batch order.
+    An event left out for its timestamp gets only the timestamp line.
     """
-    from .otlp import otlp_genai_data_indexes
+    from .otlp import OTLP_GENAI_TIMESTAMP_EVENT_TYPES, otlp_genai_data_indexes
 
-    positions = list(range(len(events)))
+    unusable_times = {
+        position
+        for position, event in enumerate(events)
+        if event.event_type in OTLP_GENAI_TIMESTAMP_EVENT_TYPES
+        and usable_time(event.timestamp) is None
+    }
+    positions = [
+        position for position in range(len(events)) if position not in unusable_times
+    ]
     while True:
         kept = [events[position] for position in positions]
         unreadable = {
@@ -1737,7 +1750,9 @@ def _otlp_readable_events(events: list[TraceEvent]) -> tuple[list[TraceEvent], s
             position for index, position in enumerate(positions) if index not in unreadable
         ]
     lines = "".join(
-        left_out_event_warning("stream", events[position])
+        left_out_timestamp_warning("stream", events[position])
+        if position in unusable_times
+        else left_out_event_warning("stream", events[position])
         for position in sorted(set(range(len(events))).difference(positions))
     )
     return kept, lines

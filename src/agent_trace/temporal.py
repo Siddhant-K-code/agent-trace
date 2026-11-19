@@ -18,9 +18,20 @@ import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from .event_data import NonObjectEventDataError, require_object_event_data
+from .event_data import (
+    NonObjectEventDataError,
+    UnusableTimestampError,
+    require_object_event_data,
+    require_usable_session_times,
+    require_usable_timestamps,
+)
 from .models import SessionMeta, TraceEvent
-from .otlp import export_otlp_payload, otlp_genai_data_indexes, session_to_otlp_genai
+from .otlp import (
+    OTLP_GENAI_TIMESTAMP_EVENT_TYPES,
+    export_otlp_payload,
+    otlp_genai_data_indexes,
+    session_to_otlp_genai,
+)
 from .propagation import extract_traceparent
 from .store import TraceStore
 
@@ -120,7 +131,9 @@ def session_to_temporal_otlp(
 
     Raises ValueError when the session has no usable Temporal trace context,
     and then NonObjectEventDataError when an event whose data the conversion
-    reads is not an object.
+    reads is not an object. Then raises UnusableTimestampError when an event
+    of a type the conversion reads, the session's started_at, or its ended_at
+    when it is not None, is not a Unix time in seconds.
     """
     trace_id = meta.trace_id.lower()
     parent_span_id = meta.parent_span_id.lower()
@@ -132,6 +145,8 @@ def session_to_temporal_otlp(
         )
     _validate_ids(trace_id, parent_span_id, trace_flags)
     require_object_event_data(events, indexes=otlp_genai_data_indexes(events))
+    require_usable_timestamps(events, event_types=OTLP_GENAI_TIMESTAMP_EVENT_TYPES)
+    require_usable_session_times(meta)
 
     payload = session_to_otlp_genai(
         meta,
@@ -166,7 +181,7 @@ def export_temporal_otlp(
         return False
     try:
         payload = session_to_temporal_otlp(meta, events, service_name=service_name)
-    except NonObjectEventDataError:
+    except (NonObjectEventDataError, UnusableTimestampError):
         raise
     except ValueError as exc:
         sys.stderr.write(f"Temporal export failed: {exc}\n")

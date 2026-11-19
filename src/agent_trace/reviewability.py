@@ -21,7 +21,12 @@ from typing import Any, Iterable, Sequence, TextIO
 
 from .approval import list_requests
 from .correlation import correlate_tool_events
-from .event_data import NonObjectEventDataError, require_object_event_data
+from .event_data import (
+    NonObjectEventDataError,
+    UnusableTimestampError,
+    require_object_event_data,
+    require_usable_timestamps,
+)
 from .external_evidence import (
     NOT_GRADED,
     ExternalEvidence,
@@ -1246,6 +1251,7 @@ def _load_sessions(
         meta = store.load_meta(item.session_id)
         events = store.load_events(item.session_id)
         require_object_event_data(events, session_id=item.session_id)
+        require_usable_timestamps(events, session_id=item.session_id)
         provider = detect_provider(meta, events).provider
         entry = matrix.entry(provider) if provider else None
         sessions.append(_Session(item.session_id, item.link, meta, events, provider, entry))
@@ -1515,7 +1521,7 @@ def cmd_review(args: argparse.Namespace) -> int:
         report = build_report(
             store, linked, threshold, branch=branch, artifacts=artifacts, external=external
         )
-    except NonObjectEventDataError:
+    except (NonObjectEventDataError, UnusableTimestampError):
         raise
     except (PRCommentError, OSError, ValueError) as exc:
         sys.stderr.write(f"review: {exc}\n")
