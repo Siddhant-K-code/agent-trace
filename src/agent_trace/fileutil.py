@@ -16,6 +16,10 @@ root owns, in a root-owned directory that no other user can change, are
 trusted, such as ``/tmp`` and ``/var`` on macOS.  A cloned repository or an
 unpacked archive creates links owned by the current user, so those are never
 trusted.
+
+``split_lf_lines`` splits JSON Lines text at LF only. ``str.splitlines`` also
+splits at U+2028, U+2029 and U+0085, which JSON allows raw inside a string, so
+it can cut one record in two.
 """
 
 from __future__ import annotations
@@ -312,3 +316,16 @@ def fsync_directory(path: str | Path) -> None:
         pass
     finally:
         os.close(descriptor)
+
+
+def split_lf_lines(text: str) -> list[str]:
+    """Split JSON Lines text at LF only, for any reader of JSON Lines.
+
+    Each line loses one trailing CR, so CRLF text gives the same lines as LF
+    text. A final LF does not add an empty line, so ``""`` gives ``[]`` and
+    ``"\\n"`` gives ``[""]``.
+    """
+    lines = text.split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    return [line[:-1] if line.endswith("\r") else line for line in lines]

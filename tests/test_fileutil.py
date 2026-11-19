@@ -23,6 +23,7 @@ from agent_trace.fileutil import (
     unlock_descriptor,
     write_atomic,
 )
+from agent_trace.models import EventType, TraceEvent
 
 try:
     from _concurrency import run_concurrently
@@ -382,6 +383,47 @@ class TestSystemSymlinks(unittest.TestCase):
             link.symlink_to(directory, target_is_directory=True)
             self.assertIsNone(trusted_symlink_target(link))
             self.assertTrue(has_untrusted_symlink(link))
+
+
+# JSON allows these raw inside a string. str.splitlines() splits at all three.
+RAW_SEPARATORS = ("\u2028", "\u2029", "\u0085")
+
+
+class TestSplitLfLines(unittest.TestCase):
+    def test_splits_at_lf_and_drops_one_cr_per_line(self):
+        for text, expected in (
+            ("", []),
+            ("\n", [""]),
+            ("a\n", ["a"]),
+            ("a", ["a"]),
+            ("a\n\n", ["a", ""]),
+            ("a\r\nb\r\n", ["a", "b"]),
+            ("a\r\r\n", ["a\r"]),
+            ("a\rb\n", ["a\rb"]),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(fileutil.split_lf_lines(text), expected)
+
+    def test_keeps_raw_separators_inside_a_line(self):
+        for separator in RAW_SEPARATORS:
+            with self.subTest(separator=hex(ord(separator))):
+                first = json.dumps({"text": f"a{separator}b"}, ensure_ascii=False)
+                text = f"{first}\n" + '{"n": 2}\n'
+                self.assertEqual(fileutil.split_lf_lines(text), [first, '{"n": 2}'])
+                self.assertEqual(json.loads(fileutil.split_lf_lines(text)[0])["text"],
+                                 f"a{separator}b")
+
+    def test_matches_splitlines_on_lines_our_writers_produce(self):
+        lines = [
+            TraceEvent(EventType.TOOL_CALL, timestamp=1.0 + index,
+                       data={"text": f"a{separator}b"}).to_json()
+            for index, separator in enumerate(RAW_SEPARATORS)
+        ]
+        for newline in ("\n", "\r\n"):
+            with self.subTest(newline=repr(newline)):
+                text = "".join(line + newline for line in lines)
+                self.assertEqual(fileutil.split_lf_lines(text), text.splitlines())
+                self.assertEqual(fileutil.split_lf_lines(text), lines)
 
 
 if __name__ == "__main__":

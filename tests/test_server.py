@@ -34,8 +34,10 @@ from http.server import HTTPServer
 
 try:
     from _redirect_servers import ALL_REDIRECTS, REDIRECT_NOTE, RedirectServers
+    from test_fileutil import RAW_SEPARATORS
 except ImportError:
     from tests._redirect_servers import ALL_REDIRECTS, REDIRECT_NOTE, RedirectServers
+    from tests.test_fileutil import RAW_SEPARATORS
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +207,30 @@ class TestPostEvents(unittest.TestCase):
         status, resp = _post(f"{self.base}/events", body, "application/x-ndjson")
         data = json.loads(resp)
         self.assertGreater(data["errors"], 0)
+
+    def test_post_events_keeps_a_raw_line_separator_inside_a_value(self):
+        # JS JSON.stringify and serde_json leave these characters raw.
+        for separator in RAW_SEPARATORS:
+            with self.subTest(separator=hex(ord(separator))):
+                sid = f"raw-separator-{ord(separator):04x}"
+                records = [
+                    {"event_type": "tool_call", "session_id": sid, "timestamp": 1.0,
+                     "data": {"tool_name": "Bash",
+                              "arguments": {"command": f"echo a{separator}b"}}},
+                    {"event_type": "tool_result", "session_id": sid, "timestamp": 2.0,
+                     "data": {"tool_name": "Bash", "result": "ok"}},
+                ]
+                body = "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records)
+                status, resp = _post(
+                    f"{self.base}/events", body.encode("utf-8"), "application/x-ndjson"
+                )
+                self.assertEqual((status, json.loads(resp)), (200, {"accepted": 2, "errors": 0}))
+                events = self.store.load_events(sid)
+                self.assertEqual(
+                    [event.event_type for event in events],
+                    [EventType.TOOL_CALL, EventType.TOOL_RESULT],
+                )
+                self.assertEqual(events[0].data["arguments"]["command"], f"echo a{separator}b")
 
 
 _SECRET = "SECRET-DATA-VALUE"

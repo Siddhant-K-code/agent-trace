@@ -37,6 +37,7 @@ from pathlib import Path
 
 from .fileutil import fsync_directory as _fsync_directory
 from .fileutil import lock_descriptor as _lock_descriptor
+from .fileutil import split_lf_lines as _split_lf_lines
 from .fileutil import unlock_descriptor as _unlock_descriptor
 from .fileutil import write_atomic as _write_atomic
 from .models import EventType, SessionMeta, TraceEvent
@@ -506,7 +507,7 @@ class TraceStore:
             if mtime_ns == self._erasure_audit_mtime_ns:
                 return digest in self._erased_session_hashes
             erased_hashes: set[str] = set()
-            for line in audit_path.read_text(encoding="utf-8").splitlines():
+            for line in _split_lf_lines(audit_path.read_text(encoding="utf-8")):
                 if not line:
                     continue
                 try:
@@ -529,7 +530,7 @@ class TraceStore:
         if path.is_symlink():
             raise ValueError("refusing symlinked tenant audit")
         try:
-            for line in path.read_text(encoding="utf-8").splitlines():
+            for line in _split_lf_lines(path.read_text(encoding="utf-8")):
                 try:
                     if json.loads(line).get("operation_id") == operation_id:
                         return True
@@ -563,7 +564,7 @@ class TraceStore:
                 f"session {session_id} is already assigned to another tenant"
             )
         raw_text = path.read_text(encoding="utf-8") if path.exists() else ""
-        raw_lines = [line for line in raw_text.splitlines() if line]
+        raw_lines = [line for line in _split_lf_lines(raw_text) if line]
         tagged_lines: list[str] = []
         previous_line = ""
         for raw_line in raw_lines:
@@ -640,7 +641,7 @@ class TraceStore:
             "tenant-deletions.ndjson", "tenant deletion audit"
         )
         try:
-            for line in path.read_text(encoding="utf-8").splitlines():
+            for line in _split_lf_lines(path.read_text(encoding="utf-8")):
                 try:
                     record = json.loads(line)
                 except json.JSONDecodeError:
@@ -1246,7 +1247,7 @@ class TraceStore:
         f = self._session_file(session_id, "events.ndjson", "event stream")
         meta = self.load_meta(session_id)
         events = []
-        for line in f.read_text().strip().splitlines():
+        for line in _split_lf_lines(f.read_text(encoding="utf-8").strip()):
             if line:
                 event = TraceEvent.from_json(line)
                 if event.session_id and event.session_id != session_id:
@@ -1420,7 +1421,7 @@ class TraceStore:
             # Read the bytes untranslated so a rollback restores them exactly,
             # including CRLF endings written by older Windows versions.
             raw_text = path.read_bytes().decode("utf-8") if path.exists() else ""
-            raw_lines = [line for line in raw_text.splitlines() if line]
+            raw_lines = [line for line in _split_lf_lines(raw_text) if line]
             for raw_line in raw_lines:
                 event = TraceEvent.from_json(raw_line)
                 if event.session_id and event.session_id != session_id:

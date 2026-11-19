@@ -1,5 +1,6 @@
 """Tests for trace storage."""
 
+import concurrent.futures
 import hashlib
 import io
 import json
@@ -14,14 +15,49 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+import agent_trace
 from agent_trace.fileutil import lock_descriptor, unlock_descriptor
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore, ensure_trace_dir_gitignore
 
 try:
     from _concurrency import run_concurrently
+    from _no_telemetry import without_telemetry
+    from test_fileutil import RAW_SEPARATORS
 except ImportError:
     from tests._concurrency import run_concurrently
+    from tests._no_telemetry import without_telemetry
+    from tests.test_fileutil import RAW_SEPARATORS
+
+SRC_ROOT = Path(agent_trace.__file__).resolve().parent.parent
+
+
+def raw_separator_session(store: TraceStore, separator: str) -> tuple[str, list[str]]:
+    """Write a session whose middle event holds separator raw inside a string.
+
+    Our writers escape the character, but JS JSON.stringify and serde_json
+    leave it raw. Returns the session ID and the lines as written, chained.
+    """
+    meta = SessionMeta(started_at=1.0)
+    store.create_session(meta)
+    events = [
+        TraceEvent(EventType.USER_PROMPT, timestamp=1.0, data={"prompt": "hi"}),
+        TraceEvent(EventType.TOOL_CALL, timestamp=2.0, data={
+            "tool_name": "Bash", "arguments": {"command": f"echo a{separator}b"},
+        }),
+        TraceEvent(EventType.TOOL_RESULT, timestamp=3.0,
+                   data={"tool_name": "Bash", "result": "ok"}),
+    ]
+    lines: list[str] = []
+    for event in events:
+        event.session_id = meta.session_id
+        event.tenant_id = ""
+        event.prev_hash = hashlib.sha256(lines[-1].encode("utf-8")).hexdigest() if lines else ""
+        lines.append(event.to_json().replace(json.dumps(separator)[1:-1], separator))
+    assert separator in lines[1]
+    path = store.base_dir / meta.session_id / "events.ndjson"
+    path.write_bytes("".join(line + "\n" for line in lines).encode("utf-8"))
+    return meta.session_id, lines
 
 
 class TestTraceStore(unittest.TestCase):
@@ -308,6 +344,35 @@ class TestTraceStore(unittest.TestCase):
         self.assertTrue(all(event["prev_hash"] for event in streams[1][1:]))
         self.assertNotIn(secret, json.dumps(streams[1]))
 
+    def test_load_events_keeps_a_raw_line_separator_inside_a_value(self):
+        for separator in RAW_SEPARATORS:
+            with self.subTest(separator=hex(ord(separator))):
+                session_id, _ = raw_separator_session(self.store, separator)
+                events = self.store.load_events(session_id)
+                self.assertEqual(
+                    [event.event_type for event in events],
+                    [EventType.USER_PROMPT, EventType.TOOL_CALL, EventType.TOOL_RESULT],
+                )
+                self.assertEqual(events[1].data["arguments"]["command"], f"echo a{separator}b")
+
+    def test_appended_line_separators_are_escaped_and_load_back(self):
+        meta = SessionMeta()
+        self.store.create_session(meta)
+        commands = [f"echo a{separator}b" for separator in RAW_SEPARATORS]
+        for command in commands:
+            self.store.append_event(meta.session_id, TraceEvent(
+                event_type=EventType.TOOL_CALL,
+                data={"tool_name": "Bash", "arguments": {"command": command}},
+            ))
+        raw = (self.store.base_dir / meta.session_id / "events.ndjson").read_bytes()
+        for separator in RAW_SEPARATORS:
+            self.assertNotIn(separator.encode("utf-8"), raw)
+        self.assertEqual(
+            [event.data["arguments"]["command"]
+             for event in self.store.load_events(meta.session_id)],
+            commands,
+        )
+
 _GITIGNORE_BYTES = (
     b"# Created by agent-strace: traces may contain prompts and tool output.\n"
     b"*\n"
@@ -558,6 +623,56 @@ class TestStoreWriteLock(unittest.TestCase):
         for previous, line in zip(lines, lines[1:]):
             expected = hashlib.sha256(previous.encode()).hexdigest()
             self.assertEqual(json.loads(line)["prev_hash"], expected)
+
+
+class TestRawLineSeparatorCommands(unittest.TestCase):
+    """The read commands on a session whose line holds a raw line separator."""
+
+    def test_replay_stats_export_and_inspect_exit_zero(self):
+        root = Path(tempfile.mkdtemp(prefix="raw-separator-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        (root / "home").mkdir()
+        trace_dir = root / "traces"
+        store = TraceStore(str(trace_dir), use_workspace_env=False)
+        sessions = {
+            separator: raw_separator_session(store, separator)[0]
+            for separator in RAW_SEPARATORS
+        }
+        env = without_telemetry({
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("AGENT_STRACE_") and key != "AGENT_TRACE_DIR"
+        })
+        env["PYTHONPATH"] = str(SRC_ROOT)
+        env["HOME"] = env["USERPROFILE"] = str(root / "home")
+        env["PYTHONIOENCODING"] = "utf-8"
+        jobs = [
+            (separator, command)
+            for separator in RAW_SEPARATORS
+            for command in ("replay", "stats", "export", "inspect")
+        ]
+
+        def run(job):
+            separator, command = job
+            extra = ["--format", "json"] if command == "export" else []
+            return subprocess.run(
+                [sys.executable, "-m", "agent_trace.entry", "--trace-dir", str(trace_dir),
+                 command, sessions[separator], *extra],
+                capture_output=True, text=True, encoding="utf-8",
+                env=env, cwd=root, timeout=120,
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(run, jobs))
+        for (separator, command), result in zip(jobs, results):
+            with self.subTest(separator=hex(ord(separator)), command=command):
+                self.assertEqual(result.returncode, 0, result.stderr)
+                if command == "export":
+                    events = json.loads(result.stdout)
+                    self.assertEqual(len(events), 3)
+                    self.assertEqual(
+                        events[1]["data"]["arguments"]["command"], f"echo a{separator}b"
+                    )
 
 
 if __name__ == "__main__":

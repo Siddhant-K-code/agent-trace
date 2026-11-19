@@ -28,6 +28,11 @@ from agent_trace.tenancy import (
 )
 from agent_trace.watch import cmd_watch
 
+try:
+    from test_store import raw_separator_session
+except ImportError:
+    from tests.test_store import raw_separator_session
+
 
 def _event(session_id: str, timestamp: float = 1.0, **kwargs) -> TraceEvent:
     data = kwargs.pop("data", {"prompt": "hello tenant"})
@@ -38,6 +43,15 @@ def _event(session_id: str, timestamp: float = 1.0, **kwargs) -> TraceEvent:
         data=data,
         **kwargs,
     )
+
+
+def _raw_separator_line(record: dict) -> bytes:
+    """Return record as one JSON line with a raw U+2028 in an added "note" field.
+
+    Our writers escape U+2028, so only a hand-written line holds it raw.
+    """
+    line = json.dumps({**record, "note": "a\u2028b"}, ensure_ascii=False)
+    return (line + "\n").encode("utf-8")
 
 
 def _attr_values(span: dict) -> dict:
@@ -421,6 +435,56 @@ class TestTenantModelAndStore(TenantTestCase):
         audits = (recovered.base_dir / "tenant-audit.ndjson").read_text().splitlines()
         self.assertEqual(len(audits), 1)
 
+    def test_tag_session_keeps_a_raw_line_separator_inside_a_value(self):
+        session_id, _ = raw_separator_session(self.store, "\u2028")
+        events_path = self.store.base_dir / session_id / "events.ndjson"
+
+        self.assertEqual(self.store.tag_session(session_id, "tenant-a"), 3)
+
+        raw = events_path.read_bytes()
+        self.assertNotIn("\u2028".encode("utf-8"), raw)
+        self.assertIn(b"\\u2028", raw)
+        self.assertTrue(verify_chain(self.store, session_id).ok)
+        events = self.store.load_events(session_id)
+        self.assertEqual({event.tenant_id for event in events}, {"tenant-a"})
+        self.assertEqual(events[1].data["arguments"]["command"], "echo a\u2028b")
+
+    def test_deletion_audit_line_with_a_raw_line_separator_is_read(self):
+        session_id = "erased-session"
+        operation_id = "f" * 32
+        (self.store.base_dir / "tenant-deletions.ndjson").write_bytes(_raw_separator_line({
+            "action": "tenant_data_deletion",
+            "operation_id": operation_id,
+            "session_id_sha256": [hashlib.sha256(session_id.encode()).hexdigest()],
+            "status": "completed",
+        }))
+
+        self.assertTrue(self.store._deletion_audit_has(operation_id, "completed"))
+        with self.assertRaisesRegex(ValueError, "was erased"):
+            self.store.create_session(SessionMeta(session_id=session_id))
+
+    def test_tag_recovery_does_not_repeat_an_audit_line_with_a_raw_line_separator(self):
+        meta = SessionMeta(session_id="recover-tag-raw", tenant_id="")
+        self.store.create_session(meta)
+        self.store.append_event(meta.session_id, _event(meta.session_id))
+        operation_id = "c" * 32
+        audit_path = self.store.base_dir / "tenant-audit.ndjson"
+        audit_path.write_bytes(_raw_separator_line({
+            "action": "session_tenant_assigned", "operation_id": operation_id,
+        }))
+        journal_dir = self.store.base_dir / ".tenant-journal"
+        journal_dir.mkdir()
+        (journal_dir / f"tag-{operation_id}.json").write_text(json.dumps({
+            "operation": "tag_session", "operation_id": operation_id,
+            "session_id": meta.session_id, "tenant_id": "tenant-a",
+            "phase": "commit", "previous_terminal_hash": "before",
+        }))
+
+        recovered = TraceStore(self.tempdir.name, redact=False)
+
+        self.assertEqual(recovered.load_meta(meta.session_id).tenant_id, "tenant-a")
+        self.assertEqual(audit_path.read_bytes().count(b"\n"), 1)
+
 
 class TestTenantCostsAndCommands(TenantTestCase):
     def test_cost_reports_are_exactly_tenant_scoped(self):
@@ -550,6 +614,17 @@ class TestTenantExportAndDelete(TenantTestCase):
         self.assertEqual(payload["sessions"][0]["session"]["session_id"], "a")
         self.assertEqual(payload["sessions"][0]["events"][0]["tenant_id"], "tenant-a")
         self.assertNotIn("tenant-b", json.dumps(payload))
+
+    def test_export_reads_an_audit_line_with_a_raw_line_separator(self):
+        (self.store.base_dir / "tenant-audit.ndjson").write_bytes(_raw_separator_line({
+            "action": "session_tenant_assigned",
+            "operation_id": "d" * 32,
+            "tenant_id_sha256": hashlib.sha256(b"tenant-a").hexdigest(),
+        }))
+
+        records = tenant_export_payload(self.store, "tenant-a")["audit_records"]
+
+        self.assertEqual([item["record"]["note"] for item in records], ["a\u2028b"])
 
     def test_admin_operations_fail_closed_on_corrupt_session_metadata(self):
         good = self.create_session("admin-good", "tenant-a")

@@ -25,6 +25,7 @@ from typing import TextIO
 from .cost import session_cost
 from .event_data import require_object_event_data
 from .failures import count_session_errors
+from .fileutil import split_lf_lines
 from .inert import inert
 from .models import EventType, SessionMeta, TraceEvent
 from .store import TraceStore
@@ -114,7 +115,7 @@ def load_annotations(store: TraceStore) -> list[TrendAnnotation]:
     if not p.exists():
         return []
     result = []
-    for line in p.read_text().splitlines():
+    for line in split_lf_lines(p.read_text(encoding="utf-8")):
         line = line.strip()
         if not line:
             continue

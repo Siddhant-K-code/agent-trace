@@ -522,6 +522,16 @@ class TestCollectorClient(unittest.TestCase):
                 "http://localhost:8000", "secret", opener=unauthenticated
             ).list_sessions()
 
+    def test_load_events_keeps_a_raw_line_separator_inside_a_value(self):
+        body = self._event_bytes(data={"prompt": "a\u2028b"})
+        body = body.replace(b"\\u2028", "\u2028".encode("utf-8"))
+        opener = _RouteOpener([], {"remote": body})
+        client = CollectorClient("http://localhost:8000", "secret", opener=opener)
+
+        events = client.load_events(SessionMeta.from_json(json.dumps(self._meta())))
+
+        self.assertEqual([event.data["prompt"] for event in events], ["a\u2028b"])
+
     def test_redirect_size_and_truncation_fail_closed(self):
         class RedirectOpener:
             def open(self, request, timeout=0):

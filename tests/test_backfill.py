@@ -186,6 +186,22 @@ class TestDryRunAndApply(_Base):
         self.assertEqual(len(store.load_events("sub1")), 7)
         self.assertTrue(verify_chain(store, "sub1").ok)
 
+    def test_apply_reads_a_raw_line_separator_inside_a_value(self):
+        events = subagent_events("sub1")
+        events[-1].data["text"] = "done\u2028ok"
+        events_path = write_metaless(self.root, "sub1", events) / "events.ndjson"
+        # The last line holds the raw character, so the hash chain stays valid.
+        events_path.write_bytes(
+            events_path.read_bytes().replace(b"\\u2028", "\u2028".encode("utf-8"))
+        )
+
+        report = backfill_trace_dir(self.root, apply=True)
+
+        self.assertEqual(self.item(report, "sub1").status, "written")
+        store = TraceStore(self.root, redact=False, use_workspace_env=False)
+        self.assertEqual(store.load_events("sub1")[-1].data["text"], "done\u2028ok")
+        self.assertTrue(verify_chain(store, "sub1").ok)
+
     def test_apply_holds_store_write_lock(self):
         write_metaless(self.root, "sub1", subagent_events("sub1"))
         held = []

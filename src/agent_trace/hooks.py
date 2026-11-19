@@ -50,6 +50,7 @@ from contextvars import ContextVar
 from pathlib import Path
 
 from .failures import is_failed_response
+from .fileutil import split_lf_lines
 from .models import EventType, SessionMeta, TraceEvent
 from .pairing import hook_call_timestamp, link_response, match_hook_tool_call
 from .redact import redact_data, redact_data_with_status, redaction_enabled
@@ -1034,7 +1035,7 @@ def _events_containing(store: TraceStore, session_id: str, marker: str):
         text = path.read_text(encoding="utf-8")
     except (OSError, ValueError):
         return
-    for line in reversed(text.splitlines()):
+    for line in reversed(split_lf_lines(text)):
         if marker not in line:
             continue
         try:

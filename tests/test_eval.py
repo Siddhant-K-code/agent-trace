@@ -23,6 +23,11 @@ from agent_trace.eval.config import EvalConfig, ScorerConfig, load_config
 from agent_trace.eval.dataset import DatasetEntry, add_entry, list_entries, export_entries
 from agent_trace.eval.runner import EvalReport, run_eval, format_report_table, format_report_json, format_compare
 
+try:
+    from test_fileutil import RAW_SEPARATORS
+except ImportError:  # pragma: no cover - package-style test discovery
+    from tests.test_fileutil import RAW_SEPARATORS
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -364,6 +369,15 @@ class TestDataset(unittest.TestCase):
         self.assertEqual(loaded.session_id, entry.session_id)
         self.assertEqual(loaded.label, entry.label)
         self.assertEqual(loaded.entry_id, entry.entry_id)
+
+    def test_list_keeps_a_raw_line_separator_inside_a_label(self):
+        labels = [f"a{separator}b" for separator in RAW_SEPARATORS]
+        with open(self.dataset_path, "w", encoding="utf-8", newline="\n") as f:
+            for number, label in enumerate(labels):
+                record = {"session_id": f"s{number}", "label": label}
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+        self.assertEqual([entry.label for entry in list_entries(self.dataset_path)], labels)
 
 
 # ---------------------------------------------------------------------------

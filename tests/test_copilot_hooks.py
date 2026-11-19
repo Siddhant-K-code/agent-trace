@@ -14,6 +14,7 @@ from unittest.mock import patch
 from agent_trace.cli import cmd_setup
 from agent_trace.hooks import _read_active_session, hook_main
 from agent_trace.models import EventType
+from agent_trace.setup_verify import _copilot_disabled_plugins
 from agent_trace.store import TraceStore
 
 
@@ -531,6 +532,22 @@ class TestCopilotSetupWithPlugin(unittest.TestCase):
                                  COPILOT_PLUGIN_HOOK["command"])
                 self.user_hooks.unlink()
                 shutil.rmtree(plugin.parent.parent)
+
+    def test_disabled_plugin_is_found_next_to_a_raw_line_separator(self):
+        # JSON.stringify leaves U+2028 raw inside a string.
+        disabled = {"name": "agent-strace", "marketplace": "agent-trace", "enabled": False}
+        for settings, config in (
+            ({"note": "a\u2028b", "enabledPlugins": {"agent-strace@agent-trace": False}}, {}),
+            ({}, {"note": "a\u2028b", "installedPlugins": [disabled]}),
+        ):
+            with self.subTest(settings=settings, config=config):
+                for name, data in (("settings.json", settings), ("config.json", config)):
+                    (self.home / name).write_text(
+                        json.dumps(data, ensure_ascii=False), encoding="utf-8"
+                    )
+                self.assertEqual(
+                    _copilot_disabled_plugins(self.home)[0], {"agent-strace@agent-trace"}
+                )
 
     def test_unrelated_plugin_does_not_block_setup(self):
         plugin = self.home / "installed-plugins" / "other" / "linter"

@@ -10,6 +10,8 @@ import subprocess
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
+from .fileutil import split_lf_lines
+
 try:
     import tomllib as _tomllib
 except ModuleNotFoundError:  # Python 3.10: _FeatureFlagReader is used instead.
@@ -919,7 +921,7 @@ def _read_commented_json(path: Path) -> dict:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
         return {}
-    lines = [line for line in text.splitlines() if not line.lstrip().startswith("//")]
+    lines = [line for line in split_lf_lines(text) if not line.lstrip().startswith("//")]
     try:
         data = json.loads("\n".join(lines))
     except ValueError:

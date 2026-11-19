@@ -35,6 +35,11 @@ try:
 except ImportError:  # pragma: no cover - package-style test discovery
     from tests import _escapes
 
+try:
+    from test_fileutil import RAW_SEPARATORS
+except ImportError:  # pragma: no cover - package-style test discovery
+    from tests.test_fileutil import RAW_SEPARATORS
+
 # Markup that ends the cell and runs script if it goes into the page raw.
 HTML_PAYLOAD = "</td><script>alert(1)</script><img src=x onerror=alert(1)>"
 
@@ -162,6 +167,18 @@ class TestAnnotations(unittest.TestCase):
     def test_load_empty(self):
         anns = load_annotations(self.store)
         self.assertEqual(anns, [])
+
+    def test_load_keeps_a_raw_line_separator_inside_a_note(self):
+        notes = [f"a{separator}b" for separator in RAW_SEPARATORS]
+        path = self.store.base_dir / "annotations.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"".join(
+            (json.dumps({"date": "2026-05-10", "note": note}, ensure_ascii=False) + "\n")
+            .encode("utf-8")
+            for note in notes
+        ))
+
+        self.assertEqual([annotation.note for annotation in load_annotations(self.store)], notes)
 
     def test_annotation_x_fracs(self):
         now = time.time()
