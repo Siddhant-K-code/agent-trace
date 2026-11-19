@@ -781,7 +781,11 @@ class TestPatternsMatchMain(unittest.TestCase):
 
 
 class TestPatternCost(unittest.TestCase):
-    """Inputs that took quadratic time on main stay fast and small."""
+    """Inputs that took quadratic time on main stay fast and small.
+
+    The time guards measure the CPU time of this thread on purpose, so a busy
+    machine does not fail them.
+    """
 
     BEGIN = "-----BEGIN PRIVATE KEY-----"
 
@@ -803,9 +807,9 @@ class TestPatternCost(unittest.TestCase):
         for name, text in shapes.items():
             with self.subTest(name):
                 for check in (_contains_secret, redact_value):
-                    start = time.perf_counter()
+                    start = time.thread_time()
                     check(text)
-                    self.assertLess(time.perf_counter() - start, 1.0, check.__name__)
+                    self.assertLess(time.thread_time() - start, 1.0, check.__name__)
 
     def test_provider_key_near_misses_finish_fast(self):
         # About 1 MB each: prefixes with no body, prefixes inside a word, and
@@ -840,9 +844,9 @@ class TestPatternCost(unittest.TestCase):
         for name, text in shapes.items():
             with self.subTest(name):
                 for check in (_contains_secret, redact_value):
-                    start = time.perf_counter()
+                    start = time.thread_time()
                     check(text)
-                    self.assertLess(time.perf_counter() - start, 1.0, check.__name__)
+                    self.assertLess(time.thread_time() - start, 1.0, check.__name__)
 
     def test_long_runs_need_little_memory(self):
         # 320K characters each. A regex that keeps state for each word or line

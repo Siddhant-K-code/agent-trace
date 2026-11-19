@@ -29,6 +29,11 @@ try:  # keeps product telemetry off in this process and its children
 except ImportError:  # pragma: no cover - run as a package module
     from tests._no_telemetry import without_telemetry
 
+try:
+    from _sigint import SIGINT_DEFAULT
+except ImportError:  # pragma: no cover - run as a package module
+    from tests._sigint import SIGINT_DEFAULT
+
 from agent_trace import watch
 from agent_trace.approval import approve_request, deny_request, list_requests, load_request
 from agent_trace.models import EventType, SessionMeta, TraceEvent
@@ -1138,7 +1143,7 @@ class TestKillProcessTreeLive(unittest.TestCase):
         with open(log, "wb") as log_file:
             proc = subprocess.Popen(
                 [
-                    sys.executable, "-m", "agent_trace.entry", "--trace-dir", str(trace_dir),
+                    *SIGINT_DEFAULT, "-m", "agent_trace.entry", "--trace-dir", str(trace_dir),
                     "watch", SESSION, "--agent-pid", str(agent.pid), "--timeout", "1s",
                 ],
                 cwd=tree.folder, env=env, stdout=log_file, stderr=subprocess.STDOUT,
