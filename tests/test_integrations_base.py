@@ -551,7 +551,10 @@ class TestRunSession(unittest.TestCase):
     def test_symlinked_registry_is_refused(self):
         outside = Path(self.trace_dir) / "outside"
         outside.write_text("", encoding="utf-8")
-        self.registry().symlink_to(outside)
+        try:
+            self.registry().symlink_to(outside)
+        except OSError as exc:
+            self.skipTest(f"cannot create a symlink: {exc}")
         with self.assertRaises(ValueError):
             with _base.run_session(self.store, "agent"):
                 pass
@@ -567,6 +570,104 @@ class TestRunSession(unittest.TestCase):
                     raise RuntimeError("boom")
         self.assertEqual(self.kinds(sid)[-1], EventType.SESSION_END)
         self.assertEqual(self.markers(), [])
+
+
+class FakeKernel32:
+    """kernel32 functions as _base._windows_process calls them, answering
+    for one process."""
+
+    def __init__(self, handle=7, open_error=0, exit_code=259, created=None):
+        self.closed = []
+        self.opened = []
+
+        def open_process(access, inherit, pid):
+            self.opened.append((access, inherit, pid))
+            return handle
+
+        def get_exit_code(h, code):
+            code._obj.value = exit_code
+            return 1
+
+        def get_times(h, *times):
+            if created is None:
+                return 0
+            times[0]._obj.dwHighDateTime = created >> 32
+            times[0]._obj.dwLowDateTime = created & 0xFFFFFFFF
+            return 1
+
+        self.OpenProcess = open_process
+        self.GetExitCodeProcess = get_exit_code
+        self.GetProcessTimes = get_times
+
+        def close_handle(h):
+            self.closed.append(h)
+            return 1
+
+        self.CloseHandle = close_handle
+        self.open_error = open_error
+
+
+class TestWindowsProcess(unittest.TestCase):
+    """The Windows process checks behind the run registry."""
+
+    def windows_process(self, kernel32):
+        return self.windows_process_call(kernel32, _base._windows_process)
+
+    def test_running_process_has_its_creation_time_identity(self):
+        kernel32 = FakeKernel32(created=(5 << 32) | 9)
+        self.assertEqual(self.windows_process(kernel32), (True, f"win:{(5 << 32) | 9}"))
+        self.assertEqual(kernel32.opened, [(0x1000, False, 1234)])
+        self.assertEqual(kernel32.closed, [7])
+
+    def test_exited_process_is_not_alive(self):
+        kernel32 = FakeKernel32(exit_code=0, created=1)
+        self.assertEqual(self.windows_process(kernel32), (False, None))
+        self.assertEqual(kernel32.closed, [7])
+
+    def test_process_that_cannot_be_opened(self):
+        # Access denied means a process has the PID; any other error means none does.
+        self.assertEqual(self.windows_process(FakeKernel32(handle=0, open_error=5)), (True, None))
+        self.assertEqual(self.windows_process(FakeKernel32(handle=0, open_error=87)), (False, None))
+
+    def test_unknown_creation_time_keeps_the_process_alive_without_identity(self):
+        kernel32 = FakeKernel32(created=None)
+        self.assertEqual(self.windows_process(kernel32), (True, None))
+        self.assertEqual(kernel32.closed, [7])
+
+    def test_identity_and_liveness_use_it_on_windows(self):
+        kernel32 = FakeKernel32(created=42)
+        with patch.object(_base.os, "name", "nt"):
+            self.assertEqual(self.windows_process_call(kernel32, _base._process_identity), "win:42")
+            self.assertTrue(self.windows_process_call(kernel32, _base._pid_alive))
+        with patch.object(_base.os, "name", "nt"):
+            self.assertFalse(self.windows_process_call(
+                FakeKernel32(exit_code=1, created=42), _base._pid_alive))
+
+    def windows_process_call(self, kernel32, function):
+        import ctypes
+        with patch.object(ctypes, "WinDLL", lambda *a, **k: kernel32, create=True), \
+                patch.object(ctypes, "get_last_error", lambda: kernel32.open_error, create=True):
+            return function(1234)
+
+    @unittest.skipUnless(os.name == "nt", "real Windows processes")
+    def test_real_processes(self):
+        alive, identity = _base._windows_process(os.getpid())
+        self.assertTrue(alive)
+        self.assertRegex(identity, r"^win:\d+$")
+        self.assertEqual(_base._process_identity(os.getpid()), identity)
+
+        child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.readline()"],
+                                 stdin=subprocess.PIPE)
+        self.addCleanup(child.wait, 60)
+        child_alive, child_identity = _base._windows_process(child.pid)
+        self.assertTrue(child_alive)
+        self.assertRegex(child_identity, r"^win:\d+$")
+        self.assertNotEqual(child_identity, identity)
+        child.stdin.close()
+        child.wait(timeout=60)
+        # Popen still holds the process handle, so the PID cannot be reused yet.
+        self.assertEqual(_base._windows_process(child.pid), (False, None))
+        self.assertFalse(_base._pid_alive(child.pid))
 
 
 if __name__ == "__main__":
