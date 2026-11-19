@@ -109,23 +109,25 @@ class _Terminal:
             self.set_foreground(os.getpgrp())
 
 
-# Run in the command's process group. It reports each SIGINT and SIGQUIT the
-# group gets, and on SIGUSR1 reports "done" and exits. Python runs signal
-# handlers in signal-number order, so a SIGINT or SIGQUIT already pending
-# when SIGUSR1 arrives is reported before "done".
+# Run in the command's process group. SIGINT and SIGQUIT stay blocked, so
+# one the group gets stays pending and cannot kill the observer. When its
+# stdin is closed, the observer reports the pending ones followed by "done"
+# and exits. No handler runs and no signal is taken, so an interrupt sent
+# before stdin is closed is always reported. (sigwait is not used: on macOS
+# it can return a wrong signal number when several signals are pending.)
 _OBSERVER = """\
 import os, signal
-def report(signum, frame):
-    os.write(1, b"%d\\n" % signum)
-def done(signum, frame):
-    os.write(1, b"done\\n")
-    os._exit(0)
-for signum in (signal.SIGINT, signal.SIGQUIT):
-    signal.signal(signum, report)
-signal.signal(signal.SIGUSR1, done)
+interrupts = {signal.SIGINT, signal.SIGQUIT}
+signal.pthread_sigmask(signal.SIG_BLOCK, interrupts)
+for signum in interrupts:
+    # An ignored signal is discarded even while blocked.
+    signal.signal(signum, signal.SIG_DFL)
 os.write(1, b"ready\\n")
-while True:
-    signal.pause()
+while os.read(0, 1024):
+    pass
+pending = sorted(signal.sigpending() & interrupts)
+os.write(1, b"".join(b"%d\\n" % signum for signum in pending) + b"done\\n")
+os._exit(0)
 """
 
 
@@ -152,7 +154,7 @@ class _SignalObserver:
         try:
             proc = subprocess.Popen(
                 [sys.executable, "-I", "-S", "-c", _OBSERVER],
-                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL, **group,
             )
         except (OSError, subprocess.SubprocessError):
@@ -179,10 +181,7 @@ class _SignalObserver:
 
     def interrupts(self) -> set[int]:
         """Stop the observer and return the interrupts it got."""
-        try:
-            self._proc.send_signal(signal.SIGUSR1)
-        except OSError:
-            pass
+        self._close_stdin()
         lines = self._read_until(b"done")
         self.close()
         return {int(line) for line in lines if line.isdigit()}
@@ -193,9 +192,17 @@ class _SignalObserver:
                 self._proc.kill()
             except OSError:
                 pass
+        self._close_stdin()
         self._proc.wait()
         if self._proc.stdout is not None:
             self._proc.stdout.close()
+
+    def _close_stdin(self) -> None:
+        if self._proc.stdin is not None and not self._proc.stdin.closed:
+            try:
+                self._proc.stdin.close()
+            except OSError:
+                pass
 
 
 class CommandRunner:

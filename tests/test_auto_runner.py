@@ -492,10 +492,27 @@ class TestTerminalInterrupt(unittest.TestCase):
         observer = auto_runner._SignalObserver.start(0)
         self.assertIsNotNone(observer)
         self.addCleanup(observer.close)
-        # The observer handles both signals, so neither kills it.
+        # The observer blocks both signals, so neither kills it.
         os.killpg(observer._proc.pid, signal.SIGINT)
         os.killpg(observer._proc.pid, signal.SIGQUIT)
         self.assertEqual(observer.interrupts(), {signal.SIGINT, signal.SIGQUIT})
+
+    def test_observer_never_loses_an_interrupt_sent_just_before_it_stops(self):
+        # SIGINT, SIGQUIT and the stop request from interrupts() come back to
+        # back. The observer blocks both signals, so neither kills it.
+        lost = []
+        for attempt in range(200):
+            observer = auto_runner._SignalObserver.start(0)
+            self.assertIsNotNone(observer)
+            try:
+                os.killpg(observer._proc.pid, signal.SIGINT)
+                os.killpg(observer._proc.pid, signal.SIGQUIT)
+                got = observer.interrupts()
+            finally:
+                observer.close()
+            if got != {signal.SIGINT, signal.SIGQUIT}:
+                lost.append((attempt, sorted(got)))
+        self.assertEqual(lost, [])
 
     def test_only_an_observed_interrupt_that_killed_the_command_is_passed_on(self):
         both = {signal.SIGINT, signal.SIGQUIT}
