@@ -259,8 +259,42 @@ def _event_record(session_id: str, event_id: str, data: object = _NO_DATA) -> di
     return record
 
 
+_GOOD_TIMESTAMP = 1767225600.5
+_BIG_INT = int("1" + "0" * 400)
+# Not a Unix time in seconds. Each is valid JSON that json.dumps can write.
+_BAD_TIMESTAMPS = (
+    ("iso-text", "2026-01-01T00:00:00Z"),
+    ("null", None),
+    ("true", True),
+    ("object", {"key": _SECRET}),
+    ("nan", float("nan")),
+    ("infinity", float("inf")),
+    ("negative", -5),
+    ("1e300", 1e300),
+    ("milliseconds", 1767225600000),
+    ("400-digit-int", _BIG_INT),
+)
+_TIMESTAMP_REFUSAL = (
+    "[server] Refused one tool_call event because its timestamp is not a Unix "
+    "time in seconds."
+)
+
+
+def _timed_record(session_id: str, event_id: str, timestamp: object) -> dict:
+    record = _event_record(session_id, event_id, {"tool_name": event_id})
+    record["timestamp"] = timestamp
+    return record
+
+
+def _without_access_log(stderr: str) -> list[str]:
+    return [line for line in stderr.splitlines() if not line.startswith('[server] "')]
+
+
 class TestPostEventsNonObjectData(unittest.TestCase):
-    """POST /events refuses an event whose data is present but not an object."""
+    """POST /events refuses an event whose data is present but not an object.
+
+    It also refuses an event whose timestamp is not a Unix time in seconds.
+    """
 
     def setUp(self):
         self.store, _ = _make_store()
@@ -311,6 +345,39 @@ class TestPostEventsNonObjectData(unittest.TestCase):
                     stderr,
                 )
 
+    def test_each_unusable_timestamp_is_refused(self):
+        for name, timestamp in _BAD_TIMESTAMPS:
+            with self.subTest(timestamp=name):
+                session_id = f"bad-time-{name}"
+                status, resp, stderr = self._post_records(
+                    _timed_record(session_id, "evt-1", timestamp)
+                )
+                self.assertEqual(status, 202)
+                self.assertEqual(resp, {"accepted": 0, "errors": 1})
+                self.assertFalse((self.store.base_dir / session_id).exists())
+                lines = _without_access_log(stderr)
+                self.assertEqual(lines, [_TIMESTAMP_REFUSAL])
+                self.assertNotRegex(lines[0], r"\d")
+                for shown in (json.dumps(timestamp), str(timestamp), _SECRET):
+                    self.assertNotIn(shown.lower(), lines[0].lower())
+
+    def test_good_or_absent_timestamp_is_stored(self):
+        absent = _timed_record("absent-time", "evt-1", None)
+        del absent["timestamp"]
+        before = time.time()
+        for record in (_timed_record("good-time", "evt-1", _GOOD_TIMESTAMP), absent):
+            with self.subTest(session=record["session_id"]):
+                status, resp, stderr = self._post_records(record)
+                self.assertEqual(status, 200)
+                self.assertEqual(resp, {"accepted": 1, "errors": 0})
+                self.assertEqual(_without_access_log(stderr), [])
+        self.assertEqual(
+            [event["timestamp"] for event in self._stored("good-time")], [_GOOD_TIMESTAMP]
+        )
+        [stored] = self._stored("absent-time")
+        self.assertGreaterEqual(stored["timestamp"], before)
+        self.assertLessEqual(stored["timestamp"], time.time())
+
     def test_object_events_around_a_refused_event_are_stored_in_order(self):
         session_id = "mixed-batch"
         status, resp, _ = self._post_records(
@@ -327,6 +394,22 @@ class TestPostEventsNonObjectData(unittest.TestCase):
             [{"tool_name": "first"}, {"tool_name": "third"}],
         )
         # The server computes prev_hash from what it stored, so the chain holds.
+        self.assertTrue(verify_chain(self.store, session_id).ok)
+
+    def test_events_around_a_refused_timestamp_are_stored_in_order(self):
+        session_id = "mixed-times"
+        status, resp, _ = self._post_records(
+            _timed_record(session_id, "evt-1", _GOOD_TIMESTAMP),
+            _timed_record(session_id, "evt-2", 1767225600000),
+            _timed_record(session_id, "evt-3", _GOOD_TIMESTAMP + 1),
+        )
+        self.assertEqual(status, 202)
+        self.assertEqual(resp, {"accepted": 2, "errors": 1})
+        stored = self._stored(session_id)
+        self.assertEqual([event["event_id"] for event in stored], ["evt-1", "evt-3"])
+        self.assertEqual(
+            [event["timestamp"] for event in stored], [_GOOD_TIMESTAMP, _GOOD_TIMESTAMP + 1]
+        )
         self.assertTrue(verify_chain(self.store, session_id).ok)
 
     def test_event_without_data_is_stored_with_an_empty_object(self):
@@ -353,6 +436,17 @@ class TestPostEventsNonObjectData(unittest.TestCase):
         status, resp, _ = self._post_records(
             _event_record(session_id, "evt-1", [_SECRET]),
             _event_record(session_id, "evt-2", _SECRET),
+        )
+        self.assertEqual(status, 202)
+        self.assertEqual(resp, {"accepted": 0, "errors": 2})
+        self.assertFalse((self.store.base_dir / session_id).exists())
+        self.assertEqual(self.store.list_sessions(), [])
+
+    def test_batch_of_only_refused_timestamps_creates_no_session(self):
+        session_id = "only-bad-times"
+        status, resp, _ = self._post_records(
+            _timed_record(session_id, "evt-1", -5),
+            _timed_record(session_id, "evt-2", None),
         )
         self.assertEqual(status, 202)
         self.assertEqual(resp, {"accepted": 0, "errors": 2})

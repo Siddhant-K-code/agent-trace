@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .models import EventType, SessionMeta, TraceEvent
+from .models import EventType, SessionMeta, TraceEvent, usable_time
 from .store import TraceStore, resolve_trace_dir
 
 
@@ -73,17 +73,22 @@ def cmd_import(args: argparse.Namespace) -> int:
     return 0
 
 
-def _parse_iso_timestamp(ts: str) -> float:
-    """Convert ISO 8601 timestamp to Unix epoch seconds."""
+def _parse_iso_timestamp(ts: object) -> float:
+    """Convert an ISO 8601 timestamp to Unix epoch seconds.
+
+    Returns 0.0 for a value that is not a non-empty string, for text that does
+    not parse, and for a time that is not a Unix time in seconds, such as a
+    time before 1970.
+    """
     from datetime import datetime
 
-    if not ts:
+    if not isinstance(ts, str) or not ts:
         return 0.0
     try:
         # Handle Z suffix
         ts = ts.replace("Z", "+00:00")
         dt = datetime.fromisoformat(ts)
-        return dt.timestamp()
+        return usable_time(dt.timestamp()) or 0.0
     except (ValueError, OSError):
         return 0.0
 
@@ -229,6 +234,8 @@ def _import_jsonl(
             try:
                 raw = json.loads(line)
             except json.JSONDecodeError:
+                continue
+            if not isinstance(raw, dict):
                 continue
 
             # Skip queue operations

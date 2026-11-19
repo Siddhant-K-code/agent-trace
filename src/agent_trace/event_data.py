@@ -239,6 +239,19 @@ def refused_event_warning(command: str, event: TraceEvent) -> str:
     )
 
 
+def refused_timestamp_warning(command: str, event: TraceEvent) -> str:
+    """Return the stderr line the collector prints when it refuses a timestamp.
+
+    ``POST /events`` does not store an event whose ``timestamp`` is not a Unix
+    time in seconds. The line names the event type only, never the timestamp,
+    data values or event IDs.
+    """
+    return (
+        f"[{command}] Refused one {_event_type_value(event)} event "
+        "because its timestamp is not a Unix time in seconds.\n"
+    )
+
+
 def left_out_event_warning(command: str, event: TraceEvent) -> str:
     """Return the stderr line a live OTLP stream prints when it leaves an event out.
 

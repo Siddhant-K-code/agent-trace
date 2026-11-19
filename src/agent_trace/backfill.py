@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import sys
 import unicodedata
@@ -28,7 +27,7 @@ from pathlib import Path
 from .failures import count_session_errors
 from .fileutil import split_lf_lines
 from .hooks import _PROVIDER_AGENT
-from .models import EventType, SessionMeta, TraceEvent
+from .models import EventType, SessionMeta, TraceEvent, usable_time
 from .store import (
     _TENANT_ADMIN_AUXILIARY_DIRS,
     TraceStore,
@@ -213,12 +212,8 @@ class _Skip(Exception):
         self.detail = detail
 
 
-def _is_number(value: object) -> bool:
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(value)
-    )
+def _is_usable_time(value: object) -> bool:
+    return usable_time(value) is not None
 
 
 def _read_events(path: Path, session_id: str) -> tuple[list[TraceEvent], str]:
@@ -238,7 +233,7 @@ def _read_events(path: Path, session_id: str) -> tuple[list[TraceEvent], str]:
             event = TraceEvent.from_json(line)
         except (json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError) as exc:
             raise _Skip("unparseable_events", f"line {number}: {type(exc).__name__}") from exc
-        if not _is_number(event.timestamp):
+        if not _is_usable_time(event.timestamp):
             raise _Skip("unparseable_events", f"line {number}: invalid timestamp")
         if event.session_id and event.session_id != session_id:
             raise _Skip("session_id_mismatch", f"line {number}")

@@ -29,13 +29,14 @@ from agent_trace.skills import (
     load_codex_history,
     load_copilot_history,
 )
-from agent_trace.transcript_import import skill_tokens
+from agent_trace.transcript_import import _timestamp, skill_tokens
 
 PROMPT = "PROMPT_SENTINEL_9f2c"
 REASONING = "REASONING_SENTINEL_51ab"
 BODY = "BODY_SENTINEL_77de"
 SYSTEM = "SYSTEM_SENTINEL_0c4e"
 SENTINELS = (PROMPT, REASONING, BODY, SYSTEM)
+BIG_INT = int("1" + "0" * 400)
 
 
 def _iso(offset: float) -> str:
@@ -410,6 +411,22 @@ class TestCopilot(TranscriptTestBase):
         self.assertIn("No GitHub Copilot sessions found", err)
         self.assertIn("--copilot-dir", err)
 
+    def test_timestamp_too_large_for_a_float_is_ignored(self):
+        home = self.tmp / "copilot"
+        self._session(home, "dddd4444-0000-4000-8000-000000000004", [
+            {"type": "session.start", "timestamp": _iso(0),
+             "data": {"startTime": BIG_INT, "context": {"cwd": str(self.repo)}}},
+            {"type": "user.message", "timestamp": BIG_INT, "data": {"content": "/deploy-check"}},
+        ])
+
+        code, out, err = self.run_cli("--from-copilot", "--copilot-dir", str(home),
+                                      "--min-sessions", "1", "--format", "json")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("Read 1 GitHub Copilot session(s)", err)
+        self.assertEqual(self.skill(json.loads(out), "deploy-check")["invocations"],
+                         {"user": 1, "model": 0})
+
 
 class TestCodex(TranscriptTestBase):
     SESSION_ID = "019a0000-0000-7000-8000-000000000001"
@@ -545,6 +562,22 @@ class TestCodex(TranscriptTestBase):
         self.assertIn("1 file(s) that are not Codex rollouts", err)
         self.assertIn("--codex-dir", err)
 
+    def test_timestamp_too_large_for_a_float_is_ignored(self):
+        home = self.tmp / "codex"
+        meta = self._meta(self.SESSION_ID)
+        meta["payload"]["timestamp"] = BIG_INT
+        prompt = self._item(1, type="UserMessage", content=[{"type": "text", "text": "use $deploy-check"}])
+        prompt["timestamp"] = BIG_INT
+        self._rollout(home, "big", [meta, prompt])
+
+        code, out, err = self.run_cli("--from-codex", "--codex-dir", str(home),
+                                      "--min-sessions", "1", "--format", "json")
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("Read 1 Codex session(s)", err)
+        self.assertEqual(self.skill(json.loads(out), "deploy-check")["invocations"],
+                         {"user": 1, "model": 0})
+
     def test_defaults_to_codex_home(self):
         home = self.tmp / "custom-codex"
         self._recorded_rollout(home)
@@ -645,6 +678,17 @@ class TestCli(TranscriptTestBase):
     def test_skill_tokens_keep_only_mentions(self):
         self.assertEqual(skill_tokens(f"/deploy-check {PROMPT} $a-b and $c, cost $5"), "/deploy-check $a-b $c")
         self.assertEqual(skill_tokens(f"{PROMPT} /not-leading"), "")
+
+    def test_timestamp_keeps_only_unix_times_in_seconds(self):
+        for value in (BIG_INT, float("nan"), float("inf"), -5, 1e300, 1767225600000000,
+                      "1900-01-01T00:00:00Z", True, "not a time", None):
+            with self.subTest(value=value if value is not BIG_INT else "400-digit int"):
+                self.assertIsNone(_timestamp(value))
+        for value, expected in ((1767225600.5, 1767225600.5),
+                                (1767225600000, 1767225600.0),
+                                ("2026-01-01T00:00:00Z", 1767225600.0)):
+            with self.subTest(value=value):
+                self.assertEqual(_timestamp(value), expected)
 
     def test_skills_eval_workspace_detection(self):
         for path in ("/t/agent-strace-skills-eval-notes-k3x9_q2a/workspace",

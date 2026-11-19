@@ -134,6 +134,17 @@ but never data values or event IDs:
 [server] Refused one tool_call event because its data is an array, not an object.
 ```
 
+The collector also refuses an event whose `timestamp` is not a Unix time in
+seconds: text such as an ISO date, `null`, a boolean, an object, NaN, Infinity,
+a negative number, a time in milliseconds, or a number too large to be a date.
+Such an event is not stored, counts in `errors` and does not create a session.
+An event without `timestamp` is stored with the current time. The stderr line
+names the event type but never the timestamp:
+
+```
+[server] Refused one tool_call event because its timestamp is not a Unix time in seconds.
+```
+
 `POST /sessions` checks the metadata before it writes anything. It returns
 400 with `{"error": "<message>"}` and stores nothing when
 `org-report --endpoint` could not read that metadata back from

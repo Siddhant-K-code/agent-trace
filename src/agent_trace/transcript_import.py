@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping
 
-from .models import EventType, SessionMeta, TraceEvent
+from .models import EventType, SessionMeta, TraceEvent, usable_time
 from .store import TraceStore, validate_session_id
 
 _MAX_LINE_CHARS = 50_000_000
@@ -97,12 +97,18 @@ def _text(value: object) -> str:
 
 
 def _timestamp(value: object) -> float | None:
-    """Parse an ISO 8601 timestamp; return ``None`` when it is unusable."""
+    """Parse a timestamp; return ``None`` unless it is a Unix time in seconds.
+
+    A number above 1e11 is read as milliseconds.
+    """
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        number = float(value)
-        return number / 1000 if number > 1e11 else number
+        try:
+            number = float(value)
+        except OverflowError:
+            return None
+        return usable_time(number / 1000 if number > 1e11 else number)
     if not isinstance(value, str) or not value:
         return None
     text = value.strip().replace("Z", "+00:00")
@@ -113,7 +119,7 @@ def _timestamp(value: object) -> float | None:
         return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=datetime.timezone.utc)
-    return parsed.timestamp()
+    return usable_time(parsed.timestamp())
 
 
 def skill_tokens(text: str) -> str:
