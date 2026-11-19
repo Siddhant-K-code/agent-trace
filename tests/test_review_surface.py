@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import agent_trace
+from agent_trace import replay
 from agent_trace.annotate import Annotation, add_annotation
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.review_surface import (
@@ -35,6 +38,7 @@ class ReviewSurfaceTests(unittest.TestCase):
             for line in (FIXTURE_DIR / "events.ndjson").read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
+        self.fixture_ids = [event.event_id for event in events]
         self.store.create_session(SessionMeta(
             session_id=self.session_id,
             started_at=events[0].timestamp,
@@ -86,6 +90,29 @@ class ReviewSurfaceTests(unittest.TestCase):
         self.assertEqual(counts["recovery"], 1)
         self.assertEqual(counts["corrections"], 1)
         self.assertGreaterEqual(counts["gaps"], 1)
+
+    def test_replay_shows_the_review_items_in_the_same_order(self) -> None:
+        shown: list[TraceEvent] = []
+        format_event = replay.format_event
+
+        def record(event: TraceEvent, *args, **kwargs) -> str:
+            shown.append(event)
+            return format_event(event, *args, **kwargs)
+
+        with patch.object(replay, "format_event", side_effect=record):
+            replay.replay_session(self.store, self.session_id, out=io.StringIO())
+        review = build_session_review(self.store, self.session_id)
+
+        replayed = [
+            (event.event_id, event.event_type.value, event.parent_id or None, event.redacted)
+            for event in shown
+        ]
+        reviewed = [
+            (item["event_id"], item["event_type"], item["parent_id"], item["redacted"])
+            for item in review["items"]
+        ]
+        self.assertEqual(replayed, reviewed)
+        self.assertEqual([event_id for event_id, *_ in replayed], self.fixture_ids)
 
     def test_surfaces_live_capture_verification_for_supported_provider(self) -> None:
         session_id = "claude-review"

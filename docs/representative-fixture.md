@@ -10,7 +10,7 @@ The scenario intentionally includes a session boundary, redacted prompt, file re
 2. Edit `events.ndjson` using fields accepted by `TraceEvent.from_json()` and `annotations.jsonl` using fields accepted by `Annotation.from_json()`.
 3. Update `expected.json` whenever event count, failure/retry/recovery IDs, annotation IDs, or the intentional gap changes.
 4. Run `agent-strace validate src/agent_trace/corpus/v1/fixture-review-001 --format json`.
-5. Run `python -m unittest tests.test_representative_fixture tests.test_trace_validation -v`.
+5. Run `python -m unittest tests.test_representative_fixture tests.test_review_surface tests.test_trace_validation -v`. These cover the fixture itself; its json, ndjson, csv, anonymized, EU AI Act, OTLP and OTLP GenAI exports; and CLI replay listing the same ordered events as the review surface.
 6. Consumers may add assertions against this fixture, but generated expectations should be changed together with their source event change rather than hand-edited independently.
 
 ## Trust boundary
