@@ -684,6 +684,9 @@ class TestRecordProjectBudgetConfig(unittest.TestCase):
             self.addCleanup(patcher.stop)
             proxy.return_value.run.return_value = 0
             self.proxies.append(proxy)
+        # record starts its session in run(prepare=...), as the real proxy does.
+        record_proxy = self.proxies[0].return_value
+        record_proxy.run.side_effect = lambda prepare=None: (prepare and prepare()) or 0
 
     def _run(self, command: str, name: str, data: str) -> tuple[int, str, str]:
         path = Path(name)

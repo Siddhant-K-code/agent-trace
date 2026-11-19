@@ -411,6 +411,9 @@ class MCPProxy:
         with self._emit_lock:
             if self._sealed:
                 return
+            if not final and self._ending not in (None, threading.get_ident()):
+                # The session is ending: its counters are being saved.
+                return
             event.session_id = self.meta.session_id
             if self.redact or self.masking_config:
                 event.data = mask_event_data(
@@ -484,7 +487,10 @@ class MCPProxy:
         """Record the session end, seal the trace and save the final metadata."""
         # Wait for each write to the agent that has started to end.
         self._hold_agent_gates()
-        self._ending = threading.get_ident()
+        with self._emit_lock:
+            # From here only this thread records events, so the counters
+            # saved below are final.
+            self._ending = threading.get_ident()
         try:
             self.meta.ended_at = time.time()
             self.meta.total_duration_ms = (
@@ -511,7 +517,8 @@ class MCPProxy:
                 # The metadata is final: session_end changes no counter.
                 self._emit(TraceEvent(event_type=EventType.SESSION_END, data=data), final=True)
         finally:
-            self._ending = None
+            with self._emit_lock:
+                self._ending = None
             self._err_gate.release()
             self._out_gate.release()
         return returncode
@@ -626,8 +633,11 @@ class MCPProxy:
         self._emit(TraceEvent(event_type=EventType.ERROR, data={"message": message}))
         return self._end_session(returncode)
 
-    def run(self) -> int:
+    def run(self, prepare: Callable[[], None] | None = None) -> int:
         """Start the proxy. Blocks until the server exits.
+
+        prepare, if given, runs once the stop signal handlers are in, before
+        the session starts: a stop signal from then on ends the session.
 
         The session ends when the server exits, or when the proxy stops the
         server because the agent stopped reading or record got SIGTERM or
@@ -648,6 +658,8 @@ class MCPProxy:
         # any point after it starts reaches on_signal.
         previous_handlers = _handle_stop_signals(on_signal)
         try:
+            if prepare is not None:
+                prepare()
             returncode = self._run(stop_server, signals)
         finally:
             _restore_signal_handlers(previous_handlers)
@@ -678,12 +690,14 @@ class MCPProxy:
             return self._relay(server, stop_server)
         finally:
             try:
-                server.close()
-                if not self._sealed:
-                    try:
-                        self._end_session(server.returncode)
-                    except Exception:
-                        pass
+                try:
+                    server.close()
+                finally:
+                    if not self._sealed:
+                        try:
+                            self._end_session(server.returncode)
+                        except Exception:
+                            pass
             finally:
                 for writer in reversed(self._agent_writers):
                     restore = getattr(writer, "restore", None)
@@ -786,12 +800,21 @@ STOP_SIGNALS = ("SIGTERM", "SIGINT")
 def _handle_stop_signals(handler: Callable[[int, Any], None]) -> dict[int, Any]:
     """Install handler for the stop signals. Returns the handlers it replaced.
 
-    A signal record was started with ignored stays ignored. Signal handlers
-    can only be set in the main thread. Elsewhere nothing is installed.
+    A signal record was started with ignored stays ignored. An ignored
+    SIGCHLD is set back to the default, so the server is not reaped before
+    record has stopped what it started (see _Server). Signal handlers can
+    only be set in the main thread. Elsewhere nothing is installed.
     """
     previous: dict[int, Any] = {}
     if threading.current_thread() is not threading.main_thread():
         return previous
+    sigchld = getattr(signal, "SIGCHLD", None)
+    if sigchld is not None:
+        try:
+            if signal.getsignal(sigchld) == signal.SIG_IGN:
+                previous[sigchld] = signal.signal(sigchld, signal.SIG_DFL)
+        except (OSError, ValueError):
+            pass
     for name in STOP_SIGNALS:
         signum = getattr(signal, name, None)
         if signum is None:
@@ -847,7 +870,10 @@ class _Server:
     On POSIX the server leads a new process group and session, and a
     _TreeTracker finds the processes it started, including those that left
     the group. The server is not reaped until close(), so while they are
-    stopped its PID and process group ID name no other process. On Windows
+    stopped its PID and process group ID name no other process. Its exit is
+    seen with waitid(WNOWAIT), or a kqueue on macOS before Python 3.13. If
+    the server is reaped sooner (it exits before the kqueue watches it, or
+    SIGCHLD is ignored), its process group is signalled only while it runs. On Windows
     the server starts suspended and runs only once it is in a job object,
     which kills every process in it when record closes the job or exits. A
     server that cannot be put in a job is not run.
@@ -858,6 +884,11 @@ class _Server:
         self._job = None
         self.returncode: int | None = None
         self._tree: _TreeTracker | None = _TreeTracker() if posix else None
+        self._kqueue: Any = None
+        # True while the server's PID, and so its process group ID, can name
+        # no other process: it runs, or is a zombie record has not reaped.
+        self._auto_reaped = posix and _sigchld_ignored()
+        self._held = posix and not self._auto_reaped
         self.proc = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
@@ -869,6 +900,8 @@ class _Server:
         )
         if self._tree is not None:
             self._tree.start(self.proc.pid)
+            if _WAITID is None:
+                self._watch_exit()
             return
         try:
             self._job = _windows_job_and_resume(self.proc.pid)
@@ -879,30 +912,66 @@ class _Server:
                 _close(stream)
             raise
 
+    def _watch_exit(self) -> None:
+        """Watch for the server's exit without reaping it, where there is no waitid."""
+        if sys.platform != "darwin" or not hasattr(select, "kqueue"):
+            return
+        kq = select.kqueue()
+        try:
+            kq.control([select.kevent(
+                self.proc.pid, filter=select.KQ_FILTER_PROC,
+                flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                fflags=select.KQ_NOTE_EXIT | _NOTE_EXITSTATUS,
+            )], 0, 0)
+        except OSError:
+            # The server has exited already. A kqueue cannot watch a zombie.
+            kq.close()
+            return
+        self._kqueue = kq
+
     def poll(self) -> int | None:
         """The server's exit code, or None while it runs.
 
-        On POSIX an exited server is left a zombie, unreaped, until close().
+        On POSIX an exited server is left a zombie, unreaped, until close(),
+        where that can be done.
         """
         if self.returncode is not None:
             return self.returncode
         if self._tree is None:
             self.returncode = self.proc.poll()
             return self.returncode
-        try:
-            info = os.waitid(  # type: ignore[attr-defined]
-                os.P_PID, self.proc.pid,  # type: ignore[attr-defined]
-                os.WEXITED | os.WNOHANG | os.WNOWAIT,  # type: ignore[attr-defined]
-            )
-        except ChildProcessError:
-            # Reaped elsewhere, so its exit code is lost.
-            self.returncode = self.proc.poll()
-            if self.returncode is None:
+        if self._held and _WAITID is not None:
+            try:
+                info = _WAITID(
+                    os.P_PID, self.proc.pid,  # type: ignore[attr-defined]
+                    os.WEXITED | os.WNOHANG | os.WNOWAIT,  # type: ignore[attr-defined]
+                )
+            except ChildProcessError:
+                # Reaped elsewhere, so its exit code is lost.
+                self._held = False
                 self.returncode = 255
+                return self.returncode
+            if info is not None:
+                exited = info.si_code == os.CLD_EXITED  # type: ignore[attr-defined]
+                self.returncode = info.si_status if exited else -info.si_status
             return self.returncode
-        if info is not None:
-            exited = info.si_code == os.CLD_EXITED  # type: ignore[attr-defined]
-            self.returncode = info.si_status if exited else -info.si_status
+        if self._held and self._kqueue is not None:
+            try:
+                events = self._kqueue.control(None, 1, 0)
+            except OSError:
+                events = []
+            if events:
+                self.returncode = os.waitstatus_to_exitcode(events[0].data)
+                self._kqueue.close()
+                self._kqueue = None
+            return self.returncode
+        # Nothing watches the server without reaping it.
+        returncode = self.proc.poll()
+        if returncode is not None:
+            self._held = False
+            # With SIGCHLD ignored the system reaps the server, and Popen
+            # reports 0 for an exit code it never saw.
+            self.returncode = 255 if self._auto_reaped else returncode
         return self.returncode
 
     def wait(self, timeout: float | None = None) -> int:
@@ -925,11 +994,14 @@ class _Server:
     def _signal(self, kill: bool) -> None:
         if self._tree is not None:
             sig = signal.SIGKILL if kill else signal.SIGTERM  # type: ignore[attr-defined]
-            # Safe while the server is unreaped: the group is the server's.
-            try:
-                os.killpg(self.proc.pid, sig)  # type: ignore[attr-defined]
-            except OSError:
-                pass
+            running = self.poll() is None
+            # The group is the server's while the server is held, or still
+            # runs: a running process's PID names no other process.
+            if self._held or (self._auto_reaped and running):
+                try:
+                    os.killpg(self.proc.pid, sig)  # type: ignore[attr-defined]
+                except OSError:
+                    pass
             self._tree.signal(sig)
             return
         # Windows has no polite stop: terminate the job.
@@ -982,6 +1054,10 @@ class _Server:
         finally:
             if self._tree is not None:
                 self._tree.close()
+                if self._kqueue is not None:
+                    self._kqueue.close()
+                    self._kqueue = None
+                self._held = False
                 try:
                     self.proc.wait(timeout=STOP_TIMEOUT)
                 except subprocess.TimeoutExpired:
@@ -990,6 +1066,19 @@ class _Server:
             if self._job is not None:
                 _windows_close(self._job)
                 self._job = None
+
+
+_WAITID = getattr(os, "waitid", None)
+# macOS: a NOTE_EXIT event carries the wait status.
+_NOTE_EXITSTATUS = 0x04000000
+
+
+def _sigchld_ignored() -> bool:
+    sigchld = getattr(signal, "SIGCHLD", None)
+    try:
+        return sigchld is not None and signal.getsignal(sigchld) == signal.SIG_IGN
+    except (OSError, ValueError):
+        return False
 
 
 # Set in the server's environment to a token of its run, and inherited by

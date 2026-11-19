@@ -1,5 +1,6 @@
 """Tests for the stdio MCP proxy: pairing, and relaying what it cannot trace."""
 
+import contextlib
 import io
 import json
 import os
@@ -746,6 +747,41 @@ def _kill_pid(pid):
         pass
 
 
+@contextlib.contextmanager
+def _without_waitid():
+    """Run as on a Python without os.waitid, like macOS before 3.13."""
+    saved = getattr(os, "waitid", None)
+    if saved is not None:
+        del os.waitid
+    try:
+        with patch.object(proxy_module, "_WAITID", None, create=True):
+            yield
+    finally:
+        if saved is not None:
+            os.waitid = saved
+
+
+# Runs agent-strace with a stop signal sent to itself as soon as the session
+# is created, before the server is started.
+# argv: signal name, agent-strace argv.
+_SIGNAL_AT_CREATE = (
+    "import os, signal, sys\n"
+    "signal.signal(signal.SIGINT, signal.default_int_handler)\n"
+    "signal.signal(signal.SIGTERM, signal.SIG_DFL)\n"
+    "sig = getattr(signal, sys.argv[1])\n"
+    "from agent_trace.store import TraceStore\n"
+    "create = TraceStore.create_session\n"
+    "def create_then_signal(self, *args, **kwargs):\n"
+    "    result = create(self, *args, **kwargs)\n"
+    "    os.kill(os.getpid(), sig)\n"
+    "    return result\n"
+    "TraceStore.create_session = create_then_signal\n"
+    "from agent_trace.entry import main\n"
+    "sys.argv = ['agent-strace'] + sys.argv[2:]\n"
+    "sys.exit(main())\n"
+)
+
+
 class _Sink:
     """A stand-in for the agent's stdout or stderr."""
 
@@ -1052,17 +1088,22 @@ class StdioProxyLifecycleTest(unittest.TestCase):
             return f.read()
 
     def _run_in_process(self, server_text, *server_args, agent_out=None,
-                        agent_err=None, on_event=None, before_run=None):
-        """Run the proxy in this process, with short timeouts."""
+                        agent_err=None, on_event=None, before_run=None,
+                        agent_in_fd=None):
+        """Run the proxy in this process, with short timeouts.
+
+        The agent's stdin is at its end, or reads agent_in_fd.
+        """
         server = os.path.join(self.root, "server.py")
         with open(server, "w", encoding="utf-8") as f:
             f.write(server_text)
         store = TraceStore(self.trace_dir)
         meta = SessionMeta()
         store.create_session(meta)
-        read_fd, write_fd = os.pipe()
-        os.close(write_fd)
-        agent_in = open(read_fd, "rb")
+        if agent_in_fd is None:
+            agent_in_fd, write_fd = os.pipe()
+            os.close(write_fd)
+        agent_in = open(agent_in_fd, "rb")
         self.addCleanup(agent_in.close)
         self.agent_out = agent_out if agent_out is not None else _Sink()
         if agent_err is None:
@@ -1433,8 +1474,8 @@ class StdioProxyLifecycleTest(unittest.TestCase):
         self.assertEqual(reader.read(10), b"body")
         self.assertEqual(reader.readline(), b"")
 
-    def _run_leaving_a_child(self, how):
-        files = os.path.join(self.root, f"{how}-files")
+    def _run_leaving_a_child(self, how, label=None):
+        files = os.path.join(self.root, f"{label or how}-files")
         os.makedirs(files, exist_ok=True)
         pid_file = os.path.join(files, "child.pid")
         beat_file = os.path.join(files, "beat")
@@ -1564,6 +1605,184 @@ class StdioProxyLifecycleTest(unittest.TestCase):
                 meta, events = self._session()
                 self.assertIsNotNone(meta.ended_at)
                 self.assertEqual(events[-1].event_type, EventType.SESSION_END)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX signals")
+    def test_a_stop_signal_before_the_server_starts_ends_the_session(self):
+        # The signal comes once the session is created and before record has
+        # started the server. The session is ended and the server never runs.
+        import signal
+
+        script = os.path.join(self.root, "server.py")
+        with open(script, "w", encoding="utf-8") as f:
+            f.write(MARKING_SERVER)
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            with self.subTest(sig.name):
+                self.trace_dir = os.path.join(self.root, sig.name)
+                marker = os.path.join(self.root, f"{sig.name}.ran")
+                proc = subprocess.Popen(
+                    [sys.executable, "-c", _SIGNAL_AT_CREATE, sig.name,
+                     "--trace-dir", self.trace_dir, "record", "--",
+                     sys.executable, script, marker],
+                    cwd=self.root, env=self.env, stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+                code, _, err = self._finish(proc, keep_stdin_open=True)
+                self.assertEqual(code, 128 + sig, err)
+                self.assertNotIn(b"Traceback", err)
+                self.assertFalse(os.path.exists(marker), "the server was started")
+                meta, events = self._session()
+                self.assertIsNotNone(meta.ended_at)
+                self.assertEqual(
+                    [e.event_type for e in events],
+                    [EventType.SESSION_START, EventType.SESSION_END],
+                )
+                self.assertEqual(events[-1].data["exit_code"], -sig)
+
+    def test_the_agent_input_does_not_change_the_counts_once_they_are_saved(self):
+        # A tools/call from the agent is traced right after the final
+        # metadata save. It must not be recorded: the saved counts are final.
+        read_fd, write_fd = os.pipe()
+        self.addCleanup(os.close, write_fd)
+        traced = threading.Event()
+        real_trace = proxy_module._trace_message
+
+        def trace(msg, direction, *args, **kwargs):
+            try:
+                return real_trace(msg, direction, *args, **kwargs)
+            finally:
+                if direction == "agent_to_server":
+                    traced.set()
+
+        def save_then_call(proxy):
+            real_save = proxy._save_meta
+
+            def save(note):
+                real_save(note)
+                if not traced.is_set():
+                    os.write(write_fd, _line(_call(7, "late_tool")))
+                    self.assertTrue(traced.wait(self.TIMEOUT), "the call was not relayed")
+
+            proxy._save_meta = save
+
+        with patch.object(proxy_module, "_trace_message", trace):
+            code, err, store, meta = self._run_in_process(
+                "import time\ntime.sleep(0.3)\n", agent_in_fd=read_fd,
+                before_run=save_then_call,
+            )
+        self.assertEqual(code, 0, err)
+        self.assertTrue(traced.is_set())
+        events = self._assert_final(store, meta)
+        self.assertEqual(meta.tool_calls, 0)
+        self.assertNotIn(EventType.TOOL_CALL, [e.event_type for e in events])
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX processes")
+    def test_a_server_is_followed_without_waitid(self):
+        # Python on macOS before 3.13 has no os.waitid. There a kqueue sees
+        # the server exit, and elsewhere the server is reaped when it exits.
+        cases = [("default", contextlib.nullcontext)]
+        if sys.platform == "darwin":
+            class Refused:
+                def control(self, *args):
+                    import errno
+
+                    raise ProcessLookupError(errno.ESRCH, "exited already")
+
+                def close(self):
+                    pass
+
+            cases.append(("exited-before-kqueue",
+                          lambda: patch.object(proxy_module.select, "kqueue", Refused)))
+        for name, context in cases:
+            for how in ("plain", "setsid"):
+                with self.subTest(name, how=how), _without_waitid(), context():
+                    self.trace_dir = os.path.join(self.root, name, how)
+                    self._run_leaving_a_child(how, label=f"{name}-{how}")
+            with self.subTest(name, how="exit code"), _without_waitid(), context():
+                self.trace_dir = os.path.join(self.root, name, "code")
+                code, err, store, meta = self._run_in_process("import sys\nsys.exit(3)\n")
+                self.assertEqual(code, 3, err)
+                events = self._assert_final(store, meta)
+                self.assertEqual(events[-1].data["exit_code"], 3)
+
+    def _close_after(self, server):
+        """Stop and reap the server, and close its pipes, when the test ends."""
+        for stream in (server.proc.stdin, server.proc.stdout, server.proc.stderr):
+            self.addCleanup(stream.close)
+        self.addCleanup(server.close)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX signals")
+    def test_an_ignored_sigchld_does_not_cost_the_exit_code(self):
+        # record was started with SIGCHLD ignored, so the system would reap
+        # the server. record sets it back to the default for the run.
+        import signal
+
+        previous = signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+        self.addCleanup(signal.signal, signal.SIGCHLD, previous)
+        code, err, store, meta = self._run_in_process("import sys\nsys.exit(3)\n")
+        self.assertEqual(signal.getsignal(signal.SIGCHLD), signal.SIG_IGN)
+        self.assertEqual(code, 3, err)
+        events = self._assert_final(store, meta)
+        self.assertEqual(events[-1].data["exit_code"], 3)
+        self.trace_dir = os.path.join(self.root, "child")
+        self._run_leaving_a_child("plain")
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX processes")
+    def test_a_server_reaped_by_the_system_is_not_signalled_by_its_pid(self):
+        # With SIGCHLD ignored the system reaps the server as it exits, so
+        # its PID and process group ID can name another process. Its exit
+        # code is unknown, and nothing is sent to its process group.
+        import signal
+
+        previous = signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+        try:
+            server = proxy_module._Server([sys.executable, "-c", "import sys; sys.exit(3)"])
+            self._close_after(server)
+            try:
+                server.proc.wait(timeout=self.TIMEOUT)
+            except subprocess.TimeoutExpired:
+                self.fail("the server did not exit")
+        finally:
+            signal.signal(signal.SIGCHLD, previous)
+        with patch.object(proxy_module.os, "killpg") as killpg:
+            self.assertEqual(server.stop(), 255)
+        killpg.assert_not_called()
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX processes")
+    def test_a_running_server_is_stopped_when_sigchld_is_ignored(self):
+        # As when record runs off the main thread, where SIGCHLD cannot be
+        # set back to the default: the server still runs, so it is signalled.
+        import signal
+
+        previous = signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+        try:
+            server = proxy_module._Server([sys.executable, "-c", "import time; time.sleep(60)"])
+        finally:
+            signal.signal(signal.SIGCHLD, previous)
+        self._close_after(server)
+        result = []
+        with patch.object(proxy_module, "STOP_TIMEOUT", 1.0):
+            stopper = threading.Thread(target=lambda: result.append(server.stop()), daemon=True)
+            stopper.start()
+            stopper.join(self.TIMEOUT)
+        if stopper.is_alive():
+            server.proc.kill()
+            self.fail("the server was not stopped")
+        self.assertEqual(result, [255])
+        self.assertIsNotNone(server.proc.poll())
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX processes")
+    def test_a_server_reaped_elsewhere_is_not_signalled_by_its_pid(self):
+        # Something else in record's process reaped the server, so waitid
+        # finds no child. Its PID can name another process from then on.
+        server = proxy_module._Server([sys.executable, "-c", "import time; time.sleep(60)"])
+        self._close_after(server)
+        gone = ChildProcessError(10, "No child processes")
+        with patch.object(proxy_module, "_WAITID", side_effect=gone, create=True), \
+                patch.object(proxy_module.os, "waitid", side_effect=gone, create=True), \
+                patch.object(proxy_module.os, "killpg") as killpg:
+            self.assertEqual(server.poll(), 255)
+            server._signal(kill=True)
+        killpg.assert_not_called()
 
 
 if __name__ == "__main__":

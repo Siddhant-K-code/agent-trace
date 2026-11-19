@@ -212,13 +212,14 @@ def cmd_record(args: argparse.Namespace) -> int:
         parent_event_id=_parent_event_id(),
         depth=_parent_depth(store, parent_session_id),
     )
-    store.create_session(meta)
 
-    if not args.quiet:
-        sys.stderr.write(
-            f"agent-strace: recording session {meta.session_id}\n"
-            f"agent-strace: command: {' '.join(server_cmd)}\n"
-        )
+    def start() -> None:
+        store.create_session(meta)
+        if not args.quiet:
+            sys.stderr.write(
+                f"agent-strace: recording session {meta.session_id}\n"
+                f"agent-strace: command: {' '.join(server_cmd)}\n"
+            )
 
     def summary(meta: SessionMeta) -> str:
         return (
@@ -240,7 +241,9 @@ def cmd_record(args: argparse.Namespace) -> int:
     if args.verbose:
         proxy.on_event = lambda event: proxy.notice(f"\r{format_event(event)}\n")
 
-    return proxy.run()
+    # The session is created once the stop signal handlers are in, so a stop
+    # signal never leaves it without an end.
+    return proxy.run(prepare=start)
 
 
 def cmd_record_http(args: argparse.Namespace) -> int:
