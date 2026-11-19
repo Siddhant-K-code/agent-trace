@@ -62,6 +62,13 @@ class TestParseOffset(unittest.TestCase):
         with self.assertRaises(ValueError):
             _parse_offset("not-a-time")
 
+    def test_offset_that_is_not_finite_raises(self):
+        nines = "9" * 400
+        for text in ("inf", "-inf", "nan", "1e400", nines + "m", nines + "s", nines + ":00"):
+            with self.subTest(text.replace(nines, "<400 nines>")):
+                with self.assertRaisesRegex(ValueError, "^Cannot parse offset: "):
+                    _parse_offset(text)
+
 
 class TestAnnotationRoundTrip(unittest.TestCase):
     def test_to_from_json(self):
@@ -350,11 +357,13 @@ _BAD_LINES = [
     ("number with 5000 digits", '{"created_at":' + "9" * 5000 + ',"note":"BAD-DIGITS","shareable":true}'),
     ("1000000 levels deep",
      '{"label":"BAD-DEEP","note":' + "[" * 1_000_000 + "]" * 1_000_000 + ',"shareable":true}'),
+    ("not valid UTF-8", '{"note":"BAD-UTF8-\udcff","shareable":true}'),
 ]
 
 
 def _lines(*lines):
-    return "".join(line + "\n" for line in lines).encode("utf-8")
+    # surrogateescape writes "\udcff" as the byte 0xff, which is not valid UTF-8.
+    return "".join(line + "\n" for line in lines).encode("utf-8", "surrogateescape")
 
 
 def _session_with_annotations(test, data):
@@ -374,6 +383,29 @@ def _run(handler, trace_dir, *argv):
     with redirect_stdout(out), redirect_stderr(err):
         code = handler(args)
     return code, out.getvalue(), err.getvalue()
+
+
+def _run_cli(trace_dir, *argv):
+    """Run agent-strace in a child process.
+
+    annotate --list prints through format_annotations, whose out= default is
+    bound at import, so redirect_stdout does not capture that text.
+    """
+    env = _no_telemetry.without_telemetry({
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("AGENT_STRACE_") and key != "AGENT_TRACE_DIR"
+    })
+    env["PYTHONPATH"] = os.pathsep.join(item for item in (SRC, env.get("PYTHONPATH", "")) if item)
+    env["PYTHONIOENCODING"] = "utf-8"
+    return subprocess.run(
+        [sys.executable, "-m", "agent_trace.entry", "--trace-dir", trace_dir, *argv],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=env,
+        timeout=120,
+    )
 
 
 class TestLoadSkipsLinesWithTheWrongShape(unittest.TestCase):
@@ -399,22 +431,7 @@ class TestLoadSkipsLinesWithTheWrongShape(unittest.TestCase):
     def test_annotate_list_prints_the_good_line(self):
         trace_dir, _, _ = _session_with_annotations(
             self, _lines(*(line for _, line in _BAD_LINES), _GOOD_LINE))
-        env = _no_telemetry.without_telemetry({
-            key: value
-            for key, value in os.environ.items()
-            if not key.startswith("AGENT_STRACE_") and key != "AGENT_TRACE_DIR"
-        })
-        env["PYTHONPATH"] = os.pathsep.join(item for item in (SRC, env.get("PYTHONPATH", "")) if item)
-        env["PYTHONIOENCODING"] = "utf-8"
-        result = subprocess.run(
-            [sys.executable, "-m", "agent_trace.entry", "--trace-dir", trace_dir,
-             "annotate", SESSION, "--list"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            env=env,
-            timeout=120,
-        )
+        result = _run_cli(trace_dir, "annotate", SESSION, "--list")
         self.assertEqual(result.returncode, 0, result.stderr[-2000:])
         self.assertIn("\n1 annotation(s):\n", result.stdout)
         self.assertIn("\n    GOOD-NOTE\n", result.stdout)
@@ -459,6 +476,38 @@ class TestDeleteMatchesTheAnnotationId(unittest.TestCase):
         _, store, path = _session_with_annotations(self, bad + _lines(_GOOD_LINE))
         self.assertTrue(delete_annotation(store, SESSION, "good"))
         self.assertEqual(path.read_bytes(), bad)
+
+    def test_delete_removes_a_line_that_is_not_utf8(self):
+        _, store, path = _session_with_annotations(self, _lines(
+            '{"annotation_id":"keep1"}', '{"annotation_id":"bad1","note":"x\udcff"}', '{"annotation_id":"keep2"}'))
+        self.assertTrue(delete_annotation(store, SESSION, "bad1"))
+        self.assertEqual(path.read_bytes(), _lines('{"annotation_id":"keep1"}', '{"annotation_id":"keep2"}'))
+
+
+class TestAnnotateAtWritesALineThatLoads(unittest.TestCase):
+    """annotate --at must not write a line that load_annotations skips."""
+
+    def test_offset_that_is_not_finite_exits_1_and_writes_nothing(self):
+        for at in ("inf", "nan", "1e400"):
+            with self.subTest(at):
+                trace_dir, _, path = _session_with_annotations(self, b"")
+                code, out, err = _run(cmd_annotate, trace_dir, "annotate", SESSION, "--at", at, "--note", "N")
+                self.assertEqual((code, out), (1, ""))
+                self.assertEqual(err, f"Cannot parse offset: '{at}'\n")
+                self.assertEqual(path.read_bytes(), b"")
+
+    def test_event_id_that_is_not_a_string_is_left_empty(self):
+        trace_dir, _, path = _session_with_annotations(self, b"")
+        path.with_name("events.ndjson").write_bytes(
+            b'{"event_type":"session_start","timestamp":1000.0,"event_id":5}\n'
+            b'{"event_type":"tool_call","timestamp":1010.0,"event_id":"abc","data":{"tool_name":"t"}}\n'
+        )
+        code, _, err = _run(cmd_annotate, trace_dir, "annotate", SESSION, "--at", "0s", "--note", "N-AT0")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(path.read_bytes())["event_id"], "")
+        result = _run_cli(trace_dir, "annotate", SESSION, "--list")
+        self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+        self.assertIn("  offset=0.0s\n    N-AT0\n", result.stdout)
 
 
 if __name__ == "__main__":

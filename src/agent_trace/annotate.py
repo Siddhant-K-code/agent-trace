@@ -122,21 +122,35 @@ def add_annotation(
         f.write(annotation.to_json() + "\n")
 
 
+def _read_lines(path: Path) -> list[str]:
+    """Read an annotations file as lines.
+
+    read_text() turns CR and CRLF into LF, and the text is split on LF only.
+    Another writer can leave U+2028 or another Unicode line break raw inside
+    a JSON string, and splitlines() would cut that line in two. Each byte
+    that is not valid UTF-8 is read as a lone surrogate, so one bad line does
+    not stop the read. Writing with errors="surrogateescape" gives back the
+    same byte.
+    """
+    return path.read_text(encoding="utf-8", errors="surrogateescape").split("\n")
+
+
 def load_annotations(store: TraceStore, session_id: str) -> list[Annotation]:
     """Load all annotations for a session.
 
-    The file is split on LF only. Another writer can leave U+2028 or another
-    Unicode line break raw inside a JSON string, and splitlines() would cut
-    that line in two. A line that from_json rejects is skipped.
+    A line that is not valid UTF-8, or that from_json rejects, is skipped.
     """
     path = _annotations_path(store, session_id)
     if not path.exists():
         return []
     annotations: list[Annotation] = []
-    for line in path.read_text(encoding="utf-8").split("\n"):
+    for line in _read_lines(path):
         line = line.strip()
         if line:
             try:
+                # Raises UnicodeDecodeError, a ValueError, if the line held a
+                # byte that is not valid UTF-8.
+                line.encode("utf-8", "surrogateescape").decode("utf-8")
                 annotations.append(Annotation.from_json(line))
             except (ValueError, RecursionError):
                 continue
@@ -161,11 +175,14 @@ def delete_annotation(
     session_id: str,
     annotation_id: str,
 ) -> bool:
-    """Remove an annotation by ID. Returns True if found and removed."""
+    """Remove an annotation by ID. Returns True if found and removed.
+
+    A line that is not valid UTF-8 is written back with the same bytes.
+    """
     path = _annotations_path(store, session_id)
     if not path.exists():
         return False
-    lines = path.read_text(encoding="utf-8").split("\n")
+    lines = _read_lines(path)
     new_lines = []
     found = False
     for line in lines:
@@ -180,6 +197,7 @@ def delete_annotation(
         path.write_text(
             "\n".join(new_lines) + ("\n" if new_lines else ""),
             encoding="utf-8",
+            errors="surrogateescape",
             newline="\n",
         )
     return found
@@ -190,24 +208,32 @@ def delete_annotation(
 # ---------------------------------------------------------------------------
 
 def _parse_offset(offset_str: str) -> float:
-    """Parse a time offset string like '2m14s', '134s', '2:14' into seconds."""
+    """Parse a time offset string like '2m14s', '134s', '2:14' into seconds.
+
+    Raises ValueError when the string does not parse or the result is not
+    finite. load_annotations skips a line whose offset_seconds is not finite.
+    """
     s = offset_str.strip().lower()
-    # Format: Xm Ys
     import re
     m = re.fullmatch(r"(?:(\d+)m)?(?:(\d+(?:\.\d+)?)s?)?", s)
-    if m and (m.group(1) or m.group(2)):
-        minutes = float(m.group(1) or 0)
-        seconds = float(m.group(2) or 0)
-        return minutes * 60 + seconds
-    # Format: M:SS
     m2 = re.fullmatch(r"(\d+):(\d{2}(?:\.\d+)?)", s)
-    if m2:
-        return float(m2.group(1)) * 60 + float(m2.group(2))
-    # Plain seconds
-    try:
-        return float(s.rstrip("s"))
-    except ValueError:
+    if m and (m.group(1) or m.group(2)):
+        # Format: Xm Ys
+        seconds = float(m.group(1) or 0) * 60 + float(m.group(2) or 0)
+    elif m2:
+        # Format: M:SS
+        seconds = float(m2.group(1)) * 60 + float(m2.group(2))
+    else:
+        # Plain seconds
+        try:
+            seconds = float(s.rstrip("s"))
+        except ValueError:
+            raise ValueError(f"Cannot parse offset: {offset_str!r}")
+    # float() reads "inf", "nan" and "1e400", and a long run of digits
+    # overflows to inf in every format.
+    if not math.isfinite(seconds):
         raise ValueError(f"Cannot parse offset: {offset_str!r}")
+    return seconds
 
 
 def _find_event_by_offset(
@@ -215,7 +241,12 @@ def _find_event_by_offset(
     session_id: str,
     offset_seconds: float,
 ) -> str:
-    """Return the event_id of the event nearest to *offset_seconds*."""
+    """Return the event_id of the event nearest to *offset_seconds*.
+
+    Returns "" when that event_id is not a string, so the annotation is
+    offset-based. load_annotations skips a line whose event_id is not a
+    string.
+    """
     events = store.load_events(session_id)
     if not events:
         return ""
@@ -227,7 +258,7 @@ def _find_event_by_offset(
         if diff < best_diff:
             best_diff = diff
             best = e
-    return best.event_id
+    return best.event_id if isinstance(best.event_id, str) else ""
 
 
 # ---------------------------------------------------------------------------

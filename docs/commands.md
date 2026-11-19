@@ -2336,9 +2336,9 @@ Annotations are stored in `annotations.jsonl` in the session directory, one
 JSON object per line. If another tool writes that file, only
 `"shareable": true` marks an annotation shareable. Any other value, such as
 `1` or `"true"`, keeps it private. Commands that read annotations skip a line
-that is not a JSON object or has a field of the wrong type, such as a `note`
-that is not a string. `--delete` still removes such a line by its
-`annotation_id`.
+that is not a JSON object or is not valid UTF-8. They also skip a line with a
+field of the wrong type, such as a `note` that is not a string. `--delete`
+still removes such a line by its `annotation_id`.
 
 | Flag | Description |
 |---|---|
