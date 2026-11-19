@@ -54,7 +54,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from .collector_client import check_session_meta
 from .event_data import NonObjectEventDataError, refused_event_warning
 from .fileutil import split_lf_lines
-from .models import SessionMeta, TraceEvent
+from .models import SessionMeta, TraceEvent, usable_time
 from .store import (
     TraceStore,
     DEFAULT_TRACE_DIR,
@@ -70,6 +70,20 @@ from . import web_dashboard as _wd
 _UPDATABLE_META_FIELDS = frozenset(
     field.name for field in dataclasses.fields(SessionMeta)
 ) - {"session_id", "tenant_id"}
+
+
+def _check_session_times(meta: SessionMeta) -> None:
+    """Raise ValueError if started_at, or ended_at when set, is not a usable time.
+
+    check_session_meta passes any finite number of 0 or more, such as a time
+    in milliseconds, since the client can read it. The tenant commands refuse
+    a whole store that holds such a started_at, and list and stats show such
+    a time as missing.
+    """
+    if usable_time(meta.started_at) is None:
+        raise ValueError("started_at must be a Unix time in seconds")
+    if meta.ended_at is not None and usable_time(meta.ended_at) is None:
+        raise ValueError("ended_at must be a Unix time in seconds")
 
 
 # ---------------------------------------------------------------------------
@@ -648,6 +662,7 @@ class CollectorHandler(BaseHTTPRequestHandler):
                     # Check the merged meta before the tag, which rewrites
                     # the events, so a refused update changes nothing.
                     check_session_meta(meta)
+                    _check_session_times(meta)
                     if new_tenant:
                         self.store.tag_session(session_id, new_tenant)
                     self.store.update_meta(meta)
@@ -659,6 +674,7 @@ class CollectorHandler(BaseHTTPRequestHandler):
                     # create_session stores the ID as this validated string.
                     meta.session_id = session_id
                     check_session_meta(meta)
+                    _check_session_times(meta)
                     self.store.create_session(meta)
 
             self._send_json(200, {"session_id": session_id, "status": "ok"})

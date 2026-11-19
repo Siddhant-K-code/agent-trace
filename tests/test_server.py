@@ -514,9 +514,15 @@ _REFUSED_UNKNOWN_KEYS = [
     ),
 ]
 
+# A time sent in milliseconds. CollectorClient reads it, since it is a finite
+# number, but datetime.fromtimestamp refuses it, so the store's own commands
+# cannot use it.
+_MILLISECONDS = "1780000000000"
+
 
 class TestPostSessionsStoresReadableMeta(unittest.TestCase):
-    """POST /sessions stores only metadata that CollectorClient can read."""
+    """POST /sessions stores only metadata that CollectorClient can read, with
+    times that list, stats and the tenant commands can use."""
 
     SESSION = "exist00000000001"
 
@@ -599,6 +605,53 @@ class TestPostSessionsStoresReadableMeta(unittest.TestCase):
         )
         self.assertEqual(_store_files(self.store), before)
         self.assertEqual(self.store.list_sessions(tenant_id="t2"), [])
+
+    def test_create_refuses_a_time_out_of_range(self):
+        before = _store_files(self.store)
+        for field in ("started_at", "ended_at"):
+            with self.subTest(field):
+                status, reply = self.post(
+                    _body("new0000000000001", f'"{field}": {_MILLISECONDS}')
+                )
+                self.assertEqual(
+                    (status, reply), (400, {"error": f"{field} must be a Unix time in seconds"})
+                )
+                self.assertFalse(self.store._session_dir("new0000000000001").exists())
+                self.assertEqual(_store_files(self.store), before)
+
+    def test_update_refuses_a_time_out_of_range(self):
+        before = _store_files(self.store)
+        for field in ("started_at", "ended_at"):
+            for tenant_field in ([], ['"tenant_id": "t2"']):
+                with self.subTest(field=field, new_tenant=bool(tenant_field)):
+                    status, reply = self.post(
+                        _body(self.SESSION, *tenant_field, f'"{field}": {_MILLISECONDS}')
+                    )
+                    self.assertEqual(
+                        (status, reply), (400, {"error": f"{field} must be a Unix time in seconds"})
+                    )
+                    self.assertEqual(_store_files(self.store), before)
+        self.assertEqual(self.store.list_sessions(tenant_id="t2"), [])
+
+    def test_usable_times_and_a_null_ended_at_are_stored(self):
+        times = ('"started_at": 1780000000.5', '"ended_at": 1780000060.5')
+        cases = [
+            ("create", "new0000000000001", *times),
+            ("create ended_at null", "new0000000000002", '"ended_at": null'),
+            ("update", self.SESSION, *times),
+            ("update ended_at null", self.SESSION, '"ended_at": null'),
+        ]
+        for label, session_id, *fields in cases:
+            with self.subTest(label):
+                status, reply = self.post(_body(session_id, *fields))
+                self.assertEqual(
+                    (status, reply), (200, {"session_id": session_id, "status": "ok"})
+                )
+                meta_file = self.store._session_dir(session_id) / "meta.json"
+                stored = json.loads(meta_file.read_text())
+                # A null ended_at is stored as no ended_at.
+                for key, value in json.loads("{" + ", ".join(fields) + "}").items():
+                    self.assertEqual(stored.get(key), value)
 
     def test_numeric_session_id_is_stored_as_text(self):
         status, reply = self.post(b'{"session_id": 12345}')

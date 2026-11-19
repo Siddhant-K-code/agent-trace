@@ -149,6 +149,14 @@ but never data values or event IDs:
 - a key the collector does not know that holds 64 or more levels of nested
   lists or objects
 
+It also returns 400 when `started_at`, or `ended_at` when set, is out of
+range, such as a time sent in milliseconds. `org-report --endpoint` can read
+such a time, but commands run on the collector's store directory cannot.
+`list` and `stats` would show the start time or duration as missing, and one
+such `started_at` would stop the `tenant` commands and `org-report` for every
+tenant in the store. A store written by an older collector, or edited by hand,
+can still hold one. See [`tenant`](commands.md#tenant) for the fix.
+
 A request that creates a session also gets 400 when its body has the reserved
 key `_unknown_fields`. An update sets only metadata fields, such as `ended_at`
 or `tool_calls`, and ignores other keys. The collector checks the metadata as
@@ -156,12 +164,6 @@ it would be after the update, so an update to a session whose stored metadata
 is already bad gets 400 unless it fixes every bad field. An update cannot fix
 a bad value in a key the collector does not know. A refused update changes
 nothing, the tenant tag included.
-
-The collector still accepts a `started_at` past the year 9999, such as a time
-sent in milliseconds, since `org-report --endpoint` can read it. Commands run
-on the collector's store directory treat it as bad: `list` and `stats` show it
-as missing, and the `tenant` commands and `org-report` stop until it is fixed.
-See [`tenant`](commands.md#tenant).
 
 GET session IDs are URL-decoded as one containment-safe path component, so
 legacy IDs containing spaces, Unicode, or more than 128 characters remain

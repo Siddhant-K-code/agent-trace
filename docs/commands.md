@@ -2408,11 +2408,12 @@ or irreversibly erase all local trace data for one tenant. Deletion requires
 
 `tenant report`, `tenant export`, `tenant delete` and `org-report` stop with
 "corrupt session in tenant store: <id>" when that session's `started_at` is
-not a usable Unix time, such as text, NaN, a negative number or a value out of
-range. `tenant delete` then deletes nothing. An older collector could store
-such metadata. The collector still accepts a `started_at` past the year 9999,
-such as a time sent in milliseconds. To continue, set `started_at` in that
-session's `meta.json` to a Unix time in seconds.
+not a usable Unix time. That covers text, NaN, a negative number, and a value
+out of range, such as a time sent in milliseconds. `tenant delete` then
+deletes nothing. The collector answers 400 to such a `started_at`, but a store
+written by an older collector, or edited by hand, can still hold one. To
+continue, set `started_at` in that session's `meta.json` to a Unix time in
+seconds.
 
 ### `backfill-meta`
 ```
