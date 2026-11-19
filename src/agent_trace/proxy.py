@@ -1,24 +1,24 @@
-"""MCP stdio proxy.
+r"""MCP stdio proxy.
 
-Sits between an agent and an MCP server process. Forwards all JSON-RPC
-messages in both directions while capturing tool calls, results, and
-errors as trace events.
+Sits between an agent and an MCP server process. Forwards the bytes each
+side writes to the other, unchanged and in order, and traces the JSON-RPC
+messages in them: tool calls, results and errors become trace events.
 
-MCP uses JSON-RPC 2.0 over stdio. Messages are framed with
-Content-Length headers (like LSP).
+MCP over stdio sends one JSON-RPC message or batch per line. Some servers
+frame each message with Content-Length headers instead, like LSP:
 
-    Content-Length: 42\r\n
+    Content-Length: 46\r\n
     \r\n
-    {"jsonrpc":"2.0","method":"tools/call",...}
+    {"jsonrpc":"2.0","id":1,"method":"tools/list"}
 
 The proxy:
 1. Spawns the MCP server as a subprocess
 2. Reads from agent stdin, forwards to server stdin
 3. Reads from server stdout, forwards to agent stdout
-4. Captures every message and emits trace events
+4. Traces a copy of each line or Content-Length body
 
-Tracing never stops the relay. A message the proxy cannot trace is still
-forwarded, and the next one is traced as usual.
+Tracing never stops the relay or changes what it forwards. A message the
+proxy cannot trace is still forwarded, and the next one is traced as usual.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ import sys
 import threading
 import time
 from collections.abc import Mapping
-from typing import IO, Any, Callable, NamedTuple
+from typing import IO, Any, Callable
 
 from .event_data import list_field, number_field, object_field, str_field
 from .models import EventType, SessionMeta, TraceEvent
@@ -50,104 +50,67 @@ from .store import TraceStore
 MAX_PENDING_CALLS = 10_000
 
 
-class _Message(NamedTuple):
-    """One message read from a stdio stream.
+_CONTENT_LENGTH = "Content-Length:"
 
-    ``text`` is the message as it arrived and ``value`` its parsed JSON.
-    ``error`` names the exception that kept json.loads from reading the
-    text, and is empty when it was read.
+# Largest piece of a Content-Length body read at once. BufferedReader.read(n)
+# allocates n bytes before it reads any, so a huge length is never read in one.
+_BODY_PIECE = 64 * 1024
+
+
+def _content_length(line: bytes) -> int | None:
+    """The body length a Content-Length line gives. None for any other line.
+
+    The value must be ASCII digits that int() converts. int() also takes a
+    sign, underscores and other digits, such as "+5", "5_0" and a fullwidth
+    5 (U+FF15), and raises ValueError on more digits than
+    sys.get_int_max_str_digits().
     """
-
-    text: str
-    value: Any = None
-    error: str = ""
-
-
-def _parse_message(text: str) -> _Message | None:
-    """Parse the text of a message. None if the text is not JSON.
-
-    JSON that json.loads gives up on, such as a value nested deeper than the
-    recursion limit allows or an integer too long to convert, gives a
-    message with ``error`` set, so it can still be forwarded.
-    """
-    try:
-        return _Message(text, json.loads(text))
-    except json.JSONDecodeError:
+    if _CONTENT_LENGTH.encode() not in line:
         return None
-    except Exception as exc:
-        return _Message(text, error=type(exc).__name__)
+    text = line.decode("utf-8", errors="replace").strip()
+    if not text.startswith(_CONTENT_LENGTH):
+        return None
+    value = text[len(_CONTENT_LENGTH):].strip()
+    if not (value.isascii() and value.isdigit()):
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
 
 
-def _read_message(stream: IO[bytes]) -> _Message | None:
-    """Read a single JSON-RPC message. None at the end of the stream.
+def _read_frame(source: IO[bytes]) -> tuple[bytes, bytes]:
+    """Read one frame. Returns the frame and the copy of it to trace.
 
-    Supports two framing modes:
-    1. Content-Length headers (LSP-style, used by some MCP servers)
-    2. Newline-delimited JSON (MCP spec: messages delimited by newlines)
+    A frame is a line, up to and including its LF. If the line is a
+    Content-Length line, the frame also holds the header lines after it, up
+    to and including the first blank one, and then that many body bytes.
+    The copy to trace is the line, or the body.
 
-    Auto-detects the mode from the first bytes. A newline-delimited line
-    that is not JSON is skipped. A Content-Length body that is not JSON
-    ends the stream.
+    At the end of input the frame is what arrived of it, and the copy is
+    what arrived of the body. The frame is empty once source has run out.
     """
+    line = source.readline()
+    length = _content_length(line)
+    if length is None:
+        return line, line
+    head = [line]
     while True:
-        line = stream.readline()
-        if not line:
-            return None
-
-        line_str = line.decode("utf-8", errors="replace").strip()
-        if not line_str:
-            continue
-
-        # Content-Length framing
-        if line_str.startswith("Content-Length:"):
-            content_length = int(line_str.split(":")[1].strip())
-            # consume the blank line after headers
-            while True:
-                header_line = stream.readline()
-                if not header_line:
-                    return None
-                if header_line.strip() == b"":
-                    break
-            body = stream.read(content_length)
-            if not body:
-                return None
-            return _parse_message(body.decode("utf-8"))
-
-        # Newline-delimited JSON
-        if line_str.startswith("{"):
-            message = _parse_message(line_str)
-            if message is not None:
-                return message
-
-
-def _message_text(message: _Message) -> str:
-    """Return the text to forward for a message.
-
-    The message goes out as JSON, like it was read. One that json cannot
-    read or write goes out as the text it arrived as, on one line. In JSON a
-    line break can only be whitespace, so a space replaces it.
-    """
-    if not message.error:
-        try:
-            return json.dumps(message.value)
-        except Exception:
-            pass
-    return message.text.replace("\r", " ").replace("\n", " ")
-
-
-def _write_message(stream: IO[bytes], message: _Message, use_content_length: bool = False) -> None:
-    """Write a JSON-RPC message.
-
-    Uses newline-delimited JSON by default (MCP spec).
-    Set use_content_length=True for LSP-style framing.
-    """
-    body = _message_text(message).encode("utf-8")
-    if use_content_length:
-        header = f"Content-Length: {len(body)}\r\n\r\n".encode("utf-8")
-        stream.write(header + body)
-    else:
-        stream.write(body + b"\n")
-    stream.flush()
+        header = source.readline()
+        if not header:
+            return b"".join(head), b""
+        head.append(header)
+        if not header.strip():
+            break
+    pieces = []
+    while length:
+        piece = source.read(min(length, _BODY_PIECE))
+        if not piece:
+            break
+        pieces.append(piece)
+        length -= len(piece)
+    body = b"".join(pieces)
+    return b"".join(head) + body, body
 
 
 def _rpc_id(data: dict[str, Any]) -> str | int | float | None:
@@ -446,20 +409,22 @@ class MCPProxy:
         stop_event: threading.Event,
         gate: Any = None,
     ) -> bool:
-        """Read messages from source, trace them, forward to dest.
+        """Forward each frame read from source to dest, and trace a copy of it.
 
-        Tracing never stops the relay: a message that cannot be traced is
-        still forwarded. Sets ``stop_event`` when the relay ends. Returns
-        True when source ran out, False when dest could not take a message.
+        A frame is a line or a Content-Length message (see _read_frame). It
+        is written to dest as it was read, in one write. Tracing never stops
+        the relay or changes what it forwards: a frame that cannot be traced
+        is still forwarded. Sets ``stop_event`` when the relay ends. Returns
+        True when source ran out, False when dest could not take a frame.
         Nothing is forwarded once the session has ended. With a gate, each
-        message is checked against the session end, traced and written while
+        frame is checked against the session end, traced and written while
         holding it, so no trace event or write of the relay comes after the
-        session end. A message can be traced and then not written in full,
+        session end. A frame can be traced and then not written in full,
         when its write fails or is cancelled.
         """
         while not stop_event.is_set():
-            message = _read_message(source)
-            if message is None:
+            frame, copy = _read_frame(source)
+            if not frame:
                 stop_event.set()
                 return True
 
@@ -468,20 +433,32 @@ class MCPProxy:
                     stop_event.set()
                     return True
 
-                # trace the message, or each message of a batch
-                if message.error:
-                    _note_untraced(message.error, self.notice)
-                else:
-                    for msg in _rpc_messages(message.value):
-                        _trace_message(msg, direction, self._calls, self._emit, self.notice)
+                self._trace_copy(copy, direction)
 
-                # forward the message
                 try:
-                    _write_message(dest, message)
+                    dest.write(frame)
+                    dest.flush()
                 except (OSError, ValueError):
                     stop_event.set()
                     return False
         return True
+
+    def _trace_copy(self, copy: bytes, direction: str) -> None:
+        """Trace the JSON-RPC message, or each message of a batch, in a copy.
+
+        Never raises. A blank copy is not traced. A copy that is not JSON, or
+        that json.loads gives up on, gets one note on the agent's stderr.
+        """
+        try:
+            text = copy.decode("utf-8", errors="replace").strip()
+            if not text:
+                return
+            value = json.loads(text)
+        except Exception as exc:
+            _note_untraced(type(exc).__name__, self.notice)
+            return
+        for msg in _rpc_messages(value):
+            _trace_message(msg, direction, self._calls, self._emit, self.notice)
 
     def _end_session(self, returncode: int, output_truncated: bool = False) -> int:
         """Record the session end, seal the trace and save the final metadata."""

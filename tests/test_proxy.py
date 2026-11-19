@@ -186,6 +186,26 @@ DEEP = 2000
 
 UNTRACED_LOG = "agent-strace: could not trace a message ({}). It was still forwarded.\n"
 
+# Each direction, with a message traced in it and the event it gives.
+DIRECTIONS = [
+    ("agent_to_server", _call, EventType.TOOL_CALL),
+    ("server_to_agent", _result, EventType.TOOL_RESULT),
+]
+
+# A message each way, id 7, as json.dumps would not write it: odd spacing,
+# "\u0065" for "e", a raw "\xc3\xa9" (UTF-8 for e acute) and 1e400, which
+# json.dumps writes as Infinity.
+ODD_JSON = {
+    "agent_to_server": (
+        b'{ "id":7 ,"jsonrpc" : "2.0","method":"tools/call",'
+        b'"params":{"name":"r\\u0065ad","arguments":{"text":"caf\xc3\xa9","n":1e400}}}'
+    ),
+    "server_to_agent": (
+        b'{ "id":7 ,"jsonrpc" : "2.0",'
+        b'"result":{"content":[{"type":"text","text":"r\\u0065ad caf\xc3\xa9"}],"n":1e400}}'
+    ),
+}
+
 # Messages with a field of the wrong JSON type. Each one stopped the relay
 # before the proxy read fields by type.
 ODD_REQUESTS = [
@@ -410,6 +430,35 @@ class StdioProxyRelayTest(unittest.TestCase):
         self.assertTrue(stop.is_set())
         return dest.getvalue().splitlines(), stderr.getvalue()
 
+    def _relay_bytes(self, data, direction, buffered=False, on_write=None):
+        """Relay data in one direction until it runs out.
+
+        Returns the bytes forwarded and what went to stderr, and keeps each
+        write in self.writes. With buffered, data is read through an
+        io.BufferedReader, like the server's stdout. on_write, if given, is
+        called at the start of each write.
+        """
+        writes = self.writes = []
+
+        class Dest(io.BytesIO):
+            def write(self, frame):
+                if on_write is not None:
+                    on_write()
+                writes.append(bytes(frame))
+                return super().write(frame)
+
+        source = io.BytesIO(data)
+        if buffered:
+            source = io.BufferedReader(source)
+        dest = Dest()
+        stderr = io.StringIO()
+        stop = threading.Event()
+        with patch("sys.stderr", stderr):
+            ran_out = self.proxy._forward_and_trace(source, dest, direction, stop)
+        self.assertTrue(ran_out)
+        self.assertTrue(stop.is_set())
+        return dest.getvalue(), stderr.getvalue()
+
     def _request_ids(self, event_type):
         return [
             e.data["request_id"] for e in self.store.load_events(self.meta.session_id)
@@ -470,45 +519,28 @@ class StdioProxyRelayTest(unittest.TestCase):
         self.assertEqual(stderr, UNTRACED_LOG.format("ValueError"))
         self.assertEqual(self._request_ids(EventType.TOOL_RESULT), [8])
 
-    def test_a_framed_message_json_loads_cannot_read_goes_out_on_one_line(self):
+    def test_a_framed_message_json_loads_cannot_read_is_forwarded_as_it_arrived(self):
         digits = _too_long_int()
         if digits is None:
             self.skipTest("int() has no digit limit")
         head = '{"jsonrpc": "2.0",'
         tail = '"id": 7, "result": {"content": [], "n": ' + digits + "}}"
         data = _framed(head + "\r\n" + tail) + _framed(json.dumps(_result(8)))
-        lines, stderr = self._relay(data, "server_to_agent")
-        self.assertEqual(lines, [(head + "  " + tail).encode(), json.dumps(_result(8)).encode()])
+        out, stderr = self._relay_bytes(data, "server_to_agent")
+        self.assertEqual(out, data)
         self.assertEqual(stderr, UNTRACED_LOG.format("ValueError"))
         self.assertEqual(self._request_ids(EventType.TOOL_RESULT), [8])
 
-    def test_a_message_json_dumps_cannot_write_is_forwarded_as_it_arrived(self):
-        # In a thread on Python 3.14, json.loads reads a list nested a little
-        # deeper than json.dumps can write.
-        text = '{"jsonrpc": "2.0", "id": 7, "result": {"content": [{"type": "text", "text": "x"}]}}'
-        dumps = json.dumps
-
-        def fail_on_message(value, *args, **kwargs):
-            if value == json.loads(text):
-                raise RecursionError("maximum recursion depth exceeded")
-            return dumps(value, *args, **kwargs)
-
-        with patch("json.dumps", side_effect=fail_on_message):
-            lines, stderr = self._relay((text + "\n").encode() + _line(_result(8)), "server_to_agent")
-        self.assertEqual(lines, [text.encode(), json.dumps(_result(8)).encode()])
-        self.assertEqual(stderr, "")
-        self.assertEqual(self._request_ids(EventType.TOOL_RESULT), [7, 8])
-
-    def test_a_message_with_a_duplicate_key_goes_out_as_it_was_traced(self):
-        # json.loads keeps the last "params". A server that keeps the first would
-        # run another call than the trace shows, so the parsed value goes out.
+    def test_a_message_with_a_duplicate_key_is_forwarded_as_it_arrived(self):
+        # json.loads keeps the last "params", so the trace shows "last". The
+        # server gets the bytes the agent sent, as through record-http.
         text = (
             '{"jsonrpc": "2.0", "id": 7, "method": "tools/call", '
             '"params": {"name": "first", "arguments": {}}, '
             '"params": {"name": "last", "arguments": {}}}'
         )
-        lines, stderr = self._relay(text.encode() + b"\n", "agent_to_server")
-        self.assertEqual(lines, [json.dumps(_call(7, "last")).encode()])
+        out, stderr = self._relay_bytes(text.encode() + b"\n", "agent_to_server")
+        self.assertEqual(out, text.encode() + b"\n")
         self.assertEqual(stderr, "")
         (call,) = [
             e for e in self.store.load_events(self.meta.session_id)
@@ -535,29 +567,189 @@ class StdioProxyRelayTest(unittest.TestCase):
     def test_content_length_values_that_are_not_objects_are_forwarded(self):
         bodies = ["null", "5", '"x"', "[]", '[1, "x"]']
         data = b"".join(_framed(body) for body in bodies) + _framed(json.dumps(_call(7)))
-        lines, stderr = self._relay(data, "agent_to_server")
-        self.assertEqual(
-            [json.loads(line) for line in lines], [None, 5, "x", [], [1, "x"], _call(7)]
-        )
+        out, stderr = self._relay_bytes(data, "agent_to_server")
+        self.assertEqual(out, data)
         self.assertEqual(stderr, "")
         self.assertEqual(self._request_ids(EventType.TOOL_CALL), [7])
 
-    def test_content_length_batch_is_traced_one_message_at_a_time(self):
-        calls = [_call(7, "a"), {"jsonrpc": "2.0", "method": "notifications/initialized"}, _call(8, "b")]
-        responses = [_result(8), _error(7)]
-        for direction, batch in (("agent_to_server", calls), ("server_to_agent", responses)):
-            lines, stderr = self._relay(_framed(json.dumps(batch)), direction)
-            self.assertEqual([json.loads(line) for line in lines], [batch])
-            self.assertEqual(stderr, "")
+    def test_a_batch_is_traced_one_message_at_a_time_in_both_framings(self):
+        notification = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+
+        def batches(first, second):
+            calls = [_call(first, "a"), notification, _call(second, "b")]
+            return calls, [_result(second), _error(first)]
+
+        line_calls, line_responses = batches(7, 8)
+        framed_calls, framed_responses = batches(9, 10)
+        for direction, on_a_line, framed in (
+            ("agent_to_server", line_calls, framed_calls),
+            ("server_to_agent", line_responses, framed_responses),
+        ):
+            with self.subTest(direction=direction):
+                data = _line(on_a_line) + _framed(json.dumps(framed))
+                out, stderr = self._relay_bytes(data, direction)
+                self.assertEqual(out, data)
+                self.assertEqual(stderr, "")
         events = self.store.load_events(self.meta.session_id)
         call_ids = {e.data["request_id"]: e.event_id for e in events if e.event_type == EventType.TOOL_CALL}
         parents = {
             e.data["request_id"]: e.parent_id for e in events
             if e.event_type in (EventType.TOOL_RESULT, EventType.ERROR)
         }
-        self.assertEqual(len(call_ids), 2)
+        self.assertEqual(sorted(call_ids), [7, 8, 9, 10])
         self.assertEqual(parents, call_ids)
         self.assertEqual(self.proxy._calls.pending(), {})
+
+    def test_json_is_forwarded_as_it_arrived(self):
+        for direction, _, event_type in DIRECTIONS:
+            with self.subTest(direction=direction):
+                data = ODD_JSON[direction] + b"\n"
+                out, stderr = self._relay_bytes(data, direction)
+                self.assertEqual(out, data)
+                self.assertEqual(stderr, "")
+                self.assertEqual(self._request_ids(event_type), [7])
+        call, result = [
+            e.data for e in self.store.load_events(self.meta.session_id)
+            if e.event_type in (EventType.TOOL_CALL, EventType.TOOL_RESULT)
+        ]
+        self.assertEqual(call["tool_name"], "read")
+        self.assertEqual(call["arguments"], {"text": "caf\u00e9", "n": float("inf")})
+        self.assertEqual(result["content_preview"], "read caf\u00e9")
+
+    def test_carriage_returns_blank_lines_and_a_last_line_without_lf_are_forwarded(self):
+        for direction, message, event_type in DIRECTIONS:
+            with self.subTest(direction=direction):
+                data = (
+                    json.dumps(message(7)).encode() + b"\r\n"
+                    + b"\n\r\n \t\n"
+                    + json.dumps(message(8)).encode()
+                )
+                out, stderr = self._relay_bytes(data, direction)
+                self.assertEqual(out, data)
+                self.assertEqual(stderr, "")
+                self.assertEqual(self._request_ids(event_type), [7, 8])
+
+    def test_a_line_that_is_not_json_is_forwarded_with_a_note(self):
+        for direction, message, event_type in DIRECTIONS:
+            with self.subTest(direction=direction):
+                data = (
+                    b"not json\n" + _line(message(7))
+                    + b'{"jsonrpc": "2.0", "id": \n' + _line(message(8))
+                )
+                out, stderr = self._relay_bytes(data, direction)
+                self.assertEqual(out, data)
+                self.assertEqual(stderr, UNTRACED_LOG.format("JSONDecodeError") * 2)
+                self.assertEqual(self._request_ids(event_type), [7, 8])
+
+    def test_content_length_frames_are_forwarded_with_their_headers_one_write_each(self):
+        for direction, message, event_type in DIRECTIONS:
+            with self.subTest(direction=direction):
+                body = json.dumps(message(7)).encode()
+                first = (
+                    b"Content-Length: %d\r\n"
+                    b"Content-Type: application/vscode-jsonrpc; charset=utf-8\r\n\r\n%s"
+                    % (len(body), body)
+                )
+                second = _framed(json.dumps(message(8)))
+                out, stderr = self._relay_bytes(first + second, direction)
+                self.assertEqual(out, first + second)
+                self.assertEqual(self.writes, [first, second])
+                self.assertEqual(stderr, "")
+                self.assertEqual(self._request_ids(event_type), [7, 8])
+
+    def test_a_content_length_line_with_a_bad_value_is_an_ordinary_line(self):
+        # int() takes "+5", "5_0" and a fullwidth 5, but none is a length.
+        values = ["abc", "-1", "+5", "\uff15", "5_0", ""]
+        for direction, message, event_type in DIRECTIONS:
+            for request_id, value in enumerate(values, start=1):
+                with self.subTest(direction=direction, value=value):
+                    data = (
+                        ("Content-Length: " + value + "\r\n").encode()
+                        + b"\r\n" + _line(message(request_id))
+                    )
+                    out, stderr = self._relay_bytes(data, direction)
+                    self.assertEqual(out, data)
+                    self.assertEqual(stderr, UNTRACED_LOG.format("JSONDecodeError"))
+                    self.assertEqual(self._request_ids(event_type)[-1:], [request_id])
+
+    def test_a_content_length_too_long_for_int_is_an_ordinary_line(self):
+        digits = _too_long_int()
+        if digits is None:
+            self.skipTest("int() has no digit limit")
+        for direction, message, event_type in DIRECTIONS:
+            with self.subTest(direction=direction):
+                data = b"Content-Length: " + digits.encode() + b"\r\n\r\n" + _line(message(7))
+                out, stderr = self._relay_bytes(data, direction)
+                self.assertEqual(out, data)
+                self.assertEqual(stderr, UNTRACED_LOG.format("JSONDecodeError"))
+                self.assertEqual(self._request_ids(event_type), [7])
+
+    def test_a_content_length_body_that_is_not_json_is_forwarded_with_a_note(self):
+        for direction, message, event_type in DIRECTIONS:
+            with self.subTest(direction=direction):
+                data = (
+                    b"Content-Length: 4\r\n\r\n\xff\xfe\xfd\xfc" + _framed(json.dumps(message(7)))
+                    + b"Content-Length: 8\r\n\r\nnot json" + _framed(json.dumps(message(8)))
+                )
+                out, stderr = self._relay_bytes(data, direction)
+                self.assertEqual(out, data)
+                self.assertEqual(stderr, UNTRACED_LOG.format("JSONDecodeError") * 2)
+                self.assertEqual(self._request_ids(event_type), [7, 8])
+
+    def test_a_frame_cut_short_is_forwarded_as_far_as_it_arrived(self):
+        for direction, message, event_type in DIRECTIONS:
+            cases = [
+                # (the cut frame, notes): in the headers, in the first line,
+                # and in the body
+                (b"Content-Length: 50\r\nContent-Type: x\r\n", 0),
+                (b"Content-Length: 50", 0),
+                (_framed(json.dumps(message(99)))[:-10], 1),
+            ]
+            for request_id, (cut, notes) in enumerate(cases, start=1):
+                with self.subTest(direction=direction, cut=cut):
+                    data = _line(message(request_id)) + cut
+                    out, stderr = self._relay_bytes(data, direction)
+                    self.assertEqual(out, data)
+                    self.assertEqual(stderr, UNTRACED_LOG.format("JSONDecodeError") * notes)
+            self.assertEqual(self._request_ids(event_type), [1, 2, 3])
+
+    def test_a_huge_content_length_is_read_in_pieces(self):
+        # BufferedReader.read(n) allocates n bytes first, so one read of this
+        # length raises MemoryError.
+        for direction, message, event_type in DIRECTIONS:
+            with self.subTest(direction=direction):
+                data = (
+                    _line(message(6))
+                    + b"Content-Length: 1000000000000000000\r\n\r\n" + _line(message(7))
+                )
+                out, stderr = self._relay_bytes(data, direction, buffered=True)
+                self.assertEqual(out, data)
+                self.assertEqual(stderr, "")
+                self.assertEqual(self._request_ids(event_type), [6, 7])
+
+    def test_a_large_content_length_body_goes_out_in_one_write(self):
+        for direction, message, event_type in DIRECTIONS:
+            with self.subTest(direction=direction):
+                large = dict(message(7), padding="x" * 200_000)
+                first = _framed(json.dumps(large))
+                second = _framed(json.dumps(message(8)))
+                out, stderr = self._relay_bytes(first + second, direction, buffered=True)
+                self.assertEqual(out, first + second)
+                self.assertEqual(self.writes, [first, second])
+                self.assertEqual(stderr, "")
+                self.assertEqual(self._request_ids(event_type), [7, 8])
+
+    def test_a_frame_is_traced_before_it_is_written(self):
+        for direction, message, event_type in DIRECTIONS:
+            with self.subTest(direction=direction):
+                traced = []
+                data = _line(message(7)) + _framed(json.dumps(message(8)))
+                out, _ = self._relay_bytes(
+                    data, direction,
+                    on_write=lambda: traced.append(self._request_ids(event_type)),
+                )
+                self.assertEqual(out, data)
+                self.assertEqual(traced, [[7], [7, 8]])
 
 
 SRC = os.path.dirname(os.path.dirname(os.path.abspath(agent_trace.__file__)))
@@ -666,6 +858,19 @@ DETACHING_SERVER = (
     "    time.sleep(0.01)\n"
     "if stay == '1':\n"
     "    time.sleep(60)\n"
+)
+
+# Writes the file named by its first argument to stdout, then saves what it
+# reads on stdin in the file named by its second argument.
+BYTES_SERVER = (
+    "import os, sys\n"
+    "with open(sys.argv[1], 'rb') as f:\n"
+    "    sys.stdout.buffer.write(f.read())\n"
+    "sys.stdout.buffer.flush()\n"
+    "data = sys.stdin.buffer.read()\n"
+    "with open(sys.argv[2] + '.tmp', 'wb') as f:\n"
+    "    f.write(data)\n"
+    "os.replace(sys.argv[2] + '.tmp', sys.argv[2])\n"
 )
 
 # Writes the file named by its argument, then exits.
@@ -947,6 +1152,44 @@ class StdioProxyLifecycleTest(unittest.TestCase):
              EventType.SESSION_END],
         )
         self.assertEqual(events[-1].data["exit_code"], 0)
+
+    def test_record_forwards_the_bytes_it_reads_unchanged(self):
+        # Nothing is parsed, dropped or framed again on the way, and no
+        # newline is translated on Windows.
+        def mixed(direction, message):
+            body = json.dumps(message(10)).encode()
+            return (
+                ODD_JSON[direction] + b"\r\n"
+                + b"\n\r\nnot json\n"
+                + _line([message(8), message(9)])
+                + b"Content-Length: abc\n\n"
+                + b"Content-Length: %d\r\nContent-Type: x\r\n\r\n%s" % (len(body), body)
+                + _framed(json.dumps([message(11)]))
+                + b"Content-Length: 8\r\n\r\n\xff\xfe not j"
+                + b"Content-Length: 99999999999999\r\n\r\n" + json.dumps(message(12)).encode()
+            )
+
+        sent = mixed("agent_to_server", _call)
+        replies = mixed("server_to_agent", _result)
+        replies_file = os.path.join(self.root, "replies")
+        received_file = os.path.join(self.root, "received")
+        with open(replies_file, "wb") as f:
+            f.write(replies)
+        proc = self._record(BYTES_SERVER, subprocess.PIPE, replies_file, received_file)
+        code, out, err = self._finish(proc, sent)
+
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out, replies)
+        with open(received_file, "rb") as f:
+            self.assertEqual(f.read(), sent)
+        # "not json", "Content-Length: abc" and the body that is not UTF-8, each way
+        self.assertEqual(err, UNTRACED_LOG.format("JSONDecodeError").encode() * 6)
+        _, events = self._session()
+        for event_type in (EventType.TOOL_CALL, EventType.TOOL_RESULT):
+            self.assertEqual(
+                [e.data["request_id"] for e in events if e.event_type == event_type],
+                [7, 8, 9, 10, 11, 12],
+            )
 
     def test_all_server_output_reaches_the_agent_before_session_end(self):
         # Held open, the agent's stdin is still being read when the server
