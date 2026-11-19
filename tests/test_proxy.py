@@ -1404,7 +1404,10 @@ class StdioProxyLifecycleTest(unittest.TestCase):
         self.assertTrue(events[-1].data.get("output_truncated"))
         self.assertEqual(events[-2].event_type, EventType.ERROR)
         self.assertIn("cut short", events[-2].data["message"])
-        self.assertIn(_line(_result(0)), self.agent_out.data)
+        # The server writes through text-mode stdout, so on Windows its line
+        # ends in CRLF. record forwards the line as the server wrote it.
+        written = json.dumps(_result(0)) + os.linesep
+        self.assertIn(written.encode("utf-8"), self.agent_out.data)
         # The child holding the output was stopped with the server.
         self.assertTrue(_beats_stopped(beat_file, timeout=1.0), "the child kept running")
         self.assertEqual(len(store.load_events(meta.session_id)), len(events))
