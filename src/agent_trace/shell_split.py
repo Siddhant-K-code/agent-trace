@@ -7,7 +7,7 @@ this tokenizer:
 
 - ``\\`` followed by a newline joins the two lines;
 - heredoc bodies (``<<EOF``, ``<<'EOF'``, ``<<"EOF"``, ``<<-EOF``) are dropped,
-  up to and including the terminator line;
+  up to and including the terminator line; ``<<-`` ignores leading tabs only;
 - ``# ...`` comments are dropped, keeping the newline;
 - a newline is returned as a separator token, like ``;``.
 
@@ -22,21 +22,26 @@ import shlex
 
 PUNCTUATION = ";&|()<>\n"
 
-_HEREDOC = re.compile(r"(?<!<)<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+_HEREDOC = re.compile(r"(?<!<)<<(-?)\s*(['\"]?)([A-Za-z0-9_][A-Za-z0-9_-]*)\2")
 _WORD_BOUNDARY = frozenset(" \t\r\n;&|()<>")
 
 
 def strip_heredocs(command: str) -> str:
     """Drop heredoc bodies and their terminator lines."""
     kept: list[str] = []
-    pending: list[str] = []
+    pending: list[tuple[str, bool]] = []
     for line in command.split("\n"):
         if pending:
-            if line.strip() == pending[0]:
+            delimiter, strip_tabs = pending[0]
+            candidate = line.lstrip("\t") if strip_tabs else line
+            if candidate == delimiter:
                 pending.pop(0)
             continue
         kept.append(line)
-        pending.extend(match.group(2) for match in _HEREDOC.finditer(line))
+        pending.extend(
+            (match.group(3), match.group(1) == "-")
+            for match in _HEREDOC.finditer(line)
+        )
     return "\n".join(kept)
 
 

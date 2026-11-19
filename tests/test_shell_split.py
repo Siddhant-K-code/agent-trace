@@ -21,10 +21,30 @@ from agent_trace.shell_split import (
 
 class TestShellSplit(unittest.TestCase):
     def test_strip_heredocs_all_forms(self):
-        for opener in ("<<EOF", "<<'EOF'", '<<"EOF"', "<< EOF", "<<-EOF"):
+        cases = (
+            ("<<EOF", "EOF"),
+            ("<<'EOF'", "EOF"),
+            ('<<"EOF"', "EOF"),
+            ("<< EOF", "EOF"),
+            ("<<-EOF", "\tEOF"),
+        )
+        for opener, terminator in cases:
             with self.subTest(opener=opener):
-                text = f"cat > f {opener}\n\tpytest\n\tEOF\nls"
+                text = f"cat > f {opener}\n\tpytest\n{terminator}\nls"
                 self.assertEqual(strip_heredocs(text), f"cat > f {opener}\nls")
+
+    def test_numeric_delimiters_and_shell_terminator_indentation(self):
+        numeric = "cat <<123\npytest > body.txt\n123\n"
+        self.assertEqual(command_segments(numeric), [["cat", "<<", "123"]])
+        self.assertFalse(is_test_command(numeric))
+
+        indented = "cat <<EOF\n EOF\npytest\nEOF\n"
+        self.assertEqual(command_segments(indented), [["cat", "<<", "EOF"]])
+        self.assertFalse(is_test_command(indented))
+
+        tabs_only = "cat <<-EOF\n EOF\npytest\n\tEOF\n"
+        self.assertEqual(command_segments(tabs_only), [["cat", "<<", "-EOF"]])
+        self.assertFalse(is_test_command(tabs_only))
 
     def test_strip_heredocs_keeps_here_strings(self):
         self.assertEqual(strip_heredocs("grep x <<< 'EOF'\npytest"), "grep x <<< 'EOF'\npytest")
@@ -108,6 +128,14 @@ class TestWriteTargets(unittest.TestCase):
         self.assertEqual(
             write_targets(command), ["/work/demo/src/pkg/a.py", "/work/demo/tests/test_a.py"]
         )
+
+    def test_numeric_heredoc_body_does_not_add_false_write_targets(self):
+        command = (
+            "cat > real.txt <<123\n"
+            "not a command > false-positive.txt\n"
+            "123\n"
+        )
+        self.assertEqual(write_targets(command), ["real.txt"])
 
     def test_redirect_forms(self):
         cases = {
