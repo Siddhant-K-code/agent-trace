@@ -567,10 +567,24 @@ def _should_redact() -> bool:
     )
 
 
+def _failure_text(error: object) -> object:
+    """Return a failure hook's error: its message if it is an object with one."""
+    return error.get("message", error) if isinstance(error, dict) else error
+
+
 def _normalise_payload(input_data: dict, provider: str, event: str) -> dict:
     """Map provider-specific hook payloads to the Claude-shaped fields."""
     data = dict(input_data)
     if provider not in ("codex", "gemini", "cursor", "copilot"):
+        # Claude Code's PostToolUseFailure sends its text in error, with no tool_response.
+        if (
+            provider == "claude"
+            and event == "post-tool-failure"
+            and data.get("error")
+            and "tool_output" not in data
+            and "tool_response" not in data
+        ):
+            data["tool_output"] = _failure_text(data["error"])
         return data
 
     data.setdefault(
@@ -609,8 +623,7 @@ def _normalise_payload(input_data: dict, provider: str, event: str) -> dict:
         if data.get("textResultForLlm") is not None and "tool_output" not in data:
             data["tool_output"] = data.get("textResultForLlm")
         if event == "post-tool-failure" and data.get("error") and "tool_output" not in data:
-            error = data["error"]
-            data["tool_output"] = error.get("message", error) if isinstance(error, dict) else error
+            data["tool_output"] = _failure_text(data["error"])
         command = data.get("command")
         if command and not data.get("tool_name"):
             data.setdefault("tool_name", "shell")

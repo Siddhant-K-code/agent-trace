@@ -1123,7 +1123,7 @@ class TestClaudeFixture(_ReplayChecks, unittest.TestCase):
         gaps = " ".join(self.entry["known_gaps"])
         for name in (
             "PostToolUseFailure",
-            "tool call failed",
+            "is_interrupt",
             "SessionStart",
             "SubagentStart",
             "SubagentStop",
@@ -1201,7 +1201,7 @@ class TestClaudeFixture(_ReplayChecks, unittest.TestCase):
         self.assertEqual(meta.errors, 0)
         self.assertEqual(self.codes(self.health(store, meta.session_id), "observed"), [])
 
-    def test_failed_tool_is_an_error_without_its_text(self):
+    def test_failed_tool_is_an_error_with_its_text(self):
         payloads = self.hook_payloads("tool_failure", "PostToolUseFailure")
         self.assertEqual([p["tool_name"] for p in payloads], ["Read", "Bash"])
         for payload in payloads:
@@ -1218,12 +1218,19 @@ class TestClaudeFixture(_ReplayChecks, unittest.TestCase):
         errors = self.tool_events(events, EventType.ERROR)
         self.assertEqual(self.tool_events(events, EventType.TOOL_RESULT), [])
         self.assertEqual([e.data["tool_name"] for e in errors], ["Read", "Bash"])
+        self.assertEqual(
+            [e.data["error"] for e in errors],
+            [
+                "File does not exist. Note: your current working directory is /workspace/project.",
+                "Exit code 1\nls: missing.txt: No such file or directory",
+            ],
+        )
         for error, payload in zip(errors, payloads):
             with self.subTest(tool=error.data["tool_name"]):
                 self.assertEqual(error.data["tool_use_id"], payload["tool_use_id"])
                 self.assertEqual(error.parent_id, calls[payload["tool_use_id"]].event_id)
-                # The known gap: Claude's error field is not read.
-                self.assertEqual(error.data["error"], "tool call failed")
+                # The known gap: is_interrupt is not recorded.
+                self.assertNotIn("is_interrupt", error.data)
         self.assertEqual(meta.errors, 2)
         self.assertEqual(count_session_errors(events), 2)
 
