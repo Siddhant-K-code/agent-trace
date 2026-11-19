@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import math
 import sys
 import time
 import uuid
@@ -42,6 +43,19 @@ LABEL_COLOURS: dict[str, str] = {
 }
 DEFAULT_LABEL_COLOUR = "#8b949e"
 
+_TEXT_FIELDS = ("annotation_id", "session_id", "event_id", "label", "note", "author")
+_NUMBER_FIELDS = ("offset_seconds", "created_at")
+
+
+def _is_finite_number(value: object) -> bool:
+    """Return True for an int or float, not a bool, that float() keeps finite."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except OverflowError:
+        return False
+
 
 @dataclass
 class Annotation:
@@ -60,9 +74,28 @@ class Annotation:
 
     @classmethod
     def from_json(cls, line: str) -> "Annotation":
+        """Parse one line of an annotations file.
+
+        Raises ValueError when the line is not valid JSON or not a JSON
+        object, or when a known field has the wrong type: the text fields
+        must be strings, and the number fields must be finite ints or
+        floats. Raises RecursionError when the JSON nests too deep. A missing
+        field keeps its default. Only JSON true makes the annotation
+        shareable.
+        """
         d = json.loads(line)
+        if not isinstance(d, dict):
+            raise ValueError("annotation is not a JSON object")
+        for name in _TEXT_FIELDS:
+            if name in d and not isinstance(d[name], str):
+                raise ValueError(f"annotation field {name} is not a string")
+        for name in _NUMBER_FIELDS:
+            if name in d and not _is_finite_number(d[name]):
+                raise ValueError(f"annotation field {name} is not a finite number")
         known = {f.name for f in dataclasses.fields(cls)}
-        return cls(**{k: v for k, v in d.items() if k in known})
+        values = {k: v for k, v in d.items() if k in known}
+        values["shareable"] = d.get("shareable") is True
+        return cls(**values)
 
     @property
     def label_colour(self) -> str:
@@ -89,20 +122,52 @@ def add_annotation(
         f.write(annotation.to_json() + "\n")
 
 
+def _read_lines(path: Path) -> list[str]:
+    """Read an annotations file as lines.
+
+    read_text() turns CR and CRLF into LF, and the text is split on LF only.
+    Another writer can leave U+2028 or another Unicode line break raw inside
+    a JSON string, and splitlines() would cut that line in two. Each byte
+    that is not valid UTF-8 is read as a lone surrogate, so one bad line does
+    not stop the read. Writing with errors="surrogateescape" gives back the
+    same byte.
+    """
+    return path.read_text(encoding="utf-8", errors="surrogateescape").split("\n")
+
+
 def load_annotations(store: TraceStore, session_id: str) -> list[Annotation]:
-    """Load all annotations for a session."""
+    """Load all annotations for a session.
+
+    A line that is not valid UTF-8, or that from_json rejects, is skipped.
+    """
     path = _annotations_path(store, session_id)
     if not path.exists():
         return []
     annotations: list[Annotation] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in _read_lines(path):
         line = line.strip()
         if line:
             try:
+                # Raises UnicodeDecodeError, a ValueError, if the line held a
+                # byte that is not valid UTF-8.
+                line.encode("utf-8", "surrogateescape").decode("utf-8")
                 annotations.append(Annotation.from_json(line))
-            except (json.JSONDecodeError, TypeError):
+            except (ValueError, RecursionError):
                 continue
     return annotations
+
+
+def _line_annotation_id(line: str) -> object:
+    """Return the annotation_id of a JSON object line, or None.
+
+    It checks no other field, so delete_annotation can remove a line that
+    load_annotations skips.
+    """
+    try:
+        d = json.loads(line)
+    except (ValueError, RecursionError):
+        return None
+    return d.get("annotation_id") if isinstance(d, dict) else None
 
 
 def delete_annotation(
@@ -110,29 +175,29 @@ def delete_annotation(
     session_id: str,
     annotation_id: str,
 ) -> bool:
-    """Remove an annotation by ID. Returns True if found and removed."""
+    """Remove an annotation by ID. Returns True if found and removed.
+
+    A line that is not valid UTF-8 is written back with the same bytes.
+    """
     path = _annotations_path(store, session_id)
     if not path.exists():
         return False
-    lines = path.read_text(encoding="utf-8").splitlines()
+    lines = _read_lines(path)
     new_lines = []
     found = False
     for line in lines:
         line = line.strip()
         if not line:
             continue
-        try:
-            a = Annotation.from_json(line)
-            if a.annotation_id == annotation_id:
-                found = True
-                continue
-        except Exception:
-            pass
+        if _line_annotation_id(line) == annotation_id:
+            found = True
+            continue
         new_lines.append(line)
     if found:
         path.write_text(
             "\n".join(new_lines) + ("\n" if new_lines else ""),
             encoding="utf-8",
+            errors="surrogateescape",
             newline="\n",
         )
     return found
@@ -143,24 +208,32 @@ def delete_annotation(
 # ---------------------------------------------------------------------------
 
 def _parse_offset(offset_str: str) -> float:
-    """Parse a time offset string like '2m14s', '134s', '2:14' into seconds."""
+    """Parse a time offset string like '2m14s', '134s', '2:14' into seconds.
+
+    Raises ValueError when the string does not parse or the result is not
+    finite. load_annotations skips a line whose offset_seconds is not finite.
+    """
     s = offset_str.strip().lower()
-    # Format: Xm Ys
     import re
     m = re.fullmatch(r"(?:(\d+)m)?(?:(\d+(?:\.\d+)?)s?)?", s)
-    if m and (m.group(1) or m.group(2)):
-        minutes = float(m.group(1) or 0)
-        seconds = float(m.group(2) or 0)
-        return minutes * 60 + seconds
-    # Format: M:SS
     m2 = re.fullmatch(r"(\d+):(\d{2}(?:\.\d+)?)", s)
-    if m2:
-        return float(m2.group(1)) * 60 + float(m2.group(2))
-    # Plain seconds
-    try:
-        return float(s.rstrip("s"))
-    except ValueError:
+    if m and (m.group(1) or m.group(2)):
+        # Format: Xm Ys
+        seconds = float(m.group(1) or 0) * 60 + float(m.group(2) or 0)
+    elif m2:
+        # Format: M:SS
+        seconds = float(m2.group(1)) * 60 + float(m2.group(2))
+    else:
+        # Plain seconds
+        try:
+            seconds = float(s.rstrip("s"))
+        except ValueError:
+            raise ValueError(f"Cannot parse offset: {offset_str!r}")
+    # float() reads "inf", "nan" and "1e400", and a long run of digits
+    # overflows to inf in every format.
+    if not math.isfinite(seconds):
         raise ValueError(f"Cannot parse offset: {offset_str!r}")
+    return seconds
 
 
 def _find_event_by_offset(
@@ -168,7 +241,12 @@ def _find_event_by_offset(
     session_id: str,
     offset_seconds: float,
 ) -> str:
-    """Return the event_id of the event nearest to *offset_seconds*."""
+    """Return the event_id of the event nearest to *offset_seconds*.
+
+    Returns "" when that event_id is not a string, so the annotation is
+    offset-based. load_annotations skips a line whose event_id is not a
+    string.
+    """
     events = store.load_events(session_id)
     if not events:
         return ""
@@ -180,7 +258,7 @@ def _find_event_by_offset(
         if diff < best_diff:
             best_diff = diff
             best = e
-    return best.event_id
+    return best.event_id if isinstance(best.event_id, str) else ""
 
 
 # ---------------------------------------------------------------------------
@@ -210,9 +288,10 @@ def format_annotations(
 ) -> None:
     """Write the annotations as terminal text to *out*.
 
-    An annotations file can hold any JSON value in each field, so each one
-    goes through inert() and an escape code or a line break in it shows as
-    text. In the note, each run of whitespace becomes one space first.
+    Another tool can write any text into an annotations file, so each text
+    field goes through inert() and an escape code or a line break in it
+    shows as text. In the note, each run of whitespace becomes one space
+    first. If time.localtime() rejects created_at, it prints as a number.
     """
     w = out.write
     if not annotations:
@@ -220,7 +299,10 @@ def format_annotations(
         return
     w(f"\n{len(annotations)} annotation(s):\n\n")
     for a in annotations:
-        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(a.created_at))
+        try:
+            ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(a.created_at))
+        except (OverflowError, OSError, ValueError):
+            ts = str(a.created_at)
         label_str = f"  [{inert(a.label)}]" if a.label else ""
         event_str = f"  event={inert(a.event_id)}" if a.event_id else f"  offset={a.offset_seconds:.1f}s"
         w(f"  {inert(a.annotation_id)}  {ts}{label_str}{event_str}\n")
@@ -228,7 +310,7 @@ def format_annotations(
             w(f"    {inert(' '.join(str(a.note).split()))}\n")
         if a.author:
             w(f"    {inert(a.author)}\n")
-        if a.shareable:
+        if a.shareable is True:
             w("    shareable\n")
         w("\n")
 

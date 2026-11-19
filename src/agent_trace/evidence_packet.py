@@ -443,7 +443,7 @@ def _minimize_annotations(
 ) -> tuple[Annotation, ...]:
     selected: list[Annotation] = []
     for annotation in annotations:
-        if not annotation.shareable:
+        if annotation.shareable is not True:
             continue
         minimized = copy.copy(annotation)
         minimized.annotation_id = f"annotation-{len(selected) + 1:06d}"

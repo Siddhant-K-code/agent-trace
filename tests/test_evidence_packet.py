@@ -9,6 +9,7 @@ from agent_trace.annotate import Annotation, add_annotation
 from agent_trace.evidence_packet import (
     EVIDENCE_PACKET_SCHEMA,
     EVIDENCE_PACKET_SCHEMA_VERSION,
+    _minimize_annotations,
     build_evidence_packet,
 )
 from agent_trace.models import EventType, SessionMeta, TraceEvent
@@ -215,6 +216,22 @@ class TestEvidencePacket(unittest.TestCase):
         self.assertEqual(packet.annotations[0].annotation_id, "annotation-000001")
         self.assertEqual(packet.annotations[0].event_id, "event-000004")
         self.assertEqual(packet.annotations[0].author, "")
+
+    def test_only_json_true_marks_an_annotation_shareable(self):
+        path = self.store.annotations_path(self.session_id)
+        with path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write('{"note":"NOTE-STRFALSE","shareable":"false"}\n')
+            handle.write('{"note":"NOTE-INT1","shareable":1}\n')
+        packet = build_evidence_packet(self.store, self.session_id)
+        self.assertEqual([annotation.note for annotation in packet.annotations], ["SHAREABLE-NOTE"])
+
+    def test_minimize_annotations_needs_shareable_true(self):
+        annotations = [
+            Annotation(note="one", shareable=1),
+            Annotation(note="text", shareable="true"),
+            Annotation(note="yes", shareable=True),
+        ]
+        self.assertEqual([annotation.note for annotation in _minimize_annotations(annotations, {})], ["yes"])
 
     def test_manifest_is_versioned_deterministic_and_links_source_and_packet(self):
         first = build_evidence_packet(self.store, self.session_id)
