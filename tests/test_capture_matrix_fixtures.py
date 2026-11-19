@@ -66,7 +66,8 @@ TOKEN_USAGE_KEYS = {
     "total_tokens",
 }
 SYNTHETIC_ID = re.compile(r"^[cd]\d{7}-0000-4000-8000-\d{12}$")
-# Claude Code agent ids are "a" and 16 hex digits.
+# Real Claude Code agent ids are "a" and 16 hex digits. The fixture's synthetic
+# ids use decimal digits only, so this pattern rejects any real id containing a-f.
 SYNTHETIC_CLAUDE_AGENT_ID = re.compile(r"^a\d{16}$")
 
 
