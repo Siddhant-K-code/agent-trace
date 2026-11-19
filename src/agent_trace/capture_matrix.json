@@ -8,10 +8,10 @@
       "setup_command": "agent-strace setup --cli claude",
       "config_location": "~/.claude/settings.json",
       "rollback": "The setup command only prints Claude hook JSON; it does not change ~/.claude/settings.json. If you manually merged the generated hook entries there, remove only AgentTrace's commands while retaining other hooks.",
-      "verification_status": "unverified",
-      "tested_version": null,
-      "last_verified": null,
-      "fixture_test_reference": null,
+      "verification_status": "verified",
+      "tested_version": "2.1.325",
+      "last_verified": "2026-11-19",
+      "fixture_test_reference": "tests/test_capture_matrix_fixtures.py",
       "coverage": {
         "session_start": "captured",
         "session_end": "captured",
@@ -20,13 +20,16 @@
         "tool": "captured",
         "file": "provider_defined",
         "command": "provider_defined",
-        "error": "provider_defined",
+        "error": "captured",
         "stop": "captured"
       },
       "privacy": "Events pass through AgentTrace's normal redaction path; hook visibility is limited to fields emitted by the provider.",
       "known_gaps": [
-        "File and command semantics depend on the tool payload exposed by Claude Code hooks.",
-        "This entry is intentionally marked unverified until a clean-environment versioned verification run is recorded."
+        "PostToolUseFailure sends the failure text in a top-level error field and no tool_response, and agent-strace does not read that field for Claude Code. Each failed tool call, including a Bash command that exits non-zero, is recorded as an error event with its tool name and tool_use_id and counted in the session's errors, but its text is \"tool call failed\": the error message, exit code and stderr are lost.",
+        "SessionStart carries no model name and no hook reports the session's token usage, so session_start has an empty model and sessions record no tokens.",
+        "SubagentStart and SubagentStop fire in the parent session but setup does not register them, so no subagent_start or subagent_stop events are recorded. A subagent's tool calls arrive under the parent session_id and are recorded in the parent trace with its agent_id and agent_type, between the parent's Agent tool_call and tool_result.",
+        "A tool denied at the permission prompt (in claude -p, any call without an --allowedTools grant) fires PreToolUse and PermissionRequest but no post hook, so its tool_call has no result or error. PermissionRequest is not registered.",
+        "File and command activity is visible only in tool arguments and results: Bash calls carry tool_input.command, Read, Edit and Write carry tool_input.file_path, and no file_write events are recorded."
       ]
     },
     {
