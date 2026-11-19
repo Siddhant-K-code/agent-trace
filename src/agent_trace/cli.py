@@ -3031,13 +3031,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_compare.add_argument("session_id_b", nargs="?",
                            help="second session ID (candidate)")
     p_compare.add_argument("--rerun", action="store_true",
-                           help="re-run the original prompt and compare live")
+                           help="print the session's first recorded user prompt to stderr "
+                                "and exit 1; the rerun is not automated yet")
     p_compare.add_argument("--model", metavar="MODEL",
-                           help="model to use for --rerun")
+                           help="accepted for --rerun but not used yet")
     p_compare.add_argument("--tag", metavar="TAG",
-                           help="compare the last N sessions matching this tag")
+                           help="compare the two newest sessions whose name or command "
+                                "contains TAG, ignoring case; the older one is the baseline")
     p_compare.add_argument("--last", type=int, default=2, metavar="N",
-                           help="number of tagged sessions to compare (default: 2)")
+                           help="with --tag, take the N newest matches (default: 2); "
+                                "only the two newest are compared")
     p_compare.add_argument("--format", choices=["text", "json"], default="text",
                            dest="format", help="output format (default: text)")
 
