@@ -194,6 +194,10 @@ after the Claude session continued, delete that directory first. Nothing is
 written until the whole log has been converted, so a log that fails to import
 leaves no partial session behind.
 
+Lines that are not JSON objects are skipped, as lines that are not JSON are.
+An entry whose `timestamp` is not an ISO 8601 time from 1970 on, such as a
+number, `null` or a time before 1970, is imported with the timestamp `0.0`.
+
 Claude Code writes one log line per content block of a model response and
 repeats the response's token usage on each. The import keeps that usage once,
 on the response's last line, so token totals, request counts and
@@ -1848,7 +1852,7 @@ Skill adoption from recorded behavior: available → loaded → followed → out
 
 With no sessions in the trace store, the command prints how to read Claude Code, GitHub Copilot or Codex history or set up capture instead of an empty report. In JSON mode the report is still printed and the hint goes to stderr.
 
-When sessions are left out of the aggregate, the first line says how many and why, for example `Skills across 2 of 7 sessions since 2026-10-16 (5 started before the window)`. Reasons: started before the `--since` window, or unreadable or malformed. With the `--from-*` flags, sessions that `skills eval` ran in its temporary workspaces are left out too, and stderr gives the count. JSON adds `sessions_total` and `sessions_excluded`. With `--from-claude`, transcripts that share a session ID are merged into one session, and the `Read N Claude Code session(s)` line says how many. The three `--from-*` flags are mutually exclusive. With `--from-copilot` or `--from-codex`, the `Read` line also says how many sessions recorded their skill list and what was skipped, and JSON `availability_basis` is `recorded` or `mixed`. With `--from-copilot`, skill directories that recorded loads point to are scanned like `--skills-dir`, and a builtin skill path from a deleted Copilot CLI version resolves to the newest installed version. The log formats are internal to each agent and can change; see [skills.md](skills.md#quick-start).
+When sessions are left out of the aggregate, the first line says how many and why, for example `Skills across 2 of 7 sessions since 2026-10-16 (5 started before the window)`. Reasons: started before the `--since` window, or unreadable or malformed. With the `--from-*` flags, sessions that `skills eval` ran in its temporary workspaces are left out too, and stderr gives the count. JSON adds `sessions_total` and `sessions_excluded`. With `--from-claude`, transcripts that share a session ID are merged into one session, and the `Read N Claude Code session(s)` line says how many. The three `--from-*` flags are mutually exclusive. With `--from-copilot` or `--from-codex`, the `Read` line also says how many sessions recorded their skill list and what was skipped, and JSON `availability_basis` is `recorded` or `mixed`. With `--from-copilot`, skill directories that recorded loads point to are scanned like `--skills-dir`, and a builtin skill path from a deleted Copilot CLI version resolves to the newest installed version. With `--from-copilot` or `--from-codex`, a record timestamp that cannot be read as a time from 1970 on, such as a negative number or an integer too large for a float, is ignored, and the event takes the time of the event before it or of the session start. The log formats are internal to each agent and can change; see [skills.md](skills.md#quick-start).
 
 ### `skills eval`
 ```
@@ -2469,7 +2473,9 @@ Safety:
 - Writes hold the store write lock used by every other writer.
 - Symlinked entries and workspaces are reported and never followed. Invalid
   session IDs, empty or unparseable event streams, and events naming another
-  session are reported and skipped.
+  session are reported and skipped. A stream is unparseable when a line is not
+  a valid event or its `timestamp` is not a Unix time in seconds, such as a
+  negative number, a time in milliseconds or a number too large to be a date.
 - Sessions covered by a tenant erasure tombstone, or named by a pending tenant
   delete or tag journal, are skipped so erased data is never resurrected. An
   unreadable erasure audit or journal blocks the whole store.

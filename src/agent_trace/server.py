@@ -52,7 +52,11 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .collector_client import check_session_meta
-from .event_data import NonObjectEventDataError, refused_event_warning
+from .event_data import (
+    NonObjectEventDataError,
+    refused_event_warning,
+    refused_timestamp_warning,
+)
 from .fileutil import split_lf_lines
 from .models import SessionMeta, TraceEvent, usable_time
 from .store import (
@@ -595,9 +599,11 @@ class CollectorHandler(BaseHTTPRequestHandler):
         """Accept a batch of NDJSON events.
 
         Each line is stored or refused on its own. A line that does not parse,
-        has an invalid session ID, or has ``data`` that is present but not a
-        JSON object is not stored and counts in ``errors``. An event without
-        ``data`` is stored with an empty object.
+        has an invalid session ID, has ``data`` that is present but not a
+        JSON object, or has a ``timestamp`` that is not a Unix time in seconds
+        is not stored and counts in ``errors``. An event without ``data`` is
+        stored with an empty object. An event without ``timestamp`` is stored
+        with the current time.
         """
         accepted = 0
         errors = 0
@@ -611,6 +617,10 @@ class CollectorHandler(BaseHTTPRequestHandler):
                 # refused events leaves no session behind.
                 if not isinstance(event.data, Mapping):
                     sys.stderr.write(refused_event_warning("server", event))
+                    errors += 1
+                    continue
+                if usable_time(event.timestamp) is None:
+                    sys.stderr.write(refused_timestamp_warning("server", event))
                     errors += 1
                     continue
                 session_id = validate_session_id(event.session_id)

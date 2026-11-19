@@ -573,6 +573,39 @@ class TestCli(_Base):
         self.assertEqual(session["status"], "would_write")
         self.assertEqual(session["meta"]["command"], f"github-copilot ({BACKFILL_SOURCE})")
 
+    def test_timestamp_that_is_not_a_unix_time_skips_only_that_session(self):
+        write_metaless(self.root, "sub1", subagent_events("sub1"))
+        bad = {
+            "neg1": -5,
+            "huge1": 1e300,
+            "millis1": 1767225600000,
+            "bigint1": int("1" + "0" * 400),
+        }
+        for session_id, timestamp in bad.items():
+            directory = self.root / session_id
+            directory.mkdir()
+            second = json.dumps({"event_type": "tool_call", "timestamp": timestamp,
+                                 "session_id": session_id})
+            (directory / "events.ndjson").write_text(
+                subagent_events(session_id)[0].to_json() + "\n" + second + "\n",
+                encoding="utf-8",
+            )
+
+        code, out, _ = self._run(("apply", True), ("format", "json"))
+
+        self.assertEqual(code, 0)
+        sessions = {item["session_id"]: item for item in json.loads(out)["sessions"]}
+        self.assertEqual(sessions["sub1"]["status"], "written")
+        self.assertTrue((self.root / "sub1" / "meta.json").exists())
+        for session_id in bad:
+            with self.subTest(session_id=session_id):
+                item = sessions[session_id]
+                self.assertEqual(
+                    (item["status"], item["reason"], item["detail"]),
+                    ("skipped", "unparseable_events", "line 2: invalid timestamp"),
+                )
+                self.assertFalse(os.path.lexists(self.root / session_id / "meta.json"))
+
     def test_invalid_agent_name_is_rejected(self):
         code, _, err = self._run(("agent_name", "bad\nname"))
         self.assertEqual(code, 1)

@@ -484,6 +484,49 @@ class TestJSONLImport(unittest.TestCase):
         self.assertEqual(import_jsonl(path, store=self.store), "half1")
         self.assertEqual(self.store.load_events("half1")[-1].event_type, EventType.SESSION_END)
 
+    def _prompt_times(self, session_id):
+        return {
+            event.data["prompt"]: event.timestamp
+            for event in self.store.load_events(session_id)
+            if event.event_type == EventType.USER_PROMPT
+        }
+
+    def test_lines_that_are_not_objects_are_skipped(self):
+        path = os.path.join(self.tmpdir, "session.jsonl")
+        entry = {"type": "user", "sessionId": "notobj1", "timestamp": "2026-01-01T00:00:00.500Z",
+                 "message": {"role": "user", "content": "kept"}, "uuid": "u1"}
+        with open(path, "w") as f:
+            f.write('[1, 2]\n"text"\n' + json.dumps(entry) + "\nnull\n42\n")
+        args = argparse.Namespace(trace_dir=self.tmpdir, discover=False, path=path)
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cmd_import(args), 0)
+
+        self.assertEqual(self._prompt_times("notobj1"), {"kept": 1767225600.5})
+
+    def test_timestamp_that_is_not_a_unix_time_is_stored_as_zero(self):
+        timestamps = {
+            "good": "2026-01-01T00:00:00.500Z",
+            "number": 1767225600,
+            "bool": True,
+            "object": {"seconds": 1767225600},
+            "nan": float("nan"),
+            "before-1970": "1900-01-01T00:00:00Z",
+        }
+        path = self._write_jsonl([
+            {"type": "user", "sessionId": "badtime1", "timestamp": timestamp,
+             "message": {"role": "user", "content": name}, "uuid": f"u{index}"}
+            for index, (name, timestamp) in enumerate(timestamps.items())
+        ])
+        args = argparse.Namespace(trace_dir=self.tmpdir, discover=False, path=path)
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cmd_import(args), 0)
+
+        expected = dict.fromkeys(timestamps, 0.0)
+        expected["good"] = 1767225600.5
+        self.assertEqual(self._prompt_times("badtime1"), expected)
+
 
 if __name__ == "__main__":
     unittest.main()

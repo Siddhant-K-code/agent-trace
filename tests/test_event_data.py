@@ -12,6 +12,7 @@ from agent_trace.event_data import (
     number_field,
     object_field,
     refused_event_warning,
+    refused_timestamp_warning,
     require_object_event_data,
     skipped_event_warning,
     str_field,
@@ -177,6 +178,23 @@ class TestRefusedEventWarning(unittest.TestCase):
                     refused_event_warning("server", event),
                     "[server] Refused one tool_call event because its data "
                     f"is {phrase}, not an object.\n",
+                )
+
+
+class TestRefusedTimestampWarning(unittest.TestCase):
+    def test_warning_names_the_event_type_only(self):
+        for timestamp in ("SECRET-TIME", None, float("nan"), -5, 1767225600000):
+            with self.subTest(timestamp=timestamp):
+                event = TraceEvent(
+                    event_type=EventType.TOOL_CALL,
+                    timestamp=timestamp,
+                    event_id="SECRET-EVENT-ID",
+                    data={"command": "SECRET-COMMAND"},
+                )
+                self.assertEqual(
+                    refused_timestamp_warning("server", event),
+                    "[server] Refused one tool_call event because its timestamp "
+                    "is not a Unix time in seconds.\n",
                 )
 
 
