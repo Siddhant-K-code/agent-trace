@@ -75,10 +75,10 @@ _UPDATABLE_META_FIELDS = frozenset(
 def _check_session_times(meta: SessionMeta) -> None:
     """Raise ValueError if started_at, or ended_at when set, is not a usable time.
 
-    check_session_meta passes any finite number of 0 or more, such as a time
-    in milliseconds, since the client can read it. The tenant commands refuse
-    a whole store that holds such a started_at, and list and stats show such
-    a time as missing.
+    check_session_meta lets through a time the client can read but
+    datetime.fromtimestamp refuses, such as one sent in milliseconds. list
+    and stats show such a time as missing, and the tenant commands refuse a
+    whole store that holds such a started_at.
     """
     if usable_time(meta.started_at) is None:
         raise ValueError("started_at must be a Unix time in seconds")
