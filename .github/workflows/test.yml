@@ -39,7 +39,8 @@ jobs:
     # configs, fixtures and baselines agent-strace reads back, and the by-path
     # reads and writes behind `agent-strace validate`, `compliance-report`,
     # `share --assignment` and `score`, the watch tail reading on across a
-    # tag_session rewrite, and the `record` stdio proxy's shutdown paths,
+    # tag_session rewrite, the `record` stdio proxy's shutdown paths, and
+    # `auto` removing its hook directory without POSIX signal handling,
     # which the Linux jobs never run
     # natively. Only these tests run here: the full suite does not yet pass
     # on Windows (POSIX signals and file modes, CRLF in CLI and report
@@ -78,6 +79,7 @@ jobs:
           tests.test_store.TestStoreWriteLock
           tests.test_watch_paths.TestTailFollowsReplacedFile
           tests.test_proxy.StdioProxyLifecycleTest
+          tests.test_auto_runner
         env:
           PYTHONPATH: src
           # Redirected stdout defaults to cp1252, which cannot print the

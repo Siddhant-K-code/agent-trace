@@ -2,11 +2,12 @@
 
 ``agent-strace auto -- <command>`` writes a ``sitecustomize.py`` into a
 private temporary directory, prepends that directory to ``PYTHONPATH`` and
-deletes it when the command exits. Python's ``site`` module imports
-``sitecustomize`` while the interpreter starts, before any user code, so
-every interpreter the command starts is covered: ``python script.py``,
-``python -m module``, console scripts, shebang scripts and Python
-subprocesses. The generated module:
+deletes it when the command exits, including when agent-strace is stopped
+by a signal (see :mod:`agent_trace.auto_runner`). Python's ``site``
+module imports ``sitecustomize`` while the interpreter starts, before any
+user code, so every interpreter the command starts is covered:
+``python script.py``, ``python -m module``, console scripts, shebang scripts
+and Python subprocesses. The generated module:
 
 1. runs the ``sitecustomize`` it shadows, if there is one (a venv's or a
    distribution's), and removes its own directory from ``sys.path``;
