@@ -2878,7 +2878,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_opt.add_argument("--dataset", metavar="NAME",
                        help="use a named dataset instead of a single session")
     p_opt.add_argument("--dry-run", action="store_true", dest="dry_run",
-                       help="show proposed diff without writing")
+                       help="print the proposal and write nothing, even with --apply")
     p_opt.add_argument("--apply", action="store_true",
                        help="write proposed additions to the target file")
     p_opt.add_argument("--base-url", dest="base_url", metavar="URL",

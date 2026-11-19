@@ -4,7 +4,7 @@ Analyzes a session or dataset of sessions, clusters failures by root cause,
 and proposes concrete additions to instruction files (AGENTS.md, CLAUDE.md,
 skill .md files). Uses an LLM for clustering and proposal generation via any
 OpenAI-compatible endpoint. Falls back to heuristic-only mode when no LLM
-is configured.
+is configured, the request fails or the reply has no usable patterns.
 
 No new dependencies. LLM calls use urllib.request.
 """
@@ -12,6 +12,7 @@ No new dependencies. LLM calls use urllib.request.
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import sys
 import urllib.error
@@ -240,7 +241,11 @@ Respond with JSON only, no prose:
 
 
 def _call_llm(prompt: str, base_url: str, model: str, api_key: str) -> str | None:
-    """Call an OpenAI-compatible chat endpoint. Returns the response text or None."""
+    """Call an OpenAI-compatible chat endpoint. Returns the response text or None.
+
+    None means the request failed or the reply has no text where a chat
+    completion has it. run_optimize then falls back to the heuristics.
+    """
     url = base_url.rstrip("/") + "/chat/completions"
     payload = json.dumps({
         "model": model,
@@ -256,49 +261,77 @@ def _call_llm(prompt: str, base_url: str, model: str, api_key: str) -> str | Non
     try:
         with no_redirect_opener().open(req, timeout=30) as resp:
             data = json.loads(resp.read())
-            return data["choices"][0]["message"]["content"]
-    except (urllib.error.URLError, KeyError, json.JSONDecodeError, IndexError) as exc:
+            content = data["choices"][0]["message"]["content"]
+    except (
+        OSError,  # refused, reset or timed out, also while the body is read
+        http.client.HTTPException,  # a bad status line or a cut-off body
+        ValueError,  # not JSON, or not UTF-8
+        RecursionError,  # JSON nested too deep
+        KeyError,  # JSON of another shape
+        IndexError,
+        TypeError,
+    ) as exc:
         if isinstance(exc, urllib.error.HTTPError):
             exc.close()
         return None
+    return content if isinstance(content, str) else None
 
 
 def _parse_llm_patterns(
     response: str,
     sessions: dict[str, list[TraceEvent]],
 ) -> list[FailurePattern]:
-    """Parse LLM JSON response into FailurePattern objects."""
+    """Parse LLM JSON response into FailurePattern objects.
+
+    The reply can hold anything, so each value is checked. A reply that is
+    not a JSON object with a list of patterns gives []. A pattern is skipped
+    unless it is an object whose proposed addition is a non-empty string. A
+    name, description or session list of the wrong type counts as missing.
+    Each CRLF in the addition becomes LF. The preview splits at LF, and
+    --apply writes each LF as the target's line break.
+    """
+    # Strip markdown code fences if present
+    text = response.strip()
+    if text.startswith("```"):
+        text = "\n".join(text.split("\n")[1:])
+    if text.endswith("```"):
+        text = "\n".join(text.split("\n")[:-1])
     try:
-        # Strip markdown code fences if present
-        text = response.strip()
-        if text.startswith("```"):
-            text = "\n".join(text.split("\n")[1:])
-        if text.endswith("```"):
-            text = "\n".join(text.split("\n")[:-1])
         data = json.loads(text)
-        patterns = []
-        for p in data.get("patterns", []):
-            name = str(p.get("name", "unknown"))
-            desc = str(p.get("description", ""))
-            affected = [str(s) for s in p.get("affected_sessions", [])]
-            addition = str(p.get("proposed_addition", ""))
-            if not addition:
-                continue
-            # Match affected session IDs to full IDs in sessions dict
-            matched = [
-                sid for sid in sessions
-                if any(sid.startswith(a) or a.startswith(sid[:8]) for a in affected)
-            ]
-            patterns.append(FailurePattern(
-                name=name,
-                description=desc,
-                session_ids=matched or list(sessions.keys())[:3],
-                example_events=[],
-                proposed_instruction=addition,
-            ))
-        return patterns
-    except (json.JSONDecodeError, KeyError, TypeError):
+    except (ValueError, RecursionError):
+        # Not JSON, a number too long to convert, or nested too deep.
         return []
+    if not isinstance(data, dict):
+        return []
+    items = data.get("patterns", [])
+    if not isinstance(items, list):
+        return []
+    patterns = []
+    for p in items:
+        if not isinstance(p, dict):
+            continue
+        addition = p.get("proposed_addition")
+        if not isinstance(addition, str) or not addition:
+            continue
+        name = p.get("name")
+        desc = p.get("description")
+        affected = p.get("affected_sessions")
+        if not isinstance(affected, list):
+            affected = []
+        prefixes = [a for a in affected if isinstance(a, str)]
+        # Match affected session IDs to full IDs in sessions dict
+        matched = [
+            sid for sid in sessions
+            if any(sid.startswith(a) or a.startswith(sid[:8]) for a in prefixes)
+        ]
+        patterns.append(FailurePattern(
+            name=name if isinstance(name, str) else "unknown",
+            description=desc if isinstance(desc, str) else "",
+            session_ids=matched or list(sessions.keys())[:3],
+            example_events=[],
+            proposed_instruction=addition.replace("\r\n", "\n"),
+        ))
+    return patterns
 
 
 # ---------------------------------------------------------------------------
@@ -334,6 +367,28 @@ class OptimizeProposal:
 # Core optimize function
 # ---------------------------------------------------------------------------
 
+class OptimizeTargetError(Exception):
+    """The target file cannot be read, or is not UTF-8."""
+
+
+def _read_target(target_file: str) -> str:
+    """Return the text of the target file, or "" when it does not exist.
+
+    Raises OptimizeTargetError when the file cannot be read or is not UTF-8.
+    """
+    path = Path(target_file)
+    try:
+        if not path.exists():
+            return ""
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        raise OptimizeTargetError(
+            f"{target_file} is not valid UTF-8. Save it as UTF-8 and run again."
+        ) from None
+    except OSError as exc:
+        raise OptimizeTargetError(f"cannot read {target_file}: {exc.strerror or exc}") from None
+
+
 def run_optimize(
     store: TraceStore,
     session_ids: list[str],
@@ -348,7 +403,8 @@ def run_optimize(
 
     Raises NonObjectEventDataError before the LLM call or the heuristics when
     they would read event data that is not an object. ``name_sessions`` adds
-    the session ID to that error.
+    the session ID to that error. Raises OptimizeTargetError before either
+    when the target file cannot be read or is not UTF-8.
     """
     sessions: dict[str, list[TraceEvent]] = {}
     for sid in session_ids:
@@ -357,8 +413,7 @@ def run_optimize(
         except Exception:
             continue
 
-    target_path = Path(target_file)
-    existing_content = target_path.read_text() if target_path.exists() else ""
+    existing_content = _read_target(target_file)
 
     patterns: list[FailurePattern] = []
 
@@ -402,8 +457,10 @@ def print_proposal(proposal: OptimizeProposal, out: TextIO = sys.stdout) -> None
     The cluster name, the description and the proposed addition can come
     from the LLM's reply, which trace text can steer. So each goes through
     inert() and an escape code shows as text. In the description, each run
-    of whitespace becomes one space first. The proposed addition keeps one
-    line per line of Markdown, and each line keeps its indentation.
+    of whitespace becomes one space first. The proposed addition is split at
+    LF only, as --apply writes it, so each `+` line is one line of the file
+    and keeps its indentation. A final LF adds no empty line. A lone CR,
+    U+2028 or any other line boundary stays on its line as an escape.
     """
     w = out.write
     n_sessions = sum(len(p.session_ids) for p in proposal.patterns)
@@ -422,10 +479,13 @@ def print_proposal(proposal: OptimizeProposal, out: TextIO = sys.stdout) -> None
         for ex in p.example_events[:2]:
             w(f"  Example: {ex}\n")
         w("\n  Proposed addition:\n")
-        for line in p.proposed_instruction.splitlines():
+        lines = p.proposed_instruction.split("\n")
+        if lines[-1] == "":
+            lines.pop()
+        for line in lines:
             w(f"  + {inert(line)}\n")
 
-    w("\n─" * 60 + "\n")
+    w("\n" + "─" * 60 + "\n")
     w(f"Apply? Run with --apply to write changes to {proposal.target_file}\n\n")
 
 
@@ -464,6 +524,19 @@ def _target_newline(path: Path) -> str:
         return "\n"
 
 
+def _unprintable_cluster(patterns: list[FailurePattern]) -> int:
+    """Return the number of the first cluster whose addition has a character
+    that ``str.isprintable()`` rejects, other than LF and tab, or 0.
+
+    The number is the N of the "Cluster N" line in the preview, which shows
+    each such character as an escape.
+    """
+    for i, p in enumerate(patterns, 1):
+        if not p.proposed_instruction.replace("\n", "").replace("\t", "").isprintable():
+            return i
+    return 0
+
+
 def cmd_optimize(args: argparse.Namespace) -> int:
     import os
     store = TraceStore(args.trace_dir)
@@ -492,15 +565,19 @@ def cmd_optimize(args: argparse.Namespace) -> int:
         or os.environ.get("AGENT_STRACE_LLM_KEY", "")
     )
 
-    proposal = run_optimize(
-        store,
-        session_ids,
-        target_file=target,
-        llm_base_url=base_url,
-        llm_model=model,
-        llm_api_key=api_key,
-        name_sessions=bool(getattr(args, "dataset", None)),
-    )
+    try:
+        proposal = run_optimize(
+            store,
+            session_ids,
+            target_file=target,
+            llm_base_url=base_url,
+            llm_model=model,
+            llm_api_key=api_key,
+            name_sessions=bool(getattr(args, "dataset", None)),
+        )
+    except OptimizeTargetError as exc:
+        sys.stderr.write(f"Error: {exc}\n")
+        return 1
 
     if not proposal.patterns:
         sys.stdout.write("No failure patterns detected. No changes proposed.\n")
@@ -508,13 +585,28 @@ def cmd_optimize(args: argparse.Namespace) -> int:
 
     if dry_run or not apply_flag:
         print_proposal(proposal)
-        if not apply_flag:
-            return 0
+        return 0
 
-    # Apply
+    # --apply shows no preview, so refuse any addition that the preview would
+    # show with an escape. This runs before the target is opened.
+    cluster = _unprintable_cluster(proposal.patterns)
+    if cluster:
+        sys.stderr.write(
+            f"Error: the addition in Cluster {cluster} has a control or format character,"
+            " so nothing was written. Run without --apply to see the escapes.\n"
+        )
+        return 1
+
     new_content = proposal.apply()
     target_path = Path(target)
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    target_path.write_text(new_content, newline=_target_newline(target_path))
+    try:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        data = new_content.replace("\n", _target_newline(target_path)).encode("utf-8")
+        # Write in place, so a symlink is followed and the file keeps its mode.
+        with open(target_path, "wb") as f:
+            f.write(data)
+    except OSError as exc:
+        sys.stderr.write(f"Error: cannot write {target}: {exc.strerror or exc}\n")
+        return 1
     sys.stdout.write(f"Written {len(proposal.patterns)} addition(s) to {target}\n")
     return 0

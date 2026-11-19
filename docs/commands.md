@@ -221,8 +221,9 @@ the pull request. In the Markdown from `review --format markdown` and
 error messages, reasons, annotation notes, cluster descriptions, `standup`
 uncertainty lines, phase names, hint phrases, test results, A2A tasks and the
 `postmortem` root cause and recommendations, each run of whitespace shows as
-one space instead. The `optimize` preview keeps each line of the proposed
-addition on its own `+` line. The prompt that `compare --rerun` prints keeps
+one space instead. The `optimize` preview splits the proposed addition at LF
+only, as `--apply` writes it, and shows each line on its own `+` line, so a CR
+or U+2028 shows as an escape. The prompt that `compare --rerun` prints keeps
 its lines and indentation, and shows each backslash as `\\`, so its escapes
 read back to the exact prompt. `inspect`, `approval show`,
 `review --format json`, `cognitive-debt --format json`,
@@ -1903,10 +1904,16 @@ Measure tokenizer cost impact of switching model versions. No API calls required
 
 ### `optimize`
 ```
-agent-strace optimize [--target FILE] [--dataset NAME] [--apply]
+agent-strace optimize [SESSION_ID] [--target FILE] [--dataset NAME] [--dry-run] [--apply]
                       [--base-url URL] [--model MODEL] [--api-key KEY]
 ```
-Cluster failures by root cause and propose additions to `AGENTS.md` or any instruction file. Three built-in heuristic patterns require no LLM. The POST to `--base-url` (or `AGENT_STRACE_LLM_URL`) does not follow redirects, so pass the final URL. `--apply` keeps `\r\n` line endings in a file that already uses them and writes `\n` otherwise, on every OS.
+Cluster failures by root cause and propose additions to `AGENTS.md` or any instruction file. Three built-in heuristic patterns require no LLM. The POST to `--base-url` (or `AGENT_STRACE_LLM_URL`) does not follow redirects, so pass the final URL. A failed request, or a reply that is not the JSON the prompt asks for, falls back to the heuristics. `--apply` keeps `\r\n` line endings in a file that already uses them and writes `\n` otherwise, on every OS.
+
+Without `--apply`, or with `--dry-run`, `optimize` prints the proposal and writes nothing. `--dry-run --apply` prints the same as `--dry-run`.
+
+`--apply` prints no preview, so it refuses an addition with a character that the preview shows as an escape, such as ESC, a lone CR, U+202E, U+2028 or a no-break space. A tab is allowed. It prints one error line that names the cluster, exits 1 and writes nothing. Run without `--apply` to see the escapes.
+
+`optimize` reads and writes the target as UTF-8, whatever the locale. If the target is not valid UTF-8, or cannot be read or written (for example, it is a directory), `optimize` prints one error line and exits 1. A target that is not valid UTF-8 is left unchanged, with or without `--apply`.
 
 ### `config-watch`
 ```
