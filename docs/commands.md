@@ -2332,6 +2332,14 @@ the local trace by default. Use `--shareable` to allow an annotation to appear
 in a privacy-minimized evidence packet. Full-content packets include all
 annotations.
 
+Annotations are stored in `annotations.jsonl` in the session directory, one
+JSON object per line. If another tool writes that file, only
+`"shareable": true` marks an annotation shareable. Any other value, such as
+`1` or `"true"`, keeps it private. Commands that read annotations skip a line
+that is not a JSON object or has a field of the wrong type, such as a `note`
+that is not a string. `--delete` still removes such a line by its
+`annotation_id`.
+
 | Flag | Description |
 |---|---|
 | `--event ID` | Event ID to annotate |

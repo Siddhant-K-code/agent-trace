@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import math
 import sys
 import time
 import uuid
@@ -42,6 +43,19 @@ LABEL_COLOURS: dict[str, str] = {
 }
 DEFAULT_LABEL_COLOUR = "#8b949e"
 
+_TEXT_FIELDS = ("annotation_id", "session_id", "event_id", "label", "note", "author")
+_NUMBER_FIELDS = ("offset_seconds", "created_at")
+
+
+def _is_finite_number(value: object) -> bool:
+    """Return True for an int or float, not a bool, that float() keeps finite."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except OverflowError:
+        return False
+
 
 @dataclass
 class Annotation:
@@ -60,9 +74,28 @@ class Annotation:
 
     @classmethod
     def from_json(cls, line: str) -> "Annotation":
+        """Parse one line of an annotations file.
+
+        Raises ValueError when the line is not valid JSON or not a JSON
+        object, or when a known field has the wrong type: the text fields
+        must be strings, and the number fields must be finite ints or
+        floats. Raises RecursionError when the JSON nests too deep. A missing
+        field keeps its default. Only JSON true makes the annotation
+        shareable.
+        """
         d = json.loads(line)
+        if not isinstance(d, dict):
+            raise ValueError("annotation is not a JSON object")
+        for name in _TEXT_FIELDS:
+            if name in d and not isinstance(d[name], str):
+                raise ValueError(f"annotation field {name} is not a string")
+        for name in _NUMBER_FIELDS:
+            if name in d and not _is_finite_number(d[name]):
+                raise ValueError(f"annotation field {name} is not a finite number")
         known = {f.name for f in dataclasses.fields(cls)}
-        return cls(**{k: v for k, v in d.items() if k in known})
+        values = {k: v for k, v in d.items() if k in known}
+        values["shareable"] = d.get("shareable") is True
+        return cls(**values)
 
     @property
     def label_colour(self) -> str:
@@ -90,19 +123,37 @@ def add_annotation(
 
 
 def load_annotations(store: TraceStore, session_id: str) -> list[Annotation]:
-    """Load all annotations for a session."""
+    """Load all annotations for a session.
+
+    The file is split on LF only. Another writer can leave U+2028 or another
+    Unicode line break raw inside a JSON string, and splitlines() would cut
+    that line in two. A line that from_json rejects is skipped.
+    """
     path = _annotations_path(store, session_id)
     if not path.exists():
         return []
     annotations: list[Annotation] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in path.read_text(encoding="utf-8").split("\n"):
         line = line.strip()
         if line:
             try:
                 annotations.append(Annotation.from_json(line))
-            except (json.JSONDecodeError, TypeError):
+            except (ValueError, RecursionError):
                 continue
     return annotations
+
+
+def _line_annotation_id(line: str) -> object:
+    """Return the annotation_id of a JSON object line, or None.
+
+    It checks no other field, so delete_annotation can remove a line that
+    load_annotations skips.
+    """
+    try:
+        d = json.loads(line)
+    except (ValueError, RecursionError):
+        return None
+    return d.get("annotation_id") if isinstance(d, dict) else None
 
 
 def delete_annotation(
@@ -114,20 +165,16 @@ def delete_annotation(
     path = _annotations_path(store, session_id)
     if not path.exists():
         return False
-    lines = path.read_text(encoding="utf-8").splitlines()
+    lines = path.read_text(encoding="utf-8").split("\n")
     new_lines = []
     found = False
     for line in lines:
         line = line.strip()
         if not line:
             continue
-        try:
-            a = Annotation.from_json(line)
-            if a.annotation_id == annotation_id:
-                found = True
-                continue
-        except Exception:
-            pass
+        if _line_annotation_id(line) == annotation_id:
+            found = True
+            continue
         new_lines.append(line)
     if found:
         path.write_text(
@@ -210,9 +257,10 @@ def format_annotations(
 ) -> None:
     """Write the annotations as terminal text to *out*.
 
-    An annotations file can hold any JSON value in each field, so each one
-    goes through inert() and an escape code or a line break in it shows as
-    text. In the note, each run of whitespace becomes one space first.
+    Another tool can write any text into an annotations file, so each text
+    field goes through inert() and an escape code or a line break in it
+    shows as text. In the note, each run of whitespace becomes one space
+    first. If time.localtime() rejects created_at, it prints as a number.
     """
     w = out.write
     if not annotations:
@@ -220,7 +268,10 @@ def format_annotations(
         return
     w(f"\n{len(annotations)} annotation(s):\n\n")
     for a in annotations:
-        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(a.created_at))
+        try:
+            ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(a.created_at))
+        except (OverflowError, OSError, ValueError):
+            ts = str(a.created_at)
         label_str = f"  [{inert(a.label)}]" if a.label else ""
         event_str = f"  event={inert(a.event_id)}" if a.event_id else f"  offset={a.offset_seconds:.1f}s"
         w(f"  {inert(a.annotation_id)}  {ts}{label_str}{event_str}\n")
@@ -228,7 +279,7 @@ def format_annotations(
             w(f"    {inert(' '.join(str(a.note).split()))}\n")
         if a.author:
             w(f"    {inert(a.author)}\n")
-        if a.shareable:
+        if a.shareable is True:
             w("    shareable\n")
         w("\n")
 
