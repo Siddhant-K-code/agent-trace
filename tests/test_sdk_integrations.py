@@ -1457,6 +1457,45 @@ class TestLangChainTools(FrameworkCase):
         self.assertEqual([e.event_type for e in events[3:]], [E.DECISION, E.TOOL_CALL, E.ERROR])
         self.assertLinkedTo(events, 5, 4)
 
+    def test_langgraph_recorder_passes_the_callers_config_and_kwargs_through(self):
+        modules, state_graph = self.langgraph()
+        calls = []
+
+        class Node(modules["langchain_core.runnables"].Runnable):
+            def invoke(self, input, config=None, **kwargs):
+                calls.append(("invoke", config, kwargs))
+                return input
+
+            async def ainvoke(self, input, config=None, **kwargs):
+                calls.append(("ainvoke", config, kwargs))
+                return input
+
+            async def astream(self, input, config=None, **kwargs):
+                calls.append(("astream", config, kwargs))
+                yield input
+
+        async def chunks(stream):
+            return [chunk async for chunk in stream]
+
+        node = Node()
+        self.instrument("langchain", modules)
+        recorder = state_graph({"node": node}).compile().nodes["node"].bound
+        self.assertIsNot(recorder, node)
+        # LangGraph calls node.bound with its task config.
+        # The stub graph passes no kwargs, so call it here.
+        config, stop = {"configurable": {"thread_id": "t1"}}, ["end"]
+        runs = {"invoke": lambda: recorder.invoke(1, config, stop=stop),
+                "ainvoke": lambda: _run(recorder.ainvoke(1, config, stop=stop)),
+                "astream": lambda: _run(chunks(recorder.astream(1, config, stop=stop)))}
+        for method, run in runs.items():
+            with self.subTest(method=method):
+                calls.clear()
+                run()
+                [(called, got, kwargs)] = calls
+                self.assertEqual(called, method)
+                self.assertIs(got, config)
+                self.assertEqual(kwargs, {"stop": stop})
+
     def test_langgraph_recorder_reads_attributes_of_the_node_runnable(self):
         modules, state_graph = self.langgraph()
 
