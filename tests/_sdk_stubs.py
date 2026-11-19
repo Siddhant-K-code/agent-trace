@@ -573,8 +573,18 @@ def langchain_tool_modules() -> tuple[dict[str, Any], type, type]:
 
     Like LangChain's, ``BaseTool.invoke`` and ``ainvoke`` call ``run`` and
     ``arun``, which call the ``_run`` and ``_arun`` that tool classes such
-    as ``StructuredTool`` override. ``StateGraph.compile`` returns a graph
-    whose ``nodes`` maps each node name to its function.
+    as ``StructuredTool`` override.
+
+    ``StateGraph(nodes).compile()`` returns a ``Pregel`` whose ``nodes`` maps
+    each name, ``__start__`` included, to a ``PregelNode``. A node given as a
+    function runs in a ``RunnableCallable``, a runnable is the node's
+    ``bound``, and any other object is the node itself. Like LangGraph:
+
+    - a run reads every node's ``triggers``, then runs each node's ``bound``
+      in turn, so a node that is a plain function fails;
+    - ``RunnableCallable.invoke`` fails for a node with only an async function;
+    - ``PregelNode.copy`` finds the node's subgraphs again in its new
+      ``bound``, as LangGraph 0.2 does.
     """
     modules, _ = langchain_modules()
 
@@ -601,19 +611,127 @@ def langchain_tool_modules() -> tuple[dict[str, Any], type, type]:
         async def ainvoke(self, tool_input: Any, **kwargs: Any) -> Any:
             return await self.arun(tool_input, callbacks=object(), **kwargs)
 
+    class Runnable:
+        """Like LangChain's, ``ainvoke`` and ``astream`` call ``invoke`` by default."""
+
+        def invoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+            raise NotImplementedError
+
+        async def ainvoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+            return self.invoke(input, config, **kwargs)
+
+        async def astream(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+            yield await self.ainvoke(input, config, **kwargs)
+
+    class RunnableSequence(Runnable):
+        def __init__(self, *steps: Any) -> None:
+            self.steps = steps
+
+        def invoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+            for step in self.steps:
+                input = step.invoke(input, config)
+            return input
+
+    class RunnableCallable(Runnable):
+        def __init__(self, func: Any, afunc: Any = None) -> None:
+            self.func = func
+            self.afunc = afunc
+
+        def invoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+            if self.func is None:
+                raise TypeError("No synchronous function provided")
+            return self.func(input)
+
+        async def ainvoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+            if self.afunc is None:
+                return self.invoke(input, config, **kwargs)
+            return await self.afunc(input)
+
+    class Pregel(Runnable):
+        def __init__(self, nodes: dict[str, Any]) -> None:
+            self.nodes = nodes
+
+        def _ready(self) -> list[Any]:
+            return [node for node in self.nodes.values() if node.triggers]
+
+        def invoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+            for node in self._ready():
+                input = node.bound.invoke(input, config)
+            return input
+
+        async def ainvoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+            for node in self._ready():
+                input = await node.bound.ainvoke(input, config)
+            return input
+
+        async def astream(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+            # A node's last chunk is the next node's input.
+            for node in self._ready():
+                async for chunk in node.bound.astream(input, config):
+                    input = chunk
+                    yield chunk
+
+    class PregelNode:
+        def __init__(self, triggers: list[str], bound: Any) -> None:
+            self.triggers = triggers
+            self.bound = bound
+            self.subgraphs = [bound] if isinstance(bound, Pregel) else []
+
+        def copy(self, update: dict[str, Any]) -> Any:
+            attrs = {**self.__dict__, **update}
+            attrs.pop("subgraphs")
+            return PregelNode(**attrs)
+
+    def identifier(obj: Any) -> str | None:
+        """Like LangGraph's, the name of a node's cache entries."""
+        if isinstance(obj, RunnableCallable):
+            obj = obj.func
+        name = getattr(obj, "__qualname__", None)
+        module = getattr(obj, "__module__", None)
+        return None if name is None or module is None else f"{module}.{name}"
+
+    def as_node(name: str, node: Any) -> Any:
+        if isinstance(node, Runnable):
+            return PregelNode([name], node)
+        if inspect.iscoroutinefunction(node):
+            return PregelNode([name], RunnableCallable(None, node))
+        if callable(node):
+            return PregelNode([name], RunnableCallable(node))
+        return node
+
     class StateGraph:
-        def __init__(self, nodes: dict[str, Callable[..., Any]]) -> None:
+        def __init__(self, nodes: dict[str, Any]) -> None:
             self._nodes = nodes
 
         def compile(self) -> Any:
-            return types.SimpleNamespace(nodes=dict(self._nodes, __start__=None))
+            nodes = {"__start__": PregelNode(["__start__"], RunnableCallable(lambda state: state))}
+            nodes.update((name, as_node(name, node)) for name, node in self._nodes.items())
+            return Pregel(nodes)
+
+    class GraphBubbleUp(Exception):
+        pass
+
+    class GraphInterrupt(GraphBubbleUp):
+        pass
 
     tools = _module("langchain_core.tools", BaseTool=BaseTool)
+    runnables = _module("langchain_core.runnables", Runnable=Runnable,
+                        RunnableSequence=RunnableSequence)
     graph = _module("langgraph.graph", StateGraph=StateGraph)
+    errors = _module("langgraph.errors", GraphBubbleUp=GraphBubbleUp,
+                     GraphInterrupt=GraphInterrupt)
+    call = _module("langgraph.pregel._call", identifier=identifier)
+    pregel = _module("langgraph.pregel", Pregel=Pregel, PregelNode=PregelNode,
+                     RunnableCallable=RunnableCallable, _call=call)
     modules.update({
         "langchain_core.tools": tools,
-        "langgraph": _module("langgraph", graph=graph),
+        "langchain_core.runnables": runnables,
+        "langgraph": _module("langgraph", graph=graph, errors=errors, pregel=pregel),
         "langgraph.graph": graph,
+        "langgraph.errors": errors,
+        "langgraph.pregel": pregel,
+        "langgraph.pregel._call": call,
     })
     modules["langchain_core"].tools = tools
+    modules["langchain_core"].runnables = runnables
     return modules, BaseTool, StateGraph

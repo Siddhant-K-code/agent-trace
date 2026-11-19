@@ -47,7 +47,7 @@ instrument_langchain()
 | Framework | Install | What's traced |
 |---|---|---|
 | OpenAI Agents SDK | `pip install agent-strace[openai-agents]` | `Runner.run_sync`, function tool calls (from tracing spans) |
-| LangChain / LangGraph | `pip install agent-strace[langchain]` | `BaseTool.run` and `BaseTool.arun`, chat model `_generate` and `_agenerate`, LangGraph nodes |
+| LangChain / LangGraph | `pip install agent-strace[langchain]` | `BaseTool.run` and `BaseTool.arun`, chat model `_generate` and `_agenerate`, node runs of LangGraph graphs compiled after instrumenting |
 | CrewAI | `pip install agent-strace[crewai]` | `Crew.kickoff`, `Agent.execute_task`, `Task.execute_sync` |
 | LiteLLM | `pip install agent-strace[litellm]` | `litellm.completion`, `litellm.acompletion` |
 | Anthropic SDK | `pip install anthropic` | `messages.create` (sync and async clients, streams) |
@@ -165,7 +165,9 @@ llm = ChatAnthropic(model="claude-3-5-sonnet-20241022")
 
 Traces: `BaseTool.run` and `BaseTool.arun`, which `invoke`, `ainvoke` and every tool class (including `StructuredTool`) go through, and the `_generate` and `_agenerate` methods of each chat model class, so `invoke`, `ainvoke`, `batch` and `abatch` are recorded with the token counts in the message's `usage_metadata`. A model class is patched the first time one of its models is called. `stream` and `astream` are not recorded; see [Model calls](#model-calls).
 
-LangGraph node-level tracing is included: each node execution records a `decision` naming the node, then a `tool_call` named `langgraph.node.<name>` and its `tool_result`, or an `error` if the node raises.
+LangGraph nodes are traced in graphs compiled after `instrument_langchain()`. A graph compiled before it is not traced. Each node run records a `decision` naming the node, a `tool_call` named `langgraph.node.<name>`, then a `tool_result` with the run's `duration_ms`, or an `error` if the node raises. `interrupt()`, `NodeInterrupt` and `ParentCommand` stop a node on purpose, so they record a `tool_result` with `control_flow` set to the exception's class name, such as `GraphInterrupt`, not an `error`. A retried node records each attempt, and an interrupted node records again when it resumes. Node input and output are not recorded. The graph runs, streams and draws as it does untraced.
+
+A node is traced only in LangGraph's `PregelNode` shape: it has a `copy` method and its `bound` is a LangChain `Runnable`. A node of another shape is left untraced, and so is a node whose runnable is a LangChain sequence, such as `prompt | model`. The functional API (`@entrypoint`, `@task`) is not traced. This was checked with LangGraph 1.2.23 and langchain-core 1.8.3 on Python 3.14, and with LangGraph 0.2.76 and langchain-core 0.3.86 on Python 3.10.
 
 ---
 
