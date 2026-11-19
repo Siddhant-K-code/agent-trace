@@ -13,7 +13,7 @@ prove that every action was captured.
 
 Claude Code hook coverage is verified with Claude Code `2.1.325` in the
 [capture matrix](capture-matrix.md#claude-code), which lists its known gaps,
-such as failed tool calls recorded without their error text. Hook setup verification checks
+such as sessions recorded with no model name or token usage. Hook setup verification checks
 configuration. After recording one harmless local session, live verification
 can inspect the newest matching trace. Neither mode starts Claude Code or makes
 a model request.

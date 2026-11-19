@@ -1017,6 +1017,42 @@ class TestHooksRedactBeforeCut(unittest.TestCase):
                 self.assertEqual(event.data["error"], expected)
                 self.assert_redacted_once(event, err)
 
+    def test_claude_failure_records_its_error_field(self):
+        # Claude Code's PostToolUseFailure sends its text in error, with no tool_response.
+        failure = {
+            "session_id": self.session_id,
+            "hook_event_name": "PostToolUseFailure",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls missing.txt"},
+            "is_interrupt": False,
+        }
+        text = "Exit code 1\nls: missing.txt: No such file or directory"
+        long_text = "Exit code 1\n" + "ls: missing.txt: No such file or directory\n" * 15
+        cases = (
+            ("text", {"error": text}, text, False),
+            ("message", {"error": {"message": text}}, text, False),
+            ("secret", {"error": "Exit code 1\n" + self.KEY}, "Exit code 1\n" + KEY_MARKER + "\n", True),
+            ("long", {"error": long_text}, long_text[:500], False),
+            ("no error", {}, "tool call failed", False),
+            ("tool_response", {"error": text, "tool_response": "kept"}, "kept", False),
+        )
+        for label, payload, expected, redacted in cases:
+            with self.subTest(label):
+                err = self.hook(["post-tool-failure"], {**failure, **payload})
+                event = self.last_result(self.session_id)
+                self.assertEqual(event.event_type, EventType.ERROR)
+                self.assertEqual(event.data["error"], expected)
+                if redacted:
+                    self.assert_redacted_once(event, err)
+                else:
+                    self.assertFalse(event.redacted)
+                    self.assertEqual(err, "")
+
+        sid = "metaonlyclaude01"
+        self.hook(["--metadata-only", "session-start"], {"session_id": sid, "source": "startup"})
+        self.hook(["--metadata-only", "post-tool-failure"], {**failure, "session_id": sid, "error": text})
+        self.assertEqual(self.last_result(sid).data["error"], "[OMITTED]")
+
     def test_sensitive_key_names_in_tool_output_dict(self):
         output = {"password": "hunter2-Rz2ArIYF", "api_key": "plainbLcOBXlE3A2P"}
         event, err = self.post(output, tool_name="mcp__vault__get_secret")
