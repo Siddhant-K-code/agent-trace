@@ -2489,6 +2489,10 @@ directories that hold the `--replay-baseline` file. On Windows, `validate`
 also refuses directory junctions on these paths. When this rule refuses a
 path, `validate` reports the session as `invalid` and exits 1.
 
+`validate --corpus` resolves the path to the installed package first, so this
+rule does not apply to that path. Python already imported agent-strace through
+that path, so a symlink on it has already decided which code runs.
+
 On Windows, `share --assignment` and `score` also refuse directory junctions in
 the trace store, session, output, submission, comparison directory, and rubric
 paths.
