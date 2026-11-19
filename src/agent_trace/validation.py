@@ -792,11 +792,14 @@ def validate_trace_directory(
 
 
 def _corpus_root() -> Path:
-    # A sys.path entry such as tests/../src keeps its ".." in the package
-    # path, and the trace readers refuse a ".." component. abspath drops it
-    # lexically, so no symlink is followed.
+    # This is the path Python imported agent_trace through. It can hold a
+    # ".." (tests/../src) or a symlink (a venv or PYTHONPATH reached through
+    # a link). The trace readers refuse a ".." and every symlink they do not
+    # trust, so resolve the path first. Following a link here is safe: that
+    # link already decided which code runs. The readers still check every
+    # component of the resolved path. Never resolve a user path this way.
     corpus = resources.files("agent_trace").joinpath("corpus/v1")
-    return Path(os.path.abspath(str(corpus)))
+    return Path(os.path.realpath(str(corpus)))
 
 
 def validate_packaged_corpus() -> dict[str, Any]:

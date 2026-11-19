@@ -38,10 +38,11 @@ from agent_trace.validation import (
 )
 
 
-# Lexical, as in _corpus_root(): agent_trace may be imported through
-# tests/../src, and validate_trace_directory refuses a ".." component.
+# Resolved, as in _corpus_root(): agent_trace may be imported through
+# tests/../src or a symlink, and validate_trace_directory refuses a ".."
+# component and every symlink it does not trust.
 CORPUS_ROOT = Path(
-    os.path.abspath(Path(agent_trace.__file__).parent / "corpus" / "v1")
+    os.path.realpath(Path(agent_trace.__file__).parent / "corpus" / "v1")
 )
 SRC_ROOT = Path(agent_trace.__file__).resolve().parent.parent
 
@@ -62,6 +63,16 @@ def _comparable(report):
     if data.get("replay"):
         data["replay"].pop("baseline")
     return data
+
+
+def _child_env():
+    """Return os.environ without agent-strace settings or PYTHONPATH, telemetry off."""
+    return without_telemetry({
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("AGENT_STRACE_")
+        and key not in ("AGENT_TRACE_DIR", "PYTHONPATH")
+    })
 
 
 class TestPublicTraceSchemas(unittest.TestCase):
@@ -173,19 +184,13 @@ class TestAgentEvidenceCorpus(unittest.TestCase):
             "    'matched': validate_packaged_corpus()['matched'],\n"
             "}))\n"
         )
-        env = without_telemetry({
-            key: value
-            for key, value in os.environ.items()
-            if not key.startswith("AGENT_STRACE_")
-            and key not in ("AGENT_TRACE_DIR", "PYTHONPATH")
-        })
         # -S: no site-packages or .pth file can import agent_trace first.
         result = subprocess.run(
             [sys.executable, "-S", "-c", code, dotted],
             capture_output=True,
             text=True,
             encoding="utf-8",
-            env=env,
+            env=_child_env(),
             timeout=120,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -193,6 +198,74 @@ class TestAgentEvidenceCorpus(unittest.TestCase):
         self.assertIn("..", Path(data["file"]).parts)
         self.assertNotIn("..", Path(data["root"]).parts)
         self.assertTrue(data["matched"])
+
+    def _src_link(self):
+        """Return a symlink to SRC_ROOT in a new temp dir, or skip the test."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        link = Path(tmp.name) / "link"
+        try:
+            link.symlink_to(SRC_ROOT, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+        return link
+
+    def test_corpus_root_resolves_a_symlinked_import_path(self):
+        # A venv, editable install or PYTHONPATH reached through a symlink.
+        # The readers refuse a link the user owns, and every link on Windows
+        # or as root, so the corpus must be read from the resolved path.
+        link = self._src_link()
+        code = (
+            "import json, os, sys\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "import agent_trace\n"
+            "from agent_trace.validation import _corpus_root, validate_packaged_corpus\n"
+            "root = str(_corpus_root())\n"
+            "print(json.dumps({\n"
+            "    'file': agent_trace.__file__,\n"
+            "    'root': root,\n"
+            "    'real': os.path.realpath(root),\n"
+            "    'corpus': validate_packaged_corpus(),\n"
+            "}))\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-S", "-c", code, str(link)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            env=_child_env(),
+            timeout=120,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(result.stdout)
+        self.assertTrue(Path(data["file"]).is_relative_to(link), data["file"])
+        self.assertEqual(data["root"], data["real"])
+        corpus = data["corpus"]
+        self.assertEqual(corpus["case_count"], 12)
+        for case in corpus["cases"]:
+            codes = [finding["code"] for finding in case["actual"]["findings"]]
+            with self.subTest(case=case["id"]):
+                self.assertTrue(case["matched"], codes)
+                # A read failure gets the labels invalid-schema expects.
+                self.assertNotIn("trace_read_failed", codes)
+        self.assertTrue(corpus["matched"])
+
+    def test_cli_validates_corpus_through_a_symlinked_pythonpath(self):
+        link = self._src_link()
+        env = _child_env()
+        env["PYTHONPATH"] = str(link)
+        # Run in the temp dir, so only the link can supply agent_trace.
+        result = subprocess.run(
+            [sys.executable, "-S", "-m", "agent_trace.entry", "validate", "--corpus"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            env=env,
+            cwd=link.parent,
+            timeout=120,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Agent Evidence Corpus: matched (12 cases)", result.stdout)
 
     def test_corpus_covers_required_evidence_states(self):
         result = validate_packaged_corpus()
