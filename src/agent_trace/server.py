@@ -36,6 +36,7 @@ See ADR-0012 for architecture decisions.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import ipaddress
 import json
 import os
@@ -50,6 +51,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
+from .collector_client import check_session_meta
 from .event_data import NonObjectEventDataError, refused_event_warning
 from .fileutil import split_lf_lines
 from .models import SessionMeta, TraceEvent
@@ -60,6 +62,14 @@ from .store import (
     validate_stored_id,
 )
 from . import web_dashboard as _wd
+
+
+# POST /sessions on an existing session sets only these keys. tenant_id goes
+# through tag_session, and anything else, such as a method name or the
+# _unknown_fields attribute, is ignored.
+_UPDATABLE_META_FIELDS = frozenset(
+    field.name for field in dataclasses.fields(SessionMeta)
+) - {"session_id", "tenant_id"}
 
 
 # ---------------------------------------------------------------------------
@@ -623,19 +633,32 @@ class CollectorHandler(BaseHTTPRequestHandler):
                     # Update existing meta
                     meta = self.store.load_meta(session_id)
                     incoming_tenant = str(data.get("tenant_id", "") or "").strip()
+                    new_tenant = ""
                     if "tenant_id" in data:
                         if meta.tenant_id and incoming_tenant != meta.tenant_id:
                             self._send_json(409, {"error": "session tenant cannot be cleared or changed"})
                             return
                         if not meta.tenant_id and incoming_tenant:
-                            self.store.tag_session(session_id, incoming_tenant)
-                            meta = self.store.load_meta(session_id)
+                            new_tenant = incoming_tenant
                     for k, v in data.items():
-                        if k not in {"session_id", "tenant_id"} and hasattr(meta, k):
+                        if k in _UPDATABLE_META_FIELDS:
                             setattr(meta, k, v)
+                    if new_tenant:
+                        meta.tenant_id = new_tenant
+                    # Check the merged meta before the tag, which rewrites
+                    # the events, so a refused update changes nothing.
+                    check_session_meta(meta)
+                    if new_tenant:
+                        self.store.tag_session(session_id, new_tenant)
                     self.store.update_meta(meta)
                 else:
+                    if "_unknown_fields" in data:
+                        self._send_json(400, {"error": "_unknown_fields is a reserved key"})
+                        return
                     meta = SessionMeta.from_json(body.decode("utf-8"))
+                    # create_session stores the ID as this validated string.
+                    meta.session_id = session_id
+                    check_session_meta(meta)
                     self.store.create_session(meta)
 
             self._send_json(200, {"session_id": session_id, "status": "ok"})

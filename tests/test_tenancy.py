@@ -645,6 +645,38 @@ class TestTenantExportAndDelete(TenantTestCase):
             delete_tenant_data(self.store, "tenant-a")
         self.assertTrue(self.store.session_exists(good.session_id))
 
+    def test_commands_refuse_a_store_with_an_unusable_started_at(self):
+        session_ids = ("p" * 16, "c" * 16, "b" * 16)
+        for session_id in session_ids:
+            self.create_session(session_id, "t1", 1_780_000_000.0)
+        meta_file = self.store.base_dir / ("b" * 16) / "meta.json"
+        meta = json.loads(meta_file.read_text(encoding="utf-8"))
+        meta["started_at"] = "x"
+        meta_file.write_text(json.dumps(meta), encoding="utf-8")
+        before = {
+            path: path.read_bytes() for path in self.store.base_dir.rglob("*") if path.is_file()
+        }
+        error = "corrupt session in tenant store: " + "b" * 16
+        for args, message in (
+            (["report", "--month", "2026-05"], f"Error: {error}\n"),
+            (["export", "t1"], f"Export failed: {error}\n"),
+            (["delete", "t1", "--confirm"], f"Deletion failed: {error}\n"),
+        ):
+            with self.subTest(args[0]):
+                argv = ["--trace-dir", self.tempdir.name, "tenant", *args]
+                with patch("sys.stdout", new_callable=io.StringIO) as stdout, \
+                        patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                    self.assertEqual(cmd_tenant(build_parser().parse_args(argv)), 1)
+                self.assertEqual((stdout.getvalue(), stderr.getvalue()), ("", message))
+        after = {
+            path: path.read_bytes() for path in self.store.base_dir.rglob("*") if path.is_file()
+        }
+        self.assertEqual(after, before)
+        self.assertEqual(
+            sorted(meta.session_id for meta in self.store.list_sessions()),
+            sorted(session_ids),
+        )
+
     def test_admin_operations_fail_closed_on_omitted_symlinked_metadata(self):
         session_id = "hidden-tenant-session"
         session_dir = self.store.base_dir / session_id

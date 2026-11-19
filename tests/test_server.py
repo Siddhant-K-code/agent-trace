@@ -18,6 +18,8 @@ from pathlib import Path
 
 from agent_trace.audit import verify_chain
 from agent_trace.cli import build_parser
+from agent_trace.collector_client import CollectorClient
+from agent_trace.hooks import handle_session_end, handle_session_start
 from agent_trace.integrations._base import emit
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.server import (
@@ -38,6 +40,11 @@ try:
 except ImportError:
     from tests._redirect_servers import ALL_REDIRECTS, REDIRECT_NOTE, RedirectServers
     from tests.test_fileutil import RAW_SEPARATORS
+
+try:
+    import _no_telemetry  # noqa: F401
+except ImportError:
+    from tests import _no_telemetry  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
@@ -68,10 +75,13 @@ def _get(url: str) -> tuple[int, bytes]:
         return e.code, e.read()
 
 
-def _post(url: str, body: bytes, content_type: str = "application/json") -> tuple[int, bytes]:
+def _post(
+    url: str, body: bytes, content_type: str = "application/json",
+    headers: dict | None = None,
+) -> tuple[int, bytes]:
     req = urllib.request.Request(
         url, data=body,
-        headers={"Content-Type": content_type},
+        headers={"Content-Type": content_type, **(headers or {})},
         method="POST",
     )
     try:
@@ -442,6 +452,255 @@ class TestPostSessions(unittest.TestCase):
             json.dumps({"session_id": "../escape"}).encode("utf-8"),
         )
         self.assertEqual(status, 400)
+
+
+def _store_files(store: TraceStore) -> dict[str, bytes]:
+    """Map each file under the store to its bytes."""
+    base = Path(store.base_dir)
+    return {
+        path.relative_to(base).as_posix(): path.read_bytes()
+        for path in base.rglob("*")
+        if path.is_file()
+    }
+
+
+def _nested_lists(depth: int) -> str:
+    return "[" * depth + "]" * depth
+
+
+def _nested_objects(depth: int) -> str:
+    return '{"a": ' * (depth - 1) + "{}" + "}" * (depth - 1)
+
+
+def _body(session_id: object, *fields: str) -> bytes:
+    """Build a POST /sessions body from the ID and raw '"key": value' texts."""
+    return ("{" + ", ".join([f'"session_id": {json.dumps(session_id)}', *fields]) + "}").encode()
+
+
+# Each case is (label, raw '"key": value' JSON text, the 400 error). The text
+# stays raw so NaN, 1e400 and 400-digit numbers reach the server as written.
+_REFUSED_FIELDS = [
+    ("tool_calls text", '"tool_calls": "lots"', "tool_calls must be a non-negative integer"),
+    ("tool_calls negative", '"tool_calls": -1', "tool_calls must be a non-negative integer"),
+    ("depth bool", '"depth": true', "depth must be a non-negative integer"),
+    ("ended_at text", '"ended_at": "soon"', "ended_at must be a number"),
+    ("attribution text", '"attribution": "me"', "attribution must be an object"),
+    ("started_at text", '"started_at": "x"', "started_at must be a number"),
+    ("started_at bool", '"started_at": true', "started_at must be a number"),
+    ("started_at NaN", '"started_at": NaN', "non-finite JSON number 'NaN' is not allowed"),
+    ("started_at 1e400", '"started_at": 1e400', "non-finite JSON number 'Infinity' is not allowed"),
+    (
+        "started_at 400 digits", '"started_at": ' + "9" * 400,
+        "started_at must be a finite non-negative number",
+    ),
+    (
+        "total_duration_ms 400 digits", '"total_duration_ms": ' + "9" * 400,
+        "total_duration_ms must be a finite non-negative number",
+    ),
+    ("started_at negative", '"started_at": -5', "started_at must be a finite non-negative number"),
+    ("started_at zero", '"started_at": 0', "started_at is required"),
+]
+
+# A create keeps unknown keys, so these are refused there. An update ignores them.
+_REFUSED_UNKNOWN_KEYS = [
+    ("unknown key NaN", '"zzz": NaN', "non-finite JSON number 'NaN' is not allowed"),
+    (
+        "unknown key 64 nested lists", '"zzz": ' + _nested_lists(64),
+        "collector JSON nesting exceeds the limit",
+    ),
+    (
+        "unknown key 64 nested objects", '"zzz": ' + _nested_objects(64),
+        "collector JSON nesting exceeds the limit",
+    ),
+]
+
+
+class TestPostSessionsStoresReadableMeta(unittest.TestCase):
+    """POST /sessions stores only metadata that CollectorClient can read."""
+
+    SESSION = "exist00000000001"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.store = TraceStore(tmp.name, use_workspace_env=False)
+        server, port, _ = _start_test_server(self.store)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.url = f"http://127.0.0.1:{port}/sessions"
+        status, _ = self.post(_body(self.SESSION, '"started_at": 1780000000.0', '"zzz": 1'))
+        self.assertEqual(status, 200)
+        # An event, so a tenant tag would show as a rewritten events file.
+        self.store.append_event(self.SESSION, TraceEvent(
+            event_type=EventType.USER_PROMPT,
+            session_id=self.SESSION,
+            data={"prompt": "hi"},
+        ))
+
+    def post(self, body: bytes) -> tuple[int, dict]:
+        status, raw = _post(self.url, body)
+        return status, json.loads(raw)
+
+    def test_update_ignores_keys_that_are_not_meta_fields(self):
+        before = _store_files(self.store)
+        cases = [
+            ("method name", '"to_json": "x"'),
+            ("unknown-field store", '"_unknown_fields": {"zzz": 1, "tenant_id": "t2"}'),
+        ] + [(label, field) for label, field, _ in _REFUSED_UNKNOWN_KEYS]
+        for label, field in cases:
+            with self.subTest(label):
+                status, reply = self.post(_body(self.SESSION, field))
+                self.assertEqual(
+                    (status, reply), (200, {"session_id": self.SESSION, "status": "ok"})
+                )
+                self.assertEqual(_store_files(self.store), before)
+        self.assertEqual(self.store.list_sessions(tenant_id="t2"), [])
+
+    def test_create_refuses_the_reserved_unknown_fields_key(self):
+        before = _store_files(self.store)
+        status, reply = self.post(_body("new0000000000001", '"_unknown_fields": {"zzz": 1}'))
+        self.assertEqual((status, reply), (400, {"error": "_unknown_fields is a reserved key"}))
+        self.assertEqual(_store_files(self.store), before)
+
+    def test_create_refuses_meta_the_client_cannot_read(self):
+        before = _store_files(self.store)
+        for label, field, error in _REFUSED_FIELDS + _REFUSED_UNKNOWN_KEYS:
+            with self.subTest(label):
+                status, reply = self.post(_body("new0000000000001", field))
+                self.assertEqual((status, reply), (400, {"error": error}))
+                self.assertEqual(_store_files(self.store), before)
+
+    def test_update_refuses_meta_the_client_cannot_read(self):
+        before = _store_files(self.store)
+        for label, field, error in _REFUSED_FIELDS:
+            with self.subTest(label):
+                status, reply = self.post(_body(self.SESSION, field))
+                self.assertEqual((status, reply), (400, {"error": error}))
+                self.assertEqual(_store_files(self.store), before)
+
+    def test_nesting_one_level_under_the_limit_is_stored(self):
+        for session_id, value in (
+            ("deep-lists000000", _nested_lists(63)),
+            ("deep-objects0000", _nested_objects(63)),
+        ):
+            with self.subTest(session_id):
+                status, _ = self.post(_body(session_id, f'"zzz": {value}'))
+                self.assertEqual(status, 200)
+                meta_file = self.store._session_dir(session_id) / "meta.json"
+                self.assertEqual(json.loads(meta_file.read_text())["zzz"], json.loads(value))
+
+    def test_refused_update_does_not_tag_the_session(self):
+        before = _store_files(self.store)
+        status, reply = self.post(
+            _body(self.SESSION, '"tenant_id": "t2"', '"tool_calls": "lots"')
+        )
+        self.assertEqual(
+            (status, reply), (400, {"error": "tool_calls must be a non-negative integer"})
+        )
+        self.assertEqual(_store_files(self.store), before)
+        self.assertEqual(self.store.list_sessions(tenant_id="t2"), [])
+
+    def test_numeric_session_id_is_stored_as_text(self):
+        status, reply = self.post(b'{"session_id": 12345}')
+        self.assertEqual((status, reply), (200, {"session_id": "12345", "status": "ok"}))
+        meta_file = self.store._session_dir("12345") / "meta.json"
+        self.assertEqual(json.loads(meta_file.read_text())["session_id"], "12345")
+
+
+class TestPostSessionsKeepsTheCollectorReadable(unittest.TestCase):
+    """After each POST /sessions, CollectorClient.list_sessions reads every session."""
+
+    KEY = "ast_deadbeef1234567890abcdef123456"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store = TraceStore(tmp.name, use_workspace_env=False)
+        server = HTTPServer(
+            ("127.0.0.1", 0), _make_handler(store, threading.Lock(), auth_key=self.KEY)
+        )
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.base = f"http://127.0.0.1:{server.server_address[1]}"
+
+    def test_client_reads_every_session_the_server_accepted(self):
+        client = CollectorClient(self.base, self.KEY)
+        plain = "plain00000000001"
+        refused = _REFUSED_FIELDS + _REFUSED_UNKNOWN_KEYS
+        cases = [("plain create", _body(plain, '"started_at": 1780000000.0'))]
+        cases += [
+            (f"create {label}", _body(f"new{index:013d}", field))
+            for index, (label, field, _) in enumerate(refused)
+        ]
+        cases += [(f"update {label}", _body(plain, field)) for label, field, _ in refused]
+        cases += [
+            ("update method name", _body(plain, '"to_json": "x"')),
+            ("update unknown-field store", _body(plain, '"_unknown_fields": {"zzz": 1}')),
+            ("create 63 nested lists", _body("deep-lists000000", f'"zzz": {_nested_lists(63)}')),
+            ("create 63 nested objects", _body("deep-objects0000", f'"zzz": {_nested_objects(63)}')),
+            ("create _unknown_fields", _body("reserved00000001", '"_unknown_fields": {"zzz": 1}')),
+            ("create numeric ID", b'{"session_id": 12345}'),
+        ]
+        accepted = set()
+        for label, body in cases:
+            with self.subTest(label):
+                status, raw = _post(
+                    f"{self.base}/sessions", body,
+                    headers={"Authorization": f"Bearer {self.KEY}"},
+                )
+                if status == 200:
+                    accepted.add(json.loads(raw)["session_id"])
+                self.assertEqual({meta.session_id for meta in client.list_sessions()}, accepted)
+        self.assertEqual(
+            accepted, {plain, "deep-lists000000", "deep-objects0000", "12345"}
+        )
+
+
+class TestHookSessionMetaRoundTrip(unittest.TestCase):
+    """The metas the session hooks send pass the check and are stored as sent."""
+
+    def test_start_and_end_metas_are_stored_as_sent(self):
+        server_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(server_tmp.cleanup)
+        local_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(local_tmp.cleanup)
+        server_store = TraceStore(server_tmp.name, redact=False, use_workspace_env=False)
+        server, port, _ = _start_test_server(server_store)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        sent = []
+
+        def send_and_record(meta, endpoint):
+            body = meta.to_json()
+            sent.append((body, send_session_meta_to_endpoint(meta, endpoint)))
+            return sent[-1][1]
+
+        hook_session = "a1b2c3d4e5f60718293a"
+        meta_file = server_store._session_dir(hook_session[:16]) / "meta.json"
+        env = {
+            "AGENT_TRACE_DIR": local_tmp.name,
+            "AGENT_STRACE_ENDPOINT": f"http://127.0.0.1:{port}",
+        }
+        with mock.patch.dict(os.environ, env), mock.patch(
+            "agent_trace.server.send_session_meta_to_endpoint", side_effect=send_and_record
+        ):
+            for name in (
+                "AGENT_STRACE_AUTH_KEY", "AGENT_STRACE_TENANT_ID", "AGENT_STRACE_WORKSPACE",
+                "AGENT_TRACE_REDACT", "AGENT_TRACE_NO_REDACT", "AGENT_STRACE_NO_REDACT",
+            ):
+                os.environ.pop(name, None)
+            handle_session_start({"session_id": hook_session, "source": "startup"})
+            self.assertEqual(len(sent), 1)
+            self.assertTrue(sent[0][1])
+            self.assertEqual(json.loads(meta_file.read_text()), json.loads(sent[0][0]))
+
+            handle_session_end({"session_id": hook_session})
+            self.assertEqual(len(sent), 2)
+            self.assertTrue(sent[1][1])
+            stored = json.loads(meta_file.read_text())
+            self.assertEqual(stored, json.loads(sent[1][0]))
+            self.assertIn("ended_at", stored)
 
 
 # ---------------------------------------------------------------------------

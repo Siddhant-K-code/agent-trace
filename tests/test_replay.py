@@ -8,9 +8,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import io
 import json
+import re
+import subprocess
 import tempfile
+from datetime import datetime
+from pathlib import Path
 from unittest.mock import patch
 
+import agent_trace
 from agent_trace.cli import _print_live_event
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.replay import (
@@ -27,6 +32,13 @@ try:
     import _escapes
 except ImportError:
     from tests import _escapes
+
+try:
+    from _no_telemetry import without_telemetry
+except ImportError:
+    from tests._no_telemetry import without_telemetry
+
+SRC_ROOT = Path(agent_trace.__file__).resolve().parent.parent
 
 
 class TestListLegend(unittest.TestCase):
@@ -553,11 +565,12 @@ def _list_text(fields):
 LIST_CASES = [
     ("meta.json tool_calls", "text", lambda v: {"tool_calls": v}),
     ("meta.json llm_requests", "text", lambda v: {"llm_requests": v}),
+    ("meta.json errors", "text", lambda v: {"errors": v}),
 ]
 
 
 class TestListTraceTextShowsAsText(unittest.TestCase):
-    """meta.json can hold text where a count belongs. The Tools and LLM
+    """meta.json can hold text where a count belongs. The Tools, LLM and Err
     columns of list show it as text."""
 
     def test_each_value_shows_escapes_as_text(self):
@@ -567,13 +580,164 @@ class TestListTraceTextShowsAsText(unittest.TestCase):
         _escapes.check_plain_text_unchanged(self, LIST_CASES, _list_text)
 
     def test_counts_print_as_before(self):
-        output = _list_text({"tool_calls": 7, "llm_requests": 3})
-        self.assertIn("     7     3 ", output)
+        output = _list_text({"tool_calls": 7, "llm_requests": 3, "errors": 2})
+        self.assertIn(f"     7     3 {C.RED}   2{C.RESET}\n", output)
+
+    def test_errors_that_are_not_a_count_print_dim(self):
+        for value, shown in ((True, "True"), (2.5, " 2.5")):
+            with self.subTest(errors=value):
+                output = _list_text({"errors": value})
+                self.assertIn(f"{C.DIM}{shown}{C.RESET}\n", output)
 
     def test_sgr_code_shows_as_text(self):
         output = _list_text({"tool_calls": "a\x1b[8mhidden"})
         self.assertIn(r"a\x1b[8mhidden", output)
         self.assertNotIn("\x1b[8m", output)
+
+
+MISSING = "\u2014"
+STARTED = 1_780_000_000.0
+
+# (label, value): stored started_at or ended_at values that are not a usable
+# time. 1e12 is past year 9999. 1e17 makes fromtimestamp raise OSError on macOS.
+UNUSABLE_TIMES = [
+    ("text", "x"),
+    ("bool", True),
+    ("NaN", float("nan")),
+    ("infinity", float("inf")),
+    ("400 digits", 10 ** 400),
+    ("1e12", 1e12),
+    ("1e17", 1e17),
+    ("negative", -5),
+]
+
+# (label, value): stored total_duration_ms values that are not a usable number.
+UNUSABLE_NUMBERS = [
+    ("text", "x"),
+    ("bool", True),
+    ("NaN", float("nan")),
+    ("infinity", float("inf")),
+    ("400 digits", 10 ** 400),
+    ("negative", -5),
+]
+
+
+def _session_line(output):
+    """Return the one line of list output for LIST_SESSION."""
+    [line] = [line for line in output.splitlines() if LIST_SESSION in line]
+    return line
+
+
+def _no_local_time(error):
+    """Return a datetime class whose astimezone() raises *error*."""
+
+    class NoLocalTime(datetime):
+        def astimezone(self, tz=None):
+            raise error("no local time")
+
+    return NoLocalTime
+
+
+class TestUnusableMetaValuesShowAsMissing(unittest.TestCase):
+    """stats and list show a stored time or duration they cannot use as the
+    missing marker."""
+
+    def test_started_at(self):
+        for label, value in UNUSABLE_TIMES:
+            with self.subTest(label):
+                summary = format_summary(SessionMeta(session_id="s", started_at=value))
+                self.assertIn(f"\n  Started:    {MISSING}\n  Duration:   {MISSING}\n", summary)
+                line = _session_line(_list_text({"started_at": value}))
+                self.assertTrue(
+                    line.startswith(
+                        f"  {LIST_SESSION:<18} {MISSING:<26} {C.DIM}{MISSING:>9} {C.RESET} "
+                    ),
+                    ascii(line),
+                )
+
+    def test_duration(self):
+        for field, cases in (("total_duration_ms", UNUSABLE_NUMBERS), ("ended_at", UNUSABLE_TIMES)):
+            for label, value in cases:
+                with self.subTest(field=field, value=label):
+                    fields = {"started_at": STARTED, field: value}
+                    summary = format_summary(SessionMeta(session_id="s", **fields))
+                    self.assertIn(f"\n  Duration:   {MISSING}\n", summary)
+                    line = _session_line(_list_text(fields))
+                    self.assertIn(f" {C.DIM}{MISSING:>9} {C.RESET} ", line)
+
+    def test_time_without_a_local_form(self):
+        # astimezone() can raise for a time that fromtimestamp() accepts.
+        fields = {"started_at": STARTED, "ended_at": STARTED + 2.5}
+        for error in (OverflowError, ValueError, OSError):
+            with self.subTest(error.__name__), patch(
+                "agent_trace.replay.datetime", _no_local_time(error)
+            ):
+                summary = format_summary(SessionMeta(session_id="s", **fields))
+                self.assertIn(f"\n  Started:    {MISSING}\n  Duration:   2.50s\n", summary)
+                line = _session_line(_list_text(fields))
+                self.assertTrue(
+                    line.startswith(f"  {LIST_SESSION:<18} {MISSING:<26} {2.5:>9.1f}s "),
+                    ascii(line),
+                )
+
+
+# Each meta.json as POST /sessions stored it before it checked the metadata:
+# a after its updates, b to g as created.
+OLD_SERVER_METAS = {
+    "a" * 16: {
+        "started_at": STARTED, "agent_name": "x", "attribution": "me", "zzz": 1,
+        "tenant_id": "t2", "tool_calls": "lots", "ended_at": "soon", "depth": True,
+    },
+    "b" * 16: {"started_at": "x", "attribution": {}},
+    "c" * 16: {"started_at": float("nan"), "attribution": {}},
+    "d" * 16: {"started_at": float("inf"), "attribution": {}},
+    "e" * 16: {"started_at": 5.0, "attribution": {}, "_unknown_fields": {"tenant_id": "t9"}},
+    "f" * 16: {"started_at": 10 ** 400, "attribution": {}},
+    "g" * 16: {"started_at": 5.0, "total_duration_ms": 10 ** 400, "attribution": {}},
+}
+
+
+class TestCliReadsMetasOlderServersStored(unittest.TestCase):
+    """list and stats read each meta.json that older servers stored."""
+
+    def test_list_and_stats_exit_0(self):
+        env = without_telemetry({
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("AGENT_STRACE_") and key != "AGENT_TRACE_DIR"
+        })
+        env["PYTHONPATH"] = os.pathsep.join(
+            item for item in (str(SRC_ROOT), env.get("PYTHONPATH", "")) if item
+        )
+        env["PYTHONIOENCODING"] = "utf-8"
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TraceStore(tmp, use_workspace_env=False)
+            for session_id, fields in OLD_SERVER_METAS.items():
+                store.create_session(SessionMeta(session_id=session_id))
+                path = store._session_dir(session_id) / "meta.json"
+                path.write_text(json.dumps({"session_id": session_id, **fields}), encoding="utf-8")
+
+            def run(*args):
+                result = subprocess.run(
+                    [sys.executable, "-m", "agent_trace.entry", "--trace-dir", tmp, *args],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    env=env,
+                    timeout=120,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                return result.stdout
+
+            # Newest first. An unusable started_at sorts as 0, and a tie sorts
+            # by descending session ID.
+            self.assertEqual(
+                re.findall(r"\b[a-g]{16}\b", run("list")),
+                [letter * 16 for letter in "agefdcb"],
+            )
+            for session_id in OLD_SERVER_METAS:
+                with self.subTest(session_id[0]):
+                    run("stats", session_id)
 
 
 if __name__ == "__main__":

@@ -35,6 +35,7 @@ from agent_trace.org_report import (
     _build_anomalies,
     _write_atomic,
     build_org_report,
+    cmd_org_report,
     format_org_report_html,
     format_org_report_json,
     format_org_report_text,
@@ -565,6 +566,8 @@ class TestCollectorClient(unittest.TestCase):
             b'[{"session_id":"x","session_id":"y","started_at":1}]',
             b'[{"session_id":"x","started_at":"now"}]',
             ('[{"session_id":"x","started_at":' + str(10**1000) + '}]').encode(),
+            b'[{"session_id":"x","started_at":true}]',
+            b'[{"session_id":"x","started_at":-5}]',
             b'[{"session_id":"x","started_at":1,"attribution":[]}]',
             ("[" * 10_000 + "0" + "]" * 10_000).encode(),
         ]
@@ -670,6 +673,35 @@ class TestCliAndOutput(unittest.TestCase):
         args = build_parser().parse_args(["org-report", "--month", "2026-08"])
         self.assertEqual(args.command, "org-report")
         self.assertIsNone(args.endpoint)
+
+    def test_local_store_with_an_unusable_started_at_fails_with_one_line(self):
+        started = _timestamp(2026, 5, 28)
+        with tempfile.TemporaryDirectory() as directory:
+            store = TraceStore(directory, use_workspace_env=False)
+            for session_id in ("p" * 16, "c" * 16, "b" * 16):
+                store.create_session(
+                    SessionMeta(session_id=session_id, started_at=started, tenant_id="t1")
+                )
+                store.append_event(session_id, TraceEvent(
+                    event_type=EventType.USER_PROMPT,
+                    session_id=session_id,
+                    timestamp=started,
+                    data={"prompt": "hi"},
+                ))
+            meta_file = store._session_dir("b" * 16) / "meta.json"
+            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+            meta["started_at"] = "x"
+            meta_file.write_text(json.dumps(meta), encoding="utf-8")
+            args = build_parser().parse_args(
+                ["--trace-dir", directory, "org-report", "--month", "2026-05"]
+            )
+            with patch("sys.stdout", new_callable=io.StringIO) as stdout, \
+                    patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                self.assertEqual(cmd_org_report(args), 1)
+        self.assertEqual(
+            (stdout.getvalue(), stderr.getvalue()),
+            ("", "org-report failed: corrupt session in tenant store: " + "b" * 16 + "\n"),
+        )
 
     def test_atomic_output_rejects_symlink_and_preserves_existing_on_failure(self):
         with tempfile.TemporaryDirectory() as directory:

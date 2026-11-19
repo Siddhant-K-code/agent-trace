@@ -147,6 +147,57 @@ class TestTraceStore(unittest.TestCase):
         sessions = self.store.list_sessions()
         self.assertEqual([m.session_id for m in sessions], ["valid"])
 
+    def _tenant_sessions(self) -> tuple[str, str, str]:
+        """Create sessions p, c and b of tenant t1, each with one event."""
+        ids = ("p" * 16, "c" * 16, "b" * 16)
+        for session_id in ids:
+            self.store.create_session(SessionMeta(
+                session_id=session_id, started_at=1_780_000_000.0, tenant_id="t1",
+            ))
+            self.store.append_event(session_id, TraceEvent(
+                event_type=EventType.USER_PROMPT, session_id=session_id,
+                timestamp=1_780_000_000.0, data={"prompt": "hi"},
+            ))
+        return ids
+
+    def _set_started_at(self, session_id: str, value: object) -> None:
+        """Write a value no current writer stores, as an older collector could."""
+        path = self.store._session_dir(session_id) / "meta.json"
+        meta = json.loads(path.read_text(encoding="utf-8"))
+        meta["started_at"] = value
+        path.write_text(json.dumps(meta), encoding="utf-8")
+
+    def test_unusable_started_at_lists_last_and_fails_strict_listing(self):
+        p, c, b = self._tenant_sessions()
+        for label, value in (
+            ("text", "x"), ("bool", True), ("NaN", float("nan")),
+            ("infinity", float("inf")), ("400 digits", 10**400),
+            ("past year 9999", 1e12), ("past the platform limit", 1e17),
+            ("negative", -5),
+        ):
+            with self.subTest(label):
+                self._set_started_at(b, value)
+                self.assertEqual([m.session_id for m in self.store.list_sessions()], [p, c, b])
+                with self.assertRaisesRegex(
+                    ValueError, f"^corrupt session in tenant store: {b}$"
+                ):
+                    self.store.list_sessions_strict()
+
+    def test_link_parent_redepths_children_past_an_unusable_started_at(self):
+        p, c, b = self._tenant_sessions()
+        grandchild = "g" * 16
+        self.store.create_session(SessionMeta(
+            session_id=grandchild, started_at=1_780_000_000.0, tenant_id="t1",
+        ))
+        self.store.link_parent(grandchild, c)
+        self._set_started_at(b, "x")
+
+        linked = self.store.link_parent(c, p)
+
+        self.assertEqual((linked.parent_session_id, linked.depth), (p, 1))
+        self.assertEqual(self.store.load_meta(c).parent_session_id, p)
+        self.assertEqual(self.store.load_meta(grandchild).depth, 2)
+
     def test_get_latest_session_returns_newest_meta(self):
         old = SessionMeta(session_id="zz-old", started_at=1.0)
         new = SessionMeta(session_id="aa-new", started_at=2.0)
