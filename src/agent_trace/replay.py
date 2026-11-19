@@ -17,7 +17,7 @@ from typing import TextIO
 
 from .event_data import object_field, require_object_event_data, str_field, str_list_field
 from .inert import inert
-from .models import EventType, TraceEvent, SessionMeta
+from .models import EventType, TraceEvent, SessionMeta, usable_number, usable_time
 from .store import TraceStore
 from .subagent import _returned_preview, _event_agent_id, subagent_label
 
@@ -345,24 +345,58 @@ def _append_subagent_tag(parts: list[str], event: TraceEvent) -> None:
         parts.append(f"{C.MAGENTA}[subagent {inert(label)}]{C.RESET}")
 
 
+# Shown for a time or duration that meta.json does not hold in a usable form.
+_MISSING = "\u2014"
+
+
+def _duration_seconds(meta: SessionMeta, started: float | None) -> float | None:
+    """Return total_duration_ms in seconds, else ended_at - started_at.
+
+    ``started`` is the usable started_at, or None. Returns None when the
+    duration is unknown: the session never ended, or meta.json holds a
+    value that is not a usable number or time.
+    """
+    total_ms = usable_number(meta.total_duration_ms)
+    if total_ms:
+        return total_ms / 1000
+    ended = usable_time(meta.ended_at)
+    if ended and started is not None:
+        return ended - started
+    return None
+
+
+def _local_time(started: float | None) -> datetime | None:
+    """Return ``started`` as an aware local datetime, or None.
+
+    ``astimezone()`` can raise for a time that ``fromtimestamp`` accepts:
+    within a day of year 9999 on some Pythons, and before 1970-01-02 on
+    Windows.
+    """
+    if started is None:
+        return None
+    try:
+        return datetime.fromtimestamp(started).astimezone()
+    except (OverflowError, ValueError, OSError):
+        return None
+
+
 def format_summary(meta: SessionMeta) -> str:
     """Format session summary."""
-    started = datetime.fromtimestamp(meta.started_at).astimezone()
-    if meta.total_duration_ms:
-        duration_s = meta.total_duration_ms / 1000
-    elif meta.ended_at:
-        duration_s = meta.ended_at - meta.started_at
+    started = usable_time(meta.started_at)
+    started_local = _local_time(started)
+    if started_local is None:
+        started_str = _MISSING
     else:
-        duration_s = None
-
-    duration_str = f"{duration_s:.2f}s" if duration_s is not None else "—"
+        started_str = started_local.strftime("%Y-%m-%d %H:%M:%S %Z")
+    duration_s = _duration_seconds(meta, started)
+    duration_str = f"{duration_s:.2f}s" if duration_s is not None else _MISSING
 
     lines = [
         f"",
         f"{C.BOLD}Session Summary{C.RESET}",
         f"{C.GRAY}{'─' * 50}{C.RESET}",
         f"  Session:    {meta.session_id}",
-        f"  Started:    {started.strftime('%Y-%m-%d %H:%M:%S %Z')}",
+        f"  Started:    {started_str}",
         f"  Duration:   {duration_str}",
         f"  Tool calls: {inert(meta.tool_calls)}",
         f"  LLM reqs:   {inert(meta.llm_requests)}",
@@ -486,19 +520,26 @@ def list_sessions(
 
     for meta in sessions:
         # Display in local time with timezone abbreviation (e.g. "06:45:46 IST")
-        started_local = datetime.fromtimestamp(meta.started_at).astimezone()
-        started_str = started_local.strftime("%Y-%m-%d %H:%M:%S ") + started_local.strftime("%Z")
-
-        # Prefer explicit total_duration_ms; fall back to ended_at - started_at;
-        # show "—" for sessions that never completed (crashed / still running).
-        if meta.total_duration_ms:
-            duration_str = f"{meta.total_duration_ms / 1000:>9.1f}s"
-        elif meta.ended_at:
-            duration_str = f"{meta.ended_at - meta.started_at:>9.1f}s"
+        started = usable_time(meta.started_at)
+        started_local = _local_time(started)
+        if started_local is None:
+            started_str = _MISSING
         else:
-            duration_str = f"{C.DIM}{'—':>9} {C.RESET}"
+            started_str = started_local.strftime("%Y-%m-%d %H:%M:%S ") + started_local.strftime("%Z")
 
-        err_color = C.RED if meta.errors > 0 else C.DIM
+        # Show the missing marker for sessions that never completed (crashed
+        # or still running) and for a time meta.json cannot give.
+        duration_s = _duration_seconds(meta, started)
+        if duration_s is not None:
+            duration_str = f"{duration_s:>9.1f}s"
+        else:
+            duration_str = f"{C.DIM}{_MISSING:>9} {C.RESET}"
+
+        errors = meta.errors
+        has_errors = (
+            isinstance(errors, int) and not isinstance(errors, bool) and errors > 0
+        )
+        err_color = C.RED if has_errors else C.DIM
 
         # meta.json may hold text where a count belongs, so the counts go
         # through inert() like any other recorded value.
@@ -508,7 +549,7 @@ def list_sessions(
             f"{duration_str} "
             f"{inert(meta.tool_calls):>6} "
             f"{inert(meta.llm_requests):>5} "
-            f"{err_color}{meta.errors:>4}{C.RESET}\n"
+            f"{err_color}{inert(errors):>4}{C.RESET}\n"
         )
 
     out.write(f"{C.GRAY}{'─' * 70}{C.RESET}\n")

@@ -17,7 +17,7 @@ import urllib.parse
 import urllib.request
 
 from .fileutil import split_lf_lines
-from .models import SessionMeta, TraceEvent
+from .models import SessionMeta, TraceEvent, usable_number
 from .store import validate_stored_id
 
 
@@ -92,13 +92,10 @@ def _strict_json_loads(text: str):  # noqa: ANN201
 def _finite_number(value, field: str, *, optional: bool = False) -> float | None:  # noqa: ANN001
     if optional and value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"{field} must be a number")
-    try:
-        number = float(value)
-    except OverflowError as exc:
-        raise ValueError(f"{field} must be a finite non-negative number") from exc
-    if not math.isfinite(number) or number < 0:
+    number = usable_number(value)
+    if number is None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{field} must be a number")
         raise ValueError(f"{field} must be a finite non-negative number")
     return number
 
@@ -133,6 +130,16 @@ def _validate_meta_item(item: object) -> SessionMeta:
     meta = SessionMeta.from_json(json.dumps(item, allow_nan=False))
     meta.session_id = validate_stored_id(meta.session_id, "collector session ID")
     return meta
+
+
+def check_session_meta(meta: SessionMeta) -> None:
+    """Raise ValueError if ``CollectorClient.list_sessions`` would refuse ``meta``.
+
+    GET /sessions serves each meta inside a JSON array, so the check wraps
+    it in one too: the array counts toward the nesting limit.
+    """
+    items = _strict_json_loads("[" + meta.to_json() + "]")
+    _validate_meta_item(items[0])
 
 
 def _validate_event_item(item: object, meta: SessionMeta) -> TraceEvent:

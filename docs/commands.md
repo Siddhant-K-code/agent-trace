@@ -277,6 +277,11 @@ agent-strace list [--tenant ID]
 List all captured sessions with ID, timestamp, duration, tool calls, and errors.
 `--tenant ID` performs an exact tenant match before listing metadata.
 
+A `meta.json` written by an older collector can hold a start time, end time or
+duration that is not a usable number, such as text, NaN or a value out of
+range. `list`, `stats` and `replay` show such a value as missing, as they do
+for the duration of a session that has not ended.
+
 | Column | Counts |
 |---|---|
 | `Tools` | Tool calls from any capture method: hook tool calls, MCP `tools/call` through the proxy, `@trace_tool`, imported tool uses |
@@ -2408,6 +2413,15 @@ Report monthly cost allocation, produce a tenant-scoped subject access export,
 or irreversibly erase all local trace data for one tenant. Deletion requires
 `--confirm` and appends a minimal audit record. See the
 [multi-tenant deployment guide](tenancy.md) for isolation and GDPR notes.
+
+`tenant report`, `tenant export`, `tenant delete` and `org-report` stop with
+"corrupt session in tenant store: <id>" when that session's `started_at` is
+not a usable Unix time. That covers text, NaN, a negative number, and a value
+out of range, such as a time sent in milliseconds. `tenant delete` then
+deletes nothing. The collector answers 400 to such a `started_at`, but a store
+written by an older collector, or edited by hand, can still hold one. To
+continue, set `started_at` in that session's `meta.json` to a Unix time in
+seconds.
 
 ### `backfill-meta`
 ```

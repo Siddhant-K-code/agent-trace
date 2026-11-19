@@ -40,7 +40,7 @@ from .fileutil import lock_descriptor as _lock_descriptor
 from .fileutil import split_lf_lines as _split_lf_lines
 from .fileutil import unlock_descriptor as _unlock_descriptor
 from .fileutil import write_atomic as _write_atomic
-from .models import EventType, SessionMeta, TraceEvent
+from .models import EventType, SessionMeta, TraceEvent, usable_time
 from .redact import redact_data_with_status, redaction_enabled
 
 DEFAULT_TRACE_DIR = ".agent-traces"
@@ -183,6 +183,16 @@ def _depth_below(parent_depth: object) -> int:
     if not isinstance(parent_depth, int) or isinstance(parent_depth, bool) or parent_depth < 0:
         parent_depth = 0
     return parent_depth + 1
+
+
+def _newest_first_key(meta: SessionMeta) -> tuple[float, str]:
+    """Sort key for listing sessions newest first.
+
+    Stored meta can hold any JSON value as its started_at. One that is not a
+    usable time sorts as 0, so it lists last instead of breaking the sort.
+    """
+    started = usable_time(meta.started_at)
+    return (0.0 if started is None else started, meta.session_id)
 
 
 def _lock_file(file_obj) -> None:
@@ -1286,11 +1296,7 @@ class TraceStore:
                         sessions.append(meta)
                 except (json.JSONDecodeError, TypeError, ValueError, OSError):
                     continue
-        return sorted(
-            sessions,
-            key=lambda meta: (meta.started_at, meta.session_id),
-            reverse=True,
-        )
+        return sorted(sessions, key=_newest_first_key, reverse=True)
 
     def list_sessions_strict(
         self,
@@ -1347,6 +1353,8 @@ class TraceStore:
                 raise ValueError(f"invalid core file for session {session_id}")
             try:
                 meta = self.load_meta(session_id)
+                if usable_time(meta.started_at) is None:
+                    raise ValueError("started_at is not a usable time")
                 if validate_events:
                     self.load_events(session_id)
             except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
@@ -1356,11 +1364,7 @@ class TraceStore:
             if tenant_id is None or meta.tenant_id == tenant_id:
                 sessions.append(meta)
 
-        return sorted(
-            sessions,
-            key=lambda meta: (meta.started_at, meta.session_id),
-            reverse=True,
-        )
+        return sorted(sessions, key=_newest_first_key, reverse=True)
 
     def get_latest_session(self, tenant_id: str | None = None) -> SessionMeta | None:
         """Return the newest session metadata, or None when the store is empty."""

@@ -24,15 +24,45 @@ Event types:
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 import uuid
 from dataclasses import asdict, dataclass, field, fields
+from datetime import datetime
 from enum import Enum
 from typing import Any
 
 
 _UNKNOWN_FIELDS_ATTR = "_unknown_fields"
+
+
+def usable_number(value: Any) -> float | None:
+    """Return ``value`` as a float if it is a finite number >= 0, else None.
+
+    meta.json can hold any JSON value, so readers use this to treat a bool,
+    a string, NaN, an infinity, a negative number or an int too large for a
+    float as missing.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    if not math.isfinite(number) or number < 0:
+        return None
+    return number
+
+
+def usable_time(value: Any) -> float | None:
+    """Return ``value`` as a float if it is a usable number that
+    ``datetime.fromtimestamp`` accepts, else None."""
+    try:
+        datetime.fromtimestamp(value)
+    except (OverflowError, ValueError, OSError, TypeError):
+        return None
+    return usable_number(value)
 
 
 def _from_dict(cls, data: Any):

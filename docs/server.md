@@ -134,6 +134,37 @@ but never data values or event IDs:
 [server] Refused one tool_call event because its data is an array, not an object.
 ```
 
+`POST /sessions` checks the metadata before it writes anything. It returns
+400 with `{"error": "<message>"}` and stores nothing when
+`org-report --endpoint` could not read that metadata back from
+`GET /sessions`:
+
+- a field with the wrong type, such as text in `tool_calls` or `ended_at`, or
+  `true` in `depth`
+- a count, such as `tool_calls` or `depth`, that is negative or not a whole
+  number
+- a time or duration that is negative, NaN, Infinity or too large for a float
+- `started_at` of 0, which would be stored as no `started_at`
+- NaN or Infinity in a key the collector does not know
+- a key the collector does not know that holds 64 or more levels of nested
+  lists or objects
+
+It also returns 400 when `started_at`, or `ended_at` when set, is out of
+range, such as a time sent in milliseconds. `org-report --endpoint` can read
+such a time, but commands run on the collector's store directory cannot.
+`list` and `stats` would show the start time or duration as missing, and one
+such `started_at` would stop the `tenant` commands and `org-report` for every
+tenant in the store. A store written by an older collector, or edited by hand,
+can still hold one. See [`tenant`](commands.md#tenant) for the fix.
+
+A request that creates a session also gets 400 when its body has the reserved
+key `_unknown_fields`. An update sets only metadata fields, such as `ended_at`
+or `tool_calls`, and ignores other keys. The collector checks the metadata as
+it would be after the update, so an update to a session whose stored metadata
+is already bad gets 400 unless it fixes every bad field. An update cannot fix
+a bad value in a key the collector does not know. A refused update changes
+nothing, the tenant tag included.
+
 GET session IDs are URL-decoded as one containment-safe path component, so
 legacy IDs containing spaces, Unicode, or more than 128 characters remain
 readable. POST routes retain the strict 1–128 character ASCII policy for new

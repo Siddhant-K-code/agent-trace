@@ -149,6 +149,10 @@ session covered by an erasure tombstone or a pending tenant journal, ignores
 `AGENT_STRACE_TENANT_ID`, and skips event streams with more than one tenant ID.
 See [`backfill-meta`](commands.md#backfill-meta).
 
+Tenant administration also stops with "corrupt session in tenant store: <id>"
+when that session's `started_at` is not a usable time, and deletes nothing.
+See [`tenant`](commands.md#tenant) for the fix.
+
 ## Isolation and hosted collectors
 
 Tenant tags scope agent-strace queries; they do not replace operating-system
