@@ -1251,23 +1251,238 @@ class TestLangChainTools(FrameworkCase):
         integration.uninstrument_langchain()
         self.assertEqual(self.originals(base, "run", "arun"), originals)
 
-    def test_langgraph_node_records_a_linked_tool_call(self):
+    def langgraph(self):
+        """Stub LangGraph modules, not instrumented yet, and their StateGraph."""
+        modules, _, state_graph = stubs.langchain_tool_modules()
+        return modules, state_graph
+
+    def assertNodeRuns(self, events, *names):
+        """Each node run recorded as decision, tool_call and a linked tool_result."""
+        self.assertEqual([e.event_type for e in events],
+                         [E.DECISION, E.TOOL_CALL, E.TOOL_RESULT] * len(names))
+        for index, name in enumerate(names):
+            decision, call, result = events[3 * index:3 * index + 3]
+            tool_name = f"langgraph.node.{name}"
+            self.assertEqual(decision.data, {"choice": name, "reason": f"LangGraph node: {name}"})
+            self.assertEqual(call.data, {"tool_name": tool_name})
+            self.assertEqual(result.parent_id, call.event_id)
+            self.assertEqual(sorted(result.data), ["duration_ms", "tool_name"])
+            self.assertEqual(result.data["tool_name"], tool_name)
+
+    def test_langgraph_graph_runs_as_untraced_and_records_each_node(self):
+        modules, state_graph = self.langgraph()
+        nodes = {"plan": lambda state: state + 1, "act": lambda state: state * 10}
+        untraced = state_graph(nodes).compile()
+        self.instrument("langchain", modules)
+        traced = state_graph(nodes).compile()
+        self.assertEqual((untraced.invoke(1), traced.invoke(1)), (20, 20))
+        self.assertNodeRuns(self.events(), "plan", "act")
+
+    def test_langgraph_ainvoke_runs_an_async_only_node(self):
+        modules, state_graph = self.langgraph()
+
+        async def work(state):
+            return state + 1
+
+        untraced = state_graph({"work": work}).compile()
+        self.instrument("langchain", modules)
+        traced = state_graph({"work": work}).compile()
+        self.assertEqual((_run(untraced.ainvoke(1)), _run(traced.ainvoke(1))), (2, 2))
+        self.assertNodeRuns(self.events(), "work")
+
+    def test_langgraph_node_error_is_linked_and_raised_unchanged(self):
         _, state_graph = self.instrument_tools()
+        failure = ValueError("node failed")
 
         def boom(state):
-            raise RuntimeError("node failed")
+            raise failure
 
-        compiled = state_graph({"plan": lambda state: state, "boom": boom}).compile()
-        compiled.nodes["plan"]({"x": 1})
-        with self.assertRaises(RuntimeError):
-            compiled.nodes["boom"]({})
+        async def aboom(state):
+            raise failure
+
+        runs = {"invoke": lambda: state_graph({"boom": boom}).compile().invoke(1),
+                "ainvoke": lambda: _run(state_graph({"boom": aboom}).compile().ainvoke(1))}
+        for method, run in runs.items():
+            with self.subTest(method=method):
+                before = len(self.events())
+                with self.assertRaises(ValueError) as caught:
+                    run()
+                self.assertIs(caught.exception, failure)
+                decision, call, error = self.events()[before:]
+                self.assertEqual((decision.event_type, error.event_type), (E.DECISION, E.ERROR))
+                self.assertEqual(error.parent_id, call.event_id)
+                self.assertEqual(error.data, {"tool_name": "langgraph.node.boom",
+                                              "error": "node failed", "error_type": "ValueError"})
+
+    def test_langgraph_interrupt_is_a_control_flow_result_not_an_error(self):
+        modules, state_graph = self.langgraph()
+        interrupt = modules["langgraph.errors"].GraphInterrupt("ask")
+
+        def ask(state):
+            raise interrupt
+
+        self.instrument("langchain", modules)
+        with self.assertRaises(type(interrupt)) as caught:
+            state_graph({"ask": ask}).compile().invoke(1)
+        self.assertIs(caught.exception, interrupt)
+        decision, call, result = self.events()
+        self.assertEqual(result.event_type, E.TOOL_RESULT)
+        self.assertEqual(result.parent_id, call.event_id)
+        self.assertEqual(sorted(result.data), ["control_flow", "duration_ms", "tool_name"])
+        self.assertEqual(result.data["control_flow"], "GraphInterrupt")
+
+    def test_langgraph_node_of_another_shape_is_left_untraced(self):
+        modules, state_graph = self.langgraph()
+        pregel = modules["langgraph.pregel"]
+        not_runnable = pregel.PregelNode(["plain"], types.SimpleNamespace(
+            invoke=lambda state, config: state + 1))
+        no_copy = types.SimpleNamespace(triggers=["no_copy"],
+                                        bound=pregel.RunnableCallable(lambda state: state * 10))
+        self.instrument("langchain", modules)
+        graph = state_graph({"plain": not_runnable, "no_copy": no_copy,
+                             "work": lambda state: state - 1}).compile()
+        self.assertIs(graph.nodes["plain"], not_runnable)
+        self.assertIs(graph.nodes["no_copy"], no_copy)
+        self.assertEqual(graph.invoke(1), 19)
+        self.assertNodeRuns(self.events(), "work")
+
+    def test_langgraph_no_node_is_wrapped_when_one_fails_to_copy(self):
+        modules, state_graph = self.langgraph()
+        pregel = modules["langgraph.pregel"]
+
+        class Uncopyable(pregel.PregelNode):
+            def copy(self, update):
+                raise RuntimeError("cannot copy")
+
+        work = pregel.PregelNode(["work"], pregel.RunnableCallable(lambda state: state + 1))
+        stuck = Uncopyable(["stuck"], pregel.RunnableCallable(lambda state: state * 10))
+        self.instrument("langchain", modules)
+        graph = state_graph({"work": work, "stuck": stuck}).compile()
+        self.assertIs(graph.nodes["work"], work)
+        self.assertIs(graph.nodes["stuck"], stuck)
+        self.assertEqual(graph.invoke(1), 20)
+        self.assertEqual(self.events(), [])
+
+    def test_langgraph_subgraph_node_keeps_its_subgraphs(self):
+        _, state_graph = self.instrument_tools()
+        inner = state_graph({"s1": lambda state: state + 1}).compile()
+        outer = state_graph({"sub": inner}).compile()
+        self.assertEqual(outer.nodes["sub"].subgraphs, [inner])
+        self.assertEqual(outer.invoke(1), 2)
         events = self.events()
-        self.assertEqual([e.event_type for e in events],
-                         [E.DECISION, E.TOOL_CALL, E.TOOL_RESULT,
-                          E.DECISION, E.TOOL_CALL, E.ERROR])
-        self.assertEqual(events[1].data["tool_name"], "langgraph.node.plan")
-        self.assertLinkedTo(events, 2, 1)
+        self.assertNodeRuns(events[2:5], "s1")
+        self.assertNodeRuns(events[:2] + events[5:], "sub")
+
+    def test_langgraph_only_start_and_end_nodes_are_skipped(self):
+        modules, state_graph = self.langgraph()
+        pregel = modules["langgraph.pregel"]
+        end = pregel.PregelNode([], pregel.RunnableCallable(lambda state: state))
+        self.instrument("langchain", modules)
+        graph = state_graph({"work": lambda state: state + 1, "__end__": end,
+                             "__error_handler__work": lambda state: state * 10}).compile()
+        self.assertIs(type(graph.nodes["__start__"].bound), pregel.RunnableCallable)
+        self.assertIs(graph.nodes["__end__"], end)
+        self.assertEqual(graph.invoke(1), 20)
+        self.assertNodeRuns(self.events(), "work", "__error_handler__work")
+
+    def test_langgraph_failure_to_record_never_reaches_the_graph(self):
+        from agent_trace.integrations import _base
+
+        modules, state_graph = self.langgraph()
+        real_emit, failing = _base.emit, set()
+
+        def emit(event_type, *args, **kwargs):
+            if event_type in failing:
+                raise OSError("disk full")
+            return real_emit(event_type, *args, **kwargs)
+
+        failure = ValueError("node failed")
+
+        def boom(state):
+            raise failure
+
+        self.instrument("langchain", modules)
+        with patch.object(_base, "emit", emit):
+            graph = state_graph({"work": lambda state: state + 1}).compile()
+            failing_graph = state_graph({"boom": boom}).compile()
+        for kinds in ({E.DECISION}, {E.TOOL_RESULT, E.ERROR}):
+            with self.subTest(failing=kinds):
+                failing.clear()
+                failing.update(kinds)
+                self.assertEqual(graph.invoke(1), 2)
+                with self.assertRaises(ValueError) as caught:
+                    failing_graph.invoke(1)
+                self.assertIs(caught.exception, failure)
+
+    def test_langgraph_sequence_node_is_left_untraced(self):
+        modules, state_graph = self.langgraph()
+        runnables, pregel = modules["langchain_core.runnables"], modules["langgraph.pregel"]
+        sequence = runnables.RunnableSequence(pregel.RunnableCallable(lambda state: state + 1))
+        self.instrument("langchain", modules)
+        graph = state_graph({"chain": sequence, "work": lambda state: state * 10}).compile()
+        self.assertIs(graph.nodes["chain"].bound, sequence)
+        self.assertEqual(graph.invoke(1), 20)
+        self.assertNodeRuns(self.events(), "work")
+
+    def test_langgraph_astream_passes_the_node_stream_through(self):
+        modules, state_graph = self.langgraph()
+        failure = ValueError("stream failed")
+
+        class Streamer(modules["langchain_core.runnables"].Runnable):
+            def __init__(self, fail=False):
+                self.fail = fail
+
+            def invoke(self, input, config=None, **kwargs):
+                return "ab"
+
+            async def astream(self, input, config=None, **kwargs):
+                yield "a"
+                if self.fail:
+                    raise failure
+                yield "b"
+
+        async def chunks(graph):
+            return [chunk async for chunk in graph.astream(1)]
+
+        untraced = state_graph({"stream": Streamer()}).compile()
+        self.instrument("langchain", modules)
+        traced = state_graph({"stream": Streamer()}).compile()
+        self.assertEqual((_run(chunks(untraced)), _run(chunks(traced))),
+                         ([1, "a", "b"], [1, "a", "b"]))
+        with self.assertRaises(ValueError) as caught:
+            _run(chunks(state_graph({"stream": Streamer(fail=True)}).compile()))
+        self.assertIs(caught.exception, failure)
+        events = self.events()
+        self.assertNodeRuns(events[:3], "stream")
+        self.assertEqual([e.event_type for e in events[3:]], [E.DECISION, E.TOOL_CALL, E.ERROR])
         self.assertLinkedTo(events, 5, 4)
+
+    def test_langgraph_recorder_reads_attributes_of_the_node_runnable(self):
+        modules, state_graph = self.langgraph()
+
+        class ToolNode(modules["langchain_core.runnables"].Runnable):
+            tools_by_name = {"search": object()}
+
+            def invoke(self, input, config=None, **kwargs):
+                return input
+
+        self.instrument("langchain", modules)
+        graph = state_graph({"tools": ToolNode()}).compile()
+        self.assertIs(graph.nodes["tools"].bound.tools_by_name, ToolNode.tools_by_name)
+
+    def test_langgraph_node_keeps_its_cache_identifier(self):
+        modules, state_graph = self.langgraph()
+        identifier = modules["langgraph.pregel._call"].identifier
+
+        def work(state):
+            return state + 1
+
+        untraced = state_graph({"work": work}).compile()
+        self.instrument("langchain", modules)
+        traced = state_graph({"work": work}).compile()
+        self.assertEqual(identifier(traced.nodes["work"].bound),
+                         identifier(untraced.nodes["work"].bound))
+        self.assertIn("<locals>.work", identifier(traced.nodes["work"].bound))
 
 
 # ---------------------------------------------------------------------------

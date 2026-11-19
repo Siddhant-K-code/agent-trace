@@ -3,8 +3,8 @@
 Patches:
   - langchain_core.tools.BaseTool.run and .arun    → tool_call / tool_result
   - chat models' ``_generate`` and ``_agenerate``  → llm_request / llm_response
-  - langgraph.graph.StateGraph.compile             → wraps each node with
-                                                     decision / tool_call events
+  - langgraph.graph.StateGraph.compile             → records each node run as
+                                                     decision / tool_call / tool_result
 
 Chat model classes override ``_generate``, so the class that defines a
 model's ``_generate`` and ``_agenerate`` is patched the first time the model
@@ -15,6 +15,7 @@ Install:
     pip install agent-strace[langchain]
     # or: pip install langchain-core
     # LangGraph node tracing also requires: pip install langgraph
+    # It traces graphs compiled after instrument_langchain() only.
 """
 
 from __future__ import annotations
@@ -253,42 +254,146 @@ def _instrument_chat_models(base: type, store: Any, agent_name: str) -> None:
         _MODEL_PATCHES.wrap(base, name, lambda original, a=is_async: hook(original, a))
 
 
-def _wrap_langgraph_nodes(compiled_graph, store, agent_name: str) -> None:
-    """Wrap each node in a compiled LangGraph graph to emit decision and tool events."""
+def _node_recorder(runnable: type, store: Any, agent_name: str) -> type:
+    """A runnable that records a LangGraph node's runs and runs its ``bound``.
+
+    It records no LangChain callback run of its own.
+    """
     from ._base import _get_or_create_session, emit
     from ..models import EventType
 
+    try:
+        from langgraph.errors import GraphBubbleUp
+    except ImportError:
+        GraphBubbleUp = ()
+    try:
+        from langgraph.pregel._call import identifier
+    except ImportError:
+        try:
+            from langgraph.pregel.call import identifier
+        except ImportError:
+            identifier = None
+
+    class NodeRecorder(runnable):
+        def __init__(self, bound: Any, name: str) -> None:
+            self.bound = bound
+            self.node_name = name
+            key = identifier(bound) if identifier is not None else None
+            if key:
+                # LangGraph names a node's cache entries with identifier(node.bound).
+                self.__module__, _, self.__qualname__ = key.rpartition(".")
+
+        def __getattr__(self, name: str) -> Any:
+            # LangGraph reads some attributes of node.bound, such as a ToolNode's tools_by_name.
+            if name.startswith("__") or "bound" not in self.__dict__:
+                raise AttributeError(name)
+            return getattr(self.bound, name)
+
+        def _begin(self) -> tuple[str, str, Any, float] | None:
+            try:
+                sid = _get_or_create_session(store, agent_name)
+                emit(EventType.DECISION, sid, store, choice=self.node_name,
+                     reason=f"LangGraph node: {self.node_name}")
+                tool_name = f"langgraph.node.{self.node_name}"
+                call = emit(EventType.TOOL_CALL, sid, store, tool_name=tool_name)
+            except Exception:
+                return None
+            return sid, tool_name, call, time.time()
+
+        def _finish(self, run: tuple[str, str, Any, float] | None,
+                    exc: Exception | None = None) -> None:
+            if run is None:
+                return
+            sid, tool_name, call, t0 = run
+            try:
+                if exc is None:
+                    emit(EventType.TOOL_RESULT, sid, store, parent=call,
+                         tool_name=tool_name, duration_ms=(time.time() - t0) * 1000)
+                elif isinstance(exc, GraphBubbleUp):
+                    # interrupt(), NodeInterrupt and ParentCommand stop a node on purpose.
+                    emit(EventType.TOOL_RESULT, sid, store, parent=call,
+                         tool_name=tool_name, duration_ms=(time.time() - t0) * 1000,
+                         control_flow=type(exc).__name__)
+                else:
+                    emit(EventType.ERROR, sid, store, parent=call, tool_name=tool_name,
+                         error=str(exc), error_type=type(exc).__name__)
+            except Exception:
+                pass
+
+        def invoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+            run = self._begin()
+            try:
+                output = self.bound.invoke(input, config, **kwargs)
+            except Exception as exc:
+                self._finish(run, exc)
+                raise
+            self._finish(run)
+            return output
+
+        async def ainvoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+            run = self._begin()
+            try:
+                output = await self.bound.ainvoke(input, config, **kwargs)
+            except Exception as exc:
+                self._finish(run, exc)
+                raise
+            self._finish(run)
+            return output
+
+        async def astream(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+            # LangGraph streams a node's runnable under astream_events.
+            run = self._begin()
+            try:
+                chunks = self.bound.astream(input, config, **kwargs)
+                try:
+                    async for chunk in chunks:
+                        yield chunk
+                finally:
+                    if hasattr(chunks, "aclose"):
+                        await chunks.aclose()
+            except Exception as exc:
+                self._finish(run, exc)
+                raise
+            self._finish(run)
+
+    return NodeRecorder
+
+
+def _wrap_langgraph_nodes(compiled_graph, store, agent_name: str) -> None:
+    """Record each node run of a compiled LangGraph graph.
+
+    Each node keeps its LangGraph node object. Only its ``bound`` runnable is
+    replaced, by a recorder that calls the original, so the graph runs, streams
+    and draws as it does untraced. A node of another shape is left untraced. If
+    wrapping a node raises, no node is wrapped.
+    """
     nodes = getattr(compiled_graph, "nodes", None)
     if not isinstance(nodes, dict):
         return
+    try:
+        from langchain_core.runnables import Runnable, RunnableSequence
 
-    for node_name, node_fn in list(nodes.items()):
-        if node_name in ("__start__", "__end__"):
-            continue
-
-        def _make_wrapper(name, fn):
-            def _wrapped(state, *args, **kwargs):
-                sid = _get_or_create_session(store, agent_name)
-                t0 = time.time()
-                tool_name = f"langgraph.node.{name}"
-                emit(EventType.DECISION, sid, store,
-                     choice=name,
-                     reason=f"LangGraph node: {name}")
-                call = emit(EventType.TOOL_CALL, sid, store, tool_name=tool_name)
-                try:
-                    result = fn(state, *args, **kwargs)
-                    emit(EventType.TOOL_RESULT, sid, store, parent=call,
-                         tool_name=tool_name,
-                         duration_ms=(time.time() - t0) * 1000)
-                    return result
-                except Exception as exc:
-                    emit(EventType.ERROR, sid, store, parent=call,
-                         tool_name=tool_name, error=str(exc),
-                         error_type=type(exc).__name__)
-                    raise
-            return _wrapped
-
-        nodes[node_name] = _make_wrapper(node_name, node_fn)
+        recorder = _node_recorder(Runnable, store, agent_name)
+        updates = {}
+        for name, node in nodes.items():
+            if name in ("__start__", "__end__"):
+                continue
+            bound = getattr(node, "bound", None)
+            if not isinstance(bound, Runnable) or not callable(getattr(node, "copy", None)):
+                continue
+            if isinstance(bound, RunnableSequence):
+                # LangGraph runs a sequence's steps as the node's own steps.
+                # A recorder around it would add a LangChain run.
+                continue
+            new = node.copy({"bound": recorder(bound, name)})
+            subgraphs = getattr(node, "subgraphs", None)
+            if getattr(new, "subgraphs", None) != subgraphs:
+                # LangGraph 0.2 looks for subgraphs in the new bound and finds none.
+                new.subgraphs = subgraphs
+            updates[name] = new
+    except Exception:
+        return
+    nodes.update(updates)
 
 
 def uninstrument_langchain() -> None:
