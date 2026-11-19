@@ -11,9 +11,10 @@ Each row sets one field on every event of one type in one session to a value
 of the wrong type. It runs the command once with that value and once with the
 key deleted. Both runs must exit with the same code, print the same error
 lines on stderr and write the same files. For an ``exact`` field the two runs
-must also match byte for byte after the temporary path, the current time and
-SHA-256 hashes are normalized. The event hash chain covers the stored data, so
-the hashes differ between the two runs. A ``loose`` field belongs to a command
+must also match byte for byte after the temporary path and SHA-256 hashes are
+normalized. The event hash chain covers the stored data, so the hashes differ
+between the two runs. The policy commands print a window that ends at the
+current time, so each run pins that clock. A ``loose`` field belongs to a command
 that echoes raw event data or counts its stored size, such as share HTML or the
 cost estimates, so only the checks above apply. ``sample`` copies whole sessions into the file it
 writes, so for its rows only the path of that file is compared.
@@ -34,10 +35,12 @@ from __future__ import annotations
 import contextlib
 import http.client
 import io
+import itertools
 import json
 import re
 import tempfile
 import threading
+import time
 import unittest
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -612,8 +615,10 @@ FAILED_LINE_CASES = [
 
 ALL_CASES = USER_REPORTED_CASES + OTHER_CASES + FAILED_LINE_CASES
 
-_ISO_TIME = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}\.\d{3,}Z?")
-_EPOCH_TIME = re.compile(r"\b1[6-9]\d{8}\.\d{3,}\b")
+# policy backtest, coverage and diff end their window at time.time(). _run pins
+# that clock to this value, so both runs of a case print the same window. GOOD,
+# BAD and CHILD all start in the default 30-day window that ends here.
+_POLICY_NOW = base.NOW + 3600
 # The event hash chain covers the stored data, so a run with a wrong-typed value
 # and a run with the key deleted print different hashes.
 _SHA256 = re.compile(r"\b[0-9a-f]{64}\b")
@@ -622,7 +627,6 @@ _ERROR_LINE = re.compile(r"Traceback|Error|Failed|failed")
 
 def _normalize(text: str, root: Path) -> str:
     text = text.replace(str(root), "<ROOT>").replace(root.name, "<ROOT>")
-    text = _EPOCH_TIME.sub("<NOW>", _ISO_TIME.sub("<TIME>", text))
     return _SHA256.sub("<SHA256>", text)
 
 
@@ -695,7 +699,9 @@ class TestCommandsReadWrongTypedFieldsAsMissing(base.CliTestCase):
     def _run(self, case: Case, name: str, value) -> Run:
         root = self._workspace(case, name, value)
         before = _files(root)
-        result = self.run_cli(root, *case.argv)
+        with mock.patch("agent_trace.policy_backtest.time", wraps=time) as clock:
+            clock.time.return_value = _POLICY_NOW
+            result = self.run_cli(root, *case.argv)
         after = _files(root)
         return Run(
             code=result.code,
@@ -737,6 +743,31 @@ class TestCommandsReadWrongTypedFieldsAsMissing(base.CliTestCase):
 
     def test_variants_that_printed_a_failure_line_on_main(self):
         self._check_cases(FAILED_LINE_CASES)
+
+    def _policy_json_cases(self) -> list[Case]:
+        cases = [case for case in OTHER_CASES if case.argv[0] == "policy" and "json" in case.argv]
+        self.assertEqual(len(cases), 2)
+        return cases
+
+    def test_policy_json_runs_match_whatever_the_clock_reads(self):
+        # Without the pin in _run, each run reads this clock once. Every run
+        # with the key deleted then reads 2 decimals and every wrong-typed run
+        # reads 6, as in the CI flake.
+        second = int(base.NOW) + 61
+        reads = itertools.cycle([float(f"{second}.63"), float(f"{second}.634567")])
+        with mock.patch("agent_trace.policy_backtest.time") as clock:
+            clock.time.side_effect = reads
+            self._check_cases(self._policy_json_cases())
+
+    def test_policy_window_ends_at_the_pin_and_holds_every_session(self):
+        for case in self._policy_json_cases():
+            for name, values, _exact in case.fields():
+                for value in (_DELETE, *values):
+                    shown = "deleted" if value is _DELETE else value
+                    with self.subTest(argv=" ".join(case.argv), field=name, value=shown):
+                        report = json.loads(self._run(case, name, value).out)
+                        self.assertEqual(report["window"]["end"], _POLICY_NOW)
+                        self.assertEqual(report["sessions"], 3)
 
 
 _WATCH_EVENTS = [
