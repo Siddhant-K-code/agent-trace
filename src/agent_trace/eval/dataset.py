@@ -15,6 +15,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..fileutil import split_lf_lines
+
 if TYPE_CHECKING:
     from ..store import TraceStore
 
@@ -57,7 +59,7 @@ def list_entries(dataset_path: str | Path) -> list[DatasetEntry]:
     if not p.exists():
         return []
     entries = []
-    for line in p.read_text(encoding="utf-8").splitlines():
+    for line in split_lf_lines(p.read_text(encoding="utf-8")):
         line = line.strip()
         if line:
             try:

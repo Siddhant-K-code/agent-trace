@@ -31,6 +31,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Sequence
 
+from .fileutil import split_lf_lines
+
 SIGNAL_STATUSES = ("present", "missing", "unpushed", "inconclusive")
 SIGNAL_CONFIDENCES = ("low", "medium", "high")
 
@@ -368,7 +370,7 @@ def _read_queue(common: Path) -> tuple[frozenset[str], bool]:
     except OSError:
         return frozenset(), False
     refs = set()
-    for line in text.splitlines():
+    for line in split_lf_lines(text):
         try:
             entry = json.loads(line)
         except ValueError:
@@ -720,7 +722,7 @@ def read_otel_records(path: str) -> tuple[list[tuple[dict[str, Any], Any, dict[s
         pass
     records: list[tuple[dict[str, Any], Any, dict[str, Any]]] = []
     bad = 0
-    for line in text.splitlines():
+    for line in split_lf_lines(text):
         if not line.strip():
             continue
         try:

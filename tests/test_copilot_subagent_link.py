@@ -459,6 +459,25 @@ class TestParentEventIdInference(_SubagentHookTest):
             self.store().load_meta(local(CHILD)).parent_event_id, self.task_call().event_id
         )
 
+    def test_task_call_with_a_raw_line_separator_is_found(self):
+        self.start_parent(task_args={**TASK_ARGS, "prompt": "Synthetic\u2028prompt."})
+        events_path = self.root / local(PARENT) / "events.ndjson"
+        raw = events_path.read_bytes()
+        # Only the task call, the last line, holds the escape, so making it raw
+        # keeps the hash chain valid.
+        self.assertEqual(raw.count(b"\\u2028"), 1)
+        self.assertIn(b"\\u2028", raw.splitlines()[-1])
+        events_path.write_bytes(raw.replace(b"\\u2028", "\u2028".encode("utf-8")))
+
+        self.subagent_start(child="")
+        self.child_runs()
+        self.subagent_stop()
+
+        call_id = self.task_call().event_id
+        (start,) = self.events(PARENT, EventType.SUBAGENT_START)
+        self.assertEqual(start.parent_id, call_id)
+        self.assertEqual(self.store().load_meta(local(CHILD)).parent_event_id, call_id)
+
 
 class TestLinkRefusals(_SubagentHookTest):
     def test_missing_child_is_not_created(self):

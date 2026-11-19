@@ -16,6 +16,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from .fileutil import split_lf_lines
 from .models import SessionMeta, TraceEvent
 from .store import validate_stored_id
 
@@ -403,7 +404,7 @@ class CollectorClient:
             raise CollectorClientError("collector returned non-UTF-8 event data") from exc
         events: list[TraceEvent] = []
         stream_tenant = ""
-        for line in text.splitlines():
+        for line in split_lf_lines(text):
             if not line.strip():
                 continue
             if len(line.encode("utf-8")) > self.max_event_line_bytes:

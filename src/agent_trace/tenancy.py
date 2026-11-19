@@ -22,6 +22,7 @@ from typing import TextIO
 from .cost import DEFAULT_MODEL, estimate_cost
 from .event_data import require_object_event_data
 from .explain import PHASE_DATA_EVENT_TYPES
+from .fileutil import split_lf_lines
 from .store import TraceStore, _write_atomic, validate_stored_id, validate_tenant_id
 
 
@@ -204,7 +205,7 @@ def _relevant_audit_records(store: TraceStore, tenant_hash: str) -> list[dict]:
         path = store._store_file(name, "tenant audit")
         if not path.exists():
             continue
-        for line in path.read_text(encoding="utf-8").splitlines():
+        for line in split_lf_lines(path.read_text(encoding="utf-8")):
             try:
                 record = json.loads(line)
             except json.JSONDecodeError:

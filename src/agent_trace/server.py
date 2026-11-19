@@ -51,6 +51,7 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .event_data import NonObjectEventDataError, refused_event_warning
+from .fileutil import split_lf_lines
 from .models import SessionMeta, TraceEvent
 from .store import (
     TraceStore,
@@ -576,7 +577,7 @@ class CollectorHandler(BaseHTTPRequestHandler):
         """
         accepted = 0
         errors = 0
-        for line in body.decode("utf-8", errors="replace").splitlines():
+        for line in split_lf_lines(body.decode("utf-8", errors="replace")):
             line = line.strip()
             if not line:
                 continue

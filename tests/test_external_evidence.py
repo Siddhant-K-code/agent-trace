@@ -37,6 +37,11 @@ from agent_trace.reviewability import (
 )
 from agent_trace.store import TraceStore
 
+try:
+    from test_fileutil import RAW_SEPARATORS
+except ImportError:  # pragma: no cover - package-style test discovery
+    from tests.test_fileutil import RAW_SEPARATORS
+
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "external_evidence"
 SECRET = "zebra-quartz-77"
@@ -214,6 +219,17 @@ class TestEntireSignals(_RepoCase):
         self.assertEqual(signal.facts["push_policy"], "unreadable")
         self.assertIs(signal.facts["push_sessions"], False)
 
+    def test_queue_line_with_a_raw_line_separator_is_read(self):
+        self.commit(f"feat\n\nEntire-Checkpoint: {ULID}\n")
+        ref = self.entire_ref(ULID, queued=False)
+        queue = Path(self.repo) / ".git" / "entire-checkpoint-push-queue.jsonl"
+        for separator in RAW_SEPARATORS:
+            with self.subTest(separator=hex(ord(separator))):
+                line = json.dumps({"ref": ref, "note": f"a{separator}b"}, ensure_ascii=False)
+                queue.write_bytes((line + "\n").encode("utf-8"))
+                [signal] = _by_source(self.signals(), "entire_checkpoint")
+                self.assertTrue(signal.facts["queued"])
+
     def test_checkpoint_not_in_clone_is_inconclusive(self):
         self.commit(f"feat\n\nEntire-Checkpoint: {ULID}\n")
         [signal] = _by_source(self.signals(), "entire_checkpoint")
@@ -369,6 +385,28 @@ class TestClaudeOtel(unittest.TestCase):
         self.assertEqual(signal.facts["tool_decision_rejects"], 1)
         self.assertIn("Absence does not show that nothing was refused", signal.detail)
         self.assertNotIn(SECRET, json.dumps(signal.to_dict()))
+
+    def test_jsonl_line_with_a_raw_line_separator_is_parsed(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / "claude.jsonl"
+        records = [
+            {
+                "event.name": "claude_code.user_prompt",
+                "session.id": "cc-a",
+                "app.version": "2.1.310",
+                "prompt": f"a{separator}b",
+            }
+            for separator in RAW_SEPARATORS
+        ]
+        path.write_bytes(b"".join(
+            (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8") for record in records
+        ))
+
+        signal = assess_otel_logs(str(path))
+
+        self.assertEqual(signal.facts["unparsed_lines"], 0)
+        self.assertEqual(signal.facts["claude_code_events"], 3)
 
     def test_old_version_predates_safety_event(self):
         signal = assess_otel_logs(str(FIXTURES / "claude_otel_old_version.jsonl"))

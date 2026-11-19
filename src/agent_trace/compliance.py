@@ -35,6 +35,7 @@ from . import __version__
 from .audit import verify_chain
 from .cost import _usage_dollars, session_event_usage
 from .event_data import require_object_event_data, str_field
+from .fileutil import split_lf_lines
 from .inert import inert
 from .models import EventType, TraceEvent
 from .store import TraceStore
@@ -78,7 +79,8 @@ def _load_event_lines(store: TraceStore, session_id: str) -> list[str]:
     path = store._session_file(session_id, "events.ndjson", "event stream")
     if not path.exists():
         return []
-    return [line for line in path.read_text().splitlines() if line.strip()]
+    text = path.read_text(encoding="utf-8")
+    return [line for line in split_lf_lines(text) if line.strip()]
 
 
 def _root_hash(lines: list[str]) -> str:

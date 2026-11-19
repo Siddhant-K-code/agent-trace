@@ -244,6 +244,18 @@ class TestLegacyCrlfEvents(_LineEndingCase):
                 self.assertLF(trace_dir / session_id / "events.ndjson")
                 self.assertTrue(verify_chain(store, session_id).ok)
 
+    def test_tag_audit_hashes_the_last_legacy_line_without_cr(self):
+        for mode in MODES:
+            with self.in_mode(mode) as trace_dir:
+                store, session_id, legacy = self._legacy_session(trace_dir)
+                store.tag_session(session_id, "acme")
+                audit = json.loads((trace_dir / "tenant-audit.ndjson").read_text(encoding="utf-8"))
+                last_legacy_line = legacy.split(b"\r\n")[-2]
+                self.assertEqual(
+                    audit["previous_terminal_hash"],
+                    hashlib.sha256(last_legacy_line).hexdigest(),
+                )
+
     def test_failed_tag_restores_legacy_bytes_exactly(self):
         store, session_id, legacy = self._legacy_session(self.root / "traces")
         events_path = store.base_dir / session_id / "events.ndjson"

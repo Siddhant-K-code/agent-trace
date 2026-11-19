@@ -26,6 +26,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .failures import count_session_errors
+from .fileutil import split_lf_lines
 from .hooks import _PROVIDER_AGENT
 from .models import EventType, SessionMeta, TraceEvent
 from .store import (
@@ -230,7 +231,7 @@ def _read_events(path: Path, session_id: str) -> tuple[list[TraceEvent], str]:
         raise _Skip("unreadable_events", exc.strerror or str(exc)) from exc
     events: list[TraceEvent] = []
     tenants: set[str] = set()
-    for number, line in enumerate(text.splitlines(), 1):
+    for number, line in enumerate(split_lf_lines(text), 1):
         if not line.strip():
             continue
         try:

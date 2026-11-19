@@ -1,6 +1,7 @@
 """Tests for compliance export (issue #144)."""
 
 import copy
+import hashlib
 import io
 import json
 import os
@@ -26,6 +27,7 @@ try:
         _upgrade_prefix,
         _write_lines,
     )
+    from test_store import raw_separator_session
 except ImportError:
     from tests import _escapes
     from tests import _no_telemetry  # noqa: F401
@@ -39,6 +41,7 @@ except ImportError:
         _upgrade_prefix,
         _write_lines,
     )
+    from tests.test_store import raw_separator_session
 
 from agent_trace.audit import verify_chain
 from agent_trace.cli import build_parser
@@ -231,6 +234,20 @@ class TestEuAiActArticleExport(unittest.TestCase):
         self.assertIn("prev_hash", events[1])
         self.assertIn("line_hash", events[1])
         self.assertTrue(events[1]["line_hash"])
+
+    def test_line_hashes_cover_a_line_with_a_raw_line_separator(self):
+        sid, lines = raw_separator_session(self.store, "\u2028")
+        report = export_eu_ai_act(self.store, [sid])
+        article_12 = report["sessions"][0]["article_12"]
+
+        self.assertEqual(
+            [event["line_hash"] for event in article_12["events"]],
+            [hashlib.sha256(line.encode("utf-8")).hexdigest() for line in lines],
+        )
+        self.assertTrue(article_12["trace_integrity"]["hash_chain_valid"])
+        path = Path(self.tmpdir) / "export.json"
+        path.write_text(json.dumps(report), encoding="utf-8")
+        self.assertTrue(verify_eu_ai_act_export(str(path))["ok"])
 
     def test_article_13_lists_tools_and_oversight(self):
         sid = _make_session(self.store, ["Bash"], errors=1)
