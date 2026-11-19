@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextvars
+import json
 import os
 import subprocess
 import sys
@@ -14,7 +15,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_trace.integrations import _base
-from agent_trace.models import EventType
+from agent_trace.models import EventType, TraceEvent
 from agent_trace.store import TraceStore
 
 try:  # keeps product telemetry off in this process and its children
@@ -288,6 +289,123 @@ class TestRunSession(unittest.TestCase):
             kinds.count(EventType.TOOL_CALL), kinds.count(EventType.LLM_REQUEST),
             kinds.count(EventType.ERROR)))
         self.assertEqual((meta.tool_calls, meta.llm_requests, meta.errors), (2, 1, 1))
+
+    LATE_CHILD = (
+        "import json, sys\n"
+        "from agent_trace import server\n"
+        "from agent_trace.integrations import _base\n"
+        "from agent_trace.models import EventType\n"
+        "from agent_trace.store import TraceStore\n"
+        "def send(event, endpoint):\n"
+        "    with open(sys.argv[2], 'a', encoding='utf-8') as f:\n"
+        "        f.write(event.to_json() + '\\n')\n"
+        "    return True\n"
+        "server.send_event_to_endpoint = send\n"
+        "store = TraceStore(sys.argv[1])\n"
+        "sid = _base._get_or_create_session(store, 'agent')\n"
+        "call = _base.emit(EventType.TOOL_CALL, sid, store, tool_name='slow')\n"
+        "print(sid, flush=True)\n"
+        "sys.stdin.readline()\n"
+        "late = [_base.emit(EventType.TOOL_RESULT, sid, store, parent=call)]\n"
+        "for kind in (EventType.TOOL_CALL, EventType.LLM_REQUEST, EventType.ERROR):\n"
+        "    late.append(_base.emit(kind, sid, store))\n"
+        "print(json.dumps([call.event_id] + [e.session_id for e in late]), flush=True)\n"
+    )
+
+    def run_with_late_child(self, endpoint):
+        """Run a session while a child process looks it up and records a
+        tool_call into it, then, after the run ended, its tool_result and
+        three more events. Returns the run's session ID, the tool_call's ID
+        and the events, by session, in the order they were written."""
+        log = Path(self.trace_dir) / "endpoint.ndjson"
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+        env.pop("AGENT_STRACE_ENDPOINT", None)
+        if endpoint:
+            env["AGENT_STRACE_ENDPOINT"] = "http://collector.invalid"
+
+        def send(event, url):
+            with open(log, "a", encoding="utf-8") as f:
+                f.write(event.to_json() + "\n")
+            return True
+
+        from agent_trace import server
+        with patch.dict(os.environ, env), patch.object(server, "send_event_to_endpoint", send):
+            with _base.run_session(self.store, "agent") as sid:
+                child = subprocess.Popen(
+                    [sys.executable, "-c", self.LATE_CHILD, self.trace_dir, str(log)],
+                    env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+                )
+                self.addCleanup(child.wait, 60)
+                self.addCleanup(child.stdout.close)
+                self.assertEqual(child.stdout.readline().strip(), sid)
+            child.stdin.write("\n")
+            child.stdin.close()
+            call_id, *late = json.loads(child.stdout.read())
+            self.assertEqual(child.wait(timeout=60), 0)
+
+        self.assertEqual(len(set(late)), 1)
+        self.assertNotEqual(late[0], sid)
+        if endpoint:
+            events = {}
+            for line in log.read_text(encoding="utf-8").splitlines():
+                event = TraceEvent.from_json(line)
+                events.setdefault(event.session_id, []).append(event)
+            self.assertEqual(self.store.load_events(sid), [])
+        else:
+            events = {s: self.store.load_events(s) for s in (sid, late[0])}
+        return sid, call_id, events[sid], events[late[0]]
+
+    def check_late_events(self, endpoint):
+        sid, call_id, run_events, late_events = self.run_with_late_child(endpoint)
+        self.assertEqual([e.event_type for e in run_events], [
+            EventType.SESSION_START, EventType.TOOL_CALL, EventType.SESSION_END])
+        self.assertEqual(run_events[1].event_id, call_id)
+        # The late events are kept, in another session of the agent.
+        self.assertEqual([e.event_type for e in late_events], [
+            EventType.TOOL_RESULT, EventType.TOOL_CALL, EventType.LLM_REQUEST,
+            EventType.ERROR])
+        for event in late_events:
+            self.assertEqual(event.data["original_session_id"], sid)
+        # The result does not name a request in another session.
+        result = late_events[0]
+        self.assertEqual((result.parent_id, result.duration_ms), ("", None))
+        self.assertEqual(result.data["original_parent_id"], call_id)
+        self.assertNotIn("original_parent_id", late_events[1].data)
+        return sid
+
+    def test_event_another_process_records_after_the_run_ends_is_not_appended_to_it(self):
+        sid = self.check_late_events(endpoint=False)
+        meta = self.store.load_meta(sid)
+        self.assertEqual((meta.tool_calls, meta.llm_requests, meta.errors), (1, 0, 0))
+
+    def test_event_another_process_sends_after_the_run_ends_is_not_sent_for_it(self):
+        self.check_late_events(endpoint=True)
+
+    def test_event_recorded_while_the_run_closes_waits_and_is_not_appended_to_it(self):
+        real = self.store.mutate_meta
+        late = []
+        blocked = []
+        thread = None
+
+        def mutate_meta(sid, mutate, **kwargs):
+            nonlocal thread
+            if getattr(mutate, "__name__", "") == "close":
+                thread = threading.Thread(target=lambda: late.append(
+                    _base.emit(EventType.TOOL_CALL, sid, self.store).session_id))
+                thread.start()
+                thread.join(0.5)
+                blocked.append(thread.is_alive())
+            return real(sid, mutate, **kwargs)
+
+        with patch.object(self.store, "mutate_meta", mutate_meta):
+            with _base.run_session(self.store, "agent") as sid:
+                pass
+        thread.join(60)
+        self.assertEqual(blocked, [True])
+        self.assertEqual(self.kinds(sid), [EventType.SESSION_START, EventType.SESSION_END])
+        self.assertNotEqual(late[0], sid)
+        self.assertEqual(self.kinds(late[0]), [EventType.TOOL_CALL])
 
     def test_run_of_a_process_that_died_is_dropped(self):
         child, child_sid = self.run_in_child("import os\nos._exit(0)\n")

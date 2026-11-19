@@ -78,7 +78,8 @@ def _get_or_create_session(store: TraceStore, name: str) -> str:
     returned, so threads that do not inherit the run's context still find
     it. A marker naming a run that is over (its process exited without
     ending it) moves to the newest run still in progress, or, without one,
-    is replaced by a new session. The check and the create run under a
+    is replaced by a new session, as is a marker naming a session that has
+    ended. The check and the create run under a
     per-name file lock, so concurrent first calls from threads or processes
     share one session.
     """
@@ -88,7 +89,7 @@ def _get_or_create_session(store: TraceStore, name: str) -> str:
     with _session_marker(store, name) as active_path:
         registered, live = _prune_runs(store, _runs_path(active_path))
         sid = _point_marker(active_path, registered, live)
-        if sid and store.session_exists(sid):
+        if sid and store.session_exists(sid) and not _session_ended(store, sid):
             return sid
         return _new_session(store, name, active_path)
 
@@ -330,28 +331,35 @@ def _end_run(store: TraceStore, name: str, sid: str, started: float) -> None:
 
     The counts come from the stored events, so events that other processes
     recorded into the run's session are counted too. With a remote endpoint
-    only this process's events are counted.
+    only this process's events are counted. The end is recorded and the
+    session closed under the seal :func:`emit` takes, so no event can be
+    appended to the session after its ``session_end``.
     """
     try:
-        emit(EventType.SESSION_END, sid, store,
-             duration_ms=(time.time() - started) * 1000)
+        with _session_seal(store):
+            try:
+                _write(TraceEvent(
+                    event_type=EventType.SESSION_END, session_id=sid,
+                    data={"duration_ms": (time.time() - started) * 1000},
+                ), store)
+            finally:
+                with _RUN_COUNTS_LOCK:
+                    counts = _RUN_COUNTS.pop(sid, {})
+                stored = _stored_counts(store, sid)
+                if stored is not None:
+                    counts = stored
+
+                def close(meta: SessionMeta) -> None:
+                    meta.ended_at = time.time()
+                    meta.total_duration_ms = (meta.ended_at - meta.started_at) * 1000
+                    for field_name, value in counts.items():
+                        setattr(meta, field_name, value)
+
+                store.mutate_meta(sid, close)
     finally:
         with _RUN_COUNTS_LOCK:
-            counts = _RUN_COUNTS.pop(sid, {})
-        stored = _stored_counts(store, sid)
-        if stored is not None:
-            counts = stored
-
-        def close(meta: SessionMeta) -> None:
-            meta.ended_at = time.time()
-            meta.total_duration_ms = (meta.ended_at - meta.started_at) * 1000
-            for field_name, value in counts.items():
-                setattr(meta, field_name, value)
-
-        try:
-            store.mutate_meta(sid, close)
-        finally:
-            _unregister_run(store, name, sid)
+            _RUN_COUNTS.pop(sid, None)
+        _unregister_run(store, name, sid)
 
 
 @contextlib.contextmanager
@@ -415,19 +423,82 @@ def emit(
 
     With ``parent``, the event records that it answers that request: its
     ``parent_id`` and ``duration_ms`` are set (see pairing.link_response).
-    Returns the event.
+    An event for a session that has ended, such as a run another process
+    finished after this one looked the session up, goes to the agent's
+    current session instead (see :func:`_append_to_open_session`), so
+    ``session_end`` stays the last event of the run, in the store and at a
+    remote endpoint alike. Returns the event; its ``session_id`` is the
+    session it was written to.
     """
     ev = TraceEvent(event_type=event_type, session_id=session_id, data=dict(data))
     if parent is not None:
         link_response(ev, parent.event_id, parent.timestamp)
-    endpoint = os.environ.get("AGENT_STRACE_ENDPOINT", "").rstrip("/")
+    if _append_to_open_session(ev, store):
+        _count_run_event(ev.session_id, event_type)
+    return ev
+
+
+def _endpoint() -> str:
+    return os.environ.get("AGENT_STRACE_ENDPOINT", "").rstrip("/")
+
+
+def _write(ev: TraceEvent, store: TraceStore) -> None:
+    endpoint = _endpoint()
     if endpoint:
         from ..server import send_event_to_endpoint
         send_event_to_endpoint(ev, endpoint)
     else:
-        store.append_event(session_id, ev)
-    _count_run_event(session_id, event_type)
-    return ev
+        store.append_event(ev.session_id, ev)
+
+
+@contextlib.contextmanager
+def _session_seal(store: TraceStore) -> Iterator[None]:
+    """Hold the lock under which events are appended to open integration
+    sessions and runs are closed."""
+    store.base_dir.mkdir(parents=True, exist_ok=True)
+    with file_lock(store.base_dir / ".integration-seal"):
+        yield
+
+
+def _session_ended(store: TraceStore, sid: str) -> bool:
+    try:
+        return store.load_meta(sid).ended_at is not None
+    except Exception:
+        return False
+
+
+def _append_to_open_session(ev: TraceEvent, store: TraceStore) -> bool:
+    """Write *ev* to its session, or, if that session has ended, to the
+    current session of the same agent. Returns False if it was not written.
+
+    A moved event keeps the session it was recorded for in
+    ``data["original_session_id"]``. A moved response, such as the
+    ``tool_result`` of a ``tool_call`` recorded before the run ended, no
+    longer names that request in ``parent_id``, which would point into
+    another session; the request's ID is kept in
+    ``data["original_parent_id"]`` instead.
+    """
+    for _ in range(3):
+        with _session_seal(store):
+            if not _session_ended(store, ev.session_id):
+                _write(ev, store)
+                return True
+        try:
+            name = store.load_meta(ev.session_id).agent_name
+        except Exception:
+            return False
+        if not name:
+            return False
+        sid = _get_or_create_session(store, name)
+        if sid == ev.session_id:
+            return False
+        ev.data.setdefault("original_session_id", ev.session_id)
+        if ev.parent_id:
+            ev.data["original_parent_id"] = ev.parent_id
+            ev.parent_id = ""
+            ev.duration_ms = None
+        ev.session_id = sid
+    return False
 
 
 def count(value: Any) -> int | None:
