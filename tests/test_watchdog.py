@@ -14,6 +14,11 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+try:
+    from _sigint import SIGINT_DEFAULT
+except ImportError:  # pragma: no cover - run as a package module
+    from tests._sigint import SIGINT_DEFAULT
+
 import agent_trace
 import agent_trace.watch as watch_mod
 from agent_trace.cli import build_parser
@@ -1390,7 +1395,7 @@ class TestTimeoutKillsSilentAgentLive(unittest.TestCase):
         with open(log, "wb") as log_file:
             watch = subprocess.Popen(
                 [
-                    sys.executable, "-m", "agent_trace.cli", "--trace-dir", str(trace_dir),
+                    *SIGINT_DEFAULT, "-m", "agent_trace.cli", "--trace-dir", str(trace_dir),
                     "watch", SESSION, "--agent-pid", str(agent.pid), "--timeout", "1s",
                 ],
                 cwd=root, env=env, stdout=log_file, stderr=subprocess.STDOUT,
