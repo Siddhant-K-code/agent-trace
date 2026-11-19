@@ -32,13 +32,13 @@ agent-strace record [--name NAME] [--parent SESSION] [--no-redact] -- <command>
 ```
 Capture an MCP stdio server session. Wraps `<command>` as a transparent proxy.
 
-Tracing never stops the relay. A field with an unexpected JSON type is traced as if it were missing. A response with any `error` but null, even `0`, `""` or `{}`, is traced as an `error` event. If that `error` is not an object, the event has no code. With `Content-Length` framing, a JSON-RPC batch is traced one message at a time. If the proxy cannot trace a message, for example JSON nested too deep for Python to read or a full disk, it forwards the message anyway, records no event for it and prints a note to stderr. The note names only the exception type:
+Tracing never stops the relay. A field with an unexpected JSON type is traced as if it were missing. A response with any `error` but null, even `0`, `""` or `{}`, is traced as an `error` event. If that `error` is not an object, the event has no code. A JSON-RPC batch is traced one message at a time, on one line or in a `Content-Length` frame. If the proxy cannot trace a message, for example JSON nested too deep for Python to read or a full disk, it forwards the message anyway, records no event for it and prints a note to stderr. The note names only the exception type:
 
 ```
 agent-strace: could not trace a message (RecursionError). It was still forwarded.
 ```
 
-A message that Python cannot read, or cannot write back out, is forwarded as the text it arrived as, on one line.
+`record` forwards the bytes it reads unchanged in both directions, in the framing they came in: a line, or a `Content-Length` frame with its headers. That includes blank lines, carriage returns and lines that are not JSON. A line or body it cannot parse as JSON is still forwarded and gets the note shown above. A blank line gets no note.
 
 When the agent closes its side of stdin, `record` closes the server's stdin, so the server sees the end of input. Everything the server writes before it exits reaches the agent and the trace before the session ends, and `record` exits with the server's exit code. If the agent stops reading the server's output, `record` stops the server. On SIGTERM or SIGINT, `record` stops the server too and exits with 128 plus the signal number (143 or 130). This holds from the moment the session is created: a signal that comes before the server starts ends the session, and the server is not started. Each of these ends the session with a `session_end` event and an end time.
 
