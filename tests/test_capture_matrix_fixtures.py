@@ -25,7 +25,7 @@ from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
-from agent_trace.cli import _codex_hooks_config, _copilot_hooks_config
+from agent_trace.cli import _claude_hooks_config, _codex_hooks_config, _copilot_hooks_config
 from agent_trace.failures import count_session_errors
 from agent_trace.health import assess_session, load_capture_matrix
 from agent_trace.hooks import _PROVIDER_ENV, IMPLICIT_SESSION_SOURCE, hook_main
@@ -40,6 +40,7 @@ ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_DIR = ROOT / "tests" / "fixtures" / "capture_matrix"
 REFERENCE = "tests/test_capture_matrix_fixtures.py"
 FIXTURES = {
+    "claude": "claude-2.1.325.json",
     "copilot": "copilot-1.0.107.json",
     "codex": "codex-0.167.0-alpha.3.2.json",
 }
@@ -52,6 +53,10 @@ UNREGISTERED_COPILOT_HOOKS = {"userPromptTransformed", "permissionRequest", "not
 UNREGISTERED_CODEX_HOOKS = {"PreModelRequest"}
 # Codex hooks that releases before 0.164.0 do not have.
 MODEL_REQUEST_CODEX_HOOKS = {"PostModelRequest"}
+# Claude Code hooks that fired in the 2.1.325 recording but that setup does not register.
+UNREGISTERED_CLAUDE_HOOKS = {
+    "PostToolBatch", "MessageDisplay", "PermissionRequest", "SubagentStart", "SubagentStop",
+}
 TOKEN_USAGE_KEYS = {
     "input_tokens",
     "cached_input_tokens",
@@ -61,6 +66,8 @@ TOKEN_USAGE_KEYS = {
     "total_tokens",
 }
 SYNTHETIC_ID = re.compile(r"^[cd]\d{7}-0000-4000-8000-\d{12}$")
+# Claude Code agent ids are "a" and 16 hex digits.
+SYNTHETIC_CLAUDE_AGENT_ID = re.compile(r"^a\d{16}$")
 
 
 def load_fixture(name):
@@ -74,8 +81,9 @@ def registered_hooks(provider):
     if provider == "copilot":
         for event, entries in _copilot_hooks_config(args)["hooks"].items():
             registered[event] = ("", entries[0]["command"].split()[-1])
-    elif provider == "codex":
-        for event, groups in _codex_hooks_config(args)["hooks"].items():
+    elif provider in ("codex", "claude"):
+        config = _codex_hooks_config(args) if provider == "codex" else _claude_hooks_config(args)
+        for event, groups in config["hooks"].items():
             group = groups[0]
             registered[event] = (group.get("matcher", ""), group["hooks"][0]["command"].split()[-1])
     else:
@@ -120,6 +128,7 @@ class _ReplayChecks:
 
     provider = ""
     fixture_name = ""
+    agent_id_pattern = SYNTHETIC_ID
 
     @classmethod
     def setUpClass(cls):
@@ -195,12 +204,12 @@ class _ReplayChecks:
         for scenario in self.fixture["scenarios"].values():
             for hook in scenario["hooks"]:
                 payload = hook["payload"]
-                for key in (
-                    "sessionId", "session_id", "agentId", "agent_id",
-                    "parentAgentId", "parent_agent_id",
-                ):
+                for key in ("sessionId", "session_id"):
                     if key in payload:
                         self.assertRegex(payload[key], SYNTHETIC_ID)
+                for key in ("agentId", "agent_id", "parentAgentId", "parent_agent_id"):
+                    if key in payload:
+                        self.assertRegex(payload[key], self.agent_id_pattern)
                 self.assertEqual(payload.get("cwd"), "/workspace/project")
 
     def test_every_registered_hook_fired_in_the_recording(self):
@@ -1076,6 +1085,209 @@ class TestCodexLegacyFixture(TestCodexFixture):
         self.assertEqual(second.index(spawn) + 1, second.index(start))
         self.assertEqual(second.index(start) + 1, second.index(wait))
         self.assertEqual(sorted(first), sorted(second))
+
+
+class TestClaudeFixture(_ReplayChecks, unittest.TestCase):
+    """Claude Code 2.1.325: every claude -p run is one session, a subagent's
+    hooks arrive under the parent session_id, and PostToolUseFailure carries
+    its text in a top-level error field."""
+
+    provider = "claude"
+    agent_id_pattern = SYNTHETIC_CLAUDE_AGENT_ID
+
+    def only_session(self, store):
+        (meta,) = self.sessions(store).values()
+        return meta
+
+    def hook_payloads(self, scenario, event):
+        return [
+            h["payload"] for h in self.fixture["scenarios"][scenario]["hooks"]
+            if h["event"] == event
+        ]
+
+    def tool_events(self, events, kind):
+        return [e for e in events if e.event_type == kind]
+
+    def test_unregistered_hooks(self):
+        registered = set(registered_hooks(self.provider))
+        fired = {
+            hook["event"]
+            for scenario in self.fixture["scenarios"].values()
+            for hook in scenario["hooks"]
+        }
+        self.assertEqual(fired - registered, UNREGISTERED_CLAUDE_HOOKS)
+
+    def test_entry_declares_the_gaps_this_replay_shows(self):
+        # Each gap below is demonstrated by a replay test in this class;
+        # health reports the entry's known_gaps verbatim.
+        gaps = " ".join(self.entry["known_gaps"])
+        for name in (
+            "PostToolUseFailure",
+            "tool call failed",
+            "SessionStart",
+            "SubagentStart",
+            "SubagentStop",
+            "PermissionRequest",
+            "file_write",
+        ):
+            with self.subTest(gap=name):
+                self.assertIn(name, gaps)
+
+    def test_session_end_finishes_every_session(self):
+        for scenario in self.fixture["scenarios"]:
+            store, skipped = self.replay(scenario)
+            meta = self.only_session(store)
+            events = store.load_events(meta.session_id)
+            with self.subTest(scenario=scenario):
+                self.assertLessEqual(set(skipped), UNREGISTERED_CLAUDE_HOOKS)
+                self.assertEqual(events[0].event_type, EventType.SESSION_START)
+                self.assertEqual(events[-1].event_type, EventType.SESSION_END)
+                self.assertEqual(events[-1].data["reason"], "other")
+                self.assertEqual(meta.agent_name, "claude-code")
+                self.assertIsNotNone(meta.ended_at)
+                report = self.health(store, meta.session_id)
+                self.assertIs(report.session_finalized, True)
+                expected = ["unpaired_tool_call"] if scenario == "permission_denied" else []
+                self.assertEqual(self.codes(report, "observed"), expected)
+                self.assertNotEqual(self.validate(store, meta.session_id).status, "invalid")
+
+    def test_plain_prompt_records_no_tool_events(self):
+        store, skipped = self.replay("plain")
+        self.assertEqual(skipped, ["MessageDisplay"])
+        meta = self.only_session(store)
+        self.assertEqual(
+            [e.event_type for e in store.load_events(meta.session_id)],
+            [
+                EventType.SESSION_START,
+                EventType.USER_PROMPT,
+                EventType.ASSISTANT_RESPONSE,
+                EventType.SESSION_END,
+            ],
+        )
+
+    def test_stop_records_the_response_but_no_model_or_tokens(self):
+        for scenario in self.fixture["scenarios"]:
+            (stop,) = self.hook_payloads(scenario, "Stop")
+            store, _ = self.replay(scenario)
+            meta = self.only_session(store)
+            events = store.load_events(meta.session_id)
+            (response,) = self.tool_events(events, EventType.ASSISTANT_RESPONSE)
+            with self.subTest(scenario=scenario):
+                self.assertEqual(response.data["hook_event"], "stop")
+                self.assertEqual(response.data["text"], stop["last_assistant_message"])
+                self.assertEqual(events[0].data["model"], "")
+                self.assertEqual(meta.total_tokens, 0)
+
+    def test_tool_results_pair_by_tool_use_id(self):
+        store, skipped = self.replay("tool")
+        self.assertEqual(skipped, ["PostToolBatch"] * 3 + ["MessageDisplay"])
+        meta = self.only_session(store)
+        events = store.load_events(meta.session_id)
+        calls = self.tool_events(events, EventType.TOOL_CALL)
+        results = self.tool_events(events, EventType.TOOL_RESULT)
+        self.assertEqual([c.data["tool_name"] for c in calls], ["Read", "Bash", "Edit"])
+        self.assertEqual(len(results), 3)
+        by_id = {c.data["tool_use_id"]: c for c in calls}
+        self.assertEqual(len(by_id), 3)
+        for result in results:
+            with self.subTest(tool=result.data["tool_name"]):
+                call = by_id[result.data["tool_use_id"]]
+                self.assertEqual(result.parent_id, call.event_id)
+                self.assertEqual(result.data["tool_name"], call.data["tool_name"])
+        # File and command detail is only in the tool arguments.
+        self.assertIn("command", calls[1].data["arguments"])
+        self.assertIn("file_path", calls[2].data["arguments"])
+        self.assertNotIn(EventType.FILE_WRITE, {e.event_type for e in events})
+        self.assertEqual(meta.errors, 0)
+        self.assertEqual(self.codes(self.health(store, meta.session_id), "observed"), [])
+
+    def test_failed_tool_is_an_error_without_its_text(self):
+        payloads = self.hook_payloads("tool_failure", "PostToolUseFailure")
+        self.assertEqual([p["tool_name"] for p in payloads], ["Read", "Bash"])
+        for payload in payloads:
+            self.assertNotIn("tool_response", payload)
+            self.assertTrue(payload["error"])
+            self.assertIs(payload["is_interrupt"], False)
+        self.assertTrue(payloads[1]["error"].startswith("Exit code 1"))
+
+        store, skipped = self.replay("tool_failure")
+        self.assertEqual(skipped, ["PostToolBatch"] * 2 + ["MessageDisplay"])
+        meta = self.only_session(store)
+        events = store.load_events(meta.session_id)
+        calls = {c.data["tool_use_id"]: c for c in self.tool_events(events, EventType.TOOL_CALL)}
+        errors = self.tool_events(events, EventType.ERROR)
+        self.assertEqual(self.tool_events(events, EventType.TOOL_RESULT), [])
+        self.assertEqual([e.data["tool_name"] for e in errors], ["Read", "Bash"])
+        for error, payload in zip(errors, payloads):
+            with self.subTest(tool=error.data["tool_name"]):
+                self.assertEqual(error.data["tool_use_id"], payload["tool_use_id"])
+                self.assertEqual(error.parent_id, calls[payload["tool_use_id"]].event_id)
+                # The known gap: Claude's error field is not read.
+                self.assertEqual(error.data["error"], "tool call failed")
+        self.assertEqual(meta.errors, 2)
+        self.assertEqual(count_session_errors(events), 2)
+
+    def test_denied_tool_leaves_an_unpaired_call(self):
+        store, skipped = self.replay("permission_denied")
+        self.assertEqual(skipped, ["PermissionRequest", "PostToolBatch", "MessageDisplay"])
+        meta = self.only_session(store)
+        events = store.load_events(meta.session_id)
+        kinds = [e.event_type for e in events]
+        (call,) = self.tool_events(events, EventType.TOOL_CALL)
+        self.assertEqual(call.data["tool_name"], "Write")
+        self.assertTrue(call.data["tool_use_id"])
+        self.assertNotIn(EventType.TOOL_RESULT, kinds)
+        self.assertNotIn(EventType.ERROR, kinds)
+        self.assertEqual(meta.errors, 0)
+
+    def test_subagent_tool_events_are_recorded_in_the_parent_session(self):
+        hooks = self.fixture["scenarios"]["subagent"]["hooks"]
+        (agent_id,) = {h["payload"]["agent_id"] for h in hooks if "agent_id" in h["payload"]}
+        (session_id,) = {h["payload"]["session_id"] for h in hooks}
+        (stop,) = self.hook_payloads("subagent", "SubagentStop")
+        self.assertEqual(stop["agent_type"], "general-purpose")
+        self.assertTrue(stop["agent_transcript_path"].endswith(f"/agent-{agent_id}.jsonl"))
+
+        store, skipped = self.replay("subagent")
+        self.assertEqual(
+            skipped,
+            ["SubagentStart", "PostToolBatch", "SubagentStop", "PostToolBatch", "MessageDisplay"],
+        )
+        meta = self.only_session(store)
+        self.assertTrue(session_id.startswith(meta.session_id))
+        self.assertEqual(meta.parent_session_id, "")
+        events = store.load_events(meta.session_id)
+        kinds = {e.event_type for e in events}
+        self.assertNotIn(EventType.SUBAGENT_START, kinds)
+        self.assertNotIn(EventType.SUBAGENT_STOP, kinds)
+
+        tools = [
+            (e.event_type, e.data["tool_name"])
+            for e in events
+            if e.event_type in (EventType.TOOL_CALL, EventType.TOOL_RESULT)
+        ]
+        self.assertEqual(
+            tools,
+            [
+                (EventType.TOOL_CALL, "Agent"),
+                (EventType.TOOL_CALL, "Bash"),
+                (EventType.TOOL_RESULT, "Bash"),
+                (EventType.TOOL_RESULT, "Agent"),
+            ],
+        )
+        for event in events:
+            if event.event_type not in (EventType.TOOL_CALL, EventType.TOOL_RESULT):
+                continue
+            with self.subTest(event=event.event_type, tool=event.data["tool_name"]):
+                if event.data["tool_name"] == "Bash":
+                    self.assertEqual(event.data["agent_id"], agent_id)
+                    self.assertEqual(event.data["agent_type"], "general-purpose")
+                else:
+                    self.assertNotIn("agent_id", event.data)
+                    self.assertNotIn("agent_type", event.data)
+        (subagent,) = in_session_subagents(events)
+        self.assertEqual(subagent.agent_id, agent_id)
+        self.assertEqual(self.codes(self.health(store, meta.session_id), "observed"), [])
 
 
 if __name__ == "__main__":

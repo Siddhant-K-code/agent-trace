@@ -11,8 +11,9 @@ AgentTrace does not capture hidden reasoning. It records only fields exposed by
 Claude Code hooks or present in an imported JSONL file. A clean replay does not
 prove that every action was captured.
 
-Claude Code hook coverage is currently marked unverified in the
-[capture matrix](capture-matrix.md#claude-code). Hook setup verification checks
+Claude Code hook coverage is verified with Claude Code `2.1.325` in the
+[capture matrix](capture-matrix.md#claude-code), which lists its known gaps,
+such as failed tool calls recorded without their error text. Hook setup verification checks
 configuration. After recording one harmless local session, live verification
 can inspect the newest matching trace. Neither mode starts Claude Code or makes
 a model request.

@@ -27,7 +27,7 @@ versioned, reproducible provider fixture for the adapter contract.
 
 | Provider | Setup | Session | Prompt/response | Tools | File/command/error | Verification |
 |---|---|---|---|---|---|---|
-| Claude Code | `agent-strace setup --cli claude` | start + end | captured | captured | provider-defined | unverified |
+| Claude Code | `agent-strace setup --cli claude` | start + end | captured | captured | provider-defined; errors captured without their text | verified, 2.1.325 |
 | OpenAI Codex | `agent-strace setup --cli codex` | start + end | captured | captured | provider-defined | verified, 0.167.0-alpha.3.2 |
 | GitHub Copilot CLI | `agent-strace setup --cli copilot` | start + end, first prompt can arrive before start | prompt only | captured | provider-defined; errors captured | verified, 1.0.107 |
 | GitHub Copilot cloud agent | `agent-strace setup --cli copilot-cloud` | **partial**: start + end per job, only when streamed to a collector | prompt only | captured | provider-defined; errors captured | unverified |
@@ -38,8 +38,23 @@ versioned, reproducible provider fixture for the adapter contract.
 - Setup only **prints** Claude hook JSON: manually copy or merge the generated `hooks` into `~/.claude/settings.json`; it does not write the file.
 - Rollback: remove only the AgentTrace command hooks you manually merged into that file, retaining unrelated hooks.
 - Privacy: captured fields still pass through AgentTrace redaction, but AgentTrace cannot expose fields Claude Code never emits.
-- Known gap: file and command semantics depend on the hook-visible tool payload.
-- Matrix verification: none recorded yet. A run against Claude Code `2.1.222` on 2026-11-09 was not performed because no Claude Code credentials were available in the verification environment, so the entry stays unverified.
+- Coverage: session start and end, user prompts, the final response (`Stop`, recorded as an `assistant_response` with `last_assistant_message` as its text), tool calls and results paired by `tool_use_id`, and failed tools (`PostToolUseFailure`, recorded as `error` events). Setup registers 7 hooks: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop` and `SessionEnd`.
+- Verified with Claude Code `2.1.325` on 2026-11-19 through `agent-strace setup --cli claude`: five `claude -p` runs (a plain prompt; a read, a shell command and an edit; a read of a missing file and a shell command that exits 1; a write denied at the permission prompt; a `general-purpose` subagent that ran a shell command). Each run used a throwaway workspace, a temporary `AGENT_TRACE_DIR`, `--setting-sources project,local` with the generated hooks passed through `--settings`, so no user-level hooks ran, and one `--allowedTools` grant per needed call (`Bash(wc -l notes.txt)`, `Edit(./notes.txt)`, `Bash(ls missing.txt)`) with no permission-bypass flags. A recorder-only hook logged the raw payloads of the other hook events. A run against `2.1.222` on 2026-11-09 was not performed because no credentials were available; `2.1.325` is the first verified release.
+- Event order: `SessionStart` (source `startup`), `UserPromptSubmit`, the tool hooks, `Stop`, then `SessionEnd` (reason `other` in every `claude -p` run). `PreToolUse` and `PostToolUse` carry `tool_use_id`, and each result pairs with its call by that ID. Every hook that agent-strace needs fired in `-p` mode.
+- Failed tools: a read of a missing file and a shell command that exits 1 both fire `PostToolUseFailure` with the failure text in a top-level `error` field (for the shell command it starts with `Exit code 1`), `is_interrupt` and `duration_ms`, and no `tool_response`. Each becomes an `error` event paired with its call and counted in the session's errors, but agent-strace does not read the `error` field for Claude Code, so the event text is `tool call failed`.
+- Subagents: a subagent is not a separate session. Its hooks arrive under the parent `session_id` with `agent_id` and `agent_type`. Its tool calls are recorded in the parent trace with those two fields, between the parent's `Agent` tool call and result; the parent's own tool events carry neither. `SubagentStart` and `SubagentStop` fire but are not registered, so no `subagent_start` or `subagent_stop` events are recorded. `SubagentStop` carries `agent_transcript_path` and `last_assistant_message`.
+- Hooks setup does not register: recorder-only hooks in the verification runs showed:
+  - `PostToolBatch` fired after each batch of tool calls, with a `tool_calls` list.
+  - `MessageDisplay` fired before every `Stop` with the response text in `delta`.
+  - `PermissionRequest` fired for the denied write, with `permission_suggestions`.
+  - `SubagentStart` and `SubagentStop` fired around the subagent.
+  - None of the other hook events the recorder registered fired, including `Notification`, `PermissionDenied`, `StopFailure` and the compaction hooks. `WorktreeCreate`, `WorktreeRemove` and `FileChanged` were not recorded.
+- Known gaps:
+  - `PostToolUseFailure` text is not recorded: failed tool calls, including non-zero shell exits, become `error` events with the text `tool call failed`, losing the message, exit code and stderr.
+  - `SessionStart` carries no model name and no hook reports token usage, so `session_start` has an empty model and sessions record no tokens.
+  - `SubagentStart` and `SubagentStop` are not registered, so a subagent is visible only through the `agent_id` and `agent_type` on its tool events.
+  - A tool denied at the permission prompt (in `claude -p`, any call without an `--allowedTools` grant) fires `PreToolUse` and `PermissionRequest` but no post hook, so its `tool_call` has no result or error, and `health` reports `unpaired_tool_call`.
+  - File and command activity is visible only in tool arguments and results (`tool_input.command` for `Bash`, `tool_input.file_path` for `Read`, `Edit` and `Write`); no `file_write` events are recorded.
 - Local verification: accept workspace trust, record one small session, exit it
   cleanly, then run `agent-strace setup --cli claude --verify --live`.
 
@@ -159,7 +174,7 @@ published matrix.
 
 | Provider | session_start | session_end | prompt | response | tool | file | command | error | stop | verification_status |
 |---|---|---|---|---|---|---|---|---|---|---|
-| claude | captured | captured | captured | captured | captured | provider_defined | provider_defined | provider_defined | captured | unverified |
+| claude | captured | captured | captured | captured | captured | provider_defined | provider_defined | captured | captured | verified |
 | codex | captured | captured | captured | captured | captured | provider_defined | provider_defined | provider_defined | captured | verified |
 | copilot | captured | captured | captured | unavailable | captured | provider_defined | provider_defined | captured | captured | verified |
 | copilot-cloud | captured | captured | captured | unavailable | captured | provider_defined | provider_defined | captured | captured | unverified |

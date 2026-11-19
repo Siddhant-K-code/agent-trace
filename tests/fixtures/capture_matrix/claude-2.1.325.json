@@ -1,0 +1,1055 @@
+{
+  "provider": "claude",
+  "cli": "Claude Code",
+  "tested_version": "2.1.325",
+  "recorded": "2026-11-19",
+  "sanitized": "Hook payloads recorded from real claude -p runs and then sanitized: session, prompt, message, turn, tool call and agent ids, paths, prompts, responses, tool descriptions, file contents, subagent prompts and reports, and model names are synthetic. Tool commands were chosen for the test; their output and error text are as observed, with paths replaced. Hook names, event order, payload keys and value types are as observed. The run registered the agent-strace setup hooks plus a recorder-only hook for every other Claude Code hook event except WorktreeCreate, WorktreeRemove and FileChanged; only the hooks that fired appear here.",
+  "scenarios": {
+    "plain": {
+      "description": "claude -p session: one prompt and no tool calls.",
+      "hooks": [
+        {
+          "event": "SessionStart",
+          "payload": {
+            "session_id": "c0000001-0000-4000-8000-000000000001",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000001-0000-4000-8000-000000000001.jsonl",
+            "cwd": "/workspace/project",
+            "hook_event_name": "SessionStart",
+            "source": "startup"
+          }
+        },
+        {
+          "event": "UserPromptSubmit",
+          "payload": {
+            "session_id": "c0000001-0000-4000-8000-000000000001",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000001-0000-4000-8000-000000000001.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000001-0000-4000-8000-000000000001",
+            "permission_mode": "default",
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "Synthetic prompt: reply with one short sentence."
+          }
+        },
+        {
+          "event": "MessageDisplay",
+          "payload": {
+            "session_id": "c0000001-0000-4000-8000-000000000001",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000001-0000-4000-8000-000000000001.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000001-0000-4000-8000-000000000001",
+            "hook_event_name": "MessageDisplay",
+            "turn_id": "f0000001-0000-4000-8000-000000000001",
+            "message_id": "e0000001-0000-4000-8000-000000000001",
+            "index": 0,
+            "final": true,
+            "delta": "Synthetic reply."
+          }
+        },
+        {
+          "event": "Stop",
+          "payload": {
+            "session_id": "c0000001-0000-4000-8000-000000000001",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000001-0000-4000-8000-000000000001.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000001-0000-4000-8000-000000000001",
+            "permission_mode": "default",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "Stop",
+            "stop_hook_active": false,
+            "last_assistant_message": "Synthetic reply.",
+            "background_tasks": [],
+            "session_crons": []
+          }
+        },
+        {
+          "event": "SessionEnd",
+          "payload": {
+            "session_id": "c0000001-0000-4000-8000-000000000001",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000001-0000-4000-8000-000000000001.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000001-0000-4000-8000-000000000001",
+            "hook_event_name": "SessionEnd",
+            "reason": "other"
+          }
+        }
+      ]
+    },
+    "tool": {
+      "description": "claude -p session: a read (Read), a shell command (Bash, allowed with --allowedTools 'Bash(wc -l notes.txt)') and an edit (Edit, allowed with --allowedTools 'Edit(./notes.txt)'). Each call is followed by PostToolBatch.",
+      "hooks": [
+        {
+          "event": "SessionStart",
+          "payload": {
+            "session_id": "c0000002-0000-4000-8000-000000000002",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000002-0000-4000-8000-000000000002.jsonl",
+            "cwd": "/workspace/project",
+            "hook_event_name": "SessionStart",
+            "source": "startup"
+          }
+        },
+        {
+          "event": "UserPromptSubmit",
+          "payload": {
+            "session_id": "c0000002-0000-4000-8000-000000000002",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000002-0000-4000-8000-000000000002.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000002-0000-4000-8000-000000000002",
+            "permission_mode": "default",
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "Synthetic prompt: read notes.txt, count its lines with wc and edit its first line."
+          }
+        },
+        {
+          "event": "PreToolUse",
+          "payload": {
+            "session_id": "c0000002-0000-4000-8000-000000000002",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000002-0000-4000-8000-000000000002.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000002-0000-4000-8000-000000000002",
+            "permission_mode": "default",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Read",
+            "tool_input": {
+              "file_path": "/workspace/project/notes.txt"
+            },
+            "tool_use_id": "toolu_01SyntheticToolUse000001"
+          }
+        },
+        {
+          "event": "PostToolUse",
+          "payload": {
+            "session_id": "c0000002-0000-4000-8000-000000000002",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000002-0000-4000-8000-000000000002.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000002-0000-4000-8000-000000000002",
+            "permission_mode": "default",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Read",
+            "tool_input": {
+              "file_path": "/workspace/project/notes.txt"
+            },
+            "tool_response": {
+              "type": "text",
+              "file": {
+                "filePath": "/workspace/project/notes.txt",
+                "content": "line-1\nline-2\nline-3\n",
+                "numLines": 4,
+                "startLine": 1,
+                "totalLines": 4
+              }
+            },
+            "tool_use_id": "toolu_01SyntheticToolUse000001",
+            "duration_ms": 2
+          }
+        },
+        {
+          "event": "PostToolBatch",
+          "payload": {
+            "session_id": "c0000002-0000-4000-8000-000000000002",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000002-0000-4000-8000-000000000002.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000002-0000-4000-8000-000000000002",
+            "permission_mode": "default",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "PostToolBatch",
+            "tool_calls": [
+              {
+                "tool_name": "Read",
+                "tool_input": {
+                  "file_path": "/workspace/project/notes.txt"
+                },
+                "tool_use_id": "toolu_01SyntheticToolUse000001",
+                "tool_response": "1\tline-1\n2\tline-2\n3\tline-3\n4\t"
+              }
+            ]
+          }
+        },
+        {
+          "event": "PreToolUse",
+          "payload": {
+            "session_id": "c0000002-0000-4000-8000-000000000002",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000002-0000-4000-8000-000000000002.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000002-0000-4000-8000-000000000002",
+            "permission_mode": "default",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {
+              "command": "wc -l notes.txt",
+              "description": "Synthetic tool description."
+            },
+            "tool_use_id": "toolu_01SyntheticToolUse000002"
+          }
+        },
+        {
+          "event": "PostToolUse",
+          "payload": {
+            "session_id": "c0000002-0000-4000-8000-000000000002",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000002-0000-4000-8000-000000000002.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000002-0000-4000-8000-000000000002",
+            "permission_mode": "default",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {
+              "command": "wc -l notes.txt",
+              "description": "Synthetic tool description."
+            },
+            "tool_response": {
+              "stdout": "       3 notes.txt",
+              "stderr": "",
+              "interrupted": false,
+              "isImage": false,
+              "noOutputExpected": false
+            },
+            "tool_use_id": "toolu_01SyntheticToolUse000002",
+            "duration_ms": 439
+          }
+        },
+        {
+          "event": "PostToolBatch",
+          "payload": {
+            "session_id": "c0000002-0000-4000-8000-000000000002",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000002-0000-4000-8000-000000000002.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000002-0000-4000-8000-000000000002",
+            "permission_mode": "default",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "PostToolBatch",
+            "tool_calls": [
+              {
+                "tool_name": "Bash",
+                "tool_input": {
+                  "command": "wc -l notes.txt",
+                  "description": "Synthetic tool description."
+                },
+                "tool_use_id": "toolu_01SyntheticToolUse000002",
+                "tool_response": "       3 notes.txt"
+              }
+            ]
+          }
+        },
+        {
+          "event": "PreToolUse",
+          "payload": {
+            "session_id": "c0000002-0000-4000-8000-000000000002",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000002-0000-4000-8000-000000000002.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000002-0000-4000-8000-000000000002",
+            "permission_mode": "default",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Edit",
+            "tool_input": {
+              "file_path": "/workspace/project/notes.txt",
+              "old_string": "line-1",
+              "new_string": "line-1 edited",
+              "replace_all": false
+            },
+            "tool_use_id": "toolu_01SyntheticToolUse000003"
+          }
+        },
+        {
+          "event": "PostToolUse",
+          "payload": {
+            "session_id": "c0000002-0000-4000-8000-000000000002",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000002-0000-4000-8000-000000000002.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000002-0000-4000-8000-000000000002",
+            "permission_mode": "default",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Edit",
+            "tool_input": {
+              "file_path": "/workspace/project/notes.txt",
+              "old_string": "line-1",
+              "new_string": "line-1 edited",
+              "replace_all": false
+            },
+            "tool_response": {
+              "filePath": "/workspace/project/notes.txt",
+              "oldString": "line-1",
+              "newString": "line-1 edited",
+              "originalFile": "line-1\nline-2\nline-3\n",
+              "structuredPatch": [
+                {
+                  "oldStart": 1,
+                  "oldLines": 3,
+                  "newStart": 1,
+                  "newLines": 3,
+                  "lines": [
+                    "-line-1",
+                    "+line-1 edited",
+                    " line-2",
+                    " line-3"
+                  ]
+                }
+              ],
+              "userModified": false,
+              "replaceAll": false
+            },
+            "tool_use_id": "toolu_01SyntheticToolUse000003",
+            "duration_ms": 4
+          }
+        },
+        {
+          "event": "PostToolBatch",
+          "payload": {
+            "session_id": "c0000002-0000-4000-8000-000000000002",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000002-0000-4000-8000-000000000002.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000002-0000-4000-8000-000000000002",
+            "permission_mode": "default",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "PostToolBatch",
+            "tool_calls": [
+              {
+                "tool_name": "Edit",
+                "tool_input": {
+                  "replace_all": false,
+                  "file_path": "/workspace/project/notes.txt",
+                  "old_string": "line-1",
+                  "new_string": "line-1 edited"
+                },
+                "tool_use_id": "toolu_01SyntheticToolUse000003",
+                "tool_response": "The file /workspace/project/notes.txt has been updated successfully. (file state is current in your context — no need to Read it back)"
+              }
+            ]
+          }
+        },
+        {
+          "event": "MessageDisplay",
+          "payload": {
+            "session_id": "c0000002-0000-4000-8000-000000000002",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000002-0000-4000-8000-000000000002.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000002-0000-4000-8000-000000000002",
+            "hook_event_name": "MessageDisplay",
+            "turn_id": "f0000002-0000-4000-8000-000000000002",
+            "message_id": "e0000002-0000-4000-8000-000000000002",
+            "index": 0,
+            "final": true,
+            "delta": "Synthetic reply."
+          }
+        },
+        {
+          "event": "Stop",
+          "payload": {
+            "session_id": "c0000002-0000-4000-8000-000000000002",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000002-0000-4000-8000-000000000002.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000002-0000-4000-8000-000000000002",
+            "permission_mode": "default",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "Stop",
+            "stop_hook_active": false,
+            "last_assistant_message": "Synthetic reply.",
+            "background_tasks": [],
+            "session_crons": []
+          }
+        },
+        {
+          "event": "SessionEnd",
+          "payload": {
+            "session_id": "c0000002-0000-4000-8000-000000000002",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000002-0000-4000-8000-000000000002.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000002-0000-4000-8000-000000000002",
+            "hook_event_name": "SessionEnd",
+            "reason": "other"
+          }
+        }
+      ]
+    },
+    "tool_failure": {
+      "description": "claude -p session: a read of a missing file and a shell command that exits 1 (allowed with --allowedTools 'Bash(ls missing.txt)'). Both fire PostToolUseFailure with the failure text in error and no tool_response.",
+      "hooks": [
+        {
+          "event": "SessionStart",
+          "payload": {
+            "session_id": "c0000003-0000-4000-8000-000000000003",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000003-0000-4000-8000-000000000003.jsonl",
+            "cwd": "/workspace/project",
+            "hook_event_name": "SessionStart",
+            "source": "startup"
+          }
+        },
+        {
+          "event": "UserPromptSubmit",
+          "payload": {
+            "session_id": "c0000003-0000-4000-8000-000000000003",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000003-0000-4000-8000-000000000003.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000003-0000-4000-8000-000000000003",
+            "permission_mode": "default",
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "Synthetic prompt: read missing.txt, then run ls missing.txt."
+          }
+        },
+        {
+          "event": "PreToolUse",
+          "payload": {
+            "session_id": "c0000003-0000-4000-8000-000000000003",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000003-0000-4000-8000-000000000003.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000003-0000-4000-8000-000000000003",
+            "permission_mode": "default",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Read",
+            "tool_input": {
+              "file_path": "/workspace/project/missing.txt"
+            },
+            "tool_use_id": "toolu_01SyntheticToolUse000004"
+          }
+        },
+        {
+          "event": "PostToolUseFailure",
+          "payload": {
+            "session_id": "c0000003-0000-4000-8000-000000000003",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000003-0000-4000-8000-000000000003.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000003-0000-4000-8000-000000000003",
+            "permission_mode": "default",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "PostToolUseFailure",
+            "tool_name": "Read",
+            "tool_input": {
+              "file_path": "/workspace/project/missing.txt"
+            },
+            "tool_use_id": "toolu_01SyntheticToolUse000004",
+            "error": "File does not exist. Note: your current working directory is /workspace/project.",
+            "is_interrupt": false,
+            "duration_ms": 2
+          }
+        },
+        {
+          "event": "PostToolBatch",
+          "payload": {
+            "session_id": "c0000003-0000-4000-8000-000000000003",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000003-0000-4000-8000-000000000003.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000003-0000-4000-8000-000000000003",
+            "permission_mode": "default",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "PostToolBatch",
+            "tool_calls": [
+              {
+                "tool_name": "Read",
+                "tool_input": {
+                  "file_path": "/workspace/project/missing.txt"
+                },
+                "tool_use_id": "toolu_01SyntheticToolUse000004",
+                "tool_response": "File does not exist. Note: your current working directory is /workspace/project."
+              }
+            ]
+          }
+        },
+        {
+          "event": "PreToolUse",
+          "payload": {
+            "session_id": "c0000003-0000-4000-8000-000000000003",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000003-0000-4000-8000-000000000003.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000003-0000-4000-8000-000000000003",
+            "permission_mode": "default",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {
+              "command": "ls missing.txt",
+              "description": "Synthetic tool description."
+            },
+            "tool_use_id": "toolu_01SyntheticToolUse000005"
+          }
+        },
+        {
+          "event": "PostToolUseFailure",
+          "payload": {
+            "session_id": "c0000003-0000-4000-8000-000000000003",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000003-0000-4000-8000-000000000003.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000003-0000-4000-8000-000000000003",
+            "permission_mode": "default",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "PostToolUseFailure",
+            "tool_name": "Bash",
+            "tool_input": {
+              "command": "ls missing.txt",
+              "description": "Synthetic tool description."
+            },
+            "tool_use_id": "toolu_01SyntheticToolUse000005",
+            "error": "Exit code 1\nls: missing.txt: No such file or directory",
+            "is_interrupt": false,
+            "duration_ms": 133
+          }
+        },
+        {
+          "event": "PostToolBatch",
+          "payload": {
+            "session_id": "c0000003-0000-4000-8000-000000000003",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000003-0000-4000-8000-000000000003.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000003-0000-4000-8000-000000000003",
+            "permission_mode": "default",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "PostToolBatch",
+            "tool_calls": [
+              {
+                "tool_name": "Bash",
+                "tool_input": {
+                  "command": "ls missing.txt",
+                  "description": "Synthetic tool description."
+                },
+                "tool_use_id": "toolu_01SyntheticToolUse000005",
+                "tool_response": "Exit code 1\nls: missing.txt: No such file or directory"
+              }
+            ]
+          }
+        },
+        {
+          "event": "MessageDisplay",
+          "payload": {
+            "session_id": "c0000003-0000-4000-8000-000000000003",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000003-0000-4000-8000-000000000003.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000003-0000-4000-8000-000000000003",
+            "hook_event_name": "MessageDisplay",
+            "turn_id": "f0000003-0000-4000-8000-000000000003",
+            "message_id": "e0000003-0000-4000-8000-000000000003",
+            "index": 0,
+            "final": true,
+            "delta": "Synthetic reply."
+          }
+        },
+        {
+          "event": "Stop",
+          "payload": {
+            "session_id": "c0000003-0000-4000-8000-000000000003",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000003-0000-4000-8000-000000000003.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000003-0000-4000-8000-000000000003",
+            "permission_mode": "default",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "Stop",
+            "stop_hook_active": false,
+            "last_assistant_message": "Synthetic reply.",
+            "background_tasks": [],
+            "session_crons": []
+          }
+        },
+        {
+          "event": "SessionEnd",
+          "payload": {
+            "session_id": "c0000003-0000-4000-8000-000000000003",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000003-0000-4000-8000-000000000003.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000003-0000-4000-8000-000000000003",
+            "hook_event_name": "SessionEnd",
+            "reason": "other"
+          }
+        }
+      ]
+    },
+    "permission_denied": {
+      "description": "claude -p session: a Write call with no grant. PreToolUse and PermissionRequest fire, -p denies the call and no post hook fires.",
+      "hooks": [
+        {
+          "event": "SessionStart",
+          "payload": {
+            "session_id": "c0000004-0000-4000-8000-000000000004",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000004-0000-4000-8000-000000000004.jsonl",
+            "cwd": "/workspace/project",
+            "hook_event_name": "SessionStart",
+            "source": "startup"
+          }
+        },
+        {
+          "event": "UserPromptSubmit",
+          "payload": {
+            "session_id": "c0000004-0000-4000-8000-000000000004",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000004-0000-4000-8000-000000000004.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000004-0000-4000-8000-000000000004",
+            "permission_mode": "default",
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "Synthetic prompt: create out.txt with the Write tool; do not retry if it is denied."
+          }
+        },
+        {
+          "event": "PreToolUse",
+          "payload": {
+            "session_id": "c0000004-0000-4000-8000-000000000004",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000004-0000-4000-8000-000000000004.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000004-0000-4000-8000-000000000004",
+            "permission_mode": "default",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Write",
+            "tool_input": {
+              "file_path": "/workspace/project/out.txt",
+              "content": "hello"
+            },
+            "tool_use_id": "toolu_01SyntheticToolUse000006"
+          }
+        },
+        {
+          "event": "PermissionRequest",
+          "payload": {
+            "session_id": "c0000004-0000-4000-8000-000000000004",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000004-0000-4000-8000-000000000004.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000004-0000-4000-8000-000000000004",
+            "permission_mode": "default",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "PermissionRequest",
+            "tool_name": "Write",
+            "tool_input": {
+              "file_path": "/workspace/project/out.txt",
+              "content": "hello"
+            },
+            "permission_suggestions": [
+              {
+                "type": "setMode",
+                "mode": "acceptEdits",
+                "destination": "session"
+              }
+            ]
+          }
+        },
+        {
+          "event": "PostToolBatch",
+          "payload": {
+            "session_id": "c0000004-0000-4000-8000-000000000004",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000004-0000-4000-8000-000000000004.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000004-0000-4000-8000-000000000004",
+            "permission_mode": "default",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "PostToolBatch",
+            "tool_calls": [
+              {
+                "tool_name": "Write",
+                "tool_input": {
+                  "file_path": "/workspace/project/out.txt",
+                  "content": "hello"
+                },
+                "tool_use_id": "toolu_01SyntheticToolUse000006",
+                "tool_response": "Claude requested permissions to write to /workspace/project/out.txt, but you haven't granted it yet."
+              }
+            ]
+          }
+        },
+        {
+          "event": "MessageDisplay",
+          "payload": {
+            "session_id": "c0000004-0000-4000-8000-000000000004",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000004-0000-4000-8000-000000000004.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000004-0000-4000-8000-000000000004",
+            "hook_event_name": "MessageDisplay",
+            "turn_id": "f0000004-0000-4000-8000-000000000004",
+            "message_id": "e0000004-0000-4000-8000-000000000004",
+            "index": 0,
+            "final": true,
+            "delta": "Synthetic reply."
+          }
+        },
+        {
+          "event": "Stop",
+          "payload": {
+            "session_id": "c0000004-0000-4000-8000-000000000004",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000004-0000-4000-8000-000000000004.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000004-0000-4000-8000-000000000004",
+            "permission_mode": "default",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "Stop",
+            "stop_hook_active": false,
+            "last_assistant_message": "Synthetic reply.",
+            "background_tasks": [],
+            "session_crons": []
+          }
+        },
+        {
+          "event": "SessionEnd",
+          "payload": {
+            "session_id": "c0000004-0000-4000-8000-000000000004",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000004-0000-4000-8000-000000000004.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000004-0000-4000-8000-000000000004",
+            "hook_event_name": "SessionEnd",
+            "reason": "other"
+          }
+        }
+      ]
+    },
+    "subagent": {
+      "description": "claude -p session that starts one general-purpose subagent with the Agent tool. The subagent's hooks reuse the parent session_id and add agent_id and agent_type; its Bash call was allowed with --allowedTools 'Bash(wc -l notes.txt)'.",
+      "hooks": [
+        {
+          "event": "SessionStart",
+          "payload": {
+            "session_id": "c0000005-0000-4000-8000-000000000005",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000005-0000-4000-8000-000000000005.jsonl",
+            "cwd": "/workspace/project",
+            "hook_event_name": "SessionStart",
+            "source": "startup"
+          }
+        },
+        {
+          "event": "UserPromptSubmit",
+          "payload": {
+            "session_id": "c0000005-0000-4000-8000-000000000005",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000005-0000-4000-8000-000000000005.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000005-0000-4000-8000-000000000005",
+            "permission_mode": "default",
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "Synthetic prompt: ask one general-purpose subagent to count the lines of notes.txt."
+          }
+        },
+        {
+          "event": "PreToolUse",
+          "payload": {
+            "session_id": "c0000005-0000-4000-8000-000000000005",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000005-0000-4000-8000-000000000005.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000005-0000-4000-8000-000000000005",
+            "permission_mode": "default",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Agent",
+            "tool_input": {
+              "description": "Synthetic tool description.",
+              "prompt": "Synthetic subagent prompt: run wc -l notes.txt in /workspace/project and return the line count.",
+              "subagent_type": "general-purpose",
+              "run_in_background": false
+            },
+            "tool_use_id": "toolu_01SyntheticToolUse000007"
+          }
+        },
+        {
+          "event": "SubagentStart",
+          "payload": {
+            "session_id": "c0000005-0000-4000-8000-000000000005",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000005-0000-4000-8000-000000000005.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000005-0000-4000-8000-000000000005",
+            "agent_id": "a0000000000000001",
+            "agent_type": "general-purpose",
+            "hook_event_name": "SubagentStart"
+          }
+        },
+        {
+          "event": "PreToolUse",
+          "payload": {
+            "session_id": "c0000005-0000-4000-8000-000000000005",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000005-0000-4000-8000-000000000005.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000005-0000-4000-8000-000000000005",
+            "permission_mode": "default",
+            "agent_id": "a0000000000000001",
+            "agent_type": "general-purpose",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {
+              "command": "wc -l notes.txt",
+              "description": "Synthetic tool description."
+            },
+            "tool_use_id": "toolu_01SyntheticToolUse000008"
+          }
+        },
+        {
+          "event": "PostToolUse",
+          "payload": {
+            "session_id": "c0000005-0000-4000-8000-000000000005",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000005-0000-4000-8000-000000000005.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000005-0000-4000-8000-000000000005",
+            "permission_mode": "default",
+            "agent_id": "a0000000000000001",
+            "agent_type": "general-purpose",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {
+              "command": "wc -l notes.txt",
+              "description": "Synthetic tool description."
+            },
+            "tool_response": {
+              "stdout": "       3 notes.txt",
+              "stderr": "",
+              "interrupted": false,
+              "isImage": false,
+              "noOutputExpected": false
+            },
+            "tool_use_id": "toolu_01SyntheticToolUse000008",
+            "duration_ms": 96
+          }
+        },
+        {
+          "event": "PostToolBatch",
+          "payload": {
+            "session_id": "c0000005-0000-4000-8000-000000000005",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000005-0000-4000-8000-000000000005.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000005-0000-4000-8000-000000000005",
+            "permission_mode": "default",
+            "agent_id": "a0000000000000001",
+            "agent_type": "general-purpose",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "PostToolBatch",
+            "tool_calls": [
+              {
+                "tool_name": "Bash",
+                "tool_input": {
+                  "command": "wc -l notes.txt",
+                  "description": "Synthetic tool description."
+                },
+                "tool_use_id": "toolu_01SyntheticToolUse000008",
+                "tool_response": "       3 notes.txt"
+              }
+            ]
+          }
+        },
+        {
+          "event": "SubagentStop",
+          "payload": {
+            "session_id": "c0000005-0000-4000-8000-000000000005",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000005-0000-4000-8000-000000000005.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000005-0000-4000-8000-000000000005",
+            "permission_mode": "default",
+            "agent_id": "a0000000000000001",
+            "agent_type": "general-purpose",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "SubagentStop",
+            "stop_hook_active": false,
+            "agent_transcript_path": "/claude-home/projects/-workspace-project/c0000005-0000-4000-8000-000000000005/subagents/agent-a0000000000000001.jsonl",
+            "last_assistant_message": "Synthetic subagent reply.",
+            "background_tasks": [],
+            "session_crons": []
+          }
+        },
+        {
+          "event": "PostToolUse",
+          "payload": {
+            "session_id": "c0000005-0000-4000-8000-000000000005",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000005-0000-4000-8000-000000000005.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000005-0000-4000-8000-000000000005",
+            "permission_mode": "default",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Agent",
+            "tool_input": {
+              "description": "Synthetic tool description.",
+              "prompt": "Synthetic subagent prompt: run wc -l notes.txt in /workspace/project and return the line count.",
+              "subagent_type": "general-purpose",
+              "run_in_background": false
+            },
+            "tool_response": {
+              "status": "completed",
+              "prompt": "Synthetic subagent prompt: run wc -l notes.txt in /workspace/project and return the line count.",
+              "agentId": "a0000000000000001",
+              "agentType": "general-purpose",
+              "toolsUsed": [
+                "Bash"
+              ],
+              "harnessNoteCount": 1,
+              "harnessTailCount": 0,
+              "harnessSectionHash": "0000000000000001",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Synthetic harness note.\n"
+                },
+                {
+                  "type": "text",
+                  "text": "Synthetic subagent reply."
+                }
+              ],
+              "resolvedModel": "synthetic-model",
+              "totalDurationMs": 3877,
+              "totalTokens": 12054,
+              "totalToolUseCount": 1,
+              "usage": {
+                "output_tokens_details": {
+                  "thinking_tokens": 0
+                },
+                "input_tokens": 2,
+                "cache_creation_input_tokens": 662,
+                "cache_read_input_tokens": 11387,
+                "output_tokens": 3,
+                "server_tool_use": {
+                  "web_search_requests": 0,
+                  "web_fetch_requests": 0
+                },
+                "service_tier": "standard",
+                "cache_creation": {
+                  "ephemeral_1h_input_tokens": 0,
+                  "ephemeral_5m_input_tokens": 662
+                },
+                "inference_geo": "global",
+                "iterations": [],
+                "speed": "standard",
+                "fallback_credit": null
+              },
+              "toolStats": {
+                "readCount": 0,
+                "searchCount": 0,
+                "bashCount": 1,
+                "editFileCount": 0,
+                "linesAdded": 0,
+                "linesRemoved": 0,
+                "otherToolCount": 0
+              },
+              "canContinueAgent": true
+            },
+            "tool_use_id": "toolu_01SyntheticToolUse000007",
+            "duration_ms": 3880
+          }
+        },
+        {
+          "event": "PostToolBatch",
+          "payload": {
+            "session_id": "c0000005-0000-4000-8000-000000000005",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000005-0000-4000-8000-000000000005.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000005-0000-4000-8000-000000000005",
+            "permission_mode": "default",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "PostToolBatch",
+            "tool_calls": [
+              {
+                "tool_name": "Agent",
+                "tool_input": {
+                  "description": "Synthetic tool description.",
+                  "subagent_type": "general-purpose",
+                  "prompt": "Synthetic subagent prompt: run wc -l notes.txt in /workspace/project and return the line count.",
+                  "run_in_background": false
+                },
+                "tool_use_id": "toolu_01SyntheticToolUse000007",
+                "tool_response": [
+                  {
+                    "type": "text",
+                    "text": "Synthetic subagent report.\nagentId: a0000000000000001"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "event": "MessageDisplay",
+          "payload": {
+            "session_id": "c0000005-0000-4000-8000-000000000005",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000005-0000-4000-8000-000000000005.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000005-0000-4000-8000-000000000005",
+            "hook_event_name": "MessageDisplay",
+            "turn_id": "f0000005-0000-4000-8000-000000000005",
+            "message_id": "e0000005-0000-4000-8000-000000000005",
+            "index": 0,
+            "final": true,
+            "delta": "Synthetic reply."
+          }
+        },
+        {
+          "event": "Stop",
+          "payload": {
+            "session_id": "c0000005-0000-4000-8000-000000000005",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000005-0000-4000-8000-000000000005.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000005-0000-4000-8000-000000000005",
+            "permission_mode": "default",
+            "effort": {
+              "level": "medium"
+            },
+            "hook_event_name": "Stop",
+            "stop_hook_active": false,
+            "last_assistant_message": "Synthetic reply.",
+            "background_tasks": [],
+            "session_crons": []
+          }
+        },
+        {
+          "event": "SessionEnd",
+          "payload": {
+            "session_id": "c0000005-0000-4000-8000-000000000005",
+            "transcript_path": "/claude-home/projects/-workspace-project/c0000005-0000-4000-8000-000000000005.jsonl",
+            "cwd": "/workspace/project",
+            "prompt_id": "b0000005-0000-4000-8000-000000000005",
+            "hook_event_name": "SessionEnd",
+            "reason": "other"
+          }
+        }
+      ]
+    }
+  }
+}
