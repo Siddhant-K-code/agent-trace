@@ -1457,6 +1457,119 @@ class TestLangChainTools(FrameworkCase):
         self.assertEqual([e.event_type for e in events[3:]], [E.DECISION, E.TOOL_CALL, E.ERROR])
         self.assertLinkedTo(events, 5, 4)
 
+    def node_recorder(self, make_node):
+        """The recorder of a node built by ``make_node(Runnable)``."""
+        modules, state_graph = self.langgraph()
+        node = make_node(modules["langchain_core.runnables"].Runnable)
+        self.instrument("langchain", modules)
+        return state_graph({"node": node}).compile().nodes["node"].bound
+
+    def assertNodeResult(self, **expected):
+        """One node run, closed by a tool_result with ``expected`` data."""
+        decision, call, result = self.events()
+        self.assertEqual((call.event_type, result.event_type), (E.TOOL_CALL, E.TOOL_RESULT))
+        self.assertEqual(result.parent_id, call.event_id)
+        data = dict(result.data)
+        self.assertIsInstance(data.pop("duration_ms"), float)
+        self.assertEqual(data, {"tool_name": "langgraph.node.node", **expected})
+
+    @staticmethod
+    def streamer(closed):
+        """A node maker: its stream yields "a" then "b" and appends to ``closed`` when closed."""
+        def make(runnable):
+            class Streamer(runnable):
+                def invoke(self, input, config=None, **kwargs):
+                    return "ab"
+
+                async def astream(self, input, config=None, **kwargs):
+                    try:
+                        yield "a"
+                        yield "b"
+                    finally:
+                        closed.append(True)
+
+            return Streamer()
+
+        return make
+
+    def test_langgraph_astream_closed_early_by_its_caller_is_a_control_flow_result(self):
+        closed = []
+        recorder = self.node_recorder(self.streamer(closed))
+
+        async def first_chunk():
+            stream = recorder.astream(1)
+            chunk = await stream.__anext__()
+            await stream.aclose()
+            return chunk
+
+        self.assertEqual(_run(first_chunk()), "a")
+        self.assertEqual(closed, [True])
+        self.assertNodeResult(control_flow="GeneratorExit")
+
+    def test_langgraph_astream_closed_outside_an_event_loop_records_nothing(self):
+        closed = []
+        recorder = self.node_recorder(self.streamer(closed))
+        stream = recorder.astream(1)
+        with self.assertRaises(StopIteration) as first:
+            stream.__anext__().send(None)
+        self.assertEqual(first.exception.value, "a")
+        # As the garbage collector closes a dropped stream with no loop.
+        with self.assertRaises(StopIteration):
+            stream.aclose().send(None)
+        self.assertEqual(closed, [True])
+        self.assertEqual([e.event_type for e in self.events()], [E.DECISION, E.TOOL_CALL])
+
+    def test_langgraph_cancelled_node_is_recorded_and_the_cancellation_raised(self):
+        def slow(runnable):
+            class Slow(runnable):
+                def invoke(self, input, config=None, **kwargs):
+                    return input
+
+                async def ainvoke(self, input, config=None, **kwargs):
+                    await asyncio.sleep(60)
+
+                async def astream(self, input, config=None, **kwargs):
+                    yield input
+                    await asyncio.sleep(60)
+
+            return Slow()
+
+        recorder = self.node_recorder(slow)
+
+        async def drain(stream):
+            return [chunk async for chunk in stream]
+
+        runs = {"ainvoke": lambda: recorder.ainvoke(1),
+                "astream": lambda: drain(recorder.astream(1))}
+        for method, run in runs.items():
+            with self.subTest(method=method):
+                async def cancel():
+                    task = asyncio.ensure_future(run())
+                    await asyncio.sleep(0.01)
+                    task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+
+                before = len(self.events())
+                _run(cancel())
+                decision, call, result = self.events()[before:]
+                self.assertEqual(result.event_type, E.TOOL_RESULT)
+                self.assertEqual(result.parent_id, call.event_id)
+                self.assertEqual(result.data["status"], "cancelled")
+
+    def test_langgraph_interrupted_node_is_recorded_and_the_interrupt_raised(self):
+        interrupt = KeyboardInterrupt()
+
+        def stop(state):
+            raise interrupt
+
+        modules, state_graph = self.langgraph()
+        self.instrument("langchain", modules)
+        with self.assertRaises(KeyboardInterrupt) as caught:
+            state_graph({"node": stop}).compile().invoke(1)
+        self.assertIs(caught.exception, interrupt)
+        self.assertNodeResult(status="cancelled")
+
     def test_langgraph_recorder_passes_the_callers_config_and_kwargs_through(self):
         modules, state_graph = self.langgraph()
         calls = []
