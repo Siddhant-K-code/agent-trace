@@ -42,6 +42,30 @@ def _token_count(value: object) -> int:
     return value
 
 
+# A line nested more than this many levels deep is skipped, the limit
+# collector_client.py uses. The store's redactor needs 2 frames per level on
+# Python 3.12 and later and 3 on 3.10 and 3.11, so on 3.10 and 3.11 data about
+# 328 levels deep fails, after the session is created.
+MAX_LINE_DEPTH = 64
+
+
+def _too_deep(entry: dict[str, Any]) -> bool:
+    """Return True if ``entry`` nests objects and arrays more than MAX_LINE_DEPTH levels deep.
+
+    ``entry`` is level 1. The walk uses a stack, not recursion: on 3.12 and
+    later, json.loads parses lines far deeper than Python can recurse.
+    """
+    stack = [(entry, 1)]
+    while stack:
+        node, depth = stack.pop()
+        for child in node.values() if isinstance(node, dict) else node:
+            if isinstance(child, (dict, list)):
+                if depth == MAX_LINE_DEPTH:
+                    return True
+                stack.append((child, depth + 1))
+    return False
+
+
 def _usable_session_id(value: object) -> str:
     """Return ``value`` if it is a string the store accepts as a session ID, else ""."""
     if not isinstance(value, str):
@@ -308,7 +332,7 @@ def _import_jsonl(
             raw = json.loads(line)
         except (ValueError, RecursionError):
             continue  # Not JSON, nested too deep, or a number too long to convert.
-        if not isinstance(raw, dict):
+        if not isinstance(raw, dict) or _too_deep(raw):
             continue
 
         # Skip queue operations

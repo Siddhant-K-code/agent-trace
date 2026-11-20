@@ -1433,11 +1433,17 @@ class TestCli(SkillsTestBase):
 
         # json.loads raises RecursionError on this on every CI Python (see test_optimize.py).
         too_deep = b"[" * 1_000_000 + b"]" * 1_000_000
+        # json.loads parses this, but the store cannot redact it.
+        deep_input = b'{"k":' * 600 + b'"x"' + b"}" * 600
+        tool_use = {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t1", "name": "Bash", "input": "@"}]}
         transcripts = {
             "stdout": line("kx1", message={"role": "user", "content": [{"type": "text", "text": "x"}]},
                            toolUseResult={"stdout": {"a": 1}}),
             "cut": line("cut2") + b'{"type":"user","message":{"content":"caf\xc3',
             "deep": line("deep2") + too_deep + b"\n",
+            "input": line("deepin1") + line("deepin1", type="assistant", uuid="a1",
+                                            message=tool_use).replace(b'"@"', deep_input),
         }
         for name, data in transcripts.items():
             with self.subTest(name=name):

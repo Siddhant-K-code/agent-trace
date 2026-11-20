@@ -616,6 +616,31 @@ def _with_field(line, dotted, value):
     return log
 
 
+def _nested(kind, levels):
+    """A value nested ``levels`` deep: dicts, or lists inside one dict."""
+    value = "x"
+    for _ in range(levels - 1):
+        value = {"k": value} if kind == "dict" else [value]
+    return {"k": value}
+
+
+def _deep_tool_line(sid, kind, levels):
+    """An assistant line whose tool input is ``_nested(kind, levels)``, as bytes.
+
+    It is built as text because json.dumps cannot encode 5000 levels on 3.10.
+    """
+    if kind == "dict":
+        deep = '{"k":' * levels + '"x"' + "}" * levels
+    else:
+        deep = '{"k":' + "[" * (levels - 1) + '"x"' + "]" * (levels - 1) + "}"
+    line = {"type": "assistant", "sessionId": sid, "uuid": "a1",
+            "timestamp": "2026-01-01T00:00:01Z",
+            "message": {"id": "m1", "model": "claude-sonnet-4", "role": "assistant",
+                        "content": [{"type": "tool_use", "id": "t1", "name": "Bash",
+                                     "input": "@"}]}}
+    return json.dumps(line).replace('"@"', deep).encode()
+
+
 class TestMalformedLog(unittest.TestCase):
     """A field of the wrong type reads as absent and a line that cannot be read is skipped."""
 
@@ -836,6 +861,50 @@ class TestMalformedLog(unittest.TestCase):
 
                 self.assertEqual(self._import(path), sid)
                 self.assertEqual(self._prompts(sid), ["hello", "after"])
+
+    def test_line_nested_more_than_the_limit_is_skipped(self):
+        # On 3.12 and later json.loads parses 5000 levels, so only the depth check skips them.
+        for kind in ("dict", "list"):
+            for levels in (600, 5000):
+                sid = f"deep{kind}{levels}"
+                with self.subTest(kind=kind, levels=levels):
+                    path = self._write(f"{sid}.jsonl", [
+                        _entry(sid),
+                        _deep_tool_line(sid, kind, levels),
+                        _entry(sid, uuid="u3", timestamp="2026-01-01T00:00:02Z",
+                               message={"role": "user", "content": "after"}),
+                    ])
+
+                    code, err = self._cli(path)
+
+                    self.assertEqual(code, 0, err)
+                    self.assertEqual(self._prompts(sid), ["hello", "after"])
+                    self.assertNotIn(EventType.TOOL_CALL.value,
+                                     [event["event_type"] for event in self._events(sid)])
+                    events = (self.trace / sid / "events.ndjson").read_bytes()
+
+                    code, err = self._cli(path)
+
+                    self.assertEqual(code, 0, err)
+                    self.assertEqual(err.splitlines()[0],
+                                     f"Session {sid} is already imported; nothing written.")
+                    self.assertEqual((self.trace / sid / "events.ndjson").read_bytes(), events)
+
+    def test_line_at_the_depth_limit_imports_and_one_level_more_is_skipped(self):
+        limit = jsonl_import.MAX_LINE_DEPTH
+        without = _full_log()
+        del without[1]
+        for kind in ("dict", "list"):
+            with self.subTest(kind=kind):
+                # The tool input sits below 4 levels: the line, message, content and tool_use.
+                at_limit = _nested(kind, limit - 4)
+                _, events = json.loads(self._session(
+                    _with_field(1, "message.content.1.input", at_limit)))
+                self.assertEqual([event["data"]["arguments"] for event in events
+                                  if event["event_type"] == EventType.TOOL_CALL.value], [at_limit])
+
+                over = _with_field(1, "message.content.1.input", _nested(kind, limit - 3))
+                self.assertEqual(self._session(over), self._session(without))
 
     def test_log_of_only_unusable_lines_imports_as_an_empty_session(self):
         path = self._write("empty2.jsonl", b'not json\n[1]\n'
