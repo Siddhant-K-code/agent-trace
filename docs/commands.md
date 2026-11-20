@@ -1589,8 +1589,11 @@ session with that profile. The default profile path is
 The profile tracks cost, tool calls, duration, error rate, and LLM requests.
 The error rate counts [failed model requests](production.md#session-error-counts) as errors; rebuild profiles saved by earlier
 versions with `baseline update` to include them.
-Cost matches `agent-strace cost` with its default model; a session whose
-events cannot be priced adds no cost sample. Profiles saved by older versions
+Cost matches `agent-strace cost` with its default model. A session whose
+events cannot be priced adds no cost sample. That includes a session that
+`agent-strace cost` refuses, such as one with an
+[unusable event timestamp](#sessions-with-unusable-event-timestamps).
+Profiles saved by older versions
 recorded every cost as 0, so rebuild yours with `baseline update` after
 upgrading.
 `check` exits with status 1 for an anomalous session, a missing session, or a
@@ -2681,6 +2684,98 @@ still count the stored size of each event.
 `record` and `record-http` link a tool result or a JSON-RPC error to its call
 only when the JSON-RPC id is a string or a number. With any other id they
 forward both messages and record both events without the link.
+
+---
+
+## Sessions with unusable event timestamps
+
+An event's `timestamp` is a Unix time in seconds, and `agent-strace server`
+refuses an event whose `timestamp` is not one (see
+[server.md](server.md#api-reference)). A session stored by an older version, or
+edited by hand, can still hold text, `null`, `true`, an object, an array, NaN,
+infinity, a negative number, or a number too large to be a date, such as a time
+in milliseconds. The commands in the two lists below check the session first.
+If an event a command reads has such a timestamp, the command writes one line
+to stderr and exits 1 before it prints, writes, sends, or opens anything. The
+line looks like this:
+
+```
+Error: session event timestamp must be a Unix time in seconds: event 6 of 25 (tool_call) has a string timestamp; 5 more events have unusable timestamps
+```
+
+The message names the first such event by position and event type, and says
+what kind of value its timestamp is: `string`, `null`, `boolean`, `object`,
+`array`, `non-finite`, `negative`, or `out-of-range`. It counts every other
+event in the session with an unusable timestamp. It never includes the value.
+Commands that read more than one session name the session, for example
+`Error: session c3d4e5f6a7b80003 event timestamp must be a Unix time in
+seconds: event 3 of 7 (tool_call) has an array timestamp`.
+
+These commands check every event of the session: `annotate --at`, `compare`,
+`cost`, `diff`, `explain`, `export --format eu-ai-act`, `postmortem`,
+`pr-comment`, `replay`, `review`, `share` without `--assignment`, `standup`,
+`tenant report`, and `timeline`. `cost --tenant` checks each session it
+prices. `replay` checks every event even when `--filter` or `--limit` hides
+the bad one, and `replay --expand-subagents` checks every session it shows.
+
+These commands check only the events they read, so the same session keeps
+working when the bad event is one they never read:
+
+- `a2a-tree --format json`: each `a2a_call` event in every session of the tree.
+  The text tree reads no call timestamp, so it does not check.
+- `compliance export`: `tool_call` and `error` events.
+- `export --backend langfuse`: `tool_call`, `tool_result`, `llm_request`,
+  `llm_response`, and `error` events. It checks after the credentials and
+  before it sends anything.
+- `export --format otlp`: `user_prompt`, `assistant_response`, `decision`,
+  `tool_call`, `tool_result`, `error`, `llm_request`, and `llm_response`
+  events.
+- `export --format otlp-genai` and `--format temporal`: the same types without
+  `decision`.
+- `oncall`: `tool_call` and `file_write` events.
+- `sample`: the first and last events of each session it scores.
+- `token-budget`: the first event and each `llm_request` event.
+
+`export --format otlp`, `otlp-genai`, and `temporal` also refuse a session
+whose `started_at`, or `ended_at` when set, is not a Unix time in seconds, with
+`Error: session started_at must be a Unix time in seconds` or the same message
+for `ended_at`. `export --format temporal` checks the session's Temporal trace
+context first, so a session without one keeps its `Temporal export failed`
+message.
+
+`drift` and `fingerprint` skip a session whose first or last event has an
+unusable timestamp, as they skip other sessions they cannot read. `baseline`
+leaves the cost out for a session that `agent-strace cost` refuses: the session
+adds no cost sample to `baseline update`, and `baseline check` does not compare
+its cost. For an open session, `baseline check` measures the duration from the
+event timestamps it can use, and reports no duration when `started_at` is not a
+Unix time in seconds. `dashboard`, `context-score`, `team-report`, `export
+--metrics --backend otlp`, and `eval dataset auto --filter cost-above:N` price
+a session from its token usage and event sizes, not its timestamps, so they
+still show its cost.
+
+`watch --stream-otlp` leaves out each `user_prompt`, `assistant_response`,
+`tool_call`, `tool_result`, `error`, `llm_request`, and `llm_response` event
+whose timestamp is unusable. It prints one line per event on stderr, such as
+`[stream] Left one tool_call event out of the OTLP stream because its timestamp
+is not a Unix time in seconds.` The lines follow the order of the batch. An
+event that also has non-object data gets only this line. The other events of
+the batch, and later batches, are still sent.
+
+With `agent-strace server --dashboard`, the review, compare, share, and OTLP
+actions answer 400 with the same message. The OTLP action checks the events
+and session times that `export --format otlp` checks. The others check every
+event.
+
+`health` and `skills` read an integer timestamp too large for a float as they
+read infinity, and `compliance-report` reads it as it reads 1e300. Earlier
+versions stopped with a traceback.
+
+`list`, `inspect`, `tree`, `verify`, `stats`, `export --format json`, `ndjson`,
+or `csv`, `tenant export`, and the events API keep working on these sessions.
+Those that print a timestamp print it as stored. `postmortem --list`, `compare
+--rerun`, `cost --breakdown provider`, `annotate --event`, and `replay --tree`
+do not check and work as before.
 
 ---
 

@@ -3,6 +3,7 @@
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -40,6 +41,7 @@ try:
         registered_hooks,
     )
     from test_cost import _model_request
+    from test_unusable_event_timestamps import restamp, set_meta
 except ImportError:
     from tests.test_capture_matrix_fixtures import (
         FIXTURES,
@@ -48,6 +50,7 @@ except ImportError:
         registered_hooks,
     )
     from tests.test_cost import _model_request
+    from tests.test_unusable_event_timestamps import restamp, set_meta
 
 
 def _make_store_with_sessions(tmpdir: str, n: int = 10, tool_calls: int = 5) -> TraceStore:
@@ -259,6 +262,11 @@ def _priced(input_tokens: int) -> float:
     return _usage_dollars(usage, DEFAULT_MODEL)
 
 
+# Event timestamps that are not a Unix time in seconds. On main NaN and the
+# time in milliseconds were priced, and the text raised TypeError.
+UNUSABLE_STAMPS = (float("nan"), 1_795_111_200_000.0, "2026-01-01T00:00:00Z")
+
+
 class TestBaselineCost(unittest.TestCase):
     """Baselines price each session exactly as ``agent-strace cost`` does."""
 
@@ -316,6 +324,45 @@ class TestBaselineCost(unittest.TestCase):
         result = check_session(self.store, sid, profile, sigma=2.0)
         self.assertNotIn("cost_usd", result.deviations)
         self.assertIn("tool_calls", result.deviations)
+
+    def test_session_with_unusable_timestamp_adds_no_cost_sample(self):
+        # `agent-strace cost` refuses an event timestamp that is not a Unix
+        # time in seconds.
+        for value in UNUSABLE_STAMPS:
+            with self.subTest(value=value):
+                sid = _priced_session(self.store, 1000, minutes_ago=1)
+                restamp(Path(self.trace_dir) / sid, "ALL", value)
+                try:
+                    profile = build_baseline(self.store, since_days=30)
+                finally:
+                    shutil.rmtree(Path(self.trace_dir) / sid)
+                self.assertEqual(profile.session_count, 7)
+                self.assertEqual(profile.tool_calls.count, 7)
+                self.assertEqual(profile.cost_usd.count, 6)
+
+    def test_check_does_not_compare_cost_of_session_with_unusable_timestamp(self):
+        profile = build_baseline(self.store, since_days=30)
+        for value in UNUSABLE_STAMPS:
+            with self.subTest(value=value):
+                sid = _priced_session(self.store, 200_000, minutes_ago=1)
+                restamp(Path(self.trace_dir) / sid, "ALL", value)
+                result = check_session(self.store, sid, profile, sigma=2.0)
+                self.assertNotIn("cost_usd", result.deviations)
+                self.assertIn("tool_calls", result.deviations)
+
+    def test_cli_update_leaves_out_cost_of_session_with_text_timestamp(self):
+        sid = _priced_session(self.store, 1000, minutes_ago=1)
+        restamp(Path(self.trace_dir) / sid, "ALL", "2026-01-01T00:00:00Z")
+        path = os.path.join(self.trace_dir, "baseline.json")
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            rc = cmd_baseline(build_parser().parse_args(
+                ["--trace-dir", self.trace_dir, "baseline", "update", "--output", path]
+            ))
+        self.assertEqual((rc, err.getvalue()), (0, ""))
+        saved = json.loads(Path(path).read_text())
+        self.assertEqual(saved["session_count"], 7)
+        self.assertEqual(saved["cost_usd"]["count"], 6)
 
     def test_pricing_error_is_not_recorded_as_zero_cost(self):
         with patch("agent_trace.baseline.estimate_cost", side_effect=TypeError("bug")):
@@ -420,6 +467,28 @@ class TestOpenSessions(unittest.TestCase):
         self.assertTrue(result.anomalous)
         self.assertGreater(result.deviations["duration_ms"], 2.0)
         self.assertEqual(result.deviations["tool_calls"], 0.0)
+
+    def test_unusable_times_give_no_duration(self):
+        # On main 10**400 raised OverflowError. The time in milliseconds gave
+        # a duration of about 57,000 years, and a started_at of -5 one of
+        # about 57 years.
+        cases = (
+            ("timestamp", 10**400), ("timestamp", 1_795_111_200_000.0),
+            ("started_at", 10**400), ("started_at", -5),
+        )
+        for field_name, value in cases:
+            with self.subTest(field=field_name, value=value):
+                sid = self._open_session(tool_calls=12, span_s=3600.0)
+                if field_name == "timestamp":
+                    restamp(Path(self.trace_dir) / sid, "ALL", value)
+                else:
+                    set_meta(Path(self.trace_dir) / sid, started_at=value)
+                result = check_session(self.store, sid, self.profile, sigma=2.0)
+                self.assertTrue(result.scored)
+                self.assertTrue(result.open_session)
+                self.assertFalse(result.anomalous)
+                self.assertNotIn("duration_ms", result.deviations)
+                self.assertEqual(result.deviations["tool_calls"], 0.0)
 
     def test_session_below_the_mean_so_far_is_not_flagged(self):
         sid = self._open_session(tool_calls=1, span_s=5.0)
