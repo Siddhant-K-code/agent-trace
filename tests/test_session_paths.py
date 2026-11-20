@@ -63,6 +63,31 @@ class TestSessionPaths(unittest.TestCase):
         )
         self.assertEqual(normalise_path("./src/file.py", "C:/repo"), "src/file.py")
 
+    def test_normalise_path_under_unc_share_root(self):
+        self.assertEqual(
+            normalise_path("//server/share/a.py", "//server/share"), "a.py"
+        )
+        self.assertEqual(
+            normalise_path("//SERVER/SHARE/src/a.py", "//server/share"),
+            "src/a.py",
+        )
+        self.assertEqual(
+            normalise_path("//server/share/src/a.py", "//SERVER/SHARE/"),
+            "src/a.py",
+        )
+        self.assertEqual(
+            normalise_path("//server/share/src/../a.py", "//server/share"),
+            "a.py",
+        )
+        self.assertEqual(
+            normalise_path("//server/share-sibling/a.py", "//server/share"),
+            "//server/share-sibling/a.py",
+        )
+        self.assertEqual(
+            normalise_path("//server/other/a.py", "//server/share"),
+            "//server/other/a.py",
+        )
+
     def test_command_text_and_shell_call(self):
         call = _bash("ls")
         self.assertEqual(command_text(call), "ls")
@@ -140,6 +165,23 @@ class TestSessionFileActivity(unittest.TestCase):
         ])
         self.assertEqual(windows_activity.read, ["src/a.py"])
         self.assertEqual(windows_activity.written, ["src/a.py"])
+
+    def test_unc_share_root_and_case_variants_are_repo_relative(self):
+        activity = session_file_activity([
+            _ev(EventType.SESSION_START, cwd="\\\\server\\share\\"),
+            _ev(
+                EventType.TOOL_CALL,
+                tool_name="view",
+                arguments={"path": "//SERVER/SHARE/src/a.py"},
+            ),
+            _ev(
+                EventType.TOOL_CALL,
+                tool_name="edit",
+                arguments={"path": "\\\\server\\share\\src\\a.py"},
+            ),
+        ])
+        self.assertEqual(activity.read, ["src/a.py"])
+        self.assertEqual(activity.written, ["src/a.py"])
 
     def test_combines_explicit_and_shell_activity(self):
         events = [

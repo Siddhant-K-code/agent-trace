@@ -89,6 +89,15 @@ def cwd_forms(cwd: str) -> tuple[str, ...]:
 def _relative_to(value: str, cwd: str, *, windows: bool) -> str | None:
     """Return an absolute path relative to ``cwd`` when it is contained in it."""
     path_module = ntpath if windows else posixpath
+    value = path_module.normpath(value)
+    cwd = path_module.normpath(cwd)
+    if windows:
+        value_drive, value_tail = ntpath.splitdrive(value)
+        cwd_drive, cwd_tail = ntpath.splitdrive(cwd)
+        if value_drive.startswith("\\\\") and not value_tail:
+            value = value_drive + "\\"
+        if cwd_drive.startswith("\\\\") and not cwd_tail:
+            cwd = cwd_drive + "\\"
     try:
         common = path_module.commonpath((cwd, value))
     except ValueError:
@@ -116,13 +125,9 @@ def normalise_path(path: str, cwd: str) -> str:
         form_windows = bool(_WINDOWS_ABSOLUTE.match(form))
         value_windows = bool(_WINDOWS_ABSOLUTE.match(value))
         if form_windows and value_windows:
-            relative = _relative_to(
-                ntpath.normpath(value), ntpath.normpath(form), windows=True
-            )
+            relative = _relative_to(value, form, windows=True)
         elif not form_windows and form.startswith("/") and value.startswith("/"):
-            relative = _relative_to(
-                posixpath.normpath(value), posixpath.normpath(form), windows=False
-            )
+            relative = _relative_to(value, form, windows=False)
         else:
             relative = None
         if relative is not None:
