@@ -1412,7 +1412,7 @@ class TestCli(SkillsTestBase):
     def test_from_claude_counts_malformed_transcript_as_skipped(self):
         claude_dir = self.tmp / "claude"
         self._claude_transcript(claude_dir)
-        (claude_dir / "projects" / "-tmp-repo" / "bad.jsonl").write_bytes(b"[1]\n\xff\xfe\n")
+        (claude_dir / "projects" / "-tmp-repo" / "no id.jsonl").write_bytes(b"[1]\n\xff\xfe\n")
 
         code, out, err = self._run_both("--from-claude", "--claude-dir", str(claude_dir),
                                         "--min-sessions", "1", "--format", "json")
@@ -1421,6 +1421,51 @@ class TestCli(SkillsTestBase):
         self.assertIn("Read 1 Claude Code session(s)", err)
         self.assertIn("skipped 1 unreadable", err)
         self.assertEqual(json.loads(out)["sessions"], 1)
+
+    def test_from_claude_reads_transcript_with_a_line_it_cannot_use(self):
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(time.time() - 30))
+
+        def line(sid, **over):
+            entry = {"type": "user", "sessionId": sid, "uuid": "u1", "timestamp": stamp,
+                     "cwd": str(self.repo), "message": {"role": "user", "content": "hello"}}
+            entry.update(over)
+            return json.dumps(entry).encode() + b"\n"
+
+        # json.loads raises RecursionError on this on every CI Python (see test_optimize.py).
+        too_deep = b"[" * 1_000_000 + b"]" * 1_000_000
+        transcripts = {
+            "stdout": line("kx1", message={"role": "user", "content": [{"type": "text", "text": "x"}]},
+                           toolUseResult={"stdout": {"a": 1}}),
+            "cut": line("cut2") + b'{"type":"user","message":{"content":"caf\xc3',
+            "deep": line("deep2") + too_deep + b"\n",
+        }
+        for name, data in transcripts.items():
+            with self.subTest(name=name):
+                claude_dir = self.tmp / f"claude-{name}"
+                self._claude_transcript(claude_dir)
+                (claude_dir / "projects" / "-tmp-repo" / f"{name}.jsonl").write_bytes(data)
+
+                code, out, err = self._run_both("--from-claude", "--claude-dir", str(claude_dir),
+                                                "--min-sessions", "1", "--format", "json")
+
+                self.assertEqual(code, 0)
+                self.assertIn("Read 2 Claude Code session(s)", err)
+                self.assertNotIn("skipped", err)
+
+    @unittest.skipIf(os.name == "nt", "POSIX symlinks")
+    def test_from_claude_does_not_count_entries_that_are_not_files(self):
+        claude_dir = self.tmp / "claude"
+        self._claude_transcript(claude_dir)
+        project = claude_dir / "projects" / "-tmp-repo"
+        os.symlink(self.tmp / "nowhere.jsonl", project / "dangle.jsonl")
+        (project / "dir.jsonl").mkdir()
+
+        code, out, err = self._run_both("--from-claude", "--claude-dir", str(claude_dir),
+                                        "--min-sessions", "1", "--format", "json")
+
+        self.assertEqual(code, 0)
+        self.assertIn("Read 1 Claude Code session(s)", err)
+        self.assertNotIn("skipped", err)
 
     def test_from_claude_does_not_swallow_unexpected_errors(self):
         claude_dir = self.tmp / "claude"

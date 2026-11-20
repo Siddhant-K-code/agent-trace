@@ -183,20 +183,37 @@ opt-out and deletes the local anonymous installation ID. `DO_NOT_TRACK=1` or
 ```
 agent-strace import <path.jsonl> [--discover]
 ```
-Import a Claude Code JSONL session log. `--discover` lists available sessions in `~/.claude/projects/`. The imported session starts with a `session_start` event, which holds the `cwd` when the log records a working directory.
+Import a Claude Code JSONL session log. `--discover` lists available sessions in `~/.claude/projects/`. It lists only regular files, or symlinks to them, and skips entries it cannot read, such as a broken symlink. The imported session starts with a `session_start` event, which holds the `cwd` when the log records a working directory.
 
-The session ID is the log's Claude `sessionId`, or the file name when the log
-has none. If the trace directory already holds a session with that ID,
-`import` writes nothing, prints `Session <id> is already imported; nothing
-written.` with the session's directory, and exits 0, so importing the same
-file twice does not duplicate its events. To import a log again, for example
-after the Claude session continued, delete that directory first. Nothing is
-written until the whole log has been converted, so a log that fails to import
-leaves no partial session behind.
+The session ID is the first `sessionId` in the log that is a usable session
+ID: 1 to 128 ASCII letters, digits, dots, underscores or hyphens, starting
+with a letter or digit. When the log has none, the ID is the file name without
+`.jsonl`. When that is not usable either, `import` exits 1. If the trace
+directory already holds a session with that ID, `import` writes nothing,
+prints `Session <id> is already imported; nothing written.` with the
+session's directory, and exits 0, so importing the same file twice does not
+duplicate its events. To import a log again, for example after the Claude
+session continued, delete that directory first. Nothing is written until the
+whole log has been converted, so a log that fails to import leaves no partial
+session behind.
 
 Lines that are not JSON objects are skipped, as lines that are not JSON are.
-An entry whose `timestamp` is not an ISO 8601 time from 1970 on, such as a
-number, `null` or a time before 1970, is imported with the timestamp `0.0`.
+So are lines that are not UTF-8, such as a last line cut mid-character, lines
+nested too deep to parse and lines that hold a number too long to convert. A
+field of the wrong type reads as absent: for example, message text that is
+not a string, or a `durationMs` that is not a finite number of 0 or more. Only
+a whole number of 0 or more counts as tokens. An entry whose `timestamp` is
+not an ISO 8601 time from 1970 on, such as a number, `null` or a time before
+1970, is imported with the timestamp `0.0`.
+
+These errors print one line to stderr, exit 1 and write nothing:
+
+- `Session log not found: <path>`: the log does not exist.
+- `Cannot read session log <path>: <reason>`: the log cannot be read, for
+  example because it is a directory, a symlink loop or a file you cannot read.
+- `Cannot import <path>: <reason>`: neither the log nor its file name holds a
+  usable session ID, or the trace store refuses the session, for example
+  because it was erased.
 
 Claude Code writes one log line per content block of a model response and
 repeats the response's token usage on each. The import keeps that usage once,
@@ -1852,7 +1869,7 @@ Skill adoption from recorded behavior: available → loaded → followed → out
 
 With no sessions in the trace store, the command prints how to read Claude Code, GitHub Copilot or Codex history or set up capture instead of an empty report. In JSON mode the report is still printed and the hint goes to stderr.
 
-When sessions are left out of the aggregate, the first line says how many and why, for example `Skills across 2 of 7 sessions since 2026-10-16 (5 started before the window)`. Reasons: started before the `--since` window, or unreadable or malformed. With the `--from-*` flags, sessions that `skills eval` ran in its temporary workspaces are left out too, and stderr gives the count. JSON adds `sessions_total` and `sessions_excluded`. With `--from-claude`, transcripts that share a session ID are merged into one session, and the `Read N Claude Code session(s)` line says how many. The three `--from-*` flags are mutually exclusive. With `--from-copilot` or `--from-codex`, the `Read` line also says how many sessions recorded their skill list and what was skipped, and JSON `availability_basis` is `recorded` or `mixed`. With `--from-copilot`, skill directories that recorded loads point to are scanned like `--skills-dir`, and a builtin skill path from a deleted Copilot CLI version resolves to the newest installed version. With `--from-copilot` or `--from-codex`, a record timestamp that cannot be read as a time from 1970 on, such as a negative number or an integer too large for a float, is ignored, and the event takes the time of the event before it or of the session start. The log formats are internal to each agent and can change; see [skills.md](skills.md#quick-start).
+When sessions are left out of the aggregate, the first line says how many and why, for example `Skills across 2 of 7 sessions since 2026-10-16 (5 started before the window)`. Reasons: the session started before the `--since` window, or its stored trace cannot be read (shown as `unreadable or malformed`). With the `--from-*` flags, sessions that `skills eval` ran in its temporary workspaces are left out too, and stderr gives the count. JSON adds `sessions_total` and `sessions_excluded`. With `--from-claude`, transcripts that share a session ID are merged into one session, and the `Read N Claude Code session(s)` line says how many. With `--from-claude`, only regular `.jsonl` files are read, each as [`import`](#import) reads it. A transcript is counted as unreadable when it cannot be read or has no usable session ID. The three `--from-*` flags are mutually exclusive. With `--from-copilot` or `--from-codex`, the `Read` line also says how many sessions recorded their skill list and what was skipped, and JSON `availability_basis` is `recorded` or `mixed`. With `--from-copilot`, skill directories that recorded loads point to are scanned like `--skills-dir`, and a builtin skill path from a deleted Copilot CLI version resolves to the newest installed version. With `--from-copilot` or `--from-codex`, a record timestamp that cannot be read as a time from 1970 on, such as a negative number or an integer too large for a float, is ignored, and the event takes the time of the event before it or of the session start. The log formats are internal to each agent and can change; see [skills.md](skills.md#quick-start).
 
 ### `skills eval`
 ```
