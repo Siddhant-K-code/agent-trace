@@ -3003,14 +3003,16 @@ def build_parser() -> argparse.ArgumentParser:
                           help="detect AGENTS.md and config file changes between sessions")
     cw_sub = p_cw.add_subparsers(dest="config_watch_command")
 
-    cw_snap = cw_sub.add_parser("snapshot", help="record a snapshot of current config files")
+    cw_snap = cw_sub.add_parser("snapshot",
+                                help="record a snapshot of the config files in the current directory")
     cw_snap.add_argument("--label", metavar="TEXT",
                          help="human-readable label for this snapshot")
     cw_snap.add_argument("--watch", metavar="PATH", action="append",
                          help="additional file to watch (repeatable)")
 
     cw_check = cw_sub.add_parser("check",
-                                  help="check whether config has changed since last snapshot")
+                                  help="check whether the config files in the current directory "
+                                       "changed since its last snapshot")
     cw_check.add_argument("--watch", metavar="PATH", action="append",
                           help="additional file to watch (repeatable)")
     cw_check.add_argument("--format", choices=["text", "json"], default="text")

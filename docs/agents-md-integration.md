@@ -26,7 +26,7 @@ agent-strace does not parse tool permissions, path constraints or model hints fr
 
 ## Change detection
 
-`config-watch` tells you when `AGENTS.md` changed. Nothing takes a snapshot automatically, so take one after each edit:
+`config-watch` tells you when `AGENTS.md` changed. Run it from the repository root. Nothing takes a snapshot automatically, so take one after each edit:
 
 ```bash
 # Hash AGENTS.md and the other tracked config files

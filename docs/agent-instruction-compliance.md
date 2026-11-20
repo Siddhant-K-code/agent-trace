@@ -22,8 +22,9 @@ agent-strace context-score --file AGENTS.md --history 30 --compare
 agent-strace context-score --file CLAUDE.md --history 30 --compare --format json
 ```
 
-`config-watch` hashes watched files, including `AGENTS.md`, `CLAUDE.md`, and
-`.github/copilot-instructions.md`. `context-score` groups sessions by snapshots
+`config-watch` hashes watched files in the current directory, including
+`AGENTS.md`, `CLAUDE.md`, and `.github/copilot-instructions.md`. Run both
+commands from the repository root. `context-score` groups sessions by snapshots
 and compares cost estimates, tool counts, lint findings, and scope-violation
 proxies.
 

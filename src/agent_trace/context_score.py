@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
 
-from .config_watch import ConfigSnapshot, _load_snapshots
+from .config_watch import ConfigSnapshot, _load_snapshots, current_workspace
 from .cost import session_cost
 from .event_data import require_object_event_data
 from .freshness import _parse_scope_from_agents_md
@@ -422,7 +422,10 @@ def build_context_score_report(
     current_hash = _hash_file(file_path)
     now = _time.time()
     window_start = now - history_days * 86400
-    snapshots = sorted(_load_snapshots(workspace_root), key=lambda snapshot: snapshot.timestamp)
+    snapshots = sorted(
+        _load_snapshots(workspace_root, store.storage_root),
+        key=lambda snapshot: snapshot.timestamp,
+    )
 
     scope_globs = _parse_scope_from_agents_md(str(file_path))
     instruction_lines = _load_agents_md(file_path)
@@ -621,8 +624,10 @@ def format_context_score_json(report: ContextScoreReport) -> str:
 
 
 def cmd_context_score(args: argparse.Namespace) -> int:
+    workspace_root = current_workspace()
+    if workspace_root is None:
+        return 1
     store = TraceStore(args.trace_dir)
-    workspace_root = Path(args.trace_dir).parent
     report = build_context_score_report(
         store,
         workspace_root=workspace_root,

@@ -6,6 +6,7 @@ import sys
 import tempfile
 import time
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,6 +18,7 @@ from agent_trace.context_score import (
     CAVEATS,
     TEXT_CAVEAT,
     build_context_score_report,
+    cmd_context_score,
     format_context_score_json,
     format_context_score_text,
 )
@@ -269,6 +271,66 @@ class TestContextScore(unittest.TestCase):
         description = sub_action.choices["context-score"].description
         self.assertIn("Not an outcome score", description)
         self.assertIn("50 = no change vs baseline", description)
+
+    def _run_command(self, *argv):
+        """Run cmd_context_score with these CLI arguments. Return (exit code, stdout, stderr)."""
+        args = build_parser().parse_args(list(argv))
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = cmd_context_score(args)
+        return code, out.getvalue(), err.getvalue()
+
+    def _chdir(self, path):
+        old = os.getcwd()
+        os.chdir(path)
+        self.addCleanup(os.chdir, old)
+
+    def test_command_reads_the_current_directory_and_the_trace_dir(self):
+        """The command read the context file and the snapshots next to the
+        trace dir, so with a trace dir outside the repository it found
+        neither. With AGENT_STRACE_WORKSPACE set, the sessions are in a
+        workspace of the trace dir and the snapshots stay at its root."""
+        self._chdir(self.tmpdir)
+        now = time.time()
+        for workspace in ("", "team1"):
+            with self.subTest(workspace=workspace), \
+                    patch.dict(os.environ, {"AGENT_STRACE_WORKSPACE": workspace}):
+                traces = Path(tempfile.mkdtemp()) / "traces"
+                store = TraceStore(traces)
+                snapshots = [
+                    _snapshot("old111", now - 1000, "oldsha", "old"),
+                    _snapshot("new222", now - 500, "newsha", "new"),
+                ]
+                for snapshot in snapshots:
+                    snapshot.workspace = os.path.realpath(self.tmpdir)
+                traces.mkdir()
+                (traces / ".config-snapshots.json").write_text(
+                    json.dumps([snapshot.to_dict() for snapshot in snapshots])
+                )
+                _session(store, now - 900, 1, [_tool("Read", file_path="src/app.py"), _end()])
+                _session(store, now - 400, 2, [_tool("Read", file_path="src/app.py"), _end()])
+
+                code, out, _ = self._run_command(
+                    "--trace-dir", str(traces), "context-score",
+                    "--format", "json", "--min-sessions", "1", "--history", "1",
+                )
+
+                self.assertEqual(code, 0)
+                versions = json.loads(out)["versions"]
+                self.assertEqual(
+                    [(v["version_hash"], v["label"], v["session_count"]) for v in versions],
+                    [("oldsha", "old", 1), ("newsha", "new", 1)],
+                )
+
+    @unittest.skipIf(os.name == "nt", "Windows cannot remove the current directory")
+    def test_deleted_current_directory_is_an_error(self):
+        gone = self.tmpdir / "gone"
+        gone.mkdir()
+        self._chdir(gone)
+        gone.rmdir()
+        code, out, err = self._run_command("--trace-dir", str(self.trace_dir), "context-score")
+        self.assertEqual((code, out), (1, ""))
+        self.assertEqual(err, "error: cannot read the current directory: FileNotFoundError\n")
 
 
 class TestContextScoreUnpricedSessions(unittest.TestCase):

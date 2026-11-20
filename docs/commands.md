@@ -1807,6 +1807,8 @@ agent-strace context-score [--file AGENTS.md] [--history N] [--compare]
 ```
 Compare efficiency stats across AGENTS.md, CLAUDE.md, or GEMINI.md versions. Sessions are grouped by context-file hashes from `config-watch`. Each dimension (cost, tool calls, lint findings, scope violations per session) scores `50 + 100 × (baseline − current) / baseline`, clipped to 0–100; the overall score is their mean. With no version history it reports current-version stats only.
 
+Like `config-watch`, run it from the repository root. It reads the context file from the current directory. It reads the sessions and the `config-watch` snapshots from the trace store, and uses only the snapshots taken in the current directory. If the current directory cannot be read, it prints one error line and exits 1.
+
 Read with care:
 - Efficiency proxies, not outcomes. Tests, task success, merges, and reverts are not measured.
 - 50 means no change vs baseline, which grades F (A ≥ 90 … F < 60).
@@ -1814,13 +1816,14 @@ Read with care:
 - Before/after only: no task-mix control, no confidence intervals, default minimum 5 sessions per version.
 - Baseline is the oldest version, or the previous version with `--compare`.
 - Sessions that start before the first `config-watch` snapshot count as the current version.
+- Sessions are not filtered by repository. If several repositories share a trace store, the sessions of all of them are scored.
 - Cost is the `agent-strace cost` total at the default model. Sessions it refuses are reported as `N not priced` and left out of cost averages (`avg_cost` is `null` in JSON when none is priced), and the cost dimension needs `--min-sessions` priced sessions per version.
 - Lint findings, redundant reads and context saturation come from `agent-strace lint`. Sessions it refuses or where a lint rule could not run are reported as `N not linted` (`unlinted_sessions` in JSON) and left out of those averages, which show `n/a` in text and `null` in JSON when no session is linted. The lint dimension needs `--min-sessions` linted sessions per version.
 - Ignores skills and whether the agent read the context file. For adoption, see [skills.md](skills.md). For controlled instruction evidence, see [instruction-compliance.md](instruction-compliance.md).
 
 | Flag | Description |
 |---|---|
-| `--file PATH` | Context file to score; defaults to the first existing AGENTS.md, CLAUDE.md, or GEMINI.md |
+| `--file PATH` | Context file to score, relative to the current directory; defaults to the first existing AGENTS.md, CLAUDE.md, or GEMINI.md |
 | `--history N` | Days of session history to analyse; default is `30` |
 | `--compare` | Compare current context version against the previous version |
 | `--min-sessions N` | Minimum sessions per version before scoring; default is `5` |
@@ -1932,6 +1935,12 @@ agent-strace config-watch history [--format text|json]
 agent-strace config-watch affected [--since DURATION] [--format text|json]
 ```
 Track changes to AGENTS.md and other config files. `check` exits 1 when config has changed (CI gate).
+
+Run it from the repository root. It hashes the watched files in the current directory and reads `.agent-strace-watch.json` there. Snapshots are kept in `.config-snapshots.json` in the global trace store (`--trace-dir`, else `$AGENT_TRACE_DIR`, else `.agent-traces`). Each snapshot records the directory it hashed, shown as `workspace` in `history --format json`. `check`, `history` and `affected` use only the snapshots of the current directory, so several repositories can share one trace store. `affected` still lists sessions from all of them.
+
+When the current directory has no snapshot, `check` prints `No snapshots yet for <dir>` and exits 1. If the current directory cannot be read, for example because it was deleted, `config-watch` prints one error line and exits 1.
+
+Snapshots taken by older versions have no `workspace`. They belong to the directory that holds the trace store, which is the repository root in the default layout. With a trace store elsewhere, older versions kept the snapshots in `.agent-traces` next to the trace store. They are no longer read, so take a new snapshot. A snapshot stays with the directory it hashed, so also take a new one after you move or rename a repository.
 
 ---
 
