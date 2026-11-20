@@ -54,6 +54,11 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
   private currentState: SessionState | null = null;
   private selectedSessionId: string | null = null;
   private currentModel: ReviewModel | null = null;
+  // Bumped on every webview reset, so an async result started for an earlier
+  // view is dropped even if the same session is selected again.
+  private viewGeneration = 0;
+  // Bumped on every showSession() call; only the latest call may post.
+  private showRequest = 0;
   private readonly exactHealth = new Map<string, CliHealth>();
   private readonly healthRefreshTimers = new Map<
     string,
@@ -92,7 +97,7 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
   onSessionStart(state: SessionState): void {
     this.currentState = state;
     this.selectedSessionId = state.sessionId;
-    this.view?.webview.postMessage({ type: "reset" });
+    this._resetView();
     this._postLiveReview(state);
     void this._refreshHealth(state.sessionId);
   }
@@ -117,8 +122,9 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
   }
 
   async showSession(sessionId: string): Promise<void> {
+    const request = ++this.showRequest;
     if (this.selectedSessionId !== sessionId) {
-      this.view?.webview.postMessage({ type: "reset" });
+      this._resetView();
     }
     this.selectedSessionId = sessionId;
     // The live session keeps its pause and resume controls when it is picked
@@ -137,7 +143,7 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
       this._postReview(structural, null);
       const health = await this._loadHealth(sessionId);
       this.exactHealth.set(sessionId, health);
-      if (this.selectedSessionId !== sessionId) {
+      if (request !== this.showRequest || this.selectedSessionId !== sessionId) {
         return;
       }
       if (this.currentState?.sessionId === sessionId) {
@@ -146,9 +152,11 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
       }
       this._postReview(loadStoredReview(this.traceDir, sessionId, health), null);
     } catch (error) {
-      // Another session took the view, or this one went live (the live path
-      // hides health failures), while the health lookup was pending.
+      // A newer showSession() call or another session took the view, or this
+      // one went live (the live path hides health failures), while the
+      // health lookup was pending.
       if (
+        request !== this.showRequest ||
         this.selectedSessionId !== sessionId ||
         this.currentState?.sessionId === sessionId
       ) {
@@ -159,6 +167,15 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
         message: error instanceof Error ? error.message : String(error),
       });
     }
+  }
+
+  private _resetView(): void {
+    this.viewGeneration++;
+    this.view?.webview.postMessage({ type: "reset" });
+  }
+
+  private _isCurrentView(generation: number, sessionId: string): boolean {
+    return generation === this.viewGeneration && this.selectedSessionId === sessionId;
   }
 
   private _postLiveReview(state: SessionState): void {
@@ -268,12 +285,13 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
     if (!current) {
       return;
     }
+    const generation = this.viewGeneration;
     const sessions = this._sessionChoices().filter((choice) => choice.id !== current);
     const selected = await vscode.window.showQuickPick(sessions, {
       placeHolder: "Choose a local session to compare",
       matchOnDescription: true,
     });
-    if (!selected) {
+    if (!selected || !this._isCurrentView(generation, current)) {
       return;
     }
     try {
@@ -289,14 +307,15 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
       if (result.failed) {
         throw new Error(result.stderr.trim() || "Session comparison failed.");
       }
-      if (this.selectedSessionId !== current) {
+      const report: unknown = JSON.parse(result.stdout);
+      if (!this._isCurrentView(generation, current)) {
         return;
       }
-      this.view?.webview.postMessage({
-        type: "comparison",
-        report: JSON.parse(result.stdout),
-      });
+      this.view?.webview.postMessage({ type: "comparison", report });
     } catch (error) {
+      if (!this._isCurrentView(generation, current)) {
+        return;
+      }
       vscode.window.showErrorMessage(
         `agent-trace: ${error instanceof Error ? error.message : String(error)}`,
       );
@@ -330,13 +349,16 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
   }
 
   private async _saveMinimizedShare(): Promise<void> {
-    if (!this.currentModel) {
+    // The view can switch sessions while the dialog is open; save the review
+    // that was shown when the user asked.
+    const model = this.currentModel;
+    if (!model) {
       return;
     }
     const target = await vscode.window.showSaveDialog({
       defaultUri: vscode.Uri.file(path.join(
         path.dirname(this.traceDir),
-        `review-${this.currentModel.session.session_id.slice(0, 12)}-minimized.html`,
+        `review-${model.session.session_id.slice(0, 12)}-minimized.html`,
       )),
       filters: { "HTML files": ["html"] },
       saveLabel: "Save minimized review",
@@ -346,7 +368,7 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
     }
     await vscode.workspace.fs.writeFile(
       target,
-      Buffer.from(renderMinimizedReviewHtml(this.currentModel), "utf8"),
+      Buffer.from(renderMinimizedReviewHtml(model), "utf8"),
     );
     vscode.window.showInformationMessage("Privacy-minimized review saved locally.");
   }
@@ -402,6 +424,7 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
       return;
     }
     const sessionId = model.session.session_id;
+    const generation = this.viewGeneration;
     try {
       const result = await runCli([
         "--trace-dir",
@@ -414,7 +437,7 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
         "--session",
         sessionId,
       ]);
-      if (this.selectedSessionId !== sessionId) {
+      if (!this._isCurrentView(generation, sessionId)) {
         return;
       }
       this.view?.webview.postMessage({
@@ -427,7 +450,7 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
         },
       });
     } catch (error) {
-      if (this.selectedSessionId !== sessionId) {
+      if (!this._isCurrentView(generation, sessionId)) {
         return;
       }
       this.view?.webview.postMessage({

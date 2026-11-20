@@ -14,12 +14,37 @@ const fake = {
   holdHealth: false,
   pendingHealth: [] as Callback[],
   pendingArgs: [] as string[][],
+  errorMessages: [] as string[],
+  quickPick: null as null | ((choice: { id: string }) => void),
+  saveDialog: null as null | ((target: { fsPath: string }) => void),
+  saveDefault: "",
+  written: [] as string[],
 };
 
+// A dialog the test answers later, so it can switch sessions while it is open.
+function held<T>(store: (resolve: (value: T) => void) => void): Promise<T> {
+  return new Promise<T>((resolve) => store(resolve));
+}
+
 const vscodeStub = {
+  Uri: { file: (fsPath: string) => ({ fsPath }) },
   window: {
-    showQuickPick: async () => ({ id: "other" }),
-    showErrorMessage: () => undefined,
+    showQuickPick: () => held<{ id: string }>((r) => { fake.quickPick = r; }),
+    showSaveDialog: (options: { defaultUri: { fsPath: string } }) => {
+      fake.saveDefault = options.defaultUri.fsPath;
+      return held<{ fsPath: string }>((r) => { fake.saveDialog = r; });
+    },
+    showErrorMessage: (message: string) => {
+      fake.errorMessages.push(message);
+    },
+    showInformationMessage: () => undefined,
+  },
+  workspace: {
+    fs: {
+      writeFile: async (_target: unknown, data: Buffer) => {
+        fake.written.push(data.toString("utf8"));
+      },
+    },
   },
 };
 
@@ -31,7 +56,8 @@ const reviewModelStub = {
     session: { session_id: sessionId, provider: "claude" },
   }),
   loadAnnotations: () => [],
-  renderMinimizedReviewHtml: () => "",
+  renderMinimizedReviewHtml: (model: { session: { session_id: string } }) =>
+    model.session.session_id,
 };
 
 const childProcessStub = {
@@ -111,9 +137,13 @@ const reviews = (messages: Posted[]) => messages.filter((m) => m.type === "revie
 // Lets queued promise callbacks run, so a held CLI call has been issued.
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 
-// Finishes the held CLI call whose arguments include `marker`.
-function finish(marker: string, stdout: string, stderr = "") {
-  const index = fake.pendingArgs.findIndex((args) => args.includes(marker));
+// Finishes the held CLI call whose arguments include `marker`: the oldest
+// such call, or the newest with `newest`.
+function finish(marker: string, stdout: string, stderr = "", newest = false) {
+  const matches = fake.pendingArgs
+    .map((args, index) => (args.includes(marker) ? index : -1))
+    .filter((index) => index >= 0);
+  const index = (newest ? matches.at(-1) : matches[0]) ?? -1;
   assert.ok(index >= 0, `no pending CLI call for ${marker}`);
   const [callback] = fake.pendingHealth.splice(index, 1);
   fake.pendingArgs.splice(index, 1);
@@ -124,7 +154,21 @@ beforeEach(() => {
   fake.holdHealth = false;
   fake.pendingHealth = [];
   fake.pendingArgs = [];
+  fake.errorMessages = [];
+  fake.quickPick = null;
+  fake.saveDialog = null;
+  fake.saveDefault = "";
+  fake.written = [];
 });
+
+// Starts a comparison for the shown session and picks the other session.
+async function startCompare(send: (message: unknown) => void) {
+  fake.holdHealth = true;
+  send({ command: "compare" });
+  await settle();
+  fake.quickPick?.({ id: "other" });
+  await settle();
+}
 
 test("picking the live session in the browser keeps the live controls", async () => {
   const { panel, messages } = await openPanel();
@@ -226,9 +270,7 @@ test("a stored health error is not shown once the session went live", async () =
 test("a comparison that finishes after a session switch is not shown", async () => {
   const { panel, messages, send } = await openPanel();
   await panel.showSession("a");
-  fake.holdHealth = true;
-  send({ command: "compare" });
-  await settle();
+  await startCompare(send);
   const shownB = panel.showSession("b");
   finish("compare", "{}");
   await settle();
@@ -256,9 +298,7 @@ test("a live capture check that finishes after a session switch is not shown", a
 test("comparison and live capture results for the selected session are shown", async () => {
   const { panel, messages, send } = await openPanel();
   await panel.showSession("a");
-  fake.holdHealth = true;
-  send({ command: "compare" });
-  await settle();
+  await startCompare(send);
   finish("compare", "{}");
   send({ command: "verifyLiveCapture" });
   await settle();
@@ -267,4 +307,106 @@ test("comparison and live capture results for the selected session are shown", a
 
   assert.ok(messages.some((m) => m.type === "comparison"));
   assert.ok(messages.some((m) => m.type === "liveCapture"));
+});
+
+test("an older health error for a session shown again is not shown", async () => {
+  const { panel, messages } = await openPanel();
+  fake.holdHealth = true;
+  const first = panel.showSession("a");
+  const toB = panel.showSession("b");
+  const again = panel.showSession("a");
+  finish("b", "{}");
+  await toB;
+  finish("a", "{}", "", true);
+  await again;
+  finish("a", "", "old lookup failed");
+  await first;
+
+  assert.equal(messages.some((m) => m.type === "error"), false);
+  assert.equal(reviews(messages).at(-1)?.model?.session.session_id, "a");
+});
+
+test("an older health result does not replace a newer error for that session", async () => {
+  const { panel, messages } = await openPanel();
+  fake.holdHealth = true;
+  const first = panel.showSession("a");
+  const toB = panel.showSession("b");
+  const again = panel.showSession("a");
+  finish("b", "{}");
+  await toB;
+  finish("a", "", "new lookup failed", true);
+  await again;
+  finish("a", "{}");
+  await first;
+
+  assert.equal(messages.at(-1)?.type, "error");
+});
+
+for (const [name, stdout, stderr] of [
+  ["fails", "", "compare failed"],
+  ["returns invalid JSON", "not json", ""],
+]) {
+  test(`a comparison that ${name} after a session switch shows no error`, async () => {
+    const { panel, send } = await openPanel();
+    await panel.showSession("a");
+    await startCompare(send);
+    const shownB = panel.showSession("b");
+    finish("compare", stdout, stderr);
+    await settle();
+    finish("b", "{}");
+    await shownB;
+
+    assert.deepEqual(fake.errorMessages, []);
+  });
+}
+
+test("a comparison that fails for the selected session shows its error", async () => {
+  const { panel, send } = await openPanel();
+  await panel.showSession("a");
+  await startCompare(send);
+  finish("compare", "", "compare failed");
+  await settle();
+
+  assert.equal(fake.errorMessages.length, 1);
+});
+
+test("a comparison picked after a session switch does not run", async () => {
+  const { panel, send } = await openPanel();
+  await panel.showSession("a");
+  send({ command: "compare" });
+  await settle();
+  await panel.showSession("b");
+  fake.holdHealth = true;
+  fake.quickPick?.({ id: "other" });
+  await settle();
+
+  assert.equal(fake.pendingArgs.some((args) => args.includes("compare")), false);
+});
+
+test("a comparison from an earlier view of the same session is not shown", async () => {
+  const { panel, messages, send } = await openPanel();
+  await panel.showSession("a");
+  await startCompare(send);
+  const toB = panel.showSession("b");
+  const again = panel.showSession("a");
+  finish("compare", "{}");
+  await settle();
+  finish("b", "{}");
+  finish("a", "{}");
+  await Promise.all([toB, again]);
+
+  assert.equal(messages.some((m) => m.type === "comparison"), false);
+});
+
+test("a minimized share saves the review shown when it was requested", async () => {
+  const { panel, send } = await openPanel();
+  await panel.showSession("a");
+  send({ command: "saveMinimizedShare" });
+  await settle();
+  await panel.showSession("b");
+  fake.saveDialog?.({ fsPath: "/tmp/share.html" });
+  await settle();
+
+  assert.match(path.basename(fake.saveDefault), /^review-a-/);
+  assert.deepEqual(fake.written, ["a"]);
 });
