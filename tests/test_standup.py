@@ -378,6 +378,9 @@ class TestApproachLines(unittest.TestCase):
             "success false": {"success": False},
             "nonzero exit_code": {"exit_code": 1},
             "failed status": {"status": "failed"},
+            "error status with no failure words": {"status": " Error ", "content": "done"},
+            "failure status": {"status": "FAILURE"},
+            "timeout status": {"status": "timeout"},
             "failure words with no outcome field": {"content": "Traceback (most recent call)"},
         }
         for label, data in cases.items():
@@ -392,7 +395,9 @@ class TestApproachLines(unittest.TestCase):
         self.assertEqual(self.approach_lines(events), STILL_FAILING_AT_END)
 
     def test_recorded_success_is_a_success_whatever_the_text(self):
-        for data in ({"is_error": False}, {"success": True}, {"exit_code": 0}):
+        for data in ({"is_error": False}, {"success": True}, {"exit_code": 0},
+                     {"status": "success"}, {"status": " Succeeded "}, {"status": "OK"},
+                     {"status": "completed"}):
             data = {**data, "content": "ran: 0 errors"}
             with self.subTest(data):
                 self.assertEqual(
@@ -405,8 +410,11 @@ class TestApproachLines(unittest.TestCase):
 
     def test_events_that_are_not_tool_failures(self):
         cancelled = {"status": "cancelled", "content": "error: cancelled"}
+        canceled = {"status": " Canceled ", "content": "error: cancelled"}
         cases = {
             "cancelled result": [_tool("bash"), _outcome(cancelled), _outcome(cancelled), END],
+            "canceled status in any case": [_tool("bash"), _outcome(canceled),
+                                            _outcome(canceled), END],
             "error with no tool call": [_tool("bash"), _outcome({}, "", EventType.ERROR),
                                         _outcome({}, "", EventType.ERROR), END],
         }

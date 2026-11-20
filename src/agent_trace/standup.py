@@ -132,6 +132,8 @@ def _extract_uncertainties(events: list[TraceEvent]) -> list[UncertaintySignal]:
 
 
 _FAILURE_WORDS = ("error", "failed", "traceback")
+_ERROR_STATUSES = FAILED_STATUSES | {"error", "failure", "timeout"}
+_SUCCESS_STATUSES = frozenset({"success", "succeeded", "ok", "completed"})
 
 
 def _tool_result_failed(data: dict) -> bool | None:
@@ -146,9 +148,10 @@ def _tool_result_failed(data: dict) -> bool | None:
         return None
     exit_code = number_field(data, "exit_code", None)
     if (data.get("is_error") is True or data.get("success") is False
-            or (exit_code is not None and exit_code != 0) or status in FAILED_STATUSES):
+            or (exit_code is not None and exit_code != 0) or status in _ERROR_STATUSES):
         return True
-    if data.get("is_error") is False or data.get("success") is True or exit_code == 0:
+    if (data.get("is_error") is False or data.get("success") is True or exit_code == 0
+            or status in _SUCCESS_STATUSES):
         return False
     content = str(data.get("content", ""))
     return any(word in content.lower() for word in _FAILURE_WORDS)
