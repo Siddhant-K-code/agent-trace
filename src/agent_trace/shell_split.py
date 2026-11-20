@@ -149,6 +149,34 @@ def _continues_line(line: str) -> bool:
     return trailing % 2 == 1
 
 
+def _continues_command_line(line: str, quote: str) -> bool:
+    """Return whether the physical command line escapes its ending newline."""
+    trailing = len(line) - len(line.rstrip("\\"))
+    if trailing % 2 == 0:
+        return False
+    i = 0
+    end = len(line) - trailing
+    while i < end:
+        char = line[i]
+        if quote:
+            if char == "\\" and quote == '"' and i + 1 < end:
+                i += 2
+                continue
+            if char == quote:
+                quote = ""
+            i += 1
+            continue
+        if char == "\\" and i + 1 < end:
+            i += 2
+            continue
+        if char in "'\"":
+            quote = char
+        elif char == "#" and (i == 0 or line[i - 1] in _WORD_BOUNDARY):
+            break
+        i += 1
+    return quote != "'"
+
+
 def strip_heredocs(command: str) -> str:
     """Drop heredoc bodies and their terminator lines."""
     kept: list[str] = []
@@ -156,6 +184,10 @@ def strip_heredocs(command: str) -> str:
     continued = False
     quote = ""
     arithmetic_depth = 0
+    logical_line = ""
+    logical_quote = ""
+    logical_arithmetic_depth = 0
+    continuing_command = False
     for line in command.split("\n"):
         if pending:
             delimiter, strip_tabs, quoted = pending[0]
@@ -167,10 +199,22 @@ def strip_heredocs(command: str) -> str:
                 continued = not quoted and _continues_line(candidate)
             continue
         kept.append(line)
-        openers, quote, arithmetic_depth = _heredoc_openers(
-            line, quote, arithmetic_depth
+        if not continuing_command:
+            logical_line = ""
+            logical_quote = quote
+            logical_arithmetic_depth = arithmetic_depth
+        continuing_command = _continues_command_line(
+            logical_line + line, logical_quote
         )
+        logical_line += line[:-1] if continuing_command else line
+        openers, ending_quote, ending_arithmetic_depth = _heredoc_openers(
+            logical_line, logical_quote, logical_arithmetic_depth
+        )
+        if continuing_command:
+            continue
         pending.extend(openers)
+        quote = ending_quote
+        arithmetic_depth = ending_arithmetic_depth
     return "\n".join(kept)
 
 
@@ -223,7 +267,7 @@ def split_tokens(command: str) -> tuple[list[str], bool]:
     on whitespace and punctuation was used instead.
     """
     text = command.replace("\r\n", "\n")
-    text = strip_comments(strip_heredocs(text)).replace("\\\n", " ")
+    text = strip_comments(strip_heredocs(text).replace("\\\n", ""))
     lexer = shlex.shlex(text, posix=True, punctuation_chars=PUNCTUATION)
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True

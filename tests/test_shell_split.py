@@ -72,6 +72,23 @@ class TestShellSplit(unittest.TestCase):
                 command = f"cat {opener}\npytest\n123.txt\nnpm test"
                 self.assertEqual(command_segments(command)[-1], ["npm", "test"])
 
+    def test_heredoc_delimiter_can_continue_on_the_next_line(self):
+        for opener in ("<<E\\\nOF", "<<\\\nEOF", '<<"E\\\nOF"', "<<'E'\\\nOF"):
+            with self.subTest(opener=opener):
+                command = f"cat {opener}\npytest > body.txt\nEOF\nnpm test"
+                self.assertEqual(
+                    command_segments(command),
+                    [["cat", "<<", "EOF"], ["npm", "test"]],
+                )
+
+    def test_continued_heredoc_delimiter_body_is_not_a_write_target(self):
+        command = "cat > real.txt <<E\\\nOF\npytest > body.txt\nEOF\n"
+        self.assertEqual(write_targets(command), ["real.txt"])
+
+    def test_continued_heredoc_delimiter_body_is_not_a_test_command(self):
+        command = "cat <<E\\\nOF\npytest\nEOF\necho done"
+        self.assertFalse(is_test_command(command))
+
     def test_quoted_heredoc_body_does_not_fold_backslash_newline(self):
         command = "cat <<'EOF'\nbody \\\nEOF\npytest"
         self.assertEqual(command_segments(command)[-1], ["pytest"])
