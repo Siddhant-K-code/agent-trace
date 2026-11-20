@@ -322,6 +322,33 @@ class TestContextScore(unittest.TestCase):
                     [("oldsha", "old", 1), ("newsha", "new", 1)],
                 )
 
+    def test_command_reads_the_snapshots_of_older_versions(self):
+        """Older versions kept the snapshots of <parent>/custom in
+        <parent>/.agent-traces. They were no longer read, so the command
+        found no version history."""
+        self._chdir(self.tmpdir)
+        now = time.time()
+        traces = self.tmpdir / "custom"
+        store = TraceStore(traces)
+        _write_snapshots(self.tmpdir, [
+            _snapshot("old111", now - 1000, "oldsha", "old"),
+            _snapshot("new222", now - 500, "newsha", "new"),
+        ])
+        _session(store, now - 900, 1, [_tool("Read", file_path="src/app.py"), _end()])
+        _session(store, now - 400, 2, [_tool("Read", file_path="src/app.py"), _end()])
+
+        code, out, _ = self._run_command(
+            "--trace-dir", str(traces), "context-score",
+            "--format", "json", "--min-sessions", "1", "--history", "1",
+        )
+
+        self.assertEqual(code, 0)
+        versions = json.loads(out)["versions"]
+        self.assertEqual(
+            [(v["version_hash"], v["label"], v["session_count"]) for v in versions],
+            [("oldsha", "old", 1), ("newsha", "new", 1)],
+        )
+
     @unittest.skipIf(os.name == "nt", "Windows cannot remove the current directory")
     def test_deleted_current_directory_is_an_error(self):
         gone = self.tmpdir / "gone"

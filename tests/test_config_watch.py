@@ -706,6 +706,143 @@ class TestCmdConfigWatch(unittest.TestCase):
         self.assertEqual((code, out), (1, ""))
         self.assertEqual(err, "error: cannot read the current directory: FileNotFoundError\n")
 
+    def _older_snapshot(self, ws, snapshot_id, timestamp, label):
+        """A snapshot of AGENTS.md in *ws* as older versions wrote it: no workspace."""
+        return ConfigSnapshot(snapshot_id=snapshot_id, timestamp=timestamp, label=label,
+                              files=[_snapshot_file(ws, "AGENTS.md")])
+
+    def _write_older_snapshots(self, parent, *snapshots):
+        """Write *snapshots* where older versions kept them for a trace dir
+        in *parent*. Return the file."""
+        path = parent / ".agent-traces" / ".config-snapshots.json"
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps([s.to_dict() for s in snapshots], indent=2))
+        return path
+
+    def test_custom_trace_dir_reads_the_snapshots_of_older_versions(self):
+        """Older versions kept the snapshots of <parent>/custom in
+        <parent>/.agent-traces. They were no longer read, so check found no
+        snapshot, affected no change, and a new snapshot no previous one."""
+        for trace_dir in ("absolute", "relative"):
+            with self.subTest(trace_dir=trace_dir):
+                ws, _ = self._workspace()
+                traces = ws / "custom" if trace_dir == "absolute" else Path("custom")
+                now = time.time()
+                (ws / "AGENTS.md").write_text("v1")
+                one = self._older_snapshot(ws, "one111111111", now - 300, "one")
+                (ws / "AGENTS.md").write_text("v2")
+                two = self._older_snapshot(ws, "two222222222", now - 200, "two")
+                older = self._write_older_snapshots(ws, one, two)
+                before = older.read_bytes()
+                sid = _add_session(TraceStore(traces), started_at=now - 100)
+
+                code, out, err = self._run(traces, "check")
+                self.assertEqual((code, out, err), (0, "✓  No config changes since last snapshot.\n", ""))
+                history = json.loads(self._run(traces, "history", fmt="json")[1])
+                self.assertEqual([s["snapshot_id"] for s in history], ["one111111111", "two222222222"])
+                code, out, _ = self._run(traces, "affected", fmt="json")
+                self.assertEqual(code, 0)
+                self.assertEqual([(a["session_id"], a["changed_paths"]) for a in json.loads(out)],
+                                 [(sid, ["AGENTS.md"])])
+
+                (ws / "AGENTS.md").write_text("v3")
+                code, out, _ = self._run(traces, "check")
+                self.assertEqual(code, 1)
+                self.assertIn("~  AGENTS.md  (modified)", out)
+                code, out, _ = self._run(traces, "snapshot", label="three")
+                self.assertEqual(code, 0)
+                self.assertIn("Changes from previous snapshot:\n", out)
+                own = json.loads((ws / "custom" / ".config-snapshots.json").read_text())
+                self.assertEqual([(s["label"], s["workspace"]) for s in own],
+                                 [("three", os.path.realpath(ws))])
+                self.assertEqual(self._run(traces, "check")[0], 0)
+                history = json.loads(self._run(traces, "history", fmt="json")[1])
+                self.assertEqual([s["label"] for s in history], ["one", "two", "three"])
+                self.assertEqual(older.read_bytes(), before)
+
+    def test_unreadable_snapshots_of_older_versions(self):
+        """A file of older snapshots that cannot be read, or a bad entry in
+        it, gives a warning that names that file. The trace dir's own
+        snapshots still load. An unreadable own file still gives no
+        snapshots, so check does not pass on an old one."""
+        ws, _ = self._workspace()
+        (ws / "AGENTS.md").write_text("v1")
+        self.assertEqual(self._run("custom", "snapshot", label="new")[0], 0)
+        older = ws / ".agent-traces" / ".config-snapshots.json"
+        shown = os.path.join(os.getcwd(), ".agent-traces", ".config-snapshots.json")
+        old = self._older_snapshot(ws, "old111111111", time.time() - 100, "old").to_dict()
+        for label, content, labels, warning in (
+            ("not JSON", "{", ["new"],
+             f"warning: cannot parse {shown}: JSONDecodeError; treating as no snapshots\n"),
+            ("a bad entry", json.dumps([{"snapshot_id": 1}, old]), ["old", "new"],
+             f"warning: skipping snapshot 0 in {shown}: snapshot_id is missing or not a string\n"),
+        ):
+            with self.subTest(label):
+                older.write_text(content)
+                code, out, err = self._run("custom", "history", fmt="json")
+                self.assertEqual(code, 0)
+                self.assertEqual([s["label"] for s in json.loads(out)], labels)
+                self.assertEqual(err, warning)
+
+        with self.subTest("own file not JSON"):
+            older.write_text(json.dumps([old]))
+            (ws / "custom" / ".config-snapshots.json").write_text("{")
+            code, out, err = self._run("custom", "check")
+            self.assertEqual((code, out), (1, ""))
+            self.assertEqual(
+                err,
+                f"warning: cannot parse {os.path.join('custom', '.config-snapshots.json')}: "
+                "JSONDecodeError; treating as no snapshots\n"
+                f"No snapshots yet for {os.getcwd()}. Run: agent-strace config-watch snapshot\n",
+            )
+
+    def test_custom_trace_dir_skips_other_snapshots_next_to_it(self):
+        """A tagged snapshot in <parent>/.agent-traces belongs to the trace
+        dir that wrote it, such as the default one. An untagged one belongs
+        to <parent>, so another directory does not read it."""
+        ws, _ = self._workspace()
+        (ws / "AGENTS.md").write_text("v1")
+        with self.subTest("tagged snapshot of the default trace dir"):
+            self.assertEqual(self._run(ws / ".agent-traces", "snapshot")[0], 0)
+            code, _, err = self._run("custom", "check")
+            self.assertEqual(code, 1)
+            self.assertEqual(
+                err,
+                f"No snapshots yet for {os.getcwd()}. Run: agent-strace config-watch snapshot\n",
+            )
+        with self.subTest("untagged snapshot of another directory"):
+            self._write_older_snapshots(ws, self._older_snapshot(ws, "old111111111", time.time(), "old"))
+            self._chdir(tempfile.mkdtemp())
+            code, out, _ = self._run(ws / "custom", "history", fmt="json")
+            self.assertEqual((code, json.loads(out)), (0, []))
+
+    def test_default_trace_dir_reads_each_snapshot_once(self):
+        """In the default layout the file of older snapshots is the trace
+        dir's own file, also through a relative path or a symlinked
+        .agent-traces. It is read once."""
+        ws, _ = self._workspace()
+        (ws / "AGENTS.md").write_text("v1")
+        self._write_older_snapshots(ws, self._older_snapshot(ws, "old111111111", time.time() - 100, "old"))
+        self.assertEqual(self._run(".agent-traces", "snapshot", label="new")[0], 0)
+        for trace_dir in (ws / ".agent-traces", ".agent-traces"):
+            with self.subTest(trace_dir=str(trace_dir)):
+                history = json.loads(self._run(trace_dir, "history", fmt="json")[1])
+                self.assertEqual([s["label"] for s in history], ["old", "new"])
+
+        with self.subTest("symlinked .agent-traces"):
+            linked = Path(tempfile.mkdtemp())
+            (linked / "custom").mkdir()
+            try:
+                (linked / ".agent-traces").symlink_to(linked / "custom", target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"cannot create a symlink: {exc}")
+            self._chdir(linked)
+            (linked / "AGENTS.md").write_text("v1")
+            self._write_older_snapshots(
+                linked, self._older_snapshot(linked, "old111111111", time.time(), "old"))
+            history = json.loads(self._run("custom", "history", fmt="json")[1])
+            self.assertEqual([s["label"] for s in history], ["old"])
+
 
 if __name__ == "__main__":
     unittest.main()

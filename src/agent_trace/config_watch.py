@@ -30,7 +30,9 @@ Additional paths can be added via --watch or .agent-strace-watch.json.
 The CLI watches files in the current directory, so run it from the repository
 root. Snapshots are kept in ``.config-snapshots.json`` in the trace directory,
 each tagged with the directory it hashed, so several repositories can share
-one trace directory.
+one trace directory. The snapshots that older versions kept in
+``.agent-traces`` next to the trace directory are still read, but never
+written.
 """
 
 from __future__ import annotations
@@ -242,26 +244,20 @@ def _read_snapshot_entries(workspace_root: Path, trace_dir: str | Path | None = 
     return data
 
 
-def _load_snapshots(
+def _owned_snapshots(
     workspace_root: Path,
-    trace_dir: str | Path | None = None,
+    trace_dir: str | Path,
+    data: list,
 ) -> list[ConfigSnapshot]:
-    """Return the valid snapshots of *workspace_root*, skipping (with a
-    warning) entries that do not parse.
+    """Return the valid snapshots of *workspace_root* in *data*, the entries
+    of the snapshot file in *trace_dir*, skipping (with a warning) entries
+    that do not parse.
 
     Entries of other directories are skipped without a warning. An entry
     with no ``workspace`` was written before snapshots were tagged, into
     ``<directory>/.agent-traces``, so it belongs to the directory that holds
-    *trace_dir*. An unreadable file yields no snapshots and a warning on
-    stderr.
+    *trace_dir*.
     """
-    if trace_dir is None:
-        trace_dir = workspace_root / DEFAULT_TRACE_DIR
-    try:
-        data = _read_snapshot_entries(workspace_root, trace_dir)
-    except SnapshotFileError as exc:
-        sys.stderr.write(f"warning: {exc}; treating as no snapshots\n")
-        return []
     here = os.path.normcase(os.path.realpath(workspace_root))
     legacy_owner = os.path.normcase(
         os.path.realpath(os.path.dirname(os.path.abspath(trace_dir)))
@@ -280,6 +276,53 @@ def _load_snapshots(
         if owner == here:
             snapshots.append(ConfigSnapshot.from_dict(d))
     return snapshots
+
+
+def _same_path(a: str | Path, b: str | Path) -> bool:
+    return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+
+
+def _legacy_snapshots(workspace_root: Path, trace_dir: str | Path) -> list[ConfigSnapshot]:
+    """Return the snapshots of *workspace_root* that older versions kept for
+    *trace_dir*, in ``.agent-traces`` of the directory that holds it.
+
+    Only untagged entries are read: a tagged entry there belongs to the
+    trace dir that wrote it. In the default layout that file is the
+    snapshot file of *trace_dir*, so this returns []. An unreadable file
+    yields [] and a warning on stderr. The file is never written.
+    """
+    legacy_dir = Path(os.path.dirname(os.path.abspath(trace_dir))) / DEFAULT_TRACE_DIR
+    if _same_path(_snapshot_path(workspace_root, legacy_dir),
+                  _snapshot_path(workspace_root, trace_dir)):
+        return []
+    try:
+        data = _read_snapshot_entries(workspace_root, legacy_dir)
+    except SnapshotFileError as exc:
+        sys.stderr.write(f"warning: {exc}; treating as no snapshots\n")
+        return []
+    return [s for s in _owned_snapshots(workspace_root, legacy_dir, data) if not s.workspace]
+
+
+def _load_snapshots(
+    workspace_root: Path,
+    trace_dir: str | Path | None = None,
+) -> list[ConfigSnapshot]:
+    """Return the valid snapshots of *workspace_root* in *trace_dir*,
+    skipping (with a warning) entries that do not parse. An unreadable file
+    yields no snapshots and a warning on stderr.
+
+    The snapshots that older versions kept for *trace_dir* come first (see
+    ``_legacy_snapshots``).
+    """
+    if trace_dir is None:
+        trace_dir = workspace_root / DEFAULT_TRACE_DIR
+    try:
+        data = _read_snapshot_entries(workspace_root, trace_dir)
+    except SnapshotFileError as exc:
+        sys.stderr.write(f"warning: {exc}; treating as no snapshots\n")
+        return []
+    legacy = _legacy_snapshots(workspace_root, trace_dir)
+    return legacy + _owned_snapshots(workspace_root, trace_dir, data)
 
 
 def _save_snapshots(workspace_root: Path, snapshots: list[ConfigSnapshot]) -> None:

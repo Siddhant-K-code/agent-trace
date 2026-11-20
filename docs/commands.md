@@ -1940,7 +1940,7 @@ Run it from the repository root. It hashes the watched files in the current dire
 
 When the current directory has no snapshot, `check` prints `No snapshots yet for <dir>` and exits 1. If the current directory cannot be read, for example because it was deleted, `config-watch` prints one error line and exits 1.
 
-Snapshots taken by older versions have no `workspace`. They belong to the directory that holds the trace store, which is the repository root in the default layout. With a trace store elsewhere, older versions kept the snapshots in `.agent-traces` next to the trace store. They are no longer read, so take a new snapshot. A snapshot stays with the directory it hashed, so also take a new one after you move or rename a repository.
+Snapshots taken by older versions have no `workspace`. They belong to the directory that holds the trace store, which is the repository root in the default layout. With a trace store elsewhere, older versions kept the snapshots in `<parent>/.agent-traces/.config-snapshots.json`, where `<parent>` is the directory that holds the trace store. `config-watch` and `context-score` still read the untagged snapshots there, before the trace store's own, but never write to that file. A snapshot stays with the directory it hashed, so take a new one after you move or rename a repository.
 
 ---
 
