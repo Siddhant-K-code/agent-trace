@@ -24,7 +24,7 @@ from .budget_report import _parse_date
 from .cost import session_cost
 from .event_data import require_object_event_data
 from .inert import inert
-from .models import EventType, SessionMeta, TraceEvent
+from .models import EventType, SessionMeta, TraceEvent, usable_text
 from .store import TraceStore
 
 
@@ -164,7 +164,7 @@ def _branch(meta: SessionMeta) -> str:
     if branch:
         return str(branch)
     # Imported Claude sessions store the branch in the command string.
-    match = re.search(r"branch:\s*([^,)]+)", getattr(meta, "command", "") or "")
+    match = re.search(r"branch:\s*([^,)]+)", usable_text(getattr(meta, "command", "")))
     if match:
         return match.group(1).strip()
     return "(unknown)"

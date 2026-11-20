@@ -9,7 +9,7 @@ from typing import TextIO
 from .evidence_health import EvidenceHealthReasonKind, EvidenceHealthStatus
 from .health import HealthReport, assess_session, load_capture_matrix
 from .hooks import _PROVIDER_AGENT
-from .models import SessionMeta
+from .models import SessionMeta, usable_text
 from .store import TraceStore
 
 _SUPPORTED_PROVIDERS = frozenset({"claude", "codex"})
@@ -49,7 +49,7 @@ def _metadata_matches_provider(meta: SessionMeta, provider: str) -> bool:
     agent_name = _PROVIDER_AGENT.get(provider)
     if not agent_name or meta.agent_name != agent_name:
         return False
-    return meta.command.startswith(f"{agent_name} (")
+    return usable_text(meta.command).startswith(f"{agent_name} (")
 
 
 def _resolve_requested_session(store: TraceStore, requested: str) -> str | None:

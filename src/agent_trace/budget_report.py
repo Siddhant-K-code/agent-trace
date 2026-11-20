@@ -18,7 +18,7 @@ from typing import TextIO
 from .cost import estimate_cost, DEFAULT_MODEL
 from .event_data import require_object_event_data, str_field
 from .inert import inert
-from .models import EventType, SessionMeta
+from .models import EventType, SessionMeta, usable_text
 from .store import TraceStore
 
 
@@ -192,13 +192,13 @@ def build_report(
 
         spend = SessionSpend(
             session_id=meta.session_id,
-            agent_name=meta.agent_name or meta.command or "",
+            agent_name=usable_text(meta.agent_name) or usable_text(meta.command),
             started_at=meta.started_at,
             cost=cost,
             tool_breakdown=breakdown,
             watchdog_terminated=watchdog_terminated,
             watchdog_budget=watchdog_budget,
-            team=getattr(meta, "team", "") or "",
+            team=usable_text(getattr(meta, "team", "")),
         )
 
         if in_window:

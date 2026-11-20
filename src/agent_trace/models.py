@@ -65,6 +65,16 @@ def usable_time(value: Any) -> float | None:
     return usable_number(value)
 
 
+def usable_text(value: Any) -> str:
+    """Return ``value`` if it is a string, else "".
+
+    meta.json can hold any JSON value, so readers use this to treat an
+    agent_name, command or team that is a list, an object, a number, a bool
+    or null as missing.
+    """
+    return value if isinstance(value, str) else ""
+
+
 def _from_dict(cls, data: Any):
     """Build ``cls`` from ``data``, ignoring keys that are not its fields.
 

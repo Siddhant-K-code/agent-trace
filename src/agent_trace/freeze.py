@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from .inert import inert
-from .models import EventType, TraceEvent
+from .models import EventType, TraceEvent, usable_text
 from .store import TraceStore
 
 
@@ -174,7 +174,9 @@ def freeze_session(
     events = store.load_events(session_id)
     return RegressionFixture(
         session=session_id,
-        task=task or _session_task(events, meta.command or meta.agent_name),
+        task=task or _session_task(
+            events, usable_text(meta.command) or usable_text(meta.agent_name)
+        ),
         created_at=time.time(),
         steps=extract_steps(events),
     )

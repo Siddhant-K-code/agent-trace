@@ -25,7 +25,7 @@ from typing import Any, TextIO
 from .budget_report import _parse_date
 from .event_data import require_object_event_data
 from .inert import inert
-from .models import EventType, SessionMeta, TraceEvent
+from .models import EventType, SessionMeta, TraceEvent, usable_text
 from .store import TraceStore, _write_atomic
 
 
@@ -313,7 +313,7 @@ def _branch(meta: SessionMeta, cwd: str) -> str:
     branch = attr.get("git_branch") or _git(cwd, "branch", "--show-current")
     if branch:
         return str(branch)
-    match = re.search(r"branch:\s*([^,)]+)", getattr(meta, "command", "") or "")
+    match = re.search(r"branch:\s*([^,)]+)", usable_text(getattr(meta, "command", "")))
     if match:
         return match.group(1).strip()
     return "(unknown)"

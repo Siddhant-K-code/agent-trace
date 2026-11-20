@@ -19,6 +19,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import TextIO
 
+from .models import usable_text
 from .store import TraceStore
 
 
@@ -62,7 +63,7 @@ SWEET_SPOTS: dict[str, float] = {
 
 def classify_session(agent_name: str, command: str) -> str:
     """Return the task type label for a session based on its name/command."""
-    text = (agent_name + " " + command).lower()
+    text = (usable_text(agent_name) + " " + usable_text(command)).lower()
     for task_type, keywords in TASK_CLASSIFIERS:
         if any(kw in text for kw in keywords):
             return task_type
