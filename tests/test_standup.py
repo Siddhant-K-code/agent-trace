@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import os
 import tempfile
+import time
 import unittest
 
 from agent_trace.models import EventType, SessionMeta, TraceEvent
@@ -37,6 +38,7 @@ def _make_session(store: TraceStore, events_data: list[dict]) -> str:
             event_type=ed["event_type"],
             session_id=sid,
             data=ed.get("data", {}),
+            **{key: ed[key] for key in ("event_id", "parent_id") if key in ed},
         ))
     return sid
 
@@ -273,6 +275,20 @@ def _result(is_error):
             "data": {"content": "done", "is_error": is_error}}
 
 
+def _call(name, call_id):
+    return {**_tool(name), "event_id": call_id}
+
+
+def _outcome(data, parent="", event_type=EventType.TOOL_RESULT):
+    return {"event_type": event_type, "data": data, "parent_id": parent}
+
+
+END = {"event_type": EventType.SESSION_END}
+STILL_FAILING_AT_END = [
+    "  - Still failing when the session ended: Approach using bash (Failed 2 times)"]
+NO_RETRIES = ["  - Single approach (no retries detected)"]
+
+
 # A package name with no whitespace, as an install command holds it, and how it shows.
 PACKAGE = "pkg\x1b]52;c;aWQK\x07\x1b[2K\x9b\u202e"
 PACKAGE_TEXT = r"pkg\x1b]52;c;aWQK\x07\x1b[2K\x9b\u202e"
@@ -324,8 +340,12 @@ class TestApproachLines(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.store = _make_store(tmp.name)
 
-    def approach_lines(self, events_data):
+    def approach_lines(self, events_data, ended_at=None):
         sid = _make_session(self.store, events_data)
+        if ended_at is not None:
+            meta = self.store.load_meta(sid)
+            meta.ended_at = ended_at
+            self.store.update_meta(meta)
         output = _render(analyse_standup(self.store, sid))
         lines = output.split("\n")
         start = lines.index("What the agent did:") + 2
@@ -333,8 +353,79 @@ class TestApproachLines(unittest.TestCase):
 
     def test_session_ending_while_failing(self):
         self.assertEqual(
-            self.approach_lines([_tool("bash"), _result(True), _result(True)]),
-            ["  - Still failing when the session ended: Approach using bash (Failed 2 times)"])
+            self.approach_lines([_tool("bash"), _result(True), _result(True), END]),
+            STILL_FAILING_AT_END)
+
+    def test_meta_end_time_after_the_failures_ends_the_session(self):
+        events = [_tool("bash"), _result(True), _result(True)]
+        self.assertEqual(self.approach_lines(events, ended_at=time.time() + 1),
+                         STILL_FAILING_AT_END)
+
+    def test_trace_ending_while_failing(self):
+        trace_ends = ["  - Still failing when the trace ends: Approach using bash (Failed 2 times)"]
+        cases = {
+            "no session_end": [_tool("bash"), _result(True), _result(True)],
+            "failures after a session_end": [_tool("bash"), _result(False), END,
+                                             _tool("bash"), _result(True), _result(True)],
+        }
+        for label, events in cases.items():
+            with self.subTest(label):
+                self.assertEqual(self.approach_lines(events), trace_ends)
+
+    def test_each_recorded_failure_starts_a_streak(self):
+        cases = {
+            "is_error true": {"is_error": True},
+            "success false": {"success": False},
+            "nonzero exit_code": {"exit_code": 1},
+            "failed status": {"status": "failed"},
+            "failure words with no outcome field": {"content": "Traceback (most recent call)"},
+        }
+        for label, data in cases.items():
+            with self.subTest(label):
+                self.assertEqual(
+                    self.approach_lines([_tool("bash"), _outcome(data), _outcome(data), END]),
+                    STILL_FAILING_AT_END)
+
+    def test_error_event_for_a_tool_call_is_a_failure(self):
+        events = [_call("bash", "c1"), _outcome({"error": "x"}, "c1", EventType.ERROR),
+                  _call("bash", "c2"), _outcome({"error": "x"}, "c2", EventType.ERROR), END]
+        self.assertEqual(self.approach_lines(events), STILL_FAILING_AT_END)
+
+    def test_recorded_success_is_a_success_whatever_the_text(self):
+        for data in ({"is_error": False}, {"success": True}, {"exit_code": 0}):
+            data = {**data, "content": "ran: 0 errors"}
+            with self.subTest(data):
+                self.assertEqual(
+                    self.approach_lines([_tool("bash"), _outcome(data), _outcome(data)]),
+                    NO_RETRIES)
+                self.assertEqual(
+                    self.approach_lines([_tool("bash"), _result(True), _result(True),
+                                         _outcome(data)]),
+                    ["  - Tried and abandoned: Approach using bash (Failed 2 times)"])
+
+    def test_events_that_are_not_tool_failures(self):
+        cancelled = {"status": "cancelled", "content": "error: cancelled"}
+        cases = {
+            "cancelled result": [_tool("bash"), _outcome(cancelled), _outcome(cancelled), END],
+            "error with no tool call": [_tool("bash"), _outcome({}, "", EventType.ERROR),
+                                        _outcome({}, "", EventType.ERROR), END],
+        }
+        for label, events in cases.items():
+            with self.subTest(label):
+                self.assertEqual(self.approach_lines(events), NO_RETRIES)
+
+    def test_one_failure_for_each_call(self):
+        events = [_call("bash", "c1"), _outcome({"is_error": True}, "c1"),
+                  _outcome({"error": "x"}, "c1", EventType.ERROR), END]
+        self.assertEqual(self.approach_lines(events), ["  - Single approach (1 retries)"])
+
+    def test_parallel_calls_name_the_failing_call(self):
+        failed = {"content": "done", "is_error": True}
+        events = [_call("bash", "c1"), _call("read", "c2"), _outcome(failed, "c1"),
+                  _call("bash", "c3"), _call("read", "c4"), _outcome(failed, "c3"),
+                  _outcome({"is_error": False}, "c2")]
+        self.assertEqual(self.approach_lines(events),
+                         ["  - Tried and abandoned: Approach using bash (Failed 2 times)"])
 
     def test_isolated_failure(self):
         self.assertEqual(
