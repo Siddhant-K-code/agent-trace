@@ -146,6 +146,14 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
       }
       this._postReview(loadStoredReview(this.traceDir, sessionId, health), null);
     } catch (error) {
+      // Another session took the view, or this one went live (the live path
+      // hides health failures), while the health lookup was pending.
+      if (
+        this.selectedSessionId !== sessionId ||
+        this.currentState?.sessionId === sessionId
+      ) {
+        return;
+      }
       this.view?.webview.postMessage({
         type: "error",
         message: error instanceof Error ? error.message : String(error),
@@ -281,6 +289,9 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
       if (result.failed) {
         throw new Error(result.stderr.trim() || "Session comparison failed.");
       }
+      if (this.selectedSessionId !== current) {
+        return;
+      }
       this.view?.webview.postMessage({
         type: "comparison",
         report: JSON.parse(result.stdout),
@@ -390,6 +401,7 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
       );
       return;
     }
+    const sessionId = model.session.session_id;
     try {
       const result = await runCli([
         "--trace-dir",
@@ -400,8 +412,11 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
         "--verify",
         "--live",
         "--session",
-        model.session.session_id,
+        sessionId,
       ]);
+      if (this.selectedSessionId !== sessionId) {
+        return;
+      }
       this.view?.webview.postMessage({
         type: "liveCapture",
         result: {
@@ -412,6 +427,9 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
         },
       });
     } catch (error) {
+      if (this.selectedSessionId !== sessionId) {
+        return;
+      }
       this.view?.webview.postMessage({
         type: "liveCapture",
         result: {
