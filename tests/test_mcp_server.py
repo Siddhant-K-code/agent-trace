@@ -396,6 +396,188 @@ class TestHandleToolsCall(unittest.TestCase):
         self.assertFalse(r["result"]["isError"])
 
 
+# ---------------------------------------------------------------------------
+# meta.json values that are not usable
+# ---------------------------------------------------------------------------
+
+_USABLE_META = {
+    "started_at": 1767225600,
+    "agent_name": "claude-code",
+    "command": "claude (startup)",
+    "tool_calls": 3,
+    "llm_requests": 2,
+    "errors": 1,
+    "total_tokens": 5000,
+    "total_duration_ms": 1500.5,
+}
+
+
+def _write_session(root: Path, session_id: str, **fields) -> None:
+    """Write a session by hand, so its meta.json can hold any JSON value."""
+    meta = {"session_id": session_id, **_USABLE_META, **fields}
+    folder = root / session_id
+    folder.mkdir()
+    (folder / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    event = TraceEvent(event_type=EventType.TOOL_CALL, timestamp=1767225600.5,
+                       session_id=session_id,
+                       data={"tool_name": "Bash", "arguments": {}})
+    (folder / "events.ndjson").write_text(event.to_json() + "\n", encoding="utf-8")
+
+
+def _shown(session_id: str, **fields) -> dict:
+    """The session as the tools show it when its meta.json holds _USABLE_META."""
+    return {"session_id": session_id, **_USABLE_META,
+            "estimated_cost_usd": 0.015, **fields}
+
+
+def _strict_json(text: str):
+    """Parse ``text`` as a strict JSON client does, refusing NaN and Infinity."""
+    def refuse(constant):
+        raise ValueError(f"not strict JSON: {constant}")
+    return json.loads(text, parse_constant=refuse)
+
+
+class TestUnusableMetaValues(unittest.TestCase):
+    """A meta.json value that is not usable shows as null.
+
+    meta.json can hold any JSON value, for example one written by an older
+    collector or by hand. Such a session must not fail a tool call, hide the
+    other sessions, or put NaN or Infinity in the tool text.
+    """
+
+    NUMBER_FIELDS = ("tool_calls", "llm_requests", "errors", "total_tokens",
+                     "total_duration_ms", "started_at")
+    BAD_NUMBERS = (
+        ("text", "1500"),
+        ("null", None),
+        ("true", True),
+        ("negative", -5),
+        ("NaN", float("nan")),
+        ("Infinity", float("inf")),
+        ("int too large for a float", 10**400),
+        ("list", [1]),
+        ("object", {"n": 1}),
+    )
+    # Usable numbers that are not usable times.
+    BAD_TIMES = (
+        ("milliseconds", 1_780_000_000_000),
+        ("1e300", 1e300),
+    )
+
+    def _root(self) -> Path:
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        return root
+
+    def _call(self, root: Path, tool: str, arguments: dict):
+        store = TraceStore(root, read_only=True)
+        response = _handle(store, _rpc("tools/call", {"name": tool, "arguments": arguments}))
+        result = response["result"]
+        text = result["content"][0]["text"]
+        self.assertFalse(result["isError"], text)
+        return _strict_json(text)
+
+    def test_list_sessions_shows_an_unusable_number_as_null(self):
+        for field in self.NUMBER_FIELDS:
+            cases = self.BAD_NUMBERS + (self.BAD_TIMES if field == "started_at" else ())
+            for label, value in cases:
+                with self.subTest(field=field, value=label):
+                    root = self._root()
+                    _write_session(root, "good")
+                    _write_session(root, "bad", **{field: value})
+                    result = self._call(root, "list_sessions", {})
+                    self.assertEqual(result["count"], 2)
+                    sessions = {s["session_id"]: s for s in result["sessions"]}
+                    self.assertEqual(sessions["good"], _shown("good"))
+                    shown = _shown("bad", **{field: None})
+                    if field == "total_tokens":
+                        shown["estimated_cost_usd"] = None
+                    self.assertEqual(sessions["bad"], shown)
+
+    def test_get_session_returns_the_events_of_a_session_with_unusable_values(self):
+        root = self._root()
+        _write_session(root, "bad", started_at="soon", tool_calls=float("nan"),
+                       llm_requests=-1, errors=True, total_tokens="many",
+                       total_duration_ms=float("inf"), agent_name=5,
+                       command=["claude", "-p"])
+        result = self._call(root, "get_session", {"session_id": "bad"})
+        self.assertEqual(result["session"], {
+            "session_id": "bad", "started_at": None, "agent_name": "",
+            "command": "", "tool_calls": None, "llm_requests": None,
+            "errors": None, "total_tokens": None, "total_duration_ms": None,
+            "estimated_cost_usd": None,
+        })
+        self.assertEqual(result["event_count"], 1)
+        self.assertEqual(result["events"][0]["data"]["tool_name"], "Bash")
+
+    def test_diff_sessions_shows_a_delta_from_an_unusable_value_as_null(self):
+        bad_tokens = {"total_tokens": 10**400}
+        bad_duration = {"total_duration_ms": float("nan")}
+        cases = (
+            ("tokens in a", bad_tokens, {}),
+            ("tokens in b", {}, bad_tokens),
+            ("tokens in both", bad_tokens, bad_tokens),
+            ("duration in a", bad_duration, {}),
+            ("duration in b", {}, bad_duration),
+            ("duration in both", bad_duration, bad_duration),
+        )
+        for label, fields_a, fields_b in cases:
+            with self.subTest(label):
+                root = self._root()
+                _write_session(root, "a", **fields_a)
+                _write_session(root, "b", **{"total_tokens": 2000,
+                                             "total_duration_ms": 500.5, **fields_b})
+                result = self._call(root, "diff_sessions",
+                                    {"session_a": "a", "session_b": "b"})
+                if "tokens" in label:
+                    self.assertIsNone(result["token_delta"])
+                    self.assertIsNone(result["cost_delta_usd"])
+                    self.assertEqual(result["duration_delta_ms"], -1000.0)
+                else:
+                    self.assertEqual(result["token_delta"], -3000)
+                    self.assertEqual(result["cost_delta_usd"], -0.009)
+                    self.assertIsNone(result["duration_delta_ms"])
+
+    def test_agent_filter_skips_a_name_that_is_not_a_string(self):
+        root = self._root()
+        _write_session(root, "named")
+        _write_session(root, "number", agent_name=5)
+        _write_session(root, "list", agent_name=["claude-code"])
+        _write_session(root, "object", agent_name={"claude": 1})
+        _write_session(root, "null", agent_name=None)
+        result = self._call(root, "list_sessions", {"agent": "claude"})
+        self.assertEqual([s["session_id"] for s in result["sessions"]], ["named"])
+        result = self._call(root, "list_sessions", {})
+        names = {s["session_id"]: s["agent_name"] for s in result["sessions"]}
+        self.assertEqual(names, {"named": "claude-code", "number": "", "list": "",
+                                 "object": "", "null": ""})
+
+    def test_usable_values_print_as_stored(self):
+        root = self._root()
+        _write_session(root, "good")
+        _write_session(root, "zero", started_at=0, tool_calls=0, llm_requests=0,
+                       errors=0, total_tokens=0, total_duration_ms=0)
+        _write_session(root, "huge", total_tokens=10**300, total_duration_ms=1.5e308)
+        cases = (
+            ("good", _shown("good")),
+            ("zero", _shown("zero", started_at=0, tool_calls=0, llm_requests=0,
+                            errors=0, total_tokens=0, total_duration_ms=0,
+                            estimated_cost_usd=0.0)),
+            ("huge", _shown("huge", total_tokens=10**300, total_duration_ms=1.5e308,
+                            estimated_cost_usd=3e294)),
+        )
+        for session_id, shown in cases:
+            with self.subTest(session_id):
+                result = self._call(root, "get_session", {"session_id": session_id})
+                # JSON text, so an int that came back as a float fails too.
+                self.assertEqual(json.dumps(result["session"], sort_keys=True),
+                                 json.dumps(shown, sort_keys=True))
+        result = self._call(root, "diff_sessions", {"session_a": "good", "session_b": "huge"})
+        self.assertEqual(result["token_delta"], 10**300 - 5000)
+        self.assertEqual(result["cost_delta_usd"], 3e294)
+        self.assertEqual(result["duration_delta_ms"], 1.5e308 - 1500.5)
+
+
 if __name__ == "__main__":
     unittest.main()
 

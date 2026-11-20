@@ -44,7 +44,7 @@ from .reviewability import (
     render_markdown,
 )
 from .skills import build_aggregate_report, build_session_report
-from .models import EventType, TraceEvent
+from .models import EventType, TraceEvent, usable_number, usable_time
 from .store import TraceStore
 
 
@@ -341,19 +341,37 @@ _TOOLS: list[dict] = [
 _COST_PER_1K = 0.003  # rough blended cost estimate
 
 
+def _meta_number(value: Any, check=usable_number) -> Any:
+    """Return a meta.json number as stored, or None when ``check`` refuses it.
+
+    meta.json can hold any JSON value. A value that is not a usable number
+    shows as null, so one bad session cannot fail a tool or put NaN or
+    Infinity in its JSON.
+    """
+    return value if check(value) is not None else None
+
+
+def _meta_text(value: Any) -> str:
+    return value if isinstance(value, str) else ""
+
+
+def _cost(tokens: Any) -> float:
+    return tokens / 1_000 * _COST_PER_1K
+
+
 def _session_to_dict(meta) -> dict:
-    cost = meta.total_tokens / 1_000 * _COST_PER_1K
+    tokens = _meta_number(meta.total_tokens)
     return {
         "session_id": meta.session_id,
-        "started_at": meta.started_at,
-        "agent_name": meta.agent_name or "",
-        "command": meta.command or "",
-        "tool_calls": meta.tool_calls,
-        "llm_requests": meta.llm_requests,
-        "errors": meta.errors,
-        "total_tokens": meta.total_tokens,
-        "total_duration_ms": meta.total_duration_ms,
-        "estimated_cost_usd": round(cost, 4),
+        "started_at": _meta_number(meta.started_at, usable_time),
+        "agent_name": _meta_text(meta.agent_name),
+        "command": _meta_text(meta.command),
+        "tool_calls": _meta_number(meta.tool_calls),
+        "llm_requests": _meta_number(meta.llm_requests),
+        "errors": _meta_number(meta.errors),
+        "total_tokens": tokens,
+        "total_duration_ms": _meta_number(meta.total_duration_ms),
+        "estimated_cost_usd": None if tokens is None else round(_cost(tokens), 4),
     }
 
 
@@ -374,7 +392,7 @@ def _tool_list_sessions(store: TraceStore, args: dict) -> str:
     agent_filter = str(args.get("agent") or "").lower()
     sessions = store.list_sessions()
     if agent_filter:
-        sessions = [s for s in sessions if agent_filter in (s.agent_name or "").lower()]
+        sessions = [s for s in sessions if agent_filter in _meta_text(s.agent_name).lower()]
     sessions = sessions[:limit]
     result = [_session_to_dict(s) for s in sessions]
     return json.dumps({"sessions": result, "count": len(result)}, indent=2)
@@ -521,8 +539,12 @@ def _tool_diff_sessions(store: TraceStore, args: dict) -> str:
         if tools_a.get(t, 0) != tools_b.get(t, 0)
     }
 
-    cost_a = meta_a.total_tokens / 1_000 * _COST_PER_1K
-    cost_b = meta_b.total_tokens / 1_000 * _COST_PER_1K
+    tokens_a = _meta_number(meta_a.total_tokens)
+    tokens_b = _meta_number(meta_b.total_tokens)
+    duration_a = _meta_number(meta_a.total_duration_ms)
+    duration_b = _meta_number(meta_b.total_duration_ms)
+    tokens_known = tokens_a is not None and tokens_b is not None
+    duration_known = duration_a is not None and duration_b is not None
 
     return json.dumps({
         "session_a": full_a,
@@ -531,11 +553,11 @@ def _tool_diff_sessions(store: TraceStore, args: dict) -> str:
         "files_only_in_a": sorted(files_a - files_b),
         "files_only_in_b": sorted(files_b - files_a),
         "files_in_both": sorted(files_a & files_b),
-        "token_delta": meta_b.total_tokens - meta_a.total_tokens,
-        "cost_delta_usd": round(cost_b - cost_a, 4),
+        "token_delta": tokens_b - tokens_a if tokens_known else None,
+        "cost_delta_usd": round(_cost(tokens_b) - _cost(tokens_a), 4) if tokens_known else None,
         "error_count_a": len(errors_a),
         "error_count_b": len(errors_b),
-        "duration_delta_ms": meta_b.total_duration_ms - meta_a.total_duration_ms,
+        "duration_delta_ms": duration_b - duration_a if duration_known else None,
         "errors_a": errors_a[:10],
         "errors_b": errors_b[:10],
     }, indent=2)
