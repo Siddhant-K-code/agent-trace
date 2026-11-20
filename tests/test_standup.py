@@ -98,6 +98,35 @@ class TestStandupExtraction(unittest.TestCase):
         abandoned = [a for a in approaches if a.abandoned]
         self.assertGreater(len(abandoned), 0)
 
+    def test_stream_ending_while_failing_is_still_failing(self):
+        from agent_trace.standup import _extract_approaches
+        events = [TraceEvent(**_tool("bash")), TraceEvent(**_result(True)),
+                  TraceEvent(**_result(True))]
+        self.assertEqual(_extract_approaches(events), [ApproachAttempt(
+            "Approach using bash", abandoned=False, failure_reason="Failed 2 times",
+            retries=2, still_failing=True)])
+
+    def test_abandoned_then_still_failing(self):
+        from agent_trace.standup import _extract_approaches
+        events = [TraceEvent(**e) for e in [
+            _tool("bash"), _result(True), _result(True), _result(False),
+            _tool("edit"), _result(True), _result(True),
+        ]]
+        approaches = _extract_approaches(events)
+        self.assertEqual([(a.description, a.abandoned, a.still_failing) for a in approaches],
+                         [("Approach using bash", True, False),
+                          ("Approach using edit", False, True)])
+
+    def test_failing_tool_name_on_the_result_wins(self):
+        from agent_trace.standup import _extract_approaches
+        failed = {"event_type": EventType.TOOL_RESULT,
+                  "data": {"tool_name": "bash", "content": "done", "is_error": True}}
+        events = [TraceEvent(**e) for e in [
+            _tool("bash"), _tool("read"), failed, failed, _result(False),
+        ]]
+        approaches = _extract_approaches(events)
+        self.assertEqual([a.description for a in approaches], ["Approach using bash"])
+
 
 class TestStandupReport(unittest.TestCase):
     def setUp(self):
@@ -197,6 +226,8 @@ FORMAT_STANDUP_CASES = [
     ("abandoned approach", "text",
      lambda v: _approach(v, abandoned=True, failure_reason="plain")),
     ("failure reason", "text", lambda v: _approach(abandoned=True, failure_reason=v)),
+    ("still-failing approach", "text",
+     lambda v: _approach(v, abandoned=False, failure_reason="plain", still_failing=True)),
     ("new dependency", "text", lambda v: _report(new_dependencies=["plain", v])),
     ("uncertainty", "free", lambda v: _uncertainty(description=v)),
     ("uncertainty location", "text", lambda v: _uncertainty(location=v)),
@@ -283,3 +314,39 @@ class TestPayloadTrace(unittest.TestCase):
                                _result(False)])
         self.assertIn(f"Tried and abandoned: Approach using {_escapes.PAYLOAD_TEXT} "
                       "(Failed 2 times)\n", output)
+
+
+class TestApproachLines(unittest.TestCase):
+    """The approach lines standup prints for a session."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.store = _make_store(tmp.name)
+
+    def approach_lines(self, events_data):
+        sid = _make_session(self.store, events_data)
+        output = _render(analyse_standup(self.store, sid))
+        lines = output.split("\n")
+        start = lines.index("What the agent did:") + 2
+        return lines[start:lines.index("", start)]
+
+    def test_session_ending_while_failing(self):
+        self.assertEqual(
+            self.approach_lines([_tool("bash"), _result(True), _result(True)]),
+            ["  - Still failing when the session ended: Approach using bash (Failed 2 times)"])
+
+    def test_isolated_failure(self):
+        self.assertEqual(
+            self.approach_lines([_tool("bash"), _result(True), _tool("bash"), _result(False)]),
+            ["  - Single approach (1 retries)"])
+
+    def test_no_failure(self):
+        self.assertEqual(self.approach_lines([_tool("bash"), _result(False)]),
+                         ["  - Single approach (no retries detected)"])
+
+    def test_abandoned_approach(self):
+        self.assertEqual(
+            self.approach_lines([_tool("bash"), _result(True), _tool("bash"), _result(True),
+                                 _tool("write"), _result(False)]),
+            ["  - Tried and abandoned: Approach using bash (Failed 2 times)"])

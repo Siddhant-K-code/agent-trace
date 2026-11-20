@@ -1887,6 +1887,8 @@ agent-strace standup [session-id] [--no-llm]
 ```
 Structured standup from a session trace. No LLM required. Covers files touched, approaches tried, dependencies added, TODOs written.
 
+Two or more failed tool results in a row make an approach, named after the tool that failed first. It shows as "Tried and abandoned" when a later tool result succeeds, and as "Still failing when the session ended" when the trace ends first.
+
 ### `freshness`
 ```
 agent-strace freshness [--since DATE] [--scope GLOB]

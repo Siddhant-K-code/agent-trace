@@ -34,6 +34,8 @@ class ApproachAttempt:
     abandoned: bool
     failure_reason: str = ""
     retries: int = 0
+    # The session ended while this approach was failing: no other approach followed.
+    still_failing: bool = False
 
 
 @dataclass
@@ -131,7 +133,17 @@ def _extract_approaches(events: list[TraceEvent]) -> list[ApproachAttempt]:
     approaches: list[ApproachAttempt] = []
     consecutive_errors = 0
     last_tool = ""
+    # The tool whose failure started the current streak of errors.
+    failing_tool = ""
     retry_count = 0
+
+    def failing_approach(**fields) -> ApproachAttempt:
+        return ApproachAttempt(
+            description=f"Approach using {failing_tool or 'unknown tool'}",
+            failure_reason=f"Failed {consecutive_errors} times",
+            retries=consecutive_errors,
+            **fields,
+        )
 
     for e in events:
         if e.event_type == EventType.TOOL_RESULT:
@@ -140,25 +152,26 @@ def _extract_approaches(events: list[TraceEvent]) -> list[ApproachAttempt]:
                 kw in content.lower() for kw in ("error", "failed", "traceback")
             )
             if is_error:
+                if consecutive_errors == 0:
+                    failing_tool = str_field(e.data, "tool_name", "") or last_tool
                 consecutive_errors += 1
                 retry_count += 1
             else:
                 if consecutive_errors >= 2:
                     # Detected an abandoned approach
-                    approaches.append(ApproachAttempt(
-                        description=f"Approach using {last_tool or 'unknown tool'}",
-                        abandoned=True,
-                        failure_reason=f"Failed {consecutive_errors} times",
-                        retries=consecutive_errors,
-                    ))
+                    approaches.append(failing_approach(abandoned=True))
                 consecutive_errors = 0
 
         if e.event_type == EventType.TOOL_CALL:
             last_tool = e.data.get("tool_name", "")
 
+    if consecutive_errors >= 2:
+        approaches.append(failing_approach(abandoned=False, still_failing=True))
+
     if not approaches:
         approaches.append(ApproachAttempt(
-            description="Single approach (no retries detected)",
+            description="Single approach" if retry_count else
+                        "Single approach (no retries detected)",
             abandoned=False,
             retries=retry_count,
         ))
@@ -333,7 +346,10 @@ def format_standup(report: StandupReport, out: TextIO = sys.stdout) -> None:
 
     for approach in report.approaches:
         description = inert(approach.description)
-        if approach.abandoned:
+        if approach.still_failing:
+            w(f"  - Still failing when the session ended: {description} "
+              f"({inert(approach.failure_reason)})\n")
+        elif approach.abandoned:
             w(f"  - Tried and abandoned: {description} "
               f"({inert(approach.failure_reason)})\n")
         elif approach.retries > 0:
