@@ -46,6 +46,40 @@ class TestShellSplit(unittest.TestCase):
         self.assertEqual(command_segments(tabs_only), [["cat", "<<", "-EOF"]])
         self.assertFalse(is_test_command(tabs_only))
 
+    def test_heredoc_detection_respects_quotes_and_comments(self):
+        quoted = "echo '<<123'\npytest"
+        self.assertEqual(
+            command_segments(quoted), [["echo", "<<123"], ["pytest"]]
+        )
+        self.assertTrue(is_test_command(quoted))
+
+        commented = "# <<123\npytest"
+        self.assertEqual(command_segments(commented), [["pytest"]])
+        self.assertTrue(is_test_command(commented))
+
+        multiline_quoted = "echo '\n<<123\n'\npytest"
+        self.assertEqual(strip_heredocs(multiline_quoted), multiline_quoted)
+        self.assertTrue(is_test_command(multiline_quoted))
+
+    def test_arithmetic_shifts_are_not_heredocs(self):
+        for command in ("(( value << 2 ))\npytest", "echo $((1 << 2))\npytest"):
+            with self.subTest(command=command):
+                self.assertTrue(is_test_command(command))
+
+    def test_heredoc_delimiter_is_the_complete_shell_word(self):
+        for opener in ("<<123.txt", "<<'123'.txt", r"<<123\.txt"):
+            with self.subTest(opener=opener):
+                command = f"cat {opener}\npytest\n123.txt\nnpm test"
+                self.assertEqual(command_segments(command)[-1], ["npm", "test"])
+
+    def test_quoted_heredoc_body_does_not_fold_backslash_newline(self):
+        command = "cat <<'EOF'\nbody \\\nEOF\npytest"
+        self.assertEqual(command_segments(command)[-1], ["pytest"])
+
+    def test_unquoted_heredoc_body_folds_backslash_newline(self):
+        command = "cat <<EOF\nbody \\\nEOF\nnot-a-command\nEOF\npytest"
+        self.assertEqual(command_segments(command)[-1], ["pytest"])
+
     def test_strip_heredocs_keeps_here_strings(self):
         self.assertEqual(strip_heredocs("grep x <<< 'EOF'\npytest"), "grep x <<< 'EOF'\npytest")
 

@@ -22,26 +22,155 @@ import shlex
 
 PUNCTUATION = ";&|()<>\n"
 
-_HEREDOC = re.compile(r"(?<!<)<<(-?)\s*(['\"]?)([A-Za-z0-9_][A-Za-z0-9_-]*)\2")
 _WORD_BOUNDARY = frozenset(" \t\r\n;&|()<>")
+
+
+def _heredoc_word(line: str, start: int) -> tuple[str, bool, int] | None:
+    """Return a quote-removed heredoc word, whether it was quoted, and its end."""
+    word: list[str] = []
+    quote = ""
+    quoted = False
+    consumed = False
+    i = start
+    while i < len(line):
+        char = line[i]
+        if quote == "'":
+            consumed = True
+            if char == "'":
+                quote = ""
+            else:
+                word.append(char)
+            i += 1
+            continue
+        if quote == '"':
+            consumed = True
+            if char == '"':
+                quote = ""
+                i += 1
+                continue
+            if char == "\\" and i + 1 < len(line):
+                following = line[i + 1]
+                if following in '$`"\\':
+                    word.append(following)
+                else:
+                    word.extend((char, following))
+                i += 2
+                continue
+            word.append(char)
+            i += 1
+            continue
+        if char in " \t\r" or char in PUNCTUATION:
+            break
+        consumed = True
+        if char in "'\"":
+            quote = char
+            quoted = True
+            i += 1
+            continue
+        if char == "\\":
+            if i + 1 >= len(line):
+                return None
+            quoted = True
+            word.append(line[i + 1])
+            i += 2
+            continue
+        word.append(char)
+        i += 1
+    if quote or not consumed:
+        return None
+    return "".join(word), quoted, i
+
+
+def _heredoc_openers(
+    line: str, quote: str, arithmetic_depth: int
+) -> tuple[list[tuple[str, bool, bool]], str, int]:
+    """Find heredocs in one command line and return the ending quote state."""
+    openers: list[tuple[str, bool, bool]] = []
+    i = 0
+    while i < len(line):
+        char = line[i]
+        if arithmetic_depth:
+            if char == "(":
+                arithmetic_depth += 1
+            elif char == ")":
+                arithmetic_depth -= 1
+            i += 1
+            continue
+        if quote:
+            if char == "\\" and quote == '"' and i + 1 < len(line):
+                i += 2
+                continue
+            if char == quote:
+                quote = ""
+            i += 1
+            continue
+        if char == "\\" and i + 1 < len(line):
+            i += 2
+            continue
+        if char in "'\"":
+            quote = char
+            i += 1
+            continue
+        if char == "#" and (i == 0 or line[i - 1] in _WORD_BOUNDARY):
+            break
+        if line.startswith("$((", i):
+            arithmetic_depth = 2
+            i += 3
+            continue
+        if line.startswith("((", i):
+            arithmetic_depth = 2
+            i += 2
+            continue
+        if (
+            char == "<"
+            and i + 1 < len(line)
+            and line[i + 1] == "<"
+            and (i == 0 or line[i - 1] != "<")
+            and (i + 2 == len(line) or line[i + 2] != "<")
+        ):
+            word_start = i + 2
+            strip_tabs = word_start < len(line) and line[word_start] == "-"
+            if strip_tabs:
+                word_start += 1
+            while word_start < len(line) and line[word_start] in " \t\r":
+                word_start += 1
+            parsed = _heredoc_word(line, word_start)
+            if parsed is not None:
+                delimiter, quoted, end = parsed
+                openers.append((delimiter, strip_tabs, quoted))
+                i = end
+                continue
+        i += 1
+    return openers, quote, arithmetic_depth
+
+
+def _continues_line(line: str) -> bool:
+    trailing = len(line) - len(line.rstrip("\\"))
+    return trailing % 2 == 1
 
 
 def strip_heredocs(command: str) -> str:
     """Drop heredoc bodies and their terminator lines."""
     kept: list[str] = []
-    pending: list[tuple[str, bool]] = []
+    pending: list[tuple[str, bool, bool]] = []
+    continued = False
+    quote = ""
+    arithmetic_depth = 0
     for line in command.split("\n"):
         if pending:
-            delimiter, strip_tabs = pending[0]
+            delimiter, strip_tabs, quoted = pending[0]
             candidate = line.lstrip("\t") if strip_tabs else line
-            if candidate == delimiter:
+            if not continued and candidate == delimiter:
                 pending.pop(0)
+                continued = False
+            else:
+                continued = not quoted and _continues_line(candidate)
             continue
         kept.append(line)
-        pending.extend(
-            (match.group(3), match.group(1) == "-")
-            for match in _HEREDOC.finditer(line)
+        openers, quote, arithmetic_depth = _heredoc_openers(
+            line, quote, arithmetic_depth
         )
+        pending.extend(openers)
     return "\n".join(kept)
 
 
@@ -93,8 +222,8 @@ def split_tokens(command: str) -> tuple[list[str], bool]:
     tokenize as shell (for example an unbalanced quote) and a plain split
     on whitespace and punctuation was used instead.
     """
-    text = command.replace("\r\n", "\n").replace("\\\n", " ")
-    text = strip_comments(strip_heredocs(text))
+    text = command.replace("\r\n", "\n")
+    text = strip_comments(strip_heredocs(text)).replace("\\\n", " ")
     lexer = shlex.shlex(text, posix=True, punctuation_chars=PUNCTUATION)
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
