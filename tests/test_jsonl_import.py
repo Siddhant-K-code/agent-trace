@@ -891,19 +891,19 @@ class TestMalformedLog(unittest.TestCase):
                     self.assertEqual((self.trace / sid / "events.ndjson").read_bytes(), events)
 
     def test_line_at_the_depth_limit_imports_and_one_level_more_is_skipped(self):
-        limit = jsonl_import.MAX_LINE_DEPTH
         without = _full_log()
         del without[1]
         for kind in ("dict", "list"):
             with self.subTest(kind=kind):
                 # The tool input sits below 4 levels: the line, message, content and tool_use.
-                at_limit = _nested(kind, limit - 4)
+                # docs/commands.md promises 64 levels, so this does not read MAX_LINE_DEPTH.
+                at_limit = _nested(kind, 64 - 4)
                 _, events = json.loads(self._session(
                     _with_field(1, "message.content.1.input", at_limit)))
                 self.assertEqual([event["data"]["arguments"] for event in events
                                   if event["event_type"] == EventType.TOOL_CALL.value], [at_limit])
 
-                over = _with_field(1, "message.content.1.input", _nested(kind, limit - 3))
+                over = _with_field(1, "message.content.1.input", _nested(kind, 65 - 4))
                 self.assertEqual(self._session(over), self._session(without))
 
     def test_log_of_only_unusable_lines_imports_as_an_empty_session(self):
