@@ -347,7 +347,9 @@ def crewai_modules() -> dict[str, Any]:
     """``sys.modules`` entries for a CrewAI whose crews run their tasks.
 
     ``Crew.kickoff`` runs each task's ``execute_sync``, which has its agent
-    ``execute_task``. A task whose description is ``"fail"`` raises.
+    ``execute_task``. A task whose description is ``"fail"`` raises, and one
+    whose description is ``"interrupt"`` or ``"exit"`` raises
+    ``KeyboardInterrupt`` or ``SystemExit``.
     """
     class Agent:
         role = "researcher"
@@ -355,6 +357,10 @@ def crewai_modules() -> dict[str, Any]:
         def execute_task(self, task: Any, *args: Any, **kwargs: Any) -> Any:
             if task.description == "fail":
                 raise RuntimeError("task failed")
+            if task.description == "interrupt":
+                raise KeyboardInterrupt
+            if task.description == "exit":
+                raise SystemExit(3)
             return f"done: {task.description}"
 
     class Task:

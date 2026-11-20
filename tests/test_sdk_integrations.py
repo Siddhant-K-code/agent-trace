@@ -1029,6 +1029,41 @@ class TestCrewAISessions(FrameworkCase):
         self.assertEqual(events[5].parent_id, "")
         self.assertNoMarkers()
 
+    def test_interrupted_task_closes_its_tool_call_and_llm_request(self):
+        modules = stubs.crewai_modules()
+        self.instrument("crewai", modules)
+        crewai = modules["crewai"]
+        agent = crewai.Agent()
+        for description, raised in (("interrupt", KeyboardInterrupt), ("exit", SystemExit)):
+            with self.subTest(raised=raised.__name__):
+                before = len(self.events())
+                with self.assertRaises(raised):
+                    crewai.Task(description, agent).execute_sync()
+                call, request, response, result = self.events()[before:]
+                self.assertEqual([e.event_type for e in (call, request, response, result)],
+                                 [E.TOOL_CALL, E.LLM_REQUEST, E.LLM_RESPONSE, E.TOOL_RESULT])
+                self.assertEqual(response.parent_id, request.event_id)
+                self.assertEqual(result.parent_id, call.event_id)
+                response_data, result_data = dict(response.data), dict(result.data)
+                self.assertIsInstance(response_data.pop("duration_ms"), float)
+                self.assertIsInstance(result_data.pop("duration_ms"), float)
+                self.assertEqual(response_data, {"agent_role": "researcher",
+                                                 "status": "cancelled"})
+                self.assertEqual(result_data, {"tool_name": "crewai.task",
+                                               "status": "cancelled"})
+
+    def test_interrupted_execute_task_closes_its_llm_request(self):
+        modules = stubs.crewai_modules()
+        self.instrument("crewai", modules)
+        crewai = modules["crewai"]
+        agent = crewai.Agent()
+        with self.assertRaises(KeyboardInterrupt):
+            agent.execute_task(crewai.Task("interrupt", agent))
+        request, response = self.events()
+        self.assertEqual(response.event_type, E.LLM_RESPONSE)
+        self.assertEqual(response.parent_id, request.event_id)
+        self.assertEqual(response.data["status"], "cancelled")
+
 
 class TestOpenAIAgentsSessions(FrameworkCase):
     """Tools run through FunctionTool.on_invoke_tool inside a function span."""
@@ -1242,6 +1277,48 @@ class TestLangChainTools(FrameworkCase):
         self.assertEqual(error.event_type, E.ERROR)
         self.assertEqual(error.parent_id, call.event_id)
         self.assertEqual(error.data["error_type"], "ValueError")
+
+    def test_interrupted_tool_run_is_recorded_as_cancelled_and_raised(self):
+        base, _ = self.instrument_tools()
+        interrupt = KeyboardInterrupt()
+
+        class StoppedTool(base):
+            name = "stop"
+
+            def _run(self, query):
+                raise interrupt
+
+        with self.assertRaises(KeyboardInterrupt) as caught:
+            StoppedTool().invoke("x")
+        self.assertIs(caught.exception, interrupt)
+        call, result = self.events()
+        self.assertEqual(result.event_type, E.TOOL_RESULT)
+        self.assertEqual(result.parent_id, call.event_id)
+        data = dict(result.data)
+        self.assertIsInstance(data.pop("duration_ms"), float)
+        self.assertEqual(data, {"tool_name": "stop", "status": "cancelled"})
+
+    def test_cancelled_tool_arun_is_recorded_as_cancelled_and_raised(self):
+        base, _ = self.instrument_tools()
+
+        class SlowTool(base):
+            name = "slow"
+
+            async def _arun(self, query):
+                await asyncio.sleep(60)
+
+        async def cancel():
+            task = asyncio.ensure_future(SlowTool().ainvoke("x"))
+            await asyncio.sleep(0.01)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        _run(cancel())
+        call, result = self.events()
+        self.assertEqual(result.event_type, E.TOOL_RESULT)
+        self.assertEqual(result.parent_id, call.event_id)
+        self.assertEqual(result.data["status"], "cancelled")
 
     def test_uninstrument_restores_run_and_arun(self):
         modules, base, _ = stubs.langchain_tool_modules()

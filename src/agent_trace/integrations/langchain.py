@@ -172,6 +172,15 @@ def _instrument_tools(base: type, store: Any, agent_name: str) -> None:
         emit(EventType.ERROR, sid, store, parent=call,
              tool_name=tool_name, error=str(exc), error_type=type(exc).__name__)
 
+    def cancel(started: tuple[str, Any, Any, float]) -> None:
+        # Cancelled, KeyboardInterrupt or SystemExit, as for a model call.
+        sid, tool_name, call, t0 = started
+        try:
+            emit(EventType.TOOL_RESULT, sid, store, parent=call, tool_name=tool_name,
+                 duration_ms=(time.time() - t0) * 1000, status="cancelled")
+        except Exception:
+            pass
+
     def wrap_run(original: Any) -> Any:
         @functools.wraps(original)
         def run(self: Any, tool_input: Any, *args: Any, **kwargs: Any) -> Any:
@@ -180,6 +189,9 @@ def _instrument_tools(base: type, store: Any, agent_name: str) -> None:
                 result = original(self, tool_input, *args, **kwargs)
             except Exception as exc:
                 fail(started, exc)
+                raise
+            except BaseException:
+                cancel(started)
                 raise
             succeed(started, result)
             return result
@@ -194,6 +206,9 @@ def _instrument_tools(base: type, store: Any, agent_name: str) -> None:
                 result = await original(self, tool_input, *args, **kwargs)
             except Exception as exc:
                 fail(started, exc)
+                raise
+            except BaseException:
+                cancel(started)
                 raise
             succeed(started, result)
             return result

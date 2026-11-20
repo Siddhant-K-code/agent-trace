@@ -62,7 +62,7 @@ pip install agent-strace[all-integrations]
 
 Each integration is an optional extra. The core package stays dependency-free. See [ADR-0003](../ADRs/0003-zero-runtime-dependencies.md).
 
-When a model call raises, the OpenAI, Anthropic, LiteLLM, LangChain chat model and CrewAI `Agent.execute_task` integrations record an `error` event whose `parent_id` names the call's `llm_request`, so the exports report that call as failed. See [Failed and cancelled model requests](production.md#failed-and-cancelled-model-requests).
+When a model call raises, the OpenAI, Anthropic, LiteLLM, LangChain chat model and CrewAI `Agent.execute_task` integrations record an `error` event whose `parent_id` names the call's `llm_request`, so the exports report that call as failed. A call ended by cancellation, `KeyboardInterrupt` or `SystemExit` records an `llm_response` with `"status": "cancelled"` instead, and the exception is raised unchanged. See [Failed and cancelled model requests](production.md#failed-and-cancelled-model-requests).
 
 ### Sessions
 
@@ -72,7 +72,7 @@ Events from a thread or task that is not inside a run, such as a thread the prog
 
 Events recorded outside a run, such as a LangChain tool call or a model call through the OpenAI, Anthropic or LiteLLM integration, go to one session per integration, which stays open while the program records into it.
 
-Each tool `tool_result`, and each `error` a tool raises, names its `tool_call` in its `parent_id`, so the exports pair them.
+Each tool `tool_result`, and each `error` a tool raises, names its `tool_call` in its `parent_id`, so the exports pair them. A LangChain tool, LangGraph node or CrewAI `Task.execute_sync` ended by cancellation, `KeyboardInterrupt` or `SystemExit` records a `tool_result` with `"status": "cancelled"`, so its `tool_call` is closed, and the exception is raised unchanged.
 
 ### Model calls
 
