@@ -1293,7 +1293,11 @@ class TraceStore:
                 event.session_id = session_id
                 if validate_tenant_ids:
                     event.tenant_id = validate_optional_tenant_id(event.tenant_id)
-                if meta.tenant_id and event.tenant_id and event.tenant_id != meta.tenant_id:
+                if (
+                    event.tenant_id
+                    and event.tenant_id != meta.tenant_id
+                    and (meta.tenant_id or validate_tenant_ids)
+                ):
                     raise ValueError("event tenant does not match session metadata")
                 events.append(event)
         # Session-level tenancy is authoritative and also makes the single

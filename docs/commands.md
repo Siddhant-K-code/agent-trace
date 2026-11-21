@@ -2479,6 +2479,13 @@ written by an older collector, or edited by hand, can still hold one. To
 continue, set `started_at` in that session's `meta.json` to a Unix time in
 seconds.
 
+`tenant report`, `tenant export` and `tenant delete` also stop with this error
+when a session's `meta.json` has no `tenant_id` but its events carry one.
+`tenant delete` then deletes nothing. `org-report` does not check event tenant
+IDs, so it is not affected. Normal capture never writes this state, but an
+older store or a hand edit can. To continue, set `tenant_id` in that session's
+`meta.json` to the tenant ID its events carry.
+
 ### `backfill-meta`
 ```
 agent-strace backfill-meta [--apply] [--agent-name NAME] [--format text|json]

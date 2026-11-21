@@ -126,6 +126,19 @@ class TestTenantModelAndStore(TenantTestCase):
                 ):
                     validate_optional_tenant_id(value)
 
+    def test_strict_listing_validates_metadata_when_event_validation_is_disabled(self):
+        meta = self.create_session("invalid-meta-strict", "tenant-a")
+        path = self.store._session_dir(meta.session_id) / "meta.json"
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record["tenant_id"] = False
+        path.write_text(json.dumps(record), encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            f"^corrupt session in tenant store: {meta.session_id}$",
+        ):
+            self.store.list_sessions_strict(validate_events=False)
+
     def test_environment_tags_new_sessions_and_events(self):
         with patch.dict(os.environ, {"AGENT_STRACE_TENANT_ID": "customer-acme"}):
             meta = SessionMeta(session_id="env-session")
@@ -239,6 +252,32 @@ class TestTenantModelAndStore(TenantTestCase):
             [event.tenant_id for event in self.store.load_events(meta.session_id)],
             ["tenant-a", "tenant-a"],
         )
+        self.assertEqual(
+            [item.session_id for item in self.store.list_sessions_strict("tenant-a")],
+            [meta.session_id],
+        )
+
+    def test_strict_listing_rejects_tagged_event_under_untagged_metadata(self):
+        meta = self.create_session("legacy-tagged-event", "")
+        path = self.store._session_dir(meta.session_id) / "events.ndjson"
+        event = json.loads(path.read_text(encoding="utf-8"))
+        event["tenant_id"] = "tenant-a"
+        path.write_text(json.dumps(event) + "\n", encoding="utf-8")
+
+        self.assertEqual(
+            self.store.load_events(meta.session_id)[0].tenant_id,
+            "tenant-a",
+        )
+        self.assertEqual(
+            [item.session_id for item in self.store.list_sessions()],
+            [meta.session_id],
+        )
+        for tenant_id in (None, "tenant-a"):
+            with self.subTest(tenant_id=tenant_id), self.assertRaisesRegex(
+                ValueError,
+                f"^corrupt session in tenant store: {meta.session_id}$",
+            ):
+                self.store.list_sessions_strict(tenant_id)
 
     def test_session_metadata_rejects_mixed_tenant_event(self):
         meta = self.create_session("isolated", "tenant-a")
@@ -897,6 +936,27 @@ class TestTenantExportAndDelete(TenantTestCase):
 
                 with self.assertRaisesRegex(ValueError, "corrupt session"):
                     tenant_export_payload(store, "tenant-a")
+
+    def test_delete_fails_closed_on_tagged_event_under_untagged_metadata(self):
+        tagged = self.create_session("delete-tagged", "tenant-a")
+        untagged = self.create_session("delete-untagged", "")
+        path = self.store._session_dir(untagged.session_id) / "events.ndjson"
+        event = json.loads(path.read_text(encoding="utf-8"))
+        event["tenant_id"] = "tenant-a"
+        path.write_text(json.dumps(event) + "\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            f"^corrupt session in tenant store: {untagged.session_id}$",
+        ):
+            delete_tenant_data(self.store, "tenant-a")
+
+        self.assertTrue(self.store.session_exists(tagged.session_id))
+        self.assertTrue(self.store.session_exists(untagged.session_id))
+        self.assertFalse(
+            (self.store.base_dir / "tenant-deletions.ndjson").exists()
+        )
+        self.assertFalse((self.store.base_dir / ".tenant-journal").exists())
 
     def test_commands_refuse_a_store_with_an_unusable_started_at(self):
         session_ids = ("p" * 16, "c" * 16, "b" * 16)
