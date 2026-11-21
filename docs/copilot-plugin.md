@@ -73,16 +73,17 @@ copilot plugin marketplace add "$PWD"
 copilot plugin install agent-strace@agent-trace
 ```
 
-The repository ships the plugin twice:
+The repository ships the Copilot plugin twice, plus a separate Codex package:
 
 | Package | Manifest | Agent | Hooks | Used by |
 |---|---|---|---|---|
 | Repo root | `plugin.json` (legacy) | `agents/` | `hooks.json` | This repo's marketplace, all Copilot CLI versions |
 | `plugins/agent-strace/` | `plugin.json` ([Agent Plugins 1.0](https://github.com/agentplugins/agent-plugins-spec/blob/main/spec/1.0.0.md)) | `com.github.copilot/agents/` | `com.github.copilot/hooks/hooks.json` | Marketplaces that require Agent Plugins 1.0 |
+| `plugins/agent-strace-codex/` | `.codex-plugin/plugin.json` | none | `hooks/hooks.json` | OpenAI Codex only; see the [Codex plugin guide](codex-plugin.md) |
 
-The repo root is also the Claude Code plugin (`.claude-plugin/`, `hooks/hooks.json`). The root `plugin.json` names `hooks.json` explicitly, so Copilot CLI never falls back to the Claude-format `hooks/hooks.json`. Neither package registers the MCP server: plugin MCP servers start in the plugin directory, not your project, so they would read the wrong `.agent-traces/`.
+The repo root is also the Claude Code plugin (`.claude-plugin/`, `hooks/hooks.json`). The root `plugin.json` names `hooks.json` explicitly, so Copilot CLI never falls back to the Claude-format `hooks/hooks.json`. Codex reads `.agents/plugins/marketplace.json`, which lists only the Codex package. No package registers the MCP server: plugin MCP servers start in the plugin directory, not your project, so they would read the wrong `.agent-traces/`.
 
-`plugins/agent-strace/` holds copies of `skills/`, `agents/`, and `hooks.json`. Edit both copies together; `tests/test_plugin.py` checks them.
+`plugins/agent-strace/` holds copies of `skills/`, `agents/`, and `hooks.json`. Edit both copies together; `tests/test_plugin.py` checks them. `plugins/agent-strace-codex/skills/` holds a third copy of the skill, which `tests/test_codex_plugin.py` checks.
 
 Copilot caches installed plugin components. Run
 `copilot plugin marketplace update agent-trace` followed by

@@ -24,6 +24,7 @@ class TestReleaseWorkflows(unittest.TestCase):
         self.assertIn("plugins/agent-strace/plugin.json", workflow)
         self.assertIn(".claude-plugin/plugin.json", workflow)
         self.assertIn(".claude-plugin/marketplace.json", workflow)
+        self.assertIn("plugins/agent-strace-codex/.codex-plugin/plugin.json", workflow)
         self.assertIn("server.json PyPI package", workflow)
         self.assertIn("generated Gemini extension", workflow)
         self.assertIn("Action pin", workflow)

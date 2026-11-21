@@ -1,0 +1,38 @@
+{
+  "name": "agent-strace",
+  "version": "0.117.0",
+  "description": "Capture and investigate OpenAI Codex agent sessions with local AgentTrace hooks and a reusable skill.",
+  "author": {
+    "name": "Siddhant Khare",
+    "email": "siddhantkhare2694@gmail.com",
+    "url": "https://github.com/Siddhant-K-code"
+  },
+  "homepage": "https://github.com/Siddhant-K-code/agent-trace",
+  "repository": "https://github.com/Siddhant-K-code/agent-trace",
+  "license": "MIT",
+  "keywords": [
+    "agents",
+    "codex",
+    "observability",
+    "tracing"
+  ],
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "AgentTrace",
+    "shortDescription": "Record Codex sessions locally, then replay, explain, lint, and cost them with agent-strace.",
+    "longDescription": "AgentTrace adds Codex lifecycle hooks that record prompts, tool calls, subagents, and session ends to .agent-traces/ in the project, plus a skill that replays, explains, lints, audits, and prices recorded sessions. It needs the agent-strace Python package on PATH. Review and trust the hooks in /hooks before they run.",
+    "developerName": "Siddhant Khare",
+    "category": "Development",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/Siddhant-K-code/agent-trace",
+    "defaultPrompt": [
+      "List my recent agent-strace sessions and summarize the latest one.",
+      "Explain why the last Codex session failed.",
+      "How much did the latest session cost?"
+    ]
+  }
+}

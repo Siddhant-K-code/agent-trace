@@ -77,6 +77,9 @@ jobs:
           claude_marketplace = json.loads(
               Path(".claude-plugin/marketplace.json").read_text()
           )
+          codex_plugin = json.loads(
+              Path("plugins/agent-strace-codex/.codex-plugin/plugin.json").read_text()
+          )
           server = json.loads(Path("server.json").read_text())
           gemini_extension = _gemini_extension_manifest()
 
@@ -92,6 +95,9 @@ jobs:
               ".claude-plugin/plugin.json": claude_plugin["version"],
               ".claude-plugin/marketplace.json plugin": (
                   claude_marketplace["plugins"][0]["version"]
+              ),
+              "plugins/agent-strace-codex/.codex-plugin/plugin.json": (
+                  codex_plugin["version"]
               ),
               "server.json": server["version"],
               "server.json PyPI package": server["packages"][0]["version"],

@@ -35,6 +35,7 @@ Set the same `X.Y.Z` value in:
 - `plugins/agent-strace/plugin.json`
 - `.claude-plugin/plugin.json`
 - `.claude-plugin/marketplace.json` at `plugins[0].version`
+- `plugins/agent-strace-codex/.codex-plugin/plugin.json`
 - `server.json` at the top level and at `packages[0].version`
 - every `Siddhant-K-code/agent-trace@vX.Y.Z` Action pin in `README.md`,
   `docs/`, and `examples/` (today `README.md`, `docs/commands.md`,
