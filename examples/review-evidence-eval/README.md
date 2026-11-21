@@ -6,11 +6,17 @@ It does not run agents, execute checks mentioned in the fixtures, or call a mode
 The base scorer reads normalized JSON only. A separate adapter demonstrates one
 synthetic Phase A packet, without Inspect.
 
-From the repository root:
+From a fresh checkout, run:
 
 ```bash
+git clone --single-branch --branch siddhant-k-code-offline-workflow-evals \
+  https://github.com/Siddhant-K-code/agent-trace.git agent-trace-eval
+cd agent-trace-eval
 python3 examples/review-evidence-eval/score.py
 ```
+
+The fixtures are bundled. No agent installation, session database, app
+artifacts, credentials, or paid services are needed.
 
 The report gives one outcome and a result for each expected workflow step, including
 `unknown` results. There is no combined grade. Exit code `0` means all labels
@@ -107,26 +113,28 @@ because two expected labels changed). A bad binding exits `2` without a score.
 
 ## Two-case reviewer exercise
 
-Build the plain and packet-assisted views with Python 3.10+ and local Git:
+The reviewer kit also needs the pinned Phase A producer in local Git history.
+From the checkout above, fetch the producer feature branch once (without a
+depth limit, so its pinned ancestor is available):
 
 ```bash
-python3 -B examples/review-evidence-eval/build_reviewer_exercise.py \
-  --producer /path/to/phase-a-checkout \
-  --output /path/to/new-exercise-directory
+git fetch --no-tags origin refs/heads/siddhant-k-code-pr-evidence-assembler
 ```
 
-The builder extracts the Phase A implementation at
-`423601ceb6e290b31e8bb290aac67dc5c041313e` from the supplied checkout's local
-Git objects and runs its actual CLI in a temporary directory. It does not
-switch branches, write to the producer checkout, or run the proposed changes
-or checks. The output directory must be new and its parent must exist.
+The builder runs offline with Python 3.10+ and Git. It extracts the Phase A
+implementation at `423601ceb6e290b31e8bb290aac67dc5c041313e` from local Git
+objects. It does not switch branches, write to the producer checkout, or run
+the proposed changes or checks. Pass `--producer .` after the fetch above,
+or point it at a separate checkout containing that commit. The output
+directory must be new, outside the producer checkout, and have an existing
+parent.
 
-For each case, `baseline/` and `packet-assisted/` have the same `worksheet.md`
-and byte-identical `evidence/`. Only the second view adds the producer's
-`packet/` (start at `packet/review.md`). The script checks both arms and the
-packet's retained sources for byte parity. It prints an assembly report and
-keeps a copy at `assembly.json` outside the review arms. Exit `0` from the
-builder means both views were assembled, not that either change was accepted.
+Without `--reviewer-kit`, the builder writes each case under `baseline/` and
+`packet-assisted/`. Both have the same `worksheet.md` and byte-identical
+`evidence/`. Only the second adds the producer's `packet/`. The builder
+checks both arms and the packet's retained sources for byte parity and
+writes `assembly.json` outside the review arms. Exit `0` means assembly
+succeeded, not that either change was accepted.
 
 When trying a case, open only its assigned arm and record a decision and
 rationale in the worksheet. If manually measuring effort, keep assembly and
@@ -142,9 +150,10 @@ To include the pinned producer smoke in the example's tests, set
 ### Balanced, ready-to-run sets
 
 ```bash
+scratch="$(mktemp -d)"
 python3 -B examples/review-evidence-eval/build_reviewer_exercise.py \
-  --producer /path/to/phase-a-checkout \
-  --output /path/to/new-reviewer-kit \
+  --producer . \
+  --output "$scratch/reviewer-kit" \
   --reviewer-kit
 ```
 
