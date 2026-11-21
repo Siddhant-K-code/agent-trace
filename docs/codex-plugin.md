@@ -28,18 +28,19 @@ Codex reads `.agents/plugins/marketplace.json`, which lists only
 `$CODEX_HOME` (default `~/.codex`) and runs in every project.
 
 The third-party [Codex Marketplace](https://www.codex-marketplace.com/) CLI,
-which is not affiliated with OpenAI, can install it into one project instead.
-Run it from the project directory:
+which is not affiliated with OpenAI, can also install it. Run it from a
+project directory:
 
 ```bash
 npx codex-marketplace add Siddhant-K-code/agent-trace/plugins/agent-strace-codex --plugin --project
 ```
 
-It copies the package to `plugins/agent-strace/` in the project, lists it in
-the project's `.agents/plugins/marketplace.json`, and enables it in
-`$CODEX_HOME/config.toml`. Pass the full `plugins/agent-strace-codex` path:
-the repository root is not a Codex plugin. Use one install path, not both:
-two installs register the same hooks twice.
+It copies the package to `plugins/agent-strace/` in the project and lists it
+in the project's `.agents/plugins/marketplace.json`. It also enables the plugin
+in `$CODEX_HOME/config.toml`, so Codex loads it in every directory, not only
+in that project. Pass the full `plugins/agent-strace-codex` path: the
+repository root is not a Codex plugin. Use one install path, not both: two
+installs register the same hooks twice.
 
 ### Trust the hooks
 

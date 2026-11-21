@@ -1326,9 +1326,12 @@ def _report_copilot_plugin(plugin_dirs: list[Path]) -> None:
         )
 
 
-def _report_codex_plugin(plugins: list[CodexPlugin]) -> None:
+def _report_codex_plugin(plugins: list[CodexPlugin], args: argparse.Namespace) -> None:
     """Explain why setup leaves Codex hooks to an enabled AgentTrace plugin."""
     hooks_path = _codex_config_dir() / "hooks.json"
+    redact = _redact_setting(args)
+    flag = "" if redact is None else "--redact" if redact else "--no-redact"
+    rerun = f"agent-strace setup --cli codex {flag}".rstrip()
     for plugin in plugins:
         sys.stderr.write(
             f"Found the AgentTrace Codex plugin {plugin.key} at {plugin.root}. "
@@ -1336,8 +1339,15 @@ def _report_codex_plugin(plugins: list[CodexPlugin]) -> None:
         )
     sys.stderr.write(
         f"Did not write {hooks_path}: Codex would run both and record every event twice.\n"
+    )
+    if flag:
+        sys.stderr.write(
+            f"Did not apply {flag} to Codex. The plugin hooks use the default, "
+            "which redacts secrets.\n"
+        )
+    sys.stderr.write(
         f"To use {hooks_path} instead, run {codex_plugin_remove_commands(plugins)}, "
-        "then run `agent-strace setup --cli codex` again.\n"
+        f"then run `{rerun}` again.\n"
     )
     if len(plugins) > 1:
         sys.stderr.write(
@@ -1680,7 +1690,7 @@ def cmd_setup(args: argparse.Namespace) -> int | None:
             return 1
         codex_plugins = find_codex_plugins(_codex_config_dir())
         if codex_plugins:
-            _report_codex_plugin(codex_plugins)
+            _report_codex_plugin(codex_plugins, args)
     if cli in ("codex", "all") and not codex_plugins:
         previous_path = _codex_config_dir() / "hooks.json"
         if previous_path.exists():

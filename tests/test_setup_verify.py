@@ -864,10 +864,15 @@ class CodexPluginTests(unittest.TestCase):
         moved = self.root / "config" / "agent.json"
         moved.parent.mkdir()
         self._write_json(moved, hooks)
+        # Outside the plugin, so Codex never reads it.
+        self._write_json(self.root.parent / "hooks.json", hooks)
         cases = (
             ("./config/agent.json", [moved]),
             (["../hooks.json", "config/agent.json", "./config/agent.json"], [moved]),
-            ("../hooks/hooks.json", [self.plugin_hooks]),  # No usable path: the default file.
+            # No usable path: the default file.
+            ("config/agent.json", [self.plugin_hooks]),
+            ("./../hooks.json", [self.plugin_hooks]),
+            ("../hooks/hooks.json", [self.plugin_hooks]),
             (None, [self.plugin_hooks]),
             (7, [self.plugin_hooks]),
             (hooks, [manifest_path]),  # Inline hooks.
@@ -891,13 +896,52 @@ class CodexPluginTests(unittest.TestCase):
         [plugin] = find_codex_plugins(self.codex)
         self.assertEqual(plugin.hooks_files, [moved])
 
+    def test_hooks_files_codex_rejects_give_the_plugin_no_hooks(self):
+        self._config(_PLUGIN_ON)
+        hooks = _codex_hooks_config(_args())
+        # Codex rejects unknown top-level keys, and a description must be a string.
+        cases = (
+            ({"note": "x"}, 1),
+            ({"description": 5}, 1),
+            ({"description": ["AgentTrace"]}, 1),
+            ({"description": "AgentTrace"}, 0),
+            ({"description": None}, 0),
+        )
+        for extra, expected in cases:
+            with self.subTest(extra=extra):
+                self._write_json(self.plugin_hooks, {**hooks, **extra})
+                status, _, err = self._run()
+                self.assertEqual(status, expected)
+                if expected:
+                    self.assertIn(f"Missing Codex hooks config: {self.hooks_path}.", err)
+
+    def test_hooks_files_that_share_an_event_add_up(self):
+        self._config(_PLUGIN_ON)
+        manifest_path = self.root / ".codex-plugin" / "plugin.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["hooks"] = ["./hooks/hooks.json", "./hooks/user.json"]
+        self._write_json(manifest_path, manifest)
+        user = {"SessionStart": [{"hooks": [{"type": "command", "command": "echo start"}]}]}
+        user_hooks = self.root / "hooks" / "user.json"
+        self._write_json(user_hooks, {"hooks": user})
+        agenttrace = json.loads(self.plugin_hooks.read_text(encoding="utf-8"))["hooks"]
+
+        [plugin] = find_codex_plugins(self.codex)
+        self.assertEqual(plugin.hooks_files, [self.plugin_hooks, user_hooks])
+        self.assertEqual(plugin.hooks["SessionStart"], agenttrace["SessionStart"] + user["SessionStart"])
+        status, out, err = self._run()
+        self.assertEqual((status, err), (0, ""))
+        self.assertIn(f"hooks:      {self.plugin_hooks}, {user_hooks} (", out)
+
     def test_plugin_and_hooks_json_pass_with_a_duplicate_warning(self):
         self._config(_PLUGIN_ON)
         agenttrace = _codex_hooks_config(_args())
         user_hooks = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo stop"}]}]}}
         mixed = json.loads(json.dumps(agenttrace))
         mixed["hooks"]["Stop"] += user_hooks["hooks"]["Stop"]
+        described = {"description": "My hooks", **agenttrace}
         hooks = shlex.quote(str(self.hooks_path))
+        delete = f"delete the entries that run `agent-strace hook` from {self.hooks_path}"
         cases = (
             (agenttrace, None, f"run: rm {hooks}"),
             (
@@ -907,11 +951,12 @@ class CodexPluginTests(unittest.TestCase):
                 f"cp {shlex.quote(str(self.backup))} {hooks}",
             ),
             (agenttrace, agenttrace, f"run: rm {hooks}"),  # This backup has AgentTrace hooks too.
-            (mixed, user_hooks, f"delete the entries that run `agent-strace hook` from {self.hooks_path}"),
+            (mixed, user_hooks, delete),
+            (described, None, delete),  # rm would delete the description too.
             (user_hooks, None, None),
         )
-        for installed, backup, cleanup in cases:
-            with self.subTest(installed=installed is agenttrace, backup=backup is not None):
+        for case, (installed, backup, cleanup) in enumerate(cases):
+            with self.subTest(case=case):
                 self._write_json(self.hooks_path, installed)
                 if backup is None:
                     self.backup.unlink(missing_ok=True)
@@ -997,6 +1042,25 @@ class CodexPluginTests(unittest.TestCase):
         # --cli all still sets up the other CLIs.
         self.assertIn("agent-strace hook user-prompt", out)
         self.assertTrue(self.copilot_hooks.is_file())
+
+    def test_setup_says_the_plugin_does_not_take_redaction_flags(self):
+        self._config(_PLUGIN_ON)
+        for flag, option in (("--no-redact", "no_redact"), ("--redact", "redact")):
+            for cli in ("codex", "all"):
+                with self.subTest(flag=flag, cli=cli):
+                    status, out, err = self._run(cli=cli, verify=False, **{option: True})
+                    self.assertIsNone(status)
+                    self.assertFalse(self.hooks_path.exists())
+                    self.assertIn(
+                        f"Did not write {self.hooks_path}: Codex would run both and record every "
+                        f"event twice.\nDid not apply {flag} to Codex. The plugin hooks use the "
+                        f"default, which redacts secrets.\nTo use {self.hooks_path} instead, run "
+                        f"`codex plugin remove {_PLUGIN_KEY}`, then run "
+                        f"`agent-strace setup --cli codex {flag}` again.\n",
+                        err,
+                    )
+        # --cli all still applies the flag to the other CLIs.
+        self.assertIn("AGENT_TRACE_REDACT=1 agent-strace hook user-prompt", out)
 
     def test_setup_with_the_plugin_says_how_to_remove_existing_hooks_json(self):
         self._config(_PLUGIN_ON)
