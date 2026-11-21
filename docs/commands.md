@@ -1669,7 +1669,9 @@ agent-strace eval dataset auto [--name NAME] [--filter FILTER] [--since Nd] [--l
 Gate the latest or selected session against named, raw-value criteria. The direct
 command exits `1` when a criterion fails or a score regresses beyond the allowed
 tolerance, making it suitable for CI. The `run`, `compare`, and `ci` subcommands
-remain available for legacy normalized scorers.
+remain available for legacy normalized scorers. The legacy `llm_judge` scorer
+takes `base_url`, `api_key` and `model` from its entry under `scorers`, and a
+missing or empty one from the same environment variables as [`optimize`](#optimize).
 
 `eval dataset auto` adds sessions from the last `--since` days (default: `7d`)
 that match `--filter` (default: `has-errors`) to
@@ -1918,7 +1920,15 @@ Measure tokenizer cost impact of switching model versions. No API calls required
 agent-strace optimize [SESSION_ID] [--target FILE] [--dataset NAME] [--dry-run] [--apply]
                       [--base-url URL] [--model MODEL] [--api-key KEY]
 ```
-Cluster failures by root cause and propose additions to `AGENTS.md` or any instruction file. Three built-in heuristic patterns require no LLM. The POST to `--base-url` (or `AGENT_STRACE_LLM_URL`) does not follow redirects, so pass the final URL. A failed request, or a reply that is not the JSON the prompt asks for, falls back to the heuristics. `--apply` keeps `\r\n` line endings in a file that already uses them and writes `\n` otherwise, on every OS.
+Cluster failures by root cause and propose additions to `AGENTS.md` or any instruction file. Three built-in heuristic patterns require no LLM. `--apply` keeps `\r\n` line endings in a file that already uses them and writes `\n` otherwise, on every OS.
+
+`optimize` calls an OpenAI-compatible LLM only when it has both a URL and a key. Otherwise it uses only the heuristics. For each value, the first one that is set wins, and an empty value counts as unset:
+
+- URL: `--base-url`, then `OPENAI_BASE_URL`, then `AGENT_STRACE_LLM_URL`.
+- Key: `--api-key`, then `OPENAI_API_KEY`, then `AGENT_STRACE_LLM_KEY`.
+- Model: `--model`, then `AGENT_STRACE_LLM_MODEL`, then `gpt-4o-mini`.
+
+The POST does not follow redirects, so pass the final URL. A failed request, or a reply that is not the JSON the prompt asks for, falls back to the heuristics.
 
 Without `--apply`, or with `--dry-run`, `optimize` prints the proposal and writes nothing. `--dry-run --apply` prints the same as `--dry-run`.
 

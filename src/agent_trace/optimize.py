@@ -557,7 +557,8 @@ def cmd_optimize(args: argparse.Namespace) -> int:
     )
     model = (
         getattr(args, "model", None)
-        or os.environ.get("AGENT_STRACE_LLM_MODEL", "gpt-4o-mini")
+        or os.environ.get("AGENT_STRACE_LLM_MODEL", "")
+        or "gpt-4o-mini"
     )
     api_key = (
         getattr(args, "api_key", None)

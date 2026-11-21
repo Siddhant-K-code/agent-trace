@@ -2883,8 +2883,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="write proposed additions to the target file")
     p_opt.add_argument("--base-url", dest="base_url", metavar="URL",
                        help="OpenAI-compatible LLM base URL (overrides OPENAI_BASE_URL)")
-    p_opt.add_argument("--model", metavar="MODEL", default="gpt-4o-mini",
-                       help="LLM model name (default: gpt-4o-mini)")
+    p_opt.add_argument("--model", metavar="MODEL",
+                       help="LLM model name (overrides AGENT_STRACE_LLM_MODEL; default: gpt-4o-mini)")
     p_opt.add_argument("--api-key", dest="api_key", metavar="KEY",
                        help="LLM API key (overrides OPENAI_API_KEY)")
 

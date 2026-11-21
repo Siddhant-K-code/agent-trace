@@ -631,7 +631,7 @@ def run_scorer(
             prompt=config.get("prompt", "Did the agent complete the task correctly?"),
             base_url=config.get("base_url", "") or os.environ.get("OPENAI_BASE_URL", "") or os.environ.get("AGENT_STRACE_LLM_URL", ""),
             api_key=config.get("api_key", "") or os.environ.get("OPENAI_API_KEY", "") or os.environ.get("AGENT_STRACE_LLM_KEY", ""),
-            model=config.get("model", "gpt-4o-mini"),
+            model=config.get("model", "") or os.environ.get("AGENT_STRACE_LLM_MODEL", "") or "gpt-4o-mini",
             threshold=threshold,
         )
 
