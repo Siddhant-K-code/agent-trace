@@ -21,10 +21,81 @@ from agent_trace.shell_split import (
 
 class TestShellSplit(unittest.TestCase):
     def test_strip_heredocs_all_forms(self):
-        for opener in ("<<EOF", "<<'EOF'", '<<"EOF"', "<< EOF", "<<-EOF"):
+        cases = (
+            ("<<EOF", "EOF"),
+            ("<<'EOF'", "EOF"),
+            ('<<"EOF"', "EOF"),
+            ("<< EOF", "EOF"),
+            ("<<-EOF", "\tEOF"),
+        )
+        for opener, terminator in cases:
             with self.subTest(opener=opener):
-                text = f"cat > f {opener}\n\tpytest\n\tEOF\nls"
+                text = f"cat > f {opener}\n\tpytest\n{terminator}\nls"
                 self.assertEqual(strip_heredocs(text), f"cat > f {opener}\nls")
+
+    def test_numeric_delimiters_and_shell_terminator_indentation(self):
+        numeric = "cat <<123\npytest > body.txt\n123\n"
+        self.assertEqual(command_segments(numeric), [["cat", "<<", "123"]])
+        self.assertFalse(is_test_command(numeric))
+
+        indented = "cat <<EOF\n EOF\npytest\nEOF\n"
+        self.assertEqual(command_segments(indented), [["cat", "<<", "EOF"]])
+        self.assertFalse(is_test_command(indented))
+
+        tabs_only = "cat <<-EOF\n EOF\npytest\n\tEOF\n"
+        self.assertEqual(command_segments(tabs_only), [["cat", "<<", "-EOF"]])
+        self.assertFalse(is_test_command(tabs_only))
+
+    def test_heredoc_detection_respects_quotes_and_comments(self):
+        quoted = "echo '<<123'\npytest"
+        self.assertEqual(
+            command_segments(quoted), [["echo", "<<123"], ["pytest"]]
+        )
+        self.assertTrue(is_test_command(quoted))
+
+        commented = "# <<123\npytest"
+        self.assertEqual(command_segments(commented), [["pytest"]])
+        self.assertTrue(is_test_command(commented))
+
+        multiline_quoted = "echo '\n<<123\n'\npytest"
+        self.assertEqual(strip_heredocs(multiline_quoted), multiline_quoted)
+        self.assertTrue(is_test_command(multiline_quoted))
+
+    def test_arithmetic_shifts_are_not_heredocs(self):
+        for command in ("(( value << 2 ))\npytest", "echo $((1 << 2))\npytest"):
+            with self.subTest(command=command):
+                self.assertTrue(is_test_command(command))
+
+    def test_heredoc_delimiter_is_the_complete_shell_word(self):
+        for opener in ("<<123.txt", "<<'123'.txt", r"<<123\.txt"):
+            with self.subTest(opener=opener):
+                command = f"cat {opener}\npytest\n123.txt\nnpm test"
+                self.assertEqual(command_segments(command)[-1], ["npm", "test"])
+
+    def test_heredoc_delimiter_can_continue_on_the_next_line(self):
+        for opener in ("<<E\\\nOF", "<<\\\nEOF", '<<"E\\\nOF"', "<<'E'\\\nOF"):
+            with self.subTest(opener=opener):
+                command = f"cat {opener}\npytest > body.txt\nEOF\nnpm test"
+                self.assertEqual(
+                    command_segments(command),
+                    [["cat", "<<", "EOF"], ["npm", "test"]],
+                )
+
+    def test_continued_heredoc_delimiter_body_is_not_a_write_target(self):
+        command = "cat > real.txt <<E\\\nOF\npytest > body.txt\nEOF\n"
+        self.assertEqual(write_targets(command), ["real.txt"])
+
+    def test_continued_heredoc_delimiter_body_is_not_a_test_command(self):
+        command = "cat <<E\\\nOF\npytest\nEOF\necho done"
+        self.assertFalse(is_test_command(command))
+
+    def test_quoted_heredoc_body_does_not_fold_backslash_newline(self):
+        command = "cat <<'EOF'\nbody \\\nEOF\npytest"
+        self.assertEqual(command_segments(command)[-1], ["pytest"])
+
+    def test_unquoted_heredoc_body_folds_backslash_newline(self):
+        command = "cat <<EOF\nbody \\\nEOF\nnot-a-command\nEOF\npytest"
+        self.assertEqual(command_segments(command)[-1], ["pytest"])
 
     def test_strip_heredocs_keeps_here_strings(self):
         self.assertEqual(strip_heredocs("grep x <<< 'EOF'\npytest"), "grep x <<< 'EOF'\npytest")
@@ -108,6 +179,14 @@ class TestWriteTargets(unittest.TestCase):
         self.assertEqual(
             write_targets(command), ["/work/demo/src/pkg/a.py", "/work/demo/tests/test_a.py"]
         )
+
+    def test_numeric_heredoc_body_does_not_add_false_write_targets(self):
+        command = (
+            "cat > real.txt <<123\n"
+            "not a command > false-positive.txt\n"
+            "123\n"
+        )
+        self.assertEqual(write_targets(command), ["real.txt"])
 
     def test_redirect_forms(self):
         cases = {
