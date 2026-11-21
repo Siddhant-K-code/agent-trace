@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import zipfile
 import zlib
@@ -394,7 +395,15 @@ class StrictInputTests(unittest.TestCase):
                 value = real_read(descriptor, length)
                 if value and not changed:
                     changed = True
+                    # On Linux a file time can move only once per clock tick,
+                    # so a rewrite in the same tick keeps the old change time.
+                    deadline = time.monotonic() + 5
                     path.write_bytes(b"modified")
+                    while os.fstat(descriptor).st_ctime_ns == before.st_ctime_ns:
+                        if time.monotonic() > deadline:
+                            self.fail("the change time did not move within 5 seconds")
+                        time.sleep(0.001)
+                        path.write_bytes(b"modified")
                     os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
                 return value
 
