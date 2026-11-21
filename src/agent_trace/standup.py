@@ -18,9 +18,10 @@ import sys
 from dataclasses import dataclass, field
 from typing import TextIO
 
-from .event_data import object_field, require_object_event_data, str_field
+from .event_data import number_field, object_field, require_object_event_data, str_field
+from .failures import CANCELLED_STATUSES, FAILED_STATUSES
 from .inert import inert
-from .models import EventType, TraceEvent
+from .models import EventType, TraceEvent, usable_time
 from .store import TraceStore
 
 
@@ -34,6 +35,10 @@ class ApproachAttempt:
     abandoned: bool
     failure_reason: str = ""
     retries: int = 0
+    # The trace ends while this approach is failing: no other approach followed.
+    still_failing: bool = False
+    # With still_failing: a session_end or the meta end time follows the failures.
+    session_ended: bool = False
 
 
 @dataclass
@@ -126,39 +131,108 @@ def _extract_uncertainties(events: list[TraceEvent]) -> list[UncertaintySignal]:
     return signals
 
 
-def _extract_approaches(events: list[TraceEvent]) -> list[ApproachAttempt]:
-    """Detect multiple approaches from retry patterns and error sequences."""
+_FAILURE_WORDS = ("error", "failed", "traceback")
+_ERROR_STATUSES = FAILED_STATUSES | {"error", "failure", "timeout"}
+_SUCCESS_STATUSES = frozenset({"success", "succeeded", "ok", "completed"})
+
+
+def _tool_result_failed(data: dict) -> bool | None:
+    """Return whether a tool_result failed, or None for a cancelled call.
+
+    Recorded outcome fields decide first. The words in the content decide
+    only for a result that records none of them.
+    """
+    status = data.get("status")
+    status = status.strip().lower() if isinstance(status, str) else ""
+    if status in CANCELLED_STATUSES:
+        return None
+    exit_code = number_field(data, "exit_code", None)
+    if (data.get("is_error") is True or data.get("success") is False
+            or (exit_code is not None and exit_code != 0) or status in _ERROR_STATUSES):
+        return True
+    if (data.get("is_error") is False or data.get("success") is True or exit_code == 0
+            or status in _SUCCESS_STATUSES):
+        return False
+    content = str(data.get("content", ""))
+    return any(word in content.lower() for word in _FAILURE_WORDS)
+
+
+def _extract_approaches(events: list[TraceEvent], ended_at: object = None) -> list[ApproachAttempt]:
+    """Detect multiple approaches from retry patterns and error sequences.
+
+    A failed tool is a failing tool_result, or an error event whose parent_id
+    names a tool_call. Only the first outcome recorded for a call counts.
+    ``ended_at`` is the session's meta end time, if it has one.
+    """
     approaches: list[ApproachAttempt] = []
     consecutive_errors = 0
     last_tool = ""
+    # The tool whose failure started the current streak of errors.
+    failing_tool = ""
     retry_count = 0
+    call_tools: dict[str, object] = {}
+    answered: set[str] = set()
+    # A session_end follows the latest failure.
+    ended_after_failure = False
+    last_failure_at: float | None = None
+
+    def failing_approach(**fields) -> ApproachAttempt:
+        return ApproachAttempt(
+            description=f"Approach using {failing_tool or 'unknown tool'}",
+            failure_reason=f"Failed {consecutive_errors} times",
+            retries=consecutive_errors,
+            **fields,
+        )
 
     for e in events:
-        if e.event_type == EventType.TOOL_RESULT:
-            content = str(e.data.get("content", ""))
-            is_error = e.data.get("is_error", False) or any(
-                kw in content.lower() for kw in ("error", "failed", "traceback")
-            )
-            if is_error:
-                consecutive_errors += 1
-                retry_count += 1
-            else:
-                if consecutive_errors >= 2:
-                    # Detected an abandoned approach
-                    approaches.append(ApproachAttempt(
-                        description=f"Approach using {last_tool or 'unknown tool'}",
-                        abandoned=True,
-                        failure_reason=f"Failed {consecutive_errors} times",
-                        retries=consecutive_errors,
-                    ))
-                consecutive_errors = 0
-
         if e.event_type == EventType.TOOL_CALL:
             last_tool = e.data.get("tool_name", "")
+            if isinstance(e.event_id, str) and e.event_id:
+                call_tools[e.event_id] = last_tool
+            continue
+        if e.event_type == EventType.SESSION_END:
+            ended_after_failure = True
+            continue
+        parent = e.parent_id if isinstance(e.parent_id, str) and e.parent_id in call_tools else ""
+        if e.event_type == EventType.TOOL_RESULT:
+            failed = _tool_result_failed(e.data)
+        elif e.event_type == EventType.ERROR and parent:
+            failed = True
+        else:
+            continue
+        if parent:
+            if parent in answered:
+                continue
+            answered.add(parent)
+        if failed is None:
+            continue
+        if failed:
+            if consecutive_errors == 0:
+                failing_tool = call_tools.get(parent) or (
+                    e.event_type == EventType.TOOL_RESULT and str_field(e.data, "tool_name", "")
+                ) or last_tool
+            consecutive_errors += 1
+            retry_count += 1
+            ended_after_failure = False
+            last_failure_at = usable_time(e.timestamp)
+        else:
+            if consecutive_errors >= 2:
+                # Detected an abandoned approach
+                approaches.append(failing_approach(abandoned=True))
+            consecutive_errors = 0
+
+    if consecutive_errors >= 2:
+        meta_end = usable_time(ended_at)
+        session_ended = ended_after_failure or (
+            meta_end is not None and last_failure_at is not None and meta_end >= last_failure_at
+        )
+        approaches.append(failing_approach(
+            abandoned=False, still_failing=True, session_ended=session_ended))
 
     if not approaches:
         approaches.append(ApproachAttempt(
-            description="Single approach (no retries detected)",
+            description="Single approach" if retry_count else
+                        "Single approach (no retries detected)",
             abandoned=False,
             retries=retry_count,
         ))
@@ -229,7 +303,8 @@ def _count_context_resets(events: list[TraceEvent]) -> int:
     return resets
 
 
-# analyse_standup reads the data of every event of these types.
+# analyse_standup reads the data of every event of these types. An error event
+# counts as a failed tool through its parent_id alone, so its data is not read.
 STANDUP_DATA_EVENT_TYPES = frozenset({
     EventType.TOOL_CALL,
     EventType.TOOL_RESULT,
@@ -284,7 +359,7 @@ def analyse_standup(store: TraceStore, session_id: str) -> StandupReport:
 
     new_deps = _extract_new_deps(events)
     uncertainties = _extract_uncertainties(events)
-    approaches = _extract_approaches(events)
+    approaches = _extract_approaches(events, meta.ended_at)
     files_modified_list = sorted(files_modified_set)
     review_items = _extract_review_items(events, files_modified_list, new_deps)
 
@@ -333,7 +408,11 @@ def format_standup(report: StandupReport, out: TextIO = sys.stdout) -> None:
 
     for approach in report.approaches:
         description = inert(approach.description)
-        if approach.abandoned:
+        if approach.still_failing:
+            when = "the session ended" if approach.session_ended else "the trace ends"
+            w(f"  - Still failing when {when}: {description} "
+              f"({inert(approach.failure_reason)})\n")
+        elif approach.abandoned:
             w(f"  - Tried and abandoned: {description} "
               f"({inert(approach.failure_reason)})\n")
         elif approach.retries > 0:

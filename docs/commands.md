@@ -1887,6 +1887,8 @@ agent-strace standup [session-id] [--no-llm]
 ```
 Structured standup from a session trace. No LLM required. Covers files touched, approaches tried, dependencies added, TODOs written.
 
+Two or more failed tool calls in a row make an approach, named after the tool call whose failure came first. A failed tool call is an `error` event linked to the call, or a `tool_result` with `is_error: true`, `success: false`, a nonzero `exit_code` or a `status` of `error`, `failed`, `failure` or `timeout`. A `tool_result` with `is_error: false`, `success: true`, `exit_code: 0` or a `status` of `success`, `succeeded`, `ok` or `completed` succeeded, whatever its text says. A result with `status: "cancelled"` is neither. Status matching ignores case and surrounding spaces. Only a result that records none of these is judged by the words "error", "failed" or "traceback" in its content. The approach shows as "Tried and abandoned" when a later tool call succeeds. If the trace ends first, it shows as "Still failing when the session ended" when a `session_end` event or the session's end time comes after the failures, and as "Still failing when the trace ends" otherwise, for example while the session is still running.
+
 ### `freshness`
 ```
 agent-strace freshness [--since DATE] [--scope GLOB]
