@@ -16,7 +16,7 @@ The scenario intentionally includes a session boundary, redacted prompt, file re
 
 ## Walkthrough
 
-This walkthrough uses `fixture_version` 2. Its output comes from the agent-strace source tree at version 0.119.0 after `fixture_version` 2 was added, where `agent-strace --version` prints `0.119.0`. Released packages up to and including 0.119.0 ship `fixture_version` 1, which used fixture-only data keys such as `content`, `tool`, `output` and `message`, so their replay output lacks most of the details below.
+This walkthrough uses `fixture_version` 2. Its output comes from agent-strace 0.120.0, the first release that ships `fixture_version` 2, where `agent-strace --version` prints `0.120.0`. Released packages up to and including 0.119.0 ship `fixture_version` 1, which used fixture-only data keys such as `content`, `tool`, `output` and `message`, so their replay output lacks most of the details below.
 
 Load the fixture into a trace directory, then replay it and check its health:
 
