@@ -203,7 +203,7 @@ Full setup guide: [docs/setup.md](docs/setup.md). Machine-wide install for platf
 | [`agent-strace share --assignment <id>`](docs/hiring.md) | Create a privacy-minimized assignment submission ZIP |
 | [`agent-strace score submission.zip`](docs/hiring.md) | Apply a deterministic process-telemetry rubric |
 | [`agent-strace pr-comment`](docs/commands.md#pr-comment) | Post or update a session summary on the current PR |
-| [`agent-strace review`](docs/review.md) | Check PR reviewability: rationale, scope, validation, stewardship, evidence health |
+| [`agent-strace review`](docs/review.md), [`review-evidence`](docs/review-evidence.md), [`review-evidence-import-assignment`](docs/review-evidence.md#convert-a-retained-assignment-zip) | Check PR reviewability or try offline packet assembly and minimized trace conversion |
 | [`agent-strace sample`](docs/commands.md#sample) | Export worst sessions as JSONL for eval datasets |
 
 Full flag reference: [docs/commands.md](docs/commands.md)

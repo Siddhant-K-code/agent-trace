@@ -1,0 +1,25 @@
+{
+  "schema": "review-evidence-session-summary/v0",
+  "target": {
+    "repo": "demo/greetings",
+    "pr": 7,
+    "task": "friendlier-label",
+    "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "session_id": "s1",
+  "attempt_id": "a1",
+  "reported_by": "fixture recorder",
+  "capture": {
+    "completeness": "PARTIAL",
+    "limits": [
+      "Only selected fixture events were retained."
+    ]
+  },
+  "observations": [
+    {
+      "step_id": "inspect",
+      "note": "Inspected the greeting."
+    }
+  ]
+}

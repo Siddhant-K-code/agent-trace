@@ -83,6 +83,8 @@ from .policy_backtest import (
     cmd_policy_diff,
 )
 from .pr_comment import cmd_pr_comment
+from .review_evidence import cmd_review_evidence
+from .review_evidence_assignment import cmd_review_evidence_import_assignment
 from .reviewability import add_artifact_arguments as add_review_artifact_arguments
 from .reviewability import add_threshold_arguments as add_review_threshold_arguments
 from .reviewability import cmd_review
@@ -2166,6 +2168,20 @@ def build_parser() -> argparse.ArgumentParser:
     add_review_artifact_arguments(p_review)
     add_external_arguments(p_review)
 
+    p_review_evidence = sub.add_parser(
+        "review-evidence", help="assemble an experimental offline PR evidence packet",
+    )
+    p_review_evidence.add_argument("bundle", metavar="BUNDLE", help="retained bundle manifest (JSON)")
+    p_review_evidence.add_argument("--output", required=True, metavar="DIR", help="new output directory")
+
+    p_review_assignment = sub.add_parser(
+        "review-evidence-import-assignment", help="convert a retained assignment ZIP to a review summary",
+    )
+    p_review_assignment.add_argument("archive", metavar="ZIP", help="minimized agent-strace assignment v1 archive")
+    p_review_assignment.add_argument("bundle", metavar="BUNDLE", help="review evidence manifest with association")
+    p_review_assignment.add_argument("--binding", required=True, metavar="JSON", help="operator's archive binding")
+    p_review_assignment.add_argument("--output", required=True, metavar="DIR", help="new output directory")
+
     # postmortem
     p_postmortem = sub.add_parser("postmortem", help="generate a structured postmortem for a failed session")
     p_postmortem.add_argument("session_id", nargs="?", help="session ID or prefix (default: latest)")
@@ -3444,8 +3460,13 @@ def _normalise_skills_argv(argv: list[str]) -> list[str]:
 
 def main() -> None:
     parser = build_parser()
-    argv = _normalise_skills_argv(_normalise_policy_argv(sys.argv[1:]))
-    args = parser.parse_args(_normalise_eval_argv(argv))
+    argv = _normalise_eval_argv(_normalise_skills_argv(_normalise_policy_argv(sys.argv[1:])))
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        if exc.code == 2 and argv[_command_index(argv):][:1] == ["review-evidence"]:
+            sys.exit(1)  # Reserve 2 for valid but inconclusive evidence.
+        raise
 
     if not args.command:
         parser.print_help()
@@ -3463,6 +3484,12 @@ def main() -> None:
 
     if args.command == "telemetry":
         sys.exit(_product_telemetry.cmd_telemetry(args))
+
+    if args.command == "review-evidence":
+        sys.exit(cmd_review_evidence(args))  # Explicitly offline, including product telemetry.
+
+    if args.command == "review-evidence-import-assignment":
+        sys.exit(cmd_review_evidence_import_assignment(args))  # Never dispatch through product telemetry.
 
     _product_telemetry.maybe_show_telemetry_notice()
 

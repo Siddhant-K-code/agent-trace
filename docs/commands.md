@@ -2301,6 +2301,31 @@ Flags override the config file. Exit codes: `0` pass, `1` threshold or
 cognitive debt check failed, `2` bad config, unknown session, or a
 `--commits` value that is not a revision range.
 
+### `review-evidence`
+```
+agent-strace review-evidence BUNDLE --output DIR
+```
+
+Experimental offline assembler, separate from `review` and `share`. `BUNDLE`
+is the retained JSON manifest; `--output DIR` names a new directory with an
+existing parent. Writes `packet.json`, `review.md`, and the explicitly admitted
+`sources/` copies. Assembly exits `0` for valid complete coverage, `2` for valid
+inconclusive coverage, or `1` for invalid evidence or an assembly error. A
+complete packet may report `FAIL`; this is not a gate. See the
+[bundle contract and local walkthrough](review-evidence.md).
+
+### `review-evidence-import-assignment`
+```
+agent-strace review-evidence-import-assignment ZIP BUNDLE --binding JSON --output DIR
+```
+
+Convert one retained minimized assignment v1 ZIP to `session-summary.json`.
+`BUNDLE` supplies the declared target and association; `--binding JSON` pins
+those declarations to the ZIP's SHA-256. `--output DIR` must name a new
+directory with an existing parent. Conversion is offline and does not amend the
+bundle, extract the archive, or infer named steps. See the
+[conversion and admission instructions](review-evidence.md#convert-a-retained-assignment-zip).
+
 ### `sample`
 ```
 agent-strace sample [--strategy worst|diverse|recent|random] [--n N]

@@ -1,0 +1,25 @@
+{
+  "schema": "review-evidence-intent/v0",
+  "target": {
+    "repo": "demo/greetings",
+    "pr": 7,
+    "task": "friendlier-label",
+    "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "by": "fixture author",
+  "summary": "Use a friendlier greeting.",
+  "criteria": [
+    {
+      "id": "hello",
+      "text": "Greeting is Hello."
+    }
+  ],
+  "expected_steps": [
+    {
+      "id": "inspect",
+      "text": "Inspect greeting.",
+      "required": true
+    }
+  ]
+}
