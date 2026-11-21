@@ -156,6 +156,17 @@ def _mask_string(value: str, config: MaskingConfig) -> str:
 # Recursive data masking
 # ---------------------------------------------------------------------------
 
+def _mask_all_strings(data: Any, replacement: str) -> Any:
+    """Replace every string in data, however deep, with the replacement."""
+    if isinstance(data, str):
+        return replacement
+    if isinstance(data, dict):
+        return {k: _mask_all_strings(v, replacement) for k, v in data.items()}
+    if isinstance(data, list):
+        return [_mask_all_strings(item, replacement) for item in data]
+    return data
+
+
 def mask_data(data: Any, config: MaskingConfig, parent_key: str = "") -> Any:
     """Recursively apply PII masking to event data.
 
@@ -167,7 +178,7 @@ def mask_data(data: Any, config: MaskingConfig, parent_key: str = "") -> Any:
         for k, v in data.items():
             k_lower = k.lower().strip()
             if config.mask_user_id_keys and k_lower in _USER_KEYS:
-                result[k] = config.replacement if isinstance(v, str) else v
+                result[k] = _mask_all_strings(v, config.replacement)
             else:
                 result[k] = mask_data(v, config, parent_key=k)
         return result

@@ -65,6 +65,26 @@ class TestMaskData(unittest.TestCase):
         self.assertEqual(result["email"], "[MASKED]")
         self.assertEqual(result["name"], "Alice")
 
+    def test_masks_every_string_under_a_personal_key(self):
+        data = {
+            "email": ["alice@example.com"],
+            "phone": {"mobile_number": "555-123-4567", "verified": True},
+            "user_id": [{"name": "alice", "n": 7}, None],
+            "customer_id": 42,
+            "note": {"name": "Alice"},
+        }
+        self.assertEqual(mask_data(data, self.cfg), {
+            "email": ["[MASKED]"],
+            "phone": {"mobile_number": "[MASKED]", "verified": True},
+            "user_id": [{"name": "[MASKED]", "n": 7}, None],
+            "customer_id": 42,
+            "note": {"name": "Alice"},
+        })
+
+    def test_personal_key_uses_the_configured_replacement(self):
+        cfg = MaskingConfig(replacement="<pii>")
+        self.assertEqual(mask_data({"ssn": ["x"]}, cfg), {"ssn": ["<pii>"]})
+
     def test_masks_nested(self):
         data = {"user": {"contact": "call 555-123-4567"}}
         result = mask_data(data, self.cfg)

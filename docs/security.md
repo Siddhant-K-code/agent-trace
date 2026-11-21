@@ -53,9 +53,9 @@ Detected patterns:
 | Basic-auth URLs | `https://user:pass@example.com` |
 | `key-` values | `key-` followed by 16 or more letters or digits |
 | `token-` values | `token-` followed by 16 or more letters or digits |
-| Key-named values | A string value under one of these keys: `password`, `passwd`, `secret`, `token`, `api_key`, `apikey`, `api-key`, `access_token`, `refresh_token`, `auth_token`, `authorization`, `credential`, `credentials`, `private_key`, `privatekey`, `client_secret`, `connection_string`, `database_url`, `db_url`, `aws_access_key_id`, `aws_secret_access_key`, `aws_session_token`. Key names match case-insensitively, and `-` counts as `_`. Only string values are replaced. That includes strings in a list under the key. |
+| Key-named values | A string value under one of these keys: `password`, `passwd`, `secret`, `token`, `api_key`, `apikey`, `api-key`, `access_token`, `refresh_token`, `auth_token`, `authorization`, `credential`, `credentials`, `private_key`, `privatekey`, `client_secret`, `connection_string`, `database_url`, `db_url`, `aws_access_key_id`, `aws_secret_access_key`, `aws_session_token`. Key names match case-insensitively, and `-` counts as `_`. Every string under the key is replaced, at any depth: in a list, in a nested object, or in a list of objects. Numbers, booleans and `null` are kept. |
 | Long lowercase hex strings | Any run of 40 or more characters from `[0-9a-f]`, anywhere in a string. This includes full 40-character git commit SHAs and SHA-256 digests (`sha256:<hex>` keeps the prefix). Uppercase hex is not matched. The only exception is the `policy_sha256` digest of a schema-validated `agent_trace_authorization` v1 record. |
-| Private keys | PEM blocks whose label ends in `PRIVATE KEY`, such as `RSA PRIVATE KEY`, `ENCRYPTED PRIVATE KEY` or `OPENSSH PRIVATE KEY`, and `PGP PRIVATE KEY BLOCK` blocks. A block with no END line before the next BEGIN line, such as a key cut short, is redacted from its BEGIN line to the end of its base64 body. |
+| Private keys | PEM blocks whose label ends in `PRIVATE KEY`, such as `RSA PRIVATE KEY`, `ENCRYPTED PRIVATE KEY` or `OPENSSH PRIVATE KEY`, and `PGP PRIVATE KEY BLOCK` blocks. A block with no END line before the next BEGIN line, such as a key cut short, is redacted from its BEGIN line to the end of its base64 body. Base64 body lines that end in an END line with no BEGIN line, such as the output of `tail` on a key file, are redacted from the first body line through the END line. Body lines may start with a line number as printed by `cat -n` or Claude Code. Certificates and public keys are not matched. |
 
 Redacted values become typed markers such as `[REDACTED:openai-key]`, `[REDACTED:bearer-token]`, or `[REDACTED:sensitive]`. The provider keys above use `stripe-key`, `stripe-webhook-secret`, `google-api-key`, `gitlab-token`, `npm-token` and `huggingface-token`. A provider prefix inside a longer word, such as `risk_live_` or `xnpm_`, is not matched. A `-` before a prefix does not stop a match, as in `x-sk_live_*` or a removed diff line, except before the short prefixes `AIza`, `npm_` and `hf_`, which can appear by chance after a `-` inside other tokens. Events with redaction are marked with `"redacted": true`. See [ADR-0007](../ADRs/0007-heuristic-redaction.md) for design rationale.
 
@@ -77,6 +77,8 @@ sanitised = mask_event_data(event.data)
 ```
 
 Masked by default: email addresses, phone numbers, credit card numbers, US Social Security Numbers, AWS ARNs.
+
+Values under personal-data key names such as `email`, `phone`, `user_id`, `ssn` or `credit_card` are replaced whole. If the value is a list or object, every string in it is replaced, at any depth. Numbers, booleans and `null` are kept.
 
 ---
 

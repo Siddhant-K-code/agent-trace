@@ -179,6 +179,23 @@ class TestRedactData(unittest.TestCase):
         self.assertIn("[REDACTED:", result["arguments"]["headers"]["Authorization"])
         self.assertEqual(result["arguments"]["api_key"], redaction_marker("sensitive"))
 
+    def test_every_string_under_a_sensitive_key(self):
+        data = {
+            "password": ["hunter2"],
+            "token": {"v": "abc", "n": 3},
+            "credentials": [{"user": "a", "keys": ["b"]}, None],
+            "other": {"v": "kept"},
+        }
+        self.assertEqual(redact_data(data), {
+            "password": [redaction_marker("sensitive")],
+            "token": {"v": redaction_marker("sensitive"), "n": 3},
+            "credentials": [
+                {"user": redaction_marker("sensitive"), "keys": [redaction_marker("sensitive")]},
+                None,
+            ],
+            "other": {"v": "kept"},
+        })
+
     def test_redact_data_with_status(self):
         data = {"text": "hello sk-abc123def456ghi789jkl012mno345pqr678"}
         result, changed = redact_data_with_status(data)
@@ -338,6 +355,99 @@ class TestCutPrivateKeyBody(unittest.TestCase):
         self.assertEqual(
             redact_value(twice), '"{\\"private_key\\": \\"' + KEY_MARKER + '\\"}"'
         )
+
+
+def numbered(text, sep="\t"):
+    """Number lines as cat -n (a tab) or Claude Code (an arrow) prints them."""
+    return "\n".join(f"{i:6}{sep}{line}" for i, line in enumerate(text.split("\n"), 1))
+
+
+class TestNumberedPrivateKey(unittest.TestCase):
+    """Keys in file views that start each line with its number."""
+
+    def test_cut_key_body_is_redacted(self):
+        key = fake_key().rstrip("\n")
+        cut = "\n".join(key.split("\n")[:10])
+        for sep in ("\t", "\u2192"):
+            with self.subTest(sep=sep):
+                text = numbered(cut, sep)
+                self.assertEqual(redact_value(text), f"     1{sep}" + KEY_MARKER)
+                self.assertEqual(
+                    redact_value(text + f"\n    11{sep}$ next"),
+                    f"     1{sep}" + KEY_MARKER + f"\n    11{sep}$ next",
+                )
+
+    def test_cut_key_in_json_text(self):
+        cut = "\n".join(fake_key().split("\n")[:10])
+        for sep in ("\t", "\u2192"):
+            with self.subTest(sep=sep):
+                text = json.dumps({"output": numbered(cut, sep)})
+                start = json.dumps(f"     1{sep}")[1:-1]
+                self.assertEqual(redact_value(text), '{"output": "' + start + KEY_MARKER + '"}')
+
+    def test_full_key_is_redacted(self):
+        for sep in ("\t", "\u2192"):
+            with self.subTest(sep=sep):
+                text = numbered(fake_key().rstrip("\n"), sep)
+                self.assertEqual(redact_value(text), f"     1{sep}" + KEY_MARKER)
+
+
+class TestKeyTail(unittest.TestCase):
+    """Body lines that end in an END line with no BEGIN line, as from tail."""
+
+    def tail(self, label="RSA PRIVATE KEY", lines=5):
+        return "\n".join(fake_key(label).rstrip("\n").split("\n")[-lines:])
+
+    def test_tail_of_a_key_file(self):
+        for label in KEY_LABELS:
+            with self.subTest(label):
+                text = "$ tail -5 id\n" + self.tail(label) + "\n$ ls"
+                self.assertEqual(redact_value(text), "$ tail -5 id\n" + KEY_MARKER + "\n$ ls")
+
+    def test_numbered_tail(self):
+        for sep in ("\t", "\u2192"):
+            with self.subTest(sep=sep):
+                self.assertEqual(redact_value(numbered(self.tail(), sep)), f"     1{sep}" + KEY_MARKER)
+
+    def test_each_line_break_form(self):
+        for brk in ("\n", "\r\n", "\\n", "\\r\\n", "\\\\n", "\\\\r\\\\n"):
+            with self.subTest(brk=brk):
+                text = "$ x" + brk + self.tail().replace("\n", brk) + brk + "$ next"
+                self.assertEqual(redact_value(text), "$ x" + brk + KEY_MARKER + brk + "$ next")
+
+    def test_tail_in_json_text(self):
+        once = json.dumps({"stdout": self.tail()})
+        self.assertEqual(redact_value(once), '{"stdout": "' + KEY_MARKER + '"}')
+        twice = json.dumps(once)
+        self.assertEqual(redact_value(twice), '"{\\"stdout\\": \\"' + KEY_MARKER + '\\"}"')
+
+    def test_prose_above_the_body_is_kept(self):
+        text = "Here is the end of the key:\n" + self.tail()
+        self.assertEqual(redact_value(text), "Here is the end of the key:\n" + KEY_MARKER)
+
+    def test_end_line_alone_or_after_prose_is_kept(self):
+        for text in (
+            "-----END RSA PRIVATE KEY-----",
+            "the file ends with\n-----END RSA PRIVATE KEY-----",
+            "AAAA -----END RSA PRIVATE KEY-----",
+            "Proc-Type: 4,ENCRYPTED\n-----END RSA PRIVATE KEY-----",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(redact_value(text), text)
+                self.assertFalse(_contains_secret(text))
+
+    def test_certificates_and_public_keys_are_kept(self):
+        body = "\n".join(self.tail().split("\n")[:-1])
+        for label in ("CERTIFICATE", "PUBLIC KEY", "RSA PUBLIC KEY"):
+            with self.subTest(label):
+                text = body + f"\n-----END {label}-----"
+                self.assertEqual(redact_value(text), text)
+                self.assertFalse(_contains_secret(text))
+
+    def test_redact_data_flags_a_tail(self):
+        result, changed = redact_data_with_status({"output": self.tail() + "\n"})
+        self.assertTrue(changed)
+        self.assertEqual(result, {"output": KEY_MARKER + "\n"})
 
 
 class TestTokenPrefixes(unittest.TestCase):
@@ -638,15 +748,22 @@ _HEADER = (
     r"[^\r\n\\]*(?:\\(?!n|r\\n|\\n|\\r\\\\n)[^\r\n\\]*)*"
 )
 _BASE64 = r"[A-Za-z0-9+/=]"
+_NUMBER = r"[0-9]+(?:\t|\\t|\\\\t|\u2192|\\u2192|\\\\u2192)"
 KEY_BODY = re.compile(
-    _BASE64 + r"*(?:(?:" + _BREAK + r"[ \t]*)+(?:" + _HEADER + "|" + _BASE64 + r"+)"
+    _BASE64 + r"*(?:(?:" + _BREAK + r"[ \t]*(?:" + _NUMBER + r"[ \t]*)?)+"
+    r"(?:" + _HEADER + "|(?!" + _NUMBER + ")" + _BASE64 + r"+)"
     r"| " + _BASE64 + r"+)*"
 )
 
 
 def in_main_domain(text):
-    """Main's labels only, and each BEGIN has its END before another BEGIN."""
+    """Main's labels only, and each BEGIN has its END before another BEGIN.
+
+    Every END line has a BEGIN line: TestKeyTail covers the rest.
+    """
     if any(m.group(1) not in MAIN_KEY_LABELS for m in ANY_KEY_LABEL.finditer(text)):
+        return False
+    if MAIN_KEY_END.search(MAIN_PRIVATE_KEY.sub("", text)):
         return False
     for begin in MAIN_KEY_BEGIN.finditer(text):
         end = MAIN_KEY_END.search(text, begin.end())
@@ -768,7 +885,8 @@ class TestPatternsMatchMain(unittest.TestCase):
         rng = random.Random(5)
         pieces = (
             "A", "b", "9", "+", "/", "=", "MIIE", "n", "r", "\n", "\r\n", "\r", "\\n",
-            "\\r\\n", "\\\\n", "\\\\r\\\\n", "\\", "\\\\", " ", "  ", "\t", "Proc-Type:",
+            "\\r\\n", "\\\\n", "\\\\r\\\\n", "\\", "\\\\", " ", "  ", "\t", "\\t", "\u2192",
+            "\\u2192", "Proc-Type:",
             "DEK-Info:", "Version:", "Comment:", "Proc-Type", " 4,ENCRYPTED", ",", ":", "-",
             ".", "x y", "é", "\n" * 70, "\\n" * 70, "\n " * 66, "a " * 70,
         )
@@ -788,6 +906,7 @@ class TestPatternCost(unittest.TestCase):
     """
 
     BEGIN = "-----BEGIN PRIVATE KEY-----"
+    END = "-----END PRIVATE KEY-----"
 
     def test_long_inputs_finish_fast(self):
         shapes = {
@@ -803,6 +922,17 @@ class TestPatternCost(unittest.TestCase):
             "base64 lines": self.BEGIN + ("\n" + "A" * 64) * 5_000,
             "spaced words": self.BEGIN + "\n" + "a " * 160_000,
             "header backslashes": self.BEGIN + "\nComment: " + "\\x" * 160_000,
+            "END lines": "-----END RSA PRIVATE KEY-----\n" * 10_000,
+            "base64 lines, then END": ("A" * 64 + "\n") * 5_000 + self.END,
+            "escaped base64 lines, then END": ("A" * 64 + "\\n") * 5_000 + self.END,
+            "base64 lines between ENDs": ("A" * 64 + "\n" + self.END + "\n") * 5_000,
+            "blank lines, then END": "\n" * 320_000 + self.END,
+            "escaped blank lines, then END": "\\n" * 160_000 + self.END,
+            "long run, then END": "A" * 320_000 + "\n" + self.END,
+            "spaced words, then END": "a " * 160_000 + "\n" + self.END,
+            "numbered lines, then END": "".join(
+                f"{i:6}\tAAAA\n" for i in range(20_000)
+            ) + self.END,
         }
         for name, text in shapes.items():
             with self.subTest(name):
@@ -857,6 +987,8 @@ class TestPatternCost(unittest.TestCase):
             "blank lines": self.BEGIN + "\n" * 320_000,
             "escaped blank lines": self.BEGIN + "\\n" * 160_000,
             "spaced words": self.BEGIN + "\n" + "a " * 160_000,
+            "blank lines, then END": "\n" * 320_000 + self.END,
+            "spaced words, then END": "a " * 160_000 + "\n" + self.END,
         }
         for name, text in shapes.items():
             with self.subTest(name):
