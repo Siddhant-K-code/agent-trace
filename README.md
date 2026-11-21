@@ -56,13 +56,15 @@ Never loaded (available in >= 5 sessions, loaded in 0):
 
 ## Quick start
 
-**Option 1: CLI hooks.** Captures prompts, responses, and hook-visible tool calls
+**Option 1: CLI hooks.** Captures the prompts, responses, and tool calls each CLI's hooks expose; coverage differs by provider
 
 ```bash
 agent-strace setup             # Claude Code hooks for ~/.claude/settings.json
 agent-strace setup --cli claude --verify # check Claude Code hooks + CLI, not live capture
+agent-strace setup --cli claude --verify --live # after one real session: fails unless its events were recorded
 agent-strace setup --cli codex # OpenAI Codex hooks in ~/.codex/hooks.json
 agent-strace setup --cli codex --verify # check Codex user hooks + CLI, not live capture
+agent-strace setup --cli codex --verify --live # after one real session: fails unless its events were recorded
 agent-strace setup --cli gemini # Gemini CLI extension under ~/.gemini/extensions
 agent-strace setup --cli cursor # Cursor project hooks in .cursor/hooks.json
 agent-strace setup --cli copilot # GitHub Copilot CLI hooks in ~/.copilot/hooks
@@ -73,17 +75,14 @@ Provider coverage and known gaps: [docs/capture-matrix.md](docs/capture-matrix.m
 
 ### Claude Code plugin
 
-After installing `agent-strace`, install the repository as a native Claude Code
-plugin to enable tracing hooks plus the shared trace analyst agent and skill:
+After installing `agent-strace`, install the repository as a native Claude Code plugin to enable tracing hooks plus the shared trace analyst agent and skill:
 
 ```bash
 claude plugin marketplace add Siddhant-K-code/agent-trace
 claude plugin install agent-strace@agent-trace
 ```
 
-See the [Claude Code plugin guide](docs/claude-code-plugin.md) for verification,
-updates, uninstall steps, privacy boundaries, provider gaps, and release
-publication.
+See the [Claude Code plugin guide](docs/claude-code-plugin.md) for verification, updates, uninstall steps, privacy boundaries, provider gaps, and release publication.
 
 ### GitHub Copilot CLI plugin
 

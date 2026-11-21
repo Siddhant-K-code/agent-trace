@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import shutil
@@ -17,9 +18,12 @@ try:  # keeps product telemetry off in this process and its children
 except ImportError:  # pragma: no cover - run as a package module
     from tests import _no_telemetry
 
+from agent_trace.cli import _claude_managed_settings_dir
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
+FIXTURES = ROOT / "tests" / "fixtures" / "capture_matrix"
 
 
 @unittest.skipUnless(os.name == "posix", "documented rollback commands use cp and rm")
@@ -151,6 +155,54 @@ class SetupRollbackTests(unittest.TestCase):
         self.assertEqual(unrelated.read_bytes(), unrelated_bytes)
         self.assertEqual(settings.read_bytes(), settings_bytes)
         self.assertEqual(sorted(path.name for path in hooks_dir.iterdir()), ["team-policy.json"])
+
+    def _replay_through_hooks(self, hooks: dict, fixture: str, scenario: str) -> None:
+        """Pipe recorded provider payloads into the hook commands setup generated."""
+        recorded = json.loads((FIXTURES / fixture).read_text(encoding="utf-8"))
+        replayed = 0
+        for hook in recorded["scenarios"][scenario]["hooks"]:
+            for group in hooks.get(hook["event"], []):
+                for handler in group["hooks"]:
+                    result = subprocess.run(
+                        ["sh", "-c", handler["command"]],
+                        cwd=self.root,
+                        env=self.env,
+                        input=json.dumps(hook["payload"]),
+                        capture_output=True,
+                        text=True,
+                        timeout=60,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    replayed += 1
+        self.assertGreater(replayed, 0)
+
+    def _assert_live_capture(self, provider: str) -> None:
+        live = self._run(f"agent-strace setup --cli {provider} --verify --live")
+        self.assertIn("Capture evidence: observed", live.stdout)
+        self.assertIn(f"Provider: {provider}", live.stdout)
+        self.assertIn("Start marker: observed", live.stdout)
+        self.assertIn("End marker: observed", live.stdout)
+
+    def test_claude_setup_to_live_verify_with_recorded_payloads(self):
+        if _claude_managed_settings_dir().exists():
+            self.skipTest("machine-wide Claude Code managed settings would also be checked")
+        settings = self.home / ".claude" / "settings.json"
+        settings.parent.mkdir()
+        settings.write_text(self._run("agent-strace setup").stdout, encoding="utf-8")
+        hooks = json.loads(settings.read_text(encoding="utf-8"))["hooks"]
+
+        self._replay_through_hooks(hooks, "claude-2.1.325.json", "plain")
+
+        self._assert_live_capture("claude")
+
+    def test_codex_setup_to_live_verify_with_recorded_payloads(self):
+        self._run("agent-strace setup --cli codex")
+        hooks_path = self.home / ".codex" / "hooks.json"
+        hooks = json.loads(hooks_path.read_text(encoding="utf-8"))["hooks"]
+
+        self._replay_through_hooks(hooks, "codex-0.167.0-alpha.3.2.json", "tool")
+
+        self._assert_live_capture("codex")
 
 
 if __name__ == "__main__":
