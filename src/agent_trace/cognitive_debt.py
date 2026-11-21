@@ -699,8 +699,11 @@ def build_cognitive_debt_report(
             if store.session_exists(full_id):
                 metas = [store.load_meta(full_id)]
         else:
+            # The report does not filter by tenant, so the tenant
+            # administration check on untagged metadata does not apply.
             metas = [
-                meta for meta in store.list_sessions_strict()
+                meta
+                for meta in store.list_sessions_strict(strict_event_tenants=False)
                 if window_start <= meta.started_at < window_end
             ]
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
