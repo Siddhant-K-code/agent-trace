@@ -9,7 +9,7 @@ Three ways to capture agent sessions. Pick the one that matches your agent.
 To install capture once per machine for every developer, with metadata-only
 defaults, see [Platform-team install](platform-install.md).
 
-Captures the lifecycle events exposed by each CLI: user prompts, assistant responses, and hook-visible tool calls or edits. Claude Code exposes broad tool coverage; Cursor coverage depends on the native events Cursor emits.
+Captures only the lifecycle events each CLI exposes through its hooks, so coverage differs by provider. For example, GitHub Copilot CLI hooks carry no response text, and Claude Code hooks report no token usage. The [capture matrix](capture-matrix.md) lists what Claude Code, Codex and Copilot CLI hooks capture, their known gaps and the provider version each entry was verified with. Gemini CLI and Cursor are not in the matrix; Cursor coverage depends on the native events Cursor emits.
 
 Claude Code users can install the
 [native AgentTrace plugin](claude-code-plugin.md) instead of copying hook
@@ -70,6 +70,8 @@ agent-strace setup --no-redact
 
 Then use Claude Code normally. Sessions appear in `.agent-traces/`.
 
+These hooks record session start and end, prompts, the final response, tool calls and results, and failed tools. They record no token usage, no subagent start or stop events, and no result for a tool denied at the permission prompt. See the [capture matrix](capture-matrix.md#claude-code) for the verified Claude Code version and every known gap.
+
 To keep traces somewhere else, set `AGENT_TRACE_DIR` (a relative path resolves against the working directory). Hooks write there, and `list`, `replay`, `health` and the other commands read from there unless you pass `--trace-dir`. An empty value is treated as unset. See [global options](commands.md#global-options).
 
 Traces can contain prompts and tool output, so `.agent-traces/` writes its own `.gitignore` and stays out of git by default. To commit a trace deliberately, use `git add -f`.
@@ -93,10 +95,14 @@ select a specific session or prefix.
 
 The report names the session ID, provider, capture method, observed event
 types, start and end markers, redaction state, evidence-health status, packaged
-capture-matrix version, and every declared gap from that provider's matrix
-entry. The command exits non-zero for missing or stale setup, no matching
-session, empty or unreadable evidence, a provider mismatch, or `unknown` or
-`invalid` evidence health.
+capture-matrix version, and every declared gap from that provider's
+[capture matrix](capture-matrix.md) entry. The command exits non-zero for
+missing or stale setup, no matching session, empty or unreadable evidence, a
+provider mismatch, or `unknown` or `invalid` evidence health.
+
+A pass shows that this installation recorded one reviewable session. It does
+not widen coverage beyond the matrix entry or change that entry's verification
+status.
 
 The verifier never starts Claude Code, Codex, or a model request. Record a
 small local session yourself, exit it cleanly, then run:
