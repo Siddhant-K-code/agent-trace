@@ -60,7 +60,7 @@ agent-strace server --storage ./traces --dashboard
 
 Open `http://127.0.0.1:4317/`, select a session, and review ordered evidence, health reasons, provider limits, annotations, raw fields, and unresolved relationships. The dashboard shows session fields and event text as plain text.
 
-The page can compare two sessions, save a privacy-minimized HTML review, and download OTLP JSON. These actions read the configured local store and return local files. They do not upload trace data. When a session has an event timestamp that is not a Unix time in seconds, the review, compare, and share actions answer 400 with the message the CLI prints, and so does the OTLP action when that event is one it exports. When a session's `meta.json` is [corrupt](commands.md#list), the session list leaves it out, and every action on it answers 400 with the message the CLI prints.
+The page can compare two sessions, save a privacy-minimized HTML review, and download OTLP JSON. These actions read the configured local store and return local files. They do not upload trace data. When a session has an event timestamp that is not a Unix time in seconds, the review, compare, and share actions answer 400 with the message the CLI prints, and so does the OTLP action when that event is one it exports. When a session's `meta.json` is [corrupt](commands.md#list), the session list leaves it out, and every action on it answers 400 with the message the CLI prints. When a session's events name another session or tenant, or its `events.ndjson` holds a line that is not an event, its events and every action on it answer 400 the same way.
 
 With `--dashboard`, the server defaults to `127.0.0.1`. An unauthenticated dashboard cannot bind to `0.0.0.0`, `::`, a LAN address, or a hostname. To expose it beyond loopback, set an API key explicitly:
 
@@ -186,6 +186,14 @@ JSON, not a JSON object, or nested more than 128 levels. `GET /sessions/<id>`
 and `GET /sessions/<id>/events` answer 400 for it with
 `{"error": "<message>"}`, the message the CLI prints. See
 [`list`](commands.md#list) for the fix.
+
+`GET /sessions/<id>/events` also answers 400 with `{"error": "<message>"}` when
+an event names another session or tenant, or a line of `events.ndjson` is not
+an event. `GET /sessions` still lists that session, so `org-report --endpoint`
+stops with `collector request failed with HTTP 400` instead of reporting
+without it. A `meta.json` whose `session_id` names another session counts as
+corrupt. Before you rebuild it, see
+[Sessions with mismatched or unreadable events](commands.md#sessions-with-mismatched-or-unreadable-events).
 
 Upgrade the collector before its clients. A v0.106.0 or older collector
 returns 400 for session metadata that contains `conversation_id`. See

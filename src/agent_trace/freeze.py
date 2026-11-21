@@ -13,7 +13,7 @@ from typing import Any, TextIO
 
 from .inert import inert
 from .models import EventType, TraceEvent, usable_text
-from .store import TraceStore
+from .store import TraceStore, refusal_reason
 
 
 SCHEMA_VERSION = 1
@@ -356,7 +356,9 @@ def cmd_freeze(args: argparse.Namespace) -> int:
     try:
         fixture = freeze_session(store, session_id, task=getattr(args, "task", "") or "")
     except Exception as exc:
-        sys.stderr.write(f"Could not freeze session {session_id}: {exc}\n")
+        sys.stderr.write(
+            f"Could not freeze session {session_id}: {refusal_reason(exc)}\n"
+        )
         return 1
 
     fmt = getattr(args, "format", "text")
@@ -399,7 +401,7 @@ def cmd_regression(args: argparse.Namespace) -> int:
     try:
         actual = freeze_session(store, session_id)
     except Exception as exc:
-        sys.stderr.write(f"Could not load session {session_id}: {exc}\n")
+        sys.stderr.write(f"Could not load session {session_id}: {refusal_reason(exc)}\n")
         return 1
 
     threshold = float(getattr(args, "threshold", 0.0) or 0.0)

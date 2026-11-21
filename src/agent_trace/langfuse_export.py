@@ -37,7 +37,7 @@ from .pairing import (
     llm_pairer,
     tool_pairer,
 )
-from .store import TraceStore
+from .store import TraceStore, refusal_reason
 
 
 # ---------------------------------------------------------------------------
@@ -361,7 +361,7 @@ def export_session_to_langfuse(
         meta = store.load_meta(session_id)
         events = store.load_events(session_id)
     except Exception as exc:
-        sys.stderr.write(f"Failed to load session {session_id}: {exc}\n")
+        sys.stderr.write(f"Failed to load session {session_id}: {refusal_reason(exc)}\n")
         return False
 
     # Batch ingestion endpoint

@@ -36,8 +36,10 @@ from agent_trace.store import TraceStore
 
 try:
     from test_cost import _codex_events
+    from test_store import OTHER_SESSION, event_line, write_session_lines
 except ImportError:  # pragma: no cover - package-style test discovery
     from tests.test_cost import _codex_events
+    from tests.test_store import OTHER_SESSION, event_line, write_session_lines
 
 
 # ---------------------------------------------------------------------------
@@ -737,6 +739,26 @@ class TestCmdLint(unittest.TestCase):
         code, out, err = self._run(self._make_args(store.base_dir, lint_all=True, fmt="json"))
         self.assertEqual((code, err), (1, error))
         self.assertEqual([report["session_id"] for report in json.loads(out)], [good])
+
+    def test_all_reports_other_sessions_and_names_a_session_the_store_refuses(self):
+        for name, lines, reason in (
+            ("mismatch", [event_line(), event_line(session_id=OTHER_SESSION)],
+             "event session ID does not match its directory"),
+            ("unreadable", [event_line(), '{"timestamp": 1.0}'],
+             "line 2 of events.ndjson has no event_type"),
+        ):
+            with self.subTest(name):
+                store, good = _make_store_with_events(
+                    [_tool_call("Write", file_path="a.py"), _session_end()],
+                )
+                bad = write_session_lines(store, lines)
+                code, out, err = self._run(self._make_args(store.base_dir, lint_all=True))
+                self.assertEqual(
+                    (code, err), (1, f"Error: cannot read session {bad}: {reason}\n")
+                )
+                self.assertIn(f"No issues found in session {good[:12]}", out)
+                self.assertNotIn(bad[:12], out)
+                self.assertNotIn(OTHER_SESSION, out + err)
 
     def test_rule_that_raises_is_not_reported_as_clean(self):
         def broken(events, cfg):

@@ -10,7 +10,7 @@ from .evidence_health import EvidenceHealthReasonKind, EvidenceHealthStatus
 from .health import HealthReport, assess_session, load_capture_matrix
 from .hooks import _PROVIDER_AGENT
 from .models import SessionMeta, usable_text
-from .store import TraceStore
+from .store import TraceStore, refusal_reason
 
 _SUPPORTED_PROVIDERS = frozenset({"claude", "codex"})
 _PROVIDER_NAMES = {
@@ -74,7 +74,8 @@ def _load_report(
         events = store.load_events(session_id)
     except (OSError, ValueError, TypeError, KeyError) as exc:
         raise LiveCaptureError(
-            f"Session {session_id} could not be read as recorded evidence: {exc}. "
+            f"Session {session_id} could not be read as recorded evidence: "
+            f"{refusal_reason(exc)}. "
             "Recapture the session, or select another with --session SESSION_ID."
         ) from exc
 
@@ -152,8 +153,8 @@ def inspect_live_capture(
             if hinted:
                 raise LiveCaptureError(
                     f"Newest {_PROVIDER_NAMES[provider]} capture candidate {meta.session_id} "
-                    f"could not be read: {exc}. Recapture the session, or select another with "
-                    "--session SESSION_ID."
+                    f"could not be read: {refusal_reason(exc)}. Recapture the session, "
+                    "or select another with --session SESSION_ID."
                 ) from exc
             continue
         if not events and hinted:

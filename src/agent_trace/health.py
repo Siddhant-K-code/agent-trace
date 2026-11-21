@@ -39,7 +39,7 @@ from .hooks import (
     _PROVIDER_AGENT,
 )
 from .models import EventType, SessionMeta, TraceEvent, usable_text
-from .store import CorruptSessionMetaError, TraceStore
+from .store import CorruptSessionMetaError, RefusedSessionError, TraceStore
 
 CAPTURE_MATRIX_RESOURCE = "capture_matrix.json"
 CAPTURE_MATRIX_SCHEMA_VERSION = 1
@@ -547,7 +547,7 @@ def cmd_health(args: argparse.Namespace) -> int:
     try:
         meta = store.load_meta(session_id)
         events = store.load_events(session_id)
-    except CorruptSessionMetaError as exc:
+    except (CorruptSessionMetaError, RefusedSessionError) as exc:
         sys.stderr.write(f"Error: {exc}\n")
         return 1
     except (OSError, ValueError, TypeError, KeyError) as exc:

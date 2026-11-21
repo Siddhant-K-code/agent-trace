@@ -36,8 +36,10 @@ from agent_trace.event_data import NonObjectEventDataError
 
 try:
     from test_html_replay import LEGACY_ID, SKIP_LEGACY_ON_WINDOWS, write_legacy_session
+    from test_store import OTHER_SESSION, event_line, write_session_lines
 except ImportError:  # pragma: no cover - package-style test discovery
     from tests.test_html_replay import LEGACY_ID, SKIP_LEGACY_ON_WINDOWS, write_legacy_session
+    from tests.test_store import OTHER_SESSION, event_line, write_session_lines
 
 # The detail page title cuts the id at 12 characters, then escapes it.
 LEGACY_TITLE = "<title>Session L&lt;&quot;&amp;a #?%20&amp; | agent-trace</title>"
@@ -483,6 +485,36 @@ class TestServerDashboardRoutes(unittest.TestCase):
                         "session invalid-review-route event data must be an object: "
                         "event 1 of 1 (tool_call) has string data",
                     )
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_session_routes_return_400_for_a_refused_session(self):
+        server, port, store = _start_server(self._tmp)
+        try:
+            other = write_session_lines(store, [event_line()])
+            mismatch = write_session_lines(
+                store, [event_line(), event_line(session_id=OTHER_SESSION)]
+            )
+            unreadable = write_session_lines(store, [event_line(), "[1]"])
+            for session_id, reason in (
+                (mismatch, "event session ID does not match its directory"),
+                (unreadable, "line 2 of events.ndjson is an array, not an object"),
+            ):
+                for suffix in (
+                    "events", "review", "share?mode=minimized", "otlp", f"compare?other={other}",
+                ):
+                    with self.subTest(reason=reason, suffix=suffix):
+                        with self.assertRaises(urllib.error.HTTPError) as context:
+                            urllib.request.urlopen(
+                                f"http://127.0.0.1:{port}/api/sessions/{session_id}/{suffix}"
+                            )
+                        with context.exception as error:
+                            self.assertEqual(error.code, 400)
+                            self.assertEqual(
+                                json.loads(error.read()),
+                                {"error": f"cannot read session {session_id}: {reason}"},
+                            )
         finally:
             server.shutdown()
             server.server_close()

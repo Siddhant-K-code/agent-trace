@@ -18,7 +18,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import agent_trace
 from agent_trace.fileutil import lock_descriptor, unlock_descriptor
 from agent_trace.models import EventType, SessionMeta, TraceEvent
-from agent_trace.store import CorruptSessionMetaError, TraceStore, ensure_trace_dir_gitignore
+from agent_trace.store import (
+    CorruptSessionMetaError,
+    SessionMismatchError,
+    TraceStore,
+    UnreadableEventLineError,
+    ensure_trace_dir_gitignore,
+)
 
 try:
     from _concurrency import run_concurrently
@@ -880,6 +886,221 @@ class TestCorruptSessionMetaCommands(unittest.TestCase):
                     (result.returncode, result.stderr), (1, "Deletion failed: " + strict)
                 )
                 self.assertTrue((root / name / "aaaa1111" / "meta.json").exists())
+
+
+OTHER_SESSION = "other-session-4c1d"
+OTHER_TENANT = "other-tenant-4c1d"
+
+
+def event_line(**fields) -> str:
+    """Return one readable event line, with ``fields`` set or replaced."""
+    record = json.loads(TraceEvent(
+        EventType.USER_PROMPT, timestamp=1.0, data={"prompt": "hi"}, tenant_id=""
+    ).to_json())
+    record.update(fields)
+    return json.dumps(record)
+
+
+def write_session_lines(
+    store: TraceStore, lines: list[str], *, tenant_id: str = "", started_at: float = 1.0
+) -> str:
+    """Create a session whose events.ndjson holds ``lines`` as written. Returns its ID."""
+    meta = SessionMeta(started_at=started_at, tenant_id=tenant_id)
+    store.create_session(meta)
+    events_file = store._session_dir(meta.session_id) / "events.ndjson"
+    events_file.write_bytes("".join(line + "\n" for line in lines).encode("utf-8"))
+    return meta.session_id
+
+
+def name_other_session_in_meta(store: TraceStore, session_id: str) -> None:
+    meta_file = store._session_dir(session_id) / "meta.json"
+    data = json.loads(meta_file.read_text(encoding="utf-8"))
+    data["session_id"] = OTHER_SESSION
+    meta_file.write_text(json.dumps(data), encoding="utf-8")
+
+
+def tree_snapshot(root: Path) -> dict[str, bytes]:
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+class TestRefusedSessions(unittest.TestCase):
+    """A session whose files name another session or tenant, or hold a line
+    that is not an event, is refused with a message that names only the
+    session directory."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.store = TraceStore(tmp.name, use_workspace_env=False)
+
+    def assert_refused(self, error, session_id, reason):
+        with self.assertRaises(error) as raised:
+            self.store.load_events(session_id)
+        exc = raised.exception
+        self.assertEqual(str(exc), f"cannot read session {session_id}: {reason}")
+        self.assertEqual((exc.session_id, exc.reason), (session_id, reason))
+        self.assertNotIn(OTHER_SESSION, str(exc))
+        self.assertNotIn(OTHER_TENANT, str(exc))
+
+    def test_a_meta_json_that_names_another_session_is_refused_first(self):
+        # load_events reads meta.json first, so this wins over the bad line.
+        session_id = write_session_lines(self.store, ["{"])
+        name_other_session_in_meta(self.store, session_id)
+        for load in (self.store.load_meta, self.store.load_events):
+            with self.subTest(load.__name__):
+                with self.assertRaises(CorruptSessionMetaError) as raised:
+                    load(session_id)
+                self.assertEqual(
+                    str(raised.exception),
+                    f"session {session_id} has a corrupt meta.json: "
+                    "metadata session ID does not match its directory",
+                )
+
+    def test_each_event_mismatch_names_the_directory_and_not_the_other_id(self):
+        cases = [
+            ("event session",
+             write_session_lines(self.store, [event_line(), event_line(session_id=OTHER_SESSION)]),
+             "event session ID does not match its directory"),
+            ("numeric event session",
+             write_session_lines(self.store, [event_line(session_id=5)]),
+             "event session ID does not match its directory"),
+            ("event tenant",
+             write_session_lines(
+                 self.store, [event_line(tenant_id=OTHER_TENANT)], tenant_id="team-a"
+             ),
+             "event tenant does not match session metadata"),
+        ]
+        for name, session_id, reason in cases:
+            with self.subTest(name):
+                self.assert_refused(SessionMismatchError, session_id, reason)
+
+    def test_each_unreadable_kind_names_the_line_and_the_kind(self):
+        cases = [
+            ("{not json", "is not valid JSON"),
+            ("   ", "is not valid JSON"),
+            ("[" * TOO_DEEP_FOR_JSON + "]" * TOO_DEEP_FOR_JSON, "is nested too deeply"),
+            ("[1, 2]", "is an array, not an object"),
+            ('"made_up"', "is a string, not an object"),
+            ("5", "is a number, not an object"),
+            ("null", "is null, not an object"),
+            ("true", "is a boolean, not an object"),
+            ('{"timestamp": 1.0}', "has no event_type"),
+        ]
+        for event_type in ("made_up", 5, None, ["tool_call"], "TOOL_CALL"):
+            cases.append((event_line(event_type=event_type), "has an unknown event_type"))
+        digit_limit = sys.get_int_max_str_digits() if hasattr(sys, "get_int_max_str_digits") else 0
+        if digit_limit:
+            cases.append((
+                '{"event_type": "user_prompt", "n": ' + "1" * (digit_limit + 1) + "}",
+                "has a number with too many digits",
+            ))
+        for line, problem in cases:
+            with self.subTest(line=line[:30], problem=problem):
+                session_id = write_session_lines(self.store, [event_line(), line, event_line()])
+                self.assert_refused(
+                    UnreadableEventLineError, session_id, f"line 2 of events.ndjson {problem}"
+                )
+
+    def test_line_numbers_count_blank_lines_and_the_other_unreadable_lines(self):
+        good = event_line()
+        cases = [
+            (["", "", good, "{", good], "line 4 of events.ndjson is not valid JSON"),
+            (["\r", "\r", good + "\r", "{\r"], "line 4 of events.ndjson is not valid JSON"),
+            ([good, "", "{", good], "line 3 of events.ndjson is not valid JSON"),
+            ([good, "{", "[1]", good],
+             "line 2 of events.ndjson is not valid JSON; 1 more line is unreadable"),
+            ([good, "[1]", "{", '{"a": 1}', good],
+             "line 2 of events.ndjson is an array, not an object; "
+             "2 more lines are unreadable"),
+        ]
+        for lines, reason in cases:
+            with self.subTest(reason):
+                session_id = write_session_lines(self.store, lines)
+                self.assert_refused(UnreadableEventLineError, session_id, reason)
+
+    def test_a_mismatch_wins_over_an_unreadable_line(self):
+        session_id = write_session_lines(self.store, ["{", event_line(session_id=OTHER_SESSION)])
+        self.assert_refused(
+            SessionMismatchError, session_id, "event session ID does not match its directory"
+        )
+
+
+class TestRefusedSessionCommands(unittest.TestCase):
+    """Read commands print one Error line for a refused session and write nothing."""
+
+    def test_read_commands_print_one_line_that_names_only_the_session(self):
+        root = Path(tempfile.mkdtemp(prefix="refused-session-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        (root / "home").mkdir()
+        good = event_line()
+        single = [["replay"], ["inspect"], ["export", "--format", "json"], ["stats"]]
+        cases = {}
+
+        def case(name, lines, reason, commands, *, tenant_id="", meta_names_other=False):
+            trace_dir = root / name
+            store = TraceStore(str(trace_dir), use_workspace_env=False)
+            write_session_lines(store, [good], started_at=1.0)
+            session_id = write_session_lines(store, lines, tenant_id=tenant_id, started_at=2.0)
+            message = f"cannot read session {session_id}: {reason}"
+            if meta_names_other:
+                name_other_session_in_meta(store, session_id)
+                message = f"session {session_id} has a corrupt meta.json: {reason}"
+            cases[name] = (trace_dir, session_id, message, commands)
+
+        case("meta-session", [good], "metadata session ID does not match its directory",
+             single, meta_names_other=True)
+        case("event-session", [good, event_line(session_id=OTHER_SESSION)],
+             "event session ID does not match its directory", single + [["standup"]])
+        case("event-session-number", [event_line(session_id=5)],
+             "event session ID does not match its directory", [["replay"]])
+        case("event-tenant", [event_line(tenant_id=OTHER_TENANT)],
+             "event tenant does not match session metadata", single, tenant_id="team-a")
+        case("not-json", [good, "{", good], "line 2 of events.ndjson is not valid JSON",
+             [["replay"], ["standup"]])
+        case("array", [good, "[1]"], "line 2 of events.ndjson is an array, not an object",
+             [["replay"]])
+        case("no-event-type", ['{"timestamp": 1.0}'], "line 1 of events.ndjson has no event_type",
+             [["replay"]])
+        case("unknown-event-type", [event_line(event_type="made_up")],
+             "line 1 of events.ndjson has an unknown event_type", [["replay"]])
+
+        env = without_telemetry({
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("AGENT_STRACE_") and key != "AGENT_TRACE_DIR"
+        })
+        env["PYTHONPATH"] = str(SRC_ROOT)
+        env["HOME"] = env["USERPROFILE"] = str(root / "home")
+        env["PYTHONIOENCODING"] = "utf-8"
+        jobs = [(name, command) for name, spec in cases.items() for command in spec[3]]
+        before = tree_snapshot(root)
+
+        def run(job):
+            name, command = job
+            trace_dir, session_id = cases[name][:2]
+            # standup with no session ID reads the newest session.
+            argv = command[:1] + ([] if command[0] == "standup" else [session_id]) + command[1:]
+            return subprocess.run(
+                [sys.executable, "-m", "agent_trace.entry", "--trace-dir", str(trace_dir), *argv],
+                capture_output=True, text=True, encoding="utf-8",
+                env=env, cwd=root, timeout=120,
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(run, jobs))
+        for (name, command), result in zip(jobs, results):
+            message = cases[name][2]
+            with self.subTest(case=name, command=command[0]):
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(result.stderr, f"Error: {message}\n")
+                self.assertNotIn(OTHER_SESSION, result.stderr)
+                self.assertNotIn(OTHER_TENANT, result.stderr)
+        self.assertEqual(tree_snapshot(root), before)
 
 
 if __name__ == "__main__":

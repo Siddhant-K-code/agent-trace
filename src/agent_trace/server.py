@@ -64,6 +64,7 @@ from .store import (
     CorruptSessionMetaError,
     TraceStore,
     DEFAULT_TRACE_DIR,
+    RefusedSessionError,
     validate_optional_tenant_id,
     validate_session_id,
     validate_stored_id,
@@ -414,7 +415,7 @@ class CollectorHandler(BaseHTTPRequestHandler):
                     return
                 try:
                     result = _wd.api_session_events(self.store, session_id)
-                except CorruptSessionMetaError as exc:
+                except (CorruptSessionMetaError, RefusedSessionError) as exc:
                     self._send_json(400, {"error": str(exc)})
                     return
                 if result is None:
@@ -439,6 +440,7 @@ class CollectorHandler(BaseHTTPRequestHandler):
                     NonObjectEventDataError,
                     UnusableTimestampError,
                     CorruptSessionMetaError,
+                    RefusedSessionError,
                 ) as exc:
                     self._send_json(400, {"error": str(exc)})
                     return
@@ -468,6 +470,7 @@ class CollectorHandler(BaseHTTPRequestHandler):
                     NonObjectEventDataError,
                     UnusableTimestampError,
                     CorruptSessionMetaError,
+                    RefusedSessionError,
                 ) as exc:
                     self._send_json(400, {"error": str(exc)})
                     return
@@ -500,6 +503,7 @@ class CollectorHandler(BaseHTTPRequestHandler):
                     NonObjectEventDataError,
                     UnusableTimestampError,
                     CorruptSessionMetaError,
+                    RefusedSessionError,
                 ) as exc:
                     self._send_json(400, {"error": str(exc)})
                     return
@@ -525,6 +529,7 @@ class CollectorHandler(BaseHTTPRequestHandler):
                     NonObjectEventDataError,
                     UnusableTimestampError,
                     CorruptSessionMetaError,
+                    RefusedSessionError,
                 ) as exc:
                     self._send_json(400, {"error": str(exc)})
                     return
@@ -569,7 +574,7 @@ class CollectorHandler(BaseHTTPRequestHandler):
                     return
             try:
                 events = self.store.load_events(session_id)
-            except CorruptSessionMetaError as exc:
+            except (CorruptSessionMetaError, RefusedSessionError) as exc:
                 self._send_json(400, {"error": str(exc)})
                 return
             self._send_ndjson(200, [e.to_json() for e in events])

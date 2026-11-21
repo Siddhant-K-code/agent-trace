@@ -14,8 +14,10 @@ from unittest.mock import patch
 
 try:  # keeps product telemetry off in this process and its children
     import _no_telemetry  # noqa: F401
+    from test_store import OTHER_SESSION, event_line, write_session_lines
 except ImportError:  # pragma: no cover - run as a package module
     from tests import _no_telemetry  # noqa: F401
+    from tests.test_store import OTHER_SESSION, event_line, write_session_lines
 
 from agent_trace import health
 from agent_trace.cli import _telemetry_command_properties, build_parser, main
@@ -1266,6 +1268,22 @@ class TestSessionResolution(_HealthBase):
     def test_empty_store_fails(self):
         code, out, err = self.run_health()
         self.assertEqual((code, out, err), (1, "", "No sessions found.\n"))
+
+    def test_a_refused_session_is_named_once(self):
+        store = TraceStore(self.trace_dir)
+        for name, lines, reason in (
+            ("unknown event_type", [event_line(event_type="made_up")],
+             "line 1 of events.ndjson has an unknown event_type"),
+            ("event session", [event_line(session_id=OTHER_SESSION)],
+             "event session ID does not match its directory"),
+        ):
+            with self.subTest(name):
+                session_id = write_session_lines(store, lines)
+                code, out, err = self.run_health(session_id)
+                self.assertEqual(
+                    (code, out, err),
+                    (1, "", f"Error: cannot read session {session_id}: {reason}\n"),
+                )
 
     def test_matrix_load_failure_fails(self):
         write_session(self.trace_dir, "a0a0a0a0a0a0a0a1", [event(EventType.SESSION_START, 0)])
