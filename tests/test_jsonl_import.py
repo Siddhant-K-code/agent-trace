@@ -641,6 +641,117 @@ def _deep_tool_line(sid, kind, levels):
     return json.dumps(line).replace('"@"', deep).encode()
 
 
+_TOKEN = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+
+
+def _straddle(limit):
+    """Text whose GitHub token starts 24 characters before ``limit``, so a cut at ``limit`` splits it."""
+    return "x" * (limit - 25) + " " + _TOKEN
+
+
+class TestRedactBeforeCut(unittest.TestCase):
+    """Import redacts the whole text before cutting it, as the hooks do."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def _import(self, entries, redact=None):
+        path = os.path.join(self.tmp, "session.jsonl")
+        with open(path, "w") as f:
+            for entry in entries:
+                f.write(json.dumps(entry) + "\n")
+        store = TraceStore(os.path.join(self.tmp, "trace"), redact=redact)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            sid = import_jsonl(path, store=store)
+        return store.load_events(sid), err.getvalue()
+
+    @staticmethod
+    def _user(content, **extra):
+        return {"type": "user", "sessionId": "red1", "uuid": "u1",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "message": {"role": "user", "content": content}, **extra}
+
+    @staticmethod
+    def _assistant(text):
+        return {"type": "assistant", "sessionId": "red1", "uuid": "a1",
+                "timestamp": "2026-01-01T00:00:01Z",
+                "message": {"id": "m1", "model": "claude-sonnet-4", "role": "assistant",
+                            "content": [{"type": "text", "text": text}]}}
+
+    def _only(self, events, event_type):
+        found = [e for e in events if e.event_type == event_type]
+        self.assertEqual(len(found), 1)
+        return found[0]
+
+    def assert_redacted(self, event, text):
+        self.assertNotIn("ghp_", text)
+        self.assertIn("[REDACTED:github-token]", text)
+        self.assertTrue(event.redacted)
+
+    def test_tool_result_token_across_the_cut(self):
+        events, err = self._import([self._user([
+            {"type": "tool_result", "tool_use_id": "t1", "content": _straddle(2000)},
+        ])])
+        event = self._only(events, EventType.TOOL_RESULT)
+        self.assert_redacted(event, event.data["content_preview"])
+        self.assertIn("redacted secrets from trace event", err)
+
+    def test_numbered_private_key_longer_than_the_cut(self):
+        lines = (["-----BEGIN RSA PRIVATE KEY-----"]
+                 + ["MIIJ" + "Q" * 60] * 47 + ["-----END RSA PRIVATE KEY-----"])
+        numbered = "\n".join(f"{i:>6}\u2192{line}" for i, line in enumerate(lines, 1))
+        self.assertGreater(len(numbered), 2000)
+        events, _ = self._import([self._user([
+            {"type": "tool_result", "tool_use_id": "t1", "content": numbered},
+        ])])
+        event = self._only(events, EventType.TOOL_RESULT)
+        self.assertNotIn("MIIJ", event.data["content_preview"])
+        self.assertTrue(event.redacted)
+
+    def test_stdout_and_stderr_tokens_across_their_cuts(self):
+        events, _ = self._import([self._user(
+            [],
+            toolUseResult={"stdout": _straddle(500), "stderr": _straddle(200)},
+        )])
+        event = self._only(events, EventType.TOOL_RESULT)
+        self.assertEqual(event.data["result"].count("[REDACTED:github-token]"), 2)
+        self.assert_redacted(event, event.data["result"])
+
+    def test_prompt_token_across_the_cut(self):
+        events, _ = self._import([self._user(_straddle(2000))])
+        event = self._only(events, EventType.USER_PROMPT)
+        self.assert_redacted(event, event.data["prompt"])
+
+    def test_response_token_across_the_cut(self):
+        events, _ = self._import([self._assistant(_straddle(2000))])
+        event = self._only(events, EventType.ASSISTANT_RESPONSE)
+        self.assert_redacted(event, event.data["text"])
+
+    def test_text_without_secrets_is_cut_as_before(self):
+        long = "y" * 2500
+        events, err = self._import([
+            self._user([{"type": "tool_result", "tool_use_id": "t1", "content": long}]),
+            self._user([], uuid="u2", toolUseResult={"stdout": long, "stderr": long}),
+            self._user(long, uuid="u3"),
+            self._assistant(long),
+        ])
+        preview, result = [e.data for e in events if e.event_type == EventType.TOOL_RESULT]
+        self.assertEqual(preview["content_preview"], "y" * 2000 + "...")
+        self.assertEqual(result["result"], "y" * 500 + " [stderr: " + "y" * 200 + "]")
+        self.assertEqual(self._only(events, EventType.USER_PROMPT).data["prompt"], "y" * 2000)
+        self.assertEqual(self._only(events, EventType.ASSISTANT_RESPONSE).data["text"], "y" * 2000)
+        self.assertFalse(any(e.redacted for e in events))
+        self.assertEqual(err, "")
+
+    def test_redaction_off_keeps_the_cut_text(self):
+        events, _ = self._import([self._user(_straddle(2000))], redact=False)
+        event = self._only(events, EventType.USER_PROMPT)
+        self.assertEqual(event.data["prompt"], _straddle(2000)[:2000])
+        self.assertFalse(event.redacted)
+
+
 class TestMalformedLog(unittest.TestCase):
     """A field of the wrong type reads as absent and a line that cannot be read is skipped."""
 
