@@ -732,7 +732,6 @@ TOO_DEEP_FOR_JSON = 1_000_000
 # json.loads parses this on 3.12 and later, but dataclasses.asdict ran out of
 # stack on it, so inspect crashed.
 TOO_DEEP_TO_COPY = 3_000
-TOO_DEEP_ERROR = "session bbbb2222 has a corrupt meta.json: metadata nests more than 128 levels"
 
 
 def nested(levels: int) -> str:
@@ -809,16 +808,22 @@ class TestCorruptSessionMeta(unittest.TestCase):
 
 
 class TestCorruptSessionMetaCommands(unittest.TestCase):
-    """The commands on a store where one meta.json nests too deep."""
+    """The commands on a store where one meta.json is corrupt."""
 
     def test_commands_skip_the_session_or_refuse_it_in_one_line(self):
-        root = Path(tempfile.mkdtemp(prefix="deep-meta-"))
+        root = Path(tempfile.mkdtemp(prefix="corrupt-meta-"))
         self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         (root / "home").mkdir()
-        trace_dirs = {}
-        for levels in (TOO_DEEP_FOR_JSON, TOO_DEEP_TO_COPY):
-            trace_dirs[levels] = root / f"traces-{levels}"
-            store_with_corrupt_meta(trace_dirs[levels], deep_meta(levels))
+        too_deep = "metadata nests more than 128 levels"
+        reasons = {}
+        for name, meta_text, reason in (
+            ("too-deep-for-json", deep_meta(TOO_DEEP_FOR_JSON), too_deep),
+            ("too-deep-to-copy", deep_meta(TOO_DEEP_TO_COPY), too_deep),
+            ("bad-parent-id", '{"session_id":"bbbb2222","parent_session_id":"../evil"}',
+             "invalid stored parent session ID"),
+        ):
+            store_with_corrupt_meta(root / name, meta_text)
+            reasons[name] = reason
         env = without_telemetry({
             key: value
             for key, value in os.environ.items()
@@ -829,35 +834,37 @@ class TestCorruptSessionMetaCommands(unittest.TestCase):
         env["PYTHONIOENCODING"] = "utf-8"
 
         def run(job):
-            levels, command = job
+            name, command = job
             return subprocess.run(
                 [sys.executable, "-m", "agent_trace.entry", "--trace-dir",
-                 str(trace_dirs[levels]), *command],
+                 str(root / name), *command],
                 capture_output=True, text=True, encoding="utf-8",
                 env=env, cwd=root, timeout=120,
             )
 
-        refused = (1, "", f"Error: {TOO_DEEP_ERROR}\n")
+        readers = [(cmd, "bbbb2222") for cmd in ("inspect", "replay", "export", "stats", "health")]
         strict = "corrupt session in tenant store: bbbb2222\n"
         expected = {
-            ("inspect", "bbbb2222"): refused,
-            ("replay", "bbbb2222"): refused,
-            ("export", "bbbb2222"): refused,
             ("tenant", "report"): (1, "", "Error: " + strict),
             ("tenant", "export", "acme"): (1, "", "Export failed: " + strict),
             ("cognitive-debt",): (1, "", "Error: trace input could not be read safely\n"),
         }
         listing = [("list",), ("stats",), ("health", "--format", "json")]
-        jobs = [(levels, command) for levels in trace_dirs for command in [*listing, *expected]]
+        jobs = [(name, command) for name in reasons for command in [*listing, *readers, *expected]]
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             results = list(pool.map(run, jobs))
         # Run last: it would delete aaaa1111 if it ignored the corrupt session.
-        deletes = [run((levels, ("tenant", "delete", "acme", "--confirm"))) for levels in trace_dirs]
+        deletes = [run((name, ("tenant", "delete", "acme", "--confirm"))) for name in reasons]
 
-        for (levels, command), result in zip(jobs, results):
-            with self.subTest(levels=levels, command=command):
+        for (name, command), result in zip(jobs, results):
+            with self.subTest(store=name, command=command):
                 self.assertNotIn("Traceback", result.stderr)
-                if command in expected:
+                if command in readers:
+                    refused = f"Error: session bbbb2222 has a corrupt meta.json: {reasons[name]}\n"
+                    self.assertEqual(
+                        (result.returncode, result.stdout, result.stderr), (1, "", refused)
+                    )
+                elif command in expected:
                     self.assertEqual(
                         (result.returncode, result.stdout, result.stderr), expected[command]
                     )
@@ -867,12 +874,12 @@ class TestCorruptSessionMetaCommands(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertIn("aaaa1111", result.stdout)
                     self.assertNotIn("bbbb2222", result.stdout)
-        for levels, result in zip(trace_dirs, deletes):
-            with self.subTest(levels=levels, command="tenant delete"):
+        for name, result in zip(reasons, deletes):
+            with self.subTest(store=name, command="tenant delete"):
                 self.assertEqual(
                     (result.returncode, result.stderr), (1, "Deletion failed: " + strict)
                 )
-                self.assertTrue((trace_dirs[levels] / "aaaa1111" / "meta.json").exists())
+                self.assertTrue((root / name / "aaaa1111" / "meta.json").exists())
 
 
 if __name__ == "__main__":

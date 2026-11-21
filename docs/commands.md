@@ -317,8 +317,8 @@ what it does for a session without that field. The exceptions:
 A `meta.json` is corrupt when it is not valid JSON, is not a JSON object, or
 nests objects and arrays more than 128 levels deep. `list`, `stats` and
 `health` skip that session and show the rest of the store. Commands that read
-that one session, such as `inspect`, `replay`, `export` and `stats <id>`, exit
-1 with one line:
+that one session, such as `inspect`, `replay`, `export`, `stats <id>` and
+`health <id>`, exit 1 with one line:
 
 ```
 Error: session bbbb2222 has a corrupt meta.json: metadata nests more than 128 levels
