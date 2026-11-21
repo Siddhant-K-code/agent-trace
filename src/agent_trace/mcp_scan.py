@@ -343,13 +343,24 @@ def scan_behavioural_anomalies(
     events: list[TraceEvent],
     session_id: str,
     project_root: str = "",
+    indexes: list[int] | None = None,
 ) -> list[McpScanFinding]:
+    """Scan events for behavioural anomalies.
+
+    indexes gives the session event number of each event. Watch mode passes
+    it for its trimmed history window so findings name the same events as a
+    full scan. Without it, events are numbered from 1.
+    """
+    if indexes is None:
+        indexes = list(range(1, len(events) + 1))
+    elif len(indexes) != len(events):
+        raise ValueError("indexes must give one event number per event")
     findings: list[McpScanFinding] = []
     credential_reads: list[tuple[int, TraceEvent]] = []
     env_dumps: list[tuple[int, TraceEvent]] = []
     read_window: list[tuple[int, TraceEvent]] = []
 
-    for idx, event in enumerate(events, start=1):
+    for idx, event in zip(indexes, events):
         if _is_credential_read(event):
             credential_reads.append((idx, event))
         if _is_env_dump(event):
@@ -422,17 +433,26 @@ def scan_live_event(
     session_id: str,
     patterns: list[tuple[str, re.Pattern[str]]] | None = None,
     project_root: str = "",
+    indexes: list[int] | None = None,
 ) -> list[McpScanFinding]:
-    """Scan a newly observed event using recent in-session history."""
+    """Scan a newly observed event using recent in-session history.
+
+    event is the last item of events. indexes gives the session event number
+    of each item of events, as for scan_behavioural_anomalies.
+    """
     findings: list[McpScanFinding] = []
+    current_index = indexes[-1] if indexes else len(events)
 
     if event.event_type == EventType.SESSION_START:
         descriptions = extract_tool_descriptions([event], session_id)
+        for desc in descriptions:
+            desc.event_index = current_index
         findings.extend(scan_description_patterns(descriptions, patterns=patterns))
 
-    behavioural = scan_behavioural_anomalies(events, session_id, project_root=project_root)
+    behavioural = scan_behavioural_anomalies(
+        events, session_id, project_root=project_root, indexes=indexes,
+    )
     if behavioural:
-        current_index = len(events)
         findings.extend([
             finding for finding in behavioural
             if finding.event_index == current_index
@@ -571,6 +591,9 @@ def _resolve_session(store: TraceStore, session_id: str) -> str | None:
     return store.find_session(session_id)
 
 
+_LIVE_HISTORY = 80
+
+
 def _watch_session(
     store: TraceStore,
     session_id: str,
@@ -595,6 +618,11 @@ def _watch_session(
         out.write(format_report(McpScanReport([session_id], [finding])) + "\n")
     out.flush()
 
+    # The history window is trimmed, so keep each event's session event
+    # number beside it. Findings and their dedupe keys then use the same
+    # numbers as a full scan.
+    indexes = list(range(1, len(history) + 1))
+    position = len(history)
     seen = 0
     with open(events_file, "r", encoding="utf-8") as f:
         f.seek(0, 2)
@@ -608,6 +636,7 @@ def _watch_session(
             except Exception:
                 continue
             seen += 1
+            position += 1
             if not isinstance(event.data, Mapping):
                 sys.stderr.write(skipped_event_warning("mcp-scan", event))
                 if event.event_type == EventType.SESSION_END:
@@ -615,13 +644,16 @@ def _watch_session(
                     return 0
                 continue
             history.append(event)
-            history = history[-80:]
+            indexes.append(position)
+            history = history[-_LIVE_HISTORY:]
+            indexes = indexes[-_LIVE_HISTORY:]
             findings = scan_live_event(
                 history,
                 event,
                 session_id,
                 patterns=patterns,
                 project_root=project_root,
+                indexes=indexes,
             )
             for finding in findings:
                 key = _finding_key(finding)
