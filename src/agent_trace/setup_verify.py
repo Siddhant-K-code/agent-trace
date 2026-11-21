@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import NamedTuple
 
 from .fileutil import split_lf_lines
 
@@ -30,6 +33,8 @@ _CLAUDE_SETUP_HINT = "Run agent-strace setup --cli claude and add the printed ho
 # Codex applies [features] keys in sorted order, so "hooks" wins over its
 # legacy alias "codex_hooks" when both are set.
 _HOOKS_FEATURE_KEYS = ("hooks", "codex_hooks")
+# [features].plugins (default true) turns every Codex plugin on or off.
+_FEATURE_KEYS = _HOOKS_FEATURE_KEYS + ("plugins",)
 _NOT_BOOLEAN = object()
 _WS = re.compile(r"[ \t]*")
 _BLANK = re.compile(r"(?:[ \t\r\n]|#[^\n]*)*")
@@ -41,7 +46,7 @@ _SCALAR = re.compile(r"\d{4}-\d{2}-\d{2}[Tt ]\d{2}:[0-9A-Za-z_+.:-]*|[0-9A-Za-z_
 
 
 class _FeatureFlagReader:
-    """Find top-level [features] hook flags in TOML without tomllib (Python 3.10).
+    """Find top-level [features] flags and [plugins] entries in TOML without tomllib (Python 3.10).
 
     Other values are skipped rather than validated, so some invalid TOML that
     tomllib rejects is accepted here. Escapes in quoted keys are not decoded.
@@ -51,6 +56,11 @@ class _FeatureFlagReader:
         self.text = text
         self.pos = 0
         self.flags: dict[str, object] = {}
+        # {plugin key: enabled}: None when unset, _NOT_BOOLEAN for a value Codex rejects.
+        self.plugins: dict[str, object] = {}
+        # True when [plugins] or one of its entries is not a table.
+        self.plugins_invalid = False
+        self._plugin_enabled_keys: set[str] = set()
 
     def read(self) -> dict[str, object]:
         table: tuple[str, ...] | None = ()
@@ -59,7 +69,7 @@ class _FeatureFlagReader:
             if self.pos == len(self.text):
                 return self.flags
             if self._accept("[["):
-                self._record(self._key(), [])
+                self._record(self._key(), [], array=True)
                 self._expect("]]")
                 table = None  # Array-of-tables entries are never the top-level table.
             elif self._accept("["):
@@ -74,7 +84,10 @@ class _FeatureFlagReader:
                     self._record(table + key, value)
             self._end_line()
 
-    def _record(self, path: tuple[str, ...], value: object) -> None:
+    def _record(self, path: tuple[str, ...], value: object, array: bool = False) -> None:
+        if path[:1] == ("plugins",):
+            self._record_plugin(path[1:], value, array)
+            return
         if path[:1] != ("features",):
             return
         if len(path) == 1:
@@ -83,7 +96,7 @@ class _FeatureFlagReader:
                     self._record(path + key, item)
             return
         name = path[1]
-        if name not in _HOOKS_FEATURE_KEYS:
+        if name not in _FEATURE_KEYS:
             return
         if len(path) == 2 and not isinstance(value, list):
             if name in self.flags:
@@ -91,6 +104,30 @@ class _FeatureFlagReader:
             self.flags[name] = value
         else:
             self.flags[name] = _NOT_BOOLEAN  # A table where Codex expects a boolean.
+
+    def _record_plugin(self, path: tuple[str, ...], value: object, array: bool) -> None:
+        """Record [plugins] as Codex reads it: a table of tables with an optional enabled."""
+        is_table = isinstance(value, list) and not array
+        if len(path) < 2:
+            if not is_table:
+                self.plugins_invalid = True
+                return
+            if path:
+                self.plugins.setdefault(path[0], None)
+            for key, item in value:
+                self._record_plugin(path + key, item, False)
+            return
+        name = path[0]
+        self.plugins.setdefault(name, None)
+        if path[1] != "enabled":
+            return
+        if len(path) > 2:
+            self.plugins[name] = _NOT_BOOLEAN  # A table where Codex expects a boolean.
+            return
+        if name in self._plugin_enabled_keys:
+            raise self._error(f"duplicate key plugins.{name}.enabled")
+        self._plugin_enabled_keys.add(name)
+        self.plugins[name] = value if isinstance(value, bool) else _NOT_BOOLEAN
 
     def _value(self) -> object:
         """Return True, False, inline-table (key, value) pairs, or _NOT_BOOLEAN."""
@@ -200,11 +237,41 @@ class _FeatureFlagReader:
 def _read_hooks_feature_flags(text: str) -> dict[str, object]:
     """Return hooks flags set in the top-level [features] table, as found."""
     if _tomllib is None:
-        return _FeatureFlagReader(text).read()
+        flags = _FeatureFlagReader(text).read()
+        return {key: flags[key] for key in _HOOKS_FEATURE_KEYS if key in flags}
     features = _tomllib.loads(text).get("features")
     if not isinstance(features, dict):
         return {}
     return {key: features[key] for key in _HOOKS_FEATURE_KEYS if key in features}
+
+
+def _read_codex_plugin_config(text: str) -> tuple[bool, dict[str, bool | None]]:
+    """Return (plugins feature on, {plugin key: enabled or None}) from Codex config.toml text.
+
+    Raises ValueError when Codex would load no plugins from this config: the
+    TOML is invalid, [features].plugins is not a boolean, or a [plugins]
+    entry is not a table with an optional boolean enabled. Like
+    check_codex_hooks_feature, only top-level tables are read.
+    """
+    if _tomllib is None:
+        reader = _FeatureFlagReader(text)
+        feature = reader.read().get("plugins", True)
+        if reader.plugins_invalid:
+            raise ValueError("[plugins] must be a table of tables")
+        plugins = reader.plugins
+    else:
+        data = _tomllib.loads(text)
+        features = data.get("features")
+        feature = features.get("plugins", True) if isinstance(features, dict) else True
+        tables = data.get("plugins", {})
+        if not isinstance(tables, dict) or not all(isinstance(t, dict) for t in tables.values()):
+            raise ValueError("[plugins] must be a table of tables")
+        plugins = {key: table.get("enabled") for key, table in tables.items()}
+    if not isinstance(feature, bool):
+        raise ValueError("[features].plugins must be true or false")
+    if not all(enabled is None or isinstance(enabled, bool) for enabled in plugins.values()):
+        raise ValueError("[plugins] enabled values must be true or false")
+    return feature, plugins
 
 
 def check_codex_hooks_feature(config_path: Path) -> tuple[list[str], str]:
@@ -412,6 +479,264 @@ def _check_executable(version: str, provider: str) -> tuple[list[str], str | Non
     return [], executable
 
 
+# Codex plugin loading, as implemented by Codex 0.143.0 through 0.171.0.
+_CODEX_PLUGIN_SEGMENT = re.compile(r"[A-Za-z0-9_-]+")
+_CODEX_VERSION_DIR = re.compile(r"[A-Za-z0-9._+-]+")
+_SEMVER_PRE = r"(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+_SEMVER = re.compile(
+    r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+    rf"(?:-({_SEMVER_PRE}(?:\.{_SEMVER_PRE})*))?"
+    r"(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
+)
+_CODEX_PLUGIN_MANIFESTS = (
+    Path(".codex-plugin", "plugin.json"),
+    Path(".claude-plugin", "plugin.json"),
+)
+
+
+class CodexPlugin(NamedTuple):
+    """An enabled AgentTrace Codex plugin and the hooks Codex loads from it."""
+
+    key: str
+    root: Path
+    hooks: dict
+    hooks_files: list[Path]
+
+
+def _semver_key(version: str) -> tuple | None:
+    """Return a sort key that orders versions like the Rust semver crate, or None."""
+    match = _SEMVER.fullmatch(version)
+    if match is None:
+        return None
+    core = tuple(int(part) for part in match.group(1, 2, 3))
+    if max(core) >= 2**64:
+        return None
+    pre, build = match.group(4), match.group(5)
+    pre_key = (1, ()) if pre is None else (0, tuple(
+        (0, len(part), part) if part.isdigit() else (1, part) for part in pre.split(".")
+    ))
+    build_key = () if build is None else tuple(
+        (0, len(part.lstrip("0")), part.lstrip("0"), len(part)) if part.isdigit() else (1, part)
+        for part in build.split(".")
+    )
+    return (*core, pre_key, build_key)
+
+
+def _compare_plugin_versions(left: str, right: str) -> int:
+    keys = (_semver_key(left), _semver_key(right))
+    if None in keys:
+        keys = (left, right)
+    return (keys[0] > keys[1]) - (keys[0] < keys[1])
+
+
+def _codex_active_plugin_dir(base: Path) -> Path | None:
+    """Return the cached plugin version Codex loads: "local", else the newest."""
+    try:
+        with os.scandir(base) as entries:
+            versions = [
+                entry.name
+                for entry in entries
+                if _CODEX_VERSION_DIR.fullmatch(entry.name)
+                and entry.is_dir(follow_symlinks=False)
+            ]
+    except OSError:
+        return None
+    if not versions:
+        return None
+    if "local" in versions:
+        return base / "local"
+    return base / max(versions, key=functools.cmp_to_key(_compare_plugin_versions))
+
+
+def _codex_plugin_path(root: Path, value: str) -> Path | None:
+    """Resolve a plugin.json path as Codex does, or None when Codex ignores it."""
+    relative = value[2:] if value.startswith("./") else ""
+    if not relative:
+        return None
+    windows = os.name == "nt"
+    parts = re.split(r"[/\\]", relative) if windows else relative.split("/")
+    if ".." in parts or relative.startswith("/"):
+        return None
+    if windows and (relative.startswith("\\") or re.match(r"[A-Za-z]:", relative)):
+        return None
+    return root / relative
+
+
+def _load_json(path: Path) -> object:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return None
+
+
+def _codex_hooks_map(data: object) -> dict | None:
+    """Return the hooks of one Codex hooks file, or None when Codex rejects it."""
+    if not isinstance(data, dict) or not set(data) <= {"description", "hooks"}:
+        return None
+    if not isinstance(data.get("description", ""), (str, type(None))):
+        return None
+    hooks = data.get("hooks", {})
+    return hooks if isinstance(hooks, dict) else None
+
+
+def _codex_plugin_hooks(root: Path) -> tuple[dict, list[Path]]:
+    """Return (hooks by event, files they came from) that Codex loads from a plugin."""
+    manifest_path = next(
+        (root / path for path in _CODEX_PLUGIN_MANIFESTS if (root / path).is_file()), None
+    )
+    manifest = _load_json(manifest_path) if manifest_path else None
+    if not isinstance(manifest, dict):
+        return {}, []
+    declared = manifest.get("hooks")
+    if isinstance(declared, str):
+        declared = [declared]
+    paths: list[Path] = []
+    inline = None
+    if isinstance(declared, list) and all(isinstance(item, str) for item in declared):
+        paths = [
+            path for path in (_codex_plugin_path(root, item) for item in declared) if path
+        ]
+    else:
+        items = [declared] if isinstance(declared, dict) else declared if isinstance(declared, list) else []
+        maps = [_codex_hooks_map(item) for item in items]
+        if maps and None not in maps:
+            inline = maps
+    if inline is not None:
+        sources = [(manifest_path, hooks) for hooks in inline]
+    else:
+        default = root / "hooks" / "hooks.json"
+        if not paths and default.is_file():
+            paths = [default]
+        sources = [(path, _codex_hooks_map(_load_json(path))) for path in paths]
+
+    merged: dict = {}
+    files: list[Path] = []
+    for path, hooks in sources:
+        if not hooks:
+            continue
+        if path not in files:
+            files.append(path)
+        for event, groups in hooks.items():
+            previous = merged.get(event)
+            if isinstance(previous, list) and isinstance(groups, list):
+                merged[event] = previous + groups
+            elif event not in merged or isinstance(previous, list):
+                merged[event] = groups
+    return merged, files
+
+
+def _has_agenttrace_hooks(hooks: object) -> bool:
+    return isinstance(hooks, dict) and any(
+        isinstance(groups, list) and next(_agenttrace_handlers(groups), None) is not None
+        for groups in hooks.values()
+    )
+
+
+def _only_agenttrace_hooks(data: object) -> bool:
+    """True when a hooks file holds AgentTrace hooks and nothing else."""
+    if not isinstance(data, dict) or set(data) != {"hooks"}:
+        return False
+    hooks = data["hooks"]
+    if not isinstance(hooks, dict) or not _has_agenttrace_hooks(hooks):
+        return False
+    for groups in hooks.values():
+        if not isinstance(groups, list):
+            return False
+        for group in groups:
+            if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+                return False
+            if len(list(_agenttrace_handlers([group]))) != len(group["hooks"]):
+                return False
+    return True
+
+
+def codex_has_agenttrace_hooks(path: Path) -> bool:
+    """True when the Codex hooks file at path has at least one AgentTrace hook."""
+    data = _load_json(path)
+    return isinstance(data, dict) and _has_agenttrace_hooks(data.get("hooks"))
+
+
+def codex_hooks_cleanup(hooks_path: Path) -> str:
+    """Say how to take the AgentTrace hooks out of a Codex hooks.json.
+
+    Returns a phrase to follow "To keep only the plugin, ". It ends with a
+    path or command and no period, so the command can be pasted as is.
+    """
+    if not _only_agenttrace_hooks(_load_json(hooks_path)):
+        return f"delete the entries that run `agent-strace hook` from {hooks_path}"
+    backup = hooks_path.with_name(f"{hooks_path.name}.agent-strace.bak")
+    if backup.is_file() and not codex_has_agenttrace_hooks(backup):
+        return (
+            "restore the hooks.json you had before agent-strace setup: "
+            f"cp {shlex.quote(str(backup))} {shlex.quote(str(hooks_path))}"
+        )
+    return f"run: rm {shlex.quote(str(hooks_path))}"
+
+
+def _join(items: list[str]) -> str:
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def codex_plugin_remove_commands(plugins: list[CodexPlugin]) -> str:
+    return _join([f"`codex plugin remove {plugin.key}`" for plugin in plugins])
+
+
+def find_codex_plugins(config_dir: Path) -> list[CodexPlugin]:
+    """Return the enabled AgentTrace Codex plugins that give Codex AgentTrace hooks.
+
+    Matches agent-strace@<any marketplace> in config_dir/config.toml, then
+    reads the cached version Codex loads. Like check_codex_hooks_feature,
+    only top-level tables are read. Nothing is written.
+    """
+    try:
+        text = (config_dir / "config.toml").read_text(encoding="utf-8-sig")
+        feature, entries = _read_codex_plugin_config(text)
+    except (OSError, UnicodeError, ValueError):
+        return []
+    if not feature:
+        return []
+    # Codex 0.171 and later apply [plugins._default] to entries without enabled.
+    default_enabled = entries.get("_default") is not False
+    plugins = []
+    for key in sorted(entries):
+        name, _, marketplace = key.rpartition("@")
+        enabled = entries[key]
+        if enabled is None:
+            enabled = default_enabled
+        if name != "agent-strace" or not enabled or not _CODEX_PLUGIN_SEGMENT.fullmatch(marketplace):
+            continue
+        root = _codex_active_plugin_dir(config_dir / "plugins" / "cache" / marketplace / name)
+        if root is None:
+            continue
+        hooks, files = _codex_plugin_hooks(root)
+        if _has_agenttrace_hooks(hooks):
+            plugins.append(CodexPlugin(key, root, hooks, files))
+    return plugins
+
+
+def _codex_duplicate_warnings(hooks_path: Path, plugins: list[CodexPlugin]) -> list[str]:
+    """Explain AgentTrace hooks that Codex loads more than once, and how to keep one."""
+    manual = codex_has_agenttrace_hooks(hooks_path)
+    count = len(plugins) + int(manual)
+    times = "twice" if count == 2 else f"{count} times"
+    warnings = []
+    if len(plugins) > 1:
+        both = "both" if len(plugins) == 2 else "all"
+        warnings.append(
+            f"The AgentTrace Codex plugins {_join([plugin.key for plugin in plugins])} are "
+            f"{both} enabled, so Codex records every event {times}. To keep only "
+            f"{plugins[0].key}, run {codex_plugin_remove_commands(plugins[1:])}."
+        )
+    if manual:
+        plugin = "plugin" if len(plugins) == 1 else "plugins"
+        warnings.append(
+            f"{hooks_path} also has AgentTrace hooks, so Codex records every event {times}. "
+            f"To keep only {hooks_path}, run {codex_plugin_remove_commands(plugins)}. "
+            f"To keep only the {plugin}, {codex_hooks_cleanup(hooks_path)}"
+        )
+    return warnings
+
+
 def verify_codex_setup(
     hooks_path: Path,
     expected: dict,
@@ -419,34 +744,44 @@ def verify_codex_setup(
     *,
     config_path: Path | None = None,
     details: dict | None = None,
+    plugins: list[CodexPlugin] | None = None,
+    warnings: list[str] | None = None,
 ) -> tuple[bool, list[str]]:
     """Verify the correct event, command, and type exactly once, without writes.
 
     Only installed AgentTrace entries are inspected; arbitrary user hooks and
     documented Codex fields on handlers remain valid. When config_path is
-    given, its [features] table must not disable Codex hooks.
+    given, its [features] table must not disable Codex hooks. When plugins
+    holds enabled AgentTrace Codex plugins (see find_codex_plugins), the hooks
+    of the first one are checked instead of hooks_path, and warnings gets a
+    note for each other copy of the AgentTrace hooks that Codex also runs.
     """
     problems: list[str] = []
     feature_summary = None
     if config_path is not None:
         problems, feature_summary = check_codex_hooks_feature(config_path)
-    if not hooks_path.is_file():
-        problems.append(
-            f"Missing Codex hooks config: {hooks_path}. "
-            "Run agent-strace setup --cli codex to install it."
-        )
-        return False, problems
+    if plugins:
+        hooks = plugins[0].hooks
+        if warnings is not None:
+            warnings += _codex_duplicate_warnings(hooks_path, plugins)
+    else:
+        if not hooks_path.is_file():
+            problems.append(
+                f"Missing Codex hooks config: {hooks_path}. "
+                "Run agent-strace setup --cli codex to install it."
+            )
+            return False, problems
 
-    try:
-        installed = json.loads(hooks_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, ValueError) as exc:
-        problems.append(f"Cannot read valid Codex hooks JSON at {hooks_path}: {exc}")
-        return False, problems
+        try:
+            installed = json.loads(hooks_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError) as exc:
+            problems.append(f"Cannot read valid Codex hooks JSON at {hooks_path}: {exc}")
+            return False, problems
 
-    hooks = installed.get("hooks") if isinstance(installed, dict) else None
-    if not isinstance(hooks, dict):
-        problems.append(f"Invalid Codex hooks structure in {hooks_path}: missing hooks object.")
-        return False, problems
+        hooks = installed.get("hooks") if isinstance(installed, dict) else None
+        if not isinstance(hooks, dict):
+            problems.append(f"Invalid Codex hooks structure in {hooks_path}: missing hooks object.")
+            return False, problems
 
     hook_problems, modes = _check_agenttrace_hooks(hooks, expected, "Codex")
     executable_problems, executable = _check_executable(version, "Codex")

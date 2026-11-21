@@ -24,7 +24,7 @@ that reaches a person. From then on, both CLI commands and hooks send events.
 | Interactive `agent-strace` command | On stderr, before the first interactive command. Piped or scripted runs never show it. |
 | Claude Code hooks (plugin or `setup --cli claude`) | As a hook message at the start of an interactive `claude` terminal session. Session events are sent from that session's end onward. Other entry points, such as `claude -p` and the Agent SDK, never show it. |
 | Gemini CLI hooks | As a hook message at session start: in the terminal UI, or on stderr for `gemini -p`. Session events are sent from that session's end onward. |
-| Codex hooks | As a `warning:` line at the start of an interactive session. `codex exec` never shows it. Codex has no session-end hook, so Codex hooks send no session events; the notice still enables later `agent-strace` commands. |
+| Codex hooks | As a `warning:` line at the start of an interactive session. `codex exec` never shows it. On Codex versions that run the `SessionEnd` hook, session events are sent from that session's end onward. Codex 0.143.0 ignores `SessionEnd`. Installs made before setup registered `SessionEnd` send none until you run `agent-strace setup --cli codex` again and trust the new hook in `/hooks`. The notice still enables later `agent-strace` commands. |
 | Cursor and GitHub Copilot CLI hooks | Never: their session-start hooks have no output the user sees. These installs send nothing until one of the places above shows the notice, `agent-strace telemetry enable` is run, or `AGENT_STRACE_TELEMETRY=1` is set. |
 
 The hook message reads:

@@ -62,7 +62,7 @@ Never loaded (available in >= 5 sessions, loaded in 0):
 agent-strace setup             # Claude Code hooks for ~/.claude/settings.json
 agent-strace setup --cli claude --verify # check Claude Code hooks + CLI, not live capture
 agent-strace setup --cli codex # OpenAI Codex hooks in ~/.codex/hooks.json
-agent-strace setup --cli codex --verify # check Codex user hooks + CLI, not live capture
+agent-strace setup --cli codex --verify # check Codex user or plugin hooks + CLI, not live capture
 agent-strace setup --cli gemini # Gemini CLI extension under ~/.gemini/extensions
 agent-strace setup --cli cursor # Cursor project hooks in .cursor/hooks.json
 agent-strace setup --cli copilot # GitHub Copilot CLI hooks in ~/.copilot/hooks
