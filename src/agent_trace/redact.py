@@ -12,10 +12,13 @@ Patterns detected:
     sk_org_*, whsec_* (not the public pk_*), Google AIza*, GitLab glpat-*,
     glptt-*, gldt-*, glrt-*, glcbt-* and the other documented gl*- prefixes,
     npm_*, Hugging Face hf_*
-  - Values under sensitive key names such as password or api_key
+  - Values under sensitive key names such as password or api_key, at any
+    depth below the key
   - Connection strings: postgres://, mysql://, mongodb://, redis://, amqp://
   - Private key blocks: any label that ends in PRIVATE KEY, and PGP.
     A block cut before its END line is redacted up to the end of its body.
+    Body lines that end in an END line with no BEGIN line are redacted too.
+    Line numbers from cat -n or Claude Code output may start body lines.
   - Basic-auth URLs, JWTs, and hex strings of 40 or more characters
 
 Works on nested dicts and lists. Redacts values, not keys.
@@ -114,8 +117,15 @@ _PEM_HEADER = (
     r"[^\r\n]*?(?=[\r\n]|\\(?:n|r\\n|\\n|\\r\\\\n)|\Z)"
 )
 _PEM_BASE64 = r"[A-Za-z0-9+/=]"
-_PEM_GAP = r"(?:" + _PEM_BREAK + r"[ \t]*)"
-_PEM_LINE = r"(?:" + _PEM_HEADER + r"|" + _PEM_BASE64 + r"+)"
+# A line number as cat -n ("2<tab>") or Claude Code ("2→") prints it, with
+# the tab or arrow as itself, JSON-escaped, or escaped twice.
+_PEM_NUMBER = r"[0-9]+(?:\t|\\t|\\\\t|\u2192|\\u2192|\\\\u2192)"
+_PEM_LINE_NUMBER = r"(?:" + _PEM_NUMBER + r"[ \t]*)?"
+_PEM_GAP = r"(?:" + _PEM_BREAK + r"[ \t]*" + _PEM_LINE_NUMBER + r")"
+# A line number is never the base64 run of a line.
+_PEM_LINE = (
+    r"(?:" + _PEM_HEADER + r"|(?!" + _PEM_NUMBER + r")" + _PEM_BASE64 + r"+)"
+)
 _PEM_FIRST_RUN = re.compile(_PEM_BASE64 + r"*")
 # Up to 64 steps. A step is up to 64 line breaks and then a header or a
 # base64 run, or a space and then a base64 run.
@@ -168,6 +178,127 @@ def _replace_private_key(match: re.Match[str], marker: str) -> str:
     return marker + match.string[body_end : match.end()]
 
 
+_PEM_END_LINE = re.compile(r"-----END " + _PEM_LABEL + r"-----")
+_PEM_LINE_PREFIX = re.compile(r"[ \t]*" + _PEM_LINE_NUMBER)
+# One whole line of a key body seen from its END line: a base64 run, a
+# header line above a base64 run, or a blank line. A run holds no spaces, so
+# a line of prose is not a body line.
+_PEM_TAIL_LINE = re.compile(
+    r"[ \t]*" + _PEM_LINE_NUMBER
+    + r"(?:(?P<header>(?:Proc-Type|DEK-Info|Version|Comment):[^\r\n]*)|"
+    + r"(?P<body>" + _PEM_BASE64 + r"+))?[ \t]*"
+)
+# A long base64 run at the end of a line that holds other text first.
+_PEM_TAIL_RUN = re.compile(
+    r"(?<![A-Za-z0-9+/=])" + _PEM_BASE64 + r"{32,}[ \t]*\Z"
+)
+# Line breaks as _PEM_BREAK reads them, longest first.
+_PEM_BREAK_FORMS = ("\\\\r\\\\n", "\\r\\n", "\\\\n", "\r\n", "\\n", "\n")
+
+
+class _LineStarts:
+    """Find line starts walking up the text from one point, not before low.
+
+    Each search starts below the last one found, so a walk over many lines
+    reads each character once.
+    """
+
+    def __init__(self, text: str, low: int) -> None:
+        self.text = text
+        self.low = low
+        self.real: int | None = None
+        self.escaped: int | None = None
+
+    def start(self, pos: int) -> int:
+        """Return where the line that ends at pos starts."""
+        text, low = self.text, self.low
+        if self.real is None or self.real >= pos:
+            self.real = text.rfind("\n", low, pos)
+        if self.escaped is None or self.escaped + 2 > pos:
+            self.escaped = text.rfind("\\n", low, pos)
+        start = low
+        if self.real >= 0:
+            start = max(start, self.real + 1)
+        if self.escaped >= 0:
+            start = max(start, self.escaped + 2)
+        return start
+
+    def break_before(self, pos: int) -> int:
+        """Return the length of the line break that ends at pos, or 0."""
+        for form in _PEM_BREAK_FORMS:
+            if pos - len(form) >= self.low and self.text.startswith(
+                form, pos - len(form), pos
+            ):
+                return len(form)
+        return 0
+
+
+def _pem_tail_start(lines: _LineStarts, line_start: int) -> int | None:
+    """Return where the body lines above an END line start, or None.
+
+    Walks up one whole line at a time and stops at a line that is not a body
+    line or at the start of the text that is left.
+    """
+    top = None
+    pos = line_start
+    while True:
+        brk = lines.break_before(pos)
+        if not brk:
+            return top
+        line_end = pos - brk
+        start = lines.start(line_end)
+        line = _PEM_TAIL_LINE.fullmatch(lines.text, start, line_end)
+        if line is None:
+            # The first body line may follow other text, as in "out": "MIIE.
+            run = _PEM_TAIL_RUN.search(lines.text, start, line_end)
+            return run.start() if run else top
+        if line.group("body") is not None:
+            top = line.start("body")
+        elif line.group("header") is not None and top is not None:
+            top = line.start("header")
+        pos = start
+
+
+def _pem_tails(text: str):
+    """Yield (start, end) for each key body cut before its BEGIN line.
+
+    The span runs from the first body line through an END line that no
+    BEGIN line claimed, as in the output of tail on a key file.
+    """
+    if "-----END " not in text:
+        return
+    low = 0
+    for end in _PEM_END_LINE.finditer(text):
+        lines = _LineStarts(text, low)
+        line_start = lines.start(end.start())
+        if _PEM_LINE_PREFIX.fullmatch(text, line_start, end.start()):
+            top = _pem_tail_start(lines, line_start)
+            if top is not None:
+                yield top, end.end()
+        low = end.end()
+
+
+@dataclass(frozen=True)
+class _KeyTailPattern(SecretPattern):
+    """Body lines of a key that end in an END line with no BEGIN line."""
+
+    def found_in(self, value: str) -> bool:
+        return next(_pem_tails(value), None) is not None
+
+    def redact(self, value: str) -> str:
+        marker = redaction_marker(self.kind)
+        parts = []
+        last = 0
+        for start, end in _pem_tails(value):
+            parts.append(value[last:start])
+            parts.append(marker)
+            last = end
+        if not parts:
+            return value
+        parts.append(value[last:])
+        return "".join(parts)
+
+
 # Each match takes the rest of its run, so the scan never starts again
 # inside a run. Only the first eyJ of a run can start a JWT.
 _JWT = re.compile(
@@ -206,6 +337,8 @@ def _replace_basic_auth(match: re.Match[str], marker: str) -> str:
 # runs on the output of the one before.
 SECRET_PATTERNS = [
     SecretPattern("private-key", _PRIVATE_KEY, replace=_replace_private_key),
+    # Runs after the BEGIN pattern, so every END line left has no BEGIN line.
+    _KeyTailPattern("private-key", _PEM_END_LINE),
     # Provider keys with a left boundary. They run before the patterns
     # without one (sk-, key-, token-), which could otherwise match inside
     # their bodies. Each lookbehind sits after the prefix so the regex keeps
@@ -307,8 +440,13 @@ def redact_value(value: str) -> str:
 def redact_data(data: Any, parent_key: str = "") -> Any:
     """Recursively redact secrets from event data.
 
-    Handles dicts, lists, and string values.
+    Handles dicts, lists, and string values. Every string under a sensitive
+    key is redacted, however deep it sits.
     """
+    return _redact_data(data, parent_key, _is_sensitive_key(parent_key))
+
+
+def _redact_data(data: Any, parent_key: str, sensitive: bool) -> Any:
     if isinstance(data, dict):
         result = {}
         for k, v in data.items():
@@ -325,17 +463,15 @@ def redact_data(data: Any, parent_key: str = "") -> Any:
             )
             if is_authorization_policy_digest:
                 result[k] = v
-            elif isinstance(v, str) and _is_sensitive_key(k):
-                result[k] = redaction_marker("sensitive")
             else:
-                result[k] = redact_data(v, parent_key=k)
+                result[k] = _redact_data(v, k, sensitive or _is_sensitive_key(k))
         return result
 
     if isinstance(data, list):
-        return [redact_data(item, parent_key=parent_key) for item in data]
+        return [_redact_data(item, parent_key, sensitive) for item in data]
 
     if isinstance(data, str):
-        if _is_sensitive_key(parent_key):
+        if sensitive:
             return redaction_marker("sensitive")
         if _contains_secret(data):
             return redact_value(data)
