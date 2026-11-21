@@ -64,7 +64,10 @@ Scope also reads file writes made through a shell tool call, because some
 agents write every file with `cat > file <<'EOF'` instead of an edit tool. The
 targets of `>`, `>>`, `>|`, `&>`, and `tee [-a] FILE` count as written files.
 A relative target is resolved against an earlier `cd DIR` in the same command,
-otherwise against the session working directory. Targets under `/dev/`, fd
+otherwise against the session working directory. A `cd` inside `( )` or
+`$( )`, in a pipeline, or run with `&` does not carry over, as in the shell.
+After an `if`, loop, or `case` whose body ran `cd`, later relative targets are
+skipped, since the directory depends on which branch ran. Targets under `/dev/`, fd
 duplications such as `2>&1`, and targets with `$`, backticks, globs, or a
 leading `~` are skipped. These paths are read from command text, not observed
 as writes, so they never raise confidence: when shell redirection is the only

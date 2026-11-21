@@ -110,6 +110,34 @@ class TestShellSplit(unittest.TestCase):
     def test_strip_comments_respects_quotes(self):
         self.assertEqual(strip_comments("echo '#x' # y\nls"), "echo '#x' \nls")
         self.assertEqual(strip_comments("echo a#b"), "echo a#b")
+        self.assertEqual(strip_comments("echo a\\ #b"), "echo a\\ #b")
+        self.assertEqual(strip_comments("echo $'\\' #' # c"), "echo $'\\' #' ")
+
+    def test_comment_ending_in_backslash_does_not_join_the_next_line(self):
+        command = "ls # note \\\ncat > notes.md <<EOF\npytest > results.txt\nEOF\n"
+        self.assertEqual(
+            split_tokens(command),
+            (["ls", "\n", "cat", ">", "notes.md", "<<", "EOF", "\n"], True),
+        )
+        self.assertEqual(write_targets(command), ["notes.md"])
+        self.assertEqual(command_segments("ls # note \\\npytest"), [["ls"], ["pytest"]])
+        self.assertTrue(is_test_command("ls # note \\\npytest"))
+
+    def test_escaped_backslash_before_newline_does_not_join(self):
+        self.assertEqual(
+            command_segments("echo done \\\\\npytest"), [["echo", "done", "\\"], ["pytest"]]
+        )
+
+    def test_ansi_c_quoting(self):
+        self.assertEqual(
+            split_tokens("echo $'a\\' #' ; pytest"), (["echo", "a' #", ";", "pytest"], True)
+        )
+        self.assertEqual(split_tokens("echo $'\\x41\\101\\t'$''")[0], ["echo", "AA\t"])
+        self.assertEqual(command_segments("echo $'a\\\nb'"), [["echo", "a\\\nb"]])
+        self.assertFalse(split_tokens("echo $'open")[1])
+        command = "printf $'it\\'s\\n'; cat > notes.txt <<EOF\npytest -x > report.txt\nEOF\n"
+        self.assertEqual(write_targets(command), ["notes.txt"])
+        self.assertFalse(is_test_command(command))
 
     def test_newline_is_a_separator(self):
         self.assertEqual(command_segments("cd repo\npytest -q"), [["cd", "repo"], ["pytest", "-q"]])
@@ -249,6 +277,31 @@ class TestWriteTargets(unittest.TestCase):
         self.assertEqual(write_targets("cd - && echo > a.txt"), [])
         self.assertEqual(write_targets("echo > a.txt; cd /x"), ["a.txt"])
 
+    def test_cd_scope_follows_the_shell(self):
+        cases = {
+            "(cd build && true) && echo ok > status.txt": ["status.txt"],
+            "x=$(cd sub; pwd); echo hi > out.txt": ["out.txt"],
+            "cd sub | true; echo hi > out.txt": ["out.txt"],
+            "true | cd sub; echo hi > out.txt": ["out.txt"],
+            "cd sub & echo hi > out.txt": ["out.txt"],
+            "{ cd sub; echo hi > out.txt; }": ["sub/out.txt"],
+            "{ cd sub; } > o.txt; echo > b.txt": ["o.txt", "sub/b.txt"],
+            "{ cd sub; } | cat; echo > b.txt": ["b.txt"],
+            "! cd sub; echo > b.txt": ["sub/b.txt"],
+            "if cd sub; then echo hi > out.txt; fi": ["sub/out.txt"],
+            "if cd sub; then echo > a; else echo > b; fi; echo > c": ["sub/a", "b"],
+            "case $x in a) cd sub; echo > a;; *) echo > b;; esac": ["sub/a", "b"],
+            "for d in a; do cd sub; echo > a; done; echo > b": ["sub/a"],
+            "while true; do echo > a; done; echo > b": ["a", "b"],
+        }
+        for command, expected in cases.items():
+            with self.subTest(command=command):
+                self.assertEqual(write_targets(command), expected)
+
+    def test_fd_number_is_not_a_file(self):
+        self.assertEqual(write_targets("echo x | tee out.txt 2>/dev/null"), ["out.txt"])
+        self.assertEqual(split_tokens("cat a 2>/dev/null")[0], ["cat", "a", "2", ">", "/dev/null"])
+
 
 class TestReadTargets(unittest.TestCase):
     def test_demo_inspect_command(self):
@@ -279,6 +332,10 @@ class TestReadTargets(unittest.TestCase):
             "wc -l < in.txt": ["in.txt"],
             "sort < in.txt > out.txt": ["in.txt"],
             "cd sub && cat a.py": ["sub/a.py"],
+            "cat notes.txt 2>/dev/null": ["notes.txt"],
+            "head -n 5 log.txt 2>&1": ["log.txt"],
+            "wc -l 0<in.txt": ["in.txt"],
+            "cat a.txt 2 >/dev/null": ["a.txt", "2"],
         }
         for command, expected in cases.items():
             with self.subTest(command=command):
