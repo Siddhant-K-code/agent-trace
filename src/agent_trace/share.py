@@ -24,7 +24,7 @@ from .disclosure import (
 from .event_data import object_field, str_field, str_list_field
 from .evidence_packet import EvidencePacket, build_evidence_packet
 from .explain import ExplainResult, build_phases
-from .models import EventType, TraceEvent, SessionMeta
+from .models import EventType, TraceEvent, SessionMeta, usable_text
 from .store import TraceStore
 from .subagent import build_tree, aggregate_stats, SessionNode
 from .annotate import LABEL_COLOURS, DEFAULT_LABEL_COLOUR
@@ -692,8 +692,9 @@ def render_html(
         ("Capture", packet.health.result.capture_method or "unknown"),
         ("Redaction", packet.health.redaction.mode),
     ]
-    if content_included and meta.agent_name:
-        meta_items.insert(1, ("Agent", meta.agent_name))
+    agent = usable_text(meta.agent_name)
+    if content_included and agent:
+        meta_items.insert(1, ("Agent", agent))
 
     meta_html = ""
     for label, value in meta_items:

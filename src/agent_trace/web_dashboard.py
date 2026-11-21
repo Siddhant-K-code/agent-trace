@@ -25,6 +25,7 @@ from .compare import DECISION_DATA_EVENT_TYPES, decision_divergence
 from .diff import compare_sessions
 from .event_data import require_object_event_data
 from .explain import PHASE_DATA_EVENT_TYPES
+from .models import usable_text
 from .otlp import otlp_data_indexes, session_to_otlp
 from .review_surface import (
     build_minimized_review_payload,
@@ -768,8 +769,14 @@ def render_health_page() -> str:
 
 def api_sessions(store: "TraceStore") -> str:
     """Return JSON array of all session metadata."""
-    sessions = store.list_sessions()
-    return json.dumps([json.loads(m.to_json()) for m in sessions])
+    sessions = [json.loads(m.to_json()) for m in store.list_sessions()]
+    for session in sessions:
+        # The page reads these as text. Drop a value that is not a string,
+        # so the session shows as if the field were missing.
+        for field in ("agent_name", "command", "team"):
+            if not usable_text(session.get(field)):
+                session.pop(field, None)
+    return json.dumps(sessions)
 
 
 def api_session_events(store: "TraceStore", session_id: str) -> str | None:

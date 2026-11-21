@@ -37,7 +37,7 @@ from .cost import _usage_dollars, session_event_usage
 from .event_data import require_object_event_data, str_field
 from .fileutil import split_lf_lines
 from .inert import inert
-from .models import EventType, TraceEvent
+from .models import EventType, TraceEvent, usable_text
 from .store import TraceStore
 
 Framework = Literal["eu-ai-act", "soc2", "hipaa", "all"]
@@ -178,7 +178,7 @@ def _eu_ai_act_report(session_id: str, meta, events: list[TraceEvent]) -> dict:
         "generated_at": time.time(),
         "session_id": session_id,
         "article_13_transparency": {
-            "agent_name": meta.agent_name,
+            "agent_name": usable_text(meta.agent_name),
             "session_start": meta.started_at,
             "session_end": meta.ended_at,
             "total_tool_calls": len(tool_calls),
@@ -220,9 +220,9 @@ def _soc2_report(session_id: str, meta, events: list[TraceEvent]) -> dict:
         "generated_at": time.time(),
         "session_id": session_id,
         "cc6_logical_access": {
-            "agent_identity": meta.agent_name,
+            "agent_identity": usable_text(meta.agent_name),
             "workspace": getattr(meta, "workspace_id", "") or "",
-            "team": getattr(meta, "team", "") or "",
+            "team": usable_text(getattr(meta, "team", "")),
             "session_start_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(meta.started_at)),
             "session_end_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(meta.ended_at)) if meta.ended_at else None,
             "resources_accessed": resources_accessed,
@@ -270,7 +270,7 @@ def _hipaa_report(session_id: str, meta, events: list[TraceEvent]) -> dict:
         "generated_at": time.time(),
         "session_id": session_id,
         "section_164_312_audit_controls": {
-            "agent_name": meta.agent_name,
+            "agent_name": usable_text(meta.agent_name),
             "session_id": session_id,
             "session_start_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(meta.started_at)),
             "session_end_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(meta.ended_at)) if meta.ended_at else None,
@@ -427,7 +427,7 @@ def _eu_ai_act_session_record(
 
     article_13 = {
         "system_description": "AI agent session trace",
-        "intended_purpose": meta.command or meta.agent_name or "not specified",
+        "intended_purpose": usable_text(meta.command) or usable_text(meta.agent_name) or "not specified",
         "capabilities_summary": {
             "tools_available": tools,
             "tools_used": tools,
@@ -446,7 +446,7 @@ def _eu_ai_act_session_record(
         "session_id": session_id,
         "session_start": _iso(meta.started_at),
         "session_end": _iso(meta.ended_at),
-        "agent_name": meta.agent_name,
+        "agent_name": usable_text(meta.agent_name),
         "article_12": article_12,
         "article_13": article_13,
     }

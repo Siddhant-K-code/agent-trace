@@ -24,7 +24,7 @@ from typing import TextIO
 from .cost import session_cost
 from .event_data import object_field, require_object_event_data, str_field
 from .failures import count_session_errors
-from .models import EventType, SessionMeta, TraceEvent
+from .models import EventType, SessionMeta, TraceEvent, usable_text
 from .store import TraceStore
 
 
@@ -209,8 +209,8 @@ def _session_to_jsonl_record(
     return {
         "session_id": meta.session_id,
         "started_at": meta.started_at,
-        "agent_name": meta.agent_name,
-        "command": meta.command,
+        "agent_name": usable_text(meta.agent_name),
+        "command": usable_text(meta.command),
         "score": {
             "error_rate": round(score.error_rate, 4),
             "retry_rate": round(score.retry_rate, 4),

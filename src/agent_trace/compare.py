@@ -19,7 +19,7 @@ from typing import TextIO
 from .diff import compare_sessions, format_compare, CompareReport
 from .event_data import require_object_event_data
 from .inert import inert
-from .models import EventType, SessionMeta
+from .models import EventType, SessionMeta, usable_text
 from .store import TraceStore
 
 
@@ -119,8 +119,8 @@ def _sessions_by_tag(store: TraceStore, tag: str, last: int = 2) -> list[str]:
     all_sessions = store.list_sessions()
     matched = [
         s for s in all_sessions
-        if tag.lower() in (s.agent_name or "").lower()
-        or tag.lower() in (s.command or "").lower()
+        if tag.lower() in usable_text(s.agent_name).lower()
+        or tag.lower() in usable_text(s.command).lower()
     ]
     # list_sessions returns newest-first
     return [s.session_id for s in matched[:last]]

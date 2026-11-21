@@ -19,7 +19,7 @@ from typing import TextIO
 from .event_data import object_field, require_object_event_data, str_field
 from .failures import session_errors
 from .inert import inert
-from .models import EventType, SessionMeta, TraceEvent
+from .models import EventType, SessionMeta, TraceEvent, usable_text
 from .store import TraceStore
 
 MAX_DEPTH = 5  # configurable guard against runaway recursion
@@ -321,7 +321,7 @@ def format_tree(
 
     # Session header
     w(f"{indent}▶ session_start  {node.meta.session_id[:12]}"
-      f"  agent={inert(node.meta.agent_name or 'unknown')}"
+      f"  agent={inert(usable_text(node.meta.agent_name) or 'unknown')}"
       f"  depth={node.depth}\n")
 
     # Build a lookup of child sessions by the parent_event_id that spawned them
@@ -472,7 +472,7 @@ def tree_to_dict(
     costs = costs or {}
     data = {
         "session_id": node.meta.session_id,
-        "agent": node.meta.agent_name or node.meta.command or "",
+        "agent": usable_text(node.meta.agent_name) or usable_text(node.meta.command),
         "depth": node.depth,
         "parent_session_id": node.meta.parent_session_id,
         "parent_event_id": node.meta.parent_event_id,
@@ -501,7 +501,7 @@ def format_session_tree(
     indent = _indent(node.depth, last_child=last_child)
     duration = _duration_seconds(node.meta)
     status = "✗" if node.meta.errors else "✓"
-    agent = node.meta.agent_name or node.meta.command or "session"
+    agent = usable_text(node.meta.agent_name) or usable_text(node.meta.command) or "session"
     out.write(
         f"{indent}{node.meta.session_id[:12]}  "
         f"{inert(agent[:28]):<28}  "

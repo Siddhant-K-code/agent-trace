@@ -20,7 +20,7 @@ from typing import TextIO
 from .event_data import object_field, require_object_event_data, str_field
 from .explain import PHASE_DATA_EVENT_TYPES, Phase, build_phases, explain_session
 from .inert import inert
-from .models import EventType
+from .models import EventType, usable_text
 from .store import TraceStore
 
 
@@ -513,9 +513,9 @@ def _count_context_resets(events) -> int:
 def _build_label(store: TraceStore, session_id: str) -> str:
     """Build a short display label from session meta."""
     try:
-        meta = store.load_meta(session_id)
-        if meta.agent_name:
-            return meta.agent_name[:20]
+        name = usable_text(store.load_meta(session_id).agent_name)
+        if name:
+            return name[:20]
     except Exception:
         pass
     return session_id[:12]
