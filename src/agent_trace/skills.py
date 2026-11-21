@@ -1989,9 +1989,10 @@ def load_claude_history(claude_dir: str, trace_dir: str) -> tuple[TraceStore, in
             with contextlib.redirect_stderr(io.StringIO()):
                 import_jsonl(found["path"], store=store, merge=True)
             imported += 1
-        # Read and parse errors only. UnicodeDecodeError and JSONDecodeError
-        # are ValueErrors; AttributeError and TypeError come from JSON lines
-        # that are not objects.
+        # OSError: the log cannot be read. ValueError: neither the log nor
+        # its file name holds a usable session ID, or the store refuses the
+        # session. AttributeError and TypeError guard against a log shape the
+        # importer does not handle.
         except (OSError, ValueError, AttributeError, TypeError):
             failed += 1
     return store, imported, failed

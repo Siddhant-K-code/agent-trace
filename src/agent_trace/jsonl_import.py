@@ -15,12 +15,90 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import stat
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
-from .models import EventType, SessionMeta, TraceEvent, usable_time
-from .store import TraceStore, resolve_trace_dir
+from .models import EventType, SessionMeta, TraceEvent, usable_number, usable_time
+from .store import TraceStore, resolve_trace_dir, validate_session_id
+
+_TOKEN_KEYS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+)
+
+
+def _token_count(value: object) -> int:
+    """Return ``value`` if it is an int >= 0 and not a bool, else 0.
+
+    This is the hook's rule (``hooks._token_count``).
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return 0
+    return value
+
+
+# A line nested more than this many levels deep is skipped, the limit
+# collector_client.py uses. The store's redactor needs 2 frames per level on
+# Python 3.12 and later and 3 on 3.10 and 3.11, so on 3.10 and 3.11 data about
+# 328 levels deep fails, after the session is created.
+MAX_LINE_DEPTH = 64
+
+
+def _too_deep(entry: dict[str, Any]) -> bool:
+    """Return True if ``entry`` nests objects and arrays more than MAX_LINE_DEPTH levels deep.
+
+    ``entry`` is level 1. The walk uses a stack, not recursion: on 3.12 and
+    later, json.loads parses lines far deeper than Python can recurse.
+    """
+    stack = [(entry, 1)]
+    while stack:
+        node, depth = stack.pop()
+        for child in node.values() if isinstance(node, dict) else node:
+            if isinstance(child, (dict, list)):
+                if depth == MAX_LINE_DEPTH:
+                    return True
+                stack.append((child, depth + 1))
+    return False
+
+
+def _usable_session_id(value: object) -> str:
+    """Return ``value`` if it is a string the store accepts as a session ID, else ""."""
+    if not isinstance(value, str):
+        return ""
+    try:
+        return validate_session_id(value)
+    except ValueError:
+        return ""
+
+
+def _resolve(path: str | Path) -> Path:
+    try:
+        return Path(path).expanduser().resolve()
+    except RuntimeError:
+        # Python 3.12 and older raise this on a symlink loop.
+        return Path(os.path.abspath(Path(path).expanduser()))
+
+
+class _UnreadableLog(OSError):
+    """The session log exists but cannot be opened or read."""
+
+
+def _log_lines(path: Path) -> Iterator[str]:
+    """Yield the lines of the log. Only errors from opening and reading it are converted."""
+    try:
+        # A byte that is not UTF-8 becomes a lone surrogate, so one bad line
+        # does not stop the read. The caller skips that line.
+        with open(path, encoding="utf-8", errors="surrogateescape") as f:
+            yield from f
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Session log not found: {path}") from None
+    except OSError as e:
+        raise _UnreadableLog(e.errno, e.strerror or str(e), e.filename) from e
 
 
 def cmd_import(args: argparse.Namespace) -> int:
@@ -50,6 +128,12 @@ def cmd_import(args: argparse.Namespace) -> int:
         session_id, written = _import_jsonl(args.path, store)
     except FileNotFoundError as e:
         sys.stderr.write(f"{e}\n")
+        return 1
+    except _UnreadableLog as e:
+        sys.stderr.write(f"Cannot read session log {args.path}: {e.strerror}\n")
+        return 1
+    except ValueError as e:
+        sys.stderr.write(f"Cannot import {args.path}: {e}\n")
         return 1
 
     if not written:
@@ -125,7 +209,8 @@ def _extract_tool_results(content: list[dict]) -> list[dict[str, Any]]:
             elif isinstance(bc, list):
                 for sub in bc:
                     if isinstance(sub, dict) and sub.get("type") == "text":
-                        text_parts.append(sub.get("text", ""))
+                        text = sub.get("text", "")
+                        text_parts.append(text if isinstance(text, str) else "")
             results.append(
                 {
                     "tool_use_id": block.get("tool_use_id", ""),
@@ -144,7 +229,8 @@ def _extract_text(content: Any) -> str:
         parts = []
         for block in content:
             if isinstance(block, dict) and block.get("type") == "text":
-                parts.append(block.get("text", ""))
+                text = block.get("text", "")
+                parts.append(text if isinstance(text, str) else "")
         return "\n".join(parts)
     return ""
 
@@ -153,14 +239,14 @@ def _explicit_sidechain_id(raw: dict[str, Any]) -> str:
     """Return a provider-supplied sidechain identity when one is available."""
     for key in ("agentId", "agent_id", "sidechainId", "sidechain_id"):
         value = raw.get(key)
-        if value:
-            return str(value)
+        if isinstance(value, str) and value:
+            return value
     return ""
 
 
 def _is_compaction_summary(raw: dict[str, Any], text: str, pending: bool) -> bool:
     """Recognise Claude Code's synthetic post-compaction user message."""
-    if raw.get("isCompactSummary") or raw.get("isCompactionSummary"):
+    if raw.get("isCompactSummary") is True or raw.get("isCompactionSummary") is True:
         return True
     lowered = text.lstrip().lower()
     if lowered.startswith(
@@ -200,6 +286,16 @@ def import_jsonl(
     -------
     str
         The session ID of the imported session.
+
+    Raises
+    ------
+    FileNotFoundError
+        The log does not exist.
+    OSError
+        The log cannot be opened or read.
+    ValueError
+        Neither the log nor its file name holds a usable session ID, or the
+        store refuses the session.
     """
     if store is None:
         store = TraceStore(resolve_trace_dir(trace_dir))
@@ -214,9 +310,7 @@ def _import_jsonl(
     Events are built in memory and written only after the whole log has been
     converted, so a log that fails to parse leaves no partial session behind.
     """
-    path = Path(path).expanduser().resolve()
-    if not path.exists():
-        raise FileNotFoundError(f"Session log not found: {path}")
+    path = _resolve(path)
 
     # First pass: extract metadata from first entry
     session_id = ""
@@ -226,43 +320,48 @@ def _import_jsonl(
     last_ts = 0.0
     entries: list[dict[str, Any]] = []
 
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                raw = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(raw, dict):
-                continue
+    for line in _log_lines(path):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            line.encode("utf-8")
+        except UnicodeEncodeError:
+            continue  # Not UTF-8, such as a last line cut mid-character.
+        try:
+            raw = json.loads(line)
+        except (ValueError, RecursionError):
+            continue  # Not JSON, nested too deep, or a number too long to convert.
+        if not isinstance(raw, dict) or _too_deep(raw):
+            continue
 
-            # Skip queue operations
-            if raw.get("type") in ("queue-operation",):
-                continue
+        # Skip queue operations
+        if raw.get("type") in ("queue-operation",):
+            continue
 
-            entries.append(raw)
+        entries.append(raw)
 
-            ts = _parse_iso_timestamp(raw.get("timestamp", ""))
-            if first_ts == 0.0 and ts > 0:
-                first_ts = ts
-            if ts > 0:
-                last_ts = ts
+        ts = _parse_iso_timestamp(raw.get("timestamp", ""))
+        if first_ts == 0.0 and ts > 0:
+            first_ts = ts
+        if ts > 0:
+            last_ts = ts
 
-            if not cwd and isinstance(raw.get("cwd"), str):
-                cwd = raw["cwd"]
+        if not cwd and isinstance(raw.get("cwd"), str):
+            cwd = raw["cwd"]
 
-            if not session_id:
-                session_id = raw.get("sessionId", "")
-                extra_meta["git_branch"] = raw.get("gitBranch", "")
-                extra_meta["version"] = raw.get("version", "")
+        if not session_id:
+            session_id = _usable_session_id(raw.get("sessionId"))
+            extra_meta["git_branch"] = raw.get("gitBranch", "")
+            extra_meta["version"] = raw.get("version", "")
 
     # Only Claude's own sessionId becomes gen_ai.conversation.id; the file-name
     # fallback below is not a native conversation ID.
-    conversation_id = session_id if isinstance(session_id, str) else ""
+    conversation_id = session_id
     if not session_id:
-        session_id = path.stem
+        session_id = _usable_session_id(path.stem)
+    if not session_id:
+        raise ValueError("no usable session ID in the log or the file name")
 
     # Create session
     meta = SessionMeta(
@@ -301,7 +400,11 @@ def _import_jsonl(
         if raw.get("type") != "assistant" or not isinstance(msg, dict):
             continue
         message_id = msg.get("id")
-        if isinstance(message_id, str) and message_id and msg.get("usage"):
+        usage = msg.get("usage")
+        if (
+            isinstance(message_id, str) and message_id
+            and isinstance(usage, dict) and usage
+        ):
             usage_line[message_id] = index
 
     # Second pass: convert entries to TraceEvents
@@ -314,6 +417,8 @@ def _import_jsonl(
 
         content = msg.get("content", "")
         usage = msg.get("usage", {})
+        if not isinstance(usage, dict):
+            usage = {}
         message_id = msg.get("id")
         usage_deferred = (
             isinstance(message_id, str) and usage_line.get(message_id, index) != index
@@ -321,9 +426,14 @@ def _import_jsonl(
         if usage_deferred:
             usage = {}
         model = msg.get("model", "")
-        is_sidechain = bool(raw.get("isSidechain", False))
-        raw_uuid = str(raw.get("uuid", ""))
-        parent_uuid = str(raw.get("parentUuid", ""))
+        is_sidechain = raw.get("isSidechain") is True
+        raw_uuid = raw.get("uuid", "")
+        if not isinstance(raw_uuid, str):
+            raw_uuid = ""
+        # Claude Code writes "parentUuid": null on the first entry of a conversation.
+        parent_uuid = raw.get("parentUuid", "")
+        if not isinstance(parent_uuid, str):
+            parent_uuid = ""
         if is_sidechain:
             explicit_id = _explicit_sidechain_id(raw)
             inherited = stream_by_uuid.get(parent_uuid, "")
@@ -376,8 +486,12 @@ def _import_jsonl(
                 # were already emitted to avoid duplicate TOOL_RESULT events.
                 tr_data = raw.get("toolUseResult")
                 if tr_data and isinstance(tr_data, dict) and not tool_results:
-                    stdout = tr_data.get("stdout", "") or ""
-                    stderr = tr_data.get("stderr", "") or ""
+                    stdout = tr_data.get("stdout", "")
+                    if not isinstance(stdout, str):
+                        stdout = ""
+                    stderr = tr_data.get("stderr", "")
+                    if not isinstance(stderr, str):
+                        stderr = ""
                     if stdout or stderr:
                         result_text = stdout[:500]
                         if stderr:
@@ -432,12 +546,12 @@ def _import_jsonl(
                         **provenance,
                     }
                     caller = tc.get("caller", {})
-                    if caller.get("type"):
+                    if isinstance(caller, dict) and caller.get("type"):
                         tool_data["caller_type"] = caller["type"]
                     # Extract subagent info from Agent tool
                     if tc["name"] == "Agent":
                         inp = tc["input"]
-                        if inp.get("subagent_type"):
+                        if isinstance(inp, dict) and inp.get("subagent_type"):
                             tool_data["subagent_type"] = inp["subagent_type"]
 
                     event = TraceEvent(
@@ -477,22 +591,17 @@ def _import_jsonl(
 
             # Track token usage
             if usage:
-                input_tokens = usage.get("input_tokens", 0)
-                output_tokens = usage.get("output_tokens", 0)
-                meta.total_tokens += (
-                    input_tokens
-                    + output_tokens
-                    + usage.get("cache_creation_input_tokens", 0)
-                    + usage.get("cache_read_input_tokens", 0)
-                )
+                meta.total_tokens += sum(_token_count(usage.get(key)) for key in _TOKEN_KEYS)
                 meta.llm_requests += 1
 
         # System entry (e.g., turn duration)
         elif entry_type == "system":
             subtype = raw.get("subtype", "")
+            if not isinstance(subtype, str):
+                subtype = ""
             if subtype == "turn_duration":
                 duration_ms = raw.get("durationMs", 0)
-                if duration_ms:
+                if usable_number(duration_ms):
                     meta.total_duration_ms += duration_ms
             elif subtype in {"compact_boundary", "compaction_boundary"}:
                 summary = _extract_text(raw.get("content", ""))
@@ -547,26 +656,37 @@ def discover_claude_sessions(
     list[dict]
         List of session info dicts with 'path', 'project', 'session_id'.
     """
-    claude_dir = Path(claude_dir).expanduser().resolve()
-    projects_dir = claude_dir / "projects"
-    if not projects_dir.exists():
+    projects_dir = _resolve(claude_dir) / "projects"
+    try:
+        project_dirs = sorted(projects_dir.iterdir())
+    except OSError:
         return []
 
     sessions = []
-    for project_dir in sorted(projects_dir.iterdir()):
-        if not project_dir.is_dir():
+    for project_dir in project_dirs:
+        try:
+            if not project_dir.is_dir():
+                continue
+            jsonl_files = sorted(project_dir.glob("*.jsonl"))
+        except OSError:
             continue
 
         project_name = _decode_project_path(project_dir.name)
 
-        for jsonl_file in sorted(project_dir.glob("*.jsonl")):
+        for jsonl_file in jsonl_files:
+            try:
+                st = jsonl_file.stat()
+            except OSError:
+                continue
+            if not stat.S_ISREG(st.st_mode):
+                continue
             # Claude Code names files <session-uuid>.jsonl, so the stem is the ID.
             sessions.append(
                 {
                     "path": jsonl_file,
                     "project": project_name,
                     "session_id": jsonl_file.stem,
-                    "size_kb": jsonl_file.stat().st_size // 1024,
+                    "size_kb": st.st_size // 1024,
                 }
             )
 
