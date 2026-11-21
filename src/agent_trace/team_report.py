@@ -23,7 +23,7 @@ from typing import TextIO
 from .budget_report import _parse_date
 from .cost import session_cost
 from .event_data import require_object_event_data
-from .inert import inert
+from .inert import escape_surrogates, inert
 from .models import EventType, SessionMeta, TraceEvent, usable_text
 from .store import TraceStore
 
@@ -414,6 +414,7 @@ def format_team_report_text(report: TeamReport, out: TextIO = sys.stdout) -> Non
 
 
 def format_team_report_csv(report: TeamReport) -> str:
+    """Return the report as CSV. Each lone surrogate is written as its escape."""
     out = StringIO()
     writer = csv.writer(out)
     writer.writerow([
@@ -421,7 +422,7 @@ def format_team_report_csv(report: TeamReport) -> str:
         "authors", "branches", "unpriced_sessions",
     ])
     for row in report.rows.values():
-        writer.writerow([
+        writer.writerow([escape_surrogates(cell) for cell in (
             report.group_by,
             row["group"],
             f"{row['sessions']:.3f}",
@@ -431,7 +432,7 @@ def format_team_report_csv(report: TeamReport) -> str:
             ";".join(row["authors"]),
             ";".join(row["branches"]),
             f"{row['unpriced_sessions']:.3f}",
-        ])
+        )])
     return out.getvalue()
 
 

@@ -44,7 +44,8 @@ jobs:
     # the integrations' run registry (process liveness and start-time
     # identity through OpenProcess and GetProcessTimes, and the session
     # seal), and `optimize --apply` reading and writing its target as UTF-8
-    # under cp1252, which the Linux jobs never run
+    # under cp1252, and `export --output` writing its file as UTF-8 with the
+    # csv module's own line endings, which the Linux jobs never run
     # natively. Only these tests run here: the full suite does not yet pass
     # on Windows (POSIX signals and file modes, CRLF in CLI and report
     # output, cp1252 stdout).
@@ -88,6 +89,7 @@ jobs:
           tests.test_sdk_integrations.TestOpenAIAgentsSessions
           tests.test_sdk_integrations.TestStrandsSessions
           tests.test_optimize.TestApplyUnderNonUtf8Locale
+          tests.test_export_output
         env:
           PYTHONPATH: src
           # Redirected stdout defaults to cp1252, which cannot print the

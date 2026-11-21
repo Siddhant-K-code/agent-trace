@@ -558,7 +558,11 @@ def cmd_export_eu_ai_act(args: argparse.Namespace) -> int:
     result = json.dumps(report, indent=2)
     output = getattr(args, "output", "") or ""
     if output:
-        Path(output).write_text(result + "\n")
+        try:
+            Path(output).write_text(result + "\n")
+        except OSError as exc:
+            sys.stderr.write(f"Error: cannot write {output}: {exc.strerror or exc}\n")
+            return 1
         sys.stderr.write(f"EU AI Act export written to {output}\n")
     else:
         sys.stdout.write(result + "\n")

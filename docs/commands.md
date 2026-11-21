@@ -252,7 +252,10 @@ read back to the exact prompt. `inspect`, `approval show`,
 `timeline --format json` and `compare --format json` print JSON with the raw
 text. Every JSON and CSV output keeps the raw text, and so do the fingerprint
 files that `fingerprint --output` and `drift --save-baseline` write, and the
-`postmortem.md` file that `postmortem` writes.
+`postmortem.md` file that `postmortem` writes. `export --format csv`,
+`cost --breakdown provider --csv` and `team-report --export csv` change only a
+lone UTF-16 surrogate, such as `\ud83d`. UTF-8 cannot encode one, so they
+write its escape, the same text the trace file holds.
 
 ### `replay`
 ```
@@ -2023,12 +2026,22 @@ deprecated `gen_ai.system`). These names replaced `gen_ai.agent.session`,
 `gen_ai.client.operation` and `gen_ai.tool.call/{tool}`. See
 [Spans and attributes](production.md#spans-and-attributes).
 
-`--format otlp`, `otlp-genai` and `temporal` write the payload to `--output`
-or to `trace-<12-character session ID>-<format>.json`. With `--endpoint URL`
-they POST it to an OTLP/HTTP collector instead. Give the collector's base URL:
-export drops trailing slashes from the path and appends `/v1/traces` unless
-the path already ends with it, and keeps the query string. This is the rule
-`watch --stream-otlp` uses:
+`--format json`, `csv`, `ndjson` and `eu-ai-act` print to stdout. With
+`--output FILE` they write FILE in UTF-8 instead and print one line on stderr
+that names it. The file holds the same text stdout gets. `--format otlp`,
+`otlp-genai` and `temporal` without `--endpoint` write the payload to
+`--output` or to `trace-<12-character session ID>-<format>.json`.
+`--anonymize` writes to `--output` or to
+`session-<12-character session ID>-anon.json`. When export cannot write its
+file, it prints one line such as `Error: cannot write out.json: No such file or
+directory` on stderr and exits 1. `--scores`, `--metrics` and `--backend` do
+not read `--output`.
+
+With `--endpoint URL`, `--format otlp`, `otlp-genai` and `temporal` POST the
+payload to an OTLP/HTTP collector instead of writing a file. Give the
+collector's base URL: export drops trailing slashes from the path and appends
+`/v1/traces` unless the path already ends with it, and keeps the query string.
+This is the rule `watch --stream-otlp` uses:
 
 | `--endpoint` | Spans are POSTed to |
 |---|---|

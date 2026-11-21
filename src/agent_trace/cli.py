@@ -22,6 +22,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
+from typing import TextIO
 
 from . import __version__
 from .store import default_trace_dir
@@ -128,7 +129,7 @@ from .event_data import (
 )
 from .failures import llm_failure, session_errors
 from .http_post import parse_header, url_problem
-from .inert import inert
+from .inert import escape_surrogates, inert
 from .models import EventType, SessionMeta, TraceEvent
 from .proxy import MCPProxy
 from .replay import format_event, format_summary, list_sessions, replay_session
@@ -489,6 +490,30 @@ def _export_endpoint_checks(args: argparse.Namespace) -> tuple[dict[str, str], s
     return headers, None
 
 
+def _write_events(out: TextIO, fmt: str, events: list[TraceEvent]) -> None:
+    """Write *events* to *out* as json, csv or ndjson."""
+    if fmt == "json":
+        output = [json.loads(e.to_json()) for e in events]
+        out.write(json.dumps(output, indent=2) + "\n")
+    elif fmt == "csv":
+        writer = csv.writer(out)
+        writer.writerow(["timestamp", "event_type", "event_id", "parent_id", "duration_ms", "data"])
+        for e in events:
+            # json.dumps escapes a lone surrogate in the data. The other
+            # cells hold stored strings as they are, so escape it there.
+            writer.writerow([escape_surrogates(cell) for cell in (
+                e.timestamp,
+                e.event_type.value,
+                e.event_id,
+                e.parent_id,
+                e.duration_ms or "",
+                json.dumps(e.data),
+            )])
+    else:
+        for e in events:
+            out.write(e.to_json() + "\n")
+
+
 def cmd_export(args: argparse.Namespace) -> int:
     """Export a session to JSON, CSV, or OTLP."""
     # Check --endpoint and --header before routing and before anything is
@@ -526,26 +551,21 @@ def cmd_export(args: argparse.Namespace) -> int:
 
     events = store.load_events(session_id)
 
-    if args.format == "json":
-        output = [json.loads(e.to_json()) for e in events]
-        sys.stdout.write(json.dumps(output, indent=2) + "\n")
-
-    elif args.format == "csv":
-        writer = csv.writer(sys.stdout)
-        writer.writerow(["timestamp", "event_type", "event_id", "parent_id", "duration_ms", "data"])
-        for e in events:
-            writer.writerow([
-                e.timestamp,
-                e.event_type.value,
-                e.event_id,
-                e.parent_id,
-                e.duration_ms or "",
-                json.dumps(e.data),
-            ])
-
-    elif args.format == "ndjson":
-        for e in events:
-            sys.stdout.write(e.to_json() + "\n")
+    if args.format in ("json", "csv", "ndjson"):
+        output_path = getattr(args, "output", "") or ""
+        if not output_path:
+            _write_events(sys.stdout, args.format, events)
+            return 0
+        # newline="" keeps the csv module's own line endings.
+        newline = "" if args.format == "csv" else None
+        try:
+            with open(output_path, "w", encoding="utf-8", newline=newline) as f:
+                _write_events(f, args.format, events)
+        except OSError as exc:
+            sys.stderr.write(f"Error: cannot write {output_path}: {exc.strerror or exc}\n")
+            return 1
+        sys.stderr.write(f"{args.format.upper()} export written to {output_path}\n")
+        return 0
 
     elif args.format in ("otlp", "otlp-genai", "temporal"):
         from .otlp import (
@@ -581,7 +601,8 @@ def cmd_export(args: argparse.Namespace) -> int:
             use_genai = False  # explicit --format otlp keeps legacy behaviour
 
         if not endpoint:
-            # No endpoint: write OTLP JSON to --output file or stdout
+            # No endpoint: write the OTLP JSON to --output or to a file named
+            # from the session ID. Nothing goes to stdout.
             meta = store.load_meta(session_id)
             try:
                 if use_temporal:
@@ -600,8 +621,12 @@ def cmd_export(args: argparse.Namespace) -> int:
             if not output_path:
                 fmt_suffix = args.format
                 output_path = f"trace-{session_id[:12]}-{fmt_suffix}.json"
-            with open(output_path, "w") as f:
-                f.write(json.dumps(payload, indent=2) + "\n")
+            try:
+                with open(output_path, "w") as f:
+                    f.write(json.dumps(payload, indent=2) + "\n")
+            except OSError as exc:
+                sys.stderr.write(f"Error: cannot write {output_path}: {exc.strerror or exc}\n")
+                return 1
             sys.stderr.write(f"OTLP payload written to {output_path}\n")
             sys.stderr.write(f"Send to a collector: agent-strace export --format {args.format} --endpoint <url>\n")
             return 0
@@ -1862,8 +1887,10 @@ def build_parser() -> argparse.ArgumentParser:
                           help="strip identifying information (paths, hostnames, emails, usernames) from the export")
     p_export.add_argument("--anonymize-config", dest="anonymize_config", metavar="FILE",
                           help="path to custom anonymization rules YAML file")
-    p_export.add_argument("--output", "-o", default="",
-                          help="output file path")
+    p_export.add_argument("--output", "-o", default="", metavar="FILE",
+                          help="write the export to FILE (json, csv, ndjson and eu-ai-act default to stdout; "
+                               "otlp, otlp-genai and temporal without --endpoint, and --anonymize, "
+                               "default to a file named from the session ID)")
     p_export.add_argument("--dry-run", action="store_true",
                           help="show what would be anonymized without writing output (use with --anonymize)")
 
