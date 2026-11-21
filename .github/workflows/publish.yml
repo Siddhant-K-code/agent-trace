@@ -23,7 +23,7 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (startsWith(github.event.release.tag_name, 'v') &&
       !startsWith(github.event.release.tag_name, 'vscode-v'))
-    runs-on: namespace-profile-siddhant-khare
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
@@ -42,8 +42,12 @@ jobs:
         with:
           python-version: "3.12"
 
+      # enable-cache defaults to auto, which turns the cache on only on
+      # GitHub-hosted runners. A publish job never restores a cache.
       - name: Install uv
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: false
 
       - name: Verify publish target
         run: |
@@ -59,7 +63,7 @@ jobs:
 
   mcp-registry:
     needs: publish
-    runs-on: namespace-profile-siddhant-khare
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read
