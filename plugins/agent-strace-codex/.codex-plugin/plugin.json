@@ -1,6 +1,6 @@
 {
   "name": "agent-strace",
-  "version": "0.117.0",
+  "version": "0.118.0",
   "description": "Capture and investigate OpenAI Codex agent sessions with local AgentTrace hooks and a reusable skill.",
   "author": {
     "name": "Siddhant Khare",
