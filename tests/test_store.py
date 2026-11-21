@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import agent_trace
 from agent_trace.fileutil import lock_descriptor, unlock_descriptor
 from agent_trace.models import EventType, SessionMeta, TraceEvent
-from agent_trace.store import TraceStore, ensure_trace_dir_gitignore
+from agent_trace.store import CorruptSessionMetaError, TraceStore, ensure_trace_dir_gitignore
 
 try:
     from _concurrency import run_concurrently
@@ -724,6 +724,162 @@ class TestRawLineSeparatorCommands(unittest.TestCase):
                     self.assertEqual(
                         events[1]["data"]["arguments"]["command"], f"echo a{separator}b"
                     )
+
+
+# json.loads raises RecursionError on text nested this deep on every CI
+# Python. 3.14 limits nesting by stack size, so 100,000 levels still parses.
+TOO_DEEP_FOR_JSON = 1_000_000
+# json.loads parses this on 3.12 and later, but dataclasses.asdict ran out of
+# stack on it, so inspect crashed.
+TOO_DEEP_TO_COPY = 3_000
+
+
+def nested(levels: int) -> str:
+    """Return JSON text that nests ``levels`` objects around a string."""
+    return '{"a":' * levels + '"x"' + "}" * levels
+
+
+def deep_meta(levels: int) -> str:
+    """Return meta.json text for bbbb2222 whose agent_name nests ``levels`` objects."""
+    return '{"session_id":"bbbb2222","agent_name":' + nested(levels) + "}"
+
+
+def store_with_corrupt_meta(root: Path, meta_text: str) -> TraceStore:
+    """Return a store holding good session aaaa1111 and bbbb2222 with ``meta_text``."""
+    store = TraceStore(str(root), use_workspace_env=False)
+    store.create_session(SessionMeta(session_id="aaaa1111", tenant_id="acme", started_at=1.0))
+    store.create_session(SessionMeta(session_id="bbbb2222", started_at=2.0))
+    (root / "bbbb2222" / "meta.json").write_text(meta_text, encoding="utf-8")
+    return store
+
+
+class TestCorruptSessionMeta(unittest.TestCase):
+    """A meta.json that is too deep or not an object is corrupt, like broken JSON."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="corrupt-meta-"))
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+
+    def test_listing_skips_it_and_session_reads_refuse_it(self):
+        cases = [
+            ("too deep for json.loads", deep_meta(TOO_DEEP_FOR_JSON),
+             "metadata nests more than 128 levels"),
+            ("too deep to copy", deep_meta(TOO_DEEP_TO_COPY),
+             "metadata nests more than 128 levels"),
+            ("array", "[]", "metadata is not a JSON object"),
+            ("null", "null", "metadata is not a JSON object"),
+        ]
+        for index, (label, text, reason) in enumerate(cases):
+            with self.subTest(label):
+                store = store_with_corrupt_meta(self.root / str(index), text)
+                self.assertEqual([m.session_id for m in store.list_sessions()], ["aaaa1111"])
+                self.assertIsNone(store.find_session("bbbb"))
+                message = f"^session bbbb2222 has a corrupt meta.json: {reason}$"
+                with self.assertRaisesRegex(CorruptSessionMetaError, message):
+                    store.load_meta("bbbb2222")
+                with self.assertRaisesRegex(CorruptSessionMetaError, message):
+                    store.update_meta(SessionMeta(session_id="bbbb2222", started_at=2.0))
+                with self.assertRaisesRegex(
+                    ValueError, "^corrupt session in tenant store: bbbb2222$"
+                ):
+                    store.list_sessions_strict()
+
+    def test_attribution_nested_up_to_the_limit_loads(self):
+        store = store_with_corrupt_meta(
+            self.root, '{"session_id":"bbbb2222","attribution":' + nested(127) + "}"
+        )
+        meta = store.load_meta("bbbb2222")
+        self.assertEqual(SessionMeta.from_json(meta.to_json()).attribution, meta.attribution)
+        self.assertEqual(len(store.list_sessions()), 2)
+
+        (self.root / "bbbb2222" / "meta.json").write_text(
+            '{"session_id":"bbbb2222","attribution":' + nested(128) + "}", encoding="utf-8"
+        )
+        with self.assertRaisesRegex(CorruptSessionMetaError, "nests more than 128 levels$"):
+            store.load_meta("bbbb2222")
+        self.assertEqual(len(store.list_sessions()), 1)
+
+    def test_create_session_refuses_metadata_it_could_not_read_back(self):
+        store = TraceStore(str(self.root), use_workspace_env=False)
+        meta = SessionMeta(session_id="cccc3333", attribution=json.loads(nested(128)))
+        with self.assertRaisesRegex(ValueError, "^metadata nests more than 128 levels$"):
+            store.create_session(meta)
+        self.assertFalse((self.root / "cccc3333").exists())
+
+
+class TestCorruptSessionMetaCommands(unittest.TestCase):
+    """The commands on a store where one meta.json is corrupt."""
+
+    def test_commands_skip_the_session_or_refuse_it_in_one_line(self):
+        root = Path(tempfile.mkdtemp(prefix="corrupt-meta-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        (root / "home").mkdir()
+        too_deep = "metadata nests more than 128 levels"
+        reasons = {}
+        for name, meta_text, reason in (
+            ("too-deep-for-json", deep_meta(TOO_DEEP_FOR_JSON), too_deep),
+            ("too-deep-to-copy", deep_meta(TOO_DEEP_TO_COPY), too_deep),
+            ("bad-parent-id", '{"session_id":"bbbb2222","parent_session_id":"../evil"}',
+             "invalid stored parent session ID"),
+        ):
+            store_with_corrupt_meta(root / name, meta_text)
+            reasons[name] = reason
+        env = without_telemetry({
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("AGENT_STRACE_") and key != "AGENT_TRACE_DIR"
+        })
+        env["PYTHONPATH"] = str(SRC_ROOT)
+        env["HOME"] = env["USERPROFILE"] = str(root / "home")
+        env["PYTHONIOENCODING"] = "utf-8"
+
+        def run(job):
+            name, command = job
+            return subprocess.run(
+                [sys.executable, "-m", "agent_trace.entry", "--trace-dir",
+                 str(root / name), *command],
+                capture_output=True, text=True, encoding="utf-8",
+                env=env, cwd=root, timeout=120,
+            )
+
+        readers = [(cmd, "bbbb2222") for cmd in ("inspect", "replay", "export", "stats", "health")]
+        strict = "corrupt session in tenant store: bbbb2222\n"
+        expected = {
+            ("tenant", "report"): (1, "", "Error: " + strict),
+            ("tenant", "export", "acme"): (1, "", "Export failed: " + strict),
+            ("cognitive-debt",): (1, "", "Error: trace input could not be read safely\n"),
+        }
+        listing = [("list",), ("stats",), ("health", "--format", "json")]
+        jobs = [(name, command) for name in reasons for command in [*listing, *readers, *expected]]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(run, jobs))
+        # Run last: it would delete aaaa1111 if it ignored the corrupt session.
+        deletes = [run((name, ("tenant", "delete", "acme", "--confirm"))) for name in reasons]
+
+        for (name, command), result in zip(jobs, results):
+            with self.subTest(store=name, command=command):
+                self.assertNotIn("Traceback", result.stderr)
+                if command in readers:
+                    refused = f"Error: session bbbb2222 has a corrupt meta.json: {reasons[name]}\n"
+                    self.assertEqual(
+                        (result.returncode, result.stdout, result.stderr), (1, "", refused)
+                    )
+                elif command in expected:
+                    self.assertEqual(
+                        (result.returncode, result.stdout, result.stderr), expected[command]
+                    )
+                elif command[0] == "health":
+                    self.assertEqual(json.loads(result.stdout)["session_id"], "aaaa1111")
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("aaaa1111", result.stdout)
+                    self.assertNotIn("bbbb2222", result.stdout)
+        for name, result in zip(reasons, deletes):
+            with self.subTest(store=name, command="tenant delete"):
+                self.assertEqual(
+                    (result.returncode, result.stderr), (1, "Deletion failed: " + strict)
+                )
+                self.assertTrue((root / name / "aaaa1111" / "meta.json").exists())
 
 
 if __name__ == "__main__":

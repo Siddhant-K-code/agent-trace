@@ -36,6 +36,37 @@ from typing import Any
 
 _UNKNOWN_FIELDS_ATTR = "_unknown_fields"
 
+# SessionMeta refuses metadata that nests objects and arrays more than this
+# many levels deep. Real metadata nests 3 levels: the meta object, attribution
+# and its process_ancestry list. The limit is twice collector_client's
+# MAX_JSON_DEPTH, so the store reads all metadata the collector accepts and the
+# collector's own nesting message comes first. It is far below the depth where
+# the redactor and dataclasses.asdict run out of stack: about 328 levels on
+# Python 3.10 and 3.11.
+MAX_META_DEPTH = 128
+
+
+def _nests_deeper_than(value: Any, limit: int) -> bool:
+    """Return True if ``value`` nests objects and arrays more than ``limit`` levels deep.
+
+    ``value`` is level 1. The walk uses a stack, not recursion: on 3.12 and
+    later, json.loads parses text far deeper than Python can recurse. A cycle
+    ends the walk too, because each step down adds a level.
+    """
+    stack = [(value, 1)]
+    while stack:
+        node, depth = stack.pop()
+        for child in node.values() if isinstance(node, dict) else node:
+            if isinstance(child, (dict, list, tuple)):
+                if depth == limit:
+                    return True
+                stack.append((child, depth + 1))
+    return False
+
+
+def _meta_too_deep() -> ValueError:
+    return ValueError(f"metadata nests more than {MAX_META_DEPTH} levels")
+
 
 def usable_number(value: Any) -> float | None:
     """Return ``value`` as a float if it is a finite number >= 0, else None.
@@ -197,13 +228,32 @@ class SessionMeta:
     conversation_id: str = ""
 
     def to_json(self) -> str:
+        # asdict and json.dumps recurse, so the depth is checked before either
+        # runs. The store then never writes metadata that from_json refuses.
+        document = {f.name: getattr(self, f.name) for f in fields(self)}
+        if _nests_deeper_than(_with_unknown_fields(self, document), MAX_META_DEPTH):
+            raise _meta_too_deep()
         d = asdict(self)
         d = {k: v for k, v in d.items() if v is not None and v != "" and v != 0}
         return json.dumps(_with_unknown_fields(self, d), indent=2)
 
     @classmethod
     def from_json(cls, text: str) -> SessionMeta:
-        data = json.loads(text)
+        """Build a SessionMeta from ``text``, or raise ValueError.
+
+        Metadata that is not a JSON object, or that nests more than
+        MAX_META_DEPTH levels, raises ValueError like any other corrupt
+        metadata. That includes text too deep for json.loads, which raises
+        RecursionError.
+        """
+        try:
+            data = json.loads(text)
+        except RecursionError as exc:
+            raise _meta_too_deep() from exc
+        if not isinstance(data, dict):
+            raise ValueError("metadata is not a JSON object")
+        if _nests_deeper_than(data, MAX_META_DEPTH):
+            raise _meta_too_deep()
         # Keep pre-tenancy metadata untagged even when the reader itself is
         # running with AGENT_STRACE_TENANT_ID set.
         data.setdefault("tenant_id", "")

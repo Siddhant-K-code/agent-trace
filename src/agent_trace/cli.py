@@ -132,7 +132,7 @@ from .inert import inert
 from .models import EventType, SessionMeta, TraceEvent
 from .proxy import MCPProxy
 from .replay import format_event, format_summary, list_sessions, replay_session
-from .store import TraceStore
+from .store import CorruptSessionMetaError, TraceStore
 from .subagent import (
     cmd_replay_tree,
     cmd_stats_tree,
@@ -3313,11 +3313,17 @@ def _run_handler(args: argparse.Namespace, handler):
 
     Commands check event data and timestamps before they print or write
     anything, so the refusal matches ``share``: one ``Error:`` line on stderr
-    and exit code 1.
+    and exit code 1. A session whose meta.json cannot be read is refused the
+    same way.
     """
     try:
         return handler(args)
-    except (NonObjectEventDataError, UnusableTimestampError, CognitiveDebtInputError) as exc:
+    except (
+        NonObjectEventDataError,
+        UnusableTimestampError,
+        CognitiveDebtInputError,
+        CorruptSessionMetaError,
+    ) as exc:
         sys.stderr.write(f"Error: {exc}\n")
         return 1
 

@@ -60,7 +60,7 @@ agent-strace server --storage ./traces --dashboard
 
 Open `http://127.0.0.1:4317/`, select a session, and review ordered evidence, health reasons, provider limits, annotations, raw fields, and unresolved relationships. The dashboard shows session fields and event text as plain text.
 
-The page can compare two sessions, save a privacy-minimized HTML review, and download OTLP JSON. These actions read the configured local store and return local files. They do not upload trace data. When a session has an event timestamp that is not a Unix time in seconds, the review, compare, and share actions answer 400 with the message the CLI prints, and so does the OTLP action when that event is one it exports.
+The page can compare two sessions, save a privacy-minimized HTML review, and download OTLP JSON. These actions read the configured local store and return local files. They do not upload trace data. When a session has an event timestamp that is not a Unix time in seconds, the review, compare, and share actions answer 400 with the message the CLI prints, and so does the OTLP action when that event is one it exports. When a session's `meta.json` is [corrupt](commands.md#list), the session list leaves it out, and every action on it answers 400 with the message the CLI prints.
 
 With `--dashboard`, the server defaults to `127.0.0.1`. An unauthenticated dashboard cannot bind to `0.0.0.0`, `::`, a LAN address, or a hostname. To expose it beyond loopback, set an API key explicitly:
 
@@ -180,6 +180,12 @@ GET session IDs are URL-decoded as one containment-safe path component, so
 legacy IDs containing spaces, Unicode, or more than 128 characters remain
 readable. POST routes retain the strict 1–128 character ASCII policy for new
 session IDs.
+
+`GET /sessions` leaves out a session whose `meta.json` is corrupt: not valid
+JSON, not a JSON object, or nested more than 128 levels. `GET /sessions/<id>`
+and `GET /sessions/<id>/events` answer 400 for it with
+`{"error": "<message>"}`, the message the CLI prints. See
+[`list`](commands.md#list) for the fix.
 
 Upgrade the collector before its clients. A v0.106.0 or older collector
 returns 400 for session metadata that contains `conversation_id`. See

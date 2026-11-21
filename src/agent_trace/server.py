@@ -61,6 +61,7 @@ from .event_data import (
 from .fileutil import split_lf_lines
 from .models import SessionMeta, TraceEvent, usable_time
 from .store import (
+    CorruptSessionMetaError,
     TraceStore,
     DEFAULT_TRACE_DIR,
     validate_optional_tenant_id,
@@ -411,7 +412,11 @@ class CollectorHandler(BaseHTTPRequestHandler):
                 except (UnicodeDecodeError, ValueError) as exc:
                     self._send_json(400, {"error": str(exc)})
                     return
-                result = _wd.api_session_events(self.store, session_id)
+                try:
+                    result = _wd.api_session_events(self.store, session_id)
+                except CorruptSessionMetaError as exc:
+                    self._send_json(400, {"error": str(exc)})
+                    return
                 if result is None:
                     self._send_json(404, {"error": f"session not found: {parts[3]}"})
                     return
@@ -430,7 +435,11 @@ class CollectorHandler(BaseHTTPRequestHandler):
                     return
                 try:
                     result = _wd.api_session_review(self.store, session_id)
-                except (NonObjectEventDataError, UnusableTimestampError) as exc:
+                except (
+                    NonObjectEventDataError,
+                    UnusableTimestampError,
+                    CorruptSessionMetaError,
+                ) as exc:
                     self._send_json(400, {"error": str(exc)})
                     return
                 if result is None:
@@ -455,7 +464,11 @@ class CollectorHandler(BaseHTTPRequestHandler):
                     return
                 try:
                     result = _wd.api_session_compare(self.store, session_id, other_id)
-                except (NonObjectEventDataError, UnusableTimestampError) as exc:
+                except (
+                    NonObjectEventDataError,
+                    UnusableTimestampError,
+                    CorruptSessionMetaError,
+                ) as exc:
                     self._send_json(400, {"error": str(exc)})
                     return
                 except (OSError, ValueError, TypeError, KeyError) as exc:
@@ -483,7 +496,11 @@ class CollectorHandler(BaseHTTPRequestHandler):
                     return
                 try:
                     result = _wd.api_minimized_review_share(self.store, session_id)
-                except (NonObjectEventDataError, UnusableTimestampError) as exc:
+                except (
+                    NonObjectEventDataError,
+                    UnusableTimestampError,
+                    CorruptSessionMetaError,
+                ) as exc:
                     self._send_json(400, {"error": str(exc)})
                     return
                 if result is None:
@@ -504,7 +521,11 @@ class CollectorHandler(BaseHTTPRequestHandler):
                     return
                 try:
                     result = _wd.api_session_otlp(self.store, session_id)
-                except (NonObjectEventDataError, UnusableTimestampError) as exc:
+                except (
+                    NonObjectEventDataError,
+                    UnusableTimestampError,
+                    CorruptSessionMetaError,
+                ) as exc:
                     self._send_json(400, {"error": str(exc)})
                     return
                 except (OSError, ValueError, TypeError, KeyError) as exc:
@@ -546,7 +567,11 @@ class CollectorHandler(BaseHTTPRequestHandler):
                 else:
                     self._send_json(404, {"error": f"session not found: {session_id}"})
                     return
-            events = self.store.load_events(session_id)
+            try:
+                events = self.store.load_events(session_id)
+            except CorruptSessionMetaError as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
             self._send_ndjson(200, [e.to_json() for e in events])
             return
 
@@ -564,7 +589,11 @@ class CollectorHandler(BaseHTTPRequestHandler):
                 else:
                     self._send_json(404, {"error": f"session not found: {session_id}"})
                     return
-            meta = self.store.load_meta(session_id)
+            try:
+                meta = self.store.load_meta(session_id)
+            except CorruptSessionMetaError as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
             self._send_json(200, json.loads(meta.to_json()))
             return
 

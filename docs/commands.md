@@ -314,6 +314,21 @@ what it does for a session without that field. The exceptions:
 - For the `mcp` tools, see [mcp.md](mcp.md).
 - `inspect`, the `server` API and other commands that copy the whole record keep the value as stored.
 
+A `meta.json` is corrupt when it is not valid JSON, is not a JSON object, or
+nests objects and arrays more than 128 levels deep. `list`, `stats` and
+`health` skip that session and show the rest of the store. Commands that read
+that one session, such as `inspect`, `replay`, `export`, `stats <id>` and
+`health <id>`, exit 1 with one line:
+
+```
+Error: session bbbb2222 has a corrupt meta.json: metadata nests more than 128 levels
+```
+
+Commands that match a session by ID prefix, such as `explain`, skip it and say
+"Session not found". To read the session again, move its `meta.json` out of the
+session directory. Then run `agent-strace backfill-meta --apply`, which
+rebuilds the metadata from the session's events.
+
 | Column | Counts |
 |---|---|
 | `Tools` | Tool calls from any capture method: hook tool calls, MCP `tools/call` through the proxy, `@trace_tool`, imported tool uses |
@@ -1833,6 +1848,8 @@ Measure review coverage for agent-written code from trace file-write events and 
 
 `agent-strace watch --rules cognitive-debt:0.8` enables a live rule that alerts when a session has modified files that have not yet had human review.
 
+`cognitive-debt` exits 1 with "trace input could not be read safely" when a session it reads has a [corrupt](#list) `meta.json`. Without `--session`, it reads every session in the store.
+
 ### `context-score`
 ```
 agent-strace context-score [--file AGENTS.md] [--history N] [--compare]
@@ -2485,6 +2502,11 @@ when a session's `meta.json` has no `tenant_id` but its events carry one.
 apply this check, so they are not affected. Normal capture never writes this
 state, but an older store or a hand edit can. To continue, set `tenant_id` in
 that session's `meta.json` to the tenant ID its events carry.
+
+`tenant report`, `tenant export`, `tenant delete` and `org-report` also stop
+with this error when a session's `meta.json` is corrupt: not valid JSON, not a
+JSON object, or nested more than 128 levels. `tenant delete` then deletes
+nothing. See [`list`](#list) for the fix.
 
 ### `backfill-meta`
 ```
