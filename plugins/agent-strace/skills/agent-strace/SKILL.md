@@ -23,11 +23,11 @@ Do not silently substitute another tracing tool.
 
 Installed plugin hooks automatically record new Claude Code, Copilot CLI, or
 Codex sessions to `.agent-traces/`. Codex runs plugin hooks only after the user
-reviews and trusts them in `/hooks`; until then it records nothing. Do not also
-install provider-specific manual hooks with a different redaction mode because
-both handlers can run. With the Codex plugin, do not run
-`agent-strace setup --cli codex` at all: Codex runs the same command from both
-sources, so every event would be recorded twice.
+reviews and trusts them in `/hooks`, and again after each plugin update; until
+then it records nothing. Do not also install provider-specific manual hooks
+with a different redaction mode because both handlers can run. With the Codex
+plugin, do not run `agent-strace setup --cli codex` at all: Codex runs the same
+command from both sources, so every event would be recorded twice.
 
 ## Investigate
 

@@ -46,8 +46,9 @@ two installs register the same hooks twice.
 Codex runs plugin hooks only after you review and trust them. Start `codex`,
 open `/hooks`, and trust the nine AgentTrace commands. In the Codex app, use
 Settings > Hooks. Until then the plugin records nothing, and `codex exec` skips
-untrusted hooks without a warning. Codex trusts each hook separately, so a
-hook that a plugin update adds or changes starts untrusted again.
+untrusted hooks without a warning. Codex 0.164.0 and later tie this trust to
+every file in the plugin. Each agent-strace release changes the plugin's
+version, so trust all AgentTrace hooks again after every update.
 
 For vetted automation, `codex exec --dangerously-bypass-hook-trust` runs the
 hooks without the review.
@@ -113,9 +114,10 @@ agent-strace list
 agent-strace inspect <session-id>
 ```
 
-`agent-strace setup --cli codex --verify` checks only `$CODEX_HOME/hooks.json`.
-It does not read plugin hooks, so it reports missing hooks while this plugin
-is working. Do not fix that by running `agent-strace setup --cli codex`; see
+`agent-strace setup --cli codex --verify` checks only the hooks in
+`$CODEX_HOME/hooks.json`. It does not read plugin hooks, so it reports missing
+hooks while this plugin is working. Do not fix that by running
+`agent-strace setup --cli codex`; see
 [Duplicate hook avoidance](#duplicate-hook-avoidance).
 
 ## Update
@@ -129,8 +131,9 @@ codex plugin marketplace upgrade agent-trace
 ```
 
 The marketplace upgrade also refreshes the installed plugin. For a project
-install, run the same `npx codex-marketplace add` command again. Review any
-new or changed hooks in `/hooks`, then start a new Codex session.
+install, run the same `npx codex-marketplace add` command again. Then trust
+the AgentTrace hooks again in `/hooks` and start a new Codex session. Until you
+do, the plugin records nothing.
 
 ### Moving from the repository-root install
 
@@ -208,7 +211,8 @@ See [Security and privacy](security.md) and
 ## Known provider gaps
 
 - The plugin does not bundle Python or the `agent-strace` executable.
-- The plugin records nothing until its hooks are trusted.
+- The plugin records nothing until its hooks are trusted, and each update
+  needs that trust again. See [Trust the hooks](#trust-the-hooks).
 - Capture is limited to hook-visible data. See the
   [capture matrix](capture-matrix.md#openai-codex).
 - OpenAI's plugin directory does not accept plugins with lifecycle hooks.
