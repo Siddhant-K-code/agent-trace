@@ -69,6 +69,21 @@ def _append_write(store, meta, path, lines):
     )
 
 
+def _append_raw_write(store, meta, path, tenant_id):
+    """Append a two-line write as a raw line, so the store cannot retag it."""
+    record = json.loads(
+        TraceEvent(
+            event_type=EventType.FILE_WRITE,
+            session_id=meta.session_id,
+            data={"path": path, "content": "a\nb"},
+        ).to_json()
+    )
+    record["tenant_id"] = tenant_id
+    events_path = store._session_dir(meta.session_id) / "events.ndjson"
+    with events_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record) + "\n")
+
+
 class TestCognitiveDebtScoring(unittest.TestCase):
     def test_debt_score_uses_unreviewed_agent_lines(self):
         session = SessionDebt(
@@ -226,6 +241,63 @@ class TestCognitiveDebtScoring(unittest.TestCase):
                     window_end=time.time() + 60,
                     session_id=meta.session_id,
                 )
+
+    def test_window_report_reads_tagged_events_under_untagged_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ, {"AGENT_STRACE_TENANT_ID": ""}
+        ):
+            store = TraceStore(Path(tmp) / "traces")
+            meta = _make_store_session(store, tmp)
+            _append_raw_write(store, meta, "a.py", "acme")
+            _append_raw_write(store, meta, "b.py", "acme")
+
+            report = build_cognitive_debt_report(
+                store,
+                window_start=time.time() - 60,
+                window_end=time.time() + 60,
+            )
+
+        self.assertEqual(
+            [session.session_id for session in report.sessions], [meta.session_id]
+        )
+        self.assertEqual(report.total_agent_written_lines, 4)
+
+    def test_window_report_still_fails_closed_on_corrupt_sessions(self):
+        # Each case breaks one part of the state the test above reads.
+        cases = {
+            "unusable started_at": ("meta.json", {"started_at": -1}),
+            "session tenant ID that is not a string": ("meta.json", {"tenant_id": 5}),
+            "event from another tenant": ("meta.json", {"tenant_id": "other"}),
+            "event tenant ID that is not a string": (
+                "events.ndjson",
+                {"tenant_id": 5},
+            ),
+            "event line that cannot be read": ("events.ndjson", None),
+        }
+        for name, (file_name, fields) in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp, patch.dict(
+                os.environ, {"AGENT_STRACE_TENANT_ID": ""}
+            ):
+                store = TraceStore(Path(tmp) / "traces")
+                meta = _make_store_session(store, tmp)
+                _append_raw_write(store, meta, "a.py", "acme")
+                path = store._session_dir(meta.session_id) / file_name
+                if fields is None:
+                    path.write_text("{not-json}\n", encoding="utf-8")
+                else:
+                    record = json.loads(path.read_text(encoding="utf-8"))
+                    record.update(fields)
+                    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+                with self.assertRaisesRegex(
+                    CognitiveDebtInputError,
+                    "^trace input could not be read safely$",
+                ):
+                    build_cognitive_debt_report(
+                        store,
+                        window_start=time.time() - 60,
+                        window_end=time.time() + 60,
+                    )
 
     def test_malformed_review_history_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:

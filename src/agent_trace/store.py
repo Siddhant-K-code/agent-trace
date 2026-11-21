@@ -1277,8 +1277,18 @@ class TraceStore:
         return meta
 
     def load_events(
-        self, session_id: str, *, validate_tenant_ids: bool = False
+        self,
+        session_id: str,
+        *,
+        validate_tenant_ids: bool = False,
+        strict_event_tenants: bool = False,
     ) -> list[TraceEvent]:
+        """Read a session's events.
+
+        An event tenant must match the session tenant when the session has
+        one. ``strict_event_tenants`` also refuses an event tenant when the
+        session has none. ``validate_tenant_ids`` checks each tenant ID.
+        """
         session_id = validate_stored_id(session_id, "stored session ID")
         f = self._session_file(session_id, "events.ndjson", "event stream")
         meta = self.load_meta(session_id)
@@ -1296,7 +1306,7 @@ class TraceStore:
                 if (
                     event.tenant_id
                     and event.tenant_id != meta.tenant_id
-                    and (meta.tenant_id or validate_tenant_ids)
+                    and (meta.tenant_id or strict_event_tenants)
                 ):
                     raise ValueError("event tenant does not match session metadata")
                 events.append(event)
@@ -1339,12 +1349,18 @@ class TraceStore:
         tenant_id: str | None = None,
         *,
         validate_events: bool = True,
+        strict_event_tenants: bool = True,
     ) -> list[SessionMeta]:
         """Strictly discover sessions for report/export/erasure workflows.
 
         Ordinary listing intentionally skips corrupt entries. Tenant
         administration must instead fail closed so it cannot report an
         incomplete result or claim deletion succeeded while data was omitted.
+
+        ``strict_event_tenants`` also refuses a session whose metadata has no
+        tenant but whose events carry one. Tenant administration needs this.
+        A reader that does not filter by tenant can pass False. Event tenant
+        IDs must be valid either way.
         """
         if tenant_id is not None:
             tenant_id = validate_optional_tenant_id(tenant_id)
@@ -1395,7 +1411,11 @@ class TraceStore:
                 if usable_time(meta.started_at) is None:
                     raise ValueError("started_at is not a usable time")
                 if validate_events:
-                    self.load_events(session_id, validate_tenant_ids=True)
+                    self.load_events(
+                        session_id,
+                        validate_tenant_ids=True,
+                        strict_event_tenants=strict_event_tenants,
+                    )
             except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
                 raise ValueError(
                     f"corrupt session in tenant store: {session_id}"

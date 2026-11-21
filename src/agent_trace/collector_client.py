@@ -456,10 +456,11 @@ class CollectorTraceStore:
         tenant_id: str | None = None,
         *,
         validate_events: bool = True,
+        strict_event_tenants: bool = True,
     ) -> list[SessionMeta]:
         # Metadata is already strictly validated. Event loading remains lazy so
         # org-report can apply its UTC month and team filters first.
-        del validate_events
+        del validate_events, strict_event_tenants
         metas = list(self._metas.values())
         if tenant_id is not None:
             metas = [meta for meta in metas if meta.tenant_id == tenant_id]
