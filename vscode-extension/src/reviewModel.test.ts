@@ -94,6 +94,40 @@ test("representative fixture projects review evidence", () => {
   assert.equal(byId.get("ev-decision")?.annotations[0].correction, true);
 });
 
+test("a session resumed after its end is live until it ends again", () => {
+  const meta: SessionMeta = {
+    session_id: "resumed",
+    started_at: 1000,
+    tool_calls: 0,
+    errors: 0,
+    total_tokens: 0,
+  };
+  const events: TraceEvent[] = [
+    { event_type: "session_start", timestamp: 1000, event_id: "start", session_id: "resumed", data: { source: "startup" } },
+    { event_type: "user_prompt", timestamp: 1001, event_id: "prompt-1", session_id: "resumed", data: { prompt: "first" } },
+    { event_type: "session_end", timestamp: 1010, event_id: "end-1", session_id: "resumed", data: {} },
+    { event_type: "session_start", timestamp: 1100, event_id: "resume", session_id: "resumed", data: { source: "resume" } },
+    { event_type: "user_prompt", timestamp: 1101, event_id: "prompt-2", session_id: "resumed", data: { prompt: "second" } },
+  ];
+
+  const live = buildReviewModel(meta, events).session;
+  assert.equal(live.ended_at, undefined);
+  assert.equal(live.duration_ms, undefined);
+  assert.equal(live.active, true);
+
+  const endedAgain = buildReviewModel(meta, [
+    ...events,
+    { event_type: "session_end", timestamp: 1120, event_id: "end-2", session_id: "resumed", data: {} },
+  ]).session;
+  assert.equal(endedAgain.ended_at, 1120);
+  assert.equal(endedAgain.duration_ms, 120_000);
+  assert.equal(endedAgain.active, false);
+
+  const metaEnd = buildReviewModel({ ...meta, ended_at: 1200 }, events).session;
+  assert.equal(metaEnd.ended_at, 1200);
+  assert.equal(metaEnd.active, false);
+});
+
 test("minimized extension share allowlists capture and annotation metadata", () => {
   const events = fixtureEvents();
   const review = buildReviewModel({

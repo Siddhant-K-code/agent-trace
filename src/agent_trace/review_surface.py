@@ -18,7 +18,7 @@ from .disclosure import build_disclosure_preview
 from .event_data import require_object_event_data, require_usable_timestamps
 from .health import CaptureMatrix, assess_session, load_capture_matrix
 from .live_verify import LiveCaptureError, inspect_live_capture
-from .models import EventType, SessionMeta, TraceEvent, usable_text
+from .models import EventType, SessionMeta, TraceEvent, usable_text, usable_time
 from .review import build_review_projection
 from .store import TraceStore
 
@@ -317,6 +317,17 @@ def _review_items(
     return items, unresolved_annotations
 
 
+def _recorded_end(events: list[TraceEvent]) -> float | None:
+    """Return the time of the session end that no later session start reopened."""
+    ended_at: float | None = None
+    for event in events:
+        if event.event_type == EventType.SESSION_END:
+            ended_at = usable_time(event.timestamp)
+        elif event.event_type == EventType.SESSION_START:
+            ended_at = None
+    return ended_at
+
+
 def build_session_review(
     store: TraceStore,
     session_id: str,
@@ -348,8 +359,7 @@ def build_session_review(
     items, unresolved_annotations = _review_items(events, annotations, standalone)
     content_mode, disclosure = _content_mode(events, len(annotations))
     started_at = meta.started_at or (items[0]["timestamp"] if items else None)
-    ended_events = [event.timestamp for event in events if event.event_type == EventType.SESSION_END]
-    ended_at = meta.ended_at or (ended_events[-1] if ended_events else None)
+    ended_at = meta.ended_at or _recorded_end(events)
     duration_ms = (
         max(0.0, (float(ended_at) - float(started_at)) * 1000)
         if started_at is not None and ended_at is not None

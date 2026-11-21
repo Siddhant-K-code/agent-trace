@@ -93,6 +93,8 @@ The review panel works for the active session and for stored sessions selected i
 
 Missing, ambiguous, and wrong-type relationships stay unresolved. The extension does not invent a parent or terminal result.
 
+A session resumed after it ended has no end or duration until it ends again.
+
 The extension asks the installed `agent-strace` CLI for exact evidence health. If the CLI is unavailable, the panel still shows local structural relationship checks and reports health as unknown or partial.
 
 For Claude Code and Codex sessions, **Verify live capture** runs the complete local `setup --verify --live` check against the selected session. The result stays in the panel and includes static hook setup plus recorded evidence.
