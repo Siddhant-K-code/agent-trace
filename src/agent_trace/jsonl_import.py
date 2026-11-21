@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .models import EventType, SessionMeta, TraceEvent, usable_number, usable_time
+from .redact import redact_data
 from .store import TraceStore, resolve_trace_dir, validate_session_id
 
 _TOKEN_KEYS = (
@@ -64,6 +65,18 @@ def _too_deep(entry: dict[str, Any]) -> bool:
                     return True
                 stack.append((child, depth + 1))
     return False
+
+
+def _redact_text(text: str, redact: bool) -> tuple[str, bool]:
+    """Return ``text`` with its secrets redacted when ``redact`` is set, and whether any were.
+
+    Call this on the whole text before cutting it, as the hooks do: a secret
+    cut in half no longer matches its pattern, so the store cannot find it.
+    """
+    if not redact or not text:
+        return text, False
+    redacted = redact_data(text)
+    return redacted, redacted != text
 
 
 def _usable_session_id(value: object) -> str:
@@ -389,6 +402,9 @@ def _import_jsonl(
     # UUID ancestry keeps separate Claude sidechains separate even when the
     # source version does not include an explicit agentId on every entry.
     stream_by_uuid: dict[str, str] = {}
+    # Events whose text was redacted before it was cut. The store cannot flag
+    # them itself when the cut lands inside a redaction marker.
+    redacted_events: list[TraceEvent] = []
     pending_compaction: set[str] = set()
     pending_context: dict[str, str] = {}
 
@@ -467,7 +483,7 @@ def _import_jsonl(
             if isinstance(content, list):
                 tool_results = _extract_tool_results(content)
                 for tr in tool_results:
-                    _c = tr["content"]
+                    _c, hit = _redact_text(tr["content"], store.redact)
                     preview = (_c[:2000] + "..." if len(_c) > 2000 else _c) if _c else ""
                     event = TraceEvent(
                         event_type=EventType.TOOL_RESULT,
@@ -480,6 +496,8 @@ def _import_jsonl(
                             **provenance,
                         },
                     )
+                    if hit:
+                        redacted_events.append(event)
                     events.append(event)
 
                 # Also check toolUseResult — only if no content-block tool_results
@@ -493,6 +511,8 @@ def _import_jsonl(
                     if not isinstance(stderr, str):
                         stderr = ""
                     if stdout or stderr:
+                        stdout, out_hit = _redact_text(stdout, store.redact)
+                        stderr, err_hit = _redact_text(stderr, store.redact)
                         result_text = stdout[:500]
                         if stderr:
                             result_text += f" [stderr: {stderr[:200]}]"
@@ -506,14 +526,17 @@ def _import_jsonl(
                                 **provenance,
                             },
                         )
+                        if out_hit or err_hit:
+                            redacted_events.append(event)
                         events.append(event)
 
             if text and not text.startswith("{"):
                 is_summary = _is_compaction_summary(
                     raw, text, context_stream in pending_compaction,
                 )
+                prompt, hit = _redact_text(text, store.redact)
                 prompt_data: dict[str, Any] = {
-                    "prompt": text[:2000],
+                    "prompt": prompt[:2000],
                     **provenance,
                 }
                 if is_summary:
@@ -529,6 +552,8 @@ def _import_jsonl(
                     session_id=meta.session_id,
                     data=prompt_data,
                 )
+                if hit:
+                    redacted_events.append(event)
                 events.append(event)
 
         # Assistant entry
@@ -567,12 +592,14 @@ def _import_jsonl(
             # contain tool calls (Claude Code often emits reasoning text alongside
             # a tool_use block in the same message).
             if text or usage:
+                hit = False
                 response_data: dict[str, Any] = {
                     "model": model,
                     **provenance,
                 }
                 if text:
-                    response_data["text"] = text[:2000]
+                    response_text, hit = _redact_text(text, store.redact)
+                    response_data["text"] = response_text[:2000]
                 if isinstance(usage, dict) and usage:
                     response_data["usage"] = dict(usage)
                 # A post-compaction summary belongs with the response's usage.
@@ -587,6 +614,8 @@ def _import_jsonl(
                     session_id=meta.session_id,
                     data=response_data,
                 )
+                if hit:
+                    redacted_events.append(event)
                 events.append(event)
 
             # Track token usage
@@ -637,6 +666,9 @@ def _import_jsonl(
         store.create_session(meta)
     elif store.create_session(meta, if_missing=True) is None:
         return meta.session_id, False
+    for event in redacted_events:
+        event.redacted = True
+        sys.stderr.write("agent-strace: redacted secrets from trace event\n")
     store.append_events(meta.session_id, events)
     return meta.session_id, True
 
