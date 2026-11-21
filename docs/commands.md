@@ -2525,9 +2525,13 @@ Safety:
 - Writes hold the store write lock used by every other writer.
 - Symlinked entries and workspaces are reported and never followed. Invalid
   session IDs, empty or unparseable event streams, and events naming another
-  session are reported and skipped. A stream is unparseable when a line is not
-  a valid event or its `timestamp` is not a Unix time in seconds, such as a
-  negative number, a time in milliseconds or a number too large to be a date.
+  session are reported and skipped. A stream is unparseable when a line:
+  - is not a valid event, or is nested too deep to read
+  - has no `timestamp`
+  - has a `timestamp` that is not a Unix time in seconds, such as a negative
+    number, a time in milliseconds or a number too large to be a date
+  - has an `event_id` or `parent_id` that is not a string
+  - has no `event_id`, or an empty one
 - Sessions covered by a tenant erasure tombstone, or named by a pending tenant
   delete or tag journal, are skipped so erased data is never resurrected. An
   unreadable erasure audit or journal blocks the whole store.

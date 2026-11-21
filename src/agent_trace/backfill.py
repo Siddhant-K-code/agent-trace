@@ -231,16 +231,34 @@ def _read_events(path: Path, session_id: str) -> tuple[list[TraceEvent], str]:
             continue
         try:
             event = TraceEvent.from_json(line)
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError) as exc:
+            # from_json gives a line with no timestamp the time it is read.
+            # It also gives a line with no event_id a new random ID each time
+            # it is read.
+            record = json.loads(line)
+        except (
+            json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError,
+            RecursionError,  # nested too deep
+        ) as exc:
             raise _Skip("unparseable_events", f"line {number}: {type(exc).__name__}") from exc
+        if "timestamp" not in record:
+            raise _Skip("unparseable_events", f"line {number}: no timestamp")
         if not _is_usable_time(event.timestamp):
             raise _Skip("unparseable_events", f"line {number}: invalid timestamp")
+        for name in ("event_id", "parent_id"):
+            # Error counting uses them as keys, and exports encode them as text.
+            if not isinstance(getattr(event, name), str):
+                raise _Skip("unparseable_events", f"line {number}: {name} is not a string")
+        if "event_id" not in record:
+            raise _Skip("unparseable_events", f"line {number}: no event_id")
+        if not event.event_id:
+            raise _Skip("unparseable_events", f"line {number}: empty event_id")
         if event.session_id and event.session_id != session_id:
             raise _Skip("session_id_mismatch", f"line {number}")
         if event.tenant_id:
             try:
                 tenants.add(validate_tenant_id(event.tenant_id))
-            except (ValueError, TypeError) as exc:
+            except (ValueError, TypeError, RecursionError) as exc:
+                # Turning the value into text can need more stack than parsing it.
                 raise _Skip("invalid_tenant", f"line {number}") from exc
         events.append(event)
     if not events:
@@ -367,13 +385,17 @@ def _examine(
     child_tenants = children.get(session_id, set())
     if child_tenants and child_tenants != {tenant_id}:
         raise _Skip("cross_tenant_child", "a child session has a different tenant")
-    meta, source = derive_meta(
-        session_id,
-        events,
-        agent_name=agent_name,
-        tenant_id=tenant_id,
-        workspace_id=store.workspace_id,
-    )
+    try:
+        meta, source = derive_meta(
+            session_id,
+            events,
+            agent_name=agent_name,
+            tenant_id=tenant_id,
+            workspace_id=store.workspace_id,
+        )
+    except RecursionError as exc:
+        # Counting errors turns some values into text, which can need more stack than parsing.
+        raise _Skip("unparseable_events", "an event is nested too deep to read") from exc
     store._redact_meta(meta)
     item.event_count = len(events)
     item.agent_name_source = source
