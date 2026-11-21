@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -25,6 +26,7 @@ FIXTURE_DIR = (
     / "v1"
     / "fixture-review-001"
 )
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
 class ReviewSurfaceTests(unittest.TestCase):
@@ -32,6 +34,7 @@ class ReviewSurfaceTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.store = TraceStore(self.tmp.name)
         expected = json.loads((FIXTURE_DIR / "expected.json").read_text(encoding="utf-8"))
+        self.expected = expected
         self.session_id = expected["session_id"]
         events = [
             TraceEvent.from_json(line)
@@ -92,12 +95,13 @@ class ReviewSurfaceTests(unittest.TestCase):
         self.assertGreaterEqual(counts["gaps"], 1)
 
     def test_replay_shows_the_review_items_in_the_same_order(self) -> None:
-        shown: list[TraceEvent] = []
+        shown: list[tuple[TraceEvent, str]] = []
         format_event = replay.format_event
 
         def record(event: TraceEvent, *args, **kwargs) -> str:
-            shown.append(event)
-            return format_event(event, *args, **kwargs)
+            line = format_event(event, *args, **kwargs)
+            shown.append((event, ANSI.sub("", line)))
+            return line
 
         with patch.object(replay, "format_event", side_effect=record):
             replay.replay_session(self.store, self.session_id, out=io.StringIO())
@@ -105,7 +109,7 @@ class ReviewSurfaceTests(unittest.TestCase):
 
         replayed = [
             (event.event_id, event.event_type.value, event.parent_id or None, event.redacted)
-            for event in shown
+            for event, _ in shown
         ]
         reviewed = [
             (item["event_id"], item["event_type"], item["parent_id"], item["redacted"])
@@ -113,6 +117,18 @@ class ReviewSurfaceTests(unittest.TestCase):
         ]
         self.assertEqual(replayed, reviewed)
         self.assertEqual([event_id for event_id, *_ in replayed], self.fixture_ids)
+
+        # Both surfaces show each event's recorded facts, not only its ID.
+        expected = self.expected["expected_review_facts"]
+        self.assertEqual(
+            [(entry["event_id"], entry["event_type"]) for entry in expected],
+            [(event_id, event_type) for event_id, event_type, *_ in replayed],
+        )
+        for entry, (_, line), item in zip(expected, shown, review["items"]):
+            for fact in entry["facts"]:
+                with self.subTest(event_id=entry["event_id"], fact=fact):
+                    self.assertIn(fact, line)
+                    self.assertIn(fact, item["summary"])
 
     def test_surfaces_live_capture_verification_for_supported_provider(self) -> None:
         session_id = "claude-review"

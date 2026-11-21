@@ -19,7 +19,7 @@ from .event_data import require_object_event_data, require_usable_timestamps
 from .health import CaptureMatrix, assess_session, load_capture_matrix
 from .live_verify import LiveCaptureError, inspect_live_capture
 from .models import EventType, SessionMeta, TraceEvent, usable_text, usable_time
-from .review import build_review_projection
+from .review import _tool_command, build_review_projection
 from .store import TraceStore
 
 REVIEW_SURFACE_SCHEMA_VERSION = 1
@@ -217,13 +217,21 @@ def _summary(event: TraceEvent) -> str:
     if event.event_type == EventType.TOOL_CALL:
         tool = data.get("tool_name") or data.get("tool") or "tool"
         arguments = data.get("arguments") or data.get("tool_input")
-        command = data.get("command")
-        detail = command if isinstance(command, str) else arguments
+        detail = _tool_command(event) or (
+            json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+            if arguments else ""
+        )
         return f"{tool}: {detail}" if detail else str(tool)
     if event.event_type == EventType.TOOL_RESULT:
-        return str(data.get("output") or data.get("result") or "tool result")
+        return str(
+            data.get("output") or data.get("result") or data.get("content_preview")
+            or "tool result"
+        )
     if event.event_type in (EventType.FILE_READ, EventType.FILE_WRITE):
-        return str(data.get("path") or data.get("file_path") or event.event_type.value)
+        return str(
+            data.get("path") or data.get("file_path") or data.get("uri")
+            or event.event_type.value
+        )
     if event.event_type == EventType.ERROR:
         return str(data.get("message") or data.get("error") or "recorded error")
     if event.event_type == EventType.USER_PROMPT:
@@ -234,8 +242,12 @@ def _summary(event: TraceEvent) -> str:
             or "assistant response"
         )
     if event.event_type == EventType.DECISION:
+        choice = data.get("choice") or data.get("decision")
+        reason = data.get("reason")
+        if choice and reason:
+            return f"{choice} (reason: {reason})"
         return str(
-            data.get("decision") or data.get("reasoning") or data.get("text")
+            choice or data.get("reasoning") or data.get("text")
             or "recorded decision"
         )
     return event.event_type.value.replace("_", " ")

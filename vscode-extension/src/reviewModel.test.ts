@@ -92,6 +92,23 @@ test("representative fixture projects review evidence", () => {
   assert.ok(byId.get("result-test-2")?.categories.includes("recovery"));
   assert.ok(byId.get("ev-decision")?.categories.includes("corrections"));
   assert.equal(byId.get("ev-decision")?.annotations[0].correction, true);
+
+  // The same ordered facts that CLI replay and the Python review surface show.
+  const expected = JSON.parse(
+    fs.readFileSync(path.join(fixtureDir, "expected.json"), "utf8"),
+  ) as { expected_review_facts: { event_id: string; event_type: string; facts: string[] }[] };
+  assert.deepEqual(
+    review.items.map((item) => [item.event_id, item.event_type]),
+    expected.expected_review_facts.map((entry) => [entry.event_id, entry.event_type]),
+  );
+  for (const [index, entry] of expected.expected_review_facts.entries()) {
+    for (const fact of entry.facts) {
+      assert.ok(
+        review.items[index].summary.includes(fact),
+        `${entry.event_id} summary ${JSON.stringify(review.items[index].summary)} lacks ${JSON.stringify(fact)}`,
+      );
+    }
+  }
 });
 
 test("a session resumed after its end is live until it ends again", () => {

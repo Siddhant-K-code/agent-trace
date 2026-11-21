@@ -1,5 +1,5 @@
 {
-  "fixture_version": 1,
+  "fixture_version": 2,
   "session_id": "fixture-review-001",
   "provider": "synthetic",
   "expected_event_count": 12,
@@ -11,5 +11,27 @@
     "event_id": "ev-orphan",
     "parent_id": "missing-tool-call",
     "reason": "orphaned tool result models an observable capture gap without inventing the missing call"
+  },
+  "expected_review_facts": [
+    {"event_id": "ev-start", "event_type": "session_start", "facts": []},
+    {"event_id": "ev-prompt", "event_type": "user_prompt", "facts": ["[REDACTED synthetic request] fix the failing example test"]},
+    {"event_id": "ev-read", "event_type": "file_read", "facts": ["src/example.py"]},
+    {"event_id": "tool-test-1", "event_type": "tool_call", "facts": ["bash", "python -m pytest -q tests/test_example.py"]},
+    {"event_id": "ev-error", "event_type": "error", "facts": ["example test failed"]},
+    {"event_id": "ev-write", "event_type": "file_write", "facts": ["src/example.py"]},
+    {"event_id": "tool-test-2", "event_type": "tool_call", "facts": ["bash", "python -m pytest -q tests/test_example.py"]},
+    {"event_id": "result-test-2", "event_type": "tool_result", "facts": ["1 passed"]},
+    {"event_id": "ev-decision", "event_type": "decision", "facts": ["keep the minimal fix", "the retry passed"]},
+    {"event_id": "ev-orphan", "event_type": "tool_result", "facts": ["deliberate orphan used to test capture-gap handling"]},
+    {"event_id": "ev-response", "event_type": "assistant_response", "facts": ["Updated the example and the focused test now passes."]},
+    {"event_id": "ev-end", "event_type": "session_end", "facts": []}
+  ],
+  "expected_health": {
+    "status": "partial",
+    "provider": "",
+    "exit_code": 0,
+    "reasons": [
+      {"code": "orphan_tool_result", "kind": "observed", "event_id": "ev-orphan"}
+    ]
   }
 }
