@@ -152,17 +152,15 @@ function commandFor(event: TraceEvent): string {
   if (event.event_type !== "tool_call") {
     return "";
   }
-  const direct = event.data.command;
-  if (typeof direct === "string") {
-    return direct;
-  }
-  const args = event.data.arguments ?? event.data.tool_input;
-  if (typeof args === "object" && args !== null) {
-    const record = args as Record<string, unknown>;
-    const value = record.command ?? record.cmd;
-    return typeof value === "string" ? value : "";
-  }
-  return "";
+  const isRecord = (value: unknown): value is Record<string, unknown> =>
+    typeof value === "object" && value !== null && !Array.isArray(value);
+  const args = isRecord(event.data.arguments)
+    ? event.data.arguments
+    : isRecord(event.data.tool_input)
+      ? event.data.tool_input
+      : {};
+  const command = args.command || args.cmd || event.data.command;
+  return typeof command === "string" ? command : "";
 }
 
 function isTestCommand(command: string): boolean {
@@ -225,29 +223,45 @@ function categoriesFor(event: TraceEvent): Set<string> {
 function eventSummary(event: TraceEvent): string {
   const data = event.data;
   if (event.event_type === "tool_call") {
-    const tool = data.tool_name ?? data.tool ?? "tool";
-    const detail = commandFor(event) || JSON.stringify(data.arguments ?? data.tool_input ?? "");
+    const tool = data.tool_name || data.tool || "tool";
+    const args = data.arguments || data.tool_input;
+    const detail = commandFor(event) || (hasValue(args) ? JSON.stringify(args) : "");
     return detail ? `${String(tool)}: ${detail}` : String(tool);
   }
   if (event.event_type === "tool_result") {
-    return String(data.output ?? data.result ?? "tool result");
+    return String(data.output || data.result || data.content_preview || "tool result");
   }
   if (event.event_type === "file_read" || event.event_type === "file_write") {
-    return String(data.path ?? data.file_path ?? event.event_type);
+    return String(data.path || data.file_path || data.uri || event.event_type);
   }
   if (event.event_type === "error") {
-    return String(data.message ?? data.error ?? "recorded error");
+    return String(data.message || data.error || "recorded error");
   }
   if (event.event_type === "user_prompt") {
-    return String(data.prompt ?? data.content ?? data.text ?? "user prompt");
+    return String(data.prompt || data.content || data.text || "user prompt");
   }
   if (event.event_type === "assistant_response") {
-    return String(data.response ?? data.content ?? data.text ?? "assistant response");
+    return String(data.response || data.content || data.text || "assistant response");
   }
   if (event.event_type === "decision") {
-    return String(data.decision ?? data.reasoning ?? data.text ?? "recorded decision");
+    const choice = data.choice || data.decision;
+    if (choice && data.reason) {
+      return `${String(choice)} (reason: ${String(data.reason)})`;
+    }
+    return String(choice || data.reasoning || data.text || "recorded decision");
   }
   return event.event_type.replace(/_/g, " ");
+}
+
+// Python truthiness, so both review surfaces fall back on the same values.
+function hasValue(value: unknown): boolean {
+  if (Array.isArray(value)) {
+    return value.length > 0;
+  }
+  if (typeof value === "object" && value !== null) {
+    return Object.keys(value).length > 0;
+  }
+  return Boolean(value);
 }
 
 function correctionFor(annotation: ReviewAnnotation): boolean {
