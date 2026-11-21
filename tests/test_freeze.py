@@ -211,6 +211,37 @@ class TestFreezeCommands(unittest.TestCase):
         data = json.loads(captured.getvalue())
         self.assertTrue(data["exceeded"])
 
+    def _add_unreadable_session(self) -> str:
+        """Add session bad789 with two unreadable lines. Return the store's reason."""
+        _add_session(self.store, "bad789", [("Read", {"file_path": "a.py"})])
+        with (Path(self.tmp) / "bad789" / "events.ndjson").open("a", encoding="utf-8") as handle:
+            handle.write("[]\n{\n")
+        return "line 3 of events.ndjson is an array, not an object; 1 more line is unreadable"
+
+    def test_cmd_freeze_names_an_unreadable_session_once(self):
+        reason = self._add_unreadable_session()
+        output = Path(self.tmp) / "fixture.json"
+        out, err = io.StringIO(), io.StringIO()
+        with patch("sys.stdout", out), patch("sys.stderr", err):
+            result = cmd_freeze(self._freeze_args(session_id="bad789", output=str(output)))
+        self.assertEqual(result, 1)
+        self.assertEqual(out.getvalue(), "")
+        self.assertEqual(err.getvalue(), f"Could not freeze session bad789: {reason}\n")
+        self.assertFalse(output.exists())
+
+    def test_cmd_regression_names_an_unreadable_session_once(self):
+        reason = self._add_unreadable_session()
+        fixture_path = Path(self.tmp) / "fixture.json"
+        fixture_path.write_text(freeze_session(self.store, "abc123").to_json())
+        out, err = io.StringIO(), io.StringIO()
+        with patch("sys.stdout", out), patch("sys.stderr", err):
+            result = cmd_regression(
+                self._regression_args(fixture_file=str(fixture_path), session_id="bad789")
+            )
+        self.assertEqual(result, 1)
+        self.assertEqual(out.getvalue(), "")
+        self.assertEqual(err.getvalue(), f"Could not load session bad789: {reason}\n")
+
     def test_parser_registers_commands(self):
         parser = build_parser()
         freeze_args = parser.parse_args(["freeze", "abc", "--output", "fixture.json"])

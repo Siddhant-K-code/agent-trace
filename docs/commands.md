@@ -2901,6 +2901,11 @@ These commands refuse such a session with this line: `audit`, `cost`, `diff`,
 - `compare`, `org-report`, and `pr-comment` print the message after their own
   prefix and exit 1. `annotate` prints it with no prefix and exits 1.
 - `review` and `compaction` print it after their own prefix and exit 2.
+- `freeze`, `regression`, and `export --backend langfuse` print the reason
+  after their own prefix, which names the session, and exit 1. For example:
+  `Could not freeze session <id>: line 5 of events.ndjson is not valid JSON`.
+- `setup --verify --live` prints `Live capture verification failed:` and a
+  sentence that names the session and gives the reason, and exits 1.
 - `cognitive-debt` keeps `Error: trace input could not be read safely`, and the
   `tenant` commands keep `corrupt session in tenant store: <id>`.
 
