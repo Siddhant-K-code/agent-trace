@@ -25,7 +25,7 @@ from .event_data import (
 )
 from .explain import PHASE_DATA_EVENT_TYPES, Phase, build_phases, explain_session
 from .inert import inert
-from .models import EventType, usable_text
+from .models import EventType, usable_count, usable_text
 from .store import TraceStore
 
 
@@ -178,8 +178,8 @@ def diff_sessions(
         duration_b=result_b.total_duration,
         events_a=result_a.total_events,
         events_b=result_b.total_events,
-        tool_calls_a=meta_a.tool_calls,
-        tool_calls_b=meta_b.tool_calls,
+        tool_calls_a=usable_count(meta_a.tool_calls),
+        tool_calls_b=usable_count(meta_b.tool_calls),
         retries_a=result_a.total_retries,
         retries_b=result_b.total_retries,
     )
@@ -349,7 +349,7 @@ def semantic_diff(
         a_wins = 0
         b_wins = 0
         metrics = [
-            (meta_a.errors, meta_b.errors, True),       # lower is better
+            (usable_count(meta_a.errors), usable_count(meta_b.errors), True),  # lower is better
             (cost_a, cost_b, True),
             (result_a.total_duration, result_b.total_duration, True),
             (result_a.total_retries, result_b.total_retries, True),
@@ -373,12 +373,12 @@ def semantic_diff(
         duration_b=result_b.total_duration,
         cost_a=cost_a,
         cost_b=cost_b,
-        errors_a=meta_a.errors,
-        errors_b=meta_b.errors,
-        tool_calls_a=meta_a.tool_calls,
-        tool_calls_b=meta_b.tool_calls,
-        llm_requests_a=meta_a.llm_requests,
-        llm_requests_b=meta_b.llm_requests,
+        errors_a=usable_count(meta_a.errors),
+        errors_b=usable_count(meta_b.errors),
+        tool_calls_a=usable_count(meta_a.tool_calls),
+        tool_calls_b=usable_count(meta_b.tool_calls),
+        llm_requests_a=usable_count(meta_a.llm_requests),
+        llm_requests_b=usable_count(meta_b.llm_requests),
         retries_a=result_a.total_retries,
         retries_b=result_b.total_retries,
         files_read_both=sorted(reads_a & reads_b),
@@ -600,7 +600,8 @@ def compare_sessions(
         comparisons = [
             (cost_a, cost_b, "cheaper"),
             (dur_a, dur_b, "faster"),
-            (float(meta_a.errors), float(meta_b.errors), "fewer errors"),
+            (float(usable_count(meta_a.errors)), float(usable_count(meta_b.errors)),
+             "fewer errors"),
         ]
         a_wins, b_wins = 0, 0
         parts_a: list[str] = []
@@ -631,16 +632,16 @@ def compare_sessions(
         duration_b=result_b.total_duration,
         cost_a=cost_a,
         cost_b=cost_b,
-        tool_calls_a=meta_a.tool_calls,
-        tool_calls_b=meta_b.tool_calls,
+        tool_calls_a=usable_count(meta_a.tool_calls),
+        tool_calls_b=usable_count(meta_b.tool_calls),
         redundant_reads_a=_count_redundant_reads(events_a),
         redundant_reads_b=_count_redundant_reads(events_b),
         context_resets_a=_count_context_resets(events_a),
         context_resets_b=_count_context_resets(events_b),
         files_modified_a=files_mod_a,
         files_modified_b=files_mod_b,
-        errors_a=meta_a.errors,
-        errors_b=meta_b.errors,
+        errors_a=usable_count(meta_a.errors),
+        errors_b=usable_count(meta_b.errors),
         divergence_points=divergence_points,
         verdict=_verdict(),
     )

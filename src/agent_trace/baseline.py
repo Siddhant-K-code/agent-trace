@@ -29,7 +29,7 @@ from .cost import estimate_cost
 from .event_data import require_object_event_data, require_usable_timestamps
 from .explain import PHASE_DATA_EVENT_TYPES
 from .failures import count_session_errors
-from .models import EventType, TraceEvent, usable_time
+from .models import EventType, TraceEvent, usable_count, usable_number, usable_time
 from .store import TraceStore
 
 
@@ -42,14 +42,28 @@ DEFAULT_SIGMA = 2.0
 # ---------------------------------------------------------------------------
 
 def _mean(values: list[float]) -> float:
-    return sum(values) / len(values) if values else 0.0
+    if not values:
+        return 0.0
+    mean = sum(values) / len(values)
+    if math.isinf(mean):
+        # Values near the float limit overflow the sum, so divide each first.
+        mean = sum(v / len(values) for v in values)
+    return mean
 
 
 def _stddev(values: list[float], mean: float) -> float:
     if len(values) < 2:
         return 0.0
-    variance = sum((v - mean) ** 2 for v in values) / (len(values) - 1)
-    return math.sqrt(variance)
+    try:
+        variance = sum((v - mean) ** 2 for v in values) / (len(values) - 1)
+    except OverflowError:
+        variance = math.inf
+    if not math.isinf(variance):
+        return math.sqrt(variance)
+    # Values near the float limit overflow the squares, so scale them first.
+    scale = max(abs(v - mean) for v in values)
+    variance = sum(((v - mean) / scale) ** 2 for v in values) / (len(values) - 1)
+    return scale * math.sqrt(variance)
 
 
 def _z_score(value: float, mean: float, stddev: float) -> float:
@@ -216,14 +230,18 @@ def _measure_session(
     except Exception:
         events = None
     errors = count_session_errors(events or [])
-    try:
-        tool_calls = float(meta.tool_calls)
-        llm_requests = float(meta.llm_requests)
-        duration_ms: float | None = float(meta.total_duration_ms or 0.0)
-        error_rate = errors / max(meta.tool_calls, 1)
-    except (TypeError, ValueError):
-        # hand-edited metadata with non-numeric counters
+    # Hand-edited metadata can hold a count or duration that is not a usable
+    # number, such as text, NaN or 2.5. Such a session adds no samples.
+    if (
+        usable_count(meta.tool_calls) != meta.tool_calls
+        or usable_count(meta.llm_requests) != meta.llm_requests
+        or (meta.total_duration_ms and usable_number(meta.total_duration_ms) is None)
+    ):
         return None, open_session, "its metadata has non-numeric counters"
+    tool_calls = float(meta.tool_calls)
+    llm_requests = float(meta.llm_requests)
+    duration_ms: float | None = usable_number(meta.total_duration_ms) or 0.0
+    error_rate = errors / max(meta.tool_calls, 1)
     if open_session:
         duration_ms = None
         if events is not None:

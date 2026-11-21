@@ -36,7 +36,7 @@ from .external_evidence import (
 )
 from .health import CaptureMatrix, assess_session, detect_provider, load_capture_matrix
 from .inert import inert
-from .models import EventType, SessionMeta, TraceEvent
+from .models import EventType, SessionMeta, TraceEvent, usable_count
 from .pr_comment import (
     PRCommentError,
     _display_path,
@@ -618,7 +618,7 @@ class _Session:
 
     @property
     def is_subagent(self) -> bool:
-        return bool(self.meta.parent_session_id) or self.meta.depth > 0
+        return bool(self.meta.parent_session_id) or usable_count(self.meta.depth) > 0
 
     def captures(self, capability: str) -> bool:
         entry = self.matrix_entry

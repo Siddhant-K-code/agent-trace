@@ -31,7 +31,14 @@ from .event_data import (
     require_usable_timestamps,
 )
 from .inert import inert
-from .models import EventType, SessionMeta, TraceEvent, usable_number, usable_text
+from .models import (
+    EventType,
+    SessionMeta,
+    TraceEvent,
+    usable_count,
+    usable_number,
+    usable_text,
+)
 from .store import TraceStore
 
 
@@ -323,7 +330,7 @@ def build_a2a_tree(
             depth=depth,
             cost_usd=cost,
             duration_ms=usable_number(meta.total_duration_ms) or 0,
-            tool_calls=meta.tool_calls,
+            tool_calls=usable_count(meta.tool_calls),
             a2a_calls=a2a_calls,
             delegations=delegations,
         )

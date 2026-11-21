@@ -640,8 +640,6 @@ FORMAT_TREE_CASES = [
 
 # Values that format_tree_summary and format_session_tree both print.
 _SUMMARY_CASES = [
-    ("tool_calls", "text", lambda v: _node(tool_calls=v)),
-    ("errors", "text", lambda v: _node(errors=v)),
     ("subagent agent_type", "text",
      lambda v: _node(_call("Bash", {"command": "plain"}, agent_id="plain", agent_type=v))),
     ("subagent agent_id", "short",
@@ -710,7 +708,10 @@ class TestTraceTextShowsAsText(unittest.TestCase):
             with self.subTest(name):
                 _escapes.check_plain_text_unchanged(self, cases, render)
 
-    def test_each_total_shows_escapes_as_text(self):
+    def test_count_that_is_not_a_count_reads_as_zero(self):
+        # meta.json can hold text where a count belongs. The tree views and
+        # the totals show it as 0, as a missing count, so no text reaches
+        # the output.
         store, tmp = _make_store_with_sessions([(SessionMeta(session_id=TREE_SESSION), [])])
         self.addCleanup(tmp.cleanup)
         handlers = [
@@ -722,7 +723,7 @@ class TestTraceTextShowsAsText(unittest.TestCase):
 
         def run(handler, kwargs, node):
             # The formatters write to the sys.stdout bound at import, and
-            # their output is checked above.
+            # their output is checked on its own.
             with patch.object(subagent_mod, "build_tree", return_value=node), \
                  patch.object(subagent_mod, "format_tree_summary"), \
                  patch.object(subagent_mod, "format_session_tree"), \
@@ -730,14 +731,18 @@ class TestTraceTextShowsAsText(unittest.TestCase):
                 self.assertEqual(handler(argparse.Namespace(trace_dir=tmp.name, **kwargs)), 0)
             return out.getvalue()
 
-        for name, handler, kwargs in handlers:
-            for field in ("tool_calls", "llm_requests", "errors"):
-                with self.subTest(command=name, field=field):
-                    _escapes.assert_shows_as_text(
-                        self,
-                        run(handler, kwargs, _node(**{field: _escapes.PAYLOAD})),
-                        _escapes.PAYLOAD_TEXT,
-                        run(handler, kwargs, _node(**{field: "plain"})),
+        renders = [
+            ("format_tree_summary", _writes(format_tree_summary)),
+            ("format_session_tree", _writes(format_session_tree)),
+        ] + [
+            (name, lambda node, h=handler, k=kwargs: run(h, k, node))
+            for name, handler, kwargs in handlers
+        ]
+        for name, render in renders:
+            for field in ("tool_calls", "llm_requests", "errors", "total_tokens"):
+                with self.subTest(render=name, field=field):
+                    self.assertEqual(
+                        render(_node(**{field: _escapes.PAYLOAD})), render(_node())
                     )
 
     def test_whitespace_in_free_text_shows_as_one_space(self):

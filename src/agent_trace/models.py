@@ -86,6 +86,19 @@ def usable_number(value: Any) -> float | None:
     return number
 
 
+def usable_count(value: Any) -> int:
+    """Return ``value`` if it is an int that usable_number() accepts, else 0.
+
+    meta.json can hold any JSON value, so readers use this for the counts
+    and the depth. A bool, a string, a float such as 2.5, NaN, a negative
+    number or an int too large for a float reads as 0, as a missing count
+    does. This is the collector's rule for a count, plus the float limit.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return value if usable_number(value) is not None else 0
+
+
 def usable_time(value: Any) -> float | None:
     """Return ``value`` as a float if it is a usable number that
     ``datetime.fromtimestamp`` accepts, else None."""

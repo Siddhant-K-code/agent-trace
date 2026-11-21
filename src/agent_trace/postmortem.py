@@ -25,7 +25,7 @@ from .event_data import (
 )
 from .explain import explain_session
 from .inert import inert
-from .models import EventType, TraceEvent
+from .models import EventType, TraceEvent, usable_number
 from .store import TraceStore
 
 
@@ -665,7 +665,7 @@ def analyze_session(
     crash = detect_crash(store, session_id, stale_after_seconds=stale_after_seconds)
 
     base_ts = events[0].timestamp if events else meta.started_at
-    total_seconds = meta.total_duration_ms / 1000 if meta.total_duration_ms else 0.0
+    total_seconds = (usable_number(meta.total_duration_ms) or 0.0) / 1000
     if not total_seconds and events:
         total_seconds = max(0.0, events[-1].timestamp - base_ts)
     failed = crash is not None or any(p.failed for p in explain.phases)

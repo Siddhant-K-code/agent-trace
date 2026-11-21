@@ -34,7 +34,7 @@ from .failures import count_session_errors
 from .http_post import no_redirect_opener, redirect_hint, same_origin_opener
 from .inert import inert
 from .lint import lint_session
-from .models import EventType, SessionMeta, TraceEvent
+from .models import EventType, SessionMeta, TraceEvent, usable_count, usable_number
 from .session_paths import normalise_path, session_cwd, shell_reads, shell_writes
 from .store import TraceStore
 
@@ -200,8 +200,9 @@ def _models(events: list[TraceEvent]) -> list[str]:
 
 
 def _duration(meta: SessionMeta, events: list[TraceEvent]) -> float:
-    if meta.total_duration_ms:
-        return max(0.0, meta.total_duration_ms / 1000.0)
+    total_ms = usable_number(meta.total_duration_ms)
+    if total_ms:
+        return total_ms / 1000.0
     if meta.ended_at is not None and meta.ended_at >= meta.started_at:
         return meta.ended_at - meta.started_at
     if len(events) >= 2:
@@ -330,7 +331,7 @@ def summarize_session(store: TraceStore, session_id: str) -> SessionSummary:
         session_id=session_id,
         duration_seconds=_duration(meta, events),
         cost_usd=cost,
-        tool_calls=tool_events or meta.tool_calls,
+        tool_calls=tool_events or usable_count(meta.tool_calls),
         models=models,
         status=_status(meta, events),
         files_read=activity.read,
@@ -343,7 +344,7 @@ def summarize_session(store: TraceStore, session_id: str) -> SessionSummary:
         lint_warnings=sum(1 for finding in non_redundant_findings if finding.level == "WARN"),
         lint_rules_not_run=[error.rule for error in lint.rule_errors],
         redundant_reads=activity.redundant,
-        errors=max(meta.errors, error_events),
+        errors=max(usable_count(meta.errors), error_events),
     )
 
 

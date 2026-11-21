@@ -36,7 +36,14 @@ from .failures import (
     error_text as _error_text,
     llm_failure,
 )
-from .models import EventType, SessionMeta, TraceEvent, usable_text
+from .models import (
+    EventType,
+    SessionMeta,
+    TraceEvent,
+    usable_count,
+    usable_number,
+    usable_text,
+)
 from .http_post import no_redirect_opener, otlp_traces_url, post_error_detail, url_endpoint
 from .pairing import (
     LLM_REQUEST_TYPES,
@@ -677,7 +684,10 @@ def session_to_otlp(
     # Root span covers the entire session
     root_span_id = _to_span_id(f"root-{meta.session_id}")
     root_start = _ts_to_nanos(meta.started_at)
-    root_end = _ts_to_nanos(meta.ended_at or (meta.started_at + (meta.total_duration_ms or 0) / 1000))
+    root_end = _ts_to_nanos(
+        meta.ended_at
+        or (meta.started_at + (usable_number(meta.total_duration_ms) or 0) / 1000)
+    )
 
     # Detect provider from agent name for semantic conventions
     agent_lower = usable_text(meta.agent_name).lower()
@@ -695,10 +705,10 @@ def session_to_otlp(
         "agent.name": usable_text(meta.agent_name) or "unknown",
         "agent.command": usable_text(meta.command),
         "agent.session_id": meta.session_id,
-        "agent.tool_calls": meta.tool_calls,
-        "agent.llm_requests": meta.llm_requests,
-        "agent.errors": meta.errors,
-        "agent.depth": meta.depth,
+        "agent.tool_calls": usable_count(meta.tool_calls),
+        "agent.llm_requests": usable_count(meta.llm_requests),
+        "agent.errors": usable_count(meta.errors),
+        "agent.depth": usable_count(meta.depth),
         # GenAI semantic conventions
         _SEMCONV_SYSTEM: gen_ai_system,
         _SEMCONV_OP: "agent.session",
@@ -887,7 +897,7 @@ def session_to_otlp(
         "endTimeUnixNano": root_end,
         "attributes": root_attrs,
         "events": root_events,
-        "status": {"code": 2 if meta.errors > 0 else 0},  # ERROR or UNSET
+        "status": {"code": 2 if usable_count(meta.errors) > 0 else 0},  # ERROR or UNSET
     }
     # Link to parent span for subagent hierarchy
     if parent_span_id:
@@ -1119,7 +1129,8 @@ def session_to_otlp_genai(
     root_span_id = _to_span_id(f"root-{meta.session_id}")
     root_start = _ts_to_nanos(meta.started_at)
     root_end = _ts_to_nanos(
-        meta.ended_at or (meta.started_at + (meta.total_duration_ms or 0) / 1000)
+        meta.ended_at
+        or (meta.started_at + (usable_number(meta.total_duration_ms) or 0) / 1000)
     )
 
     raw_provider, gen_ai_system = _provider_value(meta)
@@ -1136,9 +1147,9 @@ def session_to_otlp_genai(
         **_conversation_attributes(meta),
         # Standard resource attributes
         "agent.session_id": meta.session_id,
-        "agent.tool_calls": meta.tool_calls,
-        "agent.llm_requests": meta.llm_requests,
-        "agent.errors": meta.errors,
+        "agent.tool_calls": usable_count(meta.tool_calls),
+        "agent.llm_requests": usable_count(meta.llm_requests),
+        "agent.errors": usable_count(meta.errors),
         # agent-strace preservation attributes
         "agent.strace.provider": raw_provider,
         "agent.strace.redacted": meta.redacted or any(event.redacted for event in events),
@@ -1151,8 +1162,9 @@ def session_to_otlp_genai(
         root_attr_values["agent.strace.parent_session_id"] = meta.parent_session_id
     if meta.parent_event_id:
         root_attr_values["agent.strace.parent_event_id"] = meta.parent_event_id
-    if meta.depth:
-        root_attr_values["agent.strace.depth"] = meta.depth
+    depth = usable_count(meta.depth)
+    if depth:
+        root_attr_values["agent.strace.depth"] = depth
     root_attr_values["metadata"] = _openinference_metadata(root_attr_values)
     root_attrs = _make_attributes(root_attr_values)
 
@@ -1413,7 +1425,7 @@ def session_to_otlp_genai(
         "endTimeUnixNano": root_end,
         "attributes": root_attrs,
         "events": root_events,
-        "status": {"code": 2 if meta.errors > 0 else 0},  # ERROR or UNSET
+        "status": {"code": 2 if usable_count(meta.errors) > 0 else 0},  # ERROR or UNSET
     }
     if parent_span_id:
         root_span["parentSpanId"] = parent_span_id
