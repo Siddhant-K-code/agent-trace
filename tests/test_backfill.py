@@ -21,12 +21,16 @@ from agent_trace.backfill import (
     infer_agent_name,
 )
 from agent_trace.cli import build_parser
+from agent_trace.failures import count_session_errors
 from agent_trace.hooks import IMPLICIT_SESSION_SOURCE
 from agent_trace.models import EventType, SessionMeta, TraceEvent
-from agent_trace.store import TraceStore
+from agent_trace.store import TraceStore, validate_tenant_id
 from agent_trace.tenancy import delete_tenant_data
 
 T0 = 1_700_000_000.0
+# Python 3.14 limits JSON nesting by stack size, not by a count, so it can
+# parse 100000 levels. A million levels raise RecursionError on 3.10+.
+TOO_DEEP = 1_000_000
 
 
 def _event(event_type, offset, data=None, **kwargs):
@@ -67,6 +71,13 @@ def write_metaless(base: Path, session_id: str, events) -> Path:
         lines.append(previous)
     (directory / "events.ndjson").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return directory
+
+
+def write_lines(base: Path, session_id: str, lines) -> None:
+    """Write the lines as events.ndjson, with no meta.json."""
+    directory = base / session_id
+    directory.mkdir(parents=True)
+    (directory / "events.ndjson").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 class _Base(unittest.TestCase):
@@ -605,6 +616,133 @@ class TestCli(_Base):
                     ("skipped", "unparseable_events", "line 2: invalid timestamp"),
                 )
                 self.assertFalse(os.path.lexists(self.root / session_id / "meta.json"))
+
+    def _apply(self):
+        code, out, _ = self._run(("apply", True), ("format", "json"))
+        self.assertEqual(code, 0)
+        return {item["session_id"]: item for item in json.loads(out)["sessions"]}
+
+    def assert_unparseable(self, sessions, session_id, detail):
+        item = sessions[session_id]
+        self.assertEqual(
+            (item["status"], item.get("reason"), item.get("detail")),
+            ("skipped", "unparseable_events", detail),
+        )
+        self.assertFalse(os.path.lexists(self.root / session_id / "meta.json"))
+
+    def test_line_with_no_timestamp_skips_only_that_session(self):
+        write_metaless(self.root, "sub1", subagent_events("sub1"))
+
+        def good(session_id):
+            return subagent_events(session_id)[0].to_json()
+
+        def untimed(session_id):
+            # A timestamp inside data is not the event's timestamp.
+            return json.dumps({"event_type": "tool_call", "session_id": session_id,
+                               "data": {"timestamp": T0}})
+
+        null = json.dumps({"event_type": "tool_call", "timestamp": None, "session_id": "null1"})
+        cases = {
+            "first1": ([untimed("first1"), good("first1")], "line 1: no timestamp"),
+            "last1": ([good("last1"), untimed("last1")], "line 2: no timestamp"),
+            "all1": ([untimed("all1"), untimed("all1")], "line 1: no timestamp"),
+            "null1": ([good("null1"), null], "line 2: invalid timestamp"),
+        }
+        for session_id, (lines, _) in cases.items():
+            write_lines(self.root, session_id, lines)
+
+        sessions = self._apply()
+
+        self.assertEqual(sessions["sub1"]["status"], "written")
+        for session_id, (_, detail) in cases.items():
+            with self.subTest(session_id=session_id):
+                self.assert_unparseable(sessions, session_id, detail)
+
+    def test_line_nested_too_deep_skips_only_that_session(self):
+        write_metaless(self.root, "a1", subagent_events("a1"))
+        write_metaless(self.root, "c1", subagent_events("c1"))
+        deep = json.dumps({"event_type": "tool_call", "timestamp": T0, "session_id": "b1",
+                           "data": "DEEP"}).replace('"DEEP"', "[" * TOO_DEEP + "]" * TOO_DEEP)
+        write_lines(self.root, "b1", [subagent_events("b1")[0].to_json(), deep])
+
+        sessions = self._apply()
+
+        self.assert_unparseable(sessions, "b1", "line 2: RecursionError")
+        for session_id in ("a1", "c1"):
+            self.assertEqual(sessions[session_id]["status"], "written")
+            self.assertTrue((self.root / session_id / "meta.json").exists())
+
+    def test_event_too_deep_to_count_skips_only_that_session(self):
+        # Counting errors turns some values into text, which can need more stack
+        # than parsing the line did. The depth where that happens depends on the
+        # Python version and the stack size, so the test raises the error itself.
+        for session_id in ("a1", "b1", "c1"):
+            write_metaless(self.root, session_id, subagent_events(session_id))
+
+        def count(events):
+            if events[0].session_id == "b1":
+                raise RecursionError("maximum recursion depth exceeded")
+            return count_session_errors(events)
+
+        with patch("agent_trace.backfill.count_session_errors", side_effect=count):
+            sessions = self._apply()
+
+        self.assert_unparseable(sessions, "b1", "an event is nested too deep to read")
+        for session_id in ("a1", "c1"):
+            self.assertEqual(sessions[session_id]["status"], "written")
+            self.assertTrue((self.root / session_id / "meta.json").exists())
+
+    def test_tenant_too_deep_to_check_skips_only_that_session(self):
+        # Checking a tenant ID turns it into text, which can need more stack
+        # than parsing the line did. As above, the test raises the error itself.
+        events = subagent_events("b1", tenant_id="acme")
+        events[1].tenant_id = "deep"
+        write_metaless(self.root, "a1", subagent_events("a1", tenant_id="acme"))
+        write_metaless(self.root, "b1", events)
+        write_metaless(self.root, "c1", subagent_events("c1", tenant_id="acme"))
+
+        def validate(tenant_id):
+            if tenant_id == "deep":
+                raise RecursionError("maximum recursion depth exceeded")
+            return validate_tenant_id(tenant_id)
+
+        with patch("agent_trace.backfill.validate_tenant_id", side_effect=validate):
+            sessions = self._apply()
+
+        item = sessions["b1"]
+        self.assertEqual(
+            (item["status"], item.get("reason"), item.get("detail")),
+            ("skipped", "invalid_tenant", "line 2"),
+        )
+        self.assertFalse(os.path.lexists(self.root / "b1" / "meta.json"))
+        for session_id in ("a1", "c1"):
+            self.assertEqual(sessions[session_id]["status"], "written")
+            self.assertTrue((self.root / session_id / "meta.json").exists())
+
+    def test_id_that_is_not_a_string_skips_only_that_session(self):
+        write_metaless(self.root, "sub1", subagent_events("sub1"))
+        cases = {
+            # Before the fix, these three stopped the whole run with a TypeError.
+            "evlist1": ("llm_request", "event_id", ["x"]),
+            "pardict1": ("error", "parent_id", {"a": 1}),
+            "parlist1": ("llm_response", "parent_id", [1]),
+            # These were written to meta.json.
+            "evint1": ("tool_call", "event_id", 5),
+            "evbool1": ("tool_call", "event_id", True),
+            "parnull1": ("tool_result", "parent_id", None),
+        }
+        for session_id, (event_type, name, value) in cases.items():
+            second = {"event_type": event_type, "timestamp": T0 + 1,
+                      "session_id": session_id, name: value}
+            write_lines(self.root, session_id,
+                        [subagent_events(session_id)[0].to_json(), json.dumps(second)])
+
+        sessions = self._apply()
+
+        self.assertEqual(sessions["sub1"]["status"], "written")
+        for session_id, (_, name, _) in cases.items():
+            with self.subTest(session_id=session_id):
+                self.assert_unparseable(sessions, session_id, f"line 2: {name} is not a string")
 
     def test_invalid_agent_name_is_rejected(self):
         code, _, err = self._run(("agent_name", "bad\nname"))
