@@ -27,7 +27,7 @@ from typing import Any, TextIO
 
 from .event_data import require_object_event_data
 from .inert import inert
-from .models import EventType, SessionMeta, TraceEvent
+from .models import EventType, SessionMeta, TraceEvent, usable_text
 from .store import TraceStore
 
 
@@ -296,7 +296,7 @@ def build_a2a_tree(store: TraceStore, root_session_id: str) -> A2ATreeReport:
 
         node = AgentNode(
             session_id=sid,
-            agent_id=meta.agent_name or sid[:12],
+            agent_id=usable_text(meta.agent_name) or sid[:12],
             depth=depth,
             cost_usd=cost,
             duration_ms=meta.total_duration_ms,

@@ -38,7 +38,7 @@ from .hooks import (
     REDACTION_ON,
     _PROVIDER_AGENT,
 )
-from .models import EventType, SessionMeta, TraceEvent
+from .models import EventType, SessionMeta, TraceEvent, usable_text
 from .store import TraceStore
 
 CAPTURE_MATRIX_RESOURCE = "capture_matrix.json"
@@ -230,8 +230,9 @@ def declared_capture(
 
 def _implicit_hook_session(meta: SessionMeta) -> bool:
     """Return True for metadata the hooks wrote because the first hook was not SessionStart."""
-    implicit_command = f"{meta.agent_name} ({IMPLICIT_SESSION_SOURCE})"
-    return meta.agent_name in _AGENT_PROVIDER and meta.command == implicit_command
+    agent_name = usable_text(meta.agent_name)
+    implicit_command = f"{agent_name} ({IMPLICIT_SESSION_SOURCE})"
+    return agent_name in _AGENT_PROVIDER and meta.command == implicit_command
 
 
 def _has_active_marker(store: TraceStore, session_id: str) -> bool:

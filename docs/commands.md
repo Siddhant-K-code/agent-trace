@@ -303,6 +303,17 @@ duration that is not a usable number, such as text, NaN or a value out of
 range. `list`, `stats` and `replay` show such a value as missing, as they do
 for the duration of a session that has not ended.
 
+A `meta.json` can also hold an `agent_name`, `command` or `team` that is not a
+string, such as `null`, a list, an object, a number, `true`, NaN or infinity.
+A command that reads one of these fields as text treats such a value as
+missing, and so do the `server --dashboard` pages. Each shows, writes or sends
+what it does for a session without that field. The exceptions:
+
+- `org-report` refuses the session.
+- `share` refuses NaN and infinity, as it does in any `meta.json` field.
+- For the `mcp` tools, see [mcp.md](mcp.md).
+- `inspect`, the `server` API and other commands that copy the whole record keep the value as stored.
+
 | Column | Counts |
 |---|---|
 | `Tools` | Tool calls from any capture method: hook tool calls, MCP `tools/call` through the proxy, `@trace_tool`, imported tool uses |

@@ -27,7 +27,7 @@ from .event_data import require_object_event_data
 from .failures import count_session_errors
 from .fileutil import split_lf_lines
 from .inert import inert
-from .models import EventType, SessionMeta, TraceEvent
+from .models import EventType, SessionMeta, TraceEvent, usable_text
 from .store import TraceStore
 
 
@@ -572,7 +572,10 @@ def build_dashboard(
     all_meta = store.list_sessions()
 
     if agent_filter:
-        all_meta = [m for m in all_meta if agent_filter.lower() in m.agent_name.lower()]
+        all_meta = [
+            m for m in all_meta
+            if agent_filter.lower() in usable_text(m.agent_name).lower()
+        ]
 
     sessions = all_meta[:limit]
 
@@ -599,7 +602,7 @@ def build_dashboard(
             errors=errors,
             total_tokens=meta.total_tokens,
             estimated_cost=cost,
-            agent_name=meta.agent_name or "unknown",
+            agent_name=usable_text(meta.agent_name) or "unknown",
             succeeded=errors == 0,
         ))
 

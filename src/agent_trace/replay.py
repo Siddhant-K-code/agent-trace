@@ -17,7 +17,7 @@ from typing import TextIO
 
 from .event_data import object_field, require_object_event_data, str_field, str_list_field
 from .inert import inert
-from .models import EventType, TraceEvent, SessionMeta, usable_number, usable_time
+from .models import EventType, TraceEvent, SessionMeta, usable_number, usable_text, usable_time
 from .store import TraceStore
 from .subagent import _returned_preview, _event_agent_id, subagent_label
 
@@ -403,10 +403,12 @@ def format_summary(meta: SessionMeta) -> str:
         f"  Errors:     {inert(meta.errors)}",
     ]
 
-    if meta.agent_name:
-        lines.insert(4, f"  Agent:      {inert(meta.agent_name)}")
-    if meta.command:
-        lines.insert(4, f"  Command:    {inert(meta.command)}")
+    agent = usable_text(meta.agent_name)
+    command = usable_text(meta.command)
+    if agent:
+        lines.insert(4, f"  Agent:      {inert(agent)}")
+    if command:
+        lines.insert(4, f"  Command:    {inert(command)}")
 
     lines.append(f"{C.GRAY}{'─' * 50}{C.RESET}")
     return "\n".join(lines)

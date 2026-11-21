@@ -36,7 +36,7 @@ from .failures import (
     error_text as _error_text,
     llm_failure,
 )
-from .models import EventType, SessionMeta, TraceEvent
+from .models import EventType, SessionMeta, TraceEvent, usable_text
 from .http_post import no_redirect_opener, otlp_traces_url, post_error_detail, url_endpoint
 from .pairing import (
     LLM_REQUEST_TYPES,
@@ -312,7 +312,7 @@ def _provider_value(
     if product:
         return product, "unknown"
     attribution = meta.attribution if isinstance(meta.attribution, dict) else {}
-    raw = attribution.get("agent_provider") or meta.agent_name
+    raw = attribution.get("agent_provider") or usable_text(meta.agent_name)
     if isinstance(raw, str) and raw.strip().lower() in _AGENT_PRODUCTS:
         return raw, "unknown"
     return str(raw or "unknown"), _canonical_provider(raw)
@@ -666,7 +666,7 @@ def session_to_otlp(
     root_end = _ts_to_nanos(meta.ended_at or (meta.started_at + (meta.total_duration_ms or 0) / 1000))
 
     # Detect provider from agent name for semantic conventions
-    agent_lower = (meta.agent_name or "").lower()
+    agent_lower = usable_text(meta.agent_name).lower()
     if "claude" in agent_lower or "anthropic" in agent_lower:
         gen_ai_system = "anthropic"
     elif "gpt" in agent_lower or "openai" in agent_lower:
@@ -678,8 +678,8 @@ def session_to_otlp(
 
     root_attrs = _make_attributes({
         # Standard OTel resource attributes
-        "agent.name": meta.agent_name or "unknown",
-        "agent.command": meta.command or "",
+        "agent.name": usable_text(meta.agent_name) or "unknown",
+        "agent.command": usable_text(meta.command),
         "agent.session_id": meta.session_id,
         "agent.tool_calls": meta.tool_calls,
         "agent.llm_requests": meta.llm_requests,
@@ -867,7 +867,7 @@ def session_to_otlp(
     root_span: dict = {
         "traceId": trace_id,
         "spanId": root_span_id,
-        "name": f"agent-session ({meta.agent_name or 'agent'})",
+        "name": f"agent-session ({usable_text(meta.agent_name) or 'agent'})",
         "kind": 1,
         "startTimeUnixNano": root_start,
         "endTimeUnixNano": root_end,
@@ -1109,10 +1109,11 @@ def session_to_otlp_genai(
     )
 
     raw_provider, gen_ai_system = _provider_value(meta)
+    agent_name = usable_text(meta.agent_name)
     root_attr_values: dict[str, Any] = {
         # GenAI agent attributes
         _SEMCONV_OP: _OP_INVOKE_AGENT,
-        **({_SEMCONV_AGENT_NAME: meta.agent_name} if meta.agent_name else {}),
+        **({_SEMCONV_AGENT_NAME: agent_name} if agent_name else {}),
         _SEMCONV_PROVIDER: gen_ai_system,
         _SEMCONV_SYSTEM: gen_ai_system,
         # OpenInference compatibility attributes
@@ -1389,8 +1390,8 @@ def session_to_otlp_genai(
         "traceId": trace_id,
         "spanId": root_span_id,
         "name": (
-            f"{_OP_INVOKE_AGENT} {meta.agent_name}"
-            if meta.agent_name
+            f"{_OP_INVOKE_AGENT} {agent_name}"
+            if agent_name
             else _OP_INVOKE_AGENT
         ),
         "kind": 1,  # SPAN_KIND_INTERNAL

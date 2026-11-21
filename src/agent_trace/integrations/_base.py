@@ -12,7 +12,7 @@ import time
 from typing import Any, Callable, Iterator
 
 from ..fileutil import file_lock, write_atomic
-from ..models import EventType, SessionMeta, TraceEvent
+from ..models import EventType, SessionMeta, TraceEvent, usable_text
 from ..pairing import link_response
 from ..process_identity import process_identity
 from ..store import TraceStore, default_trace_dir
@@ -484,7 +484,7 @@ def _append_to_open_session(ev: TraceEvent, store: TraceStore) -> bool:
                 _write(ev, store)
                 return True
         try:
-            name = store.load_meta(ev.session_id).agent_name
+            name = usable_text(store.load_meta(ev.session_id).agent_name)
         except Exception:
             return False
         if not name:

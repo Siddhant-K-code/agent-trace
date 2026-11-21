@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 
 from .cost import TokenUsage, infer_provider
 from .event_data import require_object_event_data, str_field
-from .models import EventType, SessionMeta, TraceEvent
+from .models import EventType, SessionMeta, TraceEvent, usable_text
 from .failures import llm_failure, session_errors
 from .http_post import no_redirect_opener, post_error_detail
 from .otlp import model_request_usage
@@ -134,13 +134,14 @@ def _session_to_langfuse_trace(
 ) -> dict:
     """Build a Langfuse Trace ingestion body."""
     duration_s = meta.total_duration_ms / 1000 if meta.total_duration_ms else None
+    agent_name = usable_text(meta.agent_name)
     return {
         "id": meta.session_id,
-        "name": f"agent-session ({meta.agent_name or 'agent'})",
+        "name": f"agent-session ({agent_name or 'agent'})",
         "timestamp": _iso(meta.started_at),
         "metadata": {
-            "agent_name": meta.agent_name or "",
-            "command": meta.command or "",
+            "agent_name": agent_name,
+            "command": usable_text(meta.command),
             "tool_calls": meta.tool_calls,
             "llm_requests": meta.llm_requests,
             "errors": meta.errors,
@@ -484,7 +485,7 @@ def export_metrics_to_otlp(
 
         attrs = {
             "session_id": sid[:12],
-            "agent_name": meta.agent_name or "unknown",
+            "agent_name": usable_text(meta.agent_name) or "unknown",
         }
 
         session_m = _session_metrics(store, meta)

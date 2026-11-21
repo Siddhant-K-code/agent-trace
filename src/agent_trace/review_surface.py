@@ -18,7 +18,7 @@ from .disclosure import build_disclosure_preview
 from .event_data import require_object_event_data
 from .health import CaptureMatrix, assess_session, load_capture_matrix
 from .live_verify import LiveCaptureError, inspect_live_capture
-from .models import EventType, SessionMeta, TraceEvent
+from .models import EventType, SessionMeta, TraceEvent, usable_text
 from .review import build_review_projection
 from .store import TraceStore
 
@@ -66,10 +66,12 @@ def _recorded_capture_identity(
 ) -> dict[str, object]:
     starts = [event for event in events if event.event_type == EventType.SESSION_START]
     start_data = starts[0].data if starts else {}
+    agent_name = usable_text(meta.agent_name)
+    command = usable_text(meta.command)
     provider = (
         health_provider
         or str(start_data.get("provider") or "")
-        or meta.agent_name
+        or agent_name
         or "unknown"
     )
     capture_method = (
@@ -80,8 +82,8 @@ def _recorded_capture_identity(
     return {
         "provider": provider,
         "capture_method": capture_method,
-        "agent_name": meta.agent_name or None,
-        "command": meta.command or None,
+        "agent_name": agent_name or None,
+        "command": command or None,
         "attribution": dict(meta.attribution),
     }
 
