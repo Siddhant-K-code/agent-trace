@@ -1,0 +1,37 @@
+{
+  "reviewed-summary": {
+    "artifact": {"fix_ids": ["FIX-12", "FIX-28"], "fix_count": 2},
+    "observed_steps": ["skill:release-notes", "review:fix-summary"],
+    "sufficient_capture_for": ["skill:release-notes", "review:fix-summary"]
+  },
+  "wrong-summary-green-lint": {
+    "artifact": {"fix_ids": ["FIX-12", "DOC-04"], "fix_count": 2},
+    "observed_steps": ["skill:release-notes", "check:readme-lint-passed"],
+    "sufficient_capture_for": ["skill:release-notes", "review:fix-summary"]
+  },
+  "summary-missing-skill": {
+    "artifact": {"fix_ids": ["FIX-12", "FIX-28"], "fix_count": 2},
+    "observed_steps": ["review:fix-summary"],
+    "sufficient_capture_for": ["skill:release-notes", "review:fix-summary"]
+  },
+  "summary-partial-capture": {
+    "artifact": {"fix_ids": ["FIX-12", "FIX-28"], "fix_count": 2},
+    "observed_steps": ["review:fix-summary"],
+    "sufficient_capture_for": ["review:fix-summary"]
+  },
+  "count-wrong-activation": {
+    "artifact": {"fix_count": 2},
+    "observed_steps": ["skill:release-notes"],
+    "sufficient_capture_for": []
+  },
+  "count-clean-negative": {
+    "artifact": {"fix_count": 2},
+    "observed_steps": [],
+    "sufficient_capture_for": ["skill:release-notes"]
+  },
+  "count-partial-negative": {
+    "artifact": null,
+    "observed_steps": [],
+    "sufficient_capture_for": []
+  }
+}

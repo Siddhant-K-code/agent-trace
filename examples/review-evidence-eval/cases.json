@@ -1,0 +1,56 @@
+{
+  "reviewed-summary": {
+    "task": "Prepare a structured fixes summary, listing fix IDs in changelog order and their count.",
+    "expected_artifact": {"fix_ids": ["FIX-12", "FIX-28"], "fix_count": 2},
+    "steps": {"skill:release-notes": "required", "review:fix-summary": "required"},
+    "expected_labels": {
+      "outcome": "pass",
+      "workflow": {"skill:release-notes": "pass", "review:fix-summary": "pass"}
+    }
+  },
+  "wrong-summary-green-lint": {
+    "task": "Prepare a structured fixes summary, listing fix IDs in changelog order and their count.",
+    "expected_artifact": {"fix_ids": ["FIX-12", "FIX-28"], "fix_count": 2},
+    "steps": {"skill:release-notes": "required", "review:fix-summary": "required"},
+    "expected_labels": {
+      "outcome": "fail",
+      "workflow": {"skill:release-notes": "pass", "review:fix-summary": "fail"}
+    }
+  },
+  "summary-missing-skill": {
+    "task": "Prepare a structured fixes summary, listing fix IDs in changelog order and their count.",
+    "expected_artifact": {"fix_ids": ["FIX-12", "FIX-28"], "fix_count": 2},
+    "steps": {"skill:release-notes": "required", "review:fix-summary": "required"},
+    "expected_labels": {
+      "outcome": "pass",
+      "workflow": {"skill:release-notes": "fail", "review:fix-summary": "pass"}
+    }
+  },
+  "summary-partial-capture": {
+    "task": "Prepare a structured fixes summary, listing fix IDs in changelog order and their count.",
+    "expected_artifact": {"fix_ids": ["FIX-12", "FIX-28"], "fix_count": 2},
+    "steps": {"skill:release-notes": "required", "review:fix-summary": "required"},
+    "expected_labels": {
+      "outcome": "pass",
+      "workflow": {"skill:release-notes": "unknown", "review:fix-summary": "pass"}
+    }
+  },
+  "count-wrong-activation": {
+    "task": "Count fix entries in the changelog. Return only the count, not a release summary.",
+    "expected_artifact": {"fix_count": 2},
+    "steps": {"skill:release-notes": "forbidden"},
+    "expected_labels": {"outcome": "pass", "workflow": {"skill:release-notes": "fail"}}
+  },
+  "count-clean-negative": {
+    "task": "Count fix entries in the changelog. Return only the count, not a release summary.",
+    "expected_artifact": {"fix_count": 2},
+    "steps": {"skill:release-notes": "forbidden"},
+    "expected_labels": {"outcome": "pass", "workflow": {"skill:release-notes": "pass"}}
+  },
+  "count-partial-negative": {
+    "task": "Count fix entries in the changelog. Return only the count, not a release summary.",
+    "expected_artifact": {"fix_count": 2},
+    "steps": {"skill:release-notes": "forbidden"},
+    "expected_labels": {"outcome": "unknown", "workflow": {"skill:release-notes": "unknown"}}
+  }
+}
