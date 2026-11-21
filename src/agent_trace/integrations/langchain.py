@@ -20,6 +20,7 @@ Install:
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import json
 import threading
@@ -171,6 +172,15 @@ def _instrument_tools(base: type, store: Any, agent_name: str) -> None:
         emit(EventType.ERROR, sid, store, parent=call,
              tool_name=tool_name, error=str(exc), error_type=type(exc).__name__)
 
+    def cancel(started: tuple[str, Any, Any, float]) -> None:
+        # Cancelled, KeyboardInterrupt or SystemExit, as for a model call.
+        sid, tool_name, call, t0 = started
+        try:
+            emit(EventType.TOOL_RESULT, sid, store, parent=call, tool_name=tool_name,
+                 duration_ms=(time.time() - t0) * 1000, status="cancelled")
+        except Exception:
+            pass
+
     def wrap_run(original: Any) -> Any:
         @functools.wraps(original)
         def run(self: Any, tool_input: Any, *args: Any, **kwargs: Any) -> Any:
@@ -179,6 +189,9 @@ def _instrument_tools(base: type, store: Any, agent_name: str) -> None:
                 result = original(self, tool_input, *args, **kwargs)
             except Exception as exc:
                 fail(started, exc)
+                raise
+            except BaseException:
+                cancel(started)
                 raise
             succeed(started, result)
             return result
@@ -193,6 +206,9 @@ def _instrument_tools(base: type, store: Any, agent_name: str) -> None:
                 result = await original(self, tool_input, *args, **kwargs)
             except Exception as exc:
                 fail(started, exc)
+                raise
+            except BaseException:
+                cancel(started)
                 raise
             succeed(started, result)
             return result
@@ -254,6 +270,14 @@ def _instrument_chat_models(base: type, store: Any, agent_name: str) -> None:
         _MODEL_PATCHES.wrap(base, name, lambda original, a=is_async: hook(original, a))
 
 
+def _loop_is_running() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
 def _node_recorder(runnable: type, store: Any, agent_name: str) -> type:
     """A runnable that records a LangGraph node's runs and runs its ``bound``.
 
@@ -301,7 +325,7 @@ def _node_recorder(runnable: type, store: Any, agent_name: str) -> type:
             return sid, tool_name, call, time.time()
 
         def _finish(self, run: tuple[str, str, Any, float] | None,
-                    exc: Exception | None = None) -> None:
+                    exc: BaseException | None = None) -> None:
             if run is None:
                 return
             sid, tool_name, call, t0 = run
@@ -309,14 +333,20 @@ def _node_recorder(runnable: type, store: Any, agent_name: str) -> type:
                 if exc is None:
                     emit(EventType.TOOL_RESULT, sid, store, parent=call,
                          tool_name=tool_name, duration_ms=(time.time() - t0) * 1000)
-                elif isinstance(exc, GraphBubbleUp):
-                    # interrupt(), NodeInterrupt and ParentCommand stop a node on purpose.
+                elif isinstance(exc, (GraphBubbleUp, GeneratorExit)):
+                    # interrupt(), NodeInterrupt and ParentCommand stop a node on
+                    # purpose, and so does a caller that closes the node's stream.
                     emit(EventType.TOOL_RESULT, sid, store, parent=call,
                          tool_name=tool_name, duration_ms=(time.time() - t0) * 1000,
                          control_flow=type(exc).__name__)
-                else:
+                elif isinstance(exc, Exception):
                     emit(EventType.ERROR, sid, store, parent=call, tool_name=tool_name,
                          error=str(exc), error_type=type(exc).__name__)
+                else:
+                    # Cancelled, KeyboardInterrupt or SystemExit, as for a model call.
+                    emit(EventType.TOOL_RESULT, sid, store, parent=call,
+                         tool_name=tool_name, duration_ms=(time.time() - t0) * 1000,
+                         status="cancelled")
             except Exception:
                 pass
 
@@ -324,7 +354,7 @@ def _node_recorder(runnable: type, store: Any, agent_name: str) -> type:
             run = self._begin()
             try:
                 output = self.bound.invoke(input, config, **kwargs)
-            except Exception as exc:
+            except BaseException as exc:
                 self._finish(run, exc)
                 raise
             self._finish(run)
@@ -334,7 +364,7 @@ def _node_recorder(runnable: type, store: Any, agent_name: str) -> type:
             run = self._begin()
             try:
                 output = await self.bound.ainvoke(input, config, **kwargs)
-            except Exception as exc:
+            except BaseException as exc:
                 self._finish(run, exc)
                 raise
             self._finish(run)
@@ -351,7 +381,13 @@ def _node_recorder(runnable: type, store: Any, agent_name: str) -> type:
                 finally:
                     if hasattr(chunks, "aclose"):
                         await chunks.aclose()
-            except Exception as exc:
+            except GeneratorExit as exc:
+                # Without a running loop the garbage collector is closing the
+                # stream, where writing to the trace store is not safe.
+                if _loop_is_running():
+                    self._finish(run, exc)
+                raise
+            except BaseException as exc:
                 self._finish(run, exc)
                 raise
             self._finish(run)

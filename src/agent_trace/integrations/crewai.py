@@ -21,6 +21,14 @@ _orig_execute_task = None
 _orig_task_execute = None
 
 
+def _record_quietly(emit, *args, **kwargs) -> None:
+    """Record an event; a failure to record never replaces the caller's exception."""
+    try:
+        emit(*args, **kwargs)
+    except Exception:
+        pass
+
+
 def instrument_crewai(agent_name: str = "crewai") -> None:
     """Patch CrewAI to emit agent-trace events. Idempotent."""
     global _PATCHED, _orig_kickoff, _orig_execute_task, _orig_task_execute
@@ -74,16 +82,22 @@ def instrument_crewai(agent_name: str = "crewai") -> None:
                            task=task_desc)
             try:
                 result = _orig_execute_task(self, task, *args, **kwargs)
-                emit(EventType.LLM_RESPONSE, sid, store, parent=request,
-                     agent_role=agent_role,
-                     duration_ms=(time.time() - t0) * 1000,
-                     result_preview=str(result)[:300])
-                return result
             except Exception as exc:
                 emit(EventType.ERROR, sid, store, parent=request,
                      agent_role=agent_role, error=str(exc),
                      error_type=type(exc).__name__)
                 raise
+            except BaseException:
+                # Cancelled, KeyboardInterrupt or SystemExit, as for a model call.
+                _record_quietly(emit, EventType.LLM_RESPONSE, sid, store, parent=request,
+                                agent_role=agent_role, status="cancelled",
+                                duration_ms=(time.time() - t0) * 1000)
+                raise
+            emit(EventType.LLM_RESPONSE, sid, store, parent=request,
+                 agent_role=agent_role,
+                 duration_ms=(time.time() - t0) * 1000,
+                 result_preview=str(result)[:300])
+            return result
 
         Agent.execute_task = _patched_execute_task
     except (ImportError, AttributeError):
@@ -104,16 +118,21 @@ def instrument_crewai(agent_name: str = "crewai") -> None:
                         task=task_desc)
             try:
                 result = _orig_task_execute(self, *args, **kwargs)
-                emit(EventType.TOOL_RESULT, sid, store, parent=call,
-                     tool_name="crewai.task",
-                     duration_ms=(time.time() - t0) * 1000,
-                     result_preview=str(result)[:300])
-                return result
             except Exception as exc:
                 emit(EventType.ERROR, sid, store, parent=call,
                      tool_name="crewai.task", error=str(exc),
                      error_type=type(exc).__name__)
                 raise
+            except BaseException:
+                _record_quietly(emit, EventType.TOOL_RESULT, sid, store, parent=call,
+                                tool_name="crewai.task", status="cancelled",
+                                duration_ms=(time.time() - t0) * 1000)
+                raise
+            emit(EventType.TOOL_RESULT, sid, store, parent=call,
+                 tool_name="crewai.task",
+                 duration_ms=(time.time() - t0) * 1000,
+                 result_preview=str(result)[:300])
+            return result
 
         Task.execute_sync = _patched_task_execute
     except (ImportError, AttributeError):
