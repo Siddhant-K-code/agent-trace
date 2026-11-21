@@ -150,8 +150,9 @@ session covered by an erasure tombstone or a pending tenant journal, ignores
 See [`backfill-meta`](commands.md#backfill-meta).
 
 Tenant administration also stops with "corrupt session in tenant store: <id>"
-when that session's `started_at` is not a usable time, and deletes nothing.
-See [`tenant`](commands.md#tenant) for the fix.
+when that session's `started_at` is not a usable time, or its `meta.json` has no
+`tenant_id` but its events carry one. `tenant delete` deletes nothing in either
+case. See [`tenant`](commands.md#tenant) for the fix.
 
 ## Isolation and hosted collectors
 
