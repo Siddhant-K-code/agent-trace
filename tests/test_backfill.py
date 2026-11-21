@@ -744,6 +744,49 @@ class TestCli(_Base):
             with self.subTest(session_id=session_id):
                 self.assert_unparseable(sessions, session_id, f"line 2: {name} is not a string")
 
+    def test_missing_or_empty_event_id_skips_only_that_session(self):
+        # from_json gives a line with no event_id a new random ID each time it
+        # is read, so the event would have a different ID on every read.
+        cases = {
+            "evmissing1": ({}, "line 2: no event_id"),
+            "evempty1": ({"event_id": ""}, "line 2: empty event_id"),
+        }
+        for session_id, (fields, detail) in cases.items():
+            with self.subTest(session_id=session_id):
+                # The bad session sorts between two good ones.
+                self.root = Path(self._tmp.name) / session_id / ".agent-traces"
+                self.root.mkdir(parents=True)
+                write_metaless(self.root, "a1", subagent_events("a1"))
+                second = {"event_type": "tool_call", "timestamp": T0 + 1,
+                          "session_id": session_id}
+                second.update(fields)
+                write_lines(self.root, session_id,
+                            [subagent_events(session_id)[0].to_json(), json.dumps(second)])
+                write_metaless(self.root, "z1", subagent_events("z1"))
+
+                sessions = self._apply()
+
+                self.assert_unparseable(sessions, session_id, detail)
+                for good in ("a1", "z1"):
+                    self.assertEqual(sessions[good]["status"], "written")
+                    self.assertTrue((self.root / good / "meta.json").exists())
+
+    def test_missing_or_empty_parent_id_still_writes_meta(self):
+        cases = {"parmissing1": {}, "parempty1": {"parent_id": ""}}
+        for session_id, fields in cases.items():
+            second = {"event_type": "tool_result", "timestamp": T0 + 1,
+                      "session_id": session_id, "event_id": "e2"}
+            second.update(fields)
+            write_lines(self.root, session_id,
+                        [subagent_events(session_id)[0].to_json(), json.dumps(second)])
+
+        sessions = self._apply()
+
+        for session_id in cases:
+            with self.subTest(session_id=session_id):
+                self.assertEqual(sessions[session_id]["status"], "written")
+                self.assertTrue((self.root / session_id / "meta.json").exists())
+
     def test_invalid_agent_name_is_rejected(self):
         code, _, err = self._run(("agent_name", "bad\nname"))
         self.assertEqual(code, 1)

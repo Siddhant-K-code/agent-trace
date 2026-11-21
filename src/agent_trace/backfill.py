@@ -232,13 +232,15 @@ def _read_events(path: Path, session_id: str) -> tuple[list[TraceEvent], str]:
         try:
             event = TraceEvent.from_json(line)
             # from_json gives a line with no timestamp the time it is read.
-            has_timestamp = "timestamp" in json.loads(line)
+            # It also gives a line with no event_id a new random ID each time
+            # it is read.
+            record = json.loads(line)
         except (
             json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError,
             RecursionError,  # nested too deep
         ) as exc:
             raise _Skip("unparseable_events", f"line {number}: {type(exc).__name__}") from exc
-        if not has_timestamp:
+        if "timestamp" not in record:
             raise _Skip("unparseable_events", f"line {number}: no timestamp")
         if not _is_usable_time(event.timestamp):
             raise _Skip("unparseable_events", f"line {number}: invalid timestamp")
@@ -246,6 +248,10 @@ def _read_events(path: Path, session_id: str) -> tuple[list[TraceEvent], str]:
             # Error counting uses them as keys, and exports encode them as text.
             if not isinstance(getattr(event, name), str):
                 raise _Skip("unparseable_events", f"line {number}: {name} is not a string")
+        if "event_id" not in record:
+            raise _Skip("unparseable_events", f"line {number}: no event_id")
+        if not event.event_id:
+            raise _Skip("unparseable_events", f"line {number}: empty event_id")
         if event.session_id and event.session_id != session_id:
             raise _Skip("session_id_mismatch", f"line {number}")
         if event.tenant_id:

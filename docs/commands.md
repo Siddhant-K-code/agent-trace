@@ -2479,6 +2479,7 @@ Safety:
   - has a `timestamp` that is not a Unix time in seconds, such as a negative
     number, a time in milliseconds or a number too large to be a date
   - has an `event_id` or `parent_id` that is not a string
+  - has no `event_id`, or an empty one
 - Sessions covered by a tenant erasure tombstone, or named by a pending tenant
   delete or tag journal, are skipped so erased data is never resurrected. An
   unreadable erasure audit or journal blocks the whole store.
