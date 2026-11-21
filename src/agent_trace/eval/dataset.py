@@ -101,7 +101,7 @@ def _session_passes_filter(
     from ..cost import session_cost
     from ..event_data import str_field
     from ..failures import count_session_errors
-    from ..models import EventType
+    from ..models import EventType, usable_number
 
     try:
         events = store.load_events(session_id)
@@ -158,7 +158,7 @@ def _session_passes_filter(
             max_s = float(spec.split(":", 1)[1].rstrip("s"))
         except ValueError:
             return False
-        duration = meta.total_duration_ms / 1000 if meta.total_duration_ms else 0.0
+        duration = (usable_number(meta.total_duration_ms) or 0.0) / 1000
         return duration > max_s
 
     if spec.startswith("low-eval-score:"):

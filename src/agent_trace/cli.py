@@ -134,7 +134,7 @@ from .event_data import (
 from .failures import llm_failure, session_errors
 from .http_post import parse_header, url_problem
 from .inert import inert
-from .models import EventType, SessionMeta, TraceEvent
+from .models import EventType, SessionMeta, TraceEvent, usable_count
 from .proxy import MCPProxy
 from .replay import format_event, format_summary, list_sessions, replay_session
 from .store import CorruptSessionMetaError, TraceStore
@@ -187,7 +187,7 @@ def _parent_depth(store: TraceStore, parent_session_id: str) -> int:
         return 0
     try:
         parent_meta = store.load_meta(parent_session_id)
-        return parent_meta.depth + 1
+        return usable_count(parent_meta.depth) + 1
     except Exception:
         return 1
 

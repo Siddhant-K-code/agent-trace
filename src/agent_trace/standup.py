@@ -27,7 +27,7 @@ from .event_data import (
 )
 from .failures import CANCELLED_STATUSES, FAILED_STATUSES
 from .inert import inert
-from .models import EventType, TraceEvent, usable_time
+from .models import EventType, TraceEvent, usable_count, usable_time
 from .store import TraceStore
 
 
@@ -380,11 +380,11 @@ def analyse_standup(store: TraceStore, session_id: str) -> StandupReport:
         approaches=approaches,
         uncertainties=uncertainties,
         review_items=review_items,
-        tool_calls=meta.tool_calls,
-        llm_requests=meta.llm_requests,
+        tool_calls=usable_count(meta.tool_calls),
+        llm_requests=usable_count(meta.llm_requests),
         context_resets=_count_context_resets(events),
         retries=retries,
-        errors=meta.errors,
+        errors=usable_count(meta.errors),
     )
 
 

@@ -25,7 +25,14 @@ from dataclasses import dataclass, field
 
 from .cost import TokenUsage, infer_provider
 from .event_data import require_object_event_data, require_usable_timestamps, str_field
-from .models import EventType, SessionMeta, TraceEvent, usable_text
+from .models import (
+    EventType,
+    SessionMeta,
+    TraceEvent,
+    usable_count,
+    usable_number,
+    usable_text,
+)
 from .failures import llm_failure, session_errors
 from .http_post import no_redirect_opener, post_error_detail
 from .otlp import model_request_usage
@@ -133,7 +140,8 @@ def _session_to_langfuse_trace(
     events: list[TraceEvent],
 ) -> dict:
     """Build a Langfuse Trace ingestion body."""
-    duration_s = meta.total_duration_ms / 1000 if meta.total_duration_ms else None
+    total_ms = usable_number(meta.total_duration_ms)
+    duration_s = total_ms / 1000 if total_ms else None
     agent_name = usable_text(meta.agent_name)
     return {
         "id": meta.session_id,
@@ -142,10 +150,10 @@ def _session_to_langfuse_trace(
         "metadata": {
             "agent_name": agent_name,
             "command": usable_text(meta.command),
-            "tool_calls": meta.tool_calls,
-            "llm_requests": meta.llm_requests,
-            "errors": meta.errors,
-            "total_tokens": meta.total_tokens,
+            "tool_calls": usable_count(meta.tool_calls),
+            "llm_requests": usable_count(meta.llm_requests),
+            "errors": usable_count(meta.errors),
+            "total_tokens": usable_count(meta.total_tokens),
         },
         "tags": ["agent-strace"],
         **({"duration": duration_s} if duration_s else {}),
@@ -469,7 +477,7 @@ def _session_metrics(
             )
         except ValueError:
             pass
-    duration_s = meta.total_duration_ms / 1000 if meta.total_duration_ms else 0.0
+    duration_s = (usable_number(meta.total_duration_ms) or 0.0) / 1000
 
     metrics.update({
         "agent_strace.session.error_rate": errors / max(tool_calls, 1),

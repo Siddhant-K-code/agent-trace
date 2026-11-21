@@ -29,7 +29,7 @@ from .event_data import (
     require_usable_timestamps,
 )
 from .explain import PHASE_DATA_EVENT_TYPES
-from .models import usable_text
+from .models import usable_count, usable_number, usable_text
 from .otlp import OTLP_TIMESTAMP_EVENT_TYPES, otlp_data_indexes, session_to_otlp
 from .review_surface import (
     build_minimized_review_payload,
@@ -780,6 +780,15 @@ def api_sessions(store: "TraceStore") -> str:
         for field in ("agent_name", "command", "team"):
             if not usable_text(session.get(field)):
                 session.pop(field, None)
+        # The page adds and compares these as numbers. Drop a value that is
+        # not a usable count or duration, such as text, 2.5 or NaN. NaN and
+        # infinity would also make the whole response invalid JSON.
+        for field in ("tool_calls", "llm_requests", "errors", "total_tokens", "depth"):
+            if usable_count(session.get(field)) != session.get(field):
+                session.pop(field, None)
+        duration = session.get("total_duration_ms")
+        if duration is not None and usable_number(duration) is None:
+            session.pop("total_duration_ms")
     return json.dumps(sessions)
 
 

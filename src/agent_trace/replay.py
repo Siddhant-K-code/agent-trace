@@ -23,7 +23,15 @@ from .event_data import (
     str_list_field,
 )
 from .inert import inert
-from .models import EventType, TraceEvent, SessionMeta, usable_number, usable_text, usable_time
+from .models import (
+    EventType,
+    SessionMeta,
+    TraceEvent,
+    usable_count,
+    usable_number,
+    usable_text,
+    usable_time,
+)
 from .store import TraceStore
 from .subagent import _returned_preview, _event_agent_id, subagent_label
 
@@ -404,9 +412,9 @@ def format_summary(meta: SessionMeta) -> str:
         f"  Session:    {meta.session_id}",
         f"  Started:    {started_str}",
         f"  Duration:   {duration_str}",
-        f"  Tool calls: {inert(meta.tool_calls)}",
-        f"  LLM reqs:   {inert(meta.llm_requests)}",
-        f"  Errors:     {inert(meta.errors)}",
+        f"  Tool calls: {usable_count(meta.tool_calls)}",
+        f"  LLM reqs:   {usable_count(meta.llm_requests)}",
+        f"  Errors:     {usable_count(meta.errors)}",
     ]
 
     agent = usable_text(meta.agent_name)
@@ -546,21 +554,18 @@ def list_sessions(
         else:
             duration_str = f"{C.DIM}{_MISSING:>9} {C.RESET}"
 
-        errors = meta.errors
-        has_errors = (
-            isinstance(errors, int) and not isinstance(errors, bool) and errors > 0
-        )
-        err_color = C.RED if has_errors else C.DIM
+        # meta.json can hold any JSON value where a count belongs. One that
+        # is not a usable count shows as 0, as a missing count does.
+        errors = usable_count(meta.errors)
+        err_color = C.RED if errors > 0 else C.DIM
 
-        # meta.json may hold text where a count belongs, so the counts go
-        # through inert() like any other recorded value.
         out.write(
             f"  {meta.session_id:<18} "
             f"{started_str:<26} "
             f"{duration_str} "
-            f"{inert(meta.tool_calls):>6} "
-            f"{inert(meta.llm_requests):>5} "
-            f"{err_color}{inert(errors):>4}{C.RESET}\n"
+            f"{usable_count(meta.tool_calls):>6} "
+            f"{usable_count(meta.llm_requests):>5} "
+            f"{err_color}{errors:>4}{C.RESET}\n"
         )
 
     out.write(f"{C.GRAY}{'─' * 70}{C.RESET}\n")

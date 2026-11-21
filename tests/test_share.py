@@ -111,14 +111,19 @@ def _tree(errors=3, depth=1, tool_calls=5, session_count=2, total_tool_calls=7, 
 
 
 # (label, build): build(value) returns a tree and its totals with value in the
-# place the label names. A session's meta.json can hold any JSON value there.
+# place the label names.
 SUBAGENT_TREE_CASES = [
-    ("node errors", lambda v: _tree(errors=v)),
-    ("node depth", lambda v: _tree(depth=v)),
-    ("node tool calls", lambda v: _tree(tool_calls=v)),
     ("total sessions", lambda v: _tree(session_count=v)),
     ("total tool calls", lambda v: _tree(total_tool_calls=v)),
     ("total errors", lambda v: _tree(total_errors=v)),
+]
+
+# (label, build): as above, for a value from a session's meta.json, which
+# can hold any JSON value there.
+SUBAGENT_TREE_NODE_CASES = [
+    ("node errors", lambda v: _tree(errors=v)),
+    ("node depth", lambda v: _tree(depth=v)),
+    ("node tool calls", lambda v: _tree(tool_calls=v)),
 ]
 
 
@@ -138,6 +143,14 @@ class TestEscaping(unittest.TestCase):
                 section = _render_subagent_tree_html(*build(HTML_PAYLOAD))
                 self.assertNotIn(HTML_PAYLOAD, section)
                 self.assertIn(html_escape(HTML_PAYLOAD), section)
+
+    def test_each_subagent_tree_node_value_that_is_not_a_count_shows_as_zero(self):
+        for label, build in SUBAGENT_TREE_NODE_CASES:
+            with self.subTest(label):
+                self.assertEqual(
+                    _render_subagent_tree_html(*build(HTML_PAYLOAD)),
+                    _render_subagent_tree_html(*build(0)),
+                )
 
     def test_subagent_tree_numbers_render_as_before(self):
         section = _render_subagent_tree_html(*_tree())
@@ -238,7 +251,7 @@ class TestRenderHtml(unittest.TestCase):
         )
         self.assertIn("POSTMORTEM", html)
 
-    def test_string_tool_calls_in_meta_show_as_text_in_subagent_tree(self):
+    def test_string_tool_calls_in_meta_show_as_zero_in_subagent_tree(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         store = TraceStore(tmp.name)
@@ -255,8 +268,8 @@ class TestRenderHtml(unittest.TestCase):
         # The section is left out without a message if rendering it raises.
         self.assertIn("<h2>Subagent Tree</h2>", html)
         self.assertNotIn(HTML_PAYLOAD, html)
-        self.assertNotIn("<img src=x", html)
-        self.assertIn(html_escape(HTML_PAYLOAD) + " tools", html)
+        self.assertNotIn(html_escape(HTML_PAYLOAD), html)
+        self.assertIn("&nbsp;·&nbsp;0 tools", html)
 
 
 class TestPacketCost(unittest.TestCase):

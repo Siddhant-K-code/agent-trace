@@ -51,7 +51,7 @@ from pathlib import Path
 
 from .failures import is_failed_response
 from .fileutil import split_lf_lines
-from .models import EventType, SessionMeta, TraceEvent
+from .models import EventType, SessionMeta, TraceEvent, usable_count
 from .pairing import hook_call_timestamp, link_response, match_hook_tool_call
 from .redact import redact_data, redact_data_with_status, redaction_enabled
 from .store import (
@@ -787,7 +787,7 @@ def handle_session_end(input_data: dict, provider: str = "claude") -> None:
             {
                 "provider": provider,
                 "capture_method": "hooks",
-                "success": meta.errors == 0,
+                "success": usable_count(meta.errors) == 0,
                 "duration_ms": int(meta.total_duration_ms),
             },
         )
@@ -827,9 +827,9 @@ def handle_pre_tool(input_data: dict, provider: str = "claude") -> None:
     _ensure_session_meta(store, session_id, provider, input_data)
     _write_event(store, session_id, event)
 
-    # Update meta
+    # Update meta. A stored count that is not a usable count restarts at 0.
     def _count_tool_call(meta: SessionMeta) -> None:
-        meta.tool_calls += 1
+        meta.tool_calls = usable_count(meta.tool_calls) + 1
 
     _mutate_meta_or_none(store, session_id, _count_tool_call)
 
@@ -982,9 +982,9 @@ def handle_post_model_request(input_data: dict, provider: str = "claude") -> Non
     if total or failed:
         def _count(meta: SessionMeta) -> None:
             if total:
-                meta.total_tokens += total
+                meta.total_tokens = usable_count(meta.total_tokens) + total
             if failed:
-                meta.errors += 1
+                meta.errors = usable_count(meta.errors) + 1
 
         _mutate_meta_or_none(store, session_id, _count)
 
@@ -1176,7 +1176,7 @@ def _link_subagent_session(
             if _is_ancestor(store, child_id, parent):
                 return "cycle"
 
-            depth = parent.depth + 1
+            depth = usable_count(parent.depth) + 1
             already = child.parent_session_id == parent_id
             changed = not already or child.depth != depth
             child.parent_session_id = parent_id
@@ -1402,7 +1402,7 @@ def handle_post_tool(input_data: dict, failed: bool = False, provider: str = "cl
     # Update meta on errors
     if failed:
         def _count_error(meta: SessionMeta) -> None:
-            meta.errors += 1
+            meta.errors = usable_count(meta.errors) + 1
 
         _mutate_meta_or_none(store, session_id, _count_error)
 

@@ -30,7 +30,14 @@ from .event_data import (
 )
 from .evidence_packet import EvidencePacket, build_evidence_packet
 from .explain import ExplainResult, build_phases
-from .models import EventType, TraceEvent, SessionMeta, usable_text
+from .models import (
+    EventType,
+    SessionMeta,
+    TraceEvent,
+    usable_count,
+    usable_number,
+    usable_text,
+)
 from .store import TraceStore
 from .subagent import build_tree, aggregate_stats, SessionNode
 from .annotate import LABEL_COLOURS, DEFAULT_LABEL_COLOUR
@@ -515,17 +522,19 @@ _JS = r"""
 def _render_subagent_tree_html(tree: "SessionNode", stats: object) -> str:
     """Render a collapsible subagent hierarchy section for the share HTML.
 
-    The counts and the depth come from each session's meta.json, which can
-    hold any JSON value, so each goes through _esc().
+    The counts, the duration and the depth come from each session's
+    meta.json, which can hold any JSON value. One that is not a usable
+    number shows as 0. The totals in *stats* go through _esc().
     """
 
     def _node_html(node: "SessionNode", depth: int = 0) -> str:
         indent = depth * 20
         sid = node.meta.session_id[:12]
-        dur = node.meta.total_duration_ms / 1000 if node.meta.total_duration_ms else 0
+        dur = (usable_number(node.meta.total_duration_ms) or 0) / 1000
+        errors = usable_count(node.meta.errors)
         err_badge = (
-            f'<span style="color:#f85149;margin-left:8px">✗ {_esc(node.meta.errors)} err</span>'
-            if node.meta.errors else ""
+            f'<span style="color:#f85149;margin-left:8px">✗ {errors} err</span>'
+            if errors else ""
         )
         children_html = "".join(_node_html(c, depth + 1) for c in node.children)
         toggle = "▶" if node.children else "·"
@@ -534,10 +543,10 @@ def _render_subagent_tree_html(tree: "SessionNode", stats: object) -> str:
   <span class="tree-toggle">{toggle}</span>
   <span class="tree-sid">{_esc(sid)}</span>
   <span class="tree-meta">
-    depth={_esc(node.meta.depth)}
+    depth={node.depth}
     &nbsp;·&nbsp;{dur:.1f}s
-    &nbsp;·&nbsp;{_esc(node.meta.tool_calls)} tools
-    &nbsp;·&nbsp;{node.meta.total_tokens:,} tok
+    &nbsp;·&nbsp;{usable_count(node.meta.tool_calls)} tools
+    &nbsp;·&nbsp;{usable_count(node.meta.total_tokens):,} tok
     {err_badge}
   </span>
   {children_html}
@@ -571,7 +580,7 @@ def _packet_explain(packet: EvidencePacket) -> ExplainResult:
     for phase in phases:
         if not phase.name:
             phase.name = f"Phase {phase.index}"
-    duration = packet.meta.total_duration_ms / 1000 if packet.meta.total_duration_ms else 0.0
+    duration = (usable_number(packet.meta.total_duration_ms) or 0.0) / 1000
     return ExplainResult(
         session_id=packet.meta.session_id,
         total_duration=duration,
@@ -677,7 +686,7 @@ def render_html(
 
     base_ts = events[0].timestamp if events else meta.started_at
     started = datetime.fromtimestamp(meta.started_at, tz=timezone.utc)
-    duration = meta.total_duration_ms / 1000 if meta.total_duration_ms else 0.0
+    duration = (usable_number(meta.total_duration_ms) or 0.0) / 1000
     status = "FAILED" if any(p.failed for p in explain.phases) else "OK"
     status_color = "#f85149" if status == "FAILED" else "#3fb950"
 
@@ -688,9 +697,9 @@ def render_html(
         ("Started", started.strftime("%Y-%m-%d %H:%M:%S UTC")),
         ("Duration", f"{duration:.1f}s"),
         ("Events", str(len(events))),
-        ("Tool calls", str(meta.tool_calls)),
-        ("LLM requests", str(meta.llm_requests)),
-        ("Errors", str(meta.errors)),
+        ("Tool calls", str(usable_count(meta.tool_calls))),
+        ("LLM requests", str(usable_count(meta.llm_requests))),
+        ("Errors", str(usable_count(meta.errors))),
         ("Est. cost", total_cost_str),
         ("Status", status),
         ("Evidence health", packet.health.result.status.value),
