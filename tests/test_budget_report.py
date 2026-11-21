@@ -228,6 +228,17 @@ class TestBuildReport(unittest.TestCase):
 # Formatting
 # ---------------------------------------------------------------------------
 
+def _report_with_tool_cost(total_cost: float, tool_cost: float) -> BudgetReport:
+    spend = SessionSpend(
+        session_id="session-1",
+        agent_name="agent",
+        started_at=1.0,
+        cost=total_cost,
+        tool_breakdown={"Read": tool_cost},
+    )
+    return BudgetReport(window_start=0.0, window_end=86400.0, sessions=[spend])
+
+
 class TestFormatReportText(unittest.TestCase):
     def _make_report(self, n_sessions=2, with_watchdog=False):
         store, _ = _make_store()
@@ -281,6 +292,12 @@ class TestFormatReportText(unittest.TestCase):
         # Delta indicator should appear
         self.assertTrue("↑" in text or "↓" in text or "≈" in text)
 
+    def test_zero_total_tool_percentage(self):
+        out = io.StringIO()
+        format_report_text(_report_with_tool_cost(0.0, 0.0), out)
+        self.assertIn("Read", out.getvalue())
+        self.assertIn("(0%)", out.getvalue())
+
 
 class TestFormatReportMarkdown(unittest.TestCase):
     def test_markdown_headers(self):
@@ -314,6 +331,24 @@ class TestFormatReportMarkdown(unittest.TestCase):
         out = io.StringIO()
         format_report_markdown(report, out)
         self.assertIn("No sessions", out.getvalue())
+
+    def test_zero_total_tool_percentage(self):
+        out = io.StringIO()
+        format_report_markdown(_report_with_tool_cost(0.0, 0.0), out)
+        self.assertIn("| Read | $0.00 | 0% |", out.getvalue())
+
+
+class TestToolPercentages(unittest.TestCase):
+    def test_nonzero_percentages_are_preserved(self):
+        report = _report_with_tool_cost(1.0, 0.3)
+
+        text = io.StringIO()
+        format_report_text(report, text)
+        self.assertIn("$0.30  (30%)", text.getvalue())
+
+        markdown = io.StringIO()
+        format_report_markdown(report, markdown)
+        self.assertIn("| Read | $0.30 | 30% |", markdown.getvalue())
 
 
 class TestFormatReportJson(unittest.TestCase):

@@ -292,7 +292,7 @@ def format_report_text(report: BudgetReport, out: TextIO = sys.stdout) -> None:
         w("Cost by tool (estimated):\n")
         total_tool_cost = sum(tool_totals.values()) or 1e-9
         for tool, cost in list(tool_totals.items())[:8]:
-            pct = cost / report.total_cost * 100
+            pct = cost / report.total_cost * 100 if report.total_cost else 0
             w(f"  {inert(tool):<20}  ${cost:.2f}  ({pct:.0f}%)\n")
         w("\n")
 
@@ -356,7 +356,7 @@ def format_report_markdown(report: BudgetReport, out: TextIO = sys.stdout) -> No
         w("| Tool | Cost | % |\n")
         w("|------|------|---|\n")
         for tool, cost in list(tool_totals.items())[:8]:
-            pct = cost / report.total_cost * 100
+            pct = cost / report.total_cost * 100 if report.total_cost else 0
             w(f"| {inert(tool)} | ${cost:.2f} | {pct:.0f}% |\n")
         w("\n")
 
