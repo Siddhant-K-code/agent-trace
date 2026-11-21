@@ -25,6 +25,9 @@ Restart Copilot CLI after installation. Do not also install the hooks with
 would record duplicate events. When this plugin is installed and enabled,
 `agent-strace setup --cli copilot` skips writing `~/.copilot/hooks/agent-strace.json`
 and tells you to remove that file if an earlier setup created it.
+While the plugin is installed, setup does not apply `--redact` or
+`--no-redact` to Copilot CLI and says so. To use either flag, uninstall the
+plugin first.
 
 ## Verify
 

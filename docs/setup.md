@@ -346,7 +346,7 @@ See [Copilot CLI plugin](copilot-plugin.md) for verification and usage. Alternat
     └── agent-strace.json
 ```
 
-Use one of the two. If the plugin is installed and enabled under `$COPILOT_HOME/installed-plugins` or `~/.copilot/installed-plugins`, `agent-strace setup --cli copilot` (and `--cli all`) does not write `hooks/agent-strace.json`, because Copilot CLI would run both and record every event twice. It prints the plugin path and, if `hooks/agent-strace.json` already exists, the command to remove it. To switch to user-level hooks, run `copilot plugin uninstall agent-strace`, then run `agent-strace setup --cli copilot` again.
+Use one of the two. If the plugin is installed and enabled under `$COPILOT_HOME/installed-plugins` or `~/.copilot/installed-plugins`, `agent-strace setup --cli copilot` (and `--cli all`) does not write `hooks/agent-strace.json`, because Copilot CLI would run both and record every event twice. It prints the plugin path and, if `hooks/agent-strace.json` already exists, the command to remove it. To switch to user-level hooks, run `copilot plugin uninstall agent-strace`, then run `agent-strace setup --cli copilot` again. While the plugin is installed, setup does not apply `--redact` or `--no-redact` to Copilot CLI and says so. To use either flag, uninstall the plugin first.
 
 Set `COPILOT_HOME` to install into a different Copilot config directory. The generated config registers Copilot lifecycle hooks using the native event names:
 
