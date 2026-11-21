@@ -1331,9 +1331,27 @@ def _write_copilot_hooks_config(args: argparse.Namespace) -> Path:
     return hooks_path
 
 
-def _report_copilot_plugin(plugin_dirs: list[Path]) -> None:
+def _skipped_redact_flag(args: argparse.Namespace, cli: str, product: str) -> tuple[str, str]:
+    """Return the redaction flag note and the re-run command for a plugin report.
+
+    The plugin hooks never get --redact or --no-redact. The note says so, and is
+    empty without either flag. The re-run command keeps the flag.
+    """
+    redact = _redact_setting(args)
+    flag = "" if redact is None else "--redact" if redact else "--no-redact"
+    note = ""
+    if flag:
+        note = (
+            f"Did not apply {flag} to {product}. The plugin hooks use the default, "
+            "which redacts secrets.\n"
+        )
+    return note, f"agent-strace setup --cli {cli} {flag}".rstrip()
+
+
+def _report_copilot_plugin(plugin_dirs: list[Path], args: argparse.Namespace) -> None:
     """Explain why setup leaves Copilot CLI hooks to an installed plugin."""
     user_hooks = _copilot_config_dir() / "hooks" / "agent-strace.json"
+    redact_note, rerun = _skipped_redact_flag(args, "copilot", "Copilot CLI")
     for plugin_dir in plugin_dirs:
         sys.stderr.write(
             f"Found the AgentTrace Copilot CLI plugin at {plugin_dir}; it already registers "
@@ -1341,8 +1359,9 @@ def _report_copilot_plugin(plugin_dirs: list[Path]) -> None:
         )
     sys.stderr.write(
         f"Did not write {user_hooks}: Copilot CLI would run both and record every event twice.\n"
+        f"{redact_note}"
         "To use user-level hooks instead, run `copilot plugin uninstall agent-strace`, "
-        "then run `agent-strace setup --cli copilot` again.\n"
+        f"then run `{rerun}` again.\n"
     )
     if user_hooks.is_file():
         sys.stderr.write(
@@ -1354,9 +1373,7 @@ def _report_copilot_plugin(plugin_dirs: list[Path]) -> None:
 def _report_codex_plugin(plugins: list[CodexPlugin], args: argparse.Namespace) -> None:
     """Explain why setup leaves Codex hooks to an enabled AgentTrace plugin."""
     hooks_path = _codex_config_dir() / "hooks.json"
-    redact = _redact_setting(args)
-    flag = "" if redact is None else "--redact" if redact else "--no-redact"
-    rerun = f"agent-strace setup --cli codex {flag}".rstrip()
+    redact_note, rerun = _skipped_redact_flag(args, "codex", "Codex")
     for plugin in plugins:
         sys.stderr.write(
             f"Found the AgentTrace Codex plugin {plugin.key} at {plugin.root}. "
@@ -1364,12 +1381,8 @@ def _report_codex_plugin(plugins: list[CodexPlugin], args: argparse.Namespace) -
         )
     sys.stderr.write(
         f"Did not write {hooks_path}: Codex would run both and record every event twice.\n"
+        f"{redact_note}"
     )
-    if flag:
-        sys.stderr.write(
-            f"Did not apply {flag} to Codex. The plugin hooks use the default, "
-            "which redacts secrets.\n"
-        )
     sys.stderr.write(
         f"To use {hooks_path} instead, run {codex_plugin_remove_commands(plugins)}, "
         f"then run `{rerun}` again.\n"
@@ -1751,7 +1764,7 @@ def cmd_setup(args: argparse.Namespace) -> int | None:
     if cli in ("copilot", "all"):
         copilot_plugins = find_copilot_plugins(_copilot_config_dir())
         if copilot_plugins:
-            _report_copilot_plugin(copilot_plugins)
+            _report_copilot_plugin(copilot_plugins, args)
         else:
             hooks_path = _write_copilot_hooks_config(args)
             sys.stderr.write(f"Wrote GitHub Copilot hooks config: {hooks_path}\n")

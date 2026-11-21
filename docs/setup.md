@@ -175,7 +175,7 @@ root when you start Claude Code in a subdirectory or worktree. A
 
 `agent-strace setup --cli codex` writes user-level hooks to `$CODEX_HOME/hooks.json`, or to `~/.codex/hooks.json` when `CODEX_HOME` is unset or empty, and also prints the JSON shown below. This is the directory Codex reads.
 
-If `$CODEX_HOME/config.toml` enables the [AgentTrace Codex plugin](codex-plugin.md), setup does not write `hooks.json`. The plugin already registers these hooks, and Codex would record every event twice. Setup names the plugin and prints the `codex plugin remove` command to run if you want manual hooks instead. `--cli all` does the same. See [Duplicate hook avoidance](codex-plugin.md#duplicate-hook-avoidance).
+If `$CODEX_HOME/config.toml` enables the [AgentTrace Codex plugin](codex-plugin.md), setup does not write `hooks.json`. The plugin already registers these hooks, and Codex would record every event twice. Setup names the plugin and prints the `codex plugin remove` command to run if you want manual hooks instead. While the plugin is enabled, setup does not apply `--redact` or `--no-redact` to Codex and says so. To use either flag, remove the plugin first. `--cli all` does the same. See [Duplicate hook avoidance](codex-plugin.md#duplicate-hook-avoidance).
 
 As in Codex, a set `CODEX_HOME` must name an existing directory, and `~` in its value is not expanded. Otherwise setup fails and writes nothing. Setup creates `~/.codex` when it is missing. Codex does not read `CODEX_CONFIG_DIR`, so setup ignores it and prints a note when it names another directory. Older agent-strace versions wrote `hooks.json` there, where Codex never loads it. You can delete that stale file.
 
@@ -346,7 +346,7 @@ See [Copilot CLI plugin](copilot-plugin.md) for verification and usage. Alternat
     └── agent-strace.json
 ```
 
-Use one of the two. If the plugin is installed and enabled under `$COPILOT_HOME/installed-plugins` or `~/.copilot/installed-plugins`, `agent-strace setup --cli copilot` (and `--cli all`) does not write `hooks/agent-strace.json`, because Copilot CLI would run both and record every event twice. It prints the plugin path and, if `hooks/agent-strace.json` already exists, the command to remove it. To switch to user-level hooks, run `copilot plugin uninstall agent-strace`, then run `agent-strace setup --cli copilot` again.
+Use one of the two. If the plugin is installed and enabled under `$COPILOT_HOME/installed-plugins` or `~/.copilot/installed-plugins`, `agent-strace setup --cli copilot` (and `--cli all`) does not write `hooks/agent-strace.json`, because Copilot CLI would run both and record every event twice. It prints the plugin path and, if `hooks/agent-strace.json` already exists, the command to remove it. To switch to user-level hooks, run `copilot plugin uninstall agent-strace`, then run `agent-strace setup --cli copilot` again. While the plugin is installed, setup does not apply `--redact` or `--no-redact` to Copilot CLI and says so. To use either flag, uninstall the plugin first.
 
 Set `COPILOT_HOME` to install into a different Copilot config directory. The generated config registers Copilot lifecycle hooks using the native event names:
 

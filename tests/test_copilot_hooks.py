@@ -11,6 +11,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
+try:  # keeps product telemetry off in this process and its children
+    import _no_telemetry  # noqa: F401
+except ImportError:  # pragma: no cover - run as a package module
+    from tests import _no_telemetry  # noqa: F401
+
 from agent_trace.cli import cmd_setup
 from agent_trace.hooks import _read_active_session, hook_main
 from agent_trace.models import EventType
@@ -476,8 +483,8 @@ class TestCopilotSetupWithPlugin(unittest.TestCase):
             (plugin / relative).write_text((source / relative).read_text(encoding="utf-8"))
         return plugin
 
-    def _setup(self, cli="copilot"):
-        args = argparse.Namespace(redact=False, no_redact=False, global_config=False, cli=cli)
+    def _setup(self, cli="copilot", redact=False, no_redact=False):
+        args = argparse.Namespace(redact=redact, no_redact=no_redact, global_config=False, cli=cli)
         out, err = io.StringIO(), io.StringIO()
         with patch.object(sys, "stdout", out), patch.object(sys, "stderr", err):
             status = cmd_setup(args)
@@ -493,6 +500,41 @@ class TestCopilotSetupWithPlugin(unittest.TestCase):
         self.assertIn(f"Did not write {self.user_hooks}", err)
         self.assertIn("copilot plugin uninstall agent-strace", err)
         self.assertNotIn("Wrote GitHub Copilot hooks config", err)
+
+    def test_installed_plugin_says_it_skips_a_redaction_flag(self):
+        self._install_plugin()
+        dirs = {name: Path(tempfile.mkdtemp()) for name in ("codex", "cursor", "gemini")}
+        for path in dirs.values():
+            self.addCleanup(shutil.rmtree, path, True)
+        env = patch.dict(os.environ, {
+            "CODEX_HOME": str(dirs["codex"]),
+            "CURSOR_CONFIG_DIR": str(dirs["cursor"]),
+            "GEMINI_CLI_HOME": str(dirs["gemini"]),
+        })
+        env.start()
+        self.addCleanup(env.stop)
+        for cli in ("copilot", "all"):
+            for flag in ("--redact", "--no-redact", None):
+                with self.subTest(cli=cli, flag=flag):
+                    status, _, err = self._setup(
+                        cli=cli, redact=flag == "--redact", no_redact=flag == "--no-redact"
+                    )
+                    note = (
+                        f"Did not apply {flag} to Copilot CLI. The plugin hooks use the "
+                        "default, which redacts secrets.\n"
+                        if flag else ""
+                    )
+                    rerun = "agent-strace setup --cli copilot" + (f" {flag}" if flag else "")
+                    self.assertIn(status, (0, None))
+                    self.assertFalse(self.user_hooks.exists())
+                    self.assertIn(
+                        f"Did not write {self.user_hooks}: Copilot CLI would run both and "
+                        f"record every event twice.\n{note}To use user-level hooks instead, "
+                        "run `copilot plugin uninstall agent-strace`, "
+                        f"then run `{rerun}` again.\n",
+                        err,
+                    )
+                    self.assertEqual(err.count("Did not apply"), 1 if flag else 0)
 
     def test_installed_plugin_flags_existing_user_hooks(self):
         self._install_plugin()
