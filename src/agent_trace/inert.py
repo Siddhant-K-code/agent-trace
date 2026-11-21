@@ -6,6 +6,10 @@ line breaks. Printed raw, an escape code can erase or hide lines on a terminal,
 and a line break can forge a log entry. :func:`inert` shows those characters
 as escapes instead, so the reader sees that they were there.
 
+Raw output such as CSV keeps the text as it is, except for a lone UTF-16
+surrogate. UTF-8 cannot encode one, so :func:`escape_surrogates` shows it as
+its escape.
+
 This module imports nothing from agent_trace, so any module can use it without
 an import cycle.
 """
@@ -27,3 +31,17 @@ def inert(text: object) -> str:
     if text.isprintable():
         return text
     return "".join(ch if ch.isprintable() else repr(ch)[1:-1] for ch in text)
+
+
+def escape_surrogates(value: object) -> object:
+    """Return *value* with each lone surrogate in a str shown as its escape.
+
+    A stored string can hold a lone UTF-16 surrogate such as ``\\ud83d``.
+    Writing it to a strict UTF-8 stream raises UnicodeEncodeError, so it
+    becomes the escape that the stored JSON line holds. UTF-8 can encode every
+    other character, so the rest of the text stays as it is. A value that is
+    not a str comes back unchanged.
+    """
+    if isinstance(value, str):
+        return value.encode("utf-8", "backslashreplace").decode("utf-8")
+    return value

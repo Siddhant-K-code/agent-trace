@@ -18,7 +18,7 @@ from typing import Any, Mapping, TextIO
 
 from .event_data import require_object_event_data, require_usable_timestamps
 from .explain import PHASE_DATA_EVENT_TYPES, ExplainResult, explain_session
-from .inert import inert
+from .inert import escape_surrogates, inert
 from .models import EventType, TraceEvent
 from .pairing import Pairer, event_model, llm_pairer
 from .store import TraceStore, validate_optional_tenant_id, validate_tenant_id
@@ -1392,6 +1392,8 @@ def format_provider_cost_csv(
     """Write raw per-session/model rows.
 
     The first six columns are stable; the cache columns were appended later.
+    Each lone surrogate is written as its escape, so a strict UTF-8 stream
+    can take every row.
     """
     writer = csv.writer(out, lineterminator="\n")
     writer.writerow([
@@ -1399,7 +1401,7 @@ def format_provider_cost_csv(
         "cache_read_tokens", "cache_write_tokens",
     ])
     for row in report.records:
-        writer.writerow([
+        writer.writerow([escape_surrogates(cell) for cell in (
             row.provider,
             row.model,
             row.session_id,
@@ -1408,7 +1410,7 @@ def format_provider_cost_csv(
             f"{row.cost_usd:.8f}",
             row.cache_read_tokens,
             row.cache_write_tokens,
-        ])
+        )])
 
 
 # ---------------------------------------------------------------------------

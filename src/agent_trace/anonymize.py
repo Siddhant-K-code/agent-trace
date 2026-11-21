@@ -312,7 +312,11 @@ def cmd_anonymize_export(args, out: TextIO = sys.stdout) -> int:
         "events": [json.loads(ev.to_json()) for ev in anonymized_events],
     }
 
-    Path(output_path).write_text(json.dumps(export_data, indent=2))
+    try:
+        Path(output_path).write_text(json.dumps(export_data, indent=2))
+    except OSError as exc:
+        sys.stderr.write(f"Error: cannot write {output_path}: {exc.strerror or exc}\n")
+        return 1
 
     out.write(f"Anonymizing session {session_id[:16]}...\n\n")
     if result.total_replacements == 0:

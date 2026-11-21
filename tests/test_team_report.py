@@ -390,7 +390,8 @@ TEAM_TEXT_CASES = [
 class TestTraceTextShowsAsText(unittest.TestCase):
     """An author or a branch in the session meta or in git can hold escape
     codes and line breaks. team-report shows them as text. The JSON and the CSV
-    keep the raw text."""
+    keep the raw text, except that the CSV writes a lone surrogate as its
+    escape."""
 
     def test_each_value_shows_escapes_as_text(self):
         _escapes.check_each_value(self, TEAM_TEXT_CASES, _render_team)
@@ -403,17 +404,17 @@ class TestTraceTextShowsAsText(unittest.TestCase):
         self.assertIn(r"a\x1b[8mhidden", output)
         self.assertNotIn("\x1b", output)
 
-    def _run(self, export, by="author"):
+    def _run(self, export, by="author", branch=_escapes.PAYLOAD, author=_escapes.PAYLOAD):
         store, tmp = _make_store()
         self.addCleanup(shutil.rmtree, tmp, True)
-        _add_session(store, time.time() - 3600, branch=_escapes.PAYLOAD, files=["a.py"])
+        _add_session(store, time.time() - 3600, branch=branch, files=["a.py"])
         args = argparse.Namespace(trace_dir=tmp, by=by, export=export, since=None,
                                   until=None, outlier_threshold=0.5)
-        captured = io.StringIO()
-        with patch("agent_trace.team_report._git", _fake_git({"a.py": _escapes.PAYLOAD})):
+        captured = _escapes.strict_utf8_stream()
+        with patch("agent_trace.team_report._git", _fake_git({"a.py": author})):
             with patch("sys.stdout", captured):
                 self.assertEqual(cmd_team_report(args), 0)
-        return captured.getvalue()
+        return _escapes.written_text(captured)
 
     def test_meta_and_git_text_shows_as_text(self):
         for by in ("author", "branch", "pr"):
@@ -438,6 +439,19 @@ class TestTraceTextShowsAsText(unittest.TestCase):
         self.assertEqual(rows[0]["group"], _escapes.PAYLOAD)
         self.assertEqual(rows[0]["authors"], _escapes.PAYLOAD)
         self.assertEqual(rows[0]["branches"], _escapes.PAYLOAD)
+
+    def test_csv_writes_a_lone_surrogate_as_its_escape(self):
+        # The branch comes from the meta attribution, the author from git.
+        branch = "feat/" + _escapes.LONE_SURROGATE
+        shown = "feat/" + _escapes.LONE_SURROGATE_SHOWN
+        for by, group in (("author", _escapes.PLAIN), ("branch", shown), ("pr", shown)):
+            with self.subTest(by=by):
+                output = self._run("csv", by, branch=branch, author=_escapes.PLAIN)
+                row, = csv.DictReader(io.StringIO(output, newline=""))
+                self.assertEqual(
+                    (row["group"], row["authors"], row["branches"]),
+                    (group, _escapes.PLAIN, shown),
+                )
 
 
 if __name__ == "__main__":
