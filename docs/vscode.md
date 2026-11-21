@@ -108,7 +108,7 @@ For Claude Code and Codex sessions, **Verify live capture** runs the complete lo
 
 ### Local actions
 
-**Compare** runs the existing local `compare` command. **Save minimized share** writes a value-free local review ledger with verified capture identifiers and fixed annotation categories. Use `agent-strace share` for the canonical Evidence Packet. **Export OTLP JSON** calls the existing export path without an endpoint, so nothing is uploaded. Compare and Save minimized share use the session shown when you started them. If you switch sessions before Compare finishes, its result or error is dropped.
+**Compare** runs the existing local `compare` command. **Save minimized share** writes a value-free local review ledger with verified capture identifiers and fixed annotation categories. Use `agent-strace share` for the canonical Evidence Packet. **Export OTLP JSON** calls the existing export path without an endpoint, so nothing is uploaded. Compare and Save minimized share use the session shown when you started them. If you switch sessions before Compare finishes, its result or error is dropped. If the selected session fails to load, the panel clears the previous review and hides these actions, and they refuse to run until a session loads.
 
 ---
 

@@ -199,3 +199,23 @@ test("the review after a reset renders from a clean slate", () => {
   panel.key("j");
   assert.deepEqual(panel.selected(), ["b1"]);
 });
+
+test("reset clears the previous session's header and hides its actions", () => {
+  const panel = loadPanel();
+  panel.post({ type: "review", model: review("first", ["a1"]), controls });
+  assert.equal(panel.element("actions").style.display, "");
+  assert.equal(panel.element("title").textContent, "Session first");
+
+  panel.post({ type: "reset" });
+
+  assert.equal(panel.element("title").textContent, "No session selected");
+  assert.equal(panel.element("fact-start").textContent, "Not recorded");
+  assert.equal(panel.element("health").textContent, "unknown");
+  assert.equal(panel.element("actions").style.display, "none");
+  assert.equal(panel.element("verify-capture").style.display, "none");
+  assert.equal(panel.element("pause").disabled, true);
+  assert.equal(panel.element("gap-list").children.length, 0);
+
+  panel.post({ type: "review", model: review("second", ["b1"]), controls });
+  assert.equal(panel.element("actions").style.display, "");
+});

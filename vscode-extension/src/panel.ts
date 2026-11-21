@@ -60,6 +60,15 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
   // Bumped on every showSession() call; only the latest call may post.
   private showRequest = 0;
   private readonly exactHealth = new Map<string, CliHealth>();
+  // Per session: the number of the last health lookup started, and of the
+  // last one whose result was taken. A lookup that finishes after a newer
+  // one was taken is dropped.
+  private readonly healthStarted = new Map<string, number>();
+  private readonly healthTaken = new Map<string, number>();
+  // Live refreshes run one at a time per session; a refresh asked for while
+  // one runs is run once more when it finishes.
+  private readonly healthRefreshing = new Set<string>();
+  private readonly healthRefreshDirty = new Set<string>();
   private readonly healthRefreshTimers = new Map<
     string,
     ReturnType<typeof setTimeout>
@@ -123,7 +132,8 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
 
   async showSession(sessionId: string): Promise<void> {
     const request = ++this.showRequest;
-    if (this.selectedSessionId !== sessionId) {
+    const switched = this.selectedSessionId !== sessionId;
+    if (switched) {
       this._resetView();
     }
     this.selectedSessionId = sessionId;
@@ -134,23 +144,46 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
       await this._refreshHealth(sessionId);
       return;
     }
+    let structural: ReviewModel;
     try {
-      const structural = loadStoredReview(
+      structural = loadStoredReview(
         this.traceDir,
         sessionId,
         this.exactHealth.get(sessionId),
       );
+    } catch (error) {
+      // Nothing from an earlier review of this session may stay on screen
+      // or be acted on.
+      if (!switched) {
+        this._resetView();
+      }
+      this.view?.webview.postMessage({
+        type: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+    try {
       this._postReview(structural, null);
-      const health = await this._loadHealth(sessionId);
-      this.exactHealth.set(sessionId, health);
+      const lookup = this._startHealthLookup(sessionId);
+      const health = await this._loadHealth(sessionId).catch((error: unknown) => {
+        this._takeHealthLookup(sessionId, lookup);
+        throw error;
+      });
       if (request !== this.showRequest || this.selectedSessionId !== sessionId) {
         return;
+      }
+      if (this._takeHealthLookup(sessionId, lookup)) {
+        this.exactHealth.set(sessionId, health);
       }
       if (this.currentState?.sessionId === sessionId) {
         this._postLiveReview(this.currentState);
         return;
       }
-      this._postReview(loadStoredReview(this.traceDir, sessionId, health), null);
+      this._postReview(
+        loadStoredReview(this.traceDir, sessionId, this.exactHealth.get(sessionId)),
+        null,
+      );
     } catch (error) {
       // A newer showSession() call or another session took the view, or this
       // one went live (the live path hides health failures), while the
@@ -171,7 +204,37 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
 
   private _resetView(): void {
     this.viewGeneration++;
+    this.currentModel = null;
     this.view?.webview.postMessage({ type: "reset" });
+  }
+
+  // The review the actions act on: only one that belongs to the selected
+  // session. After a load error there is none, and the action says so.
+  private _shownModel(): ReviewModel | null {
+    const model = this.currentModel;
+    if (model && model.session.session_id === this.selectedSessionId) {
+      return model;
+    }
+    vscode.window.showWarningMessage(
+      "agent-trace: No session review is loaded. Select a session that loads without errors.",
+    );
+    return null;
+  }
+
+  private _startHealthLookup(sessionId: string): number {
+    const lookup = (this.healthStarted.get(sessionId) ?? 0) + 1;
+    this.healthStarted.set(sessionId, lookup);
+    return lookup;
+  }
+
+  // True when this lookup is newer than any result already taken; marks it
+  // taken so an older one that finishes later is dropped.
+  private _takeHealthLookup(sessionId: string, lookup: number): boolean {
+    if (lookup <= (this.healthTaken.get(sessionId) ?? 0)) {
+      return false;
+    }
+    this.healthTaken.set(sessionId, lookup);
+    return true;
   }
 
   private _isCurrentView(generation: number, sessionId: string): boolean {
@@ -210,8 +273,24 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
   }
 
   private async _refreshHealth(sessionId: string): Promise<void> {
+    if (this.healthRefreshing.has(sessionId)) {
+      this.healthRefreshDirty.add(sessionId);
+      return;
+    }
+    this.healthRefreshing.add(sessionId);
     try {
-      const health = await this._loadHealth(sessionId);
+      const lookup = this._startHealthLookup(sessionId);
+      let health: CliHealth;
+      try {
+        health = await this._loadHealth(sessionId);
+      } catch {
+        // Structural review remains available when the CLI is not on PATH.
+        this._takeHealthLookup(sessionId, lookup);
+        return;
+      }
+      if (!this._takeHealthLookup(sessionId, lookup)) {
+        return;
+      }
       this.exactHealth.set(sessionId, health);
       if (
         this.selectedSessionId !== sessionId ||
@@ -219,16 +298,16 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
       ) {
         return;
       }
-      const state = this.currentState;
-      const model = buildReviewModel(
-        state.meta,
-        state.events,
-        loadAnnotations(this.traceDir, sessionId),
-        health,
-      );
-      this._postReview(model, state);
-    } catch {
-      // Structural review remains available when the CLI is not on PATH.
+      this._postLiveReview(this.currentState);
+    } finally {
+      this.healthRefreshing.delete(sessionId);
+      if (
+        this.healthRefreshDirty.delete(sessionId) &&
+        this.selectedSessionId === sessionId &&
+        this.currentState?.sessionId === sessionId
+      ) {
+        void this._refreshHealth(sessionId);
+      }
     }
   }
 
@@ -281,7 +360,7 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
   }
 
   private async _compareCurrentSession(): Promise<void> {
-    const current = this.currentModel?.session.session_id;
+    const current = this._shownModel()?.session.session_id;
     if (!current) {
       return;
     }
@@ -351,7 +430,7 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
   private async _saveMinimizedShare(): Promise<void> {
     // The view can switch sessions while the dialog is open; save the review
     // that was shown when the user asked.
-    const model = this.currentModel;
+    const model = this._shownModel();
     if (!model) {
       return;
     }
@@ -374,7 +453,7 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
   }
 
   private async _exportOtlp(): Promise<void> {
-    const sessionId = this.currentModel?.session.session_id;
+    const sessionId = this._shownModel()?.session.session_id;
     if (!sessionId) {
       return;
     }
@@ -412,7 +491,7 @@ export class EventStreamPanel implements vscode.WebviewViewProvider {
   }
 
   private async _verifyLiveCapture(): Promise<void> {
-    const model = this.currentModel;
+    const model = this._shownModel();
     if (!model) {
       return;
     }

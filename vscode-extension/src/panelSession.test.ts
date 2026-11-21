@@ -1,7 +1,7 @@
 import * as assert from "node:assert/strict";
 import Module from "node:module";
 import * as path from "node:path";
-import { beforeEach, test } from "node:test";
+import { afterEach, beforeEach, mock, test } from "node:test";
 import type { SessionState } from "./traceStore";
 
 // Drives EventStreamPanel against a fake webview. The CLI health call and
@@ -15,6 +15,7 @@ const fake = {
   pendingHealth: [] as Callback[],
   pendingArgs: [] as string[][],
   errorMessages: [] as string[],
+  warnings: [] as string[],
   quickPick: null as null | ((choice: { id: string }) => void),
   saveDialog: null as null | ((target: { fsPath: string }) => void),
   saveDefault: "",
@@ -38,6 +39,9 @@ const vscodeStub = {
       fake.errorMessages.push(message);
     },
     showInformationMessage: () => undefined,
+    showWarningMessage: (message: string) => {
+      fake.warnings.push(message);
+    },
   },
   workspace: {
     fs: {
@@ -48,13 +52,30 @@ const vscodeStub = {
   },
 };
 
+interface Health {
+  status?: string;
+}
+
 const reviewModelStub = {
-  buildReviewModel: (meta: { session_id: string }) => ({
+  buildReviewModel: (
+    meta: { session_id: string },
+    events: unknown[],
+    _annotations: unknown,
+    health?: Health,
+  ) => ({
     session: { session_id: meta.session_id, provider: "claude" },
+    events: events.length,
+    health: health?.status,
   }),
-  loadStoredReview: (_dir: string, sessionId: string) => ({
-    session: { session_id: sessionId, provider: "claude" },
-  }),
+  loadStoredReview: (_dir: string, sessionId: string, health?: Health) => {
+    if (sessionId.startsWith("broken")) {
+      throw new Error("Session contains an unsupported event type.");
+    }
+    return {
+      session: { session_id: sessionId, provider: "claude" },
+      health: health?.status,
+    };
+  },
   loadAnnotations: () => [],
   renderMinimizedReviewHtml: (model: { session: { session_id: string } }) =>
     model.session.session_id,
@@ -91,7 +112,7 @@ async function loadPanelClass() {
 
 interface Posted {
   type: string;
-  model?: { session: { session_id: string } };
+  model?: { session: { session_id: string }; events?: number; health?: string };
   controls?: { live: boolean; paused: boolean };
 }
 
@@ -121,11 +142,11 @@ async function openPanel() {
   return { panel, messages, send };
 }
 
-function liveState(sessionId: string, paused = false): SessionState {
+function liveState(sessionId: string, paused = false, events = 0): SessionState {
   return {
     sessionId,
     meta: { session_id: sessionId },
-    events: [],
+    events: Array.from({ length: events }, () => ({})),
     paused,
     activeTool: null,
     estimatedCostUsd: 0.5,
@@ -150,11 +171,16 @@ function finish(marker: string, stdout: string, stderr = "", newest = false) {
   callback(stdout ? null : new Error("failed"), stdout, stderr);
 }
 
+afterEach(() => {
+  mock.timers.reset();
+});
+
 beforeEach(() => {
   fake.holdHealth = false;
   fake.pendingHealth = [];
   fake.pendingArgs = [];
   fake.errorMessages = [];
+  fake.warnings = [];
   fake.quickPick = null;
   fake.saveDialog = null;
   fake.saveDefault = "";
@@ -409,4 +435,98 @@ test("a minimized share saves the review shown when it was requested", async () 
 
   assert.match(path.basename(fake.saveDefault), /^review-a-/);
   assert.deepEqual(fake.written, ["a"]);
+});
+
+const healthCalls = () => fake.pendingArgs.filter((args) => args.includes("health"));
+
+test("live health refreshes run one at a time and the last one wins", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  const { panel, messages } = await openPanel();
+  fake.holdHealth = true;
+  panel.onSessionStart(liveState("live", false, 1));
+  panel.onStateChange(liveState("live", false, 3));
+  mock.timers.tick(400);
+  panel.onStateChange(liveState("live", false, 4));
+  mock.timers.tick(400);
+  await settle();
+
+  assert.equal(healthCalls().length, 1);
+
+  finish("health", JSON.stringify({ status: "health-for-1-event" }));
+  await settle();
+  // The trace grew while the lookup ran, so it runs once more.
+  assert.equal(healthCalls().length, 1);
+  finish("health", JSON.stringify({ status: "health-for-4-events" }));
+  await settle();
+
+  assert.equal(healthCalls().length, 0);
+  const last = reviews(messages).at(-1);
+  assert.deepEqual(
+    { events: last?.model?.events, health: last?.model?.health },
+    { events: 4, health: "health-for-4-events" },
+  );
+});
+
+test("an older stored health result does not replace a newer live one", async () => {
+  const { panel, messages } = await openPanel();
+  fake.holdHealth = true;
+  const shown = panel.showSession("s1");
+  panel.onSessionStart(liveState("s1", false, 2));
+  finish("s1", JSON.stringify({ status: "new" }), "", true);
+  await settle();
+  finish("s1", JSON.stringify({ status: "old" }));
+  await shown;
+
+  assert.equal(reviews(messages).at(-1)?.model?.health, "new");
+  panel.onStateChange(liveState("s1", false, 3));
+  assert.equal(reviews(messages).at(-1)?.model?.health, "new");
+});
+
+async function showBrokenAfterGood() {
+  const opened = await openPanel();
+  await opened.panel.showSession("good");
+  opened.messages.length = 0;
+  await opened.panel.showSession("broken");
+  return opened;
+}
+
+test("a session that fails to load resets the view and shows the error", async () => {
+  const { messages } = await showBrokenAfterGood();
+
+  assert.deepEqual(messages.map((m) => m.type), ["reset", "error"]);
+});
+
+for (const command of ["compare", "saveMinimizedShare", "exportOtlp", "verifyLiveCapture"]) {
+  test(`${command} refuses after the selected session fails to load`, async () => {
+    const { messages, send } = await showBrokenAfterGood();
+    fake.holdHealth = true;
+    send({ command });
+    await settle();
+
+    assert.equal(fake.quickPick, null);
+    assert.equal(fake.saveDialog, null);
+    assert.deepEqual(fake.pendingArgs, []);
+    assert.equal(messages.some((m) => m.type === "liveCapture"), false);
+    assert.equal(fake.warnings.length, 1);
+  });
+}
+
+test("a session shown again that now fails to load drops its old review", async () => {
+  const { panel, messages, send } = await openPanel();
+  await panel.showSession("flaky");
+  const original = reviewModelStub.loadStoredReview;
+  reviewModelStub.loadStoredReview = () => {
+    throw new Error("unreadable");
+  };
+  try {
+    messages.length = 0;
+    await panel.showSession("flaky");
+  } finally {
+    reviewModelStub.loadStoredReview = original;
+  }
+  send({ command: "exportOtlp" });
+  await settle();
+
+  assert.deepEqual(messages.map((m) => m.type), ["reset", "error"]);
+  assert.equal(fake.saveDialog, null);
 });
