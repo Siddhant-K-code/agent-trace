@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: namespace-profile-siddhant-khare
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     env:
@@ -78,7 +78,7 @@ jobs:
   # or install extension dependencies; it publishes the VSIX built above.
   publish:
     needs: build
-    runs-on: namespace-profile-siddhant-khare
+    runs-on: ubuntu-latest
     environment: vscode-publish
     permissions:
       contents: read

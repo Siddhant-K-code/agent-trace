@@ -22,6 +22,11 @@ Do not make one line wait for, inherit, or publish the other line.
 Protect production credentials with environment approvals or repository secret
 access controls where appropriate.
 
+## Runners
+
+Every Linux job runs on GitHub-hosted `ubuntu-latest`. The `windows` test job
+runs on `windows-latest`.
+
 ## Core releases
 
 ### Version parity
@@ -119,6 +124,12 @@ browser, and update the README alt text if what it shows changed.
   tag: `mcp-publisher login github` then `mcp-publisher publish`.
 
 ## VS Code extension releases
+
+Extension publishing is blocked for now. `publish-vscode.yml` fails at the
+Marketplace OIDC step with HTTP 401. The old fallback, a manual dispatch from
+the `vscode-v0.5.0` tag, runs that tag's workflow, which names the removed
+Namespace runner, so it gets no runner. Extension releases wait until the
+Marketplace OIDC trusted publisher is fixed.
 
 ### Version parity
 

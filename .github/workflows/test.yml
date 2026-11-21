@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   test:
-    runs-on: namespace-profile-siddhant-khare
+    runs-on: ubuntu-latest
     strategy:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
@@ -97,7 +97,7 @@ jobs:
   action-install:
     # Runs the Action from this checkout. uses: ./ has no release ref, so the
     # install step must install the checkout, not a PyPI release.
-    runs-on: namespace-profile-siddhant-khare
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -124,7 +124,7 @@ jobs:
           agent-strace --version
 
   vscode-extension:
-    runs-on: namespace-profile-siddhant-khare
+    runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: vscode-extension

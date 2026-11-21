@@ -232,6 +232,28 @@ class TestReleaseWorkflows(unittest.TestCase):
             self.assertIn(target, windows_job)
         self.assertIn("persist-credentials: false", windows_job)
 
+    def test_jobs_run_on_github_hosted_runners(self):
+        hosted = {"ubuntu-latest", "windows-latest"}
+        linux = set()
+        for path in sorted(WORKFLOWS.glob("*.y*ml")):
+            text = path.read_text()
+            for retired in ("namespace-profile", "AGENT_TRACE_LINUX_RUNNER"):
+                with self.subTest(workflow=path.name, retired=retired):
+                    self.assertNotIn(retired, text)
+            for number, line in enumerate(text.splitlines(), 1):
+                match = re.match(r"\s+runs-on:\s*(.*?)\s*$", line)
+                if not match:
+                    continue
+                with self.subTest(location=f"{path.name}:{number}"):
+                    self.assertIn(match.group(1), hosted)
+                if match.group(1) == "ubuntu-latest":
+                    linux.add(path.name)
+
+        self.assertLessEqual(
+            {"publish-vscode.yml", "publish.yml", "release.yml", "test.yml"},
+            linux,
+        )
+
     def test_repository_trust_files_exist(self):
         paths = (
             "SECURITY.md",
