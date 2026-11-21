@@ -335,7 +335,7 @@
     <span class="fact">Privacy<strong id="fact-privacy">Not recorded</strong></span>
   </div>
   <div id="active-tool"></div>
-  <div id="actions">
+  <div id="actions" style="display:none">
     <button id="compare">Compare</button>
     <button id="share">Save minimized share</button>
     <button id="otlp">Export OTLP JSON</button>
@@ -433,6 +433,7 @@
       : controls && controls.cost ? 'Estimated cost: $' + controls.cost : '';
     document.getElementById('verify-capture').style.display =
       session.provider === 'claude' || session.provider === 'codex' ? '' : 'none';
+    document.getElementById('actions').style.display = '';
     pauseBtn.disabled = !(controls && controls.live);
     pauseBtn.style.display = controls && controls.paused ? 'none' : '';
     resumeBtn.style.display = controls && controls.paused ? '' : 'none';
@@ -670,8 +671,8 @@
       if (details) details.open = !details.open;
     }
   });
-  // A new session starts: drop everything shown for the previous one, so
-  // the next review renders from a clean slate.
+  // A new session starts, or the selected one failed to load: drop everything
+  // shown for the previous review, so the next one renders from a clean slate.
   function resetForNewSession() {
     state.review = null;
     state.filter = 'all';
@@ -694,6 +695,23 @@
     doctor.className = '';
     doctor.textContent = '';
     document.getElementById('ended-banner').style.display = 'none';
+    document.getElementById('title').textContent = 'No session selected';
+    document.getElementById('capture').textContent =
+      'Open a recorded session from Agent Trace Sessions.';
+    const health = document.getElementById('health');
+    health.className = 'unknown';
+    health.textContent = 'unknown';
+    ['fact-start', 'fact-end', 'fact-duration', 'fact-privacy'].forEach((id) => {
+      document.getElementById(id).textContent = 'Not recorded';
+    });
+    document.getElementById('active-tool').textContent = '';
+    document.getElementById('actions').style.display = 'none';
+    document.getElementById('verify-capture').style.display = 'none';
+    pauseBtn.disabled = true;
+    pauseBtn.style.display = '';
+    resumeBtn.style.display = 'none';
+    document.getElementById('gap-summary').textContent = 'Capture gaps and limits (0)';
+    document.getElementById('gap-list').replaceChildren();
   }
   window.addEventListener('message', (event) => {
     const message = event.data;
