@@ -6,10 +6,12 @@ import argparse
 import contextlib
 import io
 import json
+import os
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from agent_trace.config_watch import (
     ConfigSnapshot,
@@ -190,6 +192,36 @@ for _ in range(10):
                          [first.snapshot_id, second.snapshot_id])
         self.assertIn(bad, json.loads(path.read_text()))
         self.assertIn("timestamp", err.getvalue())
+
+    def test_workspace_that_is_not_a_string_is_skipped(self):
+        root = Path(tempfile.mkdtemp())
+        good = take_snapshot(root, []).to_dict()
+        bad = [dict(good, snapshot_id=f"bad{n}", workspace=value)
+               for n, value in enumerate([5, None])]
+        path = root / ".agent-traces" / ".config-snapshots.json"
+        path.write_text(json.dumps([good, *bad]))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            loaded = _load_snapshots(root)
+        self.assertEqual([s.snapshot_id for s in loaded], [good["snapshot_id"]])
+        self.assertEqual(err.getvalue().count(": workspace is not a string\n"), 2)
+
+    def test_workspace_is_the_real_path_of_the_directory(self):
+        """A snapshot taken through a symlink belongs to the directory the
+        link points to, so the snapshot is found through either path."""
+        real = Path(tempfile.mkdtemp())
+        link = Path(tempfile.mkdtemp()) / "link"
+        try:
+            link.symlink_to(real, target_is_directory=True)
+        except OSError as exc:
+            self.skipTest(f"cannot create a symlink: {exc}")
+        traces = Path(tempfile.mkdtemp())
+        snap = take_snapshot(link, [], trace_dir=traces)
+        self.assertEqual(snap.workspace, os.path.realpath(real))
+        for label, root in (("real path", real), ("symlink", link)):
+            with self.subTest(label):
+                loaded = _load_snapshots(root, traces)
+                self.assertEqual([s.snapshot_id for s in loaded], [snap.snapshot_id])
 
     def test_corrupt_file_refuses_snapshot(self):
         root, _ = _make_workspace()
@@ -432,6 +464,17 @@ class TestFormatting(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestCmdConfigWatch(unittest.TestCase):
+    def _chdir(self, path):
+        old = os.getcwd()
+        os.chdir(path)
+        self.addCleanup(os.chdir, old)
+
+    def _workspace(self):
+        """Make a workspace and run the test from it, as the CLI is run."""
+        ws, store = _make_workspace()
+        self._chdir(ws)
+        return ws, store
+
     def _args(self, trace_dir, subcommand=None, label=None, watch=None,
               fmt="text", since=None):
         import argparse
@@ -445,26 +488,26 @@ class TestCmdConfigWatch(unittest.TestCase):
         return args
 
     def test_snapshot_returns_0(self):
-        ws, store = _make_workspace()
+        ws, store = self._workspace()
         args = self._args(ws / ".agent-traces", subcommand="snapshot")
         result = cmd_config_watch(args)
         self.assertEqual(result, 0)
 
     def test_snapshot_creates_file(self):
-        ws, store = _make_workspace()
+        ws, store = self._workspace()
         args = self._args(ws / ".agent-traces", subcommand="snapshot")
         cmd_config_watch(args)
         snaps = _load_snapshots(ws)
         self.assertEqual(len(snaps), 1)
 
     def test_check_no_snapshot_returns_1(self):
-        ws, store = _make_workspace()
+        ws, store = self._workspace()
         args = self._args(ws / ".agent-traces", subcommand="check")
         result = cmd_config_watch(args)
         self.assertEqual(result, 1)
 
     def test_check_no_changes_returns_0(self):
-        ws, store = _make_workspace()
+        ws, store = self._workspace()
         (ws / "AGENTS.md").write_text("v1")
         take_snapshot(ws, ["AGENTS.md"])
         args = self._args(ws / ".agent-traces", subcommand="check",
@@ -473,7 +516,7 @@ class TestCmdConfigWatch(unittest.TestCase):
         self.assertEqual(result, 0)
 
     def test_check_with_changes_returns_1(self):
-        ws, store = _make_workspace()
+        ws, store = self._workspace()
         (ws / "AGENTS.md").write_text("v1")
         take_snapshot(ws, ["AGENTS.md"])
         (ws / "AGENTS.md").write_text("v2 — changed!")
@@ -485,7 +528,7 @@ class TestCmdConfigWatch(unittest.TestCase):
     def test_check_json_format(self):
         import io
         from unittest.mock import patch
-        ws, store = _make_workspace()
+        ws, store = self._workspace()
         (ws / "AGENTS.md").write_text("v1")
         take_snapshot(ws, ["AGENTS.md"])
         (ws / "AGENTS.md").write_text("v2")
@@ -499,20 +542,20 @@ class TestCmdConfigWatch(unittest.TestCase):
         self.assertTrue(data["has_changes"])
 
     def test_history_returns_0(self):
-        ws, store = _make_workspace()
+        ws, store = self._workspace()
         take_snapshot(ws, [])
         args = self._args(ws / ".agent-traces", subcommand="history")
         result = cmd_config_watch(args)
         self.assertEqual(result, 0)
 
     def test_affected_returns_0(self):
-        ws, store = _make_workspace()
+        ws, store = self._workspace()
         args = self._args(ws / ".agent-traces", subcommand="affected")
         result = cmd_config_watch(args)
         self.assertEqual(result, 0)
 
     def test_snapshot_with_label(self):
-        ws, store = _make_workspace()
+        ws, store = self._workspace()
         args = self._args(ws / ".agent-traces", subcommand="snapshot",
                           label="before-deploy")
         cmd_config_watch(args)
@@ -520,12 +563,285 @@ class TestCmdConfigWatch(unittest.TestCase):
         self.assertEqual(snaps[0].label, "before-deploy")
 
     def test_none_subcommand_defaults_to_snapshot(self):
-        ws, store = _make_workspace()
+        ws, store = self._workspace()
         args = self._args(ws / ".agent-traces", subcommand=None)
         result = cmd_config_watch(args)
         self.assertEqual(result, 0)
         snaps = _load_snapshots(ws)
         self.assertEqual(len(snaps), 1)
+
+    def _run(self, trace_dir, subcommand, **kwargs):
+        """Run config-watch. Return (exit code, stdout, stderr)."""
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cmd_config_watch(self._args(trace_dir, subcommand, **kwargs))
+        return code, out.getvalue(), err.getvalue()
+
+    def test_trace_dir_outside_the_repository(self):
+        """config-watch hashed the files next to the trace dir, not the ones
+        in the current directory, and wrote a stray .agent-traces there. So
+        check passed after AGENTS.md changed."""
+        ws, _ = self._workspace()
+        traces = Path(tempfile.mkdtemp()) / "traces"
+        (ws / "AGENTS.md").write_text("v1")
+        code, out, _ = self._run(traces, "snapshot")
+        self.assertEqual(code, 0)
+        self.assertIn("(1 file(s) hashed)", out)
+        self.assertTrue((traces / ".config-snapshots.json").is_file())
+        self.assertFalse((traces.parent / ".agent-traces").exists())
+        (ws / "AGENTS.md").write_text("v2")
+        code, out, _ = self._run(traces, "check")
+        self.assertEqual(code, 1)
+        self.assertIn("~  AGENTS.md  (modified)", out)
+        code, out, _ = self._run(traces, "snapshot")
+        self.assertEqual(code, 0)
+        self.assertIn("Changes from previous snapshot:\n", out)
+
+    def test_relative_trace_dir_holds_the_snapshots(self):
+        """--trace-dir traces kept the snapshots in ./.agent-traces."""
+        ws, _ = self._workspace()
+        self.assertEqual(self._run("traces", "snapshot")[0], 0)
+        self.assertTrue((ws / "traces" / ".config-snapshots.json").is_file())
+        self.assertFalse((ws / ".agent-traces" / ".config-snapshots.json").exists())
+
+    def test_repositories_sharing_a_trace_dir_keep_their_own_snapshots(self):
+        """Each repository compared its files with the latest snapshot of
+        any repository that shares the trace dir."""
+        traces = Path(tempfile.mkdtemp()) / "traces"
+        repos = {"a": Path(tempfile.mkdtemp()), "b": Path(tempfile.mkdtemp())}
+        for name, repo in repos.items():
+            (repo / "AGENTS.md").write_text(name)
+            self._chdir(repo)
+            self.assertEqual(self._run(traces, "snapshot")[0], 0)
+
+        def checks():
+            codes = {}
+            for name, repo in repos.items():
+                self._chdir(repo)
+                codes[name] = self._run(traces, "check")[0]
+            return codes
+
+        self.assertEqual(checks(), {"a": 0, "b": 0})
+        (repos["a"] / "AGENTS.md").write_text("a2")
+        self.assertEqual(checks(), {"a": 1, "b": 0})
+        self._chdir(repos["b"])
+        history = json.loads(self._run(traces, "history", fmt="json")[1])
+        self.assertEqual([s["workspace"] for s in history], [os.path.realpath(repos["b"])])
+
+    def test_untagged_snapshots_belong_to_the_repository_of_the_trace_dir(self):
+        """Snapshots written before they were tagged have no workspace. They
+        were kept in <repository>/.agent-traces, so only that repository
+        reads them, also when the trace dir is given as `.` from inside it."""
+        ws, _ = self._workspace()
+        (ws / "AGENTS.md").write_text("v1")
+        untagged = take_snapshot(ws, ["AGENTS.md"]).to_dict()
+        untagged.pop("workspace", None)
+        (ws / ".agent-traces" / ".config-snapshots.json").write_text(json.dumps([untagged]))
+        self.assertEqual(self._run(ws / ".agent-traces", "check")[0], 0)
+
+        other = Path(tempfile.mkdtemp())
+        (other / "AGENTS.md").write_text("v1")
+        for label, cwd, trace_dir in (
+            ("another repository", other, ws / ".agent-traces"),
+            ("trace dir . from inside it", ws / ".agent-traces", "."),
+        ):
+            with self.subTest(label):
+                self._chdir(cwd)
+                code, _, err = self._run(trace_dir, "check")
+                self.assertEqual(code, 1)
+                self.assertEqual(
+                    err,
+                    f"No snapshots yet for {os.getcwd()}. "
+                    "Run: agent-strace config-watch snapshot\n",
+                )
+
+        self._chdir(ws)
+        self.assertEqual(self._run(ws / ".agent-traces", "snapshot")[0], 0)
+        history = json.loads(self._run(ws / ".agent-traces", "history", fmt="json")[1])
+        self.assertEqual([s.get("workspace") for s in history], [None, os.path.realpath(ws)])
+
+    def test_untagged_snapshots_in_a_symlinked_trace_dir(self):
+        """The repository that owns an untagged snapshot is the directory
+        holding the .agent-traces link, not the one holding its target."""
+        ws = Path(tempfile.mkdtemp())
+        try:
+            (ws / ".agent-traces").symlink_to(tempfile.mkdtemp(), target_is_directory=True)
+        except OSError as exc:
+            self.skipTest(f"cannot create a symlink: {exc}")
+        self._chdir(ws)
+        (ws / "AGENTS.md").write_text("v1")
+        untagged = take_snapshot(ws, ["AGENTS.md"]).to_dict()
+        untagged.pop("workspace", None)
+        (ws / ".agent-traces" / ".config-snapshots.json").write_text(json.dumps([untagged]))
+        self.assertEqual(self._run(ws / ".agent-traces", "check")[0], 0)
+
+    def test_affected_reads_the_snapshots_in_the_trace_dir(self):
+        """affected read the snapshots next to the trace dir, so with a trace
+        dir outside the repository it found no change. With
+        AGENT_STRACE_WORKSPACE set, the sessions are in a workspace of the
+        trace dir and the snapshots stay at its root."""
+        for workspace in ("", "team1"):
+            with self.subTest(workspace=workspace), \
+                    patch.dict(os.environ, {"AGENT_STRACE_WORKSPACE": workspace}):
+                ws, _ = self._workspace()
+                traces = Path(tempfile.mkdtemp()) / "traces"
+                (ws / "AGENTS.md").write_text("v1")
+                self._run(traces, "snapshot")
+                (ws / "AGENTS.md").write_text("v2")
+                self._run(traces, "snapshot")
+                history = json.loads(self._run(traces, "history", fmt="json")[1])
+                sid = _add_session(TraceStore(traces), started_at=history[-1]["timestamp"] + 10)
+                code, out, _ = self._run(traces, "affected", fmt="json")
+                self.assertEqual(code, 0)
+                self.assertEqual([a["session_id"] for a in json.loads(out)], [sid])
+
+    @unittest.skipIf(os.name == "nt", "Windows cannot remove the current directory")
+    def test_deleted_current_directory_is_an_error(self):
+        ws, _ = self._workspace()
+        gone = ws / "gone"
+        gone.mkdir()
+        os.chdir(gone)
+        gone.rmdir()
+        code, out, err = self._run(ws / ".agent-traces", "check")
+        self.assertEqual((code, out), (1, ""))
+        self.assertEqual(err, "error: cannot read the current directory: FileNotFoundError\n")
+
+    def _older_snapshot(self, ws, snapshot_id, timestamp, label):
+        """A snapshot of AGENTS.md in *ws* as older versions wrote it: no workspace."""
+        return ConfigSnapshot(snapshot_id=snapshot_id, timestamp=timestamp, label=label,
+                              files=[_snapshot_file(ws, "AGENTS.md")])
+
+    def _write_older_snapshots(self, parent, *snapshots):
+        """Write *snapshots* where older versions kept them for a trace dir
+        in *parent*. Return the file."""
+        path = parent / ".agent-traces" / ".config-snapshots.json"
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps([s.to_dict() for s in snapshots], indent=2))
+        return path
+
+    def test_custom_trace_dir_reads_the_snapshots_of_older_versions(self):
+        """Older versions kept the snapshots of <parent>/custom in
+        <parent>/.agent-traces. They were no longer read, so check found no
+        snapshot, affected no change, and a new snapshot no previous one."""
+        for trace_dir in ("absolute", "relative"):
+            with self.subTest(trace_dir=trace_dir):
+                ws, _ = self._workspace()
+                traces = ws / "custom" if trace_dir == "absolute" else Path("custom")
+                now = time.time()
+                (ws / "AGENTS.md").write_text("v1")
+                one = self._older_snapshot(ws, "one111111111", now - 300, "one")
+                (ws / "AGENTS.md").write_text("v2")
+                two = self._older_snapshot(ws, "two222222222", now - 200, "two")
+                older = self._write_older_snapshots(ws, one, two)
+                before = older.read_bytes()
+                sid = _add_session(TraceStore(traces), started_at=now - 100)
+
+                code, out, err = self._run(traces, "check")
+                self.assertEqual((code, out, err), (0, "✓  No config changes since last snapshot.\n", ""))
+                history = json.loads(self._run(traces, "history", fmt="json")[1])
+                self.assertEqual([s["snapshot_id"] for s in history], ["one111111111", "two222222222"])
+                code, out, _ = self._run(traces, "affected", fmt="json")
+                self.assertEqual(code, 0)
+                self.assertEqual([(a["session_id"], a["changed_paths"]) for a in json.loads(out)],
+                                 [(sid, ["AGENTS.md"])])
+
+                (ws / "AGENTS.md").write_text("v3")
+                code, out, _ = self._run(traces, "check")
+                self.assertEqual(code, 1)
+                self.assertIn("~  AGENTS.md  (modified)", out)
+                code, out, _ = self._run(traces, "snapshot", label="three")
+                self.assertEqual(code, 0)
+                self.assertIn("Changes from previous snapshot:\n", out)
+                own = json.loads((ws / "custom" / ".config-snapshots.json").read_text())
+                self.assertEqual([(s["label"], s["workspace"]) for s in own],
+                                 [("three", os.path.realpath(ws))])
+                self.assertEqual(self._run(traces, "check")[0], 0)
+                history = json.loads(self._run(traces, "history", fmt="json")[1])
+                self.assertEqual([s["label"] for s in history], ["one", "two", "three"])
+                self.assertEqual(older.read_bytes(), before)
+
+    def test_unreadable_snapshots_of_older_versions(self):
+        """A file of older snapshots that cannot be read, or a bad entry in
+        it, gives a warning that names that file. The trace dir's own
+        snapshots still load. An unreadable own file still gives no
+        snapshots, so check does not pass on an old one."""
+        ws, _ = self._workspace()
+        (ws / "AGENTS.md").write_text("v1")
+        self.assertEqual(self._run("custom", "snapshot", label="new")[0], 0)
+        older = ws / ".agent-traces" / ".config-snapshots.json"
+        shown = os.path.join(os.getcwd(), ".agent-traces", ".config-snapshots.json")
+        old = self._older_snapshot(ws, "old111111111", time.time() - 100, "old").to_dict()
+        for label, content, labels, warning in (
+            ("not JSON", "{", ["new"],
+             f"warning: cannot parse {shown}: JSONDecodeError; treating as no snapshots\n"),
+            ("a bad entry", json.dumps([{"snapshot_id": 1}, old]), ["old", "new"],
+             f"warning: skipping snapshot 0 in {shown}: snapshot_id is missing or not a string\n"),
+        ):
+            with self.subTest(label):
+                older.write_text(content)
+                code, out, err = self._run("custom", "history", fmt="json")
+                self.assertEqual(code, 0)
+                self.assertEqual([s["label"] for s in json.loads(out)], labels)
+                self.assertEqual(err, warning)
+
+        with self.subTest("own file not JSON"):
+            older.write_text(json.dumps([old]))
+            (ws / "custom" / ".config-snapshots.json").write_text("{")
+            code, out, err = self._run("custom", "check")
+            self.assertEqual((code, out), (1, ""))
+            self.assertEqual(
+                err,
+                f"warning: cannot parse {os.path.join('custom', '.config-snapshots.json')}: "
+                "JSONDecodeError; treating as no snapshots\n"
+                f"No snapshots yet for {os.getcwd()}. Run: agent-strace config-watch snapshot\n",
+            )
+
+    def test_custom_trace_dir_skips_other_snapshots_next_to_it(self):
+        """A tagged snapshot in <parent>/.agent-traces belongs to the trace
+        dir that wrote it, such as the default one. An untagged one belongs
+        to <parent>, so another directory does not read it."""
+        ws, _ = self._workspace()
+        (ws / "AGENTS.md").write_text("v1")
+        with self.subTest("tagged snapshot of the default trace dir"):
+            self.assertEqual(self._run(ws / ".agent-traces", "snapshot")[0], 0)
+            code, _, err = self._run("custom", "check")
+            self.assertEqual(code, 1)
+            self.assertEqual(
+                err,
+                f"No snapshots yet for {os.getcwd()}. Run: agent-strace config-watch snapshot\n",
+            )
+        with self.subTest("untagged snapshot of another directory"):
+            self._write_older_snapshots(ws, self._older_snapshot(ws, "old111111111", time.time(), "old"))
+            self._chdir(tempfile.mkdtemp())
+            code, out, _ = self._run(ws / "custom", "history", fmt="json")
+            self.assertEqual((code, json.loads(out)), (0, []))
+
+    def test_default_trace_dir_reads_each_snapshot_once(self):
+        """In the default layout the file of older snapshots is the trace
+        dir's own file, also through a relative path or a symlinked
+        .agent-traces. It is read once."""
+        ws, _ = self._workspace()
+        (ws / "AGENTS.md").write_text("v1")
+        self._write_older_snapshots(ws, self._older_snapshot(ws, "old111111111", time.time() - 100, "old"))
+        self.assertEqual(self._run(".agent-traces", "snapshot", label="new")[0], 0)
+        for trace_dir in (ws / ".agent-traces", ".agent-traces"):
+            with self.subTest(trace_dir=str(trace_dir)):
+                history = json.loads(self._run(trace_dir, "history", fmt="json")[1])
+                self.assertEqual([s["label"] for s in history], ["old", "new"])
+
+        with self.subTest("symlinked .agent-traces"):
+            linked = Path(tempfile.mkdtemp())
+            (linked / "custom").mkdir()
+            try:
+                (linked / ".agent-traces").symlink_to(linked / "custom", target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"cannot create a symlink: {exc}")
+            self._chdir(linked)
+            (linked / "AGENTS.md").write_text("v1")
+            self._write_older_snapshots(
+                linked, self._older_snapshot(linked, "old111111111", time.time(), "old"))
+            history = json.loads(self._run("custom", "history", fmt="json")[1])
+            self.assertEqual([s["label"] for s in history], ["old"])
 
 
 if __name__ == "__main__":

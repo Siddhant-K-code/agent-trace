@@ -26,6 +26,13 @@ Config files tracked by default (``DEFAULT_WATCH_PATHS``):
     .github/copilot-instructions.md
 
 Additional paths can be added via --watch or .agent-strace-watch.json.
+
+The CLI watches files in the current directory, so run it from the repository
+root. Snapshots are kept in ``.config-snapshots.json`` in the trace directory,
+each tagged with the directory it hashed, so several repositories can share
+one trace directory. The snapshots that older versions kept in
+``.agent-traces`` next to the trace directory are still read, but never
+written.
 """
 
 from __future__ import annotations
@@ -33,6 +40,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 import time
 from dataclasses import dataclass, field
@@ -41,7 +49,7 @@ from typing import TextIO
 
 from .fileutil import file_lock, write_atomic
 from .inert import inert
-from .store import TraceStore
+from .store import DEFAULT_TRACE_DIR, TraceStore
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +68,7 @@ DEFAULT_WATCH_PATHS: list[str] = [
     ".github/copilot-instructions.md",
 ]
 
-_SNAPSHOT_FILE = ".agent-traces/.config-snapshots.json"
+_SNAPSHOT_NAME = ".config-snapshots.json"
 _WATCH_CONFIG_FILE = ".agent-strace-watch.json"
 
 
@@ -83,19 +91,23 @@ class ConfigSnapshot:
     files: list[FileSnapshot]
     session_id: str = ""   # session that triggered this snapshot (if any)
     label: str = ""        # human label (e.g. "before deploy")
+    workspace: str = ""    # real path of the hashed directory; "" in older snapshots
 
     def to_dict(self) -> dict:
-        return {
+        d: dict = {
             "snapshot_id": self.snapshot_id,
             "timestamp": self.timestamp,
             "session_id": self.session_id,
             "label": self.label,
-            "files": [
-                {"path": f.path, "sha256": f.sha256,
-                 "mtime": f.mtime, "exists": f.exists}
-                for f in self.files
-            ],
         }
+        if self.workspace:
+            d["workspace"] = self.workspace
+        d["files"] = [
+            {"path": f.path, "sha256": f.sha256,
+             "mtime": f.mtime, "exists": f.exists}
+            for f in self.files
+        ]
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "ConfigSnapshot":
@@ -113,6 +125,7 @@ class ConfigSnapshot:
             timestamp=d["timestamp"],
             session_id=d.get("session_id", ""),
             label=d.get("label", ""),
+            workspace=d.get("workspace", ""),
             files=files,
         )
 
@@ -172,8 +185,10 @@ def _snapshot_file(root: Path, rel_path: str) -> FileSnapshot:
 # Snapshot storage
 # ---------------------------------------------------------------------------
 
-def _snapshot_path(workspace_root: Path) -> Path:
-    return workspace_root / _SNAPSHOT_FILE
+def _snapshot_path(workspace_root: Path, trace_dir: str | Path | None = None) -> Path:
+    if trace_dir is None:
+        trace_dir = workspace_root / DEFAULT_TRACE_DIR
+    return Path(trace_dir) / _SNAPSHOT_NAME
 
 
 class SnapshotFileError(ValueError):
@@ -192,7 +207,7 @@ def _snapshot_problem(d: object) -> str:
         return "snapshot_id is missing or not a string"
     if not _is_number(d.get("timestamp")):
         return "timestamp is missing or not a number"
-    for name in ("session_id", "label"):
+    for name in ("session_id", "label", "workspace"):
         if not isinstance(d.get(name, ""), str):
             return f"{name} is not a string"
     files = d.get("files", [])
@@ -210,12 +225,12 @@ def _snapshot_problem(d: object) -> str:
     return ""
 
 
-def _read_snapshot_entries(workspace_root: Path) -> list:
+def _read_snapshot_entries(workspace_root: Path, trace_dir: str | Path | None = None) -> list:
     """Return the raw entries of the snapshot file ([] if it does not exist).
 
     Raises SnapshotFileError if the file exists but is not a readable JSON list.
     """
-    p = _snapshot_path(workspace_root)
+    p = _snapshot_path(workspace_root, trace_dir)
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -229,27 +244,85 @@ def _read_snapshot_entries(workspace_root: Path) -> list:
     return data
 
 
-def _load_snapshots(workspace_root: Path) -> list[ConfigSnapshot]:
-    """Return valid snapshots, skipping (with a warning) entries that do not parse.
+def _owned_snapshots(
+    workspace_root: Path,
+    trace_dir: str | Path,
+    data: list,
+) -> list[ConfigSnapshot]:
+    """Return the valid snapshots of *workspace_root* in *data*, the entries
+    of the snapshot file in *trace_dir*, skipping (with a warning) entries
+    that do not parse.
 
-    An unreadable file yields no snapshots and a warning on stderr.
+    Entries of other directories are skipped without a warning. An entry
+    with no ``workspace`` was written before snapshots were tagged, into
+    ``<directory>/.agent-traces``, so it belongs to the directory that holds
+    *trace_dir*.
     """
-    try:
-        data = _read_snapshot_entries(workspace_root)
-    except SnapshotFileError as exc:
-        sys.stderr.write(f"warning: {exc}; treating as no snapshots\n")
-        return []
+    here = os.path.normcase(os.path.realpath(workspace_root))
+    legacy_owner = os.path.normcase(
+        os.path.realpath(os.path.dirname(os.path.abspath(trace_dir)))
+    )
     snapshots: list[ConfigSnapshot] = []
     for index, d in enumerate(data):
         problem = _snapshot_problem(d)
         if problem:
             sys.stderr.write(
                 f"warning: skipping snapshot {index} in "
-                f"{inert(_snapshot_path(workspace_root))}: {problem}\n"
+                f"{inert(_snapshot_path(workspace_root, trace_dir))}: {problem}\n"
             )
             continue
-        snapshots.append(ConfigSnapshot.from_dict(d))
+        workspace = d.get("workspace", "")
+        owner = os.path.normcase(workspace) if workspace else legacy_owner
+        if owner == here:
+            snapshots.append(ConfigSnapshot.from_dict(d))
     return snapshots
+
+
+def _same_path(a: str | Path, b: str | Path) -> bool:
+    return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+
+
+def _legacy_snapshots(workspace_root: Path, trace_dir: str | Path) -> list[ConfigSnapshot]:
+    """Return the snapshots of *workspace_root* that older versions kept for
+    *trace_dir*, in ``.agent-traces`` of the directory that holds it.
+
+    Only untagged entries are read: a tagged entry there belongs to the
+    trace dir that wrote it. In the default layout that file is the
+    snapshot file of *trace_dir*, so this returns []. An unreadable file
+    yields [] and a warning on stderr. The file is never written.
+    """
+    legacy_dir = Path(os.path.dirname(os.path.abspath(trace_dir))) / DEFAULT_TRACE_DIR
+    if _same_path(_snapshot_path(workspace_root, legacy_dir),
+                  _snapshot_path(workspace_root, trace_dir)):
+        return []
+    try:
+        data = _read_snapshot_entries(workspace_root, legacy_dir)
+    except SnapshotFileError as exc:
+        sys.stderr.write(f"warning: {exc}; treating as no snapshots\n")
+        return []
+    return [s for s in _owned_snapshots(workspace_root, legacy_dir, data) if not s.workspace]
+
+
+def _load_snapshots(
+    workspace_root: Path,
+    trace_dir: str | Path | None = None,
+) -> list[ConfigSnapshot]:
+    """Return the valid snapshots of *workspace_root* in *trace_dir*,
+    skipping (with a warning) entries that do not parse. An unreadable file
+    yields no snapshots and a warning on stderr.
+
+    The snapshots that older versions kept for *trace_dir* come first (see
+    ``_legacy_snapshots``).
+    """
+    if trace_dir is None:
+        trace_dir = workspace_root / DEFAULT_TRACE_DIR
+    try:
+        data = _read_snapshot_entries(workspace_root, trace_dir)
+    except SnapshotFileError as exc:
+        sys.stderr.write(f"warning: {exc}; treating as no snapshots\n")
+        return []
+    legacy = _legacy_snapshots(workspace_root, trace_dir)
+    return legacy + _owned_snapshots(workspace_root, trace_dir, data)
 
 
 def _save_snapshots(workspace_root: Path, snapshots: list[ConfigSnapshot]) -> None:
@@ -295,12 +368,15 @@ def take_snapshot(
     watch_paths: list[str],
     session_id: str = "",
     label: str = "",
+    trace_dir: str | Path | None = None,
 ) -> ConfigSnapshot:
     """Hash all watched files and append a new snapshot.
 
-    Existing entries are kept as they are, including ones that do not parse.
-    Raises SnapshotFileError, without writing, if the snapshot file exists but
-    is not a readable JSON list.
+    The snapshot is written to ``.config-snapshots.json`` in *trace_dir*
+    (default ``<workspace_root>/.agent-traces``) and tagged with the real
+    path of *workspace_root*. Existing entries are kept as they are,
+    including ones that do not parse. Raises SnapshotFileError, without
+    writing, if the snapshot file exists but is not a readable JSON list.
     """
     import uuid
     snap_id = uuid.uuid4().hex[:12]
@@ -310,12 +386,13 @@ def take_snapshot(
         timestamp=time.time(),
         session_id=session_id,
         label=label,
+        workspace=os.path.realpath(workspace_root),
         files=files,
     )
-    path = _snapshot_path(workspace_root)
+    path = _snapshot_path(workspace_root, trace_dir)
     with file_lock(path):
         try:
-            entries = _read_snapshot_entries(workspace_root)
+            entries = _read_snapshot_entries(workspace_root, trace_dir)
         except SnapshotFileError as exc:
             raise SnapshotFileError(
                 f"{exc}; refusing to write so existing snapshots are not lost. "
@@ -374,7 +451,7 @@ def find_affected_sessions(
 ) -> list[tuple[str, str, list[str]]]:
     """Return (session_id, started_at_str, changed_paths) for sessions that
     ran after a config change relative to the previous snapshot."""
-    snapshots = _load_snapshots(workspace_root)
+    snapshots = _load_snapshots(workspace_root, store.storage_root)
     if len(snapshots) < 2:
         return []
 
@@ -471,9 +548,27 @@ def format_affected(
 # CLI handler
 # ---------------------------------------------------------------------------
 
+def current_workspace() -> Path | None:
+    """Return the current directory, the one the CLI watches.
+
+    If it cannot be read, for example because it was deleted, print an
+    error and return None.
+    """
+    try:
+        return Path.cwd()
+    except OSError as exc:
+        sys.stderr.write(
+            f"error: cannot read the current directory: {inert(type(exc).__name__)}\n"
+        )
+        return None
+
+
 def cmd_config_watch(args: argparse.Namespace) -> int:
-    workspace_root = Path(args.trace_dir).parent  # .agent-traces/ → workspace root
-    store = TraceStore(Path(args.trace_dir))
+    workspace_root = current_workspace()
+    if workspace_root is None:
+        return 1
+    trace_dir = Path(args.trace_dir)
+    store = TraceStore(trace_dir)
     subcommand = getattr(args, "config_watch_command", None)
     extra_paths = getattr(args, "watch", None) or []
     watch_paths = _load_watch_paths(workspace_root, extra_paths)
@@ -482,11 +577,11 @@ def cmd_config_watch(args: argparse.Namespace) -> int:
     if subcommand == "snapshot" or subcommand is None:
         label = getattr(args, "label", "") or ""
         try:
-            snap = take_snapshot(workspace_root, watch_paths, label=label)
+            snap = take_snapshot(workspace_root, watch_paths, label=label, trace_dir=trace_dir)
         except SnapshotFileError as exc:
             sys.stderr.write(f"error: {exc}\n")
             return 1
-        existing = _load_snapshots(workspace_root)
+        existing = _load_snapshots(workspace_root, trace_dir)
         sys.stdout.write(
             f"Snapshot {snap.snapshot_id[:8]} recorded "
             f"({sum(1 for f in snap.files if f.exists)} file(s) hashed).\n"
@@ -500,9 +595,12 @@ def cmd_config_watch(args: argparse.Namespace) -> int:
         return 0
 
     elif subcommand == "check":
-        snapshots = _load_snapshots(workspace_root)
+        snapshots = _load_snapshots(workspace_root, trace_dir)
         if not snapshots:
-            sys.stderr.write("No snapshots yet. Run: agent-strace config-watch snapshot\n")
+            sys.stderr.write(
+                f"No snapshots yet for {inert(str(workspace_root))}. "
+                "Run: agent-strace config-watch snapshot\n"
+            )
             return 1
         # Compare current state against latest snapshot.
         # Use the union of: paths in the latest snapshot + any CLI --watch extras.
@@ -533,7 +631,7 @@ def cmd_config_watch(args: argparse.Namespace) -> int:
         return 1 if diff.has_changes else 0
 
     elif subcommand == "history":
-        snapshots = _load_snapshots(workspace_root)
+        snapshots = _load_snapshots(workspace_root, trace_dir)
         if fmt == "json":
             sys.stdout.write(json.dumps([s.to_dict() for s in snapshots], indent=2) + "\n")
         else:
