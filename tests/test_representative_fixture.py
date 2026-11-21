@@ -1,6 +1,7 @@
 import csv
 import io
 import json
+import re
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -15,6 +16,7 @@ import agent_trace
 from agent_trace.annotate import Annotation
 from agent_trace.anonymize import cmd_anonymize_export
 from agent_trace.cli import build_parser, cmd_export
+from agent_trace.health import assess_session, load_capture_matrix
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.otlp import _to_span_id
 from agent_trace.store import TraceStore
@@ -106,6 +108,49 @@ class TestRepresentativeEvidenceFixture(unittest.TestCase):
         self.assertEqual(orphan.parent_id, gap["parent_id"])
         self.assertNotIn(orphan.parent_id, by_id)
         self.assertTrue(orphan.data["fixture_gap"])
+
+    def test_walkthrough_states_the_fixture_version(self):
+        doc = (
+            Path(__file__).resolve().parents[1] / "docs" / "representative-fixture.md"
+        ).read_text(encoding="utf-8")
+        stated = re.findall(r"This walkthrough uses `fixture_version` (\d+)\.", doc)
+        self.assertEqual(stated, [str(self.expected["fixture_version"])])
+
+
+class TestRepresentativeFixtureHealth(unittest.TestCase):
+    def test_health_is_partial_with_only_the_deliberate_gap(self):
+        expected = json.loads((FIXTURE_DIR / "expected.json").read_text(encoding="utf-8"))
+        meta = SessionMeta.from_json((FIXTURE_DIR / "meta.json").read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TraceStore(tmp, redact=False)
+            store.create_session(meta)
+            for line in (FIXTURE_DIR / "events.ndjson").read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    store.append_event(meta.session_id, TraceEvent.from_json(line))
+            report = assess_session(
+                store,
+                meta.session_id,
+                store.load_meta(meta.session_id),
+                store.load_events(meta.session_id),
+                load_capture_matrix(),
+            )
+
+        health = expected["expected_health"]
+        self.assertEqual(report.result.status.value, health["status"])
+        self.assertEqual(report.exit_code, health["exit_code"])
+        # A synthetic session names no hook provider, so health claims none.
+        self.assertEqual(report.provider.provider, health["provider"])
+        self.assertEqual(
+            [
+                {"code": reason.code, "kind": reason.kind.value, "event_id": reason.event_id}
+                for reason in report.result.reasons
+            ],
+            health["reasons"],
+        )
+        self.assertEqual(
+            [reason["event_id"] for reason in health["reasons"]],
+            [expected["intentional_gap"]["event_id"]],
+        )
 
 
 def _otlp_attributes(item: dict) -> dict:
@@ -226,7 +271,7 @@ class TestRepresentativeFixtureExports(unittest.TestCase):
                 self.assertNotIn(self.gap["parent_id"], ids)
 
                 self.assertTrue(
-                    data[self.prompt.event_id]["content"].startswith(REDACTION_MARKER)
+                    data[self.prompt.event_id]["prompt"].startswith(REDACTION_MARKER)
                 )
                 if fmt != "csv":  # csv has no column for the redacted flag
                     self.assertEqual(
@@ -263,7 +308,7 @@ class TestRepresentativeFixtureExports(unittest.TestCase):
         self.assertTrue(json.loads(by_id[self.gap["event_id"]]["output_summary"])["fixture_gap"])
         self.assertNotIn(self.gap["parent_id"], ids)
         self.assertTrue(
-            json.loads(by_id[self.prompt.event_id]["input_summary"])["content"]
+            json.loads(by_id[self.prompt.event_id]["input_summary"])["prompt"]
             .startswith(REDACTION_MARKER)
         )
 
@@ -273,7 +318,7 @@ class TestRepresentativeFixtureExports(unittest.TestCase):
         self.assertFalse(root.get("parentSpanId"))
         self.assertEqual(root["status"]["code"], 2)
         failed_call = self.events[self.fixture_ids.index(self.failure_id)].parent_id
-        failure_message = self.events[self.fixture_ids.index(self.failure_id)].data["message"]
+        failure_message = self.events[self.fixture_ids.index(self.failure_id)].data["error"]
 
         # One span per call, in recorded order: the failed call, its retry,
         # and the orphaned result, which keeps the session root as parent.
@@ -349,7 +394,7 @@ class TestRepresentativeFixtureExports(unittest.TestCase):
         )
 
     def test_no_export_shows_the_prompt_without_its_redaction_marker(self):
-        content = self.prompt.data["content"]
+        content = self.prompt.data["prompt"]
         self.assertTrue(content.startswith(REDACTION_MARKER))
         request = content[len(REDACTION_MARKER):].strip()
         self.assertTrue(request)

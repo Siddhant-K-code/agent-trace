@@ -189,6 +189,14 @@ def _tool_call_detail(tool_name: str, args: dict) -> str:
     return ", ".join(args.keys())
 
 
+def _file_target(data: dict) -> str:
+    for key in ("path", "file_path", "uri"):
+        value = data.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
 def format_event(event: TraceEvent, base_ts: float | None = None) -> str:
     """Format a single event as a colored terminal line.
 
@@ -260,13 +268,10 @@ def format_event(event: TraceEvent, base_ts: float | None = None) -> str:
         _append_subagent_tag(parts, event)
         parts.append(f"{duration}")
 
-    elif event.event_type == EventType.FILE_READ:
-        uri = event.data.get("uri", "")
-        parts.append(f"{color}file_read{C.RESET} {C.DIM}{inert(uri)}{C.RESET}")
-
-    elif event.event_type == EventType.FILE_WRITE:
-        uri = event.data.get("uri", "")
-        parts.append(f"{color}file_write{C.RESET} {C.DIM}{inert(uri)}{C.RESET}")
+    elif event.event_type in (EventType.FILE_READ, EventType.FILE_WRITE):
+        # Hooks record "path"; the MCP proxy records "uri".
+        target = _file_target(event.data)
+        parts.append(f"{color}{event.event_type.value}{C.RESET} {C.DIM}{inert(target)}{C.RESET}")
 
     elif event.event_type == EventType.ERROR:
         msg = event.data.get("message", "") or event.data.get("error", "")
