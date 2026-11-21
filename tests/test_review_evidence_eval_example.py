@@ -2,10 +2,13 @@ import hashlib
 import json
 import os
 import runpy
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from collections import Counter
+from itertools import product
 from pathlib import Path
 from unittest.mock import patch
 
@@ -222,6 +225,23 @@ class ReviewEvidencePacketExampleTests(unittest.TestCase):
 
 
 class ReviewerExerciseTests(unittest.TestCase):
+    def build_exercise(self, output, *options):
+        result = subprocess.run(
+            [sys.executable, "-B", str(EXAMPLE / "build_reviewer_exercise.py"),
+             "--producer", os.environ["REVIEW_EVIDENCE_PRODUCER"], "--output", str(output), *options],
+            text=True, capture_output=True, timeout=45,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def file_bytes(self, root):
+        files = {}
+        for path in root.rglob("*"):
+            self.assertFalse(path.is_symlink(), path)
+            if path.is_file():
+                files[path.relative_to(root).as_posix()] = path.read_bytes()
+        return files
+
     def test_evidence_parity_rejects_a_changed_arm_or_packet_copy(self):
         with patch.object(sys, "path", [str(EXAMPLE), *sys.path]):
             verify_parity = runpy.run_path(str(EXAMPLE / "build_reviewer_exercise.py"))["verify_parity"]
@@ -257,13 +277,7 @@ class ReviewerExerciseTests(unittest.TestCase):
     def test_both_views_replay_the_same_evidence_and_footer_pass_has_gaps(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "exercise"
-            result = subprocess.run(
-                [sys.executable, "-B", str(EXAMPLE / "build_reviewer_exercise.py"),
-                 "--producer", os.environ["REVIEW_EVIDENCE_PRODUCER"], "--output", str(output)],
-                text=True, capture_output=True, timeout=45,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            report = json.loads(result.stdout)
+            report = self.build_exercise(output)
             self.assertEqual(report["cases"]["greeting"]["producer_status"], "VALID / COMPLETE / PASS")
             self.assertEqual(report["cases"]["footer"]["producer_status"], "VALID / INCONCLUSIVE / PASS")
             self.assertEqual(report["cases"]["footer"]["producer_exit"], 2)
@@ -283,3 +297,43 @@ class ReviewerExerciseTests(unittest.TestCase):
             self.assertEqual(footer["steps"][0]["status"], "UNOBSERVED")
             self.assertEqual(footer["capture"]["completeness"], "PARTIAL")
             self.assertFalse(footer["checks"][0]["coverage_eligible"])
+
+    @unittest.skipUnless(os.environ.get("REVIEW_EVIDENCE_PRODUCER"), "requires a local Phase A checkout")
+    def test_packaged_sets_are_balanced_and_independent_with_exact_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            exercise, kit, repeated = (root / name for name in ("exercise", "kit", "repeated"))
+            self.build_exercise(exercise)
+            self.build_exercise(kit, "--reviewer-kit")
+            self.build_exercise(repeated, "--reviewer-kit")
+            self.assertEqual(self.file_bytes(kit), self.file_bytes(repeated))
+
+            cases, arms, items = ("greeting", "footer"), ("baseline", "packet-assisted"), ("item-01", "item-02")
+            assignments = json.loads((kit / "coordinator/assignments.json").read_bytes())
+            sets = kit / "reviewer-sets"
+            observed = Counter()
+            set_ids = {"set-01", "set-02", "set-03", "set-04"}
+            self.assertEqual(set(assignments), set_ids)
+            self.assertEqual({path.name for path in sets.iterdir()}, set_ids)
+            self.assertEqual({path.name for path in kit.iterdir()}, {"reviewer-sets", "coordinator"})
+            worksheet = (EXAMPLE / "reviewer-exercise/worksheet.md").read_bytes()
+            instructions = (EXAMPLE / "reviewer-exercise/reviewer-instructions.md").read_bytes()
+            isolated = root / "standalone"
+            for set_id, mapping in assignments.items():
+                with self.subTest(set_id=set_id):
+                    self.assertEqual(set(mapping), set(items))
+                    self.assertCountEqual([value["case"] for value in mapping.values()], cases)
+                    self.assertCountEqual([value["arm"] for value in mapping.values()], arms)
+                    # Copy only the reviewer set, then check all files without its parent.
+                    standalone = isolated / set_id
+                    shutil.copytree(sets / set_id, standalone)
+                    self.assertEqual({path.name for path in standalone.iterdir()}, {*items, "README.md"})
+                    self.assertEqual((standalone / "README.md").read_bytes(), instructions)
+                    for item, assignment in mapping.items():
+                        case, arm = assignment["case"], assignment["arm"]
+                        observed[case, arm, item] += 1
+                        files = self.file_bytes(standalone / item)
+                        self.assertEqual(files, self.file_bytes(exercise / case / arm))
+                        self.assertEqual(files["worksheet.md"], worksheet)
+                        self.assertEqual("packet/review.md" in files, arm == "packet-assisted")
+            self.assertEqual(observed, Counter(product(cases, arms, items)))

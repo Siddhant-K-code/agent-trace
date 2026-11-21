@@ -138,3 +138,26 @@ or a measurement of usefulness or time savings.
 To include the pinned producer smoke in the example's tests, set
 `REVIEW_EVIDENCE_PRODUCER` to the same checkout and run
 `PYTHONPATH=src python3 -B -m unittest tests.test_review_evidence_eval_example`.
+
+### Balanced, ready-to-run sets
+
+```bash
+python3 -B examples/review-evidence-eval/build_reviewer_exercise.py \
+  --producer /path/to/phase-a-checkout \
+  --output /path/to/new-reviewer-kit \
+  --reviewer-kit
+```
+
+The four sets each contain both cases exactly once, with one plain and one
+packet-assisted item. Across the four sets, each case/view/position occurs
+once. Neutral names (`set-01` through `set-04`, `item-01` and `item-02`) do
+not specify the assignment. **This is not treatment-blind:** the packet is
+visible in the packet-assisted item.
+
+**Copy boundary:** Copy only the assigned `reviewer-sets/set-NN/` directory
+as a standalone folder. Do not copy its parent, the other sets, the
+repository fixture, or `coordinator/`. Each set includes instructions and
+both worksheets. `coordinator/` holds the assignment mapping, assembly
+statuses, and v1 answer key/manual rubric. Do not hand that directory or
+the builder's stdout to a reviewer. This kit contains no reviewer responses
+and does not run or score a study.

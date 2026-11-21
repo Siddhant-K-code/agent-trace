@@ -19,6 +19,8 @@ from score import HERE, read_object
 
 KIT = HERE / "reviewer-exercise"
 PRODUCER_REVISION = "423601ceb6e290b31e8bb290aac67dc5c041313e"
+CASES = ("greeting", "footer")
+ARMS = ("baseline", "packet-assisted")
 
 
 def digest(raw: bytes) -> str:
@@ -115,7 +117,36 @@ def stage_producer(checkout: Path, workspace: Path) -> Path:
     return workspace / "src"
 
 
-def build(checkout: Path, output: Path) -> dict:
+def write_reviewer_kit(prepared: Path, destination: Path, report: dict) -> None:
+    assignments = {}
+    orders = [
+        ((first, first_arm), (second, second_arm))
+        for first, second in (CASES, CASES[::-1])
+        for first_arm, second_arm in (ARMS, ARMS[::-1])
+    ]
+    for index, order in enumerate(orders, 1):
+        set_id = f"set-{index:02d}"
+        reviewer_set = destination / "reviewer-sets" / set_id
+        reviewer_set.mkdir(parents=True)
+        shutil.copyfile(KIT / "reviewer-instructions.md", reviewer_set / "README.md")
+        mapping = assignments[set_id] = {}
+        for position, (case, arm) in enumerate(order, 1):
+            item_id = f"item-{position:02d}"
+            source = prepared / case / arm
+            item = reviewer_set / item_id
+            shutil.copytree(source / "evidence", item / "evidence")
+            shutil.copyfile(source / "worksheet.md", item / "worksheet.md")
+            if arm == "packet-assisted":
+                shutil.copytree(source / "packet", item / "packet")
+            mapping[item_id] = {"case": case, "arm": arm}
+    coordinator = destination / "coordinator"
+    coordinator.mkdir()
+    shutil.copyfile(KIT / "reference.md", coordinator / "reference.md")
+    (coordinator / "assignments.json").write_bytes(json_bytes(assignments))
+    (coordinator / "assembly.json").write_bytes(json_bytes(report))
+
+
+def build(checkout: Path, output: Path, *, reviewer_kit: bool = False) -> dict:
     if output.is_relative_to(checkout) or output.exists():
         raise ValueError("output must be a new directory outside the producer checkout")
     report = {"producer_revision": PRODUCER_REVISION, "cases": {}}
@@ -123,7 +154,7 @@ def build(checkout: Path, output: Path) -> dict:
         workspace = Path(temp)
         producer_src = stage_producer(checkout, workspace)
         prepared = workspace / "prepared"
-        for case in ("greeting", "footer"):
+        for case in CASES:
             plain = prepared / case / "baseline"
             assisted = prepared / case / "packet-assisted"
             baseline = plain / "evidence"
@@ -156,9 +187,14 @@ def build(checkout: Path, output: Path) -> dict:
                 "producer_exit": result.returncode, "producer_status": result.stdout.strip(),
                 "identical_evidence_sha256": hashes,
             }
-        (prepared / "assembly.json").write_bytes(json_bytes(report))
+        if reviewer_kit:
+            destination = workspace / "kit"
+            write_reviewer_kit(prepared, destination, report)
+        else:
+            destination = prepared
+            (prepared / "assembly.json").write_bytes(json_bytes(report))
         output.mkdir()
-        shutil.copytree(prepared, output, dirs_exist_ok=True)
+        shutil.copytree(destination, output, dirs_exist_ok=True)
     return report
 
 
@@ -166,9 +202,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--producer", type=Path, required=True, help="local checkout with the pinned producer commit")
     parser.add_argument("--output", type=Path, required=True, help="new directory with an existing parent")
+    parser.add_argument("--reviewer-kit", action="store_true", help="package four balanced reviewer sets")
     args = parser.parse_args()
     try:
-        report = build(args.producer.resolve(strict=True), args.output.resolve())
+        report = build(args.producer.resolve(strict=True), args.output.resolve(), reviewer_kit=args.reviewer_kit)
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         parser.error(str(exc))
     print(json.dumps(report, indent=2))
