@@ -601,7 +601,8 @@ def cmd_export(args: argparse.Namespace) -> int:
             use_genai = False  # explicit --format otlp keeps legacy behaviour
 
         if not endpoint:
-            # No endpoint: write OTLP JSON to --output file or stdout
+            # No endpoint: write the OTLP JSON to --output or to a file named
+            # from the session ID. Nothing goes to stdout.
             meta = store.load_meta(session_id)
             try:
                 if use_temporal:
