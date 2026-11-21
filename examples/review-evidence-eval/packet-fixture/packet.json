@@ -1,0 +1,190 @@
+{
+  "association": {
+    "declaration": {
+      "attempt_id": "a1",
+      "by": "fixture operator",
+      "session_id": "s1"
+    },
+    "matching_summary": {
+      "pointer": "",
+      "source_id": "summary"
+    }
+  },
+  "attempt_inventory": {
+    "aggregate_cost": {
+      "amount_minor": null,
+      "completeness": "UNKNOWN",
+      "currency": null,
+      "reason": "INVENTORY_NOT_COMPLETE"
+    },
+    "attempts": [],
+    "by": null,
+    "completeness": "UNKNOWN",
+    "source": null
+  },
+  "capture": {
+    "completeness": "PARTIAL",
+    "limits": [
+      "Only selected fixture events were retained."
+    ],
+    "reported_by": "fixture recorder",
+    "source": {
+      "pointer": "/capture",
+      "source_id": "summary"
+    }
+  },
+  "checks": [
+    {
+      "assessment": {
+        "by": "fixture maintainer",
+        "criterion_ids": [
+          "hello"
+        ],
+        "relevance": "RELEVANT"
+      },
+      "binding": "CURRENT",
+      "coverage_eligible": true,
+      "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "id": "unit",
+      "reported_by": "fixture CI",
+      "reported_result": "PASS",
+      "source": {
+        "pointer": "",
+        "source_id": "unit"
+      }
+    }
+  ],
+  "coverage": "COMPLETE",
+  "criteria": [
+    {
+      "by": "fixture author",
+      "check_source_ids": [
+        "unit"
+      ],
+      "id": "hello",
+      "source": {
+        "pointer": "/criteria/0",
+        "source_id": "intent"
+      },
+      "stale_check_source_ids": [],
+      "status": "COVERED",
+      "text": "Greeting is Hello."
+    }
+  ],
+  "diff": {
+    "binding": "DECLARED",
+    "source": {
+      "lines": [
+        1,
+        7
+      ],
+      "source_id": "change"
+    }
+  },
+  "gaps": [],
+  "integrity": "VALID",
+  "intent": {
+    "by": "fixture author",
+    "source": {
+      "pointer": "/summary",
+      "source_id": "intent"
+    },
+    "summary": "Use a friendlier greeting."
+  },
+  "manifest_sha256": "587d8be9a25febd9566dd6ddbf17367d0c6ff97df76dd220c201ec1de65a687f",
+  "observations": [
+    {
+      "note": "Inspected the greeting.",
+      "reported_by": "fixture recorder",
+      "source": {
+        "pointer": "/observations/0",
+        "source_id": "summary"
+      },
+      "step_id": "inspect"
+    }
+  ],
+  "observed_validation": "PASS",
+  "schema": "review-evidence-packet/v0",
+  "sources": [
+    {
+      "admission": "SYNTHETIC",
+      "id": "change",
+      "lines": [
+        1,
+        7
+      ],
+      "origin": "fixture author",
+      "path": "change.input",
+      "retained_path": "sources/change.txt",
+      "sha256": "2edb646dc4baef4801b835763c6177fb1e82f4088b8445d93dbe9e166fd73fbc",
+      "type": "unified-diff",
+      "version": 0
+    },
+    {
+      "admission": "SYNTHETIC",
+      "id": "intent",
+      "lines": [
+        1,
+        25
+      ],
+      "origin": "fixture author",
+      "path": "intent.input",
+      "retained_path": "sources/intent.txt",
+      "sha256": "70b5807f7fa107e4d360eeee5de9974cc69c51606af508d9318e52060840aa56",
+      "type": "intent",
+      "version": 0
+    },
+    {
+      "admission": "SYNTHETIC",
+      "id": "summary",
+      "lines": [
+        1,
+        25
+      ],
+      "origin": "fixture author",
+      "path": "summary.input",
+      "retained_path": "sources/summary.txt",
+      "sha256": "0d83502b85fa7e83c1ce1aac4f42ad57fcbd93c410032395c4f54b9f950de1a7",
+      "type": "session-summary",
+      "version": 0
+    },
+    {
+      "admission": "SYNTHETIC",
+      "id": "unit",
+      "lines": [
+        1,
+        20
+      ],
+      "origin": "fixture author",
+      "path": "unit.input",
+      "retained_path": "sources/unit.txt",
+      "sha256": "a31f0c7b5c4a13802380290ec1dc803e00632258dfa4e53a9841e567712405bf",
+      "type": "validation-receipt",
+      "version": 0
+    }
+  ],
+  "steps": [
+    {
+      "by": "fixture author",
+      "id": "inspect",
+      "observation_source": {
+        "pointer": "/observations/0",
+        "source_id": "summary"
+      },
+      "required": true,
+      "source": {
+        "pointer": "/expected_steps/0",
+        "source_id": "intent"
+      },
+      "status": "OBSERVED",
+      "text": "Inspect greeting."
+    }
+  ],
+  "target": {
+    "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "pr": 7,
+    "repo": "demo/greetings",
+    "task": "friendlier-label"
+  }
+}

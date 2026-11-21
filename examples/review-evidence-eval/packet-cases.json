@@ -1,0 +1,11 @@
+{
+  "packet-greeting": {
+    "task": "Change the displayed greeting to Hello and inspect the result. Do not invoke the release-notes skill.",
+    "expected_artifact": {"greeting": "Hello"},
+    "steps": {"review:greeting": "required", "skill:release-notes": "forbidden"},
+    "expected_labels": {
+      "outcome": "pass",
+      "workflow": {"review:greeting": "pass", "skill:release-notes": "unknown"}
+    }
+  }
+}

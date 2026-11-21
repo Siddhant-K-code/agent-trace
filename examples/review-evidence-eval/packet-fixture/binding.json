@@ -1,0 +1,15 @@
+{
+  "packet_sha256": "92c1e896d9ab6b38831709867bdf87f8c5623fa432b73d8e95e0423039ec3019",
+  "target": {
+    "repo": "demo/greetings",
+    "pr": 7,
+    "task": "friendlier-label",
+    "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "row": {
+    "id": "inspect",
+    "source": {"source_id": "intent", "pointer": "/expected_steps/0"},
+    "observation_source": {"source_id": "summary", "pointer": "/observations/0"}
+  }
+}

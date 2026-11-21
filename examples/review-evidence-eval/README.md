@@ -3,7 +3,8 @@
 Score the delivered result separately from the workflow steps a reviewer can verify.
 This example uses hand-authored synthetic JSON, Python 3.10+ and no dependencies.
 It does not run agents, execute checks mentioned in the fixtures, or call a model or a network service.
-It does not read review packets or integrate with Inspect.
+The base scorer reads normalized JSON only. A separate adapter demonstrates one
+synthetic Phase A packet, without Inspect.
 
 From the repository root:
 
@@ -62,19 +63,44 @@ by case, then by outcome and step label; retain explicit transitions to/from
 `unknown`. An improvement can also be a mismatch against a deliberately failing
 fixture. The exit code is a local snapshot check, not a quality gate.
 
-An eventual Phase A adapter needs only a case ID, the independently checkable
-artifact (or a way to retrieve it safely, otherwise `null`), evidence identifying
-which named steps occurred in scope, and capture sufficiency for each step where
-absence can be established. These are example-local inputs, not assumptions
-about packet fields:
+## One Phase A packet, scored offline
 
-- Packet criterion coverage and reported check outcomes do not independently
-  establish what the task delivered. Verify the actual artifact separately.
-- A packet step marked observed is usable only if its evidence identifies the
-  named step in this case. The observed status alone does not identify which
-  skill was activated or whether the agent initiated the activation.
-- An unobserved step or a gap is not proof of nonactivation. Leave the step out
-  of `sufficient_capture_for` unless separate evidence establishes the relevant
-  scope was captured despite any redaction, truncation, or missing events.
+`packet-fixture/packet.json` is a byte-for-byte synthetic output of the Phase A
+`review-evidence` CLI, for `demo/greetings`, PR 7, task `friendlier-label`. Its
+`unit` receipt is current and reports `PASS`; the `inspect` step is observed
+with a locator in a partial session summary. The local adapter checks the raw
+SHA-256, complete target, `inspect` row identity, and both row locators against
+the separately supplied `binding.json`. It treats locators as identities and
+does not open packet-referenced paths. The binding is a trusted local input,
+not a signature or a substitute for the producer's validation.
 
-Expected artifacts and labels still come from the case definitions, not the packet.
+```bash
+example=examples/review-evidence-eval
+fixture=$example/packet-fixture
+python3 -B "$example/score_packet.py" \
+  "$fixture/packet.json" "$fixture/binding.json" "$fixture/evidence.json"
+```
+
+The JSON report labels the outcome and inspection `pass` and release-notes
+activation `unknown`, with no regression mismatches. Pass `missing-evidence.json`
+instead of `evidence.json` to see all three labels stay `unknown` (exit `1`,
+because two expected labels changed). A bad binding exits `2` without a score.
+
+- `packet-cases.json` holds the independently authored expected artifact,
+  workflow requirements and labels. Neither the adapter nor the candidate
+  evidence receives them.
+- `evidence.json` is a separately admitted synthetic record bound to the packet
+  digest. The candidate greeting came from replaying the synthetic change on a
+  supplied `greet.py` baseline and inspecting the resulting AST without
+  executing it. This does not verify a real Git head. The candidate is not
+  derived from the receipt, criterion coverage, or packet completeness.
+- The positive inspection sidecar is a hand-authored synthetic witness. It
+  supplies a typed `greeting-inspection`, a source ID, and the exact packet
+  observation it corroborates. This exercises the adapter; it does not prove
+  an actual inspection or any skill activation. The adapter never maps `inspect`
+  to a skill.
+- An inspection can be scored absent only if its bound row is `UNOBSERVED`
+  and the independent, step-specific record explicitly says `absent` with
+  `capture: "sufficient"`. Missing bindings, gaps, global capture declarations,
+  and `UNOBSERVED` on its own cannot establish absence. The bundled packet
+  uses the positive path; a separate in-memory test exercises the absence path.

@@ -1,0 +1,2 @@
+# Keep the generated fixture's exact bytes for the pinned SHA-256.
+packet.json -text

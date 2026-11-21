@@ -1,3 +1,4 @@
+import hashlib
 import json
 import subprocess
 import sys
@@ -101,3 +102,115 @@ class ReviewEvidenceEvalExampleTests(unittest.TestCase):
         result = self.run_scorer(observations)
         self.assertEqual(result.returncode, 2, result.stdout)
         self.assertIn("missing=['count-clean-negative']", result.stderr)
+
+
+class ReviewEvidencePacketExampleTests(unittest.TestCase):
+    fixture = EXAMPLE / "packet-fixture"
+
+    def load_input(self, name):
+        return json.loads((self.fixture / f"{name}.json").read_text(encoding="utf-8"))
+
+    def run_packet(self, *, evidence=None, binding=None, packet=None, expected_exit=0):
+        with tempfile.TemporaryDirectory() as directory:
+            files = []
+            for name, data in (("packet", packet), ("binding", binding), ("evidence", evidence)):
+                path = self.fixture / f"{name}.json"
+                if data is not None:
+                    path = Path(directory) / path.name
+                    path.write_bytes(data if isinstance(data, bytes) else json.dumps(data).encode("utf-8"))
+                files.append(str(path))
+            result = subprocess.run(
+                [sys.executable, "-B", str(EXAMPLE / "score_packet.py"), *files],
+                capture_output=True, text=True, timeout=10,
+            )
+        self.assertEqual(result.returncode, expected_exit, result.stderr or result.stdout)
+        if expected_exit == 2:
+            self.assertFalse(result.stdout)
+            return result.stderr
+        return json.loads(result.stdout)
+
+    def test_produced_packet_with_independent_artifact_and_corroborated_inspection(self):
+        report = self.run_packet()
+        case = report["cases"]["packet-greeting"]
+        self.assertEqual(report["regression_mismatches"], [])
+        self.assertEqual(case["outcome"]["label"], "pass")
+        self.assertEqual(case["workflow"]["review:greeting"]["evidence"], "observed")
+        self.assertEqual(case["workflow"]["skill:release-notes"]["label"], "unknown")
+
+    def test_current_pass_does_not_rescue_missing_or_wrong_outcome(self):
+        missing = self.load_input("missing-evidence")
+        wrong = self.load_input("evidence")
+        wrong["artifact"] = {"greeting": "Hi"}
+        for evidence, outcome, inspection in ((missing, "unknown", "unknown"), (wrong, "fail", "pass")):
+            with self.subTest(outcome=outcome):
+                case = self.run_packet(evidence=evidence, expected_exit=1)["cases"]["packet-greeting"]
+                self.assertEqual(case["outcome"]["label"], outcome)
+                self.assertEqual(case["workflow"]["review:greeting"]["label"], inspection)
+
+    def test_wrong_locator_or_untyped_evidence_leaves_inspection_unknown(self):
+        for delta in (
+            {"corroborates": {"source_id": "summary", "pointer": "/observations/1"}},
+            {"kind": None},
+            {"kind": "skill"},
+        ):
+            with self.subTest(delta=delta):
+                evidence = self.load_input("evidence")
+                evidence["inspection"].update(delta)
+                case = self.run_packet(evidence=evidence, expected_exit=1)["cases"]["packet-greeting"]
+                self.assertEqual(case["outcome"]["label"], "pass")
+                self.assertEqual(case["workflow"]["review:greeting"]["label"], "unknown")
+                self.assertEqual(case["workflow"]["skill:release-notes"]["label"], "unknown")
+
+    def test_negative_needs_explicit_absence_and_sufficient_step_capture(self):
+        # An in-memory variant tests the negative path; the producer fixture remains untouched.
+        packet = self.load_input("packet")
+        packet["steps"][0].update(status="UNOBSERVED", observation_source=None)
+        packet["observations"] = []
+        packet["capture"]["completeness"] = "COMPLETE"
+        raw = json.dumps(packet).encode("utf-8")
+        digest = hashlib.sha256(raw).hexdigest()
+        binding = self.load_input("binding")
+        binding["packet_sha256"] = digest
+        binding["row"]["observation_source"] = None
+        evidence = self.load_input("evidence")
+        evidence["packet_sha256"] = digest
+        for state, capture, expected in (
+            (None, "sufficient", "unknown"),
+            ("absent", "partial", "unknown"),
+            ("absent", "sufficient", "absent"),
+        ):
+            with self.subTest(state=state, capture=capture):
+                evidence["inspection"] = {
+                    "kind": "greeting-inspection", "state": state,
+                    "source": "fixture-observer:inspection-window", "capture": capture,
+                }
+                report = self.run_packet(packet=raw, binding=binding, evidence=evidence, expected_exit=1)
+                review = report["cases"]["packet-greeting"]["workflow"]["review:greeting"]
+                self.assertEqual(review["evidence"], expected)
+                self.assertEqual(review["label"], "fail" if expected == "absent" else "unknown")
+
+    def test_rejects_changed_bytes_and_target_or_locator_binding_mismatches(self):
+        packet = (self.fixture / "packet.json").read_bytes()
+        self.assertIn("SHA-256", self.run_packet(packet=packet + b"\n", expected_exit=2))
+        for field, key, replacement in (
+            ("target", "head", "c" * 40),
+            ("row", "id", "unrelated"),
+            ("row", "observation_source", {"source_id": "summary", "pointer": "/observations/1"}),
+        ):
+            with self.subTest(field=field, key=key):
+                binding = self.load_input("binding")
+                binding[field][key] = replacement
+                self.assertIn("does not match the supplied binding", self.run_packet(
+                    binding=binding, expected_exit=2,
+                ))
+
+    def test_missing_bound_row_is_rejected_and_evidence_cannot_cross_packets(self):
+        packet = self.load_input("packet")
+        packet["steps"] = []
+        raw = json.dumps(packet).encode("utf-8")
+        binding = self.load_input("binding")
+        binding["packet_sha256"] = hashlib.sha256(raw).hexdigest()
+        self.assertIn("inspect row or locator", self.run_packet(packet=raw, binding=binding, expected_exit=2))
+        evidence = self.load_input("evidence")
+        evidence["packet_sha256"] = "0" * 64
+        self.assertIn("reference the bound packet", self.run_packet(evidence=evidence, expected_exit=2))
