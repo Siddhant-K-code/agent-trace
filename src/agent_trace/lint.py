@@ -30,7 +30,7 @@ from .event_data import (
 from .explain import PHASE_DATA_EVENT_TYPES
 from .inert import inert
 from .models import EventType, TraceEvent
-from .store import TraceStore
+from .store import RefusedSessionError, TraceStore
 
 
 # ---------------------------------------------------------------------------
@@ -670,7 +670,7 @@ def cmd_lint(args: argparse.Namespace) -> int:
         session_ids = [full_id]
 
     reports: list[LintReport] = []
-    refusals: list[NonObjectEventDataError] = []
+    refusals: list[ValueError] = []
     for sid in session_ids:
         if not lint_all:
             # Same message and exit code (via the CLI handler) as other
@@ -679,7 +679,7 @@ def cmd_lint(args: argparse.Namespace) -> int:
             continue
         try:
             reports.append(lint_session(store, sid, config))
-        except NonObjectEventDataError as exc:
+        except (NonObjectEventDataError, RefusedSessionError) as exc:
             # One refused session must not hide the others' results.
             refusals.append(exc)
 

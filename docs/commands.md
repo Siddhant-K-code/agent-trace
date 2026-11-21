@@ -2845,6 +2845,113 @@ versions did. An unusable timestamp on the first or last event can cause that.
 
 ---
 
+## Sessions with mismatched or unreadable events
+
+A session directory holds one session. So that one session's or tenant's events
+are never read as another's, the store refuses to read a session when:
+
+- its `meta.json` has a `session_id` other than the directory name.
+- an event has a `session_id` other than the directory name, including a number
+  such as `5`. An event with no `session_id` belongs to the session.
+- an event has a `tenant_id` other than the `tenant_id` in `meta.json`. When
+  `meta.json` has no `tenant_id`, only the `tenant` commands refuse an event
+  that has one, as described under [`tenant`](#tenant).
+
+Most commands that read such a session write one line to stderr and exit 1
+before they print, write, send, or open anything. The line names the session by
+its directory and says which check failed:
+
+```
+Error: cannot read session c3d4e5f6a7b80003: event session ID does not match its directory
+```
+
+The tenant check says `event tenant does not match session metadata`. A
+`meta.json` that names another session counts as [corrupt](#list), so its line
+reads:
+
+```
+Error: session c3d4e5f6a7b80003 has a corrupt meta.json: metadata session ID does not match its directory
+```
+
+No line includes the session ID or tenant ID found in the files, event IDs, or
+data values.
+
+The store also refuses a session when a line of `events.ndjson` is not an event
+it can read. The message gives the position of the first such line, says what
+is wrong with it, and counts the other unreadable lines:
+
+```
+Error: cannot read session c3d4e5f6a7b80003: line 5 of events.ndjson is not valid JSON; 2 more lines are unreadable
+```
+
+A line is unreadable when it is not valid JSON, is JSON but not an object (for
+example `is an array, not an object`), has no `event_type`, or has an
+`event_type` that agent-strace does not know. A line nested too deeply to parse,
+or with an integer too long to read, is unreadable too. An empty line is
+skipped, but a line of spaces between events is not valid JSON. The message
+never includes the line, its `event_type`, or the parser's message. When a
+session has both a mismatch and an unreadable line, the message reports the
+mismatch.
+
+These commands refuse such a session with this line: `audit`, `cost`, `diff`,
+`explain`, `export` in every format, `health`, `inspect`, `lint`, `postmortem`,
+`replay`, `share`, `standup`, `stats`, `timeline`, `token-budget`, `tree`, and
+`why`. Some commands print the same message their own way:
+
+- `compare`, `org-report`, and `pr-comment` print the message after their own
+  prefix and exit 1. `annotate` prints it with no prefix and exits 1.
+- `review` and `compaction` print it after their own prefix and exit 2.
+- `cognitive-debt` keeps `Error: trace input could not be read safely`, and the
+  `tenant` commands keep `corrupt session in tenant store: <id>`.
+
+`health`, `stats`, `standup`, and `lint` without a session ID read the newest
+session, so they refuse when the newest session has a mismatched or unreadable
+event. `lint --all` prints the report of every other session, then one `Error:`
+line for each session it cannot read, and exits 1. `stats`, `standup`, and
+`lint` treat a session with
+[non-object event data](#sessions-with-non-object-event-data) the same way.
+
+`agent-strace server` answers `GET /sessions/<id>/events` for such a session
+with 400 and `{"error": "<message>"}`. When `meta.json` names another session,
+`GET /sessions/<id>` answers the same way (see
+[server.md](server.md#api-reference)). For a mismatched or unreadable event,
+`org-report --endpoint` then stops with
+`org-report failed: collector request failed with HTTP 400` instead of
+reporting without the session. With `--dashboard`, the session's events and its
+review, compare, share, and OTLP actions answer 400 with the message. MCP tools
+return an error result with it.
+
+`list`, `validate`, `verify`, `freshness`, and `postmortem --list` keep working.
+`verify` still checks the hash chain and reports where it breaks. `validate`
+reports the session invalid and names the check that failed.
+
+A session whose `meta.json` names another session is skipped the way
+[`list`](#list) describes for a corrupt `meta.json`. `list` leaves it out, and
+so do `health`, `stats`, `standup`, and `lint` without a session ID. So does
+`GET /sessions`, so `org-report --endpoint` does not see it. Most commands that
+take a session ID print `Session not found` for it. `replay`, `inspect`,
+`export`, `stats <id>`, and `health <id>` print the corrupt `meta.json` line
+above.
+
+`a2a-tree`, `baseline update`, `budget-report`, `compliance export`, `curve`,
+`dashboard --trend`, `inflation`, `optimize`, `sample`, and `team-report` go
+on without the session's events, as before. `dashboard` shows the session as
+not priced. Earlier versions stopped `dashboard` with a traceback when a line
+was not an object or had no `event_type`. `watch`, `mcp-scan --watch`, and
+`skills` skip a line they cannot parse.
+
+When two IDs differ, do not edit one to match the other. The events may belong
+to another session or tenant. Check instead how they got into this directory:
+whether the directory was renamed, or copied or restored from another store,
+and whether a script or a second agent wrote to it. For a tenant mismatch, check
+which tenant each capture ran under (`AGENT_STRACE_TENANT_ID`). For an
+unreadable line, check whether a crash or a full disk cut a write short, or the
+file was edited. `verify` shows whether the events changed after they were
+written. When `meta.json` names another session, make the same checks before
+you follow the `backfill-meta` steps under [`list`](#list).
+
+---
+
 ## GitHub Actions
 
 The `agent-trace eval` composite action runs evals in CI, posts a scored table to the GitHub Actions step summary, and exits non-zero on regression. It can also run the [reviewability check](review.md) as a required status check.

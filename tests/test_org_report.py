@@ -10,6 +10,7 @@ import tempfile
 import threading
 import unittest
 import urllib.error
+import warnings
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -44,6 +45,11 @@ from agent_trace.org_report import (
 from agent_trace.store import TraceStore
 from agent_trace.team_report import _fallback_author, session_engineer_attribution
 from agent_trace.tenancy import enumerate_trace_stores
+
+try:
+    from test_store import OTHER_SESSION, event_line, write_session_lines
+except ImportError:  # pragma: no cover - package-style test discovery
+    from tests.test_store import OTHER_SESSION, event_line, write_session_lines
 
 
 def _timestamp(year: int, month: int, day: int = 1) -> float:
@@ -259,15 +265,23 @@ class TestMonthAndLocalReport(unittest.TestCase):
                 session_id="deep-local", started_at=_timestamp(2026, 8, 2)
             )
             store.create_session(meta)
+            deep = "[" * 10_000 + "0" + "]" * 10_000
             payload = (
                 '{"event_type":"user_prompt","timestamp":1,"event_id":"e",'
                 '"session_id":"deep-local","data":{"nested":'
-                + "[" * 10_000 + "0" + "]" * 10_000 + "}}\n"
+                + deep + "}}\n"
             )
             (store._session_dir(meta.session_id) / "events.ndjson").write_text(
                 payload, encoding="utf-8"
             )
-            with self.assertRaisesRegex(ValueError, "nesting exceeds"):
+            try:
+                json.loads(deep)
+            except RecursionError:
+                # Where json cannot parse the line, the store refuses it first.
+                expected = "line 1 of events.ndjson is nested too deeply"
+            else:
+                expected = "nesting exceeds"
+            with self.assertRaisesRegex(ValueError, expected):
                 build_org_report([store], "2026-08")
 
     def test_tenants_are_tags_not_org_boundaries_and_are_not_emitted(self):
@@ -702,6 +716,50 @@ class TestCliAndOutput(unittest.TestCase):
             (stdout.getvalue(), stderr.getvalue()),
             ("", "org-report failed: corrupt session in tenant store: " + "b" * 16 + "\n"),
         )
+
+    def test_endpoint_refuses_a_session_the_collector_cannot_read(self):
+        from agent_trace.server import _make_handler
+
+        started = _timestamp(2026, 8, 2)
+        for name, lines in (
+            ("event session", [event_line(session_id=OTHER_SESSION)]),
+            ("unreadable line", [event_line(), "not json"]),
+        ):
+            with self.subTest(name), tempfile.TemporaryDirectory() as directory:
+                store = TraceStore(directory, use_workspace_env=False)
+                write_session_lines(
+                    store, [event_line(timestamp=started + 1)], started_at=started
+                )
+                write_session_lines(store, lines, started_at=started + 60)
+                server = ThreadingHTTPServer(
+                    ("127.0.0.1", 0), _make_handler(store, threading.Lock(), auth_key="k1")
+                )
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                args = build_parser().parse_args([
+                    "org-report", "--month", "2026-08",
+                    "--endpoint", f"http://127.0.0.1:{server.server_port}",
+                ])
+                try:
+                    # The client leaves its 401 auth probe response open.
+                    with warnings.catch_warnings(), \
+                            patch.dict(os.environ, {"AGENT_STRACE_AUTH_KEY": "k1"}), \
+                            patch("sys.stdout", new_callable=io.StringIO) as stdout, \
+                            patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                        warnings.simplefilter("ignore", ResourceWarning)
+                        code = cmd_org_report(args)
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=2)
+                errors = [
+                    line for line in stderr.getvalue().splitlines()
+                    if not line.startswith('[server] "')
+                ]
+                self.assertEqual(
+                    (code, stdout.getvalue(), errors),
+                    (1, "", ["org-report failed: collector request failed with HTTP 400"]),
+                )
 
     def test_atomic_output_rejects_symlink_and_preserves_existing_on_failure(self):
         with tempfile.TemporaryDirectory() as directory:
