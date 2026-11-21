@@ -22,6 +22,7 @@ import json
 import re
 from typing import Any, Callable
 
+from .event_data import is_redacted
 from .models import EventType, TraceEvent
 
 SUMMARY_RUNNERS = frozenset({"unittest", "pytest", "jest", "vitest"})
@@ -62,7 +63,7 @@ def output_text(result: TraceEvent | None) -> str | None:
     None when there is no result, it is an error event, it was redacted, its
     content was omitted, or the recorder truncated it.
     """
-    if result is None or result.event_type != EventType.TOOL_RESULT or result.redacted:
+    if result is None or result.event_type != EventType.TOOL_RESULT or is_redacted(result):
         return None
     data = result.data if isinstance(result.data, dict) else {}
     if data.get("content_omitted") or data.get("truncated") is True:

@@ -17,6 +17,7 @@ from dataclasses import asdict, dataclass, field
 from typing import TextIO
 
 from .event_data import (
+    event_id_of,
     object_field,
     require_object_event_data,
     require_usable_timestamps,
@@ -304,8 +305,9 @@ def require_tree_event_data(node: SessionNode, expand: bool = True) -> None:
         c.meta.parent_event_id: c for c in node.children if c.meta.parent_event_id
     }
     for event in node.events:
-        if event.event_type == EventType.TOOL_CALL and event.event_id in children_by_event:
-            require_tree_event_data(children_by_event[event.event_id], expand)
+        event_id = event_id_of(event)
+        if event.event_type == EventType.TOOL_CALL and event_id in children_by_event:
+            require_tree_event_data(children_by_event[event_id], expand)
 
 
 def require_tree_timestamps(node: SessionNode, expand: bool = True) -> None:
@@ -323,8 +325,9 @@ def require_tree_timestamps(node: SessionNode, expand: bool = True) -> None:
         c.meta.parent_event_id: c for c in node.children if c.meta.parent_event_id
     }
     for event in node.events:
-        if event.event_type == EventType.TOOL_CALL and event.event_id in children_by_event:
-            require_tree_timestamps(children_by_event[event.event_id], expand)
+        event_id = event_id_of(event)
+        if event.event_type == EventType.TOOL_CALL and event_id in children_by_event:
+            require_tree_timestamps(children_by_event[event_id], expand)
 
 
 def format_tree(
@@ -399,8 +402,8 @@ def format_tree(
             w(f"{indent}{ts_str}  → tool_call  {inert(tool_name)}{subagent_tag}{detail}\n")
 
             # Inline expand subagent if this tool_call spawned one
-            if expand and event.event_id in children_by_event:
-                child = children_by_event[event.event_id]
+            if expand and event_id_of(event) in children_by_event:
+                child = children_by_event[event_id_of(event)]
                 is_last = child == node.children[-1] if node.children else True
                 format_tree(child, base_ts=base_ts, out=out, expand=expand,
                             last_child=is_last, level=level + 1)

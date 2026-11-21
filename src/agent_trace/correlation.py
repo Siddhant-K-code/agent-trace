@@ -6,6 +6,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
+from .event_data import event_id_of, parent_id_of
 from .models import EventType, TraceEvent
 
 
@@ -35,7 +36,10 @@ def correlate_tool_events(
     calls_by_tool_use: dict[str, list[int]] = {}
     for index, event in enumerate(events):
         if event.event_type == EventType.TOOL_CALL:
-            calls_by_id.setdefault(event.event_id, []).append(index)
+            # A call without a usable event_id has no ID to share.
+            event_id = event_id_of(event)
+            if event_id:
+                calls_by_id.setdefault(event_id, []).append(index)
             tool_use = event.data.get("tool_use_id")
             if isinstance(tool_use, str) and tool_use:
                 calls_by_tool_use.setdefault(tool_use, []).append(index)
@@ -52,8 +56,9 @@ def correlate_tool_events(
             continue
         matched: int | None = None
         parent_candidates: list[int] = []
-        if isinstance(event.parent_id, str) and event.parent_id:
-            parent_candidates = calls_by_id.get(event.parent_id, [])
+        parent_id = parent_id_of(event)
+        if parent_id:
+            parent_candidates = calls_by_id.get(parent_id, [])
             prior_parent = [item for item in parent_candidates if item < index]
             later_parent = [item for item in parent_candidates if item >= index]
             if len(prior_parent) == 1 and not later_parent:

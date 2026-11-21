@@ -26,6 +26,7 @@ from .audit import (
     _extract_urls,
     _glob_match,
 )
+from .event_data import event_id_of
 from .inert import inert
 from .models import EventType, SessionMeta, TraceEvent
 from .store import TraceStore
@@ -436,7 +437,7 @@ def _evaluate_call(
     if not isinstance(event.data, Mapping):
         return CallEvaluation(
             session_id=session_id,
-            event_id=event.event_id,
+            event_id=event_id_of(event),
             event_index=event_index,
             action="Tool: ? (malformed data)",
             verdict="allowed",
@@ -449,7 +450,7 @@ def _evaluate_call(
         tool_name = str(data.get("tool_name", "?"))
         return CallEvaluation(
             session_id=session_id,
-            event_id=event.event_id,
+            event_id=event_id_of(event),
             event_index=event_index,
             action=f"Tool: {tool_name} (malformed arguments)",
             verdict="allowed",
@@ -467,7 +468,7 @@ def _evaluate_call(
     rule = rules_by_key.get(rule_key or "")
     return CallEvaluation(
         session_id=session_id,
-        event_id=event.event_id,
+        event_id=event_id_of(event),
         event_index=event_index,
         action=action,
         verdict=verdict,

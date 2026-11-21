@@ -24,6 +24,7 @@ from .correlation import correlate_tool_events
 from .event_data import (
     NonObjectEventDataError,
     UnusableTimestampError,
+    is_redacted,
     require_object_event_data,
     require_usable_timestamps,
 )
@@ -878,7 +879,7 @@ def assess_rationale(sessions: Sequence[_Session]) -> Finding:
         texts = [_prompt_text(e) for e in events]
         prompts += sum(1 for text in texts if text.strip())
         empty += sum(1 for text in texts if not text.strip())
-        redacted += sum(1 for e in events if e.redacted)
+        redacted += sum(1 for e in events if is_redacted(e))
         if any(text.strip() for text in texts):
             with_prompt += 1
         elif not session.captures("prompt"):

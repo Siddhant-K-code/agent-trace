@@ -15,7 +15,12 @@ from collections import Counter
 
 from .annotate import Annotation, load_annotations
 from .disclosure import build_disclosure_preview
-from .event_data import require_object_event_data, require_usable_timestamps
+from .event_data import (
+    duration_ms_of,
+    event_id_of,
+    require_object_event_data,
+    require_usable_timestamps,
+)
 from .health import CaptureMatrix, assess_session, load_capture_matrix
 from .live_verify import LiveCaptureError, inspect_live_capture
 from .models import EventType, SessionMeta, TraceEvent, usable_text, usable_time
@@ -187,7 +192,7 @@ def _annotation_targets(
 ) -> tuple[dict[str, list[dict[str, object]]], list[dict[str, object]]]:
     by_event: dict[str, list[dict[str, object]]] = {}
     unresolved: list[dict[str, object]] = []
-    event_id_counts = Counter(event.event_id for event in events)
+    event_id_counts = Counter(event_id_of(event) for event in events)
     started_at = events[0].timestamp if events else 0.0
 
     for annotation in annotations:
@@ -203,9 +208,10 @@ def _annotation_targets(
                     (event.timestamp - started_at) - annotation.offset_seconds
                 ),
             )
-            payload["event_id"] = target_event.event_id
-            if event_id_counts[target_event.event_id] == 1:
-                by_event.setdefault(target_event.event_id, []).append(payload)
+            target_id = event_id_of(target_event)
+            payload["event_id"] = target_id
+            if event_id_counts[target_id] == 1:
+                by_event.setdefault(target_id, []).append(payload)
                 continue
         unresolved.append(payload)
 
@@ -261,11 +267,13 @@ def _review_items(
     projection = build_review_projection(events)
     annotation_map, unresolved_annotations = _annotation_targets(annotations, events)
     event_by_index = {index: event for index, event in enumerate(events)}
-    children: dict[str, list[str]] = {}
+    children: dict[str, list[TraceEvent]] = {}
 
     for projected in projection.items:
         if projected.relationship == "linked" and projected.parent_id:
-            children.setdefault(projected.parent_id, []).append(projected.event_id)
+            children.setdefault(projected.parent_id, []).append(
+                event_by_index[projected.source_index]
+            )
 
     items: list[dict[str, object]] = []
     for sequence, projected in enumerate(projection.items, start=1):
@@ -279,7 +287,8 @@ def _review_items(
 
         relationship = projected.relationship
         relationship_issue = projected.relationship_issue
-        child_ids = children.get(projected.event_id, [])
+        child_events = children.get(projected.event_id, [])
+        child_ids = [event_id_of(child) for child in child_events]
 
         if (
             event.event_type in _EXPECTED_PARENT_TYPES
@@ -291,19 +300,12 @@ def _review_items(
             categories.add("gaps")
 
         expected_children = _REQUEST_TYPES.get(event.event_type)
-        linked_terminal_children = [
-            child_id
-            for child_id in child_ids
-            if next(
-                (
-                    candidate.event_type
-                    for candidate in events
-                    if candidate.event_id == child_id
-                ),
-                None,
-            ) in expected_children
-        ] if expected_children else []
-        missing_child = bool(expected_children and not linked_terminal_children)
+        # Check each child's own type. A child without a usable event_id has
+        # no ID to look it up by.
+        missing_child = bool(
+            expected_children
+            and not any(child.event_type in expected_children for child in child_events)
+        )
         if missing_child:
             categories.add("gaps")
 
@@ -312,7 +314,7 @@ def _review_items(
             "event_id": projected.event_id,
             "event_type": projected.event_type,
             "timestamp": projected.timestamp,
-            "duration_ms": event.duration_ms,
+            "duration_ms": duration_ms_of(event),
             "parent_id": projected.parent_id,
             "child_ids": child_ids,
             "relationship": relationship,
@@ -445,7 +447,7 @@ def build_minimized_review_payload(review: dict[str, object]) -> dict[str, objec
     sequence_by_id = {
         str(item["event_id"]): int(item["sequence"])
         for item in items
-        if isinstance(item, dict)
+        if isinstance(item, dict) and item["event_id"]
     }
     started_at = session.get("started_at")
 

@@ -127,6 +127,9 @@ from .why import cmd_why
 from .event_data import (
     NonObjectEventDataError,
     UnusableTimestampError,
+    duration_ms_of,
+    event_id_of,
+    parent_id_of,
     require_object_event_data,
     require_usable_session_times,
     require_usable_timestamps,
@@ -731,16 +734,20 @@ def cmd_stats(args: argparse.Namespace) -> int:
     # tool call frequency
     tool_counts: dict[str, int] = {}
     tool_durations: dict[str, list[float]] = {}
-    result_events = {e.parent_id: e for e in events if e.event_type == EventType.TOOL_RESULT}
+    result_events = {
+        parent_id_of(e): e for e in events if e.event_type == EventType.TOOL_RESULT
+    }
 
     for e in events:
         if e.event_type == EventType.TOOL_CALL:
             name = str_field(e.data, "tool_name", "unknown")
             tool_counts[name] = tool_counts.get(name, 0) + 1
             # find matching result
-            result = result_events.get(e.event_id)
-            if result and result.duration_ms:
-                tool_durations.setdefault(name, []).append(result.duration_ms)
+            event_id = event_id_of(e)
+            result = result_events.get(event_id) if event_id else None
+            duration = duration_ms_of(result) if result else None
+            if duration:
+                tool_durations.setdefault(name, []).append(duration)
 
     print(format_summary(meta))
     print()

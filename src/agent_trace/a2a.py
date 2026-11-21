@@ -19,6 +19,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import time
@@ -27,6 +28,7 @@ from typing import Any, TextIO
 
 from .event_data import (
     UnusableTimestampError,
+    event_id_of,
     require_object_event_data,
     require_usable_timestamps,
 )
@@ -93,7 +95,7 @@ class A2ACallEvent:
             return None
         d = event.data
         return cls(
-            event_id=event.event_id,
+            event_id=event_id_of(event),
             session_id=event.session_id,
             timestamp=event.timestamp,
             agent_id=d.get("agent_id", ""),
@@ -474,11 +476,16 @@ def a2a_calls_to_otlp_spans(
         spans.append(span)
         span_by_session[node.session_id] = span
 
-        for call in node.a2a_calls:
+        for position, call in enumerate(node.a2a_calls):
             # Multiplying a str or a list repeats it, so refuse those first.
             if isinstance(call.timestamp, bool) or not isinstance(call.timestamp, (int, float)):
                 raise UnusableTimestampError("timestamp must be a Unix time in seconds")
             call_span_id = call.event_id[:16]
+            if not call_span_id:
+                # A call without a usable event_id gets an ID from its session
+                # and position, so two such calls never share one.
+                seed = f"a2a-call-{node.session_id}-{position}"
+                call_span_id = hashlib.sha256(seed.encode()).hexdigest()[:16]
             spans.append({
                 "traceId": trace_id,
                 "spanId": call_span_id,

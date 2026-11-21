@@ -2754,6 +2754,19 @@ still count the stored size of each event.
 only when the JSON-RPC id is a string or a number. With any other id they
 forward both messages and record both events without the link.
 
+The top-level event fields `duration_ms`, `event_id`, `parent_id`, and
+`redacted` follow the same rule. A `duration_ms` that is not a number, or is
+negative, NaN, infinity, or too large for a float, reads as missing. An
+`event_id` or `parent_id` that is not a non-empty string reads as missing, so
+no event links through it. Only `true` counts as `redacted`. The `otlp` and
+`otlp-genai` exports still give each event its own span ID. `inspect`,
+`sample`, and `export --format json`, `ndjson`, or `csv` keep the stored value.
+`validate` reports each such value as `event_schema_invalid`, and `org-report`
+refuses any of them. `compliance-report` refuses an `event_id` or `parent_id`
+that is not a string, an empty `event_id`, and a NaN or infinite
+`duration_ms`. `share` refuses a NaN or infinite `duration_ms`, and
+`share --assignment` refuses any `duration_ms` that is not a usable number.
+
 ---
 
 ## Sessions with unusable event timestamps

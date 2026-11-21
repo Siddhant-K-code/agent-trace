@@ -14,7 +14,7 @@ from . import __version__
 from .annotate import Annotation, load_annotations
 from .correlation import correlate_tool_events
 from .disclosure import DisclosurePreview, build_disclosure_preview
-from .event_data import require_object_event_data
+from .event_data import event_id_of, parent_id_of, require_object_event_data
 from .health import HealthReport, assess_session, load_capture_matrix
 from .models import EventType, SessionMeta, TraceEvent
 from .store import TraceStore
@@ -414,8 +414,9 @@ def _minimize_events(
 ) -> tuple[tuple[TraceEvent, ...], dict[str, str]]:
     event_indices: dict[str, list[int]] = {}
     for index, event in enumerate(events):
-        if event.event_id:
-            event_indices.setdefault(event.event_id, []).append(index)
+        event_id = event_id_of(event)
+        if event_id:
+            event_indices.setdefault(event_id, []).append(index)
     packet_refs = {
         index: f"event-{index + 1:06d}"
         for index in range(len(events))
@@ -430,7 +431,7 @@ def _minimize_events(
         selected = copy.copy(event)
         selected.data = _minimized_data(event, index, behavior)
         selected.event_id = packet_refs[index]
-        selected.parent_id = unique_event_refs.get(event.parent_id, "")
+        selected.parent_id = unique_event_refs.get(parent_id_of(event), "")
         selected.prev_hash = ""
         selected.tenant_id = ""
         minimized.append(selected)

@@ -15,7 +15,7 @@ Usage:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 import hashlib
 import json
@@ -27,7 +27,14 @@ from typing import Any
 
 from . import __version__
 from .cost import TokenUsage, reasoning_output_tokens, usage_detail
-from .event_data import UnusableTimestampError, object_field, str_field
+from .event_data import (
+    UnusableTimestampError,
+    event_id_of,
+    is_redacted,
+    object_field,
+    parent_id_of,
+    str_field,
+)
 # ERROR_TYPE_* and LLMFailure stay importable from here.
 from .failures import (
     ERROR_TYPE_CANCELLED,
@@ -150,6 +157,29 @@ def _to_span_id(event_id: str) -> str:
     return h[:16]
 
 
+def _event_span_ids(
+    session_id: str, events: list[TraceEvent],
+) -> Callable[[TraceEvent], str]:
+    """Return a function that gives each event in ``events`` its span ID.
+
+    An event with an ``event_id`` gets ``_to_span_id(event_id)``, so a link
+    to that ID, such as a subagent's ``parent_event_id``, finds its span. An
+    event whose ``event_id`` is empty or not a string gets an ID made from the
+    session, its position in ``events`` and its timestamp, so two such events
+    never share one.
+    """
+    positions = {id(event): position for position, event in enumerate(events)}
+
+    def span_id(event: TraceEvent) -> str:
+        event_id = event_id_of(event)
+        if event_id:
+            return _to_span_id(event_id)
+        position = positions.get(id(event))
+        return _to_span_id(f"event-{session_id}-{position}-{event.timestamp!r}")
+
+    return span_id
+
+
 def _ts_to_nanos(ts: float) -> str:
     """Convert Unix timestamp to nanoseconds as string.
 
@@ -177,11 +207,19 @@ def _failure_status(failure: LLMFailure) -> dict:
     return {"code": 2}
 
 
-def _duration_to_nanos(ms: float | None) -> int:
-    """Convert milliseconds to nanoseconds."""
-    if ms is None or ms <= 0:
+def _duration_to_nanos(ms: Any) -> int:
+    """Convert milliseconds to nanoseconds.
+
+    A duration that is missing, zero or not a usable number (see
+    :func:`usable_number`) gives the 1ms default. So does one too large for a
+    float once it is in nanoseconds.
+    """
+    if not usable_number(ms):
         return 1_000_000  # 1ms default
-    return int(ms * 1_000_000)
+    nanos = ms * 1_000_000
+    if nanos > sys.float_info.max:
+        return 1_000_000
+    return int(nanos)
 
 
 class _StringArray(tuple):
@@ -481,11 +519,12 @@ def _event_trace_attributes(event: TraceEvent, role: str) -> dict[str, Any]:
     prefix = f"agent.strace.{role}"
     data = event.data if isinstance(event.data, Mapping) else {}
     attrs: dict[str, Any] = {
-        f"{prefix}.event_id": event.event_id,
-        f"{prefix}.redacted": event.redacted,
+        f"{prefix}.event_id": event_id_of(event),
+        f"{prefix}.redacted": is_redacted(event),
     }
-    if event.parent_id:
-        attrs[f"{prefix}.parent_event_id"] = event.parent_id
+    parent_id = parent_id_of(event)
+    if parent_id:
+        attrs[f"{prefix}.parent_event_id"] = parent_id
     if event.prev_hash:
         attrs[f"{prefix}.previous_hash"] = event.prev_hash
     provenance = {
@@ -683,6 +722,7 @@ def session_to_otlp(
 
     # Root span covers the entire session
     root_span_id = _to_span_id(f"root-{meta.session_id}")
+    span_id_of = _event_span_ids(meta.session_id, events)
     root_start = _ts_to_nanos(meta.started_at)
     root_end = _ts_to_nanos(
         meta.ended_at
@@ -765,7 +805,7 @@ def session_to_otlp(
             span_attrs = {
                 _SEMCONV_TOOL_NAME: tool_name,
                 _SEMCONV_OP: "tool.call",
-                _SEMCONV_TOOL_CALL_ID: (call_event.event_id if call_event else event.event_id),
+                _SEMCONV_TOOL_CALL_ID: event_id_of(call_event if call_event else event),
             }
             if call_event:
                 args = object_field(call_event.data, "arguments", {})
@@ -779,7 +819,7 @@ def session_to_otlp(
 
             child_spans.append({
                 "traceId": trace_id,
-                "spanId": _to_span_id(call_event.event_id if call_event else event.event_id),
+                "spanId": span_id_of(call_event if call_event else event),
                 "parentSpanId": root_span_id,
                 "name": f"tool/{tool_name}",
                 "kind": 3,  # SPAN_KIND_CLIENT
@@ -811,7 +851,7 @@ def session_to_otlp(
 
             child_spans.append({
                 "traceId": trace_id,
-                "spanId": _to_span_id(call_event.event_id if call_event else event.event_id),
+                "spanId": span_id_of(call_event if call_event else event),
                 "parentSpanId": root_span_id,
                 "name": tool_name,
                 "kind": 1,
@@ -874,7 +914,7 @@ def session_to_otlp(
         tool_name = call_event.data.get("tool_name", "tool")
         child_spans.append({
             "traceId": trace_id,
-            "spanId": _to_span_id(call_event.event_id),
+            "spanId": span_id_of(call_event),
             "parentSpanId": root_span_id,
             "name": tool_name,
             "kind": 1,
@@ -996,12 +1036,14 @@ def _genai_llm_span(
     root_span_id: str,
     req_event: TraceEvent | None,
     event: TraceEvent,
+    span_id: str,
 ) -> dict:
     """Build the ``chat`` model request span for one model request.
 
     ``event`` ends the request: an ``llm_response``, or an ``error`` linked
     to ``req_event``. A failed or cancelled request (see :func:`llm_failure`)
     gets ERROR status and ``error.type``; a completed one keeps OK status.
+    ``span_id`` is the span ID of ``req_event``, or of ``event`` without one.
     """
     span_start = req_event.timestamp if req_event else event.timestamp
     span_end = event.timestamp
@@ -1069,7 +1111,7 @@ def _genai_llm_span(
 
     span: dict = {
         "traceId": trace_id,
-        "spanId": _to_span_id(req_event.event_id if req_event else event.event_id),
+        "spanId": span_id,
         "parentSpanId": root_span_id,
         "name": _model_span_name(model),
         "kind": 3,  # SPAN_KIND_CLIENT
@@ -1127,6 +1169,7 @@ def session_to_otlp_genai(
     """
     trace_id = parent_trace_id if parent_trace_id else _to_trace_id(meta.session_id)
     root_span_id = _to_span_id(f"root-{meta.session_id}")
+    span_id_of = _event_span_ids(meta.session_id, events)
     root_start = _ts_to_nanos(meta.started_at)
     root_end = _ts_to_nanos(
         meta.ended_at
@@ -1152,8 +1195,8 @@ def session_to_otlp_genai(
         "agent.errors": usable_count(meta.errors),
         # agent-strace preservation attributes
         "agent.strace.provider": raw_provider,
-        "agent.strace.redacted": meta.redacted or any(event.redacted for event in events),
-        "agent.strace.redacted_event_count": sum(event.redacted for event in events),
+        "agent.strace.redacted": meta.redacted or any(is_redacted(event) for event in events),
+        "agent.strace.redacted_event_count": sum(is_redacted(event) for event in events),
         **_evidence_attributes(meta, events),
     }
     if meta.attribution:
@@ -1208,6 +1251,7 @@ def session_to_otlp_genai(
             req_event = requests.match(event)
             child_spans.append(_genai_llm_span(
                 meta, trace_id, root_span_id, req_event, event,
+                span_id_of(req_event if req_event else event),
             ))
 
         elif event.event_type == EventType.TOOL_CALL:
@@ -1225,9 +1269,7 @@ def session_to_otlp_genai(
             tool_attrs: dict = {
                 _SEMCONV_TOOL_NAME: tool_name,
                 _SEMCONV_OP: _OP_EXECUTE_TOOL,
-                _SEMCONV_TOOL_CALL_ID: (
-                    call_event.event_id if call_event else event.event_id
-                ),
+                _SEMCONV_TOOL_CALL_ID: event_id_of(call_event if call_event else event),
                 _OI_SPAN_KIND: "TOOL",
                 _OI_SESSION_ID: meta.session_id,
                 **_conversation_attributes(meta),
@@ -1254,9 +1296,7 @@ def session_to_otlp_genai(
 
             child_spans.append({
                 "traceId": trace_id,
-                "spanId": _to_span_id(
-                    call_event.event_id if call_event else event.event_id
-                ),
+                "spanId": span_id_of(call_event if call_event else event),
                 "parentSpanId": root_span_id,
                 "name": _tool_span_name(tool_name),
                 "kind": 1,  # SPAN_KIND_INTERNAL
@@ -1275,6 +1315,7 @@ def session_to_otlp_genai(
                 # exports as one failed model call instead of a tool error.
                 child_spans.append(_genai_llm_span(
                     meta, trace_id, root_span_id, req_event, event,
+                    span_id_of(req_event),
                 ))
                 continue
 
@@ -1300,9 +1341,7 @@ def session_to_otlp_genai(
             error_attrs: dict[str, Any] = {
                 _SEMCONV_TOOL_NAME: tool_name,
                 _SEMCONV_OP: _OP_EXECUTE_TOOL,
-                _SEMCONV_TOOL_CALL_ID: (
-                    call_event.event_id if call_event else event.event_id
-                ),
+                _SEMCONV_TOOL_CALL_ID: event_id_of(call_event if call_event else event),
                 _SEMCONV_ERROR_TYPE: error_type,
                 _OI_SPAN_KIND: "TOOL",
                 _OI_SESSION_ID: meta.session_id,
@@ -1324,9 +1363,7 @@ def session_to_otlp_genai(
 
             child_spans.append({
                 "traceId": trace_id,
-                "spanId": _to_span_id(
-                    call_event.event_id if call_event else event.event_id
-                ),
+                "spanId": span_id_of(call_event if call_event else event),
                 "parentSpanId": root_span_id,
                 "name": _tool_span_name(tool_name),
                 "kind": 1,  # SPAN_KIND_INTERNAL
@@ -1368,7 +1405,7 @@ def session_to_otlp_genai(
         llm_attrs["metadata"] = _openinference_metadata(llm_attrs)
         child_spans.append({
             "traceId": trace_id,
-            "spanId": _to_span_id(req_event.event_id),
+            "spanId": span_id_of(req_event),
             "parentSpanId": root_span_id,
             "name": _model_span_name(model),
             "kind": 3,
@@ -1384,7 +1421,7 @@ def session_to_otlp_genai(
         tool_attrs: dict[str, Any] = {
             _SEMCONV_TOOL_NAME: tool_name,
             _SEMCONV_OP: _OP_EXECUTE_TOOL,
-            _SEMCONV_TOOL_CALL_ID: call_event.event_id,
+            _SEMCONV_TOOL_CALL_ID: event_id_of(call_event),
             _OI_SPAN_KIND: "TOOL",
             _OI_SESSION_ID: meta.session_id,
             **_conversation_attributes(meta),
@@ -1402,7 +1439,7 @@ def session_to_otlp_genai(
         tool_attrs["metadata"] = _openinference_metadata(tool_attrs)
         child_spans.append({
             "traceId": trace_id,
-            "spanId": _to_span_id(call_event.event_id),
+            "spanId": span_id_of(call_event),
             "parentSpanId": root_span_id,
             "name": _tool_span_name(tool_name),
             "kind": 1,  # SPAN_KIND_INTERNAL

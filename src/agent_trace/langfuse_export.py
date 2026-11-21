@@ -24,7 +24,12 @@ import urllib.request
 from dataclasses import dataclass, field
 
 from .cost import TokenUsage, infer_provider
-from .event_data import require_object_event_data, require_usable_timestamps, str_field
+from .event_data import (
+    event_id_of,
+    require_object_event_data,
+    require_usable_timestamps,
+    str_field,
+)
 from .models import (
     EventType,
     SessionMeta,
@@ -259,7 +264,7 @@ def _generation(
         # request this way) carries its own model and input count.
         model = event_model(ev.data)
     generation = {
-        "id": ev.event_id,
+        "id": event_id_of(ev) or None,
         "traceId": session_id,
         "type": "GENERATION",
         "name": "llm-call",
@@ -321,7 +326,7 @@ def _events_to_langfuse_observations(
             start_ts = call.timestamp if call else ev.timestamp
             end_ts = ev.timestamp
             observations.append({
-                "id": ev.event_id,
+                "id": event_id_of(ev) or None,
                 "traceId": session_id,
                 "type": "SPAN",
                 "name": f"tool/{tool_name}",

@@ -40,6 +40,7 @@ A request with a non-empty ``event_id`` replaces a pending request with the
 same ID, which keeps its place in the pending order. Requests with an empty
 ``event_id`` never replace each other. Requests that are still pending at
 the end are returned by :meth:`Pairer.unmatched` in the order they arrived.
+An ``event_id`` or ``parent_id`` that is not a string counts as empty.
 
 The standard channels are:
 
@@ -84,6 +85,7 @@ from collections.abc import Collection, Hashable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Generic, TypeVar
 
+from .event_data import event_id_of, parent_id_of
 from .models import EventType, TraceEvent
 
 NO_FALLBACK = "none"
@@ -137,14 +139,15 @@ class Pairer(Generic[T]):
         """Make ``request`` pending, carrying ``item`` (default: the request)."""
         if item is None:
             item = request
-        key: object = request.event_id or object()
-        if request.event_id:
-            self._seen.add(request.event_id)
+        event_id = event_id_of(request)
+        key: object = event_id or object()
+        if event_id:
+            self._seen.add(event_id)
         self._pending[key] = (event_model(request.data), item)
 
     def match(self, response: TraceEvent) -> T | None:
         """Return the item of the request ``response`` pairs with, or ``None``."""
-        parent_id = response.parent_id
+        parent_id = parent_id_of(response)
         if parent_id and parent_id in self._pending:
             return self._pending.pop(parent_id)[1]
         if parent_id and parent_id in self._seen:
@@ -163,7 +166,7 @@ class Pairer(Generic[T]):
 
     def match_parent(self, response: TraceEvent) -> T | None:
         """Like :meth:`match`, but apply rule 1 only, never the fallback."""
-        parent_id = response.parent_id
+        parent_id = parent_id_of(response)
         if parent_id and parent_id in self._pending:
             return self._pending.pop(parent_id)[1]
         return None
