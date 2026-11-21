@@ -104,3 +104,37 @@ because two expected labels changed). A bad binding exits `2` without a score.
   `capture: "sufficient"`. Missing bindings, gaps, global capture declarations,
   and `UNOBSERVED` on its own cannot establish absence. The bundled packet
   uses the positive path; a separate in-memory test exercises the absence path.
+
+## Two-case reviewer exercise
+
+Build the plain and packet-assisted views with Python 3.10+ and local Git:
+
+```bash
+python3 -B examples/review-evidence-eval/build_reviewer_exercise.py \
+  --producer /path/to/phase-a-checkout \
+  --output /path/to/new-exercise-directory
+```
+
+The builder extracts the Phase A implementation at
+`423601ceb6e290b31e8bb290aac67dc5c041313e` from the supplied checkout's local
+Git objects and runs its actual CLI in a temporary directory. It does not
+switch branches, write to the producer checkout, or run the proposed changes
+or checks. The output directory must be new and its parent must exist.
+
+For each case, `baseline/` and `packet-assisted/` have the same `worksheet.md`
+and byte-identical `evidence/`. Only the second view adds the producer's
+`packet/` (start at `packet/review.md`). The script checks both arms and the
+packet's retained sources for byte parity. It prints an assembly report and
+keeps a copy at `assembly.json` outside the review arms. Exit `0` from the
+builder means both views were assembled, not that either change was accepted.
+
+When trying a case, open only its assigned arm and record a decision and
+rationale in the worksheet. If manually measuring effort, keep assembly and
+review effort separate. Check the
+[reference answers](reviewer-exercise/reference.md) afterward; they are not
+included in either arm. This is a synthetic exercise, not a reviewer study
+or a measurement of usefulness or time savings.
+
+To include the pinned producer smoke in the example's tests, set
+`REVIEW_EVIDENCE_PRODUCER` to the same checkout and run
+`PYTHONPATH=src python3 -B -m unittest tests.test_review_evidence_eval_example`.

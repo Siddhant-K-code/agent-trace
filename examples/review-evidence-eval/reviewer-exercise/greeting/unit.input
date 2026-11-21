@@ -1,0 +1,20 @@
+{
+  "schema": "review-evidence-receipt/v0",
+  "target": {
+    "repo": "demo/greetings",
+    "pr": 7,
+    "task": "friendlier-label",
+    "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "check_id": "unit",
+  "reported_by": "fixture CI",
+  "result": "PASS",
+  "assessment": {
+    "by": "fixture maintainer",
+    "relevance": "RELEVANT",
+    "criterion_ids": [
+      "hello"
+    ]
+  }
+}

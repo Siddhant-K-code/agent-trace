@@ -1,0 +1,3 @@
+# The retained manifest and inputs are pinned by their exact bytes.
+*.json -text
+*.input -text

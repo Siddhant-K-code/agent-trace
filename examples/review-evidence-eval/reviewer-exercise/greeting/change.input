@@ -1,0 +1,7 @@
+diff --git a/greet.py b/greet.py
+index 0123456..fedcba9 100644
+--- a/greet.py
++++ b/greet.py
+@@ -1 +1 @@
+-print('Hi')
++print('Hello')

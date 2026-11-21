@@ -1,10 +1,15 @@
 import hashlib
 import json
+import os
+import runpy
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+from tests import _no_telemetry  # noqa: F401
 
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "review-evidence-eval"
@@ -214,3 +219,67 @@ class ReviewEvidencePacketExampleTests(unittest.TestCase):
         evidence = self.load_input("evidence")
         evidence["packet_sha256"] = "0" * 64
         self.assertIn("reference the bound packet", self.run_packet(evidence=evidence, expected_exit=2))
+
+
+class ReviewerExerciseTests(unittest.TestCase):
+    def test_evidence_parity_rejects_a_changed_arm_or_packet_copy(self):
+        with patch.object(sys, "path", [str(EXAMPLE), *sys.path]):
+            verify_parity = runpy.run_path(str(EXAMPLE / "build_reviewer_exercise.py"))["verify_parity"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            baseline, assisted, packet = (root / name for name in ("baseline", "assisted", "packet"))
+            for folder in (baseline, assisted, packet):
+                folder.mkdir()
+            manifest = b'{"sources":[]}\n'
+            evidence = b"identical retained evidence\n"
+            for arm in (baseline, assisted):
+                (arm / "bundle.json").write_bytes(manifest)
+                (arm / "source.input").write_bytes(evidence)
+            retained = packet / "source.txt"
+            retained.write_bytes(evidence)
+            (packet / "packet.json").write_text(json.dumps({
+                "manifest_sha256": hashlib.sha256(manifest).hexdigest(),
+                "sources": [{
+                    "path": "source.input", "retained_path": retained.name,
+                    "sha256": hashlib.sha256(evidence).hexdigest(),
+                }],
+            }), encoding="utf-8")
+            verify_parity(baseline, assisted, packet)
+            retained.write_bytes(b"changed retained bytes\n")
+            with self.assertRaisesRegex(ValueError, "retained bytes differ"):
+                verify_parity(baseline, assisted, packet)
+            retained.write_bytes(evidence)
+            (assisted / "source.input").write_bytes(b"changed arm\n")
+            with self.assertRaisesRegex(ValueError, "arms differ"):
+                verify_parity(baseline, assisted, packet)
+
+    @unittest.skipUnless(os.environ.get("REVIEW_EVIDENCE_PRODUCER"), "requires a local Phase A checkout")
+    def test_both_views_replay_the_same_evidence_and_footer_pass_has_gaps(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "exercise"
+            result = subprocess.run(
+                [sys.executable, "-B", str(EXAMPLE / "build_reviewer_exercise.py"),
+                 "--producer", os.environ["REVIEW_EVIDENCE_PRODUCER"], "--output", str(output)],
+                text=True, capture_output=True, timeout=45,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["cases"]["greeting"]["producer_status"], "VALID / COMPLETE / PASS")
+            self.assertEqual(report["cases"]["footer"]["producer_status"], "VALID / INCONCLUSIVE / PASS")
+            self.assertEqual(report["cases"]["footer"]["producer_exit"], 2)
+            for case in ("greeting", "footer"):
+                plain, assisted = (output / case / name for name in ("baseline", "packet-assisted"))
+                self.assertEqual({path.name for path in plain.iterdir()}, {"worksheet.md", "evidence"})
+                self.assertEqual(
+                    {path.name for path in assisted.iterdir()}, {"worksheet.md", "evidence", "packet"},
+                )
+                self.assertEqual((plain / "worksheet.md").read_bytes(), (assisted / "worksheet.md").read_bytes())
+                for name in report["cases"][case]["identical_evidence_sha256"]:
+                    self.assertEqual((plain / "evidence" / name).read_bytes(), (assisted / "evidence" / name).read_bytes())
+            footer = json.loads((output / "footer/packet-assisted/packet/packet.json").read_bytes())
+            self.assertEqual(
+                {gap["code"] for gap in footer["gaps"]}, {"CRITERION_UNCOVERED", "STEP_UNOBSERVED"},
+            )
+            self.assertEqual(footer["steps"][0]["status"], "UNOBSERVED")
+            self.assertEqual(footer["capture"]["completeness"], "PARTIAL")
+            self.assertFalse(footer["checks"][0]["coverage_eligible"])
