@@ -35,6 +35,8 @@ class TestSessionPaths(unittest.TestCase):
             _ev(EventType.SESSION_START, cwd="/private/tmp/atdemo/"),
         ]
         self.assertEqual(session_cwd(events), "/private/tmp/atdemo")
+        self.assertEqual(session_cwd([_ev(EventType.SESSION_START, cwd="/")]), "/")
+        self.assertEqual(session_cwd([_ev(EventType.SESSION_START, cwd="C:\\")]), "C:/")
         self.assertEqual(session_cwd([]), "")
 
     def test_cwd_forms_include_macos_alias(self):
@@ -50,6 +52,41 @@ class TestSessionPaths(unittest.TestCase):
         self.assertEqual(normalise_path("./src/a.py", cwd), "src/a.py")
         self.assertEqual(normalise_path("/elsewhere/a.py", cwd), "/elsewhere/a.py")
         self.assertEqual(normalise_path("C:\\repo\\a.py", "C:/repo"), "a.py")
+        self.assertEqual(normalise_path("/workspace/file.py", "/"), "workspace/file.py")
+        self.assertEqual(normalise_path("c:/REPO/src/file.py", "C:/repo"), "src/file.py")
+        self.assertEqual(
+            normalise_path("C:/repo-sibling/file.py", "C:/repo"),
+            "C:/repo-sibling/file.py",
+        )
+        self.assertEqual(
+            normalise_path("C:/repo/src/../file.py", "C:/repo"), "file.py"
+        )
+        self.assertEqual(normalise_path("./src/file.py", "C:/repo"), "src/file.py")
+
+    def test_normalise_path_under_unc_share_root(self):
+        self.assertEqual(
+            normalise_path("//server/share/a.py", "//server/share"), "a.py"
+        )
+        self.assertEqual(
+            normalise_path("//SERVER/SHARE/src/a.py", "//server/share"),
+            "src/a.py",
+        )
+        self.assertEqual(
+            normalise_path("//server/share/src/a.py", "//SERVER/SHARE/"),
+            "src/a.py",
+        )
+        self.assertEqual(
+            normalise_path("//server/share/src/../a.py", "//server/share"),
+            "a.py",
+        )
+        self.assertEqual(
+            normalise_path("//server/share-sibling/a.py", "//server/share"),
+            "//server/share-sibling/a.py",
+        )
+        self.assertEqual(
+            normalise_path("//server/other/a.py", "//server/share"),
+            "//server/other/a.py",
+        )
 
     def test_command_text_and_shell_call(self):
         call = _bash("ls")
@@ -114,6 +151,38 @@ class TestResolvePath(unittest.TestCase):
 
 
 class TestSessionFileActivity(unittest.TestCase):
+    def test_root_cwd_and_windows_case_variants_are_repo_relative(self):
+        root_activity = session_file_activity([
+            _ev(EventType.SESSION_START, cwd="/"),
+            _ev(EventType.TOOL_CALL, tool_name="view", arguments={"path": "/workspace/a.py"}),
+        ])
+        self.assertEqual(root_activity.read, ["workspace/a.py"])
+
+        windows_activity = session_file_activity([
+            _ev(EventType.SESSION_START, cwd="C:\\Repo\\"),
+            _ev(EventType.TOOL_CALL, tool_name="view", arguments={"path": "c:/repo/src/a.py"}),
+            _ev(EventType.TOOL_CALL, tool_name="edit", arguments={"path": "C:/REPO/src/a.py"}),
+        ])
+        self.assertEqual(windows_activity.read, ["src/a.py"])
+        self.assertEqual(windows_activity.written, ["src/a.py"])
+
+    def test_unc_share_root_and_case_variants_are_repo_relative(self):
+        activity = session_file_activity([
+            _ev(EventType.SESSION_START, cwd="\\\\server\\share\\"),
+            _ev(
+                EventType.TOOL_CALL,
+                tool_name="view",
+                arguments={"path": "//SERVER/SHARE/src/a.py"},
+            ),
+            _ev(
+                EventType.TOOL_CALL,
+                tool_name="edit",
+                arguments={"path": "\\\\server\\share\\src\\a.py"},
+            ),
+        ])
+        self.assertEqual(activity.read, ["src/a.py"])
+        self.assertEqual(activity.written, ["src/a.py"])
+
     def test_combines_explicit_and_shell_activity(self):
         events = [
             _ev(EventType.SESSION_START, cwd="/private/tmp/atdemo"),

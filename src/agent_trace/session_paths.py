@@ -30,11 +30,14 @@ def session_cwd(events: Sequence[TraceEvent]) -> str:
         if event.event_type == EventType.SESSION_START:
             cwd = event.data.get("cwd")
             if isinstance(cwd, str) and cwd.strip():
-                return cwd.strip().replace("\\", "/").rstrip("/")
+                value = cwd.strip().replace("\\", "/")
+                if value == "/" or re.fullmatch(r"[A-Za-z]:/", value):
+                    return value
+                return value.rstrip("/")
     return ""
 
 
-_WINDOWS_ABSOLUTE = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
+_WINDOWS_ABSOLUTE = re.compile(r"^(?:[A-Za-z]:[\\/]|[\\/]{2})")
 _URI = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]+://")
 
 
@@ -83,13 +86,52 @@ def cwd_forms(cwd: str) -> tuple[str, ...]:
     return (cwd,)
 
 
+def _relative_to(value: str, cwd: str, *, windows: bool) -> str | None:
+    """Return an absolute path relative to ``cwd`` when it is contained in it."""
+    path_module = ntpath if windows else posixpath
+    value = path_module.normpath(value)
+    cwd = path_module.normpath(cwd)
+    if windows:
+        value_drive, value_tail = ntpath.splitdrive(value)
+        cwd_drive, cwd_tail = ntpath.splitdrive(cwd)
+        if value_drive.startswith("\\\\") and not value_tail:
+            value = value_drive + "\\"
+        if cwd_drive.startswith("\\\\") and not cwd_tail:
+            cwd = cwd_drive + "\\"
+    try:
+        common = path_module.commonpath((cwd, value))
+    except ValueError:
+        return None
+    same_root = (
+        ntpath.normcase(common) == ntpath.normcase(cwd)
+        if windows
+        else common == cwd
+    )
+    if not same_root:
+        return None
+    relative = path_module.relpath(value, cwd)
+    return relative.replace("\\", "/") if windows else relative
+
+
 def normalise_path(path: str, cwd: str) -> str:
-    """Return ``path`` relative to ``cwd`` when it is inside it."""
+    """Return ``path`` relative to ``cwd`` when it is inside it.
+
+    Absolute Windows paths are compared case-insensitively, and absolute paths
+    are normalized lexically before their containment is checked.
+    """
     value = path.strip().replace("\\", "/")
-    for form in cwd_forms(cwd):
-        if value.startswith(form + "/"):
-            value = value[len(form) + 1:]
-            break
+    working_directory = cwd.replace("\\", "/")
+    for form in cwd_forms(working_directory):
+        form_windows = bool(_WINDOWS_ABSOLUTE.match(form))
+        value_windows = bool(_WINDOWS_ABSOLUTE.match(value))
+        if form_windows and value_windows:
+            relative = _relative_to(value, form, windows=True)
+        elif not form_windows and form.startswith("/") and value.startswith("/"):
+            relative = _relative_to(value, form, windows=False)
+        else:
+            relative = None
+        if relative is not None:
+            return relative
     while value.startswith("./"):
         value = value[2:]
     return value
