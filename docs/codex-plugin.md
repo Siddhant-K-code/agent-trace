@@ -201,8 +201,8 @@ keep only the plugin:
   restores that backup.
 - When the file has only AgentTrace hooks and there is no such backup, they
   print an `rm` command.
-- When the file has other hooks too, they tell you to delete the entries that
-  run `agent-strace hook`.
+- When the file has other hooks or a `description` too, they tell you to delete
+  the entries that run `agent-strace hook`.
 
 Setup does not check project `.codex/hooks.json` files. Remove the AgentTrace
 entries from them yourself. Their commands start with
