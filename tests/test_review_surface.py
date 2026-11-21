@@ -169,6 +169,61 @@ class ReviewSurfaceTests(unittest.TestCase):
         self.assertEqual(minimized["session"]["provider"], "claude")
         self.assertEqual(minimized["session"]["capture_method"], "cli_hooks")
 
+    def _resumed_session(
+        self,
+        session_id: str,
+        *,
+        meta_ended_at: float | None = None,
+        ended_again_at: float | None = None,
+    ) -> dict:
+        self.store.create_session(SessionMeta(
+            session_id=session_id,
+            started_at=1000,
+            ended_at=meta_ended_at,
+            agent_name="Claude Code",
+            command="Claude Code (resume)",
+        ))
+        events = [
+            TraceEvent(EventType.SESSION_START, timestamp=1000, event_id="start",
+                       data={"source": "startup"}),
+            TraceEvent(EventType.USER_PROMPT, timestamp=1001, event_id="prompt-1",
+                       data={"prompt": "first"}),
+            TraceEvent(EventType.SESSION_END, timestamp=1010, event_id="end-1", data={}),
+            TraceEvent(EventType.SESSION_START, timestamp=1100, event_id="resume",
+                       data={"source": "resume"}),
+            TraceEvent(EventType.USER_PROMPT, timestamp=1101, event_id="prompt-2",
+                       data={"prompt": "second"}),
+        ]
+        if ended_again_at is not None:
+            events.append(TraceEvent(
+                EventType.SESSION_END, timestamp=ended_again_at, event_id="end-2", data={},
+            ))
+        for event in events:
+            event.session_id = session_id
+            self.store.append_event(session_id, event)
+        return build_session_review(self.store, session_id)["session"]
+
+    def test_resumed_session_is_live_until_it_ends_again(self) -> None:
+        session = self._resumed_session("resumed-live")
+
+        self.assertIsNone(session["ended_at"])
+        self.assertIsNone(session["duration_ms"])
+        self.assertTrue(session["active"])
+
+    def test_resumed_session_that_ended_again_uses_the_last_end(self) -> None:
+        session = self._resumed_session("resumed-ended", ended_again_at=1120)
+
+        self.assertEqual(session["ended_at"], 1120)
+        self.assertEqual(session["duration_ms"], 120_000)
+        self.assertFalse(session["active"])
+
+    def test_recorded_meta_end_wins_over_events(self) -> None:
+        session = self._resumed_session("resumed-meta-end", meta_ended_at=1200)
+
+        self.assertEqual(session["ended_at"], 1200)
+        self.assertEqual(session["duration_ms"], 200_000)
+        self.assertFalse(session["active"])
+
     def _parentless_response_session(self, session_id: str, provider: str) -> dict:
         self.store.create_session(SessionMeta(
             session_id=session_id,

@@ -462,6 +462,19 @@ function captureIdentity(
   return { provider, captureMethod };
 }
 
+/** Time of the session end that no later session start reopened. */
+function recordedEnd(events: TraceEvent[]): number | undefined {
+  let endedAt: number | undefined;
+  for (const event of events) {
+    if (event.event_type === "session_end") {
+      endedAt = event.timestamp;
+    } else if (event.event_type === "session_start") {
+      endedAt = undefined;
+    }
+  }
+  return endedAt;
+}
+
 export function buildReviewModel(
   meta: SessionMeta,
   events: TraceEvent[],
@@ -471,8 +484,7 @@ export function buildReviewModel(
   const projection = structuralProjection(events, annotations);
   const identity = captureIdentity(meta, events, exactHealth);
   const startedAt = meta.started_at || projection.items[0]?.timestamp;
-  const endedEvent = [...events].reverse().find((event) => event.event_type === "session_end");
-  const endedAt = meta.ended_at || endedEvent?.timestamp;
+  const endedAt = meta.ended_at || recordedEnd(events);
   const durationMs = startedAt && endedAt ? Math.max(0, (endedAt - startedAt) * 1000) : undefined;
   const contentEvents = events.filter((event) => (
     CONTENT_TYPES.has(event.event_type) ||
