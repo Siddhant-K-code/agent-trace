@@ -427,9 +427,6 @@ FORMAT_EVENT_CASES = [
 FORMAT_SUMMARY_CASES = [
     ("command", "text", lambda v: _meta(command=v, agent_name="plain")),
     ("agent_name", "text", lambda v: _meta(command="plain", agent_name=v)),
-    ("tool_calls", "text", lambda v: _meta(tool_calls=v)),
-    ("llm_requests", "text", lambda v: _meta(llm_requests=v)),
-    ("errors", "text", lambda v: _meta(errors=v)),
 ]
 
 # (label, cut, build): format_event keeps cut characters of the value the
@@ -560,41 +557,6 @@ def _list_text(fields):
         return out.getvalue()
 
 
-# (label, kind, build): build(value) returns meta.json fields with value in
-# the place the label names. The kinds are in tests/_escapes.py.
-LIST_CASES = [
-    ("meta.json tool_calls", "text", lambda v: {"tool_calls": v}),
-    ("meta.json llm_requests", "text", lambda v: {"llm_requests": v}),
-    ("meta.json errors", "text", lambda v: {"errors": v}),
-]
-
-
-class TestListTraceTextShowsAsText(unittest.TestCase):
-    """meta.json can hold text where a count belongs. The Tools, LLM and Err
-    columns of list show it as text."""
-
-    def test_each_value_shows_escapes_as_text(self):
-        _escapes.check_each_value(self, LIST_CASES, _list_text)
-
-    def test_plain_text_prints_unchanged(self):
-        _escapes.check_plain_text_unchanged(self, LIST_CASES, _list_text)
-
-    def test_counts_print_as_before(self):
-        output = _list_text({"tool_calls": 7, "llm_requests": 3, "errors": 2})
-        self.assertIn(f"     7     3 {C.RED}   2{C.RESET}\n", output)
-
-    def test_errors_that_are_not_a_count_print_dim(self):
-        for value, shown in ((True, "True"), (2.5, " 2.5")):
-            with self.subTest(errors=value):
-                output = _list_text({"errors": value})
-                self.assertIn(f"{C.DIM}{shown}{C.RESET}\n", output)
-
-    def test_sgr_code_shows_as_text(self):
-        output = _list_text({"tool_calls": "a\x1b[8mhidden"})
-        self.assertIn(r"a\x1b[8mhidden", output)
-        self.assertNotIn("\x1b[8m", output)
-
-
 MISSING = "\u2014"
 STARTED = 1_780_000_000.0
 
@@ -621,6 +583,13 @@ UNUSABLE_NUMBERS = [
     ("negative", -5),
 ]
 
+# (label, value): stored count values that are not a usable count.
+UNUSABLE_COUNTS = UNUSABLE_NUMBERS + [
+    ("escape codes", _escapes.PAYLOAD),
+    ("2.5", 2.5),
+    ("object", {"n": 1}),
+]
+
 
 def _session_line(output):
     """Return the one line of list output for LIST_SESSION."""
@@ -640,7 +609,27 @@ def _no_local_time(error):
 
 class TestUnusableMetaValuesShowAsMissing(unittest.TestCase):
     """stats and list show a stored time or duration they cannot use as the
-    missing marker."""
+    missing marker, and a count they cannot use as 0."""
+
+    def test_counts(self):
+        for field in ("tool_calls", "llm_requests", "errors"):
+            for label, value in UNUSABLE_COUNTS:
+                with self.subTest(field=field, value=label):
+                    summary = format_summary(SessionMeta(session_id="s", **{field: value}))
+                    self.assertIn(
+                        "\n  Tool calls: 0\n  LLM reqs:   0\n  Errors:     0\n", summary
+                    )
+                    line = _session_line(_list_text({field: value}))
+                    self.assertTrue(
+                        line.endswith(f"      0     0 {C.DIM}   0{C.RESET}"), ascii(line)
+                    )
+
+    def test_counts_print_as_before(self):
+        fields = {"tool_calls": 7, "llm_requests": 3, "errors": 2}
+        summary = format_summary(SessionMeta(session_id="s", **fields))
+        self.assertIn("\n  Tool calls: 7\n  LLM reqs:   3\n  Errors:     2\n", summary)
+        line = _session_line(_list_text(fields))
+        self.assertTrue(line.endswith(f"      7     3 {C.RED}   2{C.RESET}"), ascii(line))
 
     def test_started_at(self):
         for label, value in UNUSABLE_TIMES:

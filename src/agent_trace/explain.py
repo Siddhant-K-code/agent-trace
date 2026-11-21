@@ -19,7 +19,7 @@ from .event_data import (
     str_field,
 )
 from .inert import inert
-from .models import EventType, SessionMeta, TraceEvent
+from .models import EventType, SessionMeta, TraceEvent, usable_number
 from .store import TraceStore
 from .subagent import describe_subagent, in_session_subagents
 
@@ -272,7 +272,7 @@ def explain_session(
     events = store.load_events(session_id)
 
     base_ts = events[0].timestamp if events else meta.started_at
-    total_duration = meta.total_duration_ms / 1000 if meta.total_duration_ms else 0.0
+    total_duration = (usable_number(meta.total_duration_ms) or 0.0) / 1000
 
     phases = build_phases(events, base_ts)
 

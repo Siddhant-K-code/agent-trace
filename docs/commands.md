@@ -301,10 +301,28 @@ agent-strace list [--tenant ID]
 List all captured sessions with ID, timestamp, duration, tool calls, and errors.
 `--tenant ID` performs an exact tenant match before listing metadata.
 
-A `meta.json` written by an older collector can hold a start time, end time or
-duration that is not a usable number, such as text, NaN or a value out of
-range. `list`, `stats` and `replay` show such a value as missing, as they do
-for the duration of a session that has not ended.
+A `meta.json` written by an older collector can hold a start time or end time
+that is not a usable number, such as text, NaN or a value out of range.
+`list`, `stats` and `replay` show such a value as missing, as they do for the
+duration of a session that has not ended.
+
+It can also hold a `total_duration_ms`, `tool_calls`, `llm_requests`,
+`errors`, `total_tokens` or `depth` that is not a usable number, such as text,
+an object, `null`, NaN, infinity, a negative number, `true` or an integer too
+large for a float. A count or a depth must also be an integer, so `2.5` and
+`3.0` are not usable. A command that reads one of these fields treats such a
+value as missing, and so do the `server --dashboard` pages. Each shows, writes
+or sends what it does for a session without that field. For a duration, some
+commands use the end time minus the start time instead. A count or a depth
+reads as 0. A hook that adds to such a count starts again from 0. The
+exceptions:
+
+- `baseline update` leaves out a session whose duration, `tool_calls` or `llm_requests` holds such a value, and `baseline check` reports it as `[UNSCORED]`. A duration that is `null` or empty still counts as 0 ms. See [`baseline`](#baseline).
+- `org-report` refuses a session whose duration is not usable or whose count or depth is not a non-negative integer.
+- `share` refuses NaN and infinity, as it does in any `meta.json` field.
+- `validate` reports a value that breaks the trace schema.
+- For the `mcp` tools, see [mcp.md](mcp.md).
+- `inspect`, the `server` API and other commands that copy the whole record keep the value as stored.
 
 A `meta.json` can also hold an `agent_name`, `command` or `team` that is not a
 string, such as `null`, a list, an object, a number, `true`, NaN or infinity.
@@ -1628,10 +1646,13 @@ value at or below the mean scores 0. Error rate is compared both ways. The
 header shows `open session`, and the exit status follows the same rule as for
 an ended session. Open sessions never go into a profile.
 
-A session that cannot be measured at all, because its metadata is missing,
-unreadable, or has non-numeric counters, is reported as `[UNSCORED]` with the
+A session that cannot be measured at all is reported as `[UNSCORED]` with the
 reason, and `check` exits 1. Earlier versions reported it as `[OK]` and
-exited 0.
+exited 0. `update` leaves such a session out of the profile. A session cannot
+be measured when its metadata is missing or unreadable, or when its
+`tool_calls`, `llm_requests` or `total_duration_ms` is not a usable number,
+such as text, NaN or `2.5` in a count. A duration that is `null`, `false` or
+empty counts as 0 ms, as a missing one does.
 
 ### `fingerprint`
 ```

@@ -483,7 +483,6 @@ def _render_a2a_tree(fields: dict) -> str:
 # tests/_escapes.py.
 A2A_TREE_CASES = [
     ("agent name", "text", lambda v: {"agent_name": v}),
-    ("tool calls", "text", lambda v: {"tool_calls": v}),
     ("call agent ID", "text", lambda v: {"agent_id": v}),
     ("task", "free", lambda v: {"task": v}),
 ]
@@ -519,6 +518,13 @@ class TestA2ATreeShowsTraceTextAsText(unittest.TestCase):
         output = _render_a2a_tree({"agent_id": "a\x1b[8mhidden"})
         self.assertIn(r"a2a → a\x1b[8mhidden", output)
         self.assertNotIn("\x1b", output)
+
+    def test_tool_calls_that_are_not_a_count_show_as_zero(self):
+        # meta.json can hold text where the count belongs.
+        self.assertEqual(
+            _render_a2a_tree({"tool_calls": _escapes.PAYLOAD}),
+            _render_a2a_tree({"tool_calls": 0}),
+        )
 
     def test_json_keeps_the_raw_text(self):
         from agent_trace.a2a import cmd_a2a_tree

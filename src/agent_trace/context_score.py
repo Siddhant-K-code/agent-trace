@@ -23,7 +23,7 @@ from .cost import session_cost
 from .event_data import require_object_event_data
 from .freshness import _parse_scope_from_agents_md
 from .lint import lint_session
-from .models import EventType, SessionMeta, TraceEvent
+from .models import EventType, SessionMeta, TraceEvent, usable_count
 from .postmortem import _detect_agents_md_violations, _load_agents_md
 from .store import TraceStore
 
@@ -353,7 +353,7 @@ def _session_metrics(
         version_label=version_label,
         started_at=meta.started_at,
         cost=_session_cost(events, meta.session_id) if loaded else None,
-        tool_calls=_tool_calls(events) or getattr(meta, "tool_calls", 0) or 0,
+        tool_calls=_tool_calls(events) or usable_count(getattr(meta, "tool_calls", 0)),
         lint_findings=lint_count,
         redundant_reads=redundant_reads,
         context_saturation=context_saturation,

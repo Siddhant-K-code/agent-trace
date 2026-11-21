@@ -27,7 +27,14 @@ from .event_data import require_object_event_data
 from .failures import count_session_errors
 from .fileutil import split_lf_lines
 from .inert import inert
-from .models import EventType, SessionMeta, TraceEvent, usable_text
+from .models import (
+    EventType,
+    SessionMeta,
+    TraceEvent,
+    usable_count,
+    usable_number,
+    usable_text,
+)
 from .store import TraceStore
 
 
@@ -203,7 +210,7 @@ def _extract_trend_point(
     error_rate = errors / max(tool_calls, 1)
     retry_rate = retries / max(tool_calls, 1)
     cost = _priced(events, meta.session_id) if loaded else None
-    duration_s = meta.total_duration_ms / 1000 if meta.total_duration_ms else 0.0
+    duration_s = (usable_number(meta.total_duration_ms) or 0.0) / 1000
 
     eval_scores = _load_eval_scores(store, meta.session_id)
 
@@ -581,8 +588,8 @@ def build_dashboard(
 
     summaries: list[SessionSummary] = []
     for meta in sessions:
-        duration_s = meta.total_duration_ms / 1000 if meta.total_duration_ms else 0.0
-        errors = meta.errors
+        duration_s = (usable_number(meta.total_duration_ms) or 0.0) / 1000
+        errors = usable_count(meta.errors)
         try:
             events = store.load_events(meta.session_id)
         except (OSError, ValueError):
@@ -597,10 +604,10 @@ def build_dashboard(
             session_id=meta.session_id,
             started_at=meta.started_at,
             duration_s=duration_s,
-            tool_calls=meta.tool_calls,
-            llm_requests=meta.llm_requests,
+            tool_calls=usable_count(meta.tool_calls),
+            llm_requests=usable_count(meta.llm_requests),
             errors=errors,
-            total_tokens=meta.total_tokens,
+            total_tokens=usable_count(meta.total_tokens),
             estimated_cost=cost,
             agent_name=usable_text(meta.agent_name) or "unknown",
             succeeded=errors == 0,
