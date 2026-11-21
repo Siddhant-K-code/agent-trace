@@ -5,6 +5,8 @@ import io
 import json
 import os
 import signal
+import subprocess
+import sys
 import tempfile
 import time
 import types
@@ -214,8 +216,13 @@ class TestValidateAgentPid(unittest.TestCase):
                 self.assertIsNotNone(validate_agent_pid(pid), pid)
         kill.assert_not_called()
 
-    def test_real_parent_process_is_accepted(self):
-        self.assertIsNone(validate_agent_pid(os.getppid()))
+    def test_real_process_is_accepted(self):
+        # Not os.getppid(): the parent can be PID 1 or another user's process,
+        # such as su, and then signal 0 is refused.
+        with subprocess.Popen(
+            [sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE,
+        ) as child:
+            self.assertIsNone(validate_agent_pid(child.pid))
 
 
 class TestCmdWatchAgentPid(PauseTestCase):
