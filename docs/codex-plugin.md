@@ -35,9 +35,11 @@ Run it from the project directory:
 npx codex-marketplace add Siddhant-K-code/agent-trace/plugins/agent-strace-codex --plugin --project
 ```
 
-Pass the full `plugins/agent-strace-codex` path. The repository root is not a
-Codex plugin. Use one install path, not both: two installs register the same
-hooks twice.
+It copies the package to `plugins/agent-strace/` in the project, lists it in
+the project's `.agents/plugins/marketplace.json`, and enables it in
+`$CODEX_HOME/config.toml`. Pass the full `plugins/agent-strace-codex` path:
+the repository root is not a Codex plugin. Use one install path, not both:
+two installs register the same hooks twice.
 
 ### Trust the hooks
 
@@ -101,8 +103,9 @@ agent-strace --version
 ```
 
 `codex plugin list` should show `agent-strace@agent-trace` as installed and
-enabled, with a source ending in `plugins/agent-strace-codex`. In `/hooks`,
-the AgentTrace commands show the plugin as their source. Submit a prompt that
+enabled, with a source ending in `plugins/agent-strace-codex`. It does not list
+a project install made with `npx codex-marketplace`. In `/hooks`, the
+AgentTrace commands show the plugin as their source. Submit a prompt that
 uses a tool, then inspect the trace:
 
 ```bash
@@ -125,8 +128,9 @@ uv tool upgrade agent-strace
 codex plugin marketplace upgrade agent-trace
 ```
 
-The marketplace upgrade also refreshes the installed plugin. Review any new or
-changed hooks in `/hooks`, then start a new Codex session.
+The marketplace upgrade also refreshes the installed plugin. For a project
+install, run the same `npx codex-marketplace add` command again. Review any
+new or changed hooks in `/hooks`, then start a new Codex session.
 
 ### Moving from the repository-root install
 
@@ -149,9 +153,15 @@ Remove the marketplace only when no other installed plugin needs it:
 codex plugin marketplace remove agent-trace
 ```
 
-For a project install made with `npx codex-marketplace`, delete
-`plugins/agent-strace-codex/` from the project and remove its entry from the
-project's `.agents/plugins/marketplace.json`.
+Remove a project install made with `npx codex-marketplace` from the project
+directory:
+
+```bash
+npx codex-marketplace remove agent-strace --plugin --project
+```
+
+That deletes `plugins/agent-strace/` and its marketplace entry from the
+project, and the plugin from `$CODEX_HOME`.
 
 Uninstalling the plugin stops future capture. Existing `.agent-traces/` data is
 not deleted.
