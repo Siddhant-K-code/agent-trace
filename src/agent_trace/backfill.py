@@ -34,7 +34,7 @@ from .store import (
     _fsync_directory,
     validate_session_id,
     validate_stored_id,
-    validate_tenant_id,
+    validate_optional_tenant_id,
 )
 
 BACKFILL_SOURCE = "backfilled"
@@ -254,11 +254,12 @@ def _read_events(path: Path, session_id: str) -> tuple[list[TraceEvent], str]:
             raise _Skip("unparseable_events", f"line {number}: empty event_id")
         if event.session_id and event.session_id != session_id:
             raise _Skip("session_id_mismatch", f"line {number}")
-        if event.tenant_id:
+        if "tenant_id" in record:
             try:
-                tenants.add(validate_tenant_id(event.tenant_id))
-            except (ValueError, TypeError, RecursionError) as exc:
-                # Turning the value into text can need more stack than parsing it.
+                tenant_id = validate_optional_tenant_id(event.tenant_id)
+                if tenant_id:
+                    tenants.add(tenant_id)
+            except (ValueError, RecursionError) as exc:
                 raise _Skip("invalid_tenant", f"line {number}") from exc
         events.append(event)
     if not events:

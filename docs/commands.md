@@ -2513,7 +2513,7 @@ hook-written metadata:
 | `tool_calls` / `errors` / `llm_requests` | Count of `tool_call` events, of `error` events plus [failed model requests](production.md#session-error-counts), and of `llm_request` events |
 | `agent_name` | From a hook `session_start` mode or a hook `stop` response provider; otherwise `--agent-name`; otherwise `agent-cli` |
 | `command` | `"<agent_name> (backfilled)"`, distinct from captured metadata and from hook metadata marked `(no session-start)` |
-| `tenant_id` | The single tenant ID on the events, or empty. `AGENT_STRACE_TENANT_ID` is ignored |
+| `tenant_id` | The single string tenant ID on the events, or empty. `AGENT_STRACE_TENANT_ID` is ignored |
 | `workspace_id` | The workspace store the directory is in |
 | `attribution` | Empty: the current user and git state do not describe the original capture |
 | `conversation_id` | Empty: the events do not carry the agent's full session ID, so the export omits `gen_ai.conversation.id` |
@@ -2537,6 +2537,8 @@ Safety:
   unreadable erasure audit or journal blocks the whole store.
 - Event streams with more than one tenant ID, and parents whose child sessions
   belong to another tenant, are skipped.
+- A present `tenant_id` that is not a string is reported as `invalid_tenant`;
+  missing or empty tenant IDs remain untagged.
 - Directories with `identity.json` are skipped: the signature covers metadata
   fields that cannot be rebuilt.
 

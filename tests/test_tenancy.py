@@ -17,7 +17,11 @@ from agent_trace.cost import build_provider_cost_report, build_tenant_cost_repor
 from agent_trace.hooks import handle_pre_tool, handle_session_start
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.otlp import session_to_otlp, session_to_otlp_genai
-from agent_trace.store import TraceStore
+from agent_trace.store import (
+    TraceStore,
+    validate_optional_tenant_id,
+    validate_tenant_id,
+)
 from agent_trace.subagent import build_tree
 from agent_trace.tenancy import (
     build_tenant_report,
@@ -108,6 +112,20 @@ class TenantTestCase(unittest.TestCase):
 
 
 class TestTenantModelAndStore(TenantTestCase):
+    def test_tenant_validators_reject_every_non_string(self):
+        self.assertEqual(validate_tenant_id("  customer-acme  "), "customer-acme")
+        self.assertEqual(validate_optional_tenant_id(""), "")
+        for value in (None, False, 0, [], {}, ["acme"], {"a": 1}):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                    ValueError, "^tenant ID must be a string$"
+                ):
+                    validate_tenant_id(value)
+                with self.assertRaisesRegex(
+                    ValueError, "^tenant ID must be a string$"
+                ):
+                    validate_optional_tenant_id(value)
+
     def test_environment_tags_new_sessions_and_events(self):
         with patch.dict(os.environ, {"AGENT_STRACE_TENANT_ID": "customer-acme"}):
             meta = SessionMeta(session_id="env-session")
@@ -122,6 +140,32 @@ class TestTenantModelAndStore(TenantTestCase):
         )
         self.assertEqual(raw["tenant_id"], "customer-acme")
 
+    def test_create_session_rejects_explicit_non_string_before_environment_fallback(self):
+        with patch.dict(os.environ, {"AGENT_STRACE_TENANT_ID": "tenant-env"}):
+            for index, value in enumerate(
+                (None, False, 0, [], {}, ["acme"], {"a": 1})
+            ):
+                with self.subTest(value=value):
+                    meta = SessionMeta(
+                        session_id=f"invalid-create-{index}",
+                        tenant_id=value,
+                    )
+                    with self.assertRaisesRegex(
+                        ValueError, "^tenant ID must be a string$"
+                    ):
+                        self.store.create_session(meta)
+                    self.assertFalse(self.store.session_exists(meta.session_id))
+
+    def test_create_session_trims_valid_tenant_string(self):
+        meta = SessionMeta(session_id="trimmed-create", tenant_id="  customer-acme  ")
+
+        self.store.create_session(meta)
+
+        self.assertEqual(meta.tenant_id, "customer-acme")
+        self.assertEqual(
+            self.store.load_meta(meta.session_id).tenant_id, "customer-acme"
+        )
+
     def test_legacy_deserialisation_does_not_inherit_reader_environment(self):
         meta_json = '{"session_id":"legacy","started_at":1}'
         event_json = (
@@ -131,6 +175,70 @@ class TestTenantModelAndStore(TenantTestCase):
         with patch.dict(os.environ, {"AGENT_STRACE_TENANT_ID": "wrong-tenant"}):
             self.assertEqual(SessionMeta.from_json(meta_json).tenant_id, "")
             self.assertEqual(TraceEvent.from_json(event_json).tenant_id, "")
+
+    def test_append_event_rejects_truthy_and_falsey_non_string_tenants(self):
+        for index, value in enumerate(
+            (None, False, 0, [], {}, ["acme"], {"a": 1})
+        ):
+            with self.subTest(value=value):
+                session_id = f"invalid-event-{index}"
+                self.store.create_session(SessionMeta(session_id=session_id))
+                event = _event(session_id, tenant_id=value)
+                with self.assertRaisesRegex(
+                    ValueError, "^tenant ID must be a string$"
+                ):
+                    self.store.append_event(session_id, event)
+                self.assertEqual(self.store.load_events(session_id), [])
+                self.assertEqual(self.store.load_meta(session_id).tenant_id, "")
+
+    def test_append_events_rejects_falsey_non_string_tenant_before_writing(self):
+        meta = SessionMeta(session_id="invalid-event-batch")
+        self.store.create_session(meta)
+
+        with self.assertRaisesRegex(ValueError, "^tenant ID must be a string$"):
+            self.store.append_events(
+                meta.session_id,
+                [_event(meta.session_id, tenant_id=[])],
+            )
+
+        self.assertEqual(self.store.load_events(meta.session_id), [])
+
+    def test_append_without_metadata_keeps_empty_tenant_but_rejects_non_string(self):
+        self.store.append_event(
+            "event-first-valid",
+            _event("event-first-valid", tenant_id=""),
+        )
+        self.assertFalse(
+            (self.store.base_dir / "event-first-valid" / "meta.json").exists()
+        )
+        raw = json.loads(
+            (self.store.base_dir / "event-first-valid" / "events.ndjson").read_text()
+        )
+        self.assertNotIn("tenant_id", raw)
+
+        with self.assertRaisesRegex(ValueError, "^tenant ID must be a string$"):
+            self.store.append_event(
+                "event-first-invalid",
+                _event("event-first-invalid", tenant_id=False),
+            )
+        self.assertFalse((self.store.base_dir / "event-first-invalid").exists())
+
+    def test_authoritative_tenant_accepts_trimmed_match_and_inherits_when_empty(self):
+        meta = SessionMeta(session_id="authoritative", tenant_id="  tenant-a  ")
+        self.store.create_session(meta)
+        self.store.append_event(
+            meta.session_id,
+            _event(meta.session_id, tenant_id=" tenant-a "),
+        )
+        self.store.append_event(
+            meta.session_id,
+            _event(meta.session_id, timestamp=2.0, tenant_id=""),
+        )
+
+        self.assertEqual(
+            [event.tenant_id for event in self.store.load_events(meta.session_id)],
+            ["tenant-a", "tenant-a"],
+        )
 
     def test_session_metadata_rejects_mixed_tenant_event(self):
         meta = self.create_session("isolated", "tenant-a")
@@ -142,6 +250,36 @@ class TestTenantModelAndStore(TenantTestCase):
                 _event(meta.session_id, tenant_id="tenant-b"),
             )
         self.assertEqual(path.read_bytes(), before)
+
+    def test_update_and_mutate_meta_reject_non_string_tenants(self):
+        meta = SessionMeta(session_id="invalid-meta-update")
+        self.store.create_session(meta)
+        update = self.store.load_meta(meta.session_id)
+        update.tenant_id = []
+        with self.assertRaisesRegex(ValueError, "^tenant ID must be a string$"):
+            self.store.update_meta(update)
+
+        def set_false(current):
+            current.tenant_id = False
+
+        with self.assertRaisesRegex(ValueError, "^tenant ID must be a string$"):
+            self.store.mutate_meta(meta.session_id, set_false)
+        self.assertEqual(self.store.load_meta(meta.session_id).tenant_id, "")
+
+    def test_mutate_meta_rejects_stored_falsey_non_string_tenant(self):
+        meta = SessionMeta(session_id="stored-invalid-meta")
+        self.store.create_session(meta)
+        path = self.store._session_dir(meta.session_id) / "meta.json"
+        record = json.loads(path.read_text())
+        record["tenant_id"] = None
+        path.write_text(json.dumps(record))
+
+        with self.assertRaisesRegex(ValueError, "^tenant ID must be a string$"):
+            self.store.mutate_meta(
+                meta.session_id,
+                lambda current: setattr(current, "tool_calls", 1),
+            )
+        self.assertIsNone(json.loads(path.read_text())["tenant_id"])
 
     def test_scoped_store_iteration_and_prefix_lookup(self):
         self.create_session("tenant-a-session", "tenant-a", 2.0)
@@ -190,6 +328,32 @@ class TestTenantModelAndStore(TenantTestCase):
             self.store.tag_session(meta.session_id, "tenant-b")
 
         self.assertEqual((meta_path.read_bytes(), events_path.read_bytes()), before)
+
+    def test_tag_session_rejects_non_string_tenants(self):
+        for index, value in enumerate((False, 0, [], {}, ["acme"], {"a": 1})):
+            with self.subTest(value=value):
+                session_id = f"invalid-tag-{index}"
+                self.store.create_session(SessionMeta(session_id=session_id))
+                with self.assertRaisesRegex(
+                    ValueError, "^tenant ID must be a string$"
+                ):
+                    self.store.tag_session(session_id, value)
+                self.assertEqual(self.store.load_meta(session_id).tenant_id, "")
+
+    def test_tag_session_rejects_stored_falsey_non_string_event_tenant(self):
+        meta = SessionMeta(session_id="stored-invalid-event")
+        self.store.create_session(meta)
+        path = self.store._session_dir(meta.session_id) / "events.ndjson"
+        record = json.loads(_event(meta.session_id).to_json())
+        record["tenant_id"] = False
+        path.write_text(json.dumps(record) + "\n")
+        before = path.read_bytes()
+
+        with self.assertRaisesRegex(ValueError, "^tenant ID must be a string$"):
+            self.store.tag_session(meta.session_id, "tenant-a")
+
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(self.store.load_meta(meta.session_id).tenant_id, "")
 
     def test_failed_metadata_replace_rolls_back_event_rewrite(self):
         from agent_trace import store as store_module
@@ -361,6 +525,29 @@ class TestTenantModelAndStore(TenantTestCase):
         self.assertNotIn("secret-tenant", audit_text)
         self.assertNotIn(meta.session_id, audit_text)
 
+    def test_non_string_tag_journal_is_left_for_operator_recovery(self):
+        meta = SessionMeta(session_id="invalid-tag-journal")
+        self.store.create_session(meta)
+        self.store.append_event(meta.session_id, _event(meta.session_id))
+        operation_id = "b" * 32
+        journal_dir = self.store.base_dir / ".tenant-journal"
+        journal_dir.mkdir()
+        journal_path = journal_dir / f"tag-{operation_id}.json"
+        journal_path.write_text(json.dumps({
+            "operation": "tag_session",
+            "operation_id": operation_id,
+            "session_id": meta.session_id,
+            "tenant_id": False,
+            "phase": "intent",
+            "previous_terminal_hash": "before",
+        }))
+
+        recovered = TraceStore(self.tempdir.name, redact=False)
+
+        self.assertEqual(recovered.load_meta(meta.session_id).tenant_id, "")
+        self.assertTrue(journal_path.exists())
+        self.assertFalse((recovered.base_dir / "tenant-audit.ndjson").exists())
+
     def test_legacy_empty_event_session_id_is_tagged_and_recovered(self):
         meta = SessionMeta(session_id="legacy-empty-event")
         self.store.create_session(meta)
@@ -502,6 +689,12 @@ class TestTenantCostsAndCommands(TenantTestCase):
         self.assertGreater(report.total_cost, 0)
         self.assertNotIn("b", {row.session_id for row in providers.records})
 
+    def test_cost_filters_reject_non_string_tenants(self):
+        with self.assertRaisesRegex(ValueError, "^tenant ID must be a string$"):
+            build_tenant_cost_report(self.store, False)
+        with self.assertRaisesRegex(ValueError, "^tenant ID must be a string$"):
+            build_provider_cost_report(self.store, tenant_id=[])
+
     def test_monthly_report_includes_tenants_and_untagged(self):
         june = 1_781_481_600.0  # 2026-06-15 UTC
         self.create_session("a", "tenant-a", june)
@@ -581,6 +774,26 @@ class TestTenantCostsAndCommands(TenantTestCase):
 
         self.assertEqual(self.store.load_meta(meta.session_id).tenant_id, "tenant-env")
 
+    def test_watch_explicit_non_string_tenant_does_not_use_environment_fallback(self):
+        meta = SessionMeta(session_id="watch-invalid")
+        self.store.create_session(meta)
+        args = build_parser().parse_args([
+            "--trace-dir", self.tempdir.name, "watch", meta.session_id,
+        ])
+        args.tenant_id = False
+
+        with patch.dict(os.environ, {"AGENT_STRACE_TENANT_ID": "tenant-env"}), \
+                patch("agent_trace.watch.watch_session") as monitor, \
+                patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            self.assertEqual(cmd_watch(args), 1)
+
+        monitor.assert_not_called()
+        self.assertEqual(
+            stderr.getvalue(),
+            "[watch] could not assign tenant: tenant ID must be a string\n",
+        )
+        self.assertEqual(self.store.load_meta(meta.session_id).tenant_id, "")
+
     def test_list_command_passes_exact_tenant_scope(self):
         args = build_parser().parse_args([
             "--trace-dir", self.tempdir.name, "list", "--tenant", "tenant-a",
@@ -588,6 +801,20 @@ class TestTenantCostsAndCommands(TenantTestCase):
         with patch("agent_trace.cli.list_sessions") as render:
             self.assertEqual(cmd_list(args), 0)
         self.assertEqual(render.call_args.kwargs["tenant_id"], "tenant-a")
+
+    def test_list_and_cost_commands_reject_non_string_tenant_filters(self):
+        for command, handler in (("list", cmd_list), ("cost", cmd_cost)):
+            with self.subTest(command=command):
+                args = build_parser().parse_args([
+                    "--trace-dir", self.tempdir.name,
+                    command, "--tenant", "tenant-a",
+                ])
+                args.tenant = []
+                with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                    self.assertEqual(handler(args), 1)
+                self.assertEqual(
+                    stderr.getvalue(), "Error: tenant ID must be a string\n"
+                )
 
     def test_cost_command_uses_aggregate_tenant_path(self):
         now = __import__("time").time()
@@ -604,6 +831,12 @@ class TestTenantCostsAndCommands(TenantTestCase):
 
 
 class TestTenantExportAndDelete(TenantTestCase):
+    def test_export_and_delete_reject_non_string_tenants(self):
+        with self.assertRaisesRegex(ValueError, "^tenant ID must be a string$"):
+            tenant_export_payload(self.store, ["tenant-a"])
+        with self.assertRaisesRegex(ValueError, "^tenant ID must be a string$"):
+            delete_tenant_data(self.store, False)
+
     def test_export_contains_only_requested_tenant(self):
         self.create_session("a", "tenant-a")
         self.create_session("b", "tenant-b")
@@ -644,6 +877,26 @@ class TestTenantExportAndDelete(TenantTestCase):
         with self.assertRaisesRegex(ValueError, "corrupt session"):
             delete_tenant_data(self.store, "tenant-a")
         self.assertTrue(self.store.session_exists(good.session_id))
+
+    def test_admin_operations_fail_closed_on_non_string_stored_tenants(self):
+        for field, value in (("meta", None), ("event", False)):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                store = TraceStore(directory, redact=False)
+                meta = SessionMeta(session_id=f"invalid-{field}", tenant_id="tenant-a")
+                store.create_session(meta)
+                store.append_event(
+                    meta.session_id,
+                    _event(meta.session_id, tenant_id="tenant-a"),
+                )
+                path = store._session_dir(meta.session_id) / (
+                    "meta.json" if field == "meta" else "events.ndjson"
+                )
+                record = json.loads(path.read_text())
+                record["tenant_id"] = value
+                path.write_text(json.dumps(record) + ("\n" if field == "event" else ""))
+
+                with self.assertRaisesRegex(ValueError, "corrupt session"):
+                    tenant_export_payload(store, "tenant-a")
 
     def test_commands_refuse_a_store_with_an_unusable_started_at(self):
         session_ids = ("p" * 16, "c" * 16, "b" * 16)
@@ -1089,6 +1342,30 @@ class TestTenantExportAndDelete(TenantTestCase):
             for line in (self.store.base_dir / "tenant-deletions.ndjson").read_text().splitlines()
         ]
         self.assertEqual([record["status"] for record in audits], ["pending", "completed"])
+
+    def test_non_string_delete_journal_is_left_for_operator_recovery(self):
+        self.create_session("invalid-delete-journal", "False")
+        operation_id = "9" * 32
+        journal_dir = self.store.base_dir / ".tenant-journal"
+        journal_dir.mkdir()
+        journal_path = journal_dir / f"delete-{operation_id}.json"
+        journal_path.write_text(json.dumps({
+            "operation": "delete_tenant",
+            "operation_id": operation_id,
+            "tenant_id": False,
+            "workspace_id": "",
+            "phase": "intent",
+            "sessions": [{
+                "session_id": "invalid-delete-journal",
+                "event_count": 1,
+            }],
+        }))
+
+        recovered = TraceStore(self.tempdir.name, redact=False)
+
+        self.assertTrue(recovered.session_exists("invalid-delete-journal"))
+        self.assertTrue(journal_path.exists())
+        self.assertFalse((recovered.base_dir / "tenant-deletions.ndjson").exists())
 
     def test_cross_tenant_subagent_link_is_rejected(self):
         root = SessionMeta(session_id="tree-root", tenant_id="tenant-a")

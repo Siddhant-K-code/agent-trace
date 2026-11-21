@@ -24,7 +24,7 @@ from agent_trace.cli import build_parser
 from agent_trace.failures import count_session_errors
 from agent_trace.hooks import IMPLICIT_SESSION_SOURCE
 from agent_trace.models import EventType, SessionMeta, TraceEvent
-from agent_trace.store import TraceStore, validate_tenant_id
+from agent_trace.store import TraceStore, validate_optional_tenant_id
 from agent_trace.tenancy import delete_tenant_data
 
 T0 = 1_700_000_000.0
@@ -693,8 +693,8 @@ class TestCli(_Base):
             self.assertTrue((self.root / session_id / "meta.json").exists())
 
     def test_tenant_too_deep_to_check_skips_only_that_session(self):
-        # Checking a tenant ID turns it into text, which can need more stack
-        # than parsing the line did. As above, the test raises the error itself.
+        # Compatibility validation can still fail after the line parsed, so
+        # the session must remain isolated from the rest of the run.
         events = subagent_events("b1", tenant_id="acme")
         events[1].tenant_id = "deep"
         write_metaless(self.root, "a1", subagent_events("a1", tenant_id="acme"))
@@ -704,9 +704,12 @@ class TestCli(_Base):
         def validate(tenant_id):
             if tenant_id == "deep":
                 raise RecursionError("maximum recursion depth exceeded")
-            return validate_tenant_id(tenant_id)
+            return validate_optional_tenant_id(tenant_id)
 
-        with patch("agent_trace.backfill.validate_tenant_id", side_effect=validate):
+        with patch(
+            "agent_trace.backfill.validate_optional_tenant_id",
+            side_effect=validate,
+        ):
             sessions = self._apply()
 
         item = sessions["b1"]
@@ -718,6 +721,48 @@ class TestCli(_Base):
         for session_id in ("a1", "c1"):
             self.assertEqual(sessions[session_id]["status"], "written")
             self.assertTrue((self.root / session_id / "meta.json").exists())
+
+    def test_non_string_tenants_skip_only_their_sessions(self):
+        records = {}
+        for session_id in ("missing1", "empty1", "trimmed1"):
+            records[session_id] = json.loads(
+                subagent_events(session_id)[0].to_json()
+            )
+        records["empty1"]["tenant_id"] = ""
+        records["trimmed1"]["tenant_id"] = "  acme  "
+        invalid = {
+            "null1": None,
+            "false1": False,
+            "zero1": 0,
+            "list1": [],
+            "dict1": {},
+            "truthylist1": ["acme"],
+            "truthydict1": {"a": 1},
+        }
+        for session_id, value in invalid.items():
+            record = json.loads(subagent_events(session_id)[0].to_json())
+            record["tenant_id"] = value
+            records[session_id] = record
+        for session_id, record in records.items():
+            write_lines(self.root, session_id, [json.dumps(record)])
+
+        sessions = self._apply()
+
+        for session_id in ("missing1", "empty1", "trimmed1"):
+            self.assertEqual(sessions[session_id]["status"], "written")
+        self.assertNotIn("tenant_id", sessions["missing1"]["meta"])
+        self.assertNotIn("tenant_id", sessions["empty1"]["meta"])
+        self.assertEqual(sessions["trimmed1"]["meta"]["tenant_id"], "acme")
+        for session_id in invalid:
+            with self.subTest(session_id=session_id):
+                item = sessions[session_id]
+                self.assertEqual(
+                    (item["status"], item["reason"], item["detail"]),
+                    ("skipped", "invalid_tenant", "line 1"),
+                )
+                self.assertFalse(
+                    os.path.lexists(self.root / session_id / "meta.json")
+                )
 
     def test_id_that_is_not_a_string_skips_only_that_session(self):
         write_metaless(self.root, "sub1", subagent_events("sub1"))
