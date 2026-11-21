@@ -18,7 +18,7 @@ from score import HERE, read_object
 
 
 KIT = HERE / "reviewer-exercise"
-PRODUCER_REVISION = "423601ceb6e290b31e8bb290aac67dc5c041313e"
+PRODUCER_REVISION = "675ec4f66e749d02755bbe9dd9780d632c805e9b"
 CASES = ("greeting", "footer")
 ARMS = ("baseline", "packet-assisted")
 

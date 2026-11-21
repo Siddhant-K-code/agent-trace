@@ -122,12 +122,13 @@ git fetch --no-tags origin refs/heads/siddhant-k-code-pr-evidence-assembler
 ```
 
 The builder runs offline with Python 3.10+ and Git. It extracts the Phase A
-implementation at `423601ceb6e290b31e8bb290aac67dc5c041313e` from local Git
-objects. It does not switch branches, write to the producer checkout, or run
-the proposed changes or checks. Pass `--producer .` after the fetch above,
-or point it at a separate checkout containing that commit. The output
-directory must be new, outside the producer checkout, and have an existing
-parent.
+implementation at
+[`675ec4f66e749d02755bbe9dd9780d632c805e9b`](https://github.com/Siddhant-K-code/agent-trace/commit/675ec4f66e749d02755bbe9dd9780d632c805e9b)
+from local Git objects. It does not switch branches, write to the producer
+checkout, or run the proposed changes or checks. Pass `--producer .` after
+the fetch above, or point it at a separate checkout containing that commit.
+The output directory must be new, outside the producer checkout, and have an
+existing parent.
 
 Without `--reviewer-kit`, the builder writes each case under `baseline/` and
 `packet-assisted/`. Both have the same `worksheet.md` and byte-identical
