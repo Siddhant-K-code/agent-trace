@@ -16,7 +16,12 @@ import sys
 from dataclasses import asdict, dataclass, field
 from typing import TextIO
 
-from .event_data import object_field, require_object_event_data, str_field
+from .event_data import (
+    object_field,
+    require_object_event_data,
+    require_usable_timestamps,
+    str_field,
+)
 from .failures import session_errors
 from .inert import inert
 from .models import EventType, SessionMeta, TraceEvent, usable_text
@@ -289,6 +294,25 @@ def require_tree_event_data(node: SessionNode, expand: bool = True) -> None:
             require_tree_event_data(children_by_event[event.event_id], expand)
 
 
+def require_tree_timestamps(node: SessionNode, expand: bool = True) -> None:
+    """Raise UnusableTimestampError if format_tree would read a bad timestamp.
+
+    format_tree reads the timestamp of every event of each session it
+    renders: *node* and, when *expand* is set, each child it inlines under
+    the tool_call that spawned it. The base time is the root's started_at,
+    which is not checked.
+    """
+    require_usable_timestamps(node.events, session_id=node.meta.session_id)
+    if not expand:
+        return
+    children_by_event = {
+        c.meta.parent_event_id: c for c in node.children if c.meta.parent_event_id
+    }
+    for event in node.events:
+        if event.event_type == EventType.TOOL_CALL and event.event_id in children_by_event:
+            require_tree_timestamps(children_by_event[event.event_id], expand)
+
+
 def format_tree(
     node: SessionNode,
     base_ts: float | None = None,
@@ -558,6 +582,7 @@ def cmd_replay_tree(args: argparse.Namespace) -> int:
         )
     else:
         require_tree_event_data(tree, expand=expand)
+        require_tree_timestamps(tree, expand=expand)
         format_tree(tree, expand=expand)
 
     return 0

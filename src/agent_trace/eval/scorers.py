@@ -236,9 +236,7 @@ def measure_context_fill_ratio(
     return maximum
 
 
-def measure_duration_seconds(events: list[TraceEvent], meta: object | None = None) -> float:
-    """Return wall-clock session duration in seconds."""
-
+def _meta_duration_seconds(meta: object | None) -> float | None:
     duration_ms = _as_number(getattr(meta, "total_duration_ms", None))
     if duration_ms is not None and duration_ms > 0:
         return duration_ms / 1000.0
@@ -246,6 +244,24 @@ def measure_duration_seconds(events: list[TraceEvent], meta: object | None = Non
     ended_at = _as_number(getattr(meta, "ended_at", None))
     if started_at is not None and ended_at is not None and ended_at >= started_at:
         return ended_at - started_at
+    return None
+
+
+def duration_reads_event_times(events: list[TraceEvent], meta: object | None = None) -> bool:
+    """Return True if measure_duration_seconds reads the event timestamps.
+
+    It does when the metadata holds no duration and there are 2 or more
+    events. It then reads every event's timestamp.
+    """
+    return _meta_duration_seconds(meta) is None and len(events) >= 2
+
+
+def measure_duration_seconds(events: list[TraceEvent], meta: object | None = None) -> float:
+    """Return wall-clock session duration in seconds."""
+
+    duration = _meta_duration_seconds(meta)
+    if duration is not None:
+        return duration
     if len(events) < 2:
         return 0.0
     timestamps = [event.timestamp for event in events]

@@ -23,7 +23,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .cost import cost_inputs_captured, estimate_cost
-from .event_data import NonObjectEventDataError, require_object_event_data
+from .event_data import (
+    NonObjectEventDataError,
+    UnusableTimestampError,
+    require_object_event_data,
+    require_usable_timestamps,
+)
 from .explain import explain_session
 from .failures import count_session_errors
 from .http_post import no_redirect_opener, redirect_hint, same_origin_opener
@@ -1123,11 +1128,11 @@ def cmd_pr_comment(args: argparse.Namespace) -> int:
             session_ids, link = [], ""
         else:
             session_ids, link = select_sessions_with_link(store, requested, branch=branch)
-        # summarize_session reads the data of every event.
+        # summarize_session reads the data and the timestamp of every event.
         for session_id in session_ids:
-            require_object_event_data(
-                store.load_events(session_id), session_id=session_id
-            )
+            events = store.load_events(session_id)
+            require_object_event_data(events, session_id=session_id)
+            require_usable_timestamps(events, session_id=session_id)
         summaries = [summarize_session(store, session_id) for session_id in session_ids]
         share_url = (
             getattr(args, "share_url", "")
@@ -1182,7 +1187,7 @@ def cmd_pr_comment(args: argparse.Namespace) -> int:
         action = post_or_update_comment(
             target, body, token, token_header=token_header
         )
-    except NonObjectEventDataError:
+    except (NonObjectEventDataError, UnusableTimestampError):
         raise
     except (PRCommentError, OSError, ValueError, json.JSONDecodeError) as exc:
         sys.stderr.write(f"pr-comment: {exc}\n")

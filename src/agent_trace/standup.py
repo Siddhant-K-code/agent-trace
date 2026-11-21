@@ -18,7 +18,13 @@ import sys
 from dataclasses import dataclass, field
 from typing import TextIO
 
-from .event_data import number_field, object_field, require_object_event_data, str_field
+from .event_data import (
+    number_field,
+    object_field,
+    require_object_event_data,
+    require_usable_timestamps,
+    str_field,
+)
 from .failures import CANCELLED_STATUSES, FAILED_STATUSES
 from .inert import inert
 from .models import EventType, TraceEvent, usable_time
@@ -470,9 +476,9 @@ def cmd_standup(args: argparse.Namespace) -> int:
         sys.stderr.write(f"Session not found: {session_id}\n")
         return 1
 
-    require_object_event_data(
-        store.load_events(full_id), event_types=STANDUP_DATA_EVENT_TYPES
-    )
+    events = store.load_events(full_id)
+    require_object_event_data(events, event_types=STANDUP_DATA_EVENT_TYPES)
+    require_usable_timestamps(events)
     report = analyse_standup(store, full_id)
     format_standup(report)
     return 0

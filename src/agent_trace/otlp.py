@@ -27,7 +27,7 @@ from typing import Any
 
 from . import __version__
 from .cost import TokenUsage, reasoning_output_tokens, usage_detail
-from .event_data import object_field, str_field
+from .event_data import UnusableTimestampError, object_field, str_field
 # ERROR_TYPE_* and LLMFailure stay importable from here.
 from .failures import (
     ERROR_TYPE_CANCELLED,
@@ -144,7 +144,13 @@ def _to_span_id(event_id: str) -> str:
 
 
 def _ts_to_nanos(ts: float) -> str:
-    """Convert Unix timestamp to nanoseconds as string."""
+    """Convert Unix timestamp to nanoseconds as string.
+
+    Raises UnusableTimestampError for a value that is not an int or a float.
+    The multiply would repeat a str or a list a billion times.
+    """
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+        raise UnusableTimestampError("timestamp must be a Unix time in seconds")
     return str(int(ts * 1_000_000_000))
 
 
@@ -571,6 +577,14 @@ OTLP_DATA_EVENT_TYPES = frozenset({
     EventType.LLM_REQUEST,
     EventType.LLM_RESPONSE,
 })
+
+# session_to_otlp reads the timestamps of events of these types, and
+# session_to_otlp_genai of the same types but decision. Neither reads the
+# timestamp of a tool_result that pairs with a tool_call (the span starts at
+# the call) or of a tool_call that a later one with the same ID replaces
+# before it pairs. session_to_otlp_genai skips such a replaced llm_request too.
+OTLP_TIMESTAMP_EVENT_TYPES = OTLP_DATA_EVENT_TYPES | {EventType.TOOL_CALL}
+OTLP_GENAI_TIMESTAMP_EVENT_TYPES = OTLP_TIMESTAMP_EVENT_TYPES - {EventType.DECISION}
 
 
 def otlp_data_indexes(events: list[TraceEvent]) -> list[int]:

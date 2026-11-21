@@ -22,7 +22,12 @@ from pathlib import Path
 from typing import TextIO
 
 from .cost import session_cost
-from .event_data import object_field, require_object_event_data, str_field
+from .event_data import (
+    object_field,
+    require_object_event_data,
+    require_usable_timestamps,
+    str_field,
+)
 from .failures import count_session_errors
 from .models import EventType, SessionMeta, TraceEvent, usable_text
 from .store import TraceStore
@@ -247,6 +252,10 @@ def _require_sampled_event_data(
     This mirrors the scoring loop: a session that fails to load is skipped,
     and with deduplicate a repeated tool sequence is not scored, so only its
     tool_call data is read.
+
+    Raise UnusableTimestampError when a scored session's first or last event
+    timestamp is not a Unix time in seconds. Scoring reads only those two,
+    for the duration, and only when the session has 2 or more events.
     """
     seen_tool_sequences: set[str] = set()
     for meta in sessions:
@@ -265,6 +274,10 @@ def _require_sampled_event_data(
         require_object_event_data(
             events, event_types=SCORE_DATA_EVENT_TYPES, session_id=meta.session_id
         )
+        if len(events) >= 2:
+            require_usable_timestamps(
+                events, indexes={0, len(events) - 1}, session_id=meta.session_id
+            )
 
 
 def run_sample(

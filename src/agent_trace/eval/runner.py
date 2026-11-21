@@ -13,9 +13,17 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, TextIO
 
+from ..event_data import UnusableTimestampError, require_usable_timestamps
 from ..store import TraceStore
 from .config import EvalConfig, EvalCriterionConfig, load_config, load_gate_config
-from .scorers import MetricError, MetricValue, ScoreResult, measure_metric, run_scorer
+from .scorers import (
+    MetricError,
+    MetricValue,
+    ScoreResult,
+    duration_reads_event_times,
+    measure_metric,
+    run_scorer,
+)
 
 
 @dataclass
@@ -57,6 +65,16 @@ def run_eval(
     config: EvalConfig,
 ) -> EvalReport:
     events = store.load_events(session_id)
+    scorer_types = {scorer.type for scorer in config.scorers}
+    # cost_under prices the session with estimate_cost, which reads event
+    # times, so it checks every event, as agent-strace cost does.
+    # duration_under subtracts the first event's time from the last one's.
+    if "cost_under" in scorer_types:
+        require_usable_timestamps(events, session_id=session_id)
+    elif len(events) > 1 and "duration_under" in scorer_types:
+        require_usable_timestamps(
+            events, indexes={0, len(events) - 1}, session_id=session_id,
+        )
     results: list[ScoreResult] = []
 
     for scorer_cfg in config.scorers:
@@ -239,6 +257,17 @@ def run_eval_gate(
     if tolerance < 0:
         raise ValueError("tolerance must be non-negative")
     events = store.load_events(session_id)
+    metrics = {criterion.scorer for criterion in config.evals}
+    # Check here, because the loop below turns any error into a failed eval.
+    # cost_usd prices the session with estimate_cost, which reads event
+    # times, so it checks every event, as agent-strace cost does.
+    # duration_seconds reads every event's time when the metadata holds no
+    # duration.
+    if "cost_usd" in metrics or (
+        "duration_seconds" in metrics
+        and duration_reads_event_times(events, store.load_meta(session_id))
+    ):
+        require_usable_timestamps(events, session_id=session_id)
     results: list[CriterionResult] = []
     baseline = baseline or {}
 
@@ -684,6 +713,8 @@ def cmd_eval_gate(args: argparse.Namespace) -> int:
     try:
         tolerance = float(getattr(args, "tolerance", 0.0) or 0.0)
         report = run_eval_gate(store, session_id, config, baseline, tolerance)
+    except UnusableTimestampError:
+        raise
     except (OSError, TypeError, ValueError) as exc:
         sys.stderr.write(f"Eval error: {exc}\n")
         return 1

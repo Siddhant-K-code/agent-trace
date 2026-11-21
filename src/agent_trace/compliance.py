@@ -34,7 +34,7 @@ from typing import Any, Literal, TextIO
 from . import __version__
 from .audit import verify_chain
 from .cost import _usage_dollars, session_event_usage
-from .event_data import require_object_event_data, str_field
+from .event_data import require_object_event_data, require_usable_timestamps, str_field
 from .fileutil import split_lf_lines
 from .inert import inert
 from .models import EventType, TraceEvent, usable_text
@@ -304,7 +304,8 @@ def export_compliance(
 
     Returns a dict with one key per framework requested. Raises
     NonObjectEventDataError when a tool_call or error event's data is not an
-    object; ``name_session`` adds the session ID to that error.
+    object, and UnusableTimestampError when such an event's timestamp is not
+    a Unix time in seconds; ``name_session`` adds the session ID to either.
     """
     try:
         meta = store.load_meta(session_id)
@@ -315,6 +316,11 @@ def export_compliance(
     except Exception:
         events = []
     require_object_event_data(
+        events,
+        event_types=COMPLIANCE_DATA_EVENT_TYPES,
+        session_id=session_id if name_session else None,
+    )
+    require_usable_timestamps(
         events,
         event_types=COMPLIANCE_DATA_EVENT_TYPES,
         session_id=session_id if name_session else None,
@@ -364,8 +370,10 @@ def _eu_ai_act_session_record(
 ) -> dict:
     meta = store.load_meta(session_id)
     events = store.load_events(session_id)
-    # The record reads the tool name from the data of every event.
+    # The record reads the tool name from the data of every event, and the
+    # timestamp of every event.
     require_object_event_data(events, session_id=session_id if name_session else None)
+    require_usable_timestamps(events, session_id=session_id if name_session else None)
     lines = _load_event_lines(store, session_id)
     hashes = _line_hashes(lines)
     chain = verify_chain(store, session_id)
@@ -478,8 +486,9 @@ def export_eu_ai_act(
 ) -> dict:
     """Build an EU AI Act Article 12/13 JSON export for one or more sessions.
 
-    Raises NonObjectEventDataError when any event's data is not an object;
-    ``name_sessions`` adds the session ID to that error.
+    Raises NonObjectEventDataError when any event's data is not an object,
+    and UnusableTimestampError when any event's timestamp is not a Unix time
+    in seconds; ``name_sessions`` adds the session ID to either.
     """
     sessions = [
         _eu_ai_act_session_record(store, session_id, name_session=name_sessions)

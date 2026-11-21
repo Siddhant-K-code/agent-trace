@@ -118,7 +118,14 @@ from .server import allowed_host_name, cmd_server
 from .validation import cmd_validate
 from .watch import cmd_watch
 from .why import cmd_why
-from .event_data import NonObjectEventDataError, require_object_event_data, str_field
+from .event_data import (
+    NonObjectEventDataError,
+    UnusableTimestampError,
+    require_object_event_data,
+    require_usable_session_times,
+    require_usable_timestamps,
+    str_field,
+)
 from .failures import llm_failure, session_errors
 from .http_post import parse_header, url_problem
 from .inert import inert
@@ -542,6 +549,8 @@ def cmd_export(args: argparse.Namespace) -> int:
 
     elif args.format in ("otlp", "otlp-genai", "temporal"):
         from .otlp import (
+            OTLP_GENAI_TIMESTAMP_EVENT_TYPES,
+            OTLP_TIMESTAMP_EVENT_TYPES,
             export_otlp,
             export_otlp_payload,
             otlp_data_indexes,
@@ -552,12 +561,17 @@ def cmd_export(args: argparse.Namespace) -> int:
 
         use_genai = args.format == "otlp-genai"
         use_temporal = args.format == "temporal"
-        # session_to_temporal_otlp checks the data after it validates the
-        # session's Temporal context, so a session without one keeps its message.
+        # session_to_temporal_otlp checks the data and the times after it
+        # validates the session's Temporal context, so a session without one
+        # keeps its message.
         if use_genai:
             require_object_event_data(events, indexes=otlp_genai_data_indexes(events))
+            require_usable_timestamps(events, event_types=OTLP_GENAI_TIMESTAMP_EVENT_TYPES)
         elif not use_temporal:
             require_object_event_data(events, indexes=otlp_data_indexes(events))
+            require_usable_timestamps(events, event_types=OTLP_TIMESTAMP_EVENT_TYPES)
+        if not use_temporal:
+            require_usable_session_times(store.load_meta(session_id))
         endpoint = args.endpoint
 
         # When --endpoint is set and format is plain otlp, default to otlp-genai
@@ -577,7 +591,7 @@ def cmd_export(args: argparse.Namespace) -> int:
                     payload = session_to_otlp_genai(meta, events, service_name=args.service_name)
                 else:
                     payload = session_to_otlp(meta, events, service_name=args.service_name)
-            except NonObjectEventDataError:
+            except (NonObjectEventDataError, UnusableTimestampError):
                 raise
             except ValueError as exc:
                 sys.stderr.write(f"Temporal export failed: {exc}\n")
@@ -3297,12 +3311,13 @@ def _normalise_exit_code(value) -> int:
 def _run_handler(args: argparse.Namespace, handler):
     """Run a CLI handler, turning refused input into a one-line error.
 
-    Commands check event data before they print or write anything, so the
-    refusal matches ``share``: one ``Error:`` line on stderr and exit code 1.
+    Commands check event data and timestamps before they print or write
+    anything, so the refusal matches ``share``: one ``Error:`` line on stderr
+    and exit code 1.
     """
     try:
         return handler(args)
-    except (NonObjectEventDataError, CognitiveDebtInputError) as exc:
+    except (NonObjectEventDataError, UnusableTimestampError, CognitiveDebtInputError) as exc:
         sys.stderr.write(f"Error: {exc}\n")
         return 1
 

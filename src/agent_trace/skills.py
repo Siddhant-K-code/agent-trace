@@ -794,7 +794,10 @@ def _coerce_timestamp(value: object) -> float | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        number = float(value)
+        try:
+            number = float(value)
+        except OverflowError:
+            return None
     elif isinstance(value, str):
         try:
             number = float(value)

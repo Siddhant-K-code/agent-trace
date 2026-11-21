@@ -22,8 +22,13 @@ from pathlib import Path
 from typing import Any, Mapping, TextIO
 
 from .cost import get_model_pricing
-from .event_data import NonObjectEventDataError, require_object_event_data
-from .models import EventType, TraceEvent
+from .event_data import (
+    NonObjectEventDataError,
+    UnusableTimestampError,
+    require_object_event_data,
+    require_usable_timestamps,
+)
+from .models import EventType, TraceEvent, usable_time
 from .store import TraceStore
 from .token_budget import DEFAULT_CONTEXT_LIMIT, _resolve_limit
 
@@ -344,11 +349,35 @@ def detect_compactions(
     events: list[TraceEvent],
     threshold: float = DEFAULT_COMPACTION_THRESHOLD,
 ) -> list[CompactionEvent]:
-    """Return compactions inferred from consecutive logical LLM requests."""
+    """Return compactions inferred from consecutive logical LLM requests.
+
+    Raises UnusableTimestampError when there is a compaction and the first
+    event's or a compaction's timestamp is not a Unix time in seconds, since
+    each compaction's offset is measured from the first event.
+    """
+    compactions = _find_compactions(events, threshold)
+    if compactions:
+        require_usable_timestamps(
+            events, indexes={0} | {compaction.event_index for compaction in compactions},
+        )
+    base_timestamp = events[0].timestamp if events else 0.0
+    for compaction in compactions:
+        compaction.offset_seconds = max(0.0, compaction.timestamp - base_timestamp)
+    return compactions
+
+
+def _find_compactions(
+    events: list[TraceEvent],
+    threshold: float,
+) -> list[CompactionEvent]:
+    """Return the compactions with ``offset_seconds`` left at 0.0.
+
+    It does no arithmetic on a timestamp, so the lint rule, which shows no
+    time, runs on a session whose timestamps are not Unix times in seconds.
+    """
     _require_valid_threshold(threshold)
 
     samples = _request_samples(events)
-    base_timestamp = events[0].timestamp if events else 0.0
     compactions: list[CompactionEvent] = []
     previous_by_stream: dict[str, _RequestSample] = {}
     for after in samples:
@@ -376,7 +405,7 @@ def detect_compactions(
             before_request_index=before.request_index,
             after_request_index=after.request_index,
             timestamp=after.timestamp,
-            offset_seconds=max(0.0, after.timestamp - base_timestamp),
+            offset_seconds=0.0,
             tokens_before=before.input_tokens,
             tokens_after=after.input_tokens,
             tokens_dropped=dropped,
@@ -782,8 +811,11 @@ def analyse_compaction_session(
     """Build a compaction report for a stored session.
 
     Raises NonObjectEventDataError when any event's data is not an object,
-    because the analysis reads the data of every event. An invalid threshold
-    is still reported first.
+    because the analysis reads the data of every event. Raises
+    UnusableTimestampError when the session has a compaction and the first
+    event's or a compaction's timestamp is not a Unix time in seconds, since
+    the report shows how long after the first event each compaction came. An
+    invalid threshold is still reported first.
     """
     events = store.load_events(session_id)
     _require_valid_threshold(threshold)
@@ -899,12 +931,34 @@ def context_fill_ratio(event: TraceEvent) -> float | None:
     return input_tokens / _context_limit(event.data)
 
 
+def _checkpoint_read_indexes(events: list[TraceEvent]) -> set[int]:
+    """Return the positions of the first event and of the first read of each
+    file. A checkpoint shows their times, measured from the first event."""
+    indexes = {0} if events else set()
+    seen_reads: set[str] = set()
+    for index, event in enumerate(events):
+        path = _read_path(event)
+        if path and path not in seen_reads:
+            seen_reads.add(path)
+            indexes.add(index)
+    return indexes
+
+
 def build_checkpoint_markdown(
     events: list[TraceEvent],
     session_id: str,
     timestamp: float | None = None,
 ) -> str:
-    """Summarize recoverable session state as deterministic Markdown."""
+    """Summarize recoverable session state as deterministic Markdown.
+
+    Raises UnusableTimestampError when the first event, the first read of a
+    file or, with no *timestamp*, the last event has a timestamp that is not
+    a Unix time in seconds.
+    """
+    indexes = _checkpoint_read_indexes(events)
+    if timestamp is None and events:
+        indexes.add(len(events) - 1)
+    require_usable_timestamps(events, indexes=indexes)
     if timestamp is None:
         timestamp = events[-1].timestamp if events else 0.0
     base_timestamp = events[0].timestamp if events else timestamp
@@ -990,6 +1044,15 @@ def write_checkpoint(
     return path
 
 
+# The watcher tracks the input tokens of these events, and one of them
+# triggers each checkpoint.
+_CHECKPOINT_EVENT_TYPES = frozenset({
+    EventType.LLM_REQUEST,
+    EventType.LLM_RESPONSE,
+    EventType.ASSISTANT_RESPONSE,
+})
+
+
 @dataclass
 class CompactionCheckpointWatcher:
     """Stateful watch-loop adapter that writes once per context-growth cycle."""
@@ -1018,6 +1081,11 @@ class CompactionCheckpointWatcher:
         # _request_samples and the stream bookkeeping below read every event.
         require_object_event_data(self.events)
         samples = _request_samples(self.events)
+        # Refuse a stored time a checkpoint would show. update leaves out a
+        # new event with such a time instead.
+        require_usable_timestamps(
+            self.events, indexes=self._checkpoint_timestamp_indexes(samples),
+        )
         if samples:
             self._last_tokens = samples[-1].input_tokens
             for sample in samples:
@@ -1045,11 +1113,9 @@ class CompactionCheckpointWatcher:
                     self._pending_previous_by_stream.pop(stream_id, None)
                     previous_exact[stream_id] = explicit
 
-    def checkpoint_current(self) -> Path | None:
-        """Checkpoint an already-saturated session when watch starts."""
-        samples = _request_samples(self.events)
-        if not samples or not self._armed:
-            return None
+    def _saturated(
+        self, samples: list[_RequestSample],
+    ) -> list[tuple[float, _RequestSample, TraceEvent]]:
         latest_exact_by_stream: dict[str, _RequestSample] = {}
         for sample in samples:
             if not sample.estimated:
@@ -1060,6 +1126,29 @@ class CompactionCheckpointWatcher:
             ratio = sample.input_tokens / _context_limit(source_event.data)
             if ratio >= self.checkpoint_at:
                 saturated.append((ratio, sample, source_event))
+        return saturated
+
+    def _checkpoint_timestamp_indexes(self, samples: list[_RequestSample]) -> set[int]:
+        """Return the positions of the events whose timestamps a checkpoint reads.
+
+        Each checkpoint shows the time of the event that triggers it and of
+        the first read of each file, both from the first event. The first
+        event and the first reads count even when nothing is saturated yet:
+        every checkpoint that update writes later shows them too, and
+        build_checkpoint_markdown checks them then. checkpoint_current also
+        compares the times of the saturated requests, so a request counts
+        only when it is saturated.
+        """
+        indexes = _checkpoint_read_indexes(self.events)
+        indexes.update(sample.event_index for _ratio, sample, _event in self._saturated(samples))
+        return indexes
+
+    def checkpoint_current(self) -> Path | None:
+        """Checkpoint an already-saturated session when watch starts."""
+        samples = _request_samples(self.events)
+        if not samples or not self._armed:
+            return None
+        saturated = self._saturated(samples)
         if not saturated:
             return None
         _ratio, _sample, source_event = max(
@@ -1070,40 +1159,65 @@ class CompactionCheckpointWatcher:
             self.store, self.session_id, self.events, source_event.timestamp,
         )
 
-    def update(self, event: TraceEvent) -> Path | None:
-        """Process a newly tailed event and return a written path, if any."""
-        self.events.append(event)
-        if event.event_type not in {
-            EventType.LLM_REQUEST,
-            EventType.LLM_RESPONSE,
-            EventType.ASSISTANT_RESPONSE,
-        }:
-            return None
+    def _token_step(self, event: TraceEvent) -> tuple[str, int | None, int | None]:
+        """Return the stream, the previous exact token count and the event's
+        own count for an LLM *event*, without changing any state."""
         stream_id = _event_stream(event)
-        explicit = _input_token_count(event.data)
-
         if event.event_type == EventType.LLM_REQUEST:
             previous_tokens = self._last_tokens_by_stream.get(stream_id)
-            self._pending_previous_by_stream[stream_id] = previous_tokens
-            # Checkpoints, like compaction reports, require provider-reported
-            # usage.  A paired response can supply it later.
-            if explicit is None:
-                return None
         else:
-            if explicit is None:
-                return None
-            previous_tokens = self._pending_previous_by_stream.pop(
+            previous_tokens = self._pending_previous_by_stream.get(
                 stream_id, self._last_tokens_by_stream.get(stream_id),
             )
+        return stream_id, previous_tokens, _input_token_count(event.data)
 
-        if explicit is None:
-            return None
-        if (
+    def _arms(self, previous_tokens: int | None, explicit: int) -> bool:
+        return (
             previous_tokens is not None
             and explicit < previous_tokens
             and (previous_tokens - explicit) / previous_tokens
             > self.compaction_threshold
-        ):
+        )
+
+    def _reads_timestamp(self, event: TraceEvent) -> bool:
+        """Return True if a checkpoint would read *event*'s timestamp once
+        update keeps it: as the first event, as the first read of a file, or
+        as the event that triggers a write."""
+        if not self.events:
+            return True
+        path = _read_path(event)
+        if path and all(_read_path(kept) != path for kept in self.events):
+            return True
+        if event.event_type not in _CHECKPOINT_EVENT_TYPES:
+            return False
+        _stream_id, previous_tokens, explicit = self._token_step(event)
+        if explicit is None:
+            return False
+        armed = self._armed or self._arms(previous_tokens, explicit)
+        return armed and explicit / _context_limit(event.data) >= self.checkpoint_at
+
+    def update(self, event: TraceEvent) -> Path | None:
+        """Process a newly tailed event and return a written path, if any.
+
+        Raises UnusableTimestampError, and keeps nothing of *event*, when a
+        checkpoint would read its timestamp and it is not a Unix time in
+        seconds. watch then leaves the event out of the checkpoint.
+        """
+        if usable_time(event.timestamp) is None and self._reads_timestamp(event):
+            raise UnusableTimestampError("timestamp must be a Unix time in seconds")
+        self.events.append(event)
+        if event.event_type not in _CHECKPOINT_EVENT_TYPES:
+            return None
+        stream_id, previous_tokens, explicit = self._token_step(event)
+        if event.event_type == EventType.LLM_REQUEST:
+            self._pending_previous_by_stream[stream_id] = previous_tokens
+        elif explicit is not None:
+            self._pending_previous_by_stream.pop(stream_id, None)
+        # Checkpoints, like compaction reports, require provider-reported
+        # usage.  A paired response can supply it later.
+        if explicit is None:
+            return None
+        if self._arms(previous_tokens, explicit):
             self._armed = True
         self._last_tokens = explicit
         self._last_tokens_by_stream[stream_id] = explicit
@@ -1128,7 +1242,7 @@ def _rule_post_compaction_regression(events: list[TraceEvent], cfg: dict) -> lis
     tool_loop_threshold = int(cfg.get("tool_loop_threshold", 5))
     findings: list[LintResult] = []
     not_run: set[str] = set()
-    for compaction in detect_compactions(events, threshold):
+    for compaction in _find_compactions(events, threshold):
         behavior = behavior_diff_for_compaction(
             events,
             compaction,
@@ -1175,7 +1289,7 @@ def cmd_compaction(args: argparse.Namespace) -> int:
     )
     try:
         report = analyse_compaction_session(store, session_id, threshold)
-    except NonObjectEventDataError:
+    except (NonObjectEventDataError, UnusableTimestampError):
         raise
     except ValueError as exc:
         sys.stderr.write(f"compaction: {exc}\n")

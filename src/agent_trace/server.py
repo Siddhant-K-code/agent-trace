@@ -54,6 +54,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from .collector_client import check_session_meta
 from .event_data import (
     NonObjectEventDataError,
+    UnusableTimestampError,
     refused_event_warning,
     refused_timestamp_warning,
 )
@@ -428,7 +429,7 @@ class CollectorHandler(BaseHTTPRequestHandler):
                     return
                 try:
                     result = _wd.api_session_review(self.store, session_id)
-                except NonObjectEventDataError as exc:
+                except (NonObjectEventDataError, UnusableTimestampError) as exc:
                     self._send_json(400, {"error": str(exc)})
                     return
                 if result is None:
@@ -453,7 +454,7 @@ class CollectorHandler(BaseHTTPRequestHandler):
                     return
                 try:
                     result = _wd.api_session_compare(self.store, session_id, other_id)
-                except NonObjectEventDataError as exc:
+                except (NonObjectEventDataError, UnusableTimestampError) as exc:
                     self._send_json(400, {"error": str(exc)})
                     return
                 except (OSError, ValueError, TypeError, KeyError) as exc:
@@ -481,7 +482,7 @@ class CollectorHandler(BaseHTTPRequestHandler):
                     return
                 try:
                     result = _wd.api_minimized_review_share(self.store, session_id)
-                except NonObjectEventDataError as exc:
+                except (NonObjectEventDataError, UnusableTimestampError) as exc:
                     self._send_json(400, {"error": str(exc)})
                     return
                 if result is None:
@@ -502,7 +503,7 @@ class CollectorHandler(BaseHTTPRequestHandler):
                     return
                 try:
                     result = _wd.api_session_otlp(self.store, session_id)
-                except NonObjectEventDataError as exc:
+                except (NonObjectEventDataError, UnusableTimestampError) as exc:
                     self._send_json(400, {"error": str(exc)})
                     return
                 except (OSError, ValueError, TypeError, KeyError) as exc:

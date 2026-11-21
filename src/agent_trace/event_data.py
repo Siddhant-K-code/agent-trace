@@ -31,17 +31,26 @@ Hooks and adapters store a tool call's arguments in ``arguments`` (or
 ``tool_input``) as an object, as a serialized object, or as plain text such as
 the patch an ``apply_patch`` call sends. :func:`tool_arguments` reads all
 three, and :func:`patch_paths` reads the file paths a patch names.
+
+An event's ``timestamp`` must be a Unix time in seconds. The collector refuses
+one that is not (see :func:`refused_timestamp_warning`), but an older version
+or a hand edit can still store one. Commands that read timestamps call
+:func:`require_usable_timestamps` before they print or write anything, and the
+CLI turns :class:`UnusableTimestampError` into one ``Error:`` line on stderr
+and exit code 1. ``watch --stream-otlp`` leaves such an event out of the OTLP
+stream (see :func:`left_out_timestamp_warning`).
 """
 
 from __future__ import annotations
 
 import ast
 import json
+import math
 import re
 from collections.abc import Collection, Mapping, Sequence
 from typing import Any
 
-from .models import EventType, TraceEvent
+from .models import EventType, SessionMeta, TraceEvent, usable_time
 
 # Longest argument text parse_mapping reads as a Python literal. JSON text is
 # read at any length.
@@ -185,6 +194,10 @@ class NonObjectEventDataError(ValueError):
     """An event's ``data`` is not a JSON object."""
 
 
+class UnusableTimestampError(ValueError):
+    """An event or session time is not a Unix time in seconds."""
+
+
 def _json_type_name(value: object) -> str:
     if value is None:
         return "null"
@@ -266,6 +279,26 @@ def left_out_event_warning(command: str, event: TraceEvent) -> str:
     )
 
 
+def left_out_timestamp_warning(
+    command: str, event: TraceEvent, target: str = "OTLP stream",
+) -> str:
+    """Return the line a live command prints when it leaves an event out of
+    *target* for its timestamp.
+
+    ``watch --stream-otlp`` cannot turn an event into spans when the converter
+    would read its timestamp and the timestamp is not a Unix time in seconds,
+    so it sends the other events of the batch without it and prints the line
+    to stderr. ``watch --compaction-checkpoint`` leaves such an event out of
+    the compaction checkpoint and prints the line with its other checkpoint
+    lines. The line names the event type only, never the timestamp, data
+    values or event IDs.
+    """
+    return (
+        f"[{command}] Left one {_event_type_value(event)} event out of the {target} "
+        "because its timestamp is not a Unix time in seconds.\n"
+    )
+
+
 def require_object_event_data(
     events: Sequence[TraceEvent],
     *,
@@ -314,3 +347,95 @@ def require_object_event_data(
     elif others:
         message += f"; {others} more events have non-object data"
     raise NonObjectEventDataError(message)
+
+
+def _timestamp_kind(value: object) -> str:
+    # Never call float() on an int: 10**400 does not fit in a float.
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, str):
+        return "string"
+    if value is None:
+        return "null"
+    if isinstance(value, Mapping):
+        return "object"
+    if isinstance(value, (list, tuple)):
+        return "array"
+    if isinstance(value, int):
+        return "negative" if value < 0 else "out-of-range"
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return "non-finite"
+        return "negative" if value < 0 else "out-of-range"
+    return "non-JSON"
+
+
+_TIMESTAMP_KINDS_WITH_AN = frozenset({"object", "array", "out-of-range"})
+
+
+def require_usable_timestamps(
+    events: Sequence[TraceEvent],
+    *,
+    event_types: Collection[EventType] | None = None,
+    indexes: Collection[int] | None = None,
+    session_id: str | None = None,
+) -> None:
+    """Raise :class:`UnusableTimestampError` if a checked event's ``timestamp``
+    is not a Unix time in seconds.
+
+    A timestamp is usable when :func:`~agent_trace.models.usable_time` accepts
+    it: a finite number of 0 or more that ``datetime.fromtimestamp`` accepts.
+    Every event is checked by default. ``event_types`` limits the check to
+    events of those types and ``indexes`` (0-based positions in ``events``)
+    limits it to those events, so a command can check only the events whose
+    timestamps it reads. When both are given, both apply.
+
+    The message names the first checked event with an unusable timestamp by
+    1-based position in ``events``, its type, and the kind of the timestamp
+    (string, null, boolean, object, array, non-finite, negative or
+    out-of-range), then counts every other event in ``events`` with an
+    unusable timestamp. It never includes the timestamp, any part of it, data
+    values or event IDs. ``session_id`` names the session for commands that
+    read more than one.
+    """
+    unusable = [
+        (position, event)
+        for position, event in enumerate(events, start=1)
+        if usable_time(event.timestamp) is None
+    ]
+    index_set = None if indexes is None else set(indexes)
+    checked = [
+        (position, event)
+        for position, event in unusable
+        if (event_types is None or event.event_type in event_types)
+        and (index_set is None or position - 1 in index_set)
+    ]
+    if not checked:
+        return
+    position, event = checked[0]
+    kind = _timestamp_kind(event.timestamp)
+    article = "an" if kind in _TIMESTAMP_KINDS_WITH_AN else "a"
+    subject = f"session {session_id}" if session_id else "session"
+    message = (
+        f"{subject} event timestamp must be a Unix time in seconds: event {position} "
+        f"of {len(events)} ({_event_type_value(event)}) has {article} {kind} timestamp"
+    )
+    others = len(unusable) - 1
+    if others == 1:
+        message += "; 1 more event has an unusable timestamp"
+    elif others:
+        message += f"; {others} more events have unusable timestamps"
+    raise UnusableTimestampError(message)
+
+
+def require_usable_session_times(meta: SessionMeta) -> None:
+    """Raise :class:`UnusableTimestampError` if the session's ``started_at``, or
+    its ``ended_at`` when it is not None, is not a Unix time in seconds.
+
+    OTLP export reads both for the root span. ``ended_at`` is None while a
+    session is open. The message never includes the value.
+    """
+    if usable_time(meta.started_at) is None:
+        raise UnusableTimestampError("session started_at must be a Unix time in seconds")
+    if meta.ended_at is not None and usable_time(meta.ended_at) is None:
+        raise UnusableTimestampError("session ended_at must be a Unix time in seconds")

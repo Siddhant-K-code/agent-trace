@@ -60,7 +60,7 @@ agent-strace server --storage ./traces --dashboard
 
 Open `http://127.0.0.1:4317/`, select a session, and review ordered evidence, health reasons, provider limits, annotations, raw fields, and unresolved relationships. The dashboard shows session fields and event text as plain text.
 
-The page can compare two sessions, save a privacy-minimized HTML review, and download OTLP JSON. These actions read the configured local store and return local files. They do not upload trace data.
+The page can compare two sessions, save a privacy-minimized HTML review, and download OTLP JSON. These actions read the configured local store and return local files. They do not upload trace data. When a session has an event timestamp that is not a Unix time in seconds, the review, compare, and share actions answer 400 with the message the CLI prints, and so does the OTLP action when that event is one it exports.
 
 With `--dashboard`, the server defaults to `127.0.0.1`. An unauthenticated dashboard cannot bind to `0.0.0.0`, `::`, a LAN address, or a hostname. To expose it beyond loopback, set an API key explicitly:
 

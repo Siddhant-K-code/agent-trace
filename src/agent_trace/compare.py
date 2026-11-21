@@ -17,7 +17,7 @@ from dataclasses import asdict
 from typing import TextIO
 
 from .diff import compare_sessions, format_compare, CompareReport
-from .event_data import require_object_event_data
+from .event_data import require_object_event_data, require_usable_timestamps
 from .inert import inert
 from .models import EventType, SessionMeta, usable_text
 from .store import TraceStore
@@ -247,6 +247,15 @@ def cmd_compare(args: argparse.Namespace) -> int:
             sys.stderr.write(f"Session not found: {raw_b}\n")
             return 1
         session_b = full_b
+
+    # compare_sessions reads every timestamp of both sessions. Check them
+    # here, because the try below turns any error into "[compare] Failed:".
+    for session_id in (session_a, session_b):
+        try:
+            events = store.load_events(session_id)
+        except Exception:
+            continue
+        require_usable_timestamps(events, session_id=session_id)
 
     # Run comparison
     try:

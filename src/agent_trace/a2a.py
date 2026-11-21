@@ -25,9 +25,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, TextIO
 
-from .event_data import require_object_event_data
+from .event_data import (
+    UnusableTimestampError,
+    require_object_event_data,
+    require_usable_timestamps,
+)
 from .inert import inert
-from .models import EventType, SessionMeta, TraceEvent, usable_text
+from .models import EventType, SessionMeta, TraceEvent, usable_number, usable_text
 from .store import TraceStore
 
 
@@ -240,11 +244,20 @@ def _extract_a2a_calls(events: list[TraceEvent]) -> list[A2ACallEvent]:
     return calls
 
 
-def build_a2a_tree(store: TraceStore, root_session_id: str) -> A2ATreeReport:
+def build_a2a_tree(
+    store: TraceStore,
+    root_session_id: str,
+    *,
+    check_call_timestamps: bool = False,
+) -> A2ATreeReport:
     """Build the full agent call graph rooted at root_session_id.
 
     Raises NonObjectEventDataError, naming the session, when an event in a
     session of the tree has data that is not an object.
+
+    With ``check_call_timestamps``, also raises UnusableTimestampError, naming
+    the session, when an A2A call's timestamp is not a Unix time in seconds.
+    The OTLP spans read those timestamps. The text tree does not.
     """
     # A session already on the path from the root is a cycle. A session
     # already shown in full elsewhere (a diamond) is a shared reference.
@@ -286,6 +299,16 @@ def build_a2a_tree(store: TraceStore, root_session_id: str) -> A2ATreeReport:
 
         # _extract_a2a_calls reads the data of every event.
         require_object_event_data(events, session_id=sid)
+        if check_call_timestamps:
+            require_usable_timestamps(
+                events,
+                indexes={
+                    index
+                    for index, event in enumerate(events)
+                    if event.data.get("event_subtype") == A2A_CALL
+                },
+                session_id=sid,
+            )
         a2a_calls = _extract_a2a_calls(events)
 
         try:
@@ -299,7 +322,7 @@ def build_a2a_tree(store: TraceStore, root_session_id: str) -> A2ATreeReport:
             agent_id=usable_text(meta.agent_name) or sid[:12],
             depth=depth,
             cost_usd=cost,
-            duration_ms=meta.total_duration_ms,
+            duration_ms=usable_number(meta.total_duration_ms) or 0,
             tool_calls=meta.tool_calls,
             a2a_calls=a2a_calls,
             delegations=delegations,
@@ -445,6 +468,9 @@ def a2a_calls_to_otlp_spans(
         span_by_session[node.session_id] = span
 
         for call in node.a2a_calls:
+            # Multiplying a str or a list repeats it, so refuse those first.
+            if isinstance(call.timestamp, bool) or not isinstance(call.timestamp, (int, float)):
+                raise UnusableTimestampError("timestamp must be a Unix time in seconds")
             call_span_id = call.event_id[:16]
             spans.append({
                 "traceId": trace_id,
@@ -492,9 +518,9 @@ def cmd_a2a_tree(args: argparse.Namespace) -> int:
         sys.stderr.write(f"Session not found: {session_id}\n")
         return 1
 
-    report = build_a2a_tree(store, full_id)
-
     fmt = getattr(args, "format", "text") or "text"
+    report = build_a2a_tree(store, full_id, check_call_timestamps=fmt == "json")
+
     if fmt == "json":
         import json as _json
         spans = a2a_calls_to_otlp_spans(report)

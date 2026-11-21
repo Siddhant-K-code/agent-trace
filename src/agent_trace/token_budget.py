@@ -25,7 +25,12 @@ from dataclasses import dataclass, field
 from typing import TextIO
 
 from .cost import _estimate_tokens
-from .event_data import number_field, require_object_event_data, str_field
+from .event_data import (
+    number_field,
+    require_object_event_data,
+    require_usable_timestamps,
+    str_field,
+)
 from .inert import inert
 from .models import EventType, TraceEvent
 from .store import TraceStore
@@ -152,11 +157,22 @@ def analyse_token_budget(
     """Build a TokenBudgetReport for *session_id*.
 
     Raises NonObjectEventDataError when it would read event data that is not
-    an object.
+    an object, and UnusableTimestampError when the first event's or an
+    llm_request's timestamp is not a Unix time in seconds.
     """
     meta = store.load_meta(session_id)
     events = store.load_events(session_id)
     require_object_event_data(events, indexes=token_budget_data_indexes(events))
+    # Each request's offset is its timestamp minus the first event's.
+    require_usable_timestamps(
+        events,
+        indexes={0}
+        | {
+            index
+            for index, event in enumerate(events)
+            if event.event_type == EventType.LLM_REQUEST
+        },
+    )
 
     base_ts = events[0].timestamp if events else meta.started_at
     model = ""

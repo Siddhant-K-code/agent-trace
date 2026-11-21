@@ -17,7 +17,12 @@ from pathlib import Path
 from typing import TextIO
 
 from .cost import estimate_cost
-from .event_data import object_field, require_object_event_data, str_field
+from .event_data import (
+    object_field,
+    require_object_event_data,
+    require_usable_timestamps,
+    str_field,
+)
 from .explain import explain_session
 from .inert import inert
 from .models import EventType, TraceEvent
@@ -949,6 +954,7 @@ def cmd_postmortem(args: argparse.Namespace) -> int:
     require_object_event_data(
         events, indexes=postmortem_data_indexes(events, crashed=crash is not None)
     )
+    require_usable_timestamps(events)
 
     agents_md = getattr(args, "agents_md", "AGENTS.md")
     report = analyze_session(

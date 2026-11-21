@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import TextIO
 
 from .cost import DEFAULT_MODEL, estimate_cost
-from .event_data import require_object_event_data
+from .event_data import require_object_event_data, require_usable_timestamps
 from .explain import PHASE_DATA_EVENT_TYPES
 from .fileutil import split_lf_lines
 from .store import TraceStore, _write_atomic, validate_stored_id, validate_tenant_id
@@ -139,6 +139,7 @@ def build_tenant_report(
             require_object_event_data(
                 events, event_types=PHASE_DATA_EVENT_TYPES, session_id=meta.session_id
             )
+            require_usable_timestamps(events, session_id=meta.session_id)
             try:
                 result = estimate_cost(scoped_store, meta.session_id, model=model)
                 values[1] = float(values[1]) + result.total_cost

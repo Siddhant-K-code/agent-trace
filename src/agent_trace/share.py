@@ -21,7 +21,13 @@ from .disclosure import (
     NonObjectEventDataError,
     require_object_event_data,
 )
-from .event_data import object_field, str_field, str_list_field
+from .event_data import (
+    UnusableTimestampError,
+    object_field,
+    require_usable_timestamps,
+    str_field,
+    str_list_field,
+)
 from .evidence_packet import EvidencePacket, build_evidence_packet
 from .explain import ExplainResult, build_phases
 from .models import EventType, TraceEvent, SessionMeta, usable_text
@@ -989,8 +995,10 @@ def cmd_share(args: argparse.Namespace) -> int:
     # One check before any mode runs, so --dry-run refuses exactly the sessions
     # that share refuses, and nothing is written, printed, or opened.
     try:
-        require_object_event_data(store.load_events(full_id))
-    except NonObjectEventDataError as exc:
+        events = store.load_events(full_id)
+        require_object_event_data(events)
+        require_usable_timestamps(events)
+    except (NonObjectEventDataError, UnusableTimestampError) as exc:
         sys.stderr.write(f"Error: {exc}\n")
         return 1
 
