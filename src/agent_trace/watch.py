@@ -91,7 +91,7 @@ from .project_budget import (
     project_budget_status,
 )
 from .session_paths import absolute_cwd, resolve_path
-from .store import TraceStore
+from .store import TraceStore, validate_optional_tenant_id
 
 
 # ---------------------------------------------------------------------------
@@ -3401,19 +3401,24 @@ def cmd_watch(args: argparse.Namespace) -> int:
         sys.stderr.write(f"Session not found: {session_id}\n")
         return 1
 
-    tenant_id = (
-        getattr(args, "tenant_id", None)
-        or os.environ.get("AGENT_STRACE_TENANT_ID", "")
-    )
-    if tenant_id:
-        try:
+    try:
+        requested_tenant = getattr(args, "tenant_id", None)
+        tenant_id = validate_optional_tenant_id(
+            "" if requested_tenant is None else requested_tenant
+        )
+        if tenant_id == "":
+            tenant_id = validate_optional_tenant_id(
+                os.environ.get("AGENT_STRACE_TENANT_ID", "").strip()
+            )
+        if tenant_id:
             tagged_events = store.tag_session(full_id, tenant_id)
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
-            # The error can quote an event ID from the session's events file.
-            sys.stderr.write(f"[watch] could not assign tenant: {inert(exc)}\n")
-            return 1
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        # The error can quote an event ID from the session's events file.
+        sys.stderr.write(f"[watch] could not assign tenant: {inert(exc)}\n")
+        return 1
+    if tenant_id:
         sys.stderr.write(
-            f"[watch] Tenant {tenant_id.strip()} assigned to "
+            f"[watch] Tenant {tenant_id} assigned to "
             f"{tagged_events} existing event(s).\n"
         )
 

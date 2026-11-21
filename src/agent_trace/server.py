@@ -63,6 +63,7 @@ from .models import SessionMeta, TraceEvent, usable_time
 from .store import (
     TraceStore,
     DEFAULT_TRACE_DIR,
+    validate_optional_tenant_id,
     validate_session_id,
     validate_stored_id,
 )
@@ -657,9 +658,12 @@ class CollectorHandler(BaseHTTPRequestHandler):
                 if self.store.session_exists(session_id):
                     # Update existing meta
                     meta = self.store.load_meta(session_id)
-                    incoming_tenant = str(data.get("tenant_id", "") or "").strip()
+                    meta.tenant_id = validate_optional_tenant_id(meta.tenant_id)
                     new_tenant = ""
                     if "tenant_id" in data:
+                        incoming_tenant = validate_optional_tenant_id(
+                            data["tenant_id"]
+                        )
                         if meta.tenant_id and incoming_tenant != meta.tenant_id:
                             self._send_json(409, {"error": "session tenant cannot be cleared or changed"})
                             return

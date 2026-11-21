@@ -540,6 +540,20 @@ class TestPostSessions(unittest.TestCase):
         )
         self.assertEqual(raw["tenant_id"], "tenant-a")
 
+    def test_first_tenant_assignment_rejects_non_string(self):
+        meta = SessionMeta(session_id="legacy-invalid-tenant", tenant_id="")
+        self.store.create_session(meta)
+        body = json.dumps({
+            "session_id": meta.session_id,
+            "tenant_id": ["tenant-a"],
+        }).encode("utf-8")
+
+        status, response = _post(f"{self.base}/sessions", body)
+
+        self.assertEqual(status, 400)
+        self.assertIn(b"tenant ID must be a string", response)
+        self.assertEqual(self.store.load_meta(meta.session_id).tenant_id, "")
+
     def test_path_traversal_session_id_is_rejected(self):
         status, _ = _post(
             f"{self.base}/sessions",

@@ -49,8 +49,8 @@ untagged tree, unlink the relationship, tag both sessions, and then relink it
 as one coordinated migration.
 
 Use stable opaque customer identifiers rather than names, emails, or other
-personal data. Tenant IDs must be 256 characters or fewer and cannot contain
-control characters.
+personal data. Tenant IDs must be strings, 256 characters or fewer, and cannot
+contain control characters.
 
 ## Scoped queries and cost attribution
 

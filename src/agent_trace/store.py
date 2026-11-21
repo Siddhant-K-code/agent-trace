@@ -84,14 +84,16 @@ def _has_control_character(value: str) -> bool:
     return any(unicodedata.category(char) == "Cc" for char in value)
 
 
-def validate_tenant_id(tenant_id: str) -> str:
+def validate_tenant_id(tenant_id: object) -> str:
     """Return a normalised tenant ID or raise ``ValueError``.
 
     Tenant IDs are data tags rather than paths, but rejecting control
     characters prevents terminal/log injection and a modest length limit
     keeps exported attributes bounded.
     """
-    value = str(tenant_id).strip()
+    if not isinstance(tenant_id, str):
+        raise ValueError("tenant ID must be a string")
+    value = tenant_id.strip()
     if not value:
         raise ValueError("tenant ID cannot be empty")
     if len(value) > 256:
@@ -99,6 +101,15 @@ def validate_tenant_id(tenant_id: str) -> str:
     if _has_control_character(value):
         raise ValueError("tenant ID cannot contain control characters")
     return value
+
+
+def validate_optional_tenant_id(tenant_id: object) -> str:
+    """Return an empty or normalised tenant ID, rejecting non-strings."""
+    if not isinstance(tenant_id, str):
+        raise ValueError("tenant ID must be a string")
+    if tenant_id == "":
+        return ""
+    return validate_tenant_id(tenant_id)
 
 
 def validate_session_id(session_id: str) -> str:
@@ -569,6 +580,7 @@ class TraceStore:
         path = self._session_file(session_id, "events.ndjson", "event stream")
         meta_path = self._session_file(session_id, "meta.json", "session metadata")
         meta = self.load_meta(session_id)
+        meta.tenant_id = validate_optional_tenant_id(meta.tenant_id)
         if meta.tenant_id and meta.tenant_id != tenant_id:
             raise ValueError(
                 f"session {session_id} is already assigned to another tenant"
@@ -582,6 +594,7 @@ class TraceStore:
             if event.session_id and event.session_id != session_id:
                 raise ValueError("event session ID does not match its directory")
             event.session_id = session_id
+            event.tenant_id = validate_optional_tenant_id(event.tenant_id)
             if event.tenant_id and event.tenant_id != tenant_id:
                 raise ValueError(f"event {event.event_id} belongs to another tenant")
             event.tenant_id = tenant_id
@@ -816,6 +829,7 @@ class TraceStore:
             self.checkpoint_path(session_id)
             if session_dir.exists():
                 meta = self.load_meta(session_id)
+                meta.tenant_id = validate_optional_tenant_id(meta.tenant_id)
                 self._session_file(session_id, "events.ndjson", "event stream")
                 if meta.tenant_id != tenant_id:
                     raise ValueError(
@@ -848,6 +862,7 @@ class TraceStore:
                 session_dir = self._session_dir(session_id)
                 if session_dir.exists():
                     meta = self.load_meta(session_id)
+                    meta.tenant_id = validate_optional_tenant_id(meta.tenant_id)
                     if meta.tenant_id != tenant_id:
                         raise ValueError(
                             "deletion journal tenant does not match session"
@@ -923,6 +938,7 @@ class TraceStore:
             parent = self.load_meta(meta.parent_session_id)
         except FileNotFoundError as exc:
             raise ValueError("parent session must exist in the same scoped store") from exc
+        parent.tenant_id = validate_optional_tenant_id(parent.tenant_id)
         if parent.tenant_id == meta.tenant_id:
             return  # includes the explicit legacy untagged→untagged case
         if inherit and parent.tenant_id and not meta.tenant_id:
@@ -941,6 +957,7 @@ class TraceStore:
                 raise ValueError(
                     "parent session must exist in the same scoped store"
                 ) from exc
+            parent.tenant_id = validate_optional_tenant_id(parent.tenant_id)
             if parent.tenant_id != tenant_id:
                 raise ValueError(
                     "tagging session would create a cross-tenant parent link"
@@ -948,6 +965,7 @@ class TraceStore:
         for child in self.list_sessions():
             if child.parent_session_id != meta.session_id:
                 continue
+            child.tenant_id = validate_optional_tenant_id(child.tenant_id)
             if child.tenant_id != tenant_id:
                 raise ValueError(
                     "tagging session would create a cross-tenant child link"
@@ -974,10 +992,10 @@ class TraceStore:
                 raise ValueError(f"session {meta.session_id} was erased and cannot be recreated")
             if self.workspace_id and not getattr(meta, "workspace_id", ""):
                 meta.workspace_id = self.workspace_id
-            if not meta.tenant_id:
+            meta.tenant_id = validate_optional_tenant_id(meta.tenant_id)
+            if meta.tenant_id == "":
                 meta.tenant_id = os.environ.get(_TENANT_ENV, "").strip()
-            if meta.tenant_id:
-                meta.tenant_id = validate_tenant_id(meta.tenant_id)
+                meta.tenant_id = validate_optional_tenant_id(meta.tenant_id)
             self._enforce_parent_tenant(meta, inherit=True)
             self._redact_meta(meta)
             d = self._session_dir(meta.session_id)
@@ -988,6 +1006,7 @@ class TraceStore:
                 if if_missing:
                     return None
                 existing = SessionMeta.from_json(existing_meta_path.read_text())
+                existing.tenant_id = validate_optional_tenant_id(existing.tenant_id)
                 if existing.tenant_id and not meta.tenant_id:
                     meta.tenant_id = existing.tenant_id
                 elif existing.tenant_id != meta.tenant_id:
@@ -1020,6 +1039,7 @@ class TraceStore:
         if event.session_id and event.session_id != session_id:
             raise ValueError("event session ID does not match target session")
         event.session_id = session_id
+        event.tenant_id = validate_optional_tenant_id(event.tenant_id)
         # The only supported empty→tagged metadata transition is tag_session,
         # which atomically updates historical events and records hash evidence.
         if event.tenant_id:
@@ -1040,6 +1060,7 @@ class TraceStore:
             except (OSError, ValueError, TypeError, json.JSONDecodeError):
                 meta = None
             if meta is not None:
+                meta.tenant_id = validate_optional_tenant_id(meta.tenant_id)
                 if meta.tenant_id:
                     if event.tenant_id and event.tenant_id != meta.tenant_id:
                         raise ValueError(
@@ -1047,8 +1068,6 @@ class TraceStore:
                             f"session tenant {meta.tenant_id!r}"
                         )
                     event.tenant_id = validate_tenant_id(meta.tenant_id)
-            elif event.tenant_id:
-                event.tenant_id = validate_tenant_id(event.tenant_id)
             self._redact_event(event)
             f.parent.mkdir(parents=True, exist_ok=True)
             # newline="\n" writes LF on every OS. It also turns off newline
@@ -1074,6 +1093,8 @@ class TraceStore:
         events = list(events)
         if not events:
             return
+        for event in events:
+            event.tenant_id = validate_optional_tenant_id(event.tenant_id)
         if any(event.tenant_id for event in events):
             for event in events:
                 self.append_event(session_id, event)
@@ -1097,7 +1118,10 @@ class TraceStore:
                 meta = self.load_meta(session_id)
             except (OSError, ValueError, TypeError, json.JSONDecodeError):
                 meta = None
-            tenant_id = validate_tenant_id(meta.tenant_id) if meta is not None and meta.tenant_id else ""
+            tenant_id = (
+                validate_optional_tenant_id(meta.tenant_id)
+                if meta is not None else ""
+            )
             f.parent.mkdir(parents=True, exist_ok=True)
             with open(f, "a+", encoding="utf-8", newline="\n") as fh:
                 fh.seek(0)
@@ -1232,12 +1256,12 @@ class TraceStore:
         existing = SessionMeta.from_json(f.read_text())
         if existing.session_id != meta.session_id:
             raise ValueError("metadata session ID does not match its directory")
+        existing.tenant_id = validate_optional_tenant_id(existing.tenant_id)
+        meta.tenant_id = validate_optional_tenant_id(meta.tenant_id)
         if existing.tenant_id != meta.tenant_id:
             if not existing.tenant_id and meta.tenant_id:
                 raise ValueError("use tag_session for the first tenant assignment")
             raise ValueError("session tenant cannot be cleared or changed")
-        if meta.tenant_id:
-            meta.tenant_id = validate_tenant_id(meta.tenant_id)
         if preserve_parent_link:
             _carry_parent_link(meta, existing)
         self._enforce_parent_tenant(meta, inherit=False)
@@ -1252,10 +1276,14 @@ class TraceStore:
         _validate_meta_ids(meta)
         return meta
 
-    def load_events(self, session_id: str) -> list[TraceEvent]:
+    def load_events(
+        self, session_id: str, *, validate_tenant_ids: bool = False
+    ) -> list[TraceEvent]:
         session_id = validate_stored_id(session_id, "stored session ID")
         f = self._session_file(session_id, "events.ndjson", "event stream")
         meta = self.load_meta(session_id)
+        if validate_tenant_ids:
+            meta.tenant_id = validate_optional_tenant_id(meta.tenant_id)
         events = []
         for line in _split_lf_lines(f.read_text(encoding="utf-8").strip()):
             if line:
@@ -1263,6 +1291,8 @@ class TraceStore:
                 if event.session_id and event.session_id != session_id:
                     raise ValueError("event session ID does not match its directory")
                 event.session_id = session_id
+                if validate_tenant_ids:
+                    event.tenant_id = validate_optional_tenant_id(event.tenant_id)
                 if meta.tenant_id and event.tenant_id and event.tenant_id != meta.tenant_id:
                     raise ValueError("event tenant does not match session metadata")
                 events.append(event)
@@ -1276,6 +1306,8 @@ class TraceStore:
 
     def list_sessions(self, tenant_id: str | None = None) -> list[SessionMeta]:
         """Return valid sessions sorted newest first by started_at, then descending session ID."""
+        if tenant_id is not None:
+            tenant_id = validate_optional_tenant_id(tenant_id)
         if not self.base_dir.exists():
             return []
         sessions = []
@@ -1310,6 +1342,8 @@ class TraceStore:
         administration must instead fail closed so it cannot report an
         incomplete result or claim deletion succeeded while data was omitted.
         """
+        if tenant_id is not None:
+            tenant_id = validate_optional_tenant_id(tenant_id)
         if self.base_dir.is_symlink():
             raise ValueError("refusing symlinked trace store")
         if not self.base_dir.exists():
@@ -1353,10 +1387,11 @@ class TraceStore:
                 raise ValueError(f"invalid core file for session {session_id}")
             try:
                 meta = self.load_meta(session_id)
+                meta.tenant_id = validate_optional_tenant_id(meta.tenant_id)
                 if usable_time(meta.started_at) is None:
                     raise ValueError("started_at is not a usable time")
                 if validate_events:
-                    self.load_events(session_id)
+                    self.load_events(session_id, validate_tenant_ids=True)
             except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
                 raise ValueError(
                     f"corrupt session in tenant store: {session_id}"
@@ -1388,6 +1423,8 @@ class TraceStore:
     def find_session(self, prefix: str, tenant_id: str | None = None) -> str | None:
         """Find a session by prefix match."""
         validate_stored_id(prefix, "session ID prefix")
+        if tenant_id is not None:
+            tenant_id = validate_optional_tenant_id(tenant_id)
         if not self.base_dir.exists():
             return None
         for d in self.base_dir.iterdir():
@@ -1416,6 +1453,7 @@ class TraceStore:
         meta_path = self._session_file(session_id, "meta.json", "session metadata")
         with self.write_lock():
             meta = self.load_meta(session_id)
+            meta.tenant_id = validate_optional_tenant_id(meta.tenant_id)
             self._store_file("tenant-audit.ndjson", "tenant audit")
             if meta.tenant_id and meta.tenant_id != tenant_id:
                 raise ValueError(
@@ -1430,6 +1468,7 @@ class TraceStore:
                 event = TraceEvent.from_json(raw_line)
                 if event.session_id and event.session_id != session_id:
                     raise ValueError("event session ID does not match its directory")
+                event.tenant_id = validate_optional_tenant_id(event.tenant_id)
                 if event.tenant_id and event.tenant_id != tenant_id:
                     raise ValueError(f"event {event.event_id} belongs to another tenant")
             previous_terminal_hash = (

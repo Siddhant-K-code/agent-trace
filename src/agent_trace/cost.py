@@ -21,7 +21,7 @@ from .explain import PHASE_DATA_EVENT_TYPES, ExplainResult, explain_session
 from .inert import inert
 from .models import EventType, TraceEvent
 from .pairing import Pairer, event_model, llm_pairer
-from .store import TraceStore
+from .store import TraceStore, validate_optional_tenant_id, validate_tenant_id
 
 
 # ---------------------------------------------------------------------------
@@ -1117,6 +1117,8 @@ def build_provider_cost_report(
             f"offline estimate (snapshot {PRICING_SNAPSHOT_DATE})."
         )
 
+    if tenant_id is not None:
+        tenant_id = validate_optional_tenant_id(tenant_id)
     generated_at = _time.time() if now is None else float(now)
     since_value = since or "30d"
     cutoff = parse_since(since_value, now=generated_at)
@@ -1230,6 +1232,7 @@ def build_tenant_cost_report(
     now: float | None = None,
 ) -> TenantCostResult:
     """Aggregate legacy per-session estimates for one exact tenant tag."""
+    tenant_id = validate_tenant_id(tenant_id)
     generated_at = _time.time() if now is None else float(now)
     cutoff = parse_since(since, now=generated_at)
     sessions = total_input = total_output = total_read = total_write = 0
@@ -1416,7 +1419,6 @@ def cmd_cost(args: argparse.Namespace) -> int:
     store = TraceStore(args.trace_dir)
     tenant_id = getattr(args, "tenant", None)
     if tenant_id is not None:
-        from .store import validate_tenant_id
         try:
             tenant_id = validate_tenant_id(tenant_id)
         except ValueError as exc:
