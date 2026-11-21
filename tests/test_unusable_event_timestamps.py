@@ -24,6 +24,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import unittest
 from contextlib import redirect_stderr
@@ -40,7 +41,7 @@ except ImportError:
     from tests._no_telemetry import without_telemetry
 
 import agent_trace
-from agent_trace import a2a, event_data, otlp, watch
+from agent_trace import a2a, compaction, event_data, otlp, watch
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.server import _make_handler
 from agent_trace.store import TraceStore
@@ -60,6 +61,7 @@ try:
         _live_event,
         _row,
         _tree_snapshot,
+        _watcher_config,
         _write_session,
     )
 except ImportError:
@@ -76,6 +78,7 @@ except ImportError:
         _live_event,
         _row,
         _tree_snapshot,
+        _watcher_config,
         _write_session,
     )
 
@@ -1191,6 +1194,481 @@ class TestBigintTimestamps(TimestampCliTestCase):
                 self.assertEqual(
                     negative[:3], (1, "", "Error: event timestamp must be finite and non-negative\n"),
                 )
+
+
+# compaction, the watch compaction checkpoint and eval. None of them multiplies
+# a timestamp, so these tests store text and arrays on disk.
+MODEL = "claude-sonnet-4"
+COMPACTED = "c0a1b2c3d4e50001"
+EVALUATED = "e0a1b2c3d4e50001"
+EVALUATED_GOOD = "e0a1b2c3d4e50002"
+# Its metadata holds no duration, so the duration_seconds metric reads event times.
+EVALUATED_NO_DURATION = "e0a1b2c3d4e50003"
+# One event and no duration in its metadata, so no duration reads its time.
+EVALUATED_ONE = "e0a1b2c3d4e50004"
+WATCHED = "a5a1b2c3d4e50001"
+
+# (event_type, seconds after NOW, data)
+COMPACTED_LAYOUT = (
+    ("session_start", 0, {"mode": "claude-hooks", "model": MODEL}),
+    ("user_prompt", 1, {"prompt": "Refactor the parser."}),
+    ("file_read", 2, {"path": "src/parser.py"}),
+    ("llm_request", 3, {"model": MODEL, "input_tokens": 180000}),
+    ("llm_response", 4, {"model": MODEL, "input_tokens": 180000, "output_tokens": 50}),
+    # The compaction: the input drops from 180000 to 12000 tokens.
+    ("llm_request", 42, {"model": MODEL, "input_tokens": 12000}),
+    ("llm_response", 43, {"model": MODEL, "input_tokens": 12000, "output_tokens": 40}),
+    ("session_end", 50, {"reason": "completed"}),
+)
+EVALUATED_LAYOUT = (
+    ("session_start", 0, {"mode": "claude-hooks", "model": MODEL}),
+    ("user_prompt", 1, {"prompt": "Fix add()."}),
+    ("llm_request", 2, {"model": MODEL, "input_tokens": 1000}),
+    ("llm_response", 3, {"model": MODEL, "input_tokens": 1000, "output_tokens": 200}),
+    ("tool_call", 10, {"tool_name": "Bash", "arguments": {"command": "pytest -q"}}),
+    ("tool_result", 12, {"tool_name": "Bash", "result": "1 passed"}),
+    ("assistant_response", 26, {"text": "Done."}),
+    ("session_end", 30, {"reason": "completed"}),
+)
+# Saturated, so watch writes a checkpoint at startup.
+WATCHED_LAYOUT = (
+    ("session_start", 0, {"mode": "claude-hooks", "model": MODEL}),
+    ("user_prompt", 1, {"prompt": "Refactor the parser."}),
+    ("file_read", 2, {"path": "src/parser.py"}),
+    ("llm_request", 3, {"model": MODEL, "input_tokens": 180000}),
+    ("tool_call", 4, {"tool_name": "Read", "arguments": {"file_path": "src/lexer.py"}}),
+)
+
+EVAL_CONFIGS = {
+    "duration.yaml": "scorers:\n  - type: duration_under\n    max_seconds: 120\n    threshold: 1.0\n",
+    "cost.yaml": "scorers:\n  - type: cost_under\n    max_dollars: 1.0\n    threshold: 1.0\n",
+    "plain.yaml": "scorers:\n  - type: no_errors\n",
+    "gate_duration.yaml": (
+        "evals:\n  - name: wall\n    scorer: duration_seconds\n    fail_on: above\n    threshold: 600\n"
+    ),
+    "gate_cost.yaml": (
+        "evals:\n  - name: spend\n    scorer: cost_usd\n    fail_on: above\n    threshold: 5\n"
+    ),
+    "gate_plain.yaml": (
+        "evals:\n  - name: calls\n    scorer: tool_call_count\n    fail_on: above\n    threshold: 50\n"
+    ),
+}
+
+
+def _eval_argvs(config: str) -> tuple:
+    return (
+        ("eval", "run", EVALUATED, "--config", config),
+        ("eval", "run", EVALUATED, "--config", config, "--format", "json"),
+        ("eval", "compare", EVALUATED_GOOD, EVALUATED, "--config", config),
+        ("eval", "ci", EVALUATED, "--config", config),
+    )
+
+
+def _layout_events(session_id: str, layout) -> list[dict]:
+    return [
+        {
+            "event_type": event_type, "timestamp": NOW + offset, "event_id": f"{session_id}-{index}",
+            "session_id": session_id, "data": data,
+        }
+        for index, (event_type, offset, data) in enumerate(layout)
+    ]
+
+
+def _at(*indexes: int):
+    """A restamp *where* that picks the events at *indexes*."""
+    return lambda record: int(record["event_id"].rsplit("-", 1)[1]) in indexes
+
+
+def _layout_error(session_id: str | None, layout, index: int, kind: str) -> str:
+    return f"Error: {_message(session_id, index + 1, len(layout), layout[index][0], kind, 0)}\n"
+
+
+def _event(event_type: EventType, timestamp, data: dict, session_id: str = "direct") -> TraceEvent:
+    return TraceEvent(event_type=event_type, timestamp=timestamp, session_id=session_id, data=data)
+
+
+def _request(timestamp, input_tokens: int) -> TraceEvent:
+    return _event(EventType.LLM_REQUEST, timestamp, {"model": MODEL, "input_tokens": input_tokens})
+
+
+class TestDetectCompactions(unittest.TestCase):
+    """detect_compactions reads the first event's time and each compaction's."""
+
+    def test_refuses_an_unusable_first_or_compaction_time(self):
+        for name, value, kind in TIMESTAMP_VALUES:
+            for position, events in (
+                (1, [_request(value, 180000), _request(142.0, 12000)]),
+                (2, [_request(100.0, 180000), _request(value, 12000)]),
+            ):
+                with self.subTest(value=name, position=position):
+                    with self.assertRaises(event_data.UnusableTimestampError) as caught:
+                        compaction.detect_compactions(events)
+                    self.assertEqual(
+                        str(caught.exception), _message(None, position, 2, "llm_request", kind, 0),
+                    )
+
+    def test_reads_no_time_without_a_compaction_or_before_one(self):
+        start = _event(EventType.SESSION_START, 100.0, {})
+        for name, value, _kind in TIMESTAMP_VALUES:
+            with self.subTest(value=name):
+                self.assertEqual(
+                    compaction.detect_compactions([_request(value, 1000), _request(142.0, 2000)]),
+                    [],
+                )
+                found = compaction.detect_compactions(
+                    [start, _request(value, 180000), _request(142.0, 12000)],
+                )
+                self.assertEqual([item.offset_seconds for item in found], [42.0])
+
+
+class TestCheckpointMarkdown(unittest.TestCase):
+    """build_checkpoint_markdown reads the times a checkpoint shows."""
+
+    TYPES = ("user_prompt", "file_read", "file_read", "llm_response")
+
+    @staticmethod
+    def _events(index: int | None = None, value=None) -> list[TraceEvent]:
+        events = [
+            _event(EventType.USER_PROMPT, 100.0, {"prompt": "Fix the parser."}),
+            _event(EventType.FILE_READ, 101.0, {"path": "a.py"}),
+            _event(EventType.FILE_READ, 102.0, {"path": "a.py"}),
+            _event(EventType.LLM_RESPONSE, 103.0, {"text": "Done."}),
+        ]
+        if index is not None:
+            events[index].timestamp = value
+        return events
+
+    def test_refuses_an_unusable_time_it_shows(self):
+        # The first event, the first read of a.py and, with no timestamp
+        # argument, the last event.
+        for name, value, kind in TIMESTAMP_VALUES:
+            for index in (0, 1, 3):
+                with self.subTest(value=name, index=index):
+                    with self.assertRaises(event_data.UnusableTimestampError) as caught:
+                        compaction.build_checkpoint_markdown(self._events(index, value), "direct")
+                    self.assertEqual(
+                        str(caught.exception),
+                        _message(None, index + 1, 4, self.TYPES[index], kind, 0),
+                    )
+
+    def test_reads_no_other_time(self):
+        good = compaction.build_checkpoint_markdown(self._events(), "direct")
+        for name, value, _kind in TIMESTAMP_VALUES:
+            with self.subTest(value=name):
+                self.assertEqual(
+                    compaction.build_checkpoint_markdown(self._events(2, value), "direct"), good,
+                )
+                self.assertEqual(
+                    compaction.build_checkpoint_markdown(self._events(3, value), "direct", 103.0),
+                    good,
+                )
+
+
+class TestCompactionCommand(TimestampCliTestCase):
+    """compaction refuses a session whose first event or compaction has an
+    unusable time. lint finds the same compaction and shows no time."""
+
+    ARGVS = (
+        ("compaction", COMPACTED),
+        ("compaction", COMPACTED, "--diff"),
+        ("compaction", COMPACTED, "--behavior-diff"),
+    )
+    LINT_ARGVS = (
+        ("lint", COMPACTED),
+        ("lint", COMPACTED, "--format", "json"),
+    )
+    READ = (0, 5)
+
+    def workspace(self, value=None, indexes=()) -> Path:
+        root = self.make_ts_workspace()
+        traces = root / "work" / ".agent-traces"
+        _write_session(traces, COMPACTED, NOW, _layout_events(COMPACTED, COMPACTED_LAYOUT))
+        if indexes:
+            restamp(traces / COMPACTED, "ALL", value, where=_at(*indexes))
+        return root
+
+    def test_refuses_an_unusable_first_or_compaction_time(self):
+        for name, value, kind in TIMESTAMP_VALUES:
+            for index in self.READ:
+                root = self.workspace(value, (index,))
+                for argv in self.ARGVS:
+                    with self.subTest(value=name, index=index, argv=argv):
+                        self.assert_refused(
+                            root, list(argv), _layout_error(None, COMPACTED_LAYOUT, index, kind),
+                        )
+
+    def test_other_times_and_lint_are_unchanged(self):
+        clean = self.workspace()
+        expected = {argv: self.outcome(clean, argv) for argv in self.ARGVS + self.LINT_ARGVS}
+        unread = tuple(index for index in range(len(COMPACTED_LAYOUT)) if index not in self.READ)
+        for name, value, _kind in TIMESTAMP_VALUES:
+            others = self.workspace(value, unread)
+            every = self.workspace(value, range(len(COMPACTED_LAYOUT)))
+            for root, argvs in ((others, self.ARGVS), (every, self.LINT_ARGVS)):
+                for argv in argvs:
+                    with self.subTest(value=name, argv=argv):
+                        self.assertEqual(self.outcome(root, argv), expected[argv])
+
+
+class TestWatchCheckpointAtStartup(TimestampCliTestCase):
+    """watch --compaction-checkpoint refuses a stored time a checkpoint shows."""
+
+    ARGV = ("watch", WATCHED, "--dry-run", "--compaction-checkpoint")
+    CHECKPOINTS = ".agent-traces/checkpoints/*.md"
+
+    def workspace(self, value=None, index: int | None = None) -> Path:
+        root = self.make_ts_workspace()
+        traces = root / "work" / ".agent-traces"
+        _write_session(
+            traces, WATCHED, NOW, _layout_events(WATCHED, WATCHED_LAYOUT), ended_at=None,
+        )
+        if index is not None:
+            restamp(traces / WATCHED, "ALL", value, where=_at(index))
+        return root
+
+    def test_refuses_a_stored_time_a_checkpoint_shows(self):
+        # The first event, the first read of each file and the saturated request.
+        for name, value, kind in TIMESTAMP_VALUES:
+            for index in (0, 2, 3, 4):
+                with self.subTest(value=name, index=index):
+                    root = self.workspace(value, index)
+                    # A regression would start tailing; an empty tail ends the watch.
+                    with mock.patch("agent_trace.watch._tail_events", return_value=iter([])):
+                        self.assert_refused(
+                            root, list(self.ARGV), _layout_error(None, WATCHED_LAYOUT, index, kind),
+                        )
+
+    def test_checks_first_and_read_times_below_the_checkpoint_ratio(self):
+        # The request fills 0.9 of its window, so nothing is saturated at
+        # startup. Every checkpoint written later shows the first event and
+        # the first reads, so watch still checks them. It reads no request time.
+        argv = [*self.ARGV, "--checkpoint-at", "0.95"]
+        with mock.patch("agent_trace.watch._tail_events", return_value=iter([])):
+            expected = self.outcome(self.workspace(), argv, files=self.CHECKPOINTS)
+        self.assertEqual(expected[0], 0)
+        self.assertEqual(list(expected[4]), [])
+        for name, value, kind in TIMESTAMP_VALUES:
+            for index in (0, 2, 4):
+                with self.subTest(value=name, index=index):
+                    root = self.workspace(value, index)
+                    with mock.patch("agent_trace.watch._tail_events", return_value=iter([])):
+                        self.assert_refused(
+                            root, argv, _layout_error(None, WATCHED_LAYOUT, index, kind),
+                        )
+            for index in (1, 3):
+                with self.subTest(value=name, index=index):
+                    root = self.workspace(value, index)
+                    with mock.patch("agent_trace.watch._tail_events", return_value=iter([])):
+                        self.assertEqual(self.outcome(root, argv, files=self.CHECKPOINTS), expected)
+
+    def test_other_stored_times_are_unchanged(self):
+        with mock.patch("agent_trace.watch._tail_events", return_value=iter([])):
+            expected = self.outcome(self.workspace(), self.ARGV, files=self.CHECKPOINTS)
+        self.assertEqual(list(expected[4]), [f"{WATCHED}.md"])
+        for name, value, _kind in TIMESTAMP_VALUES:
+            with self.subTest(value=name):
+                root = self.workspace(value, 1)
+                with mock.patch("agent_trace.watch._tail_events", return_value=iter([])):
+                    self.assertEqual(self.outcome(root, self.ARGV, files=self.CHECKPOINTS), expected)
+
+
+class TestWatchCheckpointLeavesOutLiveEvents(unittest.TestCase):
+    """watch keeps running and leaves a live event out of the compaction
+    checkpoint when the checkpoint would show its unusable time."""
+
+    LIVE_VALUES = SAFE_VALUES + NO_MUL_VALUES
+
+    def _watch(self, live: list[TraceEvent], stored: int = 4) -> tuple[str, str, str]:
+        """Return the watch output, its alerts and the checkpoint it leaves.
+
+        The session holds the first *stored* events of WATCHED_LAYOUT when
+        watch starts, and *live* arrives after that.
+        """
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store = TraceStore(tmp.name, redact=False)
+        store.create_session(SessionMeta(session_id=WATCHED, started_at=NOW))
+        for event_type, offset, data in WATCHED_LAYOUT[:stored]:
+            store.append_event(
+                WATCHED, _event(EventType(event_type), NOW + offset, data, WATCHED),
+            )
+        watcher = compaction.CompactionCheckpointWatcher(store, WATCHED)
+        out = io.StringIO()
+        alerts = io.StringIO()
+        alert = watch._alert_terminal
+        with mock.patch("agent_trace.watch._tail_events", return_value=iter(live)), mock.patch(
+            "agent_trace.watch._alert_terminal",
+            side_effect=lambda message, *_args, **kwargs: alert(message, alerts, **kwargs),
+        ):
+            watch.watch_session(
+                store, WATCHED, _watcher_config(), out=out, checkpoint_watcher=watcher,
+            )
+        checkpoint = store.checkpoint_path(WATCHED).read_text(encoding="utf-8")
+        output = out.getvalue()
+        for prefix in (str(Path(tmp.name).resolve()), tmp.name):
+            output = output.replace(prefix, "ROOT")
+        return output, alerts.getvalue(), checkpoint
+
+    @staticmethod
+    def _live(index: int | None = None, value=None) -> list[TraceEvent]:
+        events = [
+            _event(EventType.FILE_READ, NOW + 10, {"path": "src/lexer.py"}, WATCHED),
+            # The input drops from 180000 to 12000 tokens, which arms the watcher.
+            _event(EventType.LLM_REQUEST, NOW + 11, {"model": MODEL, "input_tokens": 12000}, WATCHED),
+            # Saturated again, so it writes a checkpoint.
+            _event(EventType.LLM_REQUEST, NOW + 12, {"model": MODEL, "input_tokens": 185000}, WATCHED),
+            _event(EventType.SESSION_END, NOW + 13, {"reason": "completed"}, WATCHED),
+        ]
+        if index is not None:
+            events[index].timestamp = value
+        return events
+
+    @staticmethod
+    def _whole_session(index: int | None = None, value=None) -> list[TraceEvent]:
+        """Every event of an empty session, tailed live."""
+        events = [
+            _event(EventType(event_type), NOW + offset, data, WATCHED)
+            for event_type, offset, data in WATCHED_LAYOUT[:4]
+        ]
+        events.append(_event(EventType.SESSION_END, NOW + 13, {"reason": "completed"}, WATCHED))
+        if index is not None:
+            events[index].timestamp = value
+        return events
+
+    @staticmethod
+    def _arm_and_write(index: int | None = None, value=None) -> list[TraceEvent]:
+        """A request that arms the watcher and writes a checkpoint, since its
+        input drops from 180000 tokens to 12000 of a 14000 token window. A
+        full request follows, so TokenBudgetWatcher alerts."""
+        events = [
+            _event(
+                EventType.LLM_REQUEST, NOW + 11,
+                {"model": MODEL, "input_tokens": 12000, "context_window": 14000}, WATCHED,
+            ),
+            _event(EventType.LLM_REQUEST, NOW + 12, {"model": MODEL, "input_tokens": 185000}, WATCHED),
+            _event(EventType.SESSION_END, NOW + 13, {"reason": "completed"}, WATCHED),
+        ]
+        if index is not None:
+            events[index].timestamp = value
+        return events
+
+    @classmethod
+    def _unread_live(cls, index: int | None = None, value=None) -> list[TraceEvent]:
+        """_live with three events no checkpoint reads the time of, after the
+        request that arms the watcher: a second read of a file, a tool result
+        with a token count, and a response with none."""
+        events = cls._live()
+        events[2:2] = [
+            _event(EventType.FILE_READ, NOW + 11, {"path": "src/parser.py"}, WATCHED),
+            _event(
+                EventType.TOOL_RESULT, NOW + 11,
+                {"tool_name": "Task", "result": "Done.", "usage": {"input_tokens": 190000}},
+                WATCHED,
+            ),
+            _event(EventType.LLM_RESPONSE, NOW + 11, {"model": MODEL, "text": "Done."}, WATCHED),
+        ]
+        if index is not None:
+            events[index].timestamp = value
+        return events
+
+    def test_leaves_out_a_new_event_whose_time_a_checkpoint_shows(self):
+        # The first event, a new read of a file, and a request that writes a
+        # checkpoint.
+        for event_type, index, stored, make in (
+            ("session_start", 0, 0, self._whole_session),
+            ("file_read", 0, 4, self._live),
+            ("llm_request", 2, 4, self._live),
+            ("llm_request", 0, 4, self._arm_and_write),
+        ):
+            alerts = self._watch(make(), stored)[1]
+            self.assertIn("TokenBudgetWatcher", alerts)
+            kept = [event for position, event in enumerate(make()) if position != index]
+            expected = self._watch(kept, stored)[2]
+            for name, value, _kind in self.LIVE_VALUES:
+                with self.subTest(event_type=event_type, value=name):
+                    live = make(index, value)
+                    output, bad_alerts, checkpoint = self._watch(live, stored)
+                    self.assertIn(
+                        f"[watch] Left one {event_type} event out of the compaction checkpoint "
+                        "because its timestamp is not a Unix time in seconds.\n",
+                        output,
+                    )
+                    self.assertIn(f"[watch] Session ended ({len(live)} events,", output)
+                    # The other watchers still see the event.
+                    self.assertEqual(bad_alerts, alerts)
+                    self.assertEqual(checkpoint, expected)
+
+    def test_keeps_a_new_event_whose_time_no_checkpoint_shows(self):
+        expected = self._watch(self._unread_live())
+        self.assertIn("Compaction checkpoint written", expected[0])
+        # The request that arms the watcher, then the three events _unread_live adds.
+        for index in (1, 2, 3, 4):
+            for name, value, _kind in self.LIVE_VALUES:
+                with self.subTest(index=index, value=name):
+                    self.assertEqual(self._watch(self._unread_live(index, value)), expected)
+
+
+class TestEvalCommands(TimestampCliTestCase):
+    """eval refuses a session when a scorer or metric it runs reads an unusable
+    time, and names the session."""
+
+    def workspace(self, value=None, indexes=()) -> Path:
+        root = self.make_ts_workspace()
+        work = root / "work"
+        traces = work / ".agent-traces"
+        no_duration = {"ended_at": None, "total_duration_ms": 0}
+        for session_id, layout, extra in (
+            (EVALUATED, EVALUATED_LAYOUT, {}),
+            (EVALUATED_GOOD, EVALUATED_LAYOUT, {}),
+            (EVALUATED_NO_DURATION, EVALUATED_LAYOUT, no_duration),
+            (EVALUATED_ONE, EVALUATED_LAYOUT[:1], no_duration),
+        ):
+            _write_session(traces, session_id, NOW, _layout_events(session_id, layout), **extra)
+        if indexes:
+            for session_id in (EVALUATED, EVALUATED_NO_DURATION, EVALUATED_ONE):
+                restamp(traces / session_id, "ALL", value, where=_at(*indexes))
+        for name, text in EVAL_CONFIGS.items():
+            (work / name).write_text(text, encoding="utf-8")
+        return root
+
+    def test_refuses_a_time_the_scorer_or_metric_reads(self):
+        # cost_under and cost_usd read every event's time. duration_under reads
+        # the first and the last. duration_seconds reads every one when the
+        # metadata holds no duration.
+        cost = _eval_argvs("cost.yaml") + (("eval", "gate", EVALUATED, "--config", "gate_cost.yaml"),)
+        gate_duration = ("eval", "gate", EVALUATED_NO_DURATION, "--config", "gate_duration.yaml")
+        for name, value, kind in TIMESTAMP_VALUES:
+            for index in (0, 4, 7):
+                root = self.workspace(value, (index,))
+                rows = [(argv, EVALUATED) for argv in cost]
+                rows.append((gate_duration, EVALUATED_NO_DURATION))
+                if index != 4:
+                    rows.extend((argv, EVALUATED) for argv in _eval_argvs("duration.yaml"))
+                for argv, session_id in rows:
+                    with self.subTest(value=name, index=index, argv=argv):
+                        self.assert_refused(
+                            root, list(argv), _layout_error(session_id, EVALUATED_LAYOUT, index, kind),
+                        )
+
+    def test_times_no_scorer_or_metric_reads_are_unchanged(self):
+        duration = _eval_argvs("duration.yaml")
+        plain = _eval_argvs("plain.yaml") + (
+            ("eval", "gate", EVALUATED, "--config", "gate_plain.yaml"),
+            # The metadata holds the duration.
+            ("eval", "gate", EVALUATED, "--config", "gate_duration.yaml"),
+            # The session has one event.
+            ("eval", "run", EVALUATED_ONE, "--config", "duration.yaml"),
+            ("eval", "gate", EVALUATED_ONE, "--config", "gate_duration.yaml"),
+        )
+        clean = self.workspace()
+        expected = {argv: self.outcome(clean, argv) for argv in duration + plain}
+        for name, value, _kind in TIMESTAMP_VALUES:
+            middle = self.workspace(value, range(1, len(EVALUATED_LAYOUT) - 1))
+            every = self.workspace(value, range(len(EVALUATED_LAYOUT)))
+            for root, argvs in ((middle, duration), (every, plain)):
+                for argv in argvs:
+                    with self.subTest(value=name, argv=argv):
+                        self.assertEqual(self.outcome(root, argv), expected[argv])
 
 
 if __name__ == "__main__":

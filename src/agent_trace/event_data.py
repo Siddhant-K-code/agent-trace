@@ -279,18 +279,23 @@ def left_out_event_warning(command: str, event: TraceEvent) -> str:
     )
 
 
-def left_out_timestamp_warning(command: str, event: TraceEvent) -> str:
-    """Return the stderr line a live OTLP stream prints when it leaves an event out
-    for its timestamp.
+def left_out_timestamp_warning(
+    command: str, event: TraceEvent, target: str = "OTLP stream",
+) -> str:
+    """Return the line a live command prints when it leaves an event out of
+    *target* for its timestamp.
 
     ``watch --stream-otlp`` cannot turn an event into spans when the converter
     would read its timestamp and the timestamp is not a Unix time in seconds,
-    so it sends the other events of the batch without it. The line names the
-    event type only, never the timestamp, data values or event IDs.
+    so it sends the other events of the batch without it and prints the line
+    to stderr. ``watch --compaction-checkpoint`` leaves such an event out of
+    the compaction checkpoint and prints the line with its other checkpoint
+    lines. The line names the event type only, never the timestamp, data
+    values or event IDs.
     """
     return (
-        f"[{command}] Left one {_event_type_value(event)} event out of the OTLP "
-        "stream because its timestamp is not a Unix time in seconds.\n"
+        f"[{command}] Left one {_event_type_value(event)} event out of the {target} "
+        "because its timestamp is not a Unix time in seconds.\n"
     )
 
 

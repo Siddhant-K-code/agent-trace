@@ -2723,7 +2723,16 @@ working when the bad event is one they never read:
 
 - `a2a-tree --format json`: each `a2a_call` event in every session of the tree.
   The text tree reads no call timestamp, so it does not check.
+- `compaction`: the first event and the `llm_request` event of each compaction
+  it finds. It checks nothing in a session with no compaction.
 - `compliance export`: `tool_call` and `error` events.
+- `eval gate`: every event, when the config has `cost_usd`, or has
+  `duration_seconds` and the session metadata holds no duration. It names the
+  session.
+- `eval run`, `eval compare`, and `eval ci`: each session they score. With
+  `cost_under` in the config, they check every event, as `cost` does. With
+  `duration_under` and no `cost_under`, they check the first and last events.
+  They name the session.
 - `export --backend langfuse`: `tool_call`, `tool_result`, `llm_request`,
   `llm_response`, and `error` events. It checks after the credentials and
   before it sends anything.
@@ -2735,6 +2744,11 @@ working when the bad event is one they never read:
 - `oncall`: `tool_call` and `file_write` events.
 - `sample`: the first and last events of each session it scores.
 - `token-budget`: the first event and each `llm_request` event.
+- `watch --compaction-checkpoint`, at startup: the first event and the first
+  read of each file, even when no context is at the `--checkpoint-at` ratio
+  yet, since every checkpoint the watch writes shows their times. It also
+  checks the last `llm_request` event of the agent and of each subagent whose
+  context is already at that ratio.
 
 `export --format otlp`, `otlp-genai`, and `temporal` also refuse a session
 whose `started_at`, or `ended_at` when set, is not a Unix time in seconds, with
@@ -2762,6 +2776,13 @@ is not a Unix time in seconds.` The lines follow the order of the batch. An
 event that also has non-object data gets only this line. The other events of
 the batch, and later batches, are still sent.
 
+`watch --compaction-checkpoint` leaves a live event out of the checkpoint when
+its timestamp is unusable and a checkpoint would show it: the first event, the
+first read of a file, or the event that triggers a checkpoint. It prints one
+line with its other checkpoint lines, such as `[watch] Left one file_read event
+out of the compaction checkpoint because its timestamp is not a Unix time in
+seconds.` The watch keeps running and passes the event to its other checks.
+
 With `agent-strace server --dashboard`, the review, compare, share, and OTLP
 actions answer 400 with the same message. The OTLP action checks the events
 and session times that `export --format otlp` checks. The others check every
@@ -2771,11 +2792,21 @@ event.
 read infinity, and `compliance-report` reads it as it reads 1e300. Earlier
 versions stopped with a traceback.
 
+`lint` finds compactions without reading a timestamp, so its
+`post-compaction-regression` rule runs on these sessions. Earlier versions
+reported `Could not run 1 rule(s)` and exited 1 when the first event or the
+`llm_request` event of a compaction had a string, `null`, object, array, or
+too-large integer timestamp.
+
 `list`, `inspect`, `tree`, `verify`, `stats`, `export --format json`, `ndjson`,
 or `csv`, `tenant export`, and the events API keep working on these sessions.
 Those that print a timestamp print it as stored. `postmortem --list`, `compare
 --rerun`, `cost --breakdown provider`, `annotate --event`, and `replay --tree`
 do not check and work as before.
+
+`tree`, `a2a-tree`, `budget-report`, and `curve` do not check before they price
+a session. When they cannot price it, they count its cost as $0, as earlier
+versions did. An unusable timestamp on the first or last event can cause that.
 
 ---
 

@@ -53,6 +53,7 @@ from .event_data import (
     EDIT_TOOLS,
     PATH_KEYS,
     NonObjectEventDataError,
+    UnusableTimestampError,
     event_arguments,
     left_out_event_warning,
     left_out_timestamp_warning,
@@ -3174,6 +3175,11 @@ def watch_session(
                             f"[watch] Compaction checkpoint written to {inert(checkpoint_path)}\n"
                         )
                         out.flush()
+                except UnusableTimestampError:
+                    out.write(
+                        left_out_timestamp_warning("watch", event, "compaction checkpoint")
+                    )
+                    out.flush()
                 except OSError as exc:
                     out.write(f"[watch] Could not write compaction checkpoint: {exc}\n")
                     out.flush()
@@ -3419,7 +3425,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 full_id,
                 checkpoint_at=float(getattr(args, "checkpoint_at", 0.80)),
             )
-        except NonObjectEventDataError:
+        except (NonObjectEventDataError, UnusableTimestampError):
             raise
         except ValueError as exc:
             sys.stderr.write(f"[watch] invalid checkpoint threshold: {exc}\n")
