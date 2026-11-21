@@ -602,7 +602,7 @@ def build_dashboard(
             errors=errors,
             total_tokens=meta.total_tokens,
             estimated_cost=cost,
-            agent_name=meta.agent_name or "unknown",
+            agent_name=usable_text(meta.agent_name) or "unknown",
             succeeded=errors == 0,
         ))
 

@@ -257,6 +257,19 @@ class TestDashboard(MetaTextTest):
                     sorted(s.session_id for s in everything.summaries), [FIRST, SECOND]
                 )
 
+    def test_summary_shows_a_name_that_is_not_text_as_unknown(self):
+        for label, value in not_text("claude-code").items():
+            with self.subTest(label):
+                store = self.new_store()
+                self.write_session(store, FIRST)
+                self.write_session(store, SECOND, started_at=START + 60, agent_name=value)
+                self.write_session(store, THIRD, started_at=START + 120, agent_name=MISSING)
+                report = build_dashboard(store)
+                self.assertEqual(
+                    sorted((s.session_id, s.agent_name) for s in report.summaries),
+                    [(FIRST, "claude-code"), (SECOND, "unknown"), (THIRD, "unknown")],
+                )
+
 
 class TestBudgetReport(MetaTextTest):
     def render(self, report) -> tuple[str, str, dict]:
