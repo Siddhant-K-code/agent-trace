@@ -6,6 +6,8 @@ the cursor, erase lines and write to the clipboard. These helpers check that
 a formatter shows each of them as text.
 """
 
+import io
+
 from agent_trace.replay import C
 
 # ESC, an OSC 52 clipboard write ended by BEL, a CSI erase-line, CR, LF, a C1
@@ -30,6 +32,11 @@ PLAIN_SHORT = "café ✓😀"
 SPACES = "one\ttwo  three\u3000four"
 SPACES_SHOWN = "one two three four"
 
+# A lone UTF-16 surrogate, which code that cuts a JavaScript string by length
+# can leave, and the escape that raw output such as CSV writes for it.
+LONE_SURROGATE = "\ud83d"
+LONE_SURROGATE_SHOWN = r"\ud83d"
+
 # The kind of a value -> (payload, how it shows, plain text that fits).
 KINDS = {
     "free": (PAYLOAD, PAYLOAD_FREE, PLAIN),
@@ -50,6 +57,21 @@ def strip_colors(text):
     for code in _COLOR_CODES:
         text = text.replace(code, "")
     return text
+
+
+def strict_utf8_stream():
+    """Return a stream that refuses a lone surrogate, as a UTF-8 terminal does.
+
+    A StringIO takes any str, so it cannot show that a write would fail. This
+    stream does not change line endings, so the text reads back as written.
+    """
+    return io.TextIOWrapper(io.BytesIO(), encoding="utf-8", errors="strict", newline="")
+
+
+def written_text(stream):
+    """Return the text written to a strict_utf8_stream()."""
+    stream.flush()
+    return stream.buffer.getvalue().decode("utf-8")
 
 
 def assert_shows_as_text(case, output, expected, plain_output):

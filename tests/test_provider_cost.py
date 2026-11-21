@@ -707,7 +707,8 @@ PROVIDER_COST_CUTS = [
 
 class TestTraceTextShowsAsText(unittest.TestCase):
     """A model name in a trace can hold escape codes and line breaks. The
-    provider dashboard shows them as text. The CSV keeps the raw text."""
+    provider dashboard shows them as text. The CSV keeps the raw text, except
+    that it writes a lone surrogate as its escape."""
 
     def test_each_value_shows_escapes_as_text(self):
         _escapes.check_each_value(self, PROVIDER_COST_CASES, _render_provider)
@@ -724,13 +725,7 @@ class TestTraceTextShowsAsText(unittest.TestCase):
         self.assertIn(r"a\x1b[8mhidden", output)
         self.assertNotIn("\x1b", output)
 
-    def test_csv_keeps_the_raw_model_name(self):
-        fixture = ProviderCostStore()
-        self.addCleanup(fixture.close)
-        fixture.add_session(
-            "s1", time.time() - 60, _escapes.PAYLOAD,
-            response_data={"input_tokens": 1000, "output_tokens": 100},
-        )
+    def _csv_rows(self, fixture):
         args = argparse.Namespace(
             trace_dir=fixture.temp_dir.name,
             session_id=None,
@@ -739,11 +734,32 @@ class TestTraceTextShowsAsText(unittest.TestCase):
             csv=True,
             live_pricing=False,
         )
-        stdout = io.StringIO()
+        stdout = _escapes.strict_utf8_stream()
         with patch("sys.stdout", stdout):
             self.assertEqual(cmd_cost(args), 0)
-        rows = list(csv.DictReader(io.StringIO(stdout.getvalue(), newline="")))
+        return list(csv.DictReader(io.StringIO(_escapes.written_text(stdout), newline="")))
+
+    def test_csv_keeps_the_raw_model_name(self):
+        fixture = ProviderCostStore()
+        self.addCleanup(fixture.close)
+        fixture.add_session(
+            "s1", time.time() - 60, _escapes.PAYLOAD,
+            response_data={"input_tokens": 1000, "output_tokens": 100},
+        )
+        rows = self._csv_rows(fixture)
         self.assertEqual([row["model"] for row in rows], [_escapes.PAYLOAD])
+
+    def test_csv_writes_a_lone_surrogate_as_its_escape(self):
+        fixture = ProviderCostStore()
+        self.addCleanup(fixture.close)
+        usage = {"input_tokens": 1000, "output_tokens": 100}
+        fixture.add_session("s1", time.time() - 60, "claude-" + _escapes.LONE_SURROGATE, response_data=usage)
+        fixture.add_session("s2", time.time() - 60, "gpt-4o " + _escapes.PLAIN, response_data=usage)
+        rows = self._csv_rows(fixture)
+        self.assertEqual(
+            {row["session_id"]: row["model"] for row in rows},
+            {"s1": "claude-" + _escapes.LONE_SURROGATE_SHOWN, "s2": "gpt-4o " + _escapes.PLAIN},
+        )
 
 
 if __name__ == "__main__":
