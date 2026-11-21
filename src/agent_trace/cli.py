@@ -26,6 +26,11 @@ from pathlib import Path
 from . import __version__
 from .store import default_trace_dir
 from .setup_verify import (
+    CodexPlugin,
+    codex_has_agenttrace_hooks,
+    codex_hooks_cleanup,
+    codex_plugin_remove_commands,
+    find_codex_plugins,
     find_copilot_plugins,
     verify_claude_managed,
     verify_claude_setup,
@@ -1321,6 +1326,32 @@ def _report_copilot_plugin(plugin_dirs: list[Path]) -> None:
         )
 
 
+def _report_codex_plugin(plugins: list[CodexPlugin]) -> None:
+    """Explain why setup leaves Codex hooks to an enabled AgentTrace plugin."""
+    hooks_path = _codex_config_dir() / "hooks.json"
+    for plugin in plugins:
+        sys.stderr.write(
+            f"Found the AgentTrace Codex plugin {plugin.key} at {plugin.root}. "
+            "It already registers the agent-strace hooks.\n"
+        )
+    sys.stderr.write(
+        f"Did not write {hooks_path}: Codex would run both and record every event twice.\n"
+        f"To use {hooks_path} instead, run {codex_plugin_remove_commands(plugins)}, "
+        "then run `agent-strace setup --cli codex` again.\n"
+    )
+    if len(plugins) > 1:
+        sys.stderr.write(
+            "These plugins also duplicate each other. To keep only "
+            f"{plugins[0].key}, run {codex_plugin_remove_commands(plugins[1:])}.\n"
+        )
+    if codex_has_agenttrace_hooks(hooks_path):
+        sys.stderr.write(
+            f"{hooks_path} already has AgentTrace hooks, which duplicate the plugin hooks. "
+            f"To keep only the plugin, {codex_hooks_cleanup(hooks_path)}\n"
+        )
+    sys.stderr.write("Check the plugin hooks with: agent-strace setup --cli codex --verify\n")
+
+
 def _copilot_cloud_redact_env(args: argparse.Namespace) -> dict[str, str]:
     if getattr(args, "no_redact", False):
         return {"AGENT_TRACE_NO_REDACT": "1"}
@@ -1568,18 +1599,34 @@ def cmd_setup(args: argparse.Namespace) -> int | None:
             return 1
         hooks_path = config_dir / "hooks.json"
         config_path = config_dir / "config.toml"
+        plugins = find_codex_plugins(config_dir)
         details: dict = {}
+        warnings: list[str] = []
         ok, messages = verify_codex_setup(
             hooks_path,
             _codex_hooks_config(args),
             __version__,
             config_path=config_path,
             details=details,
+            plugins=plugins,
+            warnings=warnings,
         )
+        for warning in warnings:
+            sys.stderr.write(f"Warning: {warning}\n")
+        plugin_files = ", ".join(str(path) for path in plugins[0].hooks_files) if plugins else ""
         if ok:
+            if plugins:
+                checked = f"plugin:     {plugins[0].key} ({plugins[0].root})\nhooks:      {plugin_files} "
+                trust = "Trust the plugin hooks after every plugin install or update."
+            else:
+                checked = f"hooks:      {hooks_path} "
+                trust = (
+                    "Hooks that setup added or changed since your last review, "
+                    "such as PostModelRequest, need trusting."
+                )
             sys.stdout.write(
                 "Codex static hook setup verified.\n"
-                f"hooks:      {hooks_path} "
+                f"{checked}"
                 f"({details['event_count']}/{details['event_total']} events, "
                 f"redaction: {details['redaction']})\n"
                 f"config:     {config_path} ({details['hooks_feature']})\n"
@@ -1587,22 +1634,35 @@ def cmd_setup(args: argparse.Namespace) -> int | None:
                 "Not checked: Codex profiles, -c overrides, and project, system, "
                 "or managed config layers.\n"
                 "Not checked: hook trust. Codex runs a hook only after it is trusted in /hooks, "
-                "and codex exec skips untrusted hooks without a warning. Hooks that setup added "
-                "or changed since your last review, such as PostModelRequest, need trusting.\n"
+                f"and codex exec skips untrusted hooks without a warning. {trust}\n"
                 "This does not prove Codex enabled/trusted hooks or captured an event; "
                 "run a local session and inspect its trace to check actual capture.\n"
             )
             if live:
                 return _verify_live_capture(args, "codex")
             return 0
+        if plugins:
+            sys.stderr.write(
+                f"Checked the hooks of the AgentTrace Codex plugin {plugins[0].key}: {plugin_files}\n"
+            )
         for message in messages:
             sys.stderr.write(f"Setup verification failed: {message}\n")
         if any(": missing " in message for message in messages):
-            sys.stderr.write(
-                "Run agent-strace setup --cli codex to add the missing hooks. Codex treats "
-                "a hook added to hooks.json as new: trust it in /hooks, or codex exec skips "
-                "it without a warning.\n"
-            )
+            if plugins:
+                key = plugins[0].key
+                sys.stderr.write(
+                    "Update the plugin to add the missing hooks. For a git marketplace, run "
+                    f"`codex plugin marketplace upgrade {key.rpartition('@')[2]}`. For a local "
+                    f"marketplace, update its checkout, then run `codex plugin add {key}`. "
+                    "For an install made with npx codex-marketplace, run its add command again. "
+                    "Then trust the new hooks in /hooks, or codex exec skips them without a warning.\n"
+                )
+            else:
+                sys.stderr.write(
+                    "Run agent-strace setup --cli codex to add the missing hooks. Codex treats "
+                    "a hook added to hooks.json as new: trust it in /hooks, or codex exec skips "
+                    "it without a warning.\n"
+                )
         return 1
 
     if cli == "copilot-cloud":
@@ -1610,6 +1670,7 @@ def cmd_setup(args: argparse.Namespace) -> int | None:
 
     configs: list[tuple[str, str, dict]] = []
     codex_needing_trust: list[str] | None = None
+    codex_plugins: list[CodexPlugin] = []
     if cli in ("claude", "all"):
         configs.append(("Claude Code", _claude_settings_target(), _claude_hooks_config(args)))
     if cli in ("codex", "all"):
@@ -1617,6 +1678,10 @@ def cmd_setup(args: argparse.Namespace) -> int | None:
         if problem:
             sys.stderr.write(f"Setup failed: {problem}\n")
             return 1
+        codex_plugins = find_codex_plugins(_codex_config_dir())
+        if codex_plugins:
+            _report_codex_plugin(codex_plugins)
+    if cli in ("codex", "all") and not codex_plugins:
         previous_path = _codex_config_dir() / "hooks.json"
         if previous_path.exists():
             codex_needing_trust = _codex_hooks_needing_trust(
@@ -1665,7 +1730,7 @@ def cmd_setup(args: argparse.Namespace) -> int | None:
             sys.stderr.write(f"Add this to {path} for {name}:\n\n")
         sys.stdout.write(json.dumps(config, indent=2) + "\n")
 
-    if cli in ("codex", "all"):
+    if cli in ("codex", "all") and not codex_plugins:
         codex_hooks_path = _codex_config_dir() / "hooks.json"
         backup_path = codex_hooks_path.with_name(
             f"{codex_hooks_path.name}.agent-strace.bak"

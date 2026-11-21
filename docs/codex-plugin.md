@@ -66,6 +66,10 @@ codex plugin marketplace add "$PWD"
 codex plugin add agent-strace@agent-trace
 ```
 
+`codex plugin marketplace upgrade` works only for a Git marketplace. After you
+change the checkout, run `codex plugin add agent-strace@agent-trace` again to
+refresh the installed copy.
+
 ## Package contents
 
 | File | Purpose |
@@ -114,11 +118,17 @@ agent-strace list
 agent-strace inspect <session-id>
 ```
 
-`agent-strace setup --cli codex --verify` checks only the hooks in
-`$CODEX_HOME/hooks.json`. It does not read plugin hooks, so it reports missing
-hooks while this plugin is working. Do not fix that by running
-`agent-strace setup --cli codex`; see
-[Duplicate hook avoidance](#duplicate-hook-avoidance).
+`agent-strace setup --cli codex --verify` also checks the plugin. It finds the
+enabled AgentTrace plugin in `$CODEX_HOME/config.toml`, then checks the hooks
+file of the copy Codex loads from `$CODEX_HOME/plugins/cache/`. When several
+versions are cached, that is `local` if present, else the newest. The output
+names the plugin and the file it checked. The `[features]` hooks flag and the
+`agent-strace` executable are checked as for manual hooks.
+
+If the plugin is missing hooks, the check fails and says how to update the
+plugin. If `$CODEX_HOME/hooks.json` also has AgentTrace hooks, the check warns
+that every event is recorded twice. The warning alone does not fail the check.
+See [Duplicate hook avoidance](#duplicate-hook-avoidance).
 
 ## Update
 
@@ -173,14 +183,33 @@ not deleted.
 
 Codex runs every hook it finds, so a command that both this plugin and
 `agent-strace setup --cli codex` register runs twice and records every event
-twice. `agent-strace setup --cli codex` does not detect the plugin.
+twice. Use one installation path.
 
-Use one installation path. Before you install the plugin, remove the hook
-entries whose commands start with `agent-strace hook --provider codex` from
-`$CODEX_HOME/hooks.json` (default `~/.codex/hooks.json`) and from any project
-`.codex/hooks.json`. To switch to manual hooks, remove the plugin first, then
-run `agent-strace setup --cli codex`. Manual setup is also the way to use
-`--redact` or `--no-redact`.
+`agent-strace setup --cli codex` and `--cli all` look for an enabled AgentTrace
+plugin in `$CODEX_HOME/config.toml`. When they find one, they do not write
+`$CODEX_HOME/hooks.json` (default `~/.codex/hooks.json`), and they print why.
+A project install made with `npx codex-marketplace` counts too, because it
+enables the plugin in `$CODEX_HOME/config.toml`.
+
+If you ran setup before you installed the plugin, `$CODEX_HOME/hooks.json`
+still has AgentTrace hooks. Setup and `--verify` then print what to run to
+keep only the plugin:
+
+- When the file has only AgentTrace hooks, and setup saved a
+  `hooks.json.agent-strace.bak` without them, they print the `cp` command that
+  restores that backup.
+- When the file has only AgentTrace hooks and there is no such backup, they
+  print an `rm` command.
+- When the file has other hooks too, they tell you to delete the entries that
+  run `agent-strace hook`.
+
+Setup does not check project `.codex/hooks.json` files. Remove the AgentTrace
+entries from them yourself. Their commands start with
+`agent-strace hook --provider codex`.
+
+To switch to manual hooks, remove the plugin first, then run
+`agent-strace setup --cli codex`. Setup prints the exact `codex plugin remove`
+command. Manual setup is also the way to use `--redact` or `--no-redact`.
 
 ## Privacy boundary
 

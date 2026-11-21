@@ -11,10 +11,11 @@ the Codex version and date last exercised with a real provider run. A
 release. The current matrix verifies `codex-cli 0.167.0-alpha.3.2`.
 
 `agent-strace setup --cli codex --verify` performs a static installation check.
-It validates the user-level hooks file, the Codex hooks feature setting, and
-the local AgentTrace executable. After one harmless local run,
-`--verify --live` adds a check of the newest matching recorded session. It does
-not start Codex or make a model request.
+It validates the hooks file, the Codex hooks feature setting, and the local
+AgentTrace executable. The hooks file is the user-level one, or the plugin's
+when the [AgentTrace Codex plugin](codex-plugin.md) is enabled. After one
+harmless local run, `--verify --live` adds a check of the newest matching
+recorded session. It does not start Codex or make a model request.
 
 ## Install and check hooks
 
@@ -28,7 +29,9 @@ Codex must trust each generated command hook in its Hooks UI. Headless
 `codex exec` can skip untrusted hooks without a warning. Re-run setup after
 upgrading from an older AgentTrace configuration so newer session-end,
 subagent and model-request hooks are present, then trust the hooks setup names
-as new or changed. Live verification reports observed event types,
+as new or changed. With the Codex plugin,
+[update the plugin](codex-plugin.md#update) instead, then trust its hooks
+again. Live verification reports observed event types,
 boundaries, redaction, evidence health, and packaged capture-matrix gaps. It
 returns non-zero when matching reviewable evidence is unavailable.
 

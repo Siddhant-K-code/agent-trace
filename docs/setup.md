@@ -175,6 +175,8 @@ root when you start Claude Code in a subdirectory or worktree. A
 
 `agent-strace setup --cli codex` writes user-level hooks to `$CODEX_HOME/hooks.json`, or to `~/.codex/hooks.json` when `CODEX_HOME` is unset or empty, and also prints the JSON shown below. This is the directory Codex reads.
 
+If `$CODEX_HOME/config.toml` enables the [AgentTrace Codex plugin](codex-plugin.md), setup does not write `hooks.json`. The plugin already registers these hooks, and Codex would record every event twice. Setup names the plugin and prints the `codex plugin remove` command to run if you want manual hooks instead. `--cli all` does the same. See [Duplicate hook avoidance](codex-plugin.md#duplicate-hook-avoidance).
+
 As in Codex, a set `CODEX_HOME` must name an existing directory, and `~` in its value is not expanded. Otherwise setup fails and writes nothing. Setup creates `~/.codex` when it is missing. Codex does not read `CODEX_CONFIG_DIR`, so setup ignores it and prints a note when it names another directory. Older agent-strace versions wrote `hooks.json` there, where Codex never loads it. You can delete that stale file.
 
 Before replacing an existing file, setup copies its original bytes once to `hooks.json.agent-strace.bak` in the same directory. Repeated setup runs preserve that first backup. To restore the pre-AgentTrace config:
@@ -226,6 +228,13 @@ Like setup, it ignores `CODEX_CONFIG_DIR` and prints a note when it names
 another directory. A Codex project-specific hooks file is **not** checked by
 this command.
 
+When `config.toml` enables the AgentTrace Codex plugin, the check reads the
+plugin's hooks file instead of `hooks.json`, and its output names the plugin
+and that file. If `hooks.json` also has AgentTrace hooks, the check warns that
+Codex records every event twice and prints how to remove one copy. The warning
+alone does not fail the check. See [Verify](codex-plugin.md#verify) in the
+plugin guide.
+
 The check also reads `config.toml` from the same directory and fails when its
 top-level `[features]` table sets `hooks = false` (including the dotted form
 `features.hooks = false`). The legacy key `codex_hooks` counts too; when both
@@ -242,13 +251,15 @@ rest of the file.
 hooks, that a provider process ran, or that events were captured.** Its
 output says that hook trust was not checked. When a hook is missing it tells
 you to run `agent-strace setup --cli codex` again and reminds you that Codex
-treats a hook added to `hooks.json` as new. Reload
+treats a hook added to `hooks.json` as new. For the plugin, it says how to
+update the plugin instead. Reload
 Codex, review the command hooks in its Hooks UI, run a local test session, then
 use `agent-strace setup --cli codex --verify --live`. Verification invokes only
 the local AgentTrace executable with `--version`; it does not execute hooks,
 write config, or start Codex.
 
-A successful verification prints the installed hooks path, matching event count,
+A successful verification prints the installed hooks path (and, for the
+plugin, its name and directory), matching event count,
 actual redaction mode, the `config.toml` path and hooks feature state, and
 resolved executable path and version. It accepts
 consistent default, `--redact` and `--no-redact` installations regardless

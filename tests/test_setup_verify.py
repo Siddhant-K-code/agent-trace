@@ -7,11 +7,18 @@ import contextlib
 import io
 import json
 import os
+import shlex
+import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+try:  # keeps product telemetry off in this process and its children
+    import _no_telemetry  # noqa: F401
+except ImportError:  # pragma: no cover - run as a package module
+    from tests import _no_telemetry  # noqa: F401
 
 from agent_trace import __version__, setup_verify
 from agent_trace.cli import (
@@ -25,6 +32,7 @@ from agent_trace.cli import (
 )
 from agent_trace.setup_verify import (
     check_codex_hooks_feature,
+    find_codex_plugins,
     verify_claude_setup,
     verify_codex_setup,
 )
@@ -639,6 +647,383 @@ class CodexHooksFeatureTests(unittest.TestCase):
                 setup_verify._tomllib.loads(text)  # The corpus must be valid TOML.
                 self.assertEqual(self._check("fallback"), self._check("tomllib"))
 
+
+_CODEX_PLUGIN = Path(__file__).resolve().parents[1] / "plugins" / "agent-strace-codex"
+_PLUGIN_KEY = "agent-strace@agent-trace"
+_PLUGIN_ON = f'[plugins."{_PLUGIN_KEY}"]\nenabled = true\n'
+_PLUGIN_OFF = f'[plugins."{_PLUGIN_KEY}"]\nenabled = false\n'
+
+
+class CodexPluginTests(unittest.TestCase):
+    """An enabled AgentTrace Codex plugin stands in for $CODEX_HOME/hooks.json. Codex never runs."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        # The space in "codex home" checks that printed commands quote paths.
+        names = {
+            "CODEX_HOME": "codex home",
+            "GEMINI_CLI_HOME": "gemini",
+            "CURSOR_CONFIG_DIR": "cursor",
+            "COPILOT_HOME": "copilot",
+        }
+        homes = {name: Path(tmp.name, folder) for name, folder in names.items()}
+        for path in homes.values():
+            path.mkdir()
+        env = patch.dict(os.environ, {name: str(path) for name, path in homes.items()})
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("CODEX_CONFIG_DIR", None)
+        os.environ.pop("GEMINI_CONFIG_DIR", None)
+        self.codex = homes["CODEX_HOME"]
+        self.copilot_hooks = homes["COPILOT_HOME"] / "hooks" / "agent-strace.json"
+        self.hooks_path = self.codex / "hooks.json"
+        self.backup = self.codex / "hooks.json.agent-strace.bak"
+        self.root = self._install("0.118.0")
+        self.plugin_hooks = self.root / "hooks" / "hooks.json"
+
+    def _install(self, version, marketplace="agent-trace"):
+        """Cache the shipped plugin the way `codex plugin add` does."""
+        root = self.codex / "plugins" / "cache" / marketplace / "agent-strace" / version
+        for name in (".codex-plugin/plugin.json", "hooks/hooks.json"):
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(_CODEX_PLUGIN / name, root / name)
+        return root
+
+    def _config(self, text):
+        (self.codex / "config.toml").write_text(text, encoding="utf-8")
+
+    def _write_json(self, path, data):
+        path.write_text(json.dumps(data), encoding="utf-8")
+
+    def _run(self, parser="tomllib", **updates):
+        """Run cmd_setup (verify by default) with a working agent-strace on PATH."""
+        module = setup_verify._tomllib if parser == "tomllib" else None
+        probe = subprocess.CompletedProcess([], 0, stdout=f"agent-strace {__version__}\n", stderr="")
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(setup_verify, "_tomllib", module))
+            stack.enter_context(
+                patch("agent_trace.setup_verify.shutil.which", return_value="/bin/agent-strace")
+            )
+            stack.enter_context(patch("agent_trace.setup_verify.subprocess.run", return_value=probe))
+            stack.enter_context(contextlib.redirect_stdout(out))
+            stack.enter_context(contextlib.redirect_stderr(err))
+            status = cmd_setup(_args(**updates))
+        return status, out.getvalue(), err.getvalue()
+
+    def _plugin_keys(self, parser):
+        module = setup_verify._tomllib if parser == "tomllib" else None
+        with patch.object(setup_verify, "_tomllib", module):
+            return [plugin.key for plugin in find_codex_plugins(self.codex)]
+
+    def test_enabled_plugin_passes_verify_and_names_the_file_checked(self):
+        self._config(_PLUGIN_ON)
+        events = len(_codex_hooks_config(_args())["hooks"])
+        for parser in _PARSERS:
+            with self.subTest(parser=parser):
+                status, out, err = self._run(parser)
+                self.assertEqual((status, err), (0, ""))
+                self.assertIn(
+                    "Codex static hook setup verified.\n"
+                    f"plugin:     {_PLUGIN_KEY} ({self.root})\n"
+                    f"hooks:      {self.plugin_hooks} ({events}/{events} events, redaction: default)\n",
+                    out,
+                )
+                self.assertIn("Trust the plugin hooks after every plugin install or update.", out)
+        self.assertFalse(self.hooks_path.exists())
+
+    def test_verify_still_fails_when_config_toml_disables_hooks(self):
+        self._config("[features]\nhooks = false\n" + _PLUGIN_ON)
+        status, out, err = self._run()
+        self.assertEqual((status, out), (1, ""))
+        self.assertIn(
+            f"Checked the hooks of the AgentTrace Codex plugin {_PLUGIN_KEY}: {self.plugin_hooks}\n", err
+        )
+        self.assertIn("Codex hooks are disabled in", err)
+
+    def test_incomplete_plugin_fails_and_says_how_to_update_it(self):
+        self._config(_PLUGIN_ON)
+        hooks = json.loads(self.plugin_hooks.read_text(encoding="utf-8"))
+        del hooks["hooks"]["SessionEnd"]
+        self._write_json(self.plugin_hooks, hooks)
+        status, out, err = self._run()
+        self.assertEqual((status, out), (1, ""))
+        self.assertIn(
+            f"Checked the hooks of the AgentTrace Codex plugin {_PLUGIN_KEY}: {self.plugin_hooks}\n"
+            "Setup verification failed: SessionEnd: missing ",
+            err,
+        )
+        self.assertIn(
+            "Update the plugin to add the missing hooks. For a git marketplace, run "
+            "`codex plugin marketplace upgrade agent-trace`. For a local marketplace, update its "
+            f"checkout, then run `codex plugin add {_PLUGIN_KEY}`. For an install made with npx "
+            "codex-marketplace, run its add command again. Then trust the new hooks",
+            err,
+        )
+        self.assertNotIn("Run agent-strace setup --cli codex", err)
+        self.assertFalse(self.hooks_path.exists())
+
+    def test_plugins_codex_does_not_load_are_ignored(self):
+        self._install("0.118.0", marketplace="agent.trace")
+        configs = (
+            _PLUGIN_OFF,
+            "",
+            "[features]\nplugins = false\n" + _PLUGIN_ON,
+            f'[plugins._default]\nenabled = false\n[plugins."{_PLUGIN_KEY}"]\n',
+            '[plugins."agent-strace@agent.trace"]\nenabled = true\n',  # Not a valid marketplace name.
+            '[plugins."agent-strace@elsewhere"]\nenabled = true\n',  # Enabled but not cached.
+        )
+        for parser in _PARSERS:
+            for text in configs:
+                with self.subTest(parser=parser, config=text):
+                    self._config(text)
+                    status, _, err = self._run(parser)
+                    self.assertEqual(status, 1)
+                    self.assertIn(f"Missing Codex hooks config: {self.hooks_path}.", err)
+                    self.assertNotIn("AgentTrace Codex plugin", err)
+
+        self._config(_PLUGIN_ON)
+        self._write_json(self.plugin_hooks, {"hooks": {"Stop": [{"hooks": [
+            {"type": "command", "command": "echo stop"},
+        ]}]}})
+        self.assertEqual(self._plugin_keys("tomllib"), [])
+
+    def test_config_toml_forms(self):
+        enabled = (
+            _PLUGIN_ON,
+            f"[plugins.'{_PLUGIN_KEY}']\nenabled = true\n",
+            f'[ plugins . "{_PLUGIN_KEY}" ] # AgentTrace\nenabled=true # on\n',
+            f'[plugins]\n"{_PLUGIN_KEY}" = {{ enabled = true }}\n',
+            f'[plugins]\n"{_PLUGIN_KEY}".enabled = true\n',
+            f'plugins."{_PLUGIN_KEY}".enabled = true\n',
+            f'plugins = {{ "{_PLUGIN_KEY}" = {{ enabled = true }} }}\n',
+            f'[plugins."{_PLUGIN_KEY}"]\n',  # enabled defaults to true.
+            f'[plugins."{_PLUGIN_KEY}"]\nenabled = true\nnote = "x"\n[plugins."{_PLUGIN_KEY}".extra]\n',
+            "\ufeff" + _PLUGIN_ON.replace("\n", "\r\n"),
+            "[features]\nplugins = true\n" + _PLUGIN_ON,
+            "[plugins._default]\nenabled = false\n" + _PLUGIN_ON,  # An explicit value wins.
+            # As written by `codex plugin marketplace add` and `codex plugin add`.
+            '[marketplaces.agent-trace]\nlast_updated = "2026-11-21T18:54:07Z"\n'
+            'source_type = "local"\nsource = "/src/agent-trace"\n\n' + _PLUGIN_ON,
+        )
+        ignored = (
+            _PLUGIN_OFF,
+            "features.plugins = false\n" + _PLUGIN_ON,
+            f'[profiles.work.plugins."{_PLUGIN_KEY}"]\nenabled = true\n',
+            # Codex loads no plugins when an entry or [features].plugins is invalid.
+            _PLUGIN_ON + '[plugins."other@agent-trace"]\nenabled = "yes"\n',
+            _PLUGIN_ON + '[plugins]\n"other@agent-trace" = true\n',
+            _PLUGIN_ON + "[features]\nplugins = 1\n",
+            'plugins = "agent-strace@agent-trace"\n',
+            f'[[plugins."{_PLUGIN_KEY}"]]\nenabled = true\n',
+            f'[plugins."{_PLUGIN_KEY}".enabled]\nvalue = true\n',
+            # Codex rejects invalid TOML.
+            _PLUGIN_ON + "enabled = true\n",
+            f'plugins = {{ "{_PLUGIN_KEY}" = {{ enabled = true, enabled = true }} }}\n',
+            "broken = [\n" + _PLUGIN_ON,
+        )
+        for parser in _PARSERS:
+            for texts, expected in ((enabled, [_PLUGIN_KEY]), (ignored, [])):
+                for text in texts:
+                    with self.subTest(parser=parser, config=text):
+                        self._config(text)
+                        self.assertEqual(self._plugin_keys(parser), expected)
+
+    def test_checks_the_cached_version_codex_loads(self):
+        self._config(_PLUGIN_ON)
+        cases = (
+            (("0.9.0", "0.10.0"), "0.10.0"),
+            (("1.0.0", "1.0.0-rc.1"), "1.0.0"),
+            (("1.0.0-alpha.9", "1.0.0-alpha.10"), "1.0.0-alpha.10"),
+            (("0.118.0", "local"), "local"),
+            (("local", "main"), "local"),  # local wins even over a name that sorts after it.
+            (("0.118.0", "dev"), "dev"),  # Names that are not versions compare as text.
+            (("0.118.0", "9.0.0 copy"), "0.118.0"),  # Codex skips other names.
+        )
+        for versions, expected in cases:
+            with self.subTest(versions=versions):
+                shutil.rmtree(self.codex / "plugins")
+                for version in versions:
+                    self._install(version)
+                self.assertEqual([p.root.name for p in find_codex_plugins(self.codex)], [expected])
+
+        base = self.codex / "plugins" / "cache" / "agent-trace" / "agent-strace"
+        shutil.rmtree(base / "9.0.0 copy")
+        try:
+            (base / "9.0.0").symlink_to(base / "0.118.0", target_is_directory=True)
+        except OSError:
+            self.skipTest("symlinks are not available")
+        self.assertEqual([p.root.name for p in find_codex_plugins(self.codex)], ["0.118.0"])
+
+    def test_plugin_hooks_files_resolve_like_codex(self):
+        self._config(_PLUGIN_ON)
+        manifest_path = self.root / ".codex-plugin" / "plugin.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        hooks = json.loads(self.plugin_hooks.read_text(encoding="utf-8"))
+        moved = self.root / "config" / "agent.json"
+        moved.parent.mkdir()
+        self._write_json(moved, hooks)
+        cases = (
+            ("./config/agent.json", [moved]),
+            (["../hooks.json", "config/agent.json", "./config/agent.json"], [moved]),
+            ("../hooks/hooks.json", [self.plugin_hooks]),  # No usable path: the default file.
+            (None, [self.plugin_hooks]),
+            (7, [self.plugin_hooks]),
+            (hooks, [manifest_path]),  # Inline hooks.
+            ({"hooks": []}, [self.plugin_hooks]),  # Not a valid hooks file: the default file.
+        )
+        for declared, expected in cases:
+            with self.subTest(hooks=str(declared)[:40]):
+                manifest.pop("hooks", None)
+                if declared is not None:
+                    manifest["hooks"] = declared
+                self._write_json(manifest_path, manifest)
+                [plugin] = find_codex_plugins(self.codex)
+                self.assertEqual(plugin.hooks_files, expected)
+
+        # Codex reads .claude-plugin/plugin.json when .codex-plugin has no manifest.
+        manifest["hooks"] = "./config/agent.json"
+        claude_manifest = self.root / ".claude-plugin" / "plugin.json"
+        claude_manifest.parent.mkdir()
+        self._write_json(claude_manifest, manifest)
+        manifest_path.unlink()
+        [plugin] = find_codex_plugins(self.codex)
+        self.assertEqual(plugin.hooks_files, [moved])
+
+    def test_plugin_and_hooks_json_pass_with_a_duplicate_warning(self):
+        self._config(_PLUGIN_ON)
+        agenttrace = _codex_hooks_config(_args())
+        user_hooks = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo stop"}]}]}}
+        mixed = json.loads(json.dumps(agenttrace))
+        mixed["hooks"]["Stop"] += user_hooks["hooks"]["Stop"]
+        hooks = shlex.quote(str(self.hooks_path))
+        cases = (
+            (agenttrace, None, f"run: rm {hooks}"),
+            (
+                agenttrace,
+                user_hooks,
+                "restore the hooks.json you had before agent-strace setup: "
+                f"cp {shlex.quote(str(self.backup))} {hooks}",
+            ),
+            (agenttrace, agenttrace, f"run: rm {hooks}"),  # This backup has AgentTrace hooks too.
+            (mixed, user_hooks, f"delete the entries that run `agent-strace hook` from {self.hooks_path}"),
+            (user_hooks, None, None),
+        )
+        for installed, backup, cleanup in cases:
+            with self.subTest(installed=installed is agenttrace, backup=backup is not None):
+                self._write_json(self.hooks_path, installed)
+                if backup is None:
+                    self.backup.unlink(missing_ok=True)
+                else:
+                    self._write_json(self.backup, backup)
+                status, out, err = self._run()
+                self.assertEqual(status, 0)
+                self.assertIn(f"plugin:     {_PLUGIN_KEY} ({self.root})\n", out)
+                expected = "" if cleanup is None else (
+                    f"Warning: {self.hooks_path} also has AgentTrace hooks, so Codex records every "
+                    f"event twice. To keep only {self.hooks_path}, run "
+                    f"`codex plugin remove {_PLUGIN_KEY}`. To keep only the plugin, {cleanup}\n"
+                )
+                self.assertEqual(err, expected)
+
+    @unittest.skipUnless(os.name == "posix" and shutil.which("sh"), "runs the printed command in sh")
+    def test_printed_cleanup_command_leaves_only_the_plugin(self):
+        self._config(_PLUGIN_ON)
+        original = b'{"hooks": {}}\n'
+        for backup in (None, original):
+            with self.subTest(backup=backup):
+                self._write_json(self.hooks_path, _codex_hooks_config(_args()))
+                if backup is not None:
+                    self.backup.write_bytes(backup)
+                _, _, err = self._run()
+                command = err.rpartition("To keep only the plugin, ")[2].partition(": ")[2].strip()
+                subprocess.run(["sh", "-c", command], check=True, timeout=30)
+                self.assertEqual(self._run()[0::2], (0, ""))
+                if backup is None:
+                    self.assertFalse(self.hooks_path.exists())
+                else:
+                    self.assertEqual(self.hooks_path.read_bytes(), original)
+
+    def test_several_enabled_plugins_warn_about_each_other(self):
+        self._install("0.118.0", marketplace="mirror")
+        self._config(_PLUGIN_ON + '[plugins."agent-strace@mirror"]\nenabled = true\n')
+        status, out, err = self._run()
+        self.assertEqual(status, 0)
+        self.assertIn(f"plugin:     {_PLUGIN_KEY} ({self.root})\n", out)
+        self.assertEqual(
+            err,
+            f"Warning: The AgentTrace Codex plugins {_PLUGIN_KEY} and agent-strace@mirror are both "
+            f"enabled, so Codex records every event twice. To keep only {_PLUGIN_KEY}, run "
+            "`codex plugin remove agent-strace@mirror`.\n",
+        )
+
+        self._write_json(self.hooks_path, _codex_hooks_config(_args()))
+        status, _, err = self._run()
+        self.assertEqual(status, 0)
+        self.assertIn("are both enabled, so Codex records every event 3 times.", err)
+        self.assertIn(
+            f"To keep only {self.hooks_path}, run `codex plugin remove {_PLUGIN_KEY}` and "
+            "`codex plugin remove agent-strace@mirror`. To keep only the plugins, run: rm ",
+            err,
+        )
+
+        _, _, err = self._run(verify=False)
+        self.assertIn(
+            f"These plugins also duplicate each other. To keep only {_PLUGIN_KEY}, run "
+            "`codex plugin remove agent-strace@mirror`.\n",
+            err,
+        )
+
+    def test_setup_leaves_codex_hooks_to_an_enabled_plugin(self):
+        self._config(_PLUGIN_ON)
+        for parser in _PARSERS:
+            for cli in ("codex", "all"):
+                with self.subTest(parser=parser, cli=cli):
+                    status, out, err = self._run(parser, cli=cli, verify=False)
+                    self.assertIsNone(status)
+                    self.assertEqual(sorted(p.name for p in self.codex.iterdir()), ["config.toml", "plugins"])
+                    self.assertIn(
+                        f"Found the AgentTrace Codex plugin {_PLUGIN_KEY} at {self.root}. "
+                        "It already registers the agent-strace hooks.\n"
+                        f"Did not write {self.hooks_path}: Codex would run both and record every "
+                        f"event twice.\nTo use {self.hooks_path} instead, run "
+                        f"`codex plugin remove {_PLUGIN_KEY}`, then run `agent-strace setup --cli codex` "
+                        "again.\nCheck the plugin hooks with: agent-strace setup --cli codex --verify\n",
+                        err,
+                    )
+                    self.assertNotIn("--provider codex", out)
+                    self.assertNotIn("Codex hook checklist", err)
+        # --cli all still sets up the other CLIs.
+        self.assertIn("agent-strace hook user-prompt", out)
+        self.assertTrue(self.copilot_hooks.is_file())
+
+    def test_setup_with_the_plugin_says_how_to_remove_existing_hooks_json(self):
+        self._config(_PLUGIN_ON)
+        self._write_json(self.hooks_path, _codex_hooks_config(_args()))
+        before = self.hooks_path.read_bytes()
+        _, _, err = self._run(verify=False)
+        self.assertEqual(self.hooks_path.read_bytes(), before)
+        self.assertFalse(self.backup.exists())
+        self.assertIn(
+            f"{self.hooks_path} already has AgentTrace hooks, which duplicate the plugin hooks. "
+            f"To keep only the plugin, run: rm {shlex.quote(str(self.hooks_path))}\n",
+            err,
+        )
+
+    def test_setup_writes_hooks_json_when_no_plugin_is_enabled(self):
+        for text in (_PLUGIN_OFF, "", _PLUGIN_ON):
+            with self.subTest(config=text):
+                if text == _PLUGIN_ON:
+                    shutil.rmtree(self.codex / "plugins")  # Enabled but not cached.
+                self._config(text)
+                self.hooks_path.unlink(missing_ok=True)
+                status, out, err = self._run(verify=False)
+                self.assertIsNone(status)
+                self.assertTrue(self.hooks_path.is_file())
+                self.assertIn("--provider codex", out)
+                self.assertIn("Codex hook checklist", err)
+                self.assertNotIn("AgentTrace Codex plugin", err)
 
 
 class ClaudeSetupVerifyTests(unittest.TestCase):
