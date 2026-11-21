@@ -160,6 +160,30 @@ def _validate_meta_ids(meta: SessionMeta, *, strict_session: bool = False) -> No
         )
 
 
+class CorruptSessionMetaError(ValueError):
+    """A session's meta.json cannot be read as its metadata.
+
+    It is a ValueError, so readers that skip or refuse corrupt sessions
+    handle it as before. The CLI and the collector print its message, which
+    names the session but no file content, instead of a traceback.
+    """
+
+    def __init__(self, session_id: str, reason: object) -> None:
+        super().__init__(f"session {session_id} has a corrupt meta.json: {reason}")
+        self.session_id = session_id
+
+
+def _read_meta_file(path: Path, session_id: str) -> SessionMeta:
+    """Parse the meta.json at ``path``, or raise CorruptSessionMetaError.
+
+    A missing or unreadable file raises OSError, as before.
+    """
+    try:
+        return SessionMeta.from_json(path.read_text())
+    except ValueError as exc:
+        raise CorruptSessionMetaError(session_id, exc) from exc
+
+
 def _carry_parent_link(meta: SessionMeta, existing: SessionMeta) -> bool:
     """Copy ``existing``'s parent link onto ``meta`` where ``meta`` lacks it.
 
@@ -1005,7 +1029,7 @@ class TraceStore:
             if existing_meta_path.exists():
                 if if_missing:
                     return None
-                existing = SessionMeta.from_json(existing_meta_path.read_text())
+                existing = _read_meta_file(existing_meta_path, meta.session_id)
                 existing.tenant_id = validate_optional_tenant_id(existing.tenant_id)
                 if existing.tenant_id and not meta.tenant_id:
                     meta.tenant_id = existing.tenant_id
@@ -1017,10 +1041,13 @@ class TraceStore:
                     self._enforce_parent_tenant(meta, inherit=False)
                 if existing.parent_session_id != meta.parent_session_id:
                     raise ValueError("use update_meta to change a session parent")
+            # Serialized before the directory exists, so metadata that
+            # to_json refuses leaves no incomplete session directory behind.
+            text = meta.to_json()
             d.mkdir(parents=True, exist_ok=True)
             self._session_file(
                 meta.session_id, "meta.json", "session metadata"
-            ).write_text(meta.to_json(), encoding="utf-8", newline="\n")
+            ).write_text(text, encoding="utf-8", newline="\n")
             # create empty events file
             self._session_file(
                 meta.session_id, "events.ndjson", "event stream"
@@ -1253,9 +1280,11 @@ class TraceStore:
         )
         if not f.exists():
             raise FileNotFoundError(f"session not found: {meta.session_id}")
-        existing = SessionMeta.from_json(f.read_text())
+        existing = _read_meta_file(f, meta.session_id)
         if existing.session_id != meta.session_id:
-            raise ValueError("metadata session ID does not match its directory")
+            raise CorruptSessionMetaError(
+                meta.session_id, "metadata session ID does not match its directory"
+            )
         existing.tenant_id = validate_optional_tenant_id(existing.tenant_id)
         meta.tenant_id = validate_optional_tenant_id(meta.tenant_id)
         if existing.tenant_id != meta.tenant_id:
@@ -1269,11 +1298,22 @@ class TraceStore:
         _write_atomic(f, meta.to_json())
 
     def load_meta(self, session_id: str) -> SessionMeta:
+        """Return the session's metadata.
+
+        Raises CorruptSessionMetaError, a ValueError, when meta.json does not
+        hold this session's metadata, and OSError when it cannot be read.
+        """
         f = self._session_file(session_id, "meta.json", "session metadata")
-        meta = SessionMeta.from_json(f.read_text())
-        if meta.session_id != validate_stored_id(session_id, "stored session ID"):
-            raise ValueError("metadata session ID does not match its directory")
-        _validate_meta_ids(meta)
+        session_id = validate_stored_id(session_id, "stored session ID")
+        meta = _read_meta_file(f, session_id)
+        if meta.session_id != session_id:
+            raise CorruptSessionMetaError(
+                session_id, "metadata session ID does not match its directory"
+            )
+        try:
+            _validate_meta_ids(meta)
+        except ValueError as exc:
+            raise CorruptSessionMetaError(session_id, exc) from exc
         return meta
 
     def load_events(

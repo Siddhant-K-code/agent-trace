@@ -958,6 +958,66 @@ class TestGetSessionEvents(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# GET routes on a session whose meta.json nests too deep
+# ---------------------------------------------------------------------------
+
+class TestGetCorruptSessionMeta(unittest.TestCase):
+    """A meta.json too deep to read answers 400. Session lists skip it."""
+
+    ERROR = {
+        "error": "session bbbb2222 has a corrupt meta.json: metadata nests more than 128 levels"
+    }
+    REFUSED = [
+        "/sessions/bbbb2222",
+        "/sessions/bbbb2222/events",
+        "/api/sessions/bbbb2222/events",
+        "/api/sessions/bbbb2222/review",
+        "/api/sessions/bbbb2222/compare?other=aaaa1111",
+        "/api/sessions/aaaa1111/compare?other=bbbb2222",
+        "/api/sessions/bbbb2222/share?mode=minimized",
+        "/api/sessions/bbbb2222/otlp",
+    ]
+
+    def serve(self, levels: int) -> str:
+        """Serve the dashboard for good session aaaa1111 and bbbb2222 nested ``levels`` deep."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store = TraceStore(tmp.name, use_workspace_env=False)
+        store.create_session(SessionMeta(session_id="aaaa1111", started_at=1.0))
+        store.create_session(SessionMeta(session_id="bbbb2222", started_at=2.0))
+        (store.base_dir / "bbbb2222" / "meta.json").write_text(
+            '{"session_id": "bbbb2222", "agent_name": ' + _nested_objects(levels) + "}"
+        )
+        server = HTTPServer(
+            ("127.0.0.1", 0), _make_handler(store, threading.Lock(), dashboard=True)
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_address[1]}"
+
+    def test_session_routes_answer_400_and_lists_skip_it(self):
+        # json.loads raises RecursionError at 1,000,000 levels on every
+        # Python. 3,000 levels parses on 3.12 and later, but copying it for
+        # the response ran out of stack and dropped the connection.
+        for levels in (1_000_000, 3_000):
+            base = self.serve(levels)
+            for path in self.REFUSED:
+                with self.subTest(levels=levels, path=path):
+                    status, body = _get(base + path)
+                    self.assertEqual((status, json.loads(body)), (400, self.ERROR))
+            for path in ("/sessions", "/api/sessions"):
+                with self.subTest(levels=levels, path=path):
+                    status, body = _get(base + path)
+                    self.assertEqual(status, 200)
+                    self.assertEqual(
+                        [session["session_id"] for session in json.loads(body)], ["aaaa1111"]
+                    )
+
+
+# ---------------------------------------------------------------------------
 # send_event_to_endpoint helper
 # ---------------------------------------------------------------------------
 
