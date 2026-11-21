@@ -67,6 +67,11 @@ class TestClaudePlugin(unittest.TestCase):
         claude_marketplace = json.loads(
             (CLAUDE_PLUGIN_DIR / "marketplace.json").read_text()
         )
+        codex_manifest = json.loads(
+            (
+                ROOT / "plugins" / "agent-strace-codex" / ".codex-plugin" / "plugin.json"
+            ).read_text()
+        )
 
         versions = {
             __version__,
@@ -75,6 +80,7 @@ class TestClaudePlugin(unittest.TestCase):
             copilot_marketplace["plugins"][0]["version"],
             claude_manifest["version"],
             claude_marketplace["plugins"][0]["version"],
+            codex_manifest["version"],
         }
         self.assertEqual(versions, {__version__})
 

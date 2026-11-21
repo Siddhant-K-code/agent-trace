@@ -99,8 +99,9 @@ Restart Copilot CLI, then use `/agent` to select
 repository you opened. Do not also run `agent-strace setup --cli copilot`,
 which would register duplicate hooks.
 
-See the [Copilot CLI plugin guide](docs/copilot-plugin.md) for verification,
-updates, and usage.
+See the [Copilot CLI plugin guide](docs/copilot-plugin.md) for verification, updates, and usage.
+
+**OpenAI Codex plugin:** run `codex plugin marketplace add Siddhant-K-code/agent-trace`, then `codex plugin add agent-strace@agent-trace`, and trust the hooks in `/hooks`. Don't also run `agent-strace setup --cli codex`. See the [Codex plugin guide](docs/codex-plugin.md).
 
 **Option 2: MCP proxy.** Wraps any MCP server, works with Cursor, Windsurf, and Copilot Desktop MCP servers
 

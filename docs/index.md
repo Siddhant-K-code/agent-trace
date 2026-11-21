@@ -35,6 +35,7 @@ canonical flag reference.
 - [Claude Code session replay](claude-code-session-replay.md)
 - [Claude Code plugin](claude-code-plugin.md)
 - [OpenAI Codex trace viewer and verified capture](codex-trace-viewer.md)
+- [OpenAI Codex plugin](codex-plugin.md)
 - [GitHub Copilot CLI observability](github-copilot-cli-observability.md)
 - [Copilot CLI plugin](copilot-plugin.md)
 - [Copilot cloud agent capture](copilot-cloud-agent.md): partial, unverified

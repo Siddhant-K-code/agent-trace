@@ -1,0 +1,224 @@
+# OpenAI Codex plugin
+
+The `agent-strace` Codex plugin records OpenAI Codex sessions through lifecycle
+hooks and adds the shared AgentTrace skill. It lives in
+`plugins/agent-strace-codex/`, apart from the Claude Code and Copilot CLI
+packages, so each agent loads only hooks written for it. The Python CLI remains
+a separate prerequisite because the hooks run `agent-strace` from `PATH`.
+
+## Install
+
+Install the zero-dependency CLI, and check that `agent-strace --version` works
+in the shell you start Codex from:
+
+```bash
+uv tool install agent-strace
+# or: pip install agent-strace
+```
+
+Add this repository as a Codex marketplace, then install the plugin:
+
+```bash
+codex plugin marketplace add Siddhant-K-code/agent-trace
+codex plugin add agent-strace@agent-trace
+```
+
+Codex reads `.agents/plugins/marketplace.json`, which lists only
+`plugins/agent-strace-codex`. The plugin is installed for your user under
+`$CODEX_HOME` (default `~/.codex`) and runs in every project.
+
+The third-party [Codex Marketplace](https://www.codex-marketplace.com/) CLI,
+which is not affiliated with OpenAI, can install it into one project instead.
+Run it from the project directory:
+
+```bash
+npx codex-marketplace add Siddhant-K-code/agent-trace/plugins/agent-strace-codex --plugin --project
+```
+
+Pass the full `plugins/agent-strace-codex` path. The repository root is not a
+Codex plugin. Use one install path, not both: two installs register the same
+hooks twice.
+
+### Trust the hooks
+
+Codex runs plugin hooks only after you review and trust them. Start `codex`,
+open `/hooks`, and trust the nine AgentTrace commands. In the Codex app, use
+Settings > Hooks. Until then the plugin records nothing, and `codex exec` skips
+untrusted hooks without a warning. Codex trusts each hook separately, so a
+hook that a plugin update adds or changes starts untrusted again.
+
+For vetted automation, `codex exec --dangerously-bypass-hook-trust` runs the
+hooks without the review.
+
+Hooks run in the session's working directory, so traces go to `.agent-traces/`
+in the directory where you started Codex, or to `AGENT_TRACE_DIR` when set.
+
+### Develop locally
+
+From a clone of this repository:
+
+```bash
+pip install -e .
+codex plugin marketplace add "$PWD"
+codex plugin add agent-strace@agent-trace
+```
+
+## Package contents
+
+| File | Purpose |
+|---|---|
+| `.codex-plugin/plugin.json` | Manifest and marketplace listing |
+| `hooks/hooks.json` | The hooks that `agent-strace setup --cli codex` writes by default |
+| `skills/agent-strace/SKILL.md` | The shared AgentTrace skill |
+
+The hooks are:
+
+| Codex event | Command |
+|---|---|
+| `SessionStart` | `agent-strace hook --provider codex session-start` |
+| `UserPromptSubmit` | `agent-strace hook --provider codex user-prompt` |
+| `PreToolUse` | `agent-strace hook --provider codex pre-tool` |
+| `PostToolUse` | `agent-strace hook --provider codex post-tool` |
+| `PostModelRequest` | `agent-strace hook --provider codex post-model-request` |
+| `SubagentStart` | `agent-strace hook --provider codex subagent-start` |
+| `SubagentStop` | `agent-strace hook --provider codex subagent-stop` |
+| `Stop` | `agent-strace hook --provider codex stop` |
+| `SessionEnd` | `agent-strace hook --provider codex session-end` (3 second timeout) |
+
+Codex ignores events it does not know. `PostModelRequest` needs Codex 0.164.0
+or later, and Codex 0.143.0 also ignores `SessionEnd`. See the
+[capture matrix](capture-matrix.md#openai-codex) for what each event records.
+
+The plugin does not register the AgentTrace MCP server. Plugin MCP servers
+start in the plugin directory, not your project, so they would read the wrong
+`.agent-traces/`. To add the server yourself, see [MCP server](mcp.md).
+
+## Verify
+
+```bash
+codex plugin list
+agent-strace --version
+```
+
+`codex plugin list` should show `agent-strace@agent-trace` as installed and
+enabled, with a source ending in `plugins/agent-strace-codex`. In `/hooks`,
+the AgentTrace commands show the plugin as their source. Submit a prompt that
+uses a tool, then inspect the trace:
+
+```bash
+agent-strace list
+agent-strace inspect <session-id>
+```
+
+`agent-strace setup --cli codex --verify` checks only `$CODEX_HOME/hooks.json`.
+It does not read plugin hooks, so it reports missing hooks while this plugin
+is working. Do not fix that by running `agent-strace setup --cli codex`; see
+[Duplicate hook avoidance](#duplicate-hook-avoidance).
+
+## Update
+
+Update the CLI and the marketplace together:
+
+```bash
+uv tool upgrade agent-strace
+# or: python -m pip install --upgrade agent-strace
+codex plugin marketplace upgrade agent-trace
+```
+
+The marketplace upgrade also refreshes the installed plugin. Review any new or
+changed hooks in `/hooks`, then start a new Codex session.
+
+### Moving from the repository-root install
+
+Before this package existed, `codex plugin marketplace add
+Siddhant-K-code/agent-trace` read `.claude-plugin/marketplace.json` and
+installed the whole repository as a Codex plugin, with Claude Code hooks that
+do not pass `--provider codex`. Run `codex plugin marketplace upgrade
+agent-trace` to switch that install to this package, then trust the new hooks
+in `/hooks`.
+
+## Uninstall
+
+```bash
+codex plugin remove agent-strace@agent-trace
+```
+
+Remove the marketplace only when no other installed plugin needs it:
+
+```bash
+codex plugin marketplace remove agent-trace
+```
+
+For a project install made with `npx codex-marketplace`, delete
+`plugins/agent-strace-codex/` from the project and remove its entry from the
+project's `.agents/plugins/marketplace.json`.
+
+Uninstalling the plugin stops future capture. Existing `.agent-traces/` data is
+not deleted.
+
+## Duplicate hook avoidance
+
+Codex runs every hook it finds, so a command that both this plugin and
+`agent-strace setup --cli codex` register runs twice and records every event
+twice. `agent-strace setup --cli codex` does not detect the plugin.
+
+Use one installation path. Before you install the plugin, remove the hook
+entries whose commands start with `agent-strace hook --provider codex` from
+`$CODEX_HOME/hooks.json` (default `~/.codex/hooks.json`) and from any project
+`.codex/hooks.json`. To switch to manual hooks, remove the plugin first, then
+run `agent-strace setup --cli codex`. Manual setup is also the way to use
+`--redact` or `--no-redact`.
+
+## Privacy boundary
+
+The hooks receive the prompts, tool inputs, tool outputs, model request
+metadata, and session metadata that Codex exposes for the configured events.
+AgentTrace writes them to `.agent-traces/` in the session's working directory
+by default, or to `AGENT_TRACE_DIR` when set. Secret redaction is enabled by
+default. Do not set `AGENT_TRACE_NO_REDACT=1` for untrusted or shared
+workspaces.
+
+The plugin adds no collector by itself. If `AGENT_STRACE_ENDPOINT` is set, the
+CLI sends trace events to that configured collector. Anonymous product
+telemetry is a separate, default-on path with an allowlisted aggregate schema
+that excludes trace contents, prompts, arguments, paths, and session IDs. It
+sends nothing until its one-time notice has been shown or telemetry was
+explicitly enabled. The SessionStart hook shows that notice once, as a
+`warning:` line at the start of an interactive `codex` session. `codex exec`
+never shows it; see [When sending starts](telemetry.md#when-sending-starts).
+Disable it with:
+
+```bash
+agent-strace telemetry disable
+```
+
+See [Security and privacy](security.md) and
+[Product telemetry](telemetry.md) for the full controls.
+
+## Known provider gaps
+
+- The plugin does not bundle Python or the `agent-strace` executable.
+- The plugin records nothing until its hooks are trusted.
+- Capture is limited to hook-visible data. See the
+  [capture matrix](capture-matrix.md#openai-codex).
+- OpenAI's plugin directory does not accept plugins with lifecycle hooks.
+  Install from this repository's marketplace or from codex-marketplace.com.
+
+## Release and publication
+
+`.codex-plugin/plugin.json` carries the package version, and the release
+workflow checks it against `src/agent_trace/__init__.py` with the other
+manifests. See the [release runbook](releases.md#version-parity).
+
+`hooks/hooks.json` must equal the default output of
+`agent-strace setup --cli codex`, and `skills/agent-strace/SKILL.md` must equal
+the root `skills/agent-strace/SKILL.md`. After changing either, run:
+
+```bash
+python -m unittest tests.test_codex_plugin -v
+```
+
+To list the plugin on codex-marketplace.com, submit it as a plugin with the
+path `Siddhant-K-code/agent-trace/plugins/agent-strace-codex`. The scanner
+rejects artifacts with more than 128 files, so keep the package small, and
+keep binary files such as images out of it.

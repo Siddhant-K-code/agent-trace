@@ -14,7 +14,9 @@ Captures the lifecycle events exposed by each CLI: user prompts, assistant respo
 Claude Code users can install the
 [native AgentTrace plugin](claude-code-plugin.md) instead of copying hook
 configuration into settings files. The plugin also loads the trace analyst
-agent and AgentTrace skill.
+agent and AgentTrace skill. OpenAI Codex users can likewise install the
+[Codex plugin](codex-plugin.md), which loads the same hooks and the skill. Use
+the plugin or `agent-strace setup --cli codex`, not both.
 
 ```bash
 # Generate Claude Code hooks config
