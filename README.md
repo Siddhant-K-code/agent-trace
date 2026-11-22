@@ -295,4 +295,4 @@ MIT. Use it however you want.
 ---
 
 <!-- mcp-name: io.github.Siddhant-K-code/agent-trace -->
-[Sponsor](https://github.com/sponsors/Siddhant-K-code) · [ADRs](ADRs/) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md) · [Release guide](docs/releases.md) · [PyPI](https://pypi.org/project/agent-strace/)
+[Sponsor](https://github.com/sponsors/Siddhant-K-code) · [ADRs](ADRs/) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md) · [Share your use case](docs/index.md#share-your-use-case) · [Release guide](docs/releases.md) · [PyPI](https://pypi.org/project/agent-strace/)
