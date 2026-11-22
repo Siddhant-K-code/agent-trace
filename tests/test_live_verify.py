@@ -289,9 +289,46 @@ class LiveSetupVerifyTests(unittest.TestCase):
 
         self.assertEqual(status, 1)
         self.assertIn("Codex static hook setup verified.", out)
-        self.assertIn("Newest OpenAI Codex capture candidate codex-corrupt-session", err)
-        self.assertIn("could not be read", err)
+        self.assertEqual(
+            err,
+            "Live capture verification failed: Newest OpenAI Codex capture candidate "
+            "codex-corrupt-session could not be read: line 1 of events.ndjson is not valid "
+            "JSON. Recapture the session, or select another with --session SESSION_ID.\n",
+        )
         self.assertNotIn("Session: codex-older-session", out)
+
+    def test_unreadable_requested_session_is_named_once(self):
+        self._write_session("codex-corrupt-session", "codex", 100)
+        events = self.trace_dir / "codex-corrupt-session" / "events.ndjson"
+        with events.open("a", encoding="utf-8") as handle:
+            handle.write("[]\n{\n")
+
+        status, out, err = self._run(session="codex-corrupt-session")
+
+        self.assertEqual(status, 1)
+        self.assertIn("Codex static hook setup verified.", out)
+        self.assertEqual(
+            err,
+            "Live capture verification failed: Session codex-corrupt-session could not be "
+            "read as recorded evidence: line 5 of events.ndjson is an array, not an object; "
+            "1 more line is unreadable. Recapture the session, or select another with "
+            "--session SESSION_ID.\n",
+        )
+
+    def test_requested_session_with_corrupt_metadata_is_named_once(self):
+        self._write_session("codex-corrupt-meta", "codex", 100)
+        (self.trace_dir / "codex-corrupt-meta" / "meta.json").write_text("[]", encoding="utf-8")
+
+        status, out, err = self._run(session="codex-corrupt-meta")
+
+        self.assertEqual(status, 1)
+        self.assertIn("Codex static hook setup verified.", out)
+        self.assertEqual(
+            err,
+            "Live capture verification failed: Session codex-corrupt-meta could not be "
+            "read as recorded evidence: corrupt meta.json: metadata is not a JSON object. "
+            "Recapture the session, or select another with --session SESSION_ID.\n",
+        )
 
     def test_explicit_session_from_another_provider_fails(self):
         self._write_session("claude-session", "claude", 100)

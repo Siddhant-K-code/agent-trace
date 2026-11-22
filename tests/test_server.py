@@ -37,9 +37,15 @@ from http.server import HTTPServer
 try:
     from _redirect_servers import ALL_REDIRECTS, REDIRECT_NOTE, RedirectServers
     from test_fileutil import RAW_SEPARATORS
+    from test_store import (
+        OTHER_SESSION, OTHER_TENANT, event_line, name_other_session_in_meta, write_session_lines,
+    )
 except ImportError:
     from tests._redirect_servers import ALL_REDIRECTS, REDIRECT_NOTE, RedirectServers
     from tests.test_fileutil import RAW_SEPARATORS
+    from tests.test_store import (
+        OTHER_SESSION, OTHER_TENANT, event_line, name_other_session_in_meta, write_session_lines,
+    )
 
 try:
     import _no_telemetry  # noqa: F401
@@ -72,7 +78,8 @@ def _get(url: str) -> tuple[int, bytes]:
         with urllib.request.urlopen(url, timeout=5) as resp:
             return resp.status, resp.read()
     except urllib.error.HTTPError as e:
-        return e.code, e.read()
+        with e:
+            return e.code, e.read()
 
 
 def _post(
@@ -955,6 +962,59 @@ class TestGetSessionEvents(unittest.TestCase):
     def test_get_events_unknown_session_returns_404(self):
         status, body = _get(f"{self.base}/sessions/nonexistent/events")
         self.assertEqual(status, 404)
+
+
+class TestGetRefusedSession(unittest.TestCase):
+    """GET answers 400 with the refusal for a session the store refuses to read."""
+
+    def setUp(self):
+        self.store, _ = _make_store()
+        self.server, self.port, _ = _start_test_server(self.store)
+        self.base = f"http://127.0.0.1:{self.port}"
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+    def test_meta_and_events_answer_400_with_one_message(self):
+        good = event_line()
+        meta_names_other = write_session_lines(self.store, [good])
+        name_other_session_in_meta(self.store, meta_names_other)
+        event_session = write_session_lines(
+            self.store, [good, event_line(session_id=OTHER_SESSION)]
+        )
+        event_tenant = write_session_lines(
+            self.store, [event_line(tenant_id=OTHER_TENANT)], tenant_id="team-a"
+        )
+        unreadable = write_session_lines(self.store, [good, "{"])
+
+        def refused(session_id, reason):
+            return f"cannot read session {session_id}: {reason}"
+
+        corrupt_meta = (
+            f"session {meta_names_other} has a corrupt meta.json: "
+            "metadata session ID does not match its directory"
+        )
+        cases = [
+            (f"/sessions/{meta_names_other}", corrupt_meta),
+            (f"/sessions/{meta_names_other}/events", corrupt_meta),
+            (f"/sessions/{event_session}/events",
+             refused(event_session, "event session ID does not match its directory")),
+            (f"/sessions/{event_tenant}/events",
+             refused(event_tenant, "event tenant does not match session metadata")),
+            (f"/sessions/{unreadable}/events",
+             refused(unreadable, "line 2 of events.ndjson is not valid JSON")),
+        ]
+        for path, message in cases:
+            with self.subTest(path=path):
+                stderr = io.StringIO()
+                with mock.patch("sys.stderr", stderr):
+                    status, body = _get(self.base + path)
+                self.assertEqual(status, 400)
+                self.assertEqual(json.loads(body), {"error": message})
+                self.assertNotIn(OTHER_SESSION, body.decode("utf-8"))
+                self.assertNotIn(OTHER_TENANT, body.decode("utf-8"))
+                self.assertEqual(_without_access_log(stderr.getvalue()), [])
 
 
 # ---------------------------------------------------------------------------

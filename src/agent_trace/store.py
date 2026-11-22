@@ -171,6 +171,7 @@ class CorruptSessionMetaError(ValueError):
     def __init__(self, session_id: str, reason: object) -> None:
         super().__init__(f"session {session_id} has a corrupt meta.json: {reason}")
         self.session_id = session_id
+        self.reason = str(reason)
 
 
 def _read_meta_file(path: Path, session_id: str) -> SessionMeta:
@@ -228,6 +229,89 @@ def _newest_first_key(meta: SessionMeta) -> tuple[float, str]:
     """
     started = usable_time(meta.started_at)
     return (0.0 if started is None else started, meta.session_id)
+
+
+class RefusedSessionError(ValueError):
+    """The store refuses to read a session.
+
+    The message names the session by its directory ID. It never holds an ID or
+    a value from the session's files, which may belong to another session or
+    tenant. ``reason`` is the message without the session, for a caller that
+    names the session itself.
+    """
+
+    def __init__(self, session_id: str, reason: str) -> None:
+        super().__init__(f"cannot read session {session_id}: {reason}")
+        self.session_id = session_id
+        self.reason = reason
+
+
+class SessionMismatchError(RefusedSessionError):
+    """An event names another session or another tenant."""
+
+
+class UnreadableEventLineError(RefusedSessionError):
+    """A line of events.ndjson is not an event the store can read."""
+
+
+def refusal_reason(exc: BaseException) -> str:
+    """Return the message of ``exc``, without the session if it is a refusal."""
+    if isinstance(exc, CorruptSessionMetaError):
+        return f"corrupt meta.json: {exc.reason}"
+    if isinstance(exc, RefusedSessionError):
+        return exc.reason
+    return str(exc)
+
+
+_EVENT_TYPE_VALUES = frozenset(event_type.value for event_type in EventType)
+
+
+def _json_type_phrase(value: object) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "a boolean"
+    if isinstance(value, (int, float)):
+        return "a number"
+    if isinstance(value, str):
+        return "a string"
+    return "an array"
+
+
+def _read_event_record(line: str) -> tuple[dict, str]:
+    """Return the decoded event line, or a phrase that says why it is unreadable.
+
+    The phrase never quotes the line, its event_type or the decoder message.
+    """
+    try:
+        record = json.loads(line)
+    except RecursionError:
+        return {}, "is nested too deeply"
+    except json.JSONDecodeError:
+        return {}, "is not valid JSON"
+    except ValueError:
+        # json.loads raises a plain ValueError for an integer with more
+        # digits than int() accepts.
+        return {}, "has a number with too many digits"
+    if not isinstance(record, dict):
+        return {}, f"is {_json_type_phrase(record)}, not an object"
+    if "event_type" not in record:
+        return {}, "has no event_type"
+    event_type = record["event_type"]
+    if not isinstance(event_type, str) or event_type not in _EVENT_TYPE_VALUES:
+        return {}, "has an unknown event_type"
+    return record, ""
+
+
+def _unreadable_lines_reason(unreadable: list[tuple[int, str]]) -> str:
+    line_number, problem = unreadable[0]
+    reason = f"line {line_number} of events.ndjson {problem}"
+    others = len(unreadable) - 1
+    if others == 1:
+        reason += "; 1 more line is unreadable"
+    elif others:
+        reason += f"; {others} more lines are unreadable"
+    return reason
 
 
 def _lock_file(file_obj) -> None:
@@ -1328,6 +1412,12 @@ class TraceStore:
         An event tenant must match the session tenant when the session has
         one. ``strict_event_tenants`` also refuses an event tenant when the
         session has none. ``validate_tenant_ids`` checks each tenant ID.
+
+        Raises CorruptSessionMetaError first, when meta.json does not hold
+        this session's metadata. Raises SessionMismatchError when an event
+        names another session or another tenant. Otherwise raises
+        UnreadableEventLineError when a line is not an event, after reading
+        every line, so a mismatch wins.
         """
         session_id = validate_stored_id(session_id, "stored session ID")
         f = self._session_file(session_id, "events.ndjson", "event stream")
@@ -1335,21 +1425,39 @@ class TraceStore:
         if validate_tenant_ids:
             meta.tenant_id = validate_optional_tenant_id(meta.tenant_id)
         events = []
-        for line in _split_lf_lines(f.read_text(encoding="utf-8").strip()):
-            if line:
-                event = TraceEvent.from_json(line)
-                if event.session_id and event.session_id != session_id:
-                    raise ValueError("event session ID does not match its directory")
-                event.session_id = session_id
-                if validate_tenant_ids:
-                    event.tenant_id = validate_optional_tenant_id(event.tenant_id)
-                if (
-                    event.tenant_id
-                    and event.tenant_id != meta.tenant_id
-                    and (meta.tenant_id or strict_event_tenants)
-                ):
-                    raise ValueError("event tenant does not match session metadata")
-                events.append(event)
+        unreadable: list[tuple[int, str]] = []
+        text = f.read_text(encoding="utf-8")
+        # Leading blank lines are stripped below but still count as lines.
+        line_number = text.count("\n", 0, len(text) - len(text.lstrip()))
+        for line in _split_lf_lines(text.strip()):
+            line_number += 1
+            if not line:
+                continue
+            record, problem = _read_event_record(line)
+            if problem:
+                unreadable.append((line_number, problem))
+                continue
+            event = TraceEvent.from_record(record)
+            if event.session_id and event.session_id != session_id:
+                raise SessionMismatchError(
+                    session_id, "event session ID does not match its directory"
+                )
+            event.session_id = session_id
+            if validate_tenant_ids:
+                event.tenant_id = validate_optional_tenant_id(event.tenant_id)
+            if (
+                event.tenant_id
+                and event.tenant_id != meta.tenant_id
+                and (meta.tenant_id or strict_event_tenants)
+            ):
+                raise SessionMismatchError(
+                    session_id, "event tenant does not match session metadata"
+                )
+            events.append(event)
+        if unreadable:
+            raise UnreadableEventLineError(
+                session_id, _unreadable_lines_reason(unreadable)
+            )
         # Session-level tenancy is authoritative and also makes the single
         # pre-watch event of an active session tenant-aware to all readers.
         tenant_id = meta.tenant_id

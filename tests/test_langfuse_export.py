@@ -582,6 +582,24 @@ class TestExportSessionToLangfuse(unittest.TestCase):
         result = export_session_to_langfuse(self.store, "nonexistent", cfg)
         self.assertFalse(result)
 
+    def test_unreadable_session_is_named_once_and_nothing_is_sent(self):
+        _add_session(self.store, "sess_bad", events=[_tool_call("Bash", event_id="tc1")])
+        with (self.store.base_dir / "sess_bad" / "events.ndjson").open("a", encoding="utf-8") as handle:
+            handle.write("[]\n{\n")
+        cfg = LangfuseConfig(public_key="pk", secret_key="sk")
+        err = io.StringIO()
+
+        with post_opener(_OPENER) as mock_open, redirect_stderr(err):
+            result = export_session_to_langfuse(self.store, "sess_bad", cfg)
+
+        self.assertFalse(result)
+        mock_open.assert_not_called()
+        self.assertEqual(
+            err.getvalue(),
+            "Failed to load session sess_bad: line 2 of events.ndjson is an array, "
+            "not an object; 1 more line is unreadable\n",
+        )
+
 
 # ---------------------------------------------------------------------------
 # Integration: export_metrics_to_otlp (mocked HTTP)

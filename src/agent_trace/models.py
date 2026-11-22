@@ -179,7 +179,11 @@ class TraceEvent:
 
     @classmethod
     def from_json(cls, line: str) -> TraceEvent:
-        d = json.loads(line)
+        return cls.from_record(json.loads(line))
+
+    @classmethod
+    def from_record(cls, d: dict[str, Any]) -> TraceEvent:
+        """Build an event from one decoded JSON line. ``d`` is changed in place."""
         d["event_type"] = EventType(d["event_type"])
         # Deserialising a legacy event must not accidentally assign the
         # current process tenant to historical data.
