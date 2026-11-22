@@ -339,6 +339,18 @@ agent-strace export <session-id> --format otlp \
   --header "X-SF-Token: $SPLUNK_ACCESS_TOKEN"
 ```
 
+### Telemetry.dev
+
+```bash
+agent-strace export <session-id> --format otlp-genai \
+  --endpoint https://api.telemetry.dev \
+  --header "Authorization: Bearer $TELEMETRY_DEV_API_KEY"
+```
+
+Tested once, with a partial result: no prompt, completion or tool content, a
+subagent is a separate trace, and retries are not linked. Read the limits in
+[telemetry-dev.md](telemetry-dev.md) before relying on it.
+
 ### Offline fixture validation
 
 The fixtures contain no credentials and require no network:

@@ -1,8 +1,8 @@
 # Telemetry.dev OTLP preflight (#241)
 
-This directory prepares the Telemetry.dev experiment in [#241](https://github.com/Siddhant-K-code/agent-trace/issues/241). Only the real send is left, and it needs the owner's Telemetry.dev key. Nothing here is packaged, imported by `src/`, or run by the test suite.
+This directory holds the Telemetry.dev experiment in [#241](https://github.com/Siddhant-K-code/agent-trace/issues/241). Nothing here is packaged, imported by `src/`, or run by the test suite. The user-facing guide is [docs/telemetry-dev.md](../../docs/telemetry-dev.md).
 
-Prepared on 2026-11-22 with agent-strace 0.120.0. **Every Telemetry.dev prediction here is doc-based, not observed.** Nothing has been sent to Telemetry.dev's ingest API; the only request made was `GET https://api.telemetry.dev/health`.
+Prepared on 2026-11-22 with agent-strace 0.120.0. [MAPPING.md](MAPPING.md) holds the doc-based predictions, written before any send. The owner sent the three payloads on 2026-11-22T17:16:23Z (run `20261122T171623Z`, all HTTP 200), and [RESULTS.md](RESULTS.md) records what Telemetry.dev showed: **PARTIAL, bounded**. The committed payloads are the agent-strace 0.120.0 bytes that run sent, before `send.py` gave them new IDs and times.
 
 ## Send it (owner)
 
@@ -37,6 +37,7 @@ agent-strace export <session> --format otlp-genai \
 | --- | --- |
 | [MAPPING.md](MAPPING.md) | The predicted mapping of every attribute, and the predicted PARTIAL decision with its top risks |
 | [CHECKLIST.md](CHECKLIST.md) | What to check in the Telemetry.dev UI, by #241 acceptance criterion, with Predicted and Observed columns |
+| [RESULTS.md](RESULTS.md) | The observed results of the real send, the decision, and every difference from the predictions |
 | `send.py` | The owner's send script |
 | `generate.py` | Builds the synthetic sessions and writes the three payloads |
 | `validate.py` | Offline check of the payloads against Telemetry.dev's documented OTLP JSON rules, and of MAPPING.md's coverage |

@@ -6,7 +6,7 @@
 | Date | 2026-11-22 |
 | Docs read | 2026-11-22: [llms-full.txt](https://telemetry.dev/docs/llms-full.txt), [OTLP ingest](https://telemetry.dev/docs/reference/otlp), [Span attributes](https://telemetry.dev/docs/reference/span-attributes), [Cost](https://telemetry.dev/docs/reference/cost), [How it works](https://telemetry.dev/docs/how-it-works), [Privacy](https://telemetry.dev/docs/platform/privacy), Traces UI |
 | Backend | `GET https://api.telemetry.dev/health` returned `200 {"ok":true}` with `x-telemetry-dev: telemetry.dev` at 2026-11-22T16:53:54Z. The endpoint does not expose a version. |
-| Status | **Every prediction here is doc-based, not observed.** Nothing has been sent to `/v1/traces`. |
+| Status | **Every prediction here is doc-based, not observed.** This file was written before anything was sent to `/v1/traces` and is kept unchanged as the record of the predictions. The real send of 2026-11-22T17:16:23Z is recorded in [RESULTS.md](RESULTS.md), with every difference from these predictions. |
 
 ## Predicted decision: PARTIAL
 

@@ -59,6 +59,7 @@ canonical flag reference.
 - [MCP client setup and published server metadata](mcp.md)
 - [Framework integrations](integrations.md)
 - [OTLP GenAI and OpenInference export](production.md#openinference-compatibility)
+- [Telemetry.dev export and its limits](telemetry-dev.md)
 - [Collector server](server.md)
 - [Public trace schema and validator](trace-schema.md)
 - [Agent Evidence Corpus](agent-evidence-corpus.md)
