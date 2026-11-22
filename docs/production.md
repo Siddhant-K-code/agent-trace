@@ -765,6 +765,10 @@ needed:
 
 ## Inspect the OTLP payload
 
+Without `--endpoint`, export writes the payload to a file and prints nothing
+on stdout:
+
 ```bash
-agent-strace export <session-id> --format otlp > trace.json
+agent-strace export <session-id> --format otlp --output trace.json
+jq . trace.json
 ```

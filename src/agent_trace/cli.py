@@ -623,7 +623,8 @@ def cmd_export(args: argparse.Namespace) -> int:
             except (NonObjectEventDataError, UnusableTimestampError):
                 raise
             except ValueError as exc:
-                sys.stderr.write(f"Temporal export failed: {exc}\n")
+                label = "Temporal" if use_temporal else "OTLP"
+                sys.stderr.write(f"{label} export failed: {exc}\n")
                 return 1
             output_path = getattr(args, "output", "") or ""
             if not output_path:
@@ -652,7 +653,13 @@ def cmd_export(args: argparse.Namespace) -> int:
         elif use_genai:
             # Export using GenAI conventions
             meta = store.load_meta(session_id)
-            payload = session_to_otlp_genai(meta, events, service_name=args.service_name)
+            try:
+                payload = session_to_otlp_genai(meta, events, service_name=args.service_name)
+            except (NonObjectEventDataError, UnusableTimestampError):
+                raise
+            except ValueError as exc:
+                sys.stderr.write(f"OTLP export failed: {exc}\n")
+                return 1
             ok = export_otlp_payload(payload, endpoint, headers=headers, event_count=len(events))
             return 0 if ok else 1
         else:

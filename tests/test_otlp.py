@@ -1,10 +1,16 @@
 """Tests for OTLP exporter."""
 
+import json
 import os
 import sys
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
+try:
+    import _escapes
+except ImportError:
+    from tests import _escapes
 
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.otlp import (
@@ -13,7 +19,12 @@ from agent_trace.otlp import (
     _to_trace_id,
     _ts_to_nanos,
     session_to_otlp,
+    session_to_otlp_genai,
 )
+
+LONE = _escapes.LONE_SURROGATE
+SHOWN = _escapes.LONE_SURROGATE_SHOWN
+PLAIN = _escapes.PLAIN
 
 
 class TestHelpers(unittest.TestCase):
@@ -62,6 +73,63 @@ class TestHelpers(unittest.TestCase):
     def test_make_attributes_list(self):
         attrs = _make_attributes({"items": [1, 2, 3]})
         self.assertIn("1", attrs[0]["value"]["stringValue"])
+
+
+class TestIdHashes(unittest.TestCase):
+    """A span ID or trace ID is the first hex digits of the SHA-256 of the ID's UTF-8 bytes.
+
+    A stored ID can hold a lone surrogate, which strict UTF-8 refuses. The
+    helpers encode it with surrogatepass, which gives bytes no valid ID has.
+    """
+
+    def test_valid_ids_keep_their_hashes(self):
+        # A session exported again must keep its span and trace IDs.
+        pinned = (
+            ("event-1", "ce36863f51b6baf9", "ce36863f51b6baf9d16397ffb3e9af50"),
+            ("call-1", "5d7963c4f471e142", "5d7963c4f471e142f5a72214a9666fb1"),
+            ("root-abc123", "83c60204acb6bb9d", "83c60204acb6bb9d649341d666972e86"),
+            (PLAIN, "81713abb8fb5e6a2", "81713abb8fb5e6a2e3d353b9961d4ad5"),
+            ("call-" + SHOWN, "fcb5dd94c5e02840", "fcb5dd94c5e0284082ab0aba1c1a9a77"),
+        )
+        for value, span_id, trace_id in pinned:
+            with self.subTest(value=value):
+                self.assertEqual((_to_span_id(value), _to_trace_id(value)), (span_id, trace_id))
+
+    def test_span_id_of_lone_surrogate(self):
+        span_id = _to_span_id("call-" + LONE)
+        self.assertEqual(span_id, "00888d4bf0f69018")
+        # The six characters of its escape are another ID.
+        self.assertNotEqual(span_id, _to_span_id("call-" + SHOWN))
+
+    def test_trace_id_of_lone_surrogate(self):
+        trace_id = _to_trace_id("sess-" + LONE)
+        self.assertEqual(trace_id, "f802fac41222ee5c70813f000aaf3df9")
+        self.assertNotEqual(trace_id, _to_trace_id("sess-" + SHOWN))
+
+    def test_converters_take_lone_surrogates(self):
+        meta = SessionMeta(session_id="sess-" + LONE, agent_name="probe", started_at=1.0, ended_at=3.0)
+        events = [
+            TraceEvent(
+                event_type=EventType.TOOL_CALL, event_id="call-" + LONE, parent_id=PLAIN + " " + LONE,
+                timestamp=1.5, data={"tool_name": "Bash", "arguments": {"command": "ls"}},
+            ),
+            TraceEvent(
+                event_type=EventType.TOOL_RESULT, event_id="result-" + LONE, parent_id="call-" + LONE,
+                timestamp=2.0, duration_ms=250, data={"tool_name": "Bash", "result": "ok"},
+            ),
+        ]
+        for convert in (session_to_otlp, session_to_otlp_genai):
+            with self.subTest(convert=convert.__name__):
+                payload = convert(meta, events)
+                root, call = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
+                self.assertEqual(root["traceId"], _to_trace_id("sess-" + LONE))
+                self.assertEqual(root["spanId"], _to_span_id("root-sess-" + LONE))
+                self.assertEqual(call["spanId"], _to_span_id("call-" + LONE))
+                self.assertEqual(call["parentSpanId"], root["spanId"])
+                # The result, found by its parent ID, ends the span 250 ms after the call.
+                self.assertEqual(call["endTimeUnixNano"], "1750000000")
+                # json.dumps writes the surrogate in an attribute as its escape.
+                self.assertIn('"call-' + SHOWN + '"', json.dumps(payload))
 
 
 class TestSessionToOTLP(unittest.TestCase):

@@ -28,6 +28,7 @@ from typing import Any
 from . import __version__
 from .cost import TokenUsage, reasoning_output_tokens, usage_detail
 from .event_data import (
+    NonObjectEventDataError,
     UnusableTimestampError,
     event_id_of,
     is_redacted,
@@ -146,14 +147,22 @@ _EVENT_PROVENANCE_KEYS = (
 
 
 def _to_trace_id(session_id: str) -> str:
-    """Convert session ID to a 32-hex-char trace ID."""
-    h = hashlib.sha256(session_id.encode()).hexdigest()
+    """Convert session ID to a 32-hex-char trace ID.
+
+    A stored ID can hold a lone surrogate, which strict UTF-8 refuses.
+    surrogatepass encodes it to bytes that no other ID encodes to. Every
+    other ID keeps its bytes, so its hash does not change.
+    """
+    h = hashlib.sha256(session_id.encode("utf-8", "surrogatepass")).hexdigest()
     return h[:32]
 
 
 def _to_span_id(event_id: str) -> str:
-    """Convert event ID to a 16-hex-char span ID."""
-    h = hashlib.sha256(event_id.encode()).hexdigest()
+    """Convert event ID to a 16-hex-char span ID.
+
+    Encodes the ID as _to_trace_id does.
+    """
+    h = hashlib.sha256(event_id.encode("utf-8", "surrogatepass")).hexdigest()
     return h[:16]
 
 
@@ -1507,7 +1516,9 @@ def export_otlp(
         service_name: OTel service name
 
     Returns:
-        True if export succeeded
+        True if export succeeded. A ValueError from the conversion, other
+        than NonObjectEventDataError and UnusableTimestampError, prints
+        one line and returns False.
     """
     meta = store.load_meta(session_id)
     if not meta:
@@ -1519,7 +1530,13 @@ def export_otlp(
         sys.stderr.write(f"No events for session {session_id}\n")
         return False
 
-    payload = session_to_otlp(meta, events, service_name)
+    try:
+        payload = session_to_otlp(meta, events, service_name)
+    except (NonObjectEventDataError, UnusableTimestampError):
+        raise
+    except ValueError as exc:
+        sys.stderr.write(f"OTLP export failed: {exc}\n")
+        return False
     return export_otlp_payload(
         payload,
         endpoint,
