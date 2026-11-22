@@ -6,10 +6,10 @@ canonical flag reference.
 
 ## Share your use case
 
-Want to help improve the docs? Start a
-[GitHub Discussion](https://github.com/Siddhant-K-code/agent-trace/discussions)
-with your main use and a question you want the docs to answer. Participation
-is optional.
+Want to help improve the docs? Choose your closest current use in the
+[use-case poll](https://github.com/Siddhant-K-code/agent-trace/discussions/556).
+You can also reply with a question you want the docs to answer.
+Participation is optional.
 
 | Main use | Start here |
 |---|---|
@@ -18,10 +18,11 @@ is optional.
 | Evaluate agents | [Evaluation command and limits](commands.md#eval) |
 | Integrate or export evidence | [Integrations](integrations.md) and [OTLP export](production.md) |
 
-Still exploring? Say what you hope to try. Use public or synthetic examples.
-Do not post private code, transcripts, customer information, or contact
-details. Discussions are public; posting requires a GitHub account. Sharing
-your use case does not opt you into outreach.
+Still exploring? Choose the last poll option. Use public or synthetic
+examples in replies. Do not post private code, transcripts, customer
+information, or contact details. The poll and replies are public; voting
+and posting require a GitHub account. Voting or commenting does not opt
+you into outreach.
 
 ## Setup and releases
 
