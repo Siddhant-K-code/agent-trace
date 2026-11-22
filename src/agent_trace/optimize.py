@@ -546,7 +546,11 @@ def cmd_optimize(args: argparse.Namespace) -> int:
 
     session_ids = _resolve_sessions(store, args)
     if not session_ids:
-        sys.stderr.write("No sessions found.\n")
+        session_arg = getattr(args, "session_id", None)
+        if session_arg and not getattr(args, "dataset", None):
+            sys.stderr.write(f"Session not found: {session_arg}\n")
+        else:
+            sys.stderr.write("No sessions found.\n")
         return 1
 
     # LLM config from env or args

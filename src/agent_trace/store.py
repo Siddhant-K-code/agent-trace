@@ -1593,22 +1593,36 @@ class TraceStore:
         ).exists()
 
     def find_session(self, prefix: str, tenant_id: str | None = None) -> str | None:
-        """Find a session by prefix match."""
+        """Return the ID of a readable session whose ID starts with ``prefix``.
+
+        A readable match wins over a corrupt one. When no readable session
+        matches but a session with a corrupt meta.json does, this raises that
+        session's CorruptSessionMetaError. If several corrupt sessions match,
+        it raises the one with the lowest ID. A lookup with ``tenant_id``
+        skips corrupt sessions instead, because their tenant cannot be read.
+        """
         validate_stored_id(prefix, "session ID prefix")
         if tenant_id is not None:
             tenant_id = validate_optional_tenant_id(tenant_id)
         if not self.base_dir.exists():
             return None
+        corrupt: CorruptSessionMetaError | None = None
         for d in self.base_dir.iterdir():
             if d.is_symlink() or not d.is_dir() or not d.name.startswith(prefix):
                 continue
             try:
                 validate_stored_id(d.name, "stored session directory")
                 meta = self.load_meta(d.name)
-                if tenant_id is None or meta.tenant_id == tenant_id:
-                    return d.name
+            except CorruptSessionMetaError as exc:
+                if corrupt is None or exc.session_id < corrupt.session_id:
+                    corrupt = exc
+                continue
             except (OSError, ValueError, TypeError, json.JSONDecodeError):
                 continue
+            if tenant_id is None or meta.tenant_id == tenant_id:
+                return d.name
+        if corrupt is not None and tenant_id is None:
+            raise corrupt
         return None
 
     def tag_session(self, session_id: str, tenant_id: str) -> int:

@@ -1076,6 +1076,24 @@ class TestGetCorruptSessionMeta(unittest.TestCase):
                         [session["session_id"] for session in json.loads(body)], ["aaaa1111"]
                     )
 
+    def test_a_prefix_of_the_session_answers_400_like_its_full_id(self):
+        for levels in (1_000_000, 3_000):
+            base = self.serve(levels)
+            for path in [path.replace("bbbb2222", "bbbb") for path in self.REFUSED]:
+                with self.subTest(levels=levels, path=path):
+                    stderr = io.StringIO()
+                    with mock.patch("sys.stderr", stderr):
+                        status, body = _get(base + path)
+                    self.assertEqual((status, json.loads(body)), (400, self.ERROR))
+                    self.assertEqual(_without_access_log(stderr.getvalue()), [])
+            for path, expected in (
+                ("/sessions/aaaa", 200),
+                ("/sessions/cccc", 404),
+                ("/sessions/cccc/events", 404),
+            ):
+                with self.subTest(levels=levels, path=path):
+                    self.assertEqual(_get(base + path)[0], expected)
+
 
 # ---------------------------------------------------------------------------
 # send_event_to_endpoint helper

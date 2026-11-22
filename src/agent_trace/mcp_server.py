@@ -45,7 +45,7 @@ from .reviewability import (
 )
 from .skills import build_aggregate_report, build_session_report
 from .models import EventType, TraceEvent, usable_number, usable_time
-from .store import TraceStore
+from .store import CorruptSessionMetaError, TraceStore
 
 
 # ---------------------------------------------------------------------------
@@ -767,6 +767,8 @@ def _handle(store: TraceStore, request: Any) -> dict | None:
 
         try:
             text = fn(store, tool_args)
+        except CorruptSessionMetaError as exc:
+            text = json.dumps({"error": str(exc)})
         except Exception as exc:
             return _ok(req_id, _tool_result(f"{name} failed: {type(exc).__name__}: {exc}", True))
 

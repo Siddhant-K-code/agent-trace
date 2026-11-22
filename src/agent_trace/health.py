@@ -522,6 +522,8 @@ def _resolve_session(store: TraceStore, requested: str | None) -> str | None:
         if store.session_exists(requested):
             return requested
         return store.find_session(requested)
+    except CorruptSessionMetaError:
+        raise
     except ValueError:
         return None
 

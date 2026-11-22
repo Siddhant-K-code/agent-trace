@@ -338,17 +338,32 @@ what it does for a session without that field. The exceptions:
 A `meta.json` is corrupt when it is not valid JSON, is not a JSON object, or
 nests objects and arrays more than 128 levels deep. `list`, `stats` and
 `health` skip that session and show the rest of the store. Commands that read
-that one session, such as `inspect`, `replay`, `export`, `stats <id>` and
-`health <id>`, exit 1 with one line:
+that one session by its ID, such as `inspect`, `replay`, `explain`, `export`,
+`stats <id>` and `health <id>`, exit 1 with one line:
 
 ```
 Error: session bbbb2222 has a corrupt meta.json: metadata nests more than 128 levels
 ```
 
-Commands that match a session by ID prefix, such as `explain`, skip it and say
-"Session not found". To read the session again, move its `meta.json` out of the
-session directory. Then run `agent-strace backfill-meta --apply`, which
-rebuilds the metadata from the session's events.
+A session ID prefix gets the same line and exit code when it matches no
+readable session but does match a session with a corrupt `meta.json`. If a
+readable session also matches, the command uses it. If several corrupt sessions
+match, the line names the one with the lowest ID. `review` and `pr-comment`
+print it after their own prefix, as in
+`review: session <id> has a corrupt meta.json: <reason>`. `review` exits 2 and
+`pr-comment` exits 1.
+`setup --verify --live --session` names it in its own failure line and exits 1.
+`cognitive-debt` keeps `Error: trace input could not be read safely`.
+`cost --tenant` skips a corrupt session, because its tenant cannot be read.
+`agent-strace server` answers `GET /sessions/<prefix>` and
+`GET /sessions/<prefix>/events` with 400 and the message. With `--dashboard`,
+the session's events and its review, compare, share, and OTLP actions answer
+the same way. MCP tools return it as an error. `verify` checks only
+`events.ndjson`, so it still checks a session given by its full ID.
+
+To read the session again, move its `meta.json` out of the session directory.
+Then run `agent-strace backfill-meta --apply`, which rebuilds the metadata from
+the session's events.
 
 | Column | Counts |
 |---|---|
@@ -2990,10 +3005,9 @@ reports the session invalid and names the check that failed.
 A session whose `meta.json` names another session is skipped the way
 [`list`](#list) describes for a corrupt `meta.json`. `list` leaves it out, and
 so do `health`, `stats`, `standup`, and `lint` without a session ID. So does
-`GET /sessions`, so `org-report --endpoint` does not see it. Most commands that
-take a session ID print `Session not found` for it. `replay`, `inspect`,
-`export`, `stats <id>`, and `health <id>` print the corrupt `meta.json` line
-above.
+`GET /sessions`, so `org-report --endpoint` does not see it. Commands given its
+ID, or a prefix that matches no readable session, print the corrupt
+`meta.json` line that [`list`](#list) shows.
 
 `a2a-tree`, `baseline update`, `budget-report`, `compliance export`, `curve`,
 `dashboard --trend`, `inflation`, `optimize`, `sample`, and `team-report` go

@@ -335,6 +335,9 @@ def print_regression_report(report: RegressionReport, out: TextIO = sys.stdout) 
     w("\n")
 
 
+_NO_SESSION = "Session not found. Provide a session ID or record a session first.\n"
+
+
 def _resolve_session(store: TraceStore, raw: str | None) -> str | None:
     if raw:
         return store.find_session(raw)
@@ -348,9 +351,10 @@ def _default_fixture_path(session_id: str) -> Path:
 
 def cmd_freeze(args: argparse.Namespace) -> int:
     store = TraceStore(args.trace_dir)
-    session_id = _resolve_session(store, getattr(args, "session_id", None))
+    requested = getattr(args, "session_id", None)
+    session_id = _resolve_session(store, requested)
     if not session_id:
-        sys.stderr.write(f"Session not found: {getattr(args, 'session_id', '')}\n")
+        sys.stderr.write(f"Session not found: {requested}\n" if requested else _NO_SESSION)
         return 1
 
     try:
@@ -395,7 +399,7 @@ def cmd_regression(args: argparse.Namespace) -> int:
     store = TraceStore(args.trace_dir)
     session_id = _resolve_session(store, getattr(args, "session_id", None))
     if not session_id:
-        sys.stderr.write("Session not found. Provide a session ID or record a session first.\n")
+        sys.stderr.write(_NO_SESSION)
         return 1
 
     try:
