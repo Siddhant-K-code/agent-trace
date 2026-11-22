@@ -24,7 +24,7 @@ from unittest.mock import MagicMock, patch
 import agent_trace.watch as watch_module
 from agent_trace.cli import build_parser
 from agent_trace.models import EventType, SessionMeta, TraceEvent
-from agent_trace.otlp import session_to_otlp_genai
+from agent_trace.otlp import otlp_genai_data_indexes, session_to_otlp_genai
 from agent_trace.store import TraceStore
 from agent_trace.watch import (
     EventStreamer,
@@ -666,6 +666,21 @@ class TestOtlpStreamNonObjectData(_ReceiverTestCase):
             [(_SESSION, [_USER, _ASSISTANT], ["execute_tool 5", "chat"])],
         )
 
+    def test_wrong_typed_ids_are_sent_without_a_line(self) -> None:
+        # An ID with the wrong type reads as missing, so nothing pairs
+        # through it, and each event still gets its own span.
+        call = _event("tool_call", {"tool_name": "Bash"}, "c1", ts=2.0)
+        call.event_id = ["SECRET-ID"]  # type: ignore[assignment]
+        result = _event("tool_result", {"tool_name": "Bash", "result": "ok"}, "c2", ts=3.0)
+        result.parent_id = {"id": "SECRET-ID"}  # type: ignore[assignment]
+        posts, stderr = self._stream(_wrapped([call, result]))
+        self.assertEqual(stderr, "")
+        self.assertEqual(
+            self._sent(posts), [(_SESSION, [_USER, _ASSISTANT], [_BASH_SPAN, _BASH_SPAN])],
+        )
+        spans = json.loads(posts[0][1])["resourceSpans"][0]["scopeSpans"][0]["spans"]
+        self.assertEqual(len({span["spanId"] for span in spans}), len(spans))
+
     def test_ndjson_stream_sends_non_object_data_as_stored(self) -> None:
         events = [
             _event(event_type, data, f"n{index}")
@@ -760,22 +775,28 @@ class TestOtlpStreamConversionFailure(_ReceiverTestCase):
         )
         self._assert_quotes_nothing(stderr)
 
-    def test_events_that_cannot_be_paired_are_counted_and_streaming_goes_on(self) -> None:
-        unhashable_id = TraceEvent(
-            event_type=EventType.TOOL_CALL,
-            event_id=["SECRET-ID"],  # type: ignore[arg-type]
-            session_id=_SESSION,
-            data={"tool_name": "Bash"},
-            tenant_id="",
-        )
-        posts, stderr = self._stream(
-            [
-                _event("user_prompt", {"prompt": "hi"}, "p1"),
-                unhashable_id,
-                _event("assistant_response", {"text": "done"}, "a1", ts=9.0),
-            ],
-            batch_size=2,
-        )
+    def test_failed_check_is_counted_and_streaming_goes_on(self) -> None:
+        # The check for the events the converter reads runs before the
+        # converter. Its failure is counted the same way.
+        real = otlp_genai_data_indexes
+        checked: list[int] = []
+
+        def fail_once(events):
+            checked.append(len(events))
+            if len(checked) == 1:
+                raise TypeError("SECRET-MESSAGE")
+            return real(events)
+
+        with patch("agent_trace.otlp.otlp_genai_data_indexes", new=fail_once):
+            posts, stderr = self._stream(
+                [
+                    _event("user_prompt", {"prompt": "hi"}, "p1"),
+                    _event("tool_call", {"tool_name": "Bash"}, "c1", ts=2.0),
+                    _event("assistant_response", {"text": "done"}, "a1", ts=9.0),
+                ],
+                batch_size=2,
+            )
+        self.assertEqual(checked, [2, 1])
         self.assertEqual(
             stderr,
             "[stream] Could not convert 2 events to OTLP spans (TypeError); "
@@ -1331,22 +1352,23 @@ class TestEventStreamerStopWait(_ScriptedReceiverTestCase):
         with patch("agent_trace.otlp.session_to_otlp_genai", new=fail_for_session_a):
             self._assert_only_the_held_session_is_counted(session_a, "KeyError")
 
-    def test_count_line_leaves_out_events_that_cannot_be_paired(self) -> None:
-        # The unhashable ID makes the check for the events the converter
-        # reads raise, before the converter runs.
-        unhashable_id = TraceEvent(
-            event_type=EventType.TOOL_CALL,
-            event_id=["SECRET-ID"],  # type: ignore[arg-type]
-            session_id="session-a",
-            data={"tool_name": "Bash"},
-            tenant_id="",
-        )
+    def test_count_line_leaves_out_events_the_check_failed_on(self) -> None:
+        # The check for the events the converter reads raises for session A,
+        # before the converter runs.
+        real = otlp_genai_data_indexes
+
+        def fail_for_session_a(events):
+            if events and events[0].session_id == "session-a":
+                raise TypeError("SECRET-MESSAGE")
+            return real(events)
+
         session_a = [
             _event("user_prompt", {"prompt": "SECRET-PROMPT"}, "a1", session_id="session-a"),
-            unhashable_id,
+            _event("tool_call", {"tool_name": "Bash"}, "a2", session_id="session-a", ts=2.0),
             _event("assistant_response", {"text": "done"}, "a3", session_id="session-a", ts=3.0),
         ]
-        self._assert_only_the_held_session_is_counted(session_a, "TypeError")
+        with patch("agent_trace.otlp.otlp_genai_data_indexes", new=fail_for_session_a):
+            self._assert_only_the_held_session_is_counted(session_a, "TypeError")
 
     def test_notice_gives_the_seconds_left_of_the_wait(self) -> None:
         # The notice comes notice_after seconds into the wait, so it gives

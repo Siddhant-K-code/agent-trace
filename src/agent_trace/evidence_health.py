@@ -17,6 +17,7 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Iterable, Sequence
 
+from .event_data import event_id_of, parent_id_of
 from .models import EventType, TraceEvent
 
 EVIDENCE_HEALTH_SCHEMA_VERSION = 1
@@ -133,7 +134,7 @@ def _reason(
         code=code,
         message=message,
         kind=kind,
-        event_id=event.event_id if event is not None else "",
+        event_id=event_id_of(event) if event is not None else "",
     )
 
 
@@ -145,12 +146,12 @@ def _relationship_reasons(
     allowed_unrequested_results: frozenset[EventType] = frozenset(),
 ) -> list[EvidenceHealthReason]:
     request_positions = {
-        event.event_id: index
+        event_id_of(event): index
         for index, event in enumerate(events)
         if event.event_type == spec.request_type
     }
     requests = {
-        event.event_id: event
+        event_id_of(event): event
         for event in events
         if event.event_type == spec.request_type
     }
@@ -163,12 +164,12 @@ def _relationship_reasons(
         is_terminal_error = (
             spec.error_is_terminal
             and event.event_type == EventType.ERROR
-            and event.parent_id.strip() in requests
+            and parent_id_of(event).strip() in requests
         )
         if not is_result and not is_terminal_error:
             continue
 
-        parent_id = event.parent_id.strip()
+        parent_id = parent_id_of(event).strip()
         if parent_id and parent_id in requests:
             outcomes_by_request.setdefault(parent_id, []).append((index, event))
             continue
@@ -186,7 +187,7 @@ def _relationship_reasons(
             reasons.append(
                 _reason(
                     spec.orphan_result_code,
-                    f"{spec.label} result {event.event_id!r}{detail}",
+                    f"{spec.label} result {event_id_of(event)!r}{detail}",
                     event=event,
                 )
             )
@@ -232,7 +233,7 @@ def _relationship_reasons(
                 reasons.append(
                     _reason(
                         spec.out_of_order_outcome_code,
-                        f"{spec.label} outcome {outcome.event_id!r} appears before request {request_id!r}",
+                        f"{spec.label} outcome {event_id_of(outcome)!r} appears before request {request_id!r}",
                         event=outcome,
                     )
                 )
@@ -243,7 +244,7 @@ def _relationship_reasons(
 def _orphan_error_reasons(events: Sequence[TraceEvent]) -> list[EvidenceHealthReason]:
     """Report ERROR events that cannot be tied to any tool or LLM request."""
     request_ids = {
-        event.event_id
+        event_id_of(event)
         for event in events
         if event.event_type in (EventType.TOOL_CALL, EventType.LLM_REQUEST)
     }
@@ -251,12 +252,12 @@ def _orphan_error_reasons(events: Sequence[TraceEvent]) -> list[EvidenceHealthRe
     for event in events:
         if event.event_type != EventType.ERROR:
             continue
-        parent_id = event.parent_id.strip()
+        parent_id = parent_id_of(event).strip()
         if not parent_id:
             reasons.append(
                 _reason(
                     "unlinked_error",
-                    f"error event {event.event_id!r} has no parent_id",
+                    f"error event {event_id_of(event)!r} has no parent_id",
                     event=event,
                 )
             )
@@ -264,7 +265,7 @@ def _orphan_error_reasons(events: Sequence[TraceEvent]) -> list[EvidenceHealthRe
             reasons.append(
                 _reason(
                     "orphan_error",
-                    f"error event {event.event_id!r} references unknown parent {parent_id!r}",
+                    f"error event {event_id_of(event)!r} references unknown parent {parent_id!r}",
                     event=event,
                 )
             )
@@ -329,7 +330,7 @@ def _boundary_reasons(
                     _reason(
                         "duplicate_session_end",
                         "captured another session end with no continuation start "
-                        f"since session end {closing_end.event_id!r}",
+                        f"since session end {event_id_of(closing_end)!r}",
                         event=event,
                     )
                 )
@@ -337,7 +338,7 @@ def _boundary_reasons(
             after_end.append(
                 _reason(
                     "events_after_session_end",
-                    f"events were recorded after session end {closing_end.event_id!r} "
+                    f"events were recorded after session end {event_id_of(closing_end)!r} "
                     "with no continuation start",
                     event=event,
                 )
@@ -427,7 +428,7 @@ def _structural_reasons(
             reasons.append(
                 _reason(
                     "invalid_timestamp",
-                    f"event {event.event_id!r} has a non-finite timestamp",
+                    f"event {event_id_of(event)!r} has a non-finite timestamp",
                     event=event,
                 )
             )
@@ -437,7 +438,7 @@ def _structural_reasons(
             reasons.append(
                 _reason(
                     "timestamp_regression",
-                    f"event {event.event_id!r} is earlier than the preceding event",
+                    f"event {event_id_of(event)!r} is earlier than the preceding event",
                     event=event,
                 )
             )
@@ -445,20 +446,21 @@ def _structural_reasons(
 
     event_ids: set[str] = set()
     for event in events:
-        if not event.event_id:
+        event_id = event_id_of(event)
+        if not event_id:
             reasons.append(_reason("missing_event_id", "captured event has no event_id", event=event))
             invalid = True
             continue
-        if event.event_id in event_ids:
+        if event_id in event_ids:
             reasons.append(
                 _reason(
                     "duplicate_event_id",
-                    f"event_id {event.event_id!r} appears more than once",
+                    f"event_id {event_id!r} appears more than once",
                     event=event,
                 )
             )
             invalid = True
-        event_ids.add(event.event_id)
+        event_ids.add(event_id)
 
     for spec in _RELATIONSHIPS:
         reasons.extend(

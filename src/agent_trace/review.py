@@ -12,6 +12,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Iterable, Literal
 
+from .event_data import event_id_of, is_redacted, parent_id_of
 from .models import EventType, TraceEvent
 from .shell_split import command_segments
 
@@ -129,7 +130,7 @@ def _explicit_categories(event: TraceEvent) -> set[ReviewCategory]:
         categories.add("failures")
     if event.event_type == EventType.DECISION:
         categories.add("decisions")
-    if event.redacted:
+    if is_redacted(event):
         categories.add("privacy")
 
     data = event.data
@@ -160,14 +161,15 @@ def build_review_projection(events: Iterable[TraceEvent]) -> ReviewProjection:
     indexed = list(enumerate(events))
     events_by_id: dict[str, list[TraceEvent]] = {}
     for _, event in indexed:
-        if event.event_id:
-            events_by_id.setdefault(event.event_id, []).append(event)
+        event_id = event_id_of(event)
+        if event_id:
+            events_by_id.setdefault(event_id, []).append(event)
     items: list[ReviewItem] = []
     orphaned: list[str] = []
 
     for source_index, event in indexed:
         categories = _explicit_categories(event)
-        parent_id = event.parent_id or None
+        parent_id = parent_id_of(event) or None
         relationship_issue: RelationshipIssue | None = None
         if parent_id is None:
             relationship: RelationshipState = "none"
@@ -183,7 +185,7 @@ def build_review_projection(events: Iterable[TraceEvent]) -> ReviewProjection:
             if relationship_issue is not None:
                 relationship = "orphaned"
                 categories.add("gaps")
-                orphaned.append(event.event_id)
+                orphaned.append(event_id_of(event))
             else:
                 relationship = "linked"
                 parent = parents[0]
@@ -195,13 +197,13 @@ def build_review_projection(events: Iterable[TraceEvent]) -> ReviewProjection:
 
         items.append(
             ReviewItem(
-                event_id=event.event_id,
+                event_id=event_id_of(event),
                 event_type=event.event_type.value,
                 timestamp=event.timestamp,
                 parent_id=parent_id,
                 relationship=relationship,
                 categories=tuple(sorted(categories)),
-                redacted=event.redacted,
+                redacted=is_redacted(event),
                 source_index=source_index,
                 data=dict(event.data),
                 relationship_issue=relationship_issue,

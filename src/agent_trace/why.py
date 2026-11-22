@@ -20,7 +20,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TextIO
 
-from .event_data import object_field, require_object_event_data, str_field
+from .event_data import (
+    event_id_of,
+    object_field,
+    parent_id_of,
+    require_object_event_data,
+    str_field,
+)
 from .inert import inert
 from .models import EventType, TraceEvent
 from .store import TraceStore
@@ -98,7 +104,7 @@ def build_causal_chain(events: list[TraceEvent], target_index: int) -> CausalCha
 
     # Index events by event_id for parent_id lookups
     by_id: dict[str, tuple[int, TraceEvent]] = {
-        e.event_id: (i, e) for i, e in enumerate(events)
+        event_id_of(e): (i, e) for i, e in enumerate(events)
     }
 
     visited: set[int] = set()
@@ -116,8 +122,9 @@ def build_causal_chain(events: list[TraceEvent], target_index: int) -> CausalCha
             return
 
         # 1. Follow parent_id link (tool_result → tool_call, llm_response → llm_request)
-        if event.parent_id and event.parent_id in by_id:
-            parent_idx, parent_event = by_id[event.parent_id]
+        parent_id = parent_id_of(event)
+        if parent_id and parent_id in by_id:
+            parent_idx, parent_event = by_id[parent_id]
             _walk(parent_idx, f"← parent of #{idx + 1}")
             return
 

@@ -31,6 +31,7 @@ from dataclasses import dataclass
 import json
 from typing import Any
 
+from .event_data import event_id_of, parent_id_of
 from .models import EventType, TraceEvent
 from .pairing import LLM_REQUEST_TYPES, LLM_RESPONSE_TYPES, Pairer, llm_pairer
 
@@ -165,13 +166,15 @@ def session_errors(events: Iterable[TraceEvent]) -> SessionErrors:
     error_events = 0
 
     def request_named(event: TraceEvent) -> int | None:
-        return request_positions.get(event.parent_id) if event.parent_id else None
+        parent_id = parent_id_of(event)
+        return request_positions.get(parent_id) if parent_id else None
 
     for index, event in enumerate(events):
         if event.event_type in LLM_REQUEST_TYPES:
             requests.add(event, index)
-            if event.event_id:
-                request_positions[event.event_id] = index
+            event_id = event_id_of(event)
+            if event_id:
+                request_positions[event_id] = index
         elif event.event_type == EventType.ERROR:
             error_events += 1
             request = requests.match_parent(event)

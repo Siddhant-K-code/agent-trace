@@ -8,6 +8,7 @@ from typing import Iterable, Literal
 
 from .event_data import (  # noqa: F401  (re-exported for existing imports)
     NonObjectEventDataError,
+    is_redacted,
     require_object_event_data,
 )
 from .models import EventType, TraceEvent
@@ -71,7 +72,7 @@ class DisclosurePreview:
 
 def count_redacted_events(events: Iterable[TraceEvent]) -> int:
     """Count events whose ``redacted`` flag says redaction changed them before write."""
-    return sum(1 for event in events if event.redacted)
+    return sum(1 for event in events if is_redacted(event))
 
 
 def _is_subagent_response(event: TraceEvent) -> bool:
@@ -151,7 +152,7 @@ def build_disclosure_preview(
 
         if event.event_type in _CONTENT_EVENT_TYPES or subagent_response:
             content_rich_event_count += 1
-            if not event.redacted:
+            if not is_redacted(event):
                 unredacted_content_rich_event_count += 1
 
     mode: DisclosureMode = "include_content" if include_content else "minimized"

@@ -25,7 +25,10 @@ from .cost import (
     session_event_usage,
 )
 from .event_data import (
+    duration_ms_of,
+    event_id_of,
     object_field,
+    parent_id_of,
     require_object_event_data,
     require_usable_timestamps,
     str_field,
@@ -190,8 +193,9 @@ def _build_entries(
         if event.event_type == EventType.TOOL_CALL:
             label, detail = _tool_label(event)
             tool_calls.add(event, len(entries))
-            if event.event_id:
-                call_ids.add(event.event_id)
+            event_id = event_id_of(event)
+            if event_id:
+                call_ids.add(event_id)
             open_calls.append(len(entries))
 
             # Retry detection: same tool+args key seen before
@@ -204,7 +208,7 @@ def _build_entries(
                 status="info",
                 label=label + retry_tag,
                 detail=detail,
-                duration_ms=event.duration_ms,
+                duration_ms=duration_ms_of(event),
                 tokens=tokens,
                 cost=cost,
             ))
@@ -214,7 +218,7 @@ def _build_entries(
             result_text = str(event.data.get("result", ""))
             is_error = event.data.get("is_error", False) or "error" in result_text.lower()[:50]
             index = tool_calls.match(event)
-            if index is None and open_calls and event.parent_id not in call_ids:
+            if index is None and open_calls and parent_id_of(event) not in call_ids:
                 # No parent_id names a call in this phase: assume the newest
                 # call still waiting for a response.
                 index = open_calls[-1]
@@ -223,8 +227,9 @@ def _build_entries(
                     open_calls.remove(index)
                 entry = entries[index]
                 entry.status = "fail" if is_error else "ok"
-                if event.duration_ms:
-                    entry.duration_ms = event.duration_ms
+                duration = duration_ms_of(event)
+                if duration:
+                    entry.duration_ms = duration
 
         elif event.event_type == EventType.LLM_REQUEST:
             model_name = event.data.get("model", "")
@@ -252,7 +257,7 @@ def _build_entries(
                 status=status,
                 label=label,
                 detail=detail,
-                duration_ms=event.duration_ms,
+                duration_ms=duration_ms_of(event),
                 tokens=tok,
                 cost=cost,
                 counted=position in errors.failed_responses,

@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import TextIO
 
 from .event_data import (
+    duration_ms_of,
+    event_id_of,
     object_field,
     require_object_event_data,
     require_usable_timestamps,
@@ -215,7 +217,7 @@ def format_event(event: TraceEvent, base_ts: float | None = None) -> str:
     color = EVENT_COLORS.get(event.event_type, C.WHITE)
     icon = EVENT_ICONS.get(event.event_type, " ")
     ts = _format_timestamp(event.timestamp, base_ts)
-    duration = _format_duration(event.duration_ms)
+    duration = _format_duration(duration_ms_of(event))
 
     parts = [
         f"{C.GRAY}{ts}{C.RESET}",
@@ -838,9 +840,9 @@ def replay_to_html(
         d = dict(e.data)
         d_out = {
             "event_type": e.event_type.value,
-            "event_id": e.event_id,
+            "event_id": event_id_of(e),
             "_offset": round(e.timestamp - base_ts, 3),
-            "duration_ms": e.duration_ms,
+            "duration_ms": duration_ms_of(e),
             "data": d,
         }
         running = running + usage
@@ -977,9 +979,9 @@ def replay_to_html_diff(
         for e in events:
             result.append({
                 "event_type": e.event_type.value,
-                "event_id": e.event_id,
+                "event_id": event_id_of(e),
                 "_offset": round(e.timestamp - base_ts, 3),
-                "duration_ms": e.duration_ms,
+                "duration_ms": duration_ms_of(e),
                 "data": dict(e.data),
             })
         return result
@@ -993,8 +995,16 @@ def replay_to_html_diff(
     only_a_keys = keys_a - keys_b
     only_b_keys = keys_b - keys_a
 
-    only_a_ids = [e.event_id for e in events_a if _event_key(e) in only_a_keys]
-    only_b_ids = [e.event_id for e in events_b if _event_key(e) in only_b_keys]
+    # An event without a usable ID is never highlighted: its "" would match
+    # every other such event.
+    only_a_ids = [
+        event_id_of(e) for e in events_a
+        if event_id_of(e) and _event_key(e) in only_a_keys
+    ]
+    only_b_ids = [
+        event_id_of(e) for e in events_b
+        if event_id_of(e) and _event_key(e) in only_b_keys
+    ]
 
     # Divergence index from diff engine
     try:

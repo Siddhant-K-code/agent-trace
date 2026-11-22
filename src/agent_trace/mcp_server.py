@@ -30,7 +30,7 @@ from typing import Any
 
 from . import __version__
 from .cost import parse_since
-from .event_data import str_field
+from .event_data import duration_ms_of, event_id_of, parent_id_of, str_field
 from .explain import explain_session, format_explain
 from .external_evidence import ExternalEvidenceError, collect_external_evidence
 from .health import assess_session, load_capture_matrix
@@ -377,12 +377,12 @@ def _session_to_dict(meta) -> dict:
 
 def _event_to_dict(ev: TraceEvent) -> dict:
     return {
-        "event_id": ev.event_id,
+        "event_id": event_id_of(ev),
         "event_type": ev.event_type.value,
         "timestamp": ev.timestamp,
         "session_id": ev.session_id or "",
-        "parent_id": ev.parent_id or "",
-        "duration_ms": ev.duration_ms,
+        "parent_id": parent_id_of(ev),
+        "duration_ms": duration_ms_of(ev),
         "data": ev.data,
     }
 

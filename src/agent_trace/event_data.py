@@ -27,6 +27,16 @@ The readers check only the value. They call ``data.get`` like the reads they
 replace, so data that is not an object still fails where it did before and
 :func:`require_object_event_data` alone decides which sessions are refused.
 
+Four top-level event fields can have the wrong JSON type too: ``event_id``,
+``parent_id``, ``duration_ms`` and ``redacted``. The collector refuses such an
+event, but a hand edit, an older store or another tool can still write one,
+and ``TraceEvent.from_json`` keeps the stored value. Commands that link,
+count, compare, format or convert these fields read them through
+:func:`event_id_of`, :func:`parent_id_of`, :func:`duration_ms_of` and
+:func:`is_redacted`, which read a value with the wrong type as missing.
+Output that copies the stored event, such as ``export --format json`` and
+``inspect``, still shows the stored value.
+
 Hooks and adapters store a tool call's arguments in ``arguments`` (or
 ``tool_input``) as an object, as a serialized object, or as plain text such as
 the patch an ``apply_patch`` call sends. :func:`tool_arguments` reads all
@@ -50,7 +60,14 @@ import re
 from collections.abc import Collection, Mapping, Sequence
 from typing import Any
 
-from .models import EventType, SessionMeta, TraceEvent, usable_time
+from .models import (
+    EventType,
+    SessionMeta,
+    TraceEvent,
+    usable_number,
+    usable_text,
+    usable_time,
+)
 
 # Longest argument text parse_mapping reads as a Python literal. JSON text is
 # read at any length.
@@ -116,6 +133,30 @@ def str_list_field(data: Mapping[str, Any], key: str, default: Any = None) -> An
     if value is None or not all(isinstance(item, str) for item in value):
         return default
     return value
+
+
+def event_id_of(event: TraceEvent) -> str:
+    """Return the event's ``event_id`` if it is a string, otherwise ""."""
+    return usable_text(event.event_id)
+
+
+def parent_id_of(event: TraceEvent) -> str:
+    """Return the event's ``parent_id`` if it is a string, otherwise ""."""
+    return usable_text(event.parent_id)
+
+
+def duration_ms_of(event: TraceEvent) -> int | float | None:
+    """Return the event's ``duration_ms`` if :func:`usable_number` accepts it, otherwise None.
+
+    The stored value comes back unchanged, so an int stays an int.
+    """
+    value = event.duration_ms
+    return value if usable_number(value) is not None else None
+
+
+def is_redacted(event: TraceEvent) -> bool:
+    """Return True only if the event's ``redacted`` is the JSON value ``true``."""
+    return event.redacted is True
 
 
 def parse_mapping(value: str) -> Mapping[str, Any] | None:

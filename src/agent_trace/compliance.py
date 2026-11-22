@@ -34,7 +34,13 @@ from typing import Any, Literal, TextIO
 from . import __version__
 from .audit import verify_chain
 from .cost import _usage_dollars, session_event_usage
-from .event_data import require_object_event_data, require_usable_timestamps, str_field
+from .event_data import (
+    duration_ms_of,
+    event_id_of,
+    require_object_event_data,
+    require_usable_timestamps,
+    str_field,
+)
 from .fileutil import split_lf_lines
 from .inert import inert
 from .models import EventType, TraceEvent, usable_number, usable_text
@@ -191,7 +197,7 @@ def _eu_ai_act_report(session_id: str, meta, events: list[TraceEvent]) -> dict:
             "error_count": len(errors),
             "error_types": [e.data.get("error_type", "unknown") for e in errors],
             "anomalous_tool_calls": [
-                {"event_id": e.event_id, "tool": e.data.get("tool_name"), "ts": e.timestamp}
+                {"event_id": event_id_of(e), "tool": e.data.get("tool_name"), "ts": e.timestamp}
                 for e in tool_calls
                 if e.data.get("blocked") or e.data.get("policy_violation")
             ],
@@ -232,7 +238,7 @@ def _soc2_report(session_id: str, meta, events: list[TraceEvent]) -> dict:
             "llm_requests": len(llm_reqs),
             "errors": len(errors),
             "error_details": [
-                {"event_id": e.event_id, "error": e.data.get("error", ""), "ts": e.timestamp}
+                {"event_id": event_id_of(e), "error": e.data.get("error", ""), "ts": e.timestamp}
                 for e in errors
             ],
             "duration_ms": meta.total_duration_ms if usable_number(meta.total_duration_ms) else 0.0,
@@ -249,15 +255,15 @@ def _hipaa_report(session_id: str, meta, events: list[TraceEvent]) -> dict:
     access_log = []
     for e in tool_calls:
         access_log.append({
-            "event_id": e.event_id,
+            "event_id": event_id_of(e),
             "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(e.timestamp)),
             "action": e.data.get("tool_name", "unknown"),
             "outcome": "success",
-            "duration_ms": e.duration_ms,
+            "duration_ms": duration_ms_of(e),
         })
     for e in errors:
         access_log.append({
-            "event_id": e.event_id,
+            "event_id": event_id_of(e),
             "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(e.timestamp)),
             "action": e.data.get("tool_name", "error"),
             "outcome": "failure",
@@ -394,11 +400,11 @@ def _eu_ai_act_session_record(
             "seq": idx + 1,
             "timestamp": _iso(event.timestamp),
             "event_type": event.event_type.value,
-            "event_id": event.event_id,
+            "event_id": event_id_of(event),
             "tool_name": _event_tool_name(event),
             "input_summary": input_summary,
             "output_summary": output_summary,
-            "duration_ms": event.duration_ms,
+            "duration_ms": duration_ms_of(event),
             "cost_usd": round(costs[idx], 8),
             "prev_hash": event.prev_hash,
             "line_hash": hashes[idx] if idx < len(hashes) else "",
@@ -425,7 +431,7 @@ def _eu_ai_act_session_record(
             "root_hash": _root_hash(lines),
             "event_count": len(events),
             "broken_at": chain.broken_at,
-            "broken_event_id": chain.broken_event_id,
+            "broken_event_id": usable_text(chain.broken_event_id),
             "verification_command": f"agent-strace verify {session_id}",
         },
         "events": event_records,
