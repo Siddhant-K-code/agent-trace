@@ -60,3 +60,6 @@ path = "src/agent_trace/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agent_trace"]
+
+[tool.hatch.build.targets.sdist]
+exclude = ["/experiments/"]
