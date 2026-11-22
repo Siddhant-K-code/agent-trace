@@ -43,8 +43,22 @@ from .event_data import (
 )
 from .fileutil import split_lf_lines
 from .inert import inert
-from .models import EventType, TraceEvent, usable_number, usable_text
-from .store import TraceStore, refuse_lines_not_utf8
+from .models import (
+    EventType,
+    SessionMeta,
+    TraceEvent,
+    usable_number,
+    usable_text,
+    usable_time,
+)
+from .store import (
+    CorruptSessionMetaError,
+    RefusedSessionError,
+    TraceStore,
+    refusal_reason,
+    refuse_lines_not_utf8,
+    validate_stored_id,
+)
 
 Framework = Literal["eu-ai-act", "soc2", "hipaa", "all"]
 
@@ -309,19 +323,20 @@ def export_compliance(
 ) -> dict:
     """Build a compliance report for one session.
 
-    Returns a dict with one key per framework requested. Raises
-    NonObjectEventDataError when a tool_call or error event's data is not an
-    object, and UnusableTimestampError when such an event's timestamp is not
-    a Unix time in seconds; ``name_session`` adds the session ID to either.
+    Returns a dict with one key per framework requested, or a dict with an
+    ``error`` key when the session has no meta.json or no events.ndjson.
+    Raises CorruptSessionMetaError or RefusedSessionError when the store
+    refuses to read the session, so a refused session is never reported as
+    empty. Raises NonObjectEventDataError when a tool_call or error event's
+    data is not an object, and UnusableTimestampError when such an event's
+    timestamp is not a Unix time in seconds; ``name_session`` adds the
+    session ID to either.
     """
     try:
         meta = store.load_meta(session_id)
-    except Exception:
-        return {"error": f"session not found: {session_id}"}
-    try:
         events = store.load_events(session_id)
-    except Exception:
-        events = []
+    except FileNotFoundError:
+        return {"error": f"session not found: {session_id}"}
     require_object_event_data(
         events,
         event_types=COMPLIANCE_DATA_EVENT_TYPES,
@@ -350,15 +365,50 @@ def export_compliance(
     return report
 
 
+def _read_refusal_reason(exc: BaseException) -> str:
+    """Return why a session could not be read, without the session ID."""
+    if isinstance(exc, OSError) and exc.strerror:
+        return exc.strerror
+    return refusal_reason(exc)
+
+
+def _export_sessions(store: TraceStore) -> list[SessionMeta]:
+    """Return every session in the store for a bulk export, newest first.
+
+    A bulk export fails closed. A session the store refuses stops the export
+    with an error that names the session and says why, so the export never
+    leaves the session out or reports it as empty. The exports do not filter
+    by tenant. So, as in ``load_events``, an event may carry a tenant when
+    its session has none.
+    """
+    prefix = "corrupt session in tenant store: "
+    try:
+        return store.list_sessions_strict(strict_event_tenants=False)
+    except ValueError as exc:
+        cause = exc.__cause__
+        if isinstance(cause, (CorruptSessionMetaError, RefusedSessionError)):
+            raise cause from cause.__cause__
+        message = str(exc)
+        if cause is None or not message.startswith(prefix):
+            raise
+        raise RefusedSessionError(
+            message[len(prefix):], _read_refusal_reason(cause)
+        ) from cause
+
+
 def export_compliance_bulk(
     store: TraceStore,
     framework: Framework = "all",
     since_days: float = 30.0,
 ) -> list[dict]:
-    """Export compliance reports for all sessions in the last N days."""
+    """Export compliance reports for the ended sessions of the last N days.
+
+    Raises a ValueError, naming the session or store entry, when the store
+    refuses any session or entry in it, even one outside the window.
+    """
     cutoff = time.time() - since_days * 86400
     reports = []
-    for meta in store.list_sessions():
+    for meta in _export_sessions(store):
         if not meta.ended_at or meta.started_at < cutoff:
             continue
         reports.append(export_compliance(store, meta.session_id, framework, name_session=True))
@@ -472,11 +522,15 @@ def select_sessions(
     since: str | None = None,
     until: str | None = None,
 ) -> list[str]:
-    """Select session IDs in a time window, newest first."""
+    """Select session IDs in a time window, newest first.
+
+    Raises a ValueError, naming the session or store entry, when the store
+    refuses any session or entry in it, even one outside the window.
+    """
     since_ts = _parse_time_bound(since, None)
     until_ts = _parse_time_bound(until, None)
     selected = []
-    for meta in store.list_sessions():
+    for meta in _export_sessions(store):
         if since_ts is not None and meta.started_at < since_ts:
             continue
         if until_ts is not None and meta.started_at > until_ts:
@@ -543,11 +597,16 @@ def export_eu_ai_act(
 def cmd_export_eu_ai_act(args: argparse.Namespace) -> int:
     store = TraceStore(args.trace_dir)
     if getattr(args, "all", False):
-        session_ids = select_sessions(
-            store,
-            since=getattr(args, "since", None),
-            until=getattr(args, "until", None),
-        )
+        try:
+            session_ids = select_sessions(
+                store,
+                since=getattr(args, "since", None),
+                until=getattr(args, "until", None),
+            )
+        except ValueError as exc:
+            # A store entry's name can hold any character.
+            sys.stderr.write(f"Error: {inert(str(exc))}\n")
+            return 1
     else:
         session_id = getattr(args, "session_id", None) or store.get_latest_session_id()
         if not session_id:
@@ -580,13 +639,75 @@ def cmd_export_eu_ai_act(args: argparse.Namespace) -> int:
 # Readiness and export verification
 # ---------------------------------------------------------------------------
 
+def _readiness_sessions(
+    store: TraceStore,
+) -> tuple[list[SessionMeta], list[dict[str, str]]]:
+    """Return the sessions to check and the sessions the store refuses.
+
+    ``list_sessions`` skips a session whose meta.json is corrupt. This scan
+    lists it as refused instead. A session whose meta.json is readable but
+    whose events the store refuses is in both lists. Each refused entry
+    holds the session ID and the reason.
+    """
+    sessions: list[SessionMeta] = []
+    refused: list[dict[str, str]] = []
+    if not store.base_dir.is_dir():
+        return sessions, refused
+    for entry in sorted(store.base_dir.iterdir(), key=lambda item: item.name):
+        meta_path = entry / "meta.json"
+        if (
+            entry.is_symlink()
+            or not entry.is_dir()
+            or meta_path.is_symlink()
+            or not meta_path.is_file()
+        ):
+            continue
+        try:
+            session_id = validate_stored_id(entry.name, "stored session directory")
+        except ValueError:
+            continue
+        try:
+            meta = store.load_meta(session_id)
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError, TypeError) as exc:
+            refused.append({"session_id": session_id, "reason": _read_refusal_reason(exc)})
+            continue
+        if usable_time(meta.started_at) is None:
+            refused.append({"session_id": session_id, "reason": "started_at is not a usable time"})
+            continue
+        sessions.append(meta)
+        try:
+            store.load_events(session_id)
+        except FileNotFoundError:
+            # verify_chain reports the missing event stream as broken.
+            pass
+        except (OSError, ValueError, TypeError) as exc:
+            refused.append({"session_id": session_id, "reason": _read_refusal_reason(exc)})
+    sessions.sort(key=lambda meta: (meta.started_at, meta.session_id), reverse=True)
+    return sessions, refused
+
+
 def build_audit_readiness(
     store: TraceStore,
     retention_days: float = 90.0,
 ) -> dict:
-    sessions = store.list_sessions()
-    chain_results = [verify_chain(store, meta.session_id) for meta in sessions]
+    """Check whether the store's sessions are ready for an EU AI Act audit.
+
+    A session the store refuses to read fails the hash chain integrity
+    check, with its reason in ``refused_sessions``. So the check never
+    passes while it leaves out a session.
+    """
+    sessions, refused = _readiness_sessions(store)
+    refused_ids = [entry["session_id"] for entry in refused]
+    chain_results = [
+        verify_chain(store, meta.session_id)
+        for meta in sessions
+        if meta.session_id not in refused_ids
+    ]
     broken = [result for result in chain_results if result.broken]
+    integrity_failed = bool(broken or refused)
+    session_count = len({meta.session_id for meta in sessions} | set(refused_ids))
     now = time.time()
     oldest = min((meta.started_at for meta in sessions), default=None)
 
@@ -610,9 +731,10 @@ def build_audit_readiness(
     retention_days_present = ((now - oldest) / 86400) if oldest else 0.0
     checks = {
         "hash_chain_integrity": {
-            "ok": not broken,
-            "checked_sessions": len(chain_results),
-            "broken_sessions": [result.session_id for result in broken],
+            "ok": not integrity_failed,
+            "checked_sessions": session_count,
+            "broken_sessions": [result.session_id for result in broken] + refused_ids,
+            "refused_sessions": refused,
         },
         "retention_coverage": {
             "ok": retention_days_present >= retention_days if sessions else False,
@@ -629,7 +751,7 @@ def build_audit_readiness(
         },
     }
     score = 100
-    if broken:
+    if integrity_failed:
         score -= 35
     if missing_hash:
         score -= 20
@@ -644,10 +766,10 @@ def build_audit_readiness(
         "framework": "eu-ai-act",
         "articles_checked": ["Article 12", "Article 13"],
         "generated_at": _iso(now),
-        "session_count": len(sessions),
+        "session_count": session_count,
         "checks": checks,
         "compliance_score": max(0, score),
-        "ready": score >= 80 and not broken and not missing_hash,
+        "ready": score >= 80 and not integrity_failed and not missing_hash,
     }
 
 
@@ -660,6 +782,8 @@ def format_audit_readiness(report: dict, out: TextIO = sys.stdout) -> None:
         f"{'OK' if checks['hash_chain_integrity']['ok'] else 'FAIL'} "
         f"Hash chain integrity: {checks['hash_chain_integrity']['checked_sessions']} sessions checked\n"
     )
+    for entry in checks["hash_chain_integrity"]["refused_sessions"]:
+        out.write(f"  cannot read session {entry['session_id']}: {entry['reason']}\n")
     out.write(
         f"{'OK' if checks['retention_coverage']['ok'] else 'WARN'} "
         f"Retention coverage: {checks['retention_coverage']['available_days']} / "
@@ -914,8 +1038,13 @@ def cmd_compliance(args: argparse.Namespace) -> int:
         if since_str or not session_id:
             # Bulk export
             since_days = float(since_str.rstrip("d")) if since_str else 30.0
-            reports = export_compliance_bulk(store, framework=framework,
-                                             since_days=since_days)
+            try:
+                reports = export_compliance_bulk(store, framework=framework,
+                                                 since_days=since_days)
+            except ValueError as exc:
+                # A store entry's name can hold any character.
+                sys.stderr.write(f"Error: {inert(str(exc))}\n")
+                return 1
             result = json.dumps(reports, indent=2)
         else:
             full_id = store.find_session(session_id)
@@ -923,6 +1052,9 @@ def cmd_compliance(args: argparse.Namespace) -> int:
                 sys.stderr.write(f"Session not found: {session_id}\n")
                 return 1
             report = export_compliance(store, full_id, framework=framework)
+            if "error" in report:
+                sys.stderr.write(f"Error: {report['error']}\n")
+                return 1
             result = json.dumps(report, indent=2)
 
         if output:

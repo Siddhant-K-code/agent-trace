@@ -367,9 +367,12 @@ what it does for a session without that field. The exceptions:
 
 A `meta.json` is corrupt when it is not valid JSON, is not a JSON object, or
 nests objects and arrays more than 128 levels deep. `list`, `stats` and
-`health` skip that session and show the rest of the store. Commands that read
+`health` skip that session and show the rest of the store. `audit-readiness`
+fails its hash chain integrity check and names the session. Commands that read
 that one session by its ID, such as `inspect`, `replay`, `explain`, `export`,
-`stats <id>` and `health <id>`, exit 1 with one line:
+`stats <id>` and `health <id>`, exit 1 with one line. So do the exports that
+read every session in the store: `compliance export` without a session ID and
+`export --format eu-ai-act --all`. The line names the session and the reason:
 
 ```
 Error: session bbbb2222 has a corrupt meta.json: metadata nests more than 128 levels
@@ -1495,6 +1498,13 @@ agent-strace compliance export [session-id] --framework eu-ai-act|soc2|hipaa|all
 ```
 Export a compliance report for the specified framework. Covers session retention, data handling, access logs, and policy enforcement evidence.
 
+Without a session ID, `compliance export` reports each ended session that
+started in the last `--since` days (default `30d`). It refuses when the store
+refuses to read any session in it, even one outside that window, so it never
+leaves out a session or reports it as empty. With a session ID, it refuses that
+session the same way. See
+[Sessions with mismatched or unreadable events](#sessions-with-mismatched-or-unreadable-events).
+
 This is the legacy compatibility command. For a privacy-minimized, explicitly
 heuristic evidence crosswalk with current versioned framework manifests, use
 [`compliance-report`](#compliance-report). The two output schemas and claims
@@ -1597,6 +1607,20 @@ Hash chain integrity fails when a session's chain is `broken` or its
 `events.ndjson` is missing. Hash chain presence warns when a session's chain is
 `empty`, `legacy` or `partial`, and lists it in `sessions_missing_prev_hashes`.
 See the states under [`verify`](#verify). Missing links cost 20 points.
+
+Hash chain integrity also fails when the store refuses to read a session: its
+`meta.json` is [corrupt](#list), its `started_at` is not a usable time, or its
+events are
+[mismatched or unreadable](#sessions-with-mismatched-or-unreadable-events).
+The check counts the session and names it with the reason:
+
+```
+FAIL Hash chain integrity: 3 sessions checked
+  cannot read session c3d4e5f6a7b80003: line 5 of events.ndjson is not valid JSON
+```
+
+With `--format json`, the session is in `broken_sessions`, and in
+`refused_sessions` with its `session_id` and `reason`.
 
 `ready` needs a score of 80 or more, no broken chain and no missing links. A
 session with missing links makes the store not `ready` even when retention and
@@ -2250,6 +2274,12 @@ evidence, Article 13 transparency documentation, hash-chain integrity metadata,
 and event-level line hashes for `agent-strace verify --from-export`. See
 [EU AI Act export package](#eu-ai-act-export-package).
 
+With `--all`, the eu-ai-act export reads every session in the store and keeps
+those that started within `--since` and `--until`. It refuses when the store
+refuses to read any session in it, even one outside that window, so the package
+never leaves out a session. See
+[Sessions with mismatched or unreadable events](#sessions-with-mismatched-or-unreadable-events).
+
 ### `share`
 ```
 agent-strace share [session-id] [-o FILE | --stdout] [--open]
@@ -2543,6 +2573,11 @@ agent-strace a2a-tree [session-id] [--format text|json]
 Visualise the A2A agent call graph. Exports as OTLP spans for Jaeger, Tempo, or any OpenTelemetry backend. A failed call span has status ERROR; a successful one leaves status UNSET (see [Span status](production.md#span-status)).
 
 Each sub-session is shown once under the agent that called it. When an agent calls the same sub-session more than once, every call is listed and the sub-session line ends with `N delegations`. A sub-session that another agent in the tree also calls (a diamond) is shown in full under its first caller and as `name  [shown above]` under the others. Only a session that is already on the path from the root is shown as `[cycle] → name`. References are not counted again in `Total agents`, the total cost, or `Max depth`. In the JSON output each session has one span with an `agent.delegations` attribute; a shared or cyclic reference adds a span link to the calling agent's span, with `agent.link` set to `shared` or `cycle`.
+
+A sub-session that is not in the store shows as `[not found]`. When the store
+refuses to read the root session or a sub-session, `a2a-tree` prints one
+`Error:` line and exits 1 before it prints anything. See
+[Sessions with mismatched or unreadable events](#sessions-with-mismatched-or-unreadable-events).
 
 ### `identity`
 ```
@@ -3059,10 +3094,11 @@ never includes the line, its `event_type`, or the parser's message. When a
 session has both a mismatch and an unreadable line, the message reports the
 mismatch.
 
-These commands refuse such a session with this line: `audit`, `cost`, `diff`,
-`explain`, `export` in every format, `health`, `inspect`, `lint`, `postmortem`,
-`replay`, `share`, `standup`, `stats`, `timeline`, `token-budget`, `tree`, and
-`why`. Some commands print the same message their own way:
+These commands refuse such a session with this line: `a2a-tree`, `audit`,
+`compliance export`, `cost`, `diff`, `explain`, `export` in every format,
+`health`, `inspect`, `lint`, `postmortem`, `replay`, `share`, `standup`,
+`stats`, `timeline`, `token-budget`, `tree`, and `why`. Some commands print the
+same message their own way:
 
 - `compare`, `org-report`, and `pr-comment` print the message after their own
   prefix and exit 1. `annotate` prints it with no prefix and exits 1.
@@ -3081,6 +3117,22 @@ event. `lint --all` prints the report of every other session, then one `Error:`
 line for each session it cannot read, and exits 1. `stats`, `standup`, and
 `lint` treat a session with
 [non-object event data](#sessions-with-non-object-event-data) the same way.
+
+`compliance export` without a session ID and `export --format eu-ai-act --all`
+read every session in the store. When the store refuses any of them, even one
+outside `--since` or `--until`, they print the line for the first such session
+by directory name and exit 1 before they print or write anything. So a bulk
+export never leaves out a session or reports it as empty. They refuse the same
+way when a session's `started_at` is not a usable time, or when the store holds
+a symlink or a directory that is not a complete session. When the trace
+directory itself is a symlink, pass the real directory with `--trace-dir`. To
+export the store again, make the checks at the end of this section, then move
+the session directory out of the store. For a corrupt `meta.json`, you can
+follow the `backfill-meta` steps under [`list`](#list) instead.
+
+`audit-readiness` does not refuse. Its hash chain integrity check fails and
+lists each session the store refuses, with the reason. See
+[`audit-readiness`](#audit-readiness).
 
 `agent-strace server` answers `GET /sessions/<id>/events` for such a session
 with 400 and `{"error": "<message>"}`. When `meta.json` names another session,
@@ -3101,14 +3153,16 @@ A session whose `meta.json` names another session is skipped the way
 so do `health`, `stats`, `standup`, and `lint` without a session ID. So does
 `GET /sessions`, so `org-report --endpoint` does not see it. Commands given its
 ID, or a prefix that matches no readable session, print the corrupt
-`meta.json` line that [`list`](#list) shows.
+`meta.json` line that [`list`](#list) shows. So does `a2a-tree` for a
+sub-session. The bulk exports above refuse the store, and `audit-readiness`
+lists the session.
 
-`a2a-tree`, `baseline update`, `budget-report`, `compliance export`, `curve`,
-`dashboard --trend`, `inflation`, `optimize`, `sample`, and `team-report` go
-on without the session's events, as before. `dashboard` shows the session as
-not priced. Earlier versions stopped `dashboard` with a traceback when a line
-was not an object or had no `event_type`. `watch`, `mcp-scan --watch`, and
-`skills` skip a line they cannot parse.
+`baseline update`, `budget-report`, `curve`, `dashboard --trend`, `inflation`,
+`optimize`, `sample`, and `team-report` go on without the session's events, as
+before. `dashboard` shows the session as not priced. Earlier versions stopped
+`dashboard` with a traceback when a line was not an object or had no
+`event_type`. `watch`, `mcp-scan --watch`, and `skills` skip a line they cannot
+parse.
 
 When two IDs differ, do not edit one to match the other. The events may belong
 to another session or tenant. Check instead how they got into this directory:

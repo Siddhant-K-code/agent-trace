@@ -253,6 +253,27 @@ def _extract_a2a_calls(events: list[TraceEvent]) -> list[A2ACallEvent]:
     return calls
 
 
+def _stored_session(
+    store: TraceStore, session_id: str
+) -> tuple[SessionMeta, list[TraceEvent]] | None:
+    """Return a session's metadata and events, or None if the store lacks it.
+
+    A child's ID comes from recorded event data. The store lacks the session
+    when the ID cannot name a session directory in it, or when the directory
+    has no meta.json or no events.ndjson. A session the store refuses to read
+    raises the store's error.
+    """
+    try:
+        if not store.session_exists(session_id):
+            return None
+    except (OSError, ValueError):
+        return None
+    try:
+        return store.load_meta(session_id), store.load_events(session_id)
+    except FileNotFoundError:
+        return None
+
+
 def build_a2a_tree(
     store: TraceStore,
     root_session_id: str,
@@ -260,6 +281,10 @@ def build_a2a_tree(
     check_call_timestamps: bool = False,
 ) -> A2ATreeReport:
     """Build the full agent call graph rooted at root_session_id.
+
+    A session that is not in the store shows as "[not found]". Raises
+    CorruptSessionMetaError or RefusedSessionError when the store refuses to
+    read a session of the tree, so a refused session never shows as missing.
 
     Raises NonObjectEventDataError, naming the session, when an event in a
     session of the tree has data that is not an object.
@@ -296,15 +321,14 @@ def build_a2a_tree(
                 ref="cycle" if sid in on_path else "shared",
             )
 
-        try:
-            meta = store.load_meta(sid)
-            events = store.load_events(sid)
-        except Exception:
+        stored = _stored_session(store, sid)
+        if stored is None:
             node = AgentNode(session_id=sid, agent_id="[not found]", depth=depth,
                              cost_usd=0, duration_ms=0, tool_calls=0,
                              delegations=delegations)
             built[sid] = node
             return node
+        meta, events = stored
 
         # _extract_a2a_calls reads the data of every event.
         require_object_event_data(events, session_id=sid)

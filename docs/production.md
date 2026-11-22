@@ -642,6 +642,10 @@ Before exporting a store for review, run:
 agent-strace audit-readiness
 ```
 
+It names each session the store refuses to read. `export --all` refuses the
+store until you fix or move those sessions. See
+[commands.md](commands.md#sessions-with-mismatched-or-unreadable-events).
+
 ---
 
 ## Behavioral metrics

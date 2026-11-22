@@ -1,5 +1,6 @@
 """Tests for compliance export (issue #144)."""
 
+import concurrent.futures
 import copy
 import hashlib
 import io
@@ -29,8 +30,10 @@ try:
     )
     from test_store import (
         NOT_UTF8_LINE,
+        OTHER_SESSION,
         event_line,
         raw_separator_session,
+        tree_snapshot,
         write_session_lines,
     )
 except ImportError:
@@ -48,8 +51,10 @@ except ImportError:
     )
     from tests.test_store import (
         NOT_UTF8_LINE,
+        OTHER_SESSION,
         event_line,
         raw_separator_session,
+        tree_snapshot,
         write_session_lines,
     )
 
@@ -66,7 +71,67 @@ from agent_trace.compliance import (
     verify_eu_ai_act_export,
 )
 from agent_trace.models import EventType, SessionMeta, TraceEvent
-from agent_trace.store import TraceStore, UnreadableEventLineError
+from agent_trace.store import (
+    CorruptSessionMetaError,
+    SessionMismatchError,
+    TraceStore,
+    UnreadableEventLineError,
+)
+
+
+# Each helper below makes the store refuse a session and returns the reason,
+# as refusal_reason in store.py gives it.
+
+def break_meta(store: TraceStore, session_id: str) -> str:
+    """Write a meta.json that is not valid JSON."""
+    (store._session_dir(session_id) / "meta.json").write_text("{", encoding="utf-8")
+    try:
+        json.loads("{")
+    except ValueError as exc:
+        return f"corrupt meta.json: {exc}"
+    raise AssertionError("'{' parsed as JSON")
+
+
+def name_another_session(store: TraceStore, session_id: str) -> str:
+    """Add an event that names another session."""
+    with (store._session_dir(session_id) / "events.ndjson").open("ab") as handle:
+        handle.write((event_line(session_id=OTHER_SESSION) + "\n").encode("utf-8"))
+    return "event session ID does not match its directory"
+
+
+def add_bad_line(store: TraceStore, session_id: str) -> str:
+    """Add a line that is not valid JSON."""
+    events_file = store._session_dir(session_id) / "events.ndjson"
+    number = len(events_file.read_bytes().splitlines()) + 1
+    with events_file.open("ab") as handle:
+        handle.write(b"not json\n")
+    return f"line {number} of events.ndjson is not valid JSON"
+
+
+def add_line_not_utf8(store: TraceStore, session_id: str) -> str:
+    """Add a line that is not valid UTF-8."""
+    events_file = store._session_dir(session_id) / "events.ndjson"
+    number = len(events_file.read_bytes().splitlines()) + 1
+    with events_file.open("ab") as handle:
+        handle.write(NOT_UTF8_LINE + b"\n")
+    return f"line {number} of events.ndjson is not valid UTF-8"
+
+
+# (kind, refuse, the error the store raises)
+REFUSALS = (
+    ("corrupt meta.json", break_meta, CorruptSessionMetaError),
+    ("mismatch", name_another_session, SessionMismatchError),
+    ("bad line", add_bad_line, UnreadableEventLineError),
+    ("not UTF-8", add_line_not_utf8, UnreadableEventLineError),
+)
+
+
+def refused_message(session_id: str, reason: str) -> str:
+    """Return the message of the error the store raises for ``reason``."""
+    prefix = "corrupt meta.json: "
+    if reason.startswith(prefix):
+        return f"session {session_id} has a corrupt meta.json: {reason[len(prefix):]}"
+    return f"cannot read session {session_id}: {reason}"
 
 
 def _make_session(store: TraceStore, tool_names: list[str],
@@ -777,12 +842,15 @@ class TestVerifyExport(_CliCase):
         )
 
 
-def _readiness_checks(sid, *, broken=False, missing_links=False):
+def _readiness_checks(sid, *, broken=False, missing_links=False, refused=None):
     return {
         "hash_chain_integrity": {
             "ok": not broken,
             "checked_sessions": 1,
             "broken_sessions": [sid] if broken else [],
+            "refused_sessions": (
+                [] if refused is None else [{"session_id": sid, "reason": refused}]
+            ),
         },
         "hash_chain_presence": {
             "ok": not missing_links,
@@ -869,18 +937,229 @@ class TestAuditReadinessChain(_CliCase):
         self.assertEqual((report["compliance_score"], report["ready"]), (55, False))
 
     def test_unreadable_stream_fails_integrity_without_a_traceback(self):
-        for sid, change, after in (
-            ("a-garbage", _add_garbage_line, None),
-            ("a-missing", None, lambda path: path.unlink()),
+        for sid, change, after, refused in (
+            ("a-garbage", _add_garbage_line, None,
+             "line 5 of events.ndjson is not valid JSON"),
+            ("a-missing", None, lambda path: path.unlink(), None),
         ):
             with self.subTest(sid):
                 report, checks, _ = self.readiness(sid, change, after=after)
-                self.assertEqual(checks, _readiness_checks(sid, broken=True))
+                self.assertEqual(
+                    checks, _readiness_checks(sid, broken=True, refused=refused)
+                )
                 self.assertEqual((report["compliance_score"], report["ready"]), (55, False))
                 for args in (("audit-readiness",), ("audit-readiness", "--format", "json")):
                     run = self.cli(*args, trace_dir=self.root / sid)
                     self.assertEqual(run.returncode, 1, run.stdout)
                     self.assertEqual(run.stderr, "")
+
+
+DAY = 86400
+
+
+def _ended_session(store: TraceStore, started_at: float, tool_name: str = "Bash") -> str:
+    meta = SessionMeta(agent_name="test-agent", started_at=started_at,
+                       ended_at=started_at + 60)
+    store.create_session(meta)
+    store.append_event(meta.session_id, TraceEvent(
+        event_type=EventType.TOOL_CALL,
+        session_id=meta.session_id,
+        timestamp=started_at + 1,
+        data={"tool_name": tool_name},
+    ))
+    return meta.session_id
+
+
+def _unusable_start(store: TraceStore, session_id: str) -> str:
+    """Set started_at in meta.json to text. Returns the reason."""
+    meta_file = store._session_dir(session_id) / "meta.json"
+    data = json.loads(meta_file.read_text(encoding="utf-8"))
+    data["started_at"] = "soon"
+    meta_file.write_text(json.dumps(data), encoding="utf-8")
+    return "started_at is not a usable time"
+
+
+def _without_times(value):
+    """Drop the times an export takes from the clock."""
+    if isinstance(value, dict):
+        return {
+            key: _without_times(item)
+            for key, item in value.items()
+            if key not in ("exported_at", "generated_at")
+        }
+    if isinstance(value, list):
+        return [_without_times(item) for item in value]
+    return value
+
+
+def _exported_ids(stdout: str) -> list[str]:
+    return [session["session_id"] for session in json.loads(stdout)["sessions"]]
+
+
+class TestRefusedSessions(_CliCase):
+    """A compliance report never leaves out a session the store refuses, or
+    reports it as empty."""
+
+    def run_each(self, runs):
+        """Run each (args, trace_dir) pair in its own process."""
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            return list(pool.map(lambda run: self.cli(*run[0], trace_dir=run[1]), runs))
+
+    def store_with(self, name, refuse, *, refused_at, readable_at):
+        """Build a store with a readable session and a refused one.
+
+        Returns the store's directory and the line the exports print.
+        """
+        trace_dir = self.root / name
+        store = TraceStore(str(trace_dir), use_workspace_env=False)
+        _ended_session(store, readable_at)
+        sid = _ended_session(store, refused_at, "Write")
+        reason = refuse(store, sid)
+        return trace_dir, f"Error: {refused_message(sid, reason)}\n"
+
+    def test_export_compliance_raises_for_a_refused_session(self):
+        for kind, refuse, error in REFUSALS:
+            with self.subTest(kind):
+                sid = _ended_session(self.store, time.time() - 120)
+                reason = refuse(self.store, sid)
+                with self.assertRaises(error) as caught:
+                    export_compliance(self.store, sid, "soc2")
+                self.assertEqual(str(caught.exception), refused_message(sid, reason))
+
+    def test_compliance_export_of_one_session_refuses_it(self):
+        cases = []
+        for kind, refuse, _ in REFUSALS:
+            sid = _ended_session(self.store, time.time() - 120)
+            line = f"Error: {refused_message(sid, refuse(self.store, sid))}\n"
+            cases.append((kind, sid, line))
+        sid = _ended_session(self.store, time.time() - 120)
+        (self.store._session_dir(sid) / "events.ndjson").unlink()
+        cases.append(("no events.ndjson", sid, f"Error: session not found: {sid}\n"))
+        before = tree_snapshot(self.trace_dir)
+        runs, expected = [], []
+        for kind, sid, line in cases:
+            command = ("compliance", "export", sid, "--framework", "soc2")
+            output = self.root / f"{sid}.json"
+            for args in (command, command + ("--output", str(output))):
+                runs.append((args, self.trace_dir))
+                expected.append((f"{kind}: {' '.join(args[3:])}", output, line))
+        for (label, output, line), run in zip(expected, self.run_each(runs)):
+            with self.subTest(label):
+                self.assertEqual((run.returncode, run.stdout, run.stderr), (1, "", line))
+                self.assertFalse(output.exists())
+        self.assertEqual(tree_snapshot(self.trace_dir), before)
+
+    def test_bulk_exports_refuse_when_any_session_is_refused(self):
+        now = time.time()
+        soc2 = ("compliance", "export", "--framework", "soc2")
+        eu_ai_act = ("export", "--format", "eu-ai-act", "--all",
+                     "--since", "30d", "--until", "1d")
+        commands = (
+            # compliance export keeps the ended sessions of the last 30 days.
+            (soc2, now - 120, (
+                ("corrupt meta.json", break_meta, now - 60),
+                ("mismatch", name_another_session, now - 60),
+                ("bad line", add_bad_line, now - 60),
+                ("not UTF-8", add_line_not_utf8, now - 60),
+                ("mismatch before the window", name_another_session, now - 60 * DAY),
+                ("bad line before the window", add_bad_line, now - 60 * DAY),
+                ("not UTF-8 before the window", add_line_not_utf8, now - 60 * DAY),
+                ("unusable started_at", _unusable_start, now - 60),
+            )),
+            # This window keeps the sessions that started 1 to 30 days ago.
+            (eu_ai_act, now - 3 * DAY, (
+                ("corrupt meta.json", break_meta, now - 3 * DAY),
+                ("mismatch before the window", name_another_session, now - 60 * DAY),
+                ("bad line after the window", add_bad_line, now - 60),
+                ("not UTF-8", add_line_not_utf8, now - 3 * DAY),
+                ("not UTF-8 after the window", add_line_not_utf8, now - 60),
+                ("unusable started_at", _unusable_start, now - 3 * DAY),
+            )),
+        )
+        runs, expected = [], []
+        for command, readable_at, cases in commands:
+            for kind, refuse, refused_at in cases:
+                name = f"store-{len(runs)}"
+                trace_dir, line = self.store_with(
+                    name, refuse, refused_at=refused_at, readable_at=readable_at
+                )
+                output = self.root / f"{name}.json"
+                for args in (command, command + ("--output", str(output))):
+                    runs.append((args, trace_dir))
+                    expected.append((f"{command[0]} {kind}: {args[-2:]}", output, line))
+        for (label, output, line), run in zip(expected, self.run_each(runs)):
+            with self.subTest(label):
+                self.assertEqual((run.returncode, run.stdout, run.stderr), (1, "", line))
+                self.assertFalse(output.exists())
+
+    def test_bulk_exports_of_readable_sessions_keep_their_windows(self):
+        # This passes on main too. It shows the fix keeps each export's filters.
+        now = time.time()
+        newer = _ended_session(self.store, now - 120, "Bash")
+        older = _ended_session(self.store, now - 3 * DAY, "Read")
+        _ended_session(self.store, now - 60 * DAY, "Write")
+        running = SessionMeta(agent_name="test-agent", started_at=now - 60)
+        self.store.create_session(running)
+        soc2 = ("compliance", "export", "--framework", "soc2")
+        eu_ai_act = ("export", "--format", "eu-ai-act", "--all", "--since", "30d")
+        runs = self.cli_many([
+            soc2, soc2 + ("--since", "2d"), eu_ai_act, eu_ai_act + ("--until", "1d"),
+        ])
+        for run in runs:
+            self.assertEqual((run.returncode, run.stderr), (0, ""))
+        reports = json.loads(json.dumps(
+            [export_compliance(self.store, sid, "soc2") for sid in (newer, older)]
+        ))
+        self.assertEqual(
+            _without_times(json.loads(runs[0].stdout)), _without_times(reports)
+        )
+        self.assertEqual(
+            _without_times(json.loads(runs[1].stdout)), _without_times(reports[:1])
+        )
+        self.assertEqual(_exported_ids(runs[2].stdout), [running.session_id, newer, older])
+        self.assertEqual(_exported_ids(runs[3].stdout), [older])
+
+    def test_audit_readiness_reports_a_refused_session(self):
+        cases = [(kind, refuse) for kind, refuse, _ in REFUSALS]
+        cases.append(("unusable started_at", _unusable_start))
+        runs, expected = [], []
+        for index, (kind, refuse) in enumerate(cases):
+            trace_dir = self.root / f"readiness-{index}"
+            store = TraceStore(str(trace_dir), use_workspace_env=False)
+            _make_probe_session(store, "a-readable")
+            _make_probe_session(store, "b-refused")
+            reason = refuse(store, "b-refused")
+            integrity = {
+                "ok": False,
+                "checked_sessions": 2,
+                "broken_sessions": ["b-refused"],
+                "refused_sessions": [{"session_id": "b-refused", "reason": reason}],
+            }
+            line = f"  cannot read session b-refused: {reason}\n"
+            with self.subTest(kind):
+                report = build_audit_readiness(store)
+                self.assertEqual(report["checks"]["hash_chain_integrity"], integrity)
+                self.assertEqual(report["session_count"], 2)
+                self.assertIs(report["ready"], False)
+                buf = io.StringIO()
+                format_audit_readiness(report, out=buf)
+                self.assertIn("Sessions analysed: 2\n", buf.getvalue())
+                self.assertIn(
+                    "FAIL Hash chain integrity: 2 sessions checked\n" + line,
+                    buf.getvalue(),
+                )
+            for args in (("audit-readiness",), ("audit-readiness", "--format", "json")):
+                runs.append((args, trace_dir))
+                expected.append((kind, args, integrity, line))
+        for (kind, args, integrity, line), run in zip(expected, self.run_each(runs)):
+            with self.subTest(kind, args=args):
+                self.assertEqual((run.returncode, run.stderr), (1, ""))
+                if "json" in args:
+                    report = json.loads(run.stdout)
+                    self.assertEqual(report["checks"]["hash_chain_integrity"], integrity)
+                else:
+                    self.assertIn("Sessions analysed: 2\n", run.stdout)
+                    self.assertIn(line, run.stdout)
 
 
 if __name__ == "__main__":
