@@ -603,7 +603,10 @@ def cmd_export_scores(args) -> int:
     # Resolve sessions
     if session_arg:
         found = store.find_session(session_arg)
-        session_ids = [found] if found else []
+        if not found:
+            sys.stderr.write(f"Session not found: {session_arg}\n")
+            return 1
+        session_ids = [found]
     elif since_raw:
         days = float(since_raw.rstrip("d"))
         cutoff = time.time() - days * 86400

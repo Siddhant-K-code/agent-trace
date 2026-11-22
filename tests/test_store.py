@@ -235,6 +235,117 @@ class TestTraceStore(unittest.TestCase):
         found = self.store.find_session("nonexistent")
         self.assertIsNone(found)
 
+    def _add_session_with_meta(self, session_id, meta_text=None, tenant_id=""):
+        """Create a session, then replace its meta.json with ``meta_text`` if given."""
+        self.store.create_session(
+            SessionMeta(session_id=session_id, tenant_id=tenant_id, started_at=1.0)
+        )
+        if meta_text is not None:
+            meta_file = self.store.base_dir / session_id / "meta.json"
+            meta_file.write_text(meta_text, encoding="utf-8")
+
+    def _scan_order(self, reverse):
+        """Make the directory scan list entries sorted, or sorted in reverse."""
+        real_iterdir = Path.iterdir
+        return patch.object(
+            type(self.store.base_dir), "iterdir",
+            lambda path: iter(sorted(real_iterdir(path), reverse=reverse)),
+        )
+
+    def test_find_session_names_a_corrupt_match_by_full_id_or_prefix(self):
+        self._add_session_with_meta("aaaa1111")
+        self._add_session_with_meta("bbbb2222", "{")
+        with self.assertRaises(CorruptSessionMetaError) as loaded:
+            self.store.load_meta("bbbb2222")
+        for typed in ("bbbb2222", "bbbb"):
+            with self.subTest(typed=typed):
+                with self.assertRaises(CorruptSessionMetaError) as raised:
+                    self.store.find_session(typed)
+                self.assertEqual(raised.exception.session_id, "bbbb2222")
+                self.assertEqual(str(raised.exception), str(loaded.exception))
+        self.assertEqual(self.store.find_session("aaaa"), "aaaa1111")
+        self.assertIsNone(self.store.find_session("cccc"))
+
+    def test_find_session_prefers_a_readable_match_in_either_scan_order(self):
+        self._add_session_with_meta("bbbb1111")
+        self._add_session_with_meta("bbbb2222", "{")
+        for reverse in (False, True):
+            with self.subTest(reverse=reverse), self._scan_order(reverse):
+                self.assertEqual(self.store.find_session("bbbb"), "bbbb1111")
+                with self.assertRaises(CorruptSessionMetaError):
+                    self.store.find_session("bbbb2")
+
+    def test_find_session_names_the_lowest_of_two_corrupt_matches(self):
+        self._add_session_with_meta("bbbb1111", "[]")
+        self._add_session_with_meta("bbbb2222", "{")
+        for reverse in (False, True):
+            with self.subTest(reverse=reverse), self._scan_order(reverse):
+                with self.assertRaisesRegex(
+                    CorruptSessionMetaError,
+                    "^session bbbb1111 has a corrupt meta.json: metadata is not a JSON object$",
+                ):
+                    self.store.find_session("bbbb")
+
+    def test_find_session_for_a_tenant_skips_a_corrupt_match(self):
+        # The tenant of a corrupt session cannot be read, so the lookup must not reveal it.
+        self._add_session_with_meta("bbbb1111", tenant_id="acme")
+        self._add_session_with_meta("bbbb2222", "{")
+        self._add_session_with_meta("cccc2222", "{")
+        for reverse in (False, True):
+            with self.subTest(reverse=reverse), self._scan_order(reverse):
+                self.assertEqual(self.store.find_session("bbbb", tenant_id="acme"), "bbbb1111")
+                self.assertIsNone(self.store.find_session("bbbb", tenant_id="other"))
+                self.assertIsNone(self.store.find_session("cccc", tenant_id="acme"))
+                with self.assertRaises(CorruptSessionMetaError):
+                    self.store.find_session("cccc")
+
+    def test_find_session_still_skips_what_it_skipped_before(self):
+        base = self.store.base_dir
+        self._add_session_with_meta("bbbb2222", "{")
+        (base / "bbbb0000").mkdir()
+        (base / "bbbb0001" / "meta.json").mkdir(parents=True)
+        self._add_session_with_meta("bbbb0002")
+        try:
+            (base / "bbbb0003").symlink_to(base / "bbbb2222", target_is_directory=True)
+            (base / "bbbb0004").mkdir()
+            (base / "bbbb0004" / "meta.json").symlink_to(base / "bbbb2222" / "meta.json")
+        except OSError:
+            pass  # This account cannot create symlinks.
+        try:
+            (base / "bbbb\x01").mkdir()
+            (base / "bbbb\x01" / "meta.json").write_text("{", encoding="utf-8")
+        except OSError:
+            pass  # Windows refuses a control character in a file name.
+        real_load_meta = TraceStore.load_meta
+
+        def load_meta(store, session_id):
+            if session_id == "bbbb0002":
+                raise PermissionError(13, "Permission denied")
+            return real_load_meta(store, session_id)
+
+        for reverse in (False, True):
+            with self.subTest(reverse=reverse), self._scan_order(reverse), patch.object(
+                TraceStore, "load_meta", load_meta
+            ):
+                with self.assertRaises(CorruptSessionMetaError) as raised:
+                    self.store.find_session("bbbb")
+                self.assertEqual(raised.exception.session_id, "bbbb2222")
+                self.assertIsNone(self.store.find_session("bbbb0"))
+
+    def test_find_session_names_a_meta_json_that_names_another_session(self):
+        self._add_session_with_meta("bbbb2222")
+        name_other_session_in_meta(self.store, "bbbb2222")
+        for typed in ("bbbb2222", "bbbb"):
+            with self.subTest(typed=typed):
+                with self.assertRaises(CorruptSessionMetaError) as raised:
+                    self.store.find_session(typed)
+                self.assertEqual(
+                    str(raised.exception),
+                    "session bbbb2222 has a corrupt meta.json: "
+                    "metadata session ID does not match its directory",
+                )
+        self.assertIsNone(self.store.find_session(OTHER_SESSION))
+
     def test_session_exists(self):
         meta = SessionMeta()
         self.store.create_session(meta)
@@ -779,8 +890,9 @@ class TestCorruptSessionMeta(unittest.TestCase):
             with self.subTest(label):
                 store = store_with_corrupt_meta(self.root / str(index), text)
                 self.assertEqual([m.session_id for m in store.list_sessions()], ["aaaa1111"])
-                self.assertIsNone(store.find_session("bbbb"))
                 message = f"^session bbbb2222 has a corrupt meta.json: {reason}$"
+                with self.assertRaisesRegex(CorruptSessionMetaError, message):
+                    store.find_session("bbbb")
                 with self.assertRaisesRegex(CorruptSessionMetaError, message):
                     store.load_meta("bbbb2222")
                 with self.assertRaisesRegex(CorruptSessionMetaError, message):
@@ -886,6 +998,131 @@ class TestCorruptSessionMetaCommands(unittest.TestCase):
                     (result.returncode, result.stderr), (1, "Deletion failed: " + strict)
                 )
                 self.assertTrue((root / name / "aaaa1111" / "meta.json").exists())
+
+
+class TestCorruptSessionMetaLookupCommands(unittest.TestCase):
+    """Commands given the ID or a prefix of a session with a corrupt meta.json name it."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="corrupt-lookup-"))
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        (self.root / "home").mkdir()
+        self.env = without_telemetry({
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("AGENT_STRACE_") and key != "AGENT_TRACE_DIR"
+        })
+        self.env["PYTHONPATH"] = str(SRC_ROOT)
+        self.env["HOME"] = self.env["USERPROFILE"] = str(self.root / "home")
+        self.env["PYTHONIOENCODING"] = "utf-8"
+        from agent_trace.freeze import freeze_session
+
+        good = TraceStore(str(self.root / "good"), use_workspace_env=False)
+        good.create_session(SessionMeta(session_id="aaaa1111", started_at=1.0))
+        self.fixture = self.root / "fixture.json"
+        self.fixture.write_text(
+            freeze_session(good, "aaaa1111").to_json() + "\n", encoding="utf-8"
+        )
+
+    def _store(self, name: str, *, readable: bool = True) -> Path:
+        """Return a trace dir where bbbb2222 has one event and meta.json "{".
+
+        With ``readable``, it also holds aaaa1111 of tenant acme.
+        """
+        trace_dir = self.root / name
+        store = TraceStore(str(trace_dir), use_workspace_env=False)
+        if readable:
+            store.create_session(
+                SessionMeta(session_id="aaaa1111", tenant_id="acme", started_at=1.0)
+            )
+        store.create_session(SessionMeta(session_id="bbbb2222", started_at=2.0))
+        store.append_event(
+            "bbbb2222", TraceEvent(EventType.USER_PROMPT, timestamp=2.0, data={"prompt": "hi"})
+        )
+        (trace_dir / "bbbb2222" / "meta.json").write_text("{", encoding="utf-8")
+        with self.assertRaises(CorruptSessionMetaError) as loaded:
+            store.load_meta("bbbb2222")
+        self.corrupt = str(loaded.exception)
+        return trace_dir
+
+    def _check(self, trace_dir: Path, expected: dict) -> None:
+        """Run each command in ``expected`` and compare (exit code, stdout, stderr)."""
+        def run(command):
+            return subprocess.run(
+                [sys.executable, "-m", "agent_trace.entry", "--trace-dir", str(trace_dir),
+                 *command],
+                capture_output=True, text=True, encoding="utf-8",
+                env=self.env, cwd=self.root, timeout=120,
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(run, expected))
+        for (command, want), result in zip(expected.items(), results):
+            with self.subTest(command=command):
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertEqual((result.returncode, result.stdout, result.stderr), want)
+
+    def test_a_full_id_or_prefix_names_the_corrupt_meta_json(self):
+        trace_dir = self._store("traces")
+        refused = (1, "", f"Error: {self.corrupt}\n")
+        expected = {}
+        for typed in ("bbbb2222", "bbbb"):
+            for command in (
+                # These said "Session not found" even for the full ID.
+                ("explain", typed),
+                ("timeline", "--format", "json", typed),
+                ("tree", "--format", "json", typed),
+                ("replay", typed, "--tree"),
+                ("stats", typed, "--include-subagents"),
+                ("a2a-tree", typed),
+                ("cost", typed),
+                ("compare", "aaaa1111", typed),
+                ("diff", "aaaa1111", typed),
+                ("why", typed, "1"),
+                ("share", typed, "--stdout"),
+                ("share", typed, "--assignment"),
+                ("freeze", typed),
+                ("regression", str(self.fixture), typed),
+                ("optimize", typed),
+                ("export", typed, "--backend", "langfuse"),
+                # These named it for the full ID only.
+                ("inspect", typed),
+                ("replay", typed),
+                ("stats", typed),
+                ("health", typed),
+                ("export", typed, "--format", "json"),
+                ("mcp-scan", "--session", typed),
+            ):
+                expected[command] = refused
+            expected[("review", typed)] = (2, "", f"review: {self.corrupt}\n")
+        # verify reads only events.ndjson, so the full ID still verifies.
+        expected[("verify", "bbbb2222")] = (0, "✅ Chain intact — 1 events verified\n", "")
+        expected[("verify", "bbbb")] = refused
+        # cognitive-debt prints one line for any trace it cannot read.
+        expected[("cognitive-debt", "--session", "bbbb")] = (
+            1, "", "Error: trace input could not be read safely\n"
+        )
+        # The tenant of a corrupt session cannot be read, so a tenant lookup skips it.
+        expected[("cost", "bbbb", "--tenant", "acme")] = (
+            1, "", "Session not found for tenant acme: bbbb\n"
+        )
+        self._check(trace_dir, expected)
+
+    def test_a_session_id_that_matches_nothing_is_named(self):
+        trace_dir = self._store("traces")
+        self._check(trace_dir, {
+            ("optimize", "cccc"): (1, "", "Session not found: cccc\n"),
+            ("export", "cccc", "--backend", "langfuse"): (1, "", "Session not found: cccc\n"),
+        })
+
+    def test_no_session_id_and_no_readable_session(self):
+        trace_dir = self._store("only-corrupt", readable=False)
+        no_session = "Session not found. Provide a session ID or record a session first.\n"
+        self._check(trace_dir, {
+            ("freeze",): (1, "", no_session),
+            ("regression", str(self.fixture)): (1, "", no_session),
+            ("optimize",): (1, "", "No sessions found.\n"),
+        })
 
 
 OTHER_SESSION = "other-session-4c1d"

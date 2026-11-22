@@ -184,8 +184,9 @@ session IDs.
 `GET /sessions` leaves out a session whose `meta.json` is corrupt: not valid
 JSON, not a JSON object, or nested more than 128 levels. `GET /sessions/<id>`
 and `GET /sessions/<id>/events` answer 400 for it with
-`{"error": "<message>"}`, the message the CLI prints. See
-[`list`](commands.md#list) for the fix.
+`{"error": "<message>"}`, the message the CLI prints. They answer the same 400
+for an ID prefix that matches no readable session but does match a corrupt
+one, not 404. See [`list`](commands.md#list) for the fix.
 
 `GET /sessions/<id>/events` also answers 400 with `{"error": "<message>"}` when
 an event names another session or tenant, or a line of `events.ndjson` is not

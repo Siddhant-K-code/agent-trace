@@ -685,7 +685,15 @@ def cmd_verify(args: argparse.Namespace) -> int:
     if not session_id:
         sys.stderr.write("No sessions found.\n")
         return 1
-    full_id = store.find_session(session_id) or session_id
+    try:
+        full_id = store.find_session(session_id) or session_id
+    except CorruptSessionMetaError as exc:
+        # verify reads only events.ndjson, so a full ID with a corrupt
+        # meta.json still verifies. A prefix that matches only such a session
+        # names it.
+        if exc.session_id != session_id:
+            raise
+        full_id = session_id
     if not store.session_exists(full_id):
         sys.stderr.write(f"Session not found: {session_id}\n")
         return 1

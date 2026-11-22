@@ -319,16 +319,19 @@ class LiveSetupVerifyTests(unittest.TestCase):
         self._write_session("codex-corrupt-meta", "codex", 100)
         (self.trace_dir / "codex-corrupt-meta" / "meta.json").write_text("[]", encoding="utf-8")
 
-        status, out, err = self._run(session="codex-corrupt-meta")
+        for requested in ("codex-corrupt-meta", "codex-corrupt"):
+            with self.subTest(requested=requested):
+                status, out, err = self._run(session=requested)
 
-        self.assertEqual(status, 1)
-        self.assertIn("Codex static hook setup verified.", out)
-        self.assertEqual(
-            err,
-            "Live capture verification failed: Session codex-corrupt-meta could not be "
-            "read as recorded evidence: corrupt meta.json: metadata is not a JSON object. "
-            "Recapture the session, or select another with --session SESSION_ID.\n",
-        )
+                self.assertEqual(status, 1)
+                self.assertIn("Codex static hook setup verified.", out)
+                self.assertEqual(
+                    err,
+                    "Live capture verification failed: Session codex-corrupt-meta could not be "
+                    "read as recorded evidence: corrupt meta.json: metadata is not a JSON "
+                    "object. Recapture the session, or select another with --session "
+                    "SESSION_ID.\n",
+                )
 
     def test_explicit_session_from_another_provider_fails(self):
         self._write_session("claude-session", "claude", 100)

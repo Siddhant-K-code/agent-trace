@@ -23,7 +23,7 @@ from agent_trace.mcp_server import (
     _tool_skills,
 )
 from agent_trace.models import EventType, SessionMeta, TraceEvent
-from agent_trace.store import TraceStore
+from agent_trace.store import CorruptSessionMetaError, TraceStore
 
 
 # ---------------------------------------------------------------------------
@@ -915,6 +915,40 @@ class TestJsonRpcValidation(unittest.TestCase):
         responses = [json.loads(line) for line in out.splitlines()]
         self.assertEqual([r.get("error", {}).get("code") for r in responses], [-32700, -32600, -32600, -32602, None])
         self.assertEqual(responses[-1]["id"], 3)
+
+
+class TestCorruptSessionMetaTools(unittest.TestCase):
+    """A tool given the ID or a prefix of a session with a corrupt meta.json names it."""
+
+    def setUp(self):
+        self.store = _make_store()
+        self.addCleanup(shutil.rmtree, self.store.base_dir, True)
+        _add_session(self.store, "aaaa1111", events=[_tool_call("Bash")])
+        _add_session(self.store, "bbbb2222", events=[_tool_call("Bash")])
+        (self.store.base_dir / "bbbb2222" / "meta.json").write_text("{", encoding="utf-8")
+        with self.assertRaises(CorruptSessionMetaError) as loaded:
+            self.store.load_meta("bbbb2222")
+        self.error = {"error": str(loaded.exception)}
+
+    def test_each_tool_returns_the_corrupt_meta_json_error(self):
+        for typed in ("bbbb2222", "bbbb"):
+            calls = [
+                ("get_session", {"session_id": typed}),
+                ("search_events", {"session_id": typed}),
+                ("get_session_summary", {"session_id": typed}),
+                ("diff_sessions", {"session_a": typed, "session_b": "aaaa1111"}),
+                ("diff_sessions", {"session_a": "aaaa1111", "session_b": typed}),
+                ("health", {"session_id": typed}),
+                ("skills", {"session_id": typed}),
+                ("review", {"session_ids": [typed], "branch": "main"}),
+            ]
+            for name, arguments in calls:
+                with self.subTest(typed=typed, name=name, arguments=arguments):
+                    r = _handle(self.store, _rpc("tools/call", {
+                        "name": name, "arguments": arguments,
+                    }))
+                    self.assertTrue(r["result"]["isError"])
+                    self.assertEqual(json.loads(r["result"]["content"][0]["text"]), self.error)
 
 
 class TestReadOnlyStore(unittest.TestCase):

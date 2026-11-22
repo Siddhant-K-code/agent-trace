@@ -565,14 +565,13 @@ class CollectorHandler(BaseHTTPRequestHandler):
             except (UnicodeDecodeError, ValueError) as exc:
                 self._send_json(400, {"error": str(exc)})
                 return
-            if not self.store.session_exists(session_id):
-                found = self.store.find_session(session_id)
-                if found:
-                    session_id = found
-                else:
-                    self._send_json(404, {"error": f"session not found: {session_id}"})
-                    return
             try:
+                if not self.store.session_exists(session_id):
+                    found = self.store.find_session(session_id)
+                    if not found:
+                        self._send_json(404, {"error": f"session not found: {session_id}"})
+                        return
+                    session_id = found
                 events = self.store.load_events(session_id)
             except (CorruptSessionMetaError, RefusedSessionError) as exc:
                 self._send_json(400, {"error": str(exc)})
@@ -587,14 +586,13 @@ class CollectorHandler(BaseHTTPRequestHandler):
             except (UnicodeDecodeError, ValueError) as exc:
                 self._send_json(400, {"error": str(exc)})
                 return
-            if not self.store.session_exists(session_id):
-                found = self.store.find_session(session_id)
-                if found:
-                    session_id = found
-                else:
-                    self._send_json(404, {"error": f"session not found: {session_id}"})
-                    return
             try:
+                if not self.store.session_exists(session_id):
+                    found = self.store.find_session(session_id)
+                    if not found:
+                        self._send_json(404, {"error": f"session not found: {session_id}"})
+                        return
+                    session_id = found
                 meta = self.store.load_meta(session_id)
             except CorruptSessionMetaError as exc:
                 self._send_json(400, {"error": str(exc)})
