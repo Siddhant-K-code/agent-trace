@@ -2103,6 +2103,11 @@ break, ESC or other unprintable character replaced by a space, so the rest of
 an escape code, such as `[31m`, still shows. These lines name only the URL's
 `scheme://host[:port]`, never its path, query or user info, or a header value.
 
+When export cannot convert the session, `--format otlp` and `otlp-genai` print
+`OTLP export failed: <reason>` and `temporal` prints
+`Temporal export failed: <reason>`. Export then exits 1 without writing a file
+or sending anything, with or without `--endpoint`.
+
 `--format otlp` and `otlp-genai` emit `gen_ai.conversation.id` with the
 agent's own session ID when the session has one (hook payloads that carry
 `session_id`, Claude JSONL `import`), so exports join with native Copilot CLI

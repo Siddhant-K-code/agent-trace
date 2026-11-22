@@ -138,18 +138,15 @@ Export every session automatically after Claude Code finishes by adding a
 
 ## Inspecting the OTLP payload
 
-To see what agent-trace sends without hitting a collector:
+To see what agent-trace sends without hitting a collector, write the payload
+to a file. Without `--endpoint`, export prints nothing on stdout.
 
 ```bash
-# Dump OTLP JSON to stdout
-agent-strace export <session-id> --format otlp
-
-# Pipe to jq for readability
-agent-strace export <session-id> --format otlp | jq .
-
-# Save to file
-agent-strace export <session-id> --format otlp > trace.json
+agent-strace export <session-id> --format otlp --output trace.json
+jq . trace.json
 ```
+
+Without `--output`, export writes `trace-<12-character session ID>-otlp.json`.
 
 ## What you see in your dashboard
 

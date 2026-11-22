@@ -1,9 +1,11 @@
-"""Tests for export --output and for lone surrogates in export --format csv.
+"""Tests for export --output and for lone surrogates in export.
 
 With --output, json, csv and ndjson write the file and print nothing on
 stdout. Each export path that takes --output turns a file it cannot write into
 one Error line and exit status 1. The CSV writes a lone UTF-16 surrogate in a
-cell as its escape, so a strict UTF-8 stdout or file can take it.
+cell as its escape, so a strict UTF-8 stdout or file can take it. OTLP export
+takes an event ID or parent ID that holds one, to a file or to a collector,
+and reports a conversion error in one line either way.
 """
 
 from __future__ import annotations
@@ -16,8 +18,11 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -34,12 +39,15 @@ except ImportError:
 import agent_trace
 from agent_trace.cli import build_parser, cmd_export
 from agent_trace.models import EventType, SessionMeta, TraceEvent
+from agent_trace.otlp import _to_span_id
 from agent_trace.store import TraceStore
 
 SRC = os.path.dirname(os.path.dirname(os.path.abspath(agent_trace.__file__)))
 LONE = _escapes.LONE_SURROGATE
 SHOWN = _escapes.LONE_SURROGATE_SHOWN
 PLAIN = _escapes.PLAIN
+# The int digit limit, 0 when this Python has none.
+_INT_DIGITS = getattr(sys, "get_int_max_str_digits", lambda: 0)()
 # Every export path that writes a file named by --output.
 FILE_EXPORTS = (
     ("--format", "json"),
@@ -212,6 +220,198 @@ class TestCsvLoneSurrogate(_ExportCase):
         run = self.run_cli("--format", "csv")
         self.assertEqual((run.returncode, run.stderr), (0, ""))
         self.assertIn(f"call-{SHOWN},{PLAIN} {SHOWN},", run.stdout)
+
+
+class _Collector(ThreadingHTTPServer):
+    """A local collector that answers each POST with 200 and keeps its path and body."""
+
+    daemon_threads = True
+    block_on_close = False
+
+    def __init__(self) -> None:
+        super().__init__(("127.0.0.1", 0), _CollectorHandler)
+        self.posts: list[tuple[str, bytes]] = []
+        self.url = f"http://127.0.0.1:{self.server_address[1]}"
+
+
+class _CollectorHandler(BaseHTTPRequestHandler):
+    def do_POST(self) -> None:  # noqa: N802
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        self.server.posts.append((self.path, body))
+        self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *args: object) -> None:
+        pass
+
+
+class _OtlpCase(_ExportCase):
+    """Add a result for the tool call, and run a local collector."""
+
+    result_id = "result-1"
+
+    def setUp(self) -> None:
+        super().setUp()
+        TraceStore(self.trace_dir).append_event(self.session_id, TraceEvent(
+            event_type=EventType.TOOL_RESULT, session_id=self.session_id, timestamp=3.0,
+            event_id=self.result_id, parent_id=self.event_id, duration_ms=250.0,
+            data={"tool_name": "Bash", "result": "ok"},
+        ))
+        # Keep the POST to 127.0.0.1 off any proxy the machine sets.
+        environ = patch.dict(os.environ, {"no_proxy": "*"})
+        environ.start()
+        self.addCleanup(environ.stop)
+        self.collector = _Collector()
+        threading.Thread(
+            target=self.collector.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True,
+        ).start()
+        self.addCleanup(self.collector.server_close)
+        self.addCleanup(self.collector.shutdown)
+
+
+class TestOtlpLoneSurrogate(_OtlpCase):
+    """OTLP export takes a session whose event IDs and parent IDs hold a lone surrogate.
+
+    The span ID is the hash of the ID's surrogatepass bytes. json.dumps writes
+    the surrogate in an attribute as its escape, so the file and the POST body
+    are ASCII.
+    """
+
+    event_id = "call-" + LONE
+    parent_id = PLAIN + " " + LONE
+    result_id = "result-" + LONE
+
+    def check_payload(self, text: str, fmt: str) -> None:
+        """Check that *text* holds the call's span, paired with its result."""
+        self.assertTrue(text.isascii())
+        self.assertIn('"call-' + SHOWN + '"', text)
+        spans = json.loads(text)["resourceSpans"][0]["scopeSpans"][0]["spans"]
+        (call,) = [span for span in spans if span["spanId"] == _to_span_id(self.event_id)]
+        # The result, found by its parent ID, ends the span 250 ms after the call.
+        self.assertEqual((call["startTimeUnixNano"], call["endTimeUnixNano"]), ("2000000000", "2250000000"))
+        attrs = {a["key"]: a["value"].get("stringValue") for a in call["attributes"]}
+        self.assertEqual(attrs["gen_ai.tool.call.id"], self.event_id)
+        if fmt != "otlp":
+            self.assertEqual(attrs["agent.strace.request.parent_event_id"], self.parent_id)
+            self.assertEqual(attrs["agent.strace.response.event_id"], self.result_id)
+
+    def test_output_file(self):
+        for fmt in ("otlp", "otlp-genai", "temporal"):
+            with self.subTest(fmt=fmt):
+                path = os.path.join(self.root, f"{fmt}.json")
+                self.assertEqual(self.export("--format", fmt, "--output", path), (0, "", (
+                    f"OTLP payload written to {path}\n"
+                    f"Send to a collector: agent-strace export --format {fmt} --endpoint <url>\n"
+                )))
+                with open(path, encoding="utf-8") as f:
+                    self.check_payload(f.read(), fmt)
+
+    def test_endpoint(self):
+        for fmt in ("otlp", "otlp-genai", "temporal"):
+            with self.subTest(fmt=fmt):
+                self.collector.posts.clear()
+                self.assertEqual(
+                    self.export("--format", fmt, "--endpoint", self.collector.url),
+                    (0, "", f"Exported 3 events to {self.collector.url} (HTTP 200)\n"),
+                )
+                ((path, body),) = self.collector.posts
+                self.assertEqual(path, "/v1/traces")
+                self.check_payload(body.decode("utf-8"), fmt)
+
+    def test_cli_exits_0(self):
+        run = self.run_cli("--format", "otlp", "--endpoint", self.collector.url)
+        self.assertEqual(
+            (run.returncode, run.stdout, run.stderr),
+            (0, "", f"Exported 3 events to {self.collector.url} (HTTP 200)\n"),
+        )
+        self.assertEqual(len(self.collector.posts), 1)
+
+
+@unittest.skipUnless(_INT_DIGITS, "this Python converts an int of any length to a string")
+class TestOtlpConversionError(_OtlpCase):
+    """A ValueError from the conversion gives one line and exit status 1.
+
+    A model response's input and output token counts each have as many digits
+    as str() converts, so they parse. otlp-genai and temporal sum them, and
+    the sum has one digit more. Export writes no file and sends nothing, with
+    or without --endpoint.
+    """
+
+    labels = (("otlp-genai", "OTLP"), ("temporal", "Temporal"))
+
+    def setUp(self) -> None:
+        super().setUp()
+        TraceStore(self.trace_dir).append_event(self.session_id, TraceEvent(
+            event_type=EventType.LLM_RESPONSE, session_id=self.session_id, timestamp=4.0,
+            event_id="response-1",
+            data={
+                "model": "m",
+                "input_tokens": 10 ** (_INT_DIGITS - 1),
+                "output_tokens": 9 * 10 ** (_INT_DIGITS - 1),
+            },
+        ))
+
+    @staticmethod
+    def failed(label: str) -> str:
+        try:
+            str(10 ** _INT_DIGITS)
+        except ValueError as exc:
+            return f"{label} export failed: {exc}\n"
+        raise AssertionError("str() converted the token sum")
+
+    def test_output_file(self):
+        for fmt, label in self.labels:
+            with self.subTest(fmt=fmt):
+                path = os.path.join(self.root, f"{fmt}.json")
+                self.assertEqual(self.export("--format", fmt, "--output", path), (1, "", self.failed(label)))
+                self.assertFalse(os.path.exists(path))
+
+    def test_endpoint(self):
+        for fmt, label in self.labels:
+            with self.subTest(fmt=fmt):
+                self.assertEqual(
+                    self.export("--format", fmt, "--endpoint", self.collector.url),
+                    (1, "", self.failed(label)),
+                )
+        self.assertEqual(self.collector.posts, [])
+        self.assertEqual(os.listdir(self.cwd), [])
+
+    def test_cli_prints_no_traceback(self):
+        run = self.run_cli("--format", "otlp-genai", "--endpoint", self.collector.url)
+        self.assertEqual((run.returncode, run.stdout, run.stderr), (1, "", self.failed("OTLP")))
+        self.assertEqual(self.collector.posts, [])
+
+
+class TestOtlpConverterError(_OtlpCase):
+    """otlp turns a ValueError from session_to_otlp into one line and exit status 1.
+
+    No stored value makes session_to_otlp raise one today, so these tests
+    patch it. export_otlp catches it on the --endpoint path, as cmd_export
+    does on the file path.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        converter = patch("agent_trace.otlp.session_to_otlp", side_effect=ValueError("no spans"))
+        converter.start()
+        self.addCleanup(converter.stop)
+
+    def test_output_file(self):
+        path = os.path.join(self.root, "otlp.json")
+        self.assertEqual(
+            self.export("--format", "otlp", "--output", path),
+            (1, "", "OTLP export failed: no spans\n"),
+        )
+        self.assertFalse(os.path.exists(path))
+
+    def test_endpoint(self):
+        self.assertEqual(
+            self.export("--format", "otlp", "--endpoint", self.collector.url),
+            (1, "", "OTLP export failed: no spans\n"),
+        )
+        self.assertEqual(self.collector.posts, [])
+        self.assertEqual(os.listdir(self.cwd), [])
 
 
 if __name__ == "__main__":
