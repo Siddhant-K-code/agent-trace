@@ -219,7 +219,12 @@ class TestMcpScanWatchIndexes(unittest.TestCase):
                 if calls:
                     raise AssertionError("watch loop did not stop at session_end")
                 calls.append(1)
-                store.append_events("s1", live)
+                if isinstance(live, bytes):
+                    # append_events would refuse a line that is not UTF-8.
+                    with open(store._session_dir("s1") / "events.ndjson", "ab") as f:
+                        f.write(live)
+                else:
+                    store.append_events("s1", live)
 
             out = io.StringIO()
             with patch("agent_trace.mcp_scan.time.sleep", append_live):
@@ -256,6 +261,21 @@ class TestMcpScanWatchIndexes(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertEqual(self._alerts(text), [("103", "102")])
+
+    def test_a_line_that_is_not_utf8_is_skipped_and_not_counted(self):
+        recorded = [_event(EventType.USER_PROMPT, prompt=f"p{i}") for i in range(100)]
+        events = _exfil_attempt() + [_event(EventType.SESSION_END)]
+        live = b"".join(
+            line + b"\n"
+            for line in [b'{"event_type": "error", "data": {"m": "\xff"}}']
+            + [event.to_json().encode() for event in events]
+        )
+
+        code, text, _batch = self._watch(recorded, live, batch=False)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(self._alerts(text), [("102", "101")])
+        self.assertIn("Session ended after 4 watched events.", text)
 
     def test_finding_from_initial_scan_is_not_reported_again(self):
         recorded = (

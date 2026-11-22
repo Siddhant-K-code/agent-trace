@@ -2980,11 +2980,11 @@ is wrong with it, and counts the other unreadable lines:
 Error: cannot read session c3d4e5f6a7b80003: line 5 of events.ndjson is not valid JSON; 2 more lines are unreadable
 ```
 
-A line is unreadable when it is not valid JSON, is JSON but not an object (for
-example `is an array, not an object`), has no `event_type`, or has an
-`event_type` that agent-strace does not know. A line nested too deeply to parse,
-or with an integer too long to read, is unreadable too. An empty line is
-skipped, but a line of spaces between events is not valid JSON. The message
+A line is unreadable when it is not valid UTF-8, is not valid JSON, is JSON but
+not an object (for example `is an array, not an object`), has no `event_type`,
+or has an `event_type` that agent-strace does not know. A line nested too deeply
+to parse, or with an integer too long to read, is unreadable too. An empty line
+is skipped, but a line of spaces between events is not valid JSON. The message
 never includes the line, its `event_type`, or the parser's message. When a
 session has both a mismatch and an unreadable line, the message reports the
 mismatch.
