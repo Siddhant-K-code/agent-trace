@@ -238,7 +238,8 @@ class TestSessionToOTLP(unittest.TestCase):
         root_id = spans[0]["spanId"]
         error_children = [s for s in spans[1:] if s.get("status", {}).get("code") == 2]
         self.assertEqual(len(error_children), 1)
-        self.assertEqual(error_children[0]["name"], "Read")
+        self.assertEqual(error_children[0]["name"], "tool/Read")
+        self.assertEqual(error_children[0]["kind"], 3)
 
     def test_error_span_has_exception_event(self):
         meta, events = self._make_session()
@@ -338,7 +339,7 @@ class TestSpanStatus(unittest.TestCase):
         meta, events = self._make_session()
         spans = self._spans(meta, events)
         self.assertEqual(spans[0]["status"], {"code": 2})
-        (error,) = [s for s in spans[1:] if s["name"] == "Read"]
+        (error,) = [s for s in spans[1:] if s["name"] == "tool/Read"]
         self.assertEqual(error["status"], {"code": 2, "message": "File not found"})
         (bash,) = [s for s in spans if s["name"] == "tool/Bash"]
         self.assertEqual(bash["status"], {"code": 0})
@@ -453,6 +454,124 @@ class TestFailedLLMResponse(unittest.TestCase):
             return self._payload(events)["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
 
         self.assertEqual(root(failed)["status"], root(completed)["status"])
+
+
+def _classic_spans(events):
+    meta = SessionMeta(agent_name="claude-code", started_at=1000.0, ended_at=1100.0)
+    return session_to_otlp(meta, events)["resourceSpans"][0]["scopeSpans"][0]["spans"]
+
+
+def _attrs(span):
+    return {a["key"]: a["value"].get("stringValue") for a in span["attributes"]}
+
+
+class TestToolSpanIdentity(unittest.TestCase):
+    """A tool call that failed or got no result names its tool the way a
+    tool call with a result does (#552)."""
+
+    IDENTITY = ("gen_ai.tool.name", "gen_ai.operation.name", "gen_ai.tool.call.id")
+
+    def _call(self, event_id="call1", **data):
+        return TraceEvent(event_type=EventType.TOOL_CALL, event_id=event_id, timestamp=1001.0,
+                          data={"tool_name": "Bash", "arguments": {"command": "false"}, **data})
+
+    def test_failed_call_has_the_identity_of_a_call_with_a_result(self):
+        result = TraceEvent(event_type=EventType.TOOL_RESULT, parent_id="ok1", timestamp=1002.0,
+                            data={"result": "done"})
+        error = TraceEvent(event_type=EventType.ERROR, parent_id="call1", timestamp=1003.0,
+                           data={"tool_name": "Bash", "error": "exit 1"})
+        _, ok, failed = _classic_spans([self._call("ok1"), result, self._call(), error])
+        self.assertEqual((ok["name"], ok["kind"]), ("tool/Bash", 3))
+        self.assertEqual((failed["name"], failed["kind"]), ("tool/Bash", 3))
+        attrs = _attrs(failed)
+        self.assertEqual(
+            {key: attrs.get(key) for key in self.IDENTITY},
+            {"gen_ai.tool.name": "Bash", "gen_ai.operation.name": "tool.call",
+             "gen_ai.tool.call.id": "call1"},
+        )
+        self.assertEqual(
+            {key: _attrs(ok).get(key) for key in self.IDENTITY},
+            {**{key: attrs[key] for key in self.IDENTITY}, "gen_ai.tool.call.id": "ok1"},
+        )
+        # The keys the failed span carried before stay.
+        self.assertEqual(attrs["tool.name"], "Bash")
+        self.assertEqual(attrs["tool.input.command"], "false")
+        self.assertEqual(attrs["error.message"], "exit 1")
+        self.assertEqual(failed["status"], {"code": 2, "message": "exit 1"})
+
+    def test_failed_call_takes_its_name_from_the_call(self):
+        # The @trace_tool decorator records the tool name only on the call.
+        error = TraceEvent(event_type=EventType.ERROR, parent_id="call1", timestamp=1003.0,
+                           data={"error": "exit 1"})
+        _, failed = _classic_spans([self._call(), error])
+        self.assertEqual(failed["name"], "tool/Bash")
+        self.assertEqual(_attrs(failed)["gen_ai.tool.name"], "Bash")
+        self.assertEqual(_attrs(failed)["tool.name"], "Bash")
+
+    def test_lone_error_is_a_tool_error_span(self):
+        error = TraceEvent(event_type=EventType.ERROR, event_id="err1", timestamp=1003.0,
+                           data={"error": "boom"})
+        _, span = _classic_spans([error])
+        self.assertEqual((span["name"], span["kind"]), ("tool/error", 3))
+        self.assertEqual(_attrs(span)["gen_ai.tool.call.id"], "err1")
+
+    def test_call_without_a_result_has_the_identity_of_a_call_with_one(self):
+        _, span = _classic_spans([self._call()])
+        self.assertEqual((span["name"], span["kind"]), ("tool/Bash", 3))
+        attrs = _attrs(span)
+        self.assertEqual(
+            {key: attrs.get(key) for key in self.IDENTITY},
+            {"gen_ai.tool.name": "Bash", "gen_ai.operation.name": "tool.call",
+             "gen_ai.tool.call.id": "call1"},
+        )
+        self.assertEqual(attrs["tool.name"], "Bash")
+        self.assertEqual(attrs["tool.input.command"], "false")
+
+    def test_error_that_ends_a_model_request_is_not_a_tool_call(self):
+        request = TraceEvent(event_type=EventType.LLM_REQUEST, event_id="req1", timestamp=1001.0,
+                             data={"model": "gpt-4o"})
+        error = TraceEvent(event_type=EventType.ERROR, parent_id="req1", timestamp=1002.0,
+                           data={"error": "rate limited"})
+        _, span = _classic_spans([request, error])
+        self.assertEqual((span["name"], span["kind"]), ("error", 1))
+        self.assertEqual(_attrs(span), {"tool.name": "error", "error.message": "rate limited"})
+
+
+class TestRetryLinks(unittest.TestCase):
+    """A tool call whose ``retry_of`` names an earlier call links to its span (#552)."""
+
+    def _session(self, retry_of="call1"):
+        return [
+            TraceEvent(event_type=EventType.TOOL_CALL, event_id="call1", timestamp=1001.0,
+                       data={"tool_name": "Bash", "arguments": {"command": "make"}}),
+            TraceEvent(event_type=EventType.ERROR, parent_id="call1", timestamp=1002.0,
+                       data={"tool_name": "Bash", "error": "exit 2"}),
+            TraceEvent(event_type=EventType.TOOL_CALL, event_id="call2", timestamp=1003.0,
+                       data={"tool_name": "Bash", "arguments": {"command": "make"},
+                             "retry_of": retry_of}),
+            TraceEvent(event_type=EventType.TOOL_RESULT, parent_id="call2", timestamp=1004.0,
+                       data={"result": "ok"}),
+        ]
+
+    def test_retry_links_to_the_attempt_it_retries(self):
+        _, first, retry = _classic_spans(self._session())
+        self.assertEqual(retry["links"], [{
+            "traceId": first["traceId"],
+            "spanId": first["spanId"],
+            "attributes": [{"key": "agent.strace.link.type", "value": {"stringValue": "retry_of"}}],
+        }])
+        self.assertNotIn("links", first)
+
+    def test_no_link_to_an_unknown_event_or_to_itself(self):
+        for retry_of in ("missing", "call2", "", 7, ["call1"]):
+            with self.subTest(retry_of=retry_of):
+                spans = _classic_spans(self._session(retry_of))
+                self.assertFalse(any("links" in span for span in spans))
+
+    def test_session_without_retries_has_no_links(self):
+        meta, events = TestSessionToOTLP()._make_session()
+        spans = session_to_otlp(meta, events)["resourceSpans"][0]["scopeSpans"][0]["spans"]
+        self.assertFalse(any("links" in span for span in spans))
 
 
 if __name__ == "__main__":

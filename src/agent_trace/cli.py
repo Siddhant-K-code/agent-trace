@@ -462,6 +462,25 @@ def _export_endpoint_not_used(args: argparse.Namespace) -> str | None:
     return None
 
 
+def _export_include_subagents_not_used(args: argparse.Namespace) -> str | None:
+    """Return why export would ignore --include-subagents, or None."""
+    if not getattr(args, "include_subagents", False):
+        return None
+    for flag in ("scores", "metrics", "backend", "anonymize"):
+        if getattr(args, flag, None):
+            return (
+                f"--include-subagents is not used with --{flag}; "
+                "it exports one OTLP trace with --format otlp or otlp-genai"
+            )
+    fmt = getattr(args, "format", "json")
+    if fmt not in ("otlp", "otlp-genai"):
+        return (
+            f"--include-subagents is not used with --format {fmt}; "
+            "use --format otlp or otlp-genai"
+        )
+    return None
+
+
 def _export_endpoint_checks(args: argparse.Namespace) -> tuple[dict[str, str], str | None]:
     """Check export's --endpoint and --header values.
 
@@ -522,11 +541,100 @@ def _write_events(out: TextIO, fmt: str, events: list[TraceEvent]) -> None:
             out.write(e.to_json() + "\n")
 
 
+def _export_otlp_tree(
+    args: argparse.Namespace,
+    store: TraceStore,
+    session_id: str,
+    headers: dict[str, str],
+) -> int:
+    """Export a session and its subagent sessions as one OTLP trace."""
+    from .otlp import (
+        OTLP_GENAI_TIMESTAMP_EVENT_TYPES,
+        OTLP_TIMESTAMP_EVENT_TYPES,
+        export_otlp_payload,
+        node_tree_to_otlp,
+        otlp_data_indexes,
+        otlp_genai_data_indexes,
+    )
+    from .subagent import SessionNode, build_tree
+
+    use_genai = args.format == "otlp-genai"
+    try:
+        tree = build_tree(store, session_id)
+    except KeyError as exc:
+        sys.stderr.write(f"Error: {exc.args[0] if exc.args else exc}\n")
+        return 1
+    except (NonObjectEventDataError, UnusableTimestampError):
+        raise
+    except ValueError as exc:
+        sys.stderr.write(f"Error: {exc}\n")
+        return 1
+
+    # Each session once, in export order; only a parent link cycle repeats one.
+    nodes: list[SessionNode] = []
+    seen: set[str] = set()
+
+    def _walk(node: SessionNode) -> None:
+        if node.meta.session_id in seen:
+            return
+        seen.add(node.meta.session_id)
+        nodes.append(node)
+        for child in node.children:
+            _walk(child)
+
+    _walk(tree)
+    for node in nodes:
+        node_id = node.meta.session_id
+        if use_genai:
+            indexes = otlp_genai_data_indexes(node.events)
+            event_types = OTLP_GENAI_TIMESTAMP_EVENT_TYPES
+        else:
+            indexes = otlp_data_indexes(node.events)
+            event_types = OTLP_TIMESTAMP_EVENT_TYPES
+        require_object_event_data(node.events, indexes=indexes, session_id=node_id)
+        require_usable_timestamps(node.events, event_types=event_types, session_id=node_id)
+        require_usable_session_times(node.meta, session_id=node_id)
+
+    try:
+        payload = node_tree_to_otlp(tree, args.service_name, genai=use_genai)
+    except (NonObjectEventDataError, UnusableTimestampError):
+        raise
+    except ValueError as exc:
+        sys.stderr.write(f"OTLP export failed: {exc}\n")
+        return 1
+    event_count = sum(len(node.events) for node in nodes)
+
+    if not args.endpoint:
+        output_path = getattr(args, "output", "") or f"trace-{session_id[:12]}-{args.format}.json"
+        try:
+            with open(output_path, "w") as f:
+                f.write(json.dumps(payload, indent=2) + "\n")
+        except OSError as exc:
+            sys.stderr.write(f"Error: cannot write {output_path}: {exc.strerror or exc}\n")
+            return 1
+        sys.stderr.write(
+            f"OTLP payload for {len(nodes)} session{'s' if len(nodes) != 1 else ''}"
+            f" written to {output_path}\n"
+        )
+        sys.stderr.write(
+            f"Send to a collector: agent-strace export --format {args.format}"
+            " --include-subagents --endpoint <url>\n"
+        )
+        return 0
+
+    ok = export_otlp_payload(payload, args.endpoint, headers=headers, event_count=event_count)
+    return 0 if ok else 1
+
+
 def cmd_export(args: argparse.Namespace) -> int:
     """Export a session to JSON, CSV, or OTLP."""
     # Check --endpoint and --header before routing and before anything is
     # read or written, so a bad value costs one line and exit status 1.
     headers, problem = _export_endpoint_checks(args)
+    if problem:
+        sys.stderr.write(f"{problem}\n")
+        return 1
+    problem = _export_include_subagents_not_used(args)
     if problem:
         sys.stderr.write(f"{problem}\n")
         return 1
@@ -556,6 +664,9 @@ def cmd_export(args: argparse.Namespace) -> int:
         else:
             sys.stderr.write(f"Session not found: {session_id}\n")
             return 1
+
+    if getattr(args, "include_subagents", False):
+        return _export_otlp_tree(args, store, session_id, headers)
 
     events = store.load_events(session_id)
 
@@ -1995,6 +2106,9 @@ def build_parser() -> argparse.ArgumentParser:
                                "default to a file named from the session ID)")
     p_export.add_argument("--dry-run", action="store_true",
                           help="show what would be anonymized without writing output (use with --anonymize)")
+    p_export.add_argument("--include-subagents", action="store_true",
+                          help="with --format otlp or otlp-genai, export the session and its subagent "
+                               "sessions as one trace, each subagent under the span that spawned it")
 
     # stats
     p_stats = sub.add_parser("stats", help="show session statistics")

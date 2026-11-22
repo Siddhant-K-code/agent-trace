@@ -159,6 +159,18 @@
                   }
                 },
                 {
+                  "key": "gen_ai.input.messages",
+                  "value": {
+                    "stringValue": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"[REDACTED:synthetic-secret] inspect the fixture\"}]}]"
+                  }
+                },
+                {
+                  "key": "gen_ai.output.messages",
+                  "value": {
+                    "stringValue": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"The fixture is complete.\"}]}]"
+                  }
+                },
+                {
                   "key": "metadata",
                   "value": {
                     "stringValue": "{\"agent_strace\": {\"provider\": \"claude-code\", \"redacted\": true, \"redacted_event_count\": 1, \"evidence.schema_version\": 1, \"evidence.status\": \"partial\", \"evidence.gap_count\": 1, \"evidence.gap_codes\": [\"orphan_tool_result\"], \"evidence.gaps\": [{\"code\": \"orphan_tool_result\", \"kind\": \"observed\", \"event_id\": \"orphan-tool-result\", \"message\": \"tool result 'orphan-tool-result' references unknown parent 'missing-tool-call'\"}], \"provenance\": {\"agent_provider\": \"claude-code\", \"agent_version\": \"fixture\", \"git_repo\": \"https://example.invalid/acme/widget.git\", \"git_branch\": \"feature/otlp-conformance\", \"git_commit\": \"0123456\"}}}"
@@ -549,6 +561,12 @@
                   }
                 },
                 {
+                  "key": "gen_ai.tool.call.arguments",
+                  "value": {
+                    "stringValue": "{\"file_path\":\"README.md\"}"
+                  }
+                },
+                {
                   "key": "agent.strace.request.event_id",
                   "value": {
                     "stringValue": "tool-read-call"
@@ -588,6 +606,12 @@
                   "key": "output.mime_type",
                   "value": {
                     "stringValue": "text/plain"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.result",
+                  "value": {
+                    "stringValue": "fixture content"
                   }
                 },
                 {
@@ -704,6 +728,12 @@
                   "key": "input.mime_type",
                   "value": {
                     "stringValue": "application/json"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.arguments",
+                  "value": {
+                    "stringValue": "{\"command\":\"false\"}"
                   }
                 },
                 {

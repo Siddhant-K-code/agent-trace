@@ -2,21 +2,34 @@
 
 [Telemetry.dev](https://telemetry.dev) accepts OTLP/HTTP JSON traces, so `agent-strace export --format otlp-genai` can send a session there. This page records what one tested send showed. Telemetry.dev is not a default endpoint, and agent-strace has no Telemetry.dev dependency. Nothing is sent there unless you pass its endpoint.
 
-## Limits as of 0.121.0
+## Limits
 
 The result was **partial**. Read these before you rely on it.
 
-- **Content is not in Telemetry.dev's content panels.** Prompts and completions appear only in a span's **Events** list, and tool input and output only in its **Attributes**. The Input, Output, Arguments and Result panels are empty; a model call's Output shows only its finish reason. [#552](https://github.com/Siddhant-K-code/agent-trace/issues/552)
+The test used 0.120.0. After 0.121.1, [#552](https://github.com/Siddhant-K-code/agent-trace/issues/552) changed the export for four limits: content panels, subagents, retries and classic `otlp` failed tool calls. Those bullets, marked **Predicted**, describe the new export. How Telemetry.dev shows it is predicted, not tested. A second send will verify it.
+
+- **Content panels (Predicted).** In the test, the Input, Output, Arguments and Result panels were empty. Prompts and completions appeared only in a span's **Events** list, and tool input and output only in its **Attributes**. The export now also sets the OpenTelemetry GenAI content attributes, which those panels read:
+  - The session's `invoke_agent` root has `gen_ai.input.messages` (the conversation up to and including the last user prompt) and `gen_ai.output.messages` (the replies after it).
+  - Each `execute_tool` span whose call has input has `gen_ai.tool.call.arguments`, and each one with a result has `gen_ai.tool.call.result`.
+  - Each value is the same redacted, truncated text as before, so a long result may not parse as JSON.
+  - A `chat` span still has no content, because agent-strace does not record a prompt per model call. Its Output will still show only the finish reason.
 - **Telemetry.dev's redaction can change ordinary values.** Telemetry.dev redacts common secrets before it stores a trace, and a match can occur inside an ordinary word.
   - In the test, the `sk-` in `task-` matched: an event ID such as `...-task-1` was stored as `...-ta[REDACTED]`.
   - This broke the ID links between a `Task` call and the subagent it started.
   - The stored copy can differ from what AgentTrace recorded. AgentTrace's local session stays the record to verify against.
-- **A subagent is a separate trace.** `agent-strace export` sends each session as its own trace, so a subagent does not appear under the `Task` call that started it. [#552](https://github.com/Siddhant-K-code/agent-trace/issues/552)
-- **Retries are not linked.** A retried model call or tool call is a second span with the same name. Telemetry.dev groups spans with the same name as "Repeated", which is not a retry link. [#552](https://github.com/Siddhant-K-code/agent-trace/issues/552)
+- **Subagents (Predicted).** In the test, each session was its own trace, so a subagent did not appear under the `Task` call that started it. `agent-strace export <session-id> --format otlp-genai --include-subagents` now sends a session and its subagents as one trace.
+  - Each subagent's `invoke_agent` root is under the span of the call that started it, or under the session root when that call is not in the export.
+  - That link is the span's parent ID, not an attribute, so Telemetry.dev's redaction is not expected to break it.
+  - Without the flag, each session is still its own trace.
+- **Retries (Predicted).** In the test, a retried model call or tool call was a second span with the same name. Telemetry.dev grouped spans with the same name as "Repeated", which is not a retry link.
+  - A call whose event names an earlier one in `retry_of` now has an OpenTelemetry span link to that call's span, with `agent.strace.link.type` set to `retry_of`.
+  - The spans keep their names, so Telemetry.dev may still group them as "Repeated".
+  - agent-strace's hooks and imports do not write `retry_of`, so a recorded Claude Code or Copilot CLI session has no retry links.
 - **Cost is Telemetry.dev's own.** Telemetry.dev prices the tokens itself. AgentTrace's estimate is kept only as the attribute `agent.strace.cost.total_usd`. A model Telemetry.dev cannot price has no cost.
 - **A recovered session still shows as an error.** If any call failed, the session's root span is an error, even when a retry succeeded.
 - **AgentTrace's evidence is not first-class.** Evidence health, provenance, redaction flags and capture gaps are plain span attributes, with no Telemetry.dev field, filter or badge. A capture gap shows as an ordinary tool span, which Telemetry.dev even shows as called by a model call. Whether these attributes can be searched was not checked.
-- **Use `otlp-genai`, not `otlp`.** Classic `--format otlp` sends no model calls, tokens or cost, and its span for a failed tool call has no operation or tool name in Telemetry.dev.
+- **Use `otlp-genai`, not `otlp`.** Classic `--format otlp` sends no model calls, tokens or cost.
+- **Classic `otlp` failed tool calls (Predicted).** In the test, classic `--format otlp` named a failed tool call's span after the bare tool name, and Telemetry.dev showed it with no operation or tool. That span is now named `tool/<name>` like a successful call, and it has the same `gen_ai.operation.name`, `gen_ai.tool.name` and `gen_ai.tool.call.id`.
 
 ## Send a session
 
@@ -65,6 +78,6 @@ Telemetry.dev showed it like this:
 | Attributes | Every attribute AgentTrace sends, on each span checked. `gen_ai.response.finish_reasons` appears as `gen_ai.output.messages`. JSON values such as `agent.strace.provenance` are shown as expandable objects, and counts as numbers. |
 | Events and Logs | Each span event with its attributes, including prompts and completions. Each event is also a log record linked to its span. A failed tool call's `exception` event is an `error` record. |
 
-The test ran on 2026-11-22 with agent-strace 0.120.0. The exporter is unchanged in 0.121.0. It was observed through Telemetry.dev's CLI and web UI. The subagent-tree trace's attributes and attribute search were not checked. The payloads, the predictions and the results are in [experiments/telemetry-dev](../experiments/telemetry-dev/RESULTS.md).
+The test ran on 2026-11-22 with agent-strace 0.120.0. The exporter is unchanged in 0.121.0. The export changes from [#552](https://github.com/Siddhant-K-code/agent-trace/issues/552) came after 0.121.1 and have not been sent to Telemetry.dev. The test was observed through Telemetry.dev's CLI and web UI. The subagent-tree trace's attributes and attribute search were not checked. The payloads, the predictions and the results are in [experiments/telemetry-dev](../experiments/telemetry-dev/RESULTS.md).
 
 See [production.md](production.md#per-backend-setup) for other backends.

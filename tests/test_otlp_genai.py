@@ -1027,5 +1027,225 @@ class TestGenAIFailedModelRequests(unittest.TestCase):
         self.assertEqual(_get_attr(span, "error.type"), "_OTHER")
 
 
+# ---------------------------------------------------------------------------
+# Content attributes, error tool names and retry links (#552)
+# ---------------------------------------------------------------------------
+
+def _genai_spans(events):
+    meta = SessionMeta(session_id="s1", agent_name="claude-code", started_at=1000.0, ended_at=1100.0)
+    return _get_spans(session_to_otlp_genai(meta, events))
+
+
+def _event(event_type, timestamp, event_id="", parent_id="", **data):
+    return TraceEvent(event_type=event_type, event_id=event_id or f"e{timestamp}",
+                      parent_id=parent_id, timestamp=timestamp, data=data)
+
+
+def _text(role, *texts):
+    return {"role": role, "parts": [{"type": "text", "content": text} for text in texts]}
+
+
+class TestGenAIRootMessages(unittest.TestCase):
+    """The root carries gen_ai.input.messages and gen_ai.output.messages as
+    semconv message JSON, with the text the message events carry."""
+
+    def _root(self, *turns):
+        events = [
+            _event(EventType.USER_PROMPT if kind == "user" else EventType.ASSISTANT_RESPONSE,
+                   1001.0 + i, **({"prompt": text} if kind == "user" else {"text": text}))
+            for i, (kind, text) in enumerate(turns)
+        ]
+        return _genai_spans(events)[0]
+
+    def _messages(self, root, key):
+        value = _get_attr(root, key)
+        return None if value is None else json.loads(value)
+
+    def test_input_is_the_conversation_up_to_the_last_prompt(self):
+        root = self._root(
+            ("user", "Fix the build"), ("assistant", "Looking at it."),
+            ("user", "Then run the tests"), ("assistant", "Done."), ("assistant", "All green."),
+        )
+        self.assertEqual(self._messages(root, "gen_ai.input.messages"), [
+            _text("user", "Fix the build"),
+            _text("assistant", "Looking at it."),
+            _text("user", "Then run the tests"),
+        ])
+        self.assertEqual(self._messages(root, "gen_ai.output.messages"), [
+            _text("assistant", "Done.", "All green."),
+        ])
+        # Compact JSON text, the way the OTel GenAI instrumentations write it.
+        self.assertNotIn(", ", _get_attr(root, "gen_ai.input.messages"))
+
+    def test_text_is_the_message_event_text(self):
+        prompt = "[REDACTED:api-key] " + "p" * 2000
+        reply = "r" * 1500
+        root = self._root(("user", prompt), ("assistant", reply))
+        events = {e["name"]: {a["key"]: a["value"].get("stringValue") for a in e["attributes"]}
+                  for e in root["events"]}
+        [user] = self._messages(root, "gen_ai.input.messages")
+        [assistant] = self._messages(root, "gen_ai.output.messages")
+        self.assertEqual(user["parts"][0]["content"], events["gen_ai.user.message"]["gen_ai.prompt"])
+        self.assertEqual(user["parts"][0]["content"], prompt[:1000])
+        self.assertEqual(
+            assistant["parts"][0]["content"], events["gen_ai.assistant.message"]["gen_ai.completion"],
+        )
+        self.assertEqual(len(assistant["parts"][0]["content"]), 1000)
+
+    def test_no_prompt_puts_every_reply_in_the_output(self):
+        root = self._root(("assistant", "One."), ("assistant", "Two."))
+        self.assertIsNone(_get_attr(root, "gen_ai.input.messages"))
+        self.assertEqual(self._messages(root, "gen_ai.output.messages"), [_text("assistant", "One.", "Two.")])
+
+    def test_prompt_without_a_reply_has_no_output(self):
+        root = self._root(("user", "Hello"))
+        self.assertEqual(self._messages(root, "gen_ai.input.messages"), [_text("user", "Hello")])
+        self.assertIsNone(_get_attr(root, "gen_ai.output.messages"))
+
+    def test_empty_and_wrong_typed_text_is_skipped(self):
+        root = self._root(("user", ""), ("assistant", 5), ("user", ["x"]), ("assistant", None))
+        self.assertIsNone(_get_attr(root, "gen_ai.input.messages"))
+        self.assertIsNone(_get_attr(root, "gen_ai.output.messages"))
+        root = self._root(("user", "Go"), ("assistant", {"a": 1}), ("assistant", "Went."))
+        self.assertEqual(self._messages(root, "gen_ai.input.messages"), [_text("user", "Go")])
+        self.assertEqual(self._messages(root, "gen_ai.output.messages"), [_text("assistant", "Went.")])
+
+    def test_empty_session_has_no_messages(self):
+        root = _genai_spans([])[0]
+        self.assertIsNone(_get_attr(root, "gen_ai.input.messages"))
+        self.assertIsNone(_get_attr(root, "gen_ai.output.messages"))
+
+
+class TestGenAIToolCallContent(unittest.TestCase):
+    """execute_tool spans carry gen_ai.tool.call.arguments and
+    gen_ai.tool.call.result, the text input.value and output.value carry."""
+
+    def _span(self, arguments, *rest):
+        call = _event(EventType.TOOL_CALL, 1001.0, "call1", tool_name="Bash", arguments=arguments)
+        spans = _genai_spans([call, *rest])
+        (span,) = spans[1:]
+        return span
+
+    def _result(self, result):
+        return _event(EventType.TOOL_RESULT, 1002.0, parent_id="call1", result=result)
+
+    def test_arguments_and_result(self):
+        span = self._span({"command": "ls -la", "timeout": 5}, self._result("a.txt\nb.txt"))
+        arguments = _get_attr(span, "gen_ai.tool.call.arguments")
+        self.assertEqual(json.loads(arguments), {"command": "ls -la", "timeout": 5})
+        self.assertEqual(arguments, _get_attr(span, "input.value"))
+        self.assertEqual(_get_attr(span, "gen_ai.tool.call.result"), "a.txt\nb.txt")
+        self.assertEqual(_get_attr(span, "gen_ai.tool.call.result"), _get_attr(span, "output.value"))
+        # The older keys stay.
+        self.assertEqual(_get_attr(span, "gen_ai.tool.input.command"), "ls -la")
+        self.assertEqual(_get_attr(span, "gen_ai.tool.output"), "a.txt\nb.txt")
+
+    def test_structured_result_is_json(self):
+        span = self._span({"path": "a"}, self._result({"files": ["a", "b"]}))
+        self.assertEqual(json.loads(_get_attr(span, "gen_ai.tool.call.result")), {"files": ["a", "b"]})
+
+    def test_result_is_cut_like_output_value(self):
+        span = self._span({"path": "a"}, self._result("x" * 2000))
+        self.assertEqual(_get_attr(span, "gen_ai.tool.call.result"), "x" * 500)
+
+    def test_long_arguments_stay_a_json_object_of_the_cut_values(self):
+        span = self._span({"path": "a.py", "content": "y" * 5000}, self._result("ok"))
+        self.assertEqual(
+            json.loads(_get_attr(span, "gen_ai.tool.call.arguments")),
+            {"path": "a.py", "content": "y" * 200},
+        )
+        # input.value is the cut JSON text, which no longer parses.
+        self.assertEqual(_get_attr(span, "input.mime_type"), "text/plain")
+        self.assertEqual(len(_get_attr(span, "input.value")), 1000)
+
+    def test_arguments_that_are_not_an_object_are_carried_as_text(self):
+        span = self._span("ls -la", self._result("ok"))
+        self.assertEqual(_get_attr(span, "gen_ai.tool.call.arguments"), "ls -la")
+
+    def test_no_arguments_and_no_result_give_no_content(self):
+        span = self._span({}, self._result(""))
+        self.assertIsNone(_get_attr(span, "gen_ai.tool.call.arguments"))
+        self.assertIsNone(_get_attr(span, "gen_ai.tool.call.result"))
+
+    def test_failed_call_and_call_without_a_result_carry_their_arguments(self):
+        error = _event(EventType.ERROR, 1002.0, parent_id="call1", error="exit 1")
+        for rest in ((error,), ()):
+            with self.subTest(error=bool(rest)):
+                span = self._span({"command": "false"}, *rest)
+                self.assertEqual(_get_attr(span, "gen_ai.tool.call.arguments"), '{"command":"false"}')
+                self.assertIsNone(_get_attr(span, "gen_ai.tool.call.result"))
+
+    def test_chat_spans_carry_no_content(self):
+        request = _event(EventType.LLM_REQUEST, 1001.0, "req1", model="gpt-4o", messages=[{"role": "user"}])
+        response = _event(EventType.LLM_RESPONSE, 1002.0, parent_id="req1", model="gpt-4o", text="hi")
+        (chat,) = _genai_spans([request, response])[1:]
+        self.assertIsNone(_get_attr(chat, "gen_ai.input.messages"))
+        self.assertIsNone(_get_attr(chat, "gen_ai.output.messages"))
+
+
+class TestGenAIErrorToolName(unittest.TestCase):
+    def test_error_without_a_tool_name_takes_the_calls(self):
+        # The @trace_tool decorator records the tool name only on the call.
+        call = _event(EventType.TOOL_CALL, 1001.0, "call1", tool_name="Read", arguments={"path": "a"})
+        error = _event(EventType.ERROR, 1002.0, parent_id="call1", error="not found")
+        (span,) = _genai_spans([call, error])[1:]
+        self.assertEqual(span["name"], "execute_tool Read")
+        self.assertEqual(_get_attr(span, "gen_ai.tool.name"), "Read")
+
+    def test_lone_error_is_still_named_error(self):
+        (span,) = _genai_spans([_event(EventType.ERROR, 1002.0, error="boom")])[1:]
+        self.assertEqual(span["name"], "execute_tool error")
+
+
+class TestGenAIRetryLinks(unittest.TestCase):
+    LINK_ATTRS = [{"key": "agent.strace.link.type", "value": {"stringValue": "retry_of"}}]
+
+    def test_tool_retry_links_to_the_failed_attempt(self):
+        spans = _genai_spans([
+            _event(EventType.TOOL_CALL, 1001.0, "call1", tool_name="Bash", arguments={"command": "make"}),
+            _event(EventType.ERROR, 1002.0, parent_id="call1", error="exit 2"),
+            _event(EventType.TOOL_CALL, 1003.0, "call2", tool_name="Bash",
+                   arguments={"command": "make"}, retry_of="call1"),
+            _event(EventType.TOOL_RESULT, 1004.0, parent_id="call2", result="ok"),
+        ])
+        _, first, retry = spans
+        self.assertEqual(retry["links"], [
+            {"traceId": first["traceId"], "spanId": first["spanId"], "attributes": self.LINK_ATTRS},
+        ])
+        self.assertNotIn("links", first)
+
+    def test_model_request_retry_links_to_the_failed_request(self):
+        spans = _genai_spans([
+            _event(EventType.LLM_REQUEST, 1001.0, "req1", model="gpt-4o"),
+            _event(EventType.ERROR, 1002.0, parent_id="req1", error="overloaded"),
+            _event(EventType.LLM_REQUEST, 1003.0, "req2", model="gpt-4o", retry_of="req1"),
+            _event(EventType.LLM_RESPONSE, 1004.0, parent_id="req2", model="gpt-4o"),
+        ])
+        _, first, retry = spans
+        self.assertEqual((first["name"], retry["name"]), ("chat gpt-4o", "chat gpt-4o"))
+        self.assertEqual(first["status"]["code"], 2)
+        self.assertEqual(retry["links"], [
+            {"traceId": first["traceId"], "spanId": first["spanId"], "attributes": self.LINK_ATTRS},
+        ])
+
+    def test_retry_of_a_result_event_links_to_its_call_span(self):
+        spans = _genai_spans([
+            _event(EventType.TOOL_CALL, 1001.0, "call1", tool_name="Bash"),
+            _event(EventType.TOOL_RESULT, 1002.0, "res1", parent_id="call1", result="flaky"),
+            _event(EventType.TOOL_CALL, 1003.0, "call2", tool_name="Bash", retry_of="res1"),
+        ])
+        _, first, retry = spans
+        self.assertEqual(retry["links"][0]["spanId"], first["spanId"])
+
+    def test_no_link_to_an_unknown_event_or_to_itself(self):
+        for retry_of in ("missing", "call2", "", None, {"id": "call1"}):
+            with self.subTest(retry_of=retry_of):
+                spans = _genai_spans([
+                    _event(EventType.TOOL_CALL, 1001.0, "call1", tool_name="Bash"),
+                    _event(EventType.TOOL_CALL, 1003.0, "call2", tool_name="Bash", retry_of=retry_of),
+                ])
+                self.assertFalse(any("links" in span for span in spans))
+
+
 if __name__ == "__main__":
     unittest.main()

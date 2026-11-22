@@ -438,6 +438,24 @@ class TestBuildTreeEdgeCases(unittest.TestCase):
         self.assertEqual(len(node.children), 0)
         tmp.cleanup()
 
+    def test_child_with_unusable_start_time_sorts_last(self):
+        # main raised TypeError comparing "soon" with a float, so tree and
+        # export --include-subagents printed a traceback.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store = TraceStore(tmp.name)
+        store.create_session(SessionMeta(session_id="rootsort", started_at=1.0))
+        for sid, started in (("late0001", 3.0), ("early001", 2.0), ("bad00001", 2.5)):
+            store.create_session(SessionMeta(session_id=sid, started_at=started, parent_session_id="rootsort"))
+        path = store.base_dir / "bad00001" / "meta.json"
+        meta = json.loads(path.read_text(encoding="utf-8"))
+        meta["started_at"] = "soon"
+        path.write_text(json.dumps(meta), encoding="utf-8")
+
+        tree = build_tree(store, "rootsort")
+
+        self.assertEqual([c.meta.session_id for c in tree.children], ["early001", "late0001", "bad00001"])
+
 
 class TestInSessionSubagentAttribution(unittest.TestCase):
     AGENT = "d0000011-0000-4000-8000-000000000011"
