@@ -341,6 +341,23 @@ class TestAgentEvidenceCorpus(unittest.TestCase):
                     ["session_active" if allow_active else "missing_session_end"],
                 )
 
+    def test_allow_active_does_not_hide_a_finalized_missing_outcome(self):
+        for allow_active in (False, True):
+            with self.subTest(allow_active=allow_active):
+                report = validate_trace_directory(
+                    CORPUS_ROOT / "incomplete-missing-outcome",
+                    allow_active=allow_active,
+                )
+                self.assertEqual(report.status, "partial")
+                self.assertEqual(report.exit_code, 1)
+                self.assertFalse(report.conformant)
+                self.assertIn("incomplete", report.labels)
+                self.assertNotIn("complete", report.labels)
+                self.assertEqual(
+                    [(finding.code, finding.event_id) for finding in report.findings],
+                    [("unpaired_tool_call", "call")],
+                )
+
     def test_replay_equivalence_uses_existing_regression_projection(self):
         case = CORPUS_ROOT / "replay-drift"
         events = [

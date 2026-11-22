@@ -1266,7 +1266,7 @@ system links such as `/tmp` on macOS. Other symlinks on it are refused; see
 | Flag | Description |
 |---|---|
 | `--format text\|json` | Human-readable result or the versioned validation report |
-| `--allow-active` | Treat absent terminal outcomes as in-flight evidence instead of finalized evidence |
+| `--allow-active` | Treat requests in the open span as in flight; requests followed by a recorded session end still require outcomes |
 | `--replay-baseline FILE` | Compare tool-call behavior with an existing regression fixture; symbolic links are rejected, and a symlink in a parent directory must be [root-owned](#symlinked-parent-directories) |
 | `--corpus` | Validate all packaged [Agent Evidence Corpus](agent-evidence-corpus.md) cases and exact expected labels |
 
