@@ -1309,6 +1309,15 @@ class TestRefusedSessions(unittest.TestCase):
 
     def test_writers_refuse_a_line_that_is_not_utf8_and_write_nothing(self):
         reason = "line 2 of events.ndjson is not valid UTF-8; 1 more line is unreadable"
+        good = event_line()
+        # load_events reads CRLF and a lone CR as one line break, so each file
+        # holds the same three lines. The writers read the bytes as written
+        # and must name the same line.
+        files = {
+            "LF": [good, NOT_UTF8_LINE, "{"],
+            "CRLF": [good + "\r", NOT_UTF8_LINE + b"\r", "{\r"],
+            "lone CR": [good.encode("utf-8") + b"\r" + NOT_UTF8_LINE, "{"],
+        }
 
         def event():
             return TraceEvent(EventType.USER_PROMPT, timestamp=2.0, data={}, tenant_id="")
@@ -1318,16 +1327,18 @@ class TestRefusedSessions(unittest.TestCase):
             "append_events": lambda session_id: self.store.append_events(session_id, [event()]),
             "tag_session": lambda session_id: self.store.tag_session(session_id, "team-a"),
         }
-        for name, write in writers.items():
-            with self.subTest(name):
-                session_id = write_session_lines(self.store, [event_line(), NOT_UTF8_LINE, "{"])
-                before = tree_snapshot(self.store.base_dir)
-                with self.assertRaises(UnreadableEventLineError) as raised:
-                    write(session_id)
-                self.assertEqual(
-                    str(raised.exception), f"cannot read session {session_id}: {reason}"
-                )
-                self.assertEqual(tree_snapshot(self.store.base_dir), before)
+        for ending, lines in files.items():
+            for name, write in writers.items():
+                with self.subTest(ending, writer=name):
+                    session_id = write_session_lines(self.store, lines)
+                    self.assert_refused(UnreadableEventLineError, session_id, reason)
+                    before = tree_snapshot(self.store.base_dir)
+                    with self.assertRaises(UnreadableEventLineError) as raised:
+                        write(session_id)
+                    self.assertEqual(
+                        str(raised.exception), f"cannot read session {session_id}: {reason}"
+                    )
+                    self.assertEqual(tree_snapshot(self.store.base_dir), before)
 
 
 class TestRefusedSessionCommands(unittest.TestCase):
