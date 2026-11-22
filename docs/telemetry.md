@@ -86,7 +86,7 @@ The CLI emits three events:
 | Event | Event-specific fields |
 |---|---|
 | `agent_strace_cli_command_completed` | command, subcommand, success, exit code, duration, error type, integration, export format/backend |
-| `agent_strace_session_completed` | provider, capture method, success, duration |
+| `agent_strace_session_completed` | provider, capture method, success, duration when known |
 | `agent_strace_telemetry_enabled` | explicit enablement source |
 
 Every event also includes the anonymous installation ID, telemetry schema

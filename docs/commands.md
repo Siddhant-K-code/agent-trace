@@ -155,7 +155,7 @@ uses it. See [Platform-team install](platform-install.md#metadata-only-capture).
 | `stop` | Assistant response or provider stop metadata |
 | `subagent-start` | Subagent start in the parent session: agent type and name, plus the child session ID for GitHub Copilot CLI or the agent ID for Codex |
 | `subagent-stop` | Subagent stop in the parent session, with the same fields and the stop reason when the provider sends one. For Codex, also the subagent's final message as `text` and its `agent_transcript_path`, both redacted |
-| `session-end` | Finish the active session and clear its hook state. A repeated `session-end` for a session that already ended, and was not resumed since, records nothing and keeps the first end time |
+| `session-end` | Finish the active session and clear its hook state. Records `duration_ms`, the time since `started_at` in `meta.json`, and stores it as `total_duration_ms`. When `started_at` is not a usable time, or is later than the end, the session still ends, `session_end` has no `duration_ms`, and `total_duration_ms` is 0. A repeated `session-end` for a session that already ended, and was not resumed since, records nothing and keeps the first end time |
 | `post-model-request` | Codex only: one `llm_response` per model request with the model, status, error, turn ID and token usage, plus `agent_id` and `agent_type` for a subagent's request |
 
 Provider-specific aliases in generated configurations are normalized to these
