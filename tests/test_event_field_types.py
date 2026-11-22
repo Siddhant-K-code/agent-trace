@@ -56,6 +56,7 @@ from agent_trace import (
     timeline,
     why,
 )
+from agent_trace.annotate import Annotation
 from agent_trace.models import SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
 
@@ -233,6 +234,8 @@ class TestDuration(StoreTestCase):
         for name, value in BAD_DURATIONS.items():
             with self.subTest(value=name):
                 self.assertEqual(_exports(_with("duration_ms", value, *TIMED)), missing)
+        # 1e308 is a usable number, but in nanoseconds it is too large for a float.
+        self.assertEqual(_exports(_with("duration_ms", 1e308, *TIMED)), missing)
         spans = _spans(otlp.session_to_otlp(META, _events(_records())))
         bash = next(span for span in spans if span["name"] == "tool/Bash")
         self.assertEqual(int(bash["endTimeUnixNano"]) - int(bash["startTimeUnixNano"]), 10**9)
@@ -294,6 +297,42 @@ class TestIds(StoreTestCase):
                     parents = {span["parentSpanId"] for span in spans if span.get("parentSpanId")}
                     self.assertLessEqual(parents, set(span_ids))
 
+    def test_otlp_exports_read_a_bad_id_as_empty(self):
+        for field in ("event_id", "parent_id"):
+            expected = _exports(_with(field, ""))
+            for name, value in BAD_IDS.items():
+                with self.subTest(field=field, value=name):
+                    self.assertEqual(_exports(_with(field, value)), expected)
+
+    def test_otlp_span_ids_stay_unique_at_one_timestamp(self):
+        # Every event has the same timestamp and no usable ID, so only its
+        # position tells the fallback span IDs apart.
+        for name, value in {**BAD_IDS, "empty": ""}.items():
+            records = _with("event_id", value)
+            for record in records:
+                record["timestamp"] = START
+            for export in (otlp.session_to_otlp, otlp.session_to_otlp_genai):
+                with self.subTest(value=name, export=export.__name__):
+                    span_ids = [span["spanId"] for span in _spans(export(META, _events(records)))]
+                    self.assertEqual(len(set(span_ids)), len(span_ids), span_ids)
+
+    def test_session_tree_export_gives_each_span_its_own_id(self):
+        # Both sessions store "" as each event_id and have the same timestamps,
+        # so only the session ID tells their fallback span IDs apart. The call
+        # that starts the child keeps its ID.
+        traces = self.tmpdir() / ".agent-traces"
+        parent = _with("event_id", "")
+        parent[BASH_CALL]["event_id"] = "c1"
+        child = _records(SID2)
+        for record in child:
+            record["event_id"] = ""
+        _write_session(traces, SID, START, parent)
+        _write_session(traces, SID2, START, child, parent_session_id=SID, parent_event_id="c1")
+        spans = _spans(otlp.tree_to_otlp(TraceStore(str(traces), read_only=True), SID))
+        self.assertEqual(sum(span["name"].startswith("agent-session") for span in spans), 2)
+        span_ids = [span["spanId"] for span in spans]
+        self.assertEqual(len(set(span_ids)), len(span_ids), span_ids)
+
     def test_a2a_call_span_ids_stay_valid_and_unique(self):
         def a2a_call(offset, event_id):
             return {
@@ -333,6 +372,18 @@ class TestIds(StoreTestCase):
                 with self.subTest(field=field, value=name):
                     records = _with(field, value, position)
                     self.assertEqual((health(records), projection(records)), expected)
+
+    def test_review_lists_an_orphan_with_a_bad_id_as_empty(self):
+        def projection(value):
+            records = _records()
+            records[BASH_RESULT].update(event_id=value, parent_id="gone")
+            return strict_json(json.dumps(review.build_review_projection(_events(records)).to_dict()))
+
+        expected = projection("")
+        self.assertEqual(expected["orphaned_event_ids"], [""])
+        for name, value in BAD_IDS.items():
+            with self.subTest(value=name):
+                self.assertEqual(projection(value), expected)
 
     def test_correlation_errors_and_why_link_nothing(self):
         def correlate(records):
@@ -395,6 +446,48 @@ class TestBuiltJson(StoreTestCase):
         self.assertEqual(
             session_review(_nan_fields(_records())), session_review(_empty_fields(_records())),
         )
+        # BASH_CALL is a parent, and BASH_RESULT is its child.
+        for position in (BASH_CALL, BASH_RESULT):
+            expected = session_review(_with("event_id", "", position))
+            for name, value in BAD_IDS.items():
+                with self.subTest(position=position, value=name):
+                    self.assertEqual(session_review(_with("event_id", value, position)), expected)
+
+    def test_session_review_with_an_offset_annotation(self):
+        # The annotation names no event, so it goes to the event nearest its
+        # offset: BASH_RESULT.
+        note = Annotation(
+            annotation_id="a1", session_id=SID, offset_seconds=4.0,
+            label="root-cause", note="n", created_at=START,
+        )
+
+        def session_review(value):
+            store = self.store(_with("event_id", value, BASH_RESULT))
+            path = Path(store.base_dir) / SID / "annotations.jsonl"
+            path.write_text(note.to_json() + "\n", encoding="utf-8")
+            built = review_surface.build_session_review(store, SID)
+            return strict_json(json.dumps(built))
+
+        expected = session_review("")
+        annotations = expected["items"][BASH_RESULT]["annotations"]
+        self.assertEqual([annotation["annotation_id"] for annotation in annotations], ["a1"])
+        for name, value in BAD_IDS.items():
+            with self.subTest(value=name):
+                self.assertEqual(session_review(value), expected)
+
+    def test_minimized_review_links_nothing_through_an_empty_id(self):
+        # BASH_CALL's ID reads as "", like the parent_id of an item with no
+        # parent. No item may link to it through that empty ID.
+        store = self.store(_with("event_id", NAN, BASH_CALL))
+        built = review_surface.build_session_review(store, SID)
+        payload = review_surface.build_minimized_review_payload(built)
+        parents = {
+            position: item["parent_sequence"]
+            for position, item in enumerate(payload["items"])
+            if item["parent_sequence"] is not None
+        }
+        # Sequences count from 1.
+        self.assertEqual(parents, {RESPONSE: REQUEST + 1, EDIT_RESULT: EDIT_CALL + 1})
 
     def test_eu_ai_act_export(self):
         store = self.store(_nan_fields(_records()))
@@ -409,6 +502,21 @@ class TestBuiltJson(StoreTestCase):
         self.assertTrue(broken)
         self.assertEqual(set(broken), {""})
 
+    def test_compliance_export(self):
+        def export(records):
+            # A blocked call is listed as an anomalous tool call.
+            records[BASH_CALL]["data"]["blocked"] = True
+            built = compliance.export_compliance(self.store(records), SID, framework="all")
+            report = strict_json(json.dumps(built))
+            report.pop("exported_at")
+            for framework in report["frameworks"].values():
+                framework.pop("generated_at")
+            return report
+
+        report = export(_nan_fields(_records()))
+        self.assertEqual(sorted(report["frameworks"]), ["eu-ai-act", "hipaa", "soc2"])
+        self.assertEqual(report, export(_empty_fields(_records())))
+
     def test_langfuse_observation_ids(self):
         for name, value in {**BAD_IDS, "empty": ""}.items():
             with self.subTest(value=name):
@@ -420,10 +528,20 @@ class TestBuiltJson(StoreTestCase):
     def test_policy_coverage(self):
         policy = self.tmpdir() / "policy.json"
         policy.write_text(json.dumps({"commands": {"allow": ["pytest *"]}}), encoding="utf-8")
-        store = self.store(_nan_fields(_records()))
-        coverage = policy_backtest.policy_coverage(store, str(policy), days=None)
-        data = strict_json(json.dumps(coverage.to_dict(show_uncovered=True)))
-        self.assertEqual([call["event_id"] for call in data["uncovered_calls"]], ["", ""])
+
+        def uncovered(records):
+            coverage = policy_backtest.policy_coverage(self.store(records), str(policy), days=None)
+            data = strict_json(json.dumps(coverage.to_dict(show_uncovered=True)))
+            return [call["event_id"] for call in data["uncovered_calls"]]
+
+        self.assertEqual(uncovered(_nan_fields(_records())), ["", ""])
+        # Data and arguments that are not objects take their own paths.
+        for name, value in BAD_IDS.items():
+            with self.subTest(value=name):
+                records = _with("event_id", value)
+                records[BASH_CALL]["data"] = ["not", "an", "object"]
+                records[EDIT_CALL]["data"]["arguments"] = "src/a.py"
+                self.assertEqual(uncovered(records), ["", ""])
 
     def test_replay_page(self):
         page = replay.replay_to_html(self.store(_nan_fields(_records())), SID)
@@ -439,9 +557,21 @@ class TestBuiltJson(StoreTestCase):
             self.assertEqual(
                 {(event["event_id"], event["duration_ms"]) for event in events}, {("", None)},
             )
-        # An event without a usable ID is never highlighted.
-        for name in ("onlyA", "onlyB"):
-            self.assertEqual(_script_json(page, rf"^const {name} = new Set\((.*)\);$"), [])
+
+    def test_replay_diff_page_highlights_only_events_with_an_id(self):
+        # B runs Write where A runs Edit, so each side has a call and a result
+        # of its own. Only the result has a usable ID.
+        for name, value in BAD_IDS.items():
+            a = _with("event_id", value, EDIT_CALL)
+            b = _records(SID2)
+            for position in (EDIT_CALL, EDIT_RESULT):
+                b[position]["data"]["tool_name"] = "Write"
+            b[EDIT_CALL]["event_id"] = value
+            page = replay.replay_to_html_diff(self.store(a, b), SID, SID2)
+            for side in ("onlyA", "onlyB"):
+                with self.subTest(value=name, side=side):
+                    found = _script_json(page, rf"^const {side} = new Set\((.*)\);$")
+                    self.assertEqual(found, ["e08"])
 
 
 class TestRedacted(StoreTestCase):
@@ -458,10 +588,12 @@ class TestRedacted(StoreTestCase):
         self.assertEqual(attributes["agent.strace.redacted_event_count"], {"intValue": "1"})
 
     def test_disclosure_review_and_runner_summary_read_other_values_as_false(self):
+        preview = disclosure.build_disclosure_preview(_events(_with("redacted", MISSING)))
         for name, value in NOT_TRUE.items():
             with self.subTest(value=name):
                 events = _events(_with("redacted", value))
                 self.assertEqual(disclosure.count_redacted_events(events), 0)
+                self.assertEqual(disclosure.build_disclosure_preview(events), preview)
                 self.assertEqual(runner_summary.output_text(events[BASH_RESULT]), "print('hi')")
                 items = review.build_review_projection(events).to_dict()["items"]
                 self.assertEqual(
@@ -504,18 +636,27 @@ class TestCommands(CliTestCase):
                     self.assertEqual(found, expected)
         self.assertIn("avg: 1000ms", self.output(_records(), "stats", SID)[1])
 
+    def test_stats_pairs_no_call_through_an_empty_id(self):
+        # The call's event_id and its result's parent_id both read as "".
+        for name, value in {**BAD_IDS, "empty": ""}.items():
+            with self.subTest(value=name):
+                code, out, _ = self.output(_linked(value), "stats", SID)
+                self.assertEqual(code, 0)
+                self.assertNotIn("avg: 1000ms", out)
+
     def test_read_only_commands(self):
         commands = (
-            ("replay", SID), ("tree", SID), ("explain", SID), ("timeline", SID), ("cost", SID),
-            ("stats",), ("health", SID), ("review", SID), ("why", SID, "2"),
-            ("pr-comment", "--dry-run"),
+            ("replay", SID), ("replay", SID, "--expand-subagents"), ("tree", SID), ("explain", SID),
+            ("timeline", SID), ("cost", SID), ("stats",), ("health", SID), ("review", SID),
+            ("why", SID, "2"), ("pr-comment", "--dry-run"),
         )
+        # A dict or a list cannot be a key of a dict or a set.
         wrong = _records()
         for record in wrong:
-            record.update(event_id={"id": "x"}, parent_id=5, duration_ms="1000", redacted="yes")
+            record.update(event_id={"id": "x"}, parent_id=["x"], duration_ms="1000", redacted="yes")
         empty = _empty_fields(_records())
         for argv in commands:
-            with self.subTest(command=argv[0]):
+            with self.subTest(command=" ".join(argv)):
                 found = self.output(wrong, *argv)
                 self.assertNotIn("Traceback", found[2])
                 self.assertEqual(found, self.output(empty, *argv))
