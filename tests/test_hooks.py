@@ -53,6 +53,7 @@ from agent_trace.hooks import (
 from agent_trace.models import EventType
 from agent_trace.redact import redact_data, redaction_marker
 from agent_trace.store import TraceStore
+from agent_trace.telemetry import SESSION_COMPLETED
 
 try:
     from _concurrency import run_concurrently
@@ -106,6 +107,105 @@ class TestHooksSessionLifecycle(unittest.TestCase):
 
         # active session should be cleared
         self.assertIsNone(_read_active_session())
+
+    def _end_with_stored_start(self, n, started_at, **stored):
+        """End a session whose meta.json holds ``started_at``, given as JSON
+        text, as another writer can leave it. Return its trace dir and ID.
+
+        The session has a pending tool call, so the end must clear it too.
+        """
+        root = Path(self.tmpdir) / f"stored-start-{n}"
+        os.environ["AGENT_TRACE_DIR"] = str(root)
+        sid = f"storedstart{n:05d}"
+        handle_session_start({"session_id": sid, "source": "startup"})
+        handle_pre_tool({
+            "session_id": sid,
+            "tool_name": "Bash",
+            "tool_input": {"command": "true"},
+            "tool_use_id": "t1",
+        })
+        meta_path = root / sid / "meta.json"
+        meta = json.loads(meta_path.read_text())
+        meta.update(stored, started_at="@start@")
+        meta_path.write_text(json.dumps(meta).replace('"@start@"', started_at))
+        self.assertEqual(len(list(root.glob(".active-session*"))), 2)
+        self.assertEqual(len(list(root.glob(".pending-calls*.json"))), 1)
+
+        handle_session_end({"session_id": sid, "reason": "exit", "cwd": "/repo"})
+        return root, sid
+
+    def test_session_end_without_a_usable_start_still_ends_the_session(self):
+        def reject(token):
+            raise ValueError(f"{token} is not JSON")
+
+        bad_starts = ('"x"', "null", "[]", "true", "NaN", "-1e308", "1e308", "4102444800.0")
+        for n, started_at in enumerate(bad_starts):
+            with self.subTest(started_at=started_at):
+                root, sid = self._end_with_stored_start(n, started_at)
+
+                store = TraceStore(root)
+                meta = store.load_meta(sid)
+                self.assertIsNotNone(meta.ended_at)
+                self.assertEqual(meta.total_duration_ms, 0)
+                events = store.load_events(sid)
+                ends = [e for e in events if e.event_type == EventType.SESSION_END]
+                self.assertEqual(len(ends), 1)
+                self.assertNotIn("duration_ms", ends[0].data)
+                self.assertEqual(ends[0].data, {"reason": "exit", "cwd": "/repo"})
+
+                for line in (root / sid / "events.ndjson").read_text().splitlines():
+                    json.loads(line, parse_constant=reject)
+                meta_text = (root / sid / "meta.json").read_text()
+                if started_at == "NaN":
+                    # The end rewrites the whole record, so the stored start
+                    # stays as it is. Nothing else may be a constant.
+                    self.assertEqual(meta_text.count('"started_at": NaN'), 1)
+                    meta_text = meta_text.replace('"started_at": NaN', '"started_at": null')
+                json.loads(meta_text, parse_constant=reject)
+
+                self.assertEqual(list(root.glob(".active-session*")), [])
+                self.assertEqual(list(root.glob(".pending-calls*.json")), [])
+                self.assertIsNone(_read_active_session())
+                self.assertEqual(_read_pending_calls(), {})
+
+    def test_session_end_without_a_usable_start_replaces_a_stored_total(self):
+        root, sid = self._end_with_stored_start(
+            0, '"x"', total_duration_ms=5000, ended_at=None
+        )
+
+        meta = TraceStore(root).load_meta(sid)
+        self.assertIsNotNone(meta.ended_at)
+        self.assertEqual(meta.total_duration_ms, 0)
+
+    def test_session_end_telemetry_sends_only_a_usable_duration(self):
+        started_at = time.time() - 2.0
+        with patch("agent_trace.hooks._product_telemetry.capture") as capture:
+            root, sid = self._end_with_stored_start(0, json.dumps(started_at))
+
+        store = TraceStore(root)
+        meta = store.load_meta(sid)
+        (end,) = [e for e in store.load_events(sid) if e.event_type == EventType.SESSION_END]
+        self.assertEqual(meta.total_duration_ms, (meta.ended_at - started_at) * 1000)
+        self.assertEqual(end.data["duration_ms"], meta.total_duration_ms)
+        capture.assert_called_once()
+        event, properties = capture.call_args.args
+        self.assertEqual(event, SESSION_COMPLETED)
+        self.assertIsInstance(properties["duration_ms"], int)
+        self.assertEqual(properties["duration_ms"], int(meta.total_duration_ms))
+
+        for n, bad_start in enumerate(('"x"', "NaN", "4102444800.0"), start=1):
+            with self.subTest(started_at=bad_start), patch(
+                "agent_trace.hooks._product_telemetry.capture"
+            ) as capture:
+                self._end_with_stored_start(n, bad_start)
+
+                capture.assert_called_once()
+                event, properties = capture.call_args.args
+                self.assertEqual(event, SESSION_COMPLETED)
+                self.assertEqual(
+                    properties,
+                    {"provider": "claude", "capture_method": "hooks", "success": True},
+                )
 
     def test_session_end_without_start_is_noop(self):
         _clear_active_session()

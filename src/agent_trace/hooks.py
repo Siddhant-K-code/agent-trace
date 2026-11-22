@@ -51,7 +51,14 @@ from pathlib import Path
 
 from .failures import is_failed_response
 from .fileutil import split_lf_lines
-from .models import EventType, SessionMeta, TraceEvent, usable_count
+from .models import (
+    EventType,
+    SessionMeta,
+    TraceEvent,
+    usable_count,
+    usable_number,
+    usable_time,
+)
 from .pairing import hook_call_timestamp, link_response, match_hook_tool_call
 from .redact import redact_data, redact_data_with_status, redaction_enabled
 from .store import (
@@ -747,6 +754,7 @@ def handle_session_end(input_data: dict, provider: str = "claude") -> None:
         return
 
     claimed = False
+    duration_ms: float | None = None
     meta = _load_meta_or_none(store, session_id)
     if meta:
         ended_at = time.time()
@@ -757,17 +765,22 @@ def handle_session_end(input_data: dict, provider: str = "claude") -> None:
         # Reloading under the lock also keeps counters written by concurrent
         # hooks since the load above.
         def _end(current: SessionMeta) -> None:
-            nonlocal claimed
+            nonlocal claimed, duration_ms
             if current.ended_at is not None:
                 return
             claimed = True
             current.ended_at = ended_at
-            current.total_duration_ms = (ended_at - current.started_at) * 1000
+            # meta.json can hold any value as started_at. A start that is not
+            # a usable time, or that is later than the end, gives no duration.
+            started = usable_time(current.started_at)
+            if started is not None:
+                duration_ms = usable_number((ended_at - started) * 1000)
+            current.total_duration_ms = 0 if duration_ms is None else duration_ms
 
         meta = _mutate_meta_or_none(store, session_id, _end)
 
     if meta is not None and claimed:
-        event_data = {"duration_ms": meta.total_duration_ms}
+        event_data = {} if duration_ms is None else {"duration_ms": duration_ms}
         for key in ("reason", "stop_reason", "cwd", "transcript_path", "hook_event_name"):
             if input_data.get(key) not in (None, ""):
                 event_data[key] = input_data.get(key)
@@ -782,15 +795,14 @@ def handle_session_end(input_data: dict, provider: str = "claude") -> None:
             ),
         )
         _write_session_meta(meta)
-        _product_telemetry.capture(
-            _product_telemetry.SESSION_COMPLETED,
-            {
-                "provider": provider,
-                "capture_method": "hooks",
-                "success": usable_count(meta.errors) == 0,
-                "duration_ms": int(meta.total_duration_ms),
-            },
-        )
+        properties = {
+            "provider": provider,
+            "capture_method": "hooks",
+            "success": usable_count(meta.errors) == 0,
+        }
+        if duration_ms is not None:
+            properties["duration_ms"] = int(duration_ms)
+        _product_telemetry.capture(_product_telemetry.SESSION_COMPLETED, properties)
 
     _clear_active_session(provider=provider)
     _clear_pending_calls(store, session_id, provider=provider)
