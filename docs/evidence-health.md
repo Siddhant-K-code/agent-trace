@@ -33,7 +33,9 @@ The calculation is deterministic and local. It performs no network calls.
 
 For an active session (`session_finalized=False`), a tool call or LLM request
 without a terminal outcome is treated as in flight rather than as missing
-evidence. Orphan, duplicate, invalid, and out-of-order outcomes are still
+evidence only if no recorded `session_end` follows that request. A missing
+outcome from a closed span stays a gap, even if a later resume is still active.
+Orphan, duplicate, invalid, and out-of-order outcomes are still
 reported immediately.
 
 ## Session boundaries

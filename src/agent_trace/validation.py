@@ -729,7 +729,9 @@ def validate_trace_directory(
     complete = (
         health.observed_start
         and health.observed_end
-        and not reason_codes.intersection(_OUTCOME_CODES)
+        and not reason_codes.intersection(
+            _OUTCOME_CODES | {"missing_session_start", "missing_session_end", "session_active"}
+        )
     )
     labels.add("complete" if complete else "incomplete")
     if any(event.redacted for event in events) or meta.redacted:

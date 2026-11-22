@@ -191,6 +191,44 @@ class TestEvidenceHealth(unittest.TestCase):
         self.assertEqual(result.status, EvidenceHealthStatus.UNKNOWN)
         self.assertEqual([reason.code for reason in result.reasons], ["session_active"])
 
+    def test_active_flag_does_not_hide_a_request_closed_by_an_end(self):
+        for request_type, code in (
+            (EventType.TOOL_CALL, "unpaired_tool_call"),
+            (EventType.LLM_REQUEST, "unpaired_llm_request"),
+        ):
+            with self.subTest(request_type=request_type):
+                events = [
+                    start(1.0, "start", "startup"),
+                    event(request_type, 2.0, "closed-request"),
+                    event(EventType.SESSION_END, 3.0, "end"),
+                ]
+                result = assess_evidence_health(events, session_finalized=False)
+                self.assertEqual(result.status, EvidenceHealthStatus.PARTIAL)
+                self.assertEqual(
+                    [(reason.code, reason.event_id) for reason in result.reasons],
+                    [(code, "closed-request")],
+                )
+
+    def test_active_resume_only_defers_requests_after_the_last_end(self):
+        for request_type, code in (
+            (EventType.TOOL_CALL, "unpaired_tool_call"),
+            (EventType.LLM_REQUEST, "unpaired_llm_request"),
+        ):
+            with self.subTest(request_type=request_type):
+                events = [
+                    start(1.0, "start", "startup"),
+                    event(request_type, 2.0, "closed-request"),
+                    event(EventType.SESSION_END, 3.0, "end"),
+                    start(4.0, "resume", "resume"),
+                    event(request_type, 5.0, "open-request"),
+                ]
+                result = assess_evidence_health(events, session_finalized=False)
+                self.assertEqual(result.status, EvidenceHealthStatus.PARTIAL)
+                self.assertEqual(
+                    [(reason.code, reason.event_id) for reason in result.reasons],
+                    [("session_active", ""), (code, "closed-request")],
+                )
+
     def test_active_session_still_reports_orphan_outcomes(self):
         events = [
             event(EventType.SESSION_START, 1.0, "start"),

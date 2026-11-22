@@ -28,6 +28,7 @@ from agent_trace.store import TraceStore
 from agent_trace.validation import (
     CORPUS_SCHEMA,
     TRACE_SCHEMA_VERSION,
+    _corpus_root,
     _json_type_matches,
     _read_trace_files,
     _schema_errors,
@@ -36,6 +37,7 @@ from agent_trace.validation import (
     validate_packaged_corpus,
     validate_trace_directory,
 )
+from examples.reliability.run import CASES, main as reliability_main
 
 
 # Resolved, as in _corpus_root(): agent_trace may be imported through
@@ -164,7 +166,7 @@ class TestAgentEvidenceCorpus(unittest.TestCase):
     def test_all_expected_labels_match_validator_output(self):
         result = validate_packaged_corpus()
         self.assertTrue(result["matched"])
-        self.assertEqual(result["case_count"], 12)
+        self.assertEqual(result["case_count"], 14)
         self.assertTrue(all(case["matched"] for case in result["cases"]))
 
     def test_corpus_root_drops_dotdot_from_import_path(self):
@@ -241,7 +243,7 @@ class TestAgentEvidenceCorpus(unittest.TestCase):
         self.assertTrue(Path(data["file"]).is_relative_to(link), data["file"])
         self.assertEqual(data["root"], data["real"])
         corpus = data["corpus"]
-        self.assertEqual(corpus["case_count"], 12)
+        self.assertEqual(corpus["case_count"], 14)
         for case in corpus["cases"]:
             codes = [finding["code"] for finding in case["actual"]["findings"]]
             with self.subTest(case=case["id"]):
@@ -265,7 +267,7 @@ class TestAgentEvidenceCorpus(unittest.TestCase):
             timeout=120,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("Agent Evidence Corpus: matched (12 cases)", result.stdout)
+        self.assertIn("Agent Evidence Corpus: matched (14 cases)", result.stdout)
 
     def test_corpus_covers_required_evidence_states(self):
         result = validate_packaged_corpus()
@@ -315,6 +317,46 @@ class TestAgentEvidenceCorpus(unittest.TestCase):
         self.assertEqual(legacy.status, "valid")
         self.assertIn("legacy", legacy.labels)
         self.assertEqual(legacy.hash_chain["state"], "legacy")
+
+    def test_resumed_session_can_finish_without_duplicate_boundaries(self):
+        report = validate_trace_directory(CORPUS_ROOT / "resumed-current")
+        self.assertEqual(report.status, "valid")
+        self.assertEqual(report.evidence_health["status"], "healthy")
+        self.assertIn("complete", report.labels)
+        self.assertEqual(report.findings, ())
+
+    def test_earlier_end_does_not_complete_a_resumed_session(self):
+        for allow_active in (False, True):
+            with self.subTest(allow_active=allow_active):
+                report = validate_trace_directory(
+                    CORPUS_ROOT / "resumed-open", allow_active=allow_active
+                )
+                self.assertTrue(report.evidence_health["observed_end"])
+                self.assertEqual(report.exit_code, 1)
+                self.assertFalse(report.conformant)
+                self.assertIn("incomplete", report.labels)
+                self.assertNotIn("complete", report.labels)
+                self.assertEqual(
+                    [finding.code for finding in report.findings],
+                    ["session_active" if allow_active else "missing_session_end"],
+                )
+
+    def test_allow_active_does_not_hide_a_finalized_missing_outcome(self):
+        for allow_active in (False, True):
+            with self.subTest(allow_active=allow_active):
+                report = validate_trace_directory(
+                    CORPUS_ROOT / "incomplete-missing-outcome",
+                    allow_active=allow_active,
+                )
+                self.assertEqual(report.status, "partial")
+                self.assertEqual(report.exit_code, 1)
+                self.assertFalse(report.conformant)
+                self.assertIn("incomplete", report.labels)
+                self.assertNotIn("complete", report.labels)
+                self.assertEqual(
+                    [(finding.code, finding.event_id) for finding in report.findings],
+                    [("unpaired_tool_call", "call")],
+                )
 
     def test_replay_equivalence_uses_existing_regression_projection(self):
         case = CORPUS_ROOT / "replay-drift"
@@ -378,6 +420,60 @@ class TestAgentEvidenceCorpus(unittest.TestCase):
             report = validate_trace_directory(case, replay_baseline=baseline)
         self.assertEqual(report.status, "invalid")
         self.assertIn("replay_baseline_invalid", report.labels)
+
+
+class TestReliabilityExamples(unittest.TestCase):
+    def test_runner_preserves_incomplete_evidence_and_unknown_active_time(self):
+        out = io.StringIO()
+        with (
+            patch("socket.create_connection", side_effect=AssertionError("example must stay offline")),
+            patch("urllib.request.urlopen", side_effect=AssertionError("example must stay offline")),
+        ):
+            self.assertEqual(reliability_main(out), 0)
+        text = out.getvalue()
+        self.assertIn("Active work time: unknown.", text)
+        resumed = text.split("resumed-current:", 1)[1].split("resumed-open:", 1)[0]
+        self.assertIn("validation=valid; conformant=true; health=healthy", resumed)
+        self.assertIn("Recorded lifetime (ended_at - started_at): 3610s", resumed)
+        self.assertIn("source=resume", resumed)
+        self.assertIn("cumulative duration=5s (not additive)", resumed)
+        self.assertIn("cumulative duration=3610s (not additive)", resumed)
+        self.assertIn("parent=call-resumed; relationship=linked; recorded exit_code=0", resumed)
+        opened = text.split("resumed-open:", 1)[1].split("incomplete-missing-outcome:", 1)[0]
+        self.assertIn("validation=partial; conformant=false; health=partial", opened)
+        self.assertIn("Recorded lifetime (ended_at - started_at): unknown", opened)
+        self.assertIn("relationship=linked; recorded exit_code=0", opened)
+        self.assertIn("Gap: missing_session_end", opened)
+        missing = text.split("incomplete-missing-outcome:", 1)[1].split("terminal-absent:", 1)[0]
+        self.assertIn("validation=partial; conformant=false", missing)
+        self.assertIn("Gap: unpaired_tool_call (call)", missing)
+        terminal = text.split("terminal-absent:", 1)[1]
+        self.assertIn("validation=partial; conformant=false", terminal)
+        self.assertIn("Gap: missing_session_end", terminal)
+
+    def test_documented_runner_is_deterministic_and_does_not_write_fixtures(self):
+        root = _corpus_root()
+        paths = [root / case / name for case in CASES for name in ("meta.json", "events.ndjson")]
+        before = {path: hashlib.sha256(path.read_bytes()).digest() for path in paths}
+        entries = sorted(str(path.relative_to(root)) for path in root.rglob("*"))
+        script = SRC_ROOT.parent / "examples" / "reliability" / "run.py"
+        env = _child_env()
+        env["AGENT_STRACE_WORKSPACE"] = "ignored-synthetic-workspace"
+        outputs = []
+        for _ in range(2):
+            result = subprocess.run(
+                [sys.executable, str(script)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                env=env,
+                timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            outputs.append(result.stdout)
+        self.assertEqual(outputs[0], outputs[1])
+        self.assertEqual(before, {path: hashlib.sha256(path.read_bytes()).digest() for path in paths})
+        self.assertEqual(entries, sorted(str(path.relative_to(root)) for path in root.rglob("*")))
 
 
 class TestTraceFileReads(unittest.TestCase):

@@ -23,6 +23,35 @@
       ]
     },
     {
+      "id": "resumed-current",
+      "path": "resumed-current",
+      "expected_status": "valid",
+      "expected_labels": [
+        "complete",
+        "conformant",
+        "hash_chain_legacy",
+        "legacy",
+        "schema_valid",
+        "usage_zero",
+        "valid"
+      ]
+    },
+    {
+      "id": "resumed-open",
+      "path": "resumed-open",
+      "expected_status": "partial",
+      "expected_labels": [
+        "hash_chain_legacy",
+        "incomplete",
+        "legacy",
+        "nonconformant",
+        "partial",
+        "schema_valid",
+        "terminal_absent",
+        "usage_zero"
+      ]
+    },
+    {
       "id": "incomplete-missing-outcome",
       "path": "incomplete-missing-outcome",
       "expected_status": "partial",

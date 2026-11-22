@@ -1266,7 +1266,7 @@ system links such as `/tmp` on macOS. Other symlinks on it are refused; see
 | Flag | Description |
 |---|---|
 | `--format text\|json` | Human-readable result or the versioned validation report |
-| `--allow-active` | Treat absent terminal outcomes as in-flight evidence instead of finalized evidence |
+| `--allow-active` | Treat requests in the open span as in flight; requests followed by a recorded session end still require outcomes |
 | `--replay-baseline FILE` | Compare tool-call behavior with an existing regression fixture; symbolic links are rejected, and a symlink in a parent directory must be [root-owned](#symlinked-parent-directories) |
 | `--corpus` | Validate all packaged [Agent Evidence Corpus](agent-evidence-corpus.md) cases and exact expected labels |
 
@@ -1274,6 +1274,11 @@ The validator distinguishes missing usage from explicit zero usage. It accepts
 legacy records that omit event `session_id` and hash links, but it does not
 silently repair them. See [Public trace schema](trace-schema.md) for all rules,
 status meanings, and compatibility decisions.
+
+A session continued by `resume` or `compact` is `incomplete` until its final
+span has an end marker. An earlier end, cumulative duration, or successful
+tool result does not fill the missing boundary. `--allow-active` does not
+make that session `complete`.
 
 ### `policy`
 ```
@@ -3019,7 +3024,7 @@ permissions:
   pull-requests: write
 
 steps:
-  - uses: Siddhant-K-code/agent-trace@v0.121.0
+  - uses: Siddhant-K-code/agent-trace@v0.121.1
     with:
       config: .agent-evals.yaml
       baseline: .agent-evals-baseline.json

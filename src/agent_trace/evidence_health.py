@@ -158,6 +158,10 @@ def _relationship_reasons(
     outcomes_by_request: dict[str, list[tuple[int, TraceEvent]]] = {}
     reasons: list[EvidenceHealthReason] = []
     declared_unrequested: list[TraceEvent] = []
+    last_end_position = max(
+        (index for index, event in enumerate(events) if event.event_type == EventType.SESSION_END),
+        default=-1,
+    )
 
     for index, event in enumerate(events):
         is_result = event.event_type == spec.result_type
@@ -208,7 +212,7 @@ def _relationship_reasons(
     for request_id, request in requests.items():
         outcomes = outcomes_by_request.get(request_id, [])
         if not outcomes:
-            if require_terminal_outcome:
+            if require_terminal_outcome or request_positions[request_id] < last_end_position:
                 reasons.append(
                     _reason(
                         spec.missing_result_code,
@@ -497,6 +501,8 @@ def assess_evidence_health(
 
     ``session_finalized=False`` distinguishes an active session from a completed
     session whose end marker is unexpectedly absent.
+    Requests closed by a recorded session end still require a terminal outcome,
+    including when a later resume leaves the current span open.
 
     ``allowed_pre_start_event_types`` must also come from declared provider
     metadata. When every event before the first session start has one of these

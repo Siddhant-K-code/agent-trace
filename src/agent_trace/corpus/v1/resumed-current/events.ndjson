@@ -1,0 +1,9 @@
+{"event_type":"session_start","timestamp":1700001000.0,"event_id":"start","session_id":"resumed-current","data":{"provider":"synthetic","capture_method":"corpus","source":"startup"}}
+{"event_type":"tool_call","timestamp":1700001001.0,"event_id":"call-first","session_id":"resumed-current","data":{"tool_name":"shell","arguments":{"command":"python -m unittest"}}}
+{"event_type":"tool_result","timestamp":1700001002.0,"event_id":"result-first","session_id":"resumed-current","parent_id":"call-first","data":{"tool_name":"shell","result":"Synthetic check passed.","exit_code":0}}
+{"event_type":"session_end","timestamp":1700001005.0,"event_id":"end-first","session_id":"resumed-current","data":{"duration_ms":5000.0}}
+{"event_type":"session_start","timestamp":1700004600.0,"event_id":"resume","session_id":"resumed-current","data":{"provider":"synthetic","capture_method":"corpus","source":"resume"}}
+{"event_type":"tool_call","timestamp":1700004601.0,"event_id":"call-resumed","session_id":"resumed-current","data":{"tool_name":"shell","arguments":{"command":"python -m unittest"}}}
+{"event_type":"tool_result","timestamp":1700004602.0,"event_id":"result-resumed","session_id":"resumed-current","parent_id":"call-resumed","data":{"tool_name":"shell","result":"Synthetic check passed.","exit_code":0}}
+{"event_type":"assistant_response","timestamp":1700004603.0,"event_id":"response","session_id":"resumed-current","data":{"text":"Synthetic checks passed."}}
+{"event_type":"session_end","timestamp":1700004610.0,"event_id":"end-resumed","session_id":"resumed-current","data":{"duration_ms":3610000.0}}
