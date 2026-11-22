@@ -24,7 +24,7 @@ from .budget_report import _parse_date
 from .cost import session_cost
 from .event_data import require_object_event_data
 from .inert import escape_surrogates, inert
-from .models import EventType, SessionMeta, TraceEvent, usable_text
+from .models import EventType, SessionMeta, TraceEvent, usable_count, usable_text
 from .store import TraceStore
 
 
@@ -232,7 +232,7 @@ def _session_cost(events: list[TraceEvent], session_id: str) -> float | None:
 
 def _session_tool_calls(events: list[TraceEvent], meta: SessionMeta) -> int:
     count = sum(1 for ev in events if ev.event_type == EventType.TOOL_CALL)
-    return count or getattr(meta, "tool_calls", 0) or 0
+    return count or usable_count(getattr(meta, "tool_calls", 0))
 
 
 def _primary_author(shares: dict[str, float]) -> str:

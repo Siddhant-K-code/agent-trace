@@ -37,7 +37,7 @@ from .cost import _usage_dollars, session_event_usage
 from .event_data import require_object_event_data, require_usable_timestamps, str_field
 from .fileutil import split_lf_lines
 from .inert import inert
-from .models import EventType, TraceEvent, usable_text
+from .models import EventType, TraceEvent, usable_number, usable_text
 from .store import TraceStore
 
 Framework = Literal["eu-ai-act", "soc2", "hipaa", "all"]
@@ -235,7 +235,7 @@ def _soc2_report(session_id: str, meta, events: list[TraceEvent]) -> dict:
                 {"event_id": e.event_id, "error": e.data.get("error", ""), "ts": e.timestamp}
                 for e in errors
             ],
-            "duration_ms": meta.total_duration_ms or 0.0,
+            "duration_ms": meta.total_duration_ms if usable_number(meta.total_duration_ms) else 0.0,
         },
     }
 

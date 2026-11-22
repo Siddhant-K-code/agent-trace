@@ -24,7 +24,14 @@ from .event_data import (
 )
 from .failures import session_errors
 from .inert import inert
-from .models import EventType, SessionMeta, TraceEvent, usable_text
+from .models import (
+    EventType,
+    SessionMeta,
+    TraceEvent,
+    usable_count,
+    usable_number,
+    usable_text,
+)
 from .store import TraceStore
 
 MAX_DEPTH = 5  # configurable guard against runaway recursion
@@ -42,7 +49,8 @@ class SessionNode:
 
     @property
     def depth(self) -> int:
-        return self.meta.depth
+        """The stored depth, or 0 when meta.json holds one that is not usable."""
+        return usable_count(self.meta.depth)
 
 
 @dataclass
@@ -119,13 +127,13 @@ def aggregate_stats(node: SessionNode) -> AggregatedStats:
     """Recursively aggregate stats across the full session tree."""
     stats = AggregatedStats(
         session_count=1,
-        tool_calls=node.meta.tool_calls,
-        llm_requests=node.meta.llm_requests,
-        errors=node.meta.errors,
-        total_tokens=node.meta.total_tokens,
+        tool_calls=usable_count(node.meta.tool_calls),
+        llm_requests=usable_count(node.meta.llm_requests),
+        errors=usable_count(node.meta.errors),
+        total_tokens=usable_count(node.meta.total_tokens),
         # Duration is wall-clock: subagents run within parent time, so we take
         # the max of the root's own duration and each child subtree's duration.
-        total_duration_ms=node.meta.total_duration_ms,
+        total_duration_ms=usable_number(node.meta.total_duration_ms) or 0.0,
     )
     for child in node.children:
         child_stats = aggregate_stats(child)
@@ -254,11 +262,17 @@ def _fmt_offset(base_ts: float, ts: float) -> str:
     return f"+{m}m{s:04.1f}s"
 
 
-def _indent(depth: int, last_child: bool = False) -> str:
-    if depth == 0:
+def _indent(level: int, last_child: bool = False) -> str:
+    """Return the prefix for a line ``level`` steps below the displayed root.
+
+    ``level`` comes from the tree, never from the stored depth, so the
+    output size does not depend on what meta.json holds. build_tree stops
+    at MAX_DEPTH.
+    """
+    if level == 0:
         return ""
     connector = "└─ " if last_child else "├─ "
-    return "│  " * (depth - 1) + connector
+    return "│  " * (level - 1) + connector
 
 
 # format_tree reads the data of events of these types.
@@ -319,6 +333,7 @@ def format_tree(
     out: TextIO = sys.stdout,
     expand: bool = True,
     last_child: bool = False,
+    level: int = 0,
 ) -> None:
     """Render the session tree to *out*.
 
@@ -332,6 +347,8 @@ def format_tree(
         If True, inline subagent events under their parent tool_call.
     last_child : bool
         Whether this node is the last child of its parent (affects tree chars).
+    level : int
+        Steps below the displayed root, which sets the indent.
 
     Each value from the trace goes through inert(), so an escape code or a
     line break in it shows as text. In prompts, responses, tool results and
@@ -340,7 +357,7 @@ def format_tree(
     if base_ts is None:
         base_ts = node.meta.started_at
 
-    indent = _indent(node.depth, last_child=last_child)
+    indent = _indent(level, last_child=last_child)
     w = out.write
 
     # Session header
@@ -386,7 +403,7 @@ def format_tree(
                 child = children_by_event[event.event_id]
                 is_last = child == node.children[-1] if node.children else True
                 format_tree(child, base_ts=base_ts, out=out, expand=expand,
-                            last_child=is_last)
+                            last_child=is_last, level=level + 1)
 
         elif event.event_type == EventType.TOOL_RESULT:
             preview = " ".join((str_field(event.data, "result", "") or
@@ -434,41 +451,46 @@ def format_tree_summary(
     node: SessionNode,
     out: TextIO = sys.stdout,
     last_child: bool = False,
+    level: int = 0,
 ) -> None:
     """Print a compact tree structure showing session hierarchy."""
     w = out.write
-    indent = _indent(node.depth, last_child=last_child)
+    indent = _indent(level, last_child=last_child)
 
-    duration = node.meta.total_duration_ms / 1000 if node.meta.total_duration_ms else 0
+    duration = (usable_number(node.meta.total_duration_ms) or 0) / 1000
+    errors = usable_count(node.meta.errors)
     w(f"{indent}{node.meta.session_id[:12]}"
       f"  {duration:.1f}s"
-      f"  {inert(node.meta.tool_calls)} tools"
-      f"  {node.meta.total_tokens:,} tokens"
-      f"{'  ✗ ' + inert(node.meta.errors) + ' errors' if node.meta.errors else ''}\n")
+      f"  {usable_count(node.meta.tool_calls)} tools"
+      f"  {usable_count(node.meta.total_tokens):,} tokens"
+      f"{f'  ✗ {errors} errors' if errors else ''}\n")
 
-    _write_subagent_lines(node, out)
+    _write_subagent_lines(node, out, level)
     for i, child in enumerate(node.children):
-        format_tree_summary(child, out=out, last_child=(i == len(node.children) - 1))
+        format_tree_summary(
+            child, out=out, last_child=(i == len(node.children) - 1), level=level + 1,
+        )
 
 
-def _write_subagent_lines(node: SessionNode, out: TextIO) -> None:
+def _write_subagent_lines(node: SessionNode, out: TextIO, level: int) -> None:
     """Write one line per in-session subagent, before any child sessions."""
     subagents = in_session_subagents(node.events)
     for i, sub in enumerate(subagents):
         last = i == len(subagents) - 1 and not node.children
         line = inert(_subagent_summary_line(sub))
-        out.write(f"{_indent(node.depth + 1, last_child=last)}{line}\n")
+        out.write(f"{_indent(level + 1, last_child=last)}{line}\n")
 
 
 def _status(meta: SessionMeta) -> str:
-    if meta.errors:
+    if usable_count(meta.errors):
         return "error"
     return "ok"
 
 
 def _duration_seconds(meta: SessionMeta) -> float:
-    if meta.total_duration_ms:
-        return meta.total_duration_ms / 1000
+    total_ms = usable_number(meta.total_duration_ms)
+    if total_ms:
+        return total_ms / 1000
     if meta.ended_at and meta.started_at:
         return max(0.0, meta.ended_at - meta.started_at)
     return 0.0
@@ -501,9 +523,9 @@ def tree_to_dict(
         "parent_session_id": node.meta.parent_session_id,
         "parent_event_id": node.meta.parent_event_id,
         "cost_usd": round(costs.get(node.meta.session_id, 0.0), 6),
-        "tool_calls": node.meta.tool_calls,
-        "llm_requests": node.meta.llm_requests,
-        "errors": node.meta.errors,
+        "tool_calls": usable_count(node.meta.tool_calls),
+        "llm_requests": usable_count(node.meta.llm_requests),
+        "errors": usable_count(node.meta.errors),
         "status": _status(node.meta),
         "duration_s": round(_duration_seconds(node.meta), 3),
         "children": [tree_to_dict(child, costs) for child in node.children],
@@ -519,32 +541,35 @@ def format_session_tree(
     costs: dict[str, float] | None = None,
     out: TextIO = sys.stdout,
     last_child: bool = False,
+    level: int = 0,
 ) -> None:
     """Print a compact tree with per-session cost, calls, status, and duration."""
     costs = costs or {}
-    indent = _indent(node.depth, last_child=last_child)
+    indent = _indent(level, last_child=last_child)
     duration = _duration_seconds(node.meta)
-    status = "✗" if node.meta.errors else "✓"
+    errors = usable_count(node.meta.errors)
+    status = "✗" if errors else "✓"
     agent = usable_text(node.meta.agent_name) or usable_text(node.meta.command) or "session"
     out.write(
         f"{indent}{node.meta.session_id[:12]}  "
         f"{inert(agent[:28]):<28}  "
         f"${costs.get(node.meta.session_id, 0.0):.4f}  "
-        f"{inert(node.meta.tool_calls)} tools  "
+        f"{usable_count(node.meta.tool_calls)} tools  "
         f"{duration:.1f}s  "
         f"{status}"
     )
-    if node.meta.errors:
-        out.write(f"  {inert(node.meta.errors)} errors")
+    if errors:
+        out.write(f"  {errors} errors")
     out.write("\n")
 
-    _write_subagent_lines(node, out)
+    _write_subagent_lines(node, out, level)
     for i, child in enumerate(node.children):
         format_session_tree(
             child,
             costs=costs,
             out=out,
             last_child=(i == len(node.children) - 1),
+            level=level + 1,
         )
 
 
@@ -575,10 +600,10 @@ def cmd_replay_tree(args: argparse.Namespace) -> int:
         format_tree_summary(tree)
         sys.stdout.write(
             f"\nTotal: {stats.session_count} sessions, "
-            f"{inert(stats.tool_calls)} tool calls, "
-            f"{inert(stats.llm_requests)} LLM requests, "
+            f"{stats.tool_calls} tool calls, "
+            f"{stats.llm_requests} LLM requests, "
             f"{stats.total_tokens:,} tokens"
-            f"{', ' + inert(stats.errors) + ' errors' if stats.errors else ''}\n\n"
+            f"{f', {stats.errors} errors' if stats.errors else ''}\n\n"
         )
     else:
         require_tree_event_data(tree, expand=expand)
@@ -607,10 +632,10 @@ def cmd_stats_tree(args: argparse.Namespace) -> int:
 
     sys.stdout.write(f"\nAggregated stats for {full_id[:12]} (including subagents)\n\n")
     sys.stdout.write(f"  Sessions:      {stats.session_count}\n")
-    sys.stdout.write(f"  Tool calls:    {inert(stats.tool_calls)}\n")
-    sys.stdout.write(f"  LLM requests:  {inert(stats.llm_requests)}\n")
+    sys.stdout.write(f"  Tool calls:    {stats.tool_calls}\n")
+    sys.stdout.write(f"  LLM requests:  {stats.llm_requests}\n")
     sys.stdout.write(f"  Total tokens:  {stats.total_tokens:,}\n")
-    sys.stdout.write(f"  Errors:        {inert(stats.errors)}\n")
+    sys.stdout.write(f"  Errors:        {stats.errors}\n")
     sys.stdout.write(f"  Duration:      {stats.total_duration_ms / 1000:.1f}s\n\n")
 
     if tree.children:
@@ -659,8 +684,8 @@ def cmd_tree(args: argparse.Namespace) -> int:
     sys.stdout.write(
         f"\nTotal: {stats.session_count} sessions, "
         f"${sum(costs.values()):.4f}, "
-        f"{inert(stats.tool_calls)} tool calls, "
-        f"{inert(stats.llm_requests)} LLM requests"
-        f"{', ' + inert(stats.errors) + ' errors' if stats.errors else ''}\n\n"
+        f"{stats.tool_calls} tool calls, "
+        f"{stats.llm_requests} LLM requests"
+        f"{f', {stats.errors} errors' if stats.errors else ''}\n\n"
     )
     return 0
