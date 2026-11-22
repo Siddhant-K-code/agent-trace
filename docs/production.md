@@ -347,9 +347,10 @@ agent-strace export <session-id> --format otlp-genai \
   --header "Authorization: Bearer $TELEMETRY_DEV_API_KEY"
 ```
 
-Tested once, with a partial result: no prompt, completion or tool content, a
-subagent is a separate trace, and retries are not linked. Read the limits in
-[telemetry-dev.md](telemetry-dev.md) before relying on it.
+Tested once, with a partial result. Content is not in Telemetry.dev's Input,
+Output, Arguments or Result panels. Telemetry.dev's own redaction can rewrite
+ordinary IDs. A subagent is a separate trace, and retries are not linked. Read
+the limits in [telemetry-dev.md](telemetry-dev.md) before relying on it.
 
 ### Offline fixture validation
 

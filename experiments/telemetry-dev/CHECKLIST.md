@@ -1,8 +1,8 @@
 # #241 checklist: what was checked in Telemetry.dev
 
-The Predicted column comes from [MAPPING.md](MAPPING.md) and is doc-based. The Observed column records the send of 2026-11-22. That send was observed through Telemetry.dev's read-only CLI 0.1.8, signed in as the owner, plus one look at the projects page. [RESULTS.md](RESULTS.md) lists every difference from the predictions. #241 says a 2xx alone does not show compatibility, so every row matters.
+The Predicted column comes from [MAPPING.md](MAPPING.md) and is doc-based. The Observed column records the send of 2026-11-22. It was observed through Telemetry.dev's read-only CLI 0.1.8, signed in as the owner. Then, at about 17:30Z, the owner signed in to the web UI, and the projects page and the span **Attributes**, **Events** and **Metadata** panels were read, read only. [RESULTS.md](RESULTS.md) lists every difference from the predictions. #241 says a 2xx alone does not show compatibility, so every row matters.
 
-**Not observed (UI-only)** marks a row that needs a span's **Attributes** tab. The CLI and the Telemetry.dev MCP server expose no span attributes, and no one opened that tab for this run. These rows are not passed. The owner can fill them in from the UI.
+**Not checked** marks a row that nobody looked at in this run: the genai-tree trace's attributes, which come from the same exporter as the genai payload, and attribute search and filters. These rows are not passed.
 
 ## Run record
 
@@ -10,11 +10,11 @@ The Predicted column comes from [MAPPING.md](MAPPING.md) and is doc-based. The O
 | --- | --- |
 | Date and time (UTC) | 2026-11-22T17:16:23Z (`sent_at` in `sent/20261122T171623Z/manifest.json`) |
 | agent-strace | 0.120.0, from `send.py` at commit `fb29a2d`. The 0.121.0 exporter differs only in the version string. |
-| Telemetry.dev | No version is exposed. `GET https://api.telemetry.dev/health` returned `200 {"ok":true}` at 2026-11-22T17:20:51Z. The plan was not recorded. |
-| Observed with | `@telemetry-dev/cli` 0.1.8: `traces`, `trace <id> --json`, `payload`. Plus the projects page in the web UI. |
+| Telemetry.dev | No version is exposed. `GET https://api.telemetry.dev/health` returned `200 {"ok":true}` at 2026-11-22T17:20:51Z. Plan: free (14-day retention). |
+| Observed with | `@telemetry-dev/cli` 0.1.8: `traces`, `trace <id> --json`, `payload`. The web UI at about 17:30Z: the projects page, and the span **Attributes**, **Events** and **Metadata** panels. |
 | Run ID | `20261122T171623Z` |
 | Environment the key sends to | `default`. No `--environment` was passed. |
-| Prompt capture for that environment | Not recorded |
+| Privacy settings | Prompt capture on (the default). Issue checks on. Retention 14 days. "Common secrets are redacted before storage", and no custom patterns. |
 | HTTP status per payload | otlp: 200 genai: 200 genai-tree: 200 |
 | Trace IDs | otlp: `a9d636957996c3ae3ffe7a43c32fd412` (parent), `7b5e7bdbcaa23b4e95fc62b9707081b5` (child). genai: `251f78ee54d0195975a3c292b7552eb7` (parent), `dda4b88cc5f053d4d07ff4c82b6dacb9` (child). genai-tree: `a54d33c58c951c037303fb2619a349c9` |
 | UI cross-check | The projects page showed the test project with 27 spans, 10 LLM spans, 32.4K tokens, $0.10 LLM cost, 3 errors and p95 latency 11s. The CLI data agrees: 27 spans in 5 traces, 32,400 tokens, $0.0987 in total, 3 error traces. "10 LLM spans" is Telemetry.dev's own count; 6 spans carry a model in the CLI view. |
@@ -39,15 +39,15 @@ Do not paste the key anywhere. `sent/<run id>/` holds the exact bytes sent and t
 
 ### 2. Versions and date recorded
 
-The run record above is filled in. Service is `agent-trace` and Framework is `otel` on all 5 traces (CLI). The `service.version` resource attribute is Not observed (UI-only).
+The run record above is filled in. Service is `agent-trace` and Framework is `otel` on all 5 traces. The `service.version` resource attribute is not visible in any panel that was checked.
 
 ### 3. Sent and received can be compared without secrets
 
 | Check | Predicted | Observed |
 | --- | --- | --- |
-| Open a GenAI `chat` span, **Attributes** | Every key in MAPPING.md's `chat` table is listed with the value from `sent/<run id>/payload-otlp-genai.json` | Not observed (UI-only) |
-| Any key missing from **Attributes** | none (`validate.py` predicts no secret-key drops) | Not observed (UI-only) |
-| Any value shown as redacted by Telemetry.dev | none. AgentTrace's own `[REDACTED…]` markers show as sent. | Not observed (UI-only). Both error messages the CLI shows arrive as sent. |
+| Open a GenAI `chat` span, **Attributes** | Every key in MAPPING.md's `chat` table is listed with the value from `sent/<run id>/payload-otlp-genai.json` | Every key arrived, with the count equal to the payload's: 24 on the failed `chat`, 36 on the successful one. One rename: `gen_ai.response.finish_reasons` is listed as `gen_ai.output.messages`. |
+| Any key missing from **Attributes** | none (`validate.py` predicts no secret-key drops) | None on any span checked. The UI counts equal the payload's on the genai root (21), failed `execute_tool bash` (19), orphan bash (15), `Task` (23), child root (23), child `read_file` (23), classic failed `bash` (3) and classic child root (9). |
+| Any value shown as redacted by Telemetry.dev | none. AgentTrace's own `[REDACTED…]` markers show as sent. | **Differs.** AgentTrace's markers show as sent, but Telemetry.dev's `sk-` match fired inside `task-`. `td241-genai-task-1` and `td241-genai-task-1-result` became `td241-genai-ta[REDACTED]` in `gen_ai.tool.call.id` on `Task`, in Task's `agent.strace.request.event_id`, `agent.strace.response.event_id` and `agent.strace.response.parent_event_id`, and in the child root's `agent.strace.parent_event_id`. IDs without `sk-` are unchanged. The `metadata` strings and the classic `tool/Task` call ID: not checked. |
 
 ### 4. Dropped, renamed or flattened attributes
 
@@ -56,14 +56,14 @@ Check these against MAPPING.md and note every difference.
 | Check | Predicted | Observed |
 | --- | --- | --- |
 | `chat` span **Model call** section | Requested model `claude-sonnet-4-5`, Provider `anthropic`, Finish reason | Model `claude-sonnet-4-5`, Provider `anthropic`, Finish reason `tool_use`, or `error` on the failed call (CLI) |
-| `execute_tool` span **Tool call** section | Tool name `bash`, `Task` or `read_file` | As predicted (CLI) |
+| `execute_tool` span **Tool call** section | Tool name `bash`, `Task` or `read_file` | As predicted. Each also shows "Called by: chat claude-sonnet-4-5", which was not predicted. |
 | Span list **Tool / Agent** column | `claude-code` on both `invoke_agent` roots | Agent `claude-code` on both roots and on the tree's child `invoke_agent` (CLI) |
-| `gen_ai.tool.input.*`, `gen_ai.tool.output`, `input.value`, `output.value` | Kept in **Attributes**, not in Arguments or Result | Arguments and Result are empty (CLI `payload`). Whether the keys are kept: Not observed (UI-only). |
-| `agent.strace.provenance`, `agent.strace.evidence.gaps` | One opaque JSON string each, not expanded into separate keys | Not observed (UI-only) |
-| Integer attributes such as `gen_ai.usage.input_tokens` | Shown as numbers | Not observed (UI-only). The token fields they feed are numbers. |
-| The trace's **Metadata** under **Source** | Empty (the `metadata` attribute is not read as metadata) | Not observed (UI-only) |
+| `gen_ai.tool.input.*`, `gen_ai.tool.output`, `input.value`, `output.value` | Kept in **Attributes**, not in Arguments or Result | As predicted. Kept in **Attributes**. Arguments and Result are empty, even when `input.value` holds JSON. |
+| `agent.strace.provenance`, `agent.strace.evidence.gaps` | One opaque JSON string each, not expanded into separate keys | **Differs.** Not flattened into separate keys, but parsed: each is shown as one expandable object or array. The same goes for `agent.strace.evidence.gap_codes`, `metadata`, `input.value`, `llm.invocation_parameters` and the `*.provenance` keys. |
+| Integer attributes such as `gen_ai.usage.input_tokens` | Shown as numbers | As predicted: token counts, `gen_ai.request.max_tokens`, `agent.strace.evidence.gap_count` and `agent.strace.depth` are numbers. |
+| The trace's **Metadata** under **Source** | Empty (the `metadata` attribute is not read as metadata) | As predicted: Source shows Agent, Service, Environment, Framework, Session and User, and there are no metadata entries. |
 | Classic `tool/*` spans | Operation `tool.call`, Tool name from `gen_ai.tool.name` | As predicted (CLI) |
-| Classic failed tool span `bash` | No operation, no Tool name (risk 4) | As predicted: neither is set (CLI). Recorded as a limit. |
+| Classic failed tool span `bash` | No operation, no Tool name (risk 4) | As predicted: neither is set. It has exactly 3 attributes: `error.message`, `tool.input.command` and `tool.name`. Recorded as a limit. |
 
 ### 5. Hierarchy, errors, tokens, cost, redaction, provenance and gaps
 
@@ -73,8 +73,8 @@ Check these against MAPPING.md and note every difference.
 | --- | --- | --- |
 | genai-tree trace, **Trace** tab, **Expand all** | One tree: `invoke_agent claude-code` > `execute_tool Task` > child `invoke_agent claude-code` > `chat` and `execute_tool read_file` | As predicted. 10 spans, and every parent resolves (CLI). |
 | genai parent and child | Two separate traces, not linked | As predicted |
-| genai child root **Attributes** | `agent.strace.parent_session_id`, `agent.strace.parent_event_id`, `agent.strace.depth` = 1 | Not observed (UI-only) |
-| otlp child | A separate trace, linked only by `agent.depth` = 1 | A separate trace, with no session. `agent.depth`: Not observed (UI-only). |
+| genai child root **Attributes** | `agent.strace.parent_session_id`, `agent.strace.parent_event_id`, `agent.strace.depth` = 1 | All kept, with `agent.strace.depth` = 1 as a number. `agent.strace.parent_event_id` is rewritten to `td241-genai-ta[REDACTED]`, so it no longer matches the parent's Task call. |
+| otlp child | A separate trace, linked only by `agent.depth` = 1 | As predicted. A separate trace with no session, and the root keeps `agent.depth` = 1. |
 | genai-tree **Session** | Unknown: `synthetic-conversation-td241-tree` or `td241-tree-child` | **`synthetic-conversation-td241-tree`**, the root's session |
 
 **Errors and status**
@@ -111,34 +111,34 @@ Check these against MAPPING.md and note every difference.
 | Trace list **Input** column | Empty for every trace | As predicted |
 | Trace list **Output** column | Empty, or a synthetic reply from the finish reason | A successful `chat` span's Output is only `[{"role":"assistant","finish_reasons":["tool_use"]}]`. The root's Input is empty (CLI `payload`). |
 | `execute_tool` **Arguments** and **Result** | Empty | As predicted |
-| Root **Events**: `gen_ai.user.message` | `gen_ai.prompt` starts with `[REDACTED synthetic request]` | The event arrives as an `info` log named `gen_ai.user.message`. Its body: Not observed (UI-only). |
-| Child `execute_tool read_file` **Attributes** | `gen_ai.tool.input.auth_header` = `[REDACTED:bearer]`, kept | Not observed (UI-only) |
-| A field or badge showing AgentTrace redaction | None. `agent.strace.redacted` and the `*.redacted` keys are plain attributes. | The CLI has no such field. Not observed (UI-only). |
+| Root **Events**: `gen_ai.user.message` | `gen_ai.prompt` starts with `[REDACTED synthetic request]` | As predicted: `gen_ai.prompt` = "[REDACTED synthetic request] fix the failing example test". The **Events** list shows every event's attributes, including `gen_ai.completion`. Each event is also an `info` log. |
+| Child `execute_tool read_file` **Attributes** | `gen_ai.tool.input.auth_header` = `[REDACTED:bearer]`, kept | As predicted |
+| A field or badge showing AgentTrace redaction | None. `agent.strace.redacted` and the `*.redacted` keys are plain attributes. | As predicted: `agent.strace.redacted` = true is a plain attribute, with no badge. |
 
 **Provenance and evidence health**
 
 | Check | Predicted | Observed |
 | --- | --- | --- |
-| Parent root **Attributes** | `agent.strace.evidence.status` = `partial`, `agent.strace.evidence.gap_count` = 1 | Not observed (UI-only) |
-| Child root | `agent.strace.evidence.status` = `healthy` | Not observed (UI-only) |
-| `agent.strace.provenance` | Present, an opaque JSON string, with `synthetic-user`, `synthetic-host` and `[REDACTED:hex-token]` | Not observed (UI-only) |
-| Searchable or filterable evidence | No | The CLI has no evidence field. Not observed (UI-only). |
+| Parent root **Attributes** | `agent.strace.evidence.status` = `partial`, `agent.strace.evidence.gap_count` = 1 | As predicted. `agent.strace.evidence.gap_codes` = `["orphan_tool_result"]`, and `agent.strace.evidence.gaps` has one item with code, kind `observed`, event ID and message. |
+| Child root | `agent.strace.evidence.status` = `healthy` | As predicted, with gap count 0 and gaps `[]` |
+| `agent.strace.provenance` | Present, an opaque JSON string, with `synthetic-user`, `synthetic-host` and `[REDACTED:hex-token]` | Present, with all three values, but parsed into an expandable object of 12 keys |
+| Searchable or filterable evidence | No | No field, filter or badge. Whether the attributes can be searched: not checked. |
 
 **The capture gap**
 
 | Check | Predicted | Observed |
 | --- | --- | --- |
-| genai parent: the orphan `execute_tool bash` span | Has `gen_ai.tool.output` but no `gen_ai.tool.input.*`, and `agent.strace.response.parent_event_id` = `missing-tool-call` | A successful 1 ms `execute_tool bash` span with empty Arguments and Result. Its attributes: Not observed (UI-only). |
-| Anything in Telemetry.dev marking it as a gap | No. Only the root's `agent.strace.evidence.gap_codes` names `orphan_tool_result`. | Nothing in the CLI. The span is counted in the "Repeated" `execute_tool bash` ×3. `gap_codes`: Not observed (UI-only). |
+| genai parent: the orphan `execute_tool bash` span | Has `gen_ai.tool.output` but no `gen_ai.tool.input.*`, and `agent.strace.response.parent_event_id` = `missing-tool-call` | As predicted. A successful 1 ms span with empty Arguments and Result and all 15 attributes. |
+| Anything in Telemetry.dev marking it as a gap | No. Only the root's `agent.strace.evidence.gap_codes` names `orphan_tool_result`. | As predicted, nothing. Telemetry.dev even shows it as "Called by: chat claude-sonnet-4-5", and counts it in the "Repeated" `execute_tool bash` ×3. |
 
 ### 6. Decision
 
 | | |
 | --- | --- |
 | Predicted | **PARTIAL**: accepted, with model, provider, tools, tokens, errors and status mapped; cost, content, cross-session hierarchy, retry and evidence lost or opaque |
-| Observed | **PARTIAL, bounded.** It rests only on what was observed, not on the "Not observed (UI-only)" rows. |
-| Rows where Observed differs from Predicted | Logs (every span event becomes a log record), the genai-tree Session (resolved to the root's), "Repeated" grouping, and the trace error type. See [RESULTS.md](RESULTS.md#differences-from-the-predictions). |
-| Bounded limits to document if PARTIAL | Cost is recomputed from tokens. No prompt, completion or tool content. The CLI export splits subagents into separate traces. Retries are not linked. Evidence, provenance, redaction and gaps are not first-class. Classic `otlp`'s failed tool span has no operation or tool. Content, trees and retries: [#552](https://github.com/Siddhant-K-code/agent-trace/issues/552). |
+| Observed | **PARTIAL, bounded.** It does not rest on the "Not checked" rows. |
+| Rows where Observed differs from Predicted | Logs (every span event becomes a log record). The genai-tree Session (the root's). "Repeated" grouping. The trace error type. JSON-string attributes are parsed. `gen_ai.response.finish_reasons` is renamed. Telemetry.dev rewrites values containing `sk-`. Tool spans show a "Called by" model call. `service.version` is not visible. See [RESULTS.md](RESULTS.md#differences-from-the-predictions). |
+| Bounded limits to document if PARTIAL | Cost is recomputed from tokens, and AgentTrace's cost is kept only as attributes. Content is in the span attributes and events, not in the Input, Output, Arguments or Result panels. Telemetry.dev's redaction rewrites ordinary IDs containing `sk-` (inside `task-`), so AgentTrace's local session stays the record. The CLI export splits subagents into separate traces. Retries are not linked. Evidence, provenance, redaction and gaps are plain attributes, not first-class. A recovered session's root is an error. Classic `otlp`'s failed tool span has no operation or tool. Content, trees and retries: [#552](https://github.com/Siddhant-K-code/agent-trace/issues/552). |
 
 ### 7. Documentation and outreach
 

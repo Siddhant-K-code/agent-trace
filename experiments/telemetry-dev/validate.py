@@ -56,7 +56,9 @@ VALUE_PATTERNS = {
     "telemetry.dev key": re.compile(r"td_live_[A-Za-z0-9]"),
     "bearer credential": re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{8,}"),
     "jwt": re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"),
-    "provider key": re.compile(r"\b(sk-[A-Za-z0-9]|AKIA[0-9A-Z]{8}|AIza[0-9A-Za-z_-]{8}|gh[pousr]_[A-Za-z0-9]|github_pat_|xox[abposr]-|xapp-)"),
+    # Observed on 2026-11-22: Telemetry.dev matched `sk-` inside a word, so
+    # `td241-genai-task-1` was stored as `td241-genai-ta[REDACTED]` (RESULTS.md).
+    "provider key": re.compile(r"(sk-[A-Za-z0-9]|\b(AKIA[0-9A-Z]{8}|AIza[0-9A-Za-z_-]{8}|gh[pousr]_[A-Za-z0-9]|github_pat_|xox[abposr]-|xapp-))"),
     "name=value secret": re.compile(r"(api_key|access_token|refresh_token|password|secret)\"?\s*[:=]"),
     "url credentials": re.compile(r"://[^/\s:@]+:[^/\s@]+@"),
     "email": re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+\.[A-Za-z]{2,}"),
@@ -303,7 +305,7 @@ def main() -> int:
         print(f"  drop {key}: {why}")
     if not dropped:
         print("  none")
-    print("Predicted value redactions (doc-based, not observed):")
+    print("Predicted value redactions (doc-based; the in-word `sk-` match was observed):")
     hits = 0
     for name, result in results.items():
         for text in _attr_strings(result["payload"]):
