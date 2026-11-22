@@ -4,6 +4,25 @@ Use this index to find the shortest path from a question to the relevant
 command and its limits. The [command reference](commands.md) remains the
 canonical flag reference.
 
+## Share your use case
+
+Want to help improve the docs? Start a
+[GitHub Discussion](https://github.com/Siddhant-K-code/agent-trace/discussions)
+with your main use and a question you want the docs to answer. Participation
+is optional.
+
+| Main use | Start here |
+|---|---|
+| Debug an agent run | [Session replay](commands.md#replay) and [evidence health](evidence-health.md) |
+| Review an agent-produced change | [PR evidence workflow](ai-agent-pr-evidence.md) |
+| Evaluate agents | [Evaluation command and limits](commands.md#eval) |
+| Integrate or export evidence | [Integrations](integrations.md) and [OTLP export](production.md) |
+
+Still exploring? Say what you hope to try. Use public or synthetic examples.
+Do not post private code, transcripts, customer information, or contact
+details. Discussions are public; posting requires a GitHub account. Sharing
+your use case does not opt you into outreach.
+
 ## Setup and releases
 
 - [Setup](setup.md): hook, proxy, and library capture paths.
