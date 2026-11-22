@@ -469,14 +469,16 @@ def require_usable_timestamps(
     raise UnusableTimestampError(message)
 
 
-def require_usable_session_times(meta: SessionMeta) -> None:
+def require_usable_session_times(meta: SessionMeta, *, session_id: str | None = None) -> None:
     """Raise :class:`UnusableTimestampError` if the session's ``started_at``, or
     its ``ended_at`` when it is not None, is not a Unix time in seconds.
 
     OTLP export reads both for the root span. ``ended_at`` is None while a
-    session is open. The message never includes the value.
+    session is open. The message never includes the value. ``session_id``
+    names the session for commands that read more than one.
     """
+    subject = f"session {session_id}" if session_id else "session"
     if usable_time(meta.started_at) is None:
-        raise UnusableTimestampError("session started_at must be a Unix time in seconds")
+        raise UnusableTimestampError(f"{subject} started_at must be a Unix time in seconds")
     if meta.ended_at is not None and usable_time(meta.ended_at) is None:
-        raise UnusableTimestampError("session ended_at must be a Unix time in seconds")
+        raise UnusableTimestampError(f"{subject} ended_at must be a Unix time in seconds")

@@ -2054,6 +2054,7 @@ Snapshots taken by older versions have no `workspace`. They belong to the direct
 ```
 agent-strace export <session-id> [--format json|csv|ndjson|otlp|otlp-genai|temporal|eu-ai-act]
                     [--endpoint URL] [--header 'NAME: VALUE'] [--service-name NAME]
+                    [--include-subagents]
                     [--anonymize] [--scores] [--metrics] [--backend otlp|langfuse]
                     [--all] [--since DURATION_OR_DATE] [--until DATE] [--output FILE]
 ```
@@ -2064,8 +2065,27 @@ GenAI semantic conventions, with additive OpenInference attributes: an
 `invoke_agent {agent}` root span, `chat {model}` model request spans and
 `execute_tool {tool}` tool spans, with `gen_ai.provider.name` (and the
 deprecated `gen_ai.system`). These names replaced `gen_ai.agent.session`,
-`gen_ai.client.operation` and `gen_ai.tool.call/{tool}`. See
+`gen_ai.client.operation` and `gen_ai.tool.call/{tool}`. The root carries the
+conversation as `gen_ai.input.messages` and `gen_ai.output.messages`, and each
+tool span its input and result as `gen_ai.tool.call.arguments` and
+`gen_ai.tool.call.result`. See
 [Spans and attributes](production.md#spans-and-attributes).
+
+In `--format otlp`, a failed tool call and a tool call with no result are
+`tool/{tool}` spans with the same `gen_ai.*` identity as a call that returned
+a result. Earlier versions named them `{tool}`. See
+[Classic tool spans](production.md#classic-tool-spans).
+
+In both OTLP formats, a call whose event names an earlier one in `retry_of`
+has a span link to that call's span.
+
+`--include-subagents` exports the session and the subagent sessions under it,
+as `agent-strace tree` shows them, as one trace in one payload. Each
+subagent's root span is under the span of the call that started it. It works
+with `--format otlp` and `otlp-genai`, to a file or with `--endpoint`. Without
+`--endpoint` it writes `--output` or `trace-<12-character session
+ID>-<format>.json` and prints `OTLP payload for N sessions written to FILE`.
+See [Subagents in one trace](production.md#subagents-in-one-trace).
 
 `--format json`, `csv`, `ndjson` and `eu-ai-act` print to stdout. With
 `--output FILE` they write FILE in UTF-8 instead and print one line on stderr
@@ -2109,6 +2129,10 @@ writes anything. It refuses these with one line on stderr and exit 1:
   a user name or password: `invalid --endpoint value: <reason>`.
 - A `--header` that breaks the rules above. The line names it by position:
   `invalid --header 2: its value is empty`.
+- `--include-subagents` with `--format json`, `csv`, `ndjson`, `temporal` or
+  `eu-ai-act`, or with `--anonymize`, `--scores`, `--metrics` or `--backend`:
+  `--include-subagents is not used with --format csv; use --format otlp or
+  otlp-genai`, or the flag it is not used with.
 
 The lines never repeat the URL or a header, which can carry a token.
 

@@ -37,10 +37,14 @@ agent-strace export <session-id> --format otlp-genai \
 | LLM calls | Events on root span | `chat {model}` child spans |
 | Tool calls | `tool/<name>` spans | `execute_tool {name}` spans |
 | Root span | `agent.name` attribute | `invoke_agent {agent}` span with `gen_ai.agent.name` |
-| Errors | Custom error span | OTel `exception` event format and `error.type` |
+| Errors | `tool/<name>` span with ERROR status and an `exception` event; see [Classic tool spans](#classic-tool-spans) | OTel `exception` event format and `error.type` |
 | Failed or cancelled model request | `error.type` on the `gen_ai.assistant.message` event | ERROR status and `error.type` on the `chat` span |
 | `gen_ai.conversation.id` | Root span | Root, LLM and tool spans |
 | Token usage | `gen_ai.usage.*` on the LLM events | `gen_ai.usage.*` and `llm.token_count.*` on the LLM spans; see [Token usage and prompt caching](#token-usage-and-prompt-caching) |
+| Prompts and replies | Events on root span | Events on root span, and `gen_ai.input.messages` and `gen_ai.output.messages` on it |
+| Tool input and output | `tool.input.*` and `tool.output` | `input.value` and `output.value`, and `gen_ai.tool.call.arguments` and `gen_ai.tool.call.result` |
+| Retries (`retry_of`) | Span links on tool spans | Span links on tool and `chat` spans |
+| Subagents | One trace with `--include-subagents`; see [Subagents in one trace](#subagents-in-one-trace) | The same |
 
 `--format otlp` keeps its span and attribute names for backwards compatibility.
 Two of its values change in this release, as in `otlp-genai`: see
@@ -69,7 +73,32 @@ resource attribute is the agent-strace version.
   neither. The session ID is on `session.id` and `agent.session_id`, and the
   agent's own session ID on `gen_ai.conversation.id`.
 - A failed tool call carries `error.type`: the recorded `error_type` or
-  `exception_type`, else `_OTHER`.
+  `exception_type`, else `_OTHER`. Its span is named after the error's
+  `tool_name`, else its call's, else `error`. The `@trace_tool` decorator, for
+  one, records the name only on the call.
+- The content attributes of the
+  [GenAI spans](https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-spans.md)
+  carry text the export already sends, with the same redaction and
+  truncation. Each is a JSON string. The events and keys that carried this
+  text before are kept.
+  - The root has `gen_ai.input.messages`: the user prompts and assistant
+    replies up to and including the last user prompt, each a message with
+    one `text` part. Its `gen_ai.output.messages` is one `assistant` message
+    with a `text` part per later reply. With no user prompt, every reply is
+    output. Each text is at most 1000 characters, and a key with no message is
+    left out.
+  - A tool span whose call has input has `gen_ai.tool.call.arguments`: the
+    `input.value` JSON, or, when that is cut, a JSON object of the
+    `gen_ai.tool.input.*` values, each at most 200 characters. A tool span
+    with a result has `gen_ai.tool.call.result`, the `output.value` text, so
+    a result cut at 500 characters may not parse as JSON.
+  - A `chat` span has no content: recorders store no prompt or reply per
+    model request.
+- A tool or `chat` span whose event names another event in `retry_of` has a
+  [span link](https://opentelemetry.io/docs/concepts/signals/traces/#span-links)
+  to that event's span, with `agent.strace.link.type` `retry_of`. A link to
+  the span itself, or to an event that is not in the session, is left out.
+  agent-strace's hooks and imports do not write `retry_of`.
 - `gen_ai.provider.name` names the provider on the root and model request
   spans, using the conventions' well-known values: `anthropic`, `openai`,
   `aws.bedrock`, `azure.ai.openai`, `azure.ai.inference`, `gcp.gen_ai`,
@@ -122,6 +151,44 @@ release:
 |---|---|---|
 | `gen_ai.response.finish_reasons`, on the `chat` span (`otlp-genai`) or the `gen_ai.assistant.message` event (`otlp`) | a string, such as `"end_turn"` or `"error"` | a string array, such as `["end_turn"]` or `["error"]`, as the conventions type it (`string[]`) |
 | `service.version` resource attribute | `agent-trace` | the agent-strace version |
+
+#### Classic tool spans
+
+In `--format otlp`, a failed tool call and a call with no result have the
+same identity as a call that returned one, so a backend shows their operation
+and tool. A failed call's name comes from the error's `tool_name`, else its
+call's, else `error`.
+
+| Span | 0.121.1 and earlier | Now |
+|---|---|---|
+| Failed tool call | named `{tool}`, kind `INTERNAL` (`1`), with `tool.name` but no `gen_ai.*` keys | named `tool/{tool}`, kind `CLIENT` (`3`), adding `gen_ai.tool.name`, `gen_ai.operation.name` `tool.call` and `gen_ai.tool.call.id` |
+| Tool call with no result | named `{tool}`, kind `INTERNAL` (`1`), with `tool.name` but no `gen_ai.*` keys | named `tool/{tool}`, kind `CLIENT` (`3`), adding the same three keys |
+
+The other attributes, the status and the events are unchanged.
+
+An `error` that ends a model request is not a tool call. It keeps its
+earlier span: named after its `tool_name`, else `error`, kind `INTERNAL`,
+with only `tool.name`.
+
+### Subagents in one trace
+
+By default each session is its own trace. With `--include-subagents`, `export`
+sends a session and the subagent sessions under it as one trace, in one OTLP
+payload, for both `--format otlp` and `--format otlp-genai`:
+
+```bash
+agent-strace export <session-id> --format otlp-genai --include-subagents \
+  --endpoint http://localhost:4318
+```
+
+- The trace ID is the root session's. Each subagent's root span has the
+  parent span of the call that started it (its `parent_event_id`). When that
+  is not a span in the parent's payload, or is not a non-empty string, the
+  subagent's root is under the parent session's root.
+- The subagents are those `agent-strace tree` shows, up to the same depth. A
+  session in the tree twice is exported once.
+- Codex subagents run inside their parent's session, so they are already in
+  its trace.
 
 ### Joining with native agent telemetry
 
@@ -178,13 +245,17 @@ such as `"end_turn"`.
 
 The mapping is not fully lossless:
 
-- Multi-turn user and assistant messages remain root span events.
+- Multi-turn user and assistant messages remain root span events, and the
+  root's `gen_ai.input.messages` and `gen_ai.output.messages`. They have no
+  OpenInference message attributes.
 - OpenInference types `llm.finish_reason` as one string, so when a request
   recorded several finish reasons it carries only the first, as OpenInference's
   own instrumentations and GenAI converter do. `gen_ai.response.finish_reasons`
   keeps them all. A failed or cancelled request with no recorded reason has
   `gen_ai.response.finish_reasons` `["error"]` and no `llm.finish_reason`.
 - Tool input is capped at 1000 characters and tool output at 500 characters.
+  `gen_ai.tool.call.arguments` and `gen_ai.tool.call.result` carry the same
+  capped text.
 - Only recorded cost is exported. Missing cost is not estimated.
 - Redaction markers and flags survive, but removed secret values do not.
 - Observed structural gaps survive. Provider capture-matrix blind spots remain
@@ -347,10 +418,13 @@ agent-strace export <session-id> --format otlp-genai \
   --header "Authorization: Bearer $TELEMETRY_DEV_API_KEY"
 ```
 
-Tested once, with a partial result. Content is not in Telemetry.dev's Input,
-Output, Arguments or Result panels. Telemetry.dev's own redaction can rewrite
-ordinary IDs. A subagent is a separate trace, and retries are not linked. Read
-the limits in [telemetry-dev.md](telemetry-dev.md) before relying on it.
+Tested once on 0.120.0, with a partial result. In that test, content was not
+in Telemetry.dev's Input, Output, Arguments or Result panels, a subagent was a
+separate trace, and retries were not linked. The export now sets the GenAI
+content attributes, links retries, and sends subagents in one trace with
+`--include-subagents`. How Telemetry.dev shows these is predicted, not tested.
+Telemetry.dev's own redaction can rewrite ordinary IDs. Read the limits in
+[telemetry-dev.md](telemetry-dev.md) before relying on it.
 
 ### Offline fixture validation
 
@@ -553,14 +627,16 @@ metrics are still exported.
 | agent-trace | OpenTelemetry |
 |---|---|
 | session | trace |
+| session with subagents, with `--include-subagents` | one trace; each subagent's root span under the span that started it |
 | tool_call + tool_result | span (with duration) |
 | error | span with error status + exception event |
 | failed or cancelled model request | error status and `error.type`; see [Failed and cancelled model requests](#failed-and-cancelled-model-requests) |
-| user_prompt | event on root span |
-| assistant_response | event on root span |
+| user_prompt | event on root span, and in `gen_ai.input.messages` (`otlp-genai`) |
+| assistant_response | event on root span, and in `gen_ai.input.messages` or `gen_ai.output.messages` (`otlp-genai`) |
 | session_id | trace ID |
 | event_id | span ID |
 | parent_id | parent span ID |
+| retry_of | span link |
 
 ### Span status
 
@@ -697,7 +773,7 @@ conventions and
 | Export | Failed or cancelled request |
 |---|---|
 | `--format otlp-genai`, Temporal, `watch --stream-otlp` | The `chat` span has status ERROR with the recorded error text (at most 200 characters) as its description, and `error.type`. A request ended by an `error` is one span with the request's span ID and an `exception` event, with no separate error span. |
-| `--format otlp` | There is no span per request, so the `gen_ai.assistant.message` event carries `error.type` and, when recorded, `error.message`. |
+| `--format otlp` | There is no span per request, so the `gen_ai.assistant.message` event carries `error.type` and, when recorded, `error.message`. The `error` that ended the request stays an `INTERNAL` error span named after its `tool_name`, else `error`, with no tool call identity. |
 | `export --scores --backend langfuse` | The generation has level `ERROR`, `statusMessage` set to the error text (`failed` or `cancelled` when none was recorded), and `error.type` in its metadata. A request ended by an `error` is exported as a generation too. |
 
 `error.type` is the recorded `error_type` or `exception_type`, else the `type`

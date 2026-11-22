@@ -23,7 +23,7 @@ import math
 import sys
 import urllib.error
 import urllib.request
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import __version__
 from .cost import TokenUsage, reasoning_output_tokens, usage_detail
@@ -64,6 +64,9 @@ from .pairing import (
     tool_pairer,
 )
 from .store import TraceStore
+
+if TYPE_CHECKING:
+    from .subagent import SessionNode
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +112,10 @@ _SEMCONV_CACHE_READ_TOKENS = "gen_ai.usage.cache_read.input_tokens"
 _SEMCONV_CACHE_WRITE_TOKENS = "gen_ai.usage.cache_write.input_tokens"
 _SEMCONV_TOOL_NAME = "gen_ai.tool.name"
 _SEMCONV_TOOL_CALL_ID = "gen_ai.tool.call.id"
+_SEMCONV_TOOL_CALL_ARGUMENTS = "gen_ai.tool.call.arguments"
+_SEMCONV_TOOL_CALL_RESULT = "gen_ai.tool.call.result"
+_SEMCONV_INPUT_MESSAGES = "gen_ai.input.messages"
+_SEMCONV_OUTPUT_MESSAGES = "gen_ai.output.messages"
 _SEMCONV_FINISH_REASON = "gen_ai.response.finish_reasons"
 _SEMCONV_CONVERSATION_ID = "gen_ai.conversation.id"
 _SEMCONV_ERROR_TYPE = "error.type"
@@ -621,6 +628,153 @@ def _io_value(value: object, limit: int) -> tuple[str, str]:
     return str(value)[:limit], "text/plain"
 
 
+# The GenAI content attributes are JSON text, the way the OTel Python GenAI
+# instrumentations write them on spans. Each carries only text that the older
+# keys beside it already carry, with the same cuts.
+_MESSAGE_TEXT_LIMIT = 1000
+_TOOL_ARGUMENTS_LIMIT = 1000
+_TOOL_ARGUMENT_VALUE_LIMIT = 200
+_TOOL_RESULT_LIMIT = 500
+
+
+def _json_text(value: object) -> str:
+    return json.dumps(value, separators=(",", ":"))
+
+
+def _text_message(role: str, texts: list[str]) -> dict:
+    """Return a semconv chat message with one TextPart per text."""
+    return {"role": role, "parts": [{"type": "text", "content": text} for text in texts]}
+
+
+def _root_messages(events: list[TraceEvent]) -> dict[str, str]:
+    """Return ``gen_ai.input.messages`` and ``gen_ai.output.messages`` for the root.
+
+    The input holds every user prompt and assistant reply up to and including
+    the last user_prompt, in event order. The output holds the replies after
+    it as one assistant message with one text part per reply; with no
+    user_prompt, every reply is output. Each text is the one the
+    ``gen_ai.user.message`` and ``gen_ai.assistant.message`` events carry, cut
+    at 1000 characters. A text that is empty or not a string is skipped, as a
+    missing one is. An attribute with no message is left out.
+    """
+    turns: list[tuple[str, str]] = []
+    boundary = 0
+    for event in events:
+        if event.event_type == EventType.USER_PROMPT:
+            text = str_field(event.data, "prompt", "")[:_MESSAGE_TEXT_LIMIT]
+            if text:
+                turns.append(("user", text))
+            boundary = len(turns)
+        elif event.event_type == EventType.ASSISTANT_RESPONSE:
+            text = str_field(event.data, "text", "")[:_MESSAGE_TEXT_LIMIT]
+            if text:
+                turns.append(("assistant", text))
+    attrs: dict[str, str] = {}
+    if boundary:
+        attrs[_SEMCONV_INPUT_MESSAGES] = _json_text([
+            _text_message(role, [text]) for role, text in turns[:boundary]
+        ])
+    replies = [text for _, text in turns[boundary:]]
+    if replies:
+        attrs[_SEMCONV_OUTPUT_MESSAGES] = _json_text([_text_message("assistant", replies)])
+    return attrs
+
+
+def _tool_input_attributes(arguments: object) -> dict[str, str]:
+    """Return the GenAI tool input keys for a tool call's recorded ``arguments``.
+
+    A mapping gives one ``gen_ai.tool.input.<key>`` per argument, cut at 200
+    characters. Any truthy value gives ``input.value`` and its MIME type, and
+    ``gen_ai.tool.call.arguments``. That is the ``input.value`` text when it is
+    the whole JSON object or the value is not a mapping. A mapping too long
+    for ``input.value`` gives the JSON object of the per-key values instead, so
+    the attribute stays an object and carries no new text.
+    """
+    attrs: dict[str, str] = {}
+    if isinstance(arguments, Mapping):
+        for k, v in arguments.items():
+            attrs[f"gen_ai.tool.input.{k}"] = str(v)[:_TOOL_ARGUMENT_VALUE_LIMIT]
+    if arguments:
+        input_value, input_mime = _io_value(arguments, _TOOL_ARGUMENTS_LIMIT)
+        attrs[_OI_INPUT_VALUE] = input_value
+        attrs[_OI_INPUT_MIME_TYPE] = input_mime
+        if input_mime == "application/json" or not isinstance(arguments, Mapping):
+            attrs[_SEMCONV_TOOL_CALL_ARGUMENTS] = input_value
+        else:
+            attrs[_SEMCONV_TOOL_CALL_ARGUMENTS] = json.dumps(
+                {
+                    str(k): str(v)[:_TOOL_ARGUMENT_VALUE_LIMIT]
+                    for k, v in arguments.items()
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+    return attrs
+
+
+def _error_tool_name(event: TraceEvent, call_event: TraceEvent | None) -> Any:
+    """Return the tool name for an error span.
+
+    That is the error's own ``tool_name``, else the paired tool_call's, else
+    ``error``. The ``@trace_tool`` decorator, for one, records the name only
+    on the call.
+    """
+    name = event.data.get("tool_name", "")
+    if not name and call_event is not None and isinstance(call_event.data, Mapping):
+        name = call_event.data.get("tool_name", "")
+    return name or "error"
+
+
+_LINK_TYPE = "agent.strace.link.type"
+
+
+class _RetryLinks:
+    """Collect the ``retry_of`` span links of one payload.
+
+    ``add`` records the events one span was built from. ``apply`` links each
+    span whose events name a ``retry_of`` event ID to the span built from that
+    event, when that is another span of the same payload. The first span to
+    record an event ID keeps it. Event data that is not an object is skipped.
+    """
+
+    def __init__(self) -> None:
+        self._span_of: dict[str, dict] = {}
+        self._retries: list[tuple[dict, list[str]]] = []
+
+    def add(self, span: dict, *events: TraceEvent | None) -> dict:
+        retry_ids: list[str] = []
+        for event in events:
+            if event is None:
+                continue
+            event_id = event_id_of(event)
+            if event_id:
+                self._span_of.setdefault(event_id, span)
+            if isinstance(event.data, Mapping):
+                retry_of = event.data.get("retry_of")
+                if isinstance(retry_of, str) and retry_of and retry_of not in retry_ids:
+                    retry_ids.append(retry_of)
+        if retry_ids:
+            self._retries.append((span, retry_ids))
+        return span
+
+    def apply(self) -> None:
+        for span, retry_ids in self._retries:
+            links: list[dict] = []
+            linked: set[str] = set()
+            for retry_of in retry_ids:
+                target = self._span_of.get(retry_of)
+                if target is None or target is span or target["spanId"] in linked:
+                    continue
+                linked.add(target["spanId"])
+                links.append({
+                    "traceId": target["traceId"],
+                    "spanId": target["spanId"],
+                    "attributes": _make_attributes({_LINK_TYPE: "retry_of"}),
+                })
+            if links:
+                span["links"] = links
+
+
 # session_to_otlp reads the data of every event of these types. It reads a
 # tool_call only when otlp_data_indexes says so.
 OTLP_DATA_EVENT_TYPES = frozenset({
@@ -768,6 +922,7 @@ def session_to_otlp(
     # and child spans (tool calls, errors)
     root_events = []
     child_spans = []
+    retry_links = _RetryLinks()
 
     # Pair tool_call events with their tool_result or error, and LLM
     # requests with their responses (see pairing.py)
@@ -826,7 +981,7 @@ def session_to_otlp(
             if result:
                 span_attrs["tool.output"] = str(result)[:500]
 
-            child_spans.append({
+            child_spans.append(retry_links.add({
                 "traceId": trace_id,
                 "spanId": span_id_of(call_event if call_event else event),
                 "parentSpanId": root_span_id,
@@ -836,20 +991,36 @@ def session_to_otlp(
                 "endTimeUnixNano": _ts_to_nanos(span_start + duration_ns / 1_000_000_000),
                 "attributes": _make_attributes(span_attrs),
                 "status": {"code": 0},  # STATUS_CODE_UNSET
-            })
+            }, call_event, event))
 
         elif event.event_type == EventType.ERROR:
-            # An error linked to an LLM request ends that request; it still
-            # exports as an error span below.
-            requests.match_parent(event)
+            # An error linked to an LLM request ends that request. The classic
+            # export has no model request spans, so it still exports as an
+            # error span, but not as a tool call.
+            model_error = requests.match_parent(event) is not None
             call_event = calls.match(event)
+            model_error = model_error and call_event is None
 
-            tool_name = event.data.get("tool_name", "error")
             error_msg = event.data.get("error", "") or event.data.get("message", "")
             span_start = call_event.timestamp if call_event else event.timestamp
             duration_ns = _duration_to_nanos(event.duration_ms)
 
-            span_attrs = {"tool.name": tool_name}
+            if model_error:
+                tool_name = event.data.get("tool_name", "error")
+                span_name: Any = tool_name
+                span_kind = 1  # SPAN_KIND_INTERNAL
+                span_attrs = {"tool.name": tool_name}
+            else:
+                # The same identity as a tool call that returned a result.
+                tool_name = _error_tool_name(event, call_event)
+                span_name = f"tool/{tool_name}"
+                span_kind = 3  # SPAN_KIND_CLIENT
+                span_attrs = {
+                    _SEMCONV_TOOL_NAME: tool_name,
+                    _SEMCONV_OP: "tool.call",
+                    _SEMCONV_TOOL_CALL_ID: event_id_of(call_event if call_event else event),
+                    "tool.name": tool_name,
+                }
             if error_msg:
                 span_attrs["error.message"] = str(error_msg)[:500]
             if call_event:
@@ -858,12 +1029,12 @@ def session_to_otlp(
                     for k, v in args.items():
                         span_attrs[f"tool.input.{k}"] = str(v)[:200]
 
-            child_spans.append({
+            child_spans.append(retry_links.add({
                 "traceId": trace_id,
                 "spanId": span_id_of(call_event if call_event else event),
                 "parentSpanId": root_span_id,
-                "name": tool_name,
-                "kind": 1,
+                "name": span_name,
+                "kind": span_kind,
                 "startTimeUnixNano": _ts_to_nanos(span_start),
                 "endTimeUnixNano": _ts_to_nanos(span_start + duration_ns / 1_000_000_000),
                 "attributes": _make_attributes(span_attrs),
@@ -871,7 +1042,7 @@ def session_to_otlp(
                 "events": [_make_event("exception", event.timestamp, {
                     "exception.message": str(error_msg)[:500],
                 })],
-            })
+            }, call_event, event))
 
         elif event.event_type == EventType.LLM_REQUEST:
             requests.add(event)
@@ -918,23 +1089,28 @@ def session_to_otlp(
                     llm_attrs["error.message"] = failure.message
             root_events.append(_make_event("gen_ai.assistant.message", event.timestamp, llm_attrs))
 
-    # Emit any unmatched tool_calls as spans (no result received)
+    # Emit any unmatched tool_calls as spans (no result received), with the
+    # same identity as a tool call that returned one
     for call_event in calls.unmatched():
         tool_name = call_event.data.get("tool_name", "tool")
-        child_spans.append({
+        child_spans.append(retry_links.add({
             "traceId": trace_id,
             "spanId": span_id_of(call_event),
             "parentSpanId": root_span_id,
-            "name": tool_name,
-            "kind": 1,
+            "name": f"tool/{tool_name}",
+            "kind": 3,  # SPAN_KIND_CLIENT
             "startTimeUnixNano": _ts_to_nanos(call_event.timestamp),
             "endTimeUnixNano": _ts_to_nanos(call_event.timestamp + 0.001),
             "attributes": _make_attributes({
+                _SEMCONV_TOOL_NAME: tool_name,
+                _SEMCONV_OP: "tool.call",
+                _SEMCONV_TOOL_CALL_ID: event_id_of(call_event),
                 "tool.name": tool_name,
                 **{f"tool.input.{k}": str(v)[:200] for k, v in object_field(call_event.data, "arguments", {}).items()},
             }),
             "status": {"code": 0},  # STATUS_CODE_UNSET
-        })
+        }, call_event))
+    retry_links.apply()
 
     # Build root span
     root_span: dict = {
@@ -979,64 +1155,99 @@ def session_to_otlp(
     }
 
 
+def node_tree_to_otlp(
+    tree: SessionNode,
+    service_name: str = "agent-trace",
+    *,
+    genai: bool = False,
+) -> dict:
+    """Export an already built subagent tree as a single OTLP trace.
+
+    Every session is converted with :func:`session_to_otlp`, or with
+    :func:`session_to_otlp_genai` when ``genai`` is true, under the root
+    session's trace ID. A subagent's root span is parented to the span of
+    the event its ``parent_event_id`` names in the parent session, which the
+    hooks set to the spawning tool call. A ``parent_event_id`` that is not a
+    non-empty string, or that names no span in the parent's export, parents
+    the subagent to the parent session's root span instead. A session that
+    appears twice in the tree, which only a parent link cycle produces, is
+    exported once. The resource and scope are the root session's.
+    """
+    convert = session_to_otlp_genai if genai else session_to_otlp
+    root_trace_id = _to_trace_id(tree.meta.session_id)
+    all_spans: list[dict] = []
+    exported: set[str] = set()
+    root_payload: dict = {}
+
+    def _collect(node: SessionNode, parent_span_id: str = "") -> None:
+        nonlocal root_payload
+        meta = node.meta
+        if meta.session_id in exported:
+            return
+        exported.add(meta.session_id)
+        payload = convert(
+            meta, node.events, service_name,
+            parent_span_id=parent_span_id,
+            parent_trace_id=root_trace_id,
+        )
+        if not root_payload:
+            root_payload = payload
+        spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
+        all_spans.extend(spans)
+        span_ids = {span["spanId"] for span in spans}
+        session_root_span_id = _to_span_id(f"root-{meta.session_id}")
+
+        for child in node.children:
+            parent_event_id = child.meta.parent_event_id
+            spawning_span_id = session_root_span_id
+            if isinstance(parent_event_id, str) and parent_event_id:
+                candidate = _to_span_id(parent_event_id)
+                if candidate in span_ids:
+                    spawning_span_id = candidate
+            _collect(child, parent_span_id=spawning_span_id)
+
+    _collect(tree)
+
+    resource_spans = root_payload["resourceSpans"][0]
+    return {
+        "resourceSpans": [{
+            "resource": resource_spans["resource"],
+            "scopeSpans": [{
+                "scope": resource_spans["scopeSpans"][0]["scope"],
+                "spans": all_spans,
+            }],
+        }],
+    }
+
+
 def tree_to_otlp(
     store: TraceStore,
     root_session_id: str,
     service_name: str = "agent-trace",
 ) -> dict:
-    """Export a full subagent tree as a single OTLP trace.
+    """Export a full subagent tree as a single classic OTLP trace.
 
-    All sessions in the tree share the same trace_id. Each subagent session's
-    root span is parented to the tool_call span that spawned it.
+    See :func:`node_tree_to_otlp` for how subagent root spans are parented.
     """
-    from .subagent import build_tree, SessionNode
+    from .subagent import build_tree
 
-    tree = build_tree(store, root_session_id)
-    root_trace_id = _to_trace_id(root_session_id)
-    all_spans: list[dict] = []
+    return node_tree_to_otlp(build_tree(store, root_session_id), service_name)
 
-    def _collect(node: SessionNode, parent_span_id: str = "") -> None:
-        meta = node.meta
-        events = node.events
-        payload = session_to_otlp(
-            meta, events, service_name,
-            parent_span_id=parent_span_id,
-            parent_trace_id=root_trace_id,
-        )
-        spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
-        all_spans.extend(spans)
 
-        # The root span of this session is the first span
-        session_root_span_id = _to_span_id(f"root-{meta.session_id}")
+def tree_to_otlp_genai(
+    store: TraceStore,
+    root_session_id: str,
+    service_name: str = "agent-trace",
+) -> dict:
+    """Export a full subagent tree as a single OTel GenAI OTLP trace.
 
-        for child in node.children:
-            # Parent span for child = the tool_call span that spawned it
-            spawning_span_id = (
-                _to_span_id(child.meta.parent_event_id)
-                if child.meta.parent_event_id
-                else session_root_span_id
-            )
-            _collect(child, parent_span_id=spawning_span_id)
+    See :func:`node_tree_to_otlp` for how subagent root spans are parented.
+    """
+    from .subagent import build_tree
 
-    _collect(tree)
-
-    root_meta = store.load_meta(root_session_id)
-    return {
-        "resourceSpans": [{
-            "resource": {
-                "attributes": _make_attributes({
-                    "service.name": service_name,
-                    "service.version": __version__,
-                    "agent.session_id": root_session_id,
-                    **({"tenant_id": root_meta.tenant_id} if root_meta.tenant_id else {}),
-                }),
-            },
-            "scopeSpans": [{
-                "scope": {"name": "agent-trace"},
-                "spans": all_spans,
-            }],
-        }],
-    }
+    return node_tree_to_otlp(
+        build_tree(store, root_session_id), service_name, genai=True,
+    )
 
 
 def _genai_llm_span(
@@ -1173,6 +1384,12 @@ def session_to_otlp_genai(
     - Error events use the OTel exception event format
     - gen_ai.provider.name is derived from the provider or model name when
       possible; the deprecated gen_ai.system repeats it
+    - The root span carries the recorded prompts and replies as
+      gen_ai.input.messages and gen_ai.output.messages, and tool spans carry
+      gen_ai.tool.call.arguments and gen_ai.tool.call.result, all as JSON
+      strings under the same truncation as the older content keys
+    - A tool or chat span whose event names another by ``retry_of`` links
+      to that event's span
 
     See: https://github.com/open-telemetry/semantic-conventions-genai
     """
@@ -1217,11 +1434,13 @@ def session_to_otlp_genai(
     depth = usable_count(meta.depth)
     if depth:
         root_attr_values["agent.strace.depth"] = depth
+    root_attr_values.update(_root_messages(events))
     root_attr_values["metadata"] = _openinference_metadata(root_attr_values)
     root_attrs = _make_attributes(root_attr_values)
 
     root_events: list[dict] = []
     child_spans: list[dict] = []
+    retry_links = _RetryLinks()
 
     # Pair LLM requests and tool calls with their responses (see pairing.py)
     requests: Pairer[TraceEvent] = llm_pairer()
@@ -1258,10 +1477,10 @@ def session_to_otlp_genai(
 
         elif event.event_type == EventType.LLM_RESPONSE:
             req_event = requests.match(event)
-            child_spans.append(_genai_llm_span(
+            child_spans.append(retry_links.add(_genai_llm_span(
                 meta, trace_id, root_span_id, req_event, event,
                 span_id_of(req_event if req_event else event),
-            ))
+            ), req_event, event))
 
         elif event.event_type == EventType.TOOL_CALL:
             calls.add(event)
@@ -1285,25 +1504,19 @@ def session_to_otlp_genai(
                 _OI_TOOL_NAME: tool_name,
             }
             if call_event:
-                arguments = call_event.data.get("arguments", {})
-                if isinstance(arguments, Mapping):
-                    for k, v in arguments.items():
-                        tool_attrs[f"gen_ai.tool.input.{k}"] = str(v)[:200]
-                if arguments:
-                    input_value, input_mime = _io_value(arguments, 1000)
-                    tool_attrs[_OI_INPUT_VALUE] = input_value
-                    tool_attrs[_OI_INPUT_MIME_TYPE] = input_mime
+                tool_attrs.update(_tool_input_attributes(call_event.data.get("arguments", {})))
                 tool_attrs.update(_event_trace_attributes(call_event, "request"))
             result = event.data.get("result", "")
             if result:
                 tool_attrs["gen_ai.tool.output"] = str(result)[:500]
-                output_value, output_mime = _io_value(result, 500)
+                output_value, output_mime = _io_value(result, _TOOL_RESULT_LIMIT)
                 tool_attrs[_OI_OUTPUT_VALUE] = output_value
                 tool_attrs[_OI_OUTPUT_MIME_TYPE] = output_mime
+                tool_attrs[_SEMCONV_TOOL_CALL_RESULT] = output_value
             tool_attrs.update(_event_trace_attributes(event, "response"))
             tool_attrs["metadata"] = _openinference_metadata(tool_attrs)
 
-            child_spans.append({
+            child_spans.append(retry_links.add({
                 "traceId": trace_id,
                 "spanId": span_id_of(call_event if call_event else event),
                 "parentSpanId": root_span_id,
@@ -1315,22 +1528,22 @@ def session_to_otlp_genai(
                 ),
                 "attributes": _make_attributes(tool_attrs),
                 "status": {"code": 0},  # STATUS_CODE_UNSET
-            })
+            }, call_event, event))
 
         elif event.event_type == EventType.ERROR:
             req_event = requests.match_parent(event)
             if req_event is not None:
                 # An error linked to an LLM request ends that request, so it
                 # exports as one failed model call instead of a tool error.
-                child_spans.append(_genai_llm_span(
+                child_spans.append(retry_links.add(_genai_llm_span(
                     meta, trace_id, root_span_id, req_event, event,
                     span_id_of(req_event),
-                ))
+                ), req_event, event))
                 continue
 
             call_event = calls.match(event)
 
-            tool_name = event.data.get("tool_name", "error")
+            tool_name = _error_tool_name(event, call_event)
             error_msg = event.data.get("error", "") or event.data.get("message", "")
             span_start = call_event.timestamp if call_event else event.timestamp
             duration_ns = _duration_to_nanos(event.duration_ms)
@@ -1358,19 +1571,12 @@ def session_to_otlp_genai(
                 _OI_TOOL_NAME: tool_name,
             }
             if call_event and isinstance(call_event.data, Mapping):
-                arguments = call_event.data.get("arguments", {})
-                if isinstance(arguments, Mapping):
-                    for k, v in arguments.items():
-                        error_attrs[f"gen_ai.tool.input.{k}"] = str(v)[:200]
-                if arguments:
-                    input_value, input_mime = _io_value(arguments, 1000)
-                    error_attrs[_OI_INPUT_VALUE] = input_value
-                    error_attrs[_OI_INPUT_MIME_TYPE] = input_mime
+                error_attrs.update(_tool_input_attributes(call_event.data.get("arguments", {})))
                 error_attrs.update(_event_trace_attributes(call_event, "request"))
             error_attrs.update(_event_trace_attributes(event, "response"))
             error_attrs["metadata"] = _openinference_metadata(error_attrs)
 
-            child_spans.append({
+            child_spans.append(retry_links.add({
                 "traceId": trace_id,
                 "spanId": span_id_of(call_event if call_event else event),
                 "parentSpanId": root_span_id,
@@ -1383,7 +1589,7 @@ def session_to_otlp_genai(
                 "attributes": _make_attributes(error_attrs),
                 "events": [exc_event],
                 "status": {"code": 2, "message": str(error_msg)[:200]},
-            })
+            }, call_event, event))
 
     # Emit unmatched LLM requests as minimal spans
     for req_event in requests.unmatched():
@@ -1412,7 +1618,7 @@ def session_to_otlp_genai(
         llm_attrs.update(_reasoning_attributes(req_event.data, usage, has_output))
         llm_attrs.update(_cost_attributes(req_event.data, {}))
         llm_attrs["metadata"] = _openinference_metadata(llm_attrs)
-        child_spans.append({
+        child_spans.append(retry_links.add({
             "traceId": trace_id,
             "spanId": span_id_of(req_event),
             "parentSpanId": root_span_id,
@@ -1422,7 +1628,7 @@ def session_to_otlp_genai(
             "endTimeUnixNano": _ts_to_nanos(req_event.timestamp + 0.001),
             "attributes": _make_attributes(llm_attrs),
             "status": {"code": 0},
-        })
+        }, req_event))
 
     # Emit unmatched tool calls
     for call_event in calls.unmatched():
@@ -1437,16 +1643,9 @@ def session_to_otlp_genai(
             _OI_TOOL_NAME: tool_name,
             **_event_trace_attributes(call_event, "request"),
         }
-        arguments = call_event.data.get("arguments", {})
-        if isinstance(arguments, Mapping):
-            for k, v in arguments.items():
-                tool_attrs[f"gen_ai.tool.input.{k}"] = str(v)[:200]
-        if arguments:
-            input_value, input_mime = _io_value(arguments, 1000)
-            tool_attrs[_OI_INPUT_VALUE] = input_value
-            tool_attrs[_OI_INPUT_MIME_TYPE] = input_mime
+        tool_attrs.update(_tool_input_attributes(call_event.data.get("arguments", {})))
         tool_attrs["metadata"] = _openinference_metadata(tool_attrs)
-        child_spans.append({
+        child_spans.append(retry_links.add({
             "traceId": trace_id,
             "spanId": span_id_of(call_event),
             "parentSpanId": root_span_id,
@@ -1456,7 +1655,8 @@ def session_to_otlp_genai(
             "endTimeUnixNano": _ts_to_nanos(call_event.timestamp + 0.001),
             "attributes": _make_attributes(tool_attrs),
             "status": {"code": 0},
-        })
+        }, call_event))
+    retry_links.apply()
 
     root_span: dict = {
         "traceId": trace_id,

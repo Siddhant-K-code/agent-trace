@@ -32,6 +32,7 @@ from .models import (
     usable_count,
     usable_number,
     usable_text,
+    usable_time,
 )
 from .store import TraceStore
 
@@ -67,6 +68,12 @@ class AggregatedStats:
 # ---------------------------------------------------------------------------
 # Tree building
 # ---------------------------------------------------------------------------
+
+def _start_order(meta: SessionMeta) -> tuple[bool, float]:
+    """Order sessions by start time, with an unusable one last."""
+    started = usable_time(meta.started_at)
+    return (started is None, started or 0.0)
+
 
 def build_tree(store: TraceStore, root_session_id: str) -> SessionNode:
     """Build a SessionNode tree rooted at *root_session_id*.
@@ -104,10 +111,7 @@ def build_tree(store: TraceStore, root_session_id: str) -> SessionNode:
         node = SessionNode(meta=meta, events=events)
 
         if current_depth < MAX_DEPTH:
-            for child_meta in sorted(
-                children_of.get(session_id, []),
-                key=lambda m: m.started_at,
-            ):
+            for child_meta in sorted(children_of.get(session_id, []), key=_start_order):
                 if child_meta.tenant_id != tenant_id:
                     raise ValueError(
                         f"cross-tenant child link rejected for session {child_meta.session_id}"

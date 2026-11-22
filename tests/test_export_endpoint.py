@@ -760,6 +760,182 @@ class TestExportRefusalThroughTheCli(_ExportCase):
                 self.assertEqual(os.listdir(self.cwd), [])
 
 
+class TestExportIncludeSubagents(_CollectorCase):
+    """export --include-subagents sends a session and its subagents as one
+    OTLP trace, each subagent's root under the span that spawned it (#552)."""
+
+    SPAWN_SPAN = {"otlp": "tool/Bash", "otlp-genai": "execute_tool Bash"}
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.store = TraceStore(self.trace_dir)
+        call = next(e for e in self.store.load_events(self.session_id)
+                    if e.event_type == EventType.TOOL_CALL)
+        child = SessionMeta(
+            agent_name="probe", parent_session_id=self.session_id,
+            parent_event_id=call.event_id, depth=1,
+        )
+        self.store.create_session(child)
+        self.store.append_event(child.session_id, TraceEvent(
+            event_type=EventType.TOOL_CALL, session_id=child.session_id, timestamp=3.0,
+            data={"tool_name": "Read", "arguments": {"file_path": "a.py"}},
+        ))
+        self.child_id = child.session_id
+        self.call_id = call.event_id
+
+    def assertOneTrace(self, payload: dict, fmt: str) -> None:
+        spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
+        self.assertEqual(len({span["traceId"] for span in spans}), 1)
+        roots = [s for s in spans if s["name"].startswith(("agent-session", "invoke_agent"))]
+        self.assertEqual(len(roots), 2)
+        self.assertNotIn("parentSpanId", roots[0])
+        (spawn,) = [s for s in spans if s["name"] == self.SPAWN_SPAN[fmt]]
+        self.assertEqual(roots[1]["parentSpanId"], spawn["spanId"])
+        self.assertEqual(spawn["parentSpanId"], roots[0]["spanId"])
+        self.assertIn("tool/Read" if fmt == "otlp" else "execute_tool Read",
+                      [s["name"] for s in spans])
+
+    def test_writes_one_trace_to_a_file(self):
+        for fmt in ("otlp", "otlp-genai"):
+            with self.subTest(format=fmt):
+                name = f"trace-{self.session_id[:12]}-{fmt}.json"
+                code, out, err = self.export("--format", fmt, "--include-subagents")
+                self.assertEqual((code, out), (0, ""))
+                self.assertEqual(err, (
+                    f"OTLP payload for 2 sessions written to {name}\n"
+                    f"Send to a collector: agent-strace export --format {fmt}"
+                    " --include-subagents --endpoint <url>\n"
+                ))
+                with open(os.path.join(self.cwd, name), encoding="utf-8") as f:
+                    self.assertOneTrace(json.load(f), fmt)
+                os.remove(os.path.join(self.cwd, name))
+
+    def test_output(self):
+        path = os.path.join(self.root, "tree.json")
+        code, out, err = self.export("--format", "otlp", "--include-subagents", "--output", path)
+        self.assertEqual((code, out), (0, ""))
+        self.assertTrue(err.startswith(f"OTLP payload for 2 sessions written to {path}\n"))
+        with open(path, encoding="utf-8") as f:
+            self.assertOneTrace(json.load(f), "otlp")
+        self.assertEqual(os.listdir(self.cwd), [])
+
+    def test_without_the_flag_only_the_session_is_exported(self):
+        code, _, err = self.export("--format", "otlp")
+        self.assertEqual((code, err.splitlines()[0]),
+                         (0, f"OTLP payload written to trace-{self.session_id[:12]}-otlp.json"))
+        with open(os.path.join(self.cwd, f"trace-{self.session_id[:12]}-otlp.json"),
+                  encoding="utf-8") as f:
+            spans = json.load(f)["resourceSpans"][0]["scopeSpans"][0]["spans"]
+        self.assertEqual([s["name"] for s in spans].count("agent-session (probe)"), 1)
+        self.assertNotIn("tool/Read", [s["name"] for s in spans])
+
+    def test_sends_one_request(self):
+        for fmt in ("otlp", "otlp-genai"):
+            with self.subTest(format=fmt):
+                self.collector.script((200, b"", 0.0))
+                result = self.export(
+                    "--format", fmt, "--include-subagents", "--endpoint", self.base,
+                    "--header", "X-Probe-Key: k",
+                )
+                self.assertEqual(result, (0, "", f"Exported 3 events to {self.base} (HTTP 200)\n"))
+                [post] = self.collector.received()
+                self.assertEqual((post.method, post.path), ("POST", "/v1/traces"))
+                self.assertEqual(post.header("X-Probe-Key"), ["k"])
+                self.assertOneTrace(json.loads(post.body), fmt)
+                self.assertEqual(os.listdir(self.cwd), [])
+
+    def test_refusals(self):
+        not_used = "it exports one OTLP trace with --format otlp or otlp-genai"
+        cases = (
+            ((), "--include-subagents is not used with --format json; use --format otlp or otlp-genai"),
+            (("--format", "csv"), "--include-subagents is not used with --format csv; use --format otlp or otlp-genai"),
+            (("--format", "ndjson"), "--include-subagents is not used with --format ndjson; use --format otlp or otlp-genai"),
+            (("--format", "temporal"), "--include-subagents is not used with --format temporal; use --format otlp or otlp-genai"),
+            (("--format", "otlp", "--anonymize"), f"--include-subagents is not used with --anonymize; {not_used}"),
+            (("--format", "otlp", "--scores"), f"--include-subagents is not used with --scores; {not_used}"),
+            (("--format", "otlp", "--metrics"), f"--include-subagents is not used with --metrics; {not_used}"),
+            (("--format", "otlp", "--backend", "otlp"), f"--include-subagents is not used with --backend; {not_used}"),
+            (("--format", "otlp", "--endpoint", ""), "invalid --endpoint value: it is empty"),
+        )
+        for flags, line in cases:
+            with self.subTest(flags=flags):
+                before = _tree(self.root)
+                self.assertEqual(self.export(*flags, "--include-subagents"), (1, "", line + "\n"))
+                self.assertEqual(_tree(self.root), before)
+                self.assertEqual(self.collector.received(), [])
+
+    def test_unknown_session(self):
+        code, out, err = self.export("--format", "otlp", "--include-subagents", session_id="nosuch")
+        self.assertEqual((code, out, err), (1, "", "Session not found: nosuch\n"))
+        self.assertEqual(os.listdir(self.cwd), [])
+
+    def test_subagent_with_unusable_times_is_named(self):
+        from agent_trace.event_data import UnusableTimestampError
+
+        # A second subagent, so the tree sorts children by start time.
+        self.store.create_session(SessionMeta(
+            agent_name="probe", parent_session_id=self.session_id, depth=1,
+        ))
+        path = os.path.join(self.trace_dir, self.child_id, "meta.json")
+        with open(path, encoding="utf-8") as f:
+            meta = json.load(f)
+        meta["started_at"] = "soon"
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(meta, f)
+        for fmt in ("otlp", "otlp-genai"):
+            with self.subTest(format=fmt):
+                with self.assertRaises(UnusableTimestampError) as caught:
+                    self.export("--format", fmt, "--include-subagents")
+                self.assertIn(f"session {self.child_id} started_at", str(caught.exception))
+                self.assertEqual(os.listdir(self.cwd), [])
+
+    def test_non_string_parent_event_id_parents_to_the_session_root(self):
+        path = os.path.join(self.trace_dir, self.child_id, "meta.json")
+        with open(path, encoding="utf-8") as f:
+            meta = json.load(f)
+        for value in ([self.call_id], {"id": self.call_id}, 5, True):
+            meta["parent_event_id"] = value
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(meta, f)
+            with self.subTest(value=value):
+                out_path = os.path.join(self.root, "tree.json")
+                code, _, _ = self.export("--format", "otlp", "--include-subagents", "--output", out_path)
+                self.assertEqual(code, 0)
+                with open(out_path, encoding="utf-8") as f:
+                    spans = json.load(f)["resourceSpans"][0]["scopeSpans"][0]["spans"]
+                roots = [s for s in spans if s["name"].startswith("agent-session")]
+                self.assertEqual(roots[1]["parentSpanId"], roots[0]["spanId"])
+
+    @unittest.skipUnless(
+        getattr(sys, "get_int_max_str_digits", lambda: 0)(),
+        "this Python converts an int of any length to a string",
+    )
+    def test_conversion_error_is_one_line(self):
+        # A subagent's token sum has one digit more than str() converts, so
+        # the GenAI conversion raises ValueError, as in export without the flag.
+        digits = sys.get_int_max_str_digits()
+        self.store.append_event(self.child_id, TraceEvent(
+            event_type=EventType.LLM_RESPONSE, session_id=self.child_id, timestamp=4.0,
+            data={"model": "m", "input_tokens": 10 ** (digits - 1), "output_tokens": 9 * 10 ** (digits - 1)},
+        ))
+        try:
+            str(10 ** digits)
+        except ValueError as exc:
+            failed = f"OTLP export failed: {exc}\n"
+        path = os.path.join(self.root, "tree.json")
+        self.assertEqual(
+            self.export("--format", "otlp-genai", "--include-subagents", "--output", path),
+            (1, "", failed),
+        )
+        self.assertEqual(
+            self.export("--format", "otlp-genai", "--include-subagents", "--endpoint", self.base),
+            (1, "", failed),
+        )
+        self.assertFalse(os.path.exists(path))
+        self.assertEqual(self.collector.received(), [])
+        self.assertEqual(os.listdir(self.cwd), [])
+
+
 class TestExportWithoutEndpoint(_ExportCase):
     """Without --endpoint, export works as before."""
 
