@@ -241,7 +241,7 @@ agent-strace export <session-id> --format otlp-genai \
   --endpoint http://localhost:4318
 ```
 
-Per-backend setup (Datadog, Honeycomb, Grafana, New Relic, Splunk, Langfuse): [docs/production.md](docs/production.md)
+Per-backend setup (Datadog, Honeycomb, Grafana, New Relic, Splunk, Langfuse, Telemetry.dev): [docs/production.md](docs/production.md)
 
 **Server-side collector**: for containers, CI, and multi-machine setups:
 

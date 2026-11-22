@@ -23,6 +23,7 @@ LANDING_DOCS = (
     "agent-instruction-compliance.md",
     "cognitive-debt-review-coverage.md",
     "releases.md",
+    "telemetry-dev.md",
 )
 LOCAL_LINK = re.compile(r"\[[^\]]+\]\((?!https?://|mailto:)([^)#]+)(?:#[^)]+)?\)")
 

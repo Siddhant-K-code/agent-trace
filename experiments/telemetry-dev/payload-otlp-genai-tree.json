@@ -1,0 +1,1857 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "agent-trace"
+            }
+          },
+          {
+            "key": "service.version",
+            "value": {
+              "stringValue": "0.120.0"
+            }
+          },
+          {
+            "key": "agent.session_id",
+            "value": {
+              "stringValue": "td241-tree-parent"
+            }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "agent-trace",
+            "version": "0.120.0"
+          },
+          "spans": [
+            {
+              "traceId": "c2a525553d1d97ea41e0d3ff9b0f97c6",
+              "spanId": "3f1fa4a01701e863",
+              "name": "invoke_agent claude-code",
+              "kind": 1,
+              "startTimeUnixNano": "1789300800000000000",
+              "endTimeUnixNano": "1789300811000000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "invoke_agent"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.name",
+                  "value": {
+                    "stringValue": "claude-code"
+                  }
+                },
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "anthropic"
+                  }
+                },
+                {
+                  "key": "gen_ai.system",
+                  "value": {
+                    "stringValue": "anthropic"
+                  }
+                },
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "AGENT"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "td241-tree-parent"
+                  }
+                },
+                {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "synthetic-conversation-td241-tree"
+                  }
+                },
+                {
+                  "key": "agent.session_id",
+                  "value": {
+                    "stringValue": "td241-tree-parent"
+                  }
+                },
+                {
+                  "key": "agent.tool_calls",
+                  "value": {
+                    "intValue": "3"
+                  }
+                },
+                {
+                  "key": "agent.llm_requests",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "agent.errors",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "agent.strace.provider",
+                  "value": {
+                    "stringValue": "claude-code"
+                  }
+                },
+                {
+                  "key": "agent.strace.redacted",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "agent.strace.redacted_event_count",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "agent.strace.evidence.schema_version",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "agent.strace.evidence.status",
+                  "value": {
+                    "stringValue": "partial"
+                  }
+                },
+                {
+                  "key": "agent.strace.evidence.gap_count",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "agent.strace.evidence.gap_codes",
+                  "value": {
+                    "stringValue": "[\"orphan_tool_result\"]"
+                  }
+                },
+                {
+                  "key": "agent.strace.evidence.gaps",
+                  "value": {
+                    "stringValue": "[{\"code\": \"orphan_tool_result\", \"kind\": \"observed\", \"event_id\": \"td241-tree-ev-orphan\", \"message\": \"tool result 'td241-tree-ev-orphan' references unknown parent 'missing-tool-call'\"}]"
+                  }
+                },
+                {
+                  "key": "agent.strace.provenance",
+                  "value": {
+                    "stringValue": "{\"agent_provider\": \"claude-code\", \"agent_version\": \"0.0.0-synthetic\", \"os_user\": \"synthetic-user\", \"hostname\": \"synthetic-host\", \"pid\": 4242, \"ppid\": 4241, \"process_name\": \"synthetic-shell\", \"process_ancestry\": [\"synthetic-terminal\", \"synthetic-shell\", \"claude\"], \"git_repo\": \"example/synthetic-project\", \"git_branch\": \"main\", \"git_commit\": \"[REDACTED:hex-token]\", \"working_dir\": \"/workspace/project\"}"
+                  }
+                },
+                {
+                  "key": "metadata",
+                  "value": {
+                    "stringValue": "{\"agent_strace\": {\"provider\": \"claude-code\", \"redacted\": true, \"redacted_event_count\": 1, \"evidence.schema_version\": 1, \"evidence.status\": \"partial\", \"evidence.gap_count\": 1, \"evidence.gap_codes\": [\"orphan_tool_result\"], \"evidence.gaps\": [{\"code\": \"orphan_tool_result\", \"kind\": \"observed\", \"event_id\": \"td241-tree-ev-orphan\", \"message\": \"tool result 'td241-tree-ev-orphan' references unknown parent 'missing-tool-call'\"}], \"provenance\": {\"agent_provider\": \"claude-code\", \"agent_version\": \"0.0.0-synthetic\", \"os_user\": \"synthetic-user\", \"hostname\": \"synthetic-host\", \"pid\": 4242, \"ppid\": 4241, \"process_name\": \"synthetic-shell\", \"process_ancestry\": [\"synthetic-terminal\", \"synthetic-shell\", \"claude\"], \"git_repo\": \"example/synthetic-project\", \"git_branch\": \"main\", \"git_commit\": \"[REDACTED:hex-token]\", \"working_dir\": \"/workspace/project\"}}}"
+                  }
+                }
+              ],
+              "events": [
+                {
+                  "timeUnixNano": "1789300801000000000",
+                  "name": "gen_ai.user.message",
+                  "attributes": [
+                    {
+                      "key": "gen_ai.prompt",
+                      "value": {
+                        "stringValue": "[REDACTED synthetic request] fix the failing example test"
+                      }
+                    },
+                    {
+                      "key": "agent.strace.event.event_id",
+                      "value": {
+                        "stringValue": "td241-tree-ev-prompt"
+                      }
+                    },
+                    {
+                      "key": "agent.strace.event.redacted",
+                      "value": {
+                        "boolValue": true
+                      }
+                    },
+                    {
+                      "key": "agent.strace.event.previous_hash",
+                      "value": {
+                        "stringValue": "9398a7a3cc78a5450338c16c62f42cc4f71a97bdbbd904c14e0a7020582b27f0"
+                      }
+                    },
+                    {
+                      "key": "metadata",
+                      "value": {
+                        "stringValue": "{\"agent_strace\": {\"event.event_id\": \"td241-tree-ev-prompt\", \"event.redacted\": true, \"event.previous_hash\": \"9398a7a3cc78a5450338c16c62f42cc4f71a97bdbbd904c14e0a7020582b27f0\"}}"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "1789300810000000000",
+                  "name": "gen_ai.assistant.message",
+                  "attributes": [
+                    {
+                      "key": "gen_ai.completion",
+                      "value": {
+                        "stringValue": "Updated the example and the focused test now passes."
+                      }
+                    },
+                    {
+                      "key": "agent.strace.event.event_id",
+                      "value": {
+                        "stringValue": "td241-tree-ev-response"
+                      }
+                    },
+                    {
+                      "key": "agent.strace.event.redacted",
+                      "value": {
+                        "boolValue": false
+                      }
+                    },
+                    {
+                      "key": "agent.strace.event.previous_hash",
+                      "value": {
+                        "stringValue": "f2a7a8941f81d7e57aaa2057a21003f0af33edbd30c27a58f5b8ca67209825f9"
+                      }
+                    },
+                    {
+                      "key": "metadata",
+                      "value": {
+                        "stringValue": "{\"agent_strace\": {\"event.event_id\": \"td241-tree-ev-response\", \"event.redacted\": false, \"event.previous_hash\": \"f2a7a8941f81d7e57aaa2057a21003f0af33edbd30c27a58f5b8ca67209825f9\"}}"
+                      }
+                    }
+                  ]
+                }
+              ],
+              "status": {
+                "code": 2
+              }
+            },
+            {
+              "traceId": "c2a525553d1d97ea41e0d3ff9b0f97c6",
+              "spanId": "caff12ac37a8dd64",
+              "parentSpanId": "3f1fa4a01701e863",
+              "name": "chat claude-sonnet-4-5",
+              "kind": 3,
+              "startTimeUnixNano": "1789300801200000000",
+              "endTimeUnixNano": "1789300801600000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "anthropic"
+                  }
+                },
+                {
+                  "key": "gen_ai.system",
+                  "value": {
+                    "stringValue": "anthropic"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "LLM"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "td241-tree-parent"
+                  }
+                },
+                {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "synthetic-conversation-td241-tree"
+                  }
+                },
+                {
+                  "key": "llm.provider",
+                  "value": {
+                    "stringValue": "anthropic"
+                  }
+                },
+                {
+                  "key": "agent.strace.provider",
+                  "value": {
+                    "stringValue": "anthropic"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "claude-sonnet-4-5"
+                  }
+                },
+                {
+                  "key": "llm.model_name",
+                  "value": {
+                    "stringValue": "claude-sonnet-4-5"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.max_tokens",
+                  "value": {
+                    "intValue": "4096"
+                  }
+                },
+                {
+                  "key": "llm.invocation_parameters",
+                  "value": {
+                    "stringValue": "{\"max_tokens\":4096}"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.finish_reasons",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "error"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "key": "error.type",
+                  "value": {
+                    "stringValue": "overloaded_error"
+                  }
+                },
+                {
+                  "key": "agent.strace.request.event_id",
+                  "value": {
+                    "stringValue": "td241-tree-llm-req-1"
+                  }
+                },
+                {
+                  "key": "agent.strace.request.redacted",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "agent.strace.request.previous_hash",
+                  "value": {
+                    "stringValue": "173e540b1a71b6b75af91a6d685e13d734facff6f7715f81282fc1f9abf47845"
+                  }
+                },
+                {
+                  "key": "agent.strace.request.provenance",
+                  "value": {
+                    "stringValue": "{\"provider\": \"anthropic\"}"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.event_id",
+                  "value": {
+                    "stringValue": "td241-tree-llm-res-1"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.redacted",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "agent.strace.response.parent_event_id",
+                  "value": {
+                    "stringValue": "td241-tree-llm-req-1"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.previous_hash",
+                  "value": {
+                    "stringValue": "872d20cf1e4b3ea049ba7af8cd69bf80548fad4e79370f5185fda2891adf1bd7"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.provenance",
+                  "value": {
+                    "stringValue": "{\"provider\": \"anthropic\"}"
+                  }
+                },
+                {
+                  "key": "metadata",
+                  "value": {
+                    "stringValue": "{\"agent_strace\": {\"provider\": \"anthropic\", \"request.event_id\": \"td241-tree-llm-req-1\", \"request.redacted\": false, \"request.previous_hash\": \"173e540b1a71b6b75af91a6d685e13d734facff6f7715f81282fc1f9abf47845\", \"request.provenance\": {\"provider\": \"anthropic\"}, \"response.event_id\": \"td241-tree-llm-res-1\", \"response.redacted\": false, \"response.parent_event_id\": \"td241-tree-llm-req-1\", \"response.previous_hash\": \"872d20cf1e4b3ea049ba7af8cd69bf80548fad4e79370f5185fda2891adf1bd7\", \"response.provenance\": {\"provider\": \"anthropic\"}}}"
+                  }
+                }
+              ],
+              "status": {
+                "code": 2,
+                "message": "synthetic overload, retrying"
+              }
+            },
+            {
+              "traceId": "c2a525553d1d97ea41e0d3ff9b0f97c6",
+              "spanId": "e1f776aa4c28937e",
+              "parentSpanId": "3f1fa4a01701e863",
+              "name": "chat claude-sonnet-4-5",
+              "kind": 3,
+              "startTimeUnixNano": "1789300801800000000",
+              "endTimeUnixNano": "1789300802600000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "anthropic"
+                  }
+                },
+                {
+                  "key": "gen_ai.system",
+                  "value": {
+                    "stringValue": "anthropic"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "LLM"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "td241-tree-parent"
+                  }
+                },
+                {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "synthetic-conversation-td241-tree"
+                  }
+                },
+                {
+                  "key": "llm.provider",
+                  "value": {
+                    "stringValue": "anthropic"
+                  }
+                },
+                {
+                  "key": "agent.strace.provider",
+                  "value": {
+                    "stringValue": "anthropic"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "claude-sonnet-4-5"
+                  }
+                },
+                {
+                  "key": "llm.model_name",
+                  "value": {
+                    "stringValue": "claude-sonnet-4-5"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.max_tokens",
+                  "value": {
+                    "intValue": "4096"
+                  }
+                },
+                {
+                  "key": "llm.invocation_parameters",
+                  "value": {
+                    "stringValue": "{\"max_tokens\":4096}"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "12000"
+                  }
+                },
+                {
+                  "key": "llm.token_count.prompt",
+                  "value": {
+                    "intValue": "12000"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_read.input_tokens",
+                  "value": {
+                    "intValue": "8000"
+                  }
+                },
+                {
+                  "key": "llm.token_count.prompt_details.cache_read",
+                  "value": {
+                    "intValue": "8000"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_write.input_tokens",
+                  "value": {
+                    "intValue": "1000"
+                  }
+                },
+                {
+                  "key": "llm.token_count.prompt_details.cache_write",
+                  "value": {
+                    "intValue": "1000"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "1500"
+                  }
+                },
+                {
+                  "key": "llm.token_count.completion",
+                  "value": {
+                    "intValue": "1500"
+                  }
+                },
+                {
+                  "key": "llm.token_count.total",
+                  "value": {
+                    "intValue": "13500"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.finish_reasons",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "tool_use"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "key": "agent.strace.finish_reason",
+                  "value": {
+                    "stringValue": "tool_use"
+                  }
+                },
+                {
+                  "key": "llm.finish_reason",
+                  "value": {
+                    "stringValue": "tool_use"
+                  }
+                },
+                {
+                  "key": "agent.strace.cost.total_usd",
+                  "value": {
+                    "doubleValue": 0.03765
+                  }
+                },
+                {
+                  "key": "llm.cost.total",
+                  "value": {
+                    "doubleValue": 0.03765
+                  }
+                },
+                {
+                  "key": "agent.strace.request.event_id",
+                  "value": {
+                    "stringValue": "td241-tree-llm-req-2"
+                  }
+                },
+                {
+                  "key": "agent.strace.request.redacted",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "agent.strace.request.previous_hash",
+                  "value": {
+                    "stringValue": "1d00b2eaf6449bac5e25473f0a49ae5f87a4dcb2e6f17211a78a8ff15b9579f8"
+                  }
+                },
+                {
+                  "key": "agent.strace.request.provenance",
+                  "value": {
+                    "stringValue": "{\"provider\": \"anthropic\"}"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.event_id",
+                  "value": {
+                    "stringValue": "td241-tree-llm-res-2"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.redacted",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "agent.strace.response.parent_event_id",
+                  "value": {
+                    "stringValue": "td241-tree-llm-req-2"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.previous_hash",
+                  "value": {
+                    "stringValue": "bb984e356a112fa14cc0a757863a7402f349cc2871db7d07e5e9f194c8cdc4a3"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.provenance",
+                  "value": {
+                    "stringValue": "{\"provider\": \"anthropic\"}"
+                  }
+                },
+                {
+                  "key": "metadata",
+                  "value": {
+                    "stringValue": "{\"agent_strace\": {\"provider\": \"anthropic\", \"finish_reason\": \"tool_use\", \"cost.total_usd\": 0.03765, \"request.event_id\": \"td241-tree-llm-req-2\", \"request.redacted\": false, \"request.previous_hash\": \"1d00b2eaf6449bac5e25473f0a49ae5f87a4dcb2e6f17211a78a8ff15b9579f8\", \"request.provenance\": {\"provider\": \"anthropic\"}, \"response.event_id\": \"td241-tree-llm-res-2\", \"response.redacted\": false, \"response.parent_event_id\": \"td241-tree-llm-req-2\", \"response.previous_hash\": \"bb984e356a112fa14cc0a757863a7402f349cc2871db7d07e5e9f194c8cdc4a3\", \"response.provenance\": {\"provider\": \"anthropic\"}}}"
+                  }
+                }
+              ],
+              "status": {
+                "code": 0
+              }
+            },
+            {
+              "traceId": "c2a525553d1d97ea41e0d3ff9b0f97c6",
+              "spanId": "ff7020f50640c317",
+              "parentSpanId": "3f1fa4a01701e863",
+              "name": "execute_tool bash",
+              "kind": 1,
+              "startTimeUnixNano": "1789300803000000000",
+              "endTimeUnixNano": "1789300804100000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": {
+                    "stringValue": "bash"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "execute_tool"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.id",
+                  "value": {
+                    "stringValue": "td241-tree-tool-test-1"
+                  }
+                },
+                {
+                  "key": "error.type",
+                  "value": {
+                    "stringValue": "_OTHER"
+                  }
+                },
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "TOOL"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "td241-tree-parent"
+                  }
+                },
+                {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "synthetic-conversation-td241-tree"
+                  }
+                },
+                {
+                  "key": "tool.name",
+                  "value": {
+                    "stringValue": "bash"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.input.command",
+                  "value": {
+                    "stringValue": "python -m pytest -q tests/test_example.py"
+                  }
+                },
+                {
+                  "key": "input.value",
+                  "value": {
+                    "stringValue": "{\"command\":\"python -m pytest -q tests/test_example.py\"}"
+                  }
+                },
+                {
+                  "key": "input.mime_type",
+                  "value": {
+                    "stringValue": "application/json"
+                  }
+                },
+                {
+                  "key": "agent.strace.request.event_id",
+                  "value": {
+                    "stringValue": "td241-tree-tool-test-1"
+                  }
+                },
+                {
+                  "key": "agent.strace.request.redacted",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "agent.strace.request.previous_hash",
+                  "value": {
+                    "stringValue": "775909ebfc35e9897d62086e750a0ad630a18814676d25356ac7c8b392aff46d"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.event_id",
+                  "value": {
+                    "stringValue": "td241-tree-ev-error"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.redacted",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "agent.strace.response.parent_event_id",
+                  "value": {
+                    "stringValue": "td241-tree-tool-test-1"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.previous_hash",
+                  "value": {
+                    "stringValue": "28f12f8fb4892f90f56bc9f4849f23eb899e5b09373178d2032a1bcdc0dc1f0f"
+                  }
+                },
+                {
+                  "key": "metadata",
+                  "value": {
+                    "stringValue": "{\"agent_strace\": {\"request.event_id\": \"td241-tree-tool-test-1\", \"request.redacted\": false, \"request.previous_hash\": \"775909ebfc35e9897d62086e750a0ad630a18814676d25356ac7c8b392aff46d\", \"response.event_id\": \"td241-tree-ev-error\", \"response.redacted\": false, \"response.parent_event_id\": \"td241-tree-tool-test-1\", \"response.previous_hash\": \"28f12f8fb4892f90f56bc9f4849f23eb899e5b09373178d2032a1bcdc0dc1f0f\"}}"
+                  }
+                }
+              ],
+              "events": [
+                {
+                  "timeUnixNano": "1789300804100000000",
+                  "name": "exception",
+                  "attributes": [
+                    {
+                      "key": "exception.type",
+                      "value": {
+                        "stringValue": "Error"
+                      }
+                    },
+                    {
+                      "key": "exception.message",
+                      "value": {
+                        "stringValue": "example test failed"
+                      }
+                    },
+                    {
+                      "key": "exception.escaped",
+                      "value": {
+                        "boolValue": false
+                      }
+                    },
+                    {
+                      "key": "agent.strace.response.event_id",
+                      "value": {
+                        "stringValue": "td241-tree-ev-error"
+                      }
+                    },
+                    {
+                      "key": "agent.strace.response.redacted",
+                      "value": {
+                        "boolValue": false
+                      }
+                    },
+                    {
+                      "key": "agent.strace.response.parent_event_id",
+                      "value": {
+                        "stringValue": "td241-tree-tool-test-1"
+                      }
+                    },
+                    {
+                      "key": "agent.strace.response.previous_hash",
+                      "value": {
+                        "stringValue": "28f12f8fb4892f90f56bc9f4849f23eb899e5b09373178d2032a1bcdc0dc1f0f"
+                      }
+                    }
+                  ]
+                }
+              ],
+              "status": {
+                "code": 2,
+                "message": "example test failed"
+              }
+            },
+            {
+              "traceId": "c2a525553d1d97ea41e0d3ff9b0f97c6",
+              "spanId": "03b668b28bb83259",
+              "parentSpanId": "3f1fa4a01701e863",
+              "name": "execute_tool bash",
+              "kind": 1,
+              "startTimeUnixNano": "1789300806000000000",
+              "endTimeUnixNano": "1789300806509999872",
+              "attributes": [
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": {
+                    "stringValue": "bash"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "execute_tool"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.id",
+                  "value": {
+                    "stringValue": "td241-tree-tool-test-2"
+                  }
+                },
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "TOOL"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "td241-tree-parent"
+                  }
+                },
+                {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "synthetic-conversation-td241-tree"
+                  }
+                },
+                {
+                  "key": "tool.name",
+                  "value": {
+                    "stringValue": "bash"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.input.command",
+                  "value": {
+                    "stringValue": "python -m pytest -q tests/test_example.py"
+                  }
+                },
+                {
+                  "key": "input.value",
+                  "value": {
+                    "stringValue": "{\"command\":\"python -m pytest -q tests/test_example.py\"}"
+                  }
+                },
+                {
+                  "key": "input.mime_type",
+                  "value": {
+                    "stringValue": "application/json"
+                  }
+                },
+                {
+                  "key": "agent.strace.request.event_id",
+                  "value": {
+                    "stringValue": "td241-tree-tool-test-2"
+                  }
+                },
+                {
+                  "key": "agent.strace.request.redacted",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "agent.strace.request.previous_hash",
+                  "value": {
+                    "stringValue": "2a554e7ab45d2575feb7c017246c461ad80b01cae74815936dec235647a6009d"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.output",
+                  "value": {
+                    "stringValue": "1 passed"
+                  }
+                },
+                {
+                  "key": "output.value",
+                  "value": {
+                    "stringValue": "1 passed"
+                  }
+                },
+                {
+                  "key": "output.mime_type",
+                  "value": {
+                    "stringValue": "text/plain"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.event_id",
+                  "value": {
+                    "stringValue": "td241-tree-result-test-2"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.redacted",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "agent.strace.response.parent_event_id",
+                  "value": {
+                    "stringValue": "td241-tree-tool-test-2"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.previous_hash",
+                  "value": {
+                    "stringValue": "adff24bb07b6e2ec8496442a4e3a7e4c18398680d4d3102ffb685d63eee2457a"
+                  }
+                },
+                {
+                  "key": "metadata",
+                  "value": {
+                    "stringValue": "{\"agent_strace\": {\"request.event_id\": \"td241-tree-tool-test-2\", \"request.redacted\": false, \"request.previous_hash\": \"2a554e7ab45d2575feb7c017246c461ad80b01cae74815936dec235647a6009d\", \"response.event_id\": \"td241-tree-result-test-2\", \"response.redacted\": false, \"response.parent_event_id\": \"td241-tree-tool-test-2\", \"response.previous_hash\": \"adff24bb07b6e2ec8496442a4e3a7e4c18398680d4d3102ffb685d63eee2457a\"}}"
+                  }
+                }
+              ],
+              "status": {
+                "code": 0
+              }
+            },
+            {
+              "traceId": "c2a525553d1d97ea41e0d3ff9b0f97c6",
+              "spanId": "c3308c23789d7c10",
+              "parentSpanId": "3f1fa4a01701e863",
+              "name": "execute_tool Task",
+              "kind": 1,
+              "startTimeUnixNano": "1789300807200000000",
+              "endTimeUnixNano": "1789300807900000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": {
+                    "stringValue": "Task"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "execute_tool"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.id",
+                  "value": {
+                    "stringValue": "td241-tree-task-1"
+                  }
+                },
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "TOOL"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "td241-tree-parent"
+                  }
+                },
+                {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "synthetic-conversation-td241-tree"
+                  }
+                },
+                {
+                  "key": "tool.name",
+                  "value": {
+                    "stringValue": "Task"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.input.description",
+                  "value": {
+                    "stringValue": "review the fix"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.input.subagent_type",
+                  "value": {
+                    "stringValue": "code-reviewer"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.input.prompt",
+                  "value": {
+                    "stringValue": "Review src/example.py for regressions."
+                  }
+                },
+                {
+                  "key": "input.value",
+                  "value": {
+                    "stringValue": "{\"description\":\"review the fix\",\"prompt\":\"Review src/example.py for regressions.\",\"subagent_type\":\"code-reviewer\"}"
+                  }
+                },
+                {
+                  "key": "input.mime_type",
+                  "value": {
+                    "stringValue": "application/json"
+                  }
+                },
+                {
+                  "key": "agent.strace.request.event_id",
+                  "value": {
+                    "stringValue": "td241-tree-task-1"
+                  }
+                },
+                {
+                  "key": "agent.strace.request.redacted",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "agent.strace.request.previous_hash",
+                  "value": {
+                    "stringValue": "a71d577148dd72a08d8535f8440ece8c46be9f43579251ef2dd06de6cb0b148d"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.output",
+                  "value": {
+                    "stringValue": "review: no regressions found"
+                  }
+                },
+                {
+                  "key": "output.value",
+                  "value": {
+                    "stringValue": "review: no regressions found"
+                  }
+                },
+                {
+                  "key": "output.mime_type",
+                  "value": {
+                    "stringValue": "text/plain"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.event_id",
+                  "value": {
+                    "stringValue": "td241-tree-task-1-result"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.redacted",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "agent.strace.response.parent_event_id",
+                  "value": {
+                    "stringValue": "td241-tree-task-1"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.previous_hash",
+                  "value": {
+                    "stringValue": "392c4578e9e5c874411bbc1ac00107411439374edbb55bb08fb28d6c98e4122a"
+                  }
+                },
+                {
+                  "key": "metadata",
+                  "value": {
+                    "stringValue": "{\"agent_strace\": {\"request.event_id\": \"td241-tree-task-1\", \"request.redacted\": false, \"request.previous_hash\": \"a71d577148dd72a08d8535f8440ece8c46be9f43579251ef2dd06de6cb0b148d\", \"response.event_id\": \"td241-tree-task-1-result\", \"response.redacted\": false, \"response.parent_event_id\": \"td241-tree-task-1\", \"response.previous_hash\": \"392c4578e9e5c874411bbc1ac00107411439374edbb55bb08fb28d6c98e4122a\"}}"
+                  }
+                }
+              ],
+              "status": {
+                "code": 0
+              }
+            },
+            {
+              "traceId": "c2a525553d1d97ea41e0d3ff9b0f97c6",
+              "spanId": "f68dc6041d641207",
+              "parentSpanId": "3f1fa4a01701e863",
+              "name": "execute_tool bash",
+              "kind": 1,
+              "startTimeUnixNano": "1789300809000000000",
+              "endTimeUnixNano": "1789300809000999936",
+              "attributes": [
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": {
+                    "stringValue": "bash"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "execute_tool"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.id",
+                  "value": {
+                    "stringValue": "td241-tree-ev-orphan"
+                  }
+                },
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "TOOL"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "td241-tree-parent"
+                  }
+                },
+                {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "synthetic-conversation-td241-tree"
+                  }
+                },
+                {
+                  "key": "tool.name",
+                  "value": {
+                    "stringValue": "bash"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.output",
+                  "value": {
+                    "stringValue": "deliberate orphan used to test capture-gap handling"
+                  }
+                },
+                {
+                  "key": "output.value",
+                  "value": {
+                    "stringValue": "deliberate orphan used to test capture-gap handling"
+                  }
+                },
+                {
+                  "key": "output.mime_type",
+                  "value": {
+                    "stringValue": "text/plain"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.event_id",
+                  "value": {
+                    "stringValue": "td241-tree-ev-orphan"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.redacted",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "agent.strace.response.parent_event_id",
+                  "value": {
+                    "stringValue": "missing-tool-call"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.previous_hash",
+                  "value": {
+                    "stringValue": "7f059e3ed98e612d69260ea80caf107058af7b71930ea78bdebcfc04d4804349"
+                  }
+                },
+                {
+                  "key": "metadata",
+                  "value": {
+                    "stringValue": "{\"agent_strace\": {\"response.event_id\": \"td241-tree-ev-orphan\", \"response.redacted\": false, \"response.parent_event_id\": \"missing-tool-call\", \"response.previous_hash\": \"7f059e3ed98e612d69260ea80caf107058af7b71930ea78bdebcfc04d4804349\"}}"
+                  }
+                }
+              ],
+              "status": {
+                "code": 0
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "agent-trace"
+            }
+          },
+          {
+            "key": "service.version",
+            "value": {
+              "stringValue": "0.120.0"
+            }
+          },
+          {
+            "key": "agent.session_id",
+            "value": {
+              "stringValue": "td241-tree-child"
+            }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "agent-trace",
+            "version": "0.120.0"
+          },
+          "spans": [
+            {
+              "traceId": "c2a525553d1d97ea41e0d3ff9b0f97c6",
+              "spanId": "f910f81d162e5bda",
+              "name": "invoke_agent claude-code",
+              "kind": 1,
+              "startTimeUnixNano": "1789300807249999872",
+              "endTimeUnixNano": "1789300807849999872",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "invoke_agent"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.name",
+                  "value": {
+                    "stringValue": "claude-code"
+                  }
+                },
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "anthropic"
+                  }
+                },
+                {
+                  "key": "gen_ai.system",
+                  "value": {
+                    "stringValue": "anthropic"
+                  }
+                },
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "AGENT"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "td241-tree-child"
+                  }
+                },
+                {
+                  "key": "agent.session_id",
+                  "value": {
+                    "stringValue": "td241-tree-child"
+                  }
+                },
+                {
+                  "key": "agent.tool_calls",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "agent.llm_requests",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "agent.errors",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "agent.strace.provider",
+                  "value": {
+                    "stringValue": "claude-code"
+                  }
+                },
+                {
+                  "key": "agent.strace.redacted",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "agent.strace.redacted_event_count",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "agent.strace.evidence.schema_version",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "agent.strace.evidence.status",
+                  "value": {
+                    "stringValue": "healthy"
+                  }
+                },
+                {
+                  "key": "agent.strace.evidence.gap_count",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "agent.strace.evidence.gap_codes",
+                  "value": {
+                    "stringValue": "[]"
+                  }
+                },
+                {
+                  "key": "agent.strace.evidence.gaps",
+                  "value": {
+                    "stringValue": "[]"
+                  }
+                },
+                {
+                  "key": "agent.strace.provenance",
+                  "value": {
+                    "stringValue": "{\"agent_provider\": \"claude-code\", \"agent_version\": \"0.0.0-synthetic\", \"os_user\": \"synthetic-user\", \"hostname\": \"synthetic-host\", \"pid\": 4242, \"ppid\": 4241, \"process_name\": \"synthetic-shell\", \"process_ancestry\": [\"synthetic-terminal\", \"synthetic-shell\", \"claude\"], \"git_repo\": \"example/synthetic-project\", \"git_branch\": \"main\", \"git_commit\": \"[REDACTED:hex-token]\", \"working_dir\": \"/workspace/project\"}"
+                  }
+                },
+                {
+                  "key": "agent.strace.parent_session_id",
+                  "value": {
+                    "stringValue": "td241-tree-parent"
+                  }
+                },
+                {
+                  "key": "agent.strace.parent_event_id",
+                  "value": {
+                    "stringValue": "td241-tree-task-1"
+                  }
+                },
+                {
+                  "key": "agent.strace.depth",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "metadata",
+                  "value": {
+                    "stringValue": "{\"agent_strace\": {\"provider\": \"claude-code\", \"redacted\": true, \"redacted_event_count\": 1, \"evidence.schema_version\": 1, \"evidence.status\": \"healthy\", \"evidence.gap_count\": 0, \"evidence.gap_codes\": [], \"evidence.gaps\": [], \"provenance\": {\"agent_provider\": \"claude-code\", \"agent_version\": \"0.0.0-synthetic\", \"os_user\": \"synthetic-user\", \"hostname\": \"synthetic-host\", \"pid\": 4242, \"ppid\": 4241, \"process_name\": \"synthetic-shell\", \"process_ancestry\": [\"synthetic-terminal\", \"synthetic-shell\", \"claude\"], \"git_repo\": \"example/synthetic-project\", \"git_branch\": \"main\", \"git_commit\": \"[REDACTED:hex-token]\", \"working_dir\": \"/workspace/project\"}, \"parent_session_id\": \"td241-tree-parent\", \"parent_event_id\": \"td241-tree-task-1\", \"depth\": 1}}"
+                  }
+                }
+              ],
+              "events": [
+                {
+                  "timeUnixNano": "1789300807300000000",
+                  "name": "gen_ai.user.message",
+                  "attributes": [
+                    {
+                      "key": "gen_ai.prompt",
+                      "value": {
+                        "stringValue": "Review src/example.py for regressions."
+                      }
+                    },
+                    {
+                      "key": "agent.strace.event.event_id",
+                      "value": {
+                        "stringValue": "td241-tree-c-prompt"
+                      }
+                    },
+                    {
+                      "key": "agent.strace.event.redacted",
+                      "value": {
+                        "boolValue": false
+                      }
+                    },
+                    {
+                      "key": "agent.strace.event.previous_hash",
+                      "value": {
+                        "stringValue": "c68811fb5a6182522219e176e59b2ed67c07c22ded44776c67c2fb8e7b3af39d"
+                      }
+                    },
+                    {
+                      "key": "agent.strace.event.provenance",
+                      "value": {
+                        "stringValue": "{\"agent_id\": \"synthetic-agent-1\", \"agent_type\": \"code-reviewer\"}"
+                      }
+                    },
+                    {
+                      "key": "metadata",
+                      "value": {
+                        "stringValue": "{\"agent_strace\": {\"event.event_id\": \"td241-tree-c-prompt\", \"event.redacted\": false, \"event.previous_hash\": \"c68811fb5a6182522219e176e59b2ed67c07c22ded44776c67c2fb8e7b3af39d\", \"event.provenance\": {\"agent_id\": \"synthetic-agent-1\", \"agent_type\": \"code-reviewer\"}}}"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "1789300807800000000",
+                  "name": "gen_ai.assistant.message",
+                  "attributes": [
+                    {
+                      "key": "gen_ai.completion",
+                      "value": {
+                        "stringValue": "No regressions found in src/example.py."
+                      }
+                    },
+                    {
+                      "key": "agent.strace.event.event_id",
+                      "value": {
+                        "stringValue": "td241-tree-c-response"
+                      }
+                    },
+                    {
+                      "key": "agent.strace.event.redacted",
+                      "value": {
+                        "boolValue": false
+                      }
+                    },
+                    {
+                      "key": "agent.strace.event.previous_hash",
+                      "value": {
+                        "stringValue": "6e0f39b61ab6f540466f2afd8bfa787be8218a6251282a1c0cd6eb9c7883cc23"
+                      }
+                    },
+                    {
+                      "key": "agent.strace.event.provenance",
+                      "value": {
+                        "stringValue": "{\"agent_id\": \"synthetic-agent-1\", \"agent_type\": \"code-reviewer\"}"
+                      }
+                    },
+                    {
+                      "key": "metadata",
+                      "value": {
+                        "stringValue": "{\"agent_strace\": {\"event.event_id\": \"td241-tree-c-response\", \"event.redacted\": false, \"event.previous_hash\": \"6e0f39b61ab6f540466f2afd8bfa787be8218a6251282a1c0cd6eb9c7883cc23\", \"event.provenance\": {\"agent_id\": \"synthetic-agent-1\", \"agent_type\": \"code-reviewer\"}}}"
+                      }
+                    }
+                  ]
+                }
+              ],
+              "status": {
+                "code": 0
+              },
+              "parentSpanId": "c3308c23789d7c10"
+            },
+            {
+              "traceId": "c2a525553d1d97ea41e0d3ff9b0f97c6",
+              "spanId": "c41bdfefbb9a4c4c",
+              "parentSpanId": "f910f81d162e5bda",
+              "name": "chat claude-sonnet-4-5",
+              "kind": 3,
+              "startTimeUnixNano": "1789300807349999872",
+              "endTimeUnixNano": "1789300807549999872",
+              "attributes": [
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "anthropic"
+                  }
+                },
+                {
+                  "key": "gen_ai.system",
+                  "value": {
+                    "stringValue": "anthropic"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "LLM"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "td241-tree-child"
+                  }
+                },
+                {
+                  "key": "llm.provider",
+                  "value": {
+                    "stringValue": "anthropic"
+                  }
+                },
+                {
+                  "key": "agent.strace.provider",
+                  "value": {
+                    "stringValue": "anthropic"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "claude-sonnet-4-5"
+                  }
+                },
+                {
+                  "key": "llm.model_name",
+                  "value": {
+                    "stringValue": "claude-sonnet-4-5"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.max_tokens",
+                  "value": {
+                    "intValue": "1024"
+                  }
+                },
+                {
+                  "key": "llm.invocation_parameters",
+                  "value": {
+                    "stringValue": "{\"max_tokens\":1024}"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "2400"
+                  }
+                },
+                {
+                  "key": "llm.token_count.prompt",
+                  "value": {
+                    "intValue": "2400"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "300"
+                  }
+                },
+                {
+                  "key": "llm.token_count.completion",
+                  "value": {
+                    "intValue": "300"
+                  }
+                },
+                {
+                  "key": "llm.token_count.total",
+                  "value": {
+                    "intValue": "2700"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.finish_reasons",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "tool_use"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "key": "agent.strace.finish_reason",
+                  "value": {
+                    "stringValue": "tool_use"
+                  }
+                },
+                {
+                  "key": "llm.finish_reason",
+                  "value": {
+                    "stringValue": "tool_use"
+                  }
+                },
+                {
+                  "key": "agent.strace.cost.total_usd",
+                  "value": {
+                    "doubleValue": 0.01234
+                  }
+                },
+                {
+                  "key": "llm.cost.total",
+                  "value": {
+                    "doubleValue": 0.01234
+                  }
+                },
+                {
+                  "key": "agent.strace.request.event_id",
+                  "value": {
+                    "stringValue": "td241-tree-c-llm-req-1"
+                  }
+                },
+                {
+                  "key": "agent.strace.request.redacted",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "agent.strace.request.previous_hash",
+                  "value": {
+                    "stringValue": "695a800cdedd2a99792b8747312915c8af7c09a119b2f42cc4af86d1835fd59e"
+                  }
+                },
+                {
+                  "key": "agent.strace.request.provenance",
+                  "value": {
+                    "stringValue": "{\"provider\": \"anthropic\", \"agent_id\": \"synthetic-agent-1\", \"agent_type\": \"code-reviewer\"}"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.event_id",
+                  "value": {
+                    "stringValue": "td241-tree-c-llm-res-1"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.redacted",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "agent.strace.response.parent_event_id",
+                  "value": {
+                    "stringValue": "td241-tree-c-llm-req-1"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.previous_hash",
+                  "value": {
+                    "stringValue": "45368294726cfa34d7730f20b9018de0746ccd2b4b23c6a62c51f91cd659e182"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.provenance",
+                  "value": {
+                    "stringValue": "{\"provider\": \"anthropic\", \"agent_id\": \"synthetic-agent-1\", \"agent_type\": \"code-reviewer\"}"
+                  }
+                },
+                {
+                  "key": "metadata",
+                  "value": {
+                    "stringValue": "{\"agent_strace\": {\"provider\": \"anthropic\", \"finish_reason\": \"tool_use\", \"cost.total_usd\": 0.01234, \"request.event_id\": \"td241-tree-c-llm-req-1\", \"request.redacted\": false, \"request.previous_hash\": \"695a800cdedd2a99792b8747312915c8af7c09a119b2f42cc4af86d1835fd59e\", \"request.provenance\": {\"provider\": \"anthropic\", \"agent_id\": \"synthetic-agent-1\", \"agent_type\": \"code-reviewer\"}, \"response.event_id\": \"td241-tree-c-llm-res-1\", \"response.redacted\": false, \"response.parent_event_id\": \"td241-tree-c-llm-req-1\", \"response.previous_hash\": \"45368294726cfa34d7730f20b9018de0746ccd2b4b23c6a62c51f91cd659e182\", \"response.provenance\": {\"provider\": \"anthropic\", \"agent_id\": \"synthetic-agent-1\", \"agent_type\": \"code-reviewer\"}}}"
+                  }
+                }
+              ],
+              "status": {
+                "code": 0
+              }
+            },
+            {
+              "traceId": "c2a525553d1d97ea41e0d3ff9b0f97c6",
+              "spanId": "e0e8399e741e998c",
+              "parentSpanId": "f910f81d162e5bda",
+              "name": "execute_tool read_file",
+              "kind": 1,
+              "startTimeUnixNano": "1789300807600000000",
+              "endTimeUnixNano": "1789300807699999744",
+              "attributes": [
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": {
+                    "stringValue": "read_file"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "execute_tool"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.id",
+                  "value": {
+                    "stringValue": "td241-tree-c-tool-1"
+                  }
+                },
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "TOOL"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "td241-tree-child"
+                  }
+                },
+                {
+                  "key": "tool.name",
+                  "value": {
+                    "stringValue": "read_file"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.input.path",
+                  "value": {
+                    "stringValue": "src/example.py"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.input.auth_header",
+                  "value": {
+                    "stringValue": "[REDACTED:bearer]"
+                  }
+                },
+                {
+                  "key": "input.value",
+                  "value": {
+                    "stringValue": "{\"auth_header\":\"[REDACTED:bearer]\",\"path\":\"src/example.py\"}"
+                  }
+                },
+                {
+                  "key": "input.mime_type",
+                  "value": {
+                    "stringValue": "application/json"
+                  }
+                },
+                {
+                  "key": "agent.strace.request.event_id",
+                  "value": {
+                    "stringValue": "td241-tree-c-tool-1"
+                  }
+                },
+                {
+                  "key": "agent.strace.request.redacted",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "agent.strace.request.previous_hash",
+                  "value": {
+                    "stringValue": "62ea3f4ceeb15288bfe247b832428558fb974e68bef2a4c9287e46383f6e3b3e"
+                  }
+                },
+                {
+                  "key": "agent.strace.request.provenance",
+                  "value": {
+                    "stringValue": "{\"agent_id\": \"synthetic-agent-1\", \"agent_type\": \"code-reviewer\"}"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.output",
+                  "value": {
+                    "stringValue": "def example():\n    return 42\n"
+                  }
+                },
+                {
+                  "key": "output.value",
+                  "value": {
+                    "stringValue": "def example():\n    return 42\n"
+                  }
+                },
+                {
+                  "key": "output.mime_type",
+                  "value": {
+                    "stringValue": "text/plain"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.event_id",
+                  "value": {
+                    "stringValue": "td241-tree-c-result-1"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.redacted",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "agent.strace.response.parent_event_id",
+                  "value": {
+                    "stringValue": "td241-tree-c-tool-1"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.previous_hash",
+                  "value": {
+                    "stringValue": "5a50f7362ef50b2be63bcd445533235db79ca2ffea0c9917ad380a77f66c6703"
+                  }
+                },
+                {
+                  "key": "agent.strace.response.provenance",
+                  "value": {
+                    "stringValue": "{\"agent_id\": \"synthetic-agent-1\", \"agent_type\": \"code-reviewer\"}"
+                  }
+                },
+                {
+                  "key": "metadata",
+                  "value": {
+                    "stringValue": "{\"agent_strace\": {\"request.event_id\": \"td241-tree-c-tool-1\", \"request.redacted\": true, \"request.previous_hash\": \"62ea3f4ceeb15288bfe247b832428558fb974e68bef2a4c9287e46383f6e3b3e\", \"request.provenance\": {\"agent_id\": \"synthetic-agent-1\", \"agent_type\": \"code-reviewer\"}, \"response.event_id\": \"td241-tree-c-result-1\", \"response.redacted\": false, \"response.parent_event_id\": \"td241-tree-c-tool-1\", \"response.previous_hash\": \"5a50f7362ef50b2be63bcd445533235db79ca2ffea0c9917ad380a77f66c6703\", \"response.provenance\": {\"agent_id\": \"synthetic-agent-1\", \"agent_type\": \"code-reviewer\"}}}"
+                  }
+                }
+              ],
+              "status": {
+                "code": 0
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

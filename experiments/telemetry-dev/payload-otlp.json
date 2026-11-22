@@ -1,0 +1,689 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "agent-trace"
+            }
+          },
+          {
+            "key": "service.version",
+            "value": {
+              "stringValue": "0.120.0"
+            }
+          },
+          {
+            "key": "agent.session_id",
+            "value": {
+              "stringValue": "td241-otlp-parent"
+            }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "agent-trace"
+          },
+          "spans": [
+            {
+              "traceId": "975b495480853cc8b4e5de75ad4ef416",
+              "spanId": "41255edffeafbafa",
+              "name": "agent-session (claude-code)",
+              "kind": 1,
+              "startTimeUnixNano": "1789300800000000000",
+              "endTimeUnixNano": "1789300811000000000",
+              "attributes": [
+                {
+                  "key": "agent.name",
+                  "value": {
+                    "stringValue": "claude-code"
+                  }
+                },
+                {
+                  "key": "agent.command",
+                  "value": {
+                    "stringValue": "claude"
+                  }
+                },
+                {
+                  "key": "agent.session_id",
+                  "value": {
+                    "stringValue": "td241-otlp-parent"
+                  }
+                },
+                {
+                  "key": "agent.tool_calls",
+                  "value": {
+                    "intValue": "3"
+                  }
+                },
+                {
+                  "key": "agent.llm_requests",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "agent.errors",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "agent.depth",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.system",
+                  "value": {
+                    "stringValue": "anthropic"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "agent.session"
+                  }
+                },
+                {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "synthetic-conversation-td241-otlp"
+                  }
+                }
+              ],
+              "events": [
+                {
+                  "timeUnixNano": "1789300801000000000",
+                  "name": "user_prompt",
+                  "attributes": [
+                    {
+                      "key": "prompt",
+                      "value": {
+                        "stringValue": "[REDACTED synthetic request] fix the failing example test"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "1789300801200000000",
+                  "name": "gen_ai.system.message",
+                  "attributes": [
+                    {
+                      "key": "gen_ai.operation.name",
+                      "value": {
+                        "stringValue": "chat"
+                      }
+                    },
+                    {
+                      "key": "gen_ai.request.model",
+                      "value": {
+                        "stringValue": "claude-sonnet-4-5"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "1789300801600000000",
+                  "name": "gen_ai.assistant.message",
+                  "attributes": [
+                    {
+                      "key": "gen_ai.operation.name",
+                      "value": {
+                        "stringValue": "chat"
+                      }
+                    },
+                    {
+                      "key": "gen_ai.response.finish_reasons",
+                      "value": {
+                        "arrayValue": {
+                          "values": [
+                            {
+                              "stringValue": "error"
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "key": "error.type",
+                      "value": {
+                        "stringValue": "overloaded_error"
+                      }
+                    },
+                    {
+                      "key": "error.message",
+                      "value": {
+                        "stringValue": "synthetic overload, retrying"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "1789300801800000000",
+                  "name": "gen_ai.system.message",
+                  "attributes": [
+                    {
+                      "key": "gen_ai.operation.name",
+                      "value": {
+                        "stringValue": "chat"
+                      }
+                    },
+                    {
+                      "key": "gen_ai.request.model",
+                      "value": {
+                        "stringValue": "claude-sonnet-4-5"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "1789300802600000000",
+                  "name": "gen_ai.assistant.message",
+                  "attributes": [
+                    {
+                      "key": "gen_ai.operation.name",
+                      "value": {
+                        "stringValue": "chat"
+                      }
+                    },
+                    {
+                      "key": "gen_ai.usage.input_tokens",
+                      "value": {
+                        "intValue": "12000"
+                      }
+                    },
+                    {
+                      "key": "gen_ai.usage.cache_read.input_tokens",
+                      "value": {
+                        "intValue": "8000"
+                      }
+                    },
+                    {
+                      "key": "gen_ai.usage.cache_write.input_tokens",
+                      "value": {
+                        "intValue": "1000"
+                      }
+                    },
+                    {
+                      "key": "gen_ai.usage.output_tokens",
+                      "value": {
+                        "intValue": "1500"
+                      }
+                    },
+                    {
+                      "key": "gen_ai.response.finish_reasons",
+                      "value": {
+                        "arrayValue": {
+                          "values": [
+                            {
+                              "stringValue": "tool_use"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "1789300808000000000",
+                  "name": "decision",
+                  "attributes": [
+                    {
+                      "key": "choice",
+                      "value": {
+                        "stringValue": "keep the minimal fix"
+                      }
+                    },
+                    {
+                      "key": "reason",
+                      "value": {
+                        "stringValue": "the retry passed"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "1789300810000000000",
+                  "name": "assistant_response",
+                  "attributes": [
+                    {
+                      "key": "text",
+                      "value": {
+                        "stringValue": "Updated the example and the focused test now passes."
+                      }
+                    }
+                  ]
+                }
+              ],
+              "status": {
+                "code": 2
+              }
+            },
+            {
+              "traceId": "975b495480853cc8b4e5de75ad4ef416",
+              "spanId": "262ee033693f9589",
+              "parentSpanId": "41255edffeafbafa",
+              "name": "bash",
+              "kind": 1,
+              "startTimeUnixNano": "1789300803000000000",
+              "endTimeUnixNano": "1789300804100000000",
+              "attributes": [
+                {
+                  "key": "tool.name",
+                  "value": {
+                    "stringValue": "bash"
+                  }
+                },
+                {
+                  "key": "error.message",
+                  "value": {
+                    "stringValue": "example test failed"
+                  }
+                },
+                {
+                  "key": "tool.input.command",
+                  "value": {
+                    "stringValue": "python -m pytest -q tests/test_example.py"
+                  }
+                }
+              ],
+              "status": {
+                "code": 2,
+                "message": "example test failed"
+              },
+              "events": [
+                {
+                  "timeUnixNano": "1789300804100000000",
+                  "name": "exception",
+                  "attributes": [
+                    {
+                      "key": "exception.message",
+                      "value": {
+                        "stringValue": "example test failed"
+                      }
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "traceId": "975b495480853cc8b4e5de75ad4ef416",
+              "spanId": "9b07bac1642ff856",
+              "parentSpanId": "41255edffeafbafa",
+              "name": "tool/bash",
+              "kind": 3,
+              "startTimeUnixNano": "1789300806000000000",
+              "endTimeUnixNano": "1789300806509999872",
+              "attributes": [
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": {
+                    "stringValue": "bash"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "tool.call"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.id",
+                  "value": {
+                    "stringValue": "td241-otlp-tool-test-2"
+                  }
+                },
+                {
+                  "key": "tool.input.command",
+                  "value": {
+                    "stringValue": "python -m pytest -q tests/test_example.py"
+                  }
+                },
+                {
+                  "key": "tool.output",
+                  "value": {
+                    "stringValue": "1 passed"
+                  }
+                }
+              ],
+              "status": {
+                "code": 0
+              }
+            },
+            {
+              "traceId": "975b495480853cc8b4e5de75ad4ef416",
+              "spanId": "614a29901363b61c",
+              "parentSpanId": "41255edffeafbafa",
+              "name": "tool/Task",
+              "kind": 3,
+              "startTimeUnixNano": "1789300807200000000",
+              "endTimeUnixNano": "1789300807900000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": {
+                    "stringValue": "Task"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "tool.call"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.id",
+                  "value": {
+                    "stringValue": "td241-otlp-task-1"
+                  }
+                },
+                {
+                  "key": "tool.input.description",
+                  "value": {
+                    "stringValue": "review the fix"
+                  }
+                },
+                {
+                  "key": "tool.input.subagent_type",
+                  "value": {
+                    "stringValue": "code-reviewer"
+                  }
+                },
+                {
+                  "key": "tool.input.prompt",
+                  "value": {
+                    "stringValue": "Review src/example.py for regressions."
+                  }
+                },
+                {
+                  "key": "tool.output",
+                  "value": {
+                    "stringValue": "review: no regressions found"
+                  }
+                }
+              ],
+              "status": {
+                "code": 0
+              }
+            },
+            {
+              "traceId": "975b495480853cc8b4e5de75ad4ef416",
+              "spanId": "27239d67d0db904b",
+              "parentSpanId": "41255edffeafbafa",
+              "name": "tool/bash",
+              "kind": 3,
+              "startTimeUnixNano": "1789300809000000000",
+              "endTimeUnixNano": "1789300809000999936",
+              "attributes": [
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": {
+                    "stringValue": "bash"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "tool.call"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.id",
+                  "value": {
+                    "stringValue": "td241-otlp-ev-orphan"
+                  }
+                },
+                {
+                  "key": "tool.output",
+                  "value": {
+                    "stringValue": "deliberate orphan used to test capture-gap handling"
+                  }
+                }
+              ],
+              "status": {
+                "code": 0
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "agent-trace"
+            }
+          },
+          {
+            "key": "service.version",
+            "value": {
+              "stringValue": "0.120.0"
+            }
+          },
+          {
+            "key": "agent.session_id",
+            "value": {
+              "stringValue": "td241-otlp-child"
+            }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "agent-trace"
+          },
+          "spans": [
+            {
+              "traceId": "63958e57be5619f8916eb1c15c8876ba",
+              "spanId": "f5f009fd9d966098",
+              "name": "agent-session (claude-code)",
+              "kind": 1,
+              "startTimeUnixNano": "1789300807249999872",
+              "endTimeUnixNano": "1789300807849999872",
+              "attributes": [
+                {
+                  "key": "agent.name",
+                  "value": {
+                    "stringValue": "claude-code"
+                  }
+                },
+                {
+                  "key": "agent.command",
+                  "value": {
+                    "stringValue": "claude"
+                  }
+                },
+                {
+                  "key": "agent.session_id",
+                  "value": {
+                    "stringValue": "td241-otlp-child"
+                  }
+                },
+                {
+                  "key": "agent.tool_calls",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "agent.llm_requests",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "agent.errors",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "agent.depth",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "gen_ai.system",
+                  "value": {
+                    "stringValue": "anthropic"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "agent.session"
+                  }
+                }
+              ],
+              "events": [
+                {
+                  "timeUnixNano": "1789300807300000000",
+                  "name": "user_prompt",
+                  "attributes": [
+                    {
+                      "key": "prompt",
+                      "value": {
+                        "stringValue": "Review src/example.py for regressions."
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "1789300807349999872",
+                  "name": "gen_ai.system.message",
+                  "attributes": [
+                    {
+                      "key": "gen_ai.operation.name",
+                      "value": {
+                        "stringValue": "chat"
+                      }
+                    },
+                    {
+                      "key": "gen_ai.request.model",
+                      "value": {
+                        "stringValue": "claude-sonnet-4-5"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "1789300807549999872",
+                  "name": "gen_ai.assistant.message",
+                  "attributes": [
+                    {
+                      "key": "gen_ai.operation.name",
+                      "value": {
+                        "stringValue": "chat"
+                      }
+                    },
+                    {
+                      "key": "gen_ai.usage.input_tokens",
+                      "value": {
+                        "intValue": "2400"
+                      }
+                    },
+                    {
+                      "key": "gen_ai.usage.output_tokens",
+                      "value": {
+                        "intValue": "300"
+                      }
+                    },
+                    {
+                      "key": "gen_ai.response.finish_reasons",
+                      "value": {
+                        "arrayValue": {
+                          "values": [
+                            {
+                              "stringValue": "tool_use"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "1789300807800000000",
+                  "name": "assistant_response",
+                  "attributes": [
+                    {
+                      "key": "text",
+                      "value": {
+                        "stringValue": "No regressions found in src/example.py."
+                      }
+                    }
+                  ]
+                }
+              ],
+              "status": {
+                "code": 0
+              }
+            },
+            {
+              "traceId": "63958e57be5619f8916eb1c15c8876ba",
+              "spanId": "8bed080851244347",
+              "parentSpanId": "f5f009fd9d966098",
+              "name": "tool/read_file",
+              "kind": 3,
+              "startTimeUnixNano": "1789300807600000000",
+              "endTimeUnixNano": "1789300807699999744",
+              "attributes": [
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": {
+                    "stringValue": "read_file"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "tool.call"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.id",
+                  "value": {
+                    "stringValue": "td241-otlp-c-tool-1"
+                  }
+                },
+                {
+                  "key": "tool.input.path",
+                  "value": {
+                    "stringValue": "src/example.py"
+                  }
+                },
+                {
+                  "key": "tool.input.auth_header",
+                  "value": {
+                    "stringValue": "[REDACTED:bearer]"
+                  }
+                },
+                {
+                  "key": "tool.output",
+                  "value": {
+                    "stringValue": "def example():\n    return 42\n"
+                  }
+                }
+              ],
+              "status": {
+                "code": 0
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
