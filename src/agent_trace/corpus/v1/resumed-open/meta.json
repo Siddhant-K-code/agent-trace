@@ -1,0 +1,10 @@
+{
+  "session_id": "resumed-open",
+  "started_at": 1700001000.0,
+  "agent_name": "synthetic-corpus",
+  "tool_calls": 2,
+  "llm_requests": 0,
+  "errors": 0,
+  "total_tokens": 0,
+  "total_duration_ms": 5000.0
+}

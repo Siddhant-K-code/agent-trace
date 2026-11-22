@@ -15,6 +15,8 @@ The manifest records the exact expected status and labels for each case. Validat
 | Case | Purpose |
 |---|---|
 | `complete-current` | Complete current trace with valid byte-level hash links |
+| `resumed-current` | One session resumed after an end, with cumulative durations rather than separate work totals |
+| `resumed-open` | Successful results after a resume, but no final end; an earlier end cannot make it complete |
 | `incomplete-missing-outcome` | Finalized tool call with no terminal result |
 | `terminal-absent` | Parseable trace with no final session boundary |
 | `fixture-review-001` | Representative redacted failure, retry, recovery, human correction, and deliberate orphan gap |
@@ -26,6 +28,11 @@ The manifest records the exact expected status and labels for each case. Validat
 | `out-of-order` | Event timestamps regress |
 | `invalid-schema` | Event `data` is not an object |
 | `replay-drift` | Tool-call behavior differs from the existing regression baseline |
+
+The [local reliability example](../examples/reliability/README.md) reads a small
+selection through the validator, read-only store, and review projection. It
+shows why cumulative session lifetime is not active work time and why missing
+boundaries remain incomplete.
 
 ## Perturbation policy
 

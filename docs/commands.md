@@ -1275,6 +1275,11 @@ legacy records that omit event `session_id` and hash links, but it does not
 silently repair them. See [Public trace schema](trace-schema.md) for all rules,
 status meanings, and compatibility decisions.
 
+A session continued by `resume` or `compact` is `incomplete` until its final
+span has an end marker. An earlier end, cumulative duration, or successful
+tool result does not fill the missing boundary. `--allow-active` does not
+make that session `complete`.
+
 ### `policy`
 ```
 agent-strace policy [generate] [SESSION_ID ...] [--output FILE] [--dry-run]
@@ -3014,7 +3019,7 @@ permissions:
   pull-requests: write
 
 steps:
-  - uses: Siddhant-K-code/agent-trace@v0.121.0
+  - uses: Siddhant-K-code/agent-trace@v0.121.1
     with:
       config: .agent-evals.yaml
       baseline: .agent-evals-baseline.json
