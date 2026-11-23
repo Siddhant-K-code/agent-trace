@@ -1376,6 +1376,14 @@ legacy records that omit event `session_id` and hash links, but it does not
 silently repair them. See [Public trace schema](trace-schema.md) for all rules,
 status meanings, and compatibility decisions.
 
+Each event line must be strict JSON. Earlier versions wrote a NaN or infinite
+number in an event as the bare token `NaN`, `Infinity` or `-Infinity`. These
+tokens are not JSON, so `validate` reports such a line as
+`event_schema_invalid`. Current versions write the number as `null` and leave
+out a NaN or infinite `duration_ms`, so new event lines do not hold the
+tokens. A session that an earlier version recorded is not rewritten, so its
+lines are still flagged.
+
 A session continued by `resume` or `compact` is `incomplete` until its final
 span has an end marker. An earlier end, cumulative duration, or successful
 tool result does not fill the missing boundary. `--allow-active` does not
@@ -2231,6 +2239,13 @@ file, it prints one line such as `Error: cannot write out.json: No such file or
 directory` on stderr and exits 1. `--scores`, `--metrics` and `--backend` do
 not read `--output`.
 
+`--format json` and `ndjson` write strict JSON. A NaN or infinite number in an
+event is written as `null`, as JavaScript's `JSON.stringify` writes it, and a
+NaN or infinite `duration_ms` is left out. This holds for a session that an
+earlier version stored with the bare `NaN`, `Infinity` or `-Infinity` tokens,
+too. `--format csv` writes a NaN or infinite `timestamp` or `duration_ms` as
+`nan`, `inf` or `-inf`, and the `data` cell as stored.
+
 With `--endpoint URL`, `--format otlp`, `otlp-genai` and `temporal` POST the
 payload to an OTLP/HTTP collector instead of writing a file. Give the
 collector's base URL: export drops trailing slashes from the path and appends
@@ -2927,8 +2942,8 @@ events other than decisions already stopped on these sessions with their own
 error message and exit code 1, and they keep it.
 
 `list`, `inspect`, `tree`, `verify`, and `export --format json`, `ndjson`, or `csv`
-keep working on these sessions. The export formats include the data exactly as
-stored.
+keep working on these sessions. The export formats include the data as stored,
+except that `json` and `ndjson` write a NaN or infinite number as `null`.
 
 `watch` keeps running when a live event that one of its checks reads has
 non-object data. It skips the checks for that event, prints one line such as
@@ -2983,7 +2998,9 @@ negative, NaN, infinity, or too large for a float, reads as missing. An
 `event_id` or `parent_id` that is not a non-empty string reads as missing, so
 no event links through it. Only `true` counts as `redacted`. The `otlp` and
 `otlp-genai` exports still give each event its own span ID. `inspect`,
-`sample`, and `export --format json`, `ndjson`, or `csv` keep the stored value.
+`sample`, and `export --format json`, `ndjson`, or `csv` keep the stored value,
+except a NaN or infinite `duration_ms`. `inspect`, `sample`, `json` and
+`ndjson` leave it out, and `csv` writes it as `nan`, `inf` or `-inf`.
 `validate` reports each such value as `event_schema_invalid`, and `org-report`
 refuses any of them. `compliance-report` refuses an `event_id` or `parent_id`
 that is not a string, an empty `event_id`, and a NaN or infinite
@@ -2996,13 +3013,15 @@ that is not a string, an empty `event_id`, and a NaN or infinite
 
 An event's `timestamp` is a Unix time in seconds, and `agent-strace server`
 refuses an event whose `timestamp` is not one (see
-[server.md](server.md#api-reference)). A session stored by an older version, or
-edited by hand, can still hold text, `null`, `true`, an object, an array, NaN,
-infinity, a negative number, or a number too large to be a date, such as a time
-in milliseconds. The commands in the two lists below check the session first.
-If an event a command reads has such a timestamp, the command writes one line
-to stderr and exits 1 before it prints, writes, sends, or opens anything. The
-line looks like this:
+[server.md](server.md#api-reference)). In Python, `TraceStore.append_event`
+and `append_events` raise `ValueError` for a NaN or infinite `timestamp` and
+write nothing. A batch with one such event writes none of its events. A
+session stored by an older version, or edited by hand, can still hold text,
+`null`, `true`, an object, an array, NaN, infinity, a negative number, or a
+number too large to be a date, such as a time in milliseconds. The commands in
+the two lists below check the session first. If an event a command reads has
+such a timestamp, the command writes one line to stderr and exits 1 before it
+prints, writes, sends, or opens anything. The line looks like this:
 
 ```
 Error: session event timestamp must be a Unix time in seconds: event 6 of 25 (tool_call) has a string timestamp; 5 more events have unusable timestamps
@@ -3105,9 +3124,12 @@ too-large integer timestamp.
 
 `list`, `inspect`, `tree`, `verify`, `stats`, `export --format json`, `ndjson`,
 or `csv`, `tenant export`, and the events API keep working on these sessions.
-Those that print a timestamp print it as stored. `postmortem --list`, `compare
---rerun`, `cost --breakdown provider`, `annotate --event`, and `replay --tree`
-do not check and work as before.
+Those that print a timestamp print it as stored, except a NaN or infinite one.
+`inspect`, `export --format json` and `ndjson`, `tenant export`, and the events
+API print that as `null`, and `export --format csv` prints it as `nan`, `inf`
+or `-inf`. `postmortem --list`, `compare --rerun`, `cost --breakdown
+provider`, `annotate --event`, and `replay --tree` do not check and work as
+before.
 
 `tree`, `a2a-tree`, `budget-report`, and `curve` do not check before they price
 a session. When they cannot price it, they count its cost as $0, as earlier

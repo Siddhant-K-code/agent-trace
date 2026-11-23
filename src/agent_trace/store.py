@@ -25,6 +25,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -357,6 +358,15 @@ def _unreadable_lines_reason(unreadable: list[tuple[int, str]]) -> str:
     elif others:
         reason += f"; {others} more lines are unreadable"
     return reason
+
+
+def _refuse_non_finite_timestamp(event: TraceEvent) -> None:
+    """Raise ValueError when the event timestamp is a NaN or infinite float.
+
+    to_json would write it as null, which readers do not take as a time.
+    """
+    if isinstance(event.timestamp, float) and not math.isfinite(event.timestamp):
+        raise ValueError("event timestamp must be a finite number")
 
 
 def _lock_file(file_obj) -> None:
@@ -755,7 +765,9 @@ class TraceStore:
                 hashlib.sha256(previous_line.encode()).hexdigest()
                 if previous_line else ""
             )
-            serialised = event.to_json()
+            # Keep the NaN, Infinity and -Infinity tokens older releases
+            # stored. Tagging changes only session_id, tenant_id and prev_hash.
+            serialised = event.to_json(allow_nan=True)
             tagged_lines.append(serialised)
             previous_line = serialised
         tagged_text = "\n".join(tagged_lines) + ("\n" if tagged_lines else "")
@@ -1184,6 +1196,7 @@ class TraceStore:
             return d
 
     def append_event(self, session_id: str, event: TraceEvent) -> None:
+        _refuse_non_finite_timestamp(event)
         try:
             session_id = validate_session_id(session_id)
         except ValueError:
@@ -1253,6 +1266,10 @@ class TraceStore:
         events = list(events)
         if not events:
             return
+        # Check the whole batch first. The tenant branch below writes the
+        # events one at a time.
+        for event in events:
+            _refuse_non_finite_timestamp(event)
         for event in events:
             event.tenant_id = validate_optional_tenant_id(event.tenant_id)
         if any(event.tenant_id for event in events):

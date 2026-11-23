@@ -541,6 +541,51 @@ class TestTraceStore(unittest.TestCase):
             commands,
         )
 
+    def untagged_session_with_one_event(self) -> str:
+        meta = SessionMeta(started_at=1.0, tenant_id="")
+        self.store.create_session(meta)
+        self.store.append_event(meta.session_id, TraceEvent(
+            event_type=EventType.SESSION_START, timestamp=1.0, tenant_id="",
+        ))
+        return meta.session_id
+
+    def test_append_event_refuses_a_non_finite_timestamp_and_writes_nothing(self):
+        class Real(float):
+            """A float subclass, as numpy's float64 is."""
+
+        session_id = self.untagged_session_with_one_event()
+        before = tree_snapshot(self.store.base_dir)
+        for timestamp in (float("nan"), float("inf"), float("-inf"), Real("nan")):
+            # With a tenant, append_event would first tag the untagged session.
+            for tenant in ("", "acme"):
+                with self.subTest(timestamp=timestamp, tenant=tenant):
+                    event = TraceEvent(event_type=EventType.DECISION, timestamp=timestamp,
+                                       data={"choice": "a"}, tenant_id=tenant)
+                    with self.assertRaisesRegex(
+                        ValueError, "^event timestamp must be a finite number$"
+                    ):
+                        self.store.append_event(session_id, event)
+                    self.assertEqual(tree_snapshot(self.store.base_dir), before)
+
+    def test_append_events_refuses_the_whole_batch_for_one_non_finite_timestamp(self):
+        # With a tenant, append_events hands each event to append_event.
+        for tenant in ("", "acme"):
+            with self.subTest(tenant=tenant):
+                session_id = self.untagged_session_with_one_event()
+                before = tree_snapshot(self.store.base_dir)
+                batch = [
+                    TraceEvent(event_type=EventType.TOOL_CALL, timestamp=2.0, tenant_id=tenant,
+                               data={"tool_name": "Bash"}),
+                    TraceEvent(event_type=EventType.DECISION, timestamp=float("nan"),
+                               tenant_id=tenant),
+                    TraceEvent(event_type=EventType.TOOL_RESULT, timestamp=3.0, tenant_id=tenant),
+                ]
+                with self.assertRaisesRegex(
+                    ValueError, "^event timestamp must be a finite number$"
+                ):
+                    self.store.append_events(session_id, batch)
+                self.assertEqual(tree_snapshot(self.store.base_dir), before)
+
 _GITIGNORE_BYTES = (
     b"# Created by agent-strace: traces may contain prompts and tool output.\n"
     b"*\n"

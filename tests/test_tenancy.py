@@ -49,6 +49,10 @@ def _event(session_id: str, timestamp: float = 1.0, **kwargs) -> TraceEvent:
     )
 
 
+def _refuse_constant(token):
+    raise ValueError(f"not JSON: {token}")
+
+
 def _raw_separator_line(record: dict) -> bytes:
     """Return record as one JSON line with a raw U+2028 in an added "note" field.
 
@@ -356,6 +360,71 @@ class TestTenantModelAndStore(TenantTestCase):
         self.assertTrue(audit["previous_terminal_hash"])
         self.assertTrue(audit["new_terminal_hash"])
         self.assertNotEqual(audit["previous_terminal_hash"], audit["new_terminal_hash"])
+
+    def test_tag_session_keeps_nan_and_infinity_tokens_from_older_releases(self):
+        session_id = "nan-tokens"
+        self.store.create_session(SessionMeta(session_id=session_id, started_at=1.0, tenant_id=""))
+        nan, inf = float("nan"), float("inf")
+        records = [
+            {"event_type": "user_prompt", "timestamp": 1.0, "event_id": "e1",
+             "session_id": session_id, "data": {"prompt": "hi", "score": nan}},
+            {"event_type": "tool_call", "timestamp": 2.0, "event_id": "e2",
+             "session_id": session_id, "duration_ms": inf,
+             "data": {"tool_name": "Bash", "arguments": {"y": -inf}}},
+            {"event_type": "decision", "timestamp": nan, "event_id": "e3",
+             "session_id": session_id, "data": {"choice": "a"}},
+        ]
+        lines = []
+        for record in records:
+            if lines:
+                record = {**record, "prev_hash": hashlib.sha256(lines[-1].encode()).hexdigest()}
+            # Written as releases before strict JSON wrote it.
+            lines.append(json.dumps(record, separators=(",", ":")))
+        events_path = self.store.base_dir / session_id / "events.ndjson"
+        events_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        def kept_fields(line):
+            # json.dumps writes NaN and infinity back as the same tokens.
+            record = json.loads(line)
+            record.pop("tenant_id", None)
+            record.pop("prev_hash", None)
+            return json.dumps(record, sort_keys=True)
+
+        self.assertEqual(self.store.tag_session(session_id, "tenant-a"), 3)
+
+        tagged = events_path.read_bytes()
+        tagged_lines = tagged.decode("utf-8").splitlines()
+        self.assertEqual([kept_fields(line) for line in tagged_lines],
+                         [kept_fields(line) for line in lines])
+        for token in (b'"score":NaN', b'"duration_ms":Infinity', b'"y":-Infinity',
+                      b'"timestamp":NaN'):
+            self.assertIn(token, tagged)
+        self.assertEqual({json.loads(line)["tenant_id"] for line in tagged_lines}, {"tenant-a"})
+        self.assertTrue(verify_chain(self.store, session_id).ok)
+
+        # A second roll-forward of the same journal gives the same bytes.
+        journal_dir = self.store.base_dir / ".tenant-journal"
+        journal_dir.mkdir(exist_ok=True)
+        with self.store.write_lock():
+            count = self.store._complete_tag_journal_locked(journal_dir / "tag-again.json", {
+                "operation": "tag_session", "operation_id": "d" * 32,
+                "session_id": session_id, "tenant_id": "tenant-a",
+                "phase": "intent", "previous_terminal_hash": "",
+            })
+        self.assertEqual(count, 3)
+        self.assertEqual(events_path.read_bytes(), tagged)
+
+        # New events are strict JSON, and the chain still verifies.
+        self.store.append_event(
+            session_id, _event(session_id, 4.0, data={"v": nan}, tenant_id="tenant-a")
+        )
+        text = events_path.read_bytes()
+        self.assertTrue(text.startswith(tagged))
+        appended = json.loads(
+            text[len(tagged):].decode("utf-8"), parse_constant=_refuse_constant
+        )
+        self.assertEqual(appended["data"], {"v": None})
+        self.assertTrue(verify_chain(self.store, session_id).ok)
 
     def test_tag_session_conflict_leaves_trace_unchanged(self):
         meta = self.create_session("already-tagged", "tenant-a")

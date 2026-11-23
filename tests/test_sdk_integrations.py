@@ -1320,6 +1320,28 @@ class TestLangChainTools(FrameworkCase):
         self.assertEqual(async_result.parent_id, async_call.event_id)
         self.assertEqual(async_result.data["result"], "4")
 
+    def test_a_nan_argument_is_stored_as_null(self):
+        base, _ = self.instrument_tools()
+
+        class ScaleTool(base):
+            name = "scale"
+
+            def _run(self, factor):
+                return factor
+
+        ScaleTool().invoke({"factor": float("nan")})
+
+        def refuse(token):
+            raise ValueError(f"not JSON: {token}")
+
+        store = TraceStore(self.trace_dir)
+        records = []
+        for meta in store.list_sessions():
+            text = (store.base_dir / meta.session_id / "events.ndjson").read_text(encoding="utf-8")
+            records.extend(json.loads(line, parse_constant=refuse) for line in text.splitlines())
+        (call,) = [record for record in records if record["event_type"] == "tool_call"]
+        self.assertEqual(call["data"]["arguments"], {"factor": None})
+
     def test_tool_error_is_linked_to_its_call(self):
         base, _ = self.instrument_tools()
 

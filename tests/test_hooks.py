@@ -1042,6 +1042,54 @@ class TestHooksMetadataOnly(unittest.TestCase):
         self.assertEqual(sent.data["cwd"], "[OMITTED]")
 
 
+def _refuse_constant(token):
+    raise ValueError(f"not JSON: {token}")
+
+
+class TestHooksNonFiniteNumbers(unittest.TestCase):
+    """Python's json reads NaN, Infinity and 1e400 from hook stdin. The stored lines are JSON."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        env = patch.dict(os.environ, {"AGENT_TRACE_DIR": self.tmpdir})
+        env.start()
+        self.addCleanup(env.stop)
+        for name in (
+            "AGENT_TRACE_REDACT",
+            "AGENT_TRACE_NO_REDACT",
+            "AGENT_STRACE_NO_REDACT",
+            "AGENT_STRACE_ENDPOINT",
+            "AGENT_TRACE_COPILOT_SESSION_ID",
+            "AGENT_TRACE_SESSION_ID",
+        ):
+            os.environ.pop(name, None)
+
+    def test_nan_and_overflowing_numbers_are_stored_as_null(self):
+        from agent_trace.validation import validate_trace_directory
+
+        session = "nonfinitehook001"
+        for args, raw in (
+            (["session-start"], json.dumps({"session_id": session, "source": "startup"})),
+            (["pre-tool"], '{"session_id":"%s","tool_name":"Bash","tool_use_id":"t1",'
+                           '"tool_input":{"command":"ls","limit":1e400,"ratio":NaN}}' % session),
+            (["post-tool"], '{"session_id":"%s","tool_name":"Bash","tool_use_id":"t1",'
+                            '"tool_input":{"command":"ls"},"tool_response":{"rows":-Infinity}}'
+                            % session),
+        ):
+            with patch.object(sys, "stdin", io.StringIO(raw)):
+                hook_main(args)
+
+        session_dir = Path(self.tmpdir) / session
+        lines = (session_dir / "events.ndjson").read_text(encoding="utf-8").splitlines()
+        records = [json.loads(line, parse_constant=_refuse_constant) for line in lines]
+        self.assertEqual(
+            [record["event_type"] for record in records], ["session_start", "tool_call", "tool_result"]
+        )
+        self.assertEqual(records[1]["data"]["arguments"], {"command": "ls", "limit": None, "ratio": None})
+        report = validate_trace_directory(session_dir, allow_active=True)
+        self.assertNotIn("event_schema_invalid", {finding.code for finding in report.findings})
+
+
 SUFFIX = "." * 3 + " (truncated)"
 REDACTION_WARNING = "agent-strace: redacted secrets from trace event\n"
 KEY_MARKER = redaction_marker("private-key")

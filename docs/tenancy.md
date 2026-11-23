@@ -25,12 +25,13 @@ python my_agent.py
 `events.ndjson`. The session value is authoritative: agent-strace rejects an
 event with a different tenant and refuses to move an already-tagged session to
 another tenant. When `watch` tags events already written to the active session,
-it atomically rewrites the file and rebuilds the SHA-256 event chain. The
-pre-change and post-change terminal hashes are recorded in
-`.agent-traces/tenant-audit.ndjson`. A small durable intent journal is used so
-an interrupted metadata/event transition can roll forward on restart. A `watch`
-already running on the session keeps reading after the rewrite and does not
-check the rewritten events again.
+it atomically rewrites the file and rebuilds the SHA-256 event chain. A bare
+`NaN`, `Infinity` or `-Infinity` token that an older version stored stays as it
+is in the rewrite. The pre-change and post-change terminal hashes are recorded
+in `.agent-traces/tenant-audit.ndjson`. A small durable intent journal is used
+so an interrupted metadata/event transition can roll forward on restart. A
+`watch` already running on the session keeps reading after the rewrite and does
+not check the rewritten events again.
 
 New session and workspace IDs accepted by capture and collector entry points
 use a strict 1–128 character ASCII format (`A-Z`, `a-z`, digits, `.`, `_`, and

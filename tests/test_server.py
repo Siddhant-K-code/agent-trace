@@ -1,8 +1,10 @@
 """Tests for the server-side event collector (issue #101)."""
 
 import io
+import hashlib
 import http.client
 import json
+import math
 import os
 import sys
 import tempfile
@@ -11,13 +13,13 @@ import time
 import unittest
 import urllib.request
 import urllib.error
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 from urllib.parse import quote
 from pathlib import Path
 
 from agent_trace.audit import verify_chain
-from agent_trace.cli import build_parser
+from agent_trace.cli import build_parser, cmd_export
 from agent_trace.collector_client import CollectorClient
 from agent_trace.hooks import handle_session_end, handle_session_start
 from agent_trace.integrations._base import emit
@@ -1600,6 +1602,118 @@ class TestAllowHostFlag(unittest.TestCase):
                     build_parser().parse_args(["server", "--allow-host", value])
                 self.assertEqual(ctx.exception.code, 2)
                 self.assertIn("argument --allow-host: invalid host name", err.getvalue())
+
+
+def _refuse_constant(token):
+    raise ValueError(f"not JSON: {token}")
+
+
+def _strict_loads(text):
+    """Parse text as JSON that has no bare NaN, Infinity or -Infinity."""
+    return json.loads(text, parse_constant=_refuse_constant)
+
+
+class TestEventsAreStrictJson(unittest.TestCase):
+    """The collector stores and serves NaN and infinity as null, as JSON.stringify writes them."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.trace_dir = tmp.name
+        self.store = TraceStore(tmp.name, redact=False, use_workspace_env=False)
+        server = HTTPServer(
+            ("127.0.0.1", 0), _make_handler(self.store, threading.Lock(), dashboard=True)
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.base = f"http://127.0.0.1:{server.server_address[1]}"
+
+    def served_events(self, session_id):
+        """Return the events from both GET routes, parsed strictly."""
+        status, body = _get(f"{self.base}/sessions/{session_id}/events")
+        self.assertEqual(status, 200)
+        ndjson = [_strict_loads(line) for line in body.decode("utf-8").splitlines()]
+        status, body = _get(f"{self.base}/api/sessions/{session_id}/events")
+        self.assertEqual(status, 200)
+        self.assertEqual(_strict_loads(body.decode("utf-8")), ndjson)
+        return ndjson
+
+    def stored_lines(self, session_id):
+        return (self.store.base_dir / session_id / "events.ndjson").read_text(
+            encoding="utf-8"
+        ).splitlines()
+
+    def export(self, session_id, fmt):
+        args = build_parser().parse_args(
+            ["--trace-dir", self.trace_dir, "export", session_id, "--format", fmt]
+        )
+        out = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(io.StringIO()):
+            self.assertEqual(cmd_export(args), 0)
+        return out.getvalue()
+
+    def test_posted_nan_and_infinity_are_stored_and_served_as_null(self):
+        line = (
+            '{"event_type":"tool_call","timestamp":1700000000.0,"event_id":"p1",'
+            '"session_id":"srvnan01","duration_ms":Infinity,'
+            '"data":{"tool_name":"Bash","arguments":{"v":NaN,"w":[1,-Infinity]}}}'
+        )
+        status, body = _post(f"{self.base}/events", line.encode(), "application/x-ndjson")
+        self.assertEqual((status, json.loads(body)), (200, {"accepted": 1, "errors": 0}))
+
+        (stored,) = [_strict_loads(text) for text in self.stored_lines("srvnan01")]
+        self.assertNotIn("duration_ms", stored)
+        self.assertEqual(stored["data"]["arguments"], {"v": None, "w": [1, None]})
+        self.assertEqual(self.served_events("srvnan01"), [stored])
+
+    def test_an_old_session_with_bare_tokens_loads_verifies_and_is_served_strict(self):
+        session_id = "oldnan01"
+        self.store.create_session(SessionMeta(session_id=session_id, started_at=1.0))
+        records = [
+            {"event_type": "session_start", "timestamp": 1.0, "event_id": "e1",
+             "session_id": session_id, "data": {"cwd": "/w"}},
+            {"event_type": "tool_call", "timestamp": 2.0, "event_id": "e2",
+             "session_id": session_id, "duration_ms": float("inf"),
+             "data": {"tool_name": "Bash", "arguments": {"x": float("nan"), "y": float("-inf")}}},
+            {"event_type": "tool_result", "timestamp": 3.0, "event_id": "e3",
+             "session_id": session_id, "parent_id": "e2",
+             "data": {"tool_name": "Bash", "result": "ok", "score": float("nan")}},
+        ]
+        lines = []
+        for record in records:
+            if lines:
+                record = {**record, "prev_hash": hashlib.sha256(lines[-1].encode()).hexdigest()}
+            # Written as releases before strict JSON wrote it.
+            lines.append(json.dumps(record, separators=(",", ":")))
+        old_text = "\n".join(lines) + "\n"
+        for token in ("NaN", "Infinity", "-Infinity"):
+            self.assertIn(token, old_text)
+        events_path = self.store.base_dir / session_id / "events.ndjson"
+        events_path.write_text(old_text, encoding="utf-8")
+
+        loaded = self.store.load_events(session_id)
+        self.assertTrue(math.isnan(loaded[1].data["arguments"]["x"]))
+        self.assertTrue(verify_chain(self.store, session_id).ok)
+
+        exported = _strict_loads(self.export(session_id, "json"))
+        self.assertEqual(
+            [_strict_loads(text) for text in self.export(session_id, "ndjson").splitlines()],
+            exported,
+        )
+        self.assertEqual(exported[1]["data"]["arguments"], {"x": None, "y": None})
+        self.assertNotIn("duration_ms", exported[1])
+        self.assertEqual(self.served_events(session_id), exported)
+
+        self.store.append_event(session_id, TraceEvent(
+            event_type=EventType.SESSION_END, timestamp=4.0, data={"v": float("nan")},
+        ))
+        self.assertTrue(verify_chain(self.store, session_id).ok)
+        text = events_path.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith(old_text))
+        self.assertEqual(_strict_loads(text[len(old_text):])["data"], {"v": None})
 
 
 if __name__ == "__main__":
