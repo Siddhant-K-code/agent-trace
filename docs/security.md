@@ -21,7 +21,7 @@ See [Product telemetry](telemetry.md) for the complete schemas and controls.
 
 ## Secret redaction
 
-Strips API keys, tokens, and credentials before they hit disk. The original data is never stored. Redaction is enabled by default for all trace writes. A hook redacts a tool's output before it cuts the output to 1000 characters, or to 500 for a failed call. `agent-strace import` also redacts each prompt, response and tool result before it cuts them to their stored length, so a secret that crosses the cut is still removed.
+Strips API keys, tokens, and credentials before they hit disk. The original data is never stored. Redaction is enabled by default for all trace writes. A hook redacts a tool's output before it cuts the output to 1000 characters, or to 500 for a failed call. Output sent as an object is redacted field by field, then written as JSON and cut. `agent-strace import` also redacts each prompt, response and tool result before it cuts them to their stored length, so a secret that crosses the cut is still removed.
 
 ```bash
 # Default: redact before writing traces
