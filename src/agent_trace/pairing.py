@@ -75,6 +75,12 @@ the ``parent_id`` and ``duration_ms`` that the rules above then follow:
   subagent's result does not take its parent's call. The tool name is the
   only evidence some providers send, and the hook records the pairing as a
   ``parent_id`` at once, so exporters never need a fallback for it.
+- Import (:class:`KeyedPairer`): ``agent-strace import`` reads a Claude Code
+  transcript in order and pairs each ``tool_result`` with the earlier
+  ``tool_use`` of the same ID in the same context stream (the main
+  conversation or one sidechain), so a result never takes a call from
+  another stream. A later call with the same ID replaces the pending one,
+  and a result with no pending call stays unpaired.
 """
 
 from __future__ import annotations

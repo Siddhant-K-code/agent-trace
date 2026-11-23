@@ -932,12 +932,49 @@ def _error_tool_name(event: TraceEvent, call_event: TraceEvent | None) -> Any:
 
     That is the error's own ``tool_name``, else the paired tool_call's, else
     ``error``. The ``@trace_tool`` decorator, for one, records the name only
-    on the call.
+    on the call. A failed tool_result with neither is named ``tool``, as an
+    unpaired result that did not fail is: it is a tool's outcome, not a call
+    to a tool named error.
     """
     name = event.data.get("tool_name", "")
     if not name and call_event is not None and isinstance(call_event.data, Mapping):
         name = call_event.data.get("tool_name", "")
-    return name or "error"
+    if name:
+        return name
+    return "tool" if event.event_type == EventType.TOOL_RESULT else "error"
+
+
+def _tool_call_id(call_event: TraceEvent | None, event: TraceEvent | None = None) -> str:
+    """Return the gen_ai.tool.call.id of a tool span.
+
+    That is the model's own ID for the call, the ``tool_use_id`` that the
+    hooks and ``agent-strace import`` store, taken from the call, else from
+    its outcome. Without one it is the call's event ID, else the outcome's.
+    """
+    for source in (call_event, event):
+        if source is not None and isinstance(source.data, Mapping):
+            value = source.data.get("tool_use_id")
+            if isinstance(value, str) and value.strip():
+                return value
+    return event_id_of(call_event if call_event else event)
+
+
+def _failed_tool_result(event: TraceEvent) -> bool:
+    """Return whether ``event`` is a tool_result that records a failure.
+
+    A Claude Code transcript marks a failed tool result ``is_error: true``,
+    and ``agent-strace import`` keeps the flag. Such a result exports like an
+    error that ends its tool call, with the result text as the message.
+    """
+    return event.event_type == EventType.TOOL_RESULT and event.data.get("is_error") is True
+
+
+def _tool_error_message(event: TraceEvent) -> Any:
+    """Return the message of an error, or the text of a failed tool_result."""
+    message = event.data.get("error", "") or event.data.get("message", "")
+    if not message and event.event_type == EventType.TOOL_RESULT:
+        message = event.data.get("result", "")
+    return message
 
 
 _LINK_TYPE = "agent.strace.link.type"
@@ -1114,9 +1151,10 @@ OTLP_DATA_EVENT_TYPES = frozenset({
 
 # session_to_otlp reads the timestamps of events of these types, and
 # session_to_otlp_genai of the same types but decision. Neither reads the
-# timestamp of a tool_result that pairs with a tool_call (the span starts at
-# the call) or of a tool_call that a later one with the same ID replaces
-# before it pairs. session_to_otlp_genai skips such a replaced llm_request too.
+# timestamp of a tool_result that pairs with a tool_call and did not fail (the
+# span starts at the call) or of a tool_call that a later one with the same ID
+# replaces before it pairs. session_to_otlp_genai skips such a replaced
+# llm_request too.
 OTLP_TIMESTAMP_EVENT_TYPES = OTLP_DATA_EVENT_TYPES | {EventType.TOOL_CALL}
 OTLP_GENAI_TIMESTAMP_EVENT_TYPES = OTLP_TIMESTAMP_EVENT_TYPES - {EventType.DECISION}
 
@@ -1309,7 +1347,7 @@ def session_to_otlp(
         elif event.event_type == EventType.TOOL_CALL:
             calls.add(event)
 
-        elif event.event_type == EventType.TOOL_RESULT:
+        elif event.event_type == EventType.TOOL_RESULT and not _failed_tool_result(event):
             call_event = calls.match(event)
 
             tool_name = event.data.get("tool_name", "") or (
@@ -1321,7 +1359,7 @@ def session_to_otlp(
             span_attrs = {
                 _SEMCONV_TOOL_NAME: tool_name,
                 _SEMCONV_OP: "tool.call",
-                _SEMCONV_TOOL_CALL_ID: event_id_of(call_event if call_event else event),
+                _SEMCONV_TOOL_CALL_ID: _tool_call_id(call_event, event),
             }
             if call_event:
                 args = object_field(call_event.data, "arguments", {})
@@ -1345,18 +1383,26 @@ def session_to_otlp(
                 "status": {"code": 0},  # STATUS_CODE_UNSET
             }, call_event, event))
 
-        elif event.event_type == EventType.ERROR:
+        elif event.event_type in (EventType.ERROR, EventType.TOOL_RESULT):
             # An error linked to an LLM request ends that request. The classic
             # export has no model request spans, so it still exports as an
             # error span, but not as a tool call. An error with no tool_call
             # and no tool_name of its own, such as "could not start the MCP
-            # server", is not a tool call either and gets the same span.
-            model_error = requests.match_parent(event) is not None
+            # server", is not a tool call either and gets the same span. A
+            # failed tool_result is a tool error, paired or not.
+            model_error = (
+                event.event_type == EventType.ERROR
+                and requests.match_parent(event) is not None
+            )
             call_event = calls.match(event)
             model_error = model_error and call_event is None
-            lone_error = call_event is None and not event.data.get("tool_name")
+            lone_error = (
+                event.event_type == EventType.ERROR
+                and call_event is None
+                and not event.data.get("tool_name")
+            )
 
-            error_msg = event.data.get("error", "") or event.data.get("message", "")
+            error_msg = _tool_error_message(event)
             span_start = call_event.timestamp if call_event else event.timestamp
             duration_ns = _duration_to_nanos(event.duration_ms)
 
@@ -1374,7 +1420,7 @@ def session_to_otlp(
                 span_attrs = {
                     _SEMCONV_TOOL_NAME: tool_name,
                     _SEMCONV_OP: "tool.call",
-                    _SEMCONV_TOOL_CALL_ID: event_id_of(call_event if call_event else event),
+                    _SEMCONV_TOOL_CALL_ID: _tool_call_id(call_event, event),
                     "tool.name": tool_name,
                 }
             if error_msg:
@@ -1460,7 +1506,7 @@ def session_to_otlp(
             "attributes": _make_attributes({
                 _SEMCONV_TOOL_NAME: tool_name,
                 _SEMCONV_OP: "tool.call",
-                _SEMCONV_TOOL_CALL_ID: event_id_of(call_event),
+                _SEMCONV_TOOL_CALL_ID: _tool_call_id(call_event),
                 "tool.name": tool_name,
                 **{f"tool.input.{k}": str(v)[:200] for k, v in object_field(call_event.data, "arguments", {}).items()},
             }),
@@ -1752,7 +1798,10 @@ def session_to_otlp_genai(
       with its recorded model and token usage, becomes a ``chat {model}``
       span too, with an inferred start (see _imported_response_starts)
     - Tool calls become ``execute_tool {tool}`` INTERNAL spans with
-      gen_ai.tool.name and gen_ai.tool.call.id; a failed one gets error.type
+      gen_ai.tool.name and gen_ai.tool.call.id, which is the model's ID for
+      the call when the trace stored one (``tool_use_id``), else the call's
+      event ID; a failed one, an error or a tool_result marked
+      ``is_error: true``, gets error.type
     - The root is an ``invoke_agent`` INTERNAL span with gen_ai.agent.name
       when the session names its agent. Its status follows the session's
       end state, and an ERROR root carries error.type (see
@@ -1880,7 +1929,7 @@ def session_to_otlp_genai(
         elif event.event_type == EventType.TOOL_CALL:
             calls.add(event)
 
-        elif event.event_type == EventType.TOOL_RESULT:
+        elif event.event_type == EventType.TOOL_RESULT and not _failed_tool_result(event):
             call_event = calls.match(event)
 
             tool_name = event.data.get("tool_name", "") or (
@@ -1892,7 +1941,7 @@ def session_to_otlp_genai(
             tool_attrs: dict = {
                 _SEMCONV_TOOL_NAME: tool_name,
                 _SEMCONV_OP: _OP_EXECUTE_TOOL,
-                _SEMCONV_TOOL_CALL_ID: event_id_of(call_event if call_event else event),
+                _SEMCONV_TOOL_CALL_ID: _tool_call_id(call_event, event),
                 _OI_SPAN_KIND: "TOOL",
                 _OI_SESSION_ID: meta.session_id,
                 **_conversation_attributes(meta),
@@ -1927,8 +1976,12 @@ def session_to_otlp_genai(
                 "status": {"code": 0},  # STATUS_CODE_UNSET
             }, call_event, event))
 
-        elif event.event_type == EventType.ERROR:
-            req_event = requests.match_parent(event)
+        elif event.event_type in (EventType.ERROR, EventType.TOOL_RESULT):
+            # A failed tool_result ends its tool call like an error does.
+            req_event = (
+                requests.match_parent(event)
+                if event.event_type == EventType.ERROR else None
+            )
             if req_event is not None:
                 # An error linked to an LLM request ends that request, so it
                 # exports as one failed model call instead of a tool error.
@@ -1941,7 +1994,7 @@ def session_to_otlp_genai(
             call_event = calls.match(event)
 
             tool_name = _error_tool_name(event, call_event)
-            error_msg = event.data.get("error", "") or event.data.get("message", "")
+            error_msg = _tool_error_message(event)
             span_start = call_event.timestamp if call_event else event.timestamp
             duration_ns = _duration_to_nanos(event.duration_ms)
 
@@ -1956,7 +2009,7 @@ def session_to_otlp_genai(
             error_attrs: dict[str, Any] = {
                 _SEMCONV_TOOL_NAME: tool_name,
                 _SEMCONV_OP: _OP_EXECUTE_TOOL,
-                _SEMCONV_TOOL_CALL_ID: event_id_of(call_event if call_event else event),
+                _SEMCONV_TOOL_CALL_ID: _tool_call_id(call_event, event),
                 _SEMCONV_ERROR_TYPE: error_type,
                 _OI_SPAN_KIND: "TOOL",
                 _OI_SESSION_ID: meta.session_id,
@@ -2030,7 +2083,7 @@ def session_to_otlp_genai(
         tool_attrs: dict[str, Any] = {
             _SEMCONV_TOOL_NAME: tool_name,
             _SEMCONV_OP: _OP_EXECUTE_TOOL,
-            _SEMCONV_TOOL_CALL_ID: event_id_of(call_event),
+            _SEMCONV_TOOL_CALL_ID: _tool_call_id(call_event),
             _OI_SPAN_KIND: "TOOL",
             _OI_SESSION_ID: meta.session_id,
             **_conversation_attributes(meta),

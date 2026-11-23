@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .models import EventType, SessionMeta, TraceEvent, usable_number, usable_time
+from .pairing import KeyedPairer, link_response
 from .redact import redact_data
 from .store import TraceStore, resolve_trace_dir, validate_session_id
 from .transcript_import import transcript_format
@@ -267,6 +268,30 @@ def _extract_tool_results(content: list[dict]) -> list[dict[str, Any]]:
     return results
 
 
+def _tool_use_key(context_stream: str, tool_use_id: object) -> tuple[str, str] | None:
+    """Return the key that pairs a tool_result with its tool_use, if it has one.
+
+    A result pairs only with a call of the same ID in the same context stream,
+    so a sidechain's result never takes a call of the main conversation or of
+    another sidechain.
+    """
+    if isinstance(tool_use_id, str) and tool_use_id:
+        return (context_stream, tool_use_id)
+    return None
+
+
+def _link_tool_result(result: TraceEvent, call: TraceEvent) -> None:
+    """Record on ``result`` that it answers ``call``, as the hooks do."""
+    link_response(result, call.event_id, call.timestamp)
+    # A line whose timestamp did not parse is stored at 0, and a result
+    # stamped before its call has no real duration.
+    if not (result.timestamp and call.timestamp) or (result.duration_ms or 0) < 0:
+        result.duration_ms = None
+    tool_name = call.data.get("tool_name")
+    if isinstance(tool_name, str) and tool_name:
+        result.data["tool_name"] = tool_name
+
+
 def _extract_text(content: Any) -> str:
     """Extract text from message content (string or content blocks)."""
     if isinstance(content, str):
@@ -460,6 +485,8 @@ def _import_jsonl(
     redacted_events: list[TraceEvent] = []
     pending_compaction: set[str] = set()
     pending_context: dict[str, str] = {}
+    # tool_use calls that no tool_result has answered yet, by _tool_use_key.
+    pending_calls: KeyedPairer[TraceEvent] = KeyedPairer()
 
     # Claude Code writes one line per content block of a response, and each
     # line repeats the response's usage. Count it once, on the last line.
@@ -544,11 +571,20 @@ def _import_jsonl(
                         session_id=meta.session_id,
                         data={
                             "tool_use_id": tr["tool_use_id"],
+                            # The text under the key the hooks and the
+                            # exporters use, and under the key earlier
+                            # imports wrote.
+                            "result": preview,
                             "content_preview": preview,
                             **({"is_error": True} if tr["is_error"] else {}),
                             **provenance,
                         },
                     )
+                    call = pending_calls.match(
+                        _tool_use_key(context_stream, tr["tool_use_id"]),
+                    )
+                    if call is not None:
+                        _link_tool_result(event, call)
                     if hit:
                         redacted_events.append(event)
                     events.append(event)
@@ -623,6 +659,9 @@ def _import_jsonl(
                         "request_id": tc["id"],
                         **provenance,
                     }
+                    # The model's ID for the call, under the hooks' key.
+                    if isinstance(tc["id"], str) and tc["id"]:
+                        tool_data["tool_use_id"] = tc["id"]
                     caller = tc.get("caller", {})
                     if isinstance(caller, dict) and caller.get("type"):
                         tool_data["caller_type"] = caller["type"]
@@ -639,6 +678,7 @@ def _import_jsonl(
                         data=tool_data,
                     )
                     events.append(event)
+                    pending_calls.add(_tool_use_key(context_stream, tc["id"]), event)
                     meta.tool_calls += 1
 
             # Log assistant text whenever present, including messages that also

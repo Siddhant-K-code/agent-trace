@@ -54,6 +54,7 @@ from agent_trace.hooks import (
     hook_main,
 )
 from agent_trace.models import EventType, TraceEvent
+from agent_trace.otlp import session_to_otlp, session_to_otlp_genai
 from agent_trace.redact import redact_data, redaction_marker
 from agent_trace.reviewability import _result_status
 from agent_trace.runner_summary import output_text, summary_outcome
@@ -501,6 +502,51 @@ class TestHooksToolCapture(unittest.TestCase):
 
         meta = store.load_meta(self.session_id)
         self.assertEqual(meta.errors, 1)
+
+    def test_otlp_call_id_is_the_tool_use_id(self):
+        # gen_ai.tool.call.id is the model's ID for the call (#578). A call
+        # recorded without one keeps the event ID.
+        read_output = {"type": "text", "file": {"filePath": "a.py", "content": "x"}}
+        handle_pre_tool({"tool_name": "Read", "tool_input": {}, "tool_use_id": "toolu_01ok"})
+        handle_post_tool({"tool_name": "Read", "tool_response": read_output,
+                          "tool_use_id": "toolu_01ok"})
+        handle_pre_tool({"tool_name": "Bash", "tool_input": {}, "tool_use_id": "toolu_01err"})
+        handle_post_tool({"tool_name": "Bash", "tool_output": "out", "tool_use_id": "toolu_01err"},
+                         failed=True)
+        handle_pre_tool({"tool_name": "Glob", "tool_input": {}, "tool_use_id": "toolu_01open"})
+        handle_pre_tool({"tool_name": "Grep", "tool_input": {}})
+
+        store = TraceStore(self.tmpdir)
+        meta = store.load_meta(self.session_id)
+        events = store.load_events(self.session_id)
+        calls = {e.data["tool_name"]: e.event_id for e in events
+                 if e.event_type == EventType.TOOL_CALL}
+        expected = {"Read": "toolu_01ok", "Bash": "toolu_01err",
+                    "Glob": "toolu_01open", "Grep": calls["Grep"]}
+        for convert, prefix in ((session_to_otlp_genai, "execute_tool "),
+                                (session_to_otlp, "tool/")):
+            with self.subTest(convert=convert.__name__):
+                spans = convert(meta, events)["resourceSpans"][0]["scopeSpans"][0]["spans"]
+                attrs = {
+                    span["name"][len(prefix):]: {
+                        a["key"]: next(iter(a["value"].values())) for a in span["attributes"]
+                    }
+                    for span in spans if span["name"].startswith(prefix)
+                }
+                self.assertEqual(
+                    {tool: a["gen_ai.tool.call.id"] for tool, a in attrs.items()}, expected,
+                )
+                if convert is session_to_otlp_genai:
+                    # The link to the stored event is unchanged.
+                    self.assertEqual(
+                        {tool: a["agent.strace.request.event_id"] for tool, a in attrs.items()},
+                        calls,
+                    )
+                    # The object output is stored as JSON (#576) and exported
+                    # on the span that carries the toolu_ ID.
+                    self.assertEqual(
+                        json.loads(attrs["Read"]["gen_ai.tool.call.result"]), read_output,
+                    )
 
     def test_meta_tool_count_increments(self):
         for i in range(3):

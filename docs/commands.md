@@ -271,6 +271,19 @@ The span's start is inferred, not recorded. See
 Sessions imported by earlier versions have no `message_id` or `stop_reason`;
 import the log again to add them.
 
+Each `tool_use` block becomes a `tool_call` event that stores the block's ID
+as `tool_use_id` (and as `request_id`). Each `tool_result` block becomes a
+`tool_result` event linked to the earlier call with that ID in the same
+conversation stream, with the call's `tool_name`, the time between the two
+lines as `duration_ms`, and the result text as `result`; a sidechain's result
+never links to a call of another stream. `export --format otlp` and
+`otlp-genai` then show the call and its result as one tool span with the
+`toolu_...` ID as `gen_ai.tool.call.id`, and a result marked `is_error` as a
+failed one. A result with no earlier call of its ID stays unpaired. See
+[Tool results imported from a transcript](production.md#tool-results-imported-from-a-transcript).
+Sessions imported by earlier versions show each call and its result as two
+spans; delete the session's directory and import the log again to pair them.
+
 ---
 
 ## Replay and inspection
@@ -2166,6 +2179,12 @@ In `--format otlp`, a failed tool call and a tool call with no result are
 a result. Earlier versions named them `{tool}`. An `error` is a tool call only
 when it pairs with a call or has its own `tool_name`. See
 [Classic tool spans](production.md#classic-tool-spans).
+
+In both OTLP formats, a tool span's `gen_ai.tool.call.id` is the model's ID
+for the call, the `tool_use_id` that hooks and [`import`](#import) store,
+such as `toolu_...`. A call with none keeps its event ID there, as earlier
+versions did for every call. See
+[Spans and attributes](production.md#spans-and-attributes).
 
 In both OTLP formats, a call whose event names an earlier one in `retry_of`
 has a span link to that call's span.
