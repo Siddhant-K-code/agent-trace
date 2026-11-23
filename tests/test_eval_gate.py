@@ -197,6 +197,32 @@ class TestSessionStatus(unittest.TestCase):
         self.assertEqual(measure_session_status(_ended(reason=["kill"])), "killed")
         self.assertEqual(measure_session_status(_ended(exit_code=True)), "completed")
 
+    def test_a_resumed_session_has_not_ended(self):
+        def resumed(**end):
+            return [
+                _event(EventType.SESSION_START, 1.0),
+                _event(EventType.SESSION_END, 2.0, **end),
+                _event(EventType.SESSION_START, 3.0, source="resume"),
+            ]
+
+        meta = SessionMeta(session_id="gate-session", started_at=1.0, ended_at=4.0)
+        # The session_end before the resume does not decide.
+        self.assertEqual(measure_session_status(resumed(reason="complete")), "killed")
+        self.assertEqual(measure_session_status(resumed(reason="error"), meta), "completed")
+        # A session_end after the resume decides.
+        self.assertEqual(
+            measure_session_status(
+                resumed(reason="error") + [_event(EventType.SESSION_END, 4.0, reason="complete")]
+            ),
+            "completed",
+        )
+        self.assertEqual(
+            measure_session_status(
+                resumed(reason="complete") + [_event(EventType.SESSION_END, 4.0, reason="error")]
+            ),
+            "killed",
+        )
+
     def test_matches_recorded_session_status(self):
         statuses = sorted(
             session_outcome._COMPLETED_STATUSES

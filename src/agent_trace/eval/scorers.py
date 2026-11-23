@@ -21,7 +21,7 @@ from ..event_data import object_field, str_field
 from ..failures import count_session_errors
 from ..http_post import no_redirect_opener, post_error_detail
 from ..models import EventType, TraceEvent
-from ..session_outcome import SESSION_END_REASON_KEYS, session_end_status
+from ..session_outcome import SESSION_END_REASON_KEYS, final_session_end, session_end_status
 from ..store import TraceStore
 
 
@@ -83,18 +83,15 @@ def measure_error_count(events: list[TraceEvent]) -> int:
 def measure_session_status(events: list[TraceEvent], meta: object | None = None) -> str:
     """Classify a session as completed, killed, or timeout.
 
-    The last ``session_end`` decides, by the rules of
+    The final ``session_end`` decides, by the rules of
     :func:`~agent_trace.session_outcome.session_end_status`, with ``killed``
     for ``terminated``. Unlike ``recorded_session_status``, it also reads a
     text exit code such as ``"1"`` and a reason that is not text. With no
-    ``session_end``, the session is completed when its metadata has
-    ``ended_at``.
+    ``session_end``, or when a later ``session_start`` (a resume) reopened
+    the session, it is completed when its metadata has ``ended_at``.
     """
 
-    end_event = next(
-        (event for event in reversed(events) if event.event_type == EventType.SESSION_END),
-        None,
-    )
+    end_event = final_session_end(events)
     if end_event is None:
         return "completed" if getattr(meta, "ended_at", None) else "killed"
 

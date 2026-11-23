@@ -1878,8 +1878,9 @@ criterion-specific parameters it declares. When a lint rule could not run, a
 `terminated`. So Copilot's `error` and `abort` reasons are `killed`, and so is
 an exit code too large for a float. It differs from those rules in three ways:
 
-- With no `session_end`, the session is `completed` when its metadata has
-  `ended_at`, else `killed`.
+- With no `session_end`, or when a later `session_start` (a resume) reopened
+  the session, the session is `completed` when its metadata has `ended_at`,
+  else `killed`.
 - It also reads a text exit code such as `"1"`.
 - It reads a reason that is not text, such as a list, as text.
 
@@ -1887,6 +1888,7 @@ Earlier versions ignored an `error` or `abort` reason. Such a session was
 `completed` with exit code `0` or none, and `timeout` with exit code `124`.
 For an exit code too large for a float, they failed the criterion with no
 score and the reason `int too large to convert to float`.
+They read a resumed session by the `session_end` before the resume.
 
 | Flag | Default | Description |
 |---|---|---|
