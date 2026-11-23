@@ -18,7 +18,7 @@ agent-strace does not record an `AGENTS.md` hash when a session starts. It reads
 | `agent-strace context-score` | Groups sessions by `AGENTS.md` version (from `config-watch` snapshots) and compares cost, tool calls, lint findings and scope violations per version |
 | `agent-strace postmortem --agents-md AGENTS.md` | Flags shell commands that contradict a "use X, not Y", "never use Y" or "do not use Y" line |
 | `agent-strace optimize --target AGENTS.md` | Proposes additions to `AGENTS.md` from trace failures |
-| `agent-strace freshness` | Reads file globs listed under a scope heading (a line ending in `:` that mentions scope, files, include or watch) in `CLAUDE.md` or `AGENTS.md` |
+| `agent-strace freshness` | Reads file globs listed as `-` or `*` bullets under a scope heading (a line ending in `:` that mentions scope, files, include or watch). It reads `CLAUDE.md` at the repository's top level, then `AGENTS.md` there if `CLAUDE.md` lists none |
 
 agent-strace does not parse tool permissions, path constraints or model hints from `AGENTS.md`. To enforce tool and path rules, write a JSON scope policy and check sessions with `agent-strace audit` (see [Checking sessions against rules](#checking-sessions-against-rules)).
 
