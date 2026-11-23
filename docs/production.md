@@ -56,10 +56,14 @@ Two of its values change in this release, as in `otlp-genai`: see
 auto-instrumentation and the `@trace_*` decorators all build these spans. They
 follow the GenAI conventions in
 [open-telemetry/semantic-conventions-genai](https://github.com/open-telemetry/semantic-conventions-genai)
-at commit `e6658f1` (2026-11-06). That repository publishes no release or
-schema URL yet, so the payload sets no `schemaUrl`. The instrumentation scope
+release [`v0.1.0`](https://github.com/open-telemetry/semantic-conventions-genai/releases/tag/v0.1.0)
+(2026-11-21). The schema URL that release names,
+`https://opentelemetry.io/schemas/semconv-genai-dev/0.1.0-dev`, does not
+resolve yet, so the payload sets no `schemaUrl`. The instrumentation scope
 is `agent-trace` with the agent-strace version, and the `service.version`
-resource attribute is the agent-strace version.
+resource attribute is the agent-strace version. See
+[Conformance check](#conformance-check) for what OpenTelemetry's own check
+reports.
 
 | Span | Name | Kind | `gen_ai.operation.name` | Spec |
 |---|---|---|---|---|
@@ -79,8 +83,15 @@ resource attribute is the agent-strace version.
 - The content attributes of the
   [GenAI spans](https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-spans.md)
   carry text the export already sends, with the same redaction and
-  truncation. Each is a JSON string. The events and keys that carried this
-  text before are kept.
+  truncation. The events and keys that carried this text before are kept.
+  See [Content capture](#content-capture) for when content is exported.
+  - Each is a JSON string. The conventions say these attributes MUST be
+    recorded as an [AnyValue](https://opentelemetry.io/docs/specs/otel/common/#anyvalue),
+    a structured array or map, and describe it as the data model, not an
+    encoding. agent-strace sends a JSON string, which backends that do not
+    read structured values can still show and search. OpenTelemetry's
+    conformance check accepts either form: it parses a string and checks
+    the result against the message schema, and agent-strace's messages pass.
   - The root has `gen_ai.input.messages`: the user prompts and assistant
     replies up to and including the last user prompt, each a message with
     one `text` part. Its `gen_ai.output.messages` is one `assistant` message
@@ -89,11 +100,41 @@ resource attribute is the agent-strace version.
     left out.
   - A tool span whose call has input has `gen_ai.tool.call.arguments`: the
     `input.value` JSON, or, when that is cut, a JSON object of the
-    `gen_ai.tool.input.*` values, each at most 200 characters. A tool span
-    with a result has `gen_ai.tool.call.result`, the `output.value` text, so
-    a result cut at 500 characters may not parse as JSON.
+    `gen_ai.tool.input.*` values, each at most 200 characters. Input that is
+    not an object, such as a list, is cut the way a result is.
+  - A tool span with a result has `gen_ai.tool.call.result`, at most 500
+    characters, as `output.value` is. A result that is JSON, either a
+    recorded object or list or text that parses as JSON, stays valid JSON
+    when it is cut: members are kept in order while they fit, the first that
+    does not fit is cut the same way, string values are shortened, and the
+    rest are left out. Text that starts with `{` or `[` but does not parse
+    becomes a JSON string of as much of it as fits. That includes JSON a
+    recorder already cut, and the Python `repr` the hooks store when an agent
+    reports a tool result as an object, such as `{'type': 'text'}`. Other
+    text, such as `1 passed`, is the plain text, as before. `output.value`
+    keeps the plain cut text.
   - A `chat` span has no content: recorders store no prompt or reply per
     model request.
+- A `chat` span carries `gen_ai.response.id`, `gen_ai.response.model`,
+  `server.address` and `server.port` only when the capture path recorded
+  them. Nothing is derived from the request model or the provider.
+  - The OpenAI and Anthropic SDK integrations (`instrument_openai`,
+    `instrument_anthropic`) record the response ID and model from the
+    response, or from the first stream chunk or `message_start` that has
+    them, and the server host and port from the client's base URL. The port
+    is the one in the URL, else 443 for `https` and 80 for `http`. A failed
+    request keeps the server but has no response ID or model.
+  - `import` of a Claude Code transcript records the response model, and the
+    response ID when the stored `message_id` is there, but no server address
+    or port. The `chat` span of each imported model response carries what was
+    recorded as `gen_ai.response.model` and `gen_ai.response.id`, in
+    `--format otlp` too; see
+    [Model responses imported from a transcript](#model-responses-imported-from-a-transcript).
+  - The hooks, `record`, `record-http`, the LiteLLM, LangChain, CrewAI,
+    Strands and OpenAI Agents integrations, and the `@trace_*` decorators
+    record none of them, so their `chat` spans have none.
+  - `--format otlp` exports other model requests as events on the root span,
+    without these keys.
 - A tool or `chat` span whose event names another event in `retry_of` has a
   [span link](https://opentelemetry.io/docs/concepts/signals/traces/#span-links)
   to that event's span, with `agent.strace.link.type` `retry_of`. A link to
@@ -122,6 +163,40 @@ resource attribute is the agent-strace version.
   it. It is deprecated, since the conventions renamed it to
   `gen_ai.provider.name` in semantic conventions v1.37.0, and will be removed
   in a later release. Read `gen_ai.provider.name` instead.
+
+#### Content capture
+
+The conventions make content opt-in: instrumentation reads
+`OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT`, whose default `NO_CONTENT`
+records no prompts, replies or tool arguments and results. agent-strace does
+not read that variable. Its exports send the content a session recorded, in
+the content attributes above and in the events and keys that carried it
+before. Secrets are removed when a session is recorded, unless it was recorded
+with `--no-redact`; see [Secret redaction](security.md#secret-redaction).
+Export has no option that leaves the content out, so do not send a session
+whose prompts or tool output must not leave the machine.
+
+#### Keys outside the GenAI registry
+
+The export also sends keys that the GenAI registry does not define.
+OpenTelemetry's conformance check lists each as `missing_attribute`. They are
+kept for backends and queries that read them:
+
+- `agent.strace.*`: agent-strace's own values, such as the recorded provider,
+  cost, evidence and provenance.
+- `agent.session_id` on the resource and the root, `agent.errors`,
+  `agent.llm_requests` and `agent.tool_calls` on the root, `tenant_id` on the
+  resource when the session has one, and `session.id`.
+- The [OpenInference](#openinference-compatibility) keys: `openinference.span.kind`,
+  `input.value`, `input.mime_type`, `output.value`, `output.mime_type`,
+  `llm.*` and `metadata`.
+- `gen_ai.system`, the deprecated copy of `gen_ai.provider.name`.
+- `gen_ai.prompt` and `gen_ai.completion` on the prompt and reply events.
+- `gen_ai.tool.input.*` and `gen_ai.tool.output` on tool spans, and
+  `tool.name`.
+- `exception.escaped` on `exception` events.
+- `service.version` on the resource. It is a core OpenTelemetry attribute,
+  outside the GenAI registry the check reads.
 
 #### Renamed in this release
 
@@ -259,8 +334,9 @@ The mapping is not fully lossless:
   keeps them all. A failed or cancelled request with no recorded reason has
   `gen_ai.response.finish_reasons` `["error"]` and no `llm.finish_reason`.
 - Tool input is capped at 1000 characters and tool output at 500 characters.
-  `gen_ai.tool.call.arguments` and `gen_ai.tool.call.result` carry the same
-  capped text.
+  `gen_ai.tool.call.arguments` and `gen_ai.tool.call.result` keep the same
+  limits, and a value that is JSON is cut so that it stays valid JSON; see
+  [Spans and attributes](#spans-and-attributes).
 - Only recorded cost is exported. Missing cost is not estimated.
 - Redaction markers and flags survive, but removed secret values do not.
 - Observed structural gaps survive. Provider capture-matrix blind spots remain
@@ -328,6 +404,39 @@ input.
   [Model responses imported from a transcript](#model-responses-imported-from-a-transcript).
   Temporal, built on `otlp-genai`, has the same spans. The direct Langfuse
   export does not export it yet. `cost` counts it.
+
+### Conformance check
+
+[`experiments/semconv-conformance/`](../experiments/semconv-conformance/README.md)
+runs OpenTelemetry's
+[GenAI conformance runner](https://github.com/open-telemetry/semantic-conventions-conformance),
+which checks a payload with Weaver live-check against the GenAI registry. Its
+README has the commands to run it again. It exports three scenarios: the
+synthetic parent and subagent sessions of
+[`experiments/telemetry-dev`](../experiments/telemetry-dev/), once as two
+traces and once as one trace with `--include-subagents`, and a session
+recorded by the OpenAI and Anthropic SDK integrations against the runner's
+mock model server. The runs against `v0.1.0` and `e6658f1` report the same
+findings. [RESULTS.md](../experiments/semconv-conformance/RESULTS.md) lists
+them. No ERROR span lacks `error.type`: every ERROR root has one (see
+[Session root status](#session-root-status)). What remains:
+
+- The scope has no schema URL (`instrumentation_scope_schema_url_missing`),
+  because the release's schema URL does not resolve.
+- A `chat` span lacks `gen_ai.response.id`, `gen_ai.response.model` or
+  `server.address` when its capture path did not record them, and a failed
+  request has no response or usage (`genai_expected_attribute_missing`).
+- The keys listed in [Keys outside the GenAI registry](#keys-outside-the-genai-registry)
+  are `missing_attribute`, and attributes still in development are
+  `not_stable`.
+- Two information-level findings: `error.type` values such as
+  `BadRequestError` on failed `chat` spans and roots, which the conventions
+  allow, and `gen_ai.provider.name`
+  `unknown` on the root of a session that used more than one provider.
+
+The check also confirms that `gen_ai.input.messages` and
+`gen_ai.output.messages` match the message schema, and that span links reach
+the collector.
 
 ---
 

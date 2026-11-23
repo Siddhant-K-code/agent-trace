@@ -10,6 +10,7 @@ import os
 import threading
 import time
 from typing import Any, Callable, Iterator
+from urllib.parse import urlsplit
 
 from ..fileutil import file_lock, write_atomic
 from ..models import EventType, SessionMeta, TraceEvent, usable_text
@@ -528,6 +529,45 @@ def given(value: Any, default: Any = None) -> Any:
     to ``create``.
     """
     return default if type(value).__name__ in ("NotGiven", "Omit") else value
+
+
+_DEFAULT_PORTS = {"https": 443, "http": 80}
+
+
+def server_fields(resource: Any) -> dict[str, Any]:
+    """``server_address`` and ``server_port`` of the server an SDK resource calls.
+
+    They come from the ``base_url`` of the resource's client, as the OpenAI
+    and Anthropic SDKs keep it. The address is the host name, without any
+    user name or password. A URL with no port gets the default port of its
+    scheme. Nothing is returned when there is no such URL or it names no host.
+    """
+    try:
+        parts = urlsplit(str(resource._client.base_url))
+        host = parts.hostname
+        port = parts.port or _DEFAULT_PORTS.get(parts.scheme)
+    except Exception:
+        return {}
+    if not host:
+        return {}
+    fields: dict[str, Any] = {"server_address": host}
+    if port:
+        fields["server_port"] = port
+    return fields
+
+
+def response_fields(response: Any) -> dict[str, Any]:
+    """``response_id`` and ``response_model`` of an SDK response object.
+
+    They are the ``id`` and ``model`` the provider returned, kept only when
+    they are non-empty strings.
+    """
+    fields: dict[str, Any] = {}
+    for source, key in (("id", "response_id"), ("model", "response_model")):
+        value = getattr(response, source, None)
+        if isinstance(value, str) and value:
+            fields[key] = value
+    return fields
 
 
 # ---------------------------------------------------------------------------

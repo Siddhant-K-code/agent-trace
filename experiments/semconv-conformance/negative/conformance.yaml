@@ -1,0 +1,10 @@
+# Negative check: the payload of the `session` scenario with a
+# gen_ai.input.messages that breaks the message schema. Weaver must report
+# genai_content_schema for it. See ../README.md.
+runner: genai-conformance
+instrumented_library: agent-strace
+instrumentation_library: agent-strace
+
+scenarios:
+  invalid-content:
+    run: python ../scenario.py invalid-content

@@ -82,8 +82,8 @@ if TYPE_CHECKING:
 
 # ---------------------------------------------------------------------------
 # OTel semantic conventions for GenAI. ``session_to_otlp_genai`` follows
-# https://github.com/open-telemetry/semantic-conventions-genai at commit
-# e6658f1 (2026-11-06); see docs/production.md.
+# https://github.com/open-telemetry/semantic-conventions-genai release
+# v0.1.0 (2026-11-21); see docs/production.md.
 # ---------------------------------------------------------------------------
 
 # Deprecated: renamed to gen_ai.provider.name in semantic-conventions v1.37.0.
@@ -128,6 +128,10 @@ _SEMCONV_TOOL_CALL_RESULT = "gen_ai.tool.call.result"
 _SEMCONV_INPUT_MESSAGES = "gen_ai.input.messages"
 _SEMCONV_OUTPUT_MESSAGES = "gen_ai.output.messages"
 _SEMCONV_FINISH_REASON = "gen_ai.response.finish_reasons"
+_SEMCONV_RESPONSE_ID = "gen_ai.response.id"
+_SEMCONV_RESPONSE_MODEL = "gen_ai.response.model"
+_SEMCONV_SERVER_ADDRESS = "server.address"
+_SEMCONV_SERVER_PORT = "server.port"
 _SEMCONV_CONVERSATION_ID = "gen_ai.conversation.id"
 _SEMCONV_ERROR_TYPE = "error.type"
 
@@ -269,6 +273,36 @@ def _finish_reasons(value: object) -> _StringArray:
         item if isinstance(item, str) else json.dumps(item, default=str)
         for item in items
     )
+
+
+def _response_server_attributes(
+    req_data: Mapping[str, Any],
+    resp_data: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return ``gen_ai.response.id``, ``gen_ai.response.model``,
+    ``server.address`` and ``server.port`` for one model request.
+
+    Each comes only from what a capture path recorded: ``response_id`` and
+    ``response_model`` on the response, ``server_address`` and
+    ``server_port`` on the request. The OpenAI and Anthropic SDK integrations
+    record them. A value that is not a non-empty string is left out, and so is
+    a port that is not an integer from 1 to 65535 or that has no address.
+    """
+    attrs: dict[str, Any] = {}
+    for key, attr in (
+        ("response_id", _SEMCONV_RESPONSE_ID),
+        ("response_model", _SEMCONV_RESPONSE_MODEL),
+    ):
+        value = resp_data.get(key)
+        if isinstance(value, str) and value:
+            attrs[attr] = value
+    address = req_data.get("server_address")
+    if isinstance(address, str) and address:
+        attrs[_SEMCONV_SERVER_ADDRESS] = address
+        port = req_data.get("server_port")
+        if isinstance(port, int) and not isinstance(port, bool) and 0 < port < 65536:
+            attrs[_SEMCONV_SERVER_PORT] = port
+    return attrs
 
 
 def _make_attributes(data: dict) -> list[dict]:
@@ -710,11 +744,105 @@ def _io_value(value: object, limit: int) -> tuple[str, str]:
 
 # The GenAI content attributes are JSON text, the way the OTel Python GenAI
 # instrumentations write them on spans. Each carries only text that the older
-# keys beside it already carry, with the same cuts.
+# keys beside it already carry, within the same limits.
 _MESSAGE_TEXT_LIMIT = 1000
 _TOOL_ARGUMENTS_LIMIT = 1000
 _TOOL_ARGUMENT_VALUE_LIMIT = 200
 _TOOL_RESULT_LIMIT = 500
+
+
+def _compact_json(value: object, sort_keys: bool) -> str:
+    return json.dumps(value, sort_keys=sort_keys, separators=(",", ":"))
+
+
+def _json_string(text: str, limit: int) -> str:
+    """Return the longest leading part of ``text`` whose JSON string literal
+    fits in ``limit`` characters, as that literal."""
+    low, high = 0, min(len(text), max(limit - 2, 0))
+    while low < high:
+        middle = (low + high + 1) // 2
+        if len(_compact_json(text[:middle], False)) <= limit:
+            low = middle
+        else:
+            high = middle - 1
+    return _compact_json(text[:low], False)
+
+
+def _cut_json(value: object, limit: int, sort_keys: bool) -> tuple[str, bool] | None:
+    """Return the leading part of ``value`` that fits in ``limit`` characters
+    as compact JSON, and whether that is all of it.
+
+    Members of an object or array are kept in order while they fit; the
+    first that does not is cut the same way, and the rest are dropped. A
+    string keeps its longest leading part that fits. None means not even an
+    empty value of the same kind fits.
+    """
+    text = _compact_json(value, sort_keys)
+    if len(text) <= limit:
+        return text, True
+    if isinstance(value, str):
+        return (_json_string(value, limit), False) if limit >= 2 else None
+    if isinstance(value, dict):
+        keys = sorted(value) if sort_keys else list(value)
+        members = [
+            (_compact_json(key if isinstance(key, str) else str(key), False) + ":", value[key])
+            for key in keys
+        ]
+        opening, closing = "{", "}"
+    elif isinstance(value, list):
+        members = [("", item) for item in value]
+        opening, closing = "[", "]"
+    else:
+        return None
+    if limit < 2:
+        return None
+    parts: list[str] = []
+    used = 2
+    for prefix, member in members:
+        prefix = ("," if parts else "") + prefix
+        cut = _cut_json(member, limit - used - len(prefix), sort_keys)
+        if cut is None:
+            break
+        parts.append(prefix + cut[0])
+        used += len(prefix) + len(cut[0])
+        if not cut[1]:
+            break
+    return opening + "".join(parts) + closing, False
+
+
+def _json_content(value: object, limit: int) -> str:
+    """Return tool call arguments or a tool result for its GenAI content
+    attribute, in at most ``limit`` characters.
+
+    A dict or list is compact JSON. A string that starts with ``{`` or ``[``
+    is kept when it is JSON that fits. Either kind of JSON that does not fit
+    is cut with its structure kept (see :func:`_cut_json`), so it stays valid
+    JSON. A string that starts with ``{`` or ``[`` but is not JSON, such as
+    the Python text of a dict a hook stored, becomes a JSON string, so a
+    reader that parses such values gets one. Any other value is its text, cut
+    at ``limit``, as before.
+    """
+    if isinstance(value, (dict, list)):
+        parsed: object = value
+        sort_keys = True
+    elif isinstance(value, str) and value.lstrip()[:1] in ("{", "["):
+        try:
+            parsed = json.loads(value)
+        except (ValueError, RecursionError):
+            return _json_string(value, limit)
+        if len(value) <= limit:
+            return value
+        sort_keys = False
+    else:
+        return str(value)[:limit]
+    try:
+        cut = _cut_json(parsed, limit, sort_keys)
+    except RecursionError:
+        cut = None
+    if cut is not None:
+        return cut[0]
+    text = value if isinstance(value, str) else _compact_json(value, True)
+    return _json_string(text, limit)
 
 
 def _json_text(value: object) -> str:
@@ -765,10 +893,12 @@ def _tool_input_attributes(arguments: object) -> dict[str, str]:
 
     A mapping gives one ``gen_ai.tool.input.<key>`` per argument, cut at 200
     characters. Any truthy value gives ``input.value`` and its MIME type, and
-    ``gen_ai.tool.call.arguments``. That is the ``input.value`` text when it is
-    the whole JSON object or the value is not a mapping. A mapping too long
-    for ``input.value`` gives the JSON object of the per-key values instead, so
-    the attribute stays an object and carries no new text.
+    ``gen_ai.tool.call.arguments``. For a mapping that is the ``input.value``
+    text when it is the whole JSON object. A mapping too long for
+    ``input.value`` gives the JSON object of the per-key values instead, so
+    the attribute stays an object and carries no new text. Any other value
+    gives the text :func:`_json_content` returns, which is valid JSON when
+    the value is JSON.
     """
     attrs: dict[str, str] = {}
     if isinstance(arguments, Mapping):
@@ -778,7 +908,11 @@ def _tool_input_attributes(arguments: object) -> dict[str, str]:
         input_value, input_mime = _io_value(arguments, _TOOL_ARGUMENTS_LIMIT)
         attrs[_OI_INPUT_VALUE] = input_value
         attrs[_OI_INPUT_MIME_TYPE] = input_mime
-        if input_mime == "application/json" or not isinstance(arguments, Mapping):
+        if not isinstance(arguments, Mapping):
+            attrs[_SEMCONV_TOOL_CALL_ARGUMENTS] = _json_content(
+                arguments, _TOOL_ARGUMENTS_LIMIT,
+            )
+        elif input_mime == "application/json":
             attrs[_SEMCONV_TOOL_CALL_ARGUMENTS] = input_value
         else:
             attrs[_SEMCONV_TOOL_CALL_ARGUMENTS] = json.dumps(
@@ -859,8 +993,6 @@ class _RetryLinks:
 # Model responses read from a transcript
 # ---------------------------------------------------------------------------
 
-_SEMCONV_RESPONSE_MODEL = "gen_ai.response.model"
-_SEMCONV_RESPONSE_ID = "gen_ai.response.id"
 # Marks a span whose start time was not recorded but inferred from other
 # events, so its duration is not a measured latency.
 _TIMING = "agent.strace.timing"
@@ -1530,6 +1662,7 @@ def _genai_llm_span(
                 sort_keys=True,
                 separators=(",", ":"),
             )
+    llm_attrs.update(_response_server_attributes(req_data, event.data))
 
     usage, has_input, has_output = model_request_usage(req_data, event.data)
     llm_attrs.update(_token_attributes(usage, has_input, has_output))
@@ -1604,8 +1737,8 @@ def session_to_otlp_genai(
 ) -> dict:
     """Convert a session to OTLP JSON using the OTel GenAI semantic conventions.
 
-    Follows the semantic-conventions-genai repository at commit e6658f1
-    (2026-11-06). Differences from session_to_otlp():
+    Follows the semantic-conventions-genai release v0.1.0 (2026-11-21).
+    Differences from session_to_otlp():
     - LLM request/response pairs become ``chat {model}`` CLIENT child spans
       (not just events on the root span). A failed or cancelled model
       request, or an error linked to an llm_request, gets ERROR status and
@@ -1628,7 +1761,11 @@ def session_to_otlp_genai(
     - The root span carries the recorded prompts and replies as
       gen_ai.input.messages and gen_ai.output.messages, and tool spans carry
       gen_ai.tool.call.arguments and gen_ai.tool.call.result, all as JSON
-      strings under the same truncation as the older content keys
+      strings under the same length limits as the older content keys; a
+      tool argument or result that is JSON stays valid JSON when it is cut
+    - A chat span carries gen_ai.response.id, gen_ai.response.model,
+      server.address and server.port only when the capture path recorded
+      them
     - A tool or chat span whose event names another by ``retry_of`` links
       to that event's span
 
@@ -1765,7 +1902,9 @@ def session_to_otlp_genai(
                 output_value, output_mime = _io_value(result, _TOOL_RESULT_LIMIT)
                 tool_attrs[_OI_OUTPUT_VALUE] = output_value
                 tool_attrs[_OI_OUTPUT_MIME_TYPE] = output_mime
-                tool_attrs[_SEMCONV_TOOL_CALL_RESULT] = output_value
+                tool_attrs[_SEMCONV_TOOL_CALL_RESULT] = _json_content(
+                    result, _TOOL_RESULT_LIMIT,
+                )
             tool_attrs.update(_event_trace_attributes(event, "response"))
             tool_attrs["metadata"] = _openinference_metadata(tool_attrs)
 
@@ -1862,6 +2001,7 @@ def session_to_otlp_genai(
         if model:
             llm_attrs[_SEMCONV_MODEL] = model
             llm_attrs[_OI_LLM_MODEL] = model
+        llm_attrs.update(_response_server_attributes(req_event.data, {}))
         usage, has_input, has_output = usage_detail(req_event.data)
         llm_attrs.update(_token_attributes(usage, has_input, has_output))
         llm_attrs.update(_reasoning_attributes(req_event.data, usage, has_output))

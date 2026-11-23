@@ -23,7 +23,9 @@ from __future__ import annotations
 import importlib
 from typing import Any
 
-from ._base import Patches, count as _count, given, message_count
+from ._base import (
+    Patches, count as _count, given, message_count, response_fields, server_fields,
+)
 
 _PATCHED = False
 _PATCHES = Patches()
@@ -109,21 +111,27 @@ def _responses_fields(response: Any, *, with_usage: bool = True) -> dict[str, An
         code = _text(getattr(error, "code", None))
         if code:
             fields["error_type"] = code
+    fields.update(response_fields(response))
     return fields
 
 
 class _ChatStream:
-    """Usage and finish reason of a Chat Completions stream, from its chunks.
+    """Usage, finish reason, response ID and model of a Chat Completions
+    stream, from its chunks.
 
     Usage arrives only with ``stream_options={"include_usage": True}``, on
-    the last chunk, so without it no token counts are recorded.
+    the last chunk, so without it no token counts are recorded. The ID and
+    model are the first non-empty ones a chunk carries.
     """
 
     def __init__(self) -> None:
         self.usage: Any = None
         self.finish_reason: Any = ""
+        self.response: dict[str, Any] = {}
 
     def add(self, chunk: Any) -> None:
+        for key, value in response_fields(chunk).items():
+            self.response.setdefault(key, value)
         usage = getattr(chunk, "usage", None)
         if usage is not None:
             self.usage = usage
@@ -138,6 +146,7 @@ class _ChatStream:
     def fields(self) -> dict[str, Any]:
         fields = _usage_fields(self.usage) if self.usage is not None else {}
         fields["finish_reason"] = self.finish_reason
+        fields.update(self.response)
         return fields
 
 
@@ -203,12 +212,14 @@ def instrument_openai(agent_name: str = "openai") -> None:
     def start_chat(args: tuple, kwargs: dict) -> ModelCall:
         return ModelCall(store, agent_name, given(kwargs.get("model", ""), ""),
                          max_tokens=given(kwargs.get("max_tokens", 0), 0),
-                         message_count=message_count(kwargs.get("messages")))
+                         message_count=message_count(kwargs.get("messages")),
+                         **server_fields(args[0] if args else None))
 
     def start_responses(args: tuple, kwargs: dict) -> ModelCall:
         return ModelCall(store, agent_name, given(kwargs.get("model", ""), ""),
                          max_tokens=given(kwargs.get("max_output_tokens", 0), 0),
-                         message_count=_input_count(kwargs.get("input")))
+                         message_count=_input_count(kwargs.get("input")),
+                         **server_fields(args[0] if args else None))
 
     def finisher(api: str):
         def finish(call: ModelCall, kwargs: dict, result: Any) -> None:
@@ -221,6 +232,7 @@ def instrument_openai(agent_name: str = "openai") -> None:
             if api == "chat":
                 fields = _usage_fields(getattr(result, "usage", None))
                 fields["finish_reason"] = _chat_finish_reason(result)
+                fields.update(response_fields(result))
                 call.respond(fields)
             else:
                 call.respond(_with_model(_responses_fields(result), call.model, result))

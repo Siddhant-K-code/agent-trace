@@ -11,7 +11,7 @@ The test used 0.120.0. After 0.121.1, [#552](https://github.com/Siddhant-K-code/
 - **Content panels (Predicted).** In the test, the Input, Output, Arguments and Result panels were empty. Prompts and completions appeared only in a span's **Events** list, and tool input and output only in its **Attributes**. The export now also sets the OpenTelemetry GenAI content attributes, which those panels read:
   - The session's `invoke_agent` root has `gen_ai.input.messages` (the conversation up to and including the last user prompt) and `gen_ai.output.messages` (the replies after it).
   - Each `execute_tool` span whose call has input has `gen_ai.tool.call.arguments`, and each one with a result has `gen_ai.tool.call.result`.
-  - Each value is the same redacted, truncated text as before, so a long result may not parse as JSON.
+  - Each value is redacted and truncated as before. A tool argument or result that is JSON stays valid JSON when it is cut. Text that starts like JSON but does not parse, such as a result a hook already cut, becomes a JSON string. Other text, such as a command's output, stays plain text.
   - A `chat` span still has no content, because agent-strace does not record a prompt per model call. Its Output will still show only the finish reason.
 - **Telemetry.dev's redaction can change ordinary values.** Telemetry.dev redacts common secrets before it stores a trace, and a match can occur inside an ordinary word.
   - In the test, the `sk-` in `task-` matched: an event ID such as `...-task-1` was stored as `...-ta[REDACTED]`.

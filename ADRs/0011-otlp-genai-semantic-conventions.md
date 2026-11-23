@@ -182,3 +182,13 @@ once.
   provider and model name, as the original consequences note.
 - When `semantic-conventions-genai` publishes a release, the export should set
   its `schemaUrl` and this ADR should name the release instead of a commit.
+
+### Release v0.1.0 (#563)
+
+`semantic-conventions-genai` released `v0.1.0` on 2026-11-21. OpenTelemetry's
+conformance check (`experiments/semconv-conformance/`) reports the same
+findings for the export against `v0.1.0` as against `e6658f1`, so the export
+now names `v0.1.0`. The schema URL that release names,
+`https://opentelemetry.io/schemas/semconv-genai-dev/0.1.0-dev`, does not
+resolve, so the export still sets no `schemaUrl`. It should set one once a
+release's schema URL resolves.

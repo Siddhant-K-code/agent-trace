@@ -320,6 +320,32 @@ class TestOpenAIChat(SDKCase):
         _, response = self.pair()
         self.assertResponse(response, {"model": "gpt-4o", "finish_reason": "stop"})
 
+    def test_server_and_response_ids_are_recorded_when_the_sdk_has_them(self):
+        sync, _ = self.instrument_chat(lambda kw: ns(
+            id="chatcmpl-1", model="gpt-4o-2024-08-06", usage=None,
+            choices=[ns(index=0, finish_reason="stop")]))
+        sync._client = ns(base_url="https://api.openai.com/v1/")
+        sync.create(model="gpt-4o", messages=HI)
+        request, response = self.pair()
+        self.assertEqual(request.data, {"model": "gpt-4o", "max_tokens": 0, "message_count": 1,
+                                        "server_address": "api.openai.com", "server_port": 443})
+        self.assertEqual(response.data["response_id"], "chatcmpl-1")
+        self.assertEqual(response.data["response_model"], "gpt-4o-2024-08-06")
+
+    def test_stream_records_the_first_response_id_and_model(self):
+        def chunk(id, model, finish_reason=None):
+            return ns(id=id, model=model, usage=None,
+                      choices=[ns(index=0, finish_reason=finish_reason, delta=ns(content="x"))])
+
+        chunks = [chunk("", ""), chunk("chatcmpl-1", "gpt-4o-2024-08-06"),
+                  chunk("chatcmpl-2", "other", "stop")]
+        sync, _ = self.instrument_chat(lambda kw: stubs.Stream(chunks))
+        list(sync.create(model="gpt-4o", messages=HI, stream=True))
+        _, response = self.pair()
+        self.assertResponse(response, {"model": "gpt-4o", "finish_reason": "stop",
+                                       "response_id": "chatcmpl-1",
+                                       "response_model": "gpt-4o-2024-08-06"})
+
     def test_stream_failure_is_linked_and_raised(self):
         chunks = [_chunk()]
         sync, _ = self.instrument_chat(
@@ -436,8 +462,8 @@ RESPONSES_USAGE = ns(input_tokens=1000, output_tokens=50,
 
 
 def _response(usage=RESPONSES_USAGE, status="completed", model="gpt-5-2025-08-07",
-              incomplete=None, error=None):
-    return ns(model=model, status=status, usage=usage, error=error,
+              incomplete=None, error=None, id=None):
+    return ns(id=id, model=model, status=status, usage=usage, error=error,
               incomplete_details=ns(reason=incomplete) if incomplete else None)
 
 
@@ -449,7 +475,7 @@ class TestOpenAIResponses(SDKCase):
         return module.Responses(), module.AsyncResponses()
 
     def test_sync_call(self):
-        sync, _ = self.instrument_responses(lambda kw: _response())
+        sync, _ = self.instrument_responses(lambda kw: _response(id="resp_1"))
         sync.create(model="gpt-5", input="hello", max_output_tokens=500)
         request, response = self.pair()
         self.assertEqual(request.data, {"model": "gpt-5", "max_tokens": 500, "message_count": 1})
@@ -457,8 +483,17 @@ class TestOpenAIResponses(SDKCase):
             "model": "gpt-5", "input_tokens": 1000, "output_tokens": 50,
             "cached_input_tokens": 800, "cache_write_input_tokens": 100,
             "finish_reason": "completed", "status": "completed",
+            "response_id": "resp_1", "response_model": "gpt-5-2025-08-07",
         })
         self.assertLinked(request, response)
+
+    def test_server_is_recorded_from_the_client_base_url(self):
+        sync, _ = self.instrument_responses(lambda kw: _response())
+        sync._client = ns(base_url="http://localhost:8080/v1/")
+        sync.create(model="gpt-5", input="hello")
+        request, _ = self.pair()
+        self.assertEqual(request.data, {"model": "gpt-5", "max_tokens": 0, "message_count": 1,
+                                        "server_address": "localhost", "server_port": 8080})
 
     def test_input_items_are_counted(self):
         sync, _ = self.instrument_responses(lambda kw: _response())
@@ -485,6 +520,7 @@ class TestOpenAIResponses(SDKCase):
             "model": "gpt-5", "input_tokens": 0, "output_tokens": 0,
             "finish_reason": "failed", "status": "failed",
             "error": "The server had an error", "error_type": "server_error",
+            "response_model": "gpt-5-2025-08-07",
         })
 
     def test_model_comes_from_the_response_when_the_request_names_none(self):
@@ -543,6 +579,7 @@ class TestOpenAIResponses(SDKCase):
             "model": "gpt-5", "input_tokens": 1000, "output_tokens": 50,
             "cached_input_tokens": 800, "cache_write_input_tokens": 100,
             "finish_reason": "completed", "status": "completed",
+            "response_model": "gpt-5-2025-08-07",
         })
         self.assertLinked(request, response)
 
@@ -635,6 +672,28 @@ class TestAnthropicMessages(SDKCase):
         request, response = self.pair()
         self.assertResponse(response, STREAM_FIELDS)
         self.assertLinked(request, response)
+
+    def test_server_and_response_ids_are_recorded_when_the_sdk_has_them(self):
+        sync, _ = self.instrument_messages(lambda kw: ns(
+            id="msg_1", model="claude-sonnet-4-5-20250929",
+            usage=ns(input_tokens=10, output_tokens=5), stop_reason="end_turn"))
+        sync._client = ns(base_url="https://api.anthropic.com")
+        sync.create(model="claude-sonnet-4-5", messages=HI, max_tokens=1)
+        request, response = self.pair()
+        self.assertEqual(request.data["server_address"], "api.anthropic.com")
+        self.assertEqual(request.data["server_port"], 443)
+        self.assertEqual(response.data["response_id"], "msg_1")
+        self.assertEqual(response.data["response_model"], "claude-sonnet-4-5-20250929")
+
+    def test_stream_records_the_message_id_and_model(self):
+        events = _message_events(START_USAGE, DELTA_USAGE)
+        events[0] = ns(type="message_start", message=ns(
+            id="msg_1", model="claude-sonnet-4-5-20250929", usage=START_USAGE))
+        sync, _ = self.instrument_messages(lambda kw: stubs.CachedStream(events))
+        list(sync.create(model="claude-sonnet-4-5", messages=HI, max_tokens=1, stream=True))
+        _, response = self.pair()
+        self.assertResponse(response, {**STREAM_FIELDS, "response_id": "msg_1",
+                                       "response_model": "claude-sonnet-4-5-20250929"})
 
     def test_message_delta_usage_replaces_the_start_counts(self):
         delta = ns(output_tokens=42, input_tokens=12, cache_read_input_tokens=200,
