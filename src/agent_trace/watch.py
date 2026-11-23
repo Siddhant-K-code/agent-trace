@@ -71,6 +71,14 @@ from .http_post import (
 )
 from .inert import inert
 from .models import EventType, TraceEvent, usable_time
+from .otlp_proto import (
+    CONTENT_TYPES as _OTLP_CONTENT_TYPES,
+    PROTOCOL_JSON as _OTLP_JSON,
+    EncodeError as _OtlpEncodeError,
+    encode_body as _otlp_body,
+    resolve_protocol as _resolve_otlp_protocol,
+    unsupported_media_hint as _unsupported_media_hint,
+)
 from .postmortem import clear_heartbeat, write_heartbeat
 from .process_identity import (
     PID_REUSED_REASON,
@@ -1441,10 +1449,12 @@ class StreamConfig:
     headers: dict[str, str] = field(default_factory=dict)
     # Filter: only stream these event types (empty = all)
     event_types: list[str] = field(default_factory=list)
-    # When True, flush as OTLP JSON spans instead of raw NDJSON
+    # When True, flush as OTLP spans instead of raw NDJSON
     otlp: bool = False
     # OTel service name used in OTLP spans
     service_name: str = "agent-trace"
+    # OTLP/HTTP encoding: http/json or http/protobuf
+    protocol: str = _OTLP_JSON
 
     @classmethod
     def from_url(cls, url: str, headers: dict[str, str] | None = None,
@@ -1497,15 +1507,19 @@ class EventStreamer:
     quote an exception message that can repeat the URL.
 
     NDJSON mode sends every event with its data as stored. OTLP mode
-    converts each session's events to spans. It leaves out each event whose
-    timestamp is not a Unix time in seconds, or whose data is not a JSON
-    object, when the converter would read it, with one line on stderr per
-    event, and still sends the other events of the batch.
+    converts each session's events to spans and sends them as OTLP JSON or
+    protobuf (``StreamConfig.protocol``). The first 415 answer in OTLP mode
+    adds a line naming the other --protocol. OTLP mode leaves out each event
+    whose timestamp is not a Unix time in seconds, or whose data is not a
+    JSON object, when the converter would read it, with one line on stderr
+    per event, and still sends the other events of the batch.
     """
 
     def __init__(self, config: StreamConfig) -> None:
         self.config = config
         self._queue: queue.Queue[TraceEvent | None] = queue.Queue()
+        # Set by the worker after the first 415 hint, so it is shown once.
+        self._media_hint_shown = False
         # _handed counts the events enqueue() accepted. _settled counts those
         # whose POST finished or that a stderr line already reported. Both
         # change under _lock, so stop() can count the events not confirmed
@@ -1641,7 +1655,7 @@ class EventStreamer:
             raise
 
     def _flush(self, events: list[TraceEvent]) -> None:
-        """POST a batch of events as NDJSON or OTLP JSON spans."""
+        """POST a batch of events as NDJSON or OTLP spans."""
         if not events:
             return
         if self.config.otlp:
@@ -1703,13 +1717,20 @@ class EventStreamer:
                 self._report(_otlp_conversion_failed_line(len(kept), exc), len(kept))
                 continue
             line = None
+            protocol = self.config.protocol
             try:
-                body = json.dumps(payload).encode("utf-8")
-                status = self._post(body, "application/json", otlp=True)
+                body = _otlp_body(payload, protocol)
+                status = self._post(body, _OTLP_CONTENT_TYPES[protocol], otlp=True)
                 if status not in (200, 202):
                     line = self._post_line("OTLP POST", f"returned {status}")
+            except _OtlpEncodeError as exc:
+                line = self._post_line("OTLP POST", f"failed: {exc}")
             except Exception as exc:
                 line = self._post_line("OTLP POST", f"failed: {_stream_error_detail(exc)}")
+                if (isinstance(exc, urllib.error.HTTPError) and exc.code == 415
+                        and not self._media_hint_shown):
+                    self._media_hint_shown = True
+                    line += f"[stream] {_unsupported_media_hint(protocol)}\n"
             self._report(line, len(kept))
 
 
@@ -3259,6 +3280,19 @@ def cmd_watch(args: argparse.Namespace) -> int:
         if problem:
             sys.stderr.write(f"[watch] invalid --stream-flush-interval value: {problem}\n")
             return 1
+    # --protocol, then the OTEL protocol variables, choose the OTLP encoding.
+    # The variables are read only for --stream-otlp: NDJSON is not OTLP.
+    stream_protocol = _OTLP_JSON
+    protocol_flag = getattr(args, "protocol", None)
+    if stream_url is not None and getattr(args, "stream_otlp", False):
+        try:
+            stream_protocol = _resolve_otlp_protocol(protocol_flag, os.environ)
+        except ValueError as exc:
+            sys.stderr.write(f"[watch] {exc}\n")
+            return 1
+    elif protocol_flag is not None:
+        sys.stderr.write("[watch] --protocol is used only with --stream-to and --stream-otlp\n")
+        return 1
 
     max_context_pct = getattr(args, "max_context_pct", None)
     if max_context_pct is not None and not 1 <= max_context_pct <= 100:
@@ -3444,6 +3478,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
             batch_size=getattr(args, "stream_batch_size", 10),
             flush_interval=getattr(args, "stream_flush_interval", 2.0),
             otlp=getattr(args, "stream_otlp", False),
+            protocol=stream_protocol,
         )
 
     watch_session(

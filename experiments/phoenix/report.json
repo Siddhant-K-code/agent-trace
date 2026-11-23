@@ -1,0 +1,629 @@
+{
+  "agent_strace_version": "0.121.1",
+  "cli_runs": [
+    {
+      "command": "agent-strace export px560-genai-parent --format otlp-genai --endpoint http://127.0.0.1:6016",
+      "env": {},
+      "exit": 1,
+      "stderr": "OTLP export to http://127.0.0.1:6016 failed: HTTP Error 415: Unsupported Media Type\n  Unsupported content type: application/json\n  This collector does not accept OTLP JSON; send protobuf with --protocol http/protobuf\n",
+      "stdout": ""
+    },
+    {
+      "command": "agent-strace export px560-genai-parent --format otlp-genai --endpoint http://127.0.0.1:6016 --protocol http/protobuf",
+      "env": {},
+      "exit": 0,
+      "stderr": "Exported 18 events to http://127.0.0.1:6016 (HTTP 200)\n",
+      "stdout": ""
+    },
+    {
+      "command": "agent-strace export px560-genai-child --format otlp-genai --endpoint http://127.0.0.1:6016 --protocol http/protobuf",
+      "env": {},
+      "exit": 0,
+      "stderr": "Exported 8 events to http://127.0.0.1:6016 (HTTP 200)\n",
+      "stdout": ""
+    },
+    {
+      "command": "agent-strace export px560-otlp-parent --format otlp --endpoint http://127.0.0.1:6016",
+      "env": {
+        "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf"
+      },
+      "exit": 0,
+      "stderr": "Exported 18 events to http://127.0.0.1:6016 (HTTP 200)\n",
+      "stdout": ""
+    },
+    {
+      "command": "agent-strace export px560-otlp-child --format otlp --endpoint http://127.0.0.1:6016",
+      "env": {
+        "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf"
+      },
+      "exit": 0,
+      "stderr": "Exported 8 events to http://127.0.0.1:6016 (HTTP 200)\n",
+      "stdout": ""
+    },
+    {
+      "command": "agent-strace export px560-genai-parent --format otlp-genai --endpoint http://127.0.0.1:6016 --protocol grpc",
+      "env": {},
+      "exit": 1,
+      "stderr": "--protocol grpc is not supported: agent-strace sends OTLP over HTTP only; use http/protobuf or http/json\n",
+      "stdout": ""
+    },
+    {
+      "command": "agent-strace export px560-tree-parent --format otlp-genai --include-subagents --endpoint http://127.0.0.1:6016 --protocol http/protobuf",
+      "env": {},
+      "exit": 0,
+      "stderr": "Exported 26 events to http://127.0.0.1:6016 (HTTP 200)\n",
+      "stdout": ""
+    },
+    {
+      "command": "agent-strace watch px560-watch-parent --stream-to RELAY_URL --stream-otlp --protocol http/protobuf --stream-flush-interval 1",
+      "env": {},
+      "events": 18,
+      "exit": 0,
+      "stderr": "[watch] Monitoring session px560-watch-...\n[watch] Streaming events to RELAY_URL\n[watch] Session ended (17 events, $0.0030)\n",
+      "stdout_lines": 0
+    },
+    {
+      "command": "agent-strace watch px560-watchjson-parent --stream-to RELAY_URL --stream-otlp --stream-flush-interval 1",
+      "env": {},
+      "events": 18,
+      "exit": 0,
+      "stderr": "[watch] Monitoring session px560-watchj...\n[watch] Streaming events to RELAY_URL\n[watch] Session ended (17 events, $0.0030)\n[stream] OTLP POST to RELAY_URL failed: HTTP Error 415: Unsupported Media Type\n[stream] This collector does not accept OTLP JSON; send protobuf with --protocol http/protobuf\n[stream] OTLP POST to RELAY_URL failed: HTTP Error 415: Unsupported Media Type\n[stream] OTLP POST to RELAY_URL failed: HTTP Error 415: Unsupported Media Type\n",
+      "stdout_lines": 0
+    }
+  ],
+  "graphql_span_has_links_field": false,
+  "groups": {
+    "otlp": {
+      "attributes_added_by_phoenix": {
+        "llm.provider": 2,
+        "llm.system": 2,
+        "session.id": 1
+      },
+      "attributes_changed": {},
+      "attributes_not_stored": {},
+      "attributes_sent": {
+        "agent.command": 2,
+        "agent.depth": 2,
+        "agent.errors": 2,
+        "agent.llm_requests": 2,
+        "agent.name": 2,
+        "agent.session_id": 2,
+        "agent.tool_calls": 2,
+        "error.message": 1,
+        "gen_ai.conversation.id": 1,
+        "gen_ai.operation.name": 7,
+        "gen_ai.system": 2,
+        "gen_ai.tool.call.id": 5,
+        "gen_ai.tool.name": 5,
+        "tool.input.auth_header": 1,
+        "tool.input.command": 2,
+        "tool.input.description": 1,
+        "tool.input.path": 1,
+        "tool.input.prompt": 1,
+        "tool.input.subagent_type": 1,
+        "tool.name": 1,
+        "tool.output": 4
+      },
+      "event_attributes_not_stored": {},
+      "field_mismatches": {},
+      "input_output": [
+        {
+          "input": false,
+          "output": false,
+          "phoenix_span_kind": "UNKNOWN",
+          "spans": 7
+        }
+      ],
+      "links": {
+        "rest_api_has_links_field": false,
+        "sent": 1,
+        "stored": 0
+      },
+      "missing_spans": [],
+      "sent": 7,
+      "span_kinds": [
+        {
+          "phoenix_span_kind": "UNKNOWN",
+          "sent_openinference_kind": null,
+          "spans": 7
+        }
+      ],
+      "stored": 7,
+      "tokens_and_cost": []
+    },
+    "otlp-genai": {
+      "attributes_added_by_phoenix": {
+        "llm.finish_reason": 1,
+        "llm.input_messages.0.message.content": 2,
+        "llm.input_messages.0.message.role": 2,
+        "llm.provider": 2,
+        "llm.system": 5,
+        "metadata.*": 120,
+        "tool.id": 5,
+        "tool.parameters.auth_header": 1,
+        "tool.parameters.command": 2,
+        "tool.parameters.description": 1,
+        "tool.parameters.path": 1,
+        "tool.parameters.prompt": 1,
+        "tool.parameters.subagent_type": 1
+      },
+      "attributes_changed": {},
+      "attributes_not_stored": {
+        "metadata": 10,
+        "openinference.span.kind": 10
+      },
+      "attributes_sent": {
+        "agent.errors": 2,
+        "agent.llm_requests": 2,
+        "agent.session_id": 2,
+        "agent.strace.cost.total_usd": 2,
+        "agent.strace.depth": 1,
+        "agent.strace.evidence.gap_codes": 2,
+        "agent.strace.evidence.gap_count": 2,
+        "agent.strace.evidence.gaps": 2,
+        "agent.strace.evidence.schema_version": 2,
+        "agent.strace.evidence.status": 2,
+        "agent.strace.finish_reason": 2,
+        "agent.strace.parent_event_id": 1,
+        "agent.strace.parent_session_id": 1,
+        "agent.strace.provenance": 2,
+        "agent.strace.provider": 5,
+        "agent.strace.redacted": 2,
+        "agent.strace.redacted_event_count": 2,
+        "agent.strace.request.event_id": 7,
+        "agent.strace.request.previous_hash": 7,
+        "agent.strace.request.provenance": 4,
+        "agent.strace.request.redacted": 7,
+        "agent.strace.response.event_id": 8,
+        "agent.strace.response.parent_event_id": 8,
+        "agent.strace.response.previous_hash": 8,
+        "agent.strace.response.provenance": 4,
+        "agent.strace.response.redacted": 8,
+        "agent.tool_calls": 2,
+        "error.type": 2,
+        "gen_ai.agent.name": 2,
+        "gen_ai.conversation.id": 7,
+        "gen_ai.input.messages": 2,
+        "gen_ai.operation.name": 10,
+        "gen_ai.output.messages": 2,
+        "gen_ai.provider.name": 5,
+        "gen_ai.request.max_tokens": 3,
+        "gen_ai.request.model": 3,
+        "gen_ai.response.finish_reasons": 3,
+        "gen_ai.system": 5,
+        "gen_ai.tool.call.arguments": 4,
+        "gen_ai.tool.call.id": 5,
+        "gen_ai.tool.call.result": 4,
+        "gen_ai.tool.input.auth_header": 1,
+        "gen_ai.tool.input.command": 2,
+        "gen_ai.tool.input.description": 1,
+        "gen_ai.tool.input.path": 1,
+        "gen_ai.tool.input.prompt": 1,
+        "gen_ai.tool.input.subagent_type": 1,
+        "gen_ai.tool.name": 5,
+        "gen_ai.tool.output": 4,
+        "gen_ai.usage.cache_read.input_tokens": 1,
+        "gen_ai.usage.cache_write.input_tokens": 1,
+        "gen_ai.usage.input_tokens": 2,
+        "gen_ai.usage.output_tokens": 2,
+        "input.mime_type": 4,
+        "input.value": 4,
+        "llm.cost.total": 2,
+        "llm.finish_reason": 2,
+        "llm.invocation_parameters": 3,
+        "llm.model_name": 3,
+        "llm.provider": 3,
+        "llm.token_count.completion": 2,
+        "llm.token_count.prompt": 2,
+        "llm.token_count.prompt_details.cache_read": 1,
+        "llm.token_count.prompt_details.cache_write": 1,
+        "llm.token_count.total": 2,
+        "metadata": 10,
+        "openinference.span.kind": 10,
+        "output.mime_type": 4,
+        "output.value": 4,
+        "session.id": 10,
+        "tool.name": 5
+      },
+      "event_attributes_not_stored": {
+        "exception: agent.strace.response.event_id": 1,
+        "exception: agent.strace.response.parent_event_id": 1,
+        "exception: agent.strace.response.previous_hash": 1,
+        "exception: agent.strace.response.redacted": 1
+      },
+      "field_mismatches": {},
+      "input_output": [
+        {
+          "input": false,
+          "output": false,
+          "phoenix_span_kind": "AGENT",
+          "spans": 2
+        },
+        {
+          "input": false,
+          "output": false,
+          "phoenix_span_kind": "LLM",
+          "spans": 3
+        },
+        {
+          "input": false,
+          "output": true,
+          "phoenix_span_kind": "TOOL",
+          "spans": 1
+        },
+        {
+          "input": true,
+          "output": false,
+          "phoenix_span_kind": "TOOL",
+          "spans": 1
+        },
+        {
+          "input": true,
+          "output": true,
+          "phoenix_span_kind": "TOOL",
+          "spans": 3
+        }
+      ],
+      "links": {
+        "rest_api_has_links_field": false,
+        "sent": 2,
+        "stored": 0
+      },
+      "missing_spans": [],
+      "sent": 10,
+      "span_kinds": [
+        {
+          "phoenix_span_kind": "AGENT",
+          "sent_openinference_kind": "AGENT",
+          "spans": 2
+        },
+        {
+          "phoenix_span_kind": "LLM",
+          "sent_openinference_kind": "LLM",
+          "spans": 3
+        },
+        {
+          "phoenix_span_kind": "TOOL",
+          "sent_openinference_kind": "TOOL",
+          "spans": 5
+        }
+      ],
+      "stored": 10,
+      "tokens_and_cost": [
+        {
+          "completion": 1500,
+          "phoenix_cost": 0.03765,
+          "prompt": 12000,
+          "sent_llm_cost_total": 0.03765,
+          "span": "chat claude-sonnet-4-5",
+          "status": "UNSET",
+          "total": 13500
+        },
+        {
+          "completion": 300,
+          "phoenix_cost": 0.0117,
+          "prompt": 2400,
+          "sent_llm_cost_total": 0.01234,
+          "span": "chat claude-sonnet-4-5",
+          "status": "UNSET",
+          "total": 2700
+        }
+      ]
+    },
+    "tree": {
+      "attributes_added_by_phoenix": {
+        "llm.finish_reason": 1,
+        "llm.input_messages.0.message.content": 2,
+        "llm.input_messages.0.message.role": 2,
+        "llm.provider": 2,
+        "llm.system": 5,
+        "metadata.*": 120,
+        "tool.id": 5,
+        "tool.parameters.auth_header": 1,
+        "tool.parameters.command": 2,
+        "tool.parameters.description": 1,
+        "tool.parameters.path": 1,
+        "tool.parameters.prompt": 1,
+        "tool.parameters.subagent_type": 1
+      },
+      "attributes_changed": {},
+      "attributes_not_stored": {
+        "metadata": 10,
+        "openinference.span.kind": 10
+      },
+      "attributes_sent": {
+        "agent.errors": 2,
+        "agent.llm_requests": 2,
+        "agent.session_id": 2,
+        "agent.strace.cost.total_usd": 2,
+        "agent.strace.depth": 1,
+        "agent.strace.evidence.gap_codes": 2,
+        "agent.strace.evidence.gap_count": 2,
+        "agent.strace.evidence.gaps": 2,
+        "agent.strace.evidence.schema_version": 2,
+        "agent.strace.evidence.status": 2,
+        "agent.strace.finish_reason": 2,
+        "agent.strace.parent_event_id": 1,
+        "agent.strace.parent_session_id": 1,
+        "agent.strace.provenance": 2,
+        "agent.strace.provider": 5,
+        "agent.strace.redacted": 2,
+        "agent.strace.redacted_event_count": 2,
+        "agent.strace.request.event_id": 7,
+        "agent.strace.request.previous_hash": 7,
+        "agent.strace.request.provenance": 4,
+        "agent.strace.request.redacted": 7,
+        "agent.strace.response.event_id": 8,
+        "agent.strace.response.parent_event_id": 8,
+        "agent.strace.response.previous_hash": 8,
+        "agent.strace.response.provenance": 4,
+        "agent.strace.response.redacted": 8,
+        "agent.tool_calls": 2,
+        "error.type": 2,
+        "gen_ai.agent.name": 2,
+        "gen_ai.conversation.id": 7,
+        "gen_ai.input.messages": 2,
+        "gen_ai.operation.name": 10,
+        "gen_ai.output.messages": 2,
+        "gen_ai.provider.name": 5,
+        "gen_ai.request.max_tokens": 3,
+        "gen_ai.request.model": 3,
+        "gen_ai.response.finish_reasons": 3,
+        "gen_ai.system": 5,
+        "gen_ai.tool.call.arguments": 4,
+        "gen_ai.tool.call.id": 5,
+        "gen_ai.tool.call.result": 4,
+        "gen_ai.tool.input.auth_header": 1,
+        "gen_ai.tool.input.command": 2,
+        "gen_ai.tool.input.description": 1,
+        "gen_ai.tool.input.path": 1,
+        "gen_ai.tool.input.prompt": 1,
+        "gen_ai.tool.input.subagent_type": 1,
+        "gen_ai.tool.name": 5,
+        "gen_ai.tool.output": 4,
+        "gen_ai.usage.cache_read.input_tokens": 1,
+        "gen_ai.usage.cache_write.input_tokens": 1,
+        "gen_ai.usage.input_tokens": 2,
+        "gen_ai.usage.output_tokens": 2,
+        "input.mime_type": 4,
+        "input.value": 4,
+        "llm.cost.total": 2,
+        "llm.finish_reason": 2,
+        "llm.invocation_parameters": 3,
+        "llm.model_name": 3,
+        "llm.provider": 3,
+        "llm.token_count.completion": 2,
+        "llm.token_count.prompt": 2,
+        "llm.token_count.prompt_details.cache_read": 1,
+        "llm.token_count.prompt_details.cache_write": 1,
+        "llm.token_count.total": 2,
+        "metadata": 10,
+        "openinference.span.kind": 10,
+        "output.mime_type": 4,
+        "output.value": 4,
+        "session.id": 10,
+        "tool.name": 5
+      },
+      "event_attributes_not_stored": {
+        "exception: agent.strace.response.event_id": 1,
+        "exception: agent.strace.response.parent_event_id": 1,
+        "exception: agent.strace.response.previous_hash": 1,
+        "exception: agent.strace.response.redacted": 1
+      },
+      "field_mismatches": {},
+      "input_output": [
+        {
+          "input": false,
+          "output": false,
+          "phoenix_span_kind": "AGENT",
+          "spans": 2
+        },
+        {
+          "input": false,
+          "output": false,
+          "phoenix_span_kind": "LLM",
+          "spans": 3
+        },
+        {
+          "input": false,
+          "output": true,
+          "phoenix_span_kind": "TOOL",
+          "spans": 1
+        },
+        {
+          "input": true,
+          "output": false,
+          "phoenix_span_kind": "TOOL",
+          "spans": 1
+        },
+        {
+          "input": true,
+          "output": true,
+          "phoenix_span_kind": "TOOL",
+          "spans": 3
+        }
+      ],
+      "links": {
+        "rest_api_has_links_field": false,
+        "sent": 2,
+        "stored": 0
+      },
+      "missing_spans": [],
+      "sent": 10,
+      "span_kinds": [
+        {
+          "phoenix_span_kind": "AGENT",
+          "sent_openinference_kind": "AGENT",
+          "spans": 2
+        },
+        {
+          "phoenix_span_kind": "LLM",
+          "sent_openinference_kind": "LLM",
+          "spans": 3
+        },
+        {
+          "phoenix_span_kind": "TOOL",
+          "sent_openinference_kind": "TOOL",
+          "spans": 5
+        }
+      ],
+      "stored": 10,
+      "tokens_and_cost": [
+        {
+          "completion": 1500,
+          "phoenix_cost": 0.03765,
+          "prompt": 12000,
+          "sent_llm_cost_total": 0.03765,
+          "span": "chat claude-sonnet-4-5",
+          "status": "UNSET",
+          "total": 13500
+        },
+        {
+          "completion": 300,
+          "phoenix_cost": 0.0117,
+          "prompt": 2400,
+          "sent_llm_cost_total": 0.01234,
+          "span": "chat claude-sonnet-4-5",
+          "status": "UNSET",
+          "total": 2700
+        }
+      ]
+    }
+  },
+  "phoenix_version": "22.0.1",
+  "python_version": "3.14.8",
+  "sessions": [
+    {
+      "cost": 0.03765,
+      "session_id": "px560-genai-parent",
+      "tokens": {
+        "completion": 1500.0,
+        "prompt": 12000.0,
+        "total": 13500.0
+      },
+      "traces": 1
+    },
+    {
+      "cost": 0.0117,
+      "session_id": "px560-genai-child",
+      "tokens": {
+        "completion": 300.0,
+        "prompt": 2400.0,
+        "total": 2700.0
+      },
+      "traces": 1
+    },
+    {
+      "cost": null,
+      "session_id": "synthetic-conversation-px560-otlp",
+      "tokens": {
+        "completion": 0.0,
+        "prompt": 0.0,
+        "total": 0.0
+      },
+      "traces": 1
+    },
+    {
+      "cost": 0.049350000000000005,
+      "session_id": "px560-tree-parent",
+      "tokens": {
+        "completion": 1800.0,
+        "prompt": 14400.0,
+        "total": 16200.0
+      },
+      "traces": 1
+    },
+    {
+      "cost": 0.03765,
+      "session_id": "px560-watch-parent",
+      "tokens": {
+        "completion": 1500.0,
+        "prompt": 12000.0,
+        "total": 13500.0
+      },
+      "traces": 1
+    }
+  ],
+  "traces_per_group": {
+    "otlp": 2,
+    "otlp-genai": 2,
+    "tree": 1
+  },
+  "watch_json": {
+    "posts": [
+      {
+        "content_type": "application/json",
+        "status": 415
+      },
+      {
+        "content_type": "application/json",
+        "status": 415
+      },
+      {
+        "content_type": "application/json",
+        "status": 415
+      }
+    ],
+    "stored_spans": 0
+  },
+  "watch_protobuf": {
+    "posts": [
+      {
+        "content_type": "application/x-protobuf",
+        "path": "/v1/traces",
+        "root": {
+          "agent.errors": 0,
+          "agent.llm_requests": 0,
+          "agent.tool_calls": 0
+        },
+        "spans": 1,
+        "status": 200
+      },
+      {
+        "content_type": "application/x-protobuf",
+        "path": "/v1/traces",
+        "root": {
+          "agent.errors": 0,
+          "agent.llm_requests": 0,
+          "agent.tool_calls": 0
+        },
+        "spans": 5,
+        "status": 200
+      },
+      {
+        "content_type": "application/x-protobuf",
+        "path": "/v1/traces",
+        "root": {
+          "agent.errors": 0,
+          "agent.llm_requests": 0,
+          "agent.tool_calls": 0
+        },
+        "spans": 3,
+        "status": 200
+      }
+    ],
+    "stored": {
+      "kinds": {
+        "AGENT": 1,
+        "LLM": 2,
+        "TOOL": 4
+      },
+      "names": {
+        "chat claude-sonnet-4-5": 2,
+        "execute_tool Task": 1,
+        "execute_tool bash": 3,
+        "invoke_agent agent-trace": 1
+      },
+      "spans": 7,
+      "status": {
+        "ERROR": 2,
+        "UNSET": 5
+      },
+      "traces": 1
+    },
+    "stored_root_copies": 1,
+    "stored_root_matches_post": [
+      1
+    ]
+  }
+}

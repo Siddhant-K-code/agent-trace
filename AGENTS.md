@@ -20,7 +20,7 @@ pyproject.toml      Package config and optional extras
 - **Every new CLI command must be registered in `cli.py`** following the existing subparser pattern.
 - **Every new feature must have tests** in `tests/test_<module>.py`. Run `python -m unittest discover -s tests -v` to verify.
 - **Tests never send product telemetry.** `tests/_no_telemetry.py` turns it off in the test process and in every child it spawns, whatever the disclosure state. A test module that runs agent-strace imports it; a child env built from scratch goes through `without_telemetry()`. A test that exercises telemetry mocks `urlopen` or points `AGENT_STRACE_TELEMETRY_HOST` at a local server.
-- **OTLP export uses HTTP/JSON only** — no gRPC. See ADR-0006.
+- **OTLP export uses HTTP only** — no gRPC. Payloads are built as OTLP JSON; `otlp_proto.py` converts them to protobuf for `--protocol http/protobuf` with the stdlib only. See ADR-0006.
 
 ## Development workflow
 
@@ -81,6 +81,6 @@ The `docs/` directory contains user-facing documentation. Keep these files curre
 ## ADRs to read before making architectural decisions
 
 - ADR-0003: Zero runtime dependencies
-- ADR-0006: OTLP HTTP/JSON only (no gRPC)
+- ADR-0006: OTLP over HTTP only, JSON or stdlib protobuf (no gRPC)
 - ADR-0001: Flat event stream data model
 - ADR-0002: NDJSON file storage (no database)

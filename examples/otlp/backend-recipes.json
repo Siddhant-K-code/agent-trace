@@ -7,6 +7,7 @@
     {
       "id": "phoenix-openinference",
       "exporter": "otlp-genai",
+      "transport": "otlp_http_protobuf",
       "endpoint_example": "http://localhost:6006",
       "request_path": "/v1/traces",
       "required_headers": [],
@@ -23,7 +24,13 @@
         "observed_evidence_gaps"
       ],
       "limitations": [
-        "See examples/otlp/openinference-mapping.json"
+        "See examples/otlp/openinference-mapping.json",
+        "Send with --protocol http/protobuf: Phoenix answers OTLP JSON with HTTP 415",
+        "Phoenix 22.0.1 shows a cost worked out from token counts, not llm.cost.total, which stays a span attribute",
+        "Phoenix 22.0.1 does not store span links, so retry links are lost",
+        "Exception events keep only their exception.* attributes",
+        "Each session is its own trace unless exported with --include-subagents",
+        "See experiments/phoenix/RESULTS.md"
       ]
     },
     {

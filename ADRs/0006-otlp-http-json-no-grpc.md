@@ -10,6 +10,10 @@ Production observability platforms (Grafana, Honeycomb, Datadog, Jaeger) support
 
 ## Decision
 
+> **Amended 2026-11.** Export and `watch --stream-otlp` can also send
+> OTLP/HTTP protobuf, encoded with the standard library. See
+> [Amendment (2026-11)](#amendment-2026-11-otlphttp-protobuf).
+
 OTLP export uses HTTP/JSON (`otlp.py`) via `urllib.request` from the standard library. No `opentelemetry-sdk`, no `grpcio`, no `protobuf`.
 
 **Session-to-trace mapping:**
@@ -36,3 +40,11 @@ When `--endpoint` is omitted, OTLP output is written to stdout as JSON for inspe
 - **Human-readable and debuggable** — HTTP/JSON is inspectable with `curl` and `jq`; gRPC/Protobuf is not.
 - **No connection pooling or retry** — `urllib.request` is fire-and-forget. Export failures are logged to stderr but do not affect the trace.
 - **Deterministic IDs** enable idempotent re-export without duplicate span creation (assuming the backend deduplicates by trace/span ID).
+
+## Amendment (2026-11): OTLP/HTTP protobuf
+
+Some collectors accept only one OTLP/HTTP encoding. Phoenix's `/v1/traces` accepts only `application/x-protobuf` and answers JSON with 415. Export (`--endpoint`) and `watch --stream-otlp` therefore take `--protocol http/json|http/protobuf`, then `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL`, then `OTEL_EXPORTER_OTLP_PROTOCOL`. The default stays `http/json`.
+
+- The exporters still build only the OTLP JSON payload. `otlp_proto.py` converts that dict to protobuf wire bytes by the OTLP JSON-to-protobuf rules, with the standard library only, so the two encodings cannot drift.
+- Still no `protobuf`, `grpcio` or OpenTelemetry package at runtime (ADR-0003). Tests check the bytes against the official `opentelemetry-proto` package when it is installed.
+- Files written with `--output` stay JSON. gRPC is still refused.

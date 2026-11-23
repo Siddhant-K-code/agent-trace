@@ -687,8 +687,9 @@ checkpoint setup.
 agent-strace watch [session-id] [--agent-pid PID] [--timeout DURATION] [--budget DOLLARS]
                    [--on-violation ACTION] [--webhook URL] [--config FILE]
                    [--on-death CMD] [--policy FILE] [--rules FILE_OR_BUILTINS] [--stream-to URL]
-                   [--stream-otlp] [--stream-batch-size N] [--stream-flush-interval S]
-                   [--loop-threshold N] [--loop-window N] [--max-context-pct N]
+                   [--stream-otlp] [--protocol http/json|http/protobuf]
+                   [--stream-batch-size N] [--stream-flush-interval S] [--loop-threshold N]
+                   [--loop-window N] [--max-context-pct N]
                    [--compaction-checkpoint] [--checkpoint-at RATIO] [--dry-run]
                    [--tenant-id ID]
 ```
@@ -711,7 +712,8 @@ Live session monitor with kill-switch rules.
 | `--policy FILE` | Scope policy file to enforce (default: `.agent-scope.json`). Watch reads its `files.write.deny` globs and alerts `ScopeWatcher: write to PATH denied by policy` once for each denied path that an edit names, from any edit tool, `file_write` event or `apply_patch` patch. PATH is resolved as described in **Paths and edits** below |
 | `--rules FILE_OR_BUILTINS` | A JSON or YAML rules file (see **Rules file format** below), or comma-separated built-in rules such as `mcp-poisoning,loop:3/10,budget:5,timeout:30m,cognitive-debt:0.8` (see **Built-in rules** below). A value that names an existing file is a rules file. Watch refuses a value it cannot use, with one line and exit 1, before it reads the session or writes anything |
 | `--stream-to URL` | POST events as NDJSON to this `http://` or `https://` URL while watching. Watch refuses at startup, with one line and exit 1, a URL with no host, a bad port, spaces or control characters, or a user name or password. A failed POST prints one line that names only the URL's `scheme://host[:port]`, and watch goes on. Redirects are not followed, so pass the final URL. When watch stops, it waits up to 15 seconds for the last POST; if the wait runs out or Ctrl-C stops it, one line gives the number of events not confirmed sent |
-| `--stream-otlp` | With `--stream-to`, POST OTLP/HTTP JSON spans instead of NDJSON. Trailing slashes are dropped from the URL path and `/v1/traces` is appended unless the path already ends with it; the query is kept. Pass the collector base URL, such as `http://localhost:4318`. See [Live OTLP streaming](production.md#live-otlp-streaming) |
+| `--stream-otlp` | With `--stream-to`, POST OTLP/HTTP spans instead of NDJSON, as JSON unless `--protocol` says otherwise. Trailing slashes are dropped from the URL path and `/v1/traces` is appended unless the path already ends with it; the query is kept. Pass the collector base URL, such as `http://localhost:4318`. See [Live OTLP streaming](production.md#live-otlp-streaming) |
+| `--protocol http/json\|http/protobuf` | With `--stream-otlp`, the OTLP/HTTP encoding: `http/json` (`application/json`) or `http/protobuf` (`application/x-protobuf`), which Phoenix needs. Without the flag, watch reads `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL`, then `OTEL_EXPORTER_OTLP_PROTOCOL`; with neither set it sends JSON. Watch refuses at startup, with one line and exit 1, `grpc`, any other value, and `--protocol` without `--stream-to` and `--stream-otlp`. The first POST answered 415 adds a line that names the other `--protocol`. NDJSON streaming ignores the variables. See [export](#export) |
 | `--stream-batch-size N` | With `--stream-to`, send once N events are waiting (default: `10`) |
 | `--stream-flush-interval S` | With `--stream-to`, send waiting events once S seconds have passed since the last POST (default: `2.0`). `0` sends each event at once. A negative, infinite or NaN value is refused at startup |
 | `--dry-run` | Evaluate rules without acting |
@@ -2054,7 +2056,7 @@ Snapshots taken by older versions have no `workspace`. They belong to the direct
 ```
 agent-strace export <session-id> [--format json|csv|ndjson|otlp|otlp-genai|temporal|eu-ai-act]
                     [--endpoint URL] [--header 'NAME: VALUE'] [--service-name NAME]
-                    [--include-subagents]
+                    [--protocol http/json|http/protobuf] [--include-subagents]
                     [--anonymize] [--scores] [--metrics] [--backend otlp|langfuse]
                     [--all] [--since DURATION_OR_DATE] [--until DATE] [--output FILE]
 ```
@@ -2106,7 +2108,7 @@ This is the rule `watch --stream-otlp` uses:
 
 | `--endpoint` | Spans are POSTed to |
 |---|---|
-| `http://localhost:6006` (Phoenix) | `http://localhost:6006/v1/traces` |
+| `http://localhost:6006` (Phoenix, with `--protocol http/protobuf`) | `http://localhost:6006/v1/traces` |
 | `http://localhost:4318/v1/traces` | `http://localhost:4318/v1/traces` |
 | `https://cloud.langfuse.com/api/public/otel/` | `https://cloud.langfuse.com/api/public/otel/v1/traces` |
 | `https://otel.example.com/ingest?team=a` | `https://otel.example.com/ingest/v1/traces?team=a` |
@@ -2117,7 +2119,19 @@ and the value are dropped. The name may contain only ASCII letters, digits and
 ``!#$%&'*+-.^_`|~``, the value must be printable ASCII and not empty, and no
 name may be given twice, in any letter case.
 
-Export checks `--endpoint` and `--header` before it reads the session or
+`--protocol http/json|http/protobuf` sets how the POST encodes the payload:
+`http/json` sends it as OTLP JSON (`Content-Type: application/json`),
+`http/protobuf` as OTLP protobuf (`application/x-protobuf`). Both carry the
+same payload: export builds the JSON and converts it, with the standard
+library only. Some collectors take only one: Phoenix's `/v1/traces` takes only
+protobuf. Without the flag, export reads `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL`,
+then `OTEL_EXPORTER_OTLP_PROTOCOL`, as OpenTelemetry SDKs do; the first one
+set wins, and with neither set export sends JSON. It works with every format
+`--endpoint` takes and with `--include-subagents`. Export reads the variables
+only with `--endpoint`: `--output` files and the default file are always
+JSON. agent-strace has no gRPC exporter.
+
+Export checks `--endpoint`, `--header` and `--protocol` before it reads the session or
 writes anything. It refuses these with one line on stderr and exit 1:
 
 - `--endpoint` where it would be ignored: with `--format json`, `csv`,
@@ -2133,6 +2147,13 @@ writes anything. It refuses these with one line on stderr and exit 1:
   `eu-ai-act`, or with `--anonymize`, `--scores`, `--metrics` or `--backend`:
   `--include-subagents is not used with --format csv; use --format otlp or
   otlp-genai`, or the flag it is not used with.
+- `--protocol` without `--endpoint`: `--protocol is used only with --endpoint;
+  OTLP files are always JSON`.
+- `grpc`, from `--protocol` or a variable: `--protocol grpc is not supported:
+  agent-strace sends OTLP over HTTP only; use http/protobuf or http/json`, with
+  the variable's name in place of `--protocol` when it came from one. Any other
+  value: `invalid --protocol value: use http/json or http/protobuf`. A line
+  about a variable ends `; or pass --protocol to override it`.
 
 The lines never repeat the URL or a header, which can carry a token.
 
@@ -2146,6 +2167,9 @@ its first 200 characters follow on a second, indented line, with each line
 break, ESC or other unprintable character replaced by a space, so the rest of
 an escape code, such as `[31m`, still shows. These lines name only the URL's
 `scheme://host[:port]`, never its path, query or user info, or a header value.
+When the answer is 415 Unsupported Media Type, a last indented line names the
+other encoding, such as `This collector does not accept OTLP JSON; send
+protobuf with --protocol http/protobuf`.
 
 When export cannot convert the session, `--format otlp` and `otlp-genai` print
 `OTLP export failed: <reason>` and `temporal` prints

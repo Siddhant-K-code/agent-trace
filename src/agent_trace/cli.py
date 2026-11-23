@@ -139,6 +139,7 @@ from .failures import llm_failure, session_errors
 from .http_post import parse_header, url_problem
 from .inert import escape_surrogates, inert
 from .models import EventType, SessionMeta, TraceEvent, usable_count
+from .otlp_proto import PROTOCOL_JSON, resolve_protocol
 from .proxy import MCPProxy
 from .replay import format_event, format_summary, list_sessions, replay_session
 from .store import CorruptSessionMetaError, RefusedSessionError, TraceStore
@@ -517,6 +518,26 @@ def _export_endpoint_checks(args: argparse.Namespace) -> tuple[dict[str, str], s
     return headers, None
 
 
+def _export_protocol(args: argparse.Namespace) -> tuple[str, str | None]:
+    """Return the OTLP/HTTP protocol for --endpoint and the refusal line.
+
+    --protocol wins, then OTEL_EXPORTER_OTLP_TRACES_PROTOCOL, then
+    OTEL_EXPORTER_OTLP_PROTOCOL, then http/json. The variables are read only
+    with --endpoint: OTLP files are always JSON.
+    """
+    flag = getattr(args, "protocol", None)
+    if getattr(args, "endpoint", None) is None:
+        if flag is not None:
+            return PROTOCOL_JSON, (
+                "--protocol is used only with --endpoint; OTLP files are always JSON"
+            )
+        return PROTOCOL_JSON, None
+    try:
+        return resolve_protocol(flag, os.environ), None
+    except ValueError as exc:
+        return PROTOCOL_JSON, str(exc)
+
+
 def _write_events(out: TextIO, fmt: str, events: list[TraceEvent]) -> None:
     """Write *events* to *out* as json, csv or ndjson."""
     if fmt == "json":
@@ -546,6 +567,7 @@ def _export_otlp_tree(
     store: TraceStore,
     session_id: str,
     headers: dict[str, str],
+    protocol: str = PROTOCOL_JSON,
 ) -> int:
     """Export a session and its subagent sessions as one OTLP trace."""
     from .otlp import (
@@ -622,19 +644,26 @@ def _export_otlp_tree(
         )
         return 0
 
-    ok = export_otlp_payload(payload, args.endpoint, headers=headers, event_count=event_count)
+    ok = export_otlp_payload(
+        payload, args.endpoint, headers=headers, event_count=event_count, protocol=protocol,
+    )
     return 0 if ok else 1
 
 
 def cmd_export(args: argparse.Namespace) -> int:
     """Export a session to JSON, CSV, or OTLP."""
-    # Check --endpoint and --header before routing and before anything is
-    # read or written, so a bad value costs one line and exit status 1.
+    # Check --endpoint, --header and --protocol before routing and before
+    # anything is read or written, so a bad value costs one line and exit
+    # status 1.
     headers, problem = _export_endpoint_checks(args)
     if problem:
         sys.stderr.write(f"{problem}\n")
         return 1
     problem = _export_include_subagents_not_used(args)
+    if problem:
+        sys.stderr.write(f"{problem}\n")
+        return 1
+    protocol, problem = _export_protocol(args)
     if problem:
         sys.stderr.write(f"{problem}\n")
         return 1
@@ -666,7 +695,7 @@ def cmd_export(args: argparse.Namespace) -> int:
             return 1
 
     if getattr(args, "include_subagents", False):
-        return _export_otlp_tree(args, store, session_id, headers)
+        return _export_otlp_tree(args, store, session_id, headers, protocol)
 
     events = store.load_events(session_id)
 
@@ -759,6 +788,7 @@ def cmd_export(args: argparse.Namespace) -> int:
                 endpoint=endpoint,
                 headers=headers,
                 service_name=args.service_name,
+                protocol=protocol,
             )
             return 0 if ok else 1
         elif use_genai:
@@ -771,7 +801,9 @@ def cmd_export(args: argparse.Namespace) -> int:
             except ValueError as exc:
                 sys.stderr.write(f"OTLP export failed: {exc}\n")
                 return 1
-            ok = export_otlp_payload(payload, endpoint, headers=headers, event_count=len(events))
+            ok = export_otlp_payload(
+                payload, endpoint, headers=headers, event_count=len(events), protocol=protocol,
+            )
             return 0 if ok else 1
         else:
             ok = export_otlp(
@@ -780,6 +812,7 @@ def cmd_export(args: argparse.Namespace) -> int:
                 endpoint=endpoint,
                 headers=headers,
                 service_name=args.service_name,
+                protocol=protocol,
             )
             return 0 if ok else 1
 
@@ -2080,6 +2113,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_export.add_argument("--header", action="append",
                           help="HTTP header sent with --endpoint, as 'NAME: VALUE' "
                                "(e.g. 'x-honeycomb-team: KEY'); repeat for more headers")
+    p_export.add_argument("--protocol", metavar="{http/json,http/protobuf}",
+                          help="OTLP/HTTP encoding for --endpoint (default: "
+                               "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL, then OTEL_EXPORTER_OTLP_PROTOCOL, "
+                               "then http/json); Phoenix needs http/protobuf. --output files are "
+                               "always JSON")
     p_export.add_argument("--service-name", default="agent-trace", help="OTel service name (default: agent-trace)")
     # Langfuse / OTLP metrics flags
     p_export.add_argument("--scores", action="store_true",
@@ -2553,9 +2591,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_watch.add_argument("--dry-run", action="store_true", dest="dry_run",
                          help="evaluate rules without taking action (for testing)")
     p_watch.add_argument("--stream-otlp", dest="stream_otlp", action="store_true",
-                         help="with --stream-to, send OTLP/HTTP JSON spans instead of NDJSON; "
+                         help="with --stream-to, send OTLP/HTTP spans instead of NDJSON; "
                               "/v1/traces is appended to the URL path unless it already "
                               "ends with it, and the query is kept")
+    p_watch.add_argument("--protocol", metavar="{http/json,http/protobuf}",
+                         help="OTLP/HTTP encoding for --stream-otlp (default: "
+                              "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL, then OTEL_EXPORTER_OTLP_PROTOCOL, "
+                              "then http/json); Phoenix needs http/protobuf")
     p_watch.add_argument("--stream-to", dest="stream_to", metavar="URL",
                          help="POST events as NDJSON to this http:// or https:// URL while "
                               "watching (no user name or password; redirects are not "

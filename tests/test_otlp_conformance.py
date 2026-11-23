@@ -290,6 +290,12 @@ class TestBackendRecipeFixtures(unittest.TestCase):
             {backend["exporter"] for backend in recipes["backends"]},
             {"otlp-genai"},
         )
+        transports = {
+            backend["id"]: backend.get("transport", recipes["transport"])
+            for backend in recipes["backends"]
+        }
+        self.assertEqual(transports.pop("phoenix-openinference"), "otlp_http_protobuf")
+        self.assertEqual(set(transports.values()), {"otlp_http_json"})
         for fixture in ("otlp_fixture", "langfuse_fixture"):
             self.assertTrue((ROOT / recipes[fixture]).is_file())
 
