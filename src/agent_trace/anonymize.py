@@ -166,6 +166,14 @@ def _parse_custom_rules(text: str) -> list[AnonymizationRule]:
         if stripped == "rules:":
             in_rules = True
             continue
+        # An unindented key starts a new top-level section, which ends the
+        # rules list. A "- " item at column 0 is still a rule.
+        if line == stripped and not stripped.startswith("- "):
+            if current:
+                _try_add_rule(current, rules)
+            current = {}
+            in_rules = False
+            continue
         if not in_rules:
             continue
         if stripped.startswith("- "):
