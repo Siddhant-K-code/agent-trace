@@ -114,6 +114,11 @@ event, which `explain`, `health` and the exporters treat as a failed tool.
 outcome, the `tool_result` has no `success` field: the outcome is unknown, not
 assumed.
 
+`outputTruncated: true` is stored as `output_truncated: true`. The source kept
+only part of the output, so `review` reads no
+[runner summary](review.md#findings) from such a result. Nor does it read one
+from output the import cut at 2,000 characters.
+
 ### Tokens and cost
 
 Each `firewall.token_usage` record is one model request. Its usage is stored

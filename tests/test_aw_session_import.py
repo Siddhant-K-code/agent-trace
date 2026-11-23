@@ -22,6 +22,7 @@ from agent_trace.cost import estimate_cost
 from agent_trace.jsonl_import import cmd_import, import_jsonl
 from agent_trace.models import EventType
 from agent_trace.otlp import session_to_otlp_genai
+from agent_trace.reviewability import LinkedSession, Threshold, build_report
 from agent_trace.session_outcome import recorded_session_status
 from agent_trace.store import TraceStore
 
@@ -481,6 +482,57 @@ class TestMalformedTimes(_ImportCase):
         self.assertEqual(code, 0, err)
         prompts = self._of(self.store.load_events("bad-times"), EventType.USER_PROMPT)
         self.assertEqual([p.data["timing"] for p in prompts], ["inferred"] * 3)
+
+
+_VITEST_PASSED = " Test Files  2 passed (2)\n      Tests  5 passed (5)\n   Duration  512ms\n"
+_COVERAGE_GATE = "ERROR: Coverage for lines (50%) does not meet global threshold (90%)\n"
+# vitest prints its coverage gate after the coverage table. This table is long
+# enough that the import's 2,000-character cut drops the gate.
+_VITEST_GATE_FAILED = (_VITEST_PASSED + "src/module.ts | 50 | 100 | 50 | 50\n" * 60
+                       + _COVERAGE_GATE)
+
+
+class TestRunnerSummaries(_ImportCase):
+    """review reads no runner summary from a tool output that was cut short."""
+
+    def _validation(self, command, **completion):
+        records = [
+            _header(),
+            _record("session.init", {"sessionId": "vitest-1", "sourceEngine": "copilot"}, 0),
+            _record("tool.execution_start",
+                    {"toolCallId": "t1", "toolName": "bash", "input": {"command": command}}, 1,
+                    timestamp=1000),
+            _record("tool.execution_complete",
+                    {"toolCallId": "t1", "success": True, **completion}, 2, timestamp=5000),
+        ]
+        sid, _ = self._import(self._write(records))
+        (result,) = self._of(self.store.load_events(sid), EventType.TOOL_RESULT)
+        report = build_report(self.store, [LinkedSession(sid, "explicit")], Threshold())
+        validation = next(f for f in report.findings if f.name == "validation")
+        return result, validation, validation.facts["latest"][0]
+
+    def assert_unknown(self, validation, run):
+        self.assertEqual((run["outcome"], run["outcome_source"]), ("unknown", None))
+        self.assertEqual(validation.status, "partial")
+        self.assertNotIn("runner summary", validation.detail)
+
+    def test_output_cut_by_the_import_gives_no_outcome(self):
+        result, validation, run = self._validation("npx vitest run --coverage 2>&1 | tail -80",
+                                                   output=_VITEST_GATE_FAILED)
+        self.assertNotIn(_COVERAGE_GATE.strip(), result.data["result"])
+        self.assert_unknown(validation, run)
+
+    def test_output_the_source_cut_short_gives_no_outcome(self):
+        result, validation, run = self._validation("npx vitest run --coverage 2>&1 | tail -80",
+                                                   output=_VITEST_PASSED, outputTruncated=True)
+        self.assertIs(result.data["output_truncated"], True)
+        self.assert_unknown(validation, run)
+
+    def test_a_whole_passing_output_still_reads_passed(self):
+        _, validation, run = self._validation("npx vitest run 2>&1 | tail -80",
+                                              output=_VITEST_PASSED)
+        self.assertEqual((run["outcome"], run["outcome_source"]), ("passed", "runner_summary"))
+        self.assertEqual(validation.status, "present")
 
 
 if __name__ == "__main__":

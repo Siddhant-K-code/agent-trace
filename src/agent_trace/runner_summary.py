@@ -8,7 +8,7 @@ output can still say how the run ended.
 Parsing is deterministic and strict. Only the closing summary that the runner
 itself prints counts. A summary that is absent, repeated, cut off, or that
 contradicts itself gives no outcome. Output that was redacted, omitted, or
-truncated by the recorder is not read.
+cut short by the recorder or an import is not read.
 
 Supported runners: unittest, pytest, jest, vitest. Runners without one
 run-wide summary line (``go test``, ``cargo test``) print one line per package
@@ -28,8 +28,9 @@ from .models import EventType, TraceEvent
 SUMMARY_RUNNERS = frozenset({"unittest", "pytest", "jest", "vitest"})
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
-# Suffix the hook recorder appends when it cuts a long result.
-_TRUNCATION_SUFFIX = "... (truncated)"
+# Ends of a result cut short: the marker the hook recorder appends, and the
+# three dots the Claude Code and gh-aw imports and the proxy preview append.
+_TRUNCATION_SUFFIXES = ("... (truncated)", "...")
 _TEXT_KEYS = ("result", "output", "content_preview")
 _STREAM_KEYS = ("stdout", "stderr", "output")
 
@@ -62,12 +63,18 @@ def output_text(result: TraceEvent | None) -> str | None:
     """Return the readable output of one linked tool result, or None.
 
     None when there is no result, it is an error event, it was redacted, its
-    content was omitted, or the recorder truncated it.
+    content was omitted, or it was cut short: it is marked ``truncated`` or
+    ``output_truncated``, or its stored text ends with the hook marker or with
+    three dots.
     """
     if result is None or result.event_type != EventType.TOOL_RESULT or is_redacted(result):
         return None
     data = result.data if isinstance(result.data, dict) else {}
-    if data.get("content_omitted") or data.get("truncated") is True:
+    if (
+        data.get("content_omitted")
+        or data.get("truncated") is True
+        or data.get("output_truncated") is True
+    ):
         return None
     text = next(
         (data[key] for key in _TEXT_KEYS if isinstance(data.get(key), str) and data[key].strip()),
@@ -76,7 +83,7 @@ def output_text(result: TraceEvent | None) -> str | None:
     if text is None:
         streams = [data[key] for key in ("stdout", "stderr") if isinstance(data.get(key), str)]
         text = "\n".join(streams) if streams else None
-    if text is None or "[REDACTED" in text or text.rstrip().endswith(_TRUNCATION_SUFFIX):
+    if text is None or "[REDACTED" in text or text.rstrip().endswith(_TRUNCATION_SUFFIXES):
         return None
     text = _unwrap_mapping(text)
     if text is None:
