@@ -22,10 +22,12 @@ except ImportError:  # pragma: no cover - run as a package module
     from tests import _no_telemetry  # noqa: F401
 
 from agent_trace import jsonl_import
+from agent_trace.cli import cmd_stats
 from agent_trace.cost import build_provider_cost_report, estimate_cost
 from agent_trace.jsonl_import import cmd_import, discover_claude_sessions, import_jsonl
 from agent_trace.models import EventType
 from agent_trace.otlp import _ts_to_nanos, session_to_otlp, session_to_otlp_genai
+from agent_trace.session_outcome import behavior_analysis
 from agent_trace.store import TraceStore
 from agent_trace.tenancy import delete_tenant_data, enumerate_trace_stores
 from agent_trace.validation import validate_trace_directory
@@ -1269,8 +1271,8 @@ def _span_attrs(span):
     return attrs
 
 
-class TestImportedModelUsage(unittest.TestCase):
-    """The model and usage import records reach cost and both OTLP formats (#564)."""
+class _ImportedSessionTest(unittest.TestCase):
+    """Imports a transcript into a fresh store and exports it."""
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -1287,6 +1289,10 @@ class TestImportedModelUsage(unittest.TestCase):
     def _spans(self, sid, convert):
         payload = convert(self.store.load_meta(sid), self.store.load_events(sid))
         return payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
+
+
+class TestImportedModelUsage(_ImportedSessionTest):
+    """The model and usage import records reach cost and both OTLP formats (#564)."""
 
     def _issue_transcript(self):
         """The repro transcript from issue #564."""
@@ -1432,6 +1438,232 @@ class TestImportedModelUsage(unittest.TestCase):
                 # The synthetic message does not move the response's start.
                 self.assertEqual(chat["startTimeUnixNano"], _ts_to_nanos(prompt.timestamp))
                 self.assertEqual([e["name"] for e in root["events"]].count(root_event), 2)
+
+
+_USAGE = {"input_tokens": 10, "output_tokens": 5}
+
+
+def _prompt_line(text="Find the Python files"):
+    return {"type": "user", "uuid": "u1", "sessionId": "imp1",
+            "timestamp": "2026-01-01T10:00:00.000Z",
+            "message": {"role": "user", "content": text}}
+
+
+def _tool_use(tool_use_id, name, **arguments):
+    return {"type": "tool_use", "id": tool_use_id, "name": name, "input": arguments}
+
+
+def _results_line(uuid, timestamp, *results):
+    return {"type": "user", "uuid": uuid, "sessionId": "imp1", "timestamp": timestamp,
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", **result} for result in results]}}
+
+
+class TestImportedToolResults(_ImportedSessionTest):
+    """An imported tool_result pairs with its tool_use, as a hook result does (#578)."""
+
+    def _glob_transcript(self, content="a.py\nb.py", **result):
+        return self._import([
+            _prompt_line(),
+            _assistant_line("a1", "2026-01-01T10:00:01.000Z", "msg_1",
+                            [_tool_use("toolu_01Glob", "Glob", pattern="**/*.py")],
+                            _USAGE, stop_reason="tool_use"),
+            _results_line("u2", "2026-01-01T10:00:01.250Z",
+                          {"tool_use_id": "toolu_01Glob", "content": content, **result}),
+            _assistant_line("a2", "2026-01-01T10:00:02.000Z", "msg_2",
+                            [{"type": "text", "text": "Two files."}], _USAGE,
+                            stop_reason="end_turn"),
+        ])
+
+    def _tool_spans(self, sid, convert):
+        return [span for span in self._spans(sid, convert)[1:]
+                if not span["name"].startswith("chat")]
+
+    def _call_and_result(self, sid):
+        events = self.store.load_events(sid)
+        [call] = [e for e in events if e.event_type == EventType.TOOL_CALL]
+        [result] = [e for e in events if e.event_type == EventType.TOOL_RESULT]
+        return call, result
+
+    def test_a_result_is_linked_to_its_call(self):
+        call, result = self._call_and_result(self._glob_transcript())
+        self.assertEqual((call.data["tool_use_id"], call.data["request_id"]),
+                         ("toolu_01Glob", "toolu_01Glob"))
+        self.assertEqual(result.parent_id, call.event_id)
+        self.assertAlmostEqual(result.duration_ms, 250.0)
+        self.assertEqual(result.data["tool_name"], "Glob")
+        self.assertEqual(result.data["result"], "a.py\nb.py")
+        self.assertEqual(result.data["content_preview"], "a.py\nb.py")
+
+    def test_a_tool_call_exports_one_span_with_its_result(self):
+        sid = self._glob_transcript()
+        call, result = self._call_and_result(sid)
+        for convert, name, output_key in (
+            (session_to_otlp_genai, "execute_tool Glob", "gen_ai.tool.call.result"),
+            (session_to_otlp, "tool/Glob", "tool.output"),
+        ):
+            with self.subTest(convert=convert.__name__):
+                [span] = self._tool_spans(sid, convert)
+                self.assertEqual(span["name"], name)
+                self.assertEqual(span["status"], {"code": 0})
+                self.assertEqual(span["startTimeUnixNano"], _ts_to_nanos(call.timestamp))
+                self.assertGreater(int(span["endTimeUnixNano"]) - int(span["startTimeUnixNano"]),
+                                   249_000_000)
+                attrs = _span_attrs(span)
+                self.assertEqual(attrs["gen_ai.tool.call.id"], "toolu_01Glob")
+                self.assertEqual(attrs[output_key], "a.py\nb.py")
+                if convert is session_to_otlp_genai:
+                    self.assertEqual(attrs["agent.strace.request.event_id"], call.event_id)
+                    self.assertEqual(attrs["agent.strace.response.event_id"], result.event_id)
+
+    def test_an_error_result_exports_a_failed_tool_span(self):
+        sid = self._glob_transcript(content="Path does not exist: /nope", is_error=True)
+        for convert, name in ((session_to_otlp_genai, "execute_tool Glob"),
+                              (session_to_otlp, "tool/Glob")):
+            with self.subTest(convert=convert.__name__):
+                root, *_ = self._spans(sid, convert)
+                [span] = self._tool_spans(sid, convert)
+                self.assertEqual(span["name"], name)
+                self.assertEqual(span["status"],
+                                 {"code": 2, "message": "Path does not exist: /nope"})
+                self.assertIn("exception", [event["name"] for event in span["events"]])
+                attrs = _span_attrs(span)
+                self.assertEqual(attrs["gen_ai.tool.call.id"], "toolu_01Glob")
+                self.assertNotIn("gen_ai.tool.call.result", attrs)
+                self.assertNotIn("tool.output", attrs)
+                # The failure did not recover, as for a failed hook call.
+                self.assertEqual(root["status"]["code"], 2)
+                if convert is session_to_otlp_genai:
+                    self.assertEqual(attrs["error.type"], "_OTHER")
+                    self.assertEqual(_span_attrs(root)["error.type"], "_OTHER")
+
+    def test_an_unpaired_error_result_stays_a_failed_tool_span(self):
+        # The log starts after the call was made. The result is still a tool
+        # call, not the INTERNAL span of an error with no call (#573).
+        sid = self._import([
+            _results_line("u2", "2026-01-01T10:00:01.000Z",
+                          {"tool_use_id": "toolu_gone", "content": "Permission denied",
+                           "is_error": True}),
+        ])
+        for convert, name, op in ((session_to_otlp_genai, "execute_tool tool", "execute_tool"),
+                                  (session_to_otlp, "tool/tool", "tool.call")):
+            with self.subTest(convert=convert.__name__):
+                [span] = self._tool_spans(sid, convert)
+                self.assertEqual(span["name"], name)
+                self.assertEqual(span["status"], {"code": 2, "message": "Permission denied"})
+                attrs = _span_attrs(span)
+                self.assertEqual(
+                    (attrs["gen_ai.tool.call.id"], attrs["gen_ai.tool.name"],
+                     attrs["gen_ai.operation.name"]),
+                    ("toolu_gone", "tool", op),
+                )
+                if convert is session_to_otlp:
+                    self.assertEqual(span["kind"], 3)
+                else:
+                    self.assertEqual(attrs["error.type"], "_OTHER")
+
+    def test_two_calls_in_one_message_pair_by_id(self):
+        sid = self._import([
+            _prompt_line(),
+            _assistant_line("a1", "2026-01-01T10:00:01.000Z", "msg_1",
+                            [_tool_use("toolu_01Glob", "Glob", pattern="*.py")], _USAGE),
+            _assistant_line("a2", "2026-01-01T10:00:01.100Z", "msg_1",
+                            [_tool_use("toolu_01Read", "Read", file_path="a.py")], _USAGE,
+                            stop_reason="tool_use"),
+            _results_line("u2", "2026-01-01T10:00:02.000Z",
+                          {"tool_use_id": "toolu_01Read", "content": "print(1)"},
+                          {"tool_use_id": "toolu_01Glob", "content": "a.py"}),
+        ])
+        events = self.store.load_events(sid)
+        calls = {e.event_id: e.data["tool_use_id"] for e in events
+                 if e.event_type == EventType.TOOL_CALL}
+        results = [e for e in events if e.event_type == EventType.TOOL_RESULT]
+        self.assertEqual([calls[r.parent_id] for r in results], ["toolu_01Read", "toolu_01Glob"])
+        self.assertEqual([r.data["tool_name"] for r in results], ["Read", "Glob"])
+        self.assertEqual(
+            sorted((span["name"], _span_attrs(span)["gen_ai.tool.call.id"],
+                    _span_attrs(span)["gen_ai.tool.call.result"])
+                   for span in self._tool_spans(sid, session_to_otlp_genai)),
+            [("execute_tool Glob", "toolu_01Glob", "a.py"),
+             ("execute_tool Read", "toolu_01Read", "print(1)")],
+        )
+
+    def test_a_result_pairs_only_within_its_context_stream(self):
+        sidechain = {"isSidechain": True, "agentId": "explore"}
+        sid = self._import([
+            _prompt_line(),
+            _assistant_line("a1", "2026-01-01T10:00:01.000Z", "msg_1",
+                            [_tool_use("toolu_main", "Glob", pattern="*.py")], _USAGE),
+            _assistant_line("a2", "2026-01-01T10:00:01.000Z", "msg_1",
+                            [_tool_use("toolu_both", "Grep", pattern="x")], _USAGE,
+                            stop_reason="tool_use"),
+            {**_assistant_line("s1", "2026-01-01T10:00:02.000Z", "msg_s1",
+                               [_tool_use("toolu_both", "Read", file_path="a.py")], _USAGE,
+                               stop_reason="tool_use"), **sidechain},
+            {**_results_line("s2", "2026-01-01T10:00:03.000Z",
+                             {"tool_use_id": "toolu_both", "content": "read"},
+                             {"tool_use_id": "toolu_main", "content": "stray"}), **sidechain},
+            _results_line("u2", "2026-01-01T10:00:04.000Z",
+                          {"tool_use_id": "toolu_both", "content": "grep"},
+                          {"tool_use_id": "toolu_main", "content": "glob"}),
+        ])
+        events = self.store.load_events(sid)
+        calls = {e.event_id: e.data["tool_name"] for e in events
+                 if e.event_type == EventType.TOOL_CALL}
+        paired = {(r.data["context_stream"], r.data["tool_use_id"]): calls.get(r.parent_id)
+                  for r in events if r.event_type == EventType.TOOL_RESULT}
+        self.assertEqual(paired, {
+            ("sidechain:explore", "toolu_both"): "Read",
+            ("sidechain:explore", "toolu_main"): None,
+            ("main", "toolu_both"): "Grep",
+            ("main", "toolu_main"): "Glob",
+        })
+
+    def test_a_result_with_no_pending_call_stays_unpaired(self):
+        sid = self._import([
+            _prompt_line(),
+            _results_line("u2", "2026-01-01T10:00:01.000Z",
+                          {"tool_use_id": "toolu_gone", "content": "early"}),
+            _assistant_line("a1", "2026-01-01T10:00:02.000Z", "msg_1",
+                            [_tool_use("toolu_01Glob", "Glob", pattern="*.py")], _USAGE,
+                            stop_reason="tool_use"),
+            _results_line("u3", "2026-01-01T10:00:03.000Z",
+                          {"tool_use_id": "toolu_01Glob", "content": "a.py"},
+                          {"tool_use_id": "toolu_01Glob", "content": "again"}),
+        ])
+        events = self.store.load_events(sid)
+        [call] = [e for e in events if e.event_type == EventType.TOOL_CALL]
+        results = [e for e in events if e.event_type == EventType.TOOL_RESULT]
+        self.assertEqual([r.parent_id or None for r in results], [None, call.event_id, None])
+        for unpaired in (results[0], results[2]):
+            self.assertIsNone(unpaired.duration_ms)
+            self.assertNotIn("tool_name", unpaired.data)
+        spans = self._tool_spans(sid, session_to_otlp_genai)
+        self.assertEqual(
+            sorted((span["name"], _span_attrs(span)["gen_ai.tool.call.id"]) for span in spans),
+            [("execute_tool Glob", "toolu_01Glob"), ("execute_tool tool", "toolu_01Glob"),
+             ("execute_tool tool", "toolu_gone")],
+        )
+
+    def test_stats_and_behavior_counts_see_the_paired_call(self):
+        sid = self._glob_transcript()
+        args = argparse.Namespace(trace_dir=str(self.tmp / "trace"), session_id=sid,
+                                  include_subagents=False)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(cmd_stats(args), 0)
+        self.assertRegex(out.getvalue(), r"Glob\s+1x  avg: 250ms")
+        summary = behavior_analysis(self.store.load_events(sid)).summary
+        self.assertEqual((summary.orphan_outcome_count, summary.failed_operation_count), (0, 0))
+
+    def test_behavior_counts_an_error_result_as_a_failed_call(self):
+        sid = self._glob_transcript(content="Path does not exist: /nope", is_error=True)
+        summary = behavior_analysis(self.store.load_events(sid)).summary
+        self.assertEqual(
+            (summary.orphan_outcome_count, summary.failed_operation_count,
+             summary.unresolved_failed_operation_count),
+            (0, 1, 1),
+        )
 
 
 if __name__ == "__main__":

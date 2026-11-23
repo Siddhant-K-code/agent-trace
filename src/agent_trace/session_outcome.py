@@ -106,6 +106,9 @@ def _result_failed(event: TraceEvent) -> bool:
     data = event.data
     if data.get("success") is False or data.get("ok") is False:
         return True
+    # A Claude Code transcript marks a failed tool result is_error: true.
+    if data.get("is_error") is True:
+        return True
     exit_code = data.get("exit_code")
     if isinstance(exit_code, (int, float)) and not isinstance(exit_code, bool):
         return exit_code != 0

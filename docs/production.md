@@ -86,7 +86,20 @@ reports.
 - A failed tool call carries `error.type`: the recorded `error_type` or
   `exception_type`, else `_OTHER`. Its span is named after the error's
   `tool_name`, else its call's, else `error`. The `@trace_tool` decorator, for
-  one, records the name only on the call.
+  one, records the name only on the call. A `tool_result` with
+  `is_error: true`, which is how a Claude Code transcript marks a failed tool,
+  is a failed call too: ERROR status, `error.type` and an `exception` event,
+  with no `gen_ai.tool.call.result`. When neither it nor a paired call names
+  the tool, its span is named `execute_tool tool`, like an unpaired result.
+- A tool span's `gen_ai.tool.call.id` is the model's ID for the call: the
+  `tool_use_id` stored on the call, else on its result or error. Hooks store it
+  when the agent sends one (Claude Code and Codex do, and Copilot CLI from
+  1.0.107), and `import` stores it for a transcript's `tool_use`. A call
+  stored without one, such as one from an SDK integration or an MCP proxy,
+  has its event ID there, which earlier versions exported for every call. The
+  same applies in `--format otlp`.
+  `agent.strace.request.event_id` and `agent.strace.response.event_id` still
+  name the stored events.
 - The content attributes of the
   [GenAI spans](https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-spans.md)
   carry text the export already sends, with the same redaction and
@@ -241,7 +254,7 @@ release:
 In `--format otlp`, a failed tool call and a call with no result have the
 same identity as a call that returned one, so a backend shows their operation
 and tool. A failed call's name comes from the error's `tool_name`, else its
-call's, else `error`.
+call's, else `error` (`tool` for a failed `tool_result`).
 
 | Span | 0.121.1 and earlier | Now |
 |---|---|---|
@@ -256,6 +269,11 @@ with only `tool.name`.
 
 An `error` with no call and no `tool_name`, such as `could not start the MCP
 server`, is not a tool call either. It keeps the same span, named `error`.
+A `tool_result` with `is_error: true` and no call, which `import` writes for
+a failed result whose call is not in the log, is still a tool call: a `CLIENT`
+span named `tool/tool`, or after its own `tool_name` when it has one, with its
+`tool_use_id` as `gen_ai.tool.call.id`. See
+[Tool results imported from a transcript](#tool-results-imported-from-a-transcript).
 
 ### Subagents in one trace
 
@@ -876,7 +894,8 @@ without the `agent.strace.` prefix.
 | `agent.strace.session_status` | `completed`, `timeout`, `terminated`, or `not_recorded` when there is no `session_end` or a later `session_start` resumed the session |
 | `agent.strace.last_model_request_failed` | Whether the session's last model request failed |
 
-A tool result failed when it has `success` or `ok` false, a nonzero
+A tool result failed when it has `is_error: true` (how a Claude Code
+transcript marks a failed result), `success` or `ok` false, a nonzero
 `exit_code`, or a `status` of `error`, `failed`, `failure`, `cancelled` or
 `timeout`. The session status comes from the last `session_end`, unless a
 later `session_start` (a resume) reopened the session, which is
@@ -955,7 +974,10 @@ module. `record` and `record-http` link a `tool_result` or `error` to the
 pending `tool_call` with the same JSON-RPC id, and keep at most 10,000 calls
 pending per proxy. Hooks link a result to the pending call with its
 `tool_use_id`, or, when the provider sends none, to the oldest pending call of
-the same tool name, preferring calls from the same subagent.
+the same tool name, preferring calls from the same subagent. `import` links a
+Claude Code transcript's `tool_result` to the earlier `tool_use` with the same
+ID in the same conversation stream; see
+[Tool results imported from a transcript](#tool-results-imported-from-a-transcript).
 
 ### Responses recorded without a request
 
@@ -1058,6 +1080,53 @@ so their spans have no `gen_ai.response.id` or
 `gen_ai.response.finish_reasons`. Sessions imported before v0.108.0 also
 repeat a message's usage on each of its lines, and each line counts. To
 correct either, delete the session's directory and import the log again.
+
+### Tool results imported from a transcript
+
+`agent-strace import` stores each `tool_use` block of a Claude Code transcript
+as a `tool_call` event with the block's `id` as `tool_use_id`, and as
+`request_id` as before. Each `tool_result` block is a `tool_result` event that
+links to the earlier `tool_call` with the same `tool_use_id` in the same
+conversation stream (the main conversation, or one sidechain), as a
+hook-recorded result links to its call:
+
+- `parent_id` is the call's event ID.
+- `duration_ms` is the time from the call's line to the result's line. It is
+  left out when either line's timestamp did not parse or the result's is
+  earlier.
+- `tool_name` is the call's.
+- `result`, the key hooks use, holds the result text: its first 2,000
+  characters, followed by `...` when it is longer, after redaction.
+  `content_preview` still holds the same text.
+- `is_error: true` is kept when the transcript marks the result failed.
+
+A result links only to a call of its own stream, so a subagent's result never
+takes a call of the main conversation. A result with no earlier unanswered
+call of its ID, for example in a log that starts mid-session or a second
+result for the same call, stays unpaired. It exports as its own tool span,
+named `execute_tool tool` (`tool/tool` in `--format otlp`), with its
+`tool_use_id` as `gen_ai.tool.call.id`, and fails when it has
+`is_error: true`.
+
+In `--format otlp`, `--format otlp-genai` and Temporal, a call and its result
+are then one tool span from the call to the result, named after the tool, with
+the result as `gen_ai.tool.call.result` and `output.value` (`tool.output` in
+`--format otlp`) and the `toolu_...` ID as `gen_ai.tool.call.id`. A result
+with `is_error: true` makes it a failed tool span, as a failed hook call is:
+ERROR status with the result text as its message, an `exception` event,
+`error.type` `_OTHER` in `otlp-genai`, and no result attribute. A failed call
+that no later call of the same operation recovers also makes the root span an
+error; see [Session root status](#session-root-status). In Langfuse the pair
+is one `tool/{tool}` observation with the call's input and the result as its
+output. `stats` shows the call's average duration, and the
+`agent.strace.behavior.*` counts include its outcome.
+
+Earlier versions linked no imported result. Each call was a span with no
+result, and each result a separate `execute_tool tool` (`tool/tool`) span
+whose `gen_ai.tool.call.id` was its event ID, both with the 1 ms default
+duration, and an `is_error` result was not a failure. Sessions imported by
+earlier versions keep those events; delete the session's directory and import
+the log again to pair them.
 
 ### Failed and cancelled model requests
 
