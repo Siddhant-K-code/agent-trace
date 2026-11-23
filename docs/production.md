@@ -752,7 +752,9 @@ A tool result failed when it has `success` or `ok` false, a nonzero
 (`timed_out` and `timeout` are `timeout`; `killed`, `cancelled`,
 `interrupted`, `failed`, `aborted` and similar are `terminated`), else a
 `reason`, `stop_reason` or `termination_reason` that mentions a timeout, a
-kill, a cancel, an interrupt or a termination, else an `exit_code` of 124
+kill, a cancel, an interrupt, a termination, an abort or an error (Copilot's
+`error` and `abort` reasons are `terminated`; `complete` and `user_exit` are
+`completed`), else an `exit_code` of 124
 (`timeout`) or any other nonzero code (`terminated`). `completed` is the
 recorded process status, not task success. The evidence packet and the
 assignment `session_status` scorer ([hiring.md](hiring.md)) use the same

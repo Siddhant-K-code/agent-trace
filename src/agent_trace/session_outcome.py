@@ -226,7 +226,7 @@ def recorded_session_status(events: Sequence[TraceEvent]) -> str:
     ).lower()
     if "timeout" in reason or "timed out" in reason:
         return "timeout"
-    if any(word in reason for word in ("kill", "cancel", "interrupt", "terminate")):
+    if any(word in reason for word in ("kill", "cancel", "interrupt", "terminate", "abort", "error")):
         return "terminated"
     exit_code = data.get("exit_code")
     # An int too large for a float is still a nonzero exit code.

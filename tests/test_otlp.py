@@ -717,6 +717,23 @@ class TestRootOutcome(unittest.TestCase):
                     self.assertEqual(root["status"]["code"] == 2, "error.type" in attrs)
                     self.assertNotEqual(attrs.get("error.type"), "")
 
+    def test_copilot_session_end_reasons(self):
+        # Copilot's sessionEnd reason is complete, error, abort, timeout or user_exit.
+        expected = {
+            "error": ("terminated", {"code": 2}, "terminated"),
+            "abort": ("terminated", {"code": 2}, "terminated"),
+            "complete": ("completed", {"code": 0}, None),
+            "user_exit": ("completed", {"code": 0}, None),
+        }
+        for name, convert in self.EXPORTERS:
+            for reason, (session_status, status, error_type) in expected.items():
+                with self.subTest(exporter=name, reason=reason):
+                    root = self._root(convert, [_session_end(reason=reason)])
+                    attrs = _attribute_values(root)
+                    self.assertEqual(attrs["agent.strace.session_status"], session_status)
+                    self.assertEqual(root["status"], status)
+                    self.assertEqual(attrs.get("error.type"), error_type)
+
     def test_outcome_attributes(self):
         for name, convert in self.EXPORTERS:
             with self.subTest(exporter=name):
