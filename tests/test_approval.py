@@ -4,6 +4,7 @@ import argparse
 import io
 import json
 import os
+import signal
 import sys
 import subprocess
 import tempfile
@@ -506,7 +507,7 @@ class TestStateDefinition(unittest.TestCase):
             f.write(outside.to_json())
         ok, msg = approve_request(store, "../escape", resume_agent=False)
         self.assertFalse(ok)
-        self.assertIn("not found", msg)
+        self.assertEqual(msg, "invalid request ID")
         with open(outside_path) as f:
             self.assertEqual(json.load(f)["state"], PENDING)
 
@@ -626,6 +627,258 @@ class TestCreateApprovalRequest(unittest.TestCase):
         loaded = load_request(self.store, req.request_id)
         self.assertIsNotNone(loaded)
         self.assertEqual(loaded.request_id, req.request_id)
+
+
+_real_scandir = os.scandir
+
+
+class _DescendingScandir:
+    """os.scandir that lists entries in descending name order.
+
+    The file system may list names in any order. A fixed order that is not
+    sorted shows whether the lookup sorts the matches itself.
+    """
+
+    def __init__(self, *args, **kwargs):
+        with _real_scandir(*args, **kwargs) as entries:
+            self._entries = iter(sorted(entries, key=lambda e: e.name, reverse=True))
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self._entries)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def close(self):
+        pass
+
+
+class TestRequestIdLookup(unittest.TestCase):
+    """show, approve and deny resolve a request ID or prefix the same way."""
+
+    AMBIGUOUS = "Request ID prefix abc matches 2 requests: abc111111111, abc222222222"
+
+    def setUp(self):
+        self.trace_dir = self.new_trace_dir()
+        self.store = TraceStore(self.trace_dir)
+
+    def new_trace_dir(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        return tmp.name
+
+    def save(self, request_id, pid=0, store=None):
+        save_request(store or self.store,
+                     ApprovalRequest(request_id=request_id, agent_pid=pid))
+
+    def save_three(self):
+        self.save("abc111111111", 1111)
+        self.save("abc222222222", 2222)
+        self.save("def333333333", 3333)
+
+    def set_state(self, request_id, state):
+        path = approval_mod._request_path(self.store, request_id)
+        data = json.loads(path.read_text())
+        data["state"] = state
+        path.write_text(json.dumps(data))
+
+    def state(self, request_id, store=None):
+        path = approval_mod._request_path(store or self.store, request_id)
+        return json.loads(path.read_text())["state"]
+
+    def snapshot(self):
+        d = approval_mod._approvals_dir(self.store)
+        return {p.name: p.read_bytes() for p in d.iterdir()}
+
+    def run_cli(self, sub, request_id, trace_dir=None):
+        # no_resume and no_kill stay off, so a request resolved by mistake
+        # would also be signalled.
+        args = argparse.Namespace(
+            trace_dir=trace_dir or self.trace_dir, approval_cmd=sub,
+            request_id=request_id, by="", reason="",
+            no_resume=False, no_kill=False,
+        )
+        out, err = io.StringIO(), io.StringIO()
+        with patch("os.kill") as kill, patch("os.scandir", _DescendingScandir), \
+             patch("sys.stdout", out), patch("sys.stderr", err):
+            code = approval_mod.cmd_approval(args)
+        return code, out.getvalue(), err.getvalue(), kill
+
+    def run_ok(self, sub, request_id, trace_dir=None):
+        code, out, err, kill = self.run_cli(sub, request_id, trace_dir)
+        self.assertEqual((code, err), (0, ""))
+        return out, kill
+
+    def assert_refused(self, sub, request_id, message):
+        code, out, err, kill = self.run_cli(sub, request_id)
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertEqual(err, ("" if sub == "show" else "❌ ") + message + "\n")
+        kill.assert_not_called()
+
+    def test_ambiguous_prefix_is_refused(self):
+        self.save_three()
+        before = self.snapshot()
+        for sub in ("show", "approve", "deny"):
+            with self.subTest(sub=sub):
+                self.assert_refused(sub, "abc", self.AMBIGUOUS)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_refusal_names_five_ids_at_most(self):
+        for n in (7, 3, 1, 6, 2, 5, 4):
+            self.save(f"abc{n}00000000")
+        self.assert_refused(
+            "show", "abc",
+            "Request ID prefix abc matches 7 requests: abc100000000, "
+            "abc200000000, abc300000000, abc400000000, abc500000000 and 2 more",
+        )
+
+    def test_exact_id_wins_over_longer_ids(self):
+        decided = {"approve": (APPROVED, signal.SIGCONT), "deny": (DENIED, signal.SIGTERM)}
+        for sub in ("show", "approve", "deny"):
+            with self.subTest(sub=sub):
+                trace_dir = self.new_trace_dir()
+                store = TraceStore(trace_dir)
+                self.save("abc", 1111, store)
+                self.save("abc111111111", 2222, store)
+                out, kill = self.run_ok(sub, "abc", trace_dir)
+                if sub == "show":
+                    self.assertEqual(json.loads(out)["request_id"], "abc")
+                    kill.assert_not_called()
+                else:
+                    state, sig = decided[sub]
+                    kill.assert_called_once_with(1111, sig)
+                    self.assertEqual(self.state("abc", store), state)
+                    self.assertEqual(self.state("abc111111111", store), PENDING)
+        # An exact ID whose record cannot be read still wins. The lookup does
+        # not fall through to the longer ID.
+        self.save("abc", 1111)
+        self.save("abc111111111", 2222)
+        self.set_state("abc", "maybe")
+        before = self.snapshot()
+        for sub in ("show", "approve", "deny"):
+            with self.subTest(sub=sub, record="invalid"):
+                self.assert_refused(
+                    sub, "abc",
+                    "Request abc has an invalid record: invalid approval state: 'maybe'",
+                )
+        self.assertEqual(self.snapshot(), before)
+
+    def test_unique_prefix_resolves_the_same_request_everywhere(self):
+        self.save("abc111111111", 1111)
+        self.save("abc222222222", 2222)
+        self.save("[d]444444444", 4444)
+        out, _ = self.run_ok("show", "abc1")
+        self.assertEqual(json.loads(out)["request_id"], "abc111111111")
+        _, kill = self.run_ok("approve", "abc1")
+        kill.assert_called_once_with(1111, signal.SIGCONT)
+        self.assertEqual(self.state("abc111111111"), APPROVED)
+        _, kill = self.run_ok("deny", "abc2")
+        kill.assert_called_once_with(2222, signal.SIGTERM)
+        self.assertEqual(self.state("abc222222222"), DENIED)
+        # Glob characters are plain text, so [d] names the ID that starts with it.
+        out, _ = self.run_ok("show", "[d]")
+        self.assertEqual(json.loads(out)["request_id"], "[d]444444444")
+        _, kill = self.run_ok("deny", "[d]")
+        kill.assert_called_once_with(4444, signal.SIGTERM)
+        self.assertEqual(self.state("[d]444444444"), DENIED)
+
+    def test_wildcards_match_nothing(self):
+        self.save_three()
+        before = self.snapshot()
+        for arg in ("*", "?bc2*", "[d]"):
+            for sub in ("show", "approve", "deny"):
+                with self.subTest(arg=arg, sub=sub):
+                    self.assert_refused(sub, arg, f"Request not found: {arg}")
+        self.assertEqual(self.snapshot(), before)
+
+    def test_unsafe_argument_is_refused_before_any_file_access(self):
+        outside = Path(self.trace_dir) / "zz-outside.json"
+        outside.write_text(ApprovalRequest(request_id="zz-outside").to_json())
+        before = outside.read_bytes()
+        no_access = AssertionError("file access")
+        for arg in ("../zz", "a/b", "a\\b", "", ".", "..", "abc\x1b[2J"):
+            with self.subTest(arg=arg), \
+                 patch.object(approval_mod, "TraceStore", side_effect=no_access), \
+                 patch.object(approval_mod, "_approvals_dir", side_effect=no_access):
+                for sub in ("show", "approve", "deny"):
+                    self.assert_refused(sub, arg, "invalid request ID")
+                self.assertIsNone(find_request(self.store, arg))
+                self.assertEqual(approve_request(self.store, arg, resume_agent=False),
+                                 (False, "invalid request ID"))
+                self.assertEqual(deny_request(self.store, arg, kill_agent=False),
+                                 (False, "invalid request ID"))
+        self.assertEqual(outside.read_bytes(), before)
+
+    def test_unreadable_match_still_makes_prefix_ambiguous(self):
+        self.save_three()
+        approval_mod._request_path(self.store, "abc111111111").write_text("{not json")
+        before = self.snapshot()
+        for sub in ("show", "approve", "deny"):
+            with self.subTest(sub=sub):
+                self.assert_refused(sub, "abc", self.AMBIGUOUS)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_single_invalid_match_reports_the_record(self):
+        self.save("abc111111111", 1111)
+        self.save("def333333333", 3333)
+        self.set_state("abc111111111", "maybe")
+        before = self.snapshot()
+        for sub in ("show", "approve", "deny"):
+            with self.subTest(sub=sub):
+                self.assert_refused(
+                    sub, "abc",
+                    "Request abc111111111 has an invalid record: "
+                    "invalid approval state: 'maybe'",
+                )
+        self.assertEqual(self.snapshot(), before)
+
+    def test_symlink_is_skipped(self):
+        target = Path(self.new_trace_dir()) / "abc111111111.json"
+        target.write_text(ApprovalRequest(request_id="abc111111111", agent_pid=1111).to_json())
+        link = approval_mod._request_path(self.store, "abc111111111")
+        link.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            link.symlink_to(target)
+        except (OSError, NotImplementedError):
+            self.skipTest("cannot create a symlink here")
+        before = target.read_bytes()
+        for sub in ("show", "approve", "deny"):
+            with self.subTest(sub=sub):
+                self.assert_refused(sub, "abc", "Request not found: abc")
+        self.assertEqual(target.read_bytes(), before)
+
+    def test_messages_show_ids_as_text(self):
+        # A request file name can hold escape codes, and these messages name
+        # IDs taken from file names.
+        name = "abc" + _escapes.PAYLOAD
+        try:
+            self.save(name)
+        except OSError:
+            self.skipTest("the file system refuses this name")
+        self.save("abc111111111")
+        self.set_state(name, "maybe")
+        shown = "abc" + _escapes.PAYLOAD_TEXT
+        before = self.snapshot()
+        for sub in ("show", "approve", "deny"):
+            with self.subTest(sub=sub):
+                self.assert_refused(
+                    sub, "abc",
+                    f"Request ID prefix abc matches 2 requests: abc111111111, {shown}",
+                )
+                self.assert_refused(
+                    sub, "abcA",
+                    f"Request {shown} has an invalid record: "
+                    "invalid approval state: 'maybe'",
+                )
+                self.assert_refused(sub, "zz\u202e", r"Request not found: zz\u202e")
+        self.assertEqual(self.snapshot(), before)
 
 
 def _request(**fields):

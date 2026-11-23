@@ -1467,16 +1467,36 @@ start time cannot be read now (for example on Windows).
 A request is decided once. If two reviewers approve or deny the same request
 at the same time, exactly one succeeds and the other exits non-zero with
 `Request already approved` or `Request already denied`. Records with an
-unknown `state` are skipped by `list` and rejected by `approve` and `deny`.
+unknown `state` are skipped by `list` and rejected by `show`, `approve` and
+`deny`.
+
+`show`, `approve` and `deny` take a request ID or a unique prefix of one, and
+resolve it the same way. An exact ID wins, even when longer IDs start with it.
+The argument is plain text, so `*`, `?` and `[` match only themselves. A
+prefix that matches two or more requests is refused. The command names the
+prefix and up to five matching IDs in sorted order, records nothing, signals
+nothing and exits 1:
+
+```
+❌ Request ID prefix abc matches 2 requests: abc111111111, abc222222222
+```
+
+A request file that cannot be read still counts as a match, so a prefix never
+skips it to reach another request. When it is the only match, the command
+prints `Request REQUEST_ID has an invalid record: REASON` with the full ID and
+exits 1. Symlinks in the approvals directory are skipped. An argument that is
+empty, `.` or `..`, or holds `/`, `\` or a control character is refused with
+`invalid request ID` before any file is read. These messages show each
+character of an ID that `str.isprintable()` rejects as its escape.
 
 | Command/flag | Description |
 |---|---|
 | `list --state STATE` | List requests, optionally filtered to `pending`, `approved`, or `denied` |
-| `show REQUEST_ID` | Show a request by ID or ID prefix |
-| `approve REQUEST_ID` | Approve a pending request |
+| `show REQUEST_ID` | Show a request by ID or unique ID prefix |
+| `approve REQUEST_ID` | Approve a pending request by ID or unique ID prefix |
 | `approve --by NAME` | Record the approver name |
 | `approve --no-resume` | Approve without sending `SIGCONT` to the agent |
-| `deny REQUEST_ID` | Deny a pending request |
+| `deny REQUEST_ID` | Deny a pending request by ID or unique ID prefix |
 | `deny --reason TEXT` | Record the reason for denial |
 | `deny --by NAME` | Record the reviewer name |
 | `deny --no-kill` | Deny without sending `SIGTERM` to the agent |
