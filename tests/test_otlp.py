@@ -641,6 +641,10 @@ class TestRootOutcome(unittest.TestCase):
     EXPORTERS = (("otlp", session_to_otlp), ("otlp-genai", session_to_otlp_genai))
     SCENARIOS = {
         "recovered": (_RECOVERED, None),
+        "failed again after recovering": (_RECOVERED[:-1] + [
+            _call("c3", 1005.0), _tool_error("c3", 1006.0, error_type="AgainError"),
+            _session_end(reason="completed"),
+        ], "AgainError"),
         "unresolved": ([
             _call("c1", 1001.0), _tool_error("c1", 1002.0, error_type="ShellError"),
             _call("c2", 1003.0, command="make -k"), _tool_ok("c2", 1004.0),

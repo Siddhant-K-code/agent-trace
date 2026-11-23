@@ -27,7 +27,7 @@ The test used 0.120.0. After 0.121.1, [#552](https://github.com/Siddhant-K-code/
   - agent-strace's hooks and imports do not write `retry_of`, so a recorded Claude Code or Copilot CLI session has no retry links.
 - **Cost is Telemetry.dev's own.** Telemetry.dev prices the tokens itself. AgentTrace's estimate is kept only as the attribute `agent.strace.cost.total_usd`. A model Telemetry.dev cannot price has no cost.
 - **Recovered sessions (Predicted).** In the test, the session's root span was an error because a call had failed, even though every retry succeeded. The root's status now follows how the session ended (see [Session root status](production.md#session-root-status)):
-  - The root is an error only when the session timed out or was terminated, its last model call failed, or a failed tool call never succeeded on retry. It then has `error.type`. Otherwise its status is unset, never OK, and it has no `error.type`.
+  - The root is an error only when the session timed out or was terminated, its last model call failed, or a tool call that failed also failed on its last attempt. It then has `error.type`. Otherwise its status is unset, never OK, and it has no `error.type`.
   - The test session's model call and tool call both succeeded on retry, so its root is expected to be unset. The failed model call and tool call spans are still errors.
   - The root has the counts `agent.strace.behavior.failed_operation_count`, `retry_count`, `recovered_operation_count` and `unresolved_failed_operation_count`, and `agent.strace.session_status` and `agent.strace.last_model_request_failed`. Like the evidence attributes, they are plain span attributes.
   - Telemetry.dev may still mark the trace as having errors, from the failed spans under the root.

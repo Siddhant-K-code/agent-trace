@@ -57,7 +57,8 @@ class BehaviorAnalysis:
     calls: dict[int, OperationState]
     outcomes: dict[int, tuple[int, str]]
     unresolved_failures: tuple[int, ...] = ()
-    """Positions of the failed outcomes of unresolved operations, in order."""
+    """Positions of the failed outcomes of unresolved operations after their
+    last success, in order."""
 
 
 def _first_value(data: Mapping[str, Any], keys: Sequence[str]) -> object:
@@ -107,15 +108,15 @@ def behavior_analysis(events: Sequence[TraceEvent]) -> BehaviorAnalysis:
     An operation is a tool name with its arguments, command and path. An
     outcome belongs to a call only through :func:`correlate_tool_events`.
     A call that repeats an earlier call is a retry, and a recovery attempt
-    when an earlier call of that operation failed. An operation recovered
-    when a recovery attempt succeeded; a failed operation that did not
-    recover is unresolved, so a retry with different arguments leaves the
-    first operation unresolved.
+    when an earlier call of that operation failed. Outcomes are read in call
+    order: an operation recovered when its last outcome succeeded after an
+    earlier failure. A failed operation whose last outcome failed is
+    unresolved, even if it recovered before, and so is one retried only with
+    different arguments.
 
     Event data must be objects and timestamps must be numbers.
     """
     failed_calls: set[int] = set()
-    successful_calls: set[int] = set()
     outcomes: dict[int, tuple[int, str]] = {}
     correlation = correlate_tool_events(events)
 
@@ -124,7 +125,6 @@ def behavior_analysis(events: Sequence[TraceEvent]) -> BehaviorAnalysis:
         outcome = "failed"
         if event.event_type == EventType.TOOL_RESULT and not _result_failed(event):
             outcome = "succeeded"
-            successful_calls.add(call_index)
         else:
             failed_calls.add(call_index)
         outcomes[index] = (call_index, outcome)
@@ -153,22 +153,29 @@ def behavior_analysis(events: Sequence[TraceEvent]) -> BehaviorAnalysis:
         )
         previous.append(index)
 
-    for call_index in successful_calls:
-        state = call_states.get(call_index)
-        if state is not None and state.recovery_attempt:
-            recovered_refs.add(state.ref)
-
-    failed_refs = {
-        call_states[index].ref for index in failed_calls if index in call_states
+    outcome_of_call = {
+        call_index: index for index, (call_index, _) in outcomes.items()
     }
-    unresolved_refs = failed_refs - recovered_refs
-    unresolved_failures = tuple(sorted(
-        index
-        for index, (call_index, outcome) in outcomes.items()
-        if outcome == "failed"
-        and call_index in call_states
-        and call_states[call_index].ref in unresolved_refs
-    ))
+    unresolved_refs: set[str] = set()
+    unresolved_indices: list[int] = []
+    for ref, calls in signatures.values():
+        observed = [
+            (outcome_of_call[call_index], call_index in failed_calls)
+            for call_index in calls
+            if call_index in outcome_of_call
+        ]
+        if not any(failed for _, failed in observed):
+            continue
+        if not observed[-1][1]:
+            recovered_refs.add(ref)
+            continue
+        unresolved_refs.add(ref)
+        # Only the failures after the last success are still unresolved.
+        for index, failed in reversed(observed):
+            if not failed:
+                break
+            unresolved_indices.append(index)
+    unresolved_failures = tuple(sorted(unresolved_indices))
     summary = BehaviorSummary(
         failure_event_count=sum(event.event_type == EventType.ERROR for event in events),
         failed_operation_count=len(failed_calls),
