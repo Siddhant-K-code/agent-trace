@@ -152,7 +152,9 @@ out. `GET /sessions/<id>/events` and the dashboard's
 `GET /api/sessions/<id>/events` serve each stored event the same way. That
 includes a session that an older collector stored with the bare `NaN`,
 `Infinity` or `-Infinity` tokens, so `org-report --endpoint` and the dashboard
-can read it. The stored file is not rewritten. Older `watch --stream-to`
+can read it. A collector older than v0.118.0 could also store such a
+`timestamp`. The routes serve it as `null`, and `org-report --endpoint` still
+refuses that session. The stored file is not rewritten. Older `watch --stream-to`
 clients have one limit, described in
 [Live streaming from watch](#live-streaming-from-watch).
 
