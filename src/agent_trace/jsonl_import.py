@@ -597,6 +597,11 @@ def _import_jsonl(
                     "model": model,
                     **provenance,
                 }
+                if isinstance(message_id, str) and message_id:
+                    response_data["message_id"] = message_id
+                stop_reason = msg.get("stop_reason")
+                if isinstance(stop_reason, str) and stop_reason:
+                    response_data["stop_reason"] = stop_reason
                 if text:
                     response_text, hit = _redact_text(text, store.redact)
                     response_data["text"] = response_text[:2000]

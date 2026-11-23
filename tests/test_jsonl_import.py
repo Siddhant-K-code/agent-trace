@@ -22,9 +22,10 @@ except ImportError:  # pragma: no cover - run as a package module
     from tests import _no_telemetry  # noqa: F401
 
 from agent_trace import jsonl_import
-from agent_trace.cost import build_provider_cost_report
+from agent_trace.cost import build_provider_cost_report, estimate_cost
 from agent_trace.jsonl_import import cmd_import, discover_claude_sessions, import_jsonl
 from agent_trace.models import EventType
+from agent_trace.otlp import _ts_to_nanos, session_to_otlp, session_to_otlp_genai
 from agent_trace.store import TraceStore
 from agent_trace.tenancy import delete_tenant_data, enumerate_trace_stores
 from agent_trace.validation import validate_trace_directory
@@ -830,14 +831,14 @@ class TestMalformedLog(unittest.TestCase):
     def test_field_of_the_wrong_type_reads_as_absent(self):
         cases = [(1, "message.usage", [v for v in VALUES if not isinstance(v, dict)])]
         cases += [(line, field, VALUES) for line, field in (
-            (1, "message.content.1.caller"), (1, "message.id"), (0, "message"), (1, "message"),
+            (1, "message.content.1.caller"), (0, "message"), (1, "message"),
             (3, "toolUseResult"), (4, "subtype"), (5, "subtype"), (5, "content"), (0, "type"),
         )]
         cases += [(line, field, NOT_STRINGS) for line, field in (
             (1, "message.content.0.text"), (0, "message.content"), (1, "message.content"),
             (2, "message.content.0.content"), (2, "message.content.0.content.0.text"),
             (3, "toolUseResult.stdout"), (3, "toolUseResult.stderr"), (0, "cwd"), (0, "uuid"),
-            (0, "parentUuid"), (6, "agentId"),
+            (0, "parentUuid"), (6, "agentId"), (1, "message.id"), (1, "message.stop_reason"),
         )]
         cases.append((4, "durationMs", ("x", "7", -5, NAN, INF, True, None, [1], {"a": 1}, 10**400)))
         cases += [(line, field, NOT_TRUE) for line, field in (
@@ -1146,6 +1147,161 @@ class TestMalformedLog(unittest.TestCase):
         for claude_dir in (projects_file, projects_closed, claude_closed, claude_loop):
             with self.subTest(claude_dir=claude_dir.name):
                 self.assertEqual(discover_claude_sessions(str(claude_dir)), [])
+
+
+def _assistant_line(uuid, timestamp, message_id, content, usage, stop_reason=None,
+                    sid="imp1", model="claude-sonnet-4-5"):
+    return {
+        "type": "assistant", "uuid": uuid, "sessionId": sid, "timestamp": timestamp,
+        "message": {
+            "id": message_id, "role": "assistant", "model": model,
+            "stop_reason": stop_reason, "content": content, "usage": usage,
+        },
+    }
+
+
+def _span_attrs(span):
+    attrs = {}
+    for attr in span["attributes"]:
+        value = attr["value"]
+        if "arrayValue" in value:
+            attrs[attr["key"]] = [item["stringValue"] for item in value["arrayValue"]["values"]]
+        else:
+            attrs[attr["key"]] = next(iter(value.values()))
+    return attrs
+
+
+class TestImportedModelUsage(unittest.TestCase):
+    """The model and usage import records reach cost and both OTLP formats (#564)."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+        self.store = TraceStore(str(self.tmp / "trace"), use_workspace_env=False)
+
+    def _import(self, lines):
+        path = self.tmp / "session.jsonl"
+        path.write_text("".join(json.dumps(line) + "\n" for line in lines))
+        with contextlib.redirect_stderr(io.StringIO()):
+            return import_jsonl(str(path), store=self.store)
+
+    def _spans(self, sid, convert):
+        payload = convert(self.store.load_meta(sid), self.store.load_events(sid))
+        return payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
+
+    def _issue_transcript(self):
+        """The repro transcript from issue #564."""
+        return self._import([
+            {"type": "user", "uuid": "u1", "sessionId": "imp1",
+             "timestamp": "2026-01-01T10:00:00.000Z",
+             "message": {"role": "user", "content": "Hi"}},
+            _assistant_line(
+                "a1", "2026-01-01T10:00:02.000Z", "msg_1",
+                [{"type": "text", "text": "Hello."}],
+                {"input_tokens": 25, "output_tokens": 6,
+                 "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+                stop_reason="end_turn",
+            ),
+        ])
+
+    def _split_transcript(self):
+        """One message over three lines that share message.id, then a second message."""
+        usage = {"input_tokens": 10, "cache_creation_input_tokens": 1000,
+                 "cache_read_input_tokens": 5000}
+        return self._import([
+            {"type": "user", "uuid": "u1", "sessionId": "imp1",
+             "timestamp": "2026-01-01T10:00:00.000Z",
+             "message": {"role": "user", "content": "List the files"}},
+            _assistant_line("a1", "2026-01-01T10:00:01.000Z", "msg_1",
+                            [{"type": "thinking", "thinking": "Look first."}],
+                            {**usage, "output_tokens": 1}),
+            _assistant_line("a2", "2026-01-01T10:00:02.000Z", "msg_1",
+                            [{"type": "text", "text": "Listing the files."}],
+                            {**usage, "output_tokens": 1}),
+            _assistant_line("a3", "2026-01-01T10:00:03.000Z", "msg_1",
+                            [{"type": "tool_use", "id": "t1", "name": "Bash",
+                              "input": {"command": "ls"}}],
+                            {**usage, "output_tokens": 200}, stop_reason="tool_use"),
+            {"type": "user", "uuid": "u2", "sessionId": "imp1",
+             "timestamp": "2026-01-01T10:00:04.000Z",
+             "message": {"role": "user", "content": [
+                 {"type": "tool_result", "tool_use_id": "t1", "content": "a.py"}]}},
+            _assistant_line("a4", "2026-01-01T10:00:06.000Z", "msg_2",
+                            [{"type": "text", "text": "One file."}],
+                            {"input_tokens": 30, "output_tokens": 5}, stop_reason="end_turn"),
+        ])
+
+    def test_import_stores_the_message_id_and_stop_reason(self):
+        sid = self._issue_transcript()
+        [response] = [e for e in self.store.load_events(sid)
+                      if e.event_type == EventType.ASSISTANT_RESPONSE]
+        self.assertEqual(response.data["message_id"], "msg_1")
+        self.assertEqual(response.data["stop_reason"], "end_turn")
+
+    def test_cost_prices_the_recorded_usage(self):
+        sid = self._issue_transcript()
+        result = estimate_cost(self.store, sid)
+        self.assertEqual((result.input_tokens, result.output_tokens), (25, 6))
+
+    def test_both_otlp_formats_export_a_chat_span_with_the_recorded_usage(self):
+        sid = self._issue_transcript()
+        events = self.store.load_events(sid)
+        [prompt] = [e for e in events if e.event_type == EventType.USER_PROMPT]
+        [response] = [e for e in events if e.event_type == EventType.ASSISTANT_RESPONSE]
+        for convert, root_event in ((session_to_otlp, "assistant_response"),
+                                    (session_to_otlp_genai, "gen_ai.assistant.message")):
+            with self.subTest(convert=convert.__name__):
+                root, *children = self._spans(sid, convert)
+                [chat] = [s for s in children if s["name"] == "chat claude-sonnet-4-5"]
+                self.assertEqual(chat["kind"], 3)
+                self.assertEqual(chat["parentSpanId"], root["spanId"])
+                attrs = _span_attrs(chat)
+                self.assertEqual(attrs["gen_ai.operation.name"], "chat")
+                self.assertEqual(attrs["gen_ai.request.model"], "claude-sonnet-4-5")
+                self.assertEqual(attrs["gen_ai.response.model"], "claude-sonnet-4-5")
+                self.assertEqual(attrs["gen_ai.response.id"], "msg_1")
+                self.assertEqual(attrs["gen_ai.usage.input_tokens"], "25")
+                self.assertEqual(attrs["gen_ai.usage.output_tokens"], "6")
+                self.assertEqual(attrs["gen_ai.response.finish_reasons"], ["end_turn"])
+                self.assertEqual(attrs["agent.strace.timing"], "inferred")
+                # Inferred: from the prompt the model answered to the response.
+                self.assertEqual(chat["startTimeUnixNano"], _ts_to_nanos(prompt.timestamp))
+                self.assertEqual(chat["endTimeUnixNano"], _ts_to_nanos(response.timestamp))
+                self.assertEqual(_span_attrs(root)["agent.llm_requests"], "1")
+                self.assertIn(root_event, [e["name"] for e in root["events"]])
+
+    def test_a_split_message_counts_once(self):
+        sid = self._split_transcript()
+        self.assertEqual(self.store.load_meta(sid).llm_requests, 2)
+        result = estimate_cost(self.store, sid)
+        self.assertEqual((result.input_tokens, result.output_tokens), (6010 + 30, 200 + 5))
+        self.assertEqual((result.cache_read_tokens, result.cache_write_tokens), (5000, 1000))
+
+        events = self.store.load_events(sid)
+        by_time = {e.timestamp - events[0].timestamp: e for e in events}
+        for convert in (session_to_otlp, session_to_otlp_genai):
+            with self.subTest(convert=convert.__name__):
+                root, *children = self._spans(sid, convert)
+                chats = [s for s in children if s["name"].startswith("chat")]
+                self.assertEqual(len(chats), 2)
+                self.assertEqual(_span_attrs(root)["agent.llm_requests"], str(len(chats)))
+                first, second = (_span_attrs(span) for span in chats)
+                self.assertEqual(
+                    (first["gen_ai.response.id"], first["gen_ai.usage.input_tokens"],
+                     first["gen_ai.usage.output_tokens"],
+                     first["gen_ai.usage.cache_read.input_tokens"],
+                     first["gen_ai.usage.cache_write.input_tokens"],
+                     first["gen_ai.response.finish_reasons"]),
+                    ("msg_1", "6010", "200", "5000", "1000", ["tool_use"]),
+                )
+                self.assertEqual(second["gen_ai.response.id"], "msg_2")
+                # The first starts at the prompt, the second at the tool result.
+                self.assertEqual(
+                    [(s["startTimeUnixNano"], s["endTimeUnixNano"]) for s in chats],
+                    [(_ts_to_nanos(by_time[0].timestamp), _ts_to_nanos(by_time[3].timestamp)),
+                     (_ts_to_nanos(by_time[4].timestamp), _ts_to_nanos(by_time[6].timestamp))],
+                )
 
 
 if __name__ == "__main__":

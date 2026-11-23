@@ -34,13 +34,13 @@ agent-strace export <session-id> --format otlp-genai \
 
 | Aspect | `--format otlp` | `--format otlp-genai` |
 |---|---|---|
-| LLM calls | Events on root span | `chat {model}` child spans |
+| LLM calls | Events on root span; a model response imported from a Claude Code transcript is also a `chat {model}` span | `chat {model}` child spans |
 | Tool calls | `tool/<name>` spans | `execute_tool {name}` spans |
 | Root span | `agent.name` attribute | `invoke_agent {agent}` span with `gen_ai.agent.name` |
 | Errors | `tool/<name>` span with ERROR status and an `exception` event; see [Classic tool spans](#classic-tool-spans) | OTel `exception` event format and `error.type` |
 | Failed or cancelled model request | `error.type` on the `gen_ai.assistant.message` event | ERROR status and `error.type` on the `chat` span |
 | `gen_ai.conversation.id` | Root span | Root, LLM and tool spans |
-| Token usage | `gen_ai.usage.*` on the LLM events | `gen_ai.usage.*` and `llm.token_count.*` on the LLM spans; see [Token usage and prompt caching](#token-usage-and-prompt-caching) |
+| Token usage | `gen_ai.usage.*` on the LLM events, and on the `chat` spans of imported responses | `gen_ai.usage.*` and `llm.token_count.*` on the LLM spans; see [Token usage and prompt caching](#token-usage-and-prompt-caching) |
 | Prompts and replies | Events on root span | Events on root span, and `gen_ai.input.messages` and `gen_ai.output.messages` on it |
 | Tool input and output | `tool.input.*` and `tool.output` | `input.value` and `output.value`, and `gen_ai.tool.call.arguments` and `gen_ai.tool.call.result` |
 | Retries (`retry_of`) | Span links on tool spans | Span links on tool and `chat` spans |
@@ -318,8 +318,11 @@ input.
 - Langfuse's OTLP endpoint reads the same `gen_ai.usage.*` attributes and
   subtracts the cache reads and writes from the input itself.
 - Usage that a Claude Code import records on `assistant_response` events is
-  not exported, because those events do not become model request spans or
-  generations. `cost` still counts it.
+  exported on the `chat {model}` span of each imported model response, in
+  both formats, with the same keys; see
+  [Model responses imported from a transcript](#model-responses-imported-from-a-transcript).
+  Temporal, built on `otlp-genai`, has the same spans. The direct Langfuse
+  export does not export it yet. `cost` counts it.
 
 ---
 
@@ -676,7 +679,7 @@ metrics are still exported.
 | error | span with error status + exception event |
 | failed or cancelled model request | error status and `error.type`; see [Failed and cancelled model requests](#failed-and-cancelled-model-requests) |
 | user_prompt | event on root span, and in `gen_ai.input.messages` (`otlp-genai`) |
-| assistant_response | event on root span, and in `gen_ai.input.messages` or `gen_ai.output.messages` (`otlp-genai`) |
+| assistant_response | event on root span, and in `gen_ai.input.messages` or `gen_ai.output.messages` (`otlp-genai`); one imported with recorded usage is also a `chat {model}` span (see [Model responses imported from a transcript](#model-responses-imported-from-a-transcript)) |
 | session_id | trace ID |
 | event_id | span ID |
 | parent_id | parent span ID |
@@ -797,6 +800,58 @@ and the rest of `input_tokens` at the input rate. A model without a published
 cache rate, such as the `haiku`, `gpt4` and `gpt4o` choices of `--model`,
 bills cached input at its input rate. See [`cost`](commands.md#cost)
 for the usage shapes read from each provider.
+
+### Model responses imported from a transcript
+
+`agent-strace import` stores each line of a Claude Code transcript's assistant
+messages as an `assistant_response` event with the recorded `model`, the
+transcript `message.id` as `message_id`, and `stop_reason` when the line has
+one. Claude Code writes one line per content block of a message, and the
+import keeps the message's `usage` on its last line only.
+
+In `--format otlp`, `--format otlp-genai` and Temporal, each
+`assistant_response` with recorded token counts is also a `chat {model}` span
+of kind `CLIENT`, a child of the root span, as a model request is. Its root
+span event is kept. The span carries:
+
+- `gen_ai.request.model` and `gen_ai.response.model`: the recorded model.
+- `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens` and the cache read
+  and write attributes, read as in
+  [Token usage and prompt caching](#token-usage-and-prompt-caching), and in
+  `otlp-genai` the `llm.token_count.*` attributes.
+- `gen_ai.response.finish_reasons`: the recorded `stop_reason`, when there is
+  one.
+- `gen_ai.response.id`: the stored `message_id`, when there is one. It is
+  never taken from any other field.
+- `agent.strace.timing`: `inferred`.
+
+A transcript line has one timestamp, so when the model request started was
+not recorded. The span ends at the response's timestamp and starts at the
+latest earlier event, in trace order, with the same `context_stream` (the main
+conversation, or one sidechain) that is a `user_prompt`, a `tool_result` or
+another of these responses. With no such event the span has zero length at the
+response. `agent.strace.timing=inferred` marks the start as inferred: the
+span's duration is the time since the model's last input, not a measured
+latency.
+
+A message recorded on more than one event with the same `message_id` is one
+span, and its usage counts once. The root span's `agent.llm_requests`, the
+import's count of model responses with usage, equals the number of these
+spans.
+
+`cost`, `tree`, `timeline`, `replay`, `watch` and the EU AI Act compliance
+export price such a session from the recorded usage, as in
+[Responses recorded without a request](#responses-recorded-without-a-request):
+each of these responses counts the tokens it recorded, once per
+`message_id`, and no other event is also estimated from size. Sessions
+recorded by hooks, whose `assistant_response` events carry no usage, keep the
+size estimate.
+
+Sessions imported by earlier versions have no `message_id` or `stop_reason`,
+so their spans have no `gen_ai.response.id` or
+`gen_ai.response.finish_reasons`. Sessions imported before v0.108.0 also
+repeat a message's usage on each of its lines, and each line counts. To
+correct either, delete the session's directory and import the log again.
 
 ### Failed and cancelled model requests
 

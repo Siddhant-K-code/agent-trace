@@ -1247,5 +1247,103 @@ class TestGenAIRetryLinks(unittest.TestCase):
                 self.assertFalse(any("links" in span for span in spans))
 
 
+def _imported(timestamp, usage=None, stream="main", **data):
+    """An assistant_response as agent-strace import writes it."""
+    data = {"model": "claude-sonnet-4-5", "context_stream": stream, **data}
+    if usage is not None:
+        data["usage"] = usage
+    return _event(EventType.ASSISTANT_RESPONSE, timestamp, **data)
+
+
+class TestImportedModelResponses(unittest.TestCase):
+    """Each model response read from a transcript is a chat span with an
+    inferred start, in both formats (#564)."""
+
+    CONVERTERS = (session_to_otlp, session_to_otlp_genai)
+
+    def _spans(self, convert, events):
+        meta = SessionMeta(session_id="s1", agent_name="claude-code",
+                           started_at=1000.0, ended_at=1100.0)
+        return _get_spans(convert(meta, events))
+
+    def _chats(self, convert, events):
+        return [s for s in self._spans(convert, events)[1:] if s["name"].startswith("chat")]
+
+    @staticmethod
+    def _window(span):
+        return (span["startTimeUnixNano"], span["endTimeUnixNano"])
+
+    def test_span_without_earlier_input_has_zero_length(self):
+        events = [_imported(1002.0, {"input_tokens": 25, "output_tokens": 6},
+                            message_id="msg_1", stop_reason="end_turn")]
+        for convert in self.CONVERTERS:
+            with self.subTest(convert=convert.__name__):
+                [chat] = self._chats(convert, events)
+                self.assertEqual(self._window(chat), (_ts_to_nanos(1002.0),) * 2)
+                self.assertEqual(_get_attr(chat, "agent.strace.timing"), "inferred")
+                self.assertEqual(_get_attr(chat, "gen_ai.usage.input_tokens"), "25")
+                self.assertEqual(_get_attr(chat, "gen_ai.response.finish_reasons"), ["end_turn"])
+                self.assertEqual(chat["status"], {"code": 0})
+
+    def test_span_starts_at_the_latest_input_of_its_own_stream(self):
+        usage = {"input_tokens": 10, "output_tokens": 1}
+        events = [
+            _event(EventType.USER_PROMPT, 1001.0, prompt="go", context_stream="main"),
+            _event(EventType.TOOL_RESULT, 1003.0, result="ok", context_stream="sidechain:a"),
+            _imported(1004.0, usage, stream="sidechain:a", message_id="side_1"),
+            _imported(1005.0, usage, message_id="msg_1"),
+            _event(EventType.TOOL_CALL, 1006.0, tool_name="Bash", context_stream="main"),
+            _imported(1007.0, usage, message_id="msg_2"),
+            _event(EventType.TOOL_RESULT, 1008.0, result="ok", context_stream="main"),
+            _imported(1010.0, usage, message_id="msg_3"),
+        ]
+        expected = [(1003.0, 1004.0), (1001.0, 1005.0), (1005.0, 1007.0), (1008.0, 1010.0)]
+        for convert in self.CONVERTERS:
+            with self.subTest(convert=convert.__name__):
+                self.assertEqual(
+                    [self._window(span) for span in self._chats(convert, events)],
+                    [(_ts_to_nanos(start), _ts_to_nanos(end)) for start, end in expected],
+                )
+
+    def test_a_message_recorded_twice_is_one_span(self):
+        usage = {"input_tokens": 10, "output_tokens": 1}
+        events = [
+            _event(EventType.USER_PROMPT, 1001.0, prompt="go", context_stream="main"),
+            _imported(1002.0, text="Looking.", message_id="msg_1"),
+            _imported(1003.0, usage, message_id="msg_1"),
+            _imported(1004.0, usage, message_id="msg_1"),
+        ]
+        for convert in self.CONVERTERS:
+            with self.subTest(convert=convert.__name__):
+                root, *_ = self._spans(convert, events)
+                [chat] = self._chats(convert, events)
+                self.assertEqual(self._window(chat), (_ts_to_nanos(1001.0), _ts_to_nanos(1003.0)))
+                # Every response keeps its root span event.
+                self.assertEqual(
+                    sum(e["name"] in ("assistant_response", "gen_ai.assistant.message")
+                        for e in root["events"]),
+                    3,
+                )
+
+    def test_response_without_a_message_id_has_no_response_id(self):
+        events = [_imported(1002.0, {"input_tokens": 1, "output_tokens": 1})]
+        for convert in self.CONVERTERS:
+            with self.subTest(convert=convert.__name__):
+                [chat] = self._chats(convert, events)
+                self.assertIsNone(_get_attr(chat, "gen_ai.response.id"))
+                self.assertIsNone(_get_attr(chat, "gen_ai.response.finish_reasons"))
+                self.assertEqual(_get_attr(chat, "gen_ai.response.model"), "claude-sonnet-4-5")
+
+    def test_hook_session_has_no_chat_span(self):
+        events = [
+            _event(EventType.USER_PROMPT, 1001.0, prompt="go"),
+            _event(EventType.ASSISTANT_RESPONSE, 1002.0, text="Done.", hook_event="stop",
+                   provider="claude", stop_reason="end_turn"),
+        ]
+        for convert in self.CONVERTERS:
+            with self.subTest(convert=convert.__name__):
+                self.assertEqual(len(self._spans(convert, events)), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

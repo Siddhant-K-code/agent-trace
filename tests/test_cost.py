@@ -17,6 +17,7 @@ from agent_trace.cost import (
     _estimate_tokens,
     _event_tokens,
     _usage_dollars,
+    build_provider_cost_report,
     cost_inputs_captured,
     estimate_cost,
     format_cost,
@@ -377,6 +378,55 @@ class TestRecordedUsage(unittest.TestCase):
         usage = TokenUsage(6000, 60, cache_read_tokens=3000)
         self.assertAlmostEqual(result.total_cost, _usage_dollars(usage, DEFAULT_MODEL), places=10)
         self.assertLess(result.total_cost, _dollars(6000, 60, DEFAULT_MODEL))
+
+    def test_imported_responses_count_their_recorded_usage_once_per_message(self):
+        T = 1_700_000_000.0
+        usage = {"input_tokens": 100, "output_tokens": 7, "cache_read_input_tokens": 60}
+        events = [
+            _make_event(EventType.USER_PROMPT, T + 0.0, prompt="list the files"),
+            _make_event(EventType.ASSISTANT_RESPONSE, T + 1.0, text="Listing.",
+                        model="claude-sonnet-4-5", message_id="msg_1"),
+            _make_event(EventType.TOOL_CALL, T + 1.0, tool_name="Bash",
+                        arguments={"command": "ls"}),
+            _make_event(EventType.ASSISTANT_RESPONSE, T + 1.0, text="",
+                        model="claude-sonnet-4-5", message_id="msg_1", usage=usage),
+            # The same message recorded again counts once.
+            _make_event(EventType.ASSISTANT_RESPONSE, T + 1.5, text="",
+                        model="claude-sonnet-4-5", message_id="msg_1", usage=usage),
+            _make_event(EventType.TOOL_RESULT, T + 2.0, result="README.md"),
+            _make_event(EventType.ASSISTANT_RESPONSE, T + 3.0, text="One file.",
+                        model="claude-sonnet-4-5", message_id="msg_2",
+                        usage={"input_tokens": 120, "output_tokens": 4}),
+        ]
+        self.assertTrue(session_records_usage(events))
+        self.assertEqual(session_event_tokens(events), [
+            (0, 0), (0, 0), (0, 0), (160, 7), (0, 0), (0, 0), (120, 4),
+        ])
+        store, tmp = _make_store(events)
+        self.addCleanup(tmp.cleanup)
+        result = estimate_cost(store, "s1")
+        self.assertEqual((result.input_tokens, result.output_tokens), (280, 11))
+        self.assertEqual(result.cache_read_tokens, 60)
+        self.assertAlmostEqual(
+            session_cost(store.load_events("s1")), result.total_cost, places=10,
+        )
+        [record] = build_provider_cost_report(store, since="2020-01-01", now=T + 10).records
+        self.assertEqual(
+            (record.model, record.input_tokens, record.output_tokens, record.cache_read_tokens),
+            ("claude-sonnet-4-5", 280, 11, 60),
+        )
+
+    def test_hook_session_responses_keep_size_estimates(self):
+        events = [
+            _make_event(EventType.USER_PROMPT, 0.0, prompt="fix the bug"),
+            _make_event(EventType.TOOL_CALL, 1.0, tool_name="Read",
+                        arguments={"file_path": "a.py"}),
+            _make_event(EventType.TOOL_RESULT, 2.0, result="x" * 400),
+            _make_event(EventType.ASSISTANT_RESPONSE, 3.0, text="Done.",
+                        hook_event="stop", provider="claude", stop_reason="end_turn"),
+        ]
+        self.assertFalse(session_records_usage(events))
+        self.assertEqual(session_event_tokens(events), [_event_tokens(e) for e in events])
 
     def test_other_commands_agree_on_recorded_usage(self):
         from agent_trace.compliance import _event_costs

@@ -14,7 +14,7 @@ import re
 import sys
 import time as _time
 from dataclasses import dataclass, field, replace as _replace
-from typing import Any, Mapping, TextIO
+from typing import Any, Mapping, Sequence, TextIO
 
 from .event_data import require_object_event_data, require_usable_timestamps
 from .explain import PHASE_DATA_EVENT_TYPES, ExplainResult, explain_session
@@ -443,22 +443,67 @@ def _recorded_usage(data: Any) -> tuple[int, int] | None:
     return usage.input_tokens, usage.output_tokens
 
 
+class _CountedMessages:
+    """The model message IDs whose recorded usage has already counted."""
+
+    def __init__(self) -> None:
+        self._ids: set[str] = set()
+
+    def first(self, data: Any) -> bool:
+        """Return whether *data* is the first usage record of its message.
+
+        Data with no non-empty string ``message_id`` is always first.
+        """
+        message_id = data.get("message_id") if isinstance(data, Mapping) else None
+        if not isinstance(message_id, str) or not message_id:
+            return True
+        if message_id in self._ids:
+            return False
+        self._ids.add(message_id)
+        return True
+
+
+def recorded_response_indexes(events: Sequence[TraceEvent]) -> list[int]:
+    """Return the positions of the ``assistant_response`` events that record a
+    model request's usage, in order.
+
+    Each is an ``assistant_response`` with recorded token counts, as
+    ``agent-strace import`` writes for every message of a Claude Code
+    transcript. A response whose ``message_id`` an earlier one in the list
+    already has is left out, so a message recorded on several events counts
+    once. :class:`TokenCounter` counts the usage of exactly these responses.
+    """
+    messages = _CountedMessages()
+    return [
+        index
+        for index, event in enumerate(events)
+        if event.event_type == EventType.ASSISTANT_RESPONSE
+        and _recorded_token_usage(event.data) is not None
+        and messages.first(event.data)
+    ]
+
+
 class TokenCounter:
     """Count (input, output) tokens per event of one session, in trace order.
 
-    Each event is estimated from its JSON size by default. Some providers
-    record each model request only as an ``llm_response`` with no
-    ``llm_request`` (Codex ``PostModelRequest``), and that response carries
-    the request's exact usage. Once such a response with token counts is
-    seen, the counter switches to recorded usage: every ``llm_response``
-    counts its own recorded tokens, or none when it recorded none (a failed
-    or cancelled request), and every other event counts nothing, because its
-    content is already part of some request's input.
+    Each event is estimated from its JSON size by default. Two kinds of event
+    carry a model request's exact usage: an ``llm_response`` with no
+    ``llm_request`` (Codex ``PostModelRequest``), and an
+    ``assistant_response`` with token counts (a Claude Code transcript that
+    ``agent-strace import`` read). Once either is seen with token counts, the
+    counter switches to recorded usage: every ``llm_response`` and
+    ``assistant_response`` counts its own recorded tokens, or none when it
+    recorded none (a failed or cancelled request, or a hook's reply), and
+    every other event counts nothing, because its content is already part of
+    some request's input. An ``assistant_response`` whose ``message_id`` an
+    earlier one already counted counts nothing, so a message recorded on
+    several events counts once.
     """
 
     def __init__(self, recorded_usage: bool = False) -> None:
         self.recorded_usage = recorded_usage
         self._requests: Pairer[bool] = llm_pairer()
+        self._messages = _CountedMessages()
 
     def observe(self, event: TraceEvent) -> None:
         """Update the request pairing and switch to recorded usage if due."""
@@ -467,6 +512,9 @@ class TokenCounter:
         elif event.event_type == EventType.LLM_RESPONSE:
             paired = self._requests.match(event) is not None
             if not paired and _recorded_usage(event.data) is not None:
+                self.recorded_usage = True
+        elif event.event_type == EventType.ASSISTANT_RESPONSE:
+            if _recorded_usage(event.data) is not None:
                 self.recorded_usage = True
 
     def usage(self, event: TraceEvent) -> TokenUsage:
@@ -479,9 +527,13 @@ class TokenCounter:
             self.observe(event)
         if not self.recorded_usage:
             return TokenUsage(*_event_tokens(event))
-        if event.event_type != EventType.LLM_RESPONSE:
-            return TokenUsage()
-        return _recorded_token_usage(event.data) or TokenUsage()
+        if event.event_type == EventType.LLM_RESPONSE:
+            return _recorded_token_usage(event.data) or TokenUsage()
+        if event.event_type == EventType.ASSISTANT_RESPONSE:
+            usage = _recorded_token_usage(event.data)
+            if usage is not None and self._messages.first(event.data):
+                return usage
+        return TokenUsage()
 
     def count(self, event: TraceEvent) -> tuple[int, int]:
         """Observe *event* and return its (input, output) tokens."""
@@ -503,7 +555,8 @@ def cost_inputs_captured(events: list[TraceEvent]) -> bool:
 
 
 def session_records_usage(events: list[TraceEvent]) -> bool:
-    """True when *events* hold an unpaired ``llm_response`` with token counts."""
+    """True when *events* hold an unpaired ``llm_response`` or an
+    ``assistant_response`` with token counts; see :class:`TokenCounter`."""
     counter = TokenCounter()
     for event in events:
         counter.observe(event)
@@ -1044,9 +1097,13 @@ def _session_model_token_usage(events: list[TraceEvent]) -> dict[str, TokenUsage
     records token counts (a Codex request whose model was not reported),
     is a sample under the empty model name, so its tokens are reported
     without inventing a model or a price.
+
+    An assistant_response with token counts whose ``message_id`` an earlier
+    one already counted is skipped, as in :class:`TokenCounter`.
     """
     samples: list[_UsageSample] = []
     requests: Pairer[int] = llm_pairer()
+    messages = _CountedMessages()
 
     for event in events:
         if event.event_type not in MODEL_USAGE_EVENT_TYPES:
@@ -1054,6 +1111,12 @@ def _session_model_token_usage(events: list[TraceEvent]) -> dict[str, TokenUsage
 
         model = event_model(event.data)
         recorded, has_inp, has_out = _usage_detail(event.data)
+        if (
+            event.event_type == EventType.ASSISTANT_RESPONSE
+            and (has_inp or has_out)
+            and not messages.first(event.data)
+        ):
+            continue
 
         if event.event_type == EventType.LLM_REQUEST:
             if not model:

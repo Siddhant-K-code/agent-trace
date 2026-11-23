@@ -222,6 +222,16 @@ on the response's last line, so token totals, request counts and
 count the usage once per line; delete the session's directory and import the
 log again to correct their totals.
 
+Each response's `assistant_response` event stores the recorded `model`, the
+transcript `message.id` as `message_id`, `stop_reason` when the line has one,
+and its token usage. [`cost`](#cost) prices the session from that usage, and
+`export --format otlp` and `otlp-genai` turn each response with usage into a
+`chat {model}` span with its model, token counts, stop reason and message ID.
+The span's start is inferred, not recorded. See
+[Model responses imported from a transcript](production.md#model-responses-imported-from-a-transcript).
+Sessions imported by earlier versions have no `message_id` or `stop_reason`;
+import the log again to add them.
+
 ---
 
 ## Replay and inspection
@@ -565,9 +575,15 @@ Token and dollar cost by phase. Flags wasted spend on failed phases.
 Tokens are estimated from the size of each event. A session that records each
 model request as an `llm_response` with no `llm_request` and its own token
 counts, as OpenAI Codex does, is priced from those recorded counts instead,
-and no event is also estimated from size. `tree`, `timeline`, `replay`,
-`watch` and the EU AI Act compliance export count tokens the same way. See
-[Responses recorded without a request](production.md#responses-recorded-without-a-request).
+and no event is also estimated from size. So is a Claude Code session read by
+[`import`](#import), whose `assistant_response` events carry each response's
+recorded usage; a response recorded on several events with the same
+`message_id` counts once. Sessions recorded by hooks carry no usage and keep
+the size estimate. `tree`, `timeline`, `replay`, `watch` and the EU AI Act
+compliance export count tokens the same way. See
+[Responses recorded without a request](production.md#responses-recorded-without-a-request)
+and
+[Model responses imported from a transcript](production.md#model-responses-imported-from-a-transcript).
 
 `--breakdown provider` aggregates all stored sessions in the selected window by
 inferred provider and model. It uses actual recorded token counters and a bundled,
@@ -2080,6 +2096,15 @@ a result. Earlier versions named them `{tool}`. See
 
 In both OTLP formats, a call whose event names an earlier one in `retry_of`
 has a span link to that call's span.
+
+In both OTLP formats, each model response that [`import`](#import) read from a
+Claude Code transcript with token usage is a `chat {model}` span with the
+recorded model, token counts, stop reason and message ID, as well as an event
+on the root span. The transcript does not record when the request started, so
+the span starts at the latest earlier user prompt, tool result or imported
+response of the same conversation stream, or has zero length, and carries
+`agent.strace.timing=inferred`. See
+[Model responses imported from a transcript](production.md#model-responses-imported-from-a-transcript).
 
 `--include-subagents` exports the session and the subagent sessions under it,
 as `agent-strace tree` shows them, as one trace in one payload. Each
