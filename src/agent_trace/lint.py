@@ -211,13 +211,17 @@ def _rule_reasoning_spiral(events: list[TraceEvent], cfg: dict) -> list[LintResu
     llm_types = {EventType.LLM_REQUEST, EventType.LLM_RESPONSE,
                  EventType.ASSISTANT_RESPONSE}
 
+    # Other event types do not end a run, so its LLM calls need not be
+    # adjacent: the range ends at the run's last LLM call.
     run_start = 0
+    run_last = 0
     run_len = 0
 
     for i, ev in enumerate(events):
         if ev.event_type in llm_types:
             if run_len == 0:
                 run_start = i
+            run_last = i
             run_len += 1
         elif ev.event_type == EventType.TOOL_CALL:
             if run_len >= threshold:
@@ -226,11 +230,11 @@ def _rule_reasoning_spiral(events: list[TraceEvent], cfg: dict) -> list[LintResu
                     level=level,
                     message=(
                         f"{run_len} consecutive LLM calls with no tool call "
-                        f"(events {run_start + 1}–{run_start + run_len}). "
+                        f"(events {run_start + 1}–{run_last + 1}). "
                         "Agent may be over-reasoning."
                     ),
                     line_start=run_start + 1,
-                    line_end=run_start + run_len,
+                    line_end=run_last + 1,
                 ))
             run_len = 0
 
@@ -240,11 +244,11 @@ def _rule_reasoning_spiral(events: list[TraceEvent], cfg: dict) -> list[LintResu
             level=level,
             message=(
                 f"{run_len} consecutive LLM calls with no tool call "
-                f"(events {run_start + 1}–{run_start + run_len}). "
+                f"(events {run_start + 1}–{run_last + 1}). "
                 "Agent may be over-reasoning."
             ),
             line_start=run_start + 1,
-            line_end=run_start + run_len,
+            line_end=run_last + 1,
         ))
 
     return results

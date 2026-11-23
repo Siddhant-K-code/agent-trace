@@ -42,10 +42,12 @@ from agent_trace.assignment import (
     _atomic_write_private,
     _canonical_json_bytes,
     _inflate_exact_member,
+    _lint_payload,
     _load_submission_inputs,
     _open_directory_chain,
     _parse_trace,
     _read_regular_nofollow,
+    _sanitize_events,
     _strict_json_bytes,
     _validate_no_symlink_ancestors,
     build_assignment_bundle,
@@ -583,6 +585,41 @@ class AssignmentScoringTests(unittest.TestCase):
 GOLDEN_VERSION = "0.0.0"
 GOLDEN_BUNDLE_DIGEST = "sha256:56d90e7f6735f89e215ce75e3c0cfab1848ee964a3a6c32c3143a16a63a8720a"
 GOLDEN_ARCHIVE_SHA256 = "b176d75c233b1f0cc76cae5088d2ce64f5c80486003397ed75dc2d3c0efb42c9"
+
+
+class ReasoningSpiralRangeTests(unittest.TestCase):
+    def _spiral(self, types):
+        events = [
+            TraceEvent(
+                event_type,
+                1000.0 + index,
+                event_id=f"e{index}",
+                data={"tool_name": "Bash"} if event_type == EventType.TOOL_CALL else {},
+            )
+            for index, event_type in enumerate(types)
+        ]
+        findings = _lint_payload(_sanitize_events(events))["findings"]
+        return [
+            (item["event_start"], item["event_end"])
+            for item in findings
+            if item["rule"] == "reasoning-spiral"
+        ]
+
+    def test_range_ends_at_last_model_event_when_not_adjacent(self):
+        types = [
+            EventType.SESSION_START, EventType.LLM_REQUEST, EventType.TOOL_RESULT,
+            EventType.LLM_RESPONSE, EventType.USER_PROMPT, EventType.FILE_READ,
+            EventType.LLM_REQUEST, EventType.TOOL_CALL,
+        ]
+        self.assertEqual(self._spiral(types), [(2, 7)])
+        self.assertEqual(self._spiral(types[:-1]), [(2, 7)])
+
+    def test_adjacent_run_range_is_unchanged(self):
+        types = [
+            EventType.SESSION_START, EventType.LLM_REQUEST, EventType.LLM_RESPONSE,
+            EventType.ASSISTANT_RESPONSE, EventType.TOOL_CALL,
+        ]
+        self.assertEqual(self._spiral(types), [(2, 4)])
 
 
 class ByPathParityTests(unittest.TestCase):
