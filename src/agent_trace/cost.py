@@ -14,7 +14,7 @@ import re
 import sys
 import time as _time
 from dataclasses import dataclass, field, replace as _replace
-from typing import Any, Mapping, Sequence, TextIO
+from typing import Any, Iterable, Mapping, Sequence, TextIO
 
 from .event_data import require_object_event_data, require_usable_timestamps
 from .explain import PHASE_DATA_EVENT_TYPES, ExplainResult, explain_session
@@ -691,6 +691,21 @@ def _pricing_candidates(model: str) -> list[str]:
     return list(dict.fromkeys(candidates))
 
 
+def _match_model_key(model: str, keys: Iterable[str]) -> str | None:
+    """Return the key in *keys* that names *model*, or ``None``.
+
+    Each name from :func:`_pricing_candidates` is tried in turn, against the
+    longest key first. A key matches a name that equals it, or that starts
+    with it followed by ``-``, ``:`` or ``@``.
+    """
+    ordered = sorted(keys, key=len, reverse=True)
+    for candidate in _pricing_candidates(model):
+        for key in ordered:
+            if candidate == key or candidate.startswith((f"{key}:", f"{key}@", f"{key}-")):
+                return key
+    return None
+
+
 def get_model_pricing(
     model: str,
     pricing_table: Mapping[str, Mapping[str, float]] = PRICING,
@@ -701,28 +716,21 @@ def get_model_pricing(
     Sonnet fallback retained by :func:`_dollars` for backward compatibility.
     This keeps the cross-provider dashboard from fabricating spend.
     """
-    model_keys = sorted(_MODEL_PROVIDERS, key=len, reverse=True)
-    for candidate in _pricing_candidates(model):
-        for key in model_keys:
-            if (
-                candidate == key
-                or candidate.startswith(f"{key}:")
-                or candidate.startswith(f"{key}@")
-                or candidate.startswith(f"{key}-")
-            ):
-                rates = pricing_table.get(key)
-                if rates is None:
-                    return None
-                return ModelPrice(
-                    model_key=key,
-                    provider=infer_provider(model),
-                    input_per_million=float(rates["input"]),
-                    output_per_million=float(rates["output"]),
-                    cache_read_per_million=_optional_rate(rates, "cache_read"),
-                    cache_write_per_million=_optional_rate(rates, "cache_write"),
-                    cache_write_long_per_million=_optional_rate(rates, "cache_write_long"),
-                )
-    return None
+    key = _match_model_key(model, _MODEL_PROVIDERS)
+    if key is None:
+        return None
+    rates = pricing_table.get(key)
+    if rates is None:
+        return None
+    return ModelPrice(
+        model_key=key,
+        provider=infer_provider(model),
+        input_per_million=float(rates["input"]),
+        output_per_million=float(rates["output"]),
+        cache_read_per_million=_optional_rate(rates, "cache_read"),
+        cache_write_per_million=_optional_rate(rates, "cache_write"),
+        cache_write_long_per_million=_optional_rate(rates, "cache_write_long"),
+    )
 
 
 def _optional_rate(rates: Mapping[str, float], key: str) -> float | None:
