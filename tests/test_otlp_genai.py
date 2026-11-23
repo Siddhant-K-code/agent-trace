@@ -1208,12 +1208,26 @@ class TestGenAIToolCallContent(unittest.TestCase):
                 self.assertTrue(result.startswith(parsed))
                 self.assertEqual(_get_attr(span, "output.value"), result[:500])
 
+    def test_text_that_only_looks_like_json_is_cut_to_the_limit(self):
+        result = "{'content': '" + "c" * 1000
+        span = self._span({"path": "a"}, self._result(result))
+        self.assertEqual(
+            _get_attr(span, "gen_ai.tool.call.result"), json.dumps(result[:498])
+        )
+
     def test_long_list_arguments_stay_valid_json(self):
         span = self._span(["x" * 600, "y" * 600], self._result("ok"))
         parsed = self._content(span, "gen_ai.tool.call.arguments", 1000)
         self.assertEqual(parsed[0], "x" * 600)
         self.assertTrue(("y" * 600).startswith(parsed[1]))
         self.assertEqual(len(_get_attr(span, "input.value")), 1000)
+
+    def test_members_after_a_cut_member_are_dropped(self):
+        # The escape for \x01 does not fit, so the string is cut short and
+        # leaves room for the 1. It must still be dropped.
+        span = self._span(["a" * 993 + "\x01", 1], self._result("ok"))
+        parsed = self._content(span, "gen_ai.tool.call.arguments", 1000)
+        self.assertEqual(parsed, ["a" * 993])
 
     def test_no_arguments_and_no_result_give_no_content(self):
         span = self._span({}, self._result(""))
