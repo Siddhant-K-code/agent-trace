@@ -828,7 +828,7 @@ failed along the way. It is ERROR when any of these holds:
 |---|---|
 | The recorded session status is `timeout` or `terminated` | `timeout` or `terminated` |
 | The session's last model request failed | That request's error type (see [Failed and cancelled model requests](#failed-and-cancelled-model-requests)), else `_OTHER` |
-| A failed tool operation never recovered | The `error_type` or `exception_type` of the last unresolved failure, else `_OTHER` |
+| A failed tool operation's last outcome failed | The `error_type` or `exception_type` of the last unresolved failure, else `_OTHER` |
 
 When more than one holds, the first row in the table names `error.type`. Every
 ERROR root has `error.type`, as
@@ -839,6 +839,8 @@ OK, and has no `error.type`: the export does not claim the session succeeded.
 
 - A session that failed, retried and recovered has an UNSET root. Its failed
   spans below the root keep status ERROR.
+- An operation that recovered and then failed again is unresolved: the root
+  is ERROR, and only the failures after its last success count as unresolved.
 - A failed operation retried with different arguments is a new operation, so
   the failed one stays unresolved and the root is ERROR.
 - An earlier failed model request followed by one that completed leaves the
@@ -855,8 +857,8 @@ without the `agent.strace.` prefix.
 |---|---|
 | `agent.strace.behavior.failed_operation_count` | Tool calls whose result failed or that an `error` ended |
 | `agent.strace.behavior.retry_count` | Tool calls that repeat an earlier call with the same tool name, arguments, command and path |
-| `agent.strace.behavior.recovered_operation_count` | Failed operations whose retry succeeded |
-| `agent.strace.behavior.unresolved_failed_operation_count` | Failed operations with no successful retry |
+| `agent.strace.behavior.recovered_operation_count` | Failed operations whose last outcome was a successful retry |
+| `agent.strace.behavior.unresolved_failed_operation_count` | Failed operations whose last outcome failed |
 | `agent.strace.session_status` | `completed`, `timeout`, `terminated`, or `not_recorded` when there is no `session_end` or a later `session_start` resumed the session |
 | `agent.strace.last_model_request_failed` | Whether the session's last model request failed |
 
