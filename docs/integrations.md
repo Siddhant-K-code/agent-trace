@@ -130,7 +130,7 @@ All paths write the same event stream under `.agent-traces/`, so replay, timelin
 
 ### GitHub Agentic Workflows runs
 
-gh-aw runs need no hooks: each run's `usage` artifact holds an `aw_session.jsonl` file, which `agent-strace import` reads for the Claude, Copilot, Codex, Gemini and Pi engines. Download it with `gh run download <run-id> -n usage -D usage`, then run `agent-strace import usage/aw_session.jsonl`. See [Import GitHub Agentic Workflows runs](gh-aw.md) for what is kept and dropped.
+gh-aw runs need no hooks: a run's `usage` artifact holds an `aw_session.jsonl` file, which `agent-strace import` reads for the Claude, Copilot, Codex, Gemini and Pi engines. Download it with `gh run download <run-id> -n usage -D usage`, then run `agent-strace import usage/aw_session.jsonl`. For a run from before gh-aw wrote that file, `gh aw sessions download <run-id> -o aw_session.jsonl` reconstructs one. See [Import GitHub Agentic Workflows runs](gh-aw.md) for what is kept and dropped.
 
 For Copilot Desktop, use a shared absolute trace directory such as `/Users/alice/.agent-strace/traces`, configure `agent-strace --trace-dir <dir> mcp` as an optional trace-reader MCP server, and wrap each tool-providing MCP server with `agent-strace --trace-dir <dir> record --name <label> -- <original-command> <args>`. See [setup.md](setup.md#github-copilot-desktop) for the full Local server field values and validation commands.
 
