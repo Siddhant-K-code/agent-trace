@@ -30,6 +30,7 @@ from .event_data import (
 from .explain import PHASE_DATA_EVENT_TYPES
 from .inert import inert
 from .models import EventType, TraceEvent
+from .session_outcome import final_session_end_index
 from .store import RefusedSessionError, TraceStore
 
 
@@ -399,9 +400,8 @@ def _rule_no_output(events: list[TraceEvent], cfg: dict) -> list[LintResult]:
     """Session completed with no write or file-modifying tool calls."""
     level = cfg.get("level", LintLevel.WARN)
 
-    has_session_end = any(e.event_type == EventType.SESSION_END for e in events)
-    if not has_session_end:
-        return []  # session still in progress
+    if final_session_end_index([e.event_type for e in events]) is None:
+        return []  # session still in progress, or resumed after its last end
 
     has_write = any(
         e.event_type == EventType.TOOL_CALL

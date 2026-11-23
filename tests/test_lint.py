@@ -434,6 +434,28 @@ class TestRuleNoOutput(unittest.TestCase):
         results = _rule_no_output(events, self._cfg())
         self.assertEqual(results, [])
 
+    def test_no_trigger_when_resumed_after_end(self):
+        events = [
+            _ev(EventType.SESSION_START),
+            _tool_call("Read", file_path="a.py"),
+            _session_end(),
+            _ev(EventType.SESSION_START, source="resume"),
+            _tool_call("Read", file_path="b.py"),
+        ]
+        results = _rule_no_output(events, self._cfg())
+        self.assertEqual(results, [])
+
+    def test_triggers_when_ended_again_after_resume(self):
+        events = [
+            _ev(EventType.SESSION_START),
+            _session_end(),
+            _ev(EventType.SESSION_START, source="resume"),
+            _tool_call("Read", file_path="a.py"),
+            _session_end(),
+        ]
+        results = _rule_no_output(events, self._cfg())
+        self.assertEqual(len(results), 1)
+
 
 # ---------------------------------------------------------------------------
 # Config loading
