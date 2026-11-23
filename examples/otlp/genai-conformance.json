@@ -171,9 +171,51 @@
                   }
                 },
                 {
+                  "key": "agent.strace.behavior.failed_operation_count",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "agent.strace.behavior.retry_count",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "agent.strace.behavior.recovered_operation_count",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "agent.strace.behavior.unresolved_failed_operation_count",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "agent.strace.session_status",
+                  "value": {
+                    "stringValue": "completed"
+                  }
+                },
+                {
+                  "key": "agent.strace.last_model_request_failed",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "error.type",
+                  "value": {
+                    "stringValue": "ShellError"
+                  }
+                },
+                {
                   "key": "metadata",
                   "value": {
-                    "stringValue": "{\"agent_strace\": {\"provider\": \"claude-code\", \"redacted\": true, \"redacted_event_count\": 1, \"evidence.schema_version\": 1, \"evidence.status\": \"partial\", \"evidence.gap_count\": 1, \"evidence.gap_codes\": [\"orphan_tool_result\"], \"evidence.gaps\": [{\"code\": \"orphan_tool_result\", \"kind\": \"observed\", \"event_id\": \"orphan-tool-result\", \"message\": \"tool result 'orphan-tool-result' references unknown parent 'missing-tool-call'\"}], \"provenance\": {\"agent_provider\": \"claude-code\", \"agent_version\": \"fixture\", \"git_repo\": \"https://example.invalid/acme/widget.git\", \"git_branch\": \"feature/otlp-conformance\", \"git_commit\": \"0123456\"}}}"
+                    "stringValue": "{\"agent_strace\": {\"provider\": \"claude-code\", \"redacted\": true, \"redacted_event_count\": 1, \"evidence.schema_version\": 1, \"evidence.status\": \"partial\", \"evidence.gap_count\": 1, \"evidence.gap_codes\": [\"orphan_tool_result\"], \"evidence.gaps\": [{\"code\": \"orphan_tool_result\", \"kind\": \"observed\", \"event_id\": \"orphan-tool-result\", \"message\": \"tool result 'orphan-tool-result' references unknown parent 'missing-tool-call'\"}], \"provenance\": {\"agent_provider\": \"claude-code\", \"agent_version\": \"fixture\", \"git_repo\": \"https://example.invalid/acme/widget.git\", \"git_branch\": \"feature/otlp-conformance\", \"git_commit\": \"0123456\"}, \"behavior.failed_operation_count\": 1, \"behavior.retry_count\": 0, \"behavior.recovered_operation_count\": 0, \"behavior.unresolved_failed_operation_count\": 1, \"session_status\": \"completed\", \"last_model_request_failed\": false}}"
                   }
                 }
               ],

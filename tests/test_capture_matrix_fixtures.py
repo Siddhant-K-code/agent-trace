@@ -875,7 +875,9 @@ class TestCodexFixture(_ReplayChecks, unittest.TestCase):
                 self.assertEqual(meta.errors, before_meta.errors + 1)
                 self.assertEqual(count_session_errors(events), meta.errors)
                 self.assertNotIn(EventType.ERROR, {e.event_type for e in events})
-                self.assertEqual(self.root_span_status(meta, events), 2)
+                # A later request completed, so the session's root is not an
+                # error; the failed request's own span is.
+                self.assertEqual(self.root_span_status(meta, events), 0)
 
                 validation = self.validate(store, meta.session_id)
                 self.assertEqual(validation.summary["state"], "consistent")

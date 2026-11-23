@@ -179,6 +179,42 @@ class TestSessionErrors(unittest.TestCase):
         self.assertEqual(count_session_errors(iter(events)), 2)
 
 
+class TestLastRequestFailure(unittest.TestCase):
+    """Whether the session's last model request failed, for the OTLP root (#561)."""
+
+    def test_no_request(self):
+        self.assertIsNone(failures.last_request_failure([]))
+        self.assertIsNone(failures.last_request_failure([_error("e")]))
+
+    def test_last_request_failed(self):
+        cases = {
+            "failed response": [_request(), _response("r", "req", status="failed",
+                                                      error_type="rate_limit_error")],
+            "linked error": [_request(), _error("e", "req")],
+            "codex response alone": [_codex("a", "completed"), _codex("b", "failed", "boom")],
+        }
+        expected = {"failed response": "rate_limit_error", "linked error": "_OTHER",
+                    "codex response alone": "_OTHER"}
+        for name, events in cases.items():
+            with self.subTest(name):
+                failure = failures.last_request_failure(events)
+                self.assertEqual(failure.error_type, expected[name])
+
+    def test_only_the_last_request_counts(self):
+        cases = {
+            "earlier failed": [_request("r1"), _error("e", "r1"),
+                               _request("r2"), _response("ok", "r2")],
+            "codex earlier failed": [_codex("a", "failed", "boom"), _codex("b", "completed")],
+            "last cancelled": [_request(), _response("r", "req", status="cancelled")],
+            "last has no end": [_request("r1"), _response("x", "r1", status="failed"),
+                                _request("r2")],
+            "unlinked error": [_request(), _response("r", "req"), _error("e")],
+        }
+        for name, events in cases.items():
+            with self.subTest(name):
+                self.assertIsNone(failures.last_request_failure(events))
+
+
 class TestExportsAgree(unittest.TestCase):
     """The GenAI export marks failed exactly the requests the count includes."""
 

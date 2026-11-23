@@ -1,6 +1,7 @@
 """Tests for OTLP exporter."""
 
 import json
+import math
 import os
 import sys
 import unittest
@@ -445,7 +446,7 @@ class TestFailedLLMResponse(unittest.TestCase):
             "gen_ai.operation.name", "gen_ai.request.model", "gen_ai.usage.output_tokens",
         ])
 
-    def test_root_status_does_not_count_failed_requests(self):
+    def test_root_status_follows_the_last_request(self):
         completed = [TraceEvent(event_type=EventType.LLM_RESPONSE, timestamp=1001.0,
                                 data={"status": "completed"})]
         failed = [TraceEvent(event_type=EventType.LLM_RESPONSE, timestamp=1001.0,
@@ -453,7 +454,12 @@ class TestFailedLLMResponse(unittest.TestCase):
         def root(events):
             return self._payload(events)["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
 
-        self.assertEqual(root(failed)["status"], root(completed)["status"])
+        self.assertEqual(root(completed)["status"], {"code": 0})
+        self.assertEqual(root(failed)["status"], {"code": 2})
+        self.assertIn(
+            {"key": "error.type", "value": {"stringValue": "_OTHER"}},
+            root(failed)["attributes"],
+        )
 
 
 def _classic_spans(events):
@@ -572,6 +578,244 @@ class TestRetryLinks(unittest.TestCase):
         meta, events = TestSessionToOTLP()._make_session()
         spans = session_to_otlp(meta, events)["resourceSpans"][0]["scopeSpans"][0]["spans"]
         self.assertFalse(any("links" in span for span in spans))
+
+
+def _call(event_id, ts, command="make"):
+    return TraceEvent(event_type=EventType.TOOL_CALL, event_id=event_id, timestamp=ts,
+                      data={"tool_name": "Bash", "arguments": {"command": command}})
+
+
+def _tool_error(call_id, ts, **data):
+    return TraceEvent(event_type=EventType.ERROR, parent_id=call_id, timestamp=ts,
+                      data={"tool_name": "Bash", "error": "exit 2", **data})
+
+
+def _tool_ok(call_id, ts):
+    return TraceEvent(event_type=EventType.TOOL_RESULT, parent_id=call_id, timestamp=ts,
+                      data={"tool_name": "Bash", "result": "ok"})
+
+
+def _model_request(event_id, ts):
+    return TraceEvent(event_type=EventType.LLM_REQUEST, event_id=event_id, timestamp=ts,
+                      data={"model": "gpt-4o"})
+
+
+def _model_response(request_id, ts, **data):
+    return TraceEvent(event_type=EventType.LLM_RESPONSE, parent_id=request_id, timestamp=ts,
+                      data={"model": "gpt-4o", **data})
+
+
+def _session_end(**data):
+    return TraceEvent(event_type=EventType.SESSION_END, timestamp=1090.0, data=data)
+
+
+_RECOVERED = [
+    _call("c1", 1001.0), _tool_error("c1", 1002.0, error_type="ShellError"),
+    _call("c2", 1003.0), _tool_ok("c2", 1004.0),
+    _session_end(reason="completed"),
+]
+_OUTCOME_KEYS = (
+    "agent.strace.behavior.failed_operation_count",
+    "agent.strace.behavior.retry_count",
+    "agent.strace.behavior.recovered_operation_count",
+    "agent.strace.behavior.unresolved_failed_operation_count",
+    "agent.strace.session_status",
+    "agent.strace.last_model_request_failed",
+)
+
+
+def _attribute_values(span):
+    values = {}
+    for attribute in span["attributes"]:
+        value = attribute["value"]
+        if "intValue" in value:
+            values[attribute["key"]] = int(value["intValue"])
+        else:
+            (values[attribute["key"]],) = value.values()
+    return values
+
+
+class TestRootOutcome(unittest.TestCase):
+    """The session root's status follows how the session ended (#561)."""
+
+    EXPORTERS = (("otlp", session_to_otlp), ("otlp-genai", session_to_otlp_genai))
+    SCENARIOS = {
+        "recovered": (_RECOVERED, None),
+        "unresolved": ([
+            _call("c1", 1001.0), _tool_error("c1", 1002.0, error_type="ShellError"),
+            _call("c2", 1003.0, command="make -k"), _tool_ok("c2", 1004.0),
+        ], "ShellError"),
+        "unresolved without a type": ([_call("c1", 1001.0), _tool_error("c1", 1002.0)], "_OTHER"),
+        "unresolved exception": (
+            [_call("c1", 1001.0), _tool_error("c1", 1002.0, exception_type="OSError")],
+            "OSError",
+        ),
+        "timeout reason": ([_session_end(reason="Timeout after 600s")], "timeout"),
+        "timeout status": (_RECOVERED[:-1] + [_session_end(status="timed-out")], "timeout"),
+        "timeout exit code": ([_session_end(exit_code=124)], "timeout"),
+        "terminated reason": ([_session_end(reason="killed by user")], "terminated"),
+        "terminated exit code": ([_session_end(exit_code=137)], "terminated"),
+        "huge exit code": ([_session_end(exit_code=10**400)], "terminated"),
+        "last model request failed": ([
+            _model_request("r1", 1001.0),
+            _model_response("r1", 1002.0, status="failed", error_type="rate_limit_error"),
+        ], "rate_limit_error"),
+        "last model request failed untyped": ([
+            _model_request("r1", 1001.0),
+            TraceEvent(event_type=EventType.ERROR, parent_id="r1", timestamp=1002.0,
+                       data={"error": "connection reset"}),
+        ], "_OTHER"),
+        "earlier model request failed": ([
+            _model_request("r1", 1001.0), _model_response("r1", 1002.0, status="failed"),
+            _model_request("r2", 1003.0), _model_response("r2", 1004.0, output_tokens=2),
+        ], None),
+        "last model request cancelled": ([
+            _model_request("r1", 1001.0), _model_response("r1", 1002.0, status="cancelled"),
+        ], None),
+        "session status wins": (
+            [_call("c1", 1001.0), _tool_error("c1", 1002.0, error_type="ShellError"),
+             _session_end(exit_code=124)],
+            "timeout",
+        ),
+        "model failure wins over tool failure": ([
+            _call("c1", 1001.0), _tool_error("c1", 1002.0, error_type="ShellError"),
+            _model_request("r1", 1003.0),
+            _model_response("r1", 1004.0, status="failed", error_type="overloaded"),
+        ], "overloaded"),
+        "last unresolved failure names the type": ([
+            _call("c1", 1001.0), _tool_error("c1", 1002.0, error_type="First"),
+            _call("c2", 1003.0, command="test"), _tool_error("c2", 1004.0, error_type="Last"),
+        ], "Last"),
+        "no session end": ([], None),
+    }
+
+    def _root(self, convert, events, **kwargs):
+        meta = SessionMeta(session_id="s1", agent_name="claude-code", started_at=1000.0,
+                           ended_at=1100.0, errors=1)
+        return convert(meta, events, **kwargs)["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+
+    def test_root_status_and_error_type(self):
+        for name, convert in self.EXPORTERS:
+            for scenario, (events, error_type) in self.SCENARIOS.items():
+                with self.subTest(exporter=name, scenario=scenario):
+                    root = self._root(convert, events)
+                    attrs = _attribute_values(root)
+                    if error_type is None:
+                        self.assertEqual(root["status"], {"code": 0})
+                        self.assertNotIn("error.type", attrs)
+                    else:
+                        self.assertEqual(root["status"], {"code": 2})
+                        self.assertEqual(attrs["error.type"], error_type)
+
+    def test_every_error_root_carries_error_type(self):
+        # Recording Errors: error.type MUST be set when the operation fails.
+        for name, convert in self.EXPORTERS:
+            for scenario, (events, _) in self.SCENARIOS.items():
+                with self.subTest(exporter=name, scenario=scenario):
+                    root = self._root(convert, events)
+                    attrs = _attribute_values(root)
+                    self.assertEqual(root["status"]["code"] == 2, "error.type" in attrs)
+                    self.assertNotEqual(attrs.get("error.type"), "")
+
+    def test_outcome_attributes(self):
+        for name, convert in self.EXPORTERS:
+            with self.subTest(exporter=name):
+                attrs = _attribute_values(self._root(convert, _RECOVERED))
+                self.assertEqual({key: attrs[key] for key in _OUTCOME_KEYS}, {
+                    "agent.strace.behavior.failed_operation_count": 1,
+                    "agent.strace.behavior.retry_count": 1,
+                    "agent.strace.behavior.recovered_operation_count": 1,
+                    "agent.strace.behavior.unresolved_failed_operation_count": 0,
+                    "agent.strace.session_status": "completed",
+                    "agent.strace.last_model_request_failed": False,
+                })
+                self.assertEqual(attrs["agent.errors"], 1)
+
+        attrs = _attribute_values(self._root(session_to_otlp_genai, self.SCENARIOS[
+            "last model request failed"][0]))
+        self.assertTrue(attrs["agent.strace.last_model_request_failed"])
+        self.assertEqual(attrs["agent.strace.session_status"], "not_recorded")
+        metadata = json.loads(attrs["metadata"])["agent_strace"]
+        self.assertTrue(metadata["last_model_request_failed"])
+        self.assertEqual(metadata["behavior.unresolved_failed_operation_count"], 0)
+
+    def test_failed_child_spans_keep_their_status(self):
+        for name, convert in self.EXPORTERS:
+            with self.subTest(exporter=name):
+                meta = SessionMeta(session_id="s1", agent_name="claude-code",
+                                   started_at=1000.0, ended_at=1100.0)
+                root, *children = convert(meta, _RECOVERED)["resourceSpans"][0][
+                    "scopeSpans"][0]["spans"]
+                self.assertEqual(root["status"], {"code": 0})
+                self.assertEqual(
+                    sorted(child["status"]["code"] for child in children), [0, 2],
+                )
+
+    def test_root_outcome_false_leaves_the_root_unset_without_outcome(self):
+        for name, convert in self.EXPORTERS:
+            with self.subTest(exporter=name):
+                root = self._root(convert, self.SCENARIOS["session status wins"][0],
+                                  root_outcome=False)
+                attrs = _attribute_values(root)
+                self.assertEqual(root["status"], {"code": 0})
+                self.assertFalse(set(_OUTCOME_KEYS + ("error.type",)) & set(attrs))
+
+    def test_subagent_roots(self):
+        from agent_trace.otlp import node_tree_to_otlp
+        from agent_trace.subagent import SessionNode
+
+        parent = SessionNode(
+            meta=SessionMeta(session_id="parent", agent_name="claude-code",
+                             started_at=1000.0, ended_at=1100.0),
+            events=[_call("task", 1001.0), _tool_ok("task", 1050.0)],
+        )
+        parent.children.append(SessionNode(
+            meta=SessionMeta(session_id="child", agent_name="worker", started_at=1001.0,
+                             ended_at=1049.0, parent_session_id="parent",
+                             parent_event_id="task", depth=1),
+            events=[_call("c1", 1002.0), _tool_error("c1", 1003.0, error_type="ShellError")],
+        ))
+        for genai in (False, True):
+            with self.subTest(genai=genai):
+                spans = node_tree_to_otlp(parent, genai=genai)["resourceSpans"][0][
+                    "scopeSpans"][0]["spans"]
+                roots = {span["spanId"]: span for span in spans}
+                parent_root = roots[_to_span_id("root-parent")]
+                child_root = roots[_to_span_id("root-child")]
+                self.assertEqual(parent_root["status"], {"code": 0})
+                self.assertNotIn("error.type", _attribute_values(parent_root))
+                attrs = _attribute_values(child_root)
+                self.assertEqual(child_root["status"], {"code": 2})
+                self.assertEqual(attrs["error.type"], "ShellError")
+                self.assertEqual(
+                    attrs["agent.strace.behavior.unresolved_failed_operation_count"], 1,
+                )
+                self.assertEqual(attrs["agent.strace.session_status"], "not_recorded")
+
+    def test_unusable_event_fields_do_not_stop_the_export(self):
+        arguments = {"x": math.nan, "y": LONE}
+        events = [
+            # The converter never reads this replaced call or the session_end.
+            TraceEvent(event_type=EventType.TOOL_CALL, event_id="c0", timestamp=1000.5,
+                       data=["not", "an", "object"]),
+            TraceEvent(event_type=EventType.TOOL_CALL, event_id="c0", timestamp=1000.6,
+                       data={"tool_name": "Read"}),
+            TraceEvent(event_type=EventType.TOOL_CALL, event_id="c1", timestamp=1001.0,
+                       data={"tool_name": "Bash", "arguments": arguments}),
+            _tool_error("c1", 1002.0),
+            TraceEvent(event_type=EventType.TOOL_CALL, event_id="c2", timestamp=1003.0,
+                       data={"tool_name": "Bash", "arguments": arguments}),
+            _tool_ok("c2", 1004.0),
+            TraceEvent(event_type=EventType.SESSION_END, timestamp=1006.0, data="done"),
+        ]
+        for name, convert in self.EXPORTERS:
+            with self.subTest(exporter=name):
+                root = self._root(convert, events)
+                attrs = _attribute_values(root)
+                self.assertEqual(attrs["agent.strace.session_status"], "completed")
+                self.assertEqual(attrs["agent.strace.behavior.failed_operation_count"], 1)
+                self.assertEqual(attrs["agent.strace.behavior.recovered_operation_count"], 1)
+                self.assertEqual(root["status"], {"code": 0})
 
 
 if __name__ == "__main__":

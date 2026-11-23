@@ -312,11 +312,25 @@ class TestRepresentativeFixtureExports(unittest.TestCase):
             .startswith(REDACTION_MARKER)
         )
 
+    def _assert_recovered_root(self, attributes):
+        self.assertNotIn("error.type", attributes)
+        self.assertEqual(
+            (
+                attributes["agent.strace.behavior.failed_operation_count"],
+                attributes["agent.strace.behavior.recovered_operation_count"],
+                attributes["agent.strace.behavior.unresolved_failed_operation_count"],
+            ),
+            ("1", "1", "0"),
+        )
+        self.assertEqual(attributes["agent.errors"], "1")
+
     def test_otlp_export_keeps_failure_retry_recovery_and_unparented_orphan(self):
         payload = json.loads(self._export("otlp"))
         root, *children = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
         self.assertFalse(root.get("parentSpanId"))
-        self.assertEqual(root["status"]["code"], 2)
+        # The retry recovered the failed operation, so the root is not an error.
+        self.assertEqual(root["status"], {"code": 0})
+        self._assert_recovered_root(_otlp_attributes(root))
         failed_call = self.events[self.fixture_ids.index(self.failure_id)].parent_id
         failure_message = self.events[self.fixture_ids.index(self.failure_id)].data["error"]
 
@@ -348,7 +362,8 @@ class TestRepresentativeFixtureExports(unittest.TestCase):
         payload = json.loads(self._export("otlp-genai"))
         root, *children = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
         root_attributes = _otlp_attributes(root)
-        self.assertEqual(root["status"]["code"], 2)
+        self.assertEqual(root["status"], {"code": 0})
+        self._assert_recovered_root(root_attributes)
         self.assertIs(root_attributes["agent.strace.redacted"], True)
         self.assertEqual(root_attributes["agent.strace.redacted_event_count"], "1")
         self.assertEqual(root_attributes["agent.strace.evidence.status"], "partial")
