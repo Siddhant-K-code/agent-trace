@@ -24,6 +24,7 @@ from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.optimize import (
     FailurePattern,
     OptimizeProposal,
+    _build_llm_prompt,
     _call_llm,
     _extract_patterns_heuristic,
     _parse_llm_patterns,
@@ -142,6 +143,40 @@ class TestExtractPatternsHeuristic(unittest.TestCase):
         patterns = _extract_patterns_heuristic({"s1": events})
         for p in patterns:
             self.assertTrue(p.proposed_instruction.strip())
+
+
+class TestBuildLlmPromptRuns(unittest.TestCase):
+    def _summary(self, events: list[TraceEvent]) -> str:
+        prompt = _build_llm_prompt({"sess0000": events}, "AGENTS.md", "")
+        lines = [l for l in prompt.splitlines() if l.startswith("- Session sess0000")]
+        self.assertEqual(len(lines), 1)
+        return lines[0]
+
+    def test_run_at_end_of_session_reported(self):
+        events = [_tool("Read"), _tool("Bash"), _tool("Bash"), _tool("Bash"), _tool("Bash")]
+        self.assertEqual(
+            self._summary(events),
+            "- Session sess0000: 5 tool calls, 0 errors, consecutive runs: Bash x4",
+        )
+
+    def test_whole_session_one_run_reported(self):
+        events = [_tool("Bash"), _tool("Bash"), _tool("Bash")]
+        self.assertIn("consecutive runs: Bash x3", self._summary(events))
+
+    def test_run_in_middle_reported(self):
+        events = [_tool("Bash"), _tool("Bash"), _tool("Bash"), _tool("Read")]
+        self.assertEqual(
+            self._summary(events),
+            "- Session sess0000: 4 tool calls, 0 errors, consecutive runs: Bash x3",
+        )
+
+    def test_middle_and_final_runs_both_reported_in_order(self):
+        events = [_tool("Bash")] * 3 + [_tool("Read")] * 3
+        self.assertIn("consecutive runs: Bash x3, Read x3", self._summary(events))
+
+    def test_final_pair_not_reported(self):
+        events = [_tool("Read"), _tool("Bash"), _tool("Bash")]
+        self.assertNotIn("consecutive runs", self._summary(events))
 
 
 # ---------------------------------------------------------------------------
