@@ -25,6 +25,11 @@ from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
 import re
 
+try:  # keeps product telemetry off in this process and its children
+    import _no_telemetry  # noqa: F401
+except ImportError:  # pragma: no cover - run as a package module
+    from tests import _no_telemetry  # noqa: F401
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -197,6 +202,60 @@ class TestParseCustomRules(unittest.TestCase):
         )
         rules = _parse_custom_rules(yaml)
         self.assertEqual(len(rules), 2)
+
+    def test_later_section_does_not_overwrite_last_rule(self):
+        yaml = (
+            "rules:\n"
+            '  - pattern: "acme-[0-9]+"\n'
+            '    replacement: "<CUSTOMER>"\n'
+            "settings:\n"
+            "  replacement: keep\n"
+            '  pattern: "x"\n'
+        )
+        rules = _parse_custom_rules(yaml)
+        self.assertEqual(
+            [(r.pattern.pattern, r.replacement) for r in rules],
+            [("acme-[0-9]+", "<CUSTOMER>")],
+        )
+
+    def test_rules_after_other_section_and_second_rules_section(self):
+        yaml = (
+            "settings:\n"
+            "  pattern: ignored\n"
+            "rules:\n"
+            "  - pattern: 'foo'\n    replacement: '<foo>'\n"
+            "other:\n"
+            "  pattern: ignored\n"
+            "rules:\n"
+            "- pattern: 'bar'\n  replacement: '<bar>'\n"
+        )
+        rules = _parse_custom_rules(yaml)
+        self.assertEqual(
+            [(r.pattern.pattern, r.replacement) for r in rules],
+            [("foo", "<foo>"), ("bar", "<bar>")],
+        )
+
+    def test_rules_only_file_parses_all_fields(self):
+        yaml = (
+            "# custom rules\n"
+            "rules:\n"
+            "  - pattern: 'foo'\n"
+            "    replacement: '<foo>'\n"
+            "    description: foo names\n"
+            "\n"
+            "  - pattern: 'bar'\n"
+            "- pattern: 'baz'\n"
+            "  replacement: '<baz>'\n"
+        )
+        rules = _parse_custom_rules(yaml)
+        self.assertEqual(
+            [(r.pattern.pattern, r.replacement, r.description) for r in rules],
+            [
+                ("foo", "<foo>", "foo names"),
+                ("bar", "<REDACTED>", "custom: bar"),
+                ("baz", "<baz>", "custom: baz"),
+            ],
+        )
 
 
 # ---------------------------------------------------------------------------
