@@ -10,7 +10,6 @@ import argparse
 import fnmatch
 import hashlib
 import json
-import os
 import re
 import sys
 import time as _time
@@ -25,6 +24,7 @@ from .freshness import _parse_scope_from_agents_md
 from .lint import lint_session
 from .models import EventType, SessionMeta, TraceEvent, usable_count
 from .postmortem import _detect_agents_md_violations, _load_agents_md
+from .skills import _resolve, file_reads
 from .store import TraceStore
 
 
@@ -240,37 +240,20 @@ def context_file_load_events(
     workspace_root: Path,
     context_file: str,
 ) -> list[TraceEvent]:
-    """Return recorded reads of one repository context file."""
-    target = workspace_root / context_file
-    try:
-        resolved_target = target.resolve()
-    except OSError:
-        resolved_target = target
-    found = []
-    for event in events:
-        if not isinstance(event.data, dict):
-            continue
-        if event.event_type == EventType.FILE_READ:
-            pass
-        elif event.event_type == EventType.TOOL_CALL:
-            tool_name = str(event.data.get("tool_name") or event.data.get("tool") or "").lower()
-            if tool_name not in {"read", "read_file", "open_file", "view", "get_file_contents"}:
-                continue
-        else:
-            continue
-        raw = _event_path(event)
-        if not raw:
-            continue
-        candidate = Path(os.path.expanduser(raw))
-        if not candidate.is_absolute():
-            candidate = workspace_root / candidate
-        try:
-            candidate = candidate.resolve()
-        except OSError:
-            pass
-        if candidate == resolved_target:
-            found.append(event)
-    return found
+    """Return recorded reads of one repository context file.
+
+    An event reads the files :func:`skills.file_reads` returns, with relative
+    paths resolved against *workspace_root*.
+    """
+    root = str(workspace_root)
+    target = _resolve(context_file, root)
+    if not target:
+        return []
+    return [
+        event
+        for event in events
+        if any(resolved == target for _, resolved in file_reads(event, root))
+    ]
 
 
 def _tool_calls(events: list[TraceEvent]) -> int:

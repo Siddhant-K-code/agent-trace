@@ -72,14 +72,71 @@ optional fields.
 
 | Kind | Required matcher | Meaning |
 |---|---|---|
-| `file_read` | `path` glob | A matching file read after a load |
-| `file_write` | `path` glob | A matching file write or edit after a load |
-| `tool_call` | `tool` | An exact tool name after a load |
+| `file_read` | `path` glob | An event that reads a matching file, after a load. Shell reads count |
+| `file_write` | `path` glob | An event that writes or edits a matching file, after a load. Shell commands never count |
+| `tool_call` | `tool` | A call to that tool after a load. Names compare case-insensitively |
 | `test` | none | A recorded test command after a load |
 
 The normal `skill` and `should_trigger` fields remain the skill load
 expectation. This avoids a second skill detector or duplicate expectation
 schema.
+
+### Reads and writes
+
+An event reads a file when it is one of these:
+
+- A `file_read` event. It names its file in `path`, `file_path` or `uri`.
+- A call to `read`, `read_file`, `open_file`, `view` or `get_file_contents`,
+  in any case. Each path argument counts.
+- A `str_replace_editor` or `str_replace_based_edit_tool` call whose
+  `command` is `view`. Each path argument counts.
+- A tool call whose shell command runs `awk`, `bat`, `cat`, `head`, `less`,
+  `more`, `nl`, `sed` or `tail`. Each word after the program that is not an
+  option counts as a file. `sed -i` edits, so it is not a read. A `cd`
+  earlier in the command changes the directory that later files resolve
+  against. Only the command itself is parsed: the call's `command` or `cmd`
+  argument, else the event's `command` field.
+
+An event writes a file when it is one of these:
+
+- A `file_write` event. It names its file in `path`, `file_path` or `uri`.
+- A call to `apply_patch`, `create`, `delete_file`, `edit`, `edit_file`,
+  `file_edit`, `insert`, `multiedit`, `notebookedit`, `patch`, `replace`,
+  `search_replace`, `str_replace`, `str_replace_based_edit_tool`,
+  `str_replace_editor`, `write`, `write_file` or `write_to_file`, in any
+  case. Each path argument counts. An `apply_patch` call whose arguments are
+  the patch text, as GitHub Copilot CLI stores them, writes each file the
+  patch adds, updates, deletes or moves to. A `str_replace_editor` or
+  `str_replace_based_edit_tool` call whose `command` is `view` only reads.
+
+Shell commands count as reads but never as writes. A file written by
+`echo x > RELEASE_NOTES.md` or `sed -i` does not meet a `file_write`.
+
+The path arguments are `file_path`, `path`, `absolute_path`, `filePath`,
+`target_file`, `notebook_path` and `uri`. They are read from `arguments` or
+`tool_input`, also when stored as a JSON string.
+
+An instruction counts as loaded when an event reads it by the same rule. The
+read must resolve to the instruction path under the session root described
+below. A write is not a load.
+
+### Paths
+
+Each session resolves its paths against the first `cwd` its `session_start`
+events record, as skill detection does. A session with no recorded cwd uses
+the workspace. That is the run's temp workspace in a live run. With
+`--from-traces` it is the case `fixture_dir`, else `--workspace`, else the
+current directory. Each session in a run directory uses its own cwd. So a
+run saved with `--save-traces` and scored later with `--from-traces`
+resolves against the temp workspace it ran in, even after that directory is
+gone.
+
+A relative path joins that root. A `path` glob is tried on the path
+relative to the root, or on the full path for a file outside the root. It
+is then tried on the path as stored. `./.github/x.md` matches `.github/*`.
+`../src/x.py` is outside the root, so it does not match `src/*`.
+
+Instruction availability still comes from the workspace on disk.
 
 ## Evidence states
 

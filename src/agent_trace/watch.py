@@ -50,11 +50,11 @@ from typing import Any, TextIO
 from .cost import TokenCounter, _usage_dollars
 from .compaction import CompactionCheckpointWatcher
 from .event_data import (
-    EDIT_TOOLS,
-    PATH_KEYS,
     NonObjectEventDataError,
     UnusableTimestampError,
     event_arguments,
+    event_paths as _event_paths,
+    is_edit as _is_edit,
     left_out_event_warning,
     left_out_timestamp_warning,
     patch_paths,
@@ -1870,51 +1870,6 @@ class WatchState:
             "consecutive_test_failures": self.consecutive_test_failures,
             "duration_minutes": elapsed / 60.0,
         }
-
-
-# FILE_WRITE and FILE_READ events name their file under these keys.
-_FILE_EVENT_PATH_KEYS = ("path", "file_path", "uri")
-# Editor tools that only read the file when their command is "view".
-_VIEW_COMMAND_TOOLS = frozenset({"str_replace_editor", "str_replace_based_edit_tool"})
-
-
-def _event_paths(event: TraceEvent) -> list[str]:
-    """Return the file paths an event names, as stored, in order, once each.
-
-    A tool call names each PATH_KEYS argument and, for apply_patch with the
-    patch stored as text, each file the patch adds, updates, deletes or moves
-    to. A FILE_WRITE or FILE_READ event names its path, file_path or uri.
-    Other events name none.
-    """
-    if not isinstance(event.data, Mapping):
-        return []
-    if event.event_type in (EventType.FILE_WRITE, EventType.FILE_READ):
-        values = [event.data.get(key) for key in _FILE_EVENT_PATH_KEYS]
-    elif event.event_type == EventType.TOOL_CALL:
-        args, raw = tool_arguments(event)
-        values = [args.get(key) for key in PATH_KEYS]
-        if raw is not None and str_field(event.data, "tool_name", "").lower() == "apply_patch":
-            values.extend(patch_paths(raw))
-    else:
-        return []
-    return list(dict.fromkeys(v for v in values if isinstance(v, str) and v))
-
-
-def _is_edit(event: TraceEvent) -> bool:
-    """Return True if *event* writes, edits, creates or deletes the files it names.
-
-    That is a FILE_WRITE event, or a call to an EDIT_TOOLS tool or
-    str_replace. An editor call whose command is "view" only reads. Shell
-    commands are never edits, even when they write files.
-    """
-    if event.event_type == EventType.FILE_WRITE:
-        return True
-    if event.event_type != EventType.TOOL_CALL or not isinstance(event.data, Mapping):
-        return False
-    name = str_field(event.data, "tool_name", "").lower()
-    if name in _VIEW_COMMAND_TOOLS:
-        return tool_arguments(event)[0].get("command") != "view"
-    return name in EDIT_TOOLS or name == "str_replace"
 
 
 def _event_key(event: TraceEvent) -> str:
