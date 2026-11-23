@@ -23,7 +23,14 @@ from .event_data import (
 )
 from .health import CaptureMatrix, assess_session, load_capture_matrix
 from .live_verify import LiveCaptureError, inspect_live_capture
-from .models import EventType, SessionMeta, TraceEvent, usable_text, usable_time
+from .models import (
+    EventType,
+    SessionMeta,
+    TraceEvent,
+    usable_object,
+    usable_text,
+    usable_time,
+)
 from .review import _tool_command, build_review_projection
 from .store import TraceStore
 
@@ -89,7 +96,7 @@ def _recorded_capture_identity(
         "capture_method": capture_method,
         "agent_name": agent_name or None,
         "command": command or None,
-        "attribution": dict(meta.attribution),
+        "attribution": dict(usable_object(meta.attribution)),
     }
 
 
@@ -409,7 +416,7 @@ def build_session_review(
             "ended_at": ended_at,
             "duration_ms": duration_ms,
             "active": ended_at is None,
-            "redacted_metadata": bool(meta.redacted),
+            "redacted_metadata": meta.redacted is True,
             **_recorded_capture_identity(
                 meta,
                 events,

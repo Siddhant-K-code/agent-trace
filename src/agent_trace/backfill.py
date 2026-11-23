@@ -322,12 +322,18 @@ def _check_erasure_audit(store: TraceStore) -> None:
         raise _Skip("unreadable_erasure_audit", str(exc)) from exc
 
 
-def _child_tenants(store: TraceStore) -> dict[str, set[str]]:
-    """Map parent session ID to the tenant IDs of its existing children."""
-    children: dict[str, set[str]] = {}
+def _child_tenants(store: TraceStore) -> dict[str, set[str | None]]:
+    """Map parent session ID to the tenant IDs of its existing children.
+
+    A child tenant that is not a string maps to None. None never matches the
+    parent's tenant, so the child blocks the rebuild. Reading it as "" would
+    let an untenanted parent rebuild while the child's tenant is unknown.
+    """
+    children: dict[str, set[str | None]] = {}
     for meta in store.list_sessions():
         if meta.parent_session_id:
-            children.setdefault(meta.parent_session_id, set()).add(meta.tenant_id)
+            tenant = meta.tenant_id if isinstance(meta.tenant_id, str) else None
+            children.setdefault(meta.parent_session_id, set()).add(tenant)
     return children
 
 
@@ -354,7 +360,7 @@ def _examine(
     agent_name: str,
     deleting: set[str],
     tagging: set[str],
-    children: dict[str, set[str]],
+    children: dict[str, set[str | None]],
 ) -> tuple[BackfillItem, SessionMeta | None]:
     item = BackfillItem(
         session_id=entry.name,

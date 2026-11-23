@@ -65,6 +65,15 @@ class AggregatedStats:
     total_duration_ms: float = 0
 
 
+def parent_event_id_of(meta: SessionMeta) -> str:
+    """Return the ID of the tool_call that spawned this session, or "".
+
+    meta.json can hold any JSON value, so a parent_event_id that is not a
+    string reads as missing. The session is then not tied to an event.
+    """
+    return usable_text(meta.parent_event_id)
+
+
 # ---------------------------------------------------------------------------
 # Tree building
 # ---------------------------------------------------------------------------
@@ -296,12 +305,14 @@ def _children_by_event(node: SessionNode) -> dict[str, list[SessionNode]]:
     """Map each parent_event_id to the child sessions it spawned.
 
     One tool_call can start more than one child session. Each list keeps
-    the order of node.children, which is by start time.
+    the order of node.children, which is by start time. A child whose
+    parent_event_id is not a non-empty string is in no list.
     """
     children_by_event: dict[str, list[SessionNode]] = {}
     for child in node.children:
-        if child.meta.parent_event_id:
-            children_by_event.setdefault(child.meta.parent_event_id, []).append(child)
+        parent_event_id = parent_event_id_of(child.meta)
+        if parent_event_id:
+            children_by_event.setdefault(parent_event_id, []).append(child)
     return children_by_event
 
 
@@ -331,7 +342,7 @@ def require_tree_timestamps(node: SessionNode, expand: bool = True) -> None:
     format_tree reads the timestamp of every event of each session it
     renders: *node* and, when *expand* is set, each child it inlines under
     the tool_call that spawned it. The base time is the root's started_at,
-    which is not checked.
+    or its first event's timestamp when started_at is not a usable time.
     """
     require_usable_timestamps(node.events, session_id=node.meta.session_id)
     if not expand:
@@ -358,7 +369,9 @@ def format_tree(
     node : SessionNode
         Root of the tree to render.
     base_ts : float, optional
-        Timestamp origin for relative offsets. Defaults to root session start.
+        Timestamp origin for relative offsets. Defaults to the root session's
+        start, or to its first event's timestamp when meta.json holds a start
+        that is not a usable time.
     expand : bool
         If True, inline subagent events under their parent tool_call.
     last_child : bool
@@ -371,7 +384,11 @@ def format_tree(
     errors, each run of whitespace becomes one space first.
     """
     if base_ts is None:
-        base_ts = node.meta.started_at
+        base_ts = usable_time(node.meta.started_at)
+        if base_ts is None:
+            # As plain replay does. A root with no events shows no offset,
+            # so nothing reads its base.
+            base_ts = node.events[0].timestamp if node.events else 0.0
 
     indent = _indent(level, last_child=last_child)
     w = out.write
@@ -505,8 +522,10 @@ def _duration_seconds(meta: SessionMeta) -> float:
     total_ms = usable_number(meta.total_duration_ms)
     if total_ms:
         return total_ms / 1000
-    if meta.ended_at and meta.started_at:
-        return max(0.0, meta.ended_at - meta.started_at)
+    started = usable_time(meta.started_at)
+    ended = usable_time(meta.ended_at)
+    if ended and started:
+        return max(0.0, ended - started)
     return 0.0
 
 
@@ -535,7 +554,7 @@ def tree_to_dict(
         "agent": usable_text(node.meta.agent_name) or usable_text(node.meta.command),
         "depth": node.depth,
         "parent_session_id": node.meta.parent_session_id,
-        "parent_event_id": node.meta.parent_event_id,
+        "parent_event_id": parent_event_id_of(node.meta),
         "cost_usd": round(costs.get(node.meta.session_id, 0.0), 6),
         "tool_calls": usable_count(node.meta.tool_calls),
         "llm_requests": usable_count(node.meta.llm_requests),

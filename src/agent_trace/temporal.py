@@ -25,7 +25,7 @@ from .event_data import (
     require_usable_session_times,
     require_usable_timestamps,
 )
-from .models import SessionMeta, TraceEvent
+from .models import SessionMeta, TraceEvent, usable_text
 from .otlp import (
     OTLP_GENAI_TIMESTAMP_EVENT_TYPES,
     export_otlp_payload,
@@ -134,11 +134,12 @@ def session_to_temporal_otlp(
     and then NonObjectEventDataError when an event whose data the conversion
     reads is not an object. Then raises UnusableTimestampError when an event
     of a type the conversion reads, the session's started_at, or its ended_at
-    when it is not None, is not a Unix time in seconds.
+    when it is not None, is not a Unix time in seconds. A trace_id,
+    parent_span_id or trace_flags that is not a string reads as missing.
     """
-    trace_id = meta.trace_id.lower()
-    parent_span_id = meta.parent_span_id.lower()
-    trace_flags = (meta.trace_flags or "01").lower()
+    trace_id = usable_text(meta.trace_id).lower()
+    parent_span_id = usable_text(meta.parent_span_id).lower()
+    trace_flags = (usable_text(meta.trace_flags) or "01").lower()
     if not trace_id or not parent_span_id:
         raise ValueError(
             "session has no Temporal trace context; run watch with "
