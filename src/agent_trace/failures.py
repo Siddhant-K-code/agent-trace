@@ -218,6 +218,52 @@ def count_session_errors(events: Iterable[TraceEvent]) -> int:
     return session_errors(events).errors
 
 
+def last_request_failure(events: Iterable[TraceEvent]) -> LLMFailure | None:
+    """Return how the session's last model request failed, or ``None``.
+
+    The last model request is the last ``llm_request``, or a later
+    ``llm_response`` that answers no request: Codex records a model request
+    as its response alone. It failed when an ``error`` is linked to it or a
+    response for it failed, matched as in :func:`session_errors`; the first
+    of these gives the failure. A cancelled request, and one with no
+    recorded end, did not fail.
+    """
+    requests: Pairer[int] = llm_pairer()
+    request_positions: dict[str, int] = {}
+    failures: dict[int, LLMFailure] = {}
+    last: int | None = None
+
+    def request_named(event: TraceEvent) -> int | None:
+        parent_id = parent_id_of(event)
+        return request_positions.get(parent_id) if parent_id else None
+
+    for index, event in enumerate(events):
+        if event.event_type in LLM_REQUEST_TYPES:
+            requests.add(event, index)
+            event_id = event_id_of(event)
+            if event_id:
+                request_positions[event_id] = index
+            last = index
+        elif event.event_type == EventType.ERROR:
+            request = requests.match_parent(event)
+            if request is None:
+                request = request_named(event)
+            if request is not None:
+                failure = llm_failure(event)
+                if failure is not None:
+                    failures.setdefault(request, failure)
+        elif event.event_type in LLM_RESPONSE_TYPES:
+            request = requests.match(event)
+            if request is None:
+                request = request_named(event)
+            if request is None:
+                request = last = index
+            failure = llm_failure(event)
+            if failure is not None and not failure.cancelled:
+                failures.setdefault(request, failure)
+    return failures.get(last) if last is not None else None
+
+
 __all__ = [
     "CANCELLED_STATUSES",
     "ERROR_MESSAGE_LIMIT",
@@ -229,6 +275,7 @@ __all__ = [
     "count_session_errors",
     "error_text",
     "is_failed_response",
+    "last_request_failure",
     "llm_failure",
     "response_failure",
     "session_errors",

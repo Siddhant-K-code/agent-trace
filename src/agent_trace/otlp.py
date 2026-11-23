@@ -42,6 +42,7 @@ from .failures import (
     ERROR_TYPE_OTHER,
     LLMFailure,
     error_text as _error_text,
+    last_request_failure,
     llm_failure,
 )
 from .models import (
@@ -70,6 +71,7 @@ from .pairing import (
     llm_pairer,
     tool_pairer,
 )
+from .session_outcome import behavior_analysis, recorded_session_status
 from .store import TraceStore
 
 if TYPE_CHECKING:
@@ -625,6 +627,75 @@ def _evidence_attributes(
     }
 
 
+# Recorded session statuses that end the root span in ERROR. Each is its own
+# error.type.
+_FAILED_SESSION_STATUSES = frozenset({"timeout", "terminated"})
+
+
+def _tool_error_type(event: TraceEvent) -> str:
+    """Return the error.type of a failed tool outcome with object data."""
+    return (
+        str_field(event.data, "error_type").strip()
+        or str_field(event.data, "exception_type").strip()
+        or ERROR_TYPE_OTHER
+    )
+
+
+def _outcome_event(event: TraceEvent) -> TraceEvent:
+    """Return ``event`` with object data and a number timestamp.
+
+    Data that is not an object reads as empty. An unusable timestamp becomes
+    NaN, which orders neither before nor after another event.
+    """
+    data = event.data if isinstance(event.data, Mapping) else {}
+    timestamp = usable_number(event.timestamp)
+    if data is event.data and timestamp is not None:
+        return event
+    return replace(
+        event,
+        data=data,
+        timestamp=math.nan if timestamp is None else timestamp,
+    )
+
+
+def _root_outcome(events: list[TraceEvent]) -> tuple[dict[str, Any], dict]:
+    """Return the session root's outcome attributes and its span status.
+
+    The root is ERROR when the recorded session status is timeout or
+    terminated, the last model request failed, or a failed tool operation
+    never recovered. Its error.type is then the session status, else the
+    failed request's error type, else the error type of the last unresolved
+    failure. Any other root is UNSET, never OK: the export does not claim
+    the session succeeded. Failed spans below the root keep their own status.
+    """
+    usable = [_outcome_event(event) for event in events]
+    analysis = behavior_analysis(usable)
+    behavior = analysis.summary
+    session_status = recorded_session_status(usable)
+    request_failure = last_request_failure(usable)
+    attributes: dict[str, Any] = {
+        "agent.strace.behavior.failed_operation_count": behavior.failed_operation_count,
+        "agent.strace.behavior.retry_count": behavior.retry_count,
+        "agent.strace.behavior.recovered_operation_count": behavior.recovered_operation_count,
+        "agent.strace.behavior.unresolved_failed_operation_count": (
+            behavior.unresolved_failed_operation_count
+        ),
+        "agent.strace.session_status": session_status,
+        "agent.strace.last_model_request_failed": request_failure is not None,
+    }
+    if session_status in _FAILED_SESSION_STATUSES:
+        error_type = session_status
+    elif request_failure is not None:
+        error_type = request_failure.error_type
+    elif analysis.unresolved_failures:
+        error_type = _tool_error_type(usable[analysis.unresolved_failures[-1]])
+    else:
+        return attributes, {"code": 0}  # STATUS_CODE_UNSET
+    # Recording Errors: error.type MUST be set when the operation fails.
+    attributes[_SEMCONV_ERROR_TYPE] = error_type
+    return attributes, {"code": 2}  # STATUS_CODE_ERROR
+
+
 def _io_value(value: object, limit: int) -> tuple[str, str]:
     """Serialize an OpenInference input or output value with a MIME type."""
     if isinstance(value, (dict, list)):
@@ -876,6 +947,8 @@ def session_to_otlp(
     service_name: str = "agent-trace",
     parent_span_id: str = "",
     parent_trace_id: str = "",
+    *,
+    root_outcome: bool = True,
 ) -> dict:
     """Convert an agent-trace session to OTLP JSON trace format.
 
@@ -886,6 +959,10 @@ def session_to_otlp(
             span (used for subagent hierarchy).
         parent_trace_id: When set, the root span shares this trace ID so all
             subagent spans appear in the same trace in the backend.
+        root_outcome: When True, the root span carries the session's
+            outcome attributes and its status follows the session's end
+            state (see ``_root_outcome``). Pass False when ``events`` is only
+            part of a session: the root then has neither and stays UNSET.
     """
     # Use parent trace ID for subagents so they appear in the same trace
     trace_id = parent_trace_id if parent_trace_id else _to_trace_id(meta.session_id)
@@ -910,6 +987,9 @@ def session_to_otlp(
     else:
         gen_ai_system = "unknown"
 
+    outcome_attributes, root_status = (
+        _root_outcome(events) if root_outcome else ({}, {"code": 0})
+    )
     root_attrs = _make_attributes({
         # Standard OTel resource attributes
         "agent.name": usable_text(meta.agent_name) or "unknown",
@@ -923,6 +1003,7 @@ def session_to_otlp(
         _SEMCONV_SYSTEM: gen_ai_system,
         _SEMCONV_OP: "agent.session",
         **_conversation_attributes(meta),
+        **outcome_attributes,
     })
 
     # Collect span events (user prompts, assistant responses, decisions)
@@ -1129,7 +1210,7 @@ def session_to_otlp(
         "endTimeUnixNano": root_end,
         "attributes": root_attrs,
         "events": root_events,
-        "status": {"code": 2 if usable_count(meta.errors) > 0 else 0},  # ERROR or UNSET
+        "status": root_status,
     }
     # Link to parent span for subagent hierarchy
     if parent_span_id:
@@ -1373,6 +1454,8 @@ def session_to_otlp_genai(
     service_name: str = "agent-trace",
     parent_span_id: str = "",
     parent_trace_id: str = "",
+    *,
+    root_outcome: bool = True,
 ) -> dict:
     """Convert a session to OTLP JSON using the OTel GenAI semantic conventions.
 
@@ -1385,7 +1468,10 @@ def session_to_otlp_genai(
     - Tool calls become ``execute_tool {tool}`` INTERNAL spans with
       gen_ai.tool.name and gen_ai.tool.call.id; a failed one gets error.type
     - The root is an ``invoke_agent`` INTERNAL span with gen_ai.agent.name
-      when the session names its agent
+      when the session names its agent. Its status follows the session's
+      end state, and an ERROR root carries error.type (see
+      ``_root_outcome``); ``root_outcome=False`` leaves it UNSET for a
+      partial batch of events
     - Root, LLM and tool spans carry gen_ai.conversation.id when the agent
       supplied its own session ID
     - Error events use the OTel exception event format
@@ -1442,6 +1528,10 @@ def session_to_otlp_genai(
     if depth:
         root_attr_values["agent.strace.depth"] = depth
     root_attr_values.update(_root_messages(events))
+    outcome_attributes, root_status = (
+        _root_outcome(events) if root_outcome else ({}, {"code": 0})
+    )
+    root_attr_values.update(outcome_attributes)
     root_attr_values["metadata"] = _openinference_metadata(root_attr_values)
     root_attrs = _make_attributes(root_attr_values)
 
@@ -1562,11 +1652,7 @@ def session_to_otlp_genai(
                 **_event_trace_attributes(event, "response"),
             })
 
-            error_type = (
-                str_field(event.data, "error_type").strip()
-                or str_field(event.data, "exception_type").strip()
-                or ERROR_TYPE_OTHER
-            )
+            error_type = _tool_error_type(event)
             error_attrs: dict[str, Any] = {
                 _SEMCONV_TOOL_NAME: tool_name,
                 _SEMCONV_OP: _OP_EXECUTE_TOOL,
@@ -1678,7 +1764,7 @@ def session_to_otlp_genai(
         "endTimeUnixNano": root_end,
         "attributes": root_attrs,
         "events": root_events,
-        "status": {"code": 2 if usable_count(meta.errors) > 0 else 0},  # ERROR or UNSET
+        "status": root_status,
     }
     if parent_span_id:
         root_span["parentSpanId"] = parent_span_id

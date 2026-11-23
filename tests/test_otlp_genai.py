@@ -577,13 +577,15 @@ class TestGenAISpanStatus(unittest.TestCase):
             "chat gpt-4o": {"code": 0},
         })
 
-    def test_root_with_errors_and_error_spans_are_unchanged(self):
+    def test_unlinked_error_leaves_root_unset_and_error_spans_unchanged(self):
+        # An error linked to no tool call is not an unresolved operation,
+        # so it does not end the root in ERROR; its own span still is.
         meta = SessionMeta(session_id="s1", agent_name="claude-code", errors=1)
         events = self._session() + [TraceEvent(
             event_type=EventType.ERROR, data={"tool_name": "Read", "error": "missing"},
         )]
         statuses = self._statuses(meta, events)
-        self.assertEqual(statuses["invoke_agent claude-code"], {"code": 2})
+        self.assertEqual(statuses["invoke_agent claude-code"], {"code": 0})
         self.assertEqual(statuses["execute_tool Read"], {"code": 2, "message": "missing"})
         self.assertEqual(statuses["execute_tool Bash"], {"code": 0})
         self.assertEqual(statuses["chat gpt-4o"], {"code": 0})

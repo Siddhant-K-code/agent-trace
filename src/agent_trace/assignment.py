@@ -44,6 +44,7 @@ from .fileutil import (
     unlock_descriptor,
 )
 from .models import EventType, SessionMeta, TraceEvent
+from .session_outcome import recorded_session_status as _recorded_session_status
 from .store import TraceStore, validate_stored_id
 
 
@@ -997,40 +998,6 @@ def _safe_token_fields(data: dict[str, Any]) -> dict[str, int]:
                 result[output_key] = value
                 break
     return result
-
-
-def _recorded_session_status(events: list[TraceEvent]) -> str:
-    end = next((event for event in reversed(events) if event.event_type == EventType.SESSION_END), None)
-    if end is None:
-        return "not_recorded"
-    data = end.data if isinstance(end.data, dict) else {}
-    explicit = data.get("status") or data.get("session_status")
-    if isinstance(explicit, str):
-        normalized = explicit.strip().lower().replace("-", "_")
-        if normalized in {"completed", "complete", "success", "succeeded"}:
-            return "completed"
-        if normalized in {"timeout", "timed_out"}:
-            return "timeout"
-        if normalized in {
-            "killed", "cancelled", "canceled", "interrupted", "terminated",
-            "failed", "failure", "aborted", "error",
-        }:
-            return "terminated"
-    reason = " ".join(
-        value for key in ("reason", "stop_reason", "termination_reason")
-        if isinstance((value := data.get(key)), str)
-    ).lower()
-    if "timeout" in reason or "timed out" in reason:
-        return "timeout"
-    if any(word in reason for word in ("kill", "cancel", "interrupt", "terminate")):
-        return "terminated"
-    exit_code = data.get("exit_code")
-    if isinstance(exit_code, (int, float)) and not isinstance(exit_code, bool) and math.isfinite(float(exit_code)):
-        if float(exit_code) == 124:
-            return "timeout"
-        if float(exit_code) != 0:
-            return "terminated"
-    return "completed"
 
 
 def _alias(mapping: dict[str, str], raw: str, prefix: str, width: int = 3) -> str:

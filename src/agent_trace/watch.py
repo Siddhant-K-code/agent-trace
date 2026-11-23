@@ -1710,8 +1710,11 @@ class EventStreamer:
             if not kept:
                 continue
             try:
+                # A batch is not the whole session, so its root cannot say
+                # how the session ended.
                 payload = session_to_otlp_genai(
-                    meta, kept, service_name=self.config.service_name
+                    meta, kept, service_name=self.config.service_name,
+                    root_outcome=False,
                 )
             except Exception as exc:
                 self._report(_otlp_conversion_failed_line(len(kept), exc), len(kept))

@@ -185,6 +185,11 @@ agent-strace export <session-id> --format otlp-genai --include-subagents \
   parent span of the call that started it (its `parent_event_id`). When that
   is not a span in the parent's payload, or is not a non-empty string, the
   subagent's root is under the parent session's root.
+- Each subagent's root span gets its status, `error.type` and outcome
+  attributes from its own session's events (see
+  [Session root status](#session-root-status)). The parent's root reads only
+  the parent's events, such as the result of the call that started the
+  subagent.
 - The subagents are those `agent-strace tree` shows, up to the same depth. A
   session in the tree twice is exported once.
 - Codex subagents run inside their parent's session, so they are already in
@@ -506,6 +511,7 @@ With `--stream-otlp`, watch drops trailing slashes from the URL path, then appen
 Watch sends events in batches: when `--stream-batch-size` events are waiting, when `--stream-flush-interval` seconds have passed since the last POST, and when watch stops. Each POST carries only the spans built from its own batch, so the backend receives the session in pieces:
 
 - Every POST includes the session root span again, with the same trace ID and span ID. A backend may show it more than once or keep only one copy. Phoenix keeps the first copy.
+- The root span's status is always UNSET, with no `error.type` and no outcome attributes, because a batch does not show how the session ended. See [Session root status](#session-root-status).
 - A tool call whose call and result land in different batches arrives as two spans, one from each batch.
 
 For one complete set of spans per session, export it after it ends with `agent-strace export --format otlp-genai` (see [Per-backend setup](#per-backend-setup)).
@@ -694,16 +700,79 @@ document for span status.
 |---|---|
 | A tool call with a result, a completed model request, a successful A2A call | UNSET (`{"code": 0}`) |
 | A request or tool call still pending at the end | UNSET (`{"code": 0}`) |
-| A session root span when the session's `errors` is 0 | UNSET (`{"code": 0}`) |
+| A session root span that did not fail, as below | UNSET (`{"code": 0}`) |
 | An `error`, a failed or cancelled model request, a failed A2A call | ERROR (`{"code": 2}`); error and model request spans carry the recorded error text, at most 200 characters, as `message` |
-| A session root span when the session's `errors` is above 0 | ERROR (`{"code": 2}`) |
+| A session root span that failed, as below | ERROR (`{"code": 2}`) with `error.type` |
 
-The root span reads the session's stored `errors`, which counts failed model
-requests as well as `error` events (see
-[Session error counts](#session-error-counts)). A session whose only error is a
-failed model request, such as a Codex request that failed, has an ERROR root
-span. A cancelled request alone leaves it UNSET. For a session recorded by an
-earlier version, the stored count leaves failed requests out.
+#### Session root status
+
+A session's root span, and each subagent's root span with
+`--include-subagents`, follows how the session ended, not whether anything
+failed along the way. It is ERROR when any of these holds:
+
+| Condition | `error.type` |
+|---|---|
+| The recorded session status is `timeout` or `terminated` | `timeout` or `terminated` |
+| The session's last model request failed | That request's error type (see [Failed and cancelled model requests](#failed-and-cancelled-model-requests)), else `_OTHER` |
+| A failed tool operation never recovered | The `error_type` or `exception_type` of the last unresolved failure, else `_OTHER` |
+
+When more than one holds, the first row in the table names `error.type`. Every
+ERROR root has `error.type`, as
+[Recording errors](https://github.com/open-telemetry/semantic-conventions/blob/v1.45.0/docs/general/recording-errors.md)
+requires when an operation fails; OTel's GenAI conformance check reports a
+missing one as `error_type_missing_on_error`. Any other root is UNSET, never
+OK, and has no `error.type`: the export does not claim the session succeeded.
+
+- A session that failed, retried and recovered has an UNSET root. Its failed
+  spans below the root keep status ERROR.
+- A failed operation retried with different arguments is a new operation, so
+  the failed one stays unresolved and the root is ERROR.
+- An earlier failed model request followed by one that completed leaves the
+  root UNSET. A cancelled last request does not fail the root.
+- An `error` that names no tool call and no model request, such as a proxy
+  failure, is no operation. It keeps its ERROR span and counts in
+  `agent.errors`, but it alone does not fail the root.
+
+The root also has these attributes, in both exports. In `otlp-genai` the
+OpenInference `metadata` JSON repeats them in its `agent_strace` object,
+without the `agent.strace.` prefix.
+
+| Attribute | Value |
+|---|---|
+| `agent.strace.behavior.failed_operation_count` | Tool calls whose result failed or that an `error` ended |
+| `agent.strace.behavior.retry_count` | Tool calls that repeat an earlier call with the same tool name, arguments, command and path |
+| `agent.strace.behavior.recovered_operation_count` | Failed operations whose retry succeeded |
+| `agent.strace.behavior.unresolved_failed_operation_count` | Failed operations with no successful retry |
+| `agent.strace.session_status` | `completed`, `timeout`, `terminated`, or `not_recorded` when there is no `session_end` |
+| `agent.strace.last_model_request_failed` | Whether the session's last model request failed |
+
+A tool result failed when it has `success` or `ok` false, a nonzero
+`exit_code`, or a `status` of `error`, `failed`, `failure`, `cancelled` or
+`timeout`. The session status comes from the last `session_end`: its `status`
+(`timed_out` and `timeout` are `timeout`; `killed`, `cancelled`,
+`interrupted`, `failed`, `aborted` and similar are `terminated`), else a
+`reason`, `stop_reason` or `termination_reason` that mentions a timeout, a
+kill, a cancel, an interrupt, a termination, an abort or an error (Copilot's
+`error` and `abort` reasons are `terminated`; `complete` and `user_exit` are
+`completed`), else an `exit_code` of 124
+(`timeout`) or any other nonzero code (`terminated`). `completed` is the
+recorded process status, not task success. The evidence packet and the
+assignment `session_status` scorer ([hiring.md](hiring.md)) use the same
+counts and status.
+
+The root no longer reads the session's stored `errors`. Earlier versions set
+the root ERROR whenever `errors` was above 0, so a recovered session exported
+as a failed trace, and the ERROR root had no `error.type`. A query, alert or
+dashboard that counts ERROR roots now counts fewer of them; to keep counting
+sessions with any error, filter on `agent.errors` above 0.
+
+`watch --stream-otlp` cannot apply this rule: each POST carries one batch, not
+the session's end state, so its root span is always UNSET, with no
+`error.type` and none of the attributes above. Export the session after it ends
+for its root status.
+
+`session_to_otlp` and `session_to_otlp_genai` take `root_outcome=False` to
+build the root that way.
 
 No span has status OK. The OpenTelemetry trace API reserves OK for application
 developers and operators who have validated an operation. Earlier versions set
@@ -847,9 +916,9 @@ error count share that definition, in `src/agent_trace/failures.py`, so they
 agree. It applies to:
 
 - `errors` in `meta.json`, as the hooks write it while they capture a session
-  and as `backfill-meta` derives it. The root span's status and `agent.errors`
-  attribute read it, so a session with a failed Codex request now exports a
-  root span with ERROR status.
+  and as `backfill-meta` derives it. The export root span's `agent.errors`
+  attribute reads it. The root span's status does not; see
+  [Session root status](#session-root-status).
 - `agent_strace.session.error_rate`, and the error rate in `baseline`,
   `drift`, `sample` and `dashboard --trend`.
 - `timeline`, `stats`, `dashboard`, `pr-comment`, the `eval` `error_count`
@@ -884,8 +953,8 @@ needed:
   stored count and the count from the events.
 - Commands that read only `meta.json` keep the stored count for an old
   session: `list`, `diff`, `replay`, `share`, `standup`, the subagent `tree`,
-  the web dashboard, the MCP server's session details, the export root span
-  status and `agent.errors`, and the Langfuse trace's `errors` metadata.
+  the web dashboard, the MCP server's session details, the export root span's
+  `agent.errors`, and the Langfuse trace's `errors` metadata.
 - `validate` reports a stored count that left out failed requests as the
   `info` finding `legacy_error_summary`, not as a contradiction. A count of 0
   is not written to `meta.json`, so `validate` has nothing to compare for a

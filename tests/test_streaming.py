@@ -696,6 +696,31 @@ class TestOtlpStreamNonObjectData(_ReceiverTestCase):
         )
 
 
+class TestOtlpStreamRootStatus(_ReceiverTestCase):
+    """A streamed batch is not the whole session, so its root claims no outcome (#561)."""
+
+    def test_root_is_unset_without_outcome_attributes(self) -> None:
+        events = [
+            _event("tool_call", {"tool_name": "Bash", "arguments": {"command": "make"}}, "c1",
+                   ts=2.0),
+            _event("error", {"tool_name": "Bash", "error": "exit 2", "error_type": "ShellError"},
+                   "e1", parent_id="c1", ts=3.0),
+            _event("session_end", {"exit_code": 124}, "end", ts=4.0),
+        ]
+        posts, stderr = self._stream(events)
+        self.assertEqual(stderr, "")
+        (post,) = posts
+        root, tool = json.loads(post[1])["resourceSpans"][0]["scopeSpans"][0]["spans"]
+        self.assertEqual(root["status"], {"code": 0})
+        keys = {attribute["key"] for attribute in root["attributes"]}
+        self.assertNotIn("error.type", keys)
+        self.assertFalse(any(
+            key.startswith("agent.strace.behavior.") or key == "agent.strace.session_status"
+            for key in keys
+        ))
+        self.assertEqual(tool["status"]["code"], 2)
+
+
 class TestOtlpStreamConversionFailure(_ReceiverTestCase):
     """A conversion error is reported with a count, and later batches are sent."""
 
