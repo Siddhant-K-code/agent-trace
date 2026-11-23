@@ -565,6 +565,15 @@ class TestToolSpanIdentity(unittest.TestCase):
                      "gen_ai.tool.call.id": call_id},
                 )
 
+    def test_error_that_ends_a_model_request_keeps_its_own_tool_name(self):
+        request = TraceEvent(event_type=EventType.LLM_REQUEST, event_id="req1", timestamp=1001.0,
+                             data={"model": "gpt-4o"})
+        error = TraceEvent(event_type=EventType.ERROR, parent_id="req1", timestamp=1002.0,
+                           data={"tool_name": "web_search", "error": "rate limited"})
+        _, span = _classic_spans([request, error])
+        self.assertEqual((span["name"], span["kind"]), ("web_search", 1))
+        self.assertEqual(_attrs(span), {"tool.name": "web_search", "error.message": "rate limited"})
+
     def test_call_without_a_result_has_the_identity_of_a_call_with_one(self):
         _, span = _classic_spans([self._call()])
         self.assertEqual((span["name"], span["kind"]), ("tool/Bash", 3))
