@@ -1422,6 +1422,22 @@ class TestCli(SkillsTestBase):
         self.assertIn("skipped 1 unreadable", err)
         self.assertEqual(json.loads(out)["sessions"], 1)
 
+    def test_from_claude_skips_logs_without_claude_records(self):
+        claude_dir = self.tmp / "claude"
+        self._claude_transcript(claude_dir)
+        project = claude_dir / "projects" / "-tmp-repo"
+        (project / "empty1.jsonl").write_bytes(b"")
+        (project / "rollout1.jsonl").write_text(json.dumps(
+            {"type": "session_meta", "payload": {"id": "r1", "cwd": str(self.repo)}}) + "\n")
+
+        code, out, err = self._run_both("--from-claude", "--claude-dir", str(claude_dir),
+                                        "--min-sessions", "1", "--format", "json")
+
+        self.assertEqual(code, 0)
+        self.assertIn("Read 1 Claude Code session(s)", err)
+        self.assertIn("skipped 2 unreadable", err)
+        self.assertEqual(json.loads(out)["sessions"], 1)
+
     def test_from_claude_reads_transcript_with_a_line_it_cannot_use(self):
         stamp = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(time.time() - 30))
 

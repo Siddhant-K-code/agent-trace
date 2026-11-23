@@ -24,6 +24,17 @@ from typing import Any, Iterator
 from .models import EventType, SessionMeta, TraceEvent, usable_number, usable_time
 from .redact import redact_data
 from .store import TraceStore, resolve_trace_dir, validate_session_id
+from .transcript_import import transcript_format
+
+# Record types that only a Claude Code transcript writes. A log without one
+# is not a Claude transcript, whatever the file is called.
+_CLAUDE_RECORD_TYPES = ("user", "assistant", "system", "summary")
+
+# transcript_format() name -> (what the file is, agent, `setup --cli` value).
+_OTHER_AGENT_LOGS = {
+    "codex": ("a Codex rollout", "Codex", "codex"),
+    "copilot": ("a GitHub Copilot CLI events.jsonl", "Copilot", "copilot"),
+}
 
 _TOKEN_KEYS = (
     "input_tokens",
@@ -99,6 +110,28 @@ def _resolve(path: str | Path) -> Path:
 
 class _UnreadableLog(OSError):
     """The session log exists but cannot be opened or read."""
+
+
+class NotClaudeTranscript(ValueError):
+    """The log is not a Claude Code transcript.
+
+    ``format`` is ``codex`` or ``copilot`` when the first record shows the log
+    is that agent's, else ``""``: no line is a Claude transcript record.
+    """
+
+    def __init__(self, fmt: str = "") -> None:
+        self.format = fmt
+        if fmt in _OTHER_AGENT_LOGS:
+            what, agent, cli = _OTHER_AGENT_LOGS[fmt]
+            message = (
+                f"it is {what}; import reads Claude Code transcripts only. "
+                f"Capture {agent} with hooks: agent-strace setup --cli {cli}"
+            )
+        else:
+            message = (
+                "no Claude Code transcript records; import reads Claude Code transcripts only"
+            )
+        super().__init__(message)
 
 
 def _log_lines(path: Path) -> Iterator[str]:
@@ -306,6 +339,10 @@ def import_jsonl(
         The log does not exist.
     OSError
         The log cannot be opened or read.
+    NotClaudeTranscript
+        A ``ValueError``: the log is a Codex rollout or a Copilot
+        ``events.jsonl``, or no line is a Claude Code transcript record.
+        Nothing is written.
     ValueError
         Neither the log nor its file name holds a usable session ID, or the
         store refuses the session.
@@ -332,6 +369,9 @@ def _import_jsonl(
     first_ts = 0.0
     last_ts = 0.0
     entries: list[dict[str, Any]] = []
+    first_record = True
+    other_format = ""
+    claude_records = False
 
     for line in _log_lines(path):
         line = line.strip()
@@ -347,6 +387,14 @@ def _import_jsonl(
             continue  # Not JSON, nested too deep, or a number too long to convert.
         if not isinstance(raw, dict) or _too_deep(raw):
             continue
+
+        if first_record:
+            first_record = False
+            other_format = transcript_format(raw)
+            if other_format:
+                break
+        if raw.get("type") in _CLAUDE_RECORD_TYPES:
+            claude_records = True
 
         # Skip queue operations
         if raw.get("type") in ("queue-operation",):
@@ -367,6 +415,11 @@ def _import_jsonl(
             session_id = _usable_session_id(raw.get("sessionId"))
             extra_meta["git_branch"] = raw.get("gitBranch", "")
             extra_meta["version"] = raw.get("version", "")
+
+    # Refused before the file-name fallback, so a log that is not a Claude
+    # transcript never becomes a session named after its file, like "events".
+    if other_format or not claude_records:
+        raise NotClaudeTranscript(other_format)
 
     # Only Claude's own sessionId becomes gen_ai.conversation.id; the file-name
     # fallback below is not a native conversation ID.

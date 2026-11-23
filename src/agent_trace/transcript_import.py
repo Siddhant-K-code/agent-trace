@@ -96,6 +96,20 @@ def _text(value: object) -> str:
     return value if isinstance(value, str) else ""
 
 
+def transcript_format(first: Mapping[str, Any]) -> str:
+    """Name the transcript whose first record is ``first``: ``codex``, ``copilot`` or ``""``.
+
+    A Codex rollout starts with ``session_meta``. A Copilot ``events.jsonl``
+    starts with ``session.start`` whose producer is ``copilot-agent``.
+    """
+    kind = _text(first.get("type"))
+    if kind == "session_meta":
+        return "codex"
+    if kind == "session.start" and _text(_mapping(first.get("data")).get("producer")) == "copilot-agent":
+        return "copilot"
+    return ""
+
+
 def _timestamp(value: object) -> float | None:
     """Parse a timestamp; return ``None`` unless it is a Unix time in seconds.
 
@@ -580,7 +594,7 @@ def import_codex_rollout(path: str | os.PathLike[str], store: TraceStore) -> str
         raw_ts = record.get("timestamp")
         if first:
             first = False
-            if kind != "session_meta":
+            if transcript_format(record) != "codex":
                 return "not_rollout"
             if _text(payload.get("thread_source")) == "guardian_review":
                 return "review"
