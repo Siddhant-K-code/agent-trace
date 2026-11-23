@@ -39,7 +39,12 @@ from .hooks import (
     _PROVIDER_AGENT,
 )
 from .models import EventType, SessionMeta, TraceEvent, usable_text
-from .store import CorruptSessionMetaError, RefusedSessionError, TraceStore
+from .store import (
+    AmbiguousSessionPrefixError,
+    CorruptSessionMetaError,
+    RefusedSessionError,
+    TraceStore,
+)
 
 CAPTURE_MATRIX_RESOURCE = "capture_matrix.json"
 CAPTURE_MATRIX_SCHEMA_VERSION = 1
@@ -522,7 +527,7 @@ def _resolve_session(store: TraceStore, requested: str | None) -> str | None:
         if store.session_exists(requested):
             return requested
         return store.find_session(requested)
-    except CorruptSessionMetaError:
+    except (CorruptSessionMetaError, AmbiguousSessionPrefixError):
         raise
     except ValueError:
         return None

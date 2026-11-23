@@ -38,8 +38,9 @@ from .evidence_health import EvidenceHealthStatus, assess_evidence_health
 from .failures import count_session_errors
 from .freeze import RegressionFixture, compare_fixtures, extract_steps
 from .health import declared_capture
+from .inert import inert
 from .models import EventType, SessionMeta, TraceEvent
-from .store import validate_workspace_id
+from .store import AmbiguousSessionPrefixError, validate_workspace_id
 
 
 TRACE_SCHEMA_VERSION = "1.0.0"
@@ -894,7 +895,9 @@ def _resolve_target(args: argparse.Namespace) -> Path | None:
         if exact:
             return exact[0]
         matches = [item for item in candidates if item.name.startswith(requested)]
-        return matches[0] if len(matches) == 1 else None
+        if len(matches) > 1:
+            raise AmbiguousSessionPrefixError(requested, [item.name for item in matches])
+        return matches[0] if matches else None
     if not candidates:
         return None
     return max(
@@ -930,7 +933,12 @@ def cmd_validate(args: argparse.Namespace) -> int:
                 )
         return 0 if result["matched"] else 1
 
-    target = _resolve_target(args)
+    try:
+        target = _resolve_target(args)
+    except AmbiguousSessionPrefixError as exc:
+        # These names are directory names that no ID check has passed.
+        sys.stderr.write(f"Error: {inert(exc)}\n")
+        return 1
     if target is None:
         requested = getattr(args, "target", None)
         sys.stderr.write(

@@ -24,6 +24,7 @@ from agent_trace.mcp_server import (
     _tool_search_events,
     _tool_skills,
 )
+from agent_trace.explain import explain_session, format_explain
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import CorruptSessionMetaError, TraceStore
 
@@ -953,6 +954,57 @@ class TestCorruptSessionMetaTools(unittest.TestCase):
                     }))
                     self.assertTrue(r["result"]["isError"])
                     self.assertEqual(json.loads(r["result"]["content"][0]["text"]), self.error)
+
+
+class TestAmbiguousSessionPrefixTools(unittest.TestCase):
+    """A tool refuses a prefix that matches two sessions, and an exact ID wins."""
+
+    def setUp(self):
+        self.store = _make_store()
+        self.addCleanup(shutil.rmtree, self.store.base_dir, True)
+        for session_id in ("aaaa111100000001", "aaaa222200000002", "bbbb333300000003"):
+            _add_session(self.store, session_id, events=[_tool_call("Bash")])
+
+    def _call(self, name, arguments):
+        return _handle(self.store, _rpc("tools/call", {"name": name, "arguments": arguments}))
+
+    def test_each_tool_returns_the_ambiguity_error(self):
+        error = json.dumps({"error": "session ID prefix aaaa matches 2 sessions: "
+                                     "aaaa111100000001, aaaa222200000002"})
+        calls = [
+            ("get_session", {"session_id": "aaaa"}),
+            ("search_events", {"session_id": "aaaa"}),
+            ("get_session_summary", {"session_id": "aaaa"}),
+            ("diff_sessions", {"session_a": "aaaa", "session_b": "bbbb"}),
+            ("diff_sessions", {"session_a": "bbbb", "session_b": "aaaa"}),
+            ("health", {"session_id": "aaaa"}),
+            ("skills", {"session_id": "aaaa"}),
+            ("review", {"session_ids": ["aaaa"], "branch": "main"}),
+        ]
+        for name, arguments in calls:
+            with self.subTest(name=name, arguments=arguments):
+                r = self._call(name, arguments)
+                self.assertTrue(r["result"]["isError"])
+                self.assertEqual(r["result"]["content"][0]["text"], error)
+
+    def test_an_exact_id_wins_in_either_scan_order(self):
+        _add_session(self.store, "run1", events=[_tool_call("Bash")])
+        _add_session(self.store, "run10", events=[_tool_call("Read")])
+        summary = io.StringIO()
+        format_explain(explain_session(self.store, "run1"), out=summary)
+        real_iterdir = Path.iterdir
+        for reverse in (False, True):
+            with self.subTest(reverse=reverse), patch.object(
+                type(self.store.base_dir), "iterdir",
+                lambda path, reverse=reverse: iter(sorted(real_iterdir(path), reverse=reverse)),
+            ):
+                r = self._call("get_session_summary", {"session_id": "run1"})
+                self.assertEqual(r["result"]["content"][0]["text"], summary.getvalue())
+                r = self._call("health", {"session_id": "run1"})
+                self.assertEqual(json.loads(r["result"]["content"][0]["text"])["session_id"], "run1")
+                r = self._call("diff_sessions", {"session_a": "run1", "session_b": "run10"})
+                diff = json.loads(r["result"]["content"][0]["text"])
+                self.assertEqual((diff["session_a"], diff["session_b"]), ("run1", "run10"))
 
 
 class TestReadOnlyStore(unittest.TestCase):

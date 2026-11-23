@@ -24,6 +24,22 @@ An empty `AGENT_TRACE_DIR` is treated as unset. Relative paths resolve against t
 
 ---
 
+## Session IDs
+
+A command that takes a session ID also takes a prefix of one.
+
+- An exact ID wins, even when a longer ID starts with it. `run1` selects `run1`, not `run10`.
+- A prefix that matches one session selects that session.
+- A prefix that matches two or more sessions is refused. Nothing is read or written, and the command exits 1 with one line:
+
+```
+Error: session ID prefix aaaa matches 2 sessions: aaaa111100000001, aaaa222200000002
+```
+
+The line names at most 5 IDs in sorted order, then `and N more`. Give a longer prefix or the full ID. `agent-strace list` shows the IDs. A session with a corrupt `meta.json` counts as a match. `cost --tenant` counts only that tenant's sessions. `review`, `pr-comment`, `setup --verify --live`, the server and MCP tools report the refusal their own way. See [`list`](#list).
+
+---
+
 ## Session capture
 
 ### `record`
@@ -424,21 +440,23 @@ read every session in the store: `compliance export` without a session ID and
 Error: session bbbb2222 has a corrupt meta.json: metadata nests more than 128 levels
 ```
 
-A session ID prefix gets the same line and exit code when it matches no
-readable session but does match a session with a corrupt `meta.json`. If a
-readable session also matches, the command uses it. If several corrupt sessions
-match, the line names the one with the lowest ID. `review` and `pr-comment`
-print it after their own prefix, as in
-`review: session <id> has a corrupt meta.json: <reason>`. `review` exits 2 and
-`pr-comment` exits 1.
-`setup --verify --live --session` names it in its own failure line and exits 1.
-`cognitive-debt` keeps `Error: trace input could not be read safely`.
+A session ID prefix gets the same line and exit code when the corrupt session
+is the only match. A prefix that also matches another session, readable or
+corrupt, is refused as [ambiguous](#session-ids), with the line that names the
+matches. `review` and `pr-comment` print either line after their own prefix, as
+in `review: session <id> has a corrupt meta.json: <reason>`. `review` exits 2
+and `pr-comment` exits 1.
+`setup --verify --live --session` names either one in its own failure line and
+exits 1.
+`cognitive-debt` keeps `Error: trace input could not be read safely` for a
+corrupt session, and prints the ambiguous prefix line as is.
 `cost --tenant` skips a corrupt session, because its tenant cannot be read.
 `agent-strace server` answers `GET /sessions/<prefix>` and
-`GET /sessions/<prefix>/events` with 400 and the message. With `--dashboard`,
-the session's events and its review, compare, share, and OTLP actions answer
-the same way. MCP tools return it as an error. `verify` checks only
-`events.ndjson`, so it still checks a session given by its full ID.
+`GET /sessions/<prefix>/events` with 400 and the message, for a corrupt session
+and for an ambiguous prefix. With `--dashboard`, the session's events and its
+review, compare, share, and OTLP actions answer the same way. MCP tools return
+it as an error. `verify` checks only `events.ndjson`, so it still checks a
+session given by its full ID.
 
 To read the session again, move its `meta.json` out of the session directory.
 Then run `agent-strace backfill-meta --apply`, which rebuilds the metadata from
@@ -3341,7 +3359,7 @@ A session whose `meta.json` names another session is skipped the way
 [`list`](#list) describes for a corrupt `meta.json`. `list` leaves it out, and
 so do `health`, `stats`, `standup`, and `lint` without a session ID. So does
 `GET /sessions`, so `org-report --endpoint` does not see it. Commands given its
-ID, or a prefix that matches no readable session, print the corrupt
+ID, or a prefix that matches only that session, print the corrupt
 `meta.json` line that [`list`](#list) shows. So does `a2a-tree` for a
 sub-session. The bulk exports above refuse the store, and `audit-readiness`
 lists the session.

@@ -1097,6 +1097,54 @@ class TestGetCorruptSessionMeta(unittest.TestCase):
                     self.assertEqual(_get(base + path)[0], expected)
 
 
+class TestGetAmbiguousSessionPrefix(unittest.TestCase):
+    """A prefix that matches two sessions answers 400 and names both."""
+
+    ERROR = {
+        "error": "session ID prefix aaaa matches 2 sessions: aaaa111100000001, aaaa222200000002"
+    }
+    REFUSED = [
+        "/sessions/aaaa",
+        "/sessions/aaaa/events",
+        "/api/sessions/aaaa/events",
+        "/api/sessions/aaaa/review",
+        "/api/sessions/aaaa/compare?other=bbbb",
+        "/api/sessions/bbbb/compare?other=aaaa",
+        "/api/sessions/aaaa/share?mode=minimized",
+        "/api/sessions/aaaa/otlp",
+    ]
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store = TraceStore(tmp.name, use_workspace_env=False)
+        for started, session_id in enumerate(
+            ("aaaa111100000001", "aaaa222200000002", "bbbb333300000003"), 1
+        ):
+            store.create_session(SessionMeta(session_id=session_id, started_at=float(started)))
+        server = HTTPServer(
+            ("127.0.0.1", 0), _make_handler(store, threading.Lock(), dashboard=True)
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.base = f"http://127.0.0.1:{server.server_address[1]}"
+
+    def test_session_routes_answer_400_and_name_the_matches(self):
+        for path in self.REFUSED:
+            with self.subTest(path=path):
+                stderr = io.StringIO()
+                with mock.patch("sys.stderr", stderr):
+                    status, body = _get(self.base + path)
+                self.assertEqual((status, json.loads(body)), (400, self.ERROR))
+                self.assertEqual(_without_access_log(stderr.getvalue()), [])
+        for path in ("/sessions/aaaa1", "/sessions/aaaa1/events"):
+            with self.subTest(path=path):
+                self.assertEqual(_get(self.base + path)[0], 200)
+
+
 # ---------------------------------------------------------------------------
 # send_event_to_endpoint helper
 # ---------------------------------------------------------------------------

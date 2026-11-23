@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover - run as a package module
     from tests.test_store import NOT_UTF8_LINE, OTHER_SESSION, event_line, write_session_lines
 
 from agent_trace import health
-from agent_trace.cli import _telemetry_command_properties, build_parser, main
+from agent_trace.cli import _run_handler, _telemetry_command_properties, build_parser, main
 from agent_trace.disclosure import build_disclosure_preview
 from agent_trace.evidence_health import EvidenceHealthStatus
 from agent_trace.health import (
@@ -1264,6 +1264,19 @@ class TestSessionResolution(_HealthBase):
                 self.assertEqual(code, 1)
                 self.assertEqual(out, "")
                 self.assertEqual(err, f"Session not found: {requested}\n")
+
+    def test_an_ambiguous_prefix_is_refused_not_reported_missing(self):
+        write_session(self.trace_dir, "a0a0a0a0a0a0a0a1", [event(EventType.SESSION_START, 0)])
+        write_session(self.trace_dir, "a0a0a0a0a0a0a0a2", [event(EventType.SESSION_START, 0)])
+        args = build_parser().parse_args(["--trace-dir", self.trace_dir, "health", "a0a0"])
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = _run_handler(args, cmd_health)
+        self.assertEqual(
+            (code, out.getvalue(), err.getvalue()),
+            (1, "", "Error: session ID prefix a0a0 matches 2 sessions: "
+                    "a0a0a0a0a0a0a0a1, a0a0a0a0a0a0a0a2\n"),
+        )
 
     def test_empty_store_fails(self):
         code, out, err = self.run_health()

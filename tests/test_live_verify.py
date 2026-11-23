@@ -333,6 +333,20 @@ class LiveSetupVerifyTests(unittest.TestCase):
                     "SESSION_ID.\n",
                 )
 
+    def test_requested_prefix_of_two_sessions_names_both(self):
+        self._write_session("codex-s1", "codex", 100)
+        self._write_session("codex-s2", "codex", 200)
+
+        status, out, err = self._run(session="codex-s")
+
+        self.assertEqual(status, 1)
+        self.assertIn("Codex static hook setup verified.", out)
+        self.assertEqual(
+            err,
+            "Live capture verification failed: session ID prefix codex-s matches 2 sessions: "
+            "codex-s1, codex-s2. Pass the full ID with --session SESSION_ID.\n",
+        )
+
     def test_explicit_session_from_another_provider_fails(self):
         self._write_session("claude-session", "claude", 100)
 

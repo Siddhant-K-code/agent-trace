@@ -36,7 +36,7 @@ from .review_surface import (
     build_session_review,
     render_minimized_review_html,
 )
-from .store import CorruptSessionMetaError
+from .store import AmbiguousSessionPrefixError, CorruptSessionMetaError
 
 if TYPE_CHECKING:
     from .store import TraceStore
@@ -814,7 +814,7 @@ def _resolve_session(store: "TraceStore", session_id: str) -> str | None:
         if store.session_exists(session_id):
             return session_id
         return store.find_session(session_id)
-    except CorruptSessionMetaError:
+    except (CorruptSessionMetaError, AmbiguousSessionPrefixError):
         raise
     except ValueError:
         return None

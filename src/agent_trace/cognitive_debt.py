@@ -26,7 +26,7 @@ from .budget_report import _parse_date
 from .event_data import require_object_event_data
 from .inert import inert
 from .models import EventType, SessionMeta, TraceEvent, usable_text
-from .store import TraceStore, _write_atomic
+from .store import AmbiguousSessionPrefixError, TraceStore, _write_atomic
 
 
 COGNITIVE_DEBT_SCHEMA_VERSION = 1
@@ -706,6 +706,9 @@ def build_cognitive_debt_report(
                 for meta in store.list_sessions_strict(strict_event_tenants=False)
                 if window_start <= meta.started_at < window_end
             ]
+    except AmbiguousSessionPrefixError:
+        # Its message names the matching sessions, so the user can pick one.
+        raise
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise CognitiveDebtInputError("trace input could not be read safely") from exc
 

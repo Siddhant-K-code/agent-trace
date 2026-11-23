@@ -3,10 +3,16 @@
 import io
 import json
 import argparse
+import os
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
+import agent_trace
 from agent_trace.cli import (
     build_parser,
     cmd_stats,
@@ -35,8 +41,12 @@ from agent_trace.subagent import (
 
 try:
     import _escapes
+    from _no_telemetry import without_telemetry
 except ImportError:
     from tests import _escapes
+    from tests._no_telemetry import without_telemetry
+
+SRC_ROOT = Path(agent_trace.__file__).resolve().parent.parent
 
 
 def _make_event(event_type: EventType, ts: float, session_id: str, **data) -> TraceEvent:
@@ -440,6 +450,63 @@ class TestSessionTreeCommand(unittest.TestCase):
         args = argparse.Namespace(parent="parent")
         self.assertEqual(_resolve_parent_session_id(store, args), "parent123456")
         tmp.cleanup()
+
+
+class TestAmbiguousParentSession(unittest.TestCase):
+    """record refuses a parent prefix that matches two sessions."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="ambiguous-parent-"))
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        (self.root / "home").mkdir()
+        (self.root / "cwd").mkdir()
+        self.trace_dir = self.root / "traces"
+        store = TraceStore(str(self.trace_dir), use_workspace_env=False)
+        for session_id in ("aaaa111100000001", "aaaa222200000002"):
+            store.create_session(SessionMeta(session_id=session_id, started_at=1.0))
+        self.env = without_telemetry({
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("AGENT_STRACE_") and key != "AGENT_TRACE_DIR"
+        })
+        self.env["PYTHONPATH"] = str(SRC_ROOT)
+        self.env["HOME"] = self.env["USERPROFILE"] = str(self.root / "home")
+        self.env["PYTHONIOENCODING"] = "utf-8"
+
+    def test_record_refuses_the_flag_or_the_env_and_creates_no_session(self):
+        before = sorted(path.name for path in self.trace_dir.iterdir())
+        for argv, extra in (
+            (["--parent", "aaaa"], {}),
+            ([], {"AGENT_STRACE_PARENT_SESSION": "aaaa"}),
+        ):
+            with self.subTest(argv=argv, env=extra):
+                result = subprocess.run(
+                    [sys.executable, "-m", "agent_trace.entry", "--trace-dir",
+                     str(self.trace_dir), "record", *argv, "--", sys.executable, "-c", "pass"],
+                    stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                    encoding="utf-8", env={**self.env, **extra}, cwd=self.root / "cwd",
+                    timeout=120,
+                )
+                self.assertEqual(
+                    (result.returncode, result.stdout, result.stderr),
+                    (1, "", "Error: session ID prefix aaaa matches 2 sessions: "
+                            "aaaa111100000001, aaaa222200000002\n"),
+                )
+                self.assertEqual(sorted(path.name for path in self.trace_dir.iterdir()), before)
+
+    def test_an_exact_parent_id_wins_in_either_scan_order(self):
+        store = TraceStore(str(self.trace_dir), use_workspace_env=False)
+        for session_id in ("run1", "run10"):
+            store.create_session(SessionMeta(session_id=session_id, started_at=1.0))
+        real_iterdir = Path.iterdir
+        for reverse in (False, True):
+            with self.subTest(reverse=reverse), patch.object(
+                type(store.base_dir), "iterdir",
+                lambda path, reverse=reverse: iter(sorted(real_iterdir(path), reverse=reverse)),
+            ):
+                self.assertEqual(
+                    _resolve_parent_session_id(store, argparse.Namespace(parent="run1")), "run1"
+                )
 
 
 class TestAggregateStatsDuration(unittest.TestCase):
