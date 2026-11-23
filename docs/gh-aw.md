@@ -22,6 +22,21 @@ agent-strace export claude-run-0001 --format otlp-genai --output run.json
 fails once the artifact has expired. agent-strace does not download artifacts
 itself.
 
+```
+Imported session claude-run-0001
+  4 tool calls, 2 LLM requests, 1820 tokens
+  14 events
+  1 event has no recorded time (timing: inferred)
+  Skipped 3 records not imported: engine.heartbeat 1, firewall.token_usage (repeated requestId) 1, otel.span 1
+  Replay with: agent-strace replay claude-run-0001
+```
+
+The session ID is the main agent's `session.init` or `session.start`
+`sessionId` when it is usable (see [`import`](commands.md#import)), else `aw-`
+and the first 16 hex digits of the file's SHA-256. Importing the same file
+again writes nothing and prints `Session <id> is already imported; nothing
+written.`
+
 The gh-aw CLI (`gh extension install github/gh-aw`) can fetch the file too.
 Its [`sessions download`](https://github.github.com/gh-aw/setup/cli/#sessions)
 command is experimental, and its output may change:
@@ -44,21 +59,6 @@ Codex, Copilot and Pi runs. All of them import, and `cost`, `explain` and
 `agent-stdio.log`, can have no `toolCallId` and no times. Its tool calls and
 results then stay unpaired (see [Tool calls](#tool-calls)), and their times are
 inferred (see [Times](#times)).
-
-```
-Imported session claude-run-0001
-  4 tool calls, 2 LLM requests, 1820 tokens
-  14 events
-  1 event has no recorded time (timing: inferred)
-  Skipped 3 records not imported: engine.heartbeat 1, firewall.token_usage (repeated requestId) 1, otel.span 1
-  Replay with: agent-strace replay claude-run-0001
-```
-
-The session ID is the main agent's `session.init` or `session.start`
-`sessionId` when it is usable (see [`import`](commands.md#import)), else `aw-`
-and the first 16 hex digits of the file's SHA-256. Importing the same file
-again writes nothing and prints `Session <id> is already imported; nothing
-written.`
 
 ## The header
 
