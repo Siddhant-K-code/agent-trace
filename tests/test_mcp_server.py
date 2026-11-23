@@ -1024,6 +1024,12 @@ class TestUnknownArguments(unittest.TestCase):
             "health does not take sesion_id. Did you mean session_id? It takes: session_id",
         )
 
+    def test_argument_names_match_exactly(self):
+        self.assertEqual(
+            self._refusal("health", {"Session_ID": "args-0001"}),
+            "health does not take Session_ID. Did you mean session_id? It takes: session_id",
+        )
+
     def test_list_sessions_refuses_agent_name_and_suggests_agent(self):
         self.assertEqual(
             self._refusal("list_sessions", {"agent_name": "claude"}),

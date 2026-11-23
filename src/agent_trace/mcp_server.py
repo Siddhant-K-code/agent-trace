@@ -6,7 +6,7 @@ No external dependencies; uses only stdlib.
 Tools exposed:
   list_sessions        list captured sessions with metadata
   get_session          full event stream for a session
-  search_events        filter events by tool, file path, exit code, or time range
+  search_events        filter events by tool, file path, exit code, or error
   get_session_summary  plain-English phase breakdown (wraps explain_session)
   diff_sessions        compare two sessions: what changed between runs
   health               evidence health for a session (wraps agent-strace health)
@@ -110,7 +110,7 @@ _TOOLS: list[dict] = [
         "name": "search_events",
         "description": (
             "Search events across one or all sessions. Filter by tool name, "
-            "file path substring, exit code, or time range."
+            "file path substring, exit code, or error."
         ),
         "inputSchema": {
             "type": "object",
