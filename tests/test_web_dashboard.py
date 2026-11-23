@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -153,6 +154,115 @@ class TestPageScriptsShowDataAsText(unittest.TestCase):
                     )
         self.assertIn("/session/${encodeURIComponent(", scripts["sessions"])
         self.assertIn("/api/sessions/${encodeURIComponent(", scripts["violations"])
+
+
+# Runs the detail page script under Node with a minimal fake DOM and fetch.
+# Each compare response waits its own delay, so a test can make an earlier
+# request answer after a later one.
+_COMPARE_HARNESS = r"""
+const script = __SCRIPT__;
+const responses = __RESPONSES__;
+const order = __ORDER__;
+const elements = {};
+function makeEl() {
+  return {
+    value: '', textContent: '', className: '', disabled: false, style: {},
+    children: [], options: [], listeners: {},
+    classList: {add() {}, remove() {}},
+    replaceChildren(...c) { this.children = c; },
+    append(...c) { this.children.push(...c); },
+    appendChild(c) { this.children.push(c); return c; },
+    addEventListener(type, fn) { this.listeners[type] = fn; },
+    querySelector() { return null; },
+  };
+}
+const document = {
+  getElementById(id) { return elements[id] || (elements[id] = makeEl()); },
+  createElement() { return makeEl(); },
+  createTextNode(t) { return {textContent: String(t), children: []}; },
+  addEventListener() {},
+  querySelectorAll() { return []; },
+};
+const window = {location: {pathname: '/session/self', href: 'http://dash/session/self'}};
+async function fetch(url) {
+  if (!url.includes('/compare?')) return {ok: false, json: async () => ({error: 'no review'})};
+  const reply = responses[new URL(url, 'http://dash').searchParams.get('other')];
+  await new Promise(resolve => setTimeout(resolve, reply.delay));
+  return {ok: reply.ok, json: async () => reply.body};
+}
+new Function('document', 'window', 'fetch', script)(document, window, fetch);
+const text = e => [e.textContent || '', ...(e.children || []).map(text)].join(' ');
+const select = document.getElementById('compare-session');
+const click = document.getElementById('compare-action').listeners.click;
+for (const other of order) { select.value = other; click(); }
+setTimeout(() => {
+  process.stdout.write(JSON.stringify(text(document.getElementById('compare-panel'))));
+}, 300);
+"""
+
+
+def _compare_report(label, tool_calls):
+    return {
+        "label_a": "self", "label_b": label, "verdict": f"verdict {label}",
+        "duration_a": 1, "duration_b": 2, "cost_a": 0, "cost_b": 0,
+        "tool_calls_a": 1, "tool_calls_b": tool_calls,
+        "files_modified_a": 0, "files_modified_b": 0,
+        "errors_a": 0, "errors_b": 0, "decision_divergence": 0,
+    }
+
+
+class TestDetailPageCompareRace(unittest.TestCase):
+    """Only the newest compare request may paint the compare panel."""
+
+    @staticmethod
+    def _detail_script():
+        return "".join(re.findall(r"<script>(.*?)</script>", render_detail_page("t"), re.S))
+
+    def _run(self, responses, order):
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed")
+        harness = (_COMPARE_HARNESS
+                   .replace("__SCRIPT__", json.dumps(self._detail_script()))
+                   .replace("__RESPONSES__", json.dumps(responses))
+                   .replace("__ORDER__", json.dumps(order)))
+        result = subprocess.run([node, "-"], input=harness, capture_output=True,
+                                text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_script_ignores_responses_of_older_requests(self):
+        script = self._detail_script()
+        compare = script[script.index("async function compare()"):script.index("async function load()")]
+        self.assertEqual(compare.count("if(request!==compareRequest)return;"), 2)
+
+    def test_slow_earlier_response_does_not_replace_newer_comparison(self):
+        panel = self._run({
+            "slow": {"delay": 150, "ok": True, "body": _compare_report("slow", 6)},
+            "fast": {"delay": 0, "ok": True, "body": _compare_report("fast", 1)},
+        }, ["slow", "fast"])
+        self.assertIn("verdict fast", panel)
+        self.assertNotIn("slow", panel)
+
+    def test_slow_earlier_error_does_not_replace_newer_comparison(self):
+        panel = self._run({
+            "slow": {"delay": 150, "ok": False, "body": {"error": "slow failed"}},
+            "fast": {"delay": 0, "ok": True, "body": _compare_report("fast", 1)},
+        }, ["slow", "fast"])
+        self.assertIn("verdict fast", panel)
+        self.assertNotIn("slow failed", panel)
+
+    def test_newest_slow_response_and_error_still_show(self):
+        panel = self._run({
+            "fast": {"delay": 0, "ok": True, "body": _compare_report("fast", 1)},
+            "slow": {"delay": 150, "ok": True, "body": _compare_report("slow", 6)},
+        }, ["fast", "slow"])
+        self.assertIn("verdict slow", panel)
+        self.assertNotIn("fast", panel)
+        panel = self._run({
+            "slow": {"delay": 150, "ok": False, "body": {"error": "slow failed"}},
+        }, ["slow"])
+        self.assertIn("Error: slow failed", panel)
 
 
 class TestApiHelpers(unittest.TestCase):
