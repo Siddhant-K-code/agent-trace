@@ -32,7 +32,7 @@ import sys
 import time
 import unicodedata
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 
 from .fileutil import fsync_directory as _fsync_directory
@@ -278,11 +278,56 @@ def _json_type_phrase(value: object) -> str:
     return "an array"
 
 
+# Text decoded with errors="surrogateescape" holds each byte that is not UTF-8
+# as one code point from U+DC80 to U+DCFF. Strict UTF-8 never decodes to those
+# code points, and a JSON escape such as \udcff stays six ASCII characters.
+_NOT_UTF8 = re.compile("[\udc80-\udcff]")
+
+
+def is_not_utf8(text: str) -> bool:
+    """Return whether text decoded with errors="surrogateescape" was not UTF-8."""
+    return not text.isascii() and _NOT_UTF8.search(text) is not None
+
+
+def refuse_lines_not_utf8(session_id: str, text: str) -> None:
+    """Raise UnreadableEventLineError when a line of events.ndjson is not UTF-8.
+
+    For code that reads events.ndjson without load_events. ``text`` is the file
+    decoded with errors="surrogateescape". The message is the one load_events
+    gives when no event names another session or tenant.
+    """
+    if not is_not_utf8(text):
+        return
+    unreadable = []
+    for line_number, line in _event_lines(text.replace("\r\n", "\n").replace("\r", "\n")):
+        _record, problem = _read_event_record(line)
+        if problem:
+            unreadable.append((line_number, problem))
+    raise UnreadableEventLineError(session_id, _unreadable_lines_reason(unreadable))
+
+
+def _event_lines(text: str) -> Iterator[tuple[int, str]]:
+    """Yield the number and text of each line load_events reads.
+
+    ``text`` has LF line endings. Empty lines, and blank lines at the start
+    and the end, are skipped.
+    """
+    # Leading blank lines are stripped below but still count as lines.
+    line_number = text.count("\n", 0, len(text) - len(text.lstrip()))
+    for line in _split_lf_lines(text.strip()):
+        line_number += 1
+        if line:
+            yield line_number, line
+
+
 def _read_event_record(line: str) -> tuple[dict, str]:
     """Return the decoded event line, or a phrase that says why it is unreadable.
 
     The phrase never quotes the line, its event_type or the decoder message.
     """
+    # json.loads accepts the code points that stand for bytes that are not UTF-8.
+    if is_not_utf8(line):
+        return {}, "is not valid UTF-8"
     try:
         record = json.loads(line)
     except RecursionError:
@@ -1184,12 +1229,16 @@ class TraceStore:
             # newline="\n" writes LF on every OS. It also turns off newline
             # translation on read, so strip the "\r" that older Windows
             # versions wrote: prev_hash covers the line without its ending.
-            with open(f, "a+", encoding="utf-8", newline="\n") as fh:
+            # to_json writes ASCII, so errors= changes only the read.
+            with open(
+                f, "a+", encoding="utf-8", errors="surrogateescape", newline="\n"
+            ) as fh:
                 # Compute the hash and append while holding one lock so a
                 # concurrent tenant-tag operation cannot split the chain.
                 if not event.prev_hash:
                     fh.seek(0)
                     text = fh.read()
+                    refuse_lines_not_utf8(session_id, text)
                     last_line = text.rstrip("\r\n").rsplit("\n", 1)[-1] if text.strip() else ""
                     event.prev_hash = hashlib.sha256(last_line.encode()).hexdigest() if last_line else ""
                 fh.write(event.to_json() + "\n")
@@ -1234,9 +1283,12 @@ class TraceStore:
                 if meta is not None else ""
             )
             f.parent.mkdir(parents=True, exist_ok=True)
-            with open(f, "a+", encoding="utf-8", newline="\n") as fh:
+            with open(
+                f, "a+", encoding="utf-8", errors="surrogateescape", newline="\n"
+            ) as fh:
                 fh.seek(0)
                 text = fh.read()
+                refuse_lines_not_utf8(session_id, text)
                 last_line = text.rstrip("\r\n").rsplit("\n", 1)[-1] if text.strip() else ""
                 lines = []
                 for event in events:
@@ -1426,13 +1478,9 @@ class TraceStore:
             meta.tenant_id = validate_optional_tenant_id(meta.tenant_id)
         events = []
         unreadable: list[tuple[int, str]] = []
-        text = f.read_text(encoding="utf-8")
-        # Leading blank lines are stripped below but still count as lines.
-        line_number = text.count("\n", 0, len(text) - len(text.lstrip()))
-        for line in _split_lf_lines(text.strip()):
-            line_number += 1
-            if not line:
-                continue
+        # A byte that is not UTF-8 makes its line unreadable, not the file.
+        text = f.read_text(encoding="utf-8", errors="surrogateescape")
+        for line_number, line in _event_lines(text):
             record, problem = _read_event_record(line)
             if problem:
                 unreadable.append((line_number, problem))
@@ -1648,7 +1696,11 @@ class TraceStore:
             self._enforce_tag_tenant_links(meta, tenant_id)
             # Read the bytes untranslated so a rollback restores them exactly,
             # including CRLF endings written by older Windows versions.
-            raw_text = path.read_bytes().decode("utf-8") if path.exists() else ""
+            raw_text = (
+                path.read_bytes().decode("utf-8", "surrogateescape")
+                if path.exists() else ""
+            )
+            refuse_lines_not_utf8(session_id, raw_text)
             raw_lines = [line for line in _split_lf_lines(raw_text) if line]
             for raw_line in raw_lines:
                 event = TraceEvent.from_json(raw_line)

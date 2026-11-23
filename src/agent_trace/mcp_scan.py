@@ -23,7 +23,7 @@ from typing import Any, TextIO
 from .event_data import require_object_event_data, skipped_event_warning
 from .inert import inert
 from .models import EventType, TraceEvent
-from .store import TraceStore
+from .store import TraceStore, is_not_utf8
 
 
 DEFAULT_PATTERN_FILE = Path.home() / ".agent-strace" / "mcp-patterns.txt"
@@ -624,12 +624,15 @@ def _watch_session(
     indexes = list(range(1, len(history) + 1))
     position = len(history)
     seen = 0
-    with open(events_file, "r", encoding="utf-8") as f:
+    with open(events_file, "r", encoding="utf-8", errors="surrogateescape") as f:
         f.seek(0, 2)
         while True:
             line = f.readline()
             if not line:
                 time.sleep(0.5)
+                continue
+            # A line that is not UTF-8 is skipped, as a line that is not JSON is.
+            if is_not_utf8(line):
                 continue
             try:
                 event = TraceEvent.from_json(line)

@@ -658,6 +658,29 @@ class TestCli(_Base):
             with self.subTest(session_id=session_id):
                 self.assert_unparseable(sessions, session_id, detail)
 
+    def test_line_that_is_not_utf8_skips_only_that_session(self):
+        write_metaless(self.root, "sub1", subagent_events("sub1"))
+        not_utf8 = b'{"event_type": "error", "data": {"m": "\xff"}}'
+        untimed = json.dumps({"event_type": "tool_call", "session_id": "first1"}).encode()
+        cases = {
+            "bad1": ([subagent_events("bad1")[0].to_json().encode(), not_utf8],
+                     "line 2: not valid UTF-8"),
+            # The first problem in the file is the one reported.
+            "first1": ([untimed, not_utf8], "line 1: no timestamp"),
+        }
+        for session_id, (lines, _) in cases.items():
+            (self.root / session_id).mkdir()
+            (self.root / session_id / "events.ndjson").write_bytes(
+                b"".join(line + b"\n" for line in lines)
+            )
+
+        sessions = self._apply()
+
+        self.assertEqual(sessions["sub1"]["status"], "written")
+        for session_id, (_, detail) in cases.items():
+            with self.subTest(session_id=session_id):
+                self.assert_unparseable(sessions, session_id, detail)
+
     def test_line_nested_too_deep_skips_only_that_session(self):
         write_metaless(self.root, "a1", subagent_events("a1"))
         write_metaless(self.root, "c1", subagent_events("c1"))

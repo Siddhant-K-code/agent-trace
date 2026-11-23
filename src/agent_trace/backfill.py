@@ -32,6 +32,7 @@ from .store import (
     _TENANT_ADMIN_AUXILIARY_DIRS,
     TraceStore,
     _fsync_directory,
+    is_not_utf8,
     validate_session_id,
     validate_stored_id,
     validate_optional_tenant_id,
@@ -219,9 +220,7 @@ def _is_usable_time(value: object) -> bool:
 def _read_events(path: Path, session_id: str) -> tuple[list[TraceEvent], str]:
     """Parse an event stream strictly.  Returns events and the tenant ID."""
     try:
-        text = path.read_bytes().decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise _Skip("unparseable_events", f"not UTF-8: {exc.reason}") from exc
+        text = path.read_bytes().decode("utf-8", "surrogateescape")
     except OSError as exc:
         raise _Skip("unreadable_events", exc.strerror or str(exc)) from exc
     events: list[TraceEvent] = []
@@ -229,6 +228,8 @@ def _read_events(path: Path, session_id: str) -> tuple[list[TraceEvent], str]:
     for number, line in enumerate(split_lf_lines(text), 1):
         if not line.strip():
             continue
+        if is_not_utf8(line):
+            raise _Skip("unparseable_events", f"line {number}: not valid UTF-8")
         try:
             event = TraceEvent.from_json(line)
             # from_json gives a line with no timestamp the time it is read.

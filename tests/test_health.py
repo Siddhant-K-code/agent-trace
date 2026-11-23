@@ -14,10 +14,10 @@ from unittest.mock import patch
 
 try:  # keeps product telemetry off in this process and its children
     import _no_telemetry  # noqa: F401
-    from test_store import OTHER_SESSION, event_line, write_session_lines
+    from test_store import NOT_UTF8_LINE, OTHER_SESSION, event_line, write_session_lines
 except ImportError:  # pragma: no cover - run as a package module
     from tests import _no_telemetry  # noqa: F401
-    from tests.test_store import OTHER_SESSION, event_line, write_session_lines
+    from tests.test_store import NOT_UTF8_LINE, OTHER_SESSION, event_line, write_session_lines
 
 from agent_trace import health
 from agent_trace.cli import _telemetry_command_properties, build_parser, main
@@ -1276,6 +1276,8 @@ class TestSessionResolution(_HealthBase):
              "line 1 of events.ndjson has an unknown event_type"),
             ("event session", [event_line(session_id=OTHER_SESSION)],
              "event session ID does not match its directory"),
+            ("not UTF-8", [event_line(), NOT_UTF8_LINE],
+             "line 2 of events.ndjson is not valid UTF-8"),
         ):
             with self.subTest(name):
                 session_id = write_session_lines(store, lines)

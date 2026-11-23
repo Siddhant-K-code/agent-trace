@@ -27,7 +27,12 @@ try:
         _upgrade_prefix,
         _write_lines,
     )
-    from test_store import raw_separator_session
+    from test_store import (
+        NOT_UTF8_LINE,
+        event_line,
+        raw_separator_session,
+        write_session_lines,
+    )
 except ImportError:
     from tests import _escapes
     from tests import _no_telemetry  # noqa: F401
@@ -41,11 +46,17 @@ except ImportError:
         _upgrade_prefix,
         _write_lines,
     )
-    from tests.test_store import raw_separator_session
+    from tests.test_store import (
+        NOT_UTF8_LINE,
+        event_line,
+        raw_separator_session,
+        write_session_lines,
+    )
 
 from agent_trace.audit import verify_chain
 from agent_trace.cli import build_parser
 from agent_trace.compliance import (
+    _load_event_lines,
     build_audit_readiness,
     export_compliance,
     export_compliance_bulk,
@@ -55,7 +66,7 @@ from agent_trace.compliance import (
     verify_eu_ai_act_export,
 )
 from agent_trace.models import EventType, SessionMeta, TraceEvent
-from agent_trace.store import TraceStore
+from agent_trace.store import TraceStore, UnreadableEventLineError
 
 
 def _make_session(store: TraceStore, tool_names: list[str],
@@ -248,6 +259,16 @@ class TestEuAiActArticleExport(unittest.TestCase):
         path = Path(self.tmpdir) / "export.json"
         path.write_text(json.dumps(report), encoding="utf-8")
         self.assertTrue(verify_eu_ai_act_export(str(path))["ok"])
+
+    def test_the_line_reader_refuses_a_line_that_is_not_utf8(self):
+        # export_eu_ai_act runs load_events first, which refuses the same line.
+        sid = write_session_lines(self.store, [event_line(), NOT_UTF8_LINE])
+        with self.assertRaises(UnreadableEventLineError) as raised:
+            _load_event_lines(self.store, sid)
+        self.assertEqual(
+            str(raised.exception),
+            f"cannot read session {sid}: line 2 of events.ndjson is not valid UTF-8",
+        )
 
     def test_article_13_lists_tools_and_oversight(self):
         sid = _make_session(self.store, ["Bash"], errors=1)

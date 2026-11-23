@@ -44,7 +44,7 @@ from .event_data import (
 from .fileutil import split_lf_lines
 from .inert import inert
 from .models import EventType, TraceEvent, usable_number, usable_text
-from .store import TraceStore
+from .store import TraceStore, refuse_lines_not_utf8
 
 Framework = Literal["eu-ai-act", "soc2", "hipaa", "all"]
 
@@ -85,7 +85,8 @@ def _load_event_lines(store: TraceStore, session_id: str) -> list[str]:
     path = store._session_file(session_id, "events.ndjson", "event stream")
     if not path.exists():
         return []
-    text = path.read_text(encoding="utf-8")
+    text = path.read_text(encoding="utf-8", errors="surrogateescape")
+    refuse_lines_not_utf8(session_id, text)
     return [line for line in split_lf_lines(text) if line.strip()]
 
 

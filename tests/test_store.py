@@ -1127,6 +1127,9 @@ class TestCorruptSessionMetaLookupCommands(unittest.TestCase):
 
 OTHER_SESSION = "other-session-4c1d"
 OTHER_TENANT = "other-tenant-4c1d"
+# The byte 0xff is not UTF-8. The store writes ASCII JSON, so only another
+# writer, an edit or a damaged disk leaves such a byte.
+NOT_UTF8_LINE = b'{"event_type": "error", "data": {"m": "\xff"}}'
 
 
 def event_line(**fields) -> str:
@@ -1139,13 +1142,15 @@ def event_line(**fields) -> str:
 
 
 def write_session_lines(
-    store: TraceStore, lines: list[str], *, tenant_id: str = "", started_at: float = 1.0
+    store: TraceStore, lines: list[str | bytes], *, tenant_id: str = "", started_at: float = 1.0
 ) -> str:
     """Create a session whose events.ndjson holds ``lines`` as written. Returns its ID."""
     meta = SessionMeta(started_at=started_at, tenant_id=tenant_id)
     store.create_session(meta)
     events_file = store._session_dir(meta.session_id) / "events.ndjson"
-    events_file.write_bytes("".join(line + "\n" for line in lines).encode("utf-8"))
+    events_file.write_bytes(b"".join(
+        (line if isinstance(line, bytes) else line.encode("utf-8")) + b"\n" for line in lines
+    ))
     return meta.session_id
 
 
@@ -1265,6 +1270,76 @@ class TestRefusedSessions(unittest.TestCase):
             SessionMismatchError, session_id, "event session ID does not match its directory"
         )
 
+    def test_a_line_that_is_not_utf8_is_unreadable(self):
+        good = event_line()
+        cases = [
+            ([good, good, NOT_UTF8_LINE], "line 3 of events.ndjson is not valid UTF-8"),
+            (["", good, NOT_UTF8_LINE], "line 3 of events.ndjson is not valid UTF-8"),
+            ([good, NOT_UTF8_LINE, "{", good],
+             "line 2 of events.ndjson is not valid UTF-8; 1 more line is unreadable"),
+            ([good, "{", NOT_UTF8_LINE],
+             "line 2 of events.ndjson is not valid JSON; 1 more line is unreadable"),
+            # In Latin-1, 0x85 is a line break and 0xa0 is a space.
+            ([b"\x85", good, b"\xa0"],
+             "line 1 of events.ndjson is not valid UTF-8; 1 more line is unreadable"),
+        ]
+        for lines, reason in cases:
+            with self.subTest(lines=lines):
+                session_id = write_session_lines(self.store, lines)
+                self.assert_refused(UnreadableEventLineError, session_id, reason)
+
+    def test_a_mismatch_wins_over_a_line_that_is_not_utf8(self):
+        session_id = write_session_lines(
+            self.store, [NOT_UTF8_LINE, event_line(session_id=OTHER_SESSION)]
+        )
+        self.assert_refused(
+            SessionMismatchError, session_id, "event session ID does not match its directory"
+        )
+
+    def test_the_json_escape_of_such_a_byte_still_loads(self):
+        # json.dumps writes the code point U+DCFF as the six characters \udcff.
+        escaped = event_line(data={"m": "\udcff"})
+        self.assertIn("\\udcff", escaped)
+        session_id = write_session_lines(self.store, [escaped])
+        self.assertEqual(self.store.load_events(session_id)[0].data, {"m": "\udcff"})
+        session_id = write_session_lines(self.store, [escaped, NOT_UTF8_LINE])
+        self.assert_refused(
+            UnreadableEventLineError, session_id, "line 2 of events.ndjson is not valid UTF-8"
+        )
+
+    def test_writers_refuse_a_line_that_is_not_utf8_and_write_nothing(self):
+        reason = "line 2 of events.ndjson is not valid UTF-8; 1 more line is unreadable"
+        good = event_line()
+        # load_events reads CRLF and a lone CR as one line break, so each file
+        # holds the same three lines. The writers read the bytes as written
+        # and must name the same line.
+        files = {
+            "LF": [good, NOT_UTF8_LINE, "{"],
+            "CRLF": [good + "\r", NOT_UTF8_LINE + b"\r", "{\r"],
+            "lone CR": [good.encode("utf-8") + b"\r" + NOT_UTF8_LINE, "{"],
+        }
+
+        def event():
+            return TraceEvent(EventType.USER_PROMPT, timestamp=2.0, data={}, tenant_id="")
+
+        writers = {
+            "append_event": lambda session_id: self.store.append_event(session_id, event()),
+            "append_events": lambda session_id: self.store.append_events(session_id, [event()]),
+            "tag_session": lambda session_id: self.store.tag_session(session_id, "team-a"),
+        }
+        for ending, lines in files.items():
+            for name, write in writers.items():
+                with self.subTest(ending, writer=name):
+                    session_id = write_session_lines(self.store, lines)
+                    self.assert_refused(UnreadableEventLineError, session_id, reason)
+                    before = tree_snapshot(self.store.base_dir)
+                    with self.assertRaises(UnreadableEventLineError) as raised:
+                        write(session_id)
+                    self.assertEqual(
+                        str(raised.exception), f"cannot read session {session_id}: {reason}"
+                    )
+                    self.assertEqual(tree_snapshot(self.store.base_dir), before)
+
 
 class TestRefusedSessionCommands(unittest.TestCase):
     """Read commands print one Error line for a refused session and write nothing."""
@@ -1298,6 +1373,8 @@ class TestRefusedSessionCommands(unittest.TestCase):
              "event tenant does not match session metadata", single, tenant_id="team-a")
         case("not-json", [good, "{", good], "line 2 of events.ndjson is not valid JSON",
              [["replay"], ["standup"]])
+        case("not-utf8", [good, NOT_UTF8_LINE, good], "line 2 of events.ndjson is not valid UTF-8",
+             single + [["standup"], ["export", "--format", "eu-ai-act"]])
         case("array", [good, "[1]"], "line 2 of events.ndjson is an array, not an object",
              [["replay"]])
         case("no-event-type", ['{"timestamp": 1.0}'], "line 1 of events.ndjson has no event_type",
@@ -1331,7 +1408,7 @@ class TestRefusedSessionCommands(unittest.TestCase):
             results = list(pool.map(run, jobs))
         for (name, command), result in zip(jobs, results):
             message = cases[name][2]
-            with self.subTest(case=name, command=command[0]):
+            with self.subTest(case=name, command=" ".join(command)):
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertEqual(result.stdout, "")
                 self.assertEqual(result.stderr, f"Error: {message}\n")
