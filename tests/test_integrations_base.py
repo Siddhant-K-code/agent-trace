@@ -146,6 +146,8 @@ class TestRunSession(unittest.TestCase):
             path = self.store.base_dir / sid / "meta.json"
             meta = json.loads(path.read_text(encoding="utf-8"))
             meta["started_at"] = "@start@"
+            # The end must replace a total another writer left.
+            meta["total_duration_ms"] = 123.0
             path.write_text(json.dumps(meta).replace('"@start@"', started_at),
                             encoding="utf-8")
         return sid
