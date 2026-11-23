@@ -325,16 +325,54 @@ input.
 
 ## Per-backend setup
 
+Export POSTs OTLP/HTTP JSON by default. `--protocol http/protobuf` sends the
+same payload as OTLP protobuf instead, for collectors that take only protobuf,
+such as Phoenix. Without the flag, export reads
+`OTEL_EXPORTER_OTLP_TRACES_PROTOCOL`, then `OTEL_EXPORTER_OTLP_PROTOCOL`.
+agent-strace encodes protobuf with the standard library and has no gRPC
+exporter. A collector that answers 415 Unsupported Media Type gets a hint that
+names the other `--protocol`. See [`export`](commands.md#export).
+
 ### Phoenix / OpenInference
+
+Phoenix's `/v1/traces` takes only OTLP protobuf, so pass
+`--protocol http/protobuf`. Without it Phoenix answers 415 and export exits 1.
 
 ```bash
 agent-strace export <session-id> --format otlp-genai \
+  --endpoint http://localhost:6006 --protocol http/protobuf
+
+# Or set it once for every OTLP send
+export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf
+agent-strace export <session-id> --format otlp-genai --include-subagents \
   --endpoint http://localhost:6006
+
+# Stream while the session runs
+agent-strace watch --stream-to http://localhost:6006 --stream-otlp \
+  --protocol http/protobuf
 ```
 
 The exporter appends `/v1/traces`. Phoenix serves OTLP/HTTP on its UI port
 `6006`. OpenInference span kinds and compatibility attributes are included in
 the payload.
+
+Tested locally with Phoenix 22.0.1 and synthetic sessions; see
+[experiments/phoenix/RESULTS.md](../experiments/phoenix/RESULTS.md). Phoenix
+stored every span with its parent, name, status and times. It took each span's
+kind from `openinference.span.kind`, and kept the token counts and the
+`agent.strace.*` redaction, provenance and evidence attributes. In that test:
+
+- Phoenix shows a cost it works out from the token counts, not
+  `llm.cost.total`, which stays on the span. For one request the two
+  differed.
+- Phoenix did not store span links, so retry links are lost.
+- Exception events kept only their `exception.*` attributes.
+- Each session is a trace and a Phoenix session of its own. Use
+  `--include-subagents` to send a parent and its subagents as one trace.
+- `--format otlp` spans have no OpenInference kind, so Phoenix shows them as
+  `UNKNOWN`, with no token counts or cost.
+- With `watch --stream-otlp`, Phoenix kept the first copy of the root span
+  and ignored the later ones.
 
 ### Langfuse
 
@@ -450,6 +488,12 @@ agent-strace watch --stream-to http://localhost:4318 --stream-otlp
 
 Without `--stream-otlp`, `--stream-to` POSTs the raw events as NDJSON to the URL exactly as given. That suits the [agent-strace collector](server.md#live-streaming-from-watch), not an OTLP receiver.
 
+Watch sends OTLP JSON unless `--protocol http/protobuf`, or one of the `OTEL_EXPORTER_OTLP_*PROTOCOL` variables, says otherwise, as [export](#per-backend-setup) does. Phoenix needs protobuf:
+
+```bash
+agent-strace watch --stream-to http://localhost:6006 --stream-otlp --protocol http/protobuf
+```
+
 With `--stream-otlp`, watch drops trailing slashes from the URL path, then appends `/v1/traces` unless the path already ends with it. The query string is kept:
 
 | `--stream-to` | Spans are POSTed to |
@@ -461,7 +505,7 @@ With `--stream-otlp`, watch drops trailing slashes from the URL path, then appen
 
 Watch sends events in batches: when `--stream-batch-size` events are waiting, when `--stream-flush-interval` seconds have passed since the last POST, and when watch stops. Each POST carries only the spans built from its own batch, so the backend receives the session in pieces:
 
-- Every POST includes the session root span again, with the same trace ID and span ID. A backend may show it more than once or keep only one copy.
+- Every POST includes the session root span again, with the same trace ID and span ID. A backend may show it more than once or keep only one copy. Phoenix keeps the first copy.
 - A tool call whose call and result land in different batches arrives as two spans, one from each batch.
 
 For one complete set of spans per session, export it after it ends with `agent-strace export --format otlp-genai` (see [Per-backend setup](#per-backend-setup)).

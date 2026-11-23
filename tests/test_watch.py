@@ -23,6 +23,7 @@ from unittest.mock import call, patch, MagicMock
 
 from agent_trace.cli import build_parser
 from agent_trace.models import EventType, SessionMeta, TraceEvent
+from agent_trace.otlp_proto import PROTOCOL_ENV_VARS
 from agent_trace.project_budget import ProjectBudgetConfig
 from agent_trace.store import TraceStore
 from agent_trace.watch import (
@@ -827,7 +828,8 @@ class TestWatchStreamFlagChecks(unittest.TestCase):
         env = patch.dict(os.environ)
         env.start()
         self.addCleanup(env.stop)
-        os.environ.pop("AGENT_STRACE_TENANT_ID", None)
+        for name in ("AGENT_STRACE_TENANT_ID", *PROTOCOL_ENV_VARS):
+            os.environ.pop(name, None)
 
     def _snapshot(self):
         return {
@@ -942,6 +944,60 @@ class TestWatchStreamFlagChecks(unittest.TestCase):
                     self.assertEqual(stream_config.url, url)
                     self.assertEqual(stream_config.flush_interval, float(interval))
                     self.assertTrue(stream_config.otlp)
+
+    def test_bad_protocols_are_refused(self):
+        grpc = "--protocol grpc is not supported: agent-strace sends OTLP over HTTP only; " \
+               "use http/protobuf or http/json"
+        stream = [f"--stream-to={self._URL}", "--stream-otlp"]
+        self._assert_refused([*stream, "--protocol=gRPC"], f"[watch] {grpc}\n")
+        self._assert_refused(
+            [*stream, "--protocol=SECRET-PROTOCOL"],
+            "[watch] invalid --protocol value: use http/json or http/protobuf\n",
+        )
+        os.environ["OTEL_EXPORTER_OTLP_PROTOCOL"] = "grpc"
+        self._assert_refused(stream, (
+            "[watch] OTEL_EXPORTER_OTLP_PROTOCOL grpc is not supported: agent-strace sends "
+            "OTLP over HTTP only; use http/protobuf or http/json; or pass --protocol to override it\n"
+        ))
+
+    def test_protocol_needs_stream_otlp(self):
+        line = "[watch] --protocol is used only with --stream-to and --stream-otlp\n"
+        for protocol in ("http/protobuf", "grpc"):
+            self._assert_refused([f"--stream-to={self._URL}", f"--protocol={protocol}"], line)
+            self._assert_refused([f"--protocol={protocol}"], line)
+            self._assert_refused(["--stream-otlp", f"--protocol={protocol}"], line)
+
+    def test_protocol_flag_then_variables_then_json(self):
+        stream = [f"--stream-to={self._URL}", "--stream-otlp"]
+        cases = (
+            ({}, [], "http/json"),
+            ({"OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf"}, [], "http/protobuf"),
+            ({"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": " HTTP/Protobuf ",
+              "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc"}, [], "http/protobuf"),
+            ({"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "", "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json"},
+             [], "http/json"),
+            ({"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "grpc"}, ["--protocol=http/protobuf"],
+             "http/protobuf"),
+            ({"OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf"}, ["--protocol=http/json"], "http/json"),
+        )
+        for env, flags, expected in cases:
+            with self.subTest(env=env, flags=flags), patch.dict(os.environ, env):
+                status, _, err, watch_session_mock = self._run(*stream, *flags)
+                self.assertEqual((status, err), (0, ""))
+                self.assertEqual(
+                    watch_session_mock.call_args.kwargs["stream_config"].protocol, expected,
+                )
+
+    def test_ndjson_streams_ignore_the_protocol_variables(self):
+        with patch.dict(os.environ, {"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "grpc"}):
+            for flags in ([f"--stream-to={self._URL}"], []):
+                with self.subTest(flags=flags):
+                    status, _, err, watch_session_mock = self._run(*flags)
+                    self.assertEqual((status, err), (0, ""))
+                    stream_config = watch_session_mock.call_args.kwargs.get("stream_config")
+                    if stream_config is not None:
+                        self.assertFalse(stream_config.otlp)
+                        self.assertEqual(stream_config.protocol, "http/json")
 
 
 # ---------------------------------------------------------------------------

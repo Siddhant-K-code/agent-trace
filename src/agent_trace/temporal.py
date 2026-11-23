@@ -172,8 +172,9 @@ def export_temporal_otlp(
     endpoint: str,
     headers: dict[str, str] | None = None,
     service_name: str = "agent-trace",
+    protocol: str = "http/json",
 ) -> bool:
-    """Export one Temporal-parented session via OTLP/HTTP JSON."""
+    """Export one Temporal-parented session via OTLP/HTTP JSON or protobuf."""
     meta = store.load_meta(session_id)
     events = store.load_events(session_id)
     if not events:
@@ -191,4 +192,5 @@ def export_temporal_otlp(
         endpoint,
         headers=headers,
         event_count=len(events),
+        protocol=protocol,
     )

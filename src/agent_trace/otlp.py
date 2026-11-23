@@ -53,6 +53,13 @@ from .models import (
     usable_text,
 )
 from .http_post import no_redirect_opener, otlp_traces_url, post_error_detail, url_endpoint
+from .otlp_proto import (
+    CONTENT_TYPES,
+    PROTOCOL_JSON,
+    EncodeError,
+    encode_body,
+    unsupported_media_hint,
+)
 from .pairing import (
     LLM_REQUEST_TYPES,
     LLM_RESPONSE_TYPES,
@@ -1705,6 +1712,7 @@ def export_otlp(
     endpoint: str,
     headers: dict[str, str] | None = None,
     service_name: str = "agent-trace",
+    protocol: str = PROTOCOL_JSON,
 ) -> bool:
     """Export a session to an OTLP/HTTP endpoint.
 
@@ -1714,6 +1722,7 @@ def export_otlp(
         endpoint: OTLP collector URL (e.g. http://localhost:4318)
         headers: Extra HTTP headers (for auth tokens, API keys)
         service_name: OTel service name
+        protocol: ``http/json`` or ``http/protobuf``
 
     Returns:
         True if export succeeded. A ValueError from the conversion, other
@@ -1742,6 +1751,7 @@ def export_otlp(
         endpoint,
         headers=headers,
         event_count=len(events),
+        protocol=protocol,
     )
 
 
@@ -1776,24 +1786,28 @@ def export_otlp_payload(
     endpoint: str,
     headers: dict[str, str] | None = None,
     event_count: int = 0,
+    protocol: str = PROTOCOL_JSON,
 ) -> bool:
-    """POST a prepared ExportTraceServiceRequest via OTLP/HTTP JSON.
+    """POST a prepared ExportTraceServiceRequest via OTLP/HTTP.
+
+    Sends the payload as JSON, or as protobuf when *protocol* is
+    ``http/protobuf`` (see :mod:`agent_trace.otlp_proto`).
 
     Sends to otlp_traces_url(endpoint), the URL watch --stream-to
     --stream-otlp uses, and never follows a redirect. Any 2xx answer is
     success; anything else, including a 3xx, a network error and a timeout,
-    prints a failure line and returns False without raising. Lines name only
-    the endpoint's scheme://host[:port], because the rest of the URL can
-    carry a token.
+    prints a failure line and returns False without raising. A 415 answer
+    adds a line naming the other --protocol. Lines name only the endpoint's
+    scheme://host[:port], because the rest of the URL can carry a token.
     """
     url = otlp_traces_url(endpoint)
     shown = url_endpoint(url)
     target = f" to {shown}" if shown else ""
-    req_headers = {"Content-Type": "application/json"}
+    req_headers = {"Content-Type": CONTENT_TYPES[protocol]}
     if headers:
         req_headers.update(headers)
     try:
-        body = json.dumps(payload).encode("utf-8")
+        body = encode_body(payload, protocol)
         request = urllib.request.Request(url, data=body, headers=req_headers, method="POST")
         with no_redirect_opener().open(request, timeout=_EXPORT_TIMEOUT) as response:
             status = response.status
@@ -1802,6 +1816,11 @@ def export_otlp_payload(
         sys.stderr.write(f"OTLP export{target} failed: {post_error_detail(exc)}\n")
         if excerpt:
             sys.stderr.write(f"  {excerpt}\n")
+        if exc.code == 415:
+            sys.stderr.write(f"  {unsupported_media_hint(protocol)}\n")
+        return False
+    except EncodeError as exc:
+        sys.stderr.write(f"OTLP export{target} failed: {exc}\n")
         return False
     except Exception as exc:
         sys.stderr.write(f"OTLP export{target} failed: {post_error_detail(exc)}\n")

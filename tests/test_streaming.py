@@ -25,6 +25,7 @@ import agent_trace.watch as watch_module
 from agent_trace.cli import build_parser
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.otlp import otlp_genai_data_indexes, session_to_otlp_genai
+from agent_trace.otlp_proto import encode_trace_request
 from agent_trace.store import TraceStore
 from agent_trace.watch import (
     EventStreamer,
@@ -897,6 +898,7 @@ class _ScriptedServer(ThreadingHTTPServer):
         super().__init__(("127.0.0.1", 0), _ScriptedHandler)
         self.lock = threading.Lock()
         self.requests: list[tuple[str, str, bytes]] = []
+        self.content_types: list[str | None] = []
         self.replies: list[tuple[int, float]] = []
         self.release = threading.Event()
         self.reason: str | None = None
@@ -907,6 +909,7 @@ class _ScriptedServer(ThreadingHTTPServer):
     def script(self, *replies: tuple[int, float]) -> None:
         with self.lock:
             self.requests.clear()
+            self.content_types.clear()
             self.replies[:] = replies
         self.release.clear()
 
@@ -925,6 +928,7 @@ class _ScriptedHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         with server.lock:
             server.requests.append(("POST", self.path, body))
+            server.content_types.append(self.headers.get("Content-Type"))
             status, hold = server.replies.pop(0) if server.replies else (200, 0.0)
         if hold:
             server.release.wait(hold)
@@ -973,12 +977,13 @@ class _ScriptedReceiverTestCase(unittest.TestCase):
         )
 
     def _stream(self, url: str, *, otlp: bool, events: list[TraceEvent] | None = None,
-                batch_size: int = 100) -> str:
+                batch_size: int = 100, protocol: str = "http/json") -> str:
         """Stream *events* to *url*, stop, and return what stderr got."""
         stderr = StringIO()
         with redirect_stderr(stderr):
             streamer = EventStreamer(StreamConfig(
                 url=url, otlp=otlp, batch_size=batch_size, flush_interval=60.0,
+                protocol=protocol,
             ))
             for event in _wrapped([]) if events is None else events:
                 streamer.enqueue(event)
@@ -1175,6 +1180,82 @@ class TestStreamUrlPaths(_ScriptedReceiverTestCase):
                 stderr = self._stream(f"http://127.0.0.1:{self.port}{suffix}", otlp=False)
                 self.assertEqual(stderr, "")
                 self.assertEqual([sent for sent, _ in self.server.posts()], [path])
+
+
+class TestStreamOtlpProtocol(_ScriptedReceiverTestCase):
+    """OTLP mode sends JSON or protobuf (StreamConfig.protocol); NDJSON is unchanged."""
+
+    _HINTS = {
+        "http/json": "[stream] This collector does not accept OTLP JSON; "
+                     "send protobuf with --protocol http/protobuf\n",
+        "http/protobuf": "[stream] This collector does not accept OTLP protobuf; "
+                         "send JSON with --protocol http/json\n",
+    }
+
+    def _content_types(self) -> list[str | None]:
+        with self.server.lock:
+            return list(self.server.content_types)
+
+    def test_protobuf_is_the_json_payload_encoded(self) -> None:
+        # The root span's times come from the clock, so each body is checked
+        # against the payload the converter returned for it.
+        url = f"http://127.0.0.1:{self.port}/collector?{_QUERY}"
+        encoders = {
+            "http/json": ("application/json", lambda payload: json.dumps(payload).encode("utf-8")),
+            "http/protobuf": ("application/x-protobuf", encode_trace_request),
+        }
+        for protocol, (content_type, encode) in encoders.items():
+            with self.subTest(protocol=protocol):
+                payloads = []
+
+                def convert(*args, **kwargs):
+                    payloads.append(session_to_otlp_genai(*args, **kwargs))
+                    return payloads[-1]
+
+                self.server.script()
+                with patch("agent_trace.otlp.session_to_otlp_genai", side_effect=convert):
+                    self.assertEqual(self._stream(url, otlp=True, protocol=protocol), "")
+                [(path, body)] = self.server.posts()
+                self.assertEqual(path, f"/collector/v1/traces?{_QUERY}")
+                self.assertEqual(self._content_types(), [content_type])
+                [payload] = payloads
+                self.assertTrue(payload["resourceSpans"][0]["scopeSpans"][0]["spans"])
+                self.assertEqual(body, encode(payload))
+
+    def test_first_415_names_the_other_protocol_once(self) -> None:
+        line = (
+            f"[stream] OTLP POST to http://collector.test:{self.port} failed: "
+            "HTTP Error 415: Unsupported Media Type\n"
+        )
+        for protocol, hint in self._HINTS.items():
+            with self.subTest(protocol=protocol):
+                self.server.script((415, 0.0), (415, 0.0))
+                stderr = self._stream(self._marked_url(), otlp=True, batch_size=1, protocol=protocol)
+                self.assertEqual(stderr, line + hint + line)
+                self.assertEqual(self.server.methods(), ["POST", "POST"])
+
+    def test_payload_that_cannot_be_encoded_as_protobuf(self) -> None:
+        # The line names the field, never its value, and nothing is sent.
+        payload = {"resourceSpans": [{"scopeSpans": [{"spans": [{"traceId": "SECRET-ID"}]}]}]}
+        self.server.script()
+        with patch("agent_trace.otlp.session_to_otlp_genai", return_value=payload):
+            stderr = self._stream(self._marked_url(), otlp=True, protocol="http/protobuf")
+        self.assertEqual(stderr, (
+            f"[stream] OTLP POST to http://collector.test:{self.port} failed: "
+            "resourceSpans[0].scopeSpans[0].spans[0].traceId: expected an even number of hex digits\n"
+        ))
+        self.assertEqual(self.server.methods(), [])
+
+    def test_ndjson_ignores_the_protocol_and_gets_no_hint(self) -> None:
+        self.server.script((415, 0.0))
+        stderr = self._stream(self._marked_url(), otlp=False, protocol="http/protobuf")
+        self.assertEqual(stderr, (
+            f"[stream] POST to http://collector.test:{self.port} failed: "
+            "HTTP Error 415: Unsupported Media Type\n"
+        ))
+        self.assertEqual(self._content_types(), ["application/x-ndjson"])
+        [(_, body)] = self.server.posts()
+        self.assertEqual(len([json.loads(line) for line in body.splitlines()]), 2)
 
 
 class TestStreamFlushInterval(_ScriptedReceiverTestCase):

@@ -28,6 +28,7 @@ from unittest.mock import MagicMock, patch
 
 import agent_trace
 from agent_trace import http_post, otlp, watch
+from agent_trace.otlp_proto import PROTOCOL_ENV_VARS, encode_trace_request
 from agent_trace.cli import build_parser, cmd_export
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
@@ -178,7 +179,7 @@ class _ExportCase(unittest.TestCase):
         environ = patch.dict(os.environ, {"no_proxy": "*"})
         environ.start()
         self.addCleanup(environ.stop)
-        for name in _ROUTE_ENV:
+        for name in (*_ROUTE_ENV, *PROTOCOL_ENV_VARS):
             os.environ.pop(name, None)
         store = TraceStore(self.trace_dir)
         meta = SessionMeta(
@@ -460,6 +461,67 @@ class TestExportSends(_CollectorCase):
                 self.assertEqual(post.header("X-Url"), ["http://a:b/c"])
 
 
+class TestExportProtocol(_CollectorCase):
+    """--protocol, then the OTEL protocol variables, choose JSON or protobuf."""
+
+    PROTOBUF = "application/x-protobuf"
+    JSON = "application/json"
+
+    def post(self, fmt: str, *flags: str, env: dict[str, str] | None = None):
+        """Export *fmt* with *flags* and *env*; return the result and the one POST."""
+        self.collector.script((200, b"", 0.0))
+        with patch.dict(os.environ, env or {}):
+            result = self.export("--format", fmt, "--endpoint", self.base, *flags)
+        self.assertEqual(result, (0, "", f"Exported 2 events to {self.base} (HTTP 200)\n"))
+        [post] = self.collector.received()
+        self.assertEqual((post.method, post.path), ("POST", "/v1/traces"))
+        return post
+
+    def test_protobuf_is_the_json_payload_encoded(self):
+        for fmt in FORMATS:
+            with self.subTest(format=fmt):
+                sent = self.post(fmt)
+                self.assertEqual(sent.header("Content-Type"), [self.JSON])
+                payload = json.loads(sent.body)
+                self.assertEqual(self.post(fmt).body, sent.body)  # the same each time
+                post = self.post(fmt, "--protocol", "http/protobuf", "--header", "X-Probe-Key: k")
+                self.assertEqual(post.header("Content-Type"), [self.PROTOBUF])
+                self.assertEqual(post.header("X-Probe-Key"), ["k"])
+                self.assertEqual(post.body, encode_trace_request(payload))
+                self.assertEqual(os.listdir(self.cwd), [])
+
+    def test_flag_then_traces_variable_then_generic_variable(self):
+        traces, generic = PROTOCOL_ENV_VARS
+        cases = (
+            ((), {}, self.JSON),
+            ((), {generic: "http/protobuf"}, self.PROTOBUF),
+            ((), {traces: "http/protobuf"}, self.PROTOBUF),
+            ((), {traces: "http/json", generic: "http/protobuf"}, self.JSON),
+            ((), {traces: "", generic: "http/protobuf"}, self.PROTOBUF),
+            (("--protocol", "http/json"), {traces: "http/protobuf"}, self.JSON),
+            (("--protocol", "HTTP/Protobuf"), {traces: "grpc", generic: SECRET}, self.PROTOBUF),
+        )
+        for fmt in FORMATS:
+            for flags, env, content_type in cases:
+                with self.subTest(format=fmt, flags=flags, env=env):
+                    post = self.post(fmt, *flags, env=env)
+                    self.assertEqual(post.header("Content-Type"), [content_type])
+
+    def test_415_names_the_other_protocol(self):
+        json_hint = "This collector does not accept OTLP JSON; send protobuf with --protocol http/protobuf"
+        protobuf_hint = "This collector does not accept OTLP protobuf; send JSON with --protocol http/json"
+        for fmt in FORMATS:
+            for flags, hint in (((), json_hint), (("--protocol", "http/protobuf"), protobuf_hint)):
+                with self.subTest(format=fmt, flags=flags):
+                    self.collector.script((415, b"Unsupported content type: application/json", 0.0))
+                    result = self.export("--format", fmt, "--endpoint", self.base, *flags)
+                    line = self.failure("HTTP Error 415: Unsupported Media Type")
+                    self.assertEqual(
+                        result,
+                        (1, "", f"{line}  Unsupported content type: application/json\n  {hint}\n"),
+                    )
+
+
 class TestExportFailures(_CollectorCase):
     def test_redirects_are_not_followed(self):
         # E05, E06. main followed a 302 with a GET to another host that
@@ -577,10 +639,12 @@ class TestExportFailures(_CollectorCase):
 class TestExportOtlpPayload(unittest.TestCase):
     ENDPOINT = "http://collector.test:4318/x?k=1"
 
-    def post(self, payload: dict, opener: MagicMock) -> tuple[bool, str]:
+    def post(self, payload: dict, opener: MagicMock, protocol: str = "http/json") -> tuple[bool, str]:
         err = io.StringIO()
         with patch.object(otlp, "no_redirect_opener", return_value=opener), redirect_stderr(err):
-            ok = otlp.export_otlp_payload(payload, self.ENDPOINT, headers={"X-A": "1"}, event_count=3)
+            ok = otlp.export_otlp_payload(
+                payload, self.ENDPOINT, headers={"X-A": "1"}, event_count=3, protocol=protocol,
+            )
         return ok, err.getvalue()
 
     def test_request(self):
@@ -601,6 +665,32 @@ class TestExportOtlpPayload(unittest.TestCase):
         opener = MagicMock()
         result = self.post({"bad": object()}, opener)
         self.assertEqual(result, (False, "OTLP export to http://collector.test:4318 failed: TypeError\n"))
+        opener.open.assert_not_called()
+
+    def test_protobuf_request(self):
+        opener = MagicMock()
+        opener.open.return_value = _response(200)
+        payload = {"resourceSpans": [{"scopeSpans": [{"spans": [{"name": "s", "traceId": TRACE_ID}]}]}]}
+        result = self.post(payload, opener, protocol="http/protobuf")
+        self.assertEqual(result, (True, "Exported 3 events to http://collector.test:4318 (HTTP 200)\n"))
+        [call] = opener.open.call_args_list
+        request = call.args[0]
+        self.assertEqual(request.full_url, "http://collector.test:4318/x/v1/traces?k=1")
+        self.assertEqual(request.get_header("Content-type"), "application/x-protobuf")
+        self.assertEqual(request.get_header("X-a"), "1")
+        self.assertEqual(request.data, encode_trace_request(payload))
+
+    def test_payload_that_cannot_be_encoded_as_protobuf(self):
+        # The line names the field, never its value.
+        opener = MagicMock()
+        span = {"name": "s", "traceId": SECRET}
+        result = self.post(
+            {"resourceSpans": [{"scopeSpans": [{"spans": [span]}]}]}, opener, protocol="http/protobuf",
+        )
+        self.assertEqual(result, (False, (
+            "OTLP export to http://collector.test:4318 failed: "
+            "resourceSpans[0].scopeSpans[0].spans[0].traceId: expected an even number of hex digits\n"
+        )))
         opener.open.assert_not_called()
 
     def test_status_outside_2xx_is_never_exported(self):
@@ -720,6 +810,27 @@ class TestExportRefusals(_CollectorCase):
              "--header", "bad", "--header", ": x"],
             "invalid --header 2: it has no colon; give it as NAME: VALUE",
         )
+        self.assertRefused(
+            ["--format", "otlp", "--endpoint", self.base, "--header", "bad", "--protocol", "grpc"],
+            "invalid --header 1: it has no colon; give it as NAME: VALUE",
+        )
+
+    def test_protocol(self):
+        # The line never repeats the value, and gRPC is named as unsupported.
+        traces, generic = PROTOCOL_ENV_VARS
+        grpc = "grpc is not supported: agent-strace sends OTLP over HTTP only; use http/protobuf or http/json"
+        override = "; or pass --protocol to override it"
+        invalid = "value: use http/json or http/protobuf"
+        cases = (
+            (("--protocol", "grpc"), {}, f"--protocol {grpc}"),
+            (("--protocol", f"http/{SECRET}"), {}, f"invalid --protocol {invalid}"),
+            ((), {traces: "grpc"}, f"{traces} {grpc}{override}"),
+            ((), {generic: SECRET}, f"invalid {generic} {invalid}{override}"),
+        )
+        for fmt in FORMATS:
+            for flags, env, line in cases:
+                with self.subTest(format=fmt, flags=flags, env=env), patch.dict(os.environ, env):
+                    self.assertRefused(["--format", fmt, "--endpoint", self.base, *flags], line)
 
     def test_refusal_comes_before_the_session_lookup(self):
         # main reported the missing session instead.
@@ -844,6 +955,18 @@ class TestExportIncludeSubagents(_CollectorCase):
                 self.assertOneTrace(json.loads(post.body), fmt)
                 self.assertEqual(os.listdir(self.cwd), [])
 
+    def test_sends_protobuf(self):
+        for fmt in ("otlp", "otlp-genai"):
+            with self.subTest(format=fmt):
+                self.collector.script((200, b"", 0.0), (200, b"", 0.0))
+                args = ("--format", fmt, "--include-subagents", "--endpoint", self.base)
+                self.assertEqual(self.export(*args)[0], 0)
+                result = self.export(*args, "--protocol", "http/protobuf")
+                self.assertEqual(result, (0, "", f"Exported 3 events to {self.base} (HTTP 200)\n"))
+                sent_json, sent_protobuf = self.collector.received()
+                self.assertEqual(sent_protobuf.header("Content-Type"), ["application/x-protobuf"])
+                self.assertEqual(sent_protobuf.body, encode_trace_request(json.loads(sent_json.body)))
+
     def test_refusals(self):
         not_used = "it exports one OTLP trace with --format otlp or otlp-genai"
         cases = (
@@ -856,6 +979,8 @@ class TestExportIncludeSubagents(_CollectorCase):
             (("--format", "otlp", "--metrics"), f"--include-subagents is not used with --metrics; {not_used}"),
             (("--format", "otlp", "--backend", "otlp"), f"--include-subagents is not used with --backend; {not_used}"),
             (("--format", "otlp", "--endpoint", ""), "invalid --endpoint value: it is empty"),
+            (("--format", "otlp", "--protocol", "http/protobuf"),
+             "--protocol is used only with --endpoint; OTLP files are always JSON"),
         )
         for flags, line in cases:
             with self.subTest(flags=flags):
@@ -948,6 +1073,27 @@ class TestExportWithoutEndpoint(_ExportCase):
         code, out, err = self.export("--format", "ndjson")
         self.assertEqual((code, err), (0, ""))
         self.assertEqual(len(out.splitlines()), 2)
+
+    def test_protocol_is_refused(self):
+        for flags in (("--format", "otlp"), ("--format", "otlp-genai", "--output", "x.json"), ()):
+            with self.subTest(flags=flags):
+                result = self.export(*flags, "--protocol", "http/protobuf")
+                self.assertEqual(result, (
+                    1, "", "--protocol is used only with --endpoint; OTLP files are always JSON\n",
+                ))
+                self.assertEqual(os.listdir(self.cwd), [])
+
+    def test_files_are_json_whatever_the_variables_say(self):
+        # The variables are read only with --endpoint, so even a value
+        # --endpoint would refuse is ignored here.
+        traces, generic = PROTOCOL_ENV_VARS
+        for env in ({traces: "http/protobuf"}, {generic: "grpc"}):
+            with self.subTest(env=env), patch.dict(os.environ, env):
+                code, out, err = self.export("--format", "otlp-genai", "--output", "out.json")
+                self.assertEqual((code, out), (0, ""))
+                with open(os.path.join(self.cwd, "out.json"), encoding="utf-8") as f:
+                    self.assertIn("resourceSpans", json.load(f))
+                os.remove(os.path.join(self.cwd, "out.json"))
 
 
 if __name__ == "__main__":

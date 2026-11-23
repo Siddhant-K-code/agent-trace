@@ -292,9 +292,11 @@ The implementation follows [W3C Trace Context Level 1](https://www.w3.org/TR/tra
 
 ## OTLP GenAI interoperability
 
-`agent-strace export --format otlp-genai` uses one OTLP/HTTP JSON payload for
+`agent-strace export --format otlp-genai` builds one OTLP payload for
 Phoenix/OpenInference, Langfuse, Honeycomb, Datadog, and standard OTel
-collectors. It does not install an OpenTelemetry SDK or add a gRPC path.
+collectors. It sends it over OTLP/HTTP as JSON, or as protobuf with
+`--protocol http/protobuf`, which Phoenix requires. It does not install an
+OpenTelemetry SDK or add a gRPC path.
 
 The payload carries both OpenTelemetry GenAI semantic convention attributes
 (see [Spans and attributes](production.md#spans-and-attributes)) and additive
@@ -348,5 +350,6 @@ agent-strace export "$AGENT_SESSION_ID" --format temporal \
 The session root span reuses Temporal's trace ID and sets the Temporal activity
 span as its parent; LLM and tool spans remain children of the session root. The
 setup belongs in the activity worker or agent launcher, so Temporal workflow
-definitions do not need to change. Export remains HTTP/JSON only and uses no
-Temporal, OpenTelemetry, or gRPC runtime dependency.
+definitions do not need to change. Export uses OTLP/HTTP, JSON by default or
+protobuf with `--protocol http/protobuf`, and uses no Temporal, OpenTelemetry,
+gRPC or protobuf runtime dependency.
