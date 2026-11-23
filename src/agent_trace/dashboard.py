@@ -27,6 +27,7 @@ from .event_data import require_object_event_data
 from .failures import count_session_errors
 from .fileutil import split_lf_lines
 from .inert import inert
+from .session_outcome import recorded_session_status
 from .models import (
     EventType,
     SessionMeta,
@@ -54,7 +55,7 @@ class SessionSummary:
     # Same as `agent-strace cost`; None when the session cannot be priced.
     estimated_cost: float | None
     agent_name: str
-    succeeded: bool   # True if no errors recorded
+    succeeded: bool   # No errors, and session_end does not say timeout or killed
 
 
 @dataclass
@@ -590,6 +591,7 @@ def build_dashboard(
     for meta in sessions:
         duration_s = (usable_number(meta.total_duration_ms) or 0.0) / 1000
         errors = usable_count(meta.errors)
+        ended_cleanly = True
         try:
             events = store.load_events(meta.session_id)
         except (OSError, ValueError):
@@ -599,6 +601,11 @@ def build_dashboard(
             # A session recorded before failed model requests were counted
             # stored a lower count than its events show.
             errors = max(errors, count_session_errors(events))
+            # A session_end that says the run timed out or was killed is
+            # not a success, even with no error events.
+            ended_cleanly = recorded_session_status(events) in {
+                "completed", "not_recorded",
+            }
 
         summaries.append(SessionSummary(
             session_id=meta.session_id,
@@ -610,7 +617,7 @@ def build_dashboard(
             total_tokens=usable_count(meta.total_tokens),
             estimated_cost=cost,
             agent_name=usable_text(meta.agent_name) or "unknown",
-            succeeded=errors == 0,
+            succeeded=errors == 0 and ended_cleanly,
         ))
 
     costs = [s.estimated_cost for s in summaries if s.estimated_cost is not None]
