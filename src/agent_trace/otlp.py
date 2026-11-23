@@ -4,7 +4,9 @@ Converts agent-trace sessions to OpenTelemetry spans and sends them
 to any OTLP-compatible collector over HTTP/JSON. Zero dependencies.
 
 Each agent-trace session becomes an OTel trace. Tool calls become spans.
-User prompts and assistant responses become events on the root span.
+User prompts and assistant responses become events on the root span. A model
+response that ``agent-strace import`` read from a transcript, with its
+recorded model and token usage, also becomes a ``chat {model}`` span.
 
 Works with: Datadog, Honeycomb, New Relic, Splunk, Grafana Tempo, Jaeger.
 
@@ -26,7 +28,7 @@ import urllib.request
 from typing import TYPE_CHECKING, Any
 
 from . import __version__
-from .cost import TokenUsage, reasoning_output_tokens, usage_detail
+from .cost import TokenUsage, reasoning_output_tokens, recorded_response_indexes, usage_detail
 from .event_data import (
     NonObjectEventDataError,
     UnusableTimestampError,
@@ -853,6 +855,118 @@ class _RetryLinks:
                 span["links"] = links
 
 
+# ---------------------------------------------------------------------------
+# Model responses read from a transcript
+# ---------------------------------------------------------------------------
+
+_SEMCONV_RESPONSE_MODEL = "gen_ai.response.model"
+_SEMCONV_RESPONSE_ID = "gen_ai.response.id"
+# Marks a span whose start time was not recorded but inferred from other
+# events, so its duration is not a measured latency.
+_TIMING = "agent.strace.timing"
+_TIMING_INFERRED = "inferred"
+# Events that give the model new input. The next model request of the same
+# context stream cannot have started before them.
+_MODEL_INPUT_EVENT_TYPES = frozenset({EventType.USER_PROMPT, EventType.TOOL_RESULT})
+
+
+def _imported_response_starts(events: list[TraceEvent]) -> dict[int, float]:
+    """Return the inferred span start of each recorded model response.
+
+    The responses are the ``assistant_response`` events that
+    :func:`agent_trace.cost.recorded_response_indexes` names: one per model
+    message whose usage ``agent-strace import`` read from a Claude Code
+    transcript. A transcript line has one timestamp, so the request's start
+    was not recorded. Each span ends at its response and starts at the latest
+    earlier event, in trace order, of the same ``context_stream`` that is a
+    ``user_prompt``, a ``tool_result`` or another of these responses. With no
+    such event the span has zero length at the response. A start later than
+    the response is the response's time.
+
+    A ``<synthetic>`` message, which Claude Code writes itself for an API
+    error without sending a model request, gets no span and moves no start.
+
+    The result maps ``id()`` of each response event to its start.
+    """
+    # Claude Code writes "<synthetic>" messages itself, with no model request.
+    counted = {
+        index for index in recorded_response_indexes(events)
+        if event_model(events[index].data) != "<synthetic>"
+    }
+    if not counted:
+        return {}
+    starts: dict[int, float] = {}
+    latest: dict[str, float] = {}
+    for index, event in enumerate(events):
+        if index not in counted and event.event_type not in _MODEL_INPUT_EVENT_TYPES:
+            continue
+        data = event.data if isinstance(event.data, Mapping) else {}
+        stream = str_field(data, "context_stream", "")
+        if index in counted:
+            starts[id(event)] = min(latest.get(stream, event.timestamp), event.timestamp)
+        latest[stream] = event.timestamp
+    return starts
+
+
+def _imported_response_attributes(data: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the recorded response model and ID, and the inferred timing mark.
+
+    ``gen_ai.response.id`` is the transcript ``message.id`` that import stores
+    as ``message_id``. A session imported before import stored it has none.
+    """
+    attrs: dict[str, Any] = {}
+    model = event_model(data)
+    if model:
+        attrs[_SEMCONV_RESPONSE_MODEL] = model
+    message_id = str_field(data, "message_id", "")
+    if message_id:
+        attrs[_SEMCONV_RESPONSE_ID] = message_id
+    attrs[_TIMING] = _TIMING_INFERRED
+    return attrs
+
+
+def _classic_response_span(
+    trace_id: str,
+    root_span_id: str,
+    span_id: str,
+    event: TraceEvent,
+    start: float,
+    gen_ai_system: str,
+) -> dict:
+    """Build the classic ``chat {model}`` span of one recorded model response.
+
+    It carries the recorded model, token counts and stop reason under the keys
+    the classic model request events use. See :func:`_imported_response_starts`
+    for its start.
+    """
+    data = event.data
+    model = event_model(data)
+    attrs: dict[str, Any] = {_SEMCONV_SYSTEM: gen_ai_system, _SEMCONV_OP: _OP_CHAT}
+    if model:
+        attrs[_SEMCONV_MODEL] = model
+    usage, has_input, has_output = usage_detail(data)
+    if has_input:
+        attrs[_SEMCONV_INPUT_TOKENS] = usage.input_tokens
+        attrs.update(_cache_attributes(usage))
+    if has_output:
+        attrs[_SEMCONV_OUTPUT_TOKENS] = usage.output_tokens
+    finish = data.get("stop_reason") or data.get("finish_reason", "")
+    if finish:
+        attrs[_SEMCONV_FINISH_REASON] = _finish_reasons(finish)
+    attrs.update(_imported_response_attributes(data))
+    return {
+        "traceId": trace_id,
+        "spanId": span_id,
+        "parentSpanId": root_span_id,
+        "name": _model_span_name(model),
+        "kind": 3,  # SPAN_KIND_CLIENT
+        "startTimeUnixNano": _ts_to_nanos(start),
+        "endTimeUnixNano": _ts_to_nanos(event.timestamp),
+        "attributes": _make_attributes(attrs),
+        "status": {"code": 0},  # STATUS_CODE_UNSET
+    }
+
+
 # session_to_otlp reads the data of every event of these types. It reads a
 # tool_call only when otlp_data_indexes says so.
 OTLP_DATA_EVENT_TYPES = frozenset({
@@ -954,6 +1068,11 @@ def session_to_otlp(
 
     Returns the full ExportTraceServiceRequest body ready to POST.
 
+    Model requests stay events on the root span, except a model response that
+    ``agent-strace import`` read from a transcript with recorded usage. That
+    one also becomes a ``chat {model}`` CLIENT span with an inferred start
+    (see :func:`_imported_response_starts`).
+
     Args:
         parent_span_id: When set, the root span is linked as a child of this
             span (used for subagent hierarchy).
@@ -1016,6 +1135,8 @@ def session_to_otlp(
     # requests with their responses (see pairing.py)
     calls: Pairer[TraceEvent] = tool_pairer()
     requests: Pairer[TraceEvent] = llm_pairer()
+    # Model responses read from a transcript, which recorded no request
+    response_starts = _imported_response_starts(events)
 
     for event in events:
         if event.event_type == EventType.USER_PROMPT:
@@ -1034,6 +1155,16 @@ def session_to_otlp(
                 event.timestamp,
                 {"text": text},
             ))
+            inferred_start = response_starts.get(id(event))
+            if inferred_start is not None:
+                child_spans.append(retry_links.add(_classic_response_span(
+                    trace_id,
+                    root_span_id,
+                    span_id_of(event),
+                    event,
+                    inferred_start,
+                    gen_ai_system,
+                ), event))
 
         elif event.event_type == EventType.DECISION:
             root_events.append(_make_event(
@@ -1345,6 +1476,8 @@ def _genai_llm_span(
     req_event: TraceEvent | None,
     event: TraceEvent,
     span_id: str,
+    *,
+    inferred_start: float | None = None,
 ) -> dict:
     """Build the ``chat`` model request span for one model request.
 
@@ -1352,8 +1485,16 @@ def _genai_llm_span(
     to ``req_event``. A failed or cancelled request (see :func:`llm_failure`)
     gets ERROR status and ``error.type``; a completed one keeps OK status.
     ``span_id`` is the span ID of ``req_event``, or of ``event`` without one.
+
+    ``inferred_start`` is set when ``event`` is a model response read from a
+    transcript, an ``assistant_response`` with recorded usage and no request
+    (see :func:`_imported_response_starts`). The span starts there and may
+    have zero length. It carries the recorded response model and ID and
+    ``agent.strace.timing=inferred``.
     """
     span_start = req_event.timestamp if req_event else event.timestamp
+    if inferred_start is not None:
+        span_start = inferred_start
     span_end = event.timestamp
 
     model = event.data.get("model", "") or (
@@ -1415,6 +1556,10 @@ def _genai_llm_span(
     if req_event:
         llm_attrs.update(_event_trace_attributes(req_event, "request"))
     llm_attrs.update(_event_trace_attributes(event, "response"))
+    if inferred_start is not None:
+        llm_attrs.update(_imported_response_attributes(event.data))
+    else:
+        span_end = max(span_end, span_start + 0.001)
     llm_attrs["metadata"] = _openinference_metadata(llm_attrs)
 
     span: dict = {
@@ -1424,7 +1569,7 @@ def _genai_llm_span(
         "name": _model_span_name(model),
         "kind": 3,  # SPAN_KIND_CLIENT
         "startTimeUnixNano": _ts_to_nanos(span_start),
-        "endTimeUnixNano": _ts_to_nanos(max(span_end, span_start + 0.001)),
+        "endTimeUnixNano": _ts_to_nanos(span_end),
         "attributes": _make_attributes(llm_attrs),
     }
     if event.event_type == EventType.ERROR:
@@ -1465,6 +1610,9 @@ def session_to_otlp_genai(
       (not just events on the root span). A failed or cancelled model
       request, or an error linked to an llm_request, gets ERROR status and
       error.type
+    - A model response that ``agent-strace import`` read from a transcript,
+      with its recorded model and token usage, becomes a ``chat {model}``
+      span too, with an inferred start (see _imported_response_starts)
     - Tool calls become ``execute_tool {tool}`` INTERNAL spans with
       gen_ai.tool.name and gen_ai.tool.call.id; a failed one gets error.type
     - The root is an ``invoke_agent`` INTERNAL span with gen_ai.agent.name
@@ -1542,6 +1690,8 @@ def session_to_otlp_genai(
     # Pair LLM requests and tool calls with their responses (see pairing.py)
     requests: Pairer[TraceEvent] = llm_pairer()
     calls: Pairer[TraceEvent] = tool_pairer()
+    # Model responses read from a transcript, which recorded no request
+    response_starts = _imported_response_starts(events)
 
     for event in events:
         if event.event_type == EventType.USER_PROMPT:
@@ -1568,6 +1718,12 @@ def session_to_otlp_genai(
                 event.timestamp,
                 event_attrs,
             ))
+            inferred_start = response_starts.get(id(event))
+            if inferred_start is not None:
+                child_spans.append(retry_links.add(_genai_llm_span(
+                    meta, trace_id, root_span_id, None, event, span_id_of(event),
+                    inferred_start=inferred_start,
+                ), event))
 
         elif event.event_type == EventType.LLM_REQUEST:
             requests.add(event)
