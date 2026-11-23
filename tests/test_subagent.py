@@ -14,6 +14,7 @@ from agent_trace.cli import (
     _parent_session_id,
     _resolve_parent_session_id,
 )
+from agent_trace.event_data import NonObjectEventDataError, UnusableTimestampError
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
 from agent_trace import subagent as subagent_mod
@@ -275,6 +276,73 @@ class TestFormatTree(unittest.TestCase):
         buf = io.StringIO()
         format_tree(root_node, out=buf, expand=False)
         self.assertNotIn("child003", buf.getvalue())
+
+
+class TestChildrenSharingParentEvent(unittest.TestCase):
+    """One tool_call can start more than one child session."""
+
+    def _store(self, child_ids, child_events=None):
+        root = "rootshared000000"
+        sessions = [(SessionMeta(session_id=root, agent_name="root", started_at=1000.0), [
+            TraceEvent(event_type=EventType.TOOL_CALL, timestamp=1001.0, event_id="call1",
+                       session_id=root,
+                       data={"tool_name": "Bash", "arguments": {"command": "spawn"}}),
+            TraceEvent(event_type=EventType.TOOL_RESULT, timestamp=1009.0, event_id="res1",
+                       session_id=root, data={"result": "done"}),
+        ])]
+        for i, sid in enumerate(child_ids):
+            meta = SessionMeta(session_id=sid, agent_name="worker", started_at=1002.0 + i,
+                               parent_session_id=root, parent_event_id="call1", depth=1)
+            events = (child_events or {}).get(sid) or [
+                _make_event(EventType.USER_PROMPT, 1002.5 + i, sid, prompt=f"work {sid[:6]}"),
+            ]
+            sessions.append((meta, events))
+        store, tmp = _make_store_with_sessions(sessions)
+        self.addCleanup(tmp.cleanup)
+        return build_tree(store, root)
+
+    @staticmethod
+    def _render(tree):
+        buf = io.StringIO()
+        format_tree(tree, out=buf)
+        return buf.getvalue()
+
+    def test_expand_inlines_every_child_in_start_order(self):
+        lines = self._render(self._store(["childA0000000000", "childB0000000000"])).splitlines()
+        self.assertEqual(lines[1:7], [
+            "+ 1.00s  → tool_call  Bash  $ spawn",
+            "├─ ▶ session_start  childA000000  agent=worker  depth=1",
+            "├─ + 2.50s  👤 \"work childA\"",
+            "",
+            "└─ ▶ session_start  childB000000  agent=worker  depth=1",
+            "└─ + 3.50s  👤 \"work childB\"",
+        ])
+
+    def test_one_child_per_parent_event_renders_as_before(self):
+        self.assertEqual(self._render(self._store(["childA0000000000"])), (
+            "▶ session_start  rootshared00  agent=root  depth=0\n"
+            "+ 1.00s  → tool_call  Bash  $ spawn\n"
+            "└─ ▶ session_start  childA000000  agent=worker  depth=1\n"
+            "└─ + 2.50s  👤 \"work childA\"\n"
+            "\n"
+            "+ 9.00s  ← tool_result  done\n"
+            "\n"
+        ))
+
+    def test_checks_cover_every_child_of_the_event(self):
+        bad = "childA0000000000"
+        cases = [
+            (subagent_mod.require_tree_timestamps, UnusableTimestampError,
+             [_make_event(EventType.USER_PROMPT, float("nan"), bad, prompt="x")]),
+            (subagent_mod.require_tree_event_data, NonObjectEventDataError,
+             [TraceEvent(event_type=EventType.USER_PROMPT, timestamp=1002.5,
+                         session_id=bad, data=["not", "an", "object"])]),
+        ]
+        for check, error, events in cases:
+            with self.subTest(check=check.__name__):
+                tree = self._store([bad, "childB0000000000"], {bad: events})
+                with self.assertRaises(error):
+                    check(tree)
 
 
 class TestSessionTreeCommand(unittest.TestCase):

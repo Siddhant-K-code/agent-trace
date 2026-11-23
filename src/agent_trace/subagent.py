@@ -292,6 +292,19 @@ TREE_DATA_EVENT_TYPES = frozenset({
 })
 
 
+def _children_by_event(node: SessionNode) -> dict[str, list[SessionNode]]:
+    """Map each parent_event_id to the child sessions it spawned.
+
+    One tool_call can start more than one child session. Each list keeps
+    the order of node.children, which is by start time.
+    """
+    children_by_event: dict[str, list[SessionNode]] = {}
+    for child in node.children:
+        if child.meta.parent_event_id:
+            children_by_event.setdefault(child.meta.parent_event_id, []).append(child)
+    return children_by_event
+
+
 def require_tree_event_data(node: SessionNode, expand: bool = True) -> None:
     """Raise NonObjectEventDataError if format_tree would read non-object data.
 
@@ -305,13 +318,11 @@ def require_tree_event_data(node: SessionNode, expand: bool = True) -> None:
     )
     if not expand:
         return
-    children_by_event = {
-        c.meta.parent_event_id: c for c in node.children if c.meta.parent_event_id
-    }
+    children_by_event = _children_by_event(node)
     for event in node.events:
-        event_id = event_id_of(event)
-        if event.event_type == EventType.TOOL_CALL and event_id in children_by_event:
-            require_tree_event_data(children_by_event[event_id], expand)
+        if event.event_type == EventType.TOOL_CALL:
+            for child in children_by_event.get(event_id_of(event), ()):
+                require_tree_event_data(child, expand)
 
 
 def require_tree_timestamps(node: SessionNode, expand: bool = True) -> None:
@@ -325,13 +336,11 @@ def require_tree_timestamps(node: SessionNode, expand: bool = True) -> None:
     require_usable_timestamps(node.events, session_id=node.meta.session_id)
     if not expand:
         return
-    children_by_event = {
-        c.meta.parent_event_id: c for c in node.children if c.meta.parent_event_id
-    }
+    children_by_event = _children_by_event(node)
     for event in node.events:
-        event_id = event_id_of(event)
-        if event.event_type == EventType.TOOL_CALL and event_id in children_by_event:
-            require_tree_timestamps(children_by_event[event_id], expand)
+        if event.event_type == EventType.TOOL_CALL:
+            for child in children_by_event.get(event_id_of(event), ()):
+                require_tree_timestamps(child, expand)
 
 
 def format_tree(
@@ -373,9 +382,7 @@ def format_tree(
       f"  depth={node.depth}\n")
 
     # Build a lookup of child sessions by the parent_event_id that spawned them
-    children_by_event: dict[str, SessionNode] = {
-        c.meta.parent_event_id: c for c in node.children if c.meta.parent_event_id
-    }
+    children_by_event = _children_by_event(node)
 
     for event in node.events:
         ts_str = _fmt_offset(base_ts, event.timestamp)
@@ -405,12 +412,12 @@ def format_tree(
 
             w(f"{indent}{ts_str}  → tool_call  {inert(tool_name)}{subagent_tag}{detail}\n")
 
-            # Inline expand subagent if this tool_call spawned one
-            if expand and event_id_of(event) in children_by_event:
-                child = children_by_event[event_id_of(event)]
-                is_last = child == node.children[-1] if node.children else True
-                format_tree(child, base_ts=base_ts, out=out, expand=expand,
-                            last_child=is_last, level=level + 1)
+            # Inline expand each subagent this tool_call spawned
+            if expand:
+                for child in children_by_event.get(event_id_of(event), ()):
+                    is_last = child is node.children[-1]
+                    format_tree(child, base_ts=base_ts, out=out, expand=expand,
+                                last_child=is_last, level=level + 1)
 
         elif event.event_type == EventType.TOOL_RESULT:
             preview = " ".join((str_field(event.data, "result", "") or

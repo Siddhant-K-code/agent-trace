@@ -302,7 +302,7 @@ agent-strace replay [session-id] [--format terminal|html] [--live] [--speed N]
 | `--speed N` | Speed multiplier for `--live` (default: 1.0) |
 | `--filter TYPES` | Comma-separated event types to show |
 | `--limit N` | Cap at N events |
-| `--expand-subagents` | Inline subagent sessions under the parent tool_call that started them (the child's `parent_event_id`) |
+| `--expand-subagents` | Inline subagent sessions under the parent tool_call that started them (the child's `parent_event_id`). When one tool_call started several, each shows, in start order |
 | `--tree` | Show session hierarchy without full replay |
 
 Both HTML outputs show event text and session ids as plain text.
