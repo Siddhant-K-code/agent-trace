@@ -557,6 +557,7 @@ TOKEN_KEYS = ("input_tokens", "output_tokens", "cache_creation_input_tokens",
 # json.loads raises RecursionError on this on every CI Python (see test_optimize.py).
 TOO_DEEP = b"[" * 1_000_000 + b"]" * 1_000_000
 _ABSENT = object()
+NO_CLAUDE_RECORDS = "no Claude Code transcript records; import reads Claude Code transcripts only"
 
 
 def _entry(sid="good1", **over):
@@ -1017,14 +1018,85 @@ class TestMalformedLog(unittest.TestCase):
                 over = _with_field(1, "message.content.1.input", _nested(kind, 65 - 4))
                 self.assertEqual(self._session(over), self._session(without))
 
-    def test_log_of_only_unusable_lines_imports_as_an_empty_session(self):
+    def test_log_of_only_unusable_lines_is_refused(self):
         path = self._write("empty2.jsonl", b'not json\n[1]\n'
                            b'{"type":"user","sessionId":"x1","message":{"content":"\xff"}}\n'
                            b'{"type":"user","sessionId":"x1","message":{"content":"caf\xc3')
 
-        self.assertEqual(self._import(path), "empty2")
-        self.assertEqual(len(self._events("empty2")), 2)
-        self.assertNotIn("conversation_id", self._meta("empty2"))
+        code, err = self._cli(path)
+
+        self.assertEqual(code, 1)
+        self.assertEqual(err, f"Cannot import {path}: {NO_CLAUDE_RECORDS}\n")
+        self.assertEqual(self._session_dirs(), [])
+
+    def test_codex_rollout_is_refused(self):
+        meta = {"timestamp": "2026-01-01T00:00:00.000Z", "type": "session_meta",
+                "payload": {"id": "rollout1", "timestamp": "2026-01-01T00:00:00.000Z",
+                            "cwd": "/w", "cli_version": "0.143.0", "source": "cli"}}
+        turn = {"timestamp": "2026-01-01T00:00:01.000Z", "type": "response_item",
+                "payload": {"type": "function_call", "name": "exec_command",
+                            "arguments": "{\"cmd\":\"ls\"}", "call_id": "c1"}}
+        # The first usable record decides, after a line that is not JSON.
+        path = self._write("rollout-2026-01-01T00-00-00-r1.jsonl", [b"not json", meta, turn, _entry("r1")])
+
+        code, err = self._cli(path)
+
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            err, f"Cannot import {path}: it is a Codex rollout; import reads Claude Code transcripts only. "
+                 "Capture Codex with hooks: agent-strace setup --cli codex\n")
+        self.assertEqual(self._session_dirs(), [])
+        with self.assertRaises(jsonl_import.NotClaudeTranscript) as ctx:
+            self._import(path)
+        self.assertEqual(ctx.exception.format, "codex")
+        self.assertEqual(self._session_dirs(), [])
+
+    def test_copilot_events_are_refused_every_time(self):
+        start = {"type": "session.start", "id": "e1", "parentId": None,
+                 "timestamp": "2026-01-01T00:00:00.000Z",
+                 "data": {"sessionId": "cp1", "version": 1, "producer": "copilot-agent",
+                          "copilotVersion": "1.0.112", "startTime": "2026-01-01T00:00:00.000Z",
+                          "context": {"cwd": "/w"}}}
+        prompt = {"type": "user.message", "id": "e2", "parentId": "e1",
+                  "timestamp": "2026-01-01T00:00:01.000Z", "data": {"content": "hi"}}
+        path = self._write("events.jsonl", [start, prompt])
+        expected = (f"Cannot import {path}: it is a GitHub Copilot CLI events.jsonl; import reads "
+                    "Claude Code transcripts only. Capture Copilot with hooks: "
+                    "agent-strace setup --cli copilot\n")
+
+        for _ in range(2):
+            self.assertEqual(self._cli(path), (1, expected))
+        self.assertEqual(self._session_dirs(), [])
+
+    def test_log_without_claude_records_gets_no_file_name_session(self):
+        # A session.start from another producer is not recognised as Copilot.
+        lines = [{"type": "session.start", "data": {"producer": "other"}},
+                 {"type": "event_msg", "sessionId": "x1"}, {"sessionId": "x1", "message": {}},
+                 {"type": "queue-operation", "sessionId": "x1"}]
+        path = self._write("events.jsonl", lines)
+
+        code, err = self._cli(path)
+
+        self.assertEqual(code, 1)
+        self.assertEqual(err, f"Cannot import {path}: {NO_CLAUDE_RECORDS}\n")
+        self.assertEqual(self._session_dirs(), [])
+
+    def test_transcript_with_unknown_lines_still_imports(self):
+        for name, first in (("summary", {"type": "summary", "summary": "s", "leafUuid": "u0"}),
+                            ("snapshot", {"type": "file-history-snapshot", "messageId": "m0"})):
+            with self.subTest(first=name):
+                sid = f"known{name}"
+                path = self._write(f"{sid}.jsonl", [first, {"type": "later-kind"}, _entry(sid)])
+
+                code, err = self._cli(path)
+
+                self.assertEqual(code, 0, err)
+                self.assertTrue(err.startswith(f"Imported session {sid}\n"))
+                self.assertEqual(self._prompts(sid), ["hello"])
+
+        path = self._write("summary1.jsonl", [{"type": "summary", "summary": "s", "leafUuid": "u0"}])
+        self.assertEqual(self._cli(path)[0], 0)
+        self.assertIn("summary1", self._session_dirs())
 
     @unittest.skipIf(os.name == "nt", "POSIX file modes and symlinks")
     @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root ignores file modes")

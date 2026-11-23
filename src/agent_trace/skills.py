@@ -1992,7 +1992,8 @@ def load_claude_history(claude_dir: str, trace_dir: str) -> tuple[TraceStore, in
             with contextlib.redirect_stderr(io.StringIO()):
                 import_jsonl(found["path"], store=store, merge=True)
             imported += 1
-        # OSError: the log cannot be read. ValueError: neither the log nor
+        # OSError: the log cannot be read. ValueError: the log is not a
+        # Claude Code transcript (NotClaudeTranscript), neither the log nor
         # its file name holds a usable session ID, or the store refuses the
         # session. AttributeError and TypeError guard against a log shape the
         # importer does not handle.
