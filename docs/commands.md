@@ -158,6 +158,24 @@ uses it. See [Platform-team install](platform-install.md#metadata-only-capture).
 | `session-end` | Finish the active session and clear its hook state. Records `duration_ms`, the time since `started_at` in `meta.json`, and stores it as `total_duration_ms`. When `started_at` is not a usable time, or is later than the end, the session still ends, `session_end` has no `duration_ms`, and `total_duration_ms` is 0. A repeated `session-end` for a session that already ended, and was not resumed since, records nothing and keeps the first end time |
 | `post-model-request` | Codex only: one `llm_response` per model request with the model, status, error, turn ID and token usage, plus `agent_id` and `agent_type` for a subagent's request |
 
+`post-tool` stores the tool's output as the event's `result` text, and
+`post-tool-failure` as its `error` text. Output the agent sends as a string is
+stored as sent. Output it sends as an object or list, such as Claude Code's
+Bash `{"stdout": ..., "stderr": ..., "interrupted": ..., "isImage": ...}`,
+Claude Code's Read `{"type": "text", "file": {...}}` or Codex's
+`{"exit_code": ..., "output": ...}`, is stored as compact JSON with the
+agent's field names and order, for example
+`{"stdout":"hi","stderr":"","interrupted":false,"isImage":false}`. Bash output
+is stored as the whole object, not just its streams, so `interrupted`, an exit
+code and any other field the agent sends are kept. Secrets are redacted in the
+object, field by field, before it is written as JSON. Then a result longer
+than 1000 characters keeps its first 1000 and `... (truncated)`, and an error
+keeps its first 500. Hooks in 0.121.1 and earlier stored an object as a
+Python `repr`, such as
+`{'stdout': 'hi', 'stderr': '', 'interrupted': False, 'isImage': False}`.
+Sessions recorded then keep that text, and readers that look inside a result,
+such as the test-runner summary, read both forms.
+
 Provider-specific aliases in generated configurations are normalized to these
 events. Prefer `agent-strace setup --cli PROVIDER` over invoking `hook`
 manually. See [setup.md](setup.md) for provider event coverage and generated

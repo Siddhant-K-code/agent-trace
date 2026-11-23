@@ -109,10 +109,12 @@ reports.
     does not fit is cut the same way, string values are shortened, and the
     rest are left out. Text that starts with `{` or `[` but does not parse
     becomes a JSON string of as much of it as fits. That includes JSON a
-    recorder already cut, and the Python `repr` the hooks store when an agent
-    reports a tool result as an object, such as `{'type': 'text'}`. Other
-    text, such as `1 passed`, is the plain text, as before. `output.value`
-    keeps the plain cut text.
+    recorder already cut, such as a hook result over 1000 characters, and
+    the Python `repr` that hooks in 0.121.1 and earlier stored when an agent
+    reported a tool result as an object, such as `{'type': 'text'}`. Hooks
+    now store that object as JSON, so it is cut with its structure kept.
+    Other text, such as `1 passed`, is the plain text, as before.
+    `output.value` keeps the plain cut text.
   - A `chat` span has no content: recorders store no prompt or reply per
     model request.
 - A `chat` span carries `gen_ai.response.id`, `gen_ai.response.model`,

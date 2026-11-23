@@ -14,6 +14,7 @@ import traceback
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -30,10 +31,12 @@ except ImportError:  # pragma: no cover - run as a package module
     from tests import _no_telemetry  # noqa: F401
 
 import agent_trace.store as store_module
+from agent_trace.event_data import parse_mapping
 from agent_trace.evidence_health import assess_evidence_health
 from agent_trace.hooks import (
     _PROVIDER_ENV,
     _active_session_path,
+    _cut_tool_output,
     _read_active_session,
     _write_active_session,
     _clear_active_session,
@@ -50,8 +53,10 @@ from agent_trace.hooks import (
     handle_subagent,
     hook_main,
 )
-from agent_trace.models import EventType
+from agent_trace.models import EventType, TraceEvent
 from agent_trace.redact import redact_data, redaction_marker
+from agent_trace.reviewability import _result_status
+from agent_trace.runner_summary import output_text, summary_outcome
 from agent_trace.store import TraceStore
 from agent_trace.telemetry import SESSION_COMPLETED
 
@@ -998,6 +1003,15 @@ SENSITIVE = redaction_marker("sensitive")
 GITHUB_TOKEN = "ghp_" + "A1b2" * 9
 
 
+def _as_json(value):
+    """Return tool output an object sent as a hook stores it: compact JSON."""
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _stored_result(text):
+    return TraceEvent(event_type=EventType.TOOL_RESULT, timestamp=1.0, data={"tool_name": "Bash", "result": text})
+
+
 def _fake_key(label="RSA PRIVATE KEY", seed=1, size=1190):
     """Return a PEM block of random base64. The RSA default is 1675 characters."""
     text = base64.b64encode(random.Random(seed).randbytes(size)).decode()
@@ -1070,7 +1084,7 @@ class TestHooksRedactBeforeCut(unittest.TestCase):
     def test_key_in_bash_stdout(self):
         output = {"stdout": self.KEY, "stderr": "", "interrupted": False, "isImage": False}
         event, err = self.post(output)
-        self.assertEqual(event.data["result"], str({**output, "stdout": KEY_MARKER + "\n"}))
+        self.assertEqual(event.data["result"], _as_json({**output, "stdout": KEY_MARKER + "\n"}))
         self.assert_redacted_once(event, err)
 
     def test_key_in_read_file_content(self):
@@ -1085,7 +1099,7 @@ class TestHooksRedactBeforeCut(unittest.TestCase):
         event, err = self.post({"type": "text", "file": file}, tool_name="Read")
         self.assertEqual(
             event.data["result"],
-            str({"type": "text", "file": {**file, "content": KEY_MARKER + "\n"}}),
+            _as_json({"type": "text", "file": {**file, "content": KEY_MARKER + "\n"}}),
         )
         self.assert_no_key_text(event.data["result"], key)
         self.assert_redacted_once(event, err)
@@ -1104,10 +1118,10 @@ class TestHooksRedactBeforeCut(unittest.TestCase):
             ("message", "postToolUseFailure", {"error": {"message": self.KEY}},
              KEY_MARKER + "\n"),
             ("error dict", "postToolUseFailure", {"error": {"code": "EACCES", "detail": self.KEY}},
-             str({"code": "EACCES", "detail": KEY_MARKER + "\n"})),
+             _as_json({"code": "EACCES", "detail": KEY_MARKER + "\n"})),
             ("failed result", "postToolUse",
              {"toolResult": {"resultType": "failure", "error": self.KEY}},
-             str({"resultType": "failure", "error": KEY_MARKER + "\n"})),
+             _as_json({"resultType": "failure", "error": KEY_MARKER + "\n"})),
         )
         for label, hook_event, payload, expected in cases:
             with self.subTest(label):
@@ -1156,14 +1170,14 @@ class TestHooksRedactBeforeCut(unittest.TestCase):
     def test_sensitive_key_names_in_tool_output_dict(self):
         output = {"password": "hunter2-Rz2ArIYF", "api_key": "plainbLcOBXlE3A2P"}
         event, err = self.post(output, tool_name="mcp__vault__get_secret")
-        self.assertEqual(event.data["result"], str({"password": SENSITIVE, "api_key": SENSITIVE}))
+        self.assertEqual(event.data["result"], _as_json({"password": SENSITIVE, "api_key": SENSITIVE}))
         self.assert_redacted_once(event, err)
 
     def test_first_lines_of_a_key(self):
         head = "".join(self.KEY.splitlines(keepends=True)[:12])
         output = {"stdout": head, "stderr": "", "interrupted": False, "isImage": False}
         event, err = self.post(output)
-        self.assertEqual(event.data["result"], str({**output, "stdout": KEY_MARKER + "\n"}))
+        self.assertEqual(event.data["result"], _as_json({**output, "stdout": KEY_MARKER + "\n"}))
         self.assert_redacted_once(event, err)
 
     def test_key_in_json_text(self):
@@ -1183,7 +1197,7 @@ class TestHooksRedactBeforeCut(unittest.TestCase):
             "private_key_id": redaction_marker("hex-token"),
             "private_key": KEY_MARKER + "\n",
         }, indent=2)
-        self.assertEqual(event.data["result"], str([{"type": "text", "text": expected}]))
+        self.assertEqual(event.data["result"], _as_json([{"type": "text", "text": expected}]))
         self.assert_no_key_text(event.data["result"], key)
         self.assert_redacted_once(event, err)
 
@@ -1192,7 +1206,7 @@ class TestHooksRedactBeforeCut(unittest.TestCase):
         event, err = self.post({"stdout": line, "stderr": ""})
         self.assertEqual(
             event.data["result"],
-            str({"stdout": '{"private_key": "' + KEY_MARKER, "stderr": ""}),
+            _as_json({"stdout": '{"private_key": "' + KEY_MARKER, "stderr": ""}),
         )
         self.assert_redacted_once(event, err)
 
@@ -1229,7 +1243,7 @@ class TestHooksRedactBeforeCut(unittest.TestCase):
         ):
             with self.subTest(output=str(output)[:24], failed=failed):
                 event, err = self.post(output, failed=failed)
-                text = str(output)
+                text = output if isinstance(output, str) else _as_json(output)
                 if failed:
                     expected = {"tool_name": "Bash", "error": text[:500] if output else "tool call failed"}
                 else:
@@ -1266,7 +1280,7 @@ class TestHooksRedactBeforeCut(unittest.TestCase):
             "STRIPE_SECRET_KEY=" + redaction_marker("stripe-key")
             + "\nGOOGLE_API_KEY=" + redaction_marker("google-api-key") + "\n"
         )
-        self.assertEqual(event.data["result"], str({**output, "stdout": stdout}))
+        self.assertEqual(event.data["result"], _as_json({**output, "stdout": stdout}))
         self.assertNotIn(stripe[8:], event.data["result"])
         self.assertNotIn(google[4:], event.data["result"])
         self.assert_redacted_once(event, err)
@@ -1318,7 +1332,7 @@ class TestHooksRedactBeforeCut(unittest.TestCase):
             event, err = self.post(output)
         self.assertEqual(
             event.data["result"],
-            str({"items": [{"token_value": redaction_marker("github-token")}]}),
+            _as_json({"items": [{"token_value": redaction_marker("github-token")}]}),
         )
         self.assert_redacted_once(event, err)
 
@@ -1331,11 +1345,154 @@ class TestHooksRedactBeforeCut(unittest.TestCase):
             (True, 500, "error", ""),
         ):
             with self.subTest(failed=failed):
-                text = "x" * (limit - 20 - len("{'t': '"))
+                text = "x" * (limit - 20 - len('{"t":"'))
                 with patch("agent_trace.hooks.redact_data", side_effect=_too_deep_to_walk):
                     event, err = self.post({"t": text + GITHUB_TOKEN}, failed=failed)
-                self.assertEqual(event.data[field], str({"t": text + marker})[:limit] + suffix)
+                self.assertEqual(event.data[field], _as_json({"t": text + marker})[:limit] + suffix)
                 self.assert_redacted_once(event, err)
+
+
+class TestHooksObjectOutput(unittest.TestCase):
+    """A tool response sent as an object is stored as compact JSON, not a Python repr."""
+
+    BASH = {"stdout": "hi", "stderr": "", "interrupted": False, "isImage": False}
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmpdir = tmp.name
+        env = patch.dict(os.environ, {"AGENT_TRACE_DIR": self.tmpdir})
+        env.start()
+        self.addCleanup(env.stop)
+        for name in (
+            *_PROVIDER_ENV.values(),
+            "AGENT_TRACE_REDACT",
+            "AGENT_TRACE_NO_REDACT",
+            "AGENT_STRACE_NO_REDACT",
+            "AGENT_STRACE_ENDPOINT",
+        ):
+            os.environ.pop(name, None)
+
+    def hook(self, args, payload):
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(sys, "stdin", io.StringIO(json.dumps(payload))), \
+                redirect_stdout(out), redirect_stderr(err):
+            hook_main(args)
+        return err.getvalue()
+
+    def record(self, event_name, payload, provider=None, sid="objectoutput0001"):
+        """Send one post-tool hook in a new session. Return its last result event and stderr."""
+        args = ["--provider", provider] if provider else []
+        self.hook([*args, "session-start"], {"session_id": sid, "source": "startup"})
+        err = self.hook([*args, event_name], {"session_id": sid, **payload})
+        events = TraceStore(self.tmpdir, redact=False).load_events(sid)
+        results = [e for e in events if e.event_type in (EventType.TOOL_RESULT, EventType.ERROR)]
+        return results[-1], err
+
+    def test_claude_bash_object_is_stored_as_json(self):
+        event, err = self.record("post-tool", {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "echo hi"},
+            "tool_response": self.BASH,
+        })
+        stored = event.data["result"]
+        self.assertEqual(stored, '{"stdout":"hi","stderr":"","interrupted":false,"isImage":false}')
+        self.assertEqual(json.loads(stored), self.BASH)
+        self.assertEqual(output_text(event), "hi\n")
+        self.assertEqual(parse_mapping(stored), self.BASH)
+        self.assertEqual(err, "")
+
+    def test_claude_read_object_is_stored_as_json(self):
+        response = {"type": "text", "file": {
+            "filePath": "/workspace/project/notes.txt",
+            "content": "line-1\nline-2 café\n",
+            "numLines": 3,
+            "startLine": 1,
+            "totalLines": 3,
+        }}
+        event, _ = self.record("post-tool", {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Read",
+            "tool_input": {"file_path": "/workspace/project/notes.txt"},
+            "tool_response": response,
+        })
+        stored = event.data["result"]
+        self.assertEqual(stored, _as_json(response))
+        self.assertTrue(stored.startswith('{"type":"text","file":{"filePath":'))
+        self.assertIn("café", stored)
+        self.assertEqual(json.loads(stored), response)
+
+    def test_codex_object_keeps_its_exit_code(self):
+        for exit_code, output, event_type, field in (
+            (0, "3 passed", EventType.TOOL_RESULT, "result"),
+            (1, "1 failed", EventType.ERROR, "error"),
+        ):
+            with self.subTest(exit_code=exit_code):
+                response = {"exit_code": exit_code, "output": output}
+                event, _ = self.record("post-tool", {
+                    "tool_name": "Bash",
+                    "tool_use_id": f"call_{exit_code}",
+                    "tool_response": response,
+                }, provider="codex", sid=f"codexobject0000{exit_code}")
+                self.assertEqual(event.event_type, event_type)
+                self.assertEqual(event.data[field], _as_json(response))
+                self.assertEqual(_result_status(event)[:2], ("passed" if exit_code == 0 else "failed", exit_code))
+        self.assertEqual(output_text(_stored_result(_as_json({"exit_code": 0, "output": "ok"}))), "ok")
+
+    def test_long_object_is_cut_after_1000_characters(self):
+        response = {**self.BASH, "stdout": "build line\n" * 150}
+        event, _ = self.record("post-tool", {"tool_name": "Bash", "tool_response": response})
+        stored = event.data["result"]
+        self.assertEqual(stored, _as_json(response)[:1000] + SUFFIX)
+        self.assertTrue(stored.startswith('{"stdout":"build line\\nbuild line\\n'))
+        self.assertIsNone(output_text(event))
+
+    def test_object_is_redacted_before_the_cut(self):
+        # The token crosses the cut at 1000 characters, so a pass after the cut
+        # would see only its first characters.
+        marker = redaction_marker("github-token")
+        stdout = "x" * (990 - len('{"stdout":"'))
+        response = {"stdout": stdout + GITHUB_TOKEN + "\ndone\n", "stderr": ""}
+        event, err = self.record("post-tool", {"tool_name": "Bash", "tool_response": response})
+        expected = _as_json({"stdout": stdout + marker + "\ndone\n", "stderr": ""})
+        self.assertEqual(event.data["result"], expected[:1000] + SUFFIX)
+        self.assertNotIn(GITHUB_TOKEN[:12], event.data["result"])
+        self.assertTrue(event.redacted)
+        self.assertEqual(err, REDACTION_WARNING)
+
+    def test_claude_failure_object_is_stored_as_json(self):
+        failure = {
+            "hook_event_name": "PostToolUseFailure",
+            "tool_name": "Bash",
+            "tool_input": {"command": "cat missing.txt"},
+        }
+        error = {"code": "ENOENT", "path": "missing.txt"}
+        event, _ = self.record("post-tool-failure", {**failure, "error": error})
+        self.assertEqual(event.event_type, EventType.ERROR)
+        self.assertEqual(event.data["error"], '{"code":"ENOENT","path":"missing.txt"}')
+
+        long_error = {"code": "ENOENT", "detail": "no such file\n" * 60}
+        event, _ = self.record("post-tool-failure", {**failure, "error": long_error}, sid="objectoutput0002")
+        self.assertEqual(event.data["error"], _as_json(long_error)[:500])
+
+    def test_non_json_values_are_stored_as_text(self):
+        when = datetime(2026, 1, 2, tzinfo=timezone.utc)
+        self.assertEqual(_cut_tool_output({"at": when, "n": None}, False), '{"at":"2026-01-02 00:00:00+00:00","n":null}')
+        self.assertEqual(_cut_tool_output(None, False), "null")
+        self.assertEqual(_cut_tool_output(["a", 1], True), '["a",1]')
+        self.assertEqual(_cut_tool_output({}, True), "tool call failed")
+        self.assertEqual(_cut_tool_output("plain text", False), "plain text")
+
+    def test_readers_still_parse_results_stored_before_the_fix(self):
+        old = str({"stdout": "", "stderr": "Ran 2 tests in 0.0s\n\nOK", "interrupted": False, "isImage": False})
+        new = _as_json({"stdout": "", "stderr": "Ran 2 tests in 0.0s\n\nOK", "interrupted": False, "isImage": False})
+        for stored in (old, new):
+            with self.subTest(stored=stored[:12]):
+                self.assertEqual(output_text(_stored_result(stored)), "\nRan 2 tests in 0.0s\n\nOK")
+                self.assertEqual(summary_outcome("unittest", _stored_result(stored)), "passed")
+                self.assertEqual(parse_mapping(stored)["stderr"], "Ran 2 tests in 0.0s\n\nOK")
+        self.assertEqual(_result_status(_stored_result(str({"exit_code": 1, "output": "x"})))[:2], ("failed", 1))
 
 
 class TestMetadataOnlyData(unittest.TestCase):

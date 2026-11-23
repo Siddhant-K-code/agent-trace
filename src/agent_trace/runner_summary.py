@@ -37,8 +37,9 @@ _STREAM_KEYS = ("stdout", "stderr", "output")
 def _unwrap_mapping(text: str) -> str | None:
     """Return the streams of a result recorded as a dict, else ``text``.
 
-    Some hooks record a tool response object with ``str(dict)``, which escapes
-    newlines. Only a complete literal is read; anything else is left as is.
+    Hooks record a tool response object as JSON. Sessions recorded before
+    that hold ``str(dict)``, which escapes newlines. Only a complete literal
+    is read; anything else is left as is.
     """
     stripped = text.strip()
     if not (stripped.startswith("{") and stripped.endswith("}")):

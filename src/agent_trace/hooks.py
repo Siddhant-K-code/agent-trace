@@ -1309,15 +1309,35 @@ def handle_file_write(input_data: dict, provider: str = "claude") -> None:
     )
 
 
+def _tool_output_text(tool_output: object) -> str:
+    """Return tool output as text: a string as sent, anything else as JSON.
+
+    Most providers send an object. Claude Code's Bash sends ``stdout``,
+    ``stderr``, ``interrupted`` and ``isImage``; Codex sends ``output`` and
+    ``exit_code``. Compact JSON in the provider's key order keeps every field
+    and parses back. A value JSON cannot hold, such as a dict with tuple keys,
+    is never in a hook payload; it falls back to ``str()``.
+    """
+    if isinstance(tool_output, str):
+        return tool_output
+    try:
+        return json.dumps(
+            tool_output, ensure_ascii=False, separators=(",", ":"), default=str,
+        )
+    except (TypeError, ValueError, RecursionError):
+        return str(tool_output)
+
+
 def _cut_tool_output(tool_output: object, failed: bool) -> str:
     """Return tool output as a result event stores it.
 
-    A failure keeps the first 500 characters. A result longer than 1000
-    characters keeps the first 1000 and a truncation suffix.
+    The output is text from :func:`_tool_output_text`. A failure keeps the
+    first 500 characters. A result longer than 1000 characters keeps the
+    first 1000 and a truncation suffix.
     """
     if failed:
-        return str(tool_output)[:500] if tool_output else "tool call failed"
-    output_str = str(tool_output)
+        return _tool_output_text(tool_output)[:500] if tool_output else "tool call failed"
+    output_str = _tool_output_text(tool_output)
     if len(output_str) > 1000:
         output_str = output_str[:1000] + "... (truncated)"
     return output_str
@@ -1328,7 +1348,7 @@ def _redact_tool_output(tool_output: object) -> object:
     try:
         return redact_data(tool_output)
     except RecursionError:
-        return redact_data(str(tool_output))
+        return redact_data(_tool_output_text(tool_output))
 
 
 def handle_post_tool(input_data: dict, failed: bool = False, provider: str = "claude") -> None:
@@ -1353,8 +1373,8 @@ def handle_post_tool(input_data: dict, failed: bool = False, provider: str = "cl
 
     output_text = _cut_tool_output(tool_output, failed)
     # Redact the whole output before the cut: a key cut in half loses its END
-    # line, and str() hides the key names of a dict. Metadata-only mode drops
-    # the content anyway.
+    # line, and once an object is text its key names no longer mark the values
+    # to redact. Metadata-only mode drops the content anyway.
     redacted_before_cut = False
     if _redaction_mode(store) == REDACTION_ON and not _HOOK_METADATA_ONLY.get():
         redacted_text = _cut_tool_output(_redact_tool_output(tool_output), failed)
