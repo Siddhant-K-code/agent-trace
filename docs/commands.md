@@ -29,6 +29,7 @@ An empty `AGENT_TRACE_DIR` is treated as unset. Relative paths resolve against t
 A command that takes a session ID also takes a prefix of one.
 
 - An exact ID wins, even when a longer ID starts with it. `run1` selects `run1`, not `run10`.
+- If `run1` is in the trace directory but is not a session, for example after its `meta.json` is moved out, `run1` finds no session. It does not select `run10`.
 - A prefix that matches one session selects that session.
 - A prefix that matches two or more sessions is refused. Nothing is read or written, and the command exits 1 with one line:
 

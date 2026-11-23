@@ -560,6 +560,18 @@ class TestAnnotateNamesOneSession(unittest.TestCase):
         )
         self.assertEqual(load_annotations(self.store, "run10"), [])
 
+    def test_run10_gets_no_note_when_run1_is_not_a_session(self):
+        # Before, the note went to run10.
+        outside = tempfile.TemporaryDirectory()
+        self.addCleanup(outside.cleanup)
+        (Path(self.trace_dir) / "run1" / "meta.json").rename(Path(outside.name) / "meta.json")
+        before = self._files()
+        self.assertEqual(
+            self._annotate("run1", "--note", "x"), (1, "", "Session not found: run1\n")
+        )
+        self.assertEqual(self._files(), before)
+        self.assertEqual(load_annotations(self.store, "run10"), [])
+
 
 if __name__ == "__main__":
     unittest.main()

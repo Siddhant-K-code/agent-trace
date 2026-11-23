@@ -1692,6 +1692,12 @@ class TraceStore:
         candidate wins. This returns the winner's ID, or raises its
         CorruptSessionMetaError. Two or more candidates and no exact one
         raise AmbiguousSessionPrefixError. No candidate returns None.
+
+        Without ``tenant_id``, an entry named ``prefix`` that is not a
+        candidate returns None, so a longer ID never stands in for it.
+        A directory without meta.json and a symlink are such entries.
+        A lookup with ``tenant_id`` skips this check. There, an entry
+        that is not that tenant's readable session stays invisible.
         """
         validate_stored_id(prefix, "session ID prefix")
         if tenant_id is not None:
@@ -1716,6 +1722,10 @@ class TraceStore:
                 candidates[d.name] = None
         if prefix in candidates:
             chosen = prefix
+        elif tenant_id is None and os.path.lexists(self.base_dir / prefix):
+            # An entry named exactly prefix exists but is not a session.
+            # Do not pick a longer ID in its place.
+            return None
         elif len(candidates) == 1:
             (chosen,) = candidates
         elif candidates:

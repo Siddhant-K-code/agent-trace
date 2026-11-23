@@ -354,6 +354,36 @@ class TestTraceStore(unittest.TestCase):
                 )
                 self.assertEqual(self.store.find_session("bbbb", tenant_id="other"), "bbbb2222")
 
+    def test_find_session_does_not_let_a_longer_id_stand_in_for_an_exact_entry(self):
+        # run1 is in the trace directory but is not a session. Before, run10 was used.
+        states = (
+            ("meta.json moved out", "run1/meta.json", False),
+            ("meta.json a symlink", "run1/meta.json", True),
+            ("run1 a symlinked directory", "run1", True),
+        )
+        for state, moved, linked in states:
+            tmp = tempfile.TemporaryDirectory()
+            self.addCleanup(tmp.cleanup)
+            store = TraceStore(os.path.join(tmp.name, "traces"))
+            for session_id in ("run1", "run10"):
+                store.create_session(
+                    SessionMeta(session_id=session_id, tenant_id="acme", started_at=1.0)
+                )
+            source = store.base_dir / moved
+            target = Path(tmp.name) / source.name
+            source.rename(target)
+            if linked:
+                try:
+                    source.symlink_to(target, target_is_directory=target.is_dir())
+                except OSError:
+                    continue  # This account cannot create symlinks.
+            for reverse in (False, True):
+                with self.subTest(state=state, reverse=reverse), self._scan_order(reverse):
+                    self.assertIsNone(store.find_session("run1"))
+                    self.assertEqual(store.find_session("run10"), "run10")
+                    # A lookup with a tenant skips this check, as before.
+                    self.assertEqual(store.find_session("run1", tenant_id="acme"), "run10")
+
     def test_find_session_for_a_tenant_skips_a_corrupt_match(self):
         # The tenant of a corrupt session cannot be read, so the lookup must not reveal it.
         self._add_session_with_meta("bbbb1111", tenant_id="acme")

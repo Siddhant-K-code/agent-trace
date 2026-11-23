@@ -766,6 +766,13 @@ class TestVerifyNamesTheExactSession(unittest.TestCase):
                     (0, "run10", True, ""),
                 )
 
+    def test_verify_does_not_check_run10_when_run1_is_not_a_session(self):
+        # Before, verify checked run10 and reported it as ok.
+        (self.trace_dir / "run1" / "meta.json").rename(self.trace_dir.parent / "meta.json")
+        for argv in (("run1",), ("run1", "--format", "json")):
+            with self.subTest(argv=argv):
+                self.assertEqual(self._verify(*argv), (1, "", "Session not found: run1\n"))
+
 
 if __name__ == "__main__":
     unittest.main()
