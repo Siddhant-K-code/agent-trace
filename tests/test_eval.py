@@ -1,12 +1,23 @@
 """Tests for the eval framework (scorers, dataset, runner, config, CI)."""
 
+import contextlib
 import io
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+try:  # keeps product telemetry off in this process and its children
+    import _no_telemetry  # noqa: F401
+    from test_fileutil import RAW_SEPARATORS
+except ImportError:  # pragma: no cover - package-style test discovery
+    from tests import _no_telemetry  # noqa: F401
+    from tests.test_fileutil import RAW_SEPARATORS
+
+from agent_trace.cli import main
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
 from agent_trace.eval.scorers import (
@@ -22,11 +33,6 @@ from agent_trace.eval.scorers import (
 from agent_trace.eval.config import EvalConfig, ScorerConfig, load_config
 from agent_trace.eval.dataset import DatasetEntry, add_entry, list_entries, export_entries
 from agent_trace.eval.runner import EvalReport, run_eval, format_report_table, format_report_json, format_compare
-
-try:
-    from test_fileutil import RAW_SEPARATORS
-except ImportError:  # pragma: no cover - package-style test discovery
-    from tests.test_fileutil import RAW_SEPARATORS
 
 
 # ---------------------------------------------------------------------------
@@ -502,6 +508,40 @@ class TestCIExitCode(unittest.TestCase):
             self.assertEqual(0 if report.overall_passed else 1, 1)
         finally:
             tmp.cleanup()
+
+
+# ---------------------------------------------------------------------------
+# Unknown session in eval run and eval ci
+# ---------------------------------------------------------------------------
+
+class TestUnknownSession(unittest.TestCase):
+    def _main(self, trace_dir: str, *argv: str) -> tuple[object, str]:
+        config = os.path.join(trace_dir, "absent.yaml")
+        stderr = io.StringIO()
+        with patch.object(sys, "argv", [
+            "agent-strace", "--trace-dir", trace_dir, "eval", *argv, "--config", config,
+        ]), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as caught:
+                main()
+        return caught.exception.code, stderr.getvalue()
+
+    def test_unknown_id_is_named(self):
+        _, tmp = _make_store(_ok_events("aaaa1111"), "aaaa1111")
+        try:
+            for command in ("run", "ci"):
+                with self.subTest(command=command):
+                    self.assertEqual(
+                        self._main(tmp.name, command, "zzzz9999"),
+                        (1, "Session not found: zzzz9999\n"),
+                    )
+        finally:
+            tmp.cleanup()
+
+    def test_no_id_and_no_sessions(self):
+        with tempfile.TemporaryDirectory() as trace_dir:
+            for command in ("run", "ci"):
+                with self.subTest(command=command):
+                    self.assertEqual(self._main(trace_dir, command), (1, "No sessions found.\n"))
 
 
 if __name__ == "__main__":

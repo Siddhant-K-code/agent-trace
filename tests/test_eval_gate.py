@@ -33,6 +33,7 @@ from agent_trace.eval.scorers import (
 )
 from agent_trace.cli import _normalise_eval_argv, build_parser
 from agent_trace.models import EventType, SessionMeta, TraceEvent
+from agent_trace import session_outcome
 from agent_trace.store import TraceStore
 
 
@@ -163,6 +164,103 @@ class TestBuiltInMetrics(GateTestCase):
         self.assertEqual(value, len(self.events))
 
 
+def _ended(**data):
+    return [_event(EventType.SESSION_END, 1.0, **data)]
+
+
+class TestSessionStatus(unittest.TestCase):
+    def test_copilot_error_and_abort_reasons_are_killed(self):
+        for data in (
+            {"reason": "error"},
+            {"reason": "abort"},
+            {"reason": "aborted"},
+            {"reason": "Error"},
+            {"stop_reason": "error_max_turns"},
+            # The reason decides before the exit code.
+            {"reason": "error", "exit_code": 124},
+        ):
+            with self.subTest(**data):
+                self.assertEqual(measure_session_status(_ended(**data)), "killed")
+
+    def test_complete_and_user_exit_reasons_are_completed(self):
+        for reason in ("complete", "user_exit"):
+            with self.subTest(reason=reason):
+                self.assertEqual(measure_session_status(_ended(reason=reason)), "completed")
+
+    def test_exit_code_too_large_for_a_float_is_killed(self):
+        self.assertEqual(measure_session_status(_ended(exit_code=10**400)), "killed")
+
+    def test_reads_more_than_the_recorded_status(self):
+        meta = SessionMeta(session_id="gate-session", started_at=1.0, ended_at=2.0)
+        self.assertEqual(measure_session_status([], meta), "completed")
+        self.assertEqual(measure_session_status(_ended(exit_code="1")), "killed")
+        self.assertEqual(measure_session_status(_ended(reason=["kill"])), "killed")
+        self.assertEqual(measure_session_status(_ended(exit_code=True)), "completed")
+
+    def test_a_resumed_session_has_not_ended(self):
+        def resumed(**end):
+            return [
+                _event(EventType.SESSION_START, 1.0),
+                _event(EventType.SESSION_END, 2.0, **end),
+                _event(EventType.SESSION_START, 3.0, source="resume"),
+            ]
+
+        meta = SessionMeta(session_id="gate-session", started_at=1.0, ended_at=4.0)
+        # The session_end before the resume does not decide.
+        self.assertEqual(measure_session_status(resumed(reason="complete")), "killed")
+        self.assertEqual(measure_session_status(resumed(reason="error"), meta), "completed")
+        # A session_end after the resume decides.
+        self.assertEqual(
+            measure_session_status(
+                resumed(reason="error") + [_event(EventType.SESSION_END, 4.0, reason="complete")]
+            ),
+            "completed",
+        )
+        self.assertEqual(
+            measure_session_status(
+                resumed(reason="complete") + [_event(EventType.SESSION_END, 4.0, reason="error")]
+            ),
+            "killed",
+        )
+
+    def test_matches_recorded_session_status(self):
+        statuses = sorted(
+            session_outcome._COMPLETED_STATUSES
+            | session_outcome._TIMEOUT_STATUSES
+            | session_outcome._TERMINATED_STATUSES
+        )
+        words = (
+            *session_outcome._TIMEOUT_REASON_WORDS,
+            *session_outcome._TERMINATED_REASON_WORDS,
+            "complete",
+            "user_exit",
+        )
+        rows = [{}]
+        rows += [{"status": status} for status in statuses]
+        rows += [{"session_status": f" {status.upper().replace('_', '-')} "} for status in statuses]
+        rows += [
+            {key: f"user {word}"}
+            for key in session_outcome.SESSION_END_REASON_KEYS
+            for word in words
+        ]
+        rows += [{"exit_code": code} for code in (0, 1, 124, 10**400, True, float("nan"))]
+        rows += [{"status": 1}]
+        rows += [
+            {"status": "completed", "reason": "error", "exit_code": 1},
+            {"status": "unknown", "reason": "abort", "exit_code": 0},
+            {"reason": "timed out after an error"},
+            {"reason": "complete", "exit_code": 124},
+        ]
+        for data in rows:
+            events = _ended(**data)
+            recorded = session_outcome.recorded_session_status(events)
+            with self.subTest(data=data, recorded=recorded):
+                self.assertEqual(
+                    measure_session_status(events),
+                    "killed" if recorded == "terminated" else recorded,
+                )
+
+
 class TestRunEvalGate(GateTestCase):
     def _config(self):
         return EvalConfig(evals=[
@@ -287,6 +385,43 @@ class TestGateCommand(GateTestCase):
             code = cmd_eval_gate(args)
         self.assertEqual(code, 1)
         self.assertFalse(json.loads(stdout.getvalue())["passed"])
+
+    def test_exit_code_too_large_for_a_float_passes_expected_killed(self):
+        meta = SessionMeta(session_id="huge-exit", started_at=1_000.0, ended_at=1_001.0)
+        self.store.create_session(meta)
+        self.store.append_event(
+            meta.session_id,
+            TraceEvent(
+                event_type=EventType.SESSION_END,
+                timestamp=1_001.0,
+                session_id=meta.session_id,
+                data={"exit_code": 10**400},
+            ),
+        )
+        config_path = Path(self.tmp.name) / ".agent-evals.yaml"
+        config_path.write_text(
+            "evals:\n"
+            "  - name: was-killed\n"
+            "    scorer: session_status\n"
+            "    expected: killed\n"
+            "    fail_on: not_equal\n"
+        )
+        args = argparse.Namespace(
+            trace_dir=self.tmp.name,
+            session_id=meta.session_id,
+            config=str(config_path),
+            format="json",
+            baseline=None,
+            save_baseline=None,
+            tolerance=0.0,
+        )
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = cmd_eval_gate(args)
+        results = json.loads(stdout.getvalue())["results"]
+        self.assertEqual(code, 0)
+        self.assertEqual([(item["score"], item["passed"]) for item in results], [("killed", True)])
+        self.assertNotIn("int too large", stdout.getvalue() + stderr.getvalue())
 
 
 if __name__ == "__main__":

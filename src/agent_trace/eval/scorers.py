@@ -21,6 +21,7 @@ from ..event_data import object_field, str_field
 from ..failures import count_session_errors
 from ..http_post import no_redirect_opener, post_error_detail
 from ..models import EventType, TraceEvent
+from ..session_outcome import SESSION_END_REASON_KEYS, final_session_end, session_end_status
 from ..store import TraceStore
 
 
@@ -80,44 +81,29 @@ def measure_error_count(events: list[TraceEvent]) -> int:
 
 
 def measure_session_status(events: list[TraceEvent], meta: object | None = None) -> str:
-    """Classify a session as completed, killed, or timeout."""
+    """Classify a session as completed, killed, or timeout.
 
-    end_event = next(
-        (event for event in reversed(events) if event.event_type == EventType.SESSION_END),
-        None,
-    )
+    The final ``session_end`` decides, by the rules of
+    :func:`~agent_trace.session_outcome.session_end_status`, with ``killed``
+    for ``terminated``. Unlike ``recorded_session_status``, it also reads a
+    text exit code such as ``"1"`` and a reason that is not text. With no
+    ``session_end``, or when a later ``session_start`` (a resume) reopened
+    the session, it is completed when its metadata has ``ended_at``.
+    """
+
+    end_event = final_session_end(events)
     if end_event is None:
         return "completed" if getattr(meta, "ended_at", None) else "killed"
 
     data = end_event.data
     explicit = data.get("status") or data.get("session_status")
-    if explicit:
-        normalized = str(explicit).strip().lower().replace("-", "_")
-        if normalized in {"completed", "complete", "success", "succeeded"}:
-            return "completed"
-        if normalized in {"timeout", "timed_out"}:
-            return "timeout"
-        if normalized in {
-            "killed", "cancelled", "canceled", "interrupted", "terminated",
-            "failed", "failure", "aborted", "error",
-        }:
-            return "killed"
-
-    reason = " ".join(
-        str(data.get(key, ""))
-        for key in ("reason", "stop_reason", "termination_reason")
-    ).lower()
-    if "timeout" in reason or "timed out" in reason:
-        return "timeout"
-    if any(word in reason for word in ("kill", "cancel", "interrupt", "terminate")):
-        return "killed"
-
-    exit_code = _as_number(data.get("exit_code"))
-    if exit_code == 124:
-        return "timeout"
-    if exit_code is not None and exit_code != 0:
-        return "killed"
-    return "completed"
+    reason = " ".join(str(data.get(key, "")) for key in SESSION_END_REASON_KEYS)
+    exit_code = data.get("exit_code")
+    # An int too large for a float is still a nonzero exit code.
+    if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+        exit_code = _as_number(exit_code)
+    status = session_end_status(str(explicit) if explicit else None, reason, exit_code)
+    return "killed" if status == "terminated" else status
 
 
 def _read_path(event: TraceEvent) -> str:
