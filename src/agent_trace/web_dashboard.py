@@ -552,15 +552,25 @@ async function loadCompareSessions(){
   });
   document.getElementById('compare-action').disabled=!select.options.length;
 }
+// Only the newest compare request may paint the panel, so a slow earlier
+// response cannot replace the comparison the user asked for last.
+let compareRequest=0;
 async function compare(){
   const other=document.getElementById('compare-session').value;
   if(!other)return;
-  const response=await fetch(`/api/sessions/${encodeURIComponent(sid)}/compare?other=${encodeURIComponent(other)}`);
-  if(!response.ok){
+  const request=++compareRequest;
+  try{
+    const response=await fetch(`/api/sessions/${encodeURIComponent(sid)}/compare?other=${encodeURIComponent(other)}`);
     const payload=await response.json();
-    throw new Error(payload.error||'Comparison failed');
+    if(request!==compareRequest)return;
+    if(!response.ok)throw new Error(payload.error||'Comparison failed');
+    renderCompare(payload);
+  }catch(error){
+    if(request!==compareRequest)return;
+    const panel=document.getElementById('compare-panel');
+    panel.replaceChildren(node('div','error-message',String(error)));
+    panel.classList.add('visible');
   }
-  renderCompare(await response.json());
 }
 async function load(){
   try{
@@ -578,10 +588,7 @@ async function load(){
   }
 }
 searchEl.addEventListener('input',()=>{state.search=searchEl.value;renderEvidence();});
-document.getElementById('compare-action').addEventListener('click',()=>compare().catch(error=>{
-  document.getElementById('compare-panel').replaceChildren(node('div','error-message',String(error)));
-  document.getElementById('compare-panel').classList.add('visible');
-}));
+document.getElementById('compare-action').addEventListener('click',()=>{compare();});
 document.addEventListener('keydown',event=>{
   const typing=event.target instanceof HTMLInputElement||event.target instanceof HTMLSelectElement;
   if(!typing&&(event.key==='j'||event.key==='ArrowDown')){event.preventDefault();moveSelection(1);}
