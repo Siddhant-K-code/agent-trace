@@ -864,6 +864,29 @@ class TestMalformedLog(unittest.TestCase):
                     self.assertEqual(self._counts(_with_field(1, field, value)),
                                      (absent[0] + value, *absent[1:]))
 
+    def test_duration_that_would_make_the_total_too_large_is_skipped(self):
+        def reject(token):
+            raise ValueError(f"{token} is not JSON")
+
+        for label, durations, total in (
+            ("two 1e308 floats", [1e308, 1e308], 1e308),
+            ("two 10**308 ints", [10**308, 10**308], 10**308),
+            ("valid", [1500, 2500], 4000),
+        ):
+            with self.subTest(label):
+                shutil.rmtree(self.trace, ignore_errors=True)
+                turns = [{"type": "system", "subtype": "turn_duration", "durationMs": ms,
+                          "timestamp": "2026-01-01T00:00:01Z"} for ms in durations]
+                sid = self._import(self._write("sum1.jsonl", [_entry("sum1")] + turns))
+
+                meta_text = (self.trace / sid / "meta.json").read_text(encoding="utf-8")
+                stored = json.loads(meta_text, parse_constant=reject)["total_duration_ms"]
+                self.assertEqual(stored, total)
+                self.assertIs(type(stored), type(total))
+                events_text = (self.trace / sid / "events.ndjson").read_text(encoding="utf-8")
+                for line in events_text.splitlines():
+                    json.loads(line, parse_constant=reject)
+
     def test_field_copied_raw_does_not_change_the_counts(self):
         for line, field in (
             (1, "message.content.1.input"), (1, "message.content.1.name"),

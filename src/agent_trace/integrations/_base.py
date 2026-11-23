@@ -13,7 +13,14 @@ from typing import Any, Callable, Iterator
 from urllib.parse import urlsplit
 
 from ..fileutil import file_lock, write_atomic
-from ..models import EventType, SessionMeta, TraceEvent, usable_text
+from ..models import (
+    EventType,
+    SessionMeta,
+    TraceEvent,
+    usable_number,
+    usable_text,
+    usable_time,
+)
 from ..pairing import link_response
 from ..process_identity import process_identity
 from ..store import TraceStore, default_trace_dir
@@ -352,7 +359,14 @@ def _end_run(store: TraceStore, name: str, sid: str, started: float) -> None:
 
                 def close(meta: SessionMeta) -> None:
                     meta.ended_at = time.time()
-                    meta.total_duration_ms = (meta.ended_at - meta.started_at) * 1000
+                    # meta.json can hold any value as started_at. A start that
+                    # is not a usable time, or that is later than the end,
+                    # gives no duration.
+                    stored_start = usable_time(meta.started_at)
+                    duration_ms = None
+                    if stored_start is not None:
+                        duration_ms = usable_number((meta.ended_at - stored_start) * 1000)
+                    meta.total_duration_ms = 0 if duration_ms is None else duration_ms
                     for field_name, value in counts.items():
                         setattr(meta, field_name, value)
 
