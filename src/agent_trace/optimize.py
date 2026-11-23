@@ -195,6 +195,8 @@ def _build_llm_prompt(
                     runs.append(f"{prev} x{run_len+1}")
                 prev = name
                 run_len = 0
+        if run_len >= 2 and prev:
+            runs.append(f"{prev} x{run_len+1}")
         summary = (
             f"Session {sid[:8]}: "
             f"{len(tool_calls)} tool calls, "
