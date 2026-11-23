@@ -22,6 +22,7 @@ from __future__ import annotations
 import posixpath
 import re
 import shlex
+from collections import deque
 
 PUNCTUATION = ";&|()<>\n"
 
@@ -60,6 +61,14 @@ def _ansi_c_end(text: str, start: int) -> int | None:
     return None
 
 
+_OCTAL_DIGITS = re.compile(r"[0-7]{1,3}")
+_HEX_DIGITS = {
+    "x": re.compile(r"[0-9A-Fa-f]{1,2}"),
+    "u": re.compile(r"[0-9A-Fa-f]{1,4}"),
+    "U": re.compile(r"[0-9A-Fa-f]{1,8}"),
+}
+
+
 def _ansi_c_decode(body: str) -> str:
     """Decode the backslash escapes of a ``$'...'`` body as bash does."""
     out: list[str] = []
@@ -76,14 +85,13 @@ def _ansi_c_decode(body: str) -> str:
             i += 2
             continue
         if escape in "01234567":
-            digits = re.match(r"[0-7]{1,3}", body[i + 1:])
+            digits = _OCTAL_DIGITS.match(body, i + 1)
             if digits:
                 out.append(chr(int(digits.group(), 8) & 0xFF))
                 i += 1 + len(digits.group())
                 continue
         if escape in "xuU":
-            width = {"x": 2, "u": 4, "U": 8}[escape]
-            digits = re.match(rf"[0-9A-Fa-f]{{1,{width}}}", body[i + 2:])
+            digits = _HEX_DIGITS[escape].match(body, i + 2)
             if digits and int(digits.group(), 16) <= 0x10FFFF:
                 out.append(chr(int(digits.group(), 16)))
                 i += 2 + len(digits.group())
@@ -97,14 +105,29 @@ def _ansi_c_decode(body: str) -> str:
     return "".join(out)
 
 
-def _heredoc_word(line: str, start: int) -> tuple[str, bool, int] | None:
-    """Return a quote-removed heredoc word, whether it was quoted, and its end."""
+def _heredoc_word(
+    line: str, start: int, dead: set[tuple[int, str]] | None = None
+) -> tuple[str, bool, int] | None:
+    """Return a quote-removed heredoc word, whether it was quoted, and its end.
+
+    Once the first character is consumed, whether the word fails depends only
+    on the position and quote state. ``dead`` collects the states of failed
+    scans, so a later scan that reaches one stops instead of rescanning the
+    rest of the line.
+    """
     word: list[str] = []
     quote = ""
     quoted = False
     consumed = False
+    visited: list[tuple[int, str]] = []
     i = start
     while i < len(line):
+        if consumed and dead is not None:
+            state = (i, quote)
+            if state in dead:
+                dead.update(visited)
+                return None
+            visited.append(state)
         char = line[i]
         if quote == "'":
             consumed = True
@@ -141,14 +164,16 @@ def _heredoc_word(line: str, start: int) -> tuple[str, bool, int] | None:
             continue
         if char == "\\":
             if i + 1 >= len(line):
-                return None
+                break
             quoted = True
             word.append(line[i + 1])
             i += 2
             continue
         word.append(char)
         i += 1
-    if quote or not consumed:
+    if quote or not consumed or i < len(line) and line[i] == "\\":
+        if dead is not None:
+            dead.update(visited)
         return None
     return "".join(word), quoted, i
 
@@ -158,6 +183,7 @@ def _heredoc_openers(
 ) -> tuple[list[tuple[str, bool, bool]], str, int]:
     """Find heredocs in one command line and return the ending quote state."""
     openers: list[tuple[str, bool, bool]] = []
+    dead: set[tuple[int, str]] = set()
     i = 0
     while i < len(line):
         char = line[i]
@@ -205,7 +231,7 @@ def _heredoc_openers(
                 word_start += 1
             while word_start < len(line) and line[word_start] in " \t\r":
                 word_start += 1
-            parsed = _heredoc_word(line, word_start)
+            parsed = _heredoc_word(line, word_start, dead)
             if parsed is not None:
                 delimiter, quoted, end = parsed
                 openers.append((delimiter, strip_tabs, quoted))
@@ -220,70 +246,109 @@ def _continues_line(line: str) -> bool:
     return trailing % 2 == 1
 
 
-def _continues_command_line(line: str, quote: str) -> bool:
-    """Return whether the physical command line escapes its ending newline."""
-    trailing = len(line) - len(line.rstrip("\\"))
-    if trailing % 2 == 0:
-        return False
-    i = 0
-    end = len(line) - trailing
+def _scan_command_line(
+    text: str, i: int, quote: str, end: int
+) -> tuple[str, int, str] | None:
+    """Read ``text[i:end]`` of a command line, starting in ``quote``.
+
+    Returns the quote state at ``end`` with the start and entry quote of the
+    last step taken, or None when an unquoted ``#`` starts a comment. Index 0
+    of ``text`` must be the start of the logical line or the character just
+    before ``i``, since ``#`` only starts a comment after a word boundary.
+    """
+    last, last_quote = i, quote
     while i < end:
-        char = line[i]
+        last, last_quote = i, quote
+        char = text[i]
         if quote:
-            i, quote = _quoted_step(line, i, quote, end)
-            continue
-        if char == "\\" and i + 1 < end:
+            i, quote = _quoted_step(text, i, quote, end)
+        elif char == "\\" and i + 1 < end:
             i += 2
-            continue
-        if line.startswith("$'", i):
+        elif text.startswith("$'", i):
             quote = "$'"
-            i += 1
+            i += 2
         elif char in "'\"":
             quote = char
-        elif char == "#" and (i == 0 or line[i - 1] in _WORD_BOUNDARY):
-            return False
-        i += 1
-    return quote not in ("'", "$'")
+            i += 1
+        elif char == "#" and (i == 0 or text[i - 1] in _WORD_BOUNDARY):
+            return None
+        else:
+            i += 1
+    return quote, last, last_quote
 
 
 def strip_heredocs(command: str) -> str:
     """Drop heredoc bodies and their terminator lines."""
     kept: list[str] = []
-    pending: list[tuple[str, bool, bool]] = []
+    pending: deque[tuple[str, bool, bool]] = deque()
     continued = False
     quote = ""
     arithmetic_depth = 0
-    logical_line = ""
+    pieces: list[str] = []
     logical_quote = ""
     logical_arithmetic_depth = 0
     continuing_command = False
+    # While a command line continues, the text so far ends in an even run of
+    # ``logical_run`` backslashes. The continuation scan stopped where that
+    # run starts, in ``scan_quote``. Its last step, which looked one character
+    # ahead, started in ``tail_quote`` at index ``tail_start`` of the text in
+    # ``tail``; ``tail`` begins one character before that step (for the ``#``
+    # check) unless the step was at the start of the logical line. The next
+    # physical line resumes the scan from that step, so each character is
+    # read a bounded number of times.
+    tail: list[str] = []
+    tail_start = 0
+    tail_quote = ""
+    scan_quote = ""
+    logical_run = 0
     for line in command.split("\n"):
         if pending:
             delimiter, strip_tabs, quoted = pending[0]
             candidate = line.lstrip("\t") if strip_tabs else line
             if not continued and candidate == delimiter:
-                pending.pop(0)
+                pending.popleft()
                 continued = False
             else:
                 continued = not quoted and _continues_line(candidate)
             continue
         kept.append(line)
         if not continuing_command:
-            logical_line = ""
+            pieces = []
             logical_quote = quote
             logical_arithmetic_depth = arithmetic_depth
-        continuing_command = _continues_command_line(
-            logical_line + line, logical_quote
-        )
-        logical_line += line[:-1] if continuing_command else line
-        openers, ending_quote, ending_arithmetic_depth = _heredoc_openers(
-            logical_line, logical_quote, logical_arithmetic_depth
-        )
+            tail = []
+            tail_start = 0
+            tail_quote = scan_quote = logical_quote
+            logical_run = 0
+        run = len(line) - len(line.rstrip("\\"))
+        continuing_command = False
+        if run == len(line):
+            if (logical_run + run) % 2:
+                continuing_command = scan_quote not in ("'", "$'")
+                if continuing_command:
+                    tail.append(line[:-1])
+                    logical_run += run - 1
+        elif run % 2:
+            text = "".join(tail) + line
+            scanned = _scan_command_line(
+                text, tail_start, tail_quote, len(text) - run
+            )
+            if scanned is not None:
+                scan_quote, last, tail_quote = scanned
+                continuing_command = scan_quote not in ("'", "$'")
+                if continuing_command:
+                    keep_from = last - 1 if last else 0
+                    tail = [text[keep_from:-1]]
+                    tail_start = last - keep_from
+                    logical_run = run - 1
         if continuing_command:
+            pieces.append(line[:-1])
             continue
+        pieces.append(line)
+        openers, quote, arithmetic_depth = _heredoc_openers(
+            "".join(pieces), logical_quote, logical_arithmetic_depth
+        )
         pending.extend(openers)
-        quote = ending_quote
-        arithmetic_depth = ending_arithmetic_depth
     return "\n".join(kept)
 
 
@@ -440,12 +505,12 @@ def _resolve(target: str, base: str | None) -> str | None:
 
 
 def _command_words(words: list[str]) -> list[str]:
-    words = list(words)
-    while words and _ENV_ASSIGN.match(words[0]):
-        words.pop(0)
-    if words and words[0] == "sudo":
-        words.pop(0)
-    return words
+    start = 0
+    while start < len(words) and _ENV_ASSIGN.match(words[start]):
+        start += 1
+    if start < len(words) and words[start] == "sudo":
+        start += 1
+    return words[start:]
 
 
 # Words that can come before a command name; ``{`` and ``if``/``while``/
@@ -539,17 +604,22 @@ def _file_targets(command: str) -> tuple[list[str], list[str]]:
     # whether the compound command was piped into, whether a finished branch
     # changed the directory].
     frames: list[list] = []
+    # Indexes of the ``(`` frames in ``frames``, innermost last.
+    parens: list[int] = []
     words: list[str] = []
     redirects: list[str] = []
     inputs: list[str] = []
     arithmetic = False
     piped = False
+    seen = {"written": set(), "read": set()}
 
-    def add(found: list[str], targets: list[str], at: str | None) -> None:
+    def add(kind: str, targets: list[str], at: str | None) -> None:
+        found = written if kind == "written" else read
         for word in targets:
             literal = _literal_path(word)
             path = _resolve(literal, at) if literal else None
-            if path and path not in found:
+            if path and path not in seen[kind]:
+                seen[kind].add(path)
                 found.append(path)
 
     def next_branch(kind: str) -> None:
@@ -565,9 +635,10 @@ def _file_targets(command: str) -> tuple[list[str], list[str]]:
         first = operators[0] if operators else ""
         detached = first in ("|", "|&", "&")
         in_pipe = piped
-        command_words = list(words)
-        while command_words and command_words[0] in _PREFIX_WORDS:
-            word = command_words.pop(0)
+        start = 0
+        while start < len(words) and words[start] in _PREFIX_WORDS:
+            word = words[start]
+            start += 1
             if word in ("{", "if", "while", "until"):
                 kind = "loop" if word in ("while", "until") else word
                 frames.append([kind, base, in_pipe, False])
@@ -575,8 +646,9 @@ def _file_targets(command: str) -> tuple[list[str], list[str]]:
             elif word in ("elif", "else"):
                 next_branch("if")
         at = base
-        if command_words and command_words[0] in _CLOSERS:
-            kind = _CLOSERS[command_words.pop(0)]
+        if start < len(words) and words[start] in _CLOSERS:
+            kind = _CLOSERS[words[start]]
+            start += 1
             if frames and frames[-1][0] == kind:
                 _, saved, frame_piped, changed = frames.pop()
                 # Redirects on a compound command open before its body runs.
@@ -585,7 +657,7 @@ def _file_targets(command: str) -> tuple[list[str], list[str]]:
                     base = saved
                 elif kind != "{" and (changed or base != saved):
                     base = None
-        command_words = _command_words(command_words)
+        command_words = _command_words(words[start:])
         name = command_words[0].rsplit("/", 1)[-1] if command_words else ""
         if name in ("for", "select", "case"):
             frames.append(["case" if name == "case" else "loop", base, in_pipe, False])
@@ -593,11 +665,11 @@ def _file_targets(command: str) -> tuple[list[str], list[str]]:
             targets = list(redirects)
             if name == "tee":
                 targets.extend(_tee_files(command_words))
-            add(written, targets, at)
+            add("written", targets, at)
             sources = list(inputs)
             if name in _READ_COMMANDS:
                 sources.extend(_read_files(name, command_words))
-            add(read, sources, at)
+            add("read", sources, at)
             if name == "cd" and not (in_pipe or detached):
                 base = _cd_base(command_words, base)
         if first in (";;", ";&", ";;&"):
@@ -607,11 +679,10 @@ def _file_targets(command: str) -> tuple[list[str], list[str]]:
         nonlocal base
         if frames and frames[-1][0] == "case":
             return
-        for position in range(len(frames) - 1, -1, -1):
-            if frames[position][0] == "(":
-                base = frames[position][1]
-                del frames[position:]
-                return
+        if parens:
+            position = parens.pop()
+            base = frames[position][1]
+            del frames[position:]
 
     index = 0
     while index < len(tokens):
@@ -633,6 +704,7 @@ def _file_targets(command: str) -> tuple[list[str], list[str]]:
             operators = _operators(token)
             for operator in operators:
                 if operator == "(":
+                    parens.append(len(frames))
                     frames.append(["(", base, False, False])
                 elif operator == ")":
                     close_paren()

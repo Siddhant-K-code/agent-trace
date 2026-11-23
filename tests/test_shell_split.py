@@ -2,6 +2,7 @@
 
 import os
 import sys
+import time
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -148,6 +149,65 @@ class TestShellSplit(unittest.TestCase):
 
     def test_line_continuation_joins(self):
         self.assertEqual(command_segments("python -m \\\n pytest"), [["python", "-m", "pytest"]])
+
+    def test_heredoc_detection_across_continued_lines(self):
+        # Each case is "<command>\npytest\nEOF\nls"; True means the command
+        # opens a heredoc, so the pytest and EOF lines are dropped.
+        cases = (
+            ("echo $'a\\\n' <<EOF", True),  # $'...' spans the line
+            ('echo "a\\\nb" <<EOF', True),  # "..." spans the line
+            ("echo 'a\\\n' <<EOF", True),  # '...' spans the line
+            ("echo $\\\n'\\'y\\\n<<EOF", False),  # $ and ' joined make $'
+            ("echo \\'y\\\n<<EOF", True),
+            ("echo a\\\n#b <<EOF", True),  # # joined mid-word is not a comment
+            ("echo a \\\n#b <<EOF", False),  # # after a space is
+            ("echo a \\\n# c \\\n<<EOF", True),  # a comment does not continue
+            ("echo a\\\n# c \\\n<<EOF", True),
+            ("cat <\\\n<EOF", True),  # << split by a continuation
+            ("cat <\\\n<-EOF", True),
+            ("cat <<\\\n\\\nEOF", True),
+            ("echo a\\\\\n<<EOF", True),  # even backslashes do not continue
+            ("echo a\\\\\\\n<<EOF", True),  # odd ones do
+            ("echo a\\\n\\\\\\\n<<EOF", True),  # lines of only backslashes
+            ("echo a\\\n\\\\\n<<EOF", True),
+            ("echo a\\\n\\\n\\\n<<EOF", True),
+            ("echo 'a\\\n\\\\\\\n' <<EOF", True),
+        )
+        for command, opens in cases:
+            with self.subTest(command=command):
+                text = f"{command}\npytest\nEOF\nls"
+                expected = f"{command}\nls" if opens else text
+                self.assertEqual(strip_heredocs(text), expected)
+
+    def test_continued_line_tokens(self):
+        self.assertEqual(
+            split_tokens("echo $\\\n'x' <<EOF\npytest\nEOF\nls"),
+            (["echo", "$x", "<<", "EOF", "\n", "ls"], True),
+        )
+        self.assertEqual(
+            split_tokens("echo a \\\n# c \\\n<<EOF\npytest\nEOF\nls"),
+            (["echo", "a", "\n<<", "EOF", "\n", "ls"], True),
+        )
+        self.assertEqual(
+            split_tokens("echo a\\\n\\\\\\\n<<EOF\npytest\nEOF\nls"),
+            (["echo", "a\\", "<<", "EOF", "\n", "ls"], True),
+        )
+
+    def test_cost_is_linear_in_the_command(self):
+        # A recorded command is untrusted, so splitting it must not take
+        # quadratic time. Each case took seconds before this was fixed.
+        cases = (
+            ("continued lines", write_targets, "x\\\n" * 10000),
+            ("continued backslash lines", write_targets, "x\\\n" + "\\\\\\\n" * 10000 + "y"),
+            ("failing heredoc words", strip_heredocs, "cat <<$'\\'x'" * 5000),
+            ("closing groups", write_targets, "{ " * 20000 + ")" * 20000),
+            ("prefix words", write_targets, "! " * 100000 + "A=1 " * 100000 + "echo"),
+        )
+        for label, function, command in cases:
+            with self.subTest(label):
+                started = time.perf_counter()
+                function(command)
+                self.assertLess(time.perf_counter() - started, 2.0)
 
     def test_unbalanced_quote_falls_back(self):
         tokens, parsed = split_tokens("pytest -k 'oops")
