@@ -22,6 +22,29 @@ agent-strace export claude-run-0001 --format otlp-genai --output run.json
 fails once the artifact has expired. agent-strace does not download artifacts
 itself.
 
+The gh-aw CLI (`gh extension install github/gh-aw`) can fetch the file too.
+Its [`sessions download`](https://github.github.com/gh-aw/setup/cli/#sessions)
+command is experimental, and its output may change:
+
+```bash
+gh aw sessions download <run-id> -o aw_session.jsonl
+agent-strace import aw_session.jsonl
+```
+
+It writes the run's published `usage/aw_session.jsonl` unchanged. For a run from
+an older gh-aw version, whose `usage` artifact has no `aw_session.jsonl`, it
+reconstructs the file from the agent artifact. Reconstruction needs Node.js;
+downloading a published file does not. Add `--repo owner/repo` for a run in
+another repository. Keep the default JSONL output: agent-strace cannot import
+the `--format markdown` or `--atif` output.
+
+agent-strace was tested on files that gh-aw v1.2.2 reconstructed for Claude,
+Codex, Copilot and Pi runs. All of them import, and `cost`, `explain` and
+`export` work on them. A file rebuilt from a raw log, such as Copilot's
+`agent-stdio.log`, can have no `toolCallId` and no times. Its tool calls and
+results then stay unpaired (see [Tool calls](#tool-calls)), and their times are
+inferred (see [Times](#times)).
+
 ```
 Imported session claude-run-0001
   4 tool calls, 2 LLM requests, 1820 tokens
