@@ -2239,12 +2239,13 @@ file, it prints one line such as `Error: cannot write out.json: No such file or
 directory` on stderr and exits 1. `--scores`, `--metrics` and `--backend` do
 not read `--output`.
 
-`--format json` and `ndjson` write strict JSON. A NaN or infinite number in an
-event is written as `null`, as JavaScript's `JSON.stringify` writes it, and a
-NaN or infinite `duration_ms` is left out. This holds for a session that an
-earlier version stored with the bare `NaN`, `Infinity` or `-Infinity` tokens,
-too. `--format csv` writes a NaN or infinite `timestamp` or `duration_ms` as
-`nan`, `inf` or `-inf`, and the `data` cell as stored.
+`--format json` and `ndjson` write strict JSON. A number in an event that
+reads as NaN or infinity, such as `NaN` or `1e400`, is written as `null`, as
+JavaScript's `JSON.stringify` writes it, and such a `duration_ms` is left out.
+This holds for a session that an earlier version stored with the bare `NaN`,
+`Infinity` or `-Infinity` tokens, too. `--format csv` writes a NaN or infinite
+`timestamp` or `duration_ms` as `nan`, `inf` or `-inf`, and the `data` cell as
+stored.
 
 With `--endpoint URL`, `--format otlp`, `otlp-genai` and `temporal` POST the
 payload to an OTLP/HTTP collector instead of writing a file. Give the
@@ -2999,8 +3000,9 @@ negative, NaN, infinity, or too large for a float, reads as missing. An
 no event links through it. Only `true` counts as `redacted`. The `otlp` and
 `otlp-genai` exports still give each event its own span ID. `inspect`,
 `sample`, and `export --format json`, `ndjson`, or `csv` keep the stored value,
-except a NaN or infinite `duration_ms`. `inspect`, `sample`, `json` and
-`ndjson` leave it out, and `csv` writes it as `nan`, `inf` or `-inf`.
+except a `duration_ms` that reads as NaN or infinity, such as `NaN` or `1e400`.
+`inspect`, `sample`, `json` and `ndjson` leave it out, and `csv` writes it as
+`nan`, `inf` or `-inf`.
 `validate` reports each such value as `event_schema_invalid`, and `org-report`
 refuses any of them. `compliance-report` refuses an `event_id` or `parent_id`
 that is not a string, an empty `event_id`, and a NaN or infinite
@@ -3124,12 +3126,11 @@ too-large integer timestamp.
 
 `list`, `inspect`, `tree`, `verify`, `stats`, `export --format json`, `ndjson`,
 or `csv`, `tenant export`, and the events API keep working on these sessions.
-Those that print a timestamp print it as stored, except a NaN or infinite one.
-`inspect`, `export --format json` and `ndjson`, `tenant export`, and the events
-API print that as `null`, and `export --format csv` prints it as `nan`, `inf`
-or `-inf`. `postmortem --list`, `compare --rerun`, `cost --breakdown
-provider`, `annotate --event`, and `replay --tree` do not check and work as
-before.
+Those that print a timestamp print it as stored, except that `inspect`,
+`export --format json` and `ndjson`, `tenant export`, and the events API print
+one that reads as NaN or infinity as `null`. `postmortem --list`, `compare
+--rerun`, `cost --breakdown provider`, `annotate --event`, and `replay --tree`
+do not check and work as before.
 
 `tree`, `a2a-tree`, `budget-report`, and `curve` do not check before they price
 a session. When they cannot price it, they count its cost as $0, as earlier
