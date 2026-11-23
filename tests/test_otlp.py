@@ -473,7 +473,8 @@ def _attrs(span):
 
 class TestToolSpanIdentity(unittest.TestCase):
     """A tool call that failed or got no result names its tool the way a
-    tool call with a result does (#552)."""
+    tool call with a result does (#552). An error with no call and no
+    tool_name is not a tool call."""
 
     IDENTITY = ("gen_ai.tool.name", "gen_ai.operation.name", "gen_ai.tool.call.id")
 
@@ -514,12 +515,55 @@ class TestToolSpanIdentity(unittest.TestCase):
         self.assertEqual(_attrs(failed)["gen_ai.tool.name"], "Bash")
         self.assertEqual(_attrs(failed)["tool.name"], "Bash")
 
-    def test_lone_error_is_a_tool_error_span(self):
-        error = TraceEvent(event_type=EventType.ERROR, event_id="err1", timestamp=1003.0,
-                           data={"error": "boom"})
-        _, span = _classic_spans([error])
-        self.assertEqual((span["name"], span["kind"]), ("tool/error", 3))
-        self.assertEqual(_attrs(span)["gen_ai.tool.call.id"], "err1")
+    def test_error_with_no_call_and_no_tool_name_is_not_a_tool_call(self):
+        request = TraceEvent(event_type=EventType.LLM_REQUEST, event_id="req1", timestamp=1001.0,
+                             data={"model": "gpt-4o"})
+        cases = {
+            # proxy.py, when the MCP server command fails.
+            "could not start the MCP server: [Errno 2] No such file or directory: 'srv'": [],
+            # http_proxy.py sets no parent_id, so the error does not end the request.
+            "Proxy error: [Errno 61] Connection refused": [request],
+        }
+        for message, before in cases.items():
+            with self.subTest(message=message):
+                error = TraceEvent(event_type=EventType.ERROR, event_id="err1", timestamp=1003.0,
+                                   data={"message": message})
+                _, span = _classic_spans([*before, error])
+                self.assertEqual((span["name"], span["kind"]), ("error", 1))
+                self.assertEqual(_attrs(span), {"tool.name": "error", "error.message": message})
+                self.assertEqual(span["status"], {"code": 2, "message": message})
+                self.assertEqual([event["name"] for event in span["events"]], ["exception"])
+
+    def test_error_with_an_empty_tool_name_and_no_call_is_named_error(self):
+        for tool_name in ("", None):
+            with self.subTest(tool_name=tool_name):
+                error = TraceEvent(event_type=EventType.ERROR, timestamp=1003.0,
+                                   data={"tool_name": tool_name, "error": "boom"})
+                _, span = _classic_spans([error])
+                self.assertEqual((span["name"], span["kind"]), ("error", 1))
+                self.assertEqual(_attrs(span), {"tool.name": "error", "error.message": "boom"})
+
+    def test_error_with_a_call_or_a_tool_name_is_a_tool_call(self):
+        nameless_call = TraceEvent(event_type=EventType.TOOL_CALL, event_id="call1",
+                                   timestamp=1001.0, data={"arguments": {"x": 1}})
+        cases = [
+            # A call and a tool_name, a call that names no tool, a tool_name and no call.
+            ([self._call()], "call1", {"tool_name": "Bash", "error": "exit 1"}, "Bash", "call1"),
+            ([nameless_call], "call1", {"error": "exit 1"}, "error", "call1"),
+            ([], "", {"tool_name": "Read", "error": "exit 1"}, "Read", "err1"),
+        ]
+        for before, parent_id, data, tool, call_id in cases:
+            with self.subTest(tool=tool):
+                error = TraceEvent(event_type=EventType.ERROR, event_id="err1",
+                                   parent_id=parent_id, timestamp=1003.0, data=data)
+                _, span = _classic_spans([*before, error])
+                self.assertEqual((span["name"], span["kind"]), (f"tool/{tool}", 3))
+                attrs = _attrs(span)
+                self.assertEqual(
+                    {key: attrs.get(key) for key in self.IDENTITY},
+                    {"gen_ai.tool.name": tool, "gen_ai.operation.name": "tool.call",
+                     "gen_ai.tool.call.id": call_id},
+                )
 
     def test_call_without_a_result_has_the_identity_of_a_call_with_one(self):
         _, span = _classic_spans([self._call()])
