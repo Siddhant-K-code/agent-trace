@@ -31,6 +31,7 @@ from .otlp import (
     export_otlp_payload,
     otlp_genai_data_indexes,
     session_to_otlp_genai,
+    set_agent_id,
 )
 from .propagation import extract_traceparent
 from .store import TraceStore
@@ -173,8 +174,12 @@ def export_temporal_otlp(
     headers: dict[str, str] | None = None,
     service_name: str = "agent-trace",
     protocol: str = "http/json",
+    agent_id: str = "",
 ) -> bool:
-    """Export one Temporal-parented session via OTLP/HTTP JSON or protobuf."""
+    """Export one Temporal-parented session via OTLP/HTTP JSON or protobuf.
+
+    A non-empty *agent_id* is sent as ``gen_ai.agent.id`` on every span.
+    """
     meta = store.load_meta(session_id)
     events = store.load_events(session_id)
     if not events:
@@ -187,6 +192,7 @@ def export_temporal_otlp(
     except ValueError as exc:
         sys.stderr.write(f"Temporal export failed: {exc}\n")
         return False
+    set_agent_id(payload, agent_id)
     return export_otlp_payload(
         payload,
         endpoint,

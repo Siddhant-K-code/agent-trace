@@ -40,6 +40,7 @@ agent-strace export <session-id> --format otlp-genai \
 | Errors | `tool/<name>` span with ERROR status and an `exception` event; see [Classic tool spans](#classic-tool-spans) | OTel `exception` event format and `error.type` |
 | Failed or cancelled model request | `error.type` on the `gen_ai.assistant.message` event | ERROR status and `error.type` on the `chat` span |
 | `gen_ai.conversation.id` | Root span | Root, LLM and tool spans |
+| `gen_ai.agent.id` | Every span, only with `--agent-id` or `AGENT_STRACE_AGENT_ID` | The same |
 | Token usage | `gen_ai.usage.*` on the LLM events, and on the `chat` spans of imported responses | `gen_ai.usage.*` and `llm.token_count.*` on the LLM spans; see [Token usage and prompt caching](#token-usage-and-prompt-caching) |
 | Prompts and replies | Events on root span | Events on root span, and `gen_ai.input.messages` and `gen_ai.output.messages` on it |
 | Tool input and output | `tool.input.*` and `tool.output` | `input.value` and `output.value`, and `gen_ai.tool.call.arguments` and `gen_ai.tool.call.result` |
@@ -72,10 +73,16 @@ reports.
 | Tool call, including a failed one | `execute_tool {gen_ai.tool.name}` | `INTERNAL` (`1`) | `execute_tool` | [Execute tool](https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/execute-tool.md) |
 
 - The root carries `gen_ai.agent.name` only when the session has an agent
-  name. It carries no `gen_ai.agent.id`: the conventions reserve that for the
-  stable ID of a hosted agent resource, and the agent-strace session ID is
-  neither. The session ID is on `session.id` and `agent.session_id`, and the
+  name. The session ID is on `session.id` and `agent.session_id`, and the
   agent's own session ID on `gen_ai.conversation.id`.
+- `gen_ai.agent.id` is the stable ID of an agent registered elsewhere, such as
+  a Microsoft Foundry external agent, which finds its spans by it.
+  agent-strace never derives one: the session ID is not an agent ID. It is
+  emitted only when you pass `export --agent-id ID` or `watch --agent-id ID`,
+  or set `AGENT_STRACE_AGENT_ID`, and then on every span: the root, every
+  `chat` and `execute_tool` span, and every subagent span. The value is sent
+  as given. The conventions mark `gen_ai.agent.id` as Development. See
+  [Azure Monitor and Microsoft Foundry](integrations.md#azure-monitor-and-microsoft-foundry).
 - A failed tool call carries `error.type`: the recorded `error_type` or
   `exception_type`, else `_OTHER`. Its span is named after the error's
   `tool_name`, else its call's, else `error`. The `@trace_tool` decorator, for
@@ -211,7 +218,7 @@ updating. `--format otlp` keeps its names, but two of its values change; see
 | `gen_ai.agent.session ({agent})` root span, `gen_ai.operation.name` `agent.session` | `invoke_agent {agent}` (or `invoke_agent`), `invoke_agent` |
 | `gen_ai.client.operation` model request span | `chat {model}` (or `chat`) |
 | `gen_ai.tool.call/{tool}` tool span, `gen_ai.operation.name` `execute`, kind `CLIENT` (`3`) | `execute_tool {tool}`, `execute_tool`, kind `INTERNAL` (`1`) |
-| `gen_ai.agent.id` on the root (the agent-strace session ID) | not emitted; use `session.id` |
+| `gen_ai.agent.id` on the root (the agent-strace session ID) | not derived; use `session.id`. `--agent-id ID` puts an ID you choose on every span |
 | `gen_ai.agent.name` `agent` when the session had no agent name | not emitted |
 | `gen_ai.system` `google` | `gcp.gen_ai` (or `gcp.vertex_ai`, `gcp.gemini`) |
 | `gen_ai.system` only | `gen_ai.provider.name`, with `gen_ai.system` kept as a deprecated copy |
@@ -269,6 +276,8 @@ agent-strace export <session-id> --format otlp-genai --include-subagents \
   subagent.
 - The subagents are those `agent-strace tree` shows, up to the same depth. A
   session in the tree twice is exported once.
+- With `--agent-id`, every subagent span carries the same `gen_ai.agent.id`
+  as the parent's spans. A subagent keeps its own `gen_ai.agent.name`.
 - Codex subagents run inside their parent's session, so they are already in
   its trace.
 
@@ -612,6 +621,8 @@ Watch sends OTLP JSON unless `--protocol http/protobuf`, or one of the `OTEL_EXP
 ```bash
 agent-strace watch --stream-to http://localhost:6006 --stream-otlp --protocol http/protobuf
 ```
+
+`--agent-id ID`, or `AGENT_STRACE_AGENT_ID`, puts `gen_ai.agent.id` on every streamed span, as it does for [export](commands.md#export).
 
 With `--stream-otlp`, watch drops trailing slashes from the URL path, then appends `/v1/traces` unless the path already ends with it. The query string is kept:
 

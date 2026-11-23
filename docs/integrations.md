@@ -321,6 +321,103 @@ and backend recipes.
 
 ---
 
+## Azure Monitor and Microsoft Foundry
+
+Microsoft Foundry can trace and evaluate an agent that runs outside it, an
+[external agent](https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/register-external-agent),
+from the OpenTelemetry spans in the Application Insights resource connected to
+the Foundry project. It finds the agent's spans by `gen_ai.agent.id`, which
+agent-strace sends only when you give it an ID. Azure Monitor's
+[coding-agent page](https://learn.microsoft.com/en-us/azure/azure-monitor/app/agents-view#monitor-ai-coding-agents)
+sends such spans through an OpenTelemetry Collector with the Azure Monitor
+exporter.
+
+1. Run `otelcol-contrib` (the exporter is in the contrib distribution) with an
+   OTLP/HTTP receiver and the `azure_monitor` exporter:
+
+   ```yaml
+   receivers:
+     otlp:
+       protocols:
+         http:
+           endpoint: localhost:4318
+
+   exporters:
+     azure_monitor:
+       connection_string: ${env:APPLICATIONINSIGHTS_CONNECTION_STRING}
+
+   service:
+     pipelines:
+       traces:
+         receivers: [otlp]
+         exporters: [azure_monitor]
+   ```
+
+   ```bash
+   # The connection string of the Application Insights resource connected to the Foundry project.
+   export APPLICATIONINSIGHTS_CONNECTION_STRING='InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://<region>.in.applicationinsights.azure.com/'
+   otelcol-contrib --config collector.yaml
+   ```
+
+2. Register the agent in Foundry with the ID you will send. In the Foundry
+   portal, open the project, select **Build** > **Agents** > **New agent** >
+   **Link external agent**, and enter a name, a description and the
+   OpenTelemetry ID, here `my-coding-agent`. The SDKs take the same ID as
+   `otel_agent_id`, which defaults to the agent name.
+
+3. Send sessions with that ID:
+
+   ```bash
+   agent-strace export <session-id> --format otlp-genai --include-subagents \
+     --agent-id my-coding-agent --endpoint http://localhost:4318 --protocol http/protobuf
+
+   # Or stream while the agent runs; AGENT_STRACE_AGENT_ID works for both commands.
+   AGENT_STRACE_AGENT_ID=my-coding-agent agent-strace watch \
+     --stream-to http://localhost:4318 --stream-otlp --protocol http/protobuf
+   ```
+
+`--agent-id` puts `gen_ai.agent.id` on every span, as Foundry asks: the
+`invoke_agent` root, each `chat` and `execute_tool` span, and every subagent
+span with `--include-subagents`. A subagent keeps its own `gen_ai.agent.name`.
+Without `--agent-id` or `AGENT_STRACE_AGENT_ID`, agent-strace sends no
+`gen_ai.agent.id` and never derives one. Use `--format otlp-genai`: Foundry's
+conversation evaluation reads `gen_ai.conversation.id` and the message
+attributes on `invoke_agent` spans, which only that format sends. Classic
+`--format otlp` and `--format temporal` take `--agent-id` too. The
+OpenTelemetry GenAI conventions mark `gen_ai.agent.id` as Development, so its
+use may change. Flags: [export](commands.md#export), [watch](commands.md#watch).
+
+What was checked, without an Azure account: otelcol-contrib 0.165.0's
+exporter, with its `IngestionEndpoint` on a local server, received
+`--protocol http/protobuf` exports and a `watch --stream-otlp` stream. The
+local server recorded what the exporter would send to Application Insights.
+[experiments/azure-monitor](../experiments/azure-monitor/RESULTS.md) has the
+details:
+
+- `gen_ai.agent.id` was a property of every span's envelope, subagents
+  included, and of none when no ID was given. `gen_ai.conversation.id`,
+  `gen_ai.operation.name`, the token counts and the message and tool content
+  attributes were kept as properties too.
+- Every span became a dependency (`RemoteDependency`), none a request:
+  `invoke_agent` and `execute_tool` with type `InProc`, `chat` with no type.
+- Array attributes, such as `gen_ai.response.finish_reasons`, were dropped.
+- Each property is cut to 8192 bytes. A long session's
+  `gen_ai.input.messages` arrived as its first 8192 bytes, which is not valid
+  JSON.
+- A failed tool's `exception` event became exception telemetry without
+  `gen_ai.agent.id`; it points at its span through the operation parent ID.
+  Other span events are dropped unless the exporter has
+  `spaneventsenabled: true`.
+- Span links became the `_MS.links` property, without their attributes.
+- `watch --stream-otlp` resends the root span with each batch, and the
+  exporter forwarded every copy.
+
+Application Insights and Foundry themselves were not tested: what Application
+Insights stores and whether Foundry lists the traces under the registered
+agent are unverified.
+
+---
+
 ## Temporal workflows
 
 Agent spans can be attached beneath an existing Temporal activity span without

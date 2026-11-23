@@ -549,18 +549,22 @@ class _ReceiverTestCase(unittest.TestCase):
     def setUp(self) -> None:
         _RecordingReceiver.received.clear()
 
-    def _stream_config(self, *, otlp: bool = True, batch_size: int = 100) -> StreamConfig:
+    def _stream_config(self, *, otlp: bool = True, batch_size: int = 100,
+                       agent_id: str = "") -> StreamConfig:
         return StreamConfig(
             url=self.url, otlp=otlp, batch_size=batch_size, flush_interval=60.0,
+            agent_id=agent_id,
         )
 
     def _stream(self, events: list[TraceEvent], *, otlp: bool = True,
-                batch_size: int = 100) -> tuple[list[tuple[str, bytes]], str]:
+                batch_size: int = 100, agent_id: str = "") -> tuple[list[tuple[str, bytes]], str]:
         """Stream *events* and return the POSTs received and what stderr got."""
         _RecordingReceiver.received.clear()
         stderr = StringIO()
         with redirect_stderr(stderr):
-            streamer = EventStreamer(self._stream_config(otlp=otlp, batch_size=batch_size))
+            streamer = EventStreamer(self._stream_config(
+                otlp=otlp, batch_size=batch_size, agent_id=agent_id,
+            ))
             for event in events:
                 streamer.enqueue(event)
             streamer.stop()
@@ -719,6 +723,52 @@ class TestOtlpStreamRootStatus(_ReceiverTestCase):
             for key in keys
         ))
         self.assertEqual(tool["status"]["code"], 2)
+
+
+class TestOtlpStreamAgentId(_ReceiverTestCase):
+    """StreamConfig.agent_id (watch --agent-id) is on every streamed span (#586)."""
+
+    _EVENTS = [
+        _event("user_prompt", {"prompt": "hi"}, "p1"),
+        _event("llm_request", {"model": "m"}, "r1", ts=2.0),
+        _event("llm_response", {"model": "m"}, "r2", parent_id="r1", ts=3.0),
+        _event("tool_call", {"tool_name": "Bash"}, "c1", ts=4.0),
+        _event("tool_result", {"tool_name": "Bash", "result": "ok"}, "c2",
+               parent_id="c1", ts=5.0),
+    ]
+
+    def _agent_ids(self, posts: list[tuple[str, bytes]]) -> list[list[str]]:
+        """Return each span's gen_ai.agent.id values, POST by POST."""
+        return [
+            [
+                attribute["value"]["stringValue"]
+                for attribute in span["attributes"]
+                if attribute["key"] == "gen_ai.agent.id"
+            ]
+            for _, body in posts
+            for span in json.loads(body)["resourceSpans"][0]["scopeSpans"][0]["spans"]
+        ]
+
+    def test_every_span_of_every_batch(self) -> None:
+        for batch_size in (100, 2):
+            with self.subTest(batch_size=batch_size):
+                posts, stderr = self._stream(
+                    self._EVENTS, batch_size=batch_size, agent_id="foundry-agent-7",
+                )
+                self.assertEqual(stderr, "")
+                self.assertGreaterEqual(len(posts), 1 if batch_size == 100 else 3)
+                names = [name for _, _, children in self._sent(posts) for name in children]
+                self.assertIn(_LLM_SPAN, names)
+                self.assertIn(_BASH_SPAN, names)
+                spans = self._agent_ids(posts)
+                self.assertEqual(spans, [["foundry-agent-7"]] * len(spans))
+
+    def test_none_without_an_id(self) -> None:
+        posts, stderr = self._stream(self._EVENTS)
+        self.assertEqual(stderr, "")
+        spans = self._agent_ids(posts)
+        self.assertEqual(spans, [[]] * len(spans))
+        self.assertGreaterEqual(len(spans), 3)
 
 
 class TestOtlpStreamConversionFailure(_ReceiverTestCase):

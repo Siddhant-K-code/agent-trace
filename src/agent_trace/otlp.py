@@ -96,6 +96,7 @@ _SEMCONV_INPUT_TOKENS = "gen_ai.usage.input_tokens"
 _SEMCONV_OUTPUT_TOKENS = "gen_ai.usage.output_tokens"
 _SEMCONV_REASONING_TOKENS = "gen_ai.usage.reasoning.output_tokens"
 _SEMCONV_AGENT_NAME = "gen_ai.agent.name"
+_SEMCONV_AGENT_ID = "gen_ai.agent.id"
 
 _OP_CHAT = "chat"
 _OP_EXECUTE_TOOL = "execute_tool"
@@ -2088,6 +2089,48 @@ def session_to_otlp_genai(
     }
 
 
+# Read when --agent-id is not given.
+AGENT_ID_ENV = "AGENT_STRACE_AGENT_ID"
+
+
+def resolve_agent_id(flag: str | None, environ: Mapping[str, str]) -> str:
+    """Return the ``gen_ai.agent.id`` to send, or "" for none.
+
+    --agent-id (*flag*) wins, then AGENT_STRACE_AGENT_ID. A flag that is
+    empty or only spaces raises ValueError with the line to print. A
+    variable that is empty or only spaces counts as unset, as an empty
+    OpenTelemetry variable does. The value is sent as given.
+    """
+    if flag is not None:
+        if not flag.strip():
+            raise ValueError("invalid --agent-id value: it is empty")
+        return flag
+    value = environ.get(AGENT_ID_ENV, "")
+    return value if value.strip() else ""
+
+
+def set_agent_id(payload: dict, agent_id: str) -> dict:
+    """Put ``gen_ai.agent.id`` = *agent_id* on every span of *payload*.
+
+    The ID names an agent registered elsewhere, such as a Foundry external
+    agent, which finds its spans by it. agent-strace never derives one, so
+    an empty *agent_id* changes nothing. A span's earlier
+    ``gen_ai.agent.id`` is replaced. Returns *payload*.
+    """
+    if not agent_id:
+        return payload
+    for resource_spans in payload.get("resourceSpans", []):
+        for scope_spans in resource_spans.get("scopeSpans", []):
+            for span in scope_spans.get("spans", []):
+                attributes = [
+                    attribute for attribute in span.get("attributes", [])
+                    if attribute.get("key") != _SEMCONV_AGENT_ID
+                ]
+                attributes.extend(_make_attributes({_SEMCONV_AGENT_ID: agent_id}))
+                span["attributes"] = attributes
+    return payload
+
+
 def export_otlp(
     store: TraceStore,
     session_id: str,
@@ -2095,6 +2138,7 @@ def export_otlp(
     headers: dict[str, str] | None = None,
     service_name: str = "agent-trace",
     protocol: str = PROTOCOL_JSON,
+    agent_id: str = "",
 ) -> bool:
     """Export a session to an OTLP/HTTP endpoint.
 
@@ -2105,6 +2149,7 @@ def export_otlp(
         headers: Extra HTTP headers (for auth tokens, API keys)
         service_name: OTel service name
         protocol: ``http/json`` or ``http/protobuf``
+        agent_id: ``gen_ai.agent.id`` for every span; empty sends none
 
     Returns:
         True if export succeeded. A ValueError from the conversion, other
@@ -2128,6 +2173,7 @@ def export_otlp(
     except ValueError as exc:
         sys.stderr.write(f"OTLP export failed: {exc}\n")
         return False
+    set_agent_id(payload, agent_id)
     return export_otlp_payload(
         payload,
         endpoint,

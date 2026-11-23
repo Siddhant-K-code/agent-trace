@@ -1455,6 +1455,8 @@ class StreamConfig:
     service_name: str = "agent-trace"
     # OTLP/HTTP encoding: http/json or http/protobuf
     protocol: str = _OTLP_JSON
+    # gen_ai.agent.id on every OTLP span; empty sends none
+    agent_id: str = ""
 
     @classmethod
     def from_url(cls, url: str, headers: dict[str, str] | None = None,
@@ -1686,7 +1688,7 @@ class EventStreamer:
         its message, and later batches are still sent.
         """
         try:
-            from .otlp import session_to_otlp_genai
+            from .otlp import session_to_otlp_genai, set_agent_id
             from .models import SessionMeta as _SessionMeta
         except ImportError:
             self._flush_ndjson(events)
@@ -1716,6 +1718,7 @@ class EventStreamer:
                     meta, kept, service_name=self.config.service_name,
                     root_outcome=False,
                 )
+                set_agent_id(payload, self.config.agent_id)
             except Exception as exc:
                 self._report(_otlp_conversion_failed_line(len(kept), exc), len(kept))
                 continue
@@ -3287,14 +3290,26 @@ def cmd_watch(args: argparse.Namespace) -> int:
     # The variables are read only for --stream-otlp: NDJSON is not OTLP.
     stream_protocol = _OTLP_JSON
     protocol_flag = getattr(args, "protocol", None)
+    stream_agent_id = ""
+    agent_id_flag = getattr(args, "agent_id", None)
     if stream_url is not None and getattr(args, "stream_otlp", False):
         try:
             stream_protocol = _resolve_otlp_protocol(protocol_flag, os.environ)
         except ValueError as exc:
             sys.stderr.write(f"[watch] {exc}\n")
             return 1
+        # --agent-id, then AGENT_STRACE_AGENT_ID, names gen_ai.agent.id.
+        from .otlp import resolve_agent_id
+        try:
+            stream_agent_id = resolve_agent_id(agent_id_flag, os.environ)
+        except ValueError as exc:
+            sys.stderr.write(f"[watch] {exc}\n")
+            return 1
     elif protocol_flag is not None:
         sys.stderr.write("[watch] --protocol is used only with --stream-to and --stream-otlp\n")
+        return 1
+    elif agent_id_flag is not None:
+        sys.stderr.write("[watch] --agent-id is used only with --stream-to and --stream-otlp\n")
         return 1
 
     max_context_pct = getattr(args, "max_context_pct", None)
@@ -3482,6 +3497,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
             flush_interval=getattr(args, "stream_flush_interval", 2.0),
             otlp=getattr(args, "stream_otlp", False),
             protocol=stream_protocol,
+            agent_id=stream_agent_id,
         )
 
     watch_session(

@@ -743,7 +743,7 @@ checkpoint setup.
 agent-strace watch [session-id] [--agent-pid PID] [--timeout DURATION] [--budget DOLLARS]
                    [--on-violation ACTION] [--webhook URL] [--config FILE]
                    [--on-death CMD] [--policy FILE] [--rules FILE_OR_BUILTINS] [--stream-to URL]
-                   [--stream-otlp] [--protocol http/json|http/protobuf]
+                   [--stream-otlp] [--protocol http/json|http/protobuf] [--agent-id ID]
                    [--stream-batch-size N] [--stream-flush-interval S] [--loop-threshold N]
                    [--loop-window N] [--max-context-pct N]
                    [--compaction-checkpoint] [--checkpoint-at RATIO] [--dry-run]
@@ -770,6 +770,7 @@ Live session monitor with kill-switch rules.
 | `--stream-to URL` | POST events as NDJSON to this `http://` or `https://` URL while watching. Watch refuses at startup, with one line and exit 1, a URL with no host, a bad port, spaces or control characters, or a user name or password. A failed POST prints one line that names only the URL's `scheme://host[:port]`, and watch goes on. Redirects are not followed, so pass the final URL. When watch stops, it waits up to 15 seconds for the last POST; if the wait runs out or Ctrl-C stops it, one line gives the number of events not confirmed sent |
 | `--stream-otlp` | With `--stream-to`, POST OTLP/HTTP spans instead of NDJSON, as JSON unless `--protocol` says otherwise. Trailing slashes are dropped from the URL path and `/v1/traces` is appended unless the path already ends with it; the query is kept. Pass the collector base URL, such as `http://localhost:4318`. See [Live OTLP streaming](production.md#live-otlp-streaming) |
 | `--protocol http/json\|http/protobuf` | With `--stream-otlp`, the OTLP/HTTP encoding: `http/json` (`application/json`) or `http/protobuf` (`application/x-protobuf`), which Phoenix needs. Without the flag, watch reads `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL`, then `OTEL_EXPORTER_OTLP_PROTOCOL`; with neither set it sends JSON. Watch refuses at startup, with one line and exit 1, `grpc`, any other value, and `--protocol` without `--stream-to` and `--stream-otlp`. The first POST answered 415 adds a line that names the other `--protocol`. NDJSON streaming ignores the variables. See [export](#export) |
+| `--agent-id ID` | With `--stream-otlp`, put `gen_ai.agent.id` = ID on every streamed span, for a backend that finds an agent's spans by it, such as a Microsoft Foundry external agent. Without the flag, watch reads `AGENT_STRACE_AGENT_ID`; an empty or blank variable counts as unset, and with neither watch emits no `gen_ai.agent.id`. Watch refuses at startup, with one line and exit 1, an empty or blank value and `--agent-id` without `--stream-to` and `--stream-otlp`. NDJSON streaming ignores the variable. See [export](#export) |
 | `--stream-batch-size N` | With `--stream-to`, send once N events are waiting (default: `10`) |
 | `--stream-flush-interval S` | With `--stream-to`, send waiting events once S seconds have passed since the last POST (default: `2.0`). `0` sends each event at once. A negative, infinite or NaN value is refused at startup |
 | `--dry-run` | Evaluate rules without acting |
@@ -2117,7 +2118,8 @@ Snapshots taken by older versions have no `workspace`. They belong to the direct
 ```
 agent-strace export <session-id> [--format json|csv|ndjson|otlp|otlp-genai|temporal|eu-ai-act]
                     [--endpoint URL] [--header 'NAME: VALUE'] [--service-name NAME]
-                    [--protocol http/json|http/protobuf] [--include-subagents]
+                    [--protocol http/json|http/protobuf] [--agent-id ID]
+                    [--include-subagents]
                     [--anonymize] [--scores] [--metrics] [--backend otlp|langfuse]
                     [--all] [--since DURATION_OR_DATE] [--until DATE] [--output FILE]
 ```
@@ -2202,8 +2204,21 @@ set wins, and with neither set export sends JSON. It works with every format
 only with `--endpoint`: `--output` files and the default file are always
 JSON. agent-strace has no gRPC exporter.
 
-Export checks `--endpoint`, `--header` and `--protocol` before it reads the session or
-writes anything. It refuses these with one line on stderr and exit 1:
+`--agent-id ID` puts `gen_ai.agent.id` = ID on every span: the root, every
+model request and tool span, and with `--include-subagents` every subagent
+span too. Use it to send spans to a backend that finds an agent's spans by
+that ID, such as a Microsoft Foundry external agent registered with the same
+ID (see [Azure Monitor and Microsoft Foundry](integrations.md#azure-monitor-and-microsoft-foundry)).
+Without the flag, export reads `AGENT_STRACE_AGENT_ID`; an empty or blank
+variable counts as unset. With neither, export emits no `gen_ai.agent.id`: it
+never derives one from the session. The ID is sent exactly as given. It works
+with `--format otlp`, `otlp-genai` and `temporal`, to a file or with
+`--endpoint`; the agent-strace session ID stays on `session.id`. The
+OpenTelemetry GenAI conventions mark `gen_ai.agent.id` as Development.
+
+Export checks `--endpoint`, `--header`, `--protocol` and `--agent-id` before
+it reads the session or writes anything. It refuses these with one line on
+stderr and exit 1:
 
 - `--endpoint` where it would be ignored: with `--format json`, `csv`,
   `ndjson` or `eu-ai-act`, or with `--anonymize`, `--scores`, `--metrics` or
@@ -2225,6 +2240,12 @@ writes anything. It refuses these with one line on stderr and exit 1:
   the variable's name in place of `--protocol` when it came from one. Any other
   value: `invalid --protocol value: use http/json or http/protobuf`. A line
   about a variable ends `; or pass --protocol to override it`.
+- An `--agent-id` that is empty or only spaces: `invalid --agent-id value: it
+  is empty`.
+- `--agent-id` with `--format json`, `csv`, `ndjson` or `eu-ai-act`, or with
+  `--anonymize`, `--scores`, `--metrics` or `--backend`: `--agent-id is not
+  used with --format csv; use --format otlp, otlp-genai or temporal`, or the
+  flag it is not used with. These ignore `AGENT_STRACE_AGENT_ID`.
 
 The lines never repeat the URL or a header, which can carry a token.
 
