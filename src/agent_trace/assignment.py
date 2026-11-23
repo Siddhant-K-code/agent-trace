@@ -44,6 +44,7 @@ from .fileutil import (
     unlock_descriptor,
 )
 from .models import EventType, SessionMeta, TraceEvent
+from .session_outcome import final_session_end_index
 from .session_outcome import recorded_session_status as _recorded_session_status
 from .store import TraceStore, validate_stored_id
 
@@ -1361,7 +1362,7 @@ def _lint_payload(events: list[dict[str, Any]]) -> dict[str, Any]:
         if error_counts[reference] >= 3:
             add("error-retry-loop", "WARN")
 
-    has_end = any(item["event_type"] == EventType.SESSION_END.value for item in events)
+    has_end = final_session_end_index([item["event_type"] for item in events]) is not None
     has_write = any(
         item["event_type"] == EventType.FILE_WRITE.value
         or (

@@ -855,12 +855,14 @@ without the `agent.strace.` prefix.
 | `agent.strace.behavior.retry_count` | Tool calls that repeat an earlier call with the same tool name, arguments, command and path |
 | `agent.strace.behavior.recovered_operation_count` | Failed operations whose retry succeeded |
 | `agent.strace.behavior.unresolved_failed_operation_count` | Failed operations with no successful retry |
-| `agent.strace.session_status` | `completed`, `timeout`, `terminated`, or `not_recorded` when there is no `session_end` |
+| `agent.strace.session_status` | `completed`, `timeout`, `terminated`, or `not_recorded` when there is no `session_end` or a later `session_start` resumed the session |
 | `agent.strace.last_model_request_failed` | Whether the session's last model request failed |
 
 A tool result failed when it has `success` or `ok` false, a nonzero
 `exit_code`, or a `status` of `error`, `failed`, `failure`, `cancelled` or
-`timeout`. The session status comes from the last `session_end`: its `status`
+`timeout`. The session status comes from the last `session_end`, unless a
+later `session_start` (a resume) reopened the session, which is
+`not_recorded`. It reads the `session_end`'s `status`
 (`timed_out` and `timeout` are `timeout`; `killed`, `cancelled`,
 `interrupted`, `failed`, `aborted` and similar are `terminated`), else a
 `reason`, `stop_reason` or `termination_reason` that mentions a timeout, a

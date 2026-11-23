@@ -26,6 +26,7 @@ from .event_data import (
 from .explain import explain_session
 from .inert import inert
 from .models import EventType, TraceEvent, usable_number
+from .session_outcome import final_session_end, final_session_end_index
 from .store import TraceStore
 
 
@@ -210,24 +211,21 @@ def clear_heartbeat(store: TraceStore, session_id: str) -> None:
 
 
 def _has_clean_session_end(events: list[TraceEvent]) -> bool:
-    for event in reversed(events):
-        if event.event_type == EventType.SESSION_END:
-            exit_code = event.data.get("exit_code")
-            return exit_code in (None, 0)
-    return False
+    end = final_session_end(events)
+    return end is not None and end.data.get("exit_code") in (None, 0)
 
 
 def _session_exit_code(events: list[TraceEvent]) -> int | None:
-    for event in reversed(events):
-        if event.event_type == EventType.SESSION_END:
-            raw = event.data.get("exit_code")
-            if raw is None:
-                return None
-            try:
-                return int(raw)
-            except (TypeError, ValueError):
-                return None
-    return None
+    end = final_session_end(events)
+    if end is None:
+        return None
+    raw = end.data.get("exit_code")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def _event_text(events: list[TraceEvent], limit: int = 20) -> str:
@@ -311,8 +309,8 @@ def detect_crash(
 ) -> CrashInfo | None:
     """Detect a crashed or stale session without mutating the store.
 
-    Raises NonObjectEventDataError when the last session_end event's data is
-    not an object; ``name_session`` adds the session ID to that error.
+    Raises NonObjectEventDataError when the final session_end event's data
+    is not an object; ``name_session`` adds the session ID to that error.
     """
     current_time = time.time() if now is None else now
     try:
@@ -602,7 +600,7 @@ def _last_index(events: list[TraceEvent], event_types) -> int | None:
 
 def crash_data_indexes(events: list[TraceEvent]) -> list[int]:
     """Return the indexes of the events whose data detect_crash reads."""
-    index = _last_index(events, (EventType.SESSION_END,))
+    index = final_session_end_index([event.event_type for event in events])
     return [] if index is None else [index]
 
 

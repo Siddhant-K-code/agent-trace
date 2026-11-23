@@ -197,14 +197,40 @@ def behavior_analysis(events: Sequence[TraceEvent]) -> BehaviorAnalysis:
     )
 
 
+def final_session_end_index(event_types: Sequence[str]) -> int | None:
+    """Return the index of the ``session_end`` that ends the last segment.
+
+    That is the last ``session_end``, unless a later ``session_start`` (a
+    resume) reopened the session: then the session has not ended and this
+    returns None. *event_types* holds each event's type, as an ``EventType``
+    or its string value.
+    """
+    for index in range(len(event_types) - 1, -1, -1):
+        if event_types[index] == EventType.SESSION_END:
+            return index
+        if event_types[index] == EventType.SESSION_START:
+            return None
+    return None
+
+
+def final_session_end(events: Sequence[TraceEvent]) -> TraceEvent | None:
+    """Return the ``session_end`` that ends the last segment, or None.
+
+    See ``final_session_end_index``.
+    """
+    index = final_session_end_index([event.event_type for event in events])
+    return None if index is None else events[index]
+
+
 def recorded_session_status(events: Sequence[TraceEvent]) -> str:
-    """Return how the last ``session_end`` says the process ended.
+    """Return how the final ``session_end`` says the process ended.
 
     One of ``completed``, ``timeout``, ``terminated`` or ``not_recorded``
-    (no ``session_end``). This is the recorded process status: ``completed``
-    does not mean the task succeeded.
+    (no ``session_end``, or a later ``session_start`` resumed the session).
+    This is the recorded process status: ``completed`` does not mean the
+    task succeeded.
     """
-    end = next((event for event in reversed(events) if event.event_type == EventType.SESSION_END), None)
+    end = final_session_end(events)
     if end is None:
         return "not_recorded"
     data = end.data if isinstance(end.data, dict) else {}
@@ -245,5 +271,7 @@ __all__ = [
     "BehaviorSummary",
     "OperationState",
     "behavior_analysis",
+    "final_session_end",
+    "final_session_end_index",
     "recorded_session_status",
 ]
