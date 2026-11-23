@@ -2162,7 +2162,8 @@ tool span its input and result as `gen_ai.tool.call.arguments` and
 
 In `--format otlp`, a failed tool call and a tool call with no result are
 `tool/{tool}` spans with the same `gen_ai.*` identity as a call that returned
-a result. Earlier versions named them `{tool}`. See
+a result. Earlier versions named them `{tool}`. An `error` is a tool call only
+when it pairs with a call or has its own `tool_name`. See
 [Classic tool spans](production.md#classic-tool-spans).
 
 In both OTLP formats, a call whose event names an earlier one in `retry_of`

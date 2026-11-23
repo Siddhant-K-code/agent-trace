@@ -254,6 +254,9 @@ An `error` that ends a model request is not a tool call. It keeps its
 earlier span: named after its `tool_name`, else `error`, kind `INTERNAL`,
 with only `tool.name`.
 
+An `error` with no call and no `tool_name`, such as `could not start the MCP
+server`, is not a tool call either. It keeps the same span, named `error`.
+
 ### Subagents in one trace
 
 By default each session is its own trace. With `--include-subagents`, `export`

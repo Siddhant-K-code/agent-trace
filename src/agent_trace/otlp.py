@@ -1348,17 +1348,21 @@ def session_to_otlp(
         elif event.event_type == EventType.ERROR:
             # An error linked to an LLM request ends that request. The classic
             # export has no model request spans, so it still exports as an
-            # error span, but not as a tool call.
+            # error span, but not as a tool call. An error with no tool_call
+            # and no tool_name of its own, such as "could not start the MCP
+            # server", is not a tool call either and gets the same span.
             model_error = requests.match_parent(event) is not None
             call_event = calls.match(event)
             model_error = model_error and call_event is None
+            lone_error = call_event is None and not event.data.get("tool_name")
 
             error_msg = event.data.get("error", "") or event.data.get("message", "")
             span_start = call_event.timestamp if call_event else event.timestamp
             duration_ns = _duration_to_nanos(event.duration_ms)
 
-            if model_error:
-                tool_name = event.data.get("tool_name", "error")
+            if model_error or lone_error:
+                # A lone error's tool_name is absent or empty, so it is named error.
+                tool_name = event.data.get("tool_name", "error") if model_error else "error"
                 span_name: Any = tool_name
                 span_kind = 1  # SPAN_KIND_INTERNAL
                 span_attrs = {"tool.name": tool_name}
