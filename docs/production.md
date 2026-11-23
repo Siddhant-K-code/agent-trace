@@ -874,7 +874,9 @@ kill, a cancel, an interrupt, a termination, an abort or an error (Copilot's
 (`timeout`) or any other nonzero code (`terminated`). `completed` is the
 recorded process status, not task success. The evidence packet and the
 assignment `session_status` scorer ([hiring.md](hiring.md)) use the same
-counts and status.
+counts and status. The `eval` gate's `session_status` scorer uses the same
+status rules, with `killed` for `terminated`.
+[commands.md](commands.md#eval) lists where it reads a session differently.
 
 The root no longer reads the session's stored `errors`. Earlier versions set
 the root ERROR whenever `errors` was above 0, so a recovered session exported

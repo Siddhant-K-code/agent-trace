@@ -1816,7 +1816,7 @@ agent-strace eval [session-id] [--config FILE] [--baseline FILE]
                   [--save-baseline FILE] [--tolerance N] [--format table|json]
 agent-strace eval run [session-id]
 agent-strace eval compare <session-a> <session-b>
-agent-strace eval ci
+agent-strace eval ci [session-id]
 agent-strace eval dataset auto [--name NAME] [--filter FILTER] [--since Nd] [--label TEXT]
 ```
 Gate the latest or selected session against named, raw-value criteria. The direct
@@ -1825,6 +1825,12 @@ tolerance, making it suitable for CI. The `run`, `compare`, and `ci` subcommands
 remain available for legacy normalized scorers. The legacy `llm_judge` scorer
 takes `base_url`, `api_key` and `model` from its entry under `scorers`, and a
 missing or empty one from the same environment variables as [`optimize`](#optimize).
+
+The direct command, `run`, `compare` and `ci` print `Session not found: <id>`
+and exit `1` when a session ID or prefix matches no session. With no ID and no
+sessions, the direct command, `run` and `ci` print `No sessions found.` and
+exit `1`. Earlier versions of `run` and `ci` printed `No sessions found.` for
+an unknown ID.
 
 `eval dataset auto` adds sessions from the last `--since` days (default: `7d`)
 that match `--filter` (default: `has-errors`) to
@@ -1865,6 +1871,21 @@ Built-in scorers are `cost_usd`, `error_count`, `session_status`,
 referenced as `package.module:function` and receives session events plus any
 criterion-specific parameters it declares. When a lint rule could not run, a
 `lint_violations` criterion fails with no score, and its reason names the rule.
+
+`session_status` reports `completed`, `killed` or `timeout` from the last
+`session_end`, by the rules in
+[Session root status](production.md#session-root-status) with `killed` for
+`terminated`. So Copilot's `error` and `abort` reasons are `killed`, and so is
+an exit code too large for a float. It differs from those rules in three ways:
+
+- With no `session_end`, the session is `completed` when its metadata has
+  `ended_at`, else `killed`.
+- It also reads a text exit code such as `"1"`.
+- It reads a reason that is not text, such as a list, as text.
+
+Earlier versions read an `error` or `abort` reason as `completed`. For an exit
+code too large for a float, they failed the criterion with no score and the
+reason `int too large to convert to float`.
 
 | Flag | Default | Description |
 |---|---|---|

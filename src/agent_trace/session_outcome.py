@@ -3,7 +3,8 @@
 :func:`behavior_analysis` counts failed, retried and recovered tool
 operations, and :func:`recorded_session_status` reads the recorded end state.
 Evidence packets, assignment bundles and the OTLP root span read them from
-here, so they agree on what a session did.
+here, so they agree on what a session did. The eval gate's ``session_status``
+scorer applies the same :func:`session_end_status` rules.
 
 This module imports only :mod:`correlation`, :mod:`models` and the standard
 library, so any exporter can use it without an import cycle.
@@ -22,6 +23,16 @@ from .models import EventType, TraceEvent
 _COMMAND_KEYS = ("command", "cmd", "argv")
 _PATH_KEYS = ("file_path", "path", "file", "uri", "cwd", "workdir")
 _FAILURE_STATUSES = frozenset({"error", "failed", "failure", "cancelled", "timeout"})
+
+SESSION_END_REASON_KEYS = ("reason", "stop_reason", "termination_reason")
+_COMPLETED_STATUSES = frozenset({"completed", "complete", "success", "succeeded"})
+_TIMEOUT_STATUSES = frozenset({"timeout", "timed_out"})
+_TERMINATED_STATUSES = frozenset({
+    "killed", "cancelled", "canceled", "interrupted", "terminated",
+    "failed", "failure", "aborted", "error",
+})
+_TIMEOUT_REASON_WORDS = ("timeout", "timed out")
+_TERMINATED_REASON_WORDS = ("kill", "cancel", "interrupt", "terminate", "abort", "error")
 
 
 @dataclass(frozen=True)
@@ -222,6 +233,39 @@ def final_session_end(events: Sequence[TraceEvent]) -> TraceEvent | None:
     return None if index is None else events[index]
 
 
+def session_end_status(
+    status: str | None,
+    reason: str,
+    exit_code: int | float | None,
+) -> str:
+    """Return ``completed``, ``timeout`` or ``terminated`` for a ``session_end``.
+
+    ``status`` is its ``status`` or ``session_status`` text, ``reason`` the
+    text of its :data:`SESSION_END_REASON_KEYS` joined with spaces, and
+    ``exit_code`` its exit code as a number. The status decides first, then
+    the reason, then the exit code. Callers read these values from the event
+    in their own way.
+    """
+    if status is not None:
+        normalized = status.strip().lower().replace("-", "_")
+        if normalized in _COMPLETED_STATUSES:
+            return "completed"
+        if normalized in _TIMEOUT_STATUSES:
+            return "timeout"
+        if normalized in _TERMINATED_STATUSES:
+            return "terminated"
+    reason = reason.lower()
+    if any(word in reason for word in _TIMEOUT_REASON_WORDS):
+        return "timeout"
+    if any(word in reason for word in _TERMINATED_REASON_WORDS):
+        return "terminated"
+    if exit_code == 124:
+        return "timeout"
+    if exit_code is not None and exit_code != 0:
+        return "terminated"
+    return "completed"
+
+
 def recorded_session_status(events: Sequence[TraceEvent]) -> str:
     """Return how the final ``session_end`` says the process ended.
 
@@ -235,43 +279,30 @@ def recorded_session_status(events: Sequence[TraceEvent]) -> str:
         return "not_recorded"
     data = end.data if isinstance(end.data, dict) else {}
     explicit = data.get("status") or data.get("session_status")
-    if isinstance(explicit, str):
-        normalized = explicit.strip().lower().replace("-", "_")
-        if normalized in {"completed", "complete", "success", "succeeded"}:
-            return "completed"
-        if normalized in {"timeout", "timed_out"}:
-            return "timeout"
-        if normalized in {
-            "killed", "cancelled", "canceled", "interrupted", "terminated",
-            "failed", "failure", "aborted", "error",
-        }:
-            return "terminated"
     reason = " ".join(
-        value for key in ("reason", "stop_reason", "termination_reason")
+        value for key in SESSION_END_REASON_KEYS
         if isinstance((value := data.get(key)), str)
-    ).lower()
-    if "timeout" in reason or "timed out" in reason:
-        return "timeout"
-    if any(word in reason for word in ("kill", "cancel", "interrupt", "terminate", "abort", "error")):
-        return "terminated"
+    )
     exit_code = data.get("exit_code")
     # An int too large for a float is still a nonzero exit code.
-    if (isinstance(exit_code, int) and not isinstance(exit_code, bool)) or (
-        isinstance(exit_code, float) and math.isfinite(exit_code)
+    if not (
+        (isinstance(exit_code, int) and not isinstance(exit_code, bool))
+        or (isinstance(exit_code, float) and math.isfinite(exit_code))
     ):
-        if exit_code == 124:
-            return "timeout"
-        if exit_code != 0:
-            return "terminated"
-    return "completed"
+        exit_code = None
+    return session_end_status(
+        explicit if isinstance(explicit, str) else None, reason, exit_code
+    )
 
 
 __all__ = [
     "BehaviorAnalysis",
     "BehaviorSummary",
     "OperationState",
+    "SESSION_END_REASON_KEYS",
     "behavior_analysis",
     "final_session_end",
     "final_session_end_index",
     "recorded_session_status",
+    "session_end_status",
 ]

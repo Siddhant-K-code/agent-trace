@@ -514,13 +514,23 @@ def _resolve_session(store: TraceStore, session_id: str | None) -> str | None:
     return found
 
 
+def _session_or_report(store: TraceStore, requested: str | None) -> str | None:
+    """Return the session to evaluate, or None after saying why on stderr."""
+    session_id = _resolve_session(store, requested)
+    if not session_id:
+        if requested:
+            sys.stderr.write(f"Session not found: {requested}\n")
+        else:
+            sys.stderr.write("No sessions found.\n")
+    return session_id
+
+
 def cmd_eval_run(args: argparse.Namespace) -> int:
     store = TraceStore(args.trace_dir)
     config = load_config(getattr(args, "config", ".agent-evals.yaml"))
 
-    session_id = _resolve_session(store, getattr(args, "session_id", None))
+    session_id = _session_or_report(store, getattr(args, "session_id", None))
     if not session_id:
-        sys.stderr.write("No sessions found.\n")
         return 1
 
     report = run_eval(store, session_id, config)
@@ -633,9 +643,8 @@ def cmd_eval_ci(args: argparse.Namespace) -> int:
     store = TraceStore(args.trace_dir)
     config = load_config(getattr(args, "config", ".agent-evals.yaml"))
 
-    session_id = _resolve_session(store, getattr(args, "session_id", None))
+    session_id = _session_or_report(store, getattr(args, "session_id", None))
     if not session_id:
-        sys.stderr.write("No sessions found.\n")
         return 1
 
     report = run_eval(store, session_id, config)
@@ -692,13 +701,8 @@ def cmd_eval_gate(args: argparse.Namespace) -> int:
         return 1
 
     store = TraceStore(args.trace_dir)
-    session_id = _resolve_session(store, getattr(args, "session_id", None))
+    session_id = _session_or_report(store, getattr(args, "session_id", None))
     if not session_id:
-        requested = getattr(args, "session_id", None)
-        if requested:
-            sys.stderr.write(f"Session not found: {requested}\n")
-        else:
-            sys.stderr.write("No sessions found.\n")
         return 1
 
     baseline: dict[str, MetricValue] = {}
