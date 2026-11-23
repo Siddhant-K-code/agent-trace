@@ -332,8 +332,9 @@ class TestChildrenSharingParentEvent(unittest.TestCase):
     def test_checks_cover_every_child_of_the_event(self):
         bad = "childA0000000000"
         cases = [
+            # append_event refuses a NaN timestamp, but it writes a negative one.
             (subagent_mod.require_tree_timestamps, UnusableTimestampError,
-             [_make_event(EventType.USER_PROMPT, float("nan"), bad, prompt="x")]),
+             [_make_event(EventType.USER_PROMPT, -1.0, bad, prompt="x")]),
             (subagent_mod.require_tree_event_data, NonObjectEventDataError,
              [TraceEvent(event_type=EventType.USER_PROMPT, timestamp=1002.5,
                          session_id=bad, data=["not", "an", "object"])]),
