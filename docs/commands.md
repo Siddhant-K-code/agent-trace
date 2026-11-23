@@ -664,6 +664,8 @@ agent-strace diff <session-a> <session-b> [--semantic] [--compare] [--eval-confi
 ```
 Compare two sessions structurally.
 
+Phases are numbered from 1 in each session. The output names the first phase where the sessions differ, lists each phase that appears in only one session, and shows both phase numbers when a matched phase sits at a different place in each session (`Phase 3 in A, 4 in B`).
+
 | Flag | Description |
 |---|---|
 | `--semantic` | Compare by outcome, not event order |

@@ -35,7 +35,7 @@ from .store import TraceStore
 
 @dataclass
 class PhaseDiff:
-    index: int
+    index: int                   # position among the aligned (matched) phase pairs
     label_a: str
     label_b: str
     same_label: bool
@@ -45,13 +45,18 @@ class PhaseDiff:
     cmds_only_b: list[str]
     a_failed: bool
     b_failed: bool
+    # 0-based phase index in each session; -1 means not set (use index)
+    index_a: int = -1
+    index_b: int = -1
 
 
 @dataclass
 class SessionDiff:
     session_a: str
     session_b: str
-    divergence_index: int        # first phase index where behaviour differs (-1 = identical)
+    # 0-based phase index where the sessions first differ (-1 = identical).
+    # Every phase before it matches, so it is the same index in both sessions.
+    divergence_index: int
     phase_diffs: list[PhaseDiff]
     # Summary metrics
     duration_a: float
@@ -62,6 +67,9 @@ class SessionDiff:
     tool_calls_b: int
     retries_a: int
     retries_b: int
+    # Phases with no match in the other session: (0-based phase index, name)
+    phases_only_a: list[tuple[int, str]] = field(default_factory=list)
+    phases_only_b: list[tuple[int, str]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -123,9 +131,16 @@ def diff_sessions(
 
     phase_diffs: list[PhaseDiff] = []
     divergence_index = -1
+    prev_i = prev_j = -1
 
-    # Walk aligned pairs
+    # Walk aligned pairs in phase order. Until the first divergence every
+    # pair is (k, k), so a gap before a pair starts at the same index in
+    # both sessions.
     for pair_idx, (i, j) in enumerate(aligned):
+        if divergence_index == -1 and (i > prev_i + 1 or j > prev_j + 1):
+            divergence_index = prev_i + 1
+        prev_i, prev_j = i, j
+
         pa = phases_a[i]
         pb = phases_b[j]
 
@@ -146,7 +161,7 @@ def diff_sessions(
         )
 
         if differs and divergence_index == -1:
-            divergence_index = pair_idx
+            divergence_index = i
 
         phase_diffs.append(PhaseDiff(
             index=pair_idx,
@@ -159,12 +174,16 @@ def diff_sessions(
             cmds_only_b=only_b_cmds,
             a_failed=pa.failed,
             b_failed=pb.failed,
+            index_a=i,
+            index_b=j,
         ))
 
-    # Phases only in A or only in B count as divergence
-    if aligned_set_a != set(range(len(phases_a))) or aligned_set_b != set(range(len(phases_b))):
-        if divergence_index == -1:
-            divergence_index = len(phase_diffs)
+    phases_only_a = [(i, p.name) for i, p in enumerate(phases_a) if i not in aligned_set_a]
+    phases_only_b = [(j, p.name) for j, p in enumerate(phases_b) if j not in aligned_set_b]
+
+    # Trailing phases only in A or only in B count as divergence
+    if (phases_only_a or phases_only_b) and divergence_index == -1:
+        divergence_index = prev_i + 1
 
     meta_a = store.load_meta(session_a)
     meta_b = store.load_meta(session_b)
@@ -182,6 +201,8 @@ def diff_sessions(
         tool_calls_b=usable_count(meta_b.tool_calls),
         retries_a=result_a.total_retries,
         retries_b=result_b.total_retries,
+        phases_only_a=phases_only_a,
+        phases_only_b=phases_only_b,
     )
 
 
@@ -215,13 +236,41 @@ def format_diff(result: SessionDiff, out: TextIO = sys.stdout) -> None:
     else:
         w(f"Diverged at phase {result.divergence_index + 1}:\n\n")
 
+    def _name(label: str) -> str:
+        return inert(' '.join(label.split()))
+
+    # Phases in only one session are listed in phase order among the aligned
+    # pairs. With no common phases the header already says so.
+    only_a = list(result.phases_only_a) if result.phase_diffs else []
+    only_b = list(result.phases_only_b) if result.phase_diffs else []
+
+    def _flush_only(limit_a: float, limit_b: float) -> None:
+        wrote = False
+        while only_a and only_a[0][0] < limit_a:
+            idx, label = only_a.pop(0)
+            w(f"  Phase {idx + 1} ({a} only): {_name(label)}\n")
+            wrote = True
+        while only_b and only_b[0][0] < limit_b:
+            idx, label = only_b.pop(0)
+            w(f"  Phase {idx + 1} ({b} only): {_name(label)}\n")
+            wrote = True
+        if wrote:
+            w("\n")
+
     for pd in result.phase_diffs:
+        ia = pd.index_a if pd.index_a >= 0 else pd.index
+        ib = pd.index_b if pd.index_b >= 0 else pd.index
+        _flush_only(ia, ib)
+
         if not (pd.files_only_a or pd.files_only_b
                 or pd.cmds_only_a or pd.cmds_only_b
                 or pd.a_failed != pd.b_failed):
             continue
 
-        w(f"  Phase {pd.index + 1}: {inert(' '.join(pd.label_a.split()))}\n")
+        if ia == ib:
+            w(f"  Phase {ia + 1}: {_name(pd.label_a)}\n")
+        else:
+            w(f"  Phase {ia + 1} in {a}, {ib + 1} in {b}: {_name(pd.label_a)}\n")
 
         if pd.a_failed and not pd.b_failed:
             w(f"    {a}: FAILED    {b}: passed\n")
@@ -237,6 +286,8 @@ def format_diff(result: SessionDiff, out: TextIO = sys.stdout) -> None:
         for f in pd.files_only_b:
             w(f"    {b} only:  {inert(f)}\n")
         w("\n")
+
+    _flush_only(float("inf"), float("inf"))
 
     w(f"  {a}: {_fmt_duration(result.duration_a)}, "
       f"{result.events_a} events, "
