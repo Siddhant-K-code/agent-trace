@@ -226,7 +226,8 @@ Each response's `assistant_response` event stores the recorded `model`, the
 transcript `message.id` as `message_id`, `stop_reason` when the line has one,
 and its token usage. [`cost`](#cost) prices the session from that usage, and
 `export --format otlp` and `otlp-genai` turn each response with usage into a
-`chat {model}` span with its model, token counts, stop reason and message ID.
+`chat {model}` span with its model, token counts, stop reason and message ID,
+except a `<synthetic>` API error message, which sent no request.
 The span's start is inferred, not recorded. See
 [Model responses imported from a transcript](production.md#model-responses-imported-from-a-transcript).
 Sessions imported by earlier versions have no `message_id` or `stop_reason`;
@@ -2103,7 +2104,8 @@ recorded model, token counts, stop reason and message ID, as well as an event
 on the root span. The transcript does not record when the request started, so
 the span starts at the latest earlier user prompt, tool result or imported
 response of the same conversation stream, or has zero length, and carries
-`agent.strace.timing=inferred`. See
+`agent.strace.timing=inferred`. A `<synthetic>` message, which Claude Code
+writes for an API error without sending a request, gets no span. See
 [Model responses imported from a transcript](production.md#model-responses-imported-from-a-transcript).
 
 `--include-subagents` exports the session and the subagent sessions under it,

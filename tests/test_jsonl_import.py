@@ -1303,6 +1303,38 @@ class TestImportedModelUsage(unittest.TestCase):
                      (_ts_to_nanos(by_time[4].timestamp), _ts_to_nanos(by_time[6].timestamp))],
                 )
 
+    def test_a_synthetic_api_error_message_has_no_span(self):
+        # Claude Code writes an API error as its own "<synthetic>" message,
+        # with zero usage, and sends no model request for it.
+        synthetic = _assistant_line(
+            "a1", "2026-01-01T10:00:05.100Z", "3f2c9e1a",
+            [{"type": "text", "text": "Not logged in. Please run /login"}],
+            {"input_tokens": 0, "output_tokens": 0,
+             "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0},
+            stop_reason="stop_sequence", model="<synthetic>",
+        )
+        synthetic["isApiErrorMessage"] = True
+        sid = self._import([
+            {"type": "user", "uuid": "u1", "sessionId": "imp1",
+             "timestamp": "2026-01-01T10:00:00.000Z",
+             "message": {"role": "user", "content": "Hi"}},
+            synthetic,
+            _assistant_line("a2", "2026-01-01T10:00:08.000Z", "msg_1",
+                            [{"type": "text", "text": "Hello."}],
+                            {"input_tokens": 25, "output_tokens": 6}, stop_reason="end_turn"),
+        ])
+        events = self.store.load_events(sid)
+        [prompt] = [e for e in events if e.event_type == EventType.USER_PROMPT]
+        for convert, root_event in ((session_to_otlp, "assistant_response"),
+                                    (session_to_otlp_genai, "gen_ai.assistant.message")):
+            with self.subTest(convert=convert.__name__):
+                root, *children = self._spans(sid, convert)
+                [chat] = [s for s in children if s["name"].startswith("chat")]
+                self.assertEqual(chat["name"], "chat claude-sonnet-4-5")
+                # The synthetic message does not move the response's start.
+                self.assertEqual(chat["startTimeUnixNano"], _ts_to_nanos(prompt.timestamp))
+                self.assertEqual([e["name"] for e in root["events"]].count(root_event), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

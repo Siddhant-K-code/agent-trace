@@ -812,9 +812,16 @@ def _imported_response_starts(events: list[TraceEvent]) -> dict[int, float]:
     such event the span has zero length at the response. A start later than
     the response is the response's time.
 
+    A ``<synthetic>`` message, which Claude Code writes itself for an API
+    error without sending a model request, gets no span and moves no start.
+
     The result maps ``id()`` of each response event to its start.
     """
-    counted = set(recorded_response_indexes(events))
+    # Claude Code writes "<synthetic>" messages itself, with no model request.
+    counted = {
+        index for index in recorded_response_indexes(events)
+        if event_model(events[index].data) != "<synthetic>"
+    }
     if not counted:
         return {}
     starts: dict[int, float] = {}

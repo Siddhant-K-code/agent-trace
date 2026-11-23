@@ -810,9 +810,10 @@ one. Claude Code writes one line per content block of a message, and the
 import keeps the message's `usage` on its last line only.
 
 In `--format otlp`, `--format otlp-genai` and Temporal, each
-`assistant_response` with recorded token counts is also a `chat {model}` span
-of kind `CLIENT`, a child of the root span, as a model request is. Its root
-span event is kept. The span carries:
+`assistant_response` with recorded token counts, other than a `<synthetic>`
+message (see below), is also a `chat {model}` span of kind `CLIENT`, a child
+of the root span, as a model request is. Its root span event is kept. The span
+carries:
 
 - `gen_ai.request.model` and `gen_ai.response.model`: the recorded model.
 - `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens` and the cache read
@@ -835,9 +836,14 @@ span's duration is the time since the model's last input, not a measured
 latency.
 
 A message recorded on more than one event with the same `message_id` is one
-span, and its usage counts once. The root span's `agent.llm_requests`, the
-import's count of model responses with usage, equals the number of these
-spans.
+span, and its usage counts once.
+
+Claude Code writes an API error, such as "Not logged in", as an assistant
+message of its own with the model `<synthetic>` and zero usage. No model
+request was sent, so such a message gets no span and moves no span's start; it
+stays an event on the root span. The import still counts it in the session's
+`llm_requests`, so the root span's `agent.llm_requests` can be higher than the
+number of `chat` spans.
 
 `cost`, `tree`, `timeline`, `replay`, `watch` and the EU AI Act compliance
 export price such a session from the recorded usage, as in
