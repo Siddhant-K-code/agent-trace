@@ -689,7 +689,10 @@ def _import_jsonl(
             if subtype == "turn_duration":
                 duration_ms = raw.get("durationMs", 0)
                 if usable_number(duration_ms):
-                    meta.total_duration_ms += duration_ms
+                    total = meta.total_duration_ms + duration_ms
+                    # Skip a duration that would make the total too large to store.
+                    if usable_number(total) is not None:
+                        meta.total_duration_ms = total
             elif subtype in {"compact_boundary", "compaction_boundary"}:
                 summary = _extract_text(raw.get("content", ""))
                 if not summary:

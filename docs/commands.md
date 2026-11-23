@@ -229,7 +229,8 @@ So are lines that are not UTF-8, such as a last line cut mid-character, lines
 nested more than 64 levels deep and lines that hold a number too long to
 convert. A field of the wrong type reads as absent: for example, message text
 that is not a string, or a `durationMs` that is not a finite number of 0 or
-more. Only a whole number of 0 or more counts as tokens. An entry whose
+more. A `durationMs` that would make the total duration too large to store is
+skipped too. Only a whole number of 0 or more counts as tokens. An entry whose
 `timestamp` is not an ISO 8601 time from 1970 on, such as a number, `null` or
 a time before 1970, is imported with the timestamp `0.0`.
 

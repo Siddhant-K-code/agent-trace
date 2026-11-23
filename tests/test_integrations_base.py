@@ -136,6 +136,61 @@ class TestRunSession(unittest.TestCase):
         self.assertEqual(self.store.load_events(sid)[0].data, {"agent_name": "crew"})
         self.assertNotEqual(_base._get_or_create_session(self.store, "agent"), sid)
 
+    def run_with_stored_start(self, started_at):
+        """Record a run during which another writer sets the started_at in
+        meta.json to ``started_at``, given as JSON text. Return its ID."""
+        with _base.run_session(self.store, "agent") as sid:
+            _base.emit(EventType.TOOL_CALL, sid, self.store, tool_name="t")
+            _base.emit(EventType.LLM_REQUEST, sid, self.store, model="m")
+            _base.emit(EventType.ERROR, sid, self.store, error="e")
+            path = self.store.base_dir / sid / "meta.json"
+            meta = json.loads(path.read_text(encoding="utf-8"))
+            meta["started_at"] = "@start@"
+            # The end must replace a total another writer left.
+            meta["total_duration_ms"] = 123.0
+            path.write_text(json.dumps(meta).replace('"@start@"', started_at),
+                            encoding="utf-8")
+        return sid
+
+    def test_run_without_a_usable_stored_start_still_ends(self):
+        def reject(token):
+            raise ValueError(f"{token} is not JSON")
+
+        earlier = time.time() - 2.0
+        sid = self.run_with_stored_start(json.dumps(earlier))
+        meta = self.store.load_meta(sid)
+        self.assertEqual(meta.total_duration_ms, (meta.ended_at - earlier) * 1000)
+        self.assertGreaterEqual(meta.total_duration_ms, 2000)
+
+        later = json.dumps(time.time() + 40 * 365 * 86400)
+        for started_at in ('"x"', "null", "true", "NaN", "-1e308", "1e308", later):
+            with self.subTest(started_at=started_at):
+                sid = self.run_with_stored_start(started_at)
+
+                meta = self.store.load_meta(sid)
+                self.assertIsNotNone(meta.ended_at)
+                self.assertEqual(meta.total_duration_ms, 0)
+                self.assertEqual((meta.tool_calls, meta.llm_requests, meta.errors), (1, 1, 1))
+                ends = [e for e in self.store.load_events(sid)
+                        if e.event_type == EventType.SESSION_END]
+                self.assertEqual(len(ends), 1)
+                # The event's duration comes from the start the process holds.
+                self.assertEqual(list(ends[0].data), ["duration_ms"])
+                self.assertLess(abs(ends[0].data["duration_ms"]), 60_000)
+
+                session_dir = self.store.base_dir / sid
+                events_text = (session_dir / "events.ndjson").read_text(encoding="utf-8")
+                for line in events_text.splitlines():
+                    json.loads(line, parse_constant=reject)
+                meta_text = (session_dir / "meta.json").read_text(encoding="utf-8")
+                if started_at == "NaN":
+                    # The end rewrites the whole record, so the stored start
+                    # stays as it is. Nothing else may be a constant.
+                    self.assertEqual(meta_text.count('"started_at": NaN'), 1)
+                    meta_text = meta_text.replace('"started_at": NaN', '"started_at": null')
+                json.loads(meta_text, parse_constant=reject)
+                self.assertEqual(self.markers(), [])
+
     def test_interrupted_run_records_its_error_and_end(self):
         with self.assertRaises(Interrupted):
             with _base.run_session(self.store, "agent") as sid:
