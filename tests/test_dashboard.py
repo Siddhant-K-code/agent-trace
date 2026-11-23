@@ -18,7 +18,7 @@ from agent_trace.dashboard import (
     format_dashboard,
     render_html_dashboard,
 )
-from agent_trace.models import SessionMeta
+from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
 
 try:
@@ -115,6 +115,61 @@ class TestBuildDashboard(unittest.TestCase):
         report = build_dashboard(store)
         self.assertGreaterEqual(report.success_rate, 0.0)
         self.assertLessEqual(report.success_rate, 1.0)
+
+
+class TestDashboardSessionEnd(unittest.TestCase):
+    """A session the session_end says timed out or was killed did not succeed."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.store = TraceStore(tmp.name)
+
+    def _session(self, end_data) -> None:
+        meta = SessionMeta(agent_name="agent", started_at=1000.0, errors=0)
+        self.store.create_session(meta)
+        events = [
+            TraceEvent(event_type=EventType.SESSION_START, timestamp=1000.0,
+                       session_id=meta.session_id),
+            TraceEvent(event_type=EventType.TOOL_CALL, timestamp=1001.0,
+                       session_id=meta.session_id, data={"tool_name": "Bash"}),
+        ]
+        if end_data is not None:
+            events.append(TraceEvent(event_type=EventType.SESSION_END, timestamp=1300.0,
+                                     session_id=meta.session_id, data=end_data))
+        for event in events:
+            self.store.append_event(meta.session_id, event)
+
+    def test_timeout_is_not_success(self):
+        self._session({"exit_code": 124, "reason": "timeout"})
+        report = build_dashboard(self.store)
+        self.assertEqual(report.summaries[0].errors, 0)
+        self.assertFalse(report.summaries[0].succeeded)
+        self.assertEqual(report.success_rate, 0.0)
+
+    def test_killed_is_not_success(self):
+        self._session({"status": "killed"})
+        report = build_dashboard(self.store)
+        self.assertEqual(report.summaries[0].errors, 0)
+        self.assertFalse(report.summaries[0].succeeded)
+        self.assertEqual(report.success_rate, 0.0)
+
+    def test_clean_end_without_errors_is_success(self):
+        self._session({"exit_code": 0})
+        report = build_dashboard(self.store)
+        self.assertTrue(report.summaries[0].succeeded)
+        self.assertEqual(report.success_rate, 1.0)
+
+    def test_no_session_end_without_errors_is_success(self):
+        self._session(None)
+        report = build_dashboard(self.store)
+        self.assertTrue(report.summaries[0].succeeded)
+
+    def test_text_and_html_mark_killed_session_failed(self):
+        self._session({"status": "killed"})
+        report = build_dashboard(self.store)
+        self.assertIn("✗", _format(report))
+        self.assertIn("✗", render_html_dashboard(report))
 
 
 class TestFormatDashboard(unittest.TestCase):

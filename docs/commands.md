@@ -1615,7 +1615,11 @@ agent-strace dashboard [--limit N] [--since Nd] [--html FILE] [--trend]
 Multi-session aggregate view. `--trend` shows eval quality and behavioral metrics over time.
 
 A session's errors include its [failed model requests](production.md#session-error-counts), and a session with any error is not
-counted as succeeded. For a session recorded by an earlier version, whose
+counted as succeeded. Neither is a session whose `session_end` says it timed
+out or was killed (a timeout or killed status, a reason naming one, or a
+nonzero exit code); earlier versions counted such a session as succeeded when
+it recorded no errors. A session with no `session_end` and no errors still
+counts as succeeded. For a session recorded by an earlier version, whose
 stored count leaves failed requests out, the dashboard shows the larger of the
 stored count and the count from its events. The `--trend` error rate counts
 failed requests too.
