@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import os
 import shlex
 import shutil
@@ -55,12 +56,18 @@ from .rbac import cmd_rbac
 from .iac import cmd_apply, cmd_config_diff
 from .sso import cmd_auth
 from .baseline import cmd_baseline
-from .compliance import cmd_audit_readiness, cmd_compliance, cmd_export_eu_ai_act, cmd_verify_export
+from .compliance import (
+    _parse_time_bound,
+    cmd_audit_readiness,
+    cmd_compliance,
+    cmd_export_eu_ai_act,
+    cmd_verify_export,
+)
 from .compliance_report import cmd_compliance_report
 from .drift import cmd_drift, cmd_fingerprint
 from .identity import cmd_identity
 from .workspace import cmd_workspace
-from .langfuse_export import cmd_export_scores
+from .langfuse_export import SINCE_DAYS_FORM, cmd_export_scores, parse_since_days
 from .oncall import cmd_oncall
 from .optimize import cmd_optimize
 from .freshness import cmd_freshness
@@ -570,6 +577,93 @@ def _export_agent_id(args: argparse.Namespace) -> tuple[str, str | None]:
         return "", str(exc)
 
 
+# The default _parse_time_bound returns when it cannot read a value.
+_UNREAD_TIME_BOUND = object()
+
+_TIME_BOUND_FORM = "use a duration such as 7d or 12h, an ISO date or time, or Unix seconds"
+
+
+def _readable_time_bound(value: str) -> float | None:
+    """Return the time --format eu-ai-act --all reads from *value*, or None.
+
+    None means select_sessions cannot read the value, so it would drop the
+    bound or fail, or that the time is not finite.
+    """
+    try:
+        bound = _parse_time_bound(value, _UNREAD_TIME_BOUND)
+    except (ValueError, OverflowError, OSError):
+        return None
+    if bound is _UNREAD_TIME_BOUND or not math.isfinite(bound):
+        return None
+    return bound
+
+
+def _export_window_problem(args: argparse.Namespace) -> str | None:
+    """Return why export would ignore or cannot read --all, --since or --until.
+
+    The checks follow cmd_export's routing. --scores, --metrics and --backend
+    read only --since, as a number of days, and only without a session ID.
+    --format eu-ai-act reads --since and --until only with --all, and then no
+    session ID. Every other path exports one session and reads none of the
+    three. An empty --since or --until counts as given. A line never repeats
+    a value.
+    """
+    every = bool(getattr(args, "all", False))
+    since = getattr(args, "since", None)
+    until = getattr(args, "until", None)
+    if not every and since is None and until is None:
+        return None
+    session_id = getattr(args, "session_id", None)
+
+    for flag in ("scores", "metrics", "backend"):
+        if getattr(args, flag, None):
+            path = f"--{flag}"
+            days = "use --since Nd for the last N days"
+            if every:
+                return f"--all is not used with {path}; {days}"
+            if since is not None and session_id:
+                return (
+                    f"--since is not used with {path} and a session ID; "
+                    "drop the session ID for the last N days"
+                )
+            if until is not None:
+                return f"--until is not used with {path}; {days}"
+            if parse_since_days(since) is None:
+                return f"invalid --since value: with {path}, {SINCE_DAYS_FORM}"
+            return None
+
+    fmt = getattr(args, "format", "json")
+    if getattr(args, "anonymize", False) or fmt != "eu-ai-act":
+        flag = "--all" if every else "--since" if since is not None else "--until"
+        if getattr(args, "anonymize", False):
+            path, instead = "--anonymize", "use --format eu-ai-act --all without --anonymize"
+        else:
+            path, instead = f"--format {fmt}", "use --format eu-ai-act --all"
+        exports = (
+            "one session and its subagents"
+            if getattr(args, "include_subagents", False) else "one session"
+        )
+        return f"{flag} is not used with {path}, which exports {exports}; {instead}"
+
+    if every and session_id:
+        return (
+            "a session ID is not used with --format eu-ai-act --all; drop it to export "
+            "the sessions in the window, or drop --all to export that session"
+        )
+    bounds = (("--since", since), ("--until", until))
+    for flag, value in bounds:
+        if value is not None and not every:
+            add = "add --all and drop the session ID" if session_id else "add --all"
+            return (
+                f"{flag} is not used with --format eu-ai-act without --all; "
+                f"{add} to export the sessions in the window"
+            )
+    for flag, value in bounds:
+        if value is not None and _readable_time_bound(value) is None:
+            return f"invalid {flag} value: with --format eu-ai-act --all, {_TIME_BOUND_FORM}"
+    return None
+
+
 def _write_events(out: TextIO, fmt: str, events: list[TraceEvent]) -> None:
     """Write *events* to *out* as json, csv or ndjson."""
     if fmt == "json":
@@ -688,9 +782,9 @@ def _export_otlp_tree(
 
 def cmd_export(args: argparse.Namespace) -> int:
     """Export a session to JSON, CSV, or OTLP."""
-    # Check --endpoint, --header and --protocol before routing and before
-    # anything is read or written, so a bad value costs one line and exit
-    # status 1.
+    # Check --endpoint, --header, --protocol, --agent-id and the window
+    # flags before routing and before anything is read or written, so a bad
+    # value costs one line and exit status 1.
     headers, problem = _export_endpoint_checks(args)
     if problem:
         sys.stderr.write(f"{problem}\n")
@@ -704,6 +798,10 @@ def cmd_export(args: argparse.Namespace) -> int:
         sys.stderr.write(f"{problem}\n")
         return 1
     agent_id, problem = _export_agent_id(args)
+    if problem:
+        sys.stderr.write(f"{problem}\n")
+        return 1
+    problem = _export_window_problem(args)
     if problem:
         sys.stderr.write(f"{problem}\n")
         return 1
@@ -2176,11 +2274,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_export.add_argument("--backend", choices=["langfuse", "otlp"],
                           help="export backend: langfuse or otlp")
     p_export.add_argument("--since", metavar="Nd",
-                          help="export sessions from the last N days (e.g. 7d)")
+                          help="with --scores, --metrics or --backend and no session ID: export the "
+                               "sessions of the last N days, as N or Nd (e.g. 7d); with --format "
+                               "eu-ai-act --all: also 12h, an ISO date or time, or Unix seconds")
     p_export.add_argument("--until", metavar="DATE",
-                          help="upper time bound for batch exports (ISO date or timestamp)")
+                          help="with --format eu-ai-act --all: export the sessions that started by "
+                               "this time (an ISO date or time, a duration back from now such as 1d, "
+                               "or Unix seconds)")
     p_export.add_argument("--all", action="store_true",
-                          help="export all sessions in the selected time window")
+                          help="with --format eu-ai-act: export every session in the --since and "
+                               "--until window instead of one session")
     p_export.add_argument("--langfuse-public-key", dest="langfuse_public_key", metavar="KEY",
                           help="Langfuse public key (overrides LANGFUSE_PUBLIC_KEY)")
     p_export.add_argument("--langfuse-secret-key", dest="langfuse_secret_key", metavar="KEY",
