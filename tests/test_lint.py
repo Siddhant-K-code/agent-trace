@@ -167,6 +167,24 @@ class TestRuleReasoningSpiral(unittest.TestCase):
         results = _rule_reasoning_spiral(events, self._cfg(threshold=3))
         self.assertEqual(len(results), 1)
 
+    def test_range_ends_at_last_llm_call_when_not_adjacent(self):
+        events = [_ev(EventType.SESSION_START), _llm_request(),
+                  _ev(EventType.TOOL_RESULT), _llm_response(),
+                  _ev(EventType.USER_PROMPT), _ev(EventType.FILE_READ),
+                  _llm_request()]
+        for tail in ([_tool_call("Bash")], []):
+            results = _rule_reasoning_spiral(events + tail, self._cfg(threshold=3))
+            self.assertEqual(len(results), 1)
+            self.assertEqual((results[0].line_start, results[0].line_end), (2, 7))
+            self.assertIn("events 2–7", results[0].message)
+
+    def test_adjacent_run_range_is_unchanged(self):
+        events = [_ev(EventType.SESSION_START), _llm_request(), _llm_response(),
+                  _llm_request(), _tool_call("Bash")]
+        results = _rule_reasoning_spiral(events, self._cfg(threshold=3))
+        self.assertEqual((results[0].line_start, results[0].line_end), (2, 4))
+        self.assertIn("events 2–4", results[0].message)
+
 
 # ---------------------------------------------------------------------------
 # Rule: budget-proximity

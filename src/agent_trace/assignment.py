@@ -1312,18 +1312,21 @@ def _lint_payload(events: list[dict[str, Any]]) -> dict[str, Any]:
         EventType.LLM_RESPONSE.value,
         EventType.ASSISTANT_RESPONSE.value,
     }
-    run_start, run_length = 0, 0
+    # The run's model events need not be adjacent, so the range ends at the
+    # last model event, not at run_start + run_length - 1.
+    run_start, run_last, run_length = 0, 0, 0
     for index, item in enumerate(events, 1):
         if item["event_type"] in model_types:
             if run_length == 0:
                 run_start = index
+            run_last = index
             run_length += 1
         elif item["event_type"] == EventType.TOOL_CALL.value:
             if run_length >= 3:
-                add("reasoning-spiral", "WARN", run_start, run_start + run_length - 1)
+                add("reasoning-spiral", "WARN", run_start, run_last)
             run_length = 0
     if run_length >= 3:
-        add("reasoning-spiral", "WARN", run_start, run_start + run_length - 1)
+        add("reasoning-spiral", "WARN", run_start, run_last)
 
     # context-saturation v1 uses only allowlisted request token fields and a
     # frozen 200k context / 80% threshold. It reports once.
