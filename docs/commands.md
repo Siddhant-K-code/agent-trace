@@ -201,13 +201,17 @@ opt-out and deletes the local anonymous installation ID. `DO_NOT_TRACK=1` or
 ```
 agent-strace import <path.jsonl> [--discover]
 ```
-Import a Claude Code JSONL session log. `import` reads Claude Code transcripts only; capture Codex, GitHub Copilot CLI and other agents with hooks (see [`setup`](#setup)). `--discover` lists available sessions in `~/.claude/projects/`. It lists only regular files, or symlinks to them, and skips entries it cannot read, such as a broken symlink. The imported session starts with a `session_start` event, which holds the `cwd` when the log records a working directory.
+Import a Claude Code JSONL session log or a [GitHub Agentic Workflows](gh-aw.md) `aw_session.jsonl` file. `import` reads Claude Code transcripts and gh-aw aw_session.jsonl files only; capture Codex, GitHub Copilot CLI and other agents with hooks (see [`setup`](#setup)). `--discover` lists available sessions in `~/.claude/projects/`. It lists only regular files, or symlinks to them, and skips entries it cannot read, such as a broken symlink. The imported session starts with a `session_start` event, which holds the `cwd` when the log records a working directory.
 
-The first JSON-object line that is not skipped (see below) decides whether
-the log is another agent's: a Codex rollout starts with a `session_meta`
+The first JSON-object line that is not skipped (see below) decides the
+format. A gh-aw `aw_session.jsonl` file starts with a `session.format` record;
+it is read as described in [Import GitHub Agentic Workflows runs](gh-aw.md),
+never as a Claude Code transcript, and a first line shaped like one of its
+events (a dotted `type` and a `provenance.component`) is refused for its
+missing header. A Codex rollout starts with a `session_meta`
 record, and a Copilot CLI `events.jsonl` with a `session.start` record whose
-`producer` is `copilot-agent`. A log also needs at least one Claude Code
-transcript record, a line whose `type` is `user`, `assistant`, `system` or
+`producer` is `copilot-agent`. A Claude Code log also needs at least one
+Claude Code transcript record, a line whose `type` is `user`, `assistant`, `system` or
 `summary`. A Claude transcript's other lines, such as
 `file-history-snapshot`, are skipped.
 
@@ -240,18 +244,27 @@ These errors print one line to stderr, exit 1 and write nothing:
 - `Cannot read session log <path>: <reason>`: the log cannot be read, for
   example because it is a directory, a symlink loop or a file you cannot read.
 - `Cannot import <path>: it is a Codex rollout; import reads Claude Code
-  transcripts only. Capture Codex with hooks: agent-strace setup --cli codex`
+  transcripts and gh-aw aw_session.jsonl files only. Capture Codex with hooks:
+  agent-strace setup --cli codex`
 - `Cannot import <path>: it is a GitHub Copilot CLI events.jsonl; import reads
-  Claude Code transcripts only. Capture Copilot with hooks: agent-strace setup
-  --cli copilot`
+  Claude Code transcripts and gh-aw aw_session.jsonl files only. Capture
+  Copilot with hooks: agent-strace setup --cli copilot`
 - `Cannot import <path>: no Claude Code transcript records; import reads
-  Claude Code transcripts only`: no line is a Claude Code transcript record,
-  for example an empty file or another tool's JSONL. Earlier versions imported
+  Claude Code transcripts and gh-aw aw_session.jsonl files only`: no line is a
+  Claude Code transcript record, for example an empty file or another tool's
+  JSONL. Earlier versions imported
   these three kinds of file as an empty `claude-code` session, named after the
   file when the log had no `sessionId`.
 - `Cannot import <path>: <reason>`: neither the log nor its file name holds a
-  usable session ID, or the trace store refuses the session, for example
-  because it was erased.
+  usable session ID, the trace store refuses the session, for example
+  because it was erased, or an `aw_session.jsonl` file has a missing, invalid
+  or unsupported `session.format` header (see
+  [The header](gh-aw.md#the-header)).
+
+For an `aw_session.jsonl` file, the summary also prints how many events had
+no recorded time (`timing: inferred`) and the records it did not import, by
+type, for example `Skipped 3 records not imported: engine.heartbeat 1,
+firewall.token_usage (repeated requestId) 1, otel.span 1`.
 
 Claude Code writes one log line per content block of a model response and
 repeats the response's token usage on each. The import keeps that usage once,

@@ -112,6 +112,9 @@ class _UnreadableLog(OSError):
     """The session log exists but cannot be opened or read."""
 
 
+_IMPORT_FORMATS = "Claude Code transcripts and gh-aw aw_session.jsonl files"
+
+
 class NotClaudeTranscript(ValueError):
     """The log is not a Claude Code transcript.
 
@@ -124,12 +127,12 @@ class NotClaudeTranscript(ValueError):
         if fmt in _OTHER_AGENT_LOGS:
             what, agent, cli = _OTHER_AGENT_LOGS[fmt]
             message = (
-                f"it is {what}; import reads Claude Code transcripts only. "
+                f"it is {what}; import reads {_IMPORT_FORMATS} only. "
                 f"Capture {agent} with hooks: agent-strace setup --cli {cli}"
             )
         else:
             message = (
-                "no Claude Code transcript records; import reads Claude Code transcripts only"
+                f"no Claude Code transcript records; import reads {_IMPORT_FORMATS} only"
             )
         super().__init__(message)
 
@@ -147,8 +150,22 @@ def _log_lines(path: Path) -> Iterator[str]:
         raise _UnreadableLog(e.errno, e.strerror or str(e), e.filename) from e
 
 
+def _aw_session_record(raw: dict[str, Any]) -> bool:
+    """Return whether a log's first record shows a gh-aw aw_session.jsonl file.
+
+    That file starts with a ``session.format`` header. A first record shaped
+    like one of its events also counts, so a file that lost its header is
+    refused by the aw_session reader, not read as a Claude transcript.
+    """
+    from .aw_session_import import HEADER_TYPE, looks_like_aw_record
+
+    return raw.get("type") == HEADER_TYPE or looks_like_aw_record(raw)
+
+
 def cmd_import(args: argparse.Namespace) -> int:
-    """Import a Claude Code JSONL session log (CLI handler)."""
+    """Import a Claude Code JSONL session log or a gh-aw aw_session.jsonl file (CLI handler)."""
+    from .aw_session_import import import_summary
+
     store = TraceStore(args.trace_dir)
 
     if args.discover:
@@ -198,6 +215,7 @@ def cmd_import(args: argparse.Namespace) -> int:
         f"{meta.llm_requests} LLM requests, "
         f"{meta.total_tokens} tokens\n"
         f"  {len(events)} events\n"
+        f"{import_summary(events)}"
         f"  Replay with: agent-strace replay {session_id}\n"
     )
     return 0
@@ -311,6 +329,10 @@ def import_jsonl(
 ) -> str:
     """Import a Claude Code JSONL session log into agent-trace format.
 
+    A gh-aw ``aw_session.jsonl`` file, whose first record is a
+    ``session.format`` header, is read by
+    :func:`agent_trace.aw_session_import.import_aw_session` instead.
+
     If the store already holds a session with the log's ID, nothing is
     written and that ID is returned, so importing a file again does not
     duplicate its events. With ``merge=True`` the existing session's
@@ -343,6 +365,10 @@ def import_jsonl(
         A ``ValueError``: the log is a Codex rollout or a Copilot
         ``events.jsonl``, or no line is a Claude Code transcript record.
         Nothing is written.
+    AwSessionFormatError
+        A ``ValueError``: the log is an aw_session file whose
+        ``session.format`` header is missing, malformed, or names a version
+        this agent-strace cannot read. Nothing is written.
     ValueError
         Neither the log nor its file name holds a usable session ID, or the
         store refuses the session.
@@ -371,6 +397,7 @@ def _import_jsonl(
     entries: list[dict[str, Any]] = []
     first_record = True
     other_format = ""
+    aw_session = False
     claude_records = False
 
     for line in _log_lines(path):
@@ -390,6 +417,9 @@ def _import_jsonl(
 
         if first_record:
             first_record = False
+            aw_session = _aw_session_record(raw)
+            if aw_session:
+                break
             other_format = transcript_format(raw)
             if other_format:
                 break
@@ -415,6 +445,11 @@ def _import_jsonl(
             session_id = _usable_session_id(raw.get("sessionId"))
             extra_meta["git_branch"] = raw.get("gitBranch", "")
             extra_meta["version"] = raw.get("version", "")
+
+    if aw_session:
+        from .aw_session_import import import_aw_session
+
+        return import_aw_session(path, store, merge=merge)
 
     # Refused before the file-name fallback, so a log that is not a Claude
     # transcript never becomes a session named after its file, like "events".

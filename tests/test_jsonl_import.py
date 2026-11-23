@@ -558,7 +558,8 @@ TOKEN_KEYS = ("input_tokens", "output_tokens", "cache_creation_input_tokens",
 # json.loads raises RecursionError on this on every CI Python (see test_optimize.py).
 TOO_DEEP = b"[" * 1_000_000 + b"]" * 1_000_000
 _ABSENT = object()
-NO_CLAUDE_RECORDS = "no Claude Code transcript records; import reads Claude Code transcripts only"
+NO_CLAUDE_RECORDS = ("no Claude Code transcript records; import reads Claude Code transcripts "
+                     "and gh-aw aw_session.jsonl files only")
 
 
 def _entry(sid="good1", **over):
@@ -1067,7 +1068,8 @@ class TestMalformedLog(unittest.TestCase):
 
         self.assertEqual(code, 1)
         self.assertEqual(
-            err, f"Cannot import {path}: it is a Codex rollout; import reads Claude Code transcripts only. "
+            err, f"Cannot import {path}: it is a Codex rollout; import reads Claude Code transcripts "
+                 "and gh-aw aw_session.jsonl files only. "
                  "Capture Codex with hooks: agent-strace setup --cli codex\n")
         self.assertEqual(self._session_dirs(), [])
         with self.assertRaises(jsonl_import.NotClaudeTranscript) as ctx:
@@ -1085,7 +1087,8 @@ class TestMalformedLog(unittest.TestCase):
                   "timestamp": "2026-01-01T00:00:01.000Z", "data": {"content": "hi"}}
         path = self._write("events.jsonl", [start, prompt])
         expected = (f"Cannot import {path}: it is a GitHub Copilot CLI events.jsonl; import reads "
-                    "Claude Code transcripts only. Capture Copilot with hooks: "
+                    "Claude Code transcripts and gh-aw aw_session.jsonl files only. "
+                    "Capture Copilot with hooks: "
                     "agent-strace setup --cli copilot\n")
 
         for _ in range(2):
