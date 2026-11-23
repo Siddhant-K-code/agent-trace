@@ -670,5 +670,28 @@ class TestWindowsProcess(unittest.TestCase):
         self.assertFalse(_base._pid_alive(child.pid))
 
 
+class TestServerFields(unittest.TestCase):
+    def fields(self, base_url):
+        client = type("Client", (), {"base_url": base_url})()
+        return _base.server_fields(type("Resource", (), {"_client": client})())
+
+    def test_host_and_port_come_from_the_client_base_url(self):
+        self.assertEqual(self.fields("https://api.openai.com/v1/"),
+                         {"server_address": "api.openai.com", "server_port": 443})
+        self.assertEqual(self.fields("http://127.0.0.1/v1"),
+                         {"server_address": "127.0.0.1", "server_port": 80})
+        self.assertEqual(self.fields("http://user:secret@localhost:8080/v1"),
+                         {"server_address": "localhost", "server_port": 8080})
+
+    def test_nothing_without_a_usable_host(self):
+        self.assertEqual(self.fields("/v1/"), {})
+        self.assertEqual(self.fields("https://api.example.com:99999/"), {})
+        self.assertEqual(_base.server_fields(object()), {})
+        self.assertEqual(_base.server_fields(None), {})
+
+    def test_port_left_out_when_the_scheme_has_no_default(self):
+        self.assertEqual(self.fields("custom://gateway/"), {"server_address": "gateway"})
+
+
 if __name__ == "__main__":
     unittest.main()

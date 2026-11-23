@@ -23,7 +23,9 @@ import importlib
 from types import SimpleNamespace
 from typing import Any
 
-from ._base import Patches, count as _count, given, message_count
+from ._base import (
+    Patches, count as _count, given, message_count, response_fields, server_fields,
+)
 
 _PATCHED = False
 _PATCHES = Patches()
@@ -65,17 +67,19 @@ def _usage_fields(usage: Any) -> dict[str, Any]:
 
 
 class _MessageStream:
-    """Usage and stop reason of a Messages stream, from its events.
+    """Usage, stop reason, message ID and model of a Messages stream, from
+    its events.
 
-    ``message_start`` carries the input and cache counts; ``message_delta``
-    carries the final output count and the stop reason, and may carry final
-    input and cache counts too.
+    ``message_start`` carries the message ID and model, and the input and
+    cache counts; ``message_delta`` carries the final output count and the
+    stop reason, and may carry final input and cache counts too.
     """
 
     def __init__(self) -> None:
         self.usage: dict[str, Any] = {}
         self.cache_creation: Any = None
         self.stop_reason: Any = ""
+        self.response: dict[str, Any] = {}
 
     def _take(self, usage: Any, keys: tuple[str, ...]) -> None:
         for key in keys:
@@ -86,7 +90,9 @@ class _MessageStream:
     def add(self, event: Any) -> None:
         kind = getattr(event, "type", None)
         if kind == "message_start":
-            usage = getattr(getattr(event, "message", None), "usage", None)
+            message = getattr(event, "message", None)
+            self.response = response_fields(message)
+            usage = getattr(message, "usage", None)
             self._take(usage, ("input_tokens", "output_tokens", *_CACHE_KEYS))
             split = getattr(usage, "cache_creation", None)
             if split is not None:
@@ -108,6 +114,7 @@ class _MessageStream:
         )
         fields = _usage_fields(usage)
         fields["stop_reason"] = self.stop_reason
+        fields.update(self.response)
         return fields
 
 
@@ -134,7 +141,8 @@ def instrument_anthropic(agent_name: str = "anthropic") -> None:
     def start(args: tuple, kwargs: dict) -> ModelCall:
         return ModelCall(store, agent_name, given(kwargs.get("model", ""), ""),
                          max_tokens=given(kwargs.get("max_tokens", 0), 0),
-                         message_count=message_count(kwargs.get("messages")))
+                         message_count=message_count(kwargs.get("messages")),
+                         **server_fields(args[0] if args else None))
 
     def finish(call: ModelCall, kwargs: dict, result: Any) -> None:
         if record_when_parsed(result, lambda body: finish(call, kwargs, body)):
@@ -143,6 +151,7 @@ def instrument_anthropic(agent_name: str = "anthropic") -> None:
             return
         fields = _usage_fields(getattr(result, "usage", None))
         fields["stop_reason"] = getattr(result, "stop_reason", "")
+        fields.update(response_fields(result))
         call.respond(fields)
 
     for module_name, class_name, method, is_async in _TARGETS:

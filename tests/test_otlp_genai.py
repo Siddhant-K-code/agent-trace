@@ -1120,7 +1120,8 @@ class TestGenAIRootMessages(unittest.TestCase):
 
 class TestGenAIToolCallContent(unittest.TestCase):
     """execute_tool spans carry gen_ai.tool.call.arguments and
-    gen_ai.tool.call.result, the text input.value and output.value carry."""
+    gen_ai.tool.call.result: the text input.value and output.value carry,
+    except that JSON stays valid JSON within the same limits."""
 
     def _span(self, arguments, *rest):
         call = _event(EventType.TOOL_CALL, 1001.0, "call1", tool_name="Bash", arguments=arguments)
@@ -1164,6 +1165,70 @@ class TestGenAIToolCallContent(unittest.TestCase):
         span = self._span("ls -la", self._result("ok"))
         self.assertEqual(_get_attr(span, "gen_ai.tool.call.arguments"), "ls -la")
 
+    def _content(self, span, key, limit):
+        value = _get_attr(span, key)
+        self.assertLessEqual(len(value), limit)
+        return json.loads(value)
+
+    def test_long_structured_result_stays_valid_json(self):
+        result = {"path": "/", "files": [f"file-{i}.txt" for i in range(200)]}
+        span = self._span({"path": "a"}, self._result(result))
+        parsed = self._content(span, "gen_ai.tool.call.result", 500)
+        # Keys in sorted order, as output.value writes them; the list is cut.
+        self.assertEqual(list(parsed), ["files"])
+        files = parsed["files"]
+        self.assertEqual(files[:-1], result["files"][:len(files) - 1])
+        self.assertTrue(result["files"][len(files) - 1].startswith(files[-1]))
+        self.assertGreater(len(files), 20)
+        self.assertEqual(len(_get_attr(span, "output.value")), 500)
+
+    def test_long_json_text_result_stays_valid_json(self):
+        result = json.dumps({"stdout": "z" * 2000, "exit_code": 0})
+        span = self._span({"path": "a"}, self._result(result))
+        parsed = self._content(span, "gen_ai.tool.call.result", 500)
+        # The recorded key order stays.
+        self.assertEqual(list(parsed), ["stdout"])
+        self.assertGreater(len(parsed["stdout"]), 400)
+        self.assertEqual(parsed["stdout"], "z" * len(parsed["stdout"]))
+        self.assertEqual(_get_attr(span, "output.value"), result[:500])
+
+    def test_json_text_result_that_fits_is_kept(self):
+        result = '{"b": 1, "a": [true, null]}'
+        span = self._span({"path": "a"}, self._result(result))
+        self.assertEqual(_get_attr(span, "gen_ai.tool.call.result"), result)
+
+    def test_result_that_only_looks_like_json_becomes_a_json_string(self):
+        python_text = "{'filePath': '/a.py', 'success': True}"
+        cut_json = '{"content": "' + "c" * 1200 + "... (truncated)"
+        for result in (python_text, cut_json):
+            with self.subTest(result=result[:20]):
+                span = self._span({"path": "a"}, self._result(result))
+                parsed = self._content(span, "gen_ai.tool.call.result", 500)
+                self.assertIsInstance(parsed, str)
+                self.assertTrue(result.startswith(parsed))
+                self.assertEqual(_get_attr(span, "output.value"), result[:500])
+
+    def test_text_that_only_looks_like_json_is_cut_to_the_limit(self):
+        result = "{'content': '" + "c" * 1000
+        span = self._span({"path": "a"}, self._result(result))
+        self.assertEqual(
+            _get_attr(span, "gen_ai.tool.call.result"), json.dumps(result[:498])
+        )
+
+    def test_long_list_arguments_stay_valid_json(self):
+        span = self._span(["x" * 600, "y" * 600], self._result("ok"))
+        parsed = self._content(span, "gen_ai.tool.call.arguments", 1000)
+        self.assertEqual(parsed[0], "x" * 600)
+        self.assertTrue(("y" * 600).startswith(parsed[1]))
+        self.assertEqual(len(_get_attr(span, "input.value")), 1000)
+
+    def test_members_after_a_cut_member_are_dropped(self):
+        # The escape for \x01 does not fit, so the string is cut short and
+        # leaves room for the 1. It must still be dropped.
+        span = self._span(["a" * 993 + "\x01", 1], self._result("ok"))
+        parsed = self._content(span, "gen_ai.tool.call.arguments", 1000)
+        self.assertEqual(parsed, ["a" * 993])
+
     def test_no_arguments_and_no_result_give_no_content(self):
         span = self._span({}, self._result(""))
         self.assertIsNone(_get_attr(span, "gen_ai.tool.call.arguments"))
@@ -1183,6 +1248,60 @@ class TestGenAIToolCallContent(unittest.TestCase):
         (chat,) = _genai_spans([request, response])[1:]
         self.assertIsNone(_get_attr(chat, "gen_ai.input.messages"))
         self.assertIsNone(_get_attr(chat, "gen_ai.output.messages"))
+
+
+class TestGenAIResponseAndServer(unittest.TestCase):
+    """Chat spans carry gen_ai.response.id, gen_ai.response.model,
+    server.address and server.port only where a capture path recorded them."""
+
+    KEYS = ("gen_ai.response.id", "gen_ai.response.model", "server.address", "server.port")
+
+    def _chat(self, request_data, response_data=None):
+        events = [_event(EventType.LLM_REQUEST, 1001.0, "req1", model="gpt-4o", **request_data)]
+        if response_data is not None:
+            events.append(_event(EventType.LLM_RESPONSE, 1002.0, parent_id="req1",
+                                 model="gpt-4o", **response_data))
+        (chat,) = _genai_spans(events)[1:]
+        return {key: _get_attr(chat, key) for key in self.KEYS}
+
+    def test_recorded_values(self):
+        attrs = self._chat(
+            {"server_address": "api.openai.com", "server_port": 443},
+            {"response_id": "chatcmpl-1", "response_model": "gpt-4o-2024-08-06"},
+        )
+        self.assertEqual(attrs, {
+            "gen_ai.response.id": "chatcmpl-1", "gen_ai.response.model": "gpt-4o-2024-08-06",
+            "server.address": "api.openai.com", "server.port": "443",
+        })
+        request = _event(EventType.LLM_REQUEST, 1001.0, "req1", server_address="h", server_port=1)
+        (chat,) = _genai_spans([request])[1:]
+        (port,) = [a["value"] for a in chat["attributes"] if a["key"] == "server.port"]
+        self.assertEqual(port, {"intValue": "1"})
+
+    def test_nothing_recorded_sets_nothing(self):
+        # The request model is not the response model.
+        self.assertEqual(self._chat({}, {}), dict.fromkeys(self.KEYS))
+
+    def test_unusable_values_are_left_out(self):
+        for port in (True, 0, 65536, "443", 443.0):
+            with self.subTest(port=port):
+                attrs = self._chat({"server_address": "localhost", "server_port": port}, {})
+                self.assertEqual(attrs["server.address"], "localhost")
+                self.assertIsNone(attrs["server.port"])
+        attrs = self._chat({"server_address": "", "server_port": 443},
+                           {"response_id": 5, "response_model": ""})
+        self.assertEqual(attrs, dict.fromkeys(self.KEYS))
+
+    def test_request_without_a_response_or_with_an_error_keeps_its_server(self):
+        expected = {**dict.fromkeys(self.KEYS), "server.address": "localhost", "server.port": "8080"}
+        self.assertEqual(self._chat({"server_address": "localhost", "server_port": 8080}), expected)
+        events = [
+            _event(EventType.LLM_REQUEST, 1001.0, "req1", model="gpt-4o",
+                   server_address="localhost", server_port=8080),
+            _event(EventType.ERROR, 1002.0, parent_id="req1", error="Rate limit reached"),
+        ]
+        (chat,) = _genai_spans(events)[1:]
+        self.assertEqual({key: _get_attr(chat, key) for key in self.KEYS}, expected)
 
 
 class TestGenAIErrorToolName(unittest.TestCase):

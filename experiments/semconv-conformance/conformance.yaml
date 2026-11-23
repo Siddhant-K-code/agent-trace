@@ -1,0 +1,18 @@
+# GenAI semantic-conventions conformance for agent-strace's otlp-genai export.
+# See README.md for the pinned runner, Weaver and registry, and how to run it.
+runner: genai-conformance
+instrumented_library: agent-strace
+instrumentation_library: agent-strace
+
+# The `sdk` scenario points the OpenAI and Anthropic SDKs at this server
+# through $MOCK_SERVER_URL. The other scenarios do not use it.
+server:
+  run: genai-mock-server --port ${PORT}
+
+scenarios:
+  session:
+    run: python scenario.py session
+  tree:
+    run: python scenario.py tree
+  sdk:
+    run: python scenario.py sdk
