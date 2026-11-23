@@ -20,10 +20,12 @@ try:
     import _no_telemetry  # noqa: F401
     from test_hash_chain import (
         _CliCase,
+        _dump,
         _edit_hole,
         _edit_strip_rest,
         _make_probe_session,
         _read_lines,
+        _relink,
         _strip,
         _upgrade_prefix,
         _write_lines,
@@ -41,10 +43,12 @@ except ImportError:
     from tests import _no_telemetry  # noqa: F401
     from tests.test_hash_chain import (
         _CliCase,
+        _dump,
         _edit_hole,
         _edit_strip_rest,
         _make_probe_session,
         _read_lines,
+        _relink,
         _strip,
         _upgrade_prefix,
         _write_lines,
@@ -1307,6 +1311,8 @@ class TestRefusedSessions(_CliCase):
             ("c-events-only", session("c-events-only", _drop_meta),
              "no meta.json", incomplete + "c-events-only"),
             ("c-empty", directory("c-empty"), "no meta.json", incomplete + "c-empty"),
+            ("datasets", session("datasets", _drop_meta),
+             "no meta.json", incomplete + "datasets"),
             ("c-meta-only", session("c-meta-only", _drop_events),
              "no events.ndjson", incomplete + "c-meta-only"),
             ("c-meta-dir", session("c-meta-dir", _meta_is_a_directory),
@@ -1388,6 +1394,83 @@ class TestRefusedSessions(_CliCase):
                         f"  cannot read session {inert(name)}: {reason}\n",
                         run.stdout,
                     )
+
+    def test_audit_readiness_refuses_a_workspaces_directory_in_a_workspace(self):
+        # Only the flat store skips its workspaces directory.
+        store = TraceStore(str(self.root / "ws"), workspace_id="ws1", use_workspace_env=False)
+        _make_probe_session(store, "a-readable")
+        (store.base_dir / "workspaces").mkdir()
+        with self.assertRaisesRegex(ValueError, "incomplete session directory: workspaces"):
+            store.list_sessions_strict()
+        integrity = build_audit_readiness(store)["checks"]["hash_chain_integrity"]
+        self.assertEqual(
+            integrity["refused_sessions"],
+            [{"session_id": "workspaces", "reason": "no meta.json"}],
+        )
+
+    def test_audit_readiness_fails_for_event_data_or_a_timestamp_export_all_refuses(self):
+        # export --format eu-ai-act --all checks the data and timestamp of
+        # every event. Each session keeps an intact hash chain.
+        data_reason = "event data must be an object: event {} of 7 ({}) has {} data"
+        time_reason = (
+            "event timestamp must be a Unix time in seconds: "
+            "event {} of 7 ({}) has a string timestamp"
+        )
+        # (session, event index, changed fields, reason). PROBE_EVENTS has no
+        # error event, so one case turns its first tool_result into one.
+        cases = (
+            ("a-call-time", 2, {"timestamp": "soon"}, time_reason.format(3, "tool_call")),
+            ("a-call-data", 2, {"data": [1]}, data_reason.format(3, "tool_call", "array")),
+            ("a-error-data", 3, {"event_type": "error", "data": "boom"},
+             data_reason.format(4, "error", "string")),
+            ("a-prompt-time", 1, {"timestamp": "soon"}, time_reason.format(2, "user_prompt")),
+            ("a-prompt-data", 1, {"data": [1]}, data_reason.format(2, "user_prompt", "array")),
+            ("a-start-time", 0, {"timestamp": "soon"}, time_reason.format(1, "session_start")),
+        )
+        commands = (
+            ("audit-readiness",),
+            ("audit-readiness", "--format", "json"),
+            ("export", "--format", "eu-ai-act", "--all"),
+        )
+        runs, expected = [], []
+        for sid, index, fields, reason in cases:
+            store = TraceStore(str(self.root / sid), use_workspace_env=False)
+            path = _make_probe_session(store, sid)
+            lines = _read_lines(path)
+            lines[index] = _dump({**json.loads(lines[index]), **fields})
+            _relink(lines, index + 1)
+            _write_lines(path, lines)
+            checks = _readiness_checks(sid, broken=True, refused=reason)
+            line = (
+                "FAIL Hash chain integrity: 1 sessions checked\n"
+                f"  cannot read session {sid}: {reason}\n"
+            )
+            with self.subTest(sid):
+                self.assertEqual(verify_chain(store, sid).state, "unanchored")
+                report = build_audit_readiness(store)
+                self.assertEqual({key: report["checks"][key] for key in checks}, checks)
+                self.assertEqual((report["compliance_score"], report["ready"]), (55, False))
+                buf = io.StringIO()
+                format_audit_readiness(report, out=buf)
+                self.assertIn(line, buf.getvalue())
+            for args in commands:
+                runs.append((args, store.base_dir))
+                expected.append((sid, args, reason, checks["hash_chain_integrity"], line))
+        for (sid, args, reason, integrity, line), run in zip(expected, self.run_each(runs)):
+            with self.subTest(sid, args=args):
+                if args[0] == "export":
+                    self.assertEqual(
+                        (run.returncode, run.stdout, run.stderr),
+                        (1, "", f"Error: session {sid} {reason}\n"),
+                    )
+                    continue
+                self.assertEqual((run.returncode, run.stderr), (1, ""))
+                if "json" in args:
+                    report = json.loads(run.stdout)
+                    self.assertEqual(report["checks"]["hash_chain_integrity"], integrity)
+                    self.assertIs(report["ready"], False)
+                else:
+                    self.assertIn(line, run.stdout)
 
 
 if __name__ == "__main__":

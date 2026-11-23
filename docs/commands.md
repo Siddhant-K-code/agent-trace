@@ -1617,13 +1617,18 @@ tenant ID in it is not valid, or its events are
 It fails too for each store entry that makes `export --all` refuse: a symlink,
 a directory with no `meta.json` or no `events.ndjson`, a directory whose name
 is not a session ID, and a session whose `meta.json` or `events.ndjson` is a
-symlink or not a regular file. The check counts the session or entry and names
-it with the reason:
+symlink or not a regular file. It fails as well for a session with an event
+whose `data` is not an object or whose `timestamp` is not a Unix time in
+seconds, because `export --all` refuses that session too. See
+[non-object event data](#sessions-with-non-object-event-data) and
+[unusable event timestamps](#sessions-with-unusable-event-timestamps). The
+check counts the session or entry and names it with the reason:
 
 ```
-FAIL Hash chain integrity: 3 sessions checked
+FAIL Hash chain integrity: 4 sessions checked
   cannot read session c3d4e5f6a7b80003: line 5 of events.ndjson is not valid JSON
   cannot read session c3d4e5f6a7b80004: no meta.json
+  cannot read session c3d4e5f6a7b80005: event data must be an object: event 3 of 7 (tool_call) has array data
 ```
 
 With `--format json`, the session or entry is in `broken_sessions`, and in
@@ -2873,6 +2878,11 @@ heuristics, which read more events, so it can refuse after it sent the request.
 events other than decisions already stopped on these sessions with their own
 error message and exit code 1, and they keep it.
 
+`audit-readiness` does not refuse such a session. Its hash chain integrity
+check fails when any event of a session has non-object data, and names the
+session with the reason. `export --format eu-ai-act --all` refuses that store.
+See [`audit-readiness`](#audit-readiness).
+
 `list`, `inspect`, `tree`, `verify`, and `export --format json`, `ndjson`, or `csv`
 keep working on these sessions. The export formats include the data exactly as
 stored.
@@ -3001,6 +3011,11 @@ working when the bad event is one they never read:
   yet, since every checkpoint the watch writes shows their times. It also
   checks the last `llm_request` event of the agent and of each subagent whose
   context is already at that ratio.
+
+`audit-readiness` does not refuse such a session. Its hash chain integrity
+check fails when any event of a session has an unusable timestamp, and names
+the session with the reason. `export --format eu-ai-act --all` refuses that
+store. See [`audit-readiness`](#audit-readiness).
 
 `export --format otlp`, `otlp-genai`, and `temporal` also refuse a session
 whose `started_at`, or `ended_at` when set, is not a Unix time in seconds, with

@@ -35,6 +35,8 @@ from . import __version__
 from .audit import verify_chain
 from .cost import _usage_dollars, session_event_usage
 from .event_data import (
+    NonObjectEventDataError,
+    UnusableTimestampError,
     duration_ms_of,
     event_id_of,
     require_object_event_data,
@@ -649,13 +651,15 @@ def cmd_export_eu_ai_act(args: argparse.Namespace) -> int:
 def _readiness_sessions(
     store: TraceStore,
 ) -> tuple[list[SessionMeta], list[dict[str, str]]]:
-    """Return the sessions to check and the store entries the store refuses.
+    """Return the sessions to check and the store entries that fail the scan.
 
-    The scan skips only the entries that ``list_sessions_strict`` skips, and
-    reads each session as the bulk exports do. So each entry or session that
-    makes ``export --all`` refuse fails the check. A session whose meta.json
-    is readable but whose events.ndjson is missing or refused is in both
-    lists. Each refused entry holds the entry's name and the reason.
+    The scan skips only the entries that ``list_sessions_strict`` skips. It
+    reads each session's events as the bulk exports do. It then checks the
+    data and timestamp of every event, as ``export --format eu-ai-act`` does.
+    A session whose meta.json is readable but whose events.ndjson is missing,
+    refused or fails a check is in both lists. Each failed entry holds the
+    entry's name and the reason. Unlike ``list_sessions_strict``, the scan
+    reads a trace directory that is a symlink.
     """
     sessions: list[SessionMeta] = []
     refused: list[dict[str, str]] = []
@@ -697,11 +701,20 @@ def _readiness_sessions(
         try:
             # The bulk exports read the events this way, so a tenant ID they
             # refuse fails the check too.
-            store.load_events(session_id, validate_tenant_ids=True)
+            events = store.load_events(session_id, validate_tenant_ids=True)
         except FileNotFoundError:
             refused.append({"session_id": session_id, "reason": "no events.ndjson"})
+            continue
         except (OSError, ValueError, TypeError) as exc:
             refused.append({"session_id": session_id, "reason": _read_refusal_reason(exc)})
+            continue
+        try:
+            # The EU AI Act export reads the data and timestamp of every event.
+            require_object_event_data(events, session_id=session_id)
+            require_usable_timestamps(events, session_id=session_id)
+        except (NonObjectEventDataError, UnusableTimestampError) as exc:
+            reason = str(exc).removeprefix(f"session {session_id} ")
+            refused.append({"session_id": session_id, "reason": reason})
     sessions.sort(key=lambda meta: (meta.started_at, meta.session_id), reverse=True)
     return sessions, refused
 
@@ -713,8 +726,9 @@ def build_audit_readiness(
     """Check whether the store's sessions are ready for an EU AI Act audit.
 
     A session the store refuses to read fails the hash chain integrity
-    check, with its reason in ``refused_sessions``. So the check never
-    passes while it leaves out a session.
+    check, with its reason in ``refused_sessions``. So does a session with an
+    event whose data or timestamp the EU AI Act export refuses. So the check
+    never passes while it leaves out a session.
     """
     sessions, refused = _readiness_sessions(store)
     refused_ids = [entry["session_id"] for entry in refused]
