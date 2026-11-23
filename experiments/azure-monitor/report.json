@@ -1,0 +1,1074 @@
+{
+  "agent_id": "demo-agent-v1",
+  "agent_strace_version": "0.121.1",
+  "cli_runs": [
+    {
+      "command": "agent-strace export am586-genai-parent --format otlp-genai --include-subagents --agent-id demo-agent-v1 --endpoint <otlp-receiver> --protocol http/protobuf",
+      "env": {},
+      "exit": 0,
+      "stderr": "Exported 26 events to <otlp-receiver> (HTTP 200)\n",
+      "stdout": ""
+    },
+    {
+      "command": "agent-strace export am586-otlp-parent --format otlp --include-subagents --endpoint <otlp-receiver> --protocol http/protobuf",
+      "env": {
+        "AGENT_STRACE_AGENT_ID": "demo-agent-v1"
+      },
+      "exit": 0,
+      "stderr": "Exported 26 events to <otlp-receiver> (HTTP 200)\n",
+      "stdout": ""
+    },
+    {
+      "command": "agent-strace export am586-long-parent --format otlp-genai --agent-id demo-agent-v1 --endpoint <otlp-receiver> --protocol http/protobuf",
+      "env": {},
+      "exit": 0,
+      "stderr": "Exported 24 events to <otlp-receiver> (HTTP 200)\n",
+      "stdout": ""
+    },
+    {
+      "command": "agent-strace export am586-noid-parent --format otlp-genai --include-subagents --endpoint <otlp-receiver> --protocol http/protobuf",
+      "env": {},
+      "exit": 0,
+      "stderr": "Exported 26 events to <otlp-receiver> (HTTP 200)\n",
+      "stdout": ""
+    },
+    {
+      "command": "agent-strace watch am586-watch-parent --stream-to <otlp-receiver> --stream-otlp --protocol http/protobuf --agent-id demo-agent-v1 --stream-flush-interval 1",
+      "env": {},
+      "events": 18,
+      "exit": 0,
+      "stderr": "[watch] Monitoring session am586-watch-...\n[watch] Streaming events to <otlp-receiver>\n[watch] Session ended (17 events, $0.0030)\n"
+    }
+  ],
+  "collector_exit": 0,
+  "collector_warnings": [
+    "warn: RemoteDependencyData.Properties has value with length exceeding max of 8192: gen_ai.input.messages [azure_monitor]",
+    "warn: RemoteDependencyData.Properties has value with length exceeding max of 8192: gen_ai.input.messages [azure_monitor/spanevents]"
+  ],
+  "exports": {
+    "otlp tree, AGENT_STRACE_AGENT_ID": {
+      "attributes_changed": {
+        "agent.session_id": 1
+      },
+      "attributes_dropped": {},
+      "attributes_kept": {
+        "agent.command": 2,
+        "agent.depth": 2,
+        "agent.errors": 2,
+        "agent.llm_requests": 2,
+        "agent.name": 2,
+        "agent.session_id": 1,
+        "agent.strace.behavior.failed_operation_count": 2,
+        "agent.strace.behavior.recovered_operation_count": 2,
+        "agent.strace.behavior.retry_count": 2,
+        "agent.strace.behavior.unresolved_failed_operation_count": 2,
+        "agent.strace.last_model_request_failed": 2,
+        "agent.strace.session_status": 2,
+        "agent.tool_calls": 2,
+        "error.message": 1,
+        "gen_ai.agent.id": 7,
+        "gen_ai.conversation.id": 1,
+        "gen_ai.operation.name": 7,
+        "gen_ai.system": 2,
+        "gen_ai.tool.call.id": 5,
+        "gen_ai.tool.name": 5,
+        "tool.input.auth_header": 1,
+        "tool.input.command": 2,
+        "tool.input.description": 1,
+        "tool.input.path": 1,
+        "tool.input.prompt": 1,
+        "tool.input.subagent_type": 1,
+        "tool.name": 1,
+        "tool.output": 4
+      },
+      "gen_ai.agent.id_on_event_envelopes": [
+        {
+          "baseType": "ExceptionData",
+          "envelopes": 1,
+          "exporter": "default",
+          "has_agent_id": false
+        },
+        {
+          "baseType": "ExceptionData",
+          "envelopes": 1,
+          "exporter": "spanevents",
+          "has_agent_id": false
+        },
+        {
+          "baseType": "MessageData",
+          "envelopes": 11,
+          "exporter": "spanevents",
+          "has_agent_id": false
+        }
+      ],
+      "gen_ai.agent.id_on_span_envelopes": {
+        "demo-agent-v1": 7
+      },
+      "links": [
+        {
+          "_MS.links": [
+            {
+              "id": "0b6ce61bd14319ca",
+              "operation_Id": "390df78ad0b04e5a8e8f4e298c3945b0"
+            }
+          ],
+          "same_targets": true,
+          "sent": [
+            {
+              "attributes": [
+                "agent.strace.link.type"
+              ],
+              "span_id": "0b6ce61bd14319ca",
+              "trace_id": "390df78ad0b04e5a8e8f4e298c3945b0"
+            }
+          ],
+          "span": "tool/bash"
+        }
+      ],
+      "properties_added_by_exporter": {
+        "_MS.links": 1,
+        "agent.session_id": 5,
+        "instrumentationlibrary.name": 7,
+        "otel.status_code": 7,
+        "otel.status_description": 1,
+        "service.name": 7,
+        "service.version": 7
+      },
+      "span_events": {
+        "default": {
+          "assistant_response -> dropped": 2,
+          "decision -> dropped": 1,
+          "exception -> ExceptionData": 1,
+          "gen_ai.assistant.message -> dropped": 3,
+          "gen_ai.system.message -> dropped": 3,
+          "user_prompt -> dropped": 2
+        },
+        "spanevents": {
+          "assistant_response -> MessageData": 2,
+          "decision -> MessageData": 1,
+          "exception -> ExceptionData": 1,
+          "gen_ai.assistant.message -> MessageData": 3,
+          "gen_ai.system.message -> MessageData": 3,
+          "user_prompt -> MessageData": 2
+        }
+      },
+      "span_mapping": [
+        {
+          "baseType": "RemoteDependencyData",
+          "kind": "INTERNAL",
+          "span": "agent-session",
+          "spans": 2,
+          "type": "InProc"
+        },
+        {
+          "baseType": "RemoteDependencyData",
+          "kind": "CLIENT",
+          "span": "tool/Task",
+          "spans": 1,
+          "type": ""
+        },
+        {
+          "baseType": "RemoteDependencyData",
+          "kind": "CLIENT",
+          "span": "tool/bash",
+          "spans": 3,
+          "type": ""
+        },
+        {
+          "baseType": "RemoteDependencyData",
+          "kind": "CLIENT",
+          "span": "tool/read_file",
+          "spans": 1,
+          "type": ""
+        }
+      ],
+      "spans_sent": 7,
+      "spans_with_an_envelope": 7,
+      "spans_without_an_envelope": [],
+      "values_changed": [
+        {
+          "attribute": "agent.session_id",
+          "sent": "am586-otlp-child",
+          "sent_bytes": 16,
+          "sent_is_json": false,
+          "stored": "am586-otlp-parent",
+          "stored_bytes": 17,
+          "stored_is_json": false,
+          "stored_is_prefix_of_sent": false,
+          "stored_is_the_resource_attribute": true
+        }
+      ]
+    },
+    "otlp-genai long session, --agent-id": {
+      "attributes_changed": {
+        "gen_ai.input.messages": 1
+      },
+      "attributes_dropped": {},
+      "attributes_kept": {
+        "agent.errors": 1,
+        "agent.llm_requests": 1,
+        "agent.session_id": 1,
+        "agent.strace.behavior.failed_operation_count": 1,
+        "agent.strace.behavior.recovered_operation_count": 1,
+        "agent.strace.behavior.retry_count": 1,
+        "agent.strace.behavior.unresolved_failed_operation_count": 1,
+        "agent.strace.evidence.gap_codes": 1,
+        "agent.strace.evidence.gap_count": 1,
+        "agent.strace.evidence.gaps": 1,
+        "agent.strace.evidence.schema_version": 1,
+        "agent.strace.evidence.status": 1,
+        "agent.strace.last_model_request_failed": 1,
+        "agent.strace.provider": 1,
+        "agent.strace.redacted": 1,
+        "agent.strace.redacted_event_count": 1,
+        "agent.strace.request.event_id": 1,
+        "agent.strace.request.previous_hash": 1,
+        "agent.strace.request.redacted": 1,
+        "agent.strace.response.event_id": 1,
+        "agent.strace.response.parent_event_id": 1,
+        "agent.strace.response.previous_hash": 1,
+        "agent.strace.response.redacted": 1,
+        "agent.strace.session_status": 1,
+        "agent.tool_calls": 1,
+        "gen_ai.agent.id": 2,
+        "gen_ai.agent.name": 1,
+        "gen_ai.conversation.id": 2,
+        "gen_ai.operation.name": 2,
+        "gen_ai.output.messages": 1,
+        "gen_ai.provider.name": 1,
+        "gen_ai.system": 1,
+        "gen_ai.tool.call.arguments": 1,
+        "gen_ai.tool.call.id": 1,
+        "gen_ai.tool.call.result": 1,
+        "gen_ai.tool.input.command": 1,
+        "gen_ai.tool.name": 1,
+        "gen_ai.tool.output": 1,
+        "input.mime_type": 1,
+        "input.value": 1,
+        "metadata": 2,
+        "openinference.span.kind": 2,
+        "output.mime_type": 1,
+        "output.value": 1,
+        "session.id": 2,
+        "tool.name": 1
+      },
+      "gen_ai.agent.id_on_event_envelopes": [
+        {
+          "baseType": "MessageData",
+          "envelopes": 20,
+          "exporter": "spanevents",
+          "has_agent_id": false
+        }
+      ],
+      "gen_ai.agent.id_on_span_envelopes": {
+        "demo-agent-v1": 2
+      },
+      "links": [],
+      "properties_added_by_exporter": {
+        "agent.session_id": 1,
+        "instrumentationlibrary.name": 2,
+        "instrumentationlibrary.version": 2,
+        "otel.status_code": 2,
+        "service.name": 2,
+        "service.version": 2
+      },
+      "span_events": {
+        "default": {
+          "gen_ai.assistant.message -> dropped": 10,
+          "gen_ai.user.message -> dropped": 10
+        },
+        "spanevents": {
+          "gen_ai.assistant.message -> MessageData": 10,
+          "gen_ai.user.message -> MessageData": 10
+        }
+      },
+      "span_mapping": [
+        {
+          "baseType": "RemoteDependencyData",
+          "kind": "INTERNAL",
+          "span": "execute_tool",
+          "spans": 1,
+          "type": "InProc"
+        },
+        {
+          "baseType": "RemoteDependencyData",
+          "kind": "INTERNAL",
+          "span": "invoke_agent",
+          "spans": 1,
+          "type": "InProc"
+        }
+      ],
+      "spans_sent": 2,
+      "spans_with_an_envelope": 2,
+      "spans_without_an_envelope": [],
+      "values_changed": [
+        {
+          "attribute": "gen_ai.input.messages",
+          "messages_begun_in_stored": 3,
+          "messages_sent": 19,
+          "sent_bytes": 69691,
+          "sent_is_json": true,
+          "stored_bytes": 8192,
+          "stored_is_json": false,
+          "stored_is_prefix_of_sent": true,
+          "stored_is_the_resource_attribute": false
+        }
+      ]
+    },
+    "otlp-genai tree, --agent-id": {
+      "attributes_changed": {
+        "agent.session_id": 1
+      },
+      "attributes_dropped": {
+        "gen_ai.response.finish_reasons (array)": 3
+      },
+      "attributes_kept": {
+        "agent.errors": 2,
+        "agent.llm_requests": 2,
+        "agent.session_id": 1,
+        "agent.strace.behavior.failed_operation_count": 2,
+        "agent.strace.behavior.recovered_operation_count": 2,
+        "agent.strace.behavior.retry_count": 2,
+        "agent.strace.behavior.unresolved_failed_operation_count": 2,
+        "agent.strace.cost.total_usd": 2,
+        "agent.strace.depth": 1,
+        "agent.strace.evidence.gap_codes": 2,
+        "agent.strace.evidence.gap_count": 2,
+        "agent.strace.evidence.gaps": 2,
+        "agent.strace.evidence.schema_version": 2,
+        "agent.strace.evidence.status": 2,
+        "agent.strace.finish_reason": 2,
+        "agent.strace.last_model_request_failed": 2,
+        "agent.strace.parent_event_id": 1,
+        "agent.strace.parent_session_id": 1,
+        "agent.strace.provenance": 2,
+        "agent.strace.provider": 5,
+        "agent.strace.redacted": 2,
+        "agent.strace.redacted_event_count": 2,
+        "agent.strace.request.event_id": 7,
+        "agent.strace.request.previous_hash": 7,
+        "agent.strace.request.provenance": 4,
+        "agent.strace.request.redacted": 7,
+        "agent.strace.response.event_id": 8,
+        "agent.strace.response.parent_event_id": 8,
+        "agent.strace.response.previous_hash": 8,
+        "agent.strace.response.provenance": 4,
+        "agent.strace.response.redacted": 8,
+        "agent.strace.session_status": 2,
+        "agent.tool_calls": 2,
+        "error.type": 2,
+        "gen_ai.agent.id": 10,
+        "gen_ai.agent.name": 2,
+        "gen_ai.conversation.id": 7,
+        "gen_ai.input.messages": 2,
+        "gen_ai.operation.name": 10,
+        "gen_ai.output.messages": 2,
+        "gen_ai.provider.name": 5,
+        "gen_ai.request.max_tokens": 3,
+        "gen_ai.request.model": 3,
+        "gen_ai.system": 5,
+        "gen_ai.tool.call.arguments": 4,
+        "gen_ai.tool.call.id": 5,
+        "gen_ai.tool.call.result": 4,
+        "gen_ai.tool.input.auth_header": 1,
+        "gen_ai.tool.input.command": 2,
+        "gen_ai.tool.input.description": 1,
+        "gen_ai.tool.input.path": 1,
+        "gen_ai.tool.input.prompt": 1,
+        "gen_ai.tool.input.subagent_type": 1,
+        "gen_ai.tool.name": 5,
+        "gen_ai.tool.output": 4,
+        "gen_ai.usage.cache_read.input_tokens": 1,
+        "gen_ai.usage.cache_write.input_tokens": 1,
+        "gen_ai.usage.input_tokens": 2,
+        "gen_ai.usage.output_tokens": 2,
+        "input.mime_type": 4,
+        "input.value": 4,
+        "llm.cost.total": 2,
+        "llm.finish_reason": 2,
+        "llm.invocation_parameters": 3,
+        "llm.model_name": 3,
+        "llm.provider": 3,
+        "llm.token_count.completion": 2,
+        "llm.token_count.prompt": 2,
+        "llm.token_count.prompt_details.cache_read": 1,
+        "llm.token_count.prompt_details.cache_write": 1,
+        "llm.token_count.total": 2,
+        "metadata": 10,
+        "openinference.span.kind": 10,
+        "output.mime_type": 4,
+        "output.value": 4,
+        "session.id": 10,
+        "tool.name": 5
+      },
+      "gen_ai.agent.id_on_event_envelopes": [
+        {
+          "baseType": "ExceptionData",
+          "envelopes": 1,
+          "exporter": "default",
+          "has_agent_id": false
+        },
+        {
+          "baseType": "ExceptionData",
+          "envelopes": 1,
+          "exporter": "spanevents",
+          "has_agent_id": false
+        },
+        {
+          "baseType": "MessageData",
+          "envelopes": 4,
+          "exporter": "spanevents",
+          "has_agent_id": false
+        }
+      ],
+      "gen_ai.agent.id_on_span_envelopes": {
+        "demo-agent-v1": 10
+      },
+      "links": [
+        {
+          "_MS.links": [
+            {
+              "id": "c67b6f6f451c2904",
+              "operation_Id": "5a78eb4535b614044c4a5ff0956ced55"
+            }
+          ],
+          "same_targets": true,
+          "sent": [
+            {
+              "attributes": [
+                "agent.strace.link.type"
+              ],
+              "span_id": "c67b6f6f451c2904",
+              "trace_id": "5a78eb4535b614044c4a5ff0956ced55"
+            }
+          ],
+          "span": "chat claude-sonnet-4-5"
+        },
+        {
+          "_MS.links": [
+            {
+              "id": "d00dbefae86fbd67",
+              "operation_Id": "5a78eb4535b614044c4a5ff0956ced55"
+            }
+          ],
+          "same_targets": true,
+          "sent": [
+            {
+              "attributes": [
+                "agent.strace.link.type"
+              ],
+              "span_id": "d00dbefae86fbd67",
+              "trace_id": "5a78eb4535b614044c4a5ff0956ced55"
+            }
+          ],
+          "span": "execute_tool bash"
+        }
+      ],
+      "properties_added_by_exporter": {
+        "_MS.links": 2,
+        "agent.session_id": 8,
+        "instrumentationlibrary.name": 10,
+        "instrumentationlibrary.version": 10,
+        "otel.status_code": 10,
+        "otel.status_description": 2,
+        "service.name": 10,
+        "service.version": 10
+      },
+      "span_events": {
+        "default": {
+          "exception -> ExceptionData": 1,
+          "gen_ai.assistant.message -> dropped": 2,
+          "gen_ai.user.message -> dropped": 2
+        },
+        "spanevents": {
+          "exception -> ExceptionData": 1,
+          "gen_ai.assistant.message -> MessageData": 2,
+          "gen_ai.user.message -> MessageData": 2
+        }
+      },
+      "span_mapping": [
+        {
+          "baseType": "RemoteDependencyData",
+          "kind": "CLIENT",
+          "span": "chat",
+          "spans": 3,
+          "type": ""
+        },
+        {
+          "baseType": "RemoteDependencyData",
+          "kind": "INTERNAL",
+          "span": "execute_tool",
+          "spans": 5,
+          "type": "InProc"
+        },
+        {
+          "baseType": "RemoteDependencyData",
+          "kind": "INTERNAL",
+          "span": "invoke_agent",
+          "spans": 2,
+          "type": "InProc"
+        }
+      ],
+      "spans_sent": 10,
+      "spans_with_an_envelope": 10,
+      "spans_without_an_envelope": [],
+      "values_changed": [
+        {
+          "attribute": "agent.session_id",
+          "sent": "am586-genai-child",
+          "sent_bytes": 17,
+          "sent_is_json": false,
+          "stored": "am586-genai-parent",
+          "stored_bytes": 18,
+          "stored_is_json": false,
+          "stored_is_prefix_of_sent": false,
+          "stored_is_the_resource_attribute": true
+        }
+      ]
+    },
+    "otlp-genai tree, no agent ID": {
+      "attributes_changed": {
+        "agent.session_id": 1
+      },
+      "attributes_dropped": {
+        "gen_ai.response.finish_reasons (array)": 3
+      },
+      "attributes_kept": {
+        "agent.errors": 2,
+        "agent.llm_requests": 2,
+        "agent.session_id": 1,
+        "agent.strace.behavior.failed_operation_count": 2,
+        "agent.strace.behavior.recovered_operation_count": 2,
+        "agent.strace.behavior.retry_count": 2,
+        "agent.strace.behavior.unresolved_failed_operation_count": 2,
+        "agent.strace.cost.total_usd": 2,
+        "agent.strace.depth": 1,
+        "agent.strace.evidence.gap_codes": 2,
+        "agent.strace.evidence.gap_count": 2,
+        "agent.strace.evidence.gaps": 2,
+        "agent.strace.evidence.schema_version": 2,
+        "agent.strace.evidence.status": 2,
+        "agent.strace.finish_reason": 2,
+        "agent.strace.last_model_request_failed": 2,
+        "agent.strace.parent_event_id": 1,
+        "agent.strace.parent_session_id": 1,
+        "agent.strace.provenance": 2,
+        "agent.strace.provider": 5,
+        "agent.strace.redacted": 2,
+        "agent.strace.redacted_event_count": 2,
+        "agent.strace.request.event_id": 7,
+        "agent.strace.request.previous_hash": 7,
+        "agent.strace.request.provenance": 4,
+        "agent.strace.request.redacted": 7,
+        "agent.strace.response.event_id": 8,
+        "agent.strace.response.parent_event_id": 8,
+        "agent.strace.response.previous_hash": 8,
+        "agent.strace.response.provenance": 4,
+        "agent.strace.response.redacted": 8,
+        "agent.strace.session_status": 2,
+        "agent.tool_calls": 2,
+        "error.type": 2,
+        "gen_ai.agent.name": 2,
+        "gen_ai.conversation.id": 7,
+        "gen_ai.input.messages": 2,
+        "gen_ai.operation.name": 10,
+        "gen_ai.output.messages": 2,
+        "gen_ai.provider.name": 5,
+        "gen_ai.request.max_tokens": 3,
+        "gen_ai.request.model": 3,
+        "gen_ai.system": 5,
+        "gen_ai.tool.call.arguments": 4,
+        "gen_ai.tool.call.id": 5,
+        "gen_ai.tool.call.result": 4,
+        "gen_ai.tool.input.auth_header": 1,
+        "gen_ai.tool.input.command": 2,
+        "gen_ai.tool.input.description": 1,
+        "gen_ai.tool.input.path": 1,
+        "gen_ai.tool.input.prompt": 1,
+        "gen_ai.tool.input.subagent_type": 1,
+        "gen_ai.tool.name": 5,
+        "gen_ai.tool.output": 4,
+        "gen_ai.usage.cache_read.input_tokens": 1,
+        "gen_ai.usage.cache_write.input_tokens": 1,
+        "gen_ai.usage.input_tokens": 2,
+        "gen_ai.usage.output_tokens": 2,
+        "input.mime_type": 4,
+        "input.value": 4,
+        "llm.cost.total": 2,
+        "llm.finish_reason": 2,
+        "llm.invocation_parameters": 3,
+        "llm.model_name": 3,
+        "llm.provider": 3,
+        "llm.token_count.completion": 2,
+        "llm.token_count.prompt": 2,
+        "llm.token_count.prompt_details.cache_read": 1,
+        "llm.token_count.prompt_details.cache_write": 1,
+        "llm.token_count.total": 2,
+        "metadata": 10,
+        "openinference.span.kind": 10,
+        "output.mime_type": 4,
+        "output.value": 4,
+        "session.id": 10,
+        "tool.name": 5
+      },
+      "gen_ai.agent.id_on_event_envelopes": [
+        {
+          "baseType": "ExceptionData",
+          "envelopes": 1,
+          "exporter": "default",
+          "has_agent_id": false
+        },
+        {
+          "baseType": "ExceptionData",
+          "envelopes": 1,
+          "exporter": "spanevents",
+          "has_agent_id": false
+        },
+        {
+          "baseType": "MessageData",
+          "envelopes": 4,
+          "exporter": "spanevents",
+          "has_agent_id": false
+        }
+      ],
+      "gen_ai.agent.id_on_span_envelopes": {
+        "<absent>": 10
+      },
+      "links": [
+        {
+          "_MS.links": [
+            {
+              "id": "53dcaa558e67894f",
+              "operation_Id": "7fbe6bc9423b5d6242876ed37e32c86c"
+            }
+          ],
+          "same_targets": true,
+          "sent": [
+            {
+              "attributes": [
+                "agent.strace.link.type"
+              ],
+              "span_id": "53dcaa558e67894f",
+              "trace_id": "7fbe6bc9423b5d6242876ed37e32c86c"
+            }
+          ],
+          "span": "chat claude-sonnet-4-5"
+        },
+        {
+          "_MS.links": [
+            {
+              "id": "2c124b09a67996ff",
+              "operation_Id": "7fbe6bc9423b5d6242876ed37e32c86c"
+            }
+          ],
+          "same_targets": true,
+          "sent": [
+            {
+              "attributes": [
+                "agent.strace.link.type"
+              ],
+              "span_id": "2c124b09a67996ff",
+              "trace_id": "7fbe6bc9423b5d6242876ed37e32c86c"
+            }
+          ],
+          "span": "execute_tool bash"
+        }
+      ],
+      "properties_added_by_exporter": {
+        "_MS.links": 2,
+        "agent.session_id": 8,
+        "instrumentationlibrary.name": 10,
+        "instrumentationlibrary.version": 10,
+        "otel.status_code": 10,
+        "otel.status_description": 2,
+        "service.name": 10,
+        "service.version": 10
+      },
+      "span_events": {
+        "default": {
+          "exception -> ExceptionData": 1,
+          "gen_ai.assistant.message -> dropped": 2,
+          "gen_ai.user.message -> dropped": 2
+        },
+        "spanevents": {
+          "exception -> ExceptionData": 1,
+          "gen_ai.assistant.message -> MessageData": 2,
+          "gen_ai.user.message -> MessageData": 2
+        }
+      },
+      "span_mapping": [
+        {
+          "baseType": "RemoteDependencyData",
+          "kind": "CLIENT",
+          "span": "chat",
+          "spans": 3,
+          "type": ""
+        },
+        {
+          "baseType": "RemoteDependencyData",
+          "kind": "INTERNAL",
+          "span": "execute_tool",
+          "spans": 5,
+          "type": "InProc"
+        },
+        {
+          "baseType": "RemoteDependencyData",
+          "kind": "INTERNAL",
+          "span": "invoke_agent",
+          "spans": 2,
+          "type": "InProc"
+        }
+      ],
+      "spans_sent": 10,
+      "spans_with_an_envelope": 10,
+      "spans_without_an_envelope": [],
+      "values_changed": [
+        {
+          "attribute": "agent.session_id",
+          "sent": "am586-noid-child",
+          "sent_bytes": 16,
+          "sent_is_json": false,
+          "stored": "am586-noid-parent",
+          "stored_bytes": 17,
+          "stored_is_json": false,
+          "stored_is_prefix_of_sent": false,
+          "stored_is_the_resource_attribute": true
+        }
+      ]
+    }
+  },
+  "otelcol_contrib": {
+    "sha256": "b19bcb7c192c77126ba530fed7bf361183d125b8a9decdec265cbb68b856cc2b",
+    "version": "0.165.0"
+  },
+  "python_version": "3.14.8",
+  "sample_envelopes": {
+    "chat": {
+      "data": {
+        "baseData": {
+          "data": "",
+          "duration": "00.00:00:00.400000",
+          "id": "c67b6f6f451c2904",
+          "name": "chat claude-sonnet-4-5",
+          "properties": {
+            "agent.session_id": "am586-genai-parent",
+            "agent.strace.provider": "anthropic",
+            "agent.strace.request.event_id": "am586-genai-llm-req-1",
+            "agent.strace.request.previous_hash": "95e42bb13c4b4b0916141d5a9210765d4db1d37dc19ea30082f29c338664d328",
+            "agent.strace.request.provenance": "{\"provider\": \"anthropic\"}",
+            "agent.strace.request.redacted": "false",
+            "agent.strace.response.event_id": "am586-genai-llm-res-1",
+            "agent.strace.response.parent_event_id": "am586-genai-llm-req-1",
+            "agent.strace.response.previous_hash": "b6460ba000b24bb1fc9c9a2b3f8976d713055eea461c5d52ea53d27bb1412ec4",
+            "agent.strace.response.provenance": "{\"provider\": \"anthropic\"}",
+            "agent.strace.response.redacted": "false",
+            "error.type": "overloaded_error",
+            "gen_ai.agent.id": "demo-agent-v1",
+            "gen_ai.conversation.id": "synthetic-conversation-am586-genai",
+            "gen_ai.operation.name": "chat",
+            "gen_ai.provider.name": "anthropic",
+            "gen_ai.request.max_tokens": "4096",
+            "gen_ai.request.model": "claude-sonnet-4-5",
+            "gen_ai.system": "anthropic",
+            "instrumentationlibrary.name": "agent-trace",
+            "instrumentationlibrary.version": "0.121.1",
+            "llm.invocation_parameters": "{\"max_tokens\":4096}",
+            "llm.model_name": "claude-sonnet-4-5",
+            "llm.provider": "anthropic",
+            "metadata": "{\"agent_strace\": {\"provider\": \"anthropic\", \"request.event_id\": \"am586-genai-llm-req-1\", \"request.redacted\": false, \"request.previous_hash\": \"95e42bb13c4b4b09161... (528 characters)",
+            "openinference.span.kind": "LLM",
+            "otel.status_code": "STATUS_CODE_ERROR",
+            "otel.status_description": "synthetic overload, retrying",
+            "service.name": "agent-trace",
+            "service.version": "0.121.1",
+            "session.id": "am586-genai-parent"
+          },
+          "resultCode": "2",
+          "success": false,
+          "target": "",
+          "type": "",
+          "ver": 2
+        },
+        "baseType": "RemoteDependencyData"
+      },
+      "iKey": "00000000-0000-0000-0000-000000000000",
+      "name": "Microsoft.ApplicationInsights.RemoteDependency",
+      "sampleRate": 100,
+      "seq": "",
+      "tags": {
+        "ai.application.ver": "0.121.1",
+        "ai.cloud.role": "agent-trace",
+        "ai.internal.sdkVersion": "otelc-unknown-dar-arm64",
+        "ai.operation.id": "5a78eb4535b614044c4a5ff0956ced55",
+        "ai.operation.parentId": "638e2d0346a2ea42"
+      },
+      "time": "2026-09-13T12:00:01.2Z",
+      "ver": 1
+    },
+    "exception": {
+      "data": {
+        "baseData": {
+          "exceptions": [
+            {
+              "hasFullStack": false,
+              "id": 0,
+              "message": "example test failed",
+              "outerId": 0,
+              "stack": "",
+              "typeName": "Error"
+            }
+          ],
+          "problemId": "",
+          "properties": {
+            "agent.session_id": "am586-genai-parent",
+            "agent.strace.response.event_id": "am586-genai-ev-error",
+            "agent.strace.response.parent_event_id": "am586-genai-tool-test-1",
+            "agent.strace.response.previous_hash": "fe1311c426d5dfb22fc1d741b4e16293ab23997e2cb590e7dad88506f5ba19ce",
+            "agent.strace.response.redacted": "false",
+            "exception.escaped": "false",
+            "exception.message": "example test failed",
+            "exception.type": "Error",
+            "instrumentationlibrary.name": "agent-trace",
+            "instrumentationlibrary.version": "0.121.1",
+            "service.name": "agent-trace",
+            "service.version": "0.121.1"
+          },
+          "severityLevel": 3,
+          "ver": 2
+        },
+        "baseType": "ExceptionData"
+      },
+      "iKey": "00000000-0000-0000-0000-000000000000",
+      "name": "Microsoft.ApplicationInsights.Exception",
+      "sampleRate": 100,
+      "seq": "",
+      "tags": {
+        "ai.application.ver": "0.121.1",
+        "ai.cloud.role": "agent-trace",
+        "ai.internal.sdkVersion": "otelc-unknown-dar-arm64",
+        "ai.operation.id": "5a78eb4535b614044c4a5ff0956ced55",
+        "ai.operation.parentId": "d00dbefae86fbd67"
+      },
+      "time": "2026-09-13T12:00:04.1Z",
+      "ver": 1
+    },
+    "execute_tool": {
+      "data": {
+        "baseData": {
+          "data": "",
+          "duration": "00.00:00:01.100000",
+          "id": "d00dbefae86fbd67",
+          "name": "execute_tool bash",
+          "properties": {
+            "agent.session_id": "am586-genai-parent",
+            "agent.strace.request.event_id": "am586-genai-tool-test-1",
+            "agent.strace.request.previous_hash": "1738beb8603aaaf5c7bdef6457726e0ea79869c23388445c770c254b35b5e493",
+            "agent.strace.request.redacted": "false",
+            "agent.strace.response.event_id": "am586-genai-ev-error",
+            "agent.strace.response.parent_event_id": "am586-genai-tool-test-1",
+            "agent.strace.response.previous_hash": "fe1311c426d5dfb22fc1d741b4e16293ab23997e2cb590e7dad88506f5ba19ce",
+            "agent.strace.response.redacted": "false",
+            "error.type": "_OTHER",
+            "gen_ai.agent.id": "demo-agent-v1",
+            "gen_ai.conversation.id": "synthetic-conversation-am586-genai",
+            "gen_ai.operation.name": "execute_tool",
+            "gen_ai.tool.call.arguments": "{\"command\":\"python -m pytest -q tests/test_example.py\"}",
+            "gen_ai.tool.call.id": "am586-genai-tool-test-1",
+            "gen_ai.tool.input.command": "python -m pytest -q tests/test_example.py",
+            "gen_ai.tool.name": "bash",
+            "input.mime_type": "application/json",
+            "input.value": "{\"command\":\"python -m pytest -q tests/test_example.py\"}",
+            "instrumentationlibrary.name": "agent-trace",
+            "instrumentationlibrary.version": "0.121.1",
+            "metadata": "{\"agent_strace\": {\"request.event_id\": \"am586-genai-tool-test-1\", \"request.redacted\": false, \"request.previous_hash\": \"1738beb8603aaaf5c7bdef6457726e0ea79869c233... (407 characters)",
+            "openinference.span.kind": "TOOL",
+            "otel.status_code": "STATUS_CODE_ERROR",
+            "otel.status_description": "example test failed",
+            "service.name": "agent-trace",
+            "service.version": "0.121.1",
+            "session.id": "am586-genai-parent",
+            "tool.name": "bash"
+          },
+          "resultCode": "2",
+          "success": false,
+          "target": "",
+          "type": "InProc",
+          "ver": 2
+        },
+        "baseType": "RemoteDependencyData"
+      },
+      "iKey": "00000000-0000-0000-0000-000000000000",
+      "name": "Microsoft.ApplicationInsights.RemoteDependency",
+      "sampleRate": 100,
+      "seq": "",
+      "tags": {
+        "ai.application.ver": "0.121.1",
+        "ai.cloud.role": "agent-trace",
+        "ai.internal.sdkVersion": "otelc-unknown-dar-arm64",
+        "ai.operation.id": "5a78eb4535b614044c4a5ff0956ced55",
+        "ai.operation.parentId": "638e2d0346a2ea42"
+      },
+      "time": "2026-09-13T12:00:03Z",
+      "ver": 1
+    },
+    "invoke_agent root": {
+      "data": {
+        "baseData": {
+          "data": "",
+          "duration": "00.00:00:11.000000",
+          "id": "638e2d0346a2ea42",
+          "name": "invoke_agent claude-code",
+          "properties": {
+            "agent.errors": "2",
+            "agent.llm_requests": "2",
+            "agent.session_id": "am586-genai-parent",
+            "agent.strace.behavior.failed_operation_count": "1",
+            "agent.strace.behavior.recovered_operation_count": "1",
+            "agent.strace.behavior.retry_count": "1",
+            "agent.strace.behavior.unresolved_failed_operation_count": "0",
+            "agent.strace.evidence.gap_codes": "[\"orphan_tool_result\"]",
+            "agent.strace.evidence.gap_count": "1",
+            "agent.strace.evidence.gaps": "[{\"code\": \"orphan_tool_result\", \"kind\": \"observed\", \"event_id\": \"am586-genai-ev-orphan\", \"message\": \"tool result 'am586-genai-ev-orphan' references unknown pare... (185 characters)",
+            "agent.strace.evidence.schema_version": "1",
+            "agent.strace.evidence.status": "partial",
+            "agent.strace.last_model_request_failed": "false",
+            "agent.strace.provenance": "{\"agent_provider\": \"claude-code\", \"agent_version\": \"0.0.0-synthetic\", \"os_user\": \"synthetic-user\", \"hostname\": \"synthetic-host\", \"pid\": 4242, \"ppid\": 4241, \"pro... (401 characters)",
+            "agent.strace.provider": "claude-code",
+            "agent.strace.redacted": "true",
+            "agent.strace.redacted_event_count": "1",
+            "agent.strace.session_status": "completed",
+            "agent.tool_calls": "3",
+            "gen_ai.agent.id": "demo-agent-v1",
+            "gen_ai.agent.name": "claude-code",
+            "gen_ai.conversation.id": "synthetic-conversation-am586-genai",
+            "gen_ai.input.messages": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"[REDACTED synthetic request] fix the failing example test\"}]}]",
+            "gen_ai.operation.name": "invoke_agent",
+            "gen_ai.output.messages": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"Updated the example and the focused test now passes.\"}]}]",
+            "gen_ai.provider.name": "anthropic",
+            "gen_ai.system": "anthropic",
+            "instrumentationlibrary.name": "agent-trace",
+            "instrumentationlibrary.version": "0.121.1",
+            "metadata": "{\"agent_strace\": {\"provider\": \"claude-code\", \"redacted\": true, \"redacted_event_count\": 1, \"evidence.schema_version\": 1, \"evidence.status\": \"partial\", \"evidence.... (1064 characters)",
+            "openinference.span.kind": "AGENT",
+            "otel.status_code": "STATUS_CODE_UNSET",
+            "service.name": "agent-trace",
+            "service.version": "0.121.1",
+            "session.id": "am586-genai-parent"
+          },
+          "resultCode": "0",
+          "success": true,
+          "target": "",
+          "type": "InProc",
+          "ver": 2
+        },
+        "baseType": "RemoteDependencyData"
+      },
+      "iKey": "00000000-0000-0000-0000-000000000000",
+      "name": "Microsoft.ApplicationInsights.RemoteDependency",
+      "sampleRate": 100,
+      "seq": "",
+      "tags": {
+        "ai.application.ver": "0.121.1",
+        "ai.cloud.role": "agent-trace",
+        "ai.internal.sdkVersion": "otelc-unknown-dar-arm64",
+        "ai.operation.id": "5a78eb4535b614044c4a5ff0956ced55",
+        "ai.operation.parentId": ""
+      },
+      "time": "2026-09-13T12:00:00Z",
+      "ver": 1
+    },
+    "span event (spaneventsenabled)": {
+      "data": {
+        "baseData": {
+          "message": "gen_ai.user.message",
+          "properties": {
+            "agent.session_id": "am586-genai-parent",
+            "agent.strace.event.event_id": "am586-genai-ev-prompt",
+            "agent.strace.event.previous_hash": "1406b5f6fad5dcbfa7562799207b7b68dc838f21459999d9f1fec36c47835e5b",
+            "agent.strace.event.redacted": "true",
+            "gen_ai.prompt": "[REDACTED synthetic request] fix the failing example test",
+            "instrumentationlibrary.name": "agent-trace",
+            "instrumentationlibrary.version": "0.121.1",
+            "metadata": "{\"agent_strace\": {\"event.event_id\": \"am586-genai-ev-prompt\", \"event.redacted\": true, \"event.previous_hash\": \"1406b5f6fad5dcbfa7562799207b7b68dc838f21459999d9f1f... (176 characters)",
+            "service.name": "agent-trace",
+            "service.version": "0.121.1"
+          },
+          "severityLevel": 0,
+          "ver": 2
+        },
+        "baseType": "MessageData"
+      },
+      "iKey": "00000000-0000-0000-0000-000000000000",
+      "name": "Microsoft.ApplicationInsights.Message",
+      "sampleRate": 100,
+      "seq": "",
+      "tags": {
+        "ai.application.ver": "0.121.1",
+        "ai.cloud.role": "agent-trace",
+        "ai.internal.sdkVersion": "otelc-unknown-dar-arm64",
+        "ai.operation.id": "5a78eb4535b614044c4a5ff0956ced55",
+        "ai.operation.parentId": "638e2d0346a2ea42"
+      },
+      "time": "2026-09-13T12:00:01Z",
+      "ver": 1
+    }
+  },
+  "transport": {
+    "content_encodings": [
+      "gzip"
+    ],
+    "content_types": [
+      "application/x-json-stream"
+    ],
+    "envelope_names": {
+      "Microsoft.ApplicationInsights.Exception": 4,
+      "Microsoft.ApplicationInsights.RemoteDependency": 38
+    },
+    "envelope_tags": [
+      "ai.application.ver",
+      "ai.cloud.role",
+      "ai.internal.sdkVersion",
+      "ai.operation.id",
+      "ai.operation.parentId"
+    ],
+    "envelopes": {
+      "default": 42,
+      "spanevents": 83
+    },
+    "envelopes_by_baseType": {
+      "default": {
+        "ExceptionData": 4,
+        "RemoteDependencyData": 38
+      },
+      "spanevents": {
+        "ExceptionData": 4,
+        "MessageData": 41,
+        "RemoteDependencyData": 38
+      }
+    },
+    "iKeys": [
+      "00000000-0000-0000-0000-000000000000"
+    ],
+    "largest_post_bytes_sent": 4910,
+    "largest_post_bytes_unzipped": 67168,
+    "paths": [
+      "/default/v2.1/track",
+      "/spanevents/v2.1/track"
+    ],
+    "posts": 14
+  },
+  "watch --stream-otlp --agent-id": {
+    "distinct_span_ids": 7,
+    "gen_ai.agent.id": {
+      "demo-agent-v1": 9
+    },
+    "names": {
+      "chat": 2,
+      "execute_tool": 4,
+      "invoke_agent": 3
+    },
+    "root_envelopes": 3,
+    "span_envelopes": 9,
+    "span_ids_sent_more_than_once": 1
+  }
+}

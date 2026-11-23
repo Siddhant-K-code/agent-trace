@@ -1,0 +1,4 @@
+# The collector is downloaded outside the repository; keep it out if it lands here.
+otelcol-contrib
+*.tar.gz
+__pycache__/

@@ -828,7 +828,7 @@ class TestWatchStreamFlagChecks(unittest.TestCase):
         env = patch.dict(os.environ)
         env.start()
         self.addCleanup(env.stop)
-        for name in ("AGENT_STRACE_TENANT_ID", *PROTOCOL_ENV_VARS):
+        for name in ("AGENT_STRACE_TENANT_ID", "AGENT_STRACE_AGENT_ID", *PROTOCOL_ENV_VARS):
             os.environ.pop(name, None)
 
     def _snapshot(self):
@@ -998,6 +998,44 @@ class TestWatchStreamFlagChecks(unittest.TestCase):
                     if stream_config is not None:
                         self.assertFalse(stream_config.otlp)
                         self.assertEqual(stream_config.protocol, "http/json")
+
+    def test_agent_id_needs_stream_otlp(self):
+        line = "[watch] --agent-id is used only with --stream-to and --stream-otlp\n"
+        for flags in ([f"--stream-to={self._URL}"], [], ["--stream-otlp"]):
+            self._assert_refused([*flags, "--agent-id=foundry-agent-7"], line)
+
+    def test_empty_agent_id_is_refused(self):
+        os.environ["AGENT_STRACE_AGENT_ID"] = "from-env"
+        for value in ("", " ", "\t"):
+            self._assert_refused(
+                [f"--stream-to={self._URL}", "--stream-otlp", f"--agent-id={value}"],
+                "[watch] invalid --agent-id value: it is empty\n",
+            )
+
+    def test_agent_id_flag_then_variable(self):
+        stream = [f"--stream-to={self._URL}", "--stream-otlp"]
+        cases = (
+            ({}, [], ""),
+            ({"AGENT_STRACE_AGENT_ID": ""}, [], ""),
+            ({"AGENT_STRACE_AGENT_ID": " "}, [], ""),
+            ({"AGENT_STRACE_AGENT_ID": "from-env"}, [], "from-env"),
+            ({"AGENT_STRACE_AGENT_ID": "from-env"}, ["--agent-id=foundry-agent-7"],
+             "foundry-agent-7"),
+            ({}, ["--agent-id= as given "], " as given "),
+        )
+        for env, flags, expected in cases:
+            with self.subTest(env=env, flags=flags), patch.dict(os.environ, env):
+                status, _, err, watch_session_mock = self._run(*stream, *flags)
+                self.assertEqual((status, err), (0, ""))
+                self.assertEqual(
+                    watch_session_mock.call_args.kwargs["stream_config"].agent_id, expected,
+                )
+
+    def test_ndjson_streams_ignore_the_agent_id_variable(self):
+        with patch.dict(os.environ, {"AGENT_STRACE_AGENT_ID": "from-env"}):
+            status, _, err, watch_session_mock = self._run(f"--stream-to={self._URL}")
+        self.assertEqual((status, err), (0, ""))
+        self.assertEqual(watch_session_mock.call_args.kwargs["stream_config"].agent_id, "")
 
 
 # ---------------------------------------------------------------------------

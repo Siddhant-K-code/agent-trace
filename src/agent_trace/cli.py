@@ -538,6 +538,38 @@ def _export_protocol(args: argparse.Namespace) -> tuple[str, str | None]:
         return PROTOCOL_JSON, str(exc)
 
 
+def _export_agent_id(args: argparse.Namespace) -> tuple[str, str | None]:
+    """Return the gen_ai.agent.id export sends and the refusal line.
+
+    --agent-id wins, then AGENT_STRACE_AGENT_ID. The variable is read only
+    when export sends OTLP spans; elsewhere it is ignored and the flag is
+    refused.
+    """
+    from .otlp import resolve_agent_id
+
+    flag = getattr(args, "agent_id", None)
+    for name in ("scores", "metrics", "backend", "anonymize"):
+        if getattr(args, name, None):
+            if flag is None:
+                return "", None
+            return "", (
+                f"--agent-id is not used with --{name}; "
+                "use --format otlp, otlp-genai or temporal"
+            )
+    fmt = getattr(args, "format", "json")
+    if fmt not in _ENDPOINT_FORMATS:
+        if flag is None:
+            return "", None
+        return "", (
+            f"--agent-id is not used with --format {fmt}; "
+            "use --format otlp, otlp-genai or temporal"
+        )
+    try:
+        return resolve_agent_id(flag, os.environ), None
+    except ValueError as exc:
+        return "", str(exc)
+
+
 def _write_events(out: TextIO, fmt: str, events: list[TraceEvent]) -> None:
     """Write *events* to *out* as json, csv or ndjson."""
     if fmt == "json":
@@ -568,6 +600,7 @@ def _export_otlp_tree(
     session_id: str,
     headers: dict[str, str],
     protocol: str = PROTOCOL_JSON,
+    agent_id: str = "",
 ) -> int:
     """Export a session and its subagent sessions as one OTLP trace."""
     from .otlp import (
@@ -577,6 +610,7 @@ def _export_otlp_tree(
         node_tree_to_otlp,
         otlp_data_indexes,
         otlp_genai_data_indexes,
+        set_agent_id,
     )
     from .subagent import SessionNode, build_tree
 
@@ -624,6 +658,8 @@ def _export_otlp_tree(
     except ValueError as exc:
         sys.stderr.write(f"OTLP export failed: {exc}\n")
         return 1
+    # Every subagent's spans carry the same ID as the root session's.
+    set_agent_id(payload, agent_id)
     event_count = sum(len(node.events) for node in nodes)
 
     if not args.endpoint:
@@ -667,6 +703,10 @@ def cmd_export(args: argparse.Namespace) -> int:
     if problem:
         sys.stderr.write(f"{problem}\n")
         return 1
+    agent_id, problem = _export_agent_id(args)
+    if problem:
+        sys.stderr.write(f"{problem}\n")
+        return 1
 
     # Route to Langfuse/OTLP export when --scores, --metrics, or --backend is set
     if getattr(args, "scores", False) or getattr(args, "metrics", False) or getattr(args, "backend", None):
@@ -695,7 +735,7 @@ def cmd_export(args: argparse.Namespace) -> int:
             return 1
 
     if getattr(args, "include_subagents", False):
-        return _export_otlp_tree(args, store, session_id, headers, protocol)
+        return _export_otlp_tree(args, store, session_id, headers, protocol, agent_id)
 
     events = store.load_events(session_id)
 
@@ -725,6 +765,7 @@ def cmd_export(args: argparse.Namespace) -> int:
             otlp_genai_data_indexes,
             session_to_otlp,
             session_to_otlp_genai,
+            set_agent_id,
         )
 
         use_genai = args.format == "otlp-genai"
@@ -766,6 +807,7 @@ def cmd_export(args: argparse.Namespace) -> int:
                 label = "Temporal" if use_temporal else "OTLP"
                 sys.stderr.write(f"{label} export failed: {exc}\n")
                 return 1
+            set_agent_id(payload, agent_id)
             output_path = getattr(args, "output", "") or ""
             if not output_path:
                 fmt_suffix = args.format
@@ -789,6 +831,7 @@ def cmd_export(args: argparse.Namespace) -> int:
                 headers=headers,
                 service_name=args.service_name,
                 protocol=protocol,
+                agent_id=agent_id,
             )
             return 0 if ok else 1
         elif use_genai:
@@ -801,6 +844,7 @@ def cmd_export(args: argparse.Namespace) -> int:
             except ValueError as exc:
                 sys.stderr.write(f"OTLP export failed: {exc}\n")
                 return 1
+            set_agent_id(payload, agent_id)
             ok = export_otlp_payload(
                 payload, endpoint, headers=headers, event_count=len(events), protocol=protocol,
             )
@@ -813,6 +857,7 @@ def cmd_export(args: argparse.Namespace) -> int:
                 headers=headers,
                 service_name=args.service_name,
                 protocol=protocol,
+                agent_id=agent_id,
             )
             return 0 if ok else 1
 
@@ -2118,6 +2163,10 @@ def build_parser() -> argparse.ArgumentParser:
                                "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL, then OTEL_EXPORTER_OTLP_PROTOCOL, "
                                "then http/json); Phoenix needs http/protobuf. --output files are "
                                "always JSON")
+    p_export.add_argument("--agent-id", dest="agent_id", metavar="ID",
+                          help="send gen_ai.agent.id=ID on every span with --format otlp, "
+                               "otlp-genai or temporal, such as a Foundry external agent's ID "
+                               "(default: AGENT_STRACE_AGENT_ID; none when unset)")
     p_export.add_argument("--service-name", default="agent-trace", help="OTel service name (default: agent-trace)")
     # Langfuse / OTLP metrics flags
     p_export.add_argument("--scores", action="store_true",
@@ -2598,6 +2647,10 @@ def build_parser() -> argparse.ArgumentParser:
                          help="OTLP/HTTP encoding for --stream-otlp (default: "
                               "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL, then OTEL_EXPORTER_OTLP_PROTOCOL, "
                               "then http/json); Phoenix needs http/protobuf")
+    p_watch.add_argument("--agent-id", dest="agent_id", metavar="ID",
+                         help="with --stream-otlp, send gen_ai.agent.id=ID on every span, such "
+                              "as a Foundry external agent's ID (default: "
+                              "AGENT_STRACE_AGENT_ID; none when unset)")
     p_watch.add_argument("--stream-to", dest="stream_to", metavar="URL",
                          help="POST events as NDJSON to this http:// or https:// URL while "
                               "watching (no user name or password; redirects are not "

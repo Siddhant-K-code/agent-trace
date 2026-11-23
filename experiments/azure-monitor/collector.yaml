@@ -1,0 +1,31 @@
+# The otelcol-contrib config that run.py starts. run.py sets the three
+# variables: the receiver listens on a free loopback port, and each
+# connection string has the fake instrumentation key and an IngestionEndpoint
+# on run.py's capture server, so nothing leaves the machine.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: "${env:OTLP_HTTP_ENDPOINT}"
+
+exporters:
+  # The defaults, with a short batch interval.
+  azure_monitor:
+    connection_string: "${env:CONNECTION_STRING_DEFAULT}"
+    maxbatchinterval: 1s
+  # The same, but span events other than exceptions become trace telemetry.
+  azure_monitor/spanevents:
+    connection_string: "${env:CONNECTION_STRING_SPANEVENTS}"
+    maxbatchinterval: 1s
+    spaneventsenabled: true
+
+service:
+  telemetry:
+    metrics:
+      level: none
+    logs:
+      level: warn
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [azure_monitor, azure_monitor/spanevents]

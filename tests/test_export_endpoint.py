@@ -42,6 +42,7 @@ REDIRECT_NOTE = " (redirects are not followed; give the final URL)"
 REASON = "Oops \x1b]0;PWNED-TITLE\x07\x1b[2J\x1b[31mRED\x1b[0m \x9b31m end"
 REASON_SHOWN = "Oops \\x1b]0;PWNED-TITLE\\x07\\x1b[2J\\x1b[31mRED\\x1b[0m \\x9b31m end"
 FORMATS_HINT = "use --format otlp, otlp-genai or temporal"
+AGENT_ID = "foundry-agent-7"
 NAME_RULE = "its name may only contain ASCII letters, digits and !#$%&'*+-.^_`|~"
 VALUE_RULE = "its value must contain only printable ASCII"
 # Variables that would send export --scores, --metrics or --backend somewhere.
@@ -166,6 +167,28 @@ def _response(status: int) -> MagicMock:
     return response
 
 
+def _spans(payload: dict) -> list[dict]:
+    return [
+        span
+        for resource_spans in payload["resourceSpans"]
+        for scope_spans in resource_spans["scopeSpans"]
+        for span in scope_spans["spans"]
+    ]
+
+
+def _attribute(span: dict, key: str):
+    """Return the string value of *span*'s attribute *key*, or None."""
+    values = [a["value"]["stringValue"] for a in span.get("attributes", []) if a["key"] == key]
+    if len(values) > 1:
+        raise AssertionError(f"{key} is on {span['name']} {len(values)} times")
+    return values[0] if values else None
+
+
+def _agent_ids(payload: dict) -> list:
+    """Return each span's gen_ai.agent.id, None where it has none."""
+    return [_attribute(span, "gen_ai.agent.id") for span in _spans(payload)]
+
+
 class _ExportCase(unittest.TestCase):
     """Run export in-process on a session with two events and a Temporal context."""
 
@@ -179,7 +202,7 @@ class _ExportCase(unittest.TestCase):
         environ = patch.dict(os.environ, {"no_proxy": "*"})
         environ.start()
         self.addCleanup(environ.stop)
-        for name in (*_ROUTE_ENV, *PROTOCOL_ENV_VARS):
+        for name in (*_ROUTE_ENV, *PROTOCOL_ENV_VARS, otlp.AGENT_ID_ENV):
             os.environ.pop(name, None)
         store = TraceStore(self.trace_dir)
         meta = SessionMeta(
@@ -967,6 +990,35 @@ class TestExportIncludeSubagents(_CollectorCase):
                 self.assertEqual(sent_protobuf.header("Content-Type"), ["application/x-protobuf"])
                 self.assertEqual(sent_protobuf.body, encode_trace_request(json.loads(sent_json.body)))
 
+    def test_agent_id_is_on_every_subagent_span(self):
+        # Foundry finds an agent's spans by gen_ai.agent.id, so the subagents
+        # carry the root's ID; their gen_ai.agent.name stays their own.
+        for fmt in ("otlp", "otlp-genai"):
+            with self.subTest(format=fmt):
+                path = os.path.join(self.root, f"{fmt}.json")
+                code, _, _ = self.export(
+                    "--format", fmt, "--include-subagents", "--agent-id", AGENT_ID,
+                    "--output", path,
+                )
+                self.assertEqual(code, 0)
+                with open(path, encoding="utf-8") as f:
+                    payload = json.load(f)
+                self.assertOneTrace(payload, fmt)
+                self.assertEqual(_agent_ids(payload), [AGENT_ID] * 4)
+                if fmt == "otlp-genai":
+                    roots = [s for s in _spans(payload) if s["name"].startswith("invoke_agent")]
+                    self.assertEqual(
+                        [_attribute(s, "gen_ai.agent.name") for s in roots], ["probe", "probe"],
+                    )
+        self.collector.script((200, b"", 0.0))
+        result = self.export(
+            "--format", "otlp-genai", "--include-subagents", "--endpoint", self.base,
+            "--agent-id", AGENT_ID,
+        )
+        self.assertEqual(result[0], 0)
+        [post] = self.collector.received()
+        self.assertEqual(_agent_ids(json.loads(post.body)), [AGENT_ID] * 4)
+
     def test_refusals(self):
         not_used = "it exports one OTLP trace with --format otlp or otlp-genai"
         cases = (
@@ -1094,6 +1146,107 @@ class TestExportWithoutEndpoint(_ExportCase):
                 with open(os.path.join(self.cwd, "out.json"), encoding="utf-8") as f:
                     self.assertIn("resourceSpans", json.load(f))
                 os.remove(os.path.join(self.cwd, "out.json"))
+
+
+class TestExportAgentId(_CollectorCase):
+    """--agent-id, else AGENT_STRACE_AGENT_ID, puts gen_ai.agent.id on every
+    span, so a Foundry external agent with that ID finds them (#586)."""
+
+    def payload(self, *flags: str) -> dict:
+        """Export to out.json with *flags*, return the payload and remove it."""
+        code, out, err = self.export(*flags, "--output", "out.json")
+        self.assertEqual((code, out), (0, ""), err)
+        path = os.path.join(self.cwd, "out.json")
+        with open(path, encoding="utf-8") as f:
+            payload = json.load(f)
+        os.remove(path)
+        return payload
+
+    def test_every_span_in_a_file(self):
+        for fmt in FORMATS:
+            with self.subTest(format=fmt):
+                ids = _agent_ids(self.payload("--format", fmt, "--agent-id", AGENT_ID))
+                self.assertEqual(ids, [AGENT_ID] * 2)
+
+    def test_every_span_sent(self):
+        for fmt in FORMATS:
+            with self.subTest(format=fmt):
+                self.collector.script((200, b"", 0.0), (200, b"", 0.0))
+                args = ("--format", fmt, "--endpoint", self.base, "--agent-id", AGENT_ID)
+                self.assertEqual(self.export(*args)[0], 0)
+                self.assertEqual(self.export(*args, "--protocol", "http/protobuf")[0], 0)
+                sent_json, sent_protobuf = self.collector.received()
+                payload = json.loads(sent_json.body)
+                self.assertEqual(_agent_ids(payload), [AGENT_ID] * 2)
+                self.assertEqual(sent_protobuf.body, encode_trace_request(payload))
+
+    def test_variable(self):
+        with patch.dict(os.environ, {otlp.AGENT_ID_ENV: "from-env"}):
+            for fmt in FORMATS:
+                with self.subTest(format=fmt):
+                    self.assertEqual(
+                        _agent_ids(self.payload("--format", fmt)), ["from-env"] * 2,
+                    )
+            self.collector.script((200, b"", 0.0))
+            self.assertEqual(self.export("--format", "otlp-genai", "--endpoint", self.base)[0], 0)
+            [post] = self.collector.received()
+            self.assertEqual(_agent_ids(json.loads(post.body)), ["from-env"] * 2)
+            # The flag wins.
+            ids = _agent_ids(self.payload("--format", "otlp-genai", "--agent-id", AGENT_ID))
+            self.assertEqual(ids, [AGENT_ID] * 2)
+
+    def test_absent_or_empty_variable_sends_none(self):
+        for env in ({}, {otlp.AGENT_ID_ENV: ""}, {otlp.AGENT_ID_ENV: " \t"}):
+            with patch.dict(os.environ, env):
+                for fmt in FORMATS:
+                    with self.subTest(env=env, format=fmt):
+                        self.assertEqual(_agent_ids(self.payload("--format", fmt)), [None] * 2)
+
+    def test_value_is_sent_as_given(self):
+        value = " agent v1/é "
+        self.assertEqual(
+            _agent_ids(self.payload("--format", "otlp-genai", "--agent-id", value)), [value] * 2,
+        )
+
+    def test_empty_flag_is_refused(self):
+        line = "invalid --agent-id value: it is empty\n"
+        with patch.dict(os.environ, {otlp.AGENT_ID_ENV: "from-env"}):
+            for value in ("", " ", "\t"):
+                for flags in (
+                    ("--format", "otlp-genai"),
+                    ("--format", "otlp", "--endpoint", self.base),
+                    ("--format", "temporal", "--endpoint", self.base),
+                    ("--format", "otlp-genai", "--include-subagents"),
+                ):
+                    with self.subTest(value=value, flags=flags):
+                        self.assertEqual(
+                            self.export(*flags, f"--agent-id={value}"), (1, "", line),
+                        )
+        self.assertEqual(self.collector.received(), [])
+        self.assertEqual(os.listdir(self.cwd), [])
+
+    def test_flag_where_it_is_not_used_is_refused(self):
+        for flags, used_with in (
+            ((), "--format json"),
+            (("--format", "csv"), "--format csv"),
+            (("--format", "ndjson"), "--format ndjson"),
+            (("--format", "eu-ai-act"), "--format eu-ai-act"),
+            (("--format", "otlp", "--anonymize"), "--anonymize"),
+            (("--format", "otlp", "--scores"), "--scores"),
+            (("--format", "otlp", "--metrics"), "--metrics"),
+            (("--format", "otlp", "--backend", "otlp"), "--backend"),
+        ):
+            with self.subTest(flags=flags):
+                self.assertEqual(self.export(*flags, "--agent-id", AGENT_ID), (
+                    1, "", f"--agent-id is not used with {used_with}; {FORMATS_HINT}\n",
+                ))
+        self.assertEqual(os.listdir(self.cwd), [])
+
+    def test_variable_is_ignored_where_it_is_not_used(self):
+        with patch.dict(os.environ, {otlp.AGENT_ID_ENV: "from-env"}):
+            code, out, err = self.export("--format", "ndjson")
+        self.assertEqual((code, err, len(out.splitlines())), (0, "", 2))
+        self.assertNotIn("from-env", out)
 
 
 if __name__ == "__main__":
