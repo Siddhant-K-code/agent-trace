@@ -11,9 +11,14 @@ in order: age first, then count, then size. Deletions are logged to
 
 Open sessions are never deleted and do not count toward any limit. A session
 is open when its metadata has no end time or a hook ``.active-session*``
-marker names it. An open session with no writes for OPEN_SESSION_IDLE_DAYS
-is treated as abandoned (for example, its agent crashed) and is handled like
-a closed session.
+marker names it. A stored end time that is not a usable time counts as no
+end time. An open session with no writes for OPEN_SESSION_IDLE_DAYS is
+treated as abandoned (for example, its agent crashed) and is handled like a
+closed session.
+
+Retention ages a session by its stored start time. When that is not a usable
+time, it uses the newest write to the session directory instead. A session
+with no usable start and no readable file time is kept.
 
 Usage:
     agent-strace retention status
@@ -33,7 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
 
-from .models import SessionMeta
+from .models import SessionMeta, usable_time
 from .store import TraceStore, DEFAULT_TRACE_DIR
 
 
@@ -203,17 +208,64 @@ def _active_marker_session_ids(store: TraceStore) -> set[str]:
     return session_ids
 
 
-def _last_write_time(store: TraceStore, meta: SessionMeta) -> float:
-    """Return the newest file modification time in the session directory."""
-    latest = meta.started_at
+def _newest_write_time(store: TraceStore, session_id: str) -> float | None:
+    """Return the newest file modification time in the session directory.
+
+    Returns None when no file time could be read.
+    """
+    latest: float | None = None
     try:
-        for f in store._session_dir(meta.session_id).iterdir():
+        for f in store._session_dir(session_id).iterdir():
             if f.is_symlink() or not f.is_file():
                 continue
-            latest = max(latest, f.stat().st_mtime)
+            mtime = f.stat().st_mtime
+            if latest is None or mtime > latest:
+                latest = mtime
     except (OSError, ValueError):
         pass
     return latest
+
+
+def _last_write_time(store: TraceStore, meta: SessionMeta) -> float | None:
+    """Return the newest of the stored start and the session's file writes.
+
+    A stored start that is not a usable time is ignored. Returns None when
+    no time is usable.
+    """
+    times = [
+        t
+        for t in (
+            usable_time(meta.started_at),
+            _newest_write_time(store, meta.session_id),
+        )
+        if t is not None
+    ]
+    return max(times) if times else None
+
+
+def _age_time(store: TraceStore, meta: SessionMeta) -> float | None:
+    """Return the time retention ages the session by.
+
+    This is the stored start when it is a usable time. Otherwise it is the
+    newest write to the session directory, the latest time the session can
+    have started. Returns None when neither is usable.
+    """
+    started = usable_time(meta.started_at)
+    if started is not None:
+        return started
+    return _newest_write_time(store, meta.session_id)
+
+
+def _dated_sessions(
+    store: TraceStore, sessions: list[SessionMeta],
+) -> list[tuple[float, SessionMeta]]:
+    """Return (age time, meta) for each session that has an age time, in order."""
+    dated: list[tuple[float, SessionMeta]] = []
+    for meta in sessions:
+        age_time = _age_time(store, meta)
+        if age_time is not None:
+            dated.append((age_time, meta))
+    return dated
 
 
 def _is_open(
@@ -222,10 +274,17 @@ def _is_open(
     marker_ids: set[str],
     now: float,
 ) -> bool:
-    """Return True when retention must keep the session because it may be running."""
-    if meta.ended_at is not None and meta.session_id not in marker_ids:
+    """Return True when retention must keep the session because it may be running.
+
+    A stored end time that is not a usable time counts as no end time. When
+    no time is usable, the session is kept.
+    """
+    if usable_time(meta.ended_at) is not None and meta.session_id not in marker_ids:
         return False
-    idle_seconds = now - _last_write_time(store, meta)
+    last_write = _last_write_time(store, meta)
+    if last_write is None:
+        return True
+    idle_seconds = now - last_write
     return idle_seconds < OPEN_SESSION_IDLE_DAYS * 86400
 
 
@@ -269,10 +328,11 @@ def compute_sessions_to_delete(
 ) -> list[str]:
     """Return session IDs that should be deleted under the given policy.
 
-    Sessions are sorted oldest-first. Policies are applied in order:
-    age, count, size. A session marked for deletion by any policy is
-    included once in the result. Open sessions are never selected and do
-    not count toward the count or size limits.
+    Sessions are sorted oldest first by their age time (see _age_time), then
+    by session ID. Policies are applied in order: age, count, size. A session
+    marked for deletion by any policy is included once in the result. Open
+    sessions are never selected and do not count toward the count or size
+    limits. Neither does a session with no usable age time.
     """
     sessions = store.list_sessions()
     if not sessions:
@@ -280,15 +340,18 @@ def compute_sessions_to_delete(
 
     now = time.time()
     eligible, _ = _split_open_sessions(store, sessions, now)
-    # list_sessions() returns newest-first; reverse for oldest-first processing
-    sessions_oldest_first = list(reversed(eligible))
+    dated = sorted(
+        _dated_sessions(store, eligible),
+        key=lambda pair: (pair[0], pair[1].session_id),
+    )
+    sessions_oldest_first = [meta for _, meta in dated]
     to_delete: set[str] = set()
 
     # --- Age policy ---
     if config.max_age_days is not None:
         cutoff = now - config.max_age_days * 86400
-        for meta in sessions_oldest_first:
-            if meta.started_at < cutoff:
+        for age_time, meta in dated:
+            if age_time < cutoff:
                 to_delete.add(meta.session_id)
 
     # --- Count policy ---
@@ -335,9 +398,15 @@ def get_retention_status(store: TraceStore, config: RetentionConfig) -> Retentio
             total_size_bytes=0,
         )
 
-    oldest = min(sessions, key=lambda m: m.started_at)
     now = time.time()
-    age_days = (now - oldest.started_at) / 86400
+    dated = _dated_sessions(store, sessions)
+    if dated:
+        oldest_time, oldest = min(dated, key=lambda pair: pair[0])
+        oldest_id = oldest.session_id
+        age_days = (now - oldest_time) / 86400
+    else:
+        oldest_id = ""
+        age_days = 0.0
     total_bytes = _store_size_bytes(store, sessions)
     _, open_sessions = _split_open_sessions(store, sessions, now)
     to_delete = compute_sessions_to_delete(store, config)
@@ -347,7 +416,7 @@ def get_retention_status(store: TraceStore, config: RetentionConfig) -> Retentio
 
     return RetentionStatus(
         session_count=len(sessions),
-        oldest_session_id=oldest.session_id,
+        oldest_session_id=oldest_id,
         oldest_session_age_days=age_days,
         total_size_bytes=total_bytes,
         sessions_to_delete=to_delete,
@@ -459,8 +528,9 @@ def cmd_retention_status(args: argparse.Namespace, out: TextIO = sys.stdout) -> 
         return 0
 
     out.write(f"Sessions:    {status.session_count}\n")
-    out.write(f"Oldest:      {status.oldest_session_id[:16]} "
-              f"({status.oldest_session_age_days:.1f} days ago)\n")
+    if status.oldest_session_id:
+        out.write(f"Oldest:      {status.oldest_session_id[:16]} "
+                  f"({status.oldest_session_age_days:.1f} days ago)\n")
     out.write(f"Size:        {status.total_size_mb:.1f} MB\n")
     if status.open_session_count:
         out.write(f"Open:        {status.open_session_count} session(s), "

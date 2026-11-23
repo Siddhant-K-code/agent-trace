@@ -2790,10 +2790,18 @@ sessions from oldest to newest. Use `retention clean --dry-run` to preview.
 Retention never deletes an open session, and open sessions do not count toward
 `max_sessions` or `max_size_mb`. A session is open when its metadata has no end
 time, or when a hook `.active-session*` marker in the trace store names it. An
-open session with no writes to its directory for 7 days is treated as abandoned
-(for example, the agent crashed before its session end hook ran) and is handled
-like a finished session. `status` and `clean` print how many open sessions were
-kept.
+end time that is not a usable Unix time, such as text, NaN, a negative number or
+a value out of range, counts as no end time. An open session with no writes to
+its directory for 7 days is treated as abandoned (for example, the agent crashed
+before its session end hook ran) and is handled like a finished session.
+`status` and `clean` print how many open sessions were kept.
+
+Retention ages a session by its start time. When the start time is not a usable
+Unix time, it uses the newest write to the session directory instead. That is
+the latest time the session can have started. This applies to the age limit, the
+order of the count and size limits, and the `Oldest:` line of `status`. A
+session with no usable start time and no readable file time is kept and does
+not count toward any limit.
 
 `max_size_mb` measures only what retention can free: each finished session
 directory plus its compaction checkpoint. Datasets, approval records, logs and
