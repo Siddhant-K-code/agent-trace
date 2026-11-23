@@ -260,12 +260,13 @@ Traces keep the raw text, which can hold escape codes and line breaks.
 `replay`, `record -v`, `record-http -v`, `explain`, `tree`, `approval list`,
 `dashboard`, `review`, `pr-comment`, `standup`, `oncall`, `cognitive-debt`,
 `cost`, `fingerprint`, `drift`, `skills`, `token-budget`, `budget-report`,
-`team-report`, `regression`, `annotate --list`, `optimize`, `audit`, `verify`,
-`policy generate`, `policy backtest`, `policy diff`, `policy coverage`,
-`mcp-scan`, `a2a-tree`, `why`, `timeline`, `diff`, `compare`, `postmortem`,
-`stats` and `list` show each character that Python's `str.isprintable()`
-rejects as its escape, such as `\x1b`, `\n` or `\u202e`, so recorded text cannot
-move the cursor, hide a command or write to the clipboard. `pr-comment` posts
+`team-report`, `regression`, `annotate --list`, `optimize`, `audit`,
+`audit-readiness`, `verify`, `policy generate`, `policy backtest`,
+`policy diff`, `policy coverage`, `mcp-scan`, `a2a-tree`, `why`, `timeline`,
+`diff`, `compare`, `postmortem`, `stats` and `list` show each character that
+Python's `str.isprintable()` rejects as its escape, such as `\x1b`, `\n` or
+`\u202e`, so recorded text cannot move the cursor, hide a command or write to
+the clipboard. `pr-comment` posts
 the same escapes, so a bidi control cannot make one path look like another on
 the pull request. In the Markdown from `review --format markdown` and
 `pr-comment`, CR and LF show as spaces. In prompts, responses, tool output,
@@ -1502,7 +1503,8 @@ Without a session ID, `compliance export` reports each ended session that
 started in the last `--since` days (default `30d`). It refuses when the store
 refuses to read any session in it, even one outside that window, so it never
 leaves out a session or reports it as empty. With a session ID, it refuses that
-session the same way. See
+session the same way. A session whose `events.ndjson` is a symlink is refused
+too. See
 [Sessions with mismatched or unreadable events](#sessions-with-mismatched-or-unreadable-events).
 
 This is the legacy compatibility command. For a privacy-minimized, explicitly
@@ -1609,18 +1611,30 @@ Hash chain integrity fails when a session's chain is `broken` or its
 See the states under [`verify`](#verify). Missing links cost 20 points.
 
 Hash chain integrity also fails when the store refuses to read a session: its
-`meta.json` is [corrupt](#list), its `started_at` is not a usable time, or its
-events are
+`meta.json` is [corrupt](#list), its `started_at` is not a usable time, a
+tenant ID in it is not valid, or its events are
 [mismatched or unreadable](#sessions-with-mismatched-or-unreadable-events).
-The check counts the session and names it with the reason:
+It fails too for each store entry that makes `export --all` refuse: a symlink,
+a directory with no `meta.json` or no `events.ndjson`, a directory whose name
+is not a session ID, and a session whose `meta.json` or `events.ndjson` is a
+symlink or not a regular file. The check counts the session or entry and names
+it with the reason:
 
 ```
 FAIL Hash chain integrity: 3 sessions checked
   cannot read session c3d4e5f6a7b80003: line 5 of events.ndjson is not valid JSON
+  cannot read session c3d4e5f6a7b80004: no meta.json
 ```
 
-With `--format json`, the session is in `broken_sessions`, and in
-`refused_sessions` with its `session_id` and `reason`.
+With `--format json`, the session or entry is in `broken_sessions`, and in
+`refused_sessions` with its `session_id` and `reason`. For an entry,
+`session_id` holds its name.
+
+Like `export --all`, the check skips plain files, and the `.approvals`,
+`.tenant-journal`, `checkpoints` and `datasets` directories when they hold no
+session files. Outside a workspace, it skips the `workspaces` directory the
+same way. It reads a symlinked trace directory, but `export --all` refuses
+one, so pass the real directory with `--trace-dir`.
 
 `ready` needs a score of 80 or more, no broken chain and no missing links. A
 session with missing links makes the store not `ready` even when retention and
@@ -2576,7 +2590,9 @@ Each sub-session is shown once under the agent that called it. When an agent cal
 
 A sub-session that is not in the store shows as `[not found]`. When the store
 refuses to read the root session or a sub-session, `a2a-tree` prints one
-`Error:` line and exits 1 before it prints anything. See
+`Error:` line and exits 1 before it prints anything. A sub-session whose
+directory, `meta.json` or `events.ndjson` is a symlink is refused too. So is a
+root session whose `events.ndjson` is a symlink. See
 [Sessions with mismatched or unreadable events](#sessions-with-mismatched-or-unreadable-events).
 
 ### `identity`
@@ -3131,8 +3147,8 @@ the session directory out of the store. For a corrupt `meta.json`, you can
 follow the `backfill-meta` steps under [`list`](#list) instead.
 
 `audit-readiness` does not refuse. Its hash chain integrity check fails and
-lists each session the store refuses, with the reason. See
-[`audit-readiness`](#audit-readiness).
+names each session or store entry that makes the bulk exports refuse, with the
+reason. See [`audit-readiness`](#audit-readiness).
 
 `agent-strace server` answers `GET /sessions/<id>/events` for such a session
 with 400 and `{"error": "<message>"}`. When `meta.json` names another session,

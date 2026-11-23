@@ -41,7 +41,13 @@ from .models import (
     usable_number,
     usable_text,
 )
-from .store import TraceStore
+from .store import (
+    CorruptSessionMetaError,
+    RefusedSessionError,
+    TraceStore,
+    refusal_reason,
+    validate_stored_id,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -260,18 +266,25 @@ def _stored_session(
 
     A child's ID comes from recorded event data. The store lacks the session
     when the ID cannot name a session directory in it, or when the directory
-    has no meta.json or no events.ndjson. A session the store refuses to read
-    raises the store's error.
+    has no meta.json or no events.ndjson. Raises CorruptSessionMetaError or
+    RefusedSessionError when the store refuses to read the session, for
+    example when a path in it is a symlink. An OSError, such as a permission
+    error, propagates.
     """
+    try:
+        validate_stored_id(session_id, "stored session ID")
+    except ValueError:
+        return None
     try:
         if not store.session_exists(session_id):
             return None
-    except (OSError, ValueError):
-        return None
-    try:
         return store.load_meta(session_id), store.load_events(session_id)
     except FileNotFoundError:
         return None
+    except (CorruptSessionMetaError, RefusedSessionError):
+        raise
+    except ValueError as exc:
+        raise RefusedSessionError(session_id, refusal_reason(exc)) from exc
 
 
 def build_a2a_tree(

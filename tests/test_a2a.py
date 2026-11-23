@@ -15,17 +15,17 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from agent_trace.models import EventType, SessionMeta, TraceEvent
-from agent_trace.store import TraceStore
+from agent_trace.store import RefusedSessionError, TraceStore
 
 try:
     import _escapes
     import _no_telemetry  # noqa: F401
-    from test_compliance import REFUSALS, refused_message
+    from test_compliance import REFUSALS, SYMLINKS, link_events, refused_message
     from test_hash_chain import _CliCase
 except ImportError:
     from tests import _escapes
     from tests import _no_telemetry  # noqa: F401
-    from tests.test_compliance import REFUSALS, refused_message
+    from tests.test_compliance import REFUSALS, SYMLINKS, link_events, refused_message
     from tests.test_hash_chain import _CliCase
 
 
@@ -611,6 +611,35 @@ class TestA2ATreeRefusedSessions(_CliCase):
                 for args in (("a2a-tree", root), ("a2a-tree", root, "--format", "json")):
                     runs.append((args, self.root / name))
                     expected.append((f"{kind} {place} {args[2:]}", line))
+        for (label, line), run in zip(expected, self.run_each(runs)):
+            with self.subTest(label):
+                self.assertEqual((run.returncode, run.stdout, run.stderr), (1, "", line))
+
+    def test_build_a2a_tree_raises_for_a_symlinked_session_path(self):
+        from agent_trace.a2a import build_a2a_tree
+        for index, (kind, link) in enumerate(SYMLINKS):
+            for place in ("root", "delegated"):
+                with self.subTest(kind, place=place):
+                    store, root, child = self.tree_store(f"link-{index}-{place}")
+                    sid = root if place == "root" else child
+                    reason = link(store, sid)
+                    with self.assertRaises(RefusedSessionError) as caught:
+                        build_a2a_tree(store, root)
+                    self.assertEqual(str(caught.exception), refused_message(sid, reason))
+
+    def test_a2a_tree_refuses_a_symlinked_session_path(self):
+        cases = [(kind, link, "delegated") for kind, link in SYMLINKS]
+        # find_session skips a root whose directory or meta.json is a symlink.
+        cases.append(("symlinked events.ndjson", link_events, "root"))
+        runs, expected = [], []
+        for index, (kind, link, place) in enumerate(cases):
+            name = f"cli-link-{index}"
+            store, root, child = self.tree_store(name)
+            sid = root if place == "root" else child
+            line = f"Error: {refused_message(sid, link(store, sid))}\n"
+            for args in (("a2a-tree", root), ("a2a-tree", root, "--format", "json")):
+                runs.append((args, self.root / name))
+                expected.append((f"{kind} {place} {args[2:]}", line))
         for (label, line), run in zip(expected, self.run_each(runs)):
             with self.subTest(label):
                 self.assertEqual((run.returncode, run.stdout, run.stderr), (1, "", line))

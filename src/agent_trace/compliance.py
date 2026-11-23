@@ -52,6 +52,7 @@ from .models import (
     usable_time,
 )
 from .store import (
+    _TENANT_ADMIN_AUXILIARY_DIRS,
     CorruptSessionMetaError,
     RefusedSessionError,
     TraceStore,
@@ -327,7 +328,9 @@ def export_compliance(
     ``error`` key when the session has no meta.json or no events.ndjson.
     Raises CorruptSessionMetaError or RefusedSessionError when the store
     refuses to read the session, so a refused session is never reported as
-    empty. Raises NonObjectEventDataError when a tool_call or error event's
+    empty. A symlinked meta.json or events.ndjson is such a refusal. An
+    OSError, such as a permission error, propagates. Raises
+    NonObjectEventDataError when a tool_call or error event's
     data is not an object, and UnusableTimestampError when such an event's
     timestamp is not a Unix time in seconds; ``name_session`` adds the
     session ID to either.
@@ -337,6 +340,10 @@ def export_compliance(
         events = store.load_events(session_id)
     except FileNotFoundError:
         return {"error": f"session not found: {session_id}"}
+    except (CorruptSessionMetaError, RefusedSessionError):
+        raise
+    except ValueError as exc:
+        raise RefusedSessionError(session_id, refusal_reason(exc)) from exc
     require_object_event_data(
         events,
         event_types=COMPLIANCE_DATA_EVENT_TYPES,
@@ -642,33 +649,43 @@ def cmd_export_eu_ai_act(args: argparse.Namespace) -> int:
 def _readiness_sessions(
     store: TraceStore,
 ) -> tuple[list[SessionMeta], list[dict[str, str]]]:
-    """Return the sessions to check and the sessions the store refuses.
+    """Return the sessions to check and the store entries the store refuses.
 
-    ``list_sessions`` skips a session whose meta.json is corrupt. This scan
-    lists it as refused instead. A session whose meta.json is readable but
-    whose events the store refuses is in both lists. Each refused entry
-    holds the session ID and the reason.
+    The scan skips only the entries that ``list_sessions_strict`` skips, and
+    reads each session as the bulk exports do. So each entry or session that
+    makes ``export --all`` refuse fails the check. A session whose meta.json
+    is readable but whose events.ndjson is missing or refused is in both
+    lists. Each refused entry holds the entry's name and the reason.
     """
     sessions: list[SessionMeta] = []
     refused: list[dict[str, str]] = []
     if not store.base_dir.is_dir():
         return sessions, refused
     for entry in sorted(store.base_dir.iterdir(), key=lambda item: item.name):
+        if not entry.is_symlink() and not entry.is_dir():
+            continue
         meta_path = entry / "meta.json"
+        events_path = entry / "events.ndjson"
         if (
-            entry.is_symlink()
-            or not entry.is_dir()
-            or meta_path.is_symlink()
-            or not meta_path.is_file()
+            not entry.is_symlink()
+            and (
+                entry.name in _TENANT_ADMIN_AUXILIARY_DIRS
+                or (not store.workspace_id and entry.name == "workspaces")
+            )
+            and not (meta_path.exists() or events_path.exists())
         ):
             continue
         try:
             session_id = validate_stored_id(entry.name, "stored session directory")
         except ValueError:
+            refused.append(
+                {"session_id": entry.name, "reason": "not a valid session directory name"}
+            )
             continue
         try:
             meta = store.load_meta(session_id)
         except FileNotFoundError:
+            refused.append({"session_id": session_id, "reason": "no meta.json"})
             continue
         except (OSError, ValueError, TypeError) as exc:
             refused.append({"session_id": session_id, "reason": _read_refusal_reason(exc)})
@@ -678,10 +695,11 @@ def _readiness_sessions(
             continue
         sessions.append(meta)
         try:
-            store.load_events(session_id)
+            # The bulk exports read the events this way, so a tenant ID they
+            # refuse fails the check too.
+            store.load_events(session_id, validate_tenant_ids=True)
         except FileNotFoundError:
-            # verify_chain reports the missing event stream as broken.
-            pass
+            refused.append({"session_id": session_id, "reason": "no events.ndjson"})
         except (OSError, ValueError, TypeError) as exc:
             refused.append({"session_id": session_id, "reason": _read_refusal_reason(exc)})
     sessions.sort(key=lambda meta: (meta.started_at, meta.session_id), reverse=True)
@@ -783,7 +801,7 @@ def format_audit_readiness(report: dict, out: TextIO = sys.stdout) -> None:
         f"Hash chain integrity: {checks['hash_chain_integrity']['checked_sessions']} sessions checked\n"
     )
     for entry in checks["hash_chain_integrity"]["refused_sessions"]:
-        out.write(f"  cannot read session {entry['session_id']}: {entry['reason']}\n")
+        out.write(f"  cannot read session {inert(entry['session_id'])}: {entry['reason']}\n")
     out.write(
         f"{'OK' if checks['retention_coverage']['ok'] else 'WARN'} "
         f"Retention coverage: {checks['retention_coverage']['available_days']} / "
