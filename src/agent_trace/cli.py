@@ -2288,8 +2288,10 @@ def build_parser() -> argparse.ArgumentParser:
     telemetry_sub.add_parser("disable", help="opt out and delete the anonymous installation ID")
 
     # import (Claude Code JSONL session logs)
-    p_import = sub.add_parser("import", help="import a Claude Code JSONL session log")
-    p_import.add_argument("path", nargs="?", help="path to .jsonl session file")
+    p_import = sub.add_parser(
+        "import", help="import a Claude Code JSONL session log or a gh-aw aw_session.jsonl file")
+    p_import.add_argument(
+        "path", nargs="?", help="path to a Claude Code .jsonl session file or a gh-aw aw_session.jsonl")
     p_import.add_argument("--discover", action="store_true", help="list available Claude Code sessions")
     p_import.add_argument("--claude-dir", default="~/.claude", help="Claude config directory (default: ~/.claude)")
 
