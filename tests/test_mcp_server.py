@@ -9,9 +9,11 @@ import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from agent_trace.mcp_server import (
+    _DISPATCH,
+    _TOOLS,
     _handle,
     _tool_diff_sessions,
     _tool_get_session,
@@ -879,7 +881,9 @@ class TestJsonRpcValidation(unittest.TestCase):
         self.assertEqual(self._code(_rpc("tools/call", {"name": "list_sessions", "arguments": "x"})), -32602)
 
     def test_unknown_tool_is_invalid_params(self):
-        self.assertEqual(self._code(_rpc("tools/call", {"name": "nope", "arguments": {}})), -32602)
+        for arguments in ({}, {"session_id": "x"}):
+            with self.subTest(arguments=arguments):
+                self.assertEqual(self._code(_rpc("tools/call", {"name": "nope", "arguments": arguments})), -32602)
 
     def test_notification_with_bad_params_gets_no_response(self):
         self.assertIsNone(_handle(self.store, {"jsonrpc": "2.0", "method": "x", "params": 3}))
@@ -982,3 +986,87 @@ class TestReadOnlyStore(unittest.TestCase):
         with self.assertRaises(PermissionError):
             store.create_session(SessionMeta(session_id="ro-1"))
         self.assertEqual(list(root.iterdir()), [])
+
+
+class TestUnknownArguments(unittest.TestCase):
+    """A tool refuses an argument its inputSchema does not list, and does not run."""
+
+    REVIEW_TAKES = ("branch, commits, config, fail_on, findings, format, min_confidence, "
+                    "otel_logs, session_ids")
+
+    def setUp(self):
+        self.store = _make_store()
+        self.addCleanup(shutil.rmtree, self.store.base_dir, True)
+        _add_session(self.store, "args-0001", events=[_tool_call("Bash")], agent_name="claude-code")
+
+    def _call(self, name: str, arguments: dict) -> dict:
+        r = _handle(self.store, _rpc("tools/call", {"name": name, "arguments": arguments}))
+        self.assertNotIn("error", r)
+        return r["result"]
+
+    def _refusal(self, name: str, arguments: dict) -> str:
+        result = self._call(name, arguments)
+        self.assertIs(result["isError"], True)
+        self.assertEqual(len(result["content"]), 1)
+        body = json.loads(result["content"][0]["text"])
+        self.assertEqual(list(body), ["error"])
+        return body["error"]
+
+    def test_review_refuses_session_id_and_suggests_session_ids(self):
+        self.assertEqual(
+            self._refusal("review", {"session_id": "args-0001"}),
+            f"review does not take session_id. Did you mean session_ids? It takes: {self.REVIEW_TAKES}",
+        )
+
+    def test_health_refuses_sesion_id_and_suggests_session_id(self):
+        self.assertEqual(
+            self._refusal("health", {"sesion_id": "args-0001"}),
+            "health does not take sesion_id. Did you mean session_id? It takes: session_id",
+        )
+
+    def test_list_sessions_refuses_agent_name_and_suggests_agent(self):
+        self.assertEqual(
+            self._refusal("list_sessions", {"agent_name": "claude"}),
+            "list_sessions does not take agent_name. Did you mean agent? It takes: agent, limit",
+        )
+
+    def test_every_tool_refuses_an_unknown_argument_without_running(self):
+        for tool in _TOOLS:
+            name = tool["name"]
+            schema = tool["inputSchema"]
+            with self.subTest(tool=name):
+                self.assertIs(schema.get("additionalProperties"), False)
+                self.assertIn(name, _DISPATCH)
+                handler = Mock(return_value="{}")
+                with patch.dict(_DISPATCH, {name: handler}):
+                    error = self._refusal(name, {"zz_unknown": 1})
+                handler.assert_not_called()
+                takes = ", ".join(sorted(schema["properties"]))
+                self.assertEqual(error, f"{name} does not take zz_unknown. It takes: {takes}")
+
+    def test_unknown_arguments_are_named_in_sorted_order(self):
+        self.assertEqual(
+            self._refusal("search_events", {"toolName": "Bash", "sessionId": "args-0001"}),
+            "search_events does not take sessionId, toolName. Did you mean session_id for "
+            "sessionId, tool_name for toolName? It takes: exit_code, file_path, has_error, "
+            "limit, session_id, tool_name",
+        )
+        self.assertEqual(
+            self._refusal("review", {"zz_unknown": 1, "session_id": "args-0001"}),
+            "review does not take session_id, zz_unknown. Did you mean session_ids for "
+            f"session_id? It takes: {self.REVIEW_TAKES}",
+        )
+
+    def test_known_argument_set_to_null_still_runs(self):
+        result = self._call("health", {"session_id": None})
+        self.assertIs(result["isError"], False)
+        self.assertEqual(json.loads(result["content"][0]["text"])["session_id"], "args-0001")
+        for tool in _TOOLS:
+            name = tool["name"]
+            nulls = dict.fromkeys(tool["inputSchema"]["properties"])
+            with self.subTest(tool=name):
+                handler = Mock(return_value="{}")
+                with patch.dict(_DISPATCH, {name: handler}):
+                    self.assertIs(self._call(name, nulls)["isError"], False)
+                    self._refusal(name, {**nulls, "zz_unknown": None})
+                handler.assert_called_once_with(self.store, nulls)

@@ -23,6 +23,7 @@ Client setup for Claude Code, Copilot CLI, Codex, and Gemini CLI: docs/mcp.md
 from __future__ import annotations
 
 import argparse
+import difflib
 import io
 import json
 import sys
@@ -73,6 +74,7 @@ _TOOLS: list[dict] = [
                     "default": "",
                 },
             },
+            "additionalProperties": False,
         },
     },
     {
@@ -101,6 +103,7 @@ _TOOLS: list[dict] = [
                 },
             },
             "required": ["session_id"],
+            "additionalProperties": False,
         },
     },
     {
@@ -142,6 +145,7 @@ _TOOLS: list[dict] = [
                     "default": 50,
                 },
             },
+            "additionalProperties": False,
         },
     },
     {
@@ -159,6 +163,7 @@ _TOOLS: list[dict] = [
                 },
             },
             "required": ["session_id"],
+            "additionalProperties": False,
         },
     },
     {
@@ -181,6 +186,7 @@ _TOOLS: list[dict] = [
                 },
             },
             "required": ["session_a", "session_b"],
+            "additionalProperties": False,
         },
     },
     {
@@ -200,6 +206,7 @@ _TOOLS: list[dict] = [
                     "default": "",
                 },
             },
+            "additionalProperties": False,
         },
     },
     {
@@ -245,6 +252,7 @@ _TOOLS: list[dict] = [
                     "default": 5,
                 },
             },
+            "additionalProperties": False,
         },
     },
     {
@@ -329,6 +337,7 @@ _TOOLS: list[dict] = [
                     "default": "json",
                 },
             },
+            "additionalProperties": False,
         },
     },
 ]
@@ -709,6 +718,24 @@ def _reports_error(text: str) -> bool:
     return isinstance(payload, dict) and set(payload) == {"error"}
 
 
+def _unknown_argument_error(name: str, tool_args: dict) -> str:
+    """Name each argument outside the tool's inputSchema, or return ""."""
+    schema = next((tool["inputSchema"] for tool in _TOOLS if tool["name"] == name), {})
+    accepted = sorted(schema.get("properties", {}))
+    unknown = sorted(arg for arg in tool_args if arg not in accepted)
+    if not unknown:
+        return ""
+    hints = []
+    for arg in unknown:
+        close = difflib.get_close_matches(arg, accepted, n=1)
+        if close:
+            hints.append(close[0] if len(unknown) == 1 else f"{close[0]} for {arg}")
+    message = f"{name} does not take {', '.join(unknown)}."
+    if hints:
+        message += f" Did you mean {', '.join(hints)}?"
+    return f"{message} It takes: {', '.join(accepted)}"
+
+
 def _handle(store: TraceStore, request: Any) -> dict | None:
     if not isinstance(request, dict):
         return _err(None, -32600, "invalid request: expected a JSON object")
@@ -764,6 +791,11 @@ def _handle(store: TraceStore, request: Any) -> dict | None:
         fn = _DISPATCH.get(name)
         if fn is None:
             return _err(req_id, -32602, f"unknown tool: {name}")
+
+        # A tool result, not a JSON-RPC error, so the agent reads the message and can retry.
+        refusal = _unknown_argument_error(name, tool_args)
+        if refusal:
+            return _ok(req_id, _tool_result(json.dumps({"error": refusal}), True))
 
         try:
             text = fn(store, tool_args)
