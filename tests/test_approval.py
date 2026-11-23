@@ -715,8 +715,8 @@ class TestRequestIdLookup(unittest.TestCase):
         self.assertEqual((code, err), (0, ""))
         return out, kill
 
-    def assert_refused(self, sub, request_id, message):
-        code, out, err, kill = self.run_cli(sub, request_id)
+    def assert_refused(self, sub, request_id, message, trace_dir=None):
+        code, out, err, kill = self.run_cli(sub, request_id, trace_dir)
         self.assertEqual(code, 1)
         self.assertEqual(out, "")
         self.assertEqual(err, ("" if sub == "show" else "❌ ") + message + "\n")
@@ -731,13 +731,17 @@ class TestRequestIdLookup(unittest.TestCase):
         self.assertEqual(self.snapshot(), before)
 
     def test_refusal_names_five_ids_at_most(self):
-        for n in (7, 3, 1, 6, 2, 5, 4):
+        named = "abc100000000, abc200000000, abc300000000, abc400000000, abc500000000"
+        for n in (3, 1, 5, 2, 4):
             self.save(f"abc{n}00000000")
-        self.assert_refused(
-            "show", "abc",
-            "Request ID prefix abc matches 7 requests: abc100000000, "
-            "abc200000000, abc300000000, abc400000000, abc500000000 and 2 more",
-        )
+        for count, more in ((5, ""), (6, " and 1 more"), (7, " and 2 more")):
+            if count > 5:
+                self.save(f"abc{count}00000000")
+            with self.subTest(matches=count):
+                self.assert_refused(
+                    "show", "abc",
+                    f"Request ID prefix abc matches {count} requests: {named}{more}",
+                )
 
     def test_exact_id_wins_over_longer_ids(self):
         decided = {"approve": (APPROVED, signal.SIGCONT), "deny": (DENIED, signal.SIGTERM)}
@@ -839,20 +843,36 @@ class TestRequestIdLookup(unittest.TestCase):
                 )
         self.assertEqual(self.snapshot(), before)
 
-    def test_symlink_is_skipped(self):
-        target = Path(self.new_trace_dir()) / "abc111111111.json"
-        target.write_text(ApprovalRequest(request_id="abc111111111", agent_pid=1111).to_json())
-        link = approval_mod._request_path(self.store, "abc111111111")
-        link.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            link.symlink_to(target)
-        except (OSError, NotImplementedError):
-            self.skipTest("cannot create a symlink here")
-        before = target.read_bytes()
-        for sub in ("show", "approve", "deny"):
-            with self.subTest(sub=sub):
-                self.assert_refused(sub, "abc", "Request not found: abc")
-        self.assertEqual(target.read_bytes(), before)
+    def test_symlink_counts_as_a_match_and_is_never_followed(self):
+        # (symlink ID, regular ID or None, message for the prefix abc)
+        cases = [
+            ("abc111111111", None,
+             "Request abc111111111 has an invalid record: is a symlink"),
+            ("abc111111111", "abc222222222", self.AMBIGUOUS),
+            ("abc", "abc111111111", "Request abc has an invalid record: is a symlink"),
+        ]
+        for link_id, regular_id, message in cases:
+            for sub in ("show", "approve", "deny"):
+                with self.subTest(link=link_id, regular=regular_id, sub=sub):
+                    trace_dir = self.new_trace_dir()
+                    store = TraceStore(trace_dir)
+                    target = Path(self.new_trace_dir()) / f"{link_id}.json"
+                    target.write_text(
+                        ApprovalRequest(request_id=link_id, agent_pid=1111).to_json())
+                    link = approval_mod._request_path(store, link_id)
+                    link.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        link.symlink_to(target)
+                    except (OSError, NotImplementedError):
+                        self.skipTest("cannot create a symlink here")
+                    if regular_id:
+                        self.save(regular_id, 2222, store)
+                    before = target.read_bytes()
+                    self.assert_refused(sub, "abc", message, trace_dir)
+                    self.assertTrue(link.is_symlink())
+                    self.assertEqual(target.read_bytes(), before)
+                    if regular_id:
+                        self.assertEqual(self.state(regular_id, store), PENDING)
 
     def test_messages_show_ids_as_text(self):
         # A request file name can hold escape codes, and these messages name

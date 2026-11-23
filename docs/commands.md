@@ -1482,11 +1482,12 @@ nothing and exits 1:
 ```
 
 A request file that cannot be read still counts as a match, so a prefix never
-skips it to reach another request. When it is the only match, the command
-prints `Request REQUEST_ID has an invalid record: REASON` with the full ID and
-exits 1. Symlinks in the approvals directory are skipped. An argument that is
-empty, `.` or `..`, or holds `/`, `\` or a control character is refused with
-`invalid request ID` before any file is read. These messages show each
+skips it to reach another request. A symlink counts too, and is never
+followed. When such a file is the only match, or has the exact ID, the
+command prints `Request REQUEST_ID has an invalid record: REASON` with the
+full ID and exits 1. REASON is `is a symlink` for a symlink. An argument that
+is empty, `.` or `..`, or holds `/`, `\` or a control character is refused
+with `invalid request ID` before any file is read. These messages show each
 character of an ID that `str.isprintable()` rejects as its escape.
 
 | Command/flag | Description |

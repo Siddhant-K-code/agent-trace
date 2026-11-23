@@ -206,11 +206,11 @@ def _resolve_request(
 
     ``show``, ``approve`` and ``deny`` all use this lookup. An exact ID wins.
     Otherwise the argument must start exactly one request ID. It is compared
-    as plain text, so ``*``, ``?`` and ``[`` match only themselves. Symlinks
-    are skipped. A matching file counts even when its record cannot be read,
-    so a prefix never skips one request to reach another. ``error`` is set
-    when the argument is refused, matches no request or several requests, or
-    when the one request it names has an invalid record.
+    as plain text, so ``*``, ``?`` and ``[`` match only themselves. A matching
+    file counts even when its record cannot be read, and a symlink counts but
+    is never followed, so a prefix never skips one request to reach another.
+    ``error`` is set when the argument is refused, matches no request or
+    several requests, or when the one request it names has an invalid record.
     """
     error = _request_id_error(request_id)
     if error:
@@ -223,7 +223,6 @@ def _resolve_request(
                 if (
                     name.endswith(".json")
                     and name[:-len(".json")].startswith(request_id)
-                    and not entry.is_symlink()
                 ):
                     matches[name[:-len(".json")]] = entry
     except OSError:
@@ -248,8 +247,10 @@ def _resolve_request(
     entry = matches[found]
     path = Path(entry.path)
     try:
-        # Reading a FIFO or a device file could block, so only a regular
-        # file is opened.
+        # A symlink counts as a match but is never followed. Reading a FIFO
+        # or a device file could block, so only a regular file is opened.
+        if entry.is_symlink():
+            raise ValueError("is a symlink")
         if not entry.is_file(follow_symlinks=False):
             raise ValueError("not a regular file")
         return path, ApprovalRequest.from_json(path.read_text()), ""
