@@ -374,6 +374,27 @@ class AssignmentBundleTests(unittest.TestCase):
             with self.assertRaises(AssignmentError):
                 _inflate_exact_member(raw, forged)
 
+    def test_resumed_session_has_not_ended(self):
+        loaded = load_assignment_bundle(_bundle([
+            _event(EventType.SESSION_START, 1_000.0, "start"),
+            _event(EventType.SESSION_END, 1_001.0, "end", exit_code=0),
+            _event(EventType.SESSION_START, 2_000.0, "resume", source="resume"),
+            _event(EventType.TOOL_CALL, 2_001.0, "call", tool_name="Bash"),
+        ]))
+        self.assertEqual(loaded.stats["session_status"], "not_recorded")
+        self.assertEqual(loaded.lint["rule_counts"]["no-output"], 0)
+
+    def test_session_ended_after_resume_reads_final_end(self):
+        loaded = load_assignment_bundle(_bundle([
+            _event(EventType.SESSION_START, 1_000.0, "start"),
+            _event(EventType.SESSION_END, 1_001.0, "end", status="interrupted"),
+            _event(EventType.SESSION_START, 2_000.0, "resume", source="resume"),
+            _event(EventType.TOOL_CALL, 2_001.0, "call", tool_name="Bash"),
+            _event(EventType.SESSION_END, 2_002.0, "end-again", exit_code=0),
+        ]))
+        self.assertEqual(loaded.stats["session_status"], "completed")
+        self.assertEqual(loaded.lint["rule_counts"]["no-output"], 1)
+
 
 class StrictInputTests(unittest.TestCase):
     def test_deep_json_and_oversized_integer_are_normalized(self):

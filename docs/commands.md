@@ -1384,7 +1384,8 @@ Generate a structured postmortem for failed or crashed sessions. `watch`
 writes a lightweight heartbeat while monitoring; if the heartbeat becomes
 stale and the session has no clean `SESSION_END`, `postmortem` classifies the
 crash and writes `.agent-traces/<session-id>/postmortem.md` with recovery
-context.
+context. A `SESSION_START` after the last `SESSION_END` (a resume) reopens the
+session, so that `SESSION_END` and its exit code no longer count.
 
 | Flag | Description |
 |---|---|

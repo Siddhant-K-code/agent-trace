@@ -126,6 +126,60 @@ class TestHeartbeatCrashDetection(unittest.TestCase):
         finally:
             tmp.cleanup()
 
+    def _resumed(self, events: list[tuple[EventType, dict]], heartbeat_age: float):
+        store, meta, tmp = _store_with_session()
+        self.addCleanup(tmp.cleanup)
+        for offset, (event_type, data) in enumerate(events, 1):
+            store.append_event(
+                meta.session_id,
+                TraceEvent(
+                    event_type=event_type,
+                    timestamp=meta.started_at + offset,
+                    session_id=meta.session_id,
+                    data=data,
+                ),
+            )
+        write_heartbeat(store, meta.session_id)
+        old = time.time() - heartbeat_age
+        os.utime(heartbeat_path(store, meta.session_id), (old, old))
+        return detect_crash(store, meta.session_id, stale_after_seconds=30)
+
+    def test_clean_end_then_resume_with_stale_heartbeat_is_crashed(self) -> None:
+        crash = self._resumed([
+            (EventType.SESSION_END, {"exit_code": 0}),
+            (EventType.SESSION_START, {"source": "resume"}),
+            (EventType.TOOL_CALL, {"tool_name": "Bash", "arguments": {"command": "make"}}),
+        ], heartbeat_age=600)
+
+        self.assertIsNotNone(crash)
+        self.assertEqual(crash.reason, "unknown")
+        self.assertIn("Heartbeat is stale", crash.detail)
+
+    def test_nonzero_end_then_resume_still_running_is_not_crashed(self) -> None:
+        crash = self._resumed([
+            (EventType.SESSION_END, {"exit_code": 1}),
+            (EventType.SESSION_START, {"source": "resume"}),
+            (EventType.TOOL_CALL, {"tool_name": "Bash", "arguments": {"command": "ls"}}),
+        ], heartbeat_age=1)
+
+        self.assertIsNone(crash)
+
+    def test_session_ended_after_resume_reads_final_exit_code(self) -> None:
+        crash = self._resumed([
+            (EventType.SESSION_END, {"exit_code": 0}),
+            (EventType.SESSION_START, {"source": "resume"}),
+            (EventType.SESSION_END, {"exit_code": 1}),
+        ], heartbeat_age=1)
+        self.assertIsNotNone(crash)
+        self.assertEqual(crash.reason, "nonzero_exit")
+
+        crash = self._resumed([
+            (EventType.SESSION_END, {"exit_code": 1}),
+            (EventType.SESSION_START, {"source": "resume"}),
+            (EventType.SESSION_END, {"exit_code": 0}),
+        ], heartbeat_age=600)
+        self.assertIsNone(crash)
+
     def test_write_and_clear_heartbeat(self) -> None:
         store, meta, tmp = _store_with_session()
         try:
