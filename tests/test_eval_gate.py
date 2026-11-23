@@ -176,6 +176,8 @@ class TestSessionStatus(unittest.TestCase):
             {"reason": "aborted"},
             {"reason": "Error"},
             {"stop_reason": "error_max_turns"},
+            # The reason decides before the exit code.
+            {"reason": "error", "exit_code": 124},
         ):
             with self.subTest(**data):
                 self.assertEqual(measure_session_status(_ended(**data)), "killed")
@@ -215,7 +217,8 @@ class TestSessionStatus(unittest.TestCase):
             for key in session_outcome.SESSION_END_REASON_KEYS
             for word in words
         ]
-        rows += [{"exit_code": code} for code in (0, 1, 124, 10**400)]
+        rows += [{"exit_code": code} for code in (0, 1, 124, 10**400, True, float("nan"))]
+        rows += [{"status": 1}]
         rows += [
             {"status": "completed", "reason": "error", "exit_code": 1},
             {"status": "unknown", "reason": "abort", "exit_code": 0},

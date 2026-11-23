@@ -1883,9 +1883,10 @@ an exit code too large for a float. It differs from those rules in three ways:
 - It also reads a text exit code such as `"1"`.
 - It reads a reason that is not text, such as a list, as text.
 
-Earlier versions read an `error` or `abort` reason as `completed`. For an exit
-code too large for a float, they failed the criterion with no score and the
-reason `int too large to convert to float`.
+Earlier versions ignored an `error` or `abort` reason. Such a session was
+`completed` with exit code `0` or none, and `timeout` with exit code `124`.
+For an exit code too large for a float, they failed the criterion with no
+score and the reason `int too large to convert to float`.
 
 | Flag | Default | Description |
 |---|---|---|
