@@ -41,7 +41,13 @@ from .models import (
     usable_number,
     usable_text,
 )
-from .store import TraceStore
+from .store import (
+    CorruptSessionMetaError,
+    RefusedSessionError,
+    TraceStore,
+    refusal_reason,
+    validate_stored_id,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +259,34 @@ def _extract_a2a_calls(events: list[TraceEvent]) -> list[A2ACallEvent]:
     return calls
 
 
+def _stored_session(
+    store: TraceStore, session_id: str
+) -> tuple[SessionMeta, list[TraceEvent]] | None:
+    """Return a session's metadata and events, or None if the store lacks it.
+
+    A child's ID comes from recorded event data. The store lacks the session
+    when the ID cannot name a session directory in it, or when the directory
+    has no meta.json or no events.ndjson. Raises CorruptSessionMetaError or
+    RefusedSessionError when the store refuses to read the session, for
+    example when a path in it is a symlink. An OSError, such as a permission
+    error, propagates.
+    """
+    try:
+        validate_stored_id(session_id, "stored session ID")
+    except ValueError:
+        return None
+    try:
+        if not store.session_exists(session_id):
+            return None
+        return store.load_meta(session_id), store.load_events(session_id)
+    except FileNotFoundError:
+        return None
+    except (CorruptSessionMetaError, RefusedSessionError):
+        raise
+    except ValueError as exc:
+        raise RefusedSessionError(session_id, refusal_reason(exc)) from exc
+
+
 def build_a2a_tree(
     store: TraceStore,
     root_session_id: str,
@@ -260,6 +294,10 @@ def build_a2a_tree(
     check_call_timestamps: bool = False,
 ) -> A2ATreeReport:
     """Build the full agent call graph rooted at root_session_id.
+
+    A session that is not in the store shows as "[not found]". Raises
+    CorruptSessionMetaError or RefusedSessionError when the store refuses to
+    read a session of the tree, so a refused session never shows as missing.
 
     Raises NonObjectEventDataError, naming the session, when an event in a
     session of the tree has data that is not an object.
@@ -296,15 +334,14 @@ def build_a2a_tree(
                 ref="cycle" if sid in on_path else "shared",
             )
 
-        try:
-            meta = store.load_meta(sid)
-            events = store.load_events(sid)
-        except Exception:
+        stored = _stored_session(store, sid)
+        if stored is None:
             node = AgentNode(session_id=sid, agent_id="[not found]", depth=depth,
                              cost_usd=0, duration_ms=0, tool_calls=0,
                              delegations=delegations)
             built[sid] = node
             return node
+        meta, events = stored
 
         # _extract_a2a_calls reads the data of every event.
         require_object_event_data(events, session_id=sid)

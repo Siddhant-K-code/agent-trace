@@ -3,20 +3,30 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import io
 import json
 import os
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
 from agent_trace.models import EventType, SessionMeta, TraceEvent
-from agent_trace.store import TraceStore
+from agent_trace.store import RefusedSessionError, TraceStore
 
 try:
     import _escapes
+    import _no_telemetry  # noqa: F401
+    from test_compliance import REFUSALS, SYMLINKS, link_events, refused_message
+    from test_hash_chain import _CliCase
 except ImportError:
     from tests import _escapes
+    from tests import _no_telemetry  # noqa: F401
+    from tests.test_compliance import REFUSALS, SYMLINKS, link_events, refused_message
+    from tests.test_hash_chain import _CliCase
 
 
 def _make_store(tmp_dir: str) -> TraceStore:
@@ -545,3 +555,115 @@ class TestA2ATreeShowsTraceTextAsText(unittest.TestCase):
         self.assertEqual(values["agent.id"]["stringValue"], payload)
         self.assertEqual(values["a2a.agent_id"]["stringValue"], payload)
         self.assertEqual(values["a2a.task"]["stringValue"], payload)
+
+
+class TestA2ATreeRefusedSessions(_CliCase):
+    """a2a-tree refuses a session the store refuses. Only a session that is
+    not in the store shows as "[not found]"."""
+
+    @staticmethod
+    def _session(store, name):
+        meta = SessionMeta(agent_name=name)
+        store.create_session(meta)
+        return meta.session_id
+
+    @staticmethod
+    def _call(store, sid, sub_sid):
+        from agent_trace.a2a import make_a2a_event
+        store.append_event(sid, make_a2a_event(
+            session_id=sid, agent_id="child", agent_url="http://agent",
+            task="t", response={}, sub_session_id=sub_sid,
+        ))
+
+    def tree_store(self, name):
+        """Build a store where a root session delegates to a child session."""
+        store = TraceStore(str(self.root / name), use_workspace_env=False)
+        root = self._session(store, "root")
+        child = self._session(store, "child")
+        self._call(store, root, child)
+        return store, root, child
+
+    def run_each(self, runs):
+        """Run each (args, trace_dir) pair in its own process."""
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            return list(pool.map(lambda run: self.cli(*run[0], trace_dir=run[1]), runs))
+
+    def test_build_a2a_tree_raises_for_a_refused_session(self):
+        from agent_trace.a2a import build_a2a_tree
+        for index, (kind, refuse, error) in enumerate(REFUSALS):
+            for place in ("root", "delegated"):
+                with self.subTest(kind, place=place):
+                    store, root, child = self.tree_store(f"tree-{index}-{place}")
+                    sid = root if place == "root" else child
+                    reason = refuse(store, sid)
+                    with self.assertRaises(error) as caught:
+                        build_a2a_tree(store, root)
+                    self.assertEqual(str(caught.exception), refused_message(sid, reason))
+
+    def test_a2a_tree_refuses_a_refused_session(self):
+        runs, expected = [], []
+        for index, (kind, refuse, _) in enumerate(REFUSALS):
+            for place in ("root", "delegated"):
+                name = f"cli-{index}-{place}"
+                store, root, child = self.tree_store(name)
+                sid = root if place == "root" else child
+                line = f"Error: {refused_message(sid, refuse(store, sid))}\n"
+                for args in (("a2a-tree", root), ("a2a-tree", root, "--format", "json")):
+                    runs.append((args, self.root / name))
+                    expected.append((f"{kind} {place} {args[2:]}", line))
+        for (label, line), run in zip(expected, self.run_each(runs)):
+            with self.subTest(label):
+                self.assertEqual((run.returncode, run.stdout, run.stderr), (1, "", line))
+
+    def test_build_a2a_tree_raises_for_a_symlinked_session_path(self):
+        from agent_trace.a2a import build_a2a_tree
+        for index, (kind, link) in enumerate(SYMLINKS):
+            for place in ("root", "delegated"):
+                with self.subTest(kind, place=place):
+                    store, root, child = self.tree_store(f"link-{index}-{place}")
+                    sid = root if place == "root" else child
+                    reason = link(store, sid)
+                    with self.assertRaises(RefusedSessionError) as caught:
+                        build_a2a_tree(store, root)
+                    self.assertEqual(str(caught.exception), refused_message(sid, reason))
+
+    def test_a2a_tree_refuses_a_symlinked_session_path(self):
+        cases = [(kind, link, "delegated") for kind, link in SYMLINKS]
+        # find_session skips a root whose directory or meta.json is a symlink.
+        cases.append(("symlinked events.ndjson", link_events, "root"))
+        runs, expected = [], []
+        for index, (kind, link, place) in enumerate(cases):
+            name = f"cli-link-{index}"
+            store, root, child = self.tree_store(name)
+            sid = root if place == "root" else child
+            line = f"Error: {refused_message(sid, link(store, sid))}\n"
+            for args in (("a2a-tree", root), ("a2a-tree", root, "--format", "json")):
+                runs.append((args, self.root / name))
+                expected.append((f"{kind} {place} {args[2:]}", line))
+        for (label, line), run in zip(expected, self.run_each(runs)):
+            with self.subTest(label):
+                self.assertEqual((run.returncode, run.stdout, run.stderr), (1, "", line))
+
+    def test_a_session_not_in_the_store_shows_as_not_found(self):
+        # This passes on main too. Only a refused session stops a2a-tree.
+        from agent_trace.a2a import build_a2a_tree
+        root = self._session(self.store, "root")
+        no_meta = "no-meta-4c1d"
+        self.store._session_dir(no_meta).mkdir(parents=True)
+        no_events = self._session(self.store, "no-events")
+        (self.store._session_dir(no_events) / "events.ndjson").unlink()
+        missing = ["no-such-session-4c1d", "a/b", no_meta, no_events]
+        for sub_sid in missing:
+            self._call(self.store, root, sub_sid)
+
+        report = build_a2a_tree(self.store, root)
+        self.assertEqual(
+            [(child.session_id, child.agent_id) for child in report.root.children],
+            [(sid, "[not found]") for sid in missing],
+        )
+        text, spans = self.cli_many([("a2a-tree", root), ("a2a-tree", root, "--format", "json")])
+        for run in (text, spans):
+            self.assertEqual((run.returncode, run.stderr), (0, ""))
+        self.assertEqual(text.stdout.count("[not found]"), len(missing))
+        names = [span["name"] for span in json.loads(spans.stdout)["spans"]]
+        self.assertEqual(names.count("agent:[not found]"), len(missing))
