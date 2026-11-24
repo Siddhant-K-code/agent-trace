@@ -2966,6 +2966,9 @@ A field of an `a2a_call` event with the wrong type reads as missing. See
 `cost_usd` that is not a number, or is negative, NaN, infinity, or too large
 for a float, reads as 0. Only `success: false` marks a call failed. A call
 with any other `success` value, or with none, counts as successful.
+`--format json` refuses a call time that OTLP cannot carry, as
+[Sessions with unusable event timestamps](#sessions-with-unusable-event-timestamps)
+describes.
 
 ### `identity`
 ```
@@ -3440,6 +3443,11 @@ message for `ended_at`. With `--include-subagents`, export checks every
 session in the tree this way, once every session passes the checks above. The
 line then names the session, such as `Error: session <session-id> ended_at is
 past the latest time OTLP can carry (2554-07-21T23:34:33.709551615Z)`.
+`a2a-tree --format json` refuses an `a2a_call` timestamp past that time in any
+session of the tree, once every session passes the checks above. The line
+names the session, such as `Error: session <session-id> event timestamp is
+past the latest time OTLP can carry (2554-07-21T23:34:33.709551615Z): event 3
+of 4 (tool_call)`.
 
 A span ends at its start plus its duration. A `duration_ms` whose span would
 end past that time reads as missing, so the span lasts 1 ms, as it does when
@@ -3447,6 +3455,10 @@ the duration is missing. A session with no `ended_at` ends its root span at
 `started_at` plus `total_duration_ms`. A total whose root span would end past
 that time reads as missing, so the root span ends at `started_at`. A 1 ms span
 that starts less than 1 ms before that time ends at that time.
+In `a2a-tree --format json`, a call `duration_ms` whose span would end past
+that time reads as missing, so the call span ends at its start, as it does
+when the duration is missing. A `total_duration_ms` whose agent span would end
+past that time reads as missing too, so the agent span ends at its start, 0.
 
 `drift` and `fingerprint` skip a session whose first or last event has an
 unusable timestamp, as they skip other sessions they cannot read. `baseline`

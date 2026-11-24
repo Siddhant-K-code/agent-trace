@@ -27,9 +27,13 @@ from dataclasses import dataclass, field
 from typing import Any, TextIO
 
 from .event_data import (
+    OTLP_LATEST_TIME,
+    OTLP_MAX_UNIX_NANOS,
     UnusableTimestampError,
     event_id_of,
+    otlp_unix_nanos,
     require_object_event_data,
+    require_otlp_timestamps,
     require_usable_timestamps,
 )
 from .inert import inert
@@ -40,6 +44,7 @@ from .models import (
     usable_count,
     usable_number,
     usable_text,
+    usable_time,
 )
 from .store import (
     CorruptSessionMetaError,
@@ -313,11 +318,20 @@ def build_a2a_tree(
     With ``check_call_timestamps``, also raises UnusableTimestampError, naming
     the session, when an A2A call's timestamp is not a Unix time in seconds.
     The OTLP spans read those timestamps. The text tree does not.
+
+    With ``check_call_timestamps``, it also raises UnusableTimestampError,
+    naming the session, when an A2A call's timestamp is past the latest time
+    OTLP can carry. It raises that only after every session of the tree
+    passes the other checks.
     """
     # A session already on the path from the root is a cycle. A session
     # already shown in full elsewhere (a diamond) is a shared reference.
     on_path: set[str] = set()
     built: dict[str, AgentNode] = {}
+    # One error per session with an A2A call past the latest time OTLP can
+    # carry, in pre-order. The first is raised once the whole tree is built,
+    # so a session that the other checks refuse keeps its own message.
+    past_limit: list[UnusableTimestampError] = []
 
     def _child_ids(sid: str, a2a_calls: list[A2ACallEvent]) -> dict[str, int]:
         """Return each child session once, in first-seen order, with the
@@ -354,15 +368,16 @@ def build_a2a_tree(
         # _extract_a2a_calls reads the data of every event.
         require_object_event_data(events, session_id=sid)
         if check_call_timestamps:
-            require_usable_timestamps(
-                events,
-                indexes={
-                    index
-                    for index, event in enumerate(events)
-                    if event.data.get("event_subtype") == A2A_CALL
-                },
-                session_id=sid,
-            )
+            call_indexes = {
+                index
+                for index, event in enumerate(events)
+                if event.data.get("event_subtype") == A2A_CALL
+            }
+            require_usable_timestamps(events, indexes=call_indexes, session_id=sid)
+            try:
+                require_otlp_timestamps(events, indexes=call_indexes, session_id=sid)
+            except UnusableTimestampError as exc:
+                past_limit.append(exc)
         a2a_calls = _extract_a2a_calls(events)
 
         try:
@@ -393,6 +408,8 @@ def build_a2a_tree(
         return node
 
     root = _build_node(root_session_id, 0, 0)
+    if past_limit:
+        raise past_limit[0]
 
     # References add nothing: their session is counted where it is in full.
     def _total_cost(node: AgentNode) -> float:
@@ -473,6 +490,38 @@ def format_a2a_tree(report: A2ATreeReport, out: TextIO = sys.stdout) -> None:
 # OTLP span export for A2A calls
 # ---------------------------------------------------------------------------
 
+def _call_span_times(call: A2ACallEvent) -> tuple[int, int]:
+    """Return the start and end of the span of *call* in Unix nanoseconds."""
+    start = otlp_unix_nanos(call.timestamp)
+    if start is None:
+        if usable_time(call.timestamp) is not None:
+            raise UnusableTimestampError(
+                f"timestamp is past the latest time OTLP can carry ({OTLP_LATEST_TIME})"
+            )
+        raise UnusableTimestampError("timestamp must be a Unix time in seconds")
+    duration = usable_number(call.duration_ms) or 0.0
+    end = otlp_unix_nanos(call.timestamp + duration / 1000)
+    if end is None:
+        return start, start
+    return start, end
+
+
+def _agent_span_end(duration_ms: object) -> int:
+    """Return the end of an agent span that starts at 0 and lasts *duration_ms*."""
+    duration = usable_number(duration_ms)
+    if duration is None:
+        return 0
+    # Multiply first: 0.009 ms gives 9000 ns this way, and 8999 the other.
+    try:
+        end = int(duration * 1_000_000)
+    except OverflowError:
+        return 0
+    # Compare the int, because float(OTLP_MAX_UNIX_NANOS) is 2**64.
+    if end > OTLP_MAX_UNIX_NANOS:
+        return 0
+    return end
+
+
 def a2a_calls_to_otlp_spans(
     report: A2ATreeReport,
     service_name: str = "agent-trace",
@@ -482,6 +531,11 @@ def a2a_calls_to_otlp_spans(
     Each session gets one span. A cycle or a shared sub-session adds a link
     on its session's span to the span of the agent that called it, with
     ``agent.link`` set to ``cycle`` or ``shared``.
+
+    Raises UnusableTimestampError when a call's timestamp is not a Unix time
+    in seconds, or is past the latest time OTLP can carry. A call or session
+    duration that is not a usable number, or whose span would end past that
+    time, reads as 0.
     """
     spans = []
     trace_id = report.root.session_id[:32].ljust(32, "0")
@@ -506,7 +560,7 @@ def a2a_calls_to_otlp_spans(
             "name": f"agent:{node.agent_id}",
             "kind": 3,  # CLIENT
             "startTimeUnixNano": 0,
-            "endTimeUnixNano": int(node.duration_ms * 1_000_000),
+            "endTimeUnixNano": _agent_span_end(node.duration_ms),
             "attributes": [
                 {"key": "agent.id", "value": {"stringValue": node.agent_id}},
                 {"key": "agent.session_id", "value": {"stringValue": node.session_id}},
@@ -522,9 +576,7 @@ def a2a_calls_to_otlp_spans(
         span_by_session[node.session_id] = span
 
         for position, call in enumerate(node.a2a_calls):
-            # Multiplying a str or a list repeats it, so refuse those first.
-            if isinstance(call.timestamp, bool) or not isinstance(call.timestamp, (int, float)):
-                raise UnusableTimestampError("timestamp must be a Unix time in seconds")
+            start, end = _call_span_times(call)
             call_span_id = call.event_id[:16]
             if not call_span_id:
                 # A call without a usable event_id gets an ID from its session
@@ -537,8 +589,8 @@ def a2a_calls_to_otlp_spans(
                 "parentSpanId": span_id,
                 "name": f"a2a_call:{call.agent_id}",
                 "kind": 3,
-                "startTimeUnixNano": int(call.timestamp * 1_000_000_000),
-                "endTimeUnixNano": int((call.timestamp + call.duration_ms / 1000) * 1_000_000_000),
+                "startTimeUnixNano": start,
+                "endTimeUnixNano": end,
                 "attributes": [
                     {"key": "a2a.agent_id", "value": {"stringValue": call.agent_id}},
                     {"key": "a2a.agent_url", "value": {"stringValue": call.agent_url}},

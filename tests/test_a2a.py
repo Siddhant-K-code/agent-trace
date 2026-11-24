@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from agent_trace.event_data import UnusableTimestampError
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import RefusedSessionError, TraceStore
 
@@ -23,11 +24,27 @@ try:
     import _no_telemetry  # noqa: F401
     from test_compliance import REFUSALS, SYMLINKS, link_events, refused_message
     from test_hash_chain import _CliCase
+    from test_otlp import (
+        LAST_FLOAT,
+        PAST_FLOAT,
+        PAST_LIMIT,
+        UINT64_MAX,
+        YEAR_3000,
+        unix_nanos_values,
+    )
 except ImportError:
     from tests import _escapes
     from tests import _no_telemetry  # noqa: F401
     from tests.test_compliance import REFUSALS, SYMLINKS, link_events, refused_message
     from tests.test_hash_chain import _CliCase
+    from tests.test_otlp import (
+        LAST_FLOAT,
+        PAST_FLOAT,
+        PAST_LIMIT,
+        UINT64_MAX,
+        YEAR_3000,
+        unix_nanos_values,
+    )
 
 
 def _make_store(tmp_dir: str) -> TraceStore:
@@ -808,3 +825,312 @@ class TestA2ACallFieldTypes(_CliCase):
         self.assertIn("└── [not found]", text.stdout)
         names = [span["name"] for span in json.loads(spans.stdout)["spans"]]
         self.assertIn("agent:[not found]", names)
+
+
+def _limit_line(sid: str, more: str = "") -> str:
+    """Return the line a2a-tree --format json prints when the a2a_call of
+    *sid* is past the latest time OTLP can carry."""
+    return f"Error: session {sid} event timestamp {PAST_LIMIT}: event 3 of 4 (tool_call){more}\n"
+
+
+def _string_timestamp_line(sid: str) -> str:
+    """Return the line a2a-tree --format json prints when the a2a_call of
+    *sid* has a string timestamp."""
+    return (
+        f"Error: session {sid} event timestamp must be a Unix time in seconds: "
+        "event 3 of 4 (tool_call) has a string timestamp\n"
+    )
+
+
+# The start and end of each span of the tree TestA2ATreeOtlpTimeLimit
+# writes, by span ID: the agent span of each session, then its call span.
+_ROOT_CALL_NANOS = 1_700_000_002_000_000_000
+_CHILD_CALL_NANOS = 1_700_000_012_000_000_000
+_SPANS = {
+    _A2A_ROOT: (0, 12_000_000_000),
+    f"{_A2A_ROOT}-2": (_ROOT_CALL_NANOS, 1_700_000_002_500_000_000),
+    _A2A_CHILD: (0, 12_000_000_000),
+    f"{_A2A_CHILD}-2": (_CHILD_CALL_NANOS, 1_700_000_012_500_000_000),
+}
+# A call at _NEAR that lasts 1000 ms would end past the limit. One that
+# lasts 500 ms ends in range.
+_NEAR = 18446744073.0
+_NEAR_NANOS = 18_446_744_072_999_999_488
+_LAST_NANOS = 18_446_744_073_709_549_568
+
+
+class TestA2ATreeOtlpTimeLimit(_CliCase):
+    """OTLP carries each time as an unsigned 64-bit count of nanoseconds.
+    a2a-tree --format json refuses an a2a_call timestamp past the latest time
+    it can carry. A duration whose span would end past that time reads as
+    missing."""
+
+    def setUp(self):
+        super().setUp()
+        self.trees = 0
+
+    def tree(self, changes: dict | None = None) -> Path:
+        """Write a store where the root session calls the child session, and
+        the child makes a call of its own.
+
+        Each session has four events: session_start, a tool_call, the
+        a2a_call and session_end. *changes* maps a session ID to the values
+        it changes: call_ts, duration_ms, other_ts, other_data or
+        total_duration_ms.
+        """
+        self.trees += 1
+        trace_dir = self.root / f"tree-{self.trees}"
+        store = TraceStore(str(trace_dir), redact=False, use_workspace_env=False)
+        for sid, agent, start, sub_sid in (
+            (_A2A_CHILD, "helper", _T0 + 10, ""),
+            (_A2A_ROOT, "main", _T0, _A2A_CHILD),
+        ):
+            change = (changes or {}).get(sid, {})
+            store.create_session(SessionMeta(
+                session_id=sid, agent_name=agent, started_at=start, ended_at=start + 12,
+                total_duration_ms=change.get("total_duration_ms", 12000.0),
+            ))
+            call = {
+                **_A2A_CALL, "sub_session_id": sub_sid,
+                "duration_ms": change.get("duration_ms", 500.0),
+            }
+            other = {"tool_name": "Bash", "arguments": {"command": "ls"}}
+            events = (
+                ("session_start", start, {}),
+                ("tool_call", change.get("other_ts", start + 1), change.get("other_data", other)),
+                ("tool_call", change.get("call_ts", start + 2), call),
+                ("session_end", start + 3, {}),
+            )
+            lines = "".join(
+                json.dumps({
+                    "event_type": kind, "timestamp": timestamp,
+                    "event_id": f"{sid}-{index}", "session_id": sid, "data": data,
+                }) + "\n"
+                for index, (kind, timestamp, data) in enumerate(events)
+            )
+            (store._session_dir(sid) / "events.ndjson").write_bytes(lines.encode())
+        return trace_dir
+
+    def run_trees(self, trees: list, fmt: str = "json") -> list:
+        """Run a2a-tree on the root session of each store."""
+        args = ("a2a-tree", _A2A_ROOT, "--format", fmt)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            return list(pool.map(lambda trace_dir: self.cli(*args, trace_dir=trace_dir), trees))
+
+    def span_times(self, run) -> dict:
+        """Check that *run* exited 0 and wrote every time as an int that OTLP
+        can carry. Return the start and end of each span by span ID."""
+        self.assertEqual((run.returncode, run.stderr), (0, ""))
+        payload = json.loads(run.stdout)
+        values = unix_nanos_values(payload)
+        self.assertTrue(values)
+        self.assertEqual([
+            value for value in values
+            if isinstance(value, bool) or not isinstance(value, int)
+            or not 0 <= value <= UINT64_MAX
+        ], [])
+        return {
+            span["spanId"]: (span["startTimeUnixNano"], span["endTimeUnixNano"])
+            for span in payload["spans"]
+        }
+
+    def assert_refused(self, run, line: str) -> None:
+        self.assertEqual((run.returncode, run.stdout, run.stderr), (1, "", line))
+
+    def test_a_call_past_the_limit_is_refused(self):
+        values = (YEAR_3000, 32503680000, PAST_FLOAT)
+        runs = self.run_trees([self.tree({_A2A_ROOT: {"call_ts": value}}) for value in values])
+        for value, run in zip(values, runs):
+            with self.subTest(value=value):
+                self.assert_refused(run, _limit_line(_A2A_ROOT))
+
+    def test_a_call_at_the_last_time_in_range_is_written(self):
+        control, last = self.run_trees(
+            [self.tree(), self.tree({_A2A_ROOT: {"call_ts": LAST_FLOAT}})],
+        )
+        self.assertEqual(self.span_times(control), _SPANS)
+        # 500 ms later is past the limit, so the span ends at its start.
+        self.assertEqual(
+            self.span_times(last), {**_SPANS, f"{_A2A_ROOT}-2": (_LAST_NANOS, _LAST_NANOS)},
+        )
+
+    def test_the_line_names_the_first_session_past_the_limit(self):
+        past = {"call_ts": YEAR_3000}
+        cases = [
+            ("child", {_A2A_CHILD: past}, _limit_line(_A2A_CHILD)),
+            ("root and child", {_A2A_ROOT: past, _A2A_CHILD: past}, _limit_line(_A2A_ROOT)),
+            (
+                "call and other event",
+                {_A2A_ROOT: {**past, "other_ts": YEAR_3000}},
+                _limit_line(_A2A_ROOT, "; 1 more event has a timestamp past that time"),
+            ),
+        ]
+        runs = self.run_trees([self.tree(changes) for _, changes, _ in cases])
+        for (label, _, line), run in zip(cases, runs):
+            with self.subTest(label):
+                self.assert_refused(run, line)
+
+    def test_other_events_past_the_limit_are_not_read(self):
+        past = {"other_ts": YEAR_3000}
+        control, run = self.run_trees(
+            [self.tree(), self.tree({_A2A_ROOT: past, _A2A_CHILD: past})],
+        )
+        self.assertEqual(self.span_times(run), _SPANS)
+        self.assertEqual(run.stdout, control.stdout)
+
+    def test_other_refusals_anywhere_in_the_tree_come_first(self):
+        past = {"call_ts": YEAR_3000}
+        cases = [
+            (
+                "child string timestamp",
+                self.tree({_A2A_ROOT: past, _A2A_CHILD: {"call_ts": "x"}}),
+                _string_timestamp_line(_A2A_CHILD),
+            ),
+            (
+                "child array data",
+                self.tree({_A2A_ROOT: past, _A2A_CHILD: {"other_data": [1]}}),
+                f"Error: session {_A2A_CHILD} event data must be an object: "
+                "event 2 of 4 (tool_call) has array data\n",
+            ),
+            (
+                "root string timestamp",
+                self.tree({_A2A_ROOT: {"call_ts": "x"}, _A2A_CHILD: past}),
+                _string_timestamp_line(_A2A_ROOT),
+            ),
+        ]
+        for kind, refuse, _ in REFUSALS:
+            trace_dir = self.tree({_A2A_ROOT: past})
+            reason = refuse(TraceStore(str(trace_dir), use_workspace_env=False), _A2A_CHILD)
+            line = f"Error: {refused_message(_A2A_CHILD, reason)}\n"
+            cases.append((f"child {kind}", trace_dir, line))
+        runs = self.run_trees([trace_dir for _, trace_dir, _ in cases])
+        for (label, _, line), run in zip(cases, runs):
+            with self.subTest(label):
+                self.assert_refused(run, line)
+
+    def test_the_text_tree_does_not_read_call_times(self):
+        control, run = self.run_trees(
+            [self.tree(), self.tree({_A2A_ROOT: {"call_ts": YEAR_3000}})], "text",
+        )
+        for result in (control, run):
+            self.assertEqual((result.returncode, result.stderr), (0, ""))
+        self.assertEqual(run.stdout, control.stdout)
+
+    def test_a_call_duration_past_the_limit_reads_as_missing(self):
+        cases = []
+        for sid, start in ((_A2A_ROOT, _ROOT_CALL_NANOS), (_A2A_CHILD, _CHILD_CALL_NANOS)):
+            for duration in (1e308, 1e14, 10**14):
+                cases.append((sid, {"duration_ms": duration}, (start, start)))
+            near = {"call_ts": _NEAR, "duration_ms": 1000.0}
+            cases.append((sid, near, (_NEAR_NANOS, _NEAR_NANOS)))
+            # These end in range, at the time main wrote.
+            cases.append((sid, {"duration_ms": 1e12}, (start, start + 10**18)))
+            near = {"call_ts": _NEAR, "duration_ms": 500.0}
+            cases.append((sid, near, (_NEAR_NANOS, 18_446_744_073_500_000_256)))
+        runs = self.run_trees([self.tree({sid: change}) for sid, change, _ in cases])
+        for (sid, change, times), run in zip(cases, runs):
+            with self.subTest(sid, **change):
+                self.assertEqual(self.span_times(run), {**_SPANS, f"{sid}-2": times})
+
+    def test_a_session_total_past_the_limit_reads_as_missing(self):
+        totals = [
+            (1e308, 0), (1e300, 0), (1e14, 0), (10**14, 0), (2e13, 0),
+            # Main ended these at 2**64 and at 18446744073709555712.
+            (18446744073709.55, 0), (18446744073709.555, 0),
+            # These end in range, at the time main wrote.
+            (1.8e13, 18_000_000_000_000_000_000),
+            (18446744073709.547, 18_446_744_073_709_547_520),
+            (0.009, 9000),
+        ]
+        cases = [(sid, total, end) for sid in (_A2A_ROOT, _A2A_CHILD) for total, end in totals]
+        runs = self.run_trees([
+            self.tree({sid: {"total_duration_ms": total}}) for sid, total, _ in cases
+        ])
+        for (sid, total, end), run in zip(cases, runs):
+            with self.subTest(sid, total=total):
+                self.assertEqual(self.span_times(run), {**_SPANS, sid: (0, end)})
+
+
+class TestA2ASpansOtlpTimeLimit(unittest.TestCase):
+    """a2a_calls_to_otlp_spans writes each span time as an int from 0 to
+    2**64 - 1, or refuses the call timestamp."""
+
+    @staticmethod
+    def times(timestamp=2, call_ms=500.0, node_ms=0.0) -> list:
+        """Return the start and end of each span of a tree with one session
+        that makes one call."""
+        from agent_trace.a2a import (
+            A2ACallEvent,
+            A2ATreeReport,
+            AgentNode,
+            a2a_calls_to_otlp_spans,
+        )
+        call = A2ACallEvent(
+            event_id="call-0001-abcdef", session_id="d4e5f6a7b8c90004", timestamp=timestamp,
+            agent_id="helper", agent_url="", task="t", response={}, sub_session_id="",
+            duration_ms=call_ms, cost_usd=0.0, success=True,
+        )
+        node = AgentNode(
+            session_id="d4e5f6a7b8c90004", agent_id="root", depth=0, cost_usd=0.0,
+            duration_ms=node_ms, tool_calls=1, a2a_calls=[call],
+        )
+        report = A2ATreeReport(root=node, total_cost=0.0, total_agents=1, max_depth=0)
+        return [
+            (span["startTimeUnixNano"], span["endTimeUnixNano"])
+            for span in a2a_calls_to_otlp_spans(report)
+        ]
+
+    def test_a_call_time_in_range_is_written(self):
+        cases = [
+            (2, (2_000_000_000, 2_500_000_000)),
+            (1.5, (1_500_000_000, 2_000_000_000)),
+            # 500 ms later is past the limit, so the span ends at its start.
+            (LAST_FLOAT, (_LAST_NANOS, _LAST_NANOS)),
+        ]
+        for timestamp, times in cases:
+            with self.subTest(timestamp=timestamp):
+                self.assertEqual(self.times(timestamp), [(0, 0), times])
+
+    def test_a_call_time_outside_the_range_is_refused(self):
+        must_be = "timestamp must be a Unix time in seconds"
+        cases = [
+            (YEAR_3000, f"timestamp {PAST_LIMIT}"),
+            (PAST_FLOAT, f"timestamp {PAST_LIMIT}"),
+            (-5.0, must_be),
+            (float("nan"), must_be),
+            (float("inf"), must_be),
+            (1e300, must_be),
+        ]
+        for timestamp, message in cases:
+            with self.subTest(timestamp=timestamp):
+                with self.assertRaises(UnusableTimestampError) as caught:
+                    self.times(timestamp)
+                self.assertEqual(str(caught.exception), message)
+
+    def test_an_unusable_call_duration_reads_as_0(self):
+        for duration in (1e308, float("inf"), float("nan"), -5.0, True, "10"):
+            with self.subTest(duration=duration):
+                self.assertEqual(
+                    self.times(call_ms=duration), [(0, 0), (2_000_000_000, 2_000_000_000)],
+                )
+
+    def test_an_unusable_session_duration_reads_as_0(self):
+        # 18446744073709.55 ms is 2**64 ns.
+        for duration in (1e308, float("inf"), float("nan"), -5.0, True, 18446744073709.55, "10"):
+            with self.subTest(duration=duration):
+                self.assertEqual(
+                    self.times(node_ms=duration), [(0, 0), (2_000_000_000, 2_500_000_000)],
+                )
+
+    def test_a_usable_session_duration_is_written(self):
+        cases = [
+            (1234.567, 1_234_567_000),
+            (0.0015, 1500),
+            (0.009, 9000),
+            (18446744073709.547, 18_446_744_073_709_547_520),
+        ]
+        for duration, end in cases:
+            with self.subTest(duration=duration):
+                self.assertEqual(
+                    self.times(node_ms=duration), [(0, end), (2_000_000_000, 2_500_000_000)],
+                )
