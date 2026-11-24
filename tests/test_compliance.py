@@ -1028,6 +1028,24 @@ def _unusable_start(store: TraceStore, session_id: str) -> str:
     return "started_at is not a usable time"
 
 
+def _set_meta_time(store: TraceStore, session_id: str, field: str, value) -> None:
+    """Set started_at or ended_at in meta.json. NaN is written as NaN."""
+    meta_file = store._session_dir(session_id) / "meta.json"
+    data = json.loads(meta_file.read_text(encoding="utf-8"))
+    data[field] = value
+    meta_file.write_text(json.dumps(data), encoding="utf-8")
+
+
+# Start and end times the compliance exports refuse, as (label, value).
+UNUSABLE_TIMES = (
+    ("huge", 1e300),
+    ("text", "x"),
+    ("nan", float("nan")),
+    ("true", True),
+    ("negative", -5),
+)
+
+
 def _without_times(value):
     """Drop the times an export takes from the clock."""
     if isinstance(value, dict):
@@ -1458,6 +1476,106 @@ class TestRefusedSessions(_CliCase):
                 expected.append((sid, args, reason, checks["hash_chain_integrity"], line))
         for (sid, args, reason, integrity, line), run in zip(expected, self.run_each(runs)):
             with self.subTest(sid, args=args):
+                if args[0] == "export":
+                    self.assertEqual(
+                        (run.returncode, run.stdout, run.stderr),
+                        (1, "", f"Error: session {sid} {reason}\n"),
+                    )
+                    continue
+                self.assertEqual((run.returncode, run.stderr), (1, ""))
+                if "json" in args:
+                    report = json.loads(run.stdout)
+                    self.assertEqual(report["checks"]["hash_chain_integrity"], integrity)
+                    self.assertIs(report["ready"], False)
+                else:
+                    self.assertIn(line, run.stdout)
+
+    def test_exports_of_one_session_refuse_an_unusable_start_or_end_time(self):
+        cases = [
+            (field, label, value)
+            for field in ("started_at", "ended_at")
+            for label, value in UNUSABLE_TIMES
+        ]
+        cases.append(("started_at", "null", None))
+        runs, expected = [], []
+        for field, label, value in cases:
+            sid = _ended_session(self.store, time.time() - 120)
+            _set_meta_time(self.store, sid, field, value)
+            line = f"Error: session {field} must be a Unix time in seconds\n"
+            commands = [
+                ("compliance", "export", sid, "--framework", framework)
+                for framework in ("eu-ai-act", "soc2", "hipaa", "all")
+            ]
+            commands.append(("export", sid, "--format", "eu-ai-act"))
+            for command in commands:
+                output = self.root / f"report-{len(runs)}.json"
+                for extra in ((), ("--output", str(output))):
+                    runs.append((command + extra, self.trace_dir))
+                    shown = (field, label, command[0], command[-1], bool(extra))
+                    expected.append((shown, output, line))
+        before = tree_snapshot(self.trace_dir)
+        for (shown, output, line), run in zip(expected, self.run_each(runs)):
+            with self.subTest(shown):
+                self.assertEqual((run.returncode, run.stdout, run.stderr), (1, "", line))
+                self.assertFalse(output.exists())
+        self.assertEqual(tree_snapshot(self.trace_dir), before)
+
+    def test_bulk_exports_refuse_an_unusable_end_time_and_name_the_session(self):
+        # The readable session is newer, so each export reads it first.
+        now = time.time()
+        commands = (
+            ("compliance", "export"),
+            ("compliance", "export", "--since", "2d"),
+            ("export", "--format", "eu-ai-act", "--all"),
+        )
+        runs, expected = [], []
+        for label, value in UNUSABLE_TIMES:
+            trace_dir = self.root / f"bulk-{label}"
+            store = TraceStore(str(trace_dir), use_workspace_env=False)
+            sid = _ended_session(store, now - 120, "Write")
+            _ended_session(store, now - 60)
+            _set_meta_time(store, sid, "ended_at", value)
+            line = f"Error: session {sid} ended_at must be a Unix time in seconds\n"
+            for command in commands:
+                output = self.root / f"bulk-{len(runs)}.json"
+                for extra in ((), ("--output", str(output))):
+                    runs.append((command + extra, trace_dir))
+                    expected.append(((label, command, bool(extra)), output, line))
+        for (shown, output, line), run in zip(expected, self.run_each(runs)):
+            with self.subTest(shown):
+                self.assertEqual((run.returncode, run.stdout, run.stderr), (1, "", line))
+                self.assertFalse(output.exists())
+
+    def test_audit_readiness_fails_for_an_end_time_export_all_refuses(self):
+        reason = "ended_at must be a Unix time in seconds"
+        commands = (
+            ("audit-readiness",),
+            ("audit-readiness", "--format", "json"),
+            ("export", "--format", "eu-ai-act", "--all"),
+        )
+        runs, expected = [], []
+        for label, value in UNUSABLE_TIMES:
+            sid = f"end-{label}"
+            store = TraceStore(str(self.root / sid), use_workspace_env=False)
+            _make_probe_session(store, sid)
+            _set_meta_time(store, sid, "ended_at", value)
+            checks = _readiness_checks(sid, broken=True, refused=reason)
+            line = (
+                "FAIL Hash chain integrity: 1 sessions checked\n"
+                f"  cannot read session {sid}: {reason}\n"
+            )
+            with self.subTest(label):
+                report = build_audit_readiness(store)
+                self.assertEqual({key: report["checks"][key] for key in checks}, checks)
+                self.assertEqual((report["compliance_score"], report["ready"]), (55, False))
+                buf = io.StringIO()
+                format_audit_readiness(report, out=buf)
+                self.assertIn(line, buf.getvalue())
+            for args in commands:
+                runs.append((args, store.base_dir))
+                expected.append((label, args, sid, checks["hash_chain_integrity"], line))
+        for (label, args, sid, integrity, line), run in zip(expected, self.run_each(runs)):
+            with self.subTest(label, args=args):
                 if args[0] == "export":
                     self.assertEqual(
                         (run.returncode, run.stdout, run.stderr),

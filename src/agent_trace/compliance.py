@@ -40,6 +40,7 @@ from .event_data import (
     duration_ms_of,
     event_id_of,
     require_object_event_data,
+    require_usable_session_times,
     require_usable_timestamps,
     str_field,
 )
@@ -334,8 +335,8 @@ def export_compliance(
     OSError, such as a permission error, propagates. Raises
     NonObjectEventDataError when a tool_call or error event's
     data is not an object, and UnusableTimestampError when such an event's
-    timestamp is not a Unix time in seconds; ``name_session`` adds the
-    session ID to either.
+    timestamp, the session's started_at, or its ended_at when set, is not a
+    Unix time in seconds; ``name_session`` adds the session ID to either.
     """
     try:
         meta = store.load_meta(session_id)
@@ -356,6 +357,7 @@ def export_compliance(
         event_types=COMPLIANCE_DATA_EVENT_TYPES,
         session_id=session_id if name_session else None,
     )
+    require_usable_session_times(meta, session_id=session_id if name_session else None)
 
     frameworks = _FRAMEWORKS if framework == "all" else [framework]
     report: dict = {
@@ -436,10 +438,11 @@ def _eu_ai_act_session_record(
 ) -> dict:
     meta = store.load_meta(session_id)
     events = store.load_events(session_id)
-    # The record reads the tool name from the data of every event, and the
-    # timestamp of every event.
+    # The record reads the tool name from the data of every event, the
+    # timestamp of every event, and the session's start and end times.
     require_object_event_data(events, session_id=session_id if name_session else None)
     require_usable_timestamps(events, session_id=session_id if name_session else None)
+    require_usable_session_times(meta, session_id=session_id if name_session else None)
     lines = _load_event_lines(store, session_id)
     hashes = _line_hashes(lines)
     chain = verify_chain(store, session_id)
@@ -557,8 +560,9 @@ def export_eu_ai_act(
     """Build an EU AI Act Article 12/13 JSON export for one or more sessions.
 
     Raises NonObjectEventDataError when any event's data is not an object,
-    and UnusableTimestampError when any event's timestamp is not a Unix time
-    in seconds; ``name_sessions`` adds the session ID to either.
+    and UnusableTimestampError when any event's timestamp, a session's
+    started_at, or its ended_at when set, is not a Unix time in seconds;
+    ``name_sessions`` adds the session ID to either.
     """
     sessions = [
         _eu_ai_act_session_record(store, session_id, name_session=name_sessions)
@@ -655,11 +659,13 @@ def _readiness_sessions(
 
     The scan skips only the entries that ``list_sessions_strict`` skips. It
     reads each session's events as the bulk exports do. It then checks the
-    data and timestamp of every event, as ``export --format eu-ai-act`` does.
-    A session whose meta.json is readable but whose events.ndjson is missing,
-    refused or fails a check is in both lists. Each failed entry holds the
-    entry's name and the reason. Unlike ``list_sessions_strict``, the scan
-    reads a trace directory that is a symlink.
+    data and timestamp of every event, and the session's ended_at when set,
+    as ``export --format eu-ai-act`` does.
+    A session with a readable meta.json and a usable started_at is in both
+    lists when its events.ndjson is missing or refused, or when it fails a
+    check. Each failed entry holds the entry's name and the reason. Unlike
+    ``list_sessions_strict``, the scan reads a trace directory that is a
+    symlink.
     """
     sessions: list[SessionMeta] = []
     refused: list[dict[str, str]] = []
@@ -709,9 +715,11 @@ def _readiness_sessions(
             refused.append({"session_id": session_id, "reason": _read_refusal_reason(exc)})
             continue
         try:
-            # The EU AI Act export reads the data and timestamp of every event.
+            # The EU AI Act export reads the data and timestamp of every
+            # event, and the session's start and end times.
             require_object_event_data(events, session_id=session_id)
             require_usable_timestamps(events, session_id=session_id)
+            require_usable_session_times(meta, session_id=session_id)
         except (NonObjectEventDataError, UnusableTimestampError) as exc:
             reason = str(exc).removeprefix(f"session {session_id} ")
             refused.append({"session_id": session_id, "reason": reason})
@@ -727,8 +735,9 @@ def build_audit_readiness(
 
     A session the store refuses to read fails the hash chain integrity
     check, with its reason in ``refused_sessions``. So does a session with an
-    event whose data or timestamp the EU AI Act export refuses. So the check
-    never passes while it leaves out a session.
+    event whose data or timestamp the EU AI Act export refuses, or with an
+    ended_at it refuses. So the check never passes while it leaves out a
+    session.
     """
     sessions, refused = _readiness_sessions(store)
     refused_ids = [entry["session_id"] for entry in refused]
