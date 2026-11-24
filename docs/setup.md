@@ -552,7 +552,9 @@ async def fetch(url: str) -> str:
         return await resp.text()
 ```
 
-Sessions are per thread and do not nest. Calling `start_session()` while the thread already has an active session ends that session first, exactly as `end_session()` would, then starts the new one. Concurrent asyncio tasks on one event loop run on one thread, so they share its active session.
+A failure to record never reaches the caller. The call still runs and returns its result or raises its own exception. Nothing more is recorded for a call whose call event was not written. Each argument is stored as its repr, including a default the call leaves out. When the function has no signature that can be read, as for a builtin such as `max`, or the call's arguments do not fit its signature, they are stored as `args` and `kwargs`. Keywords collected by `**kwargs` are stored as an object, so a key-named one such as `password` is redacted. A dict passed as one argument is stored as its repr, so its keys are not matched. A `model`, `choice`, `reason` or alternative that is not JSON is stored as its repr.
+
+Sessions are per thread and do not nest. Calling `start_session()` while the thread already has an active session ends that session first, exactly as `end_session()` would, then starts the new one. If ending it fails, the new session still starts. When `start_session()` or `end_session()` raises, the thread has no active session. Concurrent asyncio tasks on one event loop run on one thread, so they share its active session.
 
 ---
 
