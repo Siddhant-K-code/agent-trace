@@ -389,7 +389,8 @@ Outcome facts sit next to the load. They do not mean the skill caused them.
   parsed or printed.
 - `errors` counts error events and failed tool results (`success: false`,
   `is_error: true`, or a non-zero exit code). Hooks record a failed tool call
-  as an error event; transcripts record it as a failed result, so both count.
+  as an error event; transcripts and the MCP proxies (`record`, `record-http`)
+  record it as a failed result, so both count.
 - `session_end_recorded` is also reported.
 
 ## Aggregate mode

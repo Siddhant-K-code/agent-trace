@@ -73,6 +73,23 @@ class StdioProxyPairingTest(unittest.TestCase):
         self.assertEqual(result.duration_ms, (result.timestamp - calls[2].timestamp) * 1000)
         self.assertEqual(list(self.proxy._calls.pending()), [1])
 
+    def test_a_failed_result_with_no_content_links_to_its_call(self):
+        for request_id, result in enumerate(
+            ({"isError": True}, {"content": [], "isError": True}), start=1
+        ):
+            self._send(_call(request_id), "agent_to_server")
+            self._send({"jsonrpc": "2.0", "id": request_id, "result": result}, "server_to_agent")
+
+        calls = {c.data["request_id"]: c for c in self._events(EventType.TOOL_CALL)}
+        results = self._events(EventType.TOOL_RESULT)
+        self.assertEqual(len(results), 2)
+        for result in results:
+            call = calls[result.data["request_id"]]
+            self.assertEqual(result.data["is_error"], True)
+            self.assertEqual(result.parent_id, call.event_id)
+            self.assertEqual(result.duration_ms, (result.timestamp - call.timestamp) * 1000)
+        self.assertEqual(self.proxy._calls.pending(), {})
+
     def test_error_links_to_its_call_and_closes_it(self):
         self._send(_call(5), "agent_to_server")
         self._send(_error(5), "server_to_agent")
@@ -404,6 +421,80 @@ class ClassifyMessageTest(unittest.TestCase):
                 if event is not None:
                     # Key order shows in the stored JSON.
                     self.assertEqual(list(event.data), list(expected[1]))
+
+    def test_a_result_with_is_error_true_is_stored_as_failed(self):
+        def failed(request_id, content_types, preview):
+            return {
+                "request_id": request_id, "content_types": content_types,
+                "content_preview": preview, "is_error": True,
+            }
+
+        cases = [
+            ({"content": [{"type": "text", "text": "permission denied"}], "isError": True},
+             failed(1, ["text"], "permission denied")),
+            ({"content": [], "isError": True}, failed(1, [], "")),
+            ({"isError": True}, failed(1, [], "")),
+            ({"content": "permission denied", "isError": True}, failed(1, [], "")),
+            ({"content": {"type": "text", "text": "x"}, "isError": True}, failed(1, [], "")),
+            ({"content": None, "isError": True}, failed(1, [], "")),
+        ]
+        for result, data in cases:
+            with self.subTest(result=result):
+                event = _classify_message({"id": 1, "result": result}, "server_to_agent")
+                self.assertEqual((event.event_type, event.data), (EventType.TOOL_RESULT, data))
+                # As the jsonl import writes it: is_error comes last.
+                self.assertEqual(list(event.data), list(data))
+
+    def test_is_error_other_than_json_true_adds_no_key(self):
+        text = [{"type": "text", "text": "ok"}]
+        extras = [
+            {"isError": False}, {"isError": "true"}, {"isError": 1}, {"isError": 1.0},
+            {"isError": None}, {"isError": [True]}, {"isError": {"x": 1}}, {},
+        ]
+        for extra in extras:
+            with self.subTest(extra=extra):
+                event = _classify_message(
+                    {"id": 1, "result": {"content": text, **extra}}, "server_to_agent"
+                )
+                self.assertEqual(
+                    event.data, {"request_id": 1, "content_types": ["text"], "content_preview": "ok"}
+                )
+                # A result that did not fail and has no content records nothing.
+                for result in ({"content": [], **extra}, {**extra}, {"content": "x", **extra}):
+                    self.assertIsNone(
+                        _classify_message({"id": 1, "result": result}, "server_to_agent")
+                    )
+
+    def test_the_preview_joins_the_text_of_every_text_item(self):
+        image = {"type": "image", "data": "AAAA", "mimeType": "image/png"}
+
+        def text(value):
+            return {"type": "text", "text": value}
+
+        cases = {
+            "image then text": ([image, text("Saved to /tmp/shot.png")], "Saved to /tmp/shot.png"),
+            "two texts": ([text("test output follows"), text("Ran 3 tests\n\nOK")],
+                          "test output follows\nRan 3 tests\n\nOK"),
+            "text of any type": ([{"text": "a"}, {"type": "resource", "text": "b"}], "a\nb"),
+            "not an object between": ([text("a"), "b", text("c")], "a\nc"),
+            "empty text between": ([text("a"), text(""), text("c")], "a\nc"),
+            "text not a string between": ([text("a"), {"type": "text", "text": 5}, text("c")], "a\nc"),
+            "no text between": ([text("a"), image, text("c")], "a\nc"),
+            "empty text first and last": ([text(""), text("a"), text("")], "a"),
+            "not an object first and last": ([None, text("a"), ["b"]], "a"),
+            "no text at all": ([image, text(""), {"type": "text", "text": None}], ""),
+        }
+        for name, (content, preview) in cases.items():
+            with self.subTest(name):
+                event = _classify_message({"id": 1, "result": {"content": content}}, "server_to_agent")
+                self.assertEqual(event.data["content_preview"], preview)
+                self.assertEqual(len(event.data["content_types"]), len(content))
+
+    def test_the_preview_is_cut_at_200_characters_in_all(self):
+        content = [{"type": "text", "text": "x" * 150}, {"type": "text", "text": "y" * 150}]
+        event = _classify_message({"id": 1, "result": {"content": content}}, "server_to_agent")
+        # The first 200 characters of the join, then three dots.
+        self.assertEqual(event.data["content_preview"], "x" * 150 + "\n" + "y" * 49 + "...")
 
 
 class StdioProxyRelayTest(unittest.TestCase):
@@ -874,6 +965,19 @@ BYTES_SERVER = (
     "os.replace(sys.argv[2] + '.tmp', sys.argv[2])\n"
 )
 
+# Answers each tools/call with the result that the JSON file named by its
+# argument holds for the tool's name.
+RESULTS_SERVER = (
+    "import json, sys\n"
+    "with open(sys.argv[1], encoding='utf-8') as f:\n"
+    "    results = json.load(f)\n"
+    "for line in sys.stdin:\n"
+    "    msg = json.loads(line)\n"
+    "    result = results[msg['params']['name']]\n"
+    "    sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'id': msg['id'], 'result': result}) + '\\n')\n"
+    "    sys.stdout.flush()\n"
+)
+
 # Writes the file named by its argument, then exits.
 MARKING_SERVER = "import sys\nopen(sys.argv[1], 'w').close()\n"
 
@@ -1191,6 +1295,39 @@ class StdioProxyLifecycleTest(unittest.TestCase):
                 [e.data["request_id"] for e in events if e.event_type == event_type],
                 [7, 8, 9, 10, 11, 12],
             )
+
+    def test_record_stores_failed_results_and_the_text_of_every_item(self):
+        results = {
+            "denied": {"content": [{"type": "text", "text": "permission denied"}], "isError": True},
+            "no_content_fail": {"isError": True},
+            "run_tests": {"content": [{"type": "text", "text": "test output follows"},
+                                      {"type": "text", "text": "Ran 3 tests\n\nOK"}]},
+        }
+        results_file = os.path.join(self.root, "results.json")
+        with open(results_file, "w", encoding="utf-8") as f:
+            json.dump(results, f)
+        sent = b"".join(_line(_call(i, name)) for i, name in enumerate(results, start=1))
+        proc = self._record(RESULTS_SERVER, subprocess.PIPE, results_file)
+        code, out, err = self._finish(proc, sent)
+
+        self.assertEqual(code, 0, err)
+        self.assertEqual([reply["result"] for reply in self._replies(out)], list(results.values()))
+        meta, _ = self._session()
+        with open(os.path.join(self.trace_dir, meta.session_id, "events.ndjson"), encoding="utf-8") as f:
+            stored = [json.loads(line) for line in f.read().splitlines()]
+        calls = {e["data"]["request_id"]: e for e in stored if e["event_type"] == "tool_call"}
+        stored_results = [e for e in stored if e["event_type"] == "tool_result"]
+        self.assertEqual([e["data"] for e in stored_results], [
+            {"request_id": 1, "content_types": ["text"], "content_preview": "permission denied",
+             "is_error": True},
+            {"request_id": 2, "content_types": [], "content_preview": "", "is_error": True},
+            {"request_id": 3, "content_types": ["text", "text"],
+             "content_preview": "test output follows\nRan 3 tests\n\nOK"},
+        ])
+        for result in stored_results:
+            call = calls[result["data"]["request_id"]]
+            self.assertEqual(result["parent_id"], call["event_id"])
+            self.assertIn("duration_ms", result)
 
     def test_all_server_output_reaches_the_agent_before_session_end(self):
         # Held open, the agent's stdin is still being read when the server

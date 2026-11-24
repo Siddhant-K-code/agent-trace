@@ -87,10 +87,12 @@ reports.
   `exception_type`, else `_OTHER`. Its span is named after the error's
   `tool_name`, else its call's, else `error`. The `@trace_tool` decorator, for
   one, records the name only on the call. A `tool_result` with
-  `is_error: true`, which is how a Claude Code transcript marks a failed tool,
-  is a failed call too: ERROR status, `error.type` and an `exception` event,
-  with no `gen_ai.tool.call.result`. When neither it nor a paired call names
-  the tool, its span is named `execute_tool tool`, like an unpaired result.
+  `is_error: true` is a failed call too: ERROR status, `error.type` and an
+  `exception` event, with no `gen_ai.tool.call.result`. That is how a Claude
+  Code transcript marks a failed tool, and how `record` and `record-http`
+  store an MCP result with `isError: true`. When neither it nor a paired call
+  names the tool, its span is named `execute_tool tool`, like an unpaired
+  result.
 - A tool span's `gen_ai.tool.call.id` is the model's ID for the call: the
   `tool_use_id` stored on the call, else on its result or error. Hooks store it
   when the agent sends one (Claude Code and Codex do, and Copilot CLI from
@@ -899,7 +901,8 @@ without the `agent.strace.` prefix.
 | `agent.strace.last_model_request_failed` | Whether the session's last model request failed |
 
 A tool result failed when it has `is_error: true` (how a Claude Code
-transcript marks a failed result), `success` or `ok` false, a nonzero
+transcript marks a failed result, and how `record` and `record-http` store an
+MCP result with `isError: true`), `success` or `ok` false, a nonzero
 `exit_code`, or a `status` of `error`, `failed`, `failure`, `cancelled` or
 `timeout`. The session status comes from the last `session_end`, unless a
 later `session_start` (a resume) reopened the session, which is

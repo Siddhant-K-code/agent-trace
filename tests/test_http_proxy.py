@@ -2475,6 +2475,30 @@ class TestHTTPProxyStreamableHTTP(unittest.TestCase):
         self.assertEqual(result.parent_id, call.event_id)
         self.assertEqual(server.pending_calls, {})
 
+    def test_a_failed_tool_result_is_stored_with_is_error(self):
+        result = {"content": [{"type": "text", "text": "permission denied"}], "isError": True}
+
+        def reply(handler, request):
+            body = {"jsonrpc": "2.0", "id": json.loads(request["body"])["id"], "result": result}
+            _reply(handler, 200, json.dumps(body).encode(), [("Content-Type", "application/json")])
+
+        self.upstream.reply = reply
+        server = self._proxy()
+        resp, _, _ = self._forward(
+            server.server_address[1], "POST", "/", STREAMABLE_POST_HEADERS,
+            json.dumps(_tool_call(9)),
+        )
+        self.assertEqual(resp.status, 200)
+        call, stored = self.store.load_events(self.meta.session_id)
+        self.assertEqual(
+            [call.event_type, stored.event_type], [EventType.TOOL_CALL, EventType.TOOL_RESULT]
+        )
+        self.assertEqual(stored.parent_id, call.event_id)
+        self.assertEqual(stored.data, {
+            "request_id": 9, "content_types": ["text"],
+            "content_preview": "permission denied", "is_error": True,
+        })
+
     def test_json_reply_links_the_sub_session(self):
         child_id = self._child_session()
         headers = [("Content-Type", "application/json")] + self._child_trace_headers(child_id)
