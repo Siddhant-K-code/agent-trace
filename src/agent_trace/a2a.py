@@ -96,23 +96,29 @@ class A2ACallEvent:
 
     @classmethod
     def from_trace_event(cls, event: TraceEvent) -> "A2ACallEvent | None":
-        """Extract A2ACallEvent from a raw TraceEvent, or None if not an A2A call."""
+        """Extract A2ACallEvent from a raw TraceEvent, or None if not an A2A call.
+
+        A field with the wrong JSON type reads as missing. A ``duration_ms``
+        or ``cost_usd`` that is not a usable number reads as 0. Only
+        ``success: false`` marks the call failed.
+        """
         if event.data.get("event_subtype") != A2A_CALL:
             return None
         d = event.data
+        response = d.get("response")
         return cls(
             event_id=event_id_of(event),
             session_id=event.session_id,
             timestamp=event.timestamp,
-            agent_id=d.get("agent_id", ""),
-            agent_url=d.get("agent_url", ""),
-            task=d.get("task", ""),
-            response=d.get("response", {}),
-            sub_session_id=d.get("sub_session_id", ""),
-            duration_ms=d.get("duration_ms", 0.0),
-            cost_usd=d.get("cost_usd", 0.0),
-            success=d.get("success", True),
-            error=d.get("error", ""),
+            agent_id=usable_text(d.get("agent_id")),
+            agent_url=usable_text(d.get("agent_url")),
+            task=usable_text(d.get("task")),
+            response=response if isinstance(response, dict) else {},
+            sub_session_id=usable_text(d.get("sub_session_id")),
+            duration_ms=usable_number(d.get("duration_ms")) or 0.0,
+            cost_usd=usable_number(d.get("cost_usd")) or 0.0,
+            success=d.get("success") is not False,
+            error=usable_text(d.get("error")),
         )
 
 

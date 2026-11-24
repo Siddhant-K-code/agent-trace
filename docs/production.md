@@ -848,10 +848,10 @@ document for span status.
 
 | Span | Status |
 |---|---|
-| A tool call with a result, a completed model request, a successful A2A call | UNSET (`{"code": 0}`) |
+| A tool call with a result, a completed model request, an A2A call whose `success` is not `false` | UNSET (`{"code": 0}`) |
 | A request or tool call still pending at the end | UNSET (`{"code": 0}`) |
 | A session root span that did not fail, as below | UNSET (`{"code": 0}`) |
-| An `error`, a failed or cancelled model request, a failed A2A call | ERROR (`{"code": 2}`); error and model request spans carry the recorded error text, at most 200 characters, as `message` |
+| An `error`, a failed or cancelled model request, an A2A call whose `success` is `false` | ERROR (`{"code": 2}`); error and model request spans carry the recorded error text, at most 200 characters, as `message` |
 | A session root span that failed, as below | ERROR (`{"code": 2}`) with `error.type` |
 
 #### Session root status

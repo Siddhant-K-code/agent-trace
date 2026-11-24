@@ -10,6 +10,7 @@ import os
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -667,3 +668,143 @@ class TestA2ATreeRefusedSessions(_CliCase):
         self.assertEqual(text.stdout.count("[not found]"), len(missing))
         names = [span["name"] for span in json.loads(spans.stdout)["spans"]]
         self.assertEqual(names.count("agent:[not found]"), len(missing))
+
+
+_A2A_ROOT, _A2A_CHILD = "a2a-root", "a2a-child"
+_T0 = 1_700_000_000.0
+
+# The data of an a2a_call with each field of the type make_a2a_event writes.
+_A2A_CALL = {
+    "event_subtype": "a2a_call", "agent_id": "helper", "agent_url": "http://helper",
+    "task": "check the build", "response": {"ok": True}, "sub_session_id": _A2A_CHILD,
+    "duration_ms": 10.0, "cost_usd": 0.5, "success": True, "error": "",
+}
+
+# Values with the wrong type, by label.
+_WRONG_VALUES = {
+    "null": None, "true": True, "false": False, "0": 0, "1": 1, "-5": -5, "1.5": 1.5,
+    "NaN": float("nan"), "Infinity": float("inf"), "10**400": 10 ** 400,
+    '"10"': "10", '"x"': "x", '"false"': "false", "a list": ["x"], "an object": {"a": 1},
+}
+_WRONG_FOR_FIELD = {
+    **dict.fromkeys(
+        ("agent_id", "agent_url", "task", "sub_session_id", "error"),
+        ("null", "true", "0", "-5", "1.5", "NaN", "Infinity", "10**400", "a list", "an object"),
+    ),
+    **dict.fromkeys(
+        ("duration_ms", "cost_usd"),
+        ('"10"', "null", "true", "false", "a list", "an object", "NaN", "Infinity", "-5", "10**400"),
+    ),
+    "success": ('"x"', '"false"', "null", "0", "1", "a list", "an object", "NaN", "Infinity", "10**400"),
+    "response": ('"x"', "null", "a list", "true", "NaN"),
+}
+
+
+def _refuse_constant(name: str):
+    raise ValueError(f"not JSON: {name}")
+
+
+def _call_line(text: str) -> str:
+    """Return what the text tree shows after "a2a → " on the call line."""
+    return next(line for line in text.splitlines() if "a2a → " in line).split("a2a → ", 1)[1]
+
+
+class TestA2ACallFieldTypes(_CliCase):
+    """events.ndjson can hold any JSON value in an a2a_call field. a2a-tree
+    reads a field with the wrong type as missing."""
+
+    def tree(self, name: str, call: dict) -> Path:
+        """Write a store where the root session makes one A2A call with *call*
+        as its data. IDs and times are fixed, so two stores differ only in
+        *call*."""
+        trace_dir = self.root / name
+        store = TraceStore(str(trace_dir), redact=False, use_workspace_env=False)
+        sessions = (
+            (_A2A_CHILD, "helper", [("session_start", {})]),
+            # The session records its usage, so the size of the call does not
+            # change its cost.
+            (_A2A_ROOT, "main", [
+                ("session_start", {}),
+                ("tool_call", call),
+                ("llm_response", {"input_tokens": 1000, "output_tokens": 100}),
+            ]),
+        )
+        for sid, agent, events in sessions:
+            store.create_session(SessionMeta(
+                session_id=sid, agent_name=agent, started_at=_T0, ended_at=_T0 + 5,
+                total_duration_ms=5000.0,
+            ))
+            # json.dumps writes NaN and Infinity as bare tokens, as a hand
+            # edit or an older release can store them.
+            lines = "".join(
+                json.dumps({
+                    "event_type": kind, "timestamp": _T0 + index,
+                    "event_id": f"{sid}-{index}", "session_id": sid, "data": data,
+                }) + "\n"
+                for index, (kind, data) in enumerate(events)
+            )
+            (store._session_dir(sid) / "events.ndjson").write_bytes(lines.encode())
+        return trace_dir
+
+    def run_trees(self, calls: list[dict]) -> list[tuple]:
+        """Run a2a-tree as text and as JSON on a store for each call.
+
+        Returns a (text run, JSON run) pair for each call, in order.
+        """
+        runs = []
+        for index, call in enumerate(calls):
+            trace_dir = self.tree(f"tree-{index}", call)
+            runs.append((("a2a-tree", _A2A_ROOT), trace_dir))
+            runs.append((("a2a-tree", _A2A_ROOT, "--format", "json"), trace_dir))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            done = list(pool.map(lambda run: self.cli(*run[0], trace_dir=run[1]), runs))
+        return list(zip(done[::2], done[1::2]))
+
+    def assert_runs_cleanly(self, text, spans) -> None:
+        for run in (text, spans):
+            self.assertEqual((run.returncode, run.stderr), (0, ""))
+        json.loads(spans.stdout, parse_constant=_refuse_constant)
+
+    def test_a_field_with_the_wrong_type_reads_as_missing(self):
+        fields = list(_WRONG_FOR_FIELD)
+        cases = [(field, label) for field in fields for label in _WRONG_FOR_FIELD[field]]
+        runs = self.run_trees(
+            [{key: value for key, value in _A2A_CALL.items() if key != field} for field in fields]
+            + [{**_A2A_CALL, field: _WRONG_VALUES[label]} for field, label in cases]
+        )
+        missing = dict(zip(fields, runs))
+        for field, (text, spans) in missing.items():
+            with self.subTest(field, value="missing"):
+                self.assert_runs_cleanly(text, spans)
+        # A missing field reads as before.
+        self.assertEqual(_call_line(missing["duration_ms"][0].stdout), "helper  ✅  $0.5000  0ms")
+        self.assertEqual(_call_line(missing["cost_usd"][0].stdout), "helper  ✅  $0.0000  10ms")
+        self.assertEqual(_call_line(missing["agent_id"][0].stdout), "  ✅  $0.5000  10ms")
+
+        for (field, label), (text, spans) in zip(cases, runs[len(fields):]):
+            with self.subTest(field, value=label):
+                self.assert_runs_cleanly(text, spans)
+                expected_text, expected_spans = missing[field]
+                self.assertEqual(text.stdout, expected_text.stdout)
+                self.assertEqual(spans.stdout, expected_spans.stdout)
+
+    # The guards below pass on main too.
+
+    def test_success_false_marks_the_call_failed(self):
+        [(text, spans)] = self.run_trees([{**_A2A_CALL, "success": False}])
+        self.assert_runs_cleanly(text, spans)
+        self.assertEqual(_call_line(text.stdout), "helper  ❌  $0.5000  10ms")
+        statuses = {span["name"]: span.get("status") for span in json.loads(spans.stdout)["spans"]}
+        self.assertEqual(statuses["a2a_call:helper"], {"code": 2})
+
+    def test_usable_duration_and_cost_read_as_stored(self):
+        [(text, spans)] = self.run_trees([{**_A2A_CALL, "duration_ms": 10, "cost_usd": 0.5}])
+        self.assert_runs_cleanly(text, spans)
+        self.assertEqual(_call_line(text.stdout), "helper  ✅  $0.5000  10ms")
+
+    def test_sub_session_id_that_names_no_session_shows_not_found(self):
+        [(text, spans)] = self.run_trees([{**_A2A_CALL, "sub_session_id": "no-such-session"}])
+        self.assert_runs_cleanly(text, spans)
+        self.assertIn("└── [not found]", text.stdout)
+        names = [span["name"] for span in json.loads(spans.stdout)["spans"]]
+        self.assertIn("agent:[not found]", names)
