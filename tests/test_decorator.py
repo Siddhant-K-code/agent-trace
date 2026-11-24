@@ -731,6 +731,27 @@ class TestVarKeywordRedaction(_SessionTestCase):
                     })
 
 
+class TestDefaultsAreStored(_SessionTestCase):
+    def test_defaults_the_call_leaves_out_are_stored(self):
+        def search(query, limit=10):
+            return []
+
+        def chat(messages, model="gpt-4"):
+            return "ok"
+
+        for mode in _MODES:
+            with self.subTest(mode=mode):
+                sid = self.start()
+                _call(trace_tool(_sync_and_async(search)[mode]), "q")
+                _call(trace_llm_call(_sync_and_async(chat)[mode]), [{"role": "user"}])
+                end_session()
+                call = self.events(sid, EventType.TOOL_CALL)[0]
+                self.assertEqual(
+                    call.data["arguments"], {"query": "'q'", "limit": "10"})
+                request = self.events(sid, EventType.LLM_REQUEST)[0]
+                self.assertEqual(request.data["model"], "gpt-4")
+
+
 class TestValuesThatAreNotJson(_SessionTestCase):
     def test_model_that_is_not_json_is_stored_as_its_repr(self):
         sentinel = object()
@@ -831,6 +852,15 @@ class TestSessionStateAfterFailure(_SessionTestCase):
                 self.assertEqual(
                     self.event_types(new),
                     ["session_start", "tool_call", "tool_result", "session_end"])
+
+    def test_keyboard_interrupt_while_ending_the_old_session_starts_no_new_one(self):
+        old = self.start()
+        with _failing_write(EventType.SESSION_END, KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.start()
+        self.assertIsNone(end_session())
+        self.assertEqual(
+            [m.session_id for m in self.store().list_sessions()], [old])
 
     def test_start_session_starts_when_the_old_directory_is_gone(self):
         old = self.start()
