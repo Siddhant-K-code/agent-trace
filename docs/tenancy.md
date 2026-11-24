@@ -176,4 +176,7 @@ span and the OTLP resource. `export --format otlp`, `otlp-genai` and `temporal`
 refuse a session whose `meta.json` `tenant_id` the store would refuse. So does
 the dashboard OTLP download. See
 [Sessions with unusable event timestamps](commands.md#sessions-with-unusable-event-timestamps).
+`watch --stream-otlp` takes a session's tenant from the first of its events in
+a batch that has one. If the store would refuse that tenant, watch does not
+send those events and prints a `Could not convert` line.
 Configure equivalent access controls and retention at the observability backend.
