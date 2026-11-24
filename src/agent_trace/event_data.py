@@ -41,6 +41,8 @@ Hooks and adapters store a tool call's arguments in ``arguments`` (or
 ``tool_input``) as an object, as a serialized object, or as plain text such as
 the patch an ``apply_patch`` call sends. :func:`tool_arguments` reads all
 three, and :func:`patch_paths` reads the file paths a patch names.
+:func:`event_paths` returns the files an event names, and :func:`is_edit`
+says whether the event writes them.
 
 An event's ``timestamp`` must be a Unix time in seconds. The collector refuses
 one that is not (see :func:`refused_timestamp_warning`), but an older version
@@ -95,6 +97,10 @@ EDIT_TOOLS = frozenset({
 })
 # Argument keys that name a file.
 PATH_KEYS = ("file_path", "path", "absolute_path", "filePath", "target_file", "notebook_path", "uri")
+# FILE_WRITE and FILE_READ events name their file under these keys.
+FILE_EVENT_PATH_KEYS = ("path", "file_path", "uri")
+# Editor tools that only read the file when their command is "view".
+VIEW_COMMAND_TOOLS = frozenset({"str_replace_editor", "str_replace_based_edit_tool"})
 
 _PATCH_PATH_LINE = re.compile(
     r"^\*\*\* (?:Add File|Update File|Delete File|Move to): (.*)$", re.MULTILINE,
@@ -229,6 +235,64 @@ def patch_paths(text: str) -> list[str]:
         if path:
             paths[path] = None
     return list(paths)
+
+
+def _call_name(event: TraceEvent, tool_name: str | None) -> str:
+    return str_field(event.data, "tool_name", "").lower() if tool_name is None else tool_name
+
+
+def event_paths(event: TraceEvent, tool_name: str | None = None) -> list[str]:
+    """Return the file paths an event names, as stored, in order, once each.
+
+    A tool call names each PATH_KEYS argument and, for apply_patch with the
+    patch stored as text, each file the patch adds, updates, deletes or moves
+    to. A FILE_WRITE or FILE_READ event names its path, file_path or uri.
+    Other events name none. *tool_name* is the lower-cased tool name to use
+    instead of the event's ``tool_name`` field.
+    """
+    if not isinstance(event.data, Mapping):
+        return []
+    if event.event_type in (EventType.FILE_WRITE, EventType.FILE_READ):
+        values = [event.data.get(key) for key in FILE_EVENT_PATH_KEYS]
+    elif event.event_type == EventType.TOOL_CALL:
+        args, raw = tool_arguments(event)
+        values = [args.get(key) for key in PATH_KEYS]
+        if raw is not None and _call_name(event, tool_name) == "apply_patch":
+            values.extend(patch_paths(raw))
+    else:
+        return []
+    return list(dict.fromkeys(v for v in values if isinstance(v, str) and v))
+
+
+def is_editor_view(event: TraceEvent, tool_name: str | None = None) -> bool:
+    """Return True if *event* is a VIEW_COMMAND_TOOLS call whose command is "view".
+
+    *tool_name* works as in :func:`event_paths`.
+    """
+    return (
+        event.event_type == EventType.TOOL_CALL
+        and isinstance(event.data, Mapping)
+        and _call_name(event, tool_name) in VIEW_COMMAND_TOOLS
+        and tool_arguments(event)[0].get("command") == "view"
+    )
+
+
+def is_edit(event: TraceEvent, tool_name: str | None = None) -> bool:
+    """Return True if *event* writes, edits, creates or deletes the files it names.
+
+    That is a FILE_WRITE event, or a call to an EDIT_TOOLS tool or
+    str_replace. An editor call whose command is "view" only reads. Shell
+    commands are never edits, even when they write files. *tool_name* works
+    as in :func:`event_paths`.
+    """
+    if event.event_type == EventType.FILE_WRITE:
+        return True
+    if event.event_type != EventType.TOOL_CALL or not isinstance(event.data, Mapping):
+        return False
+    name = _call_name(event, tool_name)
+    if name in VIEW_COMMAND_TOOLS:
+        return not is_editor_view(event, name)
+    return name in EDIT_TOOLS or name == "str_replace"
 
 
 class NonObjectEventDataError(ValueError):

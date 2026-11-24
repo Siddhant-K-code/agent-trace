@@ -35,6 +35,8 @@ from .event_data import (
     EDIT_TOOLS as _EDIT_TOOLS,
     PATH_KEYS as _PATH_KEYS,
     event_arguments,
+    event_paths,
+    is_editor_view,
 )
 from .inert import inert
 from .models import EventType, SessionMeta, TraceEvent
@@ -885,6 +887,55 @@ def _session_cwd(events: list[TraceEvent]) -> str:
             if isinstance(cwd, str) and cwd:
                 return cwd
     return ""
+
+
+# Lower-cased names of tools that read the files their path arguments name.
+READ_TOOLS = frozenset({"get_file_contents", "open_file", "read", "read_file", "view"})
+
+
+def shell_reads(command: str, cwd: str) -> list[tuple[str, str]]:
+    """Return ``(word, resolved)`` for each file a shell command reads, once each.
+
+    The command is parsed the way a skill load is. A simple command that runs
+    a read program reads each word after the program that is not an option.
+    ``sed -i`` edits, so it reads nothing. ``cd`` changes the directory that
+    later words resolve against.
+    """
+    reads: list[tuple[str, str]] = []
+    effective = cwd
+    for words in _segments(command):
+        program = _program_name(words[0])
+        if program == "cd" and len(words) > 1:
+            effective = _resolve(words[1], effective) or effective
+            continue
+        if program not in _READ_PROGRAMS:
+            continue
+        if program == "sed" and any(word.startswith("-i") for word in words[1:]):
+            continue
+        for word in words[1:]:
+            if word and not word.startswith("-"):
+                reads.append((word, _resolve(word, effective)))
+    return list(dict.fromkeys(read for read in reads if read[1]))
+
+
+def file_reads(event: TraceEvent, cwd: str) -> list[tuple[str, str]]:
+    """Return ``(as_stored, resolved)`` for each file *event* reads, once each.
+
+    An event reads the path of a FILE_READ event, each path argument of a
+    call to a READ_TOOLS tool or of an editor call whose command is "view",
+    and each file a shell read in its command names (see :func:`shell_reads`).
+    Relative paths resolve against *cwd*.
+    """
+    if not isinstance(event.data, Mapping):
+        return []
+    name = _tool_name(event).lower()
+    reads: list[tuple[str, str]] = []
+    if event.event_type == EventType.FILE_READ or (
+        event.event_type == EventType.TOOL_CALL and (name in READ_TOOLS or is_editor_view(event, name))
+    ):
+        reads.extend((raw, _resolve(raw, cwd)) for raw in event_paths(event, name))
+    reads.extend(shell_reads(_event_command(event), cwd))
+    return list(dict.fromkeys(read for read in reads if read[1]))
 
 
 def _linked_results(events: list[TraceEvent]) -> dict[str, TraceEvent]:
@@ -2214,6 +2265,7 @@ __all__ = [
     "CONTEXT_FILES",
     "HINT_KINDS",
     "NOT_MEASURABLE",
+    "READ_TOOLS",
     "REPO_SKILL_DIRS",
     "SKILLS_EVAL_DIR_PREFIX",
     "USER_SKILL_DIRS",
@@ -2229,9 +2281,11 @@ __all__ = [
     "discover_skills",
     "event_arguments",
     "extract_skill_commands",
+    "file_reads",
     "is_skills_eval_workspace",
     "load_claude_history",
     "load_codex_history",
     "load_copilot_history",
+    "shell_reads",
     "skill_hints",
 ]

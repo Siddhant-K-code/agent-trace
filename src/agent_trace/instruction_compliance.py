@@ -14,17 +14,22 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from .context_score import context_file_load_events
+from .event_data import event_paths, is_edit
 from .models import EventType, TraceEvent
 from .postmortem import _detect_agents_md_violations, _load_agents_md
 from .review import is_test_command
 from .skills import (
     CONTEXT_FILES,
     USER_SKILL_DIRS,
-    _is_edit,
+    _inside,
+    _real,
+    _resolve,
     _sanitize_events,
+    _session_cwd,
     analyze_session,
     discover_skills,
     event_arguments,
+    file_reads,
 )
 
 SCHEMA_VERSION = 1
@@ -74,38 +79,30 @@ def _tool_command(event: TraceEvent) -> str:
     return str(arguments.get("command") or arguments.get("cmd") or arguments.get("script") or "")
 
 
-def _event_path(event: TraceEvent) -> str:
-    data = event.data if isinstance(event.data, Mapping) else {}
-    if event.event_type in (EventType.FILE_READ, EventType.FILE_WRITE):
-        return str(data.get("path") or data.get("file_path") or data.get("uri") or "")
-    arguments = event_arguments(event)
-    return str(
-        arguments.get("file_path")
-        or arguments.get("path")
-        or arguments.get("absolute_path")
-        or arguments.get("filePath")
-        or arguments.get("target_file")
-        or arguments.get("uri")
-        or ""
+def _file_writes(event: TraceEvent, root: str) -> list[tuple[str, str]]:
+    """Return ``(as_stored, resolved)`` for each file *event* writes.
+
+    Shell commands never write here, even when they redirect to a file.
+    """
+    name = _tool_name(event)
+    if not is_edit(event, name):
+        return []
+    writes = [(raw, _resolve(raw, root)) for raw in event_paths(event, name)]
+    return [write for write in writes if write[1]]
+
+
+def _relative_path(resolved: str, root: str) -> str:
+    """Return *resolved* relative to *root*, or the whole path when it is outside."""
+    if _inside(resolved, root):
+        return Path(os.path.relpath(resolved, root)).as_posix()
+    return Path(resolved).as_posix()
+
+
+def _path_matches(raw: str, resolved: str, pattern: str, root: str) -> bool:
+    return (
+        fnmatch.fnmatch(_relative_path(resolved, root), pattern)
+        or fnmatch.fnmatch(raw.replace("\\", "/"), pattern)
     )
-
-
-def _relative_path(raw: str, workspace: Path) -> str:
-    if not raw:
-        return ""
-    candidate = Path(os.path.expanduser(raw))
-    if not candidate.is_absolute():
-        return candidate.as_posix().lstrip("./")
-    try:
-        return candidate.resolve().relative_to(workspace.resolve()).as_posix()
-    except (OSError, ValueError):
-        return candidate.as_posix()
-
-
-def _path_matches(raw: str, pattern: str, workspace: Path) -> bool:
-    relative = _relative_path(raw, workspace)
-    normalized = raw.replace("\\", "/")
-    return fnmatch.fnmatch(relative, pattern) or fnmatch.fnmatch(normalized, pattern)
 
 
 def _is_test_event(event: TraceEvent) -> bool:
@@ -115,7 +112,12 @@ def _is_test_event(event: TraceEvent) -> bool:
     return event.event_type == EventType.TOOL_CALL and is_test_command(_tool_command(event))
 
 
-def _matches_action(event: TraceEvent, expectation: ActionExpectation, workspace: Path) -> bool:
+def _matches_action(event: TraceEvent, expectation: ActionExpectation, root: str) -> bool:
+    """Return True if *event* meets *expectation*.
+
+    *root* is the event's session root: its recorded cwd, else the workspace.
+    Relative paths resolve against it.
+    """
     if not isinstance(event.data, Mapping):
         return False
     if expectation.kind == "test":
@@ -123,12 +125,12 @@ def _matches_action(event: TraceEvent, expectation: ActionExpectation, workspace
     if expectation.kind == "tool_call":
         return event.event_type == EventType.TOOL_CALL and _tool_name(event) == expectation.tool.lower()
     if expectation.kind == "file_read":
-        return event.event_type == EventType.FILE_READ and _path_matches(_event_path(event), expectation.path, workspace)
-    if expectation.kind == "file_write":
-        return (
-            event.event_type == EventType.FILE_WRITE or _is_edit(event)
-        ) and _path_matches(_event_path(event), expectation.path, workspace)
-    return False
+        paths = file_reads(event, root)
+    elif expectation.kind == "file_write":
+        paths = _file_writes(event, root)
+    else:
+        return False
+    return any(_path_matches(raw, resolved, expectation.path, root) for raw, resolved in paths)
 
 
 def _result_fact(event: TraceEvent) -> dict[str, object]:
@@ -363,12 +365,17 @@ def _skill_follow_evidence(
 
 def _instruction_load_evidence(
     events: list[TraceEvent],
+    sessions: list[tuple[list[TraceEvent], str]],
     workspace: Path,
     instruction: str,
 ) -> tuple[dict[str, object], list[float]]:
     path = workspace / instruction
     available = os.path.isfile(path)
-    loads = context_file_load_events(events, workspace, instruction)
+    loads = [
+        event
+        for session, root in sessions
+        for event in context_file_load_events(session, Path(root), instruction)
+    ]
     if loads:
         actual = "loaded"
         evidence = "observed"
@@ -417,13 +424,18 @@ def _instruction_load_evidence(
 def _action_evidence(
     expectation: ActionExpectation,
     events: list[TraceEvent],
-    workspace: Path,
+    sessions: list[tuple[list[TraceEvent], str]],
     observed_anchor: float | None,
     inferred_anchor: bool,
     load_available: bool,
     analysis_unavailable: bool,
 ) -> dict[str, object]:
-    matches = [event for event in events if _matches_action(event, expectation, workspace)]
+    matches = [
+        event
+        for session, root in sessions
+        for event in session
+        if _matches_action(event, expectation, root)
+    ]
     after = [event for event in matches if observed_anchor is None or event.timestamp > observed_anchor]
     if observed_anchor is not None and after:
         evidence = "observed"
@@ -476,6 +488,8 @@ def analyze_compliance_run(
     reports = []
     analysis_failures = []
     clean_session_events = []
+    # Each session's events with the root its paths resolve against.
+    session_roots: list[tuple[list[TraceEvent], str]] = []
     for session_id, session in session_events:
         normalized = sum(
             1
@@ -492,6 +506,9 @@ def analyze_compliance_run(
             })
         clean, skipped = _sanitize_events(session)
         clean_session_events.append((session_id, clean))
+        ordered = [event for _, event in sorted(enumerate(clean), key=lambda pair: (pair[1].timestamp, pair[0]))]
+        session_root = _session_cwd(ordered) or str(root)
+        session_roots.append((clean, _real(session_root) or session_root))
         if skipped:
             analysis_failures.append({
                 "session": session_id,
@@ -529,7 +546,7 @@ def analyze_compliance_run(
     load_items = [skill_item]
     instruction_anchors: list[float] = []
     for instruction in instructions:
-        item, anchors = _instruction_load_evidence(events, root, instruction)
+        item, anchors = _instruction_load_evidence(events, session_roots, root, instruction)
         load_items.append(item)
         instruction_anchors.extend(anchors)
 
@@ -541,7 +558,7 @@ def analyze_compliance_run(
         _action_evidence(
             expectation,
             events,
-            root,
+            session_roots,
             observed_anchor,
             inferred_anchor,
             load_available,

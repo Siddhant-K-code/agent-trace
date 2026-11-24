@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from agent_trace.cli import _normalise_skills_argv, build_parser
 from agent_trace.context_score import context_file_load_events
 from agent_trace.instruction_compliance import ActionExpectation, analyze_compliance_run
-from agent_trace.models import EventType, TraceEvent
+from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.skills_eval import build_report, cmd_skills_eval, format_markdown, load_cases
 
 
@@ -29,6 +29,10 @@ def _event(event_type, offset, event_id, **data):
         event_id=event_id,
         data=data,
     )
+
+
+def _call(offset, event_id, tool_name, arguments):
+    return _event(EventType.TOOL_CALL, offset, event_id, tool_name=tool_name, arguments=arguments)
 
 
 def _run_corpus(fmt):
@@ -572,6 +576,298 @@ class ComplianceEvidenceTests(unittest.TestCase):
             "unavailable": 1,
         })
         self.assertEqual(report["validation"]["last_test"]["result"]["evidence"], "observed")
+
+
+class HookRecordedComplianceTests(unittest.TestCase):
+    """Reads and writes in the shapes the hooks record.
+
+    The shapes come from tests/fixtures/capture_matrix. Claude Code records
+    Read, Write and Bash calls. Copilot CLI records view, create, bash and
+    apply_patch calls, and stores apply_patch arguments as the patch text.
+    Codex records only Bash calls. Paths are absolute.
+    """
+
+    MET = ("observed", True)
+    MISSING = ("missing", False)
+    LOADED = ("loaded", "observed")
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.base = Path(temp.name)
+        self.root = self.base / "workspace"
+        skill = self.root / ".github" / "skills" / "release-notes"
+        skill.mkdir(parents=True)
+        (self.root / "AGENTS.md").write_text("Run tests after release changes.\n")
+        (skill / "SKILL.md").write_text("---\nname: release-notes\ndescription: test\n---\n# Release notes\n")
+
+    def _path(self, relative):
+        return str(self.root / relative)
+
+    def _session(self, cwd, *events):
+        return [
+            _event(EventType.SESSION_START, 0, "start", cwd=cwd),
+            *events,
+            _event(EventType.SESSION_END, 99, "end"),
+        ]
+
+    def _analyze(self, sessions, *expected):
+        return analyze_compliance_run(
+            [(f"session-{index}", events) for index, events in enumerate(sessions)],
+            workspace=str(self.root),
+            skill="release-notes",
+            should_trigger=True,
+            instructions=("AGENTS.md",),
+            expected_actions=expected,
+            user_dirs=(),
+        )
+
+    @staticmethod
+    def _actions(report):
+        return {
+            item["id"]: (item["evidence"], item["expectation_met"])
+            for item in report["follow"]["instruction_actions"]
+        }
+
+    @staticmethod
+    def _instruction_load(report):
+        item = next(item for item in report["loads"] if item["kind"] == "instruction")
+        return item["actual"], item["evidence"]
+
+    def test_claude_read_and_copilot_view_meet_file_read(self):
+        shapes = {
+            "claude": ("Read", "file_path", "Skill"),
+            "copilot": ("view", "path", "skill"),
+        }
+        for agent, (read_tool, key, skill_tool) in shapes.items():
+            with self.subTest(agent=agent):
+                report = self._analyze(
+                    [self._session(
+                        str(self.root),
+                        _call(1, "agents", read_tool, {key: self._path("AGENTS.md")}),
+                        _call(2, "skill", skill_tool, {"skill": "release-notes"}),
+                        _call(3, "read", read_tool, {key: self._path("docs/format.md")}),
+                    )],
+                    ActionExpectation("read-format", "file_read", path="docs/*.md"),
+                )
+
+                self.assertEqual(self._instruction_load(report), self.LOADED)
+                self.assertEqual(self._actions(report), {"read-format": self.MET})
+
+    def test_editor_view_is_a_read_and_not_a_write(self):
+        for tool in ("str_replace_based_edit_tool", "str_replace_editor"):
+            with self.subTest(tool=tool):
+                report = self._analyze(
+                    [self._session(
+                        str(self.root),
+                        _call(1, "agents", tool, {"command": "view", "path": self._path("AGENTS.md")}),
+                        _call(2, "skill", "skill", {"skill": "release-notes"}),
+                        _call(3, "view", tool, {"command": "view", "path": self._path("CHANGELOG.md")}),
+                        _call(4, "edit", tool, {
+                            "command": "str_replace",
+                            "path": self._path("NOTES.md"),
+                            "old_str": "a",
+                            "new_str": "b",
+                        }),
+                    )],
+                    ActionExpectation("read-changelog", "file_read", path="CHANGELOG.md"),
+                    ActionExpectation("write-changelog", "file_write", path="CHANGELOG.md"),
+                    ActionExpectation("write-notes", "file_write", path="NOTES.md"),
+                )
+
+                self.assertEqual(self._instruction_load(report), self.LOADED)
+                self.assertEqual(self._actions(report), {
+                    "read-changelog": self.MET,
+                    "write-changelog": self.MISSING,
+                    "write-notes": self.MET,
+                })
+
+    def test_codex_shell_reads_count_as_reads(self):
+        report = self._analyze(
+            [self._session(
+                str(self.root),
+                _call(1, "agents", "Bash", {"command": "cat AGENTS.md"}),
+                _call(2, "skill", "Bash", {"command": "sed -n 1,200p .github/skills/release-notes/SKILL.md"}),
+                _call(3, "read", "Bash", {"command": "cd docs && sed -n 1,40p ../CHANGELOG.md"}),
+                _call(4, "edit", "Bash", {"command": "sed -i s/a/b/ NOTES.md"}),
+            )],
+            ActionExpectation("read-changelog", "file_read", path="CHANGELOG.md"),
+            ActionExpectation("read-notes", "file_read", path="NOTES.md"),
+        )
+
+        self.assertEqual(self._instruction_load(report), self.LOADED)
+        self.assertEqual(self._actions(report), {
+            "read-changelog": self.MET,
+            "read-notes": self.MISSING,
+        })
+
+    def test_apply_patch_text_names_the_files_it_writes(self):
+        patch = "*** Begin Patch\n*** Add File: RELEASE_NOTES.md\n+notes\n*** End Patch\n"
+        report = self._analyze(
+            [self._session(
+                str(self.root),
+                _call(1, "agents", "view", {"path": self._path("AGENTS.md")}),
+                _call(2, "skill", "skill", {"skill": "release-notes"}),
+                _call(3, "patch", "apply_patch", patch),
+            )],
+            ActionExpectation("write-notes", "file_write", path="RELEASE_NOTES.md"),
+        )
+
+        self.assertEqual(self._actions(report), {"write-notes": self.MET})
+
+    def test_notebook_edit_writes_its_notebook(self):
+        report = self._analyze(
+            [self._session(
+                str(self.root),
+                _call(1, "agents", "Read", {"file_path": self._path("AGENTS.md")}),
+                _call(2, "skill", "Skill", {"skill": "release-notes"}),
+                _call(3, "notebook", "NotebookEdit", {
+                    "notebook_path": self._path("analysis.ipynb"),
+                    "new_source": "x",
+                }),
+            )],
+            ActionExpectation("edit-notebook", "file_write", path="*.ipynb"),
+        )
+
+        self.assertEqual(self._actions(report), {"edit-notebook": self.MET})
+
+    def test_replayed_run_resolves_paths_against_its_recorded_cwd(self):
+        # --save-traces keeps the run. Its paths sit under its old temp
+        # workspace, which is gone when --from-traces scores it.
+        old = self.base / "gone" / "workspace"
+        cases = self.base / "cases.json"
+        cases.write_text(json.dumps([{
+            "id": "draft",
+            "skill": "release-notes",
+            "prompt": "Draft the release notes.",
+            "should_trigger": True,
+            "instructions": ["AGENTS.md"],
+            "expected_actions": [
+                {"id": "write-notes", "kind": "file_write", "path": "RELEASE_NOTES.md"},
+            ],
+        }]))
+        events = [
+            _event(EventType.SESSION_START, 0, "start", provider="claude", cwd=str(old)),
+            _call(1, "agents", "Read", {"file_path": str(old / "AGENTS.md")}),
+            _call(2, "skill", "Skill", {"skill": "release-notes"}),
+            _call(3, "write", "Write", {"file_path": str(old / "RELEASE_NOTES.md"), "content": "notes"}),
+            _event(EventType.SESSION_END, 4, "end"),
+        ]
+        session = self.base / "traces" / "draft" / "run-1" / "s-draft"
+        session.mkdir(parents=True)
+        (session / "events.ndjson").write_text("".join(event.to_json() + "\n" for event in events))
+        (session / "meta.json").write_text(SessionMeta(
+            session_id="s-draft",
+            started_at=T0,
+            ended_at=T0 + 4,
+            agent_name="claude",
+        ).to_json())
+
+        argv = [
+            "skills",
+            "eval",
+            str(cases),
+            "--from-traces",
+            str(self.base / "traces"),
+            "--workspace",
+            str(self.root),
+            "--format",
+            "json",
+        ]
+        args = build_parser().parse_args(_normalise_skills_argv(argv))
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = cmd_skills_eval(args)
+
+        self.assertEqual(code, 0, err.getvalue())
+        compliance = json.loads(out.getvalue())["cases"][0]["run_results"][0]["compliance"]
+        self.assertEqual(self._instruction_load(compliance), self.LOADED)
+        self.assertEqual(self._actions(compliance), {"write-notes": self.MET})
+
+    def test_each_session_resolves_against_its_own_cwd(self):
+        site = self.root / "site"
+        report = self._analyze(
+            [
+                self._session(
+                    str(self.root),
+                    _call(1, "agents", "Read", {"file_path": self._path("AGENTS.md")}),
+                    _call(2, "skill", "Skill", {"skill": "release-notes"}),
+                ),
+                self._session(
+                    str(site),
+                    _call(3, "write", "Write", {"file_path": str(site / "RELEASE_NOTES.md"), "content": "notes"}),
+                ),
+            ],
+            ActionExpectation("write-notes", "file_write", path="RELEASE_NOTES.md"),
+        )
+
+        self.assertEqual(self._actions(report), {"write-notes": self.MET})
+
+    def test_dot_prefixes_resolve_instead_of_being_stripped(self):
+        report = self._analyze(
+            [self._session(
+                str(self.root),
+                _event(EventType.FILE_READ, 1, "agents", path="AGENTS.md"),
+                _call(2, "skill", "skill", {"skill": "release-notes"}),
+                _event(EventType.FILE_READ, 3, "dotdir", path="./.github/skills/release-notes/references/format.md"),
+                _event(EventType.FILE_READ, 4, "outside", path="../src/x.py"),
+                _call(5, "create", "create", {"path": "./.github/release.md", "file_text": "notes"}),
+                _call(6, "write", "Write", {"file_path": "../src/y.py", "content": "y"}),
+            )],
+            ActionExpectation("read-dotdir", "file_read", path=".github/*"),
+            ActionExpectation("read-outside", "file_read", path="src/*"),
+            ActionExpectation("write-dotdir", "file_write", path=".github/*"),
+            ActionExpectation("write-outside", "file_write", path="src/*"),
+        )
+
+        self.assertEqual(self._actions(report), {
+            "read-dotdir": self.MET,
+            "read-outside": self.MISSING,
+            "write-dotdir": self.MET,
+            "write-outside": self.MISSING,
+        })
+
+    def test_instruction_load_reads_every_path_key_and_json_text(self):
+        events = [
+            _call(1, "target-file", "read_file", {"target_file": "AGENTS.md"}),
+            _call(2, "absolute-path", "view", {"absolute_path": self._path("AGENTS.md")}),
+            _call(3, "json-text", "view", json.dumps({"path": "AGENTS.md"})),
+            _event(EventType.TOOL_CALL, 4, "tool-input", tool_name="Read", tool_input={"file_path": "AGENTS.md"}),
+        ]
+
+        loads = context_file_load_events(events, self.root, "AGENTS.md")
+
+        self.assertEqual(
+            [event.event_id for event in loads],
+            ["target-file", "absolute-path", "json-text", "tool-input"],
+        )
+
+    def test_absolute_hook_paths_under_the_workspace_still_match(self):
+        report = self._analyze(
+            [self._session(
+                str(self.root),
+                _call(1, "agents", "view", {"path": self._path("AGENTS.md")}),
+                _call(2, "skill", "skill", {"skill": "release-notes"}),
+                _call(3, "write", "Write", {"file_path": self._path("RELEASE_NOTES.md"), "content": "notes"}),
+            )],
+            ActionExpectation("write-notes", "file_write", path="RELEASE_NOTES.md"),
+        )
+
+        self.assertEqual(self._instruction_load(report), self.LOADED)
+        self.assertEqual(self._actions(report), {"write-notes": self.MET})
+
+    def test_shell_redirect_is_not_a_write(self):
+        report = self._analyze(
+            [self._session(
+                str(self.root),
+                _call(1, "agents", "Read", {"file_path": self._path("AGENTS.md")}),
+                _call(2, "skill", "Skill", {"skill": "release-notes"}),
+                _call(3, "shell", "Bash", {"command": "echo x > RELEASE_NOTES.md"}),
+            )],
+            ActionExpectation("write-notes", "file_write", path="RELEASE_NOTES.md"),
+        )
+
+        self.assertEqual(self._actions(report), {"write-notes": self.MISSING})
 
 
 class ComplianceCaseValidationTests(unittest.TestCase):
