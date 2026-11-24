@@ -2172,9 +2172,40 @@ Personal agent cost-efficiency curve by task type. Verdict per type: efficient /
 
 ### `inflation`
 ```
-agent-strace inflation [--compare MODELS] [--sessions N]
+agent-strace inflation [--compare MODELS] [--sessions N] [--daily-sessions N]
 ```
-Measure tokenizer cost impact of switching model versions. No API calls required.
+Estimate how many more tokens, and how much more money, the stored sessions would cost on another model's tokenizer. No API calls required.
+
+It reads the `llm_request`, `user_prompt`, `assistant_response` and `llm_response` events of the newest sessions. It estimates the tokens of the system prompt, tool definitions, user messages and assistant messages from their size. Each count is multiplied by each model's tokenizer factor and rounded.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--compare MODELS` | `claude-opus-4-6,claude-opus-4-7` | The baseline model and the model to compare, as two names separated by one comma. Space around each name is ignored. Each name must have a tokenizer factor. |
+| `--sessions N` | `30` | Read the newest N sessions. Must be 1 or more. |
+| `--daily-sessions N` | `8` | Sessions per day for the Daily and Monthly rows. Must be a finite number, 0 or more. A month is 30 days. |
+
+Prices come from the bundled table that [`cost`](#cost) uses. The system prompt, tool definitions and user messages use the input rate. Assistant messages use the output rate. A model with no bundled price, such as `gpt-4`, `o1` or `gemini-1.5-pro`, shows `n/a` in each cost cell of its column and in each cost delta. Its token rows still print. `claude-sonnet-4-7` uses the `claude-sonnet-4` price, as in `cost` and `dashboard`.
+
+These models have a tokenizer factor. `claude-opus-4-6` is the 1.0 baseline.
+
+| Factor | Models |
+|---|---|
+| 0.95 | `gemini-1.5-pro`, `gemini-2.0-flash` |
+| 1.00 | `claude-opus-4-6`, `claude-sonnet-4-5`, `claude-haiku-3-5`, `claude-3-opus`, `claude-3-sonnet`, `claude-3-haiku`, `gpt-4` |
+| 1.05 | `gpt-4o`, `gpt-4o-mini`, `o1`, `o3` |
+| 1.35 | `claude-sonnet-4-7` |
+| 1.38 | `claude-opus-4-7` |
+
+A model name resolves as it does in `cost`. Case is ignored, and a provider or region prefix such as `anthropic/` or `us.` is dropped. A dated or suffixed name resolves to its base model: the longest name in the table that it equals, or that it starts with followed by `-`, `:` or `@`. So `gpt-4o-2024-08-06` uses `gpt-4o`, `gpt-4o-mini-2024-07-18` uses `gpt-4o-mini`, and `anthropic/claude-opus-4-7` uses `claude-opus-4-7`. A name such as `claude` or `claude-opus-47` has no factor.
+
+The header counts only the sessions with prompt or model content. A session with only tool calls is left out, so it does not lower the per-session average. With no such session, the count and the averages are 0. "Largest inflation source" names the content type that adds the most tokens. A tie keeps the first type in table order. The line is left out when no type adds tokens.
+
+`inflation` refuses the values below before it reads any session. It prints one `Error:` line to stderr that names the flag and the value, prints nothing to stdout, and exits 2.
+
+- A `--compare` value that is not two names separated by one comma, or that has an empty name.
+- A `--compare` model with no tokenizer factor. The message lists the models that have one.
+- A `--sessions` value below 1.
+- A `--daily-sessions` value that is negative, `nan` or infinite. A value too large for a float, such as `1e400`, is infinite.
 
 ### `optimize`
 ```

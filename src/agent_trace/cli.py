@@ -2960,11 +2960,13 @@ def build_parser() -> argparse.ArgumentParser:
     # inflation (token inflation calculator)
     p_inf = sub.add_parser("inflation", help="measure tokenizer cost impact across model versions")
     p_inf.add_argument("--compare", default="claude-opus-4-6,claude-opus-4-7",
-                       help="comma-separated model pair to compare (default: claude-opus-4-6,claude-opus-4-7)")
+                       help="two model names separated by one comma, each with a tokenizer factor "
+                            "(default: claude-opus-4-6,claude-opus-4-7)")
     p_inf.add_argument("--sessions", type=int, default=30,
-                       help="number of recent sessions to analyse (default: 30)")
+                       help="number of recent sessions to analyse, 1 or more (default: 30)")
     p_inf.add_argument("--daily-sessions", type=float, default=8.0, dest="daily_sessions",
-                       help="assumed sessions per day for projections (default: 8)")
+                       help="assumed sessions per day for projections, a finite number "
+                            "0 or more (default: 8)")
 
     # a2a-tree (A2A agent call graph)
     p_a2a = sub.add_parser("a2a-tree", help="show the agent-to-agent call graph for a session")
