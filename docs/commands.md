@@ -2871,6 +2871,12 @@ directory, `meta.json` or `events.ndjson` is a symlink is refused too. So is a
 root session whose `events.ndjson` is a symlink. See
 [Sessions with mismatched or unreadable events](#sessions-with-mismatched-or-unreadable-events).
 
+A field of an `a2a_call` event with the wrong type reads as missing. See
+[Fields with the wrong type](#fields-with-the-wrong-type). A `duration_ms` or
+`cost_usd` that is not a number, or is negative, NaN, infinity, or too large
+for a float, reads as 0. Only `success: false` marks a call failed. A call
+with any other `success` value, or with none, counts as successful.
+
 ### `identity`
 ```
 agent-strace identity show
