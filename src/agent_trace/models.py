@@ -29,7 +29,7 @@ import os
 import time
 import uuid
 from dataclasses import asdict, dataclass, field, fields
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
@@ -99,14 +99,30 @@ def usable_count(value: Any) -> int:
     return value if usable_number(value) is not None else 0
 
 
+# usable_time() refuses a time after this one. Time zones run from UTC-12 to
+# UTC+14, so this time falls on 9999-12-30 or earlier in every zone. A reader
+# can still add a day to its local or UTC date.
+LAST_USABLE_TIME = 253402128000.0  # 9999-12-30T00:00:00Z
+
+
 def usable_time(value: Any) -> float | None:
-    """Return ``value`` as a float if it is a usable number that
-    ``datetime.fromtimestamp`` accepts, else None."""
-    try:
-        datetime.fromtimestamp(value)
-    except (OverflowError, ValueError, OSError, TypeError):
+    """Return ``value`` as a float if it is a usable Unix time in seconds, else None.
+
+    A usable time is a number from 0 to LAST_USABLE_TIME, which is
+    9999-12-30T00:00:00Z. The limit is the same in every time zone, so a
+    session is usable on every host or on none. Windows can have a lower
+    limit, near the end of the year 3000. So this also returns None for a
+    time that ``datetime.fromtimestamp`` refuses in local time or in UTC.
+    """
+    number = usable_number(value)
+    if number is None or number > LAST_USABLE_TIME:
         return None
-    return usable_number(value)
+    try:
+        datetime.fromtimestamp(number)
+        datetime.fromtimestamp(number, tz=timezone.utc)
+    except (OverflowError, ValueError, OSError):
+        return None
+    return number
 
 
 def usable_text(value: Any) -> str:

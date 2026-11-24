@@ -389,9 +389,11 @@ def _duration_seconds(meta: SessionMeta, started: float | None) -> float | None:
 def _local_time(started: float | None) -> datetime | None:
     """Return ``started`` as an aware local datetime, or None.
 
-    ``astimezone()`` can raise for a time that ``fromtimestamp`` accepts:
-    within a day of year 9999 on some Pythons, and before 1970-01-02 on
-    Windows.
+    ``started`` comes from usable_time, so it is 9999-12-30T00:00:00Z or
+    earlier, and ``astimezone()`` accepts it in every time zone. On Windows,
+    ``astimezone()`` can still raise for a time that ``fromtimestamp``
+    accepts: before 1970-01-02, or within a day of the Windows limit near the
+    end of the year 3000.
     """
     if started is None:
         return None

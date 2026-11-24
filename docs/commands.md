@@ -3130,7 +3130,8 @@ Safety:
   - is not a valid event, or is nested too deep to read
   - has no `timestamp`
   - has a `timestamp` that is not a Unix time in seconds, such as a negative
-    number, a time in milliseconds or a number too large to be a date
+    number, a time in milliseconds or a time after 9999-12-30T00:00:00Z (on
+    Windows the limit can be lower, near the end of the year 3000)
   - has an `event_id` or `parent_id` that is not a string
   - has no `event_id`, or an empty one
 - Sessions covered by a tenant erasure tombstone, or named by a pending tenant
@@ -3319,17 +3320,19 @@ that is not a string, an empty `event_id`, and a NaN or infinite
 
 ## Sessions with unusable event timestamps
 
-An event's `timestamp` is a Unix time in seconds, and `agent-strace server`
-refuses an event whose `timestamp` is not one (see
+An event's `timestamp` is a Unix time in seconds, from 0 to
+9999-12-30T00:00:00Z. The limit is the same in every time zone. On Windows it
+can be lower, near the end of the year 3000. `agent-strace server` refuses an
+event whose `timestamp` is not such a time (see
 [server.md](server.md#api-reference)). In Python, `TraceStore.append_event`
 and `append_events` raise `ValueError` for a NaN or infinite `timestamp` and
 write nothing. A batch with one such event writes none of its events. A
 session stored by an older version, or edited by hand, can still hold text,
 `null`, `true`, an object, an array, NaN, infinity, a negative number, or a
-number too large to be a date, such as a time in milliseconds. The commands in
-the two lists below check the session first. If an event a command reads has
-such a timestamp, the command writes one line to stderr and exits 1 before it
-prints, writes, sends, or opens anything. The line looks like this:
+time after 9999-12-30T00:00:00Z, such as a time in milliseconds. The commands
+in the two lists below check the session first. If an event a command reads
+has such a timestamp, the command writes one line to stderr and exits 1 before
+it prints, writes, sends, or opens anything. The line looks like this:
 
 ```
 Error: session event timestamp must be a Unix time in seconds: event 6 of 25 (tool_call) has a string timestamp; 5 more events have unusable timestamps
