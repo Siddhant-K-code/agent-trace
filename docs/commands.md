@@ -1592,6 +1592,17 @@ session the same way. A session whose `events.ndjson` is a symlink is refused
 too. See
 [Sessions with mismatched or unreadable events](#sessions-with-mismatched-or-unreadable-events).
 
+`compliance export` also refuses to report a session whose `started_at`, or
+`ended_at` when set, is not a Unix time in seconds. It prints one `Error:` line
+on stderr and exits 1. It prints no report and writes no file. With a session
+ID, the line is `Error: session started_at must be a Unix time in seconds`, or
+the same message for `ended_at`. Without a session ID, or with `--since`, the
+line names the session, as in
+`Error: session <session-id> ended_at must be a Unix time in seconds`.
+That path refuses a bad `started_at` first, when it lists the store, even for a
+session outside the window. That line is
+`Error: cannot read session <session-id>: started_at is not a usable time`.
+
 This is the legacy compatibility command. For a privacy-minimized, explicitly
 heuristic evidence crosswalk with current versioned framework manifests, use
 [`compliance-report`](#compliance-report). The two output schemas and claims
@@ -1696,8 +1707,8 @@ Hash chain integrity fails when a session's chain is `broken` or its
 See the states under [`verify`](#verify). Missing links cost 20 points.
 
 Hash chain integrity also fails when the store refuses to read a session: its
-`meta.json` is [corrupt](#list), its `started_at` is not a usable time, a
-tenant ID in it is not valid, or its events are
+`meta.json` is [corrupt](#list), its `started_at`, or `ended_at` when set, is
+not a usable time, a tenant ID in it is not valid, or its events are
 [mismatched or unreadable](#sessions-with-mismatched-or-unreadable-events).
 It fails too for each store entry that makes `export --all` refuse: a symlink,
 a directory with no `meta.json` or no `events.ndjson`, a directory whose name
@@ -2549,6 +2560,16 @@ refuses to read any session in it, even one outside that window, so the package
 never leaves out a session. See
 [Sessions with mismatched or unreadable events](#sessions-with-mismatched-or-unreadable-events).
 
+The eu-ai-act export also refuses to export a session whose `started_at`, or
+`ended_at` when set, is not a Unix time in seconds. It prints one `Error:` line
+on stderr and exits 1. It prints no package and writes no file. For one
+session, the line is `Error: session started_at must be a Unix time in seconds`,
+or the same message for `ended_at`. With `--all`, the line names the session,
+as in `Error: session <session-id> ended_at must be a Unix time in seconds`.
+`--all` refuses a bad `started_at` first, when it lists the store, even for a
+session outside the window. That line is
+`Error: cannot read session <session-id>: started_at is not a usable time`.
+
 ### `share`
 ```
 agent-strace share [session-id] [-o FILE | --stdout] [--open]
@@ -3282,10 +3303,18 @@ check fails when any event of a session has an unusable timestamp, and names
 the session with the reason. `export --format eu-ai-act --all` refuses that
 store. See [`audit-readiness`](#audit-readiness).
 
-`export --format otlp`, `otlp-genai`, and `temporal` also refuse a session
-whose `started_at`, or `ended_at` when set, is not a Unix time in seconds, with
+`compliance export` and `export --format otlp`, `otlp-genai`, `temporal`, and
+`eu-ai-act` also refuse a session whose `started_at`, or `ended_at` when set, is
+not a Unix time in seconds, with
 `Error: session started_at must be a Unix time in seconds` or the same message
-for `ended_at`. `export --format temporal` checks the session's Temporal trace
+for `ended_at`. `compliance export` without a session ID and
+`export --format eu-ai-act --all` name the session, as in
+`Error: session <session-id> ended_at must be a Unix time in seconds`. For
+`started_at`, both refuse first while they list the store, with
+`Error: cannot read session <session-id>: started_at is not a usable time`.
+`audit-readiness` fails its hash chain integrity check for a session whose
+`ended_at` is set but not usable, and names the session with the reason.
+`export --format temporal` checks the session's Temporal trace
 context first, so a session without one keeps its `Temporal export failed`
 message. `export <session-id> --backend langfuse` refuses a session whose
 `started_at` is not a Unix time in seconds with the same `started_at` line. So
