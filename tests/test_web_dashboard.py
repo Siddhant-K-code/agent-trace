@@ -639,6 +639,40 @@ class TestServerDashboardRoutes(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
+    def test_otlp_route_returns_400_for_a_time_past_the_otlp_limit(self):
+        year_3000 = 32503680000.0
+        limit = "is past the latest time OTLP can carry (2554-07-21T23:34:33.709551615Z)"
+        server, port, store = _start_server(self._tmp)
+        try:
+            cases = (
+                ("otlp-limit-start", {"started_at": year_3000}, 2.0,
+                 f"session started_at {limit}"),
+                ("otlp-limit-end", {"started_at": 1.0, "ended_at": year_3000}, 2.0,
+                 f"session ended_at {limit}"),
+                ("otlp-limit-event", {"started_at": 1.0}, year_3000,
+                 f"session otlp-limit-event event timestamp {limit}: event 1 of 1 (tool_call)"),
+            )
+            for session_id, times, timestamp, message in cases:
+                store.create_session(SessionMeta(session_id=session_id, **times))
+                store.append_event(session_id, TraceEvent(
+                    event_type=EventType.TOOL_CALL,
+                    timestamp=timestamp,
+                    session_id=session_id,
+                    event_id="call",
+                    data={"tool_name": "Bash"},
+                ))
+                with self.subTest(session_id=session_id):
+                    with self.assertRaises(urllib.error.HTTPError) as context:
+                        urllib.request.urlopen(
+                            f"http://127.0.0.1:{port}/api/sessions/{session_id}/otlp"
+                        )
+                    with context.exception as error:
+                        self.assertEqual(error.code, 400)
+                        self.assertEqual(json.loads(error.read()), {"error": message})
+        finally:
+            server.shutdown()
+            server.server_close()
+
     def test_health_json_when_dashboard_disabled(self):
         server, port, _ = _start_server(self._tmp, dashboard=False)
         try:

@@ -51,6 +51,13 @@ or a hand edit can still store one. Commands that read timestamps call
 CLI turns :class:`UnusableTimestampError` into one ``Error:`` line on stderr
 and exit code 1. ``watch --stream-otlp`` leaves such an event out of the OTLP
 stream (see :func:`left_out_timestamp_warning`).
+
+OTLP carries each time as an unsigned 64-bit count of nanoseconds, so it
+cannot carry a time after 2554-07-21T23:34:33.709551615Z, though such a time
+is a Unix time in seconds. The OTLP exports also call
+:func:`require_otlp_timestamps` and :func:`require_otlp_session_times`, which
+refuse such a time, and ``watch --stream-otlp`` leaves out an event with such
+a timestamp (see :func:`left_out_otlp_limit_warning`).
 """
 
 from __future__ import annotations
@@ -300,7 +307,33 @@ class NonObjectEventDataError(ValueError):
 
 
 class UnusableTimestampError(ValueError):
-    """An event or session time is not a Unix time in seconds."""
+    """An event or session time is not a Unix time in seconds, or OTLP cannot carry it."""
+
+
+# OTLP JSON carries each time as a decimal string of an unsigned 64-bit count
+# of nanoseconds since the Unix epoch. OTLP_LATEST_TIME is that count's
+# largest value as a UTC time.
+OTLP_MAX_UNIX_NANOS = 2**64 - 1
+OTLP_LATEST_TIME = "2554-07-21T23:34:33.709551615Z"
+
+
+def otlp_unix_nanos(value: object) -> int | None:
+    """Return the Unix time in seconds *value* as the nanoseconds OTLP writes.
+
+    Returns None when *value* is not an int or a float, or when its
+    nanoseconds fall outside 0 to OTLP_MAX_UNIX_NANOS. The check runs on the
+    integer, because the float nearest OTLP_MAX_UNIX_NANOS / 1e9 converts to
+    2**64.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        nanos = int(value * 1_000_000_000)
+    except (OverflowError, ValueError):
+        return None
+    if value < 0 or nanos > OTLP_MAX_UNIX_NANOS:
+        return None
+    return nanos
 
 
 def _json_type_name(value: object) -> str:
@@ -401,6 +434,23 @@ def left_out_timestamp_warning(
     return (
         f"[{command}] Left one {_event_type_value(event)} event out of the {target} "
         "because its timestamp is not a Unix time in seconds.\n"
+    )
+
+
+def left_out_otlp_limit_warning(command: str, event: TraceEvent) -> str:
+    """Return the stderr line a live OTLP stream prints when it leaves an event
+    out because OTLP cannot carry its timestamp.
+
+    ``watch --stream-otlp`` cannot turn an event into spans when the converter
+    would read its timestamp and the timestamp is past the latest time OTLP
+    can carry, so it sends the other events of the batch without it. The line
+    names the event type and that time, never the timestamp, data values or
+    event IDs.
+    """
+    return (
+        f"[{command}] Left one {_event_type_value(event)} event out of the OTLP "
+        "stream because its timestamp is past the latest time OTLP can carry "
+        f"({OTLP_LATEST_TIME}).\n"
     )
 
 
@@ -533,6 +583,55 @@ def require_usable_timestamps(
     raise UnusableTimestampError(message)
 
 
+def require_otlp_timestamps(
+    events: Sequence[TraceEvent],
+    *,
+    event_types: Collection[EventType] | None = None,
+    session_id: str | None = None,
+) -> None:
+    """Raise :class:`UnusableTimestampError` if a checked event's ``timestamp``
+    is past the latest time OTLP can carry.
+
+    :func:`require_usable_timestamps` accepts a time up to the year 9999, and
+    OTLP carries none after OTLP_LATEST_TIME, so the OTLP exports call this
+    after it, :func:`require_usable_session_times` and
+    :func:`require_otlp_session_times`. An event whose timestamp is not a
+    Unix time in seconds is left to the first.
+    ``event_types`` and ``session_id`` work as they do there.
+
+    The message names that time and the first checked event past it by
+    1-based position in ``events`` and its type, then counts every other
+    event in ``events`` past it. It never includes the timestamp, data values
+    or event IDs.
+    """
+    past_limit = [
+        (position, event)
+        for position, event in enumerate(events, start=1)
+        if usable_time(event.timestamp) is not None
+        and otlp_unix_nanos(event.timestamp) is None
+    ]
+    checked = [
+        (position, event)
+        for position, event in past_limit
+        if event_types is None or event.event_type in event_types
+    ]
+    if not checked:
+        return
+    position, event = checked[0]
+    subject = f"session {session_id}" if session_id else "session"
+    message = (
+        f"{subject} event timestamp is past the latest time OTLP can carry "
+        f"({OTLP_LATEST_TIME}): event {position} of {len(events)} "
+        f"({_event_type_value(event)})"
+    )
+    others = len(past_limit) - 1
+    if others == 1:
+        message += "; 1 more event has a timestamp past that time"
+    elif others:
+        message += f"; {others} more events have timestamps past that time"
+    raise UnusableTimestampError(message)
+
+
 def require_usable_session_times(meta: SessionMeta, *, session_id: str | None = None) -> None:
     """Raise :class:`UnusableTimestampError` if the session's ``started_at``, or
     its ``ended_at`` when it is not None, is not a Unix time in seconds.
@@ -547,3 +646,22 @@ def require_usable_session_times(meta: SessionMeta, *, session_id: str | None = 
         raise UnusableTimestampError(f"{subject} started_at must be a Unix time in seconds")
     if meta.ended_at is not None and usable_time(meta.ended_at) is None:
         raise UnusableTimestampError(f"{subject} ended_at must be a Unix time in seconds")
+
+
+def require_otlp_session_times(meta: SessionMeta, *, session_id: str | None = None) -> None:
+    """Raise :class:`UnusableTimestampError` if the session's ``started_at``, or
+    its ``ended_at`` when it is not None, is past the latest time OTLP can
+    carry.
+
+    A time that is not a Unix time in seconds is left to
+    :func:`require_usable_session_times`. The OTLP exports call that first, so
+    a session it refuses keeps its message. The message never includes the
+    value. ``session_id`` names the session for commands that read more than
+    one.
+    """
+    subject = f"session {session_id}" if session_id else "session"
+    for field, value in (("started_at", meta.started_at), ("ended_at", meta.ended_at)):
+        if usable_time(value) is not None and otlp_unix_nanos(value) is None:
+            raise UnusableTimestampError(
+                f"{subject} {field} is past the latest time OTLP can carry ({OTLP_LATEST_TIME})"
+            )

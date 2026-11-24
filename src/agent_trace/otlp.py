@@ -30,11 +30,14 @@ from typing import TYPE_CHECKING, Any
 from . import __version__
 from .cost import TokenUsage, reasoning_output_tokens, recorded_response_indexes, usage_detail
 from .event_data import (
+    OTLP_LATEST_TIME,
+    OTLP_MAX_UNIX_NANOS,
     NonObjectEventDataError,
     UnusableTimestampError,
     event_id_of,
     is_redacted,
     object_field,
+    otlp_unix_nanos,
     parent_id_of,
     str_field,
 )
@@ -55,6 +58,7 @@ from .models import (
     usable_number,
     usable_object,
     usable_text,
+    usable_time,
 )
 from .http_post import no_redirect_opener, otlp_traces_url, post_error_detail, url_endpoint
 from .otlp_proto import (
@@ -216,12 +220,69 @@ def _event_span_ids(
 def _ts_to_nanos(ts: float) -> str:
     """Convert Unix timestamp to nanoseconds as string.
 
-    Raises UnusableTimestampError for a value that is not an int or a float.
-    The multiply would repeat a str or a list a billion times.
+    Raises UnusableTimestampError for a value that is not an int or a float,
+    because the multiply would repeat a str or a list a billion times. Also
+    raises it when the nanoseconds fall outside the 0 to 2**64 - 1 that OTLP
+    carries. The OTLP exports refuse such a time before they convert, so this
+    is a last guard for a library caller such as tree_to_otlp.
     """
-    if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+    nanos = otlp_unix_nanos(ts)
+    if nanos is None:
+        if usable_time(ts) is not None:
+            raise UnusableTimestampError(
+                f"timestamp is past the latest time OTLP can carry ({OTLP_LATEST_TIME})"
+            )
         raise UnusableTimestampError("timestamp must be a Unix time in seconds")
-    return str(int(ts * 1_000_000_000))
+    return str(nanos)
+
+
+def _one_ms_end_nanos(start: float) -> str:
+    """Return the end of a span that starts at *start* and lasts 1ms.
+
+    A span that starts less than 1ms before the latest time OTLP can carry
+    ends at that time.
+    """
+    end = start + 0.001
+    if otlp_unix_nanos(end) is None and otlp_unix_nanos(start) is not None:
+        return str(OTLP_MAX_UNIX_NANOS)
+    return _ts_to_nanos(end)
+
+
+def _duration_end_nanos(start: float, duration_ns: int) -> str:
+    """Return the end of a span that starts at *start* and lasts *duration_ns*.
+
+    A duration whose span would end past the latest time OTLP can carry reads
+    as missing, so the span gets the 1ms default of :func:`_duration_to_nanos`.
+    """
+    end = start + duration_ns / 1_000_000_000
+    if otlp_unix_nanos(end) is None and otlp_unix_nanos(start) is not None:
+        return _one_ms_end_nanos(start)
+    return _ts_to_nanos(end)
+
+
+def _llm_span_end_nanos(start: float, end: float) -> str:
+    """Return the end of a model request span from *start* to *end*.
+
+    The span lasts at least 1ms (see :func:`_one_ms_end_nanos`).
+    """
+    if start + 0.001 > end:
+        return _one_ms_end_nanos(start)
+    return _ts_to_nanos(end)
+
+
+def _root_end_nanos(meta: SessionMeta) -> str:
+    """Return the end of the root span: ``ended_at``, or else ``started_at``
+    plus ``total_duration_ms``.
+
+    A total whose end would be past the latest time OTLP can carry reads as
+    missing, so the root span then ends at ``started_at``.
+    """
+    if meta.ended_at:
+        return _ts_to_nanos(meta.ended_at)
+    end = meta.started_at + (usable_number(meta.total_duration_ms) or 0) / 1000
+    if otlp_unix_nanos(end) is None and otlp_unix_nanos(meta.started_at) is not None:
+        return _ts_to_nanos(meta.started_at)
+    return _ts_to_nanos(end)
 
 
 # ---------------------------------------------------------------------------
@@ -1262,10 +1323,7 @@ def session_to_otlp(
     root_span_id = _to_span_id(f"root-{meta.session_id}")
     span_id_of = _event_span_ids(meta.session_id, events)
     root_start = _ts_to_nanos(meta.started_at)
-    root_end = _ts_to_nanos(
-        meta.ended_at
-        or (meta.started_at + (usable_number(meta.total_duration_ms) or 0) / 1000)
-    )
+    root_end = _root_end_nanos(meta)
 
     # Detect provider from agent name for semantic conventions
     agent_lower = usable_text(meta.agent_name).lower()
@@ -1379,7 +1437,7 @@ def session_to_otlp(
                 "name": f"tool/{tool_name}",
                 "kind": 3,  # SPAN_KIND_CLIENT
                 "startTimeUnixNano": _ts_to_nanos(span_start),
-                "endTimeUnixNano": _ts_to_nanos(span_start + duration_ns / 1_000_000_000),
+                "endTimeUnixNano": _duration_end_nanos(span_start, duration_ns),
                 "attributes": _make_attributes(span_attrs),
                 "status": {"code": 0},  # STATUS_CODE_UNSET
             }, call_event, event))
@@ -1439,7 +1497,7 @@ def session_to_otlp(
                 "name": span_name,
                 "kind": span_kind,
                 "startTimeUnixNano": _ts_to_nanos(span_start),
-                "endTimeUnixNano": _ts_to_nanos(span_start + duration_ns / 1_000_000_000),
+                "endTimeUnixNano": _duration_end_nanos(span_start, duration_ns),
                 "attributes": _make_attributes(span_attrs),
                 "status": {"code": 2, "message": str(error_msg)[:200]},  # STATUS_CODE_ERROR
                 "events": [_make_event("exception", event.timestamp, {
@@ -1503,7 +1561,7 @@ def session_to_otlp(
             "name": f"tool/{tool_name}",
             "kind": 3,  # SPAN_KIND_CLIENT
             "startTimeUnixNano": _ts_to_nanos(call_event.timestamp),
-            "endTimeUnixNano": _ts_to_nanos(call_event.timestamp + 0.001),
+            "endTimeUnixNano": _one_ms_end_nanos(call_event.timestamp),
             "attributes": _make_attributes({
                 _SEMCONV_TOOL_NAME: tool_name,
                 _SEMCONV_OP: "tool.call",
@@ -1745,8 +1803,9 @@ def _genai_llm_span(
     llm_attrs.update(_event_trace_attributes(event, "response"))
     if inferred_start is not None:
         llm_attrs.update(_imported_response_attributes(event.data))
+        span_end_nanos = _ts_to_nanos(span_end)
     else:
-        span_end = max(span_end, span_start + 0.001)
+        span_end_nanos = _llm_span_end_nanos(span_start, span_end)
     llm_attrs["metadata"] = _openinference_metadata(llm_attrs)
 
     span: dict = {
@@ -1756,7 +1815,7 @@ def _genai_llm_span(
         "name": _model_span_name(model),
         "kind": 3,  # SPAN_KIND_CLIENT
         "startTimeUnixNano": _ts_to_nanos(span_start),
-        "endTimeUnixNano": _ts_to_nanos(span_end),
+        "endTimeUnixNano": span_end_nanos,
         "attributes": _make_attributes(llm_attrs),
     }
     if event.event_type == EventType.ERROR:
@@ -1832,10 +1891,7 @@ def session_to_otlp_genai(
     root_span_id = _to_span_id(f"root-{meta.session_id}")
     span_id_of = _event_span_ids(meta.session_id, events)
     root_start = _ts_to_nanos(meta.started_at)
-    root_end = _ts_to_nanos(
-        meta.ended_at
-        or (meta.started_at + (usable_number(meta.total_duration_ms) or 0) / 1000)
-    )
+    root_end = _root_end_nanos(meta)
 
     raw_provider, gen_ai_system = _provider_value(meta)
     agent_name = usable_text(meta.agent_name)
@@ -1978,9 +2034,7 @@ def session_to_otlp_genai(
                 "name": _tool_span_name(tool_name),
                 "kind": 1,  # SPAN_KIND_INTERNAL
                 "startTimeUnixNano": _ts_to_nanos(span_start),
-                "endTimeUnixNano": _ts_to_nanos(
-                    span_start + duration_ns / 1_000_000_000
-                ),
+                "endTimeUnixNano": _duration_end_nanos(span_start, duration_ns),
                 "attributes": _make_attributes(tool_attrs),
                 "status": {"code": 0},  # STATUS_CODE_UNSET
             }, call_event, event))
@@ -2038,9 +2092,7 @@ def session_to_otlp_genai(
                 "name": _tool_span_name(tool_name),
                 "kind": 1,  # SPAN_KIND_INTERNAL
                 "startTimeUnixNano": _ts_to_nanos(span_start),
-                "endTimeUnixNano": _ts_to_nanos(
-                    span_start + duration_ns / 1_000_000_000
-                ),
+                "endTimeUnixNano": _duration_end_nanos(span_start, duration_ns),
                 "attributes": _make_attributes(error_attrs),
                 "events": [exc_event],
                 "status": {"code": 2, "message": str(error_msg)[:200]},
@@ -2081,7 +2133,7 @@ def session_to_otlp_genai(
             "name": _model_span_name(model),
             "kind": 3,
             "startTimeUnixNano": _ts_to_nanos(req_event.timestamp),
-            "endTimeUnixNano": _ts_to_nanos(req_event.timestamp + 0.001),
+            "endTimeUnixNano": _one_ms_end_nanos(req_event.timestamp),
             "attributes": _make_attributes(llm_attrs),
             "status": {"code": 0},
         }, req_event))
@@ -2108,7 +2160,7 @@ def session_to_otlp_genai(
             "name": _tool_span_name(tool_name),
             "kind": 1,  # SPAN_KIND_INTERNAL
             "startTimeUnixNano": _ts_to_nanos(call_event.timestamp),
-            "endTimeUnixNano": _ts_to_nanos(call_event.timestamp + 0.001),
+            "endTimeUnixNano": _one_ms_end_nanos(call_event.timestamp),
             "attributes": _make_attributes(tool_attrs),
             "status": {"code": 0},
         }, call_event))

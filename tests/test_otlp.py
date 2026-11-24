@@ -1,10 +1,14 @@
 """Tests for OTLP exporter."""
 
+import hashlib
 import json
 import math
 import os
+import re
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -13,6 +17,12 @@ try:
 except ImportError:
     from tests import _escapes
 
+try:  # keeps product telemetry off in this process and its children
+    import _no_telemetry
+except ImportError:  # pragma: no cover - run as a package module
+    from tests import _no_telemetry
+
+from agent_trace.event_data import UnusableTimestampError
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.otlp import (
     _make_attributes,
@@ -21,11 +31,98 @@ from agent_trace.otlp import (
     _ts_to_nanos,
     session_to_otlp,
     session_to_otlp_genai,
+    tree_to_otlp,
+    tree_to_otlp_genai,
 )
+from agent_trace.store import TraceStore
+
+try:
+    from test_unusable_event_timestamps import (
+        BAD,
+        CHILD,
+        ENDPOINT,
+        TimestampCliTestCase,
+        restamp,
+        set_meta,
+    )
+except ImportError:
+    from tests.test_unusable_event_timestamps import (
+        BAD,
+        CHILD,
+        ENDPOINT,
+        TimestampCliTestCase,
+        restamp,
+        set_meta,
+    )
 
 LONE = _escapes.LONE_SURROGATE
 SHOWN = _escapes.LONE_SURROGATE_SHOWN
 PLAIN = _escapes.PLAIN
+
+# OTLP carries each time as an unsigned 64-bit count of nanoseconds.
+UINT64_MAX = 2**64 - 1
+PAST_LIMIT = "is past the latest time OTLP can carry (2554-07-21T23:34:33.709551615Z)"
+YEAR_3000 = 32503680000.0
+# The largest float whose nanoseconds fit, and the next float up. The second
+# is (2**64 - 1) / 1e9 as a float, and its nanoseconds are 2**64.
+LAST_FLOAT = 18446744073.70955
+PAST_FLOAT = 18446744073.709553
+LAST_NANOS = "18446744073709549568"
+_NANOS = re.compile(r"0|[1-9][0-9]*")
+
+
+def unix_nanos_values(node) -> list:
+    """Return the value of every key ending in ``UnixNano`` in *node*."""
+    values = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key.endswith("UnixNano"):
+                values.append(value)
+            else:
+                values.extend(unix_nanos_values(value))
+    elif isinstance(node, list):
+        for item in node:
+            values.extend(unix_nanos_values(item))
+    return values
+
+
+def assert_unix_nanos_in_range(test: unittest.TestCase, payload) -> None:
+    """Assert each ``UnixNano`` value in *payload* is a decimal string from 0 to 2**64 - 1."""
+    values = unix_nanos_values(payload)
+    test.assertTrue(values)
+    bad = [
+        value for value in values
+        if not (isinstance(value, str) and _NANOS.fullmatch(value) and int(value) <= UINT64_MAX)
+    ]
+    test.assertEqual(bad, [])
+
+
+def set_event_fields(session_dir: Path, event_id: str, **fields) -> None:
+    """Set *fields* on the stored event *event_id* and rebuild the hash chain."""
+    path = session_dir / "events.ndjson"
+    lines: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        record = json.loads(line)
+        record.pop("prev_hash", None)
+        if record.get("event_id") == event_id:
+            record.update(fields)
+        if lines:
+            record["prev_hash"] = hashlib.sha256(lines[-1].encode()).hexdigest()
+        lines.append(json.dumps(record, separators=(",", ":")))
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def all_spans(payload: dict) -> list[dict]:
+    return [
+        span
+        for resource in payload["resourceSpans"]
+        for scope in resource["scopeSpans"]
+        for span in scope["spans"]
+    ]
+
+
+def span_times(span: dict) -> tuple[str, str]:
+    return span["startTimeUnixNano"], span["endTimeUnixNano"]
 
 
 class TestHelpers(unittest.TestCase):
@@ -890,6 +987,282 @@ class TestRootOutcome(unittest.TestCase):
                 self.assertEqual(attrs["agent.strace.behavior.failed_operation_count"], 1)
                 self.assertEqual(attrs["agent.strace.behavior.recovered_operation_count"], 1)
                 self.assertEqual(root["status"], {"code": 0})
+
+
+def library_meta(**fields) -> SessionMeta:
+    return SessionMeta(**{"session_id": "s1", "agent_name": "claude-code",
+                          "started_at": 1000.0, "ended_at": 1100.0, **fields})
+
+
+def tool_events(duration_ms=None) -> list[TraceEvent]:
+    """A tool call with a result, and a lone error, each with *duration_ms*."""
+    return [
+        TraceEvent(event_type=EventType.TOOL_CALL, event_id="call1", timestamp=1001.0,
+                   data={"tool_name": "Bash", "arguments": {"command": "make"}}),
+        TraceEvent(event_type=EventType.TOOL_RESULT, event_id="res1", parent_id="call1",
+                   timestamp=1002.0, duration_ms=duration_ms, data={"result": "ok"}),
+        TraceEvent(event_type=EventType.ERROR, event_id="err1", timestamp=1003.0,
+                   duration_ms=duration_ms, data={"error": "boom"}),
+    ]
+
+
+def near_limit_session() -> tuple[SessionMeta, list[TraceEvent]]:
+    """A session at LAST_FLOAT. Each span but the transcript response would end
+    1 ms or more later."""
+    def event(event_type, event_id, parent_id="", duration_ms=None, **data):
+        return TraceEvent(event_type=event_type, event_id=event_id, parent_id=parent_id,
+                          timestamp=LAST_FLOAT, duration_ms=duration_ms, data=data)
+
+    events = [
+        event(EventType.LLM_REQUEST, "req1", model="m"),
+        event(EventType.LLM_RESPONSE, "resp1", "req1", model="m"),
+        event(EventType.LLM_REQUEST, "req2", model="m"),
+        event(EventType.TOOL_CALL, "call1", tool_name="Bash"),
+        event(EventType.TOOL_CALL, "call2", tool_name="Bash"),
+        event(EventType.TOOL_RESULT, "res2", "call2", result="ok"),
+        event(EventType.ERROR, "err1", duration_ms=1e14, error="boom"),
+        # A model response read from a transcript. Its span may have zero length.
+        event(EventType.ASSISTANT_RESPONSE, "msg1", model="claude-sonnet-4-5",
+              context_stream="main", message_id="msg_1",
+              usage={"input_tokens": 1, "output_tokens": 1}),
+    ]
+    return library_meta(started_at=LAST_FLOAT, ended_at=LAST_FLOAT), events
+
+
+class TestOtlpTimeLimit(unittest.TestCase):
+    """OTLP carries each time as an unsigned 64-bit count of nanoseconds, so
+    every time the classic converter writes is from 0 to 2**64 - 1."""
+
+    def test_ts_to_nanos_refuses_a_time_outside_the_range(self):
+        self.assertEqual(_ts_to_nanos(0), "0")
+        self.assertEqual(_ts_to_nanos(LAST_FLOAT), LAST_NANOS)
+        cases = [
+            (YEAR_3000, f"timestamp {PAST_LIMIT}"),
+            (PAST_FLOAT, f"timestamp {PAST_LIMIT}"),
+            (-5.0, "timestamp must be a Unix time in seconds"),
+            (float("nan"), "timestamp must be a Unix time in seconds"),
+            (float("inf"), "timestamp must be a Unix time in seconds"),
+        ]
+        for value, message in cases:
+            with self.subTest(value=value):
+                with self.assertRaises(UnusableTimestampError) as caught:
+                    _ts_to_nanos(value)
+                self.assertEqual(str(caught.exception), message)
+
+    def test_duration_past_the_limit_reads_as_missing(self):
+        payload = session_to_otlp(library_meta(), tool_events(1e14))
+        self.assertEqual(payload, session_to_otlp(library_meta(), tool_events()))
+        _, tool, error = all_spans(payload)
+        self.assertEqual(span_times(tool), ("1001000000000", "1001001000000"))
+        self.assertEqual(span_times(error), ("1003000000000", "1003001000000"))
+        assert_unix_nanos_in_range(self, payload)
+
+    def test_failed_tool_result_duration_past_the_limit_reads_as_missing(self):
+        def failed_events(duration_ms=None):
+            events = tool_events(duration_ms)[:2]
+            events[1].data["is_error"] = True
+            return events
+
+        # A failed tool_result exports as an error span (#573).
+        for name, convert in (("otlp", session_to_otlp), ("otlp-genai", session_to_otlp_genai)):
+            with self.subTest(format=name):
+                payload = convert(library_meta(), failed_events(1e14))
+                self.assertEqual(payload, convert(library_meta(), failed_events()))
+                _, tool = all_spans(payload)
+                self.assertEqual(tool["status"]["code"], 2)
+                self.assertEqual(span_times(tool), ("1001000000000", "1001001000000"))
+                assert_unix_nanos_in_range(self, payload)
+
+    def test_root_total_past_the_limit_ends_at_the_start(self):
+        without_total = session_to_otlp(library_meta(ended_at=None), tool_events())
+        for total in (1e14, 1e308):
+            with self.subTest(total=total):
+                payload = session_to_otlp(
+                    library_meta(ended_at=None, total_duration_ms=total), tool_events(),
+                )
+                self.assertEqual(payload, without_total)
+                self.assertEqual(
+                    span_times(all_spans(payload)[0]), ("1000000000000", "1000000000000"),
+                )
+                assert_unix_nanos_in_range(self, payload)
+
+    def test_spans_near_the_limit_end_at_the_limit(self):
+        payload = session_to_otlp(*near_limit_session())
+        root, *children = all_spans(payload)
+        self.assertEqual(span_times(root), (LAST_NANOS, LAST_NANOS))
+        limit = (LAST_NANOS, str(UINT64_MAX))
+        self.assertEqual(sorted((span["name"], span_times(span)) for span in children), [
+            ("chat claude-sonnet-4-5", (LAST_NANOS, LAST_NANOS)),
+            ("error", limit),
+            ("tool/Bash", limit),
+            ("tool/Bash", limit),
+        ])
+        assert_unix_nanos_in_range(self, payload)
+
+    def test_tree_export_refuses_a_time_past_the_limit(self):
+        session_id = "d4e5f6a7b8c90004"
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TraceStore(tmp)
+            store.create_session(SessionMeta(session_id=session_id, started_at=1000.0,
+                                             ended_at=1100.0))
+            store.append_event(session_id, TraceEvent(
+                event_type=EventType.TOOL_CALL, timestamp=YEAR_3000, session_id=session_id,
+                event_id="call1", data={"tool_name": "Bash"},
+            ))
+            for convert in (tree_to_otlp, tree_to_otlp_genai):
+                with self.subTest(convert=convert.__name__):
+                    with self.assertRaises(UnusableTimestampError) as caught:
+                        convert(store, session_id)
+                    self.assertEqual(str(caught.exception), f"timestamp {PAST_LIMIT}")
+
+
+class TestOtlpExportTimeLimit(TimestampCliTestCase):
+    """export --format otlp and otlp-genai refuse a time OTLP cannot carry
+    before they write or send anything, and keep every time they write in
+    range."""
+
+    FORMATS = ("otlp", "otlp-genai")
+
+    def _argvs(self, fmt: str, *flags: str) -> list[list[str]]:
+        return [
+            ["export", BAD, "--format", fmt, *flags, "--output", "out.json"],
+            ["export", BAD, "--format", fmt, *flags, "--endpoint", ENDPOINT],
+        ]
+
+    def _export(self, root: Path, fmt: str, *flags: str) -> dict:
+        code, out, err, network, written = self.outcome(
+            root, ["export", BAD, "--format", fmt, *flags, "--output", "out.json"],
+            files="out.json", read=json.loads,
+        )
+        self.assertEqual((code, out, network), (0, "", 0), err)
+        return written["out.json"]
+
+    def test_refuses_session_times_past_the_limit(self):
+        for field in ("started_at", "ended_at"):
+            for value in (YEAR_3000, PAST_FLOAT):
+                for fmt in self.FORMATS:
+                    for argv in self._argvs(fmt):
+                        with self.subTest(field=field, value=value, argv=argv):
+                            root = self.make_ts_workspace()
+                            set_meta(root / "work" / ".agent-traces" / BAD, **{field: value})
+                            self.assert_refused(root, argv, f"Error: session {field} {PAST_LIMIT}\n")
+
+    def test_refuses_event_timestamps_past_the_limit(self):
+        def response2(record):
+            return record["event_id"] == "bad-llmresp2"
+
+        cases = [
+            ("tool_call", None, YEAR_3000, self.FORMATS,
+             "event 6 of 25 (tool_call); 5 more events have timestamps past that time"),
+            ("llm_request", None, YEAR_3000, self.FORMATS,
+             "event 3 of 25 (llm_request); 1 more event has a timestamp past that time"),
+            ("decision", None, YEAR_3000, ("otlp",), "event 10 of 25 (decision)"),
+            ("llm_response", response2, PAST_FLOAT, self.FORMATS, "event 23 of 25 (llm_response)"),
+        ]
+        for event_type, where, value, formats, tail in cases:
+            for fmt in formats:
+                for argv in self._argvs(fmt):
+                    with self.subTest(event_type=event_type, argv=argv):
+                        root = self.make_ts_workspace(BAD, event_type, value, where=where)
+                        self.assert_refused(
+                            root, argv, f"Error: session event timestamp {PAST_LIMIT}: {tail}\n",
+                        )
+
+    def test_genai_export_skips_a_decision_past_the_limit(self):
+        # otlp-genai writes no span for a decision, so its time is not checked.
+        root = self.make_ts_workspace(BAD, "decision", YEAR_3000)
+        assert_unix_nanos_in_range(self, self._export(root, "otlp-genai"))
+
+    def test_accepts_the_last_time_that_fits(self):
+        for fmt in self.FORMATS:
+            with self.subTest(fmt=fmt):
+                root = self.make_ts_workspace(
+                    BAD, "tool_call", LAST_FLOAT,
+                    where=lambda record: record["event_id"] == "bad-call-test2",
+                )
+                set_meta(root / "work" / ".agent-traces" / BAD,
+                         started_at=LAST_FLOAT, ended_at=LAST_FLOAT)
+                payload = self._export(root, fmt)
+                root_span, *children = all_spans(payload)
+                self.assertEqual(span_times(root_span), (LAST_NANOS, LAST_NANOS))
+                # The call's result lasts 1 s, which would end past the limit.
+                self.assertEqual(
+                    [span_times(span) for span in children
+                     if span["startTimeUnixNano"] == LAST_NANOS],
+                    [(LAST_NANOS, str(UINT64_MAX))],
+                )
+                assert_unix_nanos_in_range(self, payload)
+
+    def test_root_total_past_the_limit_ends_at_the_start(self):
+        for total in (1e14, 1e308):
+            for fmt in self.FORMATS:
+                with self.subTest(total=total, fmt=fmt):
+                    root = self.make_ts_workspace()
+                    set_meta(root / "work" / ".agent-traces" / BAD,
+                             ended_at=None, total_duration_ms=total)
+                    payload = self._export(root, fmt)
+                    start, end = span_times(all_spans(payload)[0])
+                    self.assertEqual(end, start)
+                    assert_unix_nanos_in_range(self, payload)
+
+    def test_subagent_tree_refuses_a_time_past_the_limit(self):
+        cases = [
+            ("started_at", f"Error: session {CHILD} started_at {PAST_LIMIT}\n"),
+            ("ended_at", f"Error: session {CHILD} ended_at {PAST_LIMIT}\n"),
+            ("tool_call", f"Error: session {CHILD} event timestamp {PAST_LIMIT}: "
+                          "event 3 of 7 (tool_call)\n"),
+        ]
+        for what, expected in cases:
+            for fmt in self.FORMATS:
+                for argv in self._argvs(fmt, "--include-subagents"):
+                    with self.subTest(what=what, argv=argv):
+                        root = self.make_ts_workspace()
+                        child = root / "work" / ".agent-traces" / CHILD
+                        if what == "tool_call":
+                            restamp(child, what, YEAR_3000)
+                        else:
+                            set_meta(child, **{what: YEAR_3000})
+                        self.assert_refused(root, argv, expected)
+
+    def test_subagent_tree_names_an_unusable_time_first(self):
+        # The root starts past the limit and a child call's time is text. The
+        # text is named, as it is when no time is past the limit.
+        expected = (
+            f"Error: session {CHILD} event timestamp must be a Unix time in seconds: "
+            "event 3 of 7 (tool_call) has a string timestamp\n"
+        )
+        for fmt in self.FORMATS:
+            for argv in self._argvs(fmt, "--include-subagents"):
+                with self.subTest(argv=argv):
+                    root = self.make_ts_workspace()
+                    traces = root / "work" / ".agent-traces"
+                    set_meta(traces / BAD, started_at=YEAR_3000)
+                    restamp(traces / CHILD, "tool_call", "soon")
+                    self.assert_refused(root, argv, expected)
+
+    def test_subagent_tree_keeps_every_time_in_range(self):
+        def tree(root: Path, fmt: str) -> dict:
+            payload = self._export(root, fmt, "--include-subagents")
+            assert_unix_nanos_in_range(self, payload)
+            return payload
+
+        for fmt in self.FORMATS:
+            with self.subTest(fmt=fmt):
+                times = []
+                for duration in (1e14, None):
+                    root = self.make_ts_workspace()
+                    child = root / "work" / ".agent-traces" / CHILD
+                    set_meta(child, ended_at=None, total_duration_ms=1e308)
+                    set_event_fields(child, "chld-res", duration_ms=duration)
+                    spans = all_spans(tree(root, fmt))
+                    child_root = [span for span in spans
+                                  if span["spanId"] == _to_span_id(f"root-{CHILD}")]
+                    self.assertEqual(len(child_root), 1)
+                    start, end = span_times(child_root[0])
+                    self.assertEqual(end, start)
+                    times.append([span_times(span) for span in spans])
+                # A result duration past the limit reads as a missing one.
+                self.assertEqual(times[0], times[1])
 
 
 if __name__ == "__main__":

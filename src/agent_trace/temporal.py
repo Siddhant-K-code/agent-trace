@@ -22,6 +22,8 @@ from .event_data import (
     NonObjectEventDataError,
     UnusableTimestampError,
     require_object_event_data,
+    require_otlp_session_times,
+    require_otlp_timestamps,
     require_usable_session_times,
     require_usable_timestamps,
 )
@@ -134,8 +136,9 @@ def session_to_temporal_otlp(
     and then NonObjectEventDataError when an event whose data the conversion
     reads is not an object. Then raises UnusableTimestampError when an event
     of a type the conversion reads, the session's started_at, or its ended_at
-    when it is not None, is not a Unix time in seconds. A trace_id,
-    parent_span_id or trace_flags that is not a string reads as missing.
+    when it is not None, is not a Unix time in seconds or is past the latest
+    time OTLP can carry. A trace_id, parent_span_id or trace_flags that is not
+    a string reads as missing.
     """
     trace_id = usable_text(meta.trace_id).lower()
     parent_span_id = usable_text(meta.parent_span_id).lower()
@@ -149,6 +152,8 @@ def session_to_temporal_otlp(
     require_object_event_data(events, indexes=otlp_genai_data_indexes(events))
     require_usable_timestamps(events, event_types=OTLP_GENAI_TIMESTAMP_EVENT_TYPES)
     require_usable_session_times(meta)
+    require_otlp_session_times(meta)
+    require_otlp_timestamps(events, event_types=OTLP_GENAI_TIMESTAMP_EVENT_TYPES)
 
     payload = session_to_otlp_genai(
         meta,
