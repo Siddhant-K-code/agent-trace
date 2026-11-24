@@ -13,7 +13,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from agent_trace.models import LAST_USABLE_TIME, EventType, SessionMeta, TraceEvent, usable_time
+from agent_trace.models import EventType, SessionMeta, TraceEvent, usable_time
 
 NAN = float("nan")
 INF = float("inf")
@@ -391,15 +391,16 @@ class TestUsableTime(unittest.TestCase):
     """usable_time() takes a Unix time in seconds up to 9999-12-30T00:00:00Z."""
 
     def test_the_limit_is_the_same_in_every_time_zone(self):
+        limit = 253402128000.0  # 9999-12-30T00:00:00Z, the limit in the docs
         refused = (
-            math.nextafter(LAST_USABLE_TIME, math.inf),
+            math.nextafter(limit, math.inf),
             253402300799.0,  # 9999-12-31T23:59:59Z
             253402300800.5,  # 10000-01-01T00:00:00.5Z
             "1700000000", True, None, NAN, -1, 10**400,
         )
         for zone in ZONES:
             use_time_zone(self, zone)
-            for value in (0, LAST_USABLE_TIME):
+            for value in (0, limit):
                 with self.subTest(zone=zone, value=value):
                     result = usable_time(value)
                     self.assertEqual(result, value)
