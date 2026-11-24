@@ -345,6 +345,22 @@ class TestBedrockCompare(_StoreTestCase):
                 self.assertAlmostEqual(report.avg_cost_baseline, per_session, places=12)
                 self.assertAlmostEqual(report.avg_cost_inflated, per_session * 1.38, places=12)
 
+    def test_compare_accepts_ca_and_in_profiles(self):
+        # Sonnet 4.5 lists at $3 input and $15 output per 1M tokens. Both names
+        # have the same tokenizer, and a ca. or in. profile costs 1.1 times the
+        # list rate.
+        per_session = (1000 * 3 + 500 * 15) / 1e6
+        for geography in ("ca", "in"):
+            with self.subTest(geography=geography):
+                inflated = f"{geography}.anthropic.claude-sonnet-4-5-20250929-v1:0"
+                code, _, err = _run(
+                    self.trace_dir, "--compare", f"claude-sonnet-4-5,{inflated}",
+                )
+                self.assertEqual((code, err), (0, ""))
+                report = analyse_inflation(self.store, "claude-sonnet-4-5", inflated)
+                self.assertAlmostEqual(report.avg_cost_baseline, per_session, places=12)
+                self.assertAlmostEqual(report.avg_cost_inflated, per_session * 1.1, places=12)
+
 
 class TestDotVersionCompare(_StoreTestCase):
     def setUp(self):

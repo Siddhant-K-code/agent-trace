@@ -706,11 +706,11 @@ Case is ignored. One provider prefix is dropped: `bedrock/`, `aws/bedrock/`,
 `openai/`, `anthropic/`, `google/` or `models/`. A Bedrock ARN in the `aws`,
 `aws-us-gov` or `aws-cn` partition stands for the model ID after its
 `foundation-model/` or `inference-profile/`. Then a Bedrock geography prefix
-is dropped (`us.`, `eu.`, `apac.`, `jp.`, `au.`, `us-gov.` or `global.`), and
-then a leading `anthropic.`. Then, in a name that starts with `claude-`, a dot
-between two digits reads as a dash. The name uses the longest table name that
-it equals, or that it starts with followed by `-`, `:` or `@`. So
-`us.anthropic.claude-sonnet-4-5-20250929-v1:0`,
+is dropped (`us.`, `eu.`, `apac.`, `jp.`, `au.`, `us-gov.`, `ca.`, `in.` or
+`global.`), and then a leading `anthropic.`. Then, in a name that starts with
+`claude-`, a dot between two digits reads as a dash. The name uses the longest
+table name that it equals, or that it starts with followed by `-`, `:` or `@`.
+So `us.anthropic.claude-sonnet-4-5-20250929-v1:0`,
 `anthropic.claude-sonnet-4-5-20250929-v1:0`, `claude-sonnet-4-5-20250929` and
 `claude-sonnet-4.5` use `claude-sonnet-4-5`, `anthropic/claude-3.5-sonnet:beta`
 uses `claude-3-5-sonnet`, and `gpt-4o-2024-08-06` uses `gpt-4o`. A name such as
@@ -719,16 +719,21 @@ uses `claude-3-5-sonnet`, and `gpt-4o-2024-08-06` uses `gpt-4o`. A name such as
 [`watch`](#watch) read model names by the same rule.
 
 **AWS Bedrock.** These names are listed under AWS Bedrock: a `bedrock/` or
-`aws/bedrock/` name, a model ID that starts with a vendor such as `anthropic.`
-or `amazon.`, with or without a geography prefix, and every Bedrock ARN. An
-application inference profile, provisioned model or custom model ARN names no
-model. It is listed under AWS Bedrock with no estimated price.
+`aws/bedrock/` name, a model ID that starts with a Bedrock vendor, with or
+without a geography prefix, and every Bedrock ARN. The Bedrock vendors are
+`ai21.`, `amazon.`, `anthropic.`, `cohere.`, `deepseek.`, `luma.`, `meta.`,
+`minimax.`, `mistral.`, `moonshot.`, `moonshotai.`, `nvidia.`, `openai.`,
+`qwen.`, `stability.`, `twelvelabs.`, `writer.`, `xai.` and `zai.`. A Bedrock
+model with no bundled price, such as `deepseek.v3.2`, is listed under AWS
+Bedrock with no estimated price. An application inference profile,
+provisioned model or custom model ARN names no model. It is listed under AWS
+Bedrock with no estimated price.
 
-A `us.`, `eu.`, `apac.`, `jp.`, `au.` or `us-gov.` profile of Claude Sonnet
-4.5, Haiku 4.5, Opus 4.5 or a later model costs 1.1 times the bundled rate,
-which is the global rate. All five rates are multiplied: input, output, cache
-read, cache write and long cache write. This holds inside `bedrock/`,
-`aws/bedrock/` and an inference-profile ARN too. The
+A `us.`, `eu.`, `apac.`, `jp.`, `au.`, `us-gov.`, `ca.` or `in.` profile of
+Claude Sonnet 4.5, Haiku 4.5, Opus 4.5 or a later model costs 1.1 times the
+bundled rate, which is the global rate. All five rates are multiplied: input,
+output, cache read, cache write and long cache write. This holds inside
+`bedrock/`, `aws/bedrock/` and an inference-profile ARN too. The
 [Anthropic pricing page](https://platform.claude.com/docs/en/about-claude/pricing)
 says regional and multi-region endpoints cost 10 percent more than global
 ones for these models. The
@@ -2334,7 +2339,7 @@ It reads the `llm_request`, `user_prompt`, `assistant_response` and `llm_respons
 | `--sessions N` | `30` | Read the newest N sessions. Must be 1 or more. |
 | `--daily-sessions N` | `8` | Sessions per day for the Daily and Monthly rows. Must be a finite number, 0 or more. A month is 30 days. |
 
-Prices come from the bundled table that [`cost`](#cost) uses. The system prompt, tool definitions and user messages use the input rate. Assistant messages use the output rate. A Bedrock name is priced as in `cost --breakdown provider`, so a `us.`, `eu.`, `apac.`, `jp.`, `au.` or `us-gov.` profile of Claude Sonnet 4.5, Haiku 4.5, Opus 4.5 or a later model costs 1.1 times the bundled rate. A model with no bundled price, such as `gpt-4`, `o1` or `gemini-1.5-pro`, shows `n/a` in each cost cell of its column and in each cost delta. Its token rows still print. `claude-sonnet-4-7` uses the `claude-sonnet-4` price, as in `cost` and `dashboard`.
+Prices come from the bundled table that [`cost`](#cost) uses. The system prompt, tool definitions and user messages use the input rate. Assistant messages use the output rate. A Bedrock name is priced as in `cost --breakdown provider`, so a `us.`, `eu.`, `apac.`, `jp.`, `au.`, `us-gov.`, `ca.` or `in.` profile of Claude Sonnet 4.5, Haiku 4.5, Opus 4.5 or a later model costs 1.1 times the bundled rate. A model with no bundled price, such as `gpt-4`, `o1` or `gemini-1.5-pro`, shows `n/a` in each cost cell of its column and in each cost delta. Its token rows still print. `claude-sonnet-4-7` uses the `claude-sonnet-4` price, as in `cost` and `dashboard`.
 
 These models have a tokenizer factor. `claude-opus-4-6` is the 1.0 baseline.
 
