@@ -441,7 +441,7 @@ what it does for a session without that field. An `attribution` that is not an
 object reads as `{}`. Only `true` counts as `redacted`. The exceptions:
 
 - `org-report` refuses the session.
-- A `tenant_id` that is not a string does not read as missing, because that would move the session out of its tenant. `backfill-meta` does not rebuild a parent whose child session has one. The `tenant` commands and `org-report` refuse the session. `export --format otlp` and `otlp-genai` copy the value as stored.
+- A `tenant_id` that is not a string does not read as missing, because that would move the session out of its tenant. `backfill-meta` does not rebuild a parent whose child session has one. The `tenant` commands and `org-report` refuse the session. So do the OTLP exports (`export --format otlp`, `otlp-genai` and `temporal`) and the `server --dashboard` OTLP download. They also refuse a `tenant_id` that is only whitespace, and a stripped `tenant_id` over 256 characters or with a control character. They export an accepted `tenant_id` stripped. See [Sessions with unusable event timestamps](#sessions-with-unusable-event-timestamps) for the line.
 - `share` refuses NaN and infinity, as it does in any `meta.json` field.
 - For the `mcp` tools, see [mcp.md](mcp.md).
 - `inspect`, the `server` API and other commands that copy the whole record keep the value as stored.
@@ -3448,6 +3448,25 @@ the duration is missing. A session with no `ended_at` ends its root span at
 that time reads as missing, so the root span ends at `started_at`. A 1 ms span
 that starts less than 1 ms before that time ends at that time.
 
+`export --format otlp`, `otlp-genai`, and `temporal` also refuse a session
+whose `meta.json` `tenant_id` the store would refuse. The store strips
+whitespace from both ends of a tenant ID. It refuses a value that is not a
+string, a string that is only whitespace, or a stripped string that is over
+256 characters or holds a control character. The exports run this check last,
+so a session the checks above refuse keeps its message. Nothing is written or
+sent. The line gives the reason and never the value:
+
+```
+Error: session tenant_id must be a string
+```
+
+The other reasons are `cannot be empty`, `cannot exceed 256 characters`, and
+`cannot contain control characters`. With `--include-subagents`, export checks
+the tenant of every session in the tree once every session passes the checks
+above. The line then names the session, such as `Error: session <session-id>
+tenant_id must be a string`. An accepted `tenant_id` is exported stripped, so
+`" acme "` exports `acme`. An empty `tenant_id` exports no tenant attribute.
+
 `drift` and `fingerprint` skip a session whose first or last event has an
 unusable timestamp, as they skip other sessions they cannot read. `baseline`
 leaves the cost out for a session that `agent-strace cost` refuses: the session
@@ -3480,7 +3499,9 @@ seconds.` The watch keeps running and passes the event to its other checks.
 With `agent-strace server --dashboard`, the review, compare, share, and OTLP
 actions answer 400 with the same message. The OTLP action checks the events
 and session times that `export --format otlp` checks, including the latest time
-OTLP can carry. The others check every event.
+OTLP can carry. The others check every event. After its checks, the OTLP action
+also refuses a session whose `tenant_id` the store would refuse, with the same
+message.
 
 `health` and `skills` read an integer timestamp too large for a float as they
 read infinity, and `compliance-report` reads it as it reads 1e300. Earlier

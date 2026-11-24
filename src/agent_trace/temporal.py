@@ -20,11 +20,13 @@ from dataclasses import dataclass
 
 from .event_data import (
     NonObjectEventDataError,
+    UnusableTenantError,
     UnusableTimestampError,
     require_object_event_data,
     require_otlp_session_times,
     require_otlp_timestamps,
     require_usable_session_times,
+    require_usable_tenant,
     require_usable_timestamps,
 )
 from .models import SessionMeta, TraceEvent, usable_text
@@ -137,8 +139,9 @@ def session_to_temporal_otlp(
     reads is not an object. Then raises UnusableTimestampError when an event
     of a type the conversion reads, the session's started_at, or its ended_at
     when it is not None, is not a Unix time in seconds or is past the latest
-    time OTLP can carry. A trace_id, parent_span_id or trace_flags that is not
-    a string reads as missing.
+    time OTLP can carry. Then raises UnusableTenantError when the session's
+    tenant_id is one the store would refuse. A trace_id, parent_span_id or
+    trace_flags that is not a string reads as missing.
     """
     trace_id = usable_text(meta.trace_id).lower()
     parent_span_id = usable_text(meta.parent_span_id).lower()
@@ -154,6 +157,7 @@ def session_to_temporal_otlp(
     require_usable_session_times(meta)
     require_otlp_session_times(meta)
     require_otlp_timestamps(events, event_types=OTLP_GENAI_TIMESTAMP_EVENT_TYPES)
+    require_usable_tenant(meta)
 
     payload = session_to_otlp_genai(
         meta,
@@ -193,7 +197,7 @@ def export_temporal_otlp(
         return False
     try:
         payload = session_to_temporal_otlp(meta, events, service_name=service_name)
-    except (NonObjectEventDataError, UnusableTimestampError):
+    except (NonObjectEventDataError, UnusableTimestampError, UnusableTenantError):
         raise
     except ValueError as exc:
         sys.stderr.write(f"Temporal export failed: {exc}\n")

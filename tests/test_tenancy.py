@@ -1,28 +1,34 @@
 """Tests for multi-tenant session isolation and GDPR workflows."""
 
+import contextlib
 import io
 import json
 import os
 import hashlib
+import sys
 import tempfile
+import threading
 import unittest
 from contextlib import redirect_stderr
 from dataclasses import fields
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
 from agent_trace.audit import verify_chain
-from agent_trace.cli import build_parser, cmd_list
+from agent_trace.cli import build_parser, cmd_list, main
 from agent_trace.cost import build_provider_cost_report, build_tenant_cost_report, cmd_cost
+from agent_trace.event_data import UnusableTenantError
 from agent_trace.hooks import handle_pre_tool, handle_session_start
 from agent_trace.models import EventType, SessionMeta, TraceEvent
-from agent_trace.otlp import session_to_otlp, session_to_otlp_genai
+from agent_trace.otlp import node_tree_to_otlp, session_to_otlp, session_to_otlp_genai
 from agent_trace.store import (
     TraceStore,
     validate_optional_tenant_id,
     validate_tenant_id,
 )
 from agent_trace.subagent import build_tree
+from agent_trace.temporal import TEMPORAL_TRACE_PARENT_ENV, session_to_temporal_otlp
 from agent_trace.tenancy import (
     build_tenant_report,
     cmd_tenant,
@@ -31,11 +37,54 @@ from agent_trace.tenancy import (
     tenant_export_payload,
 )
 from agent_trace.watch import cmd_watch
+from agent_trace.web_dashboard import api_session_otlp
 
 try:
+    import _no_telemetry  # noqa: F401
+    from test_non_object_event_data import (
+        BAD,
+        CHILD,
+        GOOD,
+        _capture_output,
+        _chdir,
+        _isolated_env,
+        _tree_snapshot,
+        build_store,
+        expected_error,
+    )
     from test_store import raw_separator_session
+    from test_unusable_event_timestamps import (
+        ENDPOINT,
+        PARENT_SPAN_ID,
+        TRACE_ID,
+        TimestampCliTestCase,
+        expected_ts_error,
+        restamp,
+        set_meta,
+    )
 except ImportError:
+    from tests import _no_telemetry  # noqa: F401
+    from tests.test_non_object_event_data import (
+        BAD,
+        CHILD,
+        GOOD,
+        _capture_output,
+        _chdir,
+        _isolated_env,
+        _tree_snapshot,
+        build_store,
+        expected_error,
+    )
     from tests.test_store import raw_separator_session
+    from tests.test_unusable_event_timestamps import (
+        ENDPOINT,
+        PARENT_SPAN_ID,
+        TRACE_ID,
+        TimestampCliTestCase,
+        expected_ts_error,
+        restamp,
+        set_meta,
+    )
 
 
 def _event(session_id: str, timestamp: float = 1.0, **kwargs) -> TraceEvent:
@@ -1590,6 +1639,378 @@ class TestTenantOTLPAndRemoteHooks(TenantTestCase):
         sent_meta = send_meta.call_args.args[0]
         self.assertEqual(sent_meta.tenant_id, "tenant-a")
         self.assertEqual(sent_meta.session_id, "remote-session"[:16])
+
+
+PAST_LIMIT = "is past the latest time OTLP can carry (2554-07-21T23:34:33.709551615Z)"
+YEAR_3000 = 32503680000.0
+
+# Each meta.json tenant_id the store would refuse, with the reason the line gives.
+REFUSED_TENANTS = (
+    ("null", None, "must be a string"),
+    ("zero", 0, "must be a string"),
+    ("false", False, "must be a string"),
+    ("empty array", [], "must be a string"),
+    ("empty object", {}, "must be a string"),
+    ("number", 5, "must be a string"),
+    ("true", True, "must be a string"),
+    ("float", 1.5, "must be a string"),
+    ("NaN", float("nan"), "must be a string"),
+    ("Infinity", float("inf"), "must be a string"),
+    ("array", ["acme"], "must be a string"),
+    ("object", {"a": 1}, "must be a string"),
+    ("whitespace", "   ", "cannot be empty"),
+    ("control character", "ac\x01me", "cannot contain control characters"),
+    ("300 characters", "x" * 300, "cannot exceed 256 characters"),
+)
+# build_tree refuses a tree whose sessions have different tenants, and NaN
+# differs from itself. test_a_tree_names_the_session_whose_tenant_is_refused
+# covers NaN in a tree.
+TREE_REFUSED_TENANTS = tuple(case for case in REFUSED_TENANTS if case[0] != "NaN")
+# Each accepted tenant_id, with the tenant_id values the resource and each span carry.
+ACCEPTED_TENANTS = (
+    (" acme ", [{"stringValue": "acme"}]),
+    ("", []),
+)
+
+OTLP_ROUTES = (
+    (),
+    ("-o", "out.json"),
+    ("--endpoint", ENDPOINT, "--protocol", "http/json"),
+    ("--endpoint", ENDPOINT, "--protocol", "http/protobuf"),
+)
+SINGLE_PATHS = tuple(
+    ("export", BAD, "--format", fmt, *route)
+    for fmt in ("otlp", "otlp-genai", "temporal")
+    for route in OTLP_ROUTES
+)
+TREE_PATHS = tuple(
+    ("export", BAD, "--format", fmt, "--include-subagents", *route)
+    for fmt in ("otlp", "otlp-genai")
+    for route in OTLP_ROUTES
+)
+WRITTEN_PATHS = (
+    ("export", BAD, "--format", "otlp"),
+    ("export", BAD, "--format", "otlp-genai"),
+    ("export", BAD, "--format", "temporal"),
+    ("export", BAD, "--format", "otlp", "--include-subagents"),
+    ("export", BAD, "--format", "otlp-genai", "--include-subagents"),
+)
+
+
+def _tenant_values(payload: dict) -> list[list[dict]]:
+    """The tenant_id values of each resource and each span, one list for each."""
+    holders = []
+    for resource_spans in payload["resourceSpans"]:
+        holders.append(resource_spans["resource"])
+        for scope_spans in resource_spans["scopeSpans"]:
+            holders.extend(scope_spans["spans"])
+    return [
+        [attr["value"] for attr in holder.get("attributes", []) if attr["key"] == "tenant_id"]
+        for holder in holders
+    ]
+
+
+def _tenant_key_value(tenant: str) -> bytes:
+    """The protobuf KeyValue of a tenant_id string attribute."""
+    text = tenant.encode()
+    any_value = b"\x0a" + bytes([len(text)]) + text
+    return b"\x0a\x09tenant_id\x12" + bytes([len(any_value)]) + any_value
+
+
+class TestOTLPBuildersRefuseUnusableTenant(unittest.TestCase):
+    """Every OTLP builder refuses a meta.json tenant_id the store would refuse."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.traces = Path(tmp.name) / ".agent-traces"
+        build_store(self.traces)
+        self.store = TraceStore(str(self.traces), use_workspace_env=False, redact=False)
+
+    def builders(self, tenant_id) -> dict:
+        set_meta(
+            self.traces / GOOD,
+            tenant_id=tenant_id, trace_id=TRACE_ID, parent_span_id=PARENT_SPAN_ID,
+        )
+        meta = self.store.load_meta(GOOD)
+        events = self.store.load_events(GOOD)
+        return {
+            "session_to_otlp": lambda: session_to_otlp(meta, events),
+            "session_to_otlp_genai": lambda: session_to_otlp_genai(meta, events),
+            "node_tree_to_otlp": lambda: node_tree_to_otlp(build_tree(self.store, GOOD)),
+            "node_tree_to_otlp genai": lambda: node_tree_to_otlp(
+                build_tree(self.store, GOOD), genai=True,
+            ),
+            "session_to_temporal_otlp": lambda: session_to_temporal_otlp(meta, events),
+            "api_session_otlp": lambda: json.loads(api_session_otlp(self.store, GOOD)),
+        }
+
+    def test_every_builder_refuses_a_tenant_the_store_would_refuse(self):
+        checked = ("session_to_temporal_otlp", "api_session_otlp")
+        for name, value, reason in REFUSED_TENANTS:
+            for builder, build in self.builders(value).items():
+                with self.subTest(tenant=name, builder=builder):
+                    if builder in checked:
+                        error, message = UnusableTenantError, f"session tenant_id {reason}"
+                    else:
+                        error, message = ValueError, f"tenant ID {reason}"
+                    with self.assertRaises(error) as context:
+                        build()
+                    self.assertEqual(str(context.exception), message)
+
+    def test_every_builder_exports_an_accepted_tenant_stripped(self):
+        for value, expected in ACCEPTED_TENANTS:
+            for builder, build in self.builders(value).items():
+                with self.subTest(tenant=value, builder=builder):
+                    values = _tenant_values(build())
+                    self.assertGreaterEqual(len(values), 3)
+                    self.assertEqual(values, [expected] * len(values))
+
+
+class TenantCliTestCase(TimestampCliTestCase):
+    def tenant_workspace(self, tenant_id, **store_options) -> Path:
+        """A workspace whose BAD and CHILD sessions store *tenant_id* as given.
+
+        BAD also gets a Temporal trace context.
+        """
+        root = self.make_workspace(**store_options)
+        traces = root / "work" / ".agent-traces"
+        set_meta(
+            traces / BAD,
+            tenant_id=tenant_id, trace_id=TRACE_ID, parent_span_id=PARENT_SPAN_ID,
+        )
+        set_meta(traces / CHILD, tenant_id=tenant_id)
+        return root
+
+
+class TestOTLPExportsRefuseUnusableTenant(TenantCliTestCase):
+    """Every OTLP export path refuses a session whose tenant_id the store would refuse."""
+
+    def test_every_otlp_path_refuses_a_tenant_the_store_would_refuse(self):
+        for name, value, reason in REFUSED_TENANTS:
+            root = self.tenant_workspace(value)
+            for argv in SINGLE_PATHS:
+                with self.subTest(tenant=name, argv=argv):
+                    self.assert_refused(root, list(argv), f"Error: session tenant_id {reason}\n")
+        for name, value, reason in TREE_REFUSED_TENANTS:
+            root = self.tenant_workspace(value)
+            for argv in TREE_PATHS:
+                with self.subTest(tenant=name, argv=argv):
+                    self.assert_refused(
+                        root, list(argv), f"Error: session {BAD} tenant_id {reason}\n",
+                    )
+
+    def test_a_tree_names_the_session_whose_tenant_is_refused(self):
+        root = self.make_workspace(tenant=True)
+        for name, value, reason in REFUSED_TENANTS:
+            # build_tree refuses a child whose tenant differs from the root's,
+            # so the child gets its tenant after the build.
+            def child_tenant(store, session_id, value=value):
+                tree = build_tree(store, session_id)
+                for child in tree.children:
+                    child.meta.tenant_id = value
+                return tree
+
+            with patch("agent_trace.subagent.build_tree", child_tenant):
+                for argv in TREE_PATHS:
+                    with self.subTest(tenant=name, argv=argv):
+                        self.assert_refused(
+                            root, list(argv), f"Error: session {CHILD} tenant_id {reason}\n",
+                        )
+
+    def test_an_accepted_tenant_is_exported_stripped(self):
+        out = Path("out.json")
+        for value, expected in ACCEPTED_TENANTS:
+            root = self.tenant_workspace(value)
+            for argv in WRITTEN_PATHS:
+                with self.subTest(tenant=value, argv=argv):
+                    result = self.run_cli(root, *argv, "-o", str(out))
+                    self.assertEqual(result.code, 0, result.err)
+                    written = root / "work" / out
+                    values = _tenant_values(json.loads(written.read_text(encoding="utf-8")))
+                    written.unlink()
+                    self.assertGreaterEqual(len(values), 3)
+                    self.assertEqual(values, [expected] * len(values))
+
+    def test_a_session_the_other_checks_refuse_keeps_their_line(self):
+        root = self.tenant_workspace(5)
+        for argv in SINGLE_PATHS:
+            with self.subTest(case="tenant alone", argv=argv):
+                self.assert_refused(root, list(argv), "Error: session tenant_id must be a string\n")
+
+        every_format = ("otlp", "otlp-genai", "temporal")
+        # Each case: the formats it covers, the build_store options, a change
+        # to the stored BAD session, and the line.
+        cases = (
+            ("non-object data", every_format, {"bad_type": "tool_call", "value": "text"}, None,
+             expected_error(BAD, "tool_call", "string", named=False)),
+            ("null event timestamp", every_format, {},
+             lambda bad: restamp(bad, "tool_call", None),
+             expected_ts_error(BAD, "tool_call", "null", named=False)),
+            ("null started_at", every_format, {},
+             lambda bad: set_meta(bad, started_at=None),
+             "Error: session started_at must be a Unix time in seconds\n"),
+            ("started_at past the OTLP limit", every_format, {},
+             lambda bad: set_meta(bad, started_at=YEAR_3000),
+             f"Error: session started_at {PAST_LIMIT}\n"),
+            ("event past the OTLP limit", every_format, {},
+             lambda bad: restamp(bad, "llm_request", YEAR_3000),
+             f"Error: session event timestamp {PAST_LIMIT}: event 3 of 25 (llm_request); "
+             "1 more event has a timestamp past that time\n"),
+            ("no Temporal trace context", ("temporal",), {},
+             lambda bad: set_meta(bad, trace_id="", parent_span_id=""),
+             "Temporal export failed: session has no Temporal trace context; "
+             f"run watch with {TEMPORAL_TRACE_PARENT_ENV} set\n"),
+            ("invalid trace ID", ("temporal",), {},
+             lambda bad: set_meta(bad, trace_id="z" * 32),
+             "Temporal export failed: traceparent contains an invalid trace ID\n"),
+        )
+        for case, formats, options, change, expected in cases:
+            root = self.tenant_workspace(5, **options)
+            if change:
+                change(root / "work" / ".agent-traces" / BAD)
+            for argv in SINGLE_PATHS:
+                if argv[3] in formats:
+                    with self.subTest(case=case, argv=argv):
+                        self.assert_refused(root, list(argv), expected)
+
+    def test_a_tree_checks_tenants_after_every_session_passes_the_other_checks(self):
+        root = self.tenant_workspace(5)
+        for argv in TREE_PATHS:
+            with self.subTest(case="tenant alone", argv=argv):
+                self.assert_refused(
+                    root, list(argv), f"Error: session {BAD} tenant_id must be a string\n",
+                )
+        for case, session_id, fields, expected in (
+            ("root started_at", BAD, {"started_at": None},
+             f"Error: session {BAD} started_at must be a Unix time in seconds\n"),
+            ("child started_at", CHILD, {"started_at": float("nan")},
+             f"Error: session {CHILD} started_at must be a Unix time in seconds\n"),
+            ("child past the OTLP limit", CHILD, {"started_at": YEAR_3000},
+             f"Error: session {CHILD} started_at {PAST_LIMIT}\n"),
+        ):
+            root = self.tenant_workspace(5)
+            set_meta(root / "work" / ".agent-traces" / session_id, **fields)
+            for argv in TREE_PATHS:
+                with self.subTest(case=case, argv=argv):
+                    self.assert_refused(root, list(argv), expected)
+
+
+class _OTLPSink(BaseHTTPRequestHandler):
+    """Record each POST and answer 200."""
+
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        self.server.requests.append((self.path, self.headers.get("Content-Type"), body))
+        self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        pass
+
+
+class TestOTLPPushesRefuseUnusableTenant(TenantCliTestCase):
+    """A local collector gets nothing for a refused tenant and the accepted tenant stripped."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.sink = HTTPServer(("127.0.0.1", 0), _OTLPSink)
+        cls.sink.requests = []
+        cls.sink_thread = threading.Thread(target=cls.sink.serve_forever, daemon=True)
+        cls.sink_thread.start()
+        cls.endpoint = f"http://127.0.0.1:{cls.sink.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.sink.shutdown()
+        cls.sink.server_close()
+        cls.sink_thread.join()
+        super().tearDownClass()
+
+    def setUp(self):
+        super().setUp()
+        self.sink.requests.clear()
+
+    def push(self, root: Path, *argv: str) -> tuple[int, str, str]:
+        """Run agent-strace with the network open, and return its exit code and output."""
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(_chdir(root / "work"))
+            stack.enter_context(_isolated_env(root / "home"))
+            stack.enter_context(patch.dict(os.environ, {"no_proxy": "*", "NO_PROXY": "*"}))
+            stack.enter_context(patch("agent_trace.cli._product_telemetry.capture"))
+            stack.enter_context(
+                patch("agent_trace.cli._product_telemetry.maybe_show_telemetry_notice")
+            )
+            stack.enter_context(patch.object(sys, "argv", ["agent-strace", *argv]))
+            captured = stack.enter_context(_capture_output())
+            try:
+                main()
+                code = 0
+            except SystemExit as exc:
+                code = 0 if exc.code is None else exc.code
+        return code, captured.out, captured.err
+
+    def endpoint_argv(self, fmt: str, protocol: str, *extra: str) -> tuple:
+        return (
+            "export", BAD, "--format", fmt, *extra,
+            "--endpoint", self.endpoint, "--protocol", protocol,
+        )
+
+    def test_a_refused_tenant_sends_nothing(self):
+        protocols = ("http/json", "http/protobuf")
+        for name, value, reason in REFUSED_TENANTS:
+            root = self.tenant_workspace(value)
+            paths = [
+                (self.endpoint_argv(fmt, protocol), f"Error: session tenant_id {reason}\n")
+                for fmt in ("otlp", "otlp-genai", "temporal")
+                for protocol in protocols
+            ]
+            if name != "NaN":
+                paths += [
+                    (
+                        self.endpoint_argv(fmt, protocol, "--include-subagents"),
+                        f"Error: session {BAD} tenant_id {reason}\n",
+                    )
+                    for fmt in ("otlp", "otlp-genai")
+                    for protocol in protocols
+                ]
+            for argv, expected in paths:
+                with self.subTest(tenant=name, argv=argv):
+                    self.assertEqual(self.push(root, *argv), (1, "", expected))
+                    self.assertEqual(self.sink.requests, [])
+
+    def test_an_accepted_tenant_is_sent_stripped(self):
+        for value, expected in ACCEPTED_TENANTS:
+            root = self.tenant_workspace(value)
+            for fmt, extra in (
+                ("otlp", ()),
+                ("otlp-genai", ()),
+                ("temporal", ()),
+                ("otlp", ("--include-subagents",)),
+                ("otlp-genai", ("--include-subagents",)),
+            ):
+                with self.subTest(tenant=value, format=fmt, extra=extra):
+                    bodies = {}
+                    for protocol in ("http/json", "http/protobuf"):
+                        self.sink.requests.clear()
+                        code, _, err = self.push(root, *self.endpoint_argv(fmt, protocol, *extra))
+                        self.assertEqual(code, 0, err)
+                        self.assertEqual(
+                            [path for path, _, _ in self.sink.requests], ["/v1/traces"],
+                        )
+                        bodies[protocol] = self.sink.requests[0][2]
+                    values = _tenant_values(json.loads(bodies["http/json"]))
+                    self.assertGreaterEqual(len(values), 3)
+                    self.assertEqual(values, [expected] * len(values))
+                    protobuf = bodies["http/protobuf"]
+                    if expected:
+                        self.assertEqual(protobuf.count(b"\x0a\x09tenant_id"), len(values))
+                        self.assertEqual(protobuf.count(_tenant_key_value("acme")), len(values))
+                    else:
+                        self.assertNotIn(b"tenant_id", bodies["http/json"])
+                        self.assertNotIn(b"tenant_id", protobuf)
 
 
 if __name__ == "__main__":

@@ -79,7 +79,7 @@ from .pairing import (
     tool_pairer,
 )
 from .session_outcome import behavior_analysis, recorded_session_status
-from .store import TraceStore
+from .store import TraceStore, validate_optional_tenant_id
 
 if TYPE_CHECKING:
     from .subagent import SessionNode
@@ -1301,6 +1301,10 @@ def session_to_otlp(
 
     Returns the full ExportTraceServiceRequest body ready to POST.
 
+    The session's tenant_id goes on the resource and on every span, as
+    ``validate_optional_tenant_id`` in store.py returns it. A tenant_id the
+    store would refuse raises ValueError.
+
     Model requests stay events on the root span, except a model response that
     ``agent-strace import`` read from a transcript with recorded usage. That
     one also becomes a ``chat {model}`` CLIENT span with an inferred start
@@ -1589,8 +1593,9 @@ def session_to_otlp(
     if parent_span_id:
         root_span["parentSpanId"] = parent_span_id
 
-    if meta.tenant_id:
-        tenant_attributes = _make_attributes({"tenant_id": meta.tenant_id})
+    tenant_id = validate_optional_tenant_id(meta.tenant_id)
+    if tenant_id:
+        tenant_attributes = _make_attributes({"tenant_id": tenant_id})
         for span in [root_span] + child_spans:
             span.setdefault("attributes", []).extend(tenant_attributes)
 
@@ -1603,7 +1608,7 @@ def session_to_otlp(
                     "service.name": service_name,
                     "service.version": __version__,
                     "agent.session_id": meta.session_id,
-                    **({"tenant_id": meta.tenant_id} if meta.tenant_id else {}),
+                    **({"tenant_id": tenant_id} if tenant_id else {}),
                 }),
             },
             "scopeSpans": [{
@@ -1884,6 +1889,8 @@ def session_to_otlp_genai(
       them
     - A tool or chat span whose event names another by ``retry_of`` links
       to that event's span
+
+    The tenant_id works as in session_to_otlp().
 
     See: https://github.com/open-telemetry/semantic-conventions-genai
     """
@@ -2184,8 +2191,9 @@ def session_to_otlp_genai(
     if parent_span_id:
         root_span["parentSpanId"] = parent_span_id
 
-    if meta.tenant_id:
-        tenant_attributes = _make_attributes({"tenant_id": meta.tenant_id})
+    tenant_id = validate_optional_tenant_id(meta.tenant_id)
+    if tenant_id:
+        tenant_attributes = _make_attributes({"tenant_id": tenant_id})
         for span in [root_span] + child_spans:
             span.setdefault("attributes", []).extend(tenant_attributes)
 
@@ -2196,7 +2204,7 @@ def session_to_otlp_genai(
                     "service.name": service_name,
                     "service.version": __version__,
                     "agent.session_id": meta.session_id,
-                    **({"tenant_id": meta.tenant_id} if meta.tenant_id else {}),
+                    **({"tenant_id": tenant_id} if tenant_id else {}),
                 }),
             },
             "scopeSpans": [{
