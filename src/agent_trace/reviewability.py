@@ -744,7 +744,9 @@ def _result_status(event: TraceEvent) -> tuple[str, int | None, str]:
     """Read one terminal outcome. Return ``(outcome, exit_code, reason)``.
 
     Only explicit signals count: an exit code, a boolean ``success`` or ``ok``,
-    or an ERROR event. No signal, or signals that disagree, is ``unknown``.
+    ``is_error: true``, or an ERROR event. No signal, or signals that disagree,
+    is ``unknown``. Only JSON true counts for ``is_error``. Any other value
+    gives no signal, so ``is_error: false`` is not a pass.
     """
     data = event.data
     codes: set[int] = set()
@@ -758,7 +760,11 @@ def _result_status(event: TraceEvent) -> tuple[str, int | None, str]:
         if isinstance(text, str):
             codes.update(int(match) for match in _EXIT_CODE_RE.findall(text))
     passed = any(code == 0 for code in codes)
-    failed = any(code != 0 for code in codes) or event.event_type == EventType.ERROR
+    failed = (
+        any(code != 0 for code in codes)
+        or event.event_type == EventType.ERROR
+        or data.get("is_error") is True
+    )
     for key in ("success", "ok"):
         flag = data.get(key)
         if flag is True:

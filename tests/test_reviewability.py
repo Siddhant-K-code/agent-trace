@@ -828,6 +828,199 @@ class TestRunnerSummaryOutcomes(_StoreCase):
         self.assertEqual(validation.status, "partial")
 
 
+JEST_OK = (
+    "PASS src/a.test.js\nTest Suites: 1 passed, 1 total\n"
+    "Tests:       5 passed, 5 total\nTime:        1.2 s\n"
+)
+# A vitest watch run prints a passing summary, then Claude Code stops it.
+VITEST_TIMED_OUT = (
+    " Test Files  1 passed (1)\n      Tests  5 passed (5)\n   Duration  1.10s\n\n"
+    " PASS  Waiting for file changes\nCommand timed out after 2m 0.0s"
+)
+
+
+class TestIsErrorOutcomes(_StoreCase):
+    """A result marked ``is_error: true`` reads like a nonzero exit with no code."""
+
+    _validate = TestValidationOutcomes._validate
+
+    def _mcp(self, sid: str, **flags):
+        # The shape `record` and `record-http` write for an MCP tools/call.
+        b = _Builder(self.store, sid)
+        b.prompt()
+        call = b.add(EventType.TOOL_CALL, tool_name="run_command",
+                     arguments={"command": "python -m unittest"}, request_id=7)
+        b.add(EventType.TOOL_RESULT, parent=call.event_id, request_id=7,
+              content_types=["text"], content_preview=UNITTEST_OK, **flags)
+        validation = self.finding(self.report(b.save()), "validation")
+        return validation, validation.facts["latest"][0]
+
+    def test_single_command_is_failed_whatever_its_summary_says(self):
+        cases = {
+            "iserr0000001": ("python -m unittest", UNITTEST_OK, "unittest"),
+            "iserr0000002": ("npm test", JEST_OK, "npm test"),
+            "iserr0000003": ("npx vitest", VITEST_TIMED_OUT, "vitest"),
+        }
+        for sid, (command, text, label) in cases.items():
+            with self.subTest(command=command):
+                validation, run = self._validate(sid, command, {"result": text, "is_error": True})
+                self.assertEqual(
+                    (run["label"], run["outcome"], run["exit_code"], run["outcome_source"]),
+                    (label, "failed", None, "exit_status"),
+                )
+                self.assertEqual((validation.status, validation.confidence), ("partial", "medium"))
+                self.assertEqual(validation.detail, f"Last run: {label} failed.")
+                self.assertNotIn("runner summary", validation.source)
+
+    def test_empty_result_is_failed(self):
+        validation, run = self._validate("iserr0000004", "ruff check src",
+                                         {"result": "", "is_error": True})
+        self.assertEqual(
+            (run["label"], run["outcome"], run["exit_code"], run["outcome_source"]),
+            ("ruff", "failed", None, "exit_status"),
+        )
+        self.assertEqual(validation.detail, "Last run: ruff failed.")
+
+    def test_passing_status_conflicts_and_no_summary_is_read(self):
+        single, piped = "python -m unittest", "python -m unittest 2>&1 | tail -5"
+        cases = {
+            "isconf000001": (single, {"result": UNITTEST_OK, "exit_code": 0}),
+            "isconf000002": (single, {"result": UNITTEST_OK, "success": True}),
+            "isconf000003": (single, {"result": UNITTEST_OK, "ok": True}),
+            "isconf000004": (single, {"result": "exit code 0\n" + UNITTEST_OK}),
+            "isconf000005": (piped, {"result": UNITTEST_OK, "exit_code": 0}),
+        }
+        for sid, (command, result) in cases.items():
+            with self.subTest(sid=sid):
+                validation, run = self._validate(sid, command, {**result, "is_error": True})
+                self.assertEqual((run["outcome"], run["exit_code"], run["outcome_source"]),
+                                 ("unknown", None, None))
+                self.assertEqual(validation.status, "partial")
+                self.assertEqual(validation.detail,
+                                 "Last run: unittest outcome unknown (conflicting status).")
+
+    def test_failing_status_agrees(self):
+        cases = {
+            "isagree00001": ({"result": UNITTEST_OK, "exit_code": 1}, 1),
+            "isagree00002": ({"result": "Exit code 1\n" + UNITTEST_OK}, 1),
+            "isagree00003": ({"result": UNITTEST_OK, "success": False}, None),
+            "isagree00004": ({"result": UNITTEST_OK, "ok": False}, None),
+        }
+        for sid, (result, code) in cases.items():
+            with self.subTest(sid=sid):
+                validation, run = self._validate(sid, "python -m unittest",
+                                                 {**result, "is_error": True})
+                self.assertEqual((run["outcome"], run["exit_code"], run["outcome_source"]),
+                                 ("failed", code, "exit_status"))
+                exit_text = "" if code is None else f", exit {code}"
+                self.assertEqual(validation.detail, f"Last run: unittest failed{exit_text}.")
+
+    def test_other_values_give_no_signal(self):
+        command = "python -m unittest"
+        values = ("true", 1, 0, False, None, [], {})
+        for tag, text, expected in (("s", UNITTEST_OK, ("passed", "runner_summary")),
+                                    ("e", "", ("unknown", None))):
+            plain, plain_run = self._validate(f"nosig{tag}plain0", command, {"result": text})
+            self.assertEqual((plain_run["outcome"], plain_run["outcome_source"]), expected)
+            for index, value in enumerate(values):
+                with self.subTest(result=tag, value=value):
+                    flagged, run = self._validate(f"nosig{tag}flag{index:02d}", command,
+                                                  {"result": text, "is_error": value})
+                    self.assertEqual(run, plain_run)
+                    self.assertEqual(
+                        (flagged.status, flagged.confidence, flagged.detail),
+                        (plain.status, plain.confidence, plain.detail),
+                    )
+
+    def test_compound_command_masks_the_failure(self):
+        command = "python3 -m unittest 2>&1 | tail -8"
+        cases = {
+            "iscmpd000001": (UNITTEST_OK, "passed", "runner_summary",
+                             "unittest passed (runner summary in output, not exit code)"),
+            "iscmpd000002": (UNITTEST_FAILED, "failed", "runner_summary",
+                             "unittest failed (runner summary in output, not exit code)"),
+            "iscmpd000003": ("", "unknown", None,
+                             "unittest outcome unknown (compound shell command)"),
+        }
+        for sid, (text, outcome, source, detail) in cases.items():
+            with self.subTest(sid=sid):
+                validation, run = self._validate(sid, command, {"result": text, "is_error": True})
+                self.assertEqual((run["outcome"], run["exit_code"], run["outcome_source"]),
+                                 (outcome, None, source))
+                self.assertEqual(validation.detail, f"Last run: {detail}.")
+
+    def test_and_chain_failure_is_not_pinned_on_a_part(self):
+        reason = "chained command failed; failing part not known"
+        summary = "passed (runner summary in output, not exit code)"
+        cases = {
+            "ischain00001": ("npm test && npm run lint", JEST_OK,
+                             [("npm run lint", "unknown", None), ("npm test", "unknown", None)],
+                             f"npm run lint outcome unknown ({reason}); "
+                             f"npm test outcome unknown ({reason})"),
+            "ischain00002": ("python -m unittest && ruff check src", UNITTEST_OK,
+                             [("ruff", "unknown", None), ("unittest", "passed", "runner_summary")],
+                             f"ruff outcome unknown ({reason}); unittest {summary}"),
+        }
+        for sid, (command, text, runs, detail) in cases.items():
+            with self.subTest(command=command):
+                validation, _ = self._validate(sid, command, {"result": text, "is_error": True})
+                self.assertEqual(
+                    [(run["label"], run["outcome"], run["outcome_source"])
+                     for run in validation.facts["latest"]],
+                    runs,
+                )
+                self.assertEqual(validation.detail, f"Last run: {detail}.")
+
+    def test_error_event_reads_the_same(self):
+        for index, command in enumerate(("pytest", "pytest | tail -3")):
+            with self.subTest(command=command):
+                plain, plain_run = self._validate(f"iserrevt{index}000", command,
+                                                  {"error": "== 3 passed in 0.1s =="}, failed=True)
+                flagged, run = self._validate(
+                    f"iserrevt{index}001", command,
+                    {"error": "== 3 passed in 0.1s ==", "is_error": True}, failed=True,
+                )
+                self.assertEqual((run, flagged.detail), (plain_run, plain.detail))
+                expected = ("failed", "exit_status") if index == 0 else ("unknown", None)
+                self.assertEqual((run["outcome"], run["outcome_source"]), expected)
+
+    def test_mcp_proxy_result(self):
+        summary = "passed (runner summary in output, not exit code)"
+        cases = {
+            "ismcp0000001": ({"is_error": True}, "failed", "exit_status", "failed"),
+            "ismcp0000002": ({}, "passed", "runner_summary", summary),
+        }
+        for sid, (flags, outcome, source, detail) in cases.items():
+            with self.subTest(flags=flags):
+                validation, run = self._mcp(sid, **flags)
+                self.assertEqual(
+                    (run["label"], run["outcome"], run["exit_code"], run["outcome_source"]),
+                    ("unittest", outcome, None, source),
+                )
+                self.assertEqual(validation.detail, f"Last run: unittest {detail}.")
+
+    def test_fail_on_partial_lists_validation(self):
+        for sid, flags, fails in (("iscli0000001", {"is_error": True}, True),
+                                  ("iscli0000002", {}, False)):
+            with self.subTest(sid=sid):
+                b = _Builder(self.store, sid)
+                b.prompt()
+                call = b.add(EventType.TOOL_CALL, tool_name="Bash",
+                             arguments={"command": "python -m unittest"})
+                b.add(EventType.TOOL_RESULT, parent=call.event_id, tool_name="Bash",
+                      result=UNITTEST_OK, **flags)
+                b.save()
+                code, out, _ = TestCommands._run(
+                    self, ["review", sid, "--fail-on", "partial", "--format", "json"],
+                )
+                payload = json.loads(out)
+                validation = next(f for f in payload["findings"] if f["name"] == "validation")
+                self.assertEqual(validation["status"], "partial" if fails else "present")
+                self.assertEqual("validation" in payload["failing"], fails)
+                if fails:
+                    self.assertEqual(code, 1)
+
+
 class TestRunnerSummariesHelper(unittest.TestCase):
     def test_counts_runner_segments(self):
         result = TraceEvent(event_type=EventType.TOOL_RESULT, timestamp=1.0,
