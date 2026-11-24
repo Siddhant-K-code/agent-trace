@@ -53,6 +53,7 @@ from .models import (
     TraceEvent,
     usable_count,
     usable_number,
+    usable_object,
     usable_text,
 )
 from .http_post import no_redirect_opener, otlp_traces_url, post_error_detail, url_endpoint
@@ -1575,6 +1576,8 @@ def node_tree_to_otlp(
     appears twice in the tree, which only a parent link cycle produces, is
     exported once. The resource and scope are the root session's.
     """
+    from .subagent import parent_event_id_of
+
     convert = session_to_otlp_genai if genai else session_to_otlp
     root_trace_id = _to_trace_id(tree.meta.session_id)
     all_spans: list[dict] = []
@@ -1600,9 +1603,9 @@ def node_tree_to_otlp(
         session_root_span_id = _to_span_id(f"root-{meta.session_id}")
 
         for child in node.children:
-            parent_event_id = child.meta.parent_event_id
+            parent_event_id = parent_event_id_of(child.meta)
             spawning_span_id = session_root_span_id
-            if isinstance(parent_event_id, str) and parent_event_id:
+            if parent_event_id:
                 candidate = _to_span_id(parent_event_id)
                 if candidate in span_ids:
                     spawning_span_id = candidate
@@ -1853,16 +1856,22 @@ def session_to_otlp_genai(
         "agent.errors": usable_count(meta.errors),
         # agent-strace preservation attributes
         "agent.strace.provider": raw_provider,
-        "agent.strace.redacted": meta.redacted or any(is_redacted(event) for event in events),
+        "agent.strace.redacted": (
+            meta.redacted is True or any(is_redacted(event) for event in events)
+        ),
         "agent.strace.redacted_event_count": sum(is_redacted(event) for event in events),
         **_evidence_attributes(meta, events),
     }
-    if meta.attribution:
-        root_attr_values["agent.strace.provenance"] = meta.attribution
+    provenance = usable_object(meta.attribution)
+    if provenance:
+        root_attr_values["agent.strace.provenance"] = provenance
     if meta.parent_session_id:
         root_attr_values["agent.strace.parent_session_id"] = meta.parent_session_id
-    if meta.parent_event_id:
-        root_attr_values["agent.strace.parent_event_id"] = meta.parent_event_id
+    from .subagent import parent_event_id_of
+
+    parent_event_id = parent_event_id_of(meta)
+    if parent_event_id:
+        root_attr_values["agent.strace.parent_event_id"] = parent_event_id
     depth = usable_count(meta.depth)
     if depth:
         root_attr_values["agent.strace.depth"] = depth

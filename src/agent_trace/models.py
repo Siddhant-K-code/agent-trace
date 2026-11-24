@@ -113,10 +113,22 @@ def usable_text(value: Any) -> str:
     """Return ``value`` if it is a string, else "".
 
     meta.json can hold any JSON value, so readers use this to treat an
-    agent_name, command or team that is a list, an object, a number, a bool
-    or null as missing.
+    agent_name, command, team, parent_event_id, trace_id, parent_span_id or
+    trace_flags that is a list, an object, a number, a bool or null as
+    missing.
     """
     return value if isinstance(value, str) else ""
+
+
+def usable_object(value: Any) -> dict:
+    """Return ``value`` if it is a dict, else {}.
+
+    meta.json can hold any JSON value, so readers use this to treat an
+    attribution that is a string, a list, a number, a bool or null as
+    missing. Do not convert with dict(): it turns a list of pairs into an
+    object.
+    """
+    return value if isinstance(value, dict) else {}
 
 
 def _from_dict(cls, data: Any):

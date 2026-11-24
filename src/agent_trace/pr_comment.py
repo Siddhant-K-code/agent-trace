@@ -34,7 +34,14 @@ from .failures import count_session_errors
 from .http_post import no_redirect_opener, redirect_hint, same_origin_opener
 from .inert import inert
 from .lint import lint_session
-from .models import EventType, SessionMeta, TraceEvent, usable_count, usable_number
+from .models import (
+    EventType,
+    SessionMeta,
+    TraceEvent,
+    usable_count,
+    usable_number,
+    usable_object,
+)
 from .session_paths import normalise_path, session_cwd, shell_reads, shell_writes
 from .store import TraceStore
 
@@ -457,7 +464,7 @@ def select_sessions_with_link(
     if active_branch and active_branch != "HEAD":
         matching = [
             meta for meta in sessions
-            if str((meta.attribution or {}).get("git_branch", "")) == active_branch
+            if str(usable_object(meta.attribution).get("git_branch", "")) == active_branch
         ]
         if matching:
             return [meta.session_id for meta in reversed(matching)], "branch"

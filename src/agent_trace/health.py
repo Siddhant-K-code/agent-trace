@@ -360,7 +360,7 @@ def redaction_state_for(meta: SessionMeta, events: Sequence[TraceEvent]) -> Reda
         mode=mode,
         session_start_modes=starts,
         redacted_event_count=count_redacted_events(events),
-        metadata_redacted=bool(meta.redacted),
+        metadata_redacted=meta.redacted is True,
     )
 
 

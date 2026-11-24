@@ -378,9 +378,12 @@ List all captured sessions with ID, timestamp, duration, tool calls, and errors.
 `--tenant ID` performs an exact tenant match before listing metadata.
 
 A `meta.json` written by an older collector can hold a start time or end time
-that is not a usable number, such as text, NaN or a value out of range.
-`list`, `stats` and `replay` show such a value as missing, as they do for the
-duration of a session that has not ended.
+that is not a usable number, such as text, a list, an object, `true`, `null`,
+NaN or a value out of range. `list`, `stats`, `replay` and `tree` show such a
+value as missing, as they do for the duration of a session that has not
+ended. `replay --expand-subagents` shows event times from the root session's
+start. When that start is missing, it counts from the root's first event, as
+`replay` does.
 
 It can also hold a `total_duration_ms`, `tool_calls`, `llm_requests`,
 `errors`, `total_tokens` or `depth` that is not a usable number, such as text,
@@ -400,13 +403,16 @@ exceptions:
 - For the `mcp` tools, see [mcp.md](mcp.md).
 - `inspect`, the `server` API and other commands that copy the whole record keep the value as stored.
 
-A `meta.json` can also hold an `agent_name`, `command` or `team` that is not a
+A `meta.json` can also hold an `agent_name`, `command`, `team`,
+`parent_event_id`, `trace_id`, `parent_span_id` or `trace_flags` that is not a
 string, such as `null`, a list, an object, a number, `true`, NaN or infinity.
 A command that reads one of these fields as text treats such a value as
 missing, and so do the `server --dashboard` pages. Each shows, writes or sends
-what it does for a session without that field. The exceptions:
+what it does for a session without that field. An `attribution` that is not an
+object reads as `{}`. Only `true` counts as `redacted`. The exceptions:
 
 - `org-report` refuses the session.
+- A `tenant_id` that is not a string does not read as missing, because that would move the session out of its tenant. `backfill-meta` does not rebuild a parent whose child session has one. The `tenant` commands and `org-report` refuse the session. `export --format otlp` and `otlp-genai` copy the value as stored.
 - `share` refuses NaN and infinity, as it does in any `meta.json` field.
 - For the `mcp` tools, see [mcp.md](mcp.md).
 - `inspect`, the `server` API and other commands that copy the whole record keep the value as stored.
@@ -2946,7 +2952,9 @@ Safety:
   delete or tag journal, are skipped so erased data is never resurrected. An
   unreadable erasure audit or journal blocks the whole store.
 - Event streams with more than one tenant ID, and parents whose child sessions
-  belong to another tenant, are skipped.
+  belong to another tenant, are skipped. A child session whose `meta.json`
+  holds a `tenant_id` that is not a string counts as another tenant, so its
+  parent is skipped as `cross_tenant_child`.
 - A present `tenant_id` that is not a string is reported as `invalid_tenant`;
   missing or empty tenant IDs remain untagged.
 - Directories with `identity.json` are skipped: the signature covers metadata
