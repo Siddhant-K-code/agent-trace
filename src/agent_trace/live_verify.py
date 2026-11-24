@@ -13,6 +13,7 @@ from .models import SessionMeta, usable_text
 from .store import (
     AmbiguousSessionPrefixError,
     CorruptSessionMetaError,
+    InvalidSessionIDError,
     TraceStore,
     refusal_reason,
 )
@@ -67,6 +68,9 @@ def _resolve_requested_session(store: TraceStore, requested: str) -> str | None:
         return exc.session_id
     except AmbiguousSessionPrefixError as exc:
         raise LiveCaptureError(f"{exc}. Pass the full ID with --session SESSION_ID.") from exc
+    except InvalidSessionIDError as exc:
+        # Its message shows the argument with repr().
+        raise LiveCaptureError(str(exc)) from exc
     except ValueError as exc:
         raise LiveCaptureError(f"Invalid session ID or prefix {requested!r}: {exc}") from exc
 

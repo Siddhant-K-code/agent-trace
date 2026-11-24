@@ -42,6 +42,7 @@ from .models import EventType, SessionMeta, TraceEvent, usable_text
 from .store import (
     AmbiguousSessionPrefixError,
     CorruptSessionMetaError,
+    InvalidSessionIDError,
     RefusedSessionError,
     TraceStore,
 )
@@ -527,7 +528,11 @@ def _resolve_session(store: TraceStore, requested: str | None) -> str | None:
         if store.session_exists(requested):
             return requested
         return store.find_session(requested)
-    except (CorruptSessionMetaError, AmbiguousSessionPrefixError):
+    except (
+        CorruptSessionMetaError,
+        AmbiguousSessionPrefixError,
+        InvalidSessionIDError,
+    ):
         raise
     except ValueError:
         return None

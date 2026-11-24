@@ -231,6 +231,8 @@ def cmd_dataset(args: argparse.Namespace) -> int:
         if not session_id:
             sys.stderr.write("--session is required\n")
             return 1
+        from ..store import validate_session_argument
+        validate_session_argument(session_id)
         entry = DatasetEntry(session_id=session_id, label=label)
         add_entry(dataset_path, entry)
         sys.stderr.write(f"Added session {session_id} to dataset {dataset_path}\n")

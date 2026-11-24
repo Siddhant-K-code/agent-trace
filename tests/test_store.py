@@ -21,6 +21,7 @@ from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import (
     AmbiguousSessionPrefixError,
     CorruptSessionMetaError,
+    InvalidSessionIDError,
     SessionMismatchError,
     TraceStore,
     UnreadableEventLineError,
@@ -1409,6 +1410,86 @@ class TestAmbiguousSessionPrefixCommands(unittest.TestCase):
                     (1, "", f"Error: {AMBIGUOUS}\n"),
                 )
         self.assertEqual(tree_snapshot(self.root), before)
+
+
+# Each one cannot name a session directory.
+INVALID_SESSION_ARGUMENTS = ("..", "a/b", "a\\b", "x\x01y")
+
+
+class TestInvalidSessionArgument(unittest.TestCase):
+    """An ID or prefix that cannot name a session directory raises
+    InvalidSessionIDError, which shows the argument with repr()."""
+
+    def test_lookups_and_session_path_helpers_raise_it(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store = TraceStore(tmp.name, use_workspace_env=False)
+        store.create_session(SessionMeta(session_id="okay", started_at=1.0))
+        calls = {
+            "session_exists": store.session_exists,
+            "find_session": store.find_session,
+            "load_meta": store.load_meta,
+            "load_events": store.load_events,
+            "checkpoint_path": store.checkpoint_path,
+            "_session_dir": store._session_dir,
+        }
+        for value in INVALID_SESSION_ARGUMENTS:
+            for name, call in calls.items():
+                with self.subTest(value=value, call=name):
+                    with self.assertRaises(InvalidSessionIDError) as raised:
+                        call(value)
+                    # Callers that catch ValueError still catch it.
+                    self.assertIsInstance(raised.exception, ValueError)
+                    self.assertEqual(
+                        (str(raised.exception), raised.exception.value),
+                        (f"invalid session ID or prefix: {value!r}", value),
+                    )
+
+
+class TestSessionTheStoreRefusesToRead(unittest.TestCase):
+    """A session whose directory or meta.json is a symlink, or whose meta.json
+    is not a regular file, reads as missing. Writes still refuse it."""
+
+    def make(self, state: str) -> tuple[TraceStore, Path]:
+        """Return a store with run1 in ``state`` next to run10, and the outside directory."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        outside = Path(tmp.name)
+        store = TraceStore(str(outside / "traces"), use_workspace_env=False)
+        for session_id in ("run1", "run10"):
+            store.create_session(SessionMeta(session_id=session_id, started_at=1.0))
+        if state == "meta.json a directory":
+            meta = store.base_dir / "run1" / "meta.json"
+            meta.unlink()
+            meta.mkdir()
+        else:
+            make_run1_not_a_session(store.base_dir, outside, state)
+        return store, outside
+
+    def test_it_does_not_exist_and_no_prefix_finds_it(self):
+        for state in ("run1 a symlinked directory", "meta.json a symlink", "meta.json a directory"):
+            with self.subTest(state=state):
+                store, _ = self.make(state)
+                self.assertFalse(store.session_exists("run1"))
+                self.assertIsNone(store.find_session("run1"))
+                self.assertTrue(store.session_exists("run10"))
+
+    def test_a_symlinked_session_directory_reads_as_missing_and_refuses_writes(self):
+        store, outside = self.make("run1 a symlinked directory")
+        target = tree_snapshot(outside / "run1")
+        self.assertFalse(store.session_exists("run1"))
+        writes = {
+            "create_session": lambda: store.create_session(SessionMeta(session_id="run1")),
+            "update_meta": lambda: store.update_meta(SessionMeta(session_id="run1")),
+            "append_event": lambda: store.append_event(
+                "run1", TraceEvent(EventType.USER_PROMPT, data={"prompt": "hi"})
+            ),
+        }
+        for name, write in writes.items():
+            with self.subTest(write=name):
+                with self.assertRaisesRegex(ValueError, "^refusing symlinked session directory$"):
+                    write()
+        self.assertEqual(tree_snapshot(outside / "run1"), target)
 
 
 OTHER_SESSION = "other-session-4c1d"

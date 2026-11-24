@@ -39,6 +39,16 @@ Error: session ID prefix aaaa matches 2 sessions: aaaa111100000001, aaaa22220000
 
 The line names at most 5 IDs in sorted order, then `and N more`. Give a longer prefix or the full ID. `agent-strace list` shows the IDs. A session with a corrupt `meta.json` counts as a match. `cost --tenant` counts only that tenant's sessions. `review`, `pr-comment`, `setup --verify --live`, the server and MCP tools report the refusal their own way. See [`list`](#list).
 
+An argument that is not a valid session ID, such as `..` or a path like `.agent-traces/abc123/`, is refused too. That is an argument that is empty, `.` or `..`, or holds `/`, `\` or a control character. Nothing is read or written, and the command exits 1 with one line. The line shows the argument as a Python string literal, so a control character prints as its escape:
+
+```
+Error: invalid session ID or prefix: '..'
+```
+
+This holds for a session ID given as an argument or with `--session`, `--diff` or `--parent`, and for the second ID of `diff`, `compare` and `eval compare`. `health` prints the same line. `review`, `pr-comment` and `setup --verify --live` print it in their own line, as in `review: invalid session ID or prefix: '..'`. `review` exits 2. An empty argument keeps its meaning in a command that gives it one, such as the latest session.
+
+A session whose directory or `meta.json` is a symlink is not read, and the link is not followed. Neither is a session whose `meta.json` is not a regular file. Such a session counts as not found. `list` does not show it, and a command given its ID prints `Session not found: ID` and exits 1. The hooks and the collector still refuse to write to it.
+
 ---
 
 ## Session capture
@@ -2175,7 +2185,7 @@ Measure review coverage for agent-written code from trace file-write events and 
 
 `agent-strace watch --rules cognitive-debt:0.8` enables a live rule that alerts when a session has modified files that have not yet had human review.
 
-`cognitive-debt` exits 1 with "trace input could not be read safely" when a session it reads has a [corrupt](#list) `meta.json`. Without `--session`, it reads every session in the store.
+`cognitive-debt` exits 1 with "trace input could not be read safely" when a session it reads has a [corrupt](#list) `meta.json`. Without `--session`, it reads every session in the store. With `--session`, it prints `Session not found: ID` and exits 1 when no session has that ID or prefix, or when the store refuses to read the session. See [Session IDs](#session-ids).
 
 ### `context-score`
 ```

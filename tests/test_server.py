@@ -40,13 +40,15 @@ try:
     from _redirect_servers import ALL_REDIRECTS, REDIRECT_NOTE, RedirectServers
     from test_fileutil import RAW_SEPARATORS
     from test_store import (
-        OTHER_SESSION, OTHER_TENANT, event_line, name_other_session_in_meta, write_session_lines,
+        OTHER_SESSION, OTHER_TENANT, event_line, make_run1_not_a_session,
+        name_other_session_in_meta, write_session_lines,
     )
 except ImportError:
     from tests._redirect_servers import ALL_REDIRECTS, REDIRECT_NOTE, RedirectServers
     from tests.test_fileutil import RAW_SEPARATORS
     from tests.test_store import (
-        OTHER_SESSION, OTHER_TENANT, event_line, name_other_session_in_meta, write_session_lines,
+        OTHER_SESSION, OTHER_TENANT, event_line, make_run1_not_a_session,
+        name_other_session_in_meta, write_session_lines,
     )
 
 try:
@@ -1017,6 +1019,49 @@ class TestGetRefusedSession(unittest.TestCase):
                 self.assertNotIn(OTHER_SESSION, body.decode("utf-8"))
                 self.assertNotIn(OTHER_TENANT, body.decode("utf-8"))
                 self.assertEqual(_without_access_log(stderr.getvalue()), [])
+
+
+class TestGetSymlinkedSession(unittest.TestCase):
+    """GET answers 404 for a session whose directory or meta.json is a
+    symlink, as for a missing session. The link is not followed."""
+
+    MARKER = "outside-the-store-5e2b"
+
+    def serve(self, state: str) -> str:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store = TraceStore(os.path.join(tmp.name, "traces"), use_workspace_env=False)
+        store.create_session(SessionMeta(session_id="run1", agent_name=self.MARKER, started_at=1.0))
+        store.append_event("run1", TraceEvent(
+            EventType.USER_PROMPT, timestamp=1.0, data={"prompt": self.MARKER}
+        ))
+        store.create_session(SessionMeta(session_id="run10", started_at=2.0))
+        make_run1_not_a_session(store.base_dir, Path(tmp.name), state)
+        server, port, thread = _start_test_server(store)
+        self.addCleanup(thread.join)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{port}"
+
+    def test_meta_and_events_answer_404(self):
+        for state in ("run1 a symlinked directory", "meta.json a symlink"):
+            with self.subTest(state=state):
+                base = self.serve(state)
+                for path in ("/sessions/run1", "/sessions/run1/events"):
+                    with self.subTest(path=path):
+                        stderr = io.StringIO()
+                        with mock.patch("sys.stderr", stderr):
+                            status, body = _get(base + path)
+                        self.assertEqual(
+                            (status, json.loads(body)),
+                            (404, {"error": "session not found: run1"}),
+                        )
+                        self.assertEqual(_without_access_log(stderr.getvalue()), [])
+                with mock.patch("sys.stderr", io.StringIO()):
+                    status, body = _get(base + "/sessions")
+                self.assertEqual(status, 200)
+                self.assertEqual([meta["session_id"] for meta in json.loads(body)], ["run10"])
+                self.assertNotIn(self.MARKER, body.decode("utf-8"))
 
 
 # ---------------------------------------------------------------------------

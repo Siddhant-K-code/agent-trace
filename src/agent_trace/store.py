@@ -142,6 +142,29 @@ def validate_stored_id(value: str, kind: str = "stored identifier") -> str:
     return value
 
 
+class InvalidSessionIDError(ValueError):
+    """A session ID or prefix cannot name a session directory.
+
+    It is empty, ``.`` or ``..``, or holds ``/``, ``\\`` or a control
+    character. The message shows the value with repr(), so a control
+    character never reaches a terminal. It is a ValueError, and the CLI
+    prints it the same way as AmbiguousSessionPrefixError.
+    """
+
+    def __init__(self, value: str) -> None:
+        super().__init__(f"invalid session ID or prefix: {value!r}")
+        self.value = value
+
+
+def validate_session_argument(value: object) -> str:
+    """Return ``value`` as a session ID or prefix, or raise InvalidSessionIDError."""
+    value = str(value)
+    try:
+        return validate_stored_id(value, "stored session ID")
+    except ValueError:
+        raise InvalidSessionIDError(value) from None
+
+
 def validate_workspace_id(workspace_id: str) -> str:
     """Validate a workspace directory identifier."""
     value = str(workspace_id)
@@ -560,7 +583,7 @@ class TraceStore:
                 self._warn_redacted("session metadata")
 
     def _session_dir(self, session_id: str) -> Path:
-        session_id = validate_stored_id(session_id, "stored session ID")
+        session_id = validate_session_argument(session_id)
         candidate = self.base_dir / session_id
         if candidate.is_symlink():
             raise ValueError("refusing symlinked session directory")
@@ -605,7 +628,7 @@ class TraceStore:
 
     def checkpoint_path(self, session_id: str) -> Path:
         """Return a checkpoint path after rejecting symlink components."""
-        session_id = validate_stored_id(session_id, "stored session ID")
+        session_id = validate_session_argument(session_id)
         directory = self._auxiliary_dir("checkpoints", "checkpoint directory")
         candidate = directory / f"{session_id}.md"
         if candidate.is_symlink():
@@ -1511,7 +1534,7 @@ class TraceStore:
         UnreadableEventLineError when a line is not an event, after reading
         every line, so a mismatch wins.
         """
-        session_id = validate_stored_id(session_id, "stored session ID")
+        session_id = validate_session_argument(session_id)
         f = self._session_file(session_id, "events.ndjson", "event stream")
         meta = self.load_meta(session_id)
         if validate_tenant_ids:
@@ -1675,10 +1698,30 @@ class TraceStore:
             return None
         return latest.session_id
 
-    def session_exists(self, session_id: str) -> bool:
+    def _meta_exists(self, session_id: str) -> bool:
+        """Return True when meta.json exists. Raise ValueError for a refused session.
+
+        Write paths and a2a use this, so a session the store refuses stays
+        refused there and does not read as missing.
+        """
         return self._session_file(
             session_id, "meta.json", "session metadata"
         ).exists()
+
+    def session_exists(self, session_id: str) -> bool:
+        """Return True when the store holds the session's meta.json.
+
+        A session the store refuses to read returns False, and nothing
+        follows the symlink: its directory or meta.json is a symlink, or its
+        meta.json is not a regular file. An invalid session ID raises
+        InvalidSessionIDError.
+        """
+        try:
+            return self._meta_exists(session_id)
+        except InvalidSessionIDError:
+            raise
+        except ValueError:
+            return False
 
     def find_session(self, prefix: str, tenant_id: str | None = None) -> str | None:
         """Return the ID of the session that ``prefix`` names.
@@ -1698,8 +1741,11 @@ class TraceStore:
         A directory without meta.json and a symlink are such entries.
         A lookup with ``tenant_id`` skips this check. There, an entry
         that is not that tenant's readable session stays invisible.
+
+        A prefix that cannot name a session directory raises
+        InvalidSessionIDError.
         """
-        validate_stored_id(prefix, "session ID prefix")
+        validate_session_argument(prefix)
         if tenant_id is not None:
             tenant_id = validate_optional_tenant_id(tenant_id)
         if not self.base_dir.exists():

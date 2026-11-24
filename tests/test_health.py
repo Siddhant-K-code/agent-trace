@@ -1258,12 +1258,18 @@ class TestSessionResolution(_HealthBase):
 
     def test_missing_and_invalid_sessions_fail_cleanly(self):
         write_session(self.trace_dir, "a0a0a0a0a0a0a0a1", [event(EventType.SESSION_START, 0)])
-        for requested in ("zzzz", "../x"):
+        for requested, message in (
+            ("zzzz", "Session not found: zzzz"),
+            ("../x", "Error: invalid session ID or prefix: '../x'"),
+        ):
             with self.subTest(requested=requested):
-                code, out, err = self.run_health(requested)
-                self.assertEqual(code, 1)
-                self.assertEqual(out, "")
-                self.assertEqual(err, f"Session not found: {requested}\n")
+                args = build_parser().parse_args(["--trace-dir", self.trace_dir, "health", requested])
+                out, err = io.StringIO(), io.StringIO()
+                with redirect_stdout(out), redirect_stderr(err):
+                    code = _run_handler(args, cmd_health)
+                self.assertEqual(
+                    (code, out.getvalue(), err.getvalue()), (1, "", message + "\n")
+                )
 
     def test_an_ambiguous_prefix_is_refused_not_reported_missing(self):
         write_session(self.trace_dir, "a0a0a0a0a0a0a0a1", [event(EventType.SESSION_START, 0)])

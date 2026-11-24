@@ -321,7 +321,9 @@ def _ensure_session_meta(
     if not session_id:
         return
     try:
-        if store.session_exists(session_id):
+        # _meta_exists raises for a session the store refuses, so this
+        # returns before it runs git or writes meta.json.
+        if store._meta_exists(session_id):
             return
         from .attribution import collect_attribution
 

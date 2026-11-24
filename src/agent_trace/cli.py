@@ -154,6 +154,7 @@ from .replay import format_event, format_summary, list_sessions, replay_session
 from .store import (
     AmbiguousSessionPrefixError,
     CorruptSessionMetaError,
+    InvalidSessionIDError,
     RefusedSessionError,
     TraceStore,
 )
@@ -1016,13 +1017,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
         if exc.session_id != session_id:
             raise
         full_id = session_id
-    try:
-        exists = store.session_exists(full_id)
-    except ValueError:
-        # session_exists refuses a symlinked session directory or meta.json,
-        # and a meta.json that is not a regular file. Treat these as not found.
-        exists = False
-    if not exists:
+    # session_exists returns False for a session the store refuses to read.
+    if not store.session_exists(full_id):
         sys.stderr.write(f"Session not found: {session_id}\n")
         return 1
 
@@ -3814,7 +3810,8 @@ def _run_handler(args: argparse.Namespace, handler):
     and exit code 1. A session whose meta.json cannot be read is refused the
     same way. So is a session ID prefix that matches several sessions, a
     session whose events name another session or tenant, and a session
-    whose events.ndjson holds a line that is not an event.
+    whose events.ndjson holds a line that is not an event. So is a session
+    argument that cannot name a session, such as ``..`` or a path.
     """
     try:
         return handler(args)
@@ -3825,6 +3822,7 @@ def _run_handler(args: argparse.Namespace, handler):
         CorruptSessionMetaError,
         AmbiguousSessionPrefixError,
         RefusedSessionError,
+        InvalidSessionIDError,
     ) as exc:
         sys.stderr.write(f"Error: {exc}\n")
         return 1
