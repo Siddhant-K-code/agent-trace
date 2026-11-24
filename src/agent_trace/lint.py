@@ -29,7 +29,7 @@ from .event_data import (
 )
 from .explain import PHASE_DATA_EVENT_TYPES
 from .inert import inert
-from .models import EventType, TraceEvent
+from .models import EventType, TraceEvent, usable_time
 from .session_outcome import final_session_end_index
 from .store import RefusedSessionError, TraceStore
 
@@ -654,7 +654,11 @@ def cmd_lint(args: argparse.Namespace) -> int:
         if since_str:
             import time as _time
             cutoff = _parse_since(since_str)
-            sessions = [s for s in sessions if s.started_at >= cutoff]
+            # A start that is not a usable time is in no window.
+            sessions = [
+                s for s in sessions
+                if (started := usable_time(s.started_at)) is not None and started >= cutoff
+            ]
         session_ids = [s.session_id for s in sessions]
         if not session_ids:
             sys.stderr.write("No sessions found.\n")

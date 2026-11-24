@@ -49,6 +49,7 @@ from typing import TextIO
 
 from .fileutil import file_lock, write_atomic
 from .inert import inert
+from .models import usable_time
 from .store import DEFAULT_TRACE_DIR, TraceStore
 
 
@@ -450,7 +451,11 @@ def find_affected_sessions(
     since: float | None = None,
 ) -> list[tuple[str, str, list[str]]]:
     """Return (session_id, started_at_str, changed_paths) for sessions that
-    ran after a config change relative to the previous snapshot."""
+    ran after a config change relative to the previous snapshot.
+
+    A session whose start is not a usable time is left out, since it cannot
+    be placed after any change.
+    """
     snapshots = _load_snapshots(workspace_root, store.storage_root)
     if len(snapshots) < 2:
         return []
@@ -466,19 +471,22 @@ def find_affected_sessions(
         return []
 
     all_sessions = store.list_sessions()
-    if since:
-        all_sessions = [s for s in all_sessions if s.started_at >= since]
 
     results: list[tuple[str, str, list[str]]] = []
     for meta in all_sessions:
+        started = usable_time(meta.started_at)
+        if started is None:
+            continue
+        if since and started < since:
+            continue
         # Find the most recent config change before this session
         relevant: list[str] = []
         for change_ts, changed_paths in change_events:
-            if change_ts <= meta.started_at:
+            if change_ts <= started:
                 relevant = changed_paths  # keep the most recent
         if relevant:
             import datetime
-            dt = datetime.datetime.fromtimestamp(meta.started_at)
+            dt = datetime.datetime.fromtimestamp(started)
             results.append((meta.session_id, dt.strftime("%Y-%m-%d %H:%M"), relevant))
 
     return results

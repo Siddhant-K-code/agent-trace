@@ -36,7 +36,7 @@ from .event_data import (
 from .explain import PHASE_DATA_EVENT_TYPES, ExplainResult, Phase, explain_session
 from .failures import SessionErrors, response_failure, session_errors
 from .inert import inert
-from .models import EventType, TraceEvent
+from .models import EventType, TraceEvent, usable_time
 from .pairing import Pairer, tool_pairer
 from .store import TraceStore
 
@@ -339,10 +339,18 @@ def build_timeline(
     session_id: str,
     model: str = DEFAULT_MODEL,
 ) -> TimelineResult:
-    """Build a structured timeline for *session_id*."""
+    """Build a structured timeline for *session_id*.
+
+    Offsets count from the session start. A start that is not a usable time
+    reads as missing, so they count from the first event, as they do for a
+    session with no meta. With no events either, they count from 0.
+    """
     explain = explain_session(store, session_id)
     meta = store.load_meta(session_id)
-    base_ts = meta.started_at if meta else (explain.phases[0].events[0].timestamp if explain.phases else 0.0)
+    if meta and usable_time(meta.started_at) is not None:
+        base_ts = meta.started_at
+    else:
+        base_ts = explain.phases[0].events[0].timestamp if explain.phases else 0.0
 
     total_cost = 0.0
     wasted_cost = 0.0

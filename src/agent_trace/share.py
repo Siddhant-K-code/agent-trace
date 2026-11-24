@@ -24,6 +24,7 @@ from .disclosure import (
 from .event_data import (
     UnusableTimestampError,
     object_field,
+    require_usable_session_times,
     require_usable_timestamps,
     str_field,
     str_list_field,
@@ -1007,6 +1008,7 @@ def cmd_share(args: argparse.Namespace) -> int:
         events = store.load_events(full_id)
         require_object_event_data(events)
         require_usable_timestamps(events)
+        require_usable_session_times(store.load_meta(full_id))
     except (NonObjectEventDataError, UnusableTimestampError) as exc:
         sys.stderr.write(f"Error: {exc}\n")
         return 1

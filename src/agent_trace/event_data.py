@@ -638,9 +638,10 @@ def require_usable_session_times(meta: SessionMeta, *, session_id: str | None = 
     its ``ended_at`` when it is not None, is not a Unix time in seconds.
 
     OTLP export reads both for the root span. The compliance exports write
-    both in their reports. ``ended_at`` is None while a session is open. The
-    message never includes the value. ``session_id`` names the session for
-    commands that read more than one.
+    both in their reports, and share writes both into its evidence packet.
+    ``ended_at`` is None while a session is open. The message never includes
+    the value. ``session_id`` names the session for commands that read more
+    than one.
     """
     subject = f"session {session_id}" if session_id else "session"
     if usable_time(meta.started_at) is None:

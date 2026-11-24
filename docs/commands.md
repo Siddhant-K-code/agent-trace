@@ -404,7 +404,24 @@ ended. `replay --expand-subagents` shows event times from the root session's
 start. When that start is missing, it counts from the root's first event, as
 `replay` does.
 
-It can also hold a `total_duration_ms`, `tool_calls`, `llm_requests`,
+A start time that is not usable also reads as missing in these commands:
+
+- `dashboard` shows `?`. `dashboard --trend --html` takes its period and annotation positions from the usable starts.
+- `timeline` counts from the first event and shows that event's time as the start.
+- `fingerprint` takes the period from the usable starts. With none, the period and the default ID are empty.
+- `curve` counts the session, but measures the days from the usable starts.
+- `sample` writes `null` as the start, and `--strategy recent` treats the session as the oldest.
+- `mcp-scan` finds no session earlier than it, and does not count it as earlier than another session.
+- `review` sorts the session as if it started at 0.
+
+Such a session is in no time window. `dashboard --trend --since`, `drift`,
+`budget-report`, `team-report`, `context-score`, `lint --all --since`,
+`mcp-scan` without `--session`, and `oncall` leave it out.
+`config-watch affected` always leaves it out, since it cannot place the
+session after a change. `share` refuses a session whose start time, or end
+time when set, is not usable. See [`share`](#share).
+
+A `meta.json` can also hold a `total_duration_ms`, `tool_calls`, `llm_requests`,
 `errors`, `total_tokens` or `depth` that is not a usable number, such as text,
 an object, `null`, NaN, infinity, a negative number, `true` or an integer too
 large for a float. A count or a depth must also be an integer, so `2.5` and
@@ -649,6 +666,10 @@ A failed model request is a failed `LLM response failed` entry that fails its
 phase and counts toward the session's errors, once even when an `error` event
 is also linked to it. A cancelled request is marked `⊘` (`cancelled` in JSON)
 and is not counted as an error. See [failed model requests](production.md#session-error-counts).
+
+When the session's `started_at` is not a usable time, the timeline counts from
+the first event, and the header and the JSON `started_at` show that event's
+time. See [`list`](#list).
 
 | Flag | Default | Description |
 |---|---|---|
@@ -1853,6 +1874,11 @@ marks the cost chart). It is never counted as $0.
 Values from the trace are escaped in the HTML from `-o` and `--trend --html`,
 so markup in them shows as text.
 
+A `started_at` that is not a usable time shows as `?`, and `--trend --since`
+leaves the session out. `--trend --html` takes its period and annotation
+positions from the usable starts. With none, the period is empty and no
+annotation is placed. See [`list`](#list).
+
 ```bash
 # Add a timeline annotation (appears as a vertical marker on trend charts)
 agent-strace dashboard annotate --date 2026-05-10 --note "Added retry policy"
@@ -1880,6 +1906,9 @@ overall score averages the other dimensions.
 
 The error rate counts [failed model requests](production.md#session-error-counts) as errors. Baselines saved by earlier versions
 left them out; save them again to compare like with like.
+
+`--since`, `--current` and `--baseline-range` leave out a session whose
+`started_at` is not a usable time. See [`list`](#list).
 
 ### `baseline`
 ```
@@ -1944,6 +1973,11 @@ Cost statistics are the `agent-strace cost` totals of the priced sessions.
 `unpriced_sessions` counts the sessions that command refuses, and `cost_usd` is
 `null` when no session is priced. Fingerprints saved by older versions counted
 those sessions as $0.
+
+The period runs from the earliest to the latest usable `started_at`. A session
+whose start is not usable still counts. When no start is usable, the text shows
+`ID: (none)` and `Period: - to -`, and the JSON `fingerprint_id` and both
+`period` fields are empty. See [`list`](#list).
 
 ### `freeze`
 ```
@@ -2307,6 +2341,9 @@ Cross-reference agent-modified files against git history to find gaps before a r
 agent-strace curve [--min-sessions N] [--export csv]
 ```
 Personal agent cost-efficiency curve by task type. Verdict per type: efficient / over sweet spot / do this yourself.
+
+A session whose `started_at` is not a usable time counts in the sessions, but
+the days come from the usable starts only. See [`list`](#list).
 
 ### `inflation`
 ```
@@ -2731,6 +2768,11 @@ names cannot be read from a non-object payload. Other commands that read event
 data refuse the same way; see
 [Sessions with non-object event data](#sessions-with-non-object-event-data).
 
+Ordinary share and `--dry-run` also exit 1 this way when the session's
+`started_at`, or its `ended_at` when it is not `null`, is not a Unix time in
+seconds. The line is `Error: session started_at must be a Unix time in seconds`,
+or the same for `ended_at`.
+
 ### `score`
 ```
 agent-strace score SUBMISSION.zip --rubric FILE [--format text|json]
@@ -2885,6 +2927,9 @@ ranked and compared on its other scores only.
 
 `score.error_rate`, which the `worst` and `diverse` strategies use, counts
 [failed model requests](production.md#session-error-counts) as errors.
+
+A `started_at` that is not a usable time is written as `null`, and
+`--strategy recent` treats the session as the oldest. See [`list`](#list).
 
 ### `server`
 ```
@@ -3390,9 +3435,9 @@ check fails when any event of a session has an unusable timestamp, and names
 the session with the reason. `export --format eu-ai-act --all` refuses that
 store. See [`audit-readiness`](#audit-readiness).
 
-`compliance export` and `export --format otlp`, `otlp-genai`, `temporal`, and
-`eu-ai-act` also refuse a session whose `started_at`, or `ended_at` when set, is
-not a Unix time in seconds, with
+`compliance export`, `share`, and `export --format otlp`, `otlp-genai`,
+`temporal`, and `eu-ai-act` also refuse a session whose `started_at`, or
+`ended_at` when set, is not a Unix time in seconds, with
 `Error: session started_at must be a Unix time in seconds` or the same message
 for `ended_at`. `compliance export` without a session ID and
 `export --format eu-ai-act --all` name the session, as in

@@ -22,7 +22,7 @@ from .cost import session_cost
 from .event_data import require_object_event_data
 from .freshness import _parse_scope_from_agents_md
 from .lint import lint_session
-from .models import EventType, SessionMeta, TraceEvent, usable_count
+from .models import EventType, SessionMeta, TraceEvent, usable_count, usable_time
 from .postmortem import _detect_agents_md_violations, _load_agents_md
 from .skills import _resolve, file_reads
 from .store import TraceStore
@@ -413,7 +413,11 @@ def build_context_score_report(
     scope_globs = _parse_scope_from_agents_md(str(file_path))
     instruction_lines = _load_agents_md(file_path)
     versions: dict[str, VersionScore] = {}
-    metas = [meta for meta in store.list_sessions() if meta.started_at >= window_start]
+    # A start that is not a usable time is in no window.
+    metas = [
+        meta for meta in store.list_sessions()
+        if (started := usable_time(meta.started_at)) is not None and started >= window_start
+    ]
     for meta in metas:
         version_hash, label = _session_version(meta, snapshots, selected_file, current_hash)
         if version_hash not in versions:

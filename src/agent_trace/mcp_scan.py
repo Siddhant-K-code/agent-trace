@@ -22,7 +22,7 @@ from typing import Any, TextIO
 
 from .event_data import require_object_event_data, skipped_event_warning
 from .inert import inert
-from .models import EventType, TraceEvent
+from .models import EventType, SessionMeta, TraceEvent, usable_time
 from .store import TraceStore, is_not_utf8
 
 
@@ -200,12 +200,22 @@ def scan_description_patterns(
 
 
 def _previous_sessions(store: TraceStore, current_session_id: str) -> list:
-    current_meta = store.load_meta(current_session_id)
-    sessions = [
-        meta for meta in store.list_sessions()
-        if meta.session_id != current_session_id and meta.started_at < current_meta.started_at
-    ]
-    return sorted(sessions, key=lambda m: m.started_at)
+    """Return the sessions that started before the current one, oldest first.
+
+    A start that is not a usable time is not earlier than any session, and a
+    session whose own start is not usable has no earlier sessions.
+    """
+    current_start = usable_time(store.load_meta(current_session_id).started_at)
+    if current_start is None:
+        return []
+    earlier: list[tuple[float, SessionMeta]] = []
+    for meta in store.list_sessions():
+        if meta.session_id == current_session_id:
+            continue
+        started = usable_time(meta.started_at)
+        if started is not None and started < current_start:
+            earlier.append((started, meta))
+    return [meta for _, meta in sorted(earlier, key=lambda item: item[0])]
 
 
 def _previous_descriptions(
@@ -509,8 +519,11 @@ def scan_store(
     findings: list[McpScanFinding] = []
     scanned: list[str] = []
     for meta in reversed(store.list_sessions()):
-        if cutoff and meta.started_at < cutoff:
-            continue
+        if cutoff:
+            # A start that is not a usable time is in no window.
+            started = usable_time(meta.started_at)
+            if started is None or started < cutoff:
+                continue
         scanned.append(meta.session_id)
         try:
             report = scan_session(store, meta.session_id, patterns=patterns, project_root=project_root)

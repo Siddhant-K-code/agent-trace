@@ -24,7 +24,7 @@ from .budget_report import _parse_date
 from .cost import session_cost
 from .event_data import require_object_event_data
 from .inert import escape_surrogates, inert
-from .models import EventType, SessionMeta, TraceEvent, usable_count, usable_text
+from .models import EventType, SessionMeta, TraceEvent, usable_count, usable_text, usable_time
 from .store import TraceStore
 
 
@@ -262,7 +262,9 @@ def build_team_report(
     sessions: list[SessionAttribution] = []
 
     for meta in store.list_sessions():
-        if not (window_start <= meta.started_at < window_end):
+        # A start that is not a usable time is in no window.
+        started = usable_time(meta.started_at)
+        if started is None or not (window_start <= started < window_end):
             continue
         try:
             events = store.load_events(meta.session_id)

@@ -29,7 +29,7 @@ from .event_data import (
     str_field,
 )
 from .failures import count_session_errors
-from .models import EventType, SessionMeta, TraceEvent, usable_text
+from .models import EventType, SessionMeta, TraceEvent, usable_text, usable_time
 from .store import TraceStore
 
 
@@ -40,7 +40,8 @@ from .store import TraceStore
 @dataclass
 class SessionScore:
     session_id: str
-    started_at: float
+    # The session start, or None when it is not a usable time.
+    started_at: float | None
     error_rate: float       # errors / max(tool_calls, 1)
     retry_rate: float       # retries / max(tool_calls, 1)
     blast_radius: int       # distinct files written
@@ -114,7 +115,7 @@ def _score_session(
 
     return SessionScore(
         session_id=session_id,
-        started_at=meta.started_at,
+        started_at=usable_time(meta.started_at),
         error_rate=error_rate,
         retry_rate=retry_rate,
         blast_radius=blast_radius,
@@ -189,8 +190,15 @@ def _sample_random(scores: list[SessionScore], n: int, seed: int | None = None) 
 
 
 def _sample_recent(scores: list[SessionScore], n: int) -> list[SessionScore]:
-    """Return the N most recent sessions."""
-    return sorted(scores, key=lambda s: s.started_at, reverse=True)[:n]
+    """Return the N most recent sessions.
+
+    A start that is not a usable time sorts as 0, so it is the oldest.
+    """
+    return sorted(
+        scores,
+        key=lambda s: 0.0 if s.started_at is None else s.started_at,
+        reverse=True,
+    )[:n]
 
 
 STRATEGIES = {
@@ -210,10 +218,13 @@ def _session_to_jsonl_record(
     events: list[TraceEvent],
     score: SessionScore,
 ) -> dict:
-    """Serialise a session to a single JSONL record."""
+    """Serialise a session to a single JSONL record.
+
+    started_at is the stored start, or null when it is not a usable time.
+    """
     return {
         "session_id": meta.session_id,
-        "started_at": meta.started_at,
+        "started_at": meta.started_at if usable_time(meta.started_at) is not None else None,
         "agent_name": usable_text(meta.agent_name),
         "command": usable_text(meta.command),
         "score": {

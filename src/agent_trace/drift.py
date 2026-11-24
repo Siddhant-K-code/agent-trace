@@ -24,7 +24,7 @@ from .cost import session_cost
 from .event_data import require_usable_timestamps, str_field
 from .failures import count_session_errors
 from .inert import inert
-from .models import EventType, TraceEvent
+from .models import EventType, TraceEvent, usable_time
 from .store import TraceStore
 
 
@@ -322,6 +322,13 @@ def compute_fingerprint(
     session_ids: list[str],
     fingerprint_id: str = "",
 ) -> BehavioralFingerprint:
+    """Measure the sessions and aggregate them into one fingerprint.
+
+    The period runs from the earliest to the latest usable start. A start
+    that is not a usable time is left out of the period, but the session
+    still counts. With no usable start, the period and the default ID are
+    empty.
+    """
     if not session_ids:
         return BehavioralFingerprint(fingerprint_id=fingerprint_id)
 
@@ -337,7 +344,10 @@ def compute_fingerprint(
             continue
         m.cost_usd = _session_cost(events, sid)
         all_metrics.append(m)
-        timestamps.append(meta.started_at)
+        # The period comes from the usable starts only.
+        started = usable_time(meta.started_at)
+        if started is not None:
+            timestamps.append(started)
 
     if not all_metrics:
         return BehavioralFingerprint(fingerprint_id=fingerprint_id)
@@ -363,11 +373,14 @@ def compute_fingerprint(
     durations = [m.duration_s for m in all_metrics]
     decisions = [float(m.decision_count) for m in all_metrics]
 
-    period_start = datetime.fromtimestamp(min(timestamps), tz=timezone.utc).strftime("%Y-%m-%d")
-    period_end = datetime.fromtimestamp(max(timestamps), tz=timezone.utc).strftime("%Y-%m-%d")
+    period_start = ""
+    period_end = ""
+    if timestamps:
+        period_start = datetime.fromtimestamp(min(timestamps), tz=timezone.utc).strftime("%Y-%m-%d")
+        period_end = datetime.fromtimestamp(max(timestamps), tz=timezone.utc).strftime("%Y-%m-%d")
 
     return BehavioralFingerprint(
-        fingerprint_id=fingerprint_id or f"fp_{period_start}",
+        fingerprint_id=fingerprint_id or (f"fp_{period_start}" if period_start else ""),
         sessions=len(all_metrics),
         period_start=period_start,
         period_end=period_end,
@@ -535,7 +548,9 @@ def _sessions_in_window(store: TraceStore, since_days: float) -> list[str]:
     cutoff = time.time() - since_days * 86400
     result = []
     for meta in store.list_sessions():
-        if meta.started_at >= cutoff:
+        # A start that is not a usable time is in no window.
+        started = usable_time(meta.started_at)
+        if started is not None and started >= cutoff:
             result.append(meta.session_id)
     return result
 
@@ -547,7 +562,9 @@ def _latest_sessions(store: TraceStore, limit: int) -> list[str]:
 def _sessions_in_range(store: TraceStore, start_ts: float, end_ts: float) -> list[str]:
     result = []
     for meta in store.list_sessions():
-        if start_ts <= meta.started_at <= end_ts:
+        # A start that is not a usable time is in no window.
+        started = usable_time(meta.started_at)
+        if started is not None and start_ts <= started <= end_ts:
             result.append(meta.session_id)
     return result
 

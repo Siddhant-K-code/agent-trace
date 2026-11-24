@@ -37,7 +37,7 @@ from .external_evidence import (
 )
 from .health import CaptureMatrix, assess_session, detect_provider, load_capture_matrix
 from .inert import inert
-from .models import EventType, SessionMeta, TraceEvent, usable_count
+from .models import EventType, SessionMeta, TraceEvent, usable_count, usable_time
 from .pr_comment import (
     PRCommentError,
     _display_path,
@@ -970,7 +970,12 @@ def assess_scope(sessions: Sequence[_Session]) -> Finding:
 
 
 def _ordered(sessions: Sequence[_Session]) -> list[_Session]:
-    return sorted(sessions, key=lambda item: (float(item.meta.started_at or 0.0), item.session_id))
+    """Sort sessions by start. A start that is not a usable time sorts as 0."""
+    def key(item: _Session) -> tuple[float, str]:
+        started = usable_time(item.meta.started_at)
+        return (0.0 if started is None else started, item.session_id)
+
+    return sorted(sessions, key=key)
 
 
 def _is_write(event: TraceEvent) -> bool:
