@@ -145,6 +145,19 @@ names the event type but never the timestamp:
 [server] Refused one tool_call event because its timestamp is not a Unix time in seconds.
 ```
 
+The collector stores and serves events as strict JSON. A NaN or infinite
+number in any other field of a `POST /events` line, such as `NaN` or `1e400`
+in `data`, is stored as `null`, and a NaN or infinite `duration_ms` is left
+out. `GET /sessions/<id>/events` and the dashboard's
+`GET /api/sessions/<id>/events` serve each stored event the same way. That
+includes a session that an older collector stored with the bare `NaN`,
+`Infinity` or `-Infinity` tokens, so `org-report --endpoint` and the dashboard
+can read it. A collector older than v0.118.0 could also store such a
+`timestamp`. The routes serve it as `null`, and `org-report --endpoint` still
+refuses that session. The stored file is not rewritten. Older `watch --stream-to`
+clients have one limit, described in
+[Live streaming from watch](#live-streaming-from-watch).
+
 `POST /sessions` checks the metadata before it writes anything. It returns
 400 with `{"error": "<message>"}` and stores nothing when
 `org-report --endpoint` could not read that metadata back from
@@ -280,3 +293,14 @@ agent-strace watch \
 ```
 
 HTTP failures are logged to stderr but never interrupt the watch loop. Each failure line, like the `[watch] Streaming events to` line at startup, names only the collector's `scheme://host[:port]`. Watch does not follow redirects, so pass the final URL, and it refuses a `--stream-to` URL that carries a user name or password. When watch stops, it waits up to 15 seconds for the last POST. See [Live OTLP streaming](production.md#live-otlp-streaming) for the startup checks, the stop wait, and `--stream-otlp`.
+
+Upgrade `watch --stream-to` clients before or with the collector. A client
+older than this release writes a NaN or infinite number in an event as a bare
+token, and `watch --stream-to` sends that event with the `prev_hash` from the
+client's session. The collector stores the number as `null`, so `verify` on the
+collector's copy fails at that client's next event. The client's own copy
+still verifies. What counts is the release that wrote the event, so a current
+`watch` that streams events an older hook wrote has the same limit. The
+`agent-strace hook` commands and the Python integrations do not have this
+limit when they send to the collector themselves. They send each event with an
+empty `prev_hash`, so the collector chains those events itself and they verify.

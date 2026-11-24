@@ -613,7 +613,8 @@ class StdioProxyRelayTest(unittest.TestCase):
             if e.event_type in (EventType.TOOL_CALL, EventType.TOOL_RESULT)
         ]
         self.assertEqual(call["tool_name"], "read")
-        self.assertEqual(call["arguments"], {"text": "caf\u00e9", "n": float("inf")})
+        # The relay forwards 1e400 as it arrived. The event stores it as null.
+        self.assertEqual(call["arguments"], {"text": "caf\u00e9", "n": None})
         self.assertEqual(result["content_preview"], "read caf\u00e9")
 
     def test_carriage_returns_blank_lines_and_a_last_line_without_lf_are_forwarded(self):

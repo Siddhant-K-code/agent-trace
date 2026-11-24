@@ -38,7 +38,7 @@ The validator uses the packaged JSON Schemas for record shape, then reuses the b
 
 | Area | Rule |
 |---|---|
-| JSON | UTF-8 JSON, no duplicate object keys, finite numbers, bounded record sizes, no blank NDJSON records |
+| JSON | UTF-8 JSON, no duplicate object keys, finite numbers, bounded record sizes, no blank NDJSON records. agent-strace writes a NaN or infinite number in an event as `null` and leaves out a NaN or infinite `duration_ms`. Older versions wrote the bare `NaN`, `Infinity` or `-Infinity` token, which fails this rule |
 | Metadata identity | `meta.json.session_id` equals the containing directory name |
 | Event identity | A present event `session_id` equals metadata; an omitted legacy value inherits metadata for validation |
 | Event type | `event_type` is one of the published v1 enum values |

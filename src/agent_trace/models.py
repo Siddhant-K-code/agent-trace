@@ -146,6 +146,66 @@ def _with_unknown_fields(obj: Any, d: dict[str, Any]) -> dict[str, Any]:
     return d
 
 
+class _NonFiniteKey(str):
+    """The text json.dumps writes for a NaN or infinite float dict key.
+
+    It hashes and compares by identity. So it never merges with another key
+    of the same text, and the copy keeps every entry json.dumps wrote.
+    """
+
+    __hash__ = object.__hash__
+
+    def __eq__(self, other: object) -> bool:
+        return self is other
+
+    def __ne__(self, other: object) -> bool:
+        return self is not other
+
+
+_LEAVE = object()
+
+
+def _finite_copy(value: Any) -> Any:
+    """Return a copy of ``value`` with each NaN or infinite float as None.
+
+    A NaN or infinite float dict key becomes the text json.dumps writes for
+    it. Dicts, lists and tuples are copied. Other values are kept, so
+    json.dumps still refuses what it refused before. ``value`` is not
+    changed. The walk uses a stack, not recursion, so it copies anything
+    json.dumps can write. A container inside itself raises ValueError, as
+    json.dumps does. One container in two places is not a cycle.
+    """
+    root = [value]
+    on_path: set[int] = set()
+    stack: list[tuple[Any, Any, Any]] = [(root, 0, value)]
+    while stack:
+        target, slot, item = stack.pop()
+        if target is _LEAVE:
+            on_path.discard(slot)
+        elif isinstance(item, float):
+            if not math.isfinite(item):
+                target[slot] = None
+        elif isinstance(item, (dict, list, tuple)):
+            if id(item) in on_path:
+                raise ValueError("Circular reference detected")
+            on_path.add(id(item))
+            stack.append((_LEAVE, id(item), None))
+            if isinstance(item, dict):
+                copy: Any = {}
+                for key, child in item.items():
+                    if isinstance(key, float) and not math.isfinite(key):
+                        key = _NonFiniteKey(
+                            "NaN" if math.isnan(key) else "Infinity" if key > 0 else "-Infinity"
+                        )
+                    copy[key] = child
+                    stack.append((copy, key, child))
+            else:
+                copy = list(item)
+                stack.extend((copy, index, child) for index, child in enumerate(item))
+            target[slot] = copy
+    return root[0]
+
+
 class EventType(str, Enum):
     SESSION_START = "session_start"
     SESSION_END = "session_end"
@@ -181,14 +241,33 @@ class TraceEvent:
         default_factory=lambda: os.environ.get("AGENT_STRACE_TENANT_ID", "").strip()
     )
 
-    def to_json(self) -> str:
+    def to_json(self, *, allow_nan: bool = False) -> str:
+        """Return the event as one line of strict JSON.
+
+        NaN and infinity are not JSON. A NaN or infinite float is written as
+        null, as JavaScript's JSON.stringify does. A NaN or infinite
+        ``duration_ms`` is left out, as a None one is. ``allow_nan=True``
+        writes the bare NaN, Infinity and -Infinity tokens instead, so
+        tag_session can keep the tokens older releases stored. The event is
+        not changed.
+        """
         d = asdict(self)
         d["event_type"] = self.event_type.value
         if not d.get("redacted"):
             d.pop("redacted", None)
         # drop None values
         d = {k: v for k, v in d.items() if v is not None and v != ""}
-        return json.dumps(_with_unknown_fields(self, d), separators=(",", ":"))
+        d = _with_unknown_fields(self, d)
+        try:
+            return json.dumps(d, separators=(",", ":"), allow_nan=allow_nan)
+        except ValueError:
+            if allow_nan:
+                raise
+        # Most events hold no NaN or infinity, so only a refused event is copied.
+        duration = d.get("duration_ms")
+        if isinstance(duration, float) and not math.isfinite(duration):
+            del d["duration_ms"]
+        return json.dumps(_finite_copy(d), separators=(",", ":"), allow_nan=False)
 
     @classmethod
     def from_json(cls, line: str) -> TraceEvent:

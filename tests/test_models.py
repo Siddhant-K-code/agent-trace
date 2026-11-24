@@ -1,13 +1,28 @@
 """Tests for trace data model."""
 
+import ctypes
 import json
+import math
 import sys
 import os
+import threading
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from agent_trace.models import EventType, SessionMeta, TraceEvent
+from agent_trace.models import EventType, SessionMeta, TraceEvent, usable_time
+
+NAN = float("nan")
+INF = float("inf")
+
+
+def _refuse_constant(token):
+    raise ValueError(f"not JSON: {token}")
+
+
+def strict_loads(text, **kwargs):
+    """Parse text as JSON that has no bare NaN, Infinity or -Infinity."""
+    return json.loads(text, parse_constant=_refuse_constant, **kwargs)
 
 
 class TestTraceEvent(unittest.TestCase):
@@ -128,6 +143,195 @@ class TestForwardCompatibleReaders(unittest.TestCase):
         self.assertNotIn("conversation_id", json.loads(meta.to_json()))
         meta.conversation_id = "native-session-id"
         self.assertEqual(json.loads(meta.to_json())["conversation_id"], "native-session-id")
+
+
+class _Real(float):
+    """A float subclass, as numpy's float64 is."""
+
+
+def _event(**kwargs):
+    kwargs.setdefault("event_type", EventType.TOOL_CALL)
+    kwargs.setdefault("timestamp", 1.0)
+    kwargs.setdefault("event_id", "e1")
+    kwargs.setdefault("session_id", "s1")
+    kwargs.setdefault("tenant_id", "")
+    return TraceEvent(**kwargs)
+
+
+def _stop_thread(thread):
+    """Raise SystemExit in a thread that is still running, so it stops using memory."""
+    api = getattr(ctypes, "pythonapi", None)
+    if api is not None:
+        api.PyThreadState_SetAsyncExc(ctypes.c_ulong(thread.ident), ctypes.py_object(SystemExit))
+        thread.join(5)
+
+
+class TestStrictJson(unittest.TestCase):
+    """to_json writes a NaN or infinite float as null, as JSON.stringify does."""
+
+    def test_non_finite_floats_are_null_at_any_depth_and_the_event_is_unchanged(self):
+        deep = [{"y": -INF}, (INF, 1.5)]
+        data = {"x": NAN, "deep": deep, "ok": 2.0}
+        event = _event(data=data)
+        event._unknown_fields = {"future": {"z": [NAN]}}
+        before = repr(event), repr(event._unknown_fields)
+
+        written = strict_loads(event.to_json())
+
+        self.assertEqual(
+            written["data"], {"x": None, "deep": [{"y": None}, [None, 1.5]], "ok": 2.0}
+        )
+        self.assertEqual(written["future"], {"z": [None]})
+        self.assertEqual((repr(event), repr(event._unknown_fields)), before)
+        self.assertIs(event.data, data)
+        self.assertIs(data["deep"], deep)
+        self.assertIsInstance(deep[1], tuple)
+
+    def test_unknown_fields_are_written_as_strict_json(self):
+        event = TraceEvent.from_json(
+            '{"event_type":"user_prompt","timestamp":1.0,"event_id":"e1",'
+            '"future":{"v":NaN,"w":[Infinity,-Infinity,1]}}'
+        )
+        self.assertEqual(
+            strict_loads(event.to_json())["future"], {"v": None, "w": [None, None, 1]}
+        )
+
+    def test_a_float_subclass_is_a_float(self):
+        event = _event(
+            data={"x": _Real("nan"), "y": [_Real("inf")], "ok": _Real(1.5), _Real("-inf"): "key"},
+            duration_ms=_Real("-inf"),
+        )
+        event._unknown_fields = {"future": _Real("-inf")}
+
+        written = strict_loads(event.to_json())
+
+        self.assertEqual(
+            written["data"], {"x": None, "y": [None], "ok": 1.5, "-Infinity": "key"}
+        )
+        self.assertIsNone(written["future"])
+        self.assertNotIn("duration_ms", written)
+
+    def test_a_non_finite_dict_key_keeps_its_text(self):
+        event = _event(data={NAN: 1, INF: 2, -INF: 3, "NaN": 4, "v": NAN})
+
+        pairs = strict_loads(event.to_json(), object_pairs_hook=list)
+
+        self.assertEqual(
+            dict(pairs)["data"],
+            [("NaN", 1), ("Infinity", 2), ("-Infinity", 3), ("NaN", 4), ("v", None)],
+        )
+
+    def test_one_list_in_two_places_is_cleaned_in_both(self):
+        shared = [NAN, 1.0]
+        event = _event(data={})
+        event._unknown_fields = {"a": shared, "b": {"c": shared, "d": (shared, shared)}}
+
+        written = strict_loads(event.to_json())
+
+        self.assertEqual(written["a"], [None, 1.0])
+        self.assertEqual(written["b"], {"c": [None, 1.0], "d": [[None, 1.0], [None, 1.0]]})
+
+    def test_a_nan_900_levels_deep_is_written_as_null(self):
+        deep = [NAN]
+        for _ in range(899):
+            deep = [deep]
+        event = _event(data={})
+        event._unknown_fields = {"deep": deep}
+
+        value = strict_loads(event.to_json())["deep"]
+
+        for _ in range(899):
+            (value,) = value
+        self.assertEqual(value, [None])
+
+    def test_a_non_finite_duration_is_left_out(self):
+        for duration in (NAN, INF, -INF):
+            with self.subTest(duration_ms=duration):
+                written = strict_loads(_event(duration_ms=duration, data={"x": 1}).to_json())
+                self.assertNotIn("duration_ms", written)
+                self.assertEqual(written["data"], {"x": 1})
+
+    def test_a_non_finite_timestamp_is_written_as_null(self):
+        # Left out, it would read back as the current time.
+        for timestamp in (NAN, INF, -INF):
+            with self.subTest(timestamp=timestamp):
+                text = _event(timestamp=timestamp).to_json()
+                written = strict_loads(text)
+                self.assertIn("timestamp", written)
+                self.assertIsNone(written["timestamp"])
+                read_back = TraceEvent.from_json(text).timestamp
+                self.assertIsNone(read_back)
+                self.assertIsNone(usable_time(read_back))
+
+    def test_circular_data_still_raises(self):
+        # The NaN comes first, so json.dumps refuses it before it meets the
+        # cycle, and the cleaner meets the cycle itself.
+        loop = [NAN]
+        loop.append(loop)
+        event = _event(data={})
+        event._unknown_fields = {"loop": loop}
+        raised = []
+
+        def write():
+            try:
+                event.to_json()
+            except Exception as exc:
+                raised.append(exc)
+
+        thread = threading.Thread(target=write, daemon=True)
+        thread.start()
+        thread.join(5)
+        if thread.is_alive():
+            _stop_thread(thread)
+            self.fail("to_json did not stop on circular data")
+        self.assertEqual([(type(exc), str(exc)) for exc in raised],
+                         [(ValueError, "Circular reference detected")])
+
+        loop.pop()
+        self.assertEqual(strict_loads(event.to_json())["loop"], [None])
+
+    def test_other_values_pass_through_and_unwritable_values_still_raise(self):
+        data = {
+            "x": NAN, "s": "text \u2028", "i": 10**30, "f": -0.5, "b": False,
+            "n": None, "e": [], "o": {}, "t": (1, "two"),
+        }
+        self.assertEqual(strict_loads(_event(data=data).to_json())["data"], {
+            "x": None, "s": "text \u2028", "i": 10**30, "f": -0.5, "b": False,
+            "n": None, "e": [], "o": {}, "t": [1, "two"],
+        })
+
+        with self.assertRaises(TypeError) as expected:
+            json.dumps({1, 2})
+        with self.assertRaises(TypeError) as caught:
+            _event(data={"x": NAN, "s": {1, 2}}).to_json()
+        self.assertEqual(str(caught.exception), str(expected.exception))
+
+    def test_an_event_without_nan_or_infinity_is_written_as_before(self):
+        # Passes on releases before strict JSON too. It guards their bytes.
+        event = _event(
+            event_type=EventType.TOOL_RESULT,
+            timestamp=1700000000.25,
+            event_id="e2",
+            parent_id="e1",
+            duration_ms=12.5,
+            data={
+                "tool_name": "Bash",
+                "result": "ok \u2028 \u00e9",
+                "nested": {"list": [1, -2.5, 1e300, None, True, (3, 4.0)], 1.5: "float key", "e": {}},
+            },
+            redacted=True,
+            prev_hash="ab" * 32,
+            tenant_id="acme",
+        )
+        event._unknown_fields = {"future": [1, {"a": 0.1}], "event_type": "ignored"}
+
+        self.assertEqual(event.to_json(), (
+            '{"event_type":"tool_result","timestamp":1700000000.25,"event_id":"e2",'
+            '"session_id":"s1","parent_id":"e1","duration_ms":12.5,"data":{"tool_name":"Bash",'
+            '"result":"ok \\u2028 \\u00e9","nested":{"list":[1,-2.5,1e+300,null,true,[3,4.0]],'
+            '"1.5":"float key","e":{}}},"prev_hash":"' + "ab" * 32 + '","redacted":true,'
+            '"tenant_id":"acme","future":[1,{"a":0.1}]}'
+        ))
 
 
 if __name__ == "__main__":
