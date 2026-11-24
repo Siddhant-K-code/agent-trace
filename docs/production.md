@@ -396,7 +396,7 @@ input.
 | Whole input | `gen_ai.usage.input_tokens`, `llm.token_count.prompt` | `gen_ai.usage.input_tokens` | sum of the `input*` keys |
 | Uncached input | not exported | not exported | `input` |
 | Cache reads | `gen_ai.usage.cache_read.input_tokens`, `llm.token_count.prompt_details.cache_read` | `gen_ai.usage.cache_read.input_tokens` | `input_cached_tokens` |
-| Cache writes | `gen_ai.usage.cache_write.input_tokens`, `llm.token_count.prompt_details.cache_write` | `gen_ai.usage.cache_write.input_tokens` | `input_cache_creation`, and `input_cache_creation_1h` for Anthropic and Bedrock 1-hour writes |
+| Cache writes | `gen_ai.usage.cache_write.input_tokens`, `llm.token_count.prompt_details.cache_write` | `gen_ai.usage.cache_write.input_tokens` | `input_cache_creation`, and `input_cache_creation_1h` for the 1-hour writes of a model that [`cost --breakdown provider`](commands.md#cost) lists under Anthropic or AWS Bedrock |
 | Output | `gen_ai.usage.output_tokens`, `llm.token_count.completion` | `gen_ai.usage.output_tokens` | `output` |
 | Reasoning output | `gen_ai.usage.reasoning.output_tokens` | not exported | not exported |
 | Total | `llm.token_count.total` | not exported | `total` |

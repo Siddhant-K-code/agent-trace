@@ -81,6 +81,29 @@ class CompactionDetectionTests(unittest.TestCase):
         self.assertAlmostEqual(event.estimated_cost_usd, 0.504)
         self.assertEqual(event.offset_seconds, 42.0)
 
+    def _dropped_context_cost(self, model: str) -> float:
+        # 150,000 then 20,000 input tokens drop 130,000 tokens.
+        events = [
+            _event(EventType.LLM_REQUEST, 1, model=model, input_tokens=150_000),
+            _event(EventType.LLM_REQUEST, 2, model=model, input_tokens=20_000),
+        ]
+        [compaction] = detect_compactions(events)
+        return compaction.estimated_cost_usd
+
+    def test_bedrock_id_prices_dropped_context_at_its_own_rate(self):
+        # Opus 4.1 input costs $15 per 1M tokens on every Bedrock endpoint.
+        for model in ("claude-opus-4-1-20250805", "us.anthropic.claude-opus-4-1-20250805-v1:0"):
+            with self.subTest(model=model):
+                self.assertAlmostEqual(self._dropped_context_cost(model), 1.95)
+
+    def test_bedrock_geography_profile_prices_dropped_context_with_the_premium(self):
+        direct = self._dropped_context_cost("claude-sonnet-4-5-20250929")
+        self.assertAlmostEqual(direct, 0.39)
+        self.assertAlmostEqual(
+            self._dropped_context_cost("us.anthropic.claude-sonnet-4-5-20250929-v1:0"),
+            direct * 1.1,
+        )
+
     def test_exactly_fifty_percent_is_not_more_than_threshold(self):
         self.assertEqual(
             detect_compactions([_request(1, 1000), _request(2, 500)]),
@@ -610,6 +633,15 @@ class CheckpointTests(unittest.TestCase):
             usage={"input_tokens": 160_000},
         )
         self.assertEqual(context_fill_ratio(event), 0.8)
+
+    def test_context_fill_ratio_finds_the_limit_by_the_cost_name_rule(self):
+        # openai/gpt-4o has 128,000 tokens. gpt-4.1 has no known limit, so it
+        # gets the 200,000 default, not the 8,192 of gpt-4.
+        cases = {"openai/gpt-4o": 0.5, "gpt-4.1-2025-04-14": 0.32}
+        for model, ratio in cases.items():
+            with self.subTest(model=model):
+                event = _event(EventType.LLM_REQUEST, 1, model=model, input_tokens=64_000)
+                self.assertAlmostEqual(context_fill_ratio(event), ratio)
 
     def test_watcher_writes_once_then_rearms_after_compaction(self):
         temporary, store, session_id = _store(self.events[:-1])

@@ -9,6 +9,7 @@ import time
 import unittest
 from unittest.mock import patch
 
+from agent_trace.cli import build_parser
 from agent_trace.cost import (
     _session_model_usage,
     LivePricingUnavailable,
@@ -674,6 +675,218 @@ class TestPricingSnapshotModels(unittest.TestCase):
                 self.assertLessEqual(
                     set(rates), {"input", "output", "cache_read", "cache_write", "cache_write_long"},
                 )
+
+
+# Claude Opus 4.1 and earlier keep the list rate in every Bedrock region.
+NO_PREMIUM_KEYS = {
+    "claude-opus-4-1", "claude-opus-4", "claude-sonnet-4", "claude-3-7-sonnet",
+    "claude-3-5-sonnet", "claude-3-haiku", "claude-3-opus",
+}
+SONNET_45 = "claude-sonnet-4-5-20250929-v1:0"
+US_SONNET_45 = "us.anthropic." + SONNET_45
+PROFILE_ARN = "arn:aws:bedrock:us-east-1:123456789012:inference-profile/" + US_SONNET_45
+FOUNDATION_ARN = "arn:aws:bedrock:us-east-1::foundation-model/anthropic." + SONNET_45
+APP_PROFILE_ARN = (
+    "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/a1b2c3d4e5f6"
+)
+SONNET_45_LIST = (3, 15, 0.3, 3.75, 6)
+SONNET_45_REGIONAL = (3.3, 16.5, 0.33, 4.125, 6.6)
+
+
+def _rates(price):
+    return (
+        price.input_per_million, price.output_per_million, price.cache_read_per_million,
+        price.cache_write_per_million, price.cache_write_long_per_million,
+    )
+
+
+class TestBedrockClaudeModelIds(unittest.TestCase):
+    """Bedrock names a Claude model by an inference profile, a base model ID
+    or an ARN. Each one gets the Claude price under AWS Bedrock. A geography
+    profile of Claude Sonnet 4.5, Haiku 4.5, Opus 4.5 or a later model costs
+    1.1 times the list rate."""
+
+    def assertPrice(self, model, key, rates, pricing_table=PRICING):
+        price = get_model_pricing(model, pricing_table)
+        self.assertIsNotNone(price)
+        self.assertEqual((price.model_key, price.provider), (key, "AWS Bedrock"))
+        names = ("input", "output", "cache read", "cache write", "long cache write")
+        for name, got, want in zip(names, _rates(price), rates):
+            with self.subTest(rate=name):
+                if want is None:
+                    self.assertIsNone(got)
+                else:
+                    self.assertAlmostEqual(got, want)
+
+    def test_each_geography_profile_costs_ten_percent_more(self):
+        for geography in ("us", "eu", "apac", "jp", "au", "us-gov"):
+            with self.subTest(geography=geography):
+                self.assertPrice(
+                    f"{geography}.anthropic.{SONNET_45}", "claude-sonnet-4-5", SONNET_45_REGIONAL,
+                )
+
+    def test_geography_profile_inside_a_prefix_or_arn_costs_ten_percent_more(self):
+        for model in (
+            "bedrock/" + US_SONNET_45,
+            "aws/bedrock/" + US_SONNET_45,
+            PROFILE_ARN,
+            "bedrock/" + PROFILE_ARN,
+            "arn:aws-us-gov:bedrock:us-gov-west-1:123456789012:inference-profile/us-gov.anthropic."
+            + SONNET_45,
+        ):
+            with self.subTest(model=model):
+                self.assertPrice(model, "claude-sonnet-4-5", SONNET_45_REGIONAL)
+
+    def test_id_with_no_geography_uses_the_list_rate(self):
+        # Global profiles have no premium. A base model ID or a foundation-model
+        # ARN does not show whether the call went to a regional endpoint.
+        for model in (
+            "global.anthropic." + SONNET_45,
+            "bedrock/global.anthropic." + SONNET_45,
+            "arn:aws:bedrock:us-east-1:123456789012:inference-profile/global.anthropic."
+            + SONNET_45,
+            "anthropic." + SONNET_45,
+            "bedrock/anthropic." + SONNET_45,
+            FOUNDATION_ARN,
+            "aws/bedrock/" + FOUNDATION_ARN,
+        ):
+            with self.subTest(model=model):
+                self.assertPrice(model, "claude-sonnet-4-5", SONNET_45_LIST)
+
+    def test_claude_in_amazon_bedrock_id_uses_the_list_rate(self):
+        self.assertPrice("anthropic.claude-opus-5-5", "claude-opus-5-5", (4, 20, 0.2, 5, 8))
+
+    def test_every_later_claude_key_gets_the_premium(self):
+        for key in PRICING:
+            if not key.startswith("claude-") or key in NO_PREMIUM_KEYS:
+                continue
+            with self.subTest(key=key):
+                expected = tuple(
+                    None if rate is None else rate * 1.1 for rate in _rates(get_model_pricing(key))
+                )
+                self.assertPrice(f"us.anthropic.{key}-v1:0", key, expected)
+
+    def test_opus_4_1_and_earlier_keep_the_list_rate(self):
+        for key in sorted(NO_PREMIUM_KEYS):
+            with self.subTest(key=key):
+                self.assertPrice(
+                    f"us.anthropic.{key}-v1:0", key, _rates(get_model_pricing(key)),
+                )
+        self.assertPrice(
+            "eu.anthropic.claude-3-7-sonnet-20250219-v1:0", "claude-3-7-sonnet",
+            (3, 15, None, None, None),
+        )
+
+    def test_nova_profiles_have_no_premium(self):
+        nova = _rates(get_model_pricing("amazon.nova-pro-v1:0"))
+        self.assertEqual(nova[:2], (0.8, 3.2))
+        for geography in ("us", "jp", "au"):
+            model = f"{geography}.amazon.nova-pro-v1:0"
+            with self.subTest(model=model):
+                self.assertPrice(model, "amazon.nova-pro-v1", nova)
+
+    def test_premium_applies_to_a_custom_pricing_table(self):
+        table = {"claude-sonnet-4-5": {"input": 10, "output": 20}}
+        self.assertPrice(US_SONNET_45, "claude-sonnet-4-5", (11, 22, None, None, None), table)
+        self.assertPrice(
+            "global.anthropic." + SONNET_45, "claude-sonnet-4-5", (10, 20, None, None, None), table,
+        )
+        usage = {"input_tokens": 1_000_000, "output_tokens": 1_000_000}
+        record = _record(US_SONNET_45, usage, pricing_table=table)
+        self.assertAlmostEqual(record.cost_usd, 33.0)
+
+    def test_report_prices_cache_tokens_at_the_premium_rates(self):
+        # Input 3.3, output 16.5, cache read 0.33, 5-minute write 4.125 and
+        # 1-hour write 6.6 dollars per 1M tokens.
+        record = _record(US_SONNET_45, {
+            "input_tokens": 1_000_000,
+            "output_tokens": 1_000_000,
+            "cache_read_input_tokens": 1_000_000,
+            "cache_creation_input_tokens": 2_000_000,
+            "cache_creation": {
+                "ephemeral_5m_input_tokens": 1_000_000,
+                "ephemeral_1h_input_tokens": 1_000_000,
+            },
+        })
+        self.assertEqual(record.provider, "AWS Bedrock")
+        self.assertAlmostEqual(record.cost_usd, 3.3 + 16.5 + 0.33 + 4.125 + 6.6)
+
+    def test_arn_reads_the_model_id_after_the_resource_type(self):
+        cases = {
+            "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0":
+                ("claude-3-5-sonnet", 3, 15),
+            "arn:aws-us-gov:bedrock:us-gov-west-1::foundation-model/"
+            "anthropic.claude-3-5-sonnet-20240620-v1:0": ("claude-3-5-sonnet", 3, 15),
+            "arn:aws-cn:bedrock:cn-north-1::foundation-model/"
+            "anthropic.claude-3-haiku-20240307-v1:0": ("claude-3-haiku", 0.25, 1.25),
+            "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-pro-v1:0":
+                ("amazon.nova-pro-v1", 0.8, 3.2),
+        }
+        for model, (key, inp, out) in cases.items():
+            with self.subTest(model=model):
+                price = get_model_pricing(model)
+                self.assertIsNotNone(price)
+                self.assertEqual((price.model_key, price.provider), (key, "AWS Bedrock"))
+                self.assertAlmostEqual(price.input_per_million, inp)
+                self.assertAlmostEqual(price.output_per_million, out)
+
+    def test_arn_that_names_no_model_gets_no_price(self):
+        for model in (
+            APP_PROFILE_ARN,
+            "arn:aws:bedrock:us-east-1:123456789012:provisioned-model/a1b2c3d4e5f6",
+            "arn:aws:bedrock:us-east-1:123456789012:custom-model/"
+            "anthropic.claude-3-haiku-20240307-v1:0:200k/a1b2c3d4e5f6",
+        ):
+            with self.subTest(model=model):
+                self.assertEqual(infer_provider(model), "AWS Bedrock")
+                self.assertIsNone(get_model_pricing(model))
+
+    def test_bedrock_ids_are_listed_under_aws_bedrock(self):
+        for model in (
+            "jp.anthropic." + SONNET_45,
+            "au.anthropic.claude-haiku-4-5-20251001-v1:0",
+            "us-gov.anthropic.claude-3-5-sonnet-20240620-v1:0",
+            "jp.amazon.nova-pro-v1:0",
+            "anthropic.claude-opus-5-5",
+            PROFILE_ARN,
+            FOUNDATION_ARN,
+            "arn:aws-us-gov:bedrock:us-gov-west-1::foundation-model/"
+            "anthropic.claude-3-5-sonnet-20240620-v1:0",
+        ):
+            with self.subTest(model=model):
+                self.assertEqual(infer_provider(model), "AWS Bedrock")
+        for model in ("claude-sonnet-4-5-20250929", "anthropic/claude-sonnet-4-5"):
+            with self.subTest(model=model):
+                self.assertEqual(infer_provider(model), "Anthropic")
+
+    def test_cost_csv_prices_each_bedrock_id(self):
+        fixture = ProviderCostStore()
+        self.addCleanup(fixture.close)
+        sessions = {
+            "c01direct": ("Anthropic", "claude-sonnet-4-5-20250929", "18.00000000"),
+            "c02us": ("AWS Bedrock", US_SONNET_45, "19.80000000"),
+            "c03global": ("AWS Bedrock", "global.anthropic." + SONNET_45, "18.00000000"),
+            "c04plain": ("AWS Bedrock", "anthropic." + SONNET_45, "18.00000000"),
+            "c05mantle": ("AWS Bedrock", "anthropic.claude-opus-5-5", "24.00000000"),
+            "c06jp": ("AWS Bedrock", "jp.anthropic." + SONNET_45, "19.80000000"),
+            "c07arn": ("AWS Bedrock", PROFILE_ARN, "19.80000000"),
+            "c08appprof": ("AWS Bedrock", APP_PROFILE_ARN, "0.00000000"),
+            "c09novajp": ("AWS Bedrock", "jp.amazon.nova-pro-v1:0", "4.00000000"),
+        }
+        usage = {"input_tokens": 1_000_000, "output_tokens": 1_000_000}
+        for session_id, (_, model, _) in sessions.items():
+            fixture.add_session(session_id, time.time() - 60, model, response_data=usage)
+        args = build_parser().parse_args([
+            "--trace-dir", fixture.temp_dir.name, "cost", "--breakdown", "provider", "--csv",
+        ])
+        stdout = io.StringIO()
+        with patch("sys.stdout", stdout):
+            self.assertEqual(cmd_cost(args), 0)
+        rows = list(csv.DictReader(io.StringIO(stdout.getvalue())))
+        self.assertEqual(
+            {row["session_id"]: (row["provider"], row["model"], row["cost_usd"]) for row in rows},
+            sessions,
+        )
 
 
 def _provider_report(provider="OpenAI", model="gpt-4o"):

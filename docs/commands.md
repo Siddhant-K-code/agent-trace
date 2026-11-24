@@ -691,6 +691,50 @@ the stable columns `provider`, `model`, `session_id`, `input_tokens`,
 under the model `(not recorded)` (an empty `model` in CSV) and the provider
 `Unknown`, with no estimated price.
 
+**Model names.** A recorded model name finds its bundled price by this rule.
+Case is ignored. One provider prefix is dropped: `bedrock/`, `aws/bedrock/`,
+`openai/`, `anthropic/`, `google/` or `models/`. A Bedrock ARN in the `aws`,
+`aws-us-gov` or `aws-cn` partition stands for the model ID after its
+`foundation-model/` or `inference-profile/`. Then a Bedrock geography prefix
+is dropped (`us.`, `eu.`, `apac.`, `jp.`, `au.`, `us-gov.` or `global.`), and
+then a leading `anthropic.`. The name uses the longest table name that it
+equals, or that it starts with followed by `-`, `:` or `@`. So
+`us.anthropic.claude-sonnet-4-5-20250929-v1:0`,
+`anthropic.claude-sonnet-4-5-20250929-v1:0` and `claude-sonnet-4-5-20250929`
+use `claude-sonnet-4-5`, and `gpt-4o-2024-08-06` uses `gpt-4o`. A name such as
+`claude` or `claude-opus-47` has no price. [`compaction`](#compaction),
+[`inflation`](#inflation), [`token-budget`](#token-budget) and
+[`watch`](#watch) read model names by the same rule.
+
+**AWS Bedrock.** These names are listed under AWS Bedrock: a `bedrock/` or
+`aws/bedrock/` name, a model ID that starts with a vendor such as `anthropic.`
+or `amazon.`, with or without a geography prefix, and every Bedrock ARN. An
+application inference profile, provisioned model or custom model ARN names no
+model. It is listed under AWS Bedrock with no estimated price.
+
+A `us.`, `eu.`, `apac.`, `jp.`, `au.` or `us-gov.` profile of Claude Sonnet
+4.5, Haiku 4.5, Opus 4.5 or a later model costs 1.1 times the bundled rate,
+which is the global rate. All five rates are multiplied: input, output, cache
+read, cache write and long cache write. This holds inside `bedrock/`,
+`aws/bedrock/` and an inference-profile ARN too. The
+[Anthropic pricing page](https://platform.claude.com/docs/en/about-claude/pricing)
+says regional and multi-region endpoints cost 10 percent more than global
+ones for these models. The
+[AWS Bedrock pricing page](https://aws.amazon.com/bedrock/pricing/) lists the
+US rates of Claude Sonnet 4.5 at 1.1 times its global rates. Older models get
+no premium, as the Anthropic page leaves them out: `claude-opus-4-1`,
+`claude-opus-4`, `claude-sonnet-4`, `claude-3-7-sonnet`, `claude-3-5-sonnet`,
+`claude-3-haiku` and `claude-3-opus`. Non-Claude models such as Nova get none
+either.
+
+A `global.` profile, a bare `anthropic.` model ID and a foundation-model ARN
+use the bundled rate. A `global.` profile has no premium. A bare ID or a
+foundation-model ARN does not show whether the call went to a regional
+endpoint.
+[Claude in Amazon Bedrock](https://platform.claude.com/docs/en/build-with-claude/claude-in-amazon-bedrock)
+always uses a bare ID, and its region is part of the endpoint. So on a
+regional endpoint the real cost is 10 percent higher than the estimate.
+
 | Flag | Default | Description |
 |---|---|---|
 | `--model` | `sonnet` | `sonnet`, `opus`, `haiku`, `gpt4`, `gpt4o` |
@@ -727,8 +771,10 @@ Cache tokens are billed at the input rate when the model has no published
 cache rate (for example the `haiku`, `gpt4` and `gpt4o` choices of `--model`,
 retired models, and `--input-price`), and a long write without its own rate
 uses the default write rate. Tokens estimated from event size have no cache
-split. Pricing estimates exclude batch discounts, regional or service-tier
-differences, long-context premiums, cache storage fees, and non-token charges.
+split. Pricing estimates exclude batch discounts, service-tier differences,
+long-context premiums, data-residency premiums, cache storage fees, and
+non-token charges. The only regional difference they include is the Bedrock
+premium above. Other regional rates, such as GovCloud rates, are excluded.
 When a pricing page lists a temporary promotional price and the price that
 follows it, the following price is used. To update the bundled table, check the
 official URLs in `PRICING_SOURCES`, update `PRICING` (each key's provider is
@@ -771,6 +817,8 @@ agent-strace token-budget [session-id] [--warning-threshold FRACTION]
 ```
 Show how full the model's context window is at each LLM request. The model is detected from the session (default: latest). A request's input tokens are the whole prompt it sent, so each request's fill is its own input tokens divided by the context limit; requests are not added together. A request at or above `--warning-threshold` of the limit (default: `0.9`) is marked `← warning`.
 
+The context limit comes from a bundled table of context windows. The model name finds its entry by the **Model names** rule of [`cost`](#cost). So `us.anthropic.claude-sonnet-4-5-20250929-v1:0` and `anthropic/claude-sonnet-4-5` get the 200,000 limit of `claude-sonnet-4-5`, and `o1-mini-2024-09-12` gets the 128,000 limit of `o1-mini`. A model with no entry, such as a `gpt-4.1` model, has no known limit. Then the header says `Context limit: unknown tokens`, each fill and the `Current` and `Peak` lines show `n/a`, no request is marked, and no `Headroom` line is printed. For such a model, [`watch`](#watch) gives no `--max-context-pct` alert, and [`compaction`](#compaction) and `--checkpoint-at` use a limit of 200,000 tokens.
+
 The input tokens are read the way [`compaction`](#compaction) reads them: provider keys such as `input_tokens` or `prompt_tokens`, nested `usage` objects, and Anthropic cache read and write tokens. A request with no count is estimated from the size of its own recorded data and shown with `~`. That data may not hold the whole prompt, so an estimated fill can be lower than the real one.
 
 Below the table: the last request's fill (`Current`), the highest fill and the request it came from (`Peak`, which can be higher than `Current` after compaction), the tokens left at the last request (`Headroom`), and the input tokens sent over all requests added together (`Input sent`, a volume figure, not a fill).
@@ -789,6 +837,15 @@ and report the context discarded by compaction.
 | `--diff` | Classify constraints, decisions, and file context as survived or likely dropped |
 | `--behavior-diff` | Compare lint findings, re-reads, loops, and exploration around compaction |
 | `--compaction-threshold RATIO` | Minimum token drop ratio (default: `0.50`) |
+
+The discarded context is priced at the model's input rate. The rate is found
+as [`cost --breakdown provider`](#cost) finds it, Bedrock premium included. A
+model with no price uses $3 per 1M tokens. With recorded token counts,
+`--behavior-diff` measures context saturation against the limit that a
+request records in `context_window`, `context_window_tokens` or
+`max_context_tokens`. Without one, the limit is found as for
+[`token-budget`](#token-budget), and a model with no known limit uses 200,000
+tokens.
 
 See the [context compaction guide](compaction.md) for interpretation and live
 checkpoint setup.
@@ -820,10 +877,10 @@ Live session monitor with kill-switch rules.
 | `--on-violation terminal\|file\|kill` | Action when a rule fires (default: `terminal`) |
 | `--webhook URL` | POST each alert as JSON to this `http://` or `https://` URL. Watch refuses at startup, with one line and exit 1, a URL with any other scheme or none, no host, a bad port, spaces or control characters, or a user name or password; when `--webhook` is not given, the same check applies to `webhook.url` in the `--config` file. Redirects are not followed, so pass the final URL. Any answer other than 2xx is a failure |
 | `--config FILE` | JSON file that sets watch limits and actions; see **Config file** below. Watch refuses a file it cannot use, with one line and exit 1, before it reads the session or writes anything. Flags given on the command line override the file |
-| `--max-context-pct N` | Alert when one LLM request's input tokens, its whole context, reach N percent of the model's context window (default: `90`). Read as for [`token-budget`](#token-budget). The alert fires once per crossing: a later request below N percent, such as one after compaction, re-arms it. N must be from 1 to 100; any other value is refused at startup |
+| `--max-context-pct N` | Alert when one LLM request's input tokens, its whole context, reach N percent of the model's context window (default: `90`). Read as for [`token-budget`](#token-budget), and a model with no known limit gives no alert. The alert fires once per crossing: a later request below N percent, such as one after compaction, re-arms it. N must be from 1 to 100; any other value is refused at startup |
 | `--on-death CMD` | Shell command that watch runs once, after it sends the agent `SIGTERM`, and only if it sent it: not on `--dry-run`, without `--agent-pid`, or when the signal could not be sent (see below). `{post_mortem_path}` is replaced with the path of the post-mortem JSON file, or with nothing if watch could not write it |
 | `--compaction-checkpoint` | Write a recovery checkpoint before context saturation |
-| `--checkpoint-at RATIO` | Context fill ratio that triggers a checkpoint (default: `0.80`) |
+| `--checkpoint-at RATIO` | Context fill ratio that triggers a checkpoint (default: `0.80`). The limit is the one a request records in `context_window`, `context_window_tokens` or `max_context_tokens`, or else is found as for [`token-budget`](#token-budget). A model with no known limit uses 200,000 tokens |
 | `--policy FILE` | Scope policy file to enforce (default: `.agent-scope.json`). Watch reads its `files.write.deny` globs and alerts `ScopeWatcher: write to PATH denied by policy` once for each denied path that an edit names, from any edit tool, `file_write` event or `apply_patch` patch. PATH is resolved as described in **Paths and edits** below |
 | `--rules FILE_OR_BUILTINS` | A JSON or YAML rules file (see **Rules file format** below), or comma-separated built-in rules such as `mcp-poisoning,loop:3/10,budget:5,timeout:30m,cognitive-debt:0.8` (see **Built-in rules** below). A value that names an existing file is a rules file. Watch refuses a value it cannot use, with one line and exit 1, before it reads the session or writes anything |
 | `--stream-to URL` | POST events as NDJSON to this `http://` or `https://` URL while watching. Watch refuses at startup, with one line and exit 1, a URL with no host, a bad port, spaces or control characters, or a user name or password. A failed POST prints one line that names only the URL's `scheme://host[:port]`, and watch goes on. Redirects are not followed, so pass the final URL. When watch stops, it waits up to 15 seconds for the last POST; if the wait runs out or Ctrl-C stops it, one line gives the number of events not confirmed sent |
@@ -2265,7 +2322,7 @@ It reads the `llm_request`, `user_prompt`, `assistant_response` and `llm_respons
 | `--sessions N` | `30` | Read the newest N sessions. Must be 1 or more. |
 | `--daily-sessions N` | `8` | Sessions per day for the Daily and Monthly rows. Must be a finite number, 0 or more. A month is 30 days. |
 
-Prices come from the bundled table that [`cost`](#cost) uses. The system prompt, tool definitions and user messages use the input rate. Assistant messages use the output rate. A model with no bundled price, such as `gpt-4`, `o1` or `gemini-1.5-pro`, shows `n/a` in each cost cell of its column and in each cost delta. Its token rows still print. `claude-sonnet-4-7` uses the `claude-sonnet-4` price, as in `cost` and `dashboard`.
+Prices come from the bundled table that [`cost`](#cost) uses. The system prompt, tool definitions and user messages use the input rate. Assistant messages use the output rate. A Bedrock name is priced as in `cost --breakdown provider`, so a `us.`, `eu.`, `apac.`, `jp.`, `au.` or `us-gov.` profile of Claude Sonnet 4.5, Haiku 4.5, Opus 4.5 or a later model costs 1.1 times the bundled rate. A model with no bundled price, such as `gpt-4`, `o1` or `gemini-1.5-pro`, shows `n/a` in each cost cell of its column and in each cost delta. Its token rows still print. `claude-sonnet-4-7` uses the `claude-sonnet-4` price, as in `cost` and `dashboard`.
 
 These models have a tokenizer factor. `claude-opus-4-6` is the 1.0 baseline.
 
@@ -2277,7 +2334,7 @@ These models have a tokenizer factor. `claude-opus-4-6` is the 1.0 baseline.
 | 1.35 | `claude-sonnet-4-7` |
 | 1.38 | `claude-opus-4-7` |
 
-A model name resolves as it does in `cost`. Case is ignored, and a provider or region prefix such as `anthropic/` or `us.` is dropped. A dated or suffixed name resolves to its base model: the longest name in the table that it equals, or that it starts with followed by `-`, `:` or `@`. So `gpt-4o-2024-08-06` uses `gpt-4o`, `gpt-4o-mini-2024-07-18` uses `gpt-4o-mini`, and `anthropic/claude-opus-4-7` uses `claude-opus-4-7`. A name such as `claude` or `claude-opus-47` has no factor.
+A model name resolves by the **Model names** rule of [`cost`](#cost). Case is ignored. A provider prefix such as `anthropic/` or `bedrock/`, a Bedrock geography prefix such as `us.`, `jp.`, `au.`, `us-gov.` or `global.`, and then a leading `anthropic.` are dropped. A Bedrock foundation-model or inference-profile ARN stands for its model ID. A dated or suffixed name resolves to its base model: the longest name in the table that it equals, or that it starts with followed by `-`, `:` or `@`. So `gpt-4o-2024-08-06` uses `gpt-4o`, `gpt-4o-mini-2024-07-18` uses `gpt-4o-mini`, and `anthropic/claude-opus-4-7`, `anthropic.claude-opus-4-7` and `us.anthropic.claude-opus-4-7-v1:0` use `claude-opus-4-7`. A name such as `claude` or `claude-opus-47` has no factor.
 
 The header counts only the sessions with prompt or model content. A session with only tool calls is left out, so it does not lower the per-session average. With no such session, the count and the averages are 0. "Largest inflation source" names the content type that adds the most tokens. A tie keeps the first type in table order. The line is left out when no type adds tokens.
 
