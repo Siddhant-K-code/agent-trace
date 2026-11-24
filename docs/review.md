@@ -136,9 +136,14 @@ The parsing is strict, and any doubt keeps the outcome unknown:
 
 - The shell call must run the runner in exactly one part, and the result must
   hold exactly one summary for it. Two runs in one call stay unknown.
-- A summary cut short, a result that ends with the hook truncation marker, a
-  redacted result, an error event, or a result whose content was not captured
-  stays unknown.
+- A summary cut short, a result cut short, a redacted result, an error event,
+  or a result whose content was not captured stays unknown. A result is cut
+  short when it ends with three dots, which the imports and the MCP proxy add
+  when they cut long output. It is also cut short when it ends with the hook
+  truncation marker, or when gh-aw marked it `outputTruncated`. The part cut
+  off can hold a failure, such as a coverage gate printed after the summary.
+  An output that really ends with three dots looks the same, so it stays
+  unknown too.
 - No tests run, all tests skipped, counts that do not add up, unknown count
   words, and a coverage threshold failure all stay unknown.
 - An explicit exit code still wins. A single `pytest` call with exit code 1 is

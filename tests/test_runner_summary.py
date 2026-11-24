@@ -160,11 +160,19 @@ class TestOutputText(unittest.TestCase):
                                           data={"content_omitted": True, "outcome_recorded": True}),
             "truncated by hook": _result(UNITTEST_OK + "x" * 50 + "... (truncated)"),
             "truncated flag": _result(UNITTEST_OK, truncated=True),
+            "cut by an import": _result(UNITTEST_OK + "x" * 50 + "..."),
+            "output_truncated flag": _result(UNITTEST_OK, output_truncated=True),
             "non-text": _result(123),
         }
         for name, event in cases.items():
             with self.subTest(case=name):
                 self.assertIsNone(summary_outcome("unittest", event))
+
+    def test_dots_before_the_end_or_untruncated_output_still_read(self):
+        verbose = f"test_a (m.T) ... ok\n\n{RULE}\nRan 1 test in 0.000s\n\nOK\n"
+        self.assertEqual(summary_outcome("unittest", _result(verbose)), "passed")
+        self.assertEqual(summary_outcome("unittest", _result(UNITTEST_OK, output_truncated=False)),
+                         "passed")
 
     def test_unsupported_runner(self):
         self.assertIsNone(summary_outcome("npm test", _result("Tests: 1 passed, 1 total")))
