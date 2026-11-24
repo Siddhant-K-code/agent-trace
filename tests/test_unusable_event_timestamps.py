@@ -60,6 +60,7 @@ try:
         Row,
         _live_event,
         _row,
+        _session_events,
         _tree_snapshot,
         _watcher_config,
         _write_session,
@@ -77,10 +78,16 @@ except ImportError:
         Row,
         _live_event,
         _row,
+        _session_events,
         _tree_snapshot,
         _watcher_config,
         _write_session,
     )
+
+try:
+    from test_models import use_time_zone
+except ImportError:
+    from tests.test_models import use_time_zone
 
 
 class _NoMulStr(str):
@@ -708,6 +715,42 @@ class TestSessionTimes(TimestampCliTestCase):
                 result = self.run_cli(root, "export", BAD, "--format", fmt)
                 self.assertEqual(result.code, 0, result.err)
                 self.assertTrue((root / "work" / f"trace-{BAD[:12]}-{fmt}.json").is_file())
+
+
+class TestTimeLimitInEveryZone(TimestampCliTestCase):
+    """A time after 9999-12-30T00:00:00Z is refused in every time zone."""
+
+    OUT_OF_RANGE = "Error: " + _message(None, 1, 25, "session_start", "out-of-range", 24) + "\n"
+
+    def make_session_at(self, start: float) -> Path:
+        """The fixture, with BAD and all its events moved to begin at *start*."""
+        root = self.make_ts_workspace()
+        traces = root / "work" / ".agent-traces"
+        shutil.rmtree(traces / BAD)
+        _write_session(traces, BAD, start, _session_events(BAD, start, "bad", child_id=CHILD))
+        return root
+
+    def test_year_10000_is_refused_behind_utc_as_in_utc(self):
+        # Main accepted this time in a zone behind UTC, and these commands
+        # then ended in a traceback when they converted it to UTC.
+        start = 253402302600.0  # 10000-01-01T00:30:00Z
+        rows = (
+            (("timeline", BAD), self.OUT_OF_RANGE),
+            (("share", BAD, "--stdout"), self.OUT_OF_RANGE),
+            (("export", BAD, "--format", "eu-ai-act"), self.OUT_OF_RANGE),
+            (("export", "--format", "eu-ai-act", "--all"),
+             f"Error: cannot read session {BAD}: started_at is not a usable time\n"),
+        )
+        for zone in ("UTC0", "PST8PDT,M3.2.0,M11.1.0"):
+            use_time_zone(self, zone)
+            for argv, expected in rows:
+                with self.subTest(zone=zone, argv=argv):
+                    self.assert_refused(self.make_session_at(start), list(argv), expected)
+
+    def test_a_time_late_on_9999_12_31_is_refused(self):
+        use_time_zone(self, "UTC0")
+        root = self.make_session_at(253402293600.0)  # 9999-12-31T22:00:00Z
+        self.assert_refused(root, ["timeline", BAD], self.OUT_OF_RANGE)
 
 
 class TestCommandsCheckTheEventsTheyRead(TimestampCliTestCase):

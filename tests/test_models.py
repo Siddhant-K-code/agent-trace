@@ -6,11 +6,14 @@ import math
 import sys
 import os
 import threading
+import time
 import unittest
+from datetime import datetime
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from agent_trace.models import EventType, SessionMeta, TraceEvent, usable_time
+from agent_trace.models import LAST_USABLE_TIME, EventType, SessionMeta, TraceEvent, usable_time
 
 NAN = float("nan")
 INF = float("inf")
@@ -332,6 +335,87 @@ class TestStrictJson(unittest.TestCase):
             '"1.5":"float key","e":{}}},"prev_hash":"' + "ab" * 32 + '","redacted":true,'
             '"tenant_id":"acme","future":[1,{"a":0.1}]}'
         ))
+
+
+# POSIX TZ strings, so no tz database is needed. Each maps to its UTC offset in
+# seconds on 1970-01-01.
+ZONES = {
+    "UTC0": 0,
+    "<-12>12": -12 * 3600,
+    "<+14>-14": 14 * 3600,
+    "<+0530>-5:30": 5 * 3600 + 30 * 60,
+    "PST8PDT,M3.2.0,M11.1.0": -8 * 3600,
+}
+
+
+def use_time_zone(test: unittest.TestCase, zone: str) -> None:
+    """Set this process's time zone to *zone*, a key of ZONES, until *test* ends."""
+    if not hasattr(time, "tzset"):
+        test.skipTest("time.tzset is not available on this platform")
+    old = os.environ.get("TZ")
+
+    def restore():
+        if old is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old
+        time.tzset()
+
+    test.addCleanup(restore)
+    os.environ["TZ"] = zone
+    time.tzset()
+    test.assertEqual(time.localtime(0).tm_gmtoff, ZONES[zone], f"TZ={zone!r} did not apply")
+
+
+class _LocalTimeFails:
+    """A datetime whose local conversion raises, as Windows can near the year 3000."""
+
+    @staticmethod
+    def fromtimestamp(timestamp, tz=None):
+        if tz is None:
+            raise OSError(22, "Invalid argument")
+        return datetime.fromtimestamp(timestamp, tz)
+
+
+class _UtcFails:
+    """A datetime whose UTC conversion raises and whose local conversion works."""
+
+    @staticmethod
+    def fromtimestamp(timestamp, tz=None):
+        if tz is not None:
+            raise OSError(22, "Invalid argument")
+        return datetime.fromtimestamp(timestamp)
+
+
+class TestUsableTime(unittest.TestCase):
+    """usable_time() takes a Unix time in seconds up to 9999-12-30T00:00:00Z."""
+
+    def test_the_limit_is_the_same_in_every_time_zone(self):
+        refused = (
+            math.nextafter(LAST_USABLE_TIME, math.inf),
+            253402300799.0,  # 9999-12-31T23:59:59Z
+            253402300800.5,  # 10000-01-01T00:00:00.5Z
+            "1700000000", True, None, NAN, -1, 10**400,
+        )
+        for zone in ZONES:
+            use_time_zone(self, zone)
+            for value in (0, LAST_USABLE_TIME):
+                with self.subTest(zone=zone, value=value):
+                    result = usable_time(value)
+                    self.assertEqual(result, value)
+                    self.assertIs(type(result), float)
+            for value in refused:
+                with self.subTest(zone=zone, value=value):
+                    self.assertIsNone(usable_time(value))
+
+    def test_a_time_that_local_or_utc_conversion_refuses_is_not_usable(self):
+        # On Windows the C library has a lower limit, near the end of the year
+        # 3000. The local and the UTC conversions can fail at different times.
+        value = 1_700_000_000.0
+        self.assertEqual(usable_time(value), value)
+        for stub in (_LocalTimeFails, _UtcFails):
+            with self.subTest(stub=stub.__name__), mock.patch("agent_trace.models.datetime", stub):
+                self.assertIsNone(usable_time(value))
 
 
 if __name__ == "__main__":

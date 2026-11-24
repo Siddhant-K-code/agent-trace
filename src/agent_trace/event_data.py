@@ -539,9 +539,10 @@ def require_usable_timestamps(
     is not a Unix time in seconds.
 
     A timestamp is usable when :func:`~agent_trace.models.usable_time` accepts
-    it: a finite number of 0 or more that ``datetime.fromtimestamp`` accepts.
-    Every event is checked by default. ``event_types`` limits the check to
-    events of those types and ``indexes`` (0-based positions in ``events``)
+    it: a Unix time in seconds from 0 to 9999-12-30T00:00:00Z, the same in
+    every time zone. Windows can have a lower limit, near the end of the year
+    3000. Every event is checked by default. ``event_types`` limits the check
+    to events of those types and ``indexes`` (0-based positions in ``events``)
     limits it to those events, so a command can check only the events whose
     timestamps it reads. When both are given, both apply.
 
@@ -592,10 +593,10 @@ def require_otlp_timestamps(
     """Raise :class:`UnusableTimestampError` if a checked event's ``timestamp``
     is past the latest time OTLP can carry.
 
-    :func:`require_usable_timestamps` accepts a time up to the year 9999, and
-    OTLP carries none after OTLP_LATEST_TIME, so the OTLP exports call this
-    after it, :func:`require_usable_session_times` and
-    :func:`require_otlp_session_times`. An event whose timestamp is not a
+    :func:`require_usable_timestamps` accepts a time up to
+    9999-12-30T00:00:00Z, and OTLP carries none after OTLP_LATEST_TIME, so
+    the OTLP exports call this after it, :func:`require_usable_session_times`
+    and :func:`require_otlp_session_times`. An event whose timestamp is not a
     Unix time in seconds is left to the first.
     ``event_types`` and ``session_id`` work as they do there.
 

@@ -135,8 +135,10 @@ but never data values or event IDs:
 ```
 
 The collector also refuses an event whose `timestamp` is not a Unix time in
-seconds: text such as an ISO date, `null`, a boolean, an object, NaN, Infinity,
-a negative number, a time in milliseconds, or a number too large to be a date.
+seconds from 0 to 9999-12-30T00:00:00Z: text such as an ISO date, `null`, a
+boolean, an object, NaN, Infinity, a negative number, or a time after
+9999-12-30T00:00:00Z, such as a time in milliseconds. The limit is the same in
+every time zone. On Windows it can be lower, near the end of the year 3000.
 Such an event is not stored, counts in `errors` and does not create a session.
 An event without `timestamp` is stored with the current time. The stderr line
 names the event type but never the timestamp:

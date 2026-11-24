@@ -85,9 +85,10 @@ def _check_session_times(meta: SessionMeta) -> None:
     """Raise ValueError if started_at, or ended_at when set, is not a usable time.
 
     check_session_meta lets through a time the client can read but
-    datetime.fromtimestamp refuses, such as one sent in milliseconds. list
-    and stats show such a time as missing, and the tenant commands refuse a
-    whole store that holds such a started_at.
+    usable_time refuses, such as a time after 9999-12-30T00:00:00Z. A time
+    sent in milliseconds is one. list and stats show such a time as missing,
+    and the tenant commands refuse a whole store that holds such a
+    started_at.
     """
     if usable_time(meta.started_at) is None:
         raise ValueError("started_at must be a Unix time in seconds")
