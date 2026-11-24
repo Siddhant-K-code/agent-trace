@@ -407,6 +407,31 @@ class TestCacheUsageEdges(unittest.TestCase):
             "total": 33,
         })
 
+    def test_langfuse_long_writes_of_any_bedrock_id_are_labelled_one_hour(self):
+        # These IDs name no Claude model, so only the Bedrock rule finds
+        # their provider.
+        for model in (
+            "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/a1b2c3d4e5f6",
+            "jp.amazon.nova-pro-v1:0",
+            "au.amazon.nova-lite-v1:0",
+            "us-gov.meta.llama3-1-70b-instruct-v1:0",
+        ):
+            with self.subTest(model=model):
+                response = {
+                    "model": model,
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                    "cache_creation_input_tokens": 30,
+                    "cache_creation": {"ephemeral_1h_input_tokens": 30},
+                }
+                (generation,) = _generations(_events(None, response))
+                self.assertEqual(generation["usageDetails"], {
+                    "input": 1,
+                    "input_cache_creation_1h": 30,
+                    "output": 2,
+                    "total": 33,
+                })
+
     def test_failed_request_linked_error_keeps_request_usage(self):
         request = {
             "model": "claude-sonnet-4-5",

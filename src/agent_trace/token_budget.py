@@ -24,7 +24,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import TextIO
 
-from .cost import _estimate_tokens
+from .cost import _estimate_tokens, _match_model_key
 from .event_data import (
     number_field,
     require_object_event_data,
@@ -72,18 +72,18 @@ DEFAULT_CONTEXT_LIMIT = 200_000  # conservative fallback
 
 
 def _resolve_limit(model: str) -> int | None:
-    """Return context limit for *model*, or None if unknown."""
+    """Return the context limit for *model*, or None if it is unknown.
+
+    The name finds its ``CONTEXT_LIMITS`` key by the rule that ``cost`` uses
+    to price a recorded model name. Case is ignored, and a provider prefix, a
+    Bedrock prefix or a Bedrock ARN is read past. The name uses the longest
+    key that it equals, or that it starts with followed by ``-``, ``:`` or
+    ``@``.
+    """
     if not model:
         return None
-    m = model.lower().strip()
-    # Exact match
-    if m in CONTEXT_LIMITS:
-        return CONTEXT_LIMITS[m]
-    # Prefix match (e.g. "claude-sonnet-4-5-20251022" → "claude-sonnet-4-5")
-    for key, limit in CONTEXT_LIMITS.items():
-        if m.startswith(key) or key.startswith(m):
-            return limit
-    return None
+    key = _match_model_key(model, CONTEXT_LIMITS)
+    return None if key is None else CONTEXT_LIMITS[key]
 
 
 # ---------------------------------------------------------------------------

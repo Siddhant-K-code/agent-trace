@@ -44,9 +44,12 @@ a long write without a long rate uses the default write rate.
 Each model uses its standard (non-batch) rate in its shortest context or
 smallest prompt tier.  When a pricing page lists a temporary promotional
 price together with the price that follows it, the following price is used.
-Batch, flex, fast and priority tiers, regional or data-residency uplifts,
-long-context tiers, cache storage fees and other non-token charges are
-excluded.
+Batch, flex, fast and priority tiers, data-residency uplifts, long-context
+tiers, cache storage fees and other non-token charges are excluded.  So are
+regional uplifts, with one exception.  A Claude rate here is also the Bedrock
+global rate.  :func:`get_model_pricing` multiplies it by 1.1 for a ``us.``,
+``eu.``, ``apac.``, ``jp.``, ``au.`` or ``us-gov.`` Bedrock inference profile
+of Claude Sonnet 4.5, Haiku 4.5, Opus 4.5 or a later model.
 
 Updating this table requires checking each URL in ``PRICING_SOURCES``,
 updating ``PRICING`` (``_MODEL_PROVIDERS`` is derived from its keys),
@@ -642,24 +645,54 @@ def _dollars(input_tokens: int, output_tokens: int, model: str) -> float:
 # Provider cost dashboard helpers
 # ---------------------------------------------------------------------------
 
+# The geography prefixes of a Bedrock cross-region inference profile ID. A
+# ``global.`` profile routes worldwide.
+_BEDROCK_GEOGRAPHIES = r"us-gov|us|eu|apac|jp|au"
+_BEDROCK_REGION = rf"(?:{_BEDROCK_GEOGRAPHIES}|global)\."
+_BEDROCK_REGION_RE = re.compile(rf"^{_BEDROCK_REGION}")
 _BEDROCK_MODEL_RE = re.compile(
-    r"^(?:(?:us|eu|apac|global)\.)?"
+    rf"^(?:{_BEDROCK_REGION})?"
     r"(?:amazon|anthropic|ai21|cohere|meta|mistral|openai|qwen|writer)\."
 )
+# A Bedrock ARN in any partition, up to its resource.
+_BEDROCK_ARN_RE = re.compile(r"^arn:aws(?:-us-gov|-cn)?:bedrock:[^:]*:[^:]*:")
+_BEDROCK_PREFIXES = ("bedrock/", "aws/bedrock/")
+_BEDROCK_GEOGRAPHY_CLAUDE_RE = re.compile(rf"^(?:{_BEDROCK_GEOGRAPHIES})\.anthropic\.")
+
+# Bedrock bills a geography inference profile of a recent Claude model at 1.1
+# times the global rate. The bundled rate is the global rate. Anthropic's
+# pricing page (https://platform.claude.com/docs/en/about-claude/pricing) says
+# the premium applies to Claude Sonnet 4.5, Haiku 4.5, Opus 4.5 and later
+# models, and not to Claude Opus 4.1 and earlier ones. These keys are the
+# earlier ones. Every other Claude key gets the premium.
+_BEDROCK_REGIONAL_PREMIUM = 1.1
+_BEDROCK_NO_REGIONAL_PREMIUM = frozenset({
+    "claude-opus-4-1",
+    "claude-opus-4",
+    "claude-sonnet-4",
+    "claude-3-7-sonnet",
+    "claude-3-5-sonnet",
+    "claude-3-haiku",
+    "claude-3-opus",
+})
 _RELATIVE_SINCE_RE = re.compile(r"^(\d+(?:\.\d+)?)([dhw])$", re.IGNORECASE)
 
 
 def infer_provider(model: str) -> str:
     """Infer a billing provider from a stored model identifier.
 
-    Bedrock inference-profile IDs are detected before their underlying model
-    vendor, so ``us.anthropic.claude-*`` is correctly attributed to AWS rather
-    than Anthropic's direct API.
+    Bedrock model IDs, inference-profile IDs and ARNs are detected before
+    their underlying model vendor, so ``us.anthropic.claude-*`` is correctly
+    attributed to AWS rather than Anthropic's direct API.
     """
     value = str(model or "").strip().lower()
     if not value:
         return "Unknown"
-    if value.startswith(("bedrock/", "aws/bedrock/")) or _BEDROCK_MODEL_RE.match(value):
+    if (
+        value.startswith(_BEDROCK_PREFIXES)
+        or _BEDROCK_MODEL_RE.match(value)
+        or _BEDROCK_ARN_RE.match(value)
+    ):
         return "AWS Bedrock"
     if "claude" in value or value.startswith("anthropic/"):
         return "Anthropic"
@@ -673,22 +706,47 @@ def infer_provider(model: str) -> str:
     return "Unknown"
 
 
+def _bedrock_arn_model(arn: str) -> tuple[str, str]:
+    """Return the resource type of the Bedrock ARN *arn* and the model it names.
+
+    Only a ``foundation-model/<id>`` or ``inference-profile/<id>`` resource
+    names a model, ``<id>``. The ID can hold a colon of its own, as in
+    ``v2:0``. For any other resource the model is ``""``.
+    """
+    match = _BEDROCK_ARN_RE.match(arn)
+    if match is None:
+        return "", ""
+    resource_type, _, resource_id = arn[match.end():].partition("/")
+    if resource_type in ("foundation-model", "inference-profile"):
+        return resource_type, resource_id
+    return resource_type, ""
+
+
 def _pricing_candidates(model: str) -> list[str]:
     value = str(model or "").strip().lower()
     candidates = [value]
 
-    for prefix in ("bedrock/", "aws/bedrock/", "openai/", "anthropic/", "google/"):
+    for prefix in (*_BEDROCK_PREFIXES, "openai/", "anthropic/", "google/"):
         if value.startswith(prefix):
             candidates.append(value[len(prefix):])
     if value.startswith("models/"):
         candidates.append(value[len("models/"):])
 
+    # A Bedrock ARN stands for the model it names. One that names no model,
+    # such as an application inference profile ARN, gives no name.
+    candidates = [
+        _bedrock_arn_model(c)[1] if _BEDROCK_ARN_RE.match(c) else c
+        for c in candidates
+    ]
+
     for candidate in list(candidates):
-        without_region = re.sub(r"^(?:us|eu|apac|global)\.", "", candidate)
-        candidates.append(without_region)
+        candidates.append(_BEDROCK_REGION_RE.sub("", candidate))
+    for candidate in list(candidates):
+        if candidate.startswith("anthropic."):
+            candidates.append(candidate[len("anthropic."):])
 
     # Keep order deterministic while removing duplicates.
-    return list(dict.fromkeys(candidates))
+    return [c for c in dict.fromkeys(candidates) if c]
 
 
 def _match_model_key(model: str, keys: Iterable[str]) -> str | None:
@@ -706,6 +764,27 @@ def _match_model_key(model: str, keys: Iterable[str]) -> str | None:
     return None
 
 
+def _bedrock_regional_profile(model: str) -> bool:
+    """Return whether *model* is a Bedrock geography profile of a Claude model.
+
+    That is a ``us.``, ``eu.``, ``apac.``, ``jp.``, ``au.`` or ``us-gov.``
+    profile of an ``anthropic.`` model: alone, after ``bedrock/`` or
+    ``aws/bedrock/``, or in an inference-profile ARN. A ``global.`` profile
+    is not one. Nor are a bare ``anthropic.`` model ID and a foundation-model
+    ARN, as they do not show whether the call went to a regional endpoint.
+    """
+    value = str(model or "").strip().lower()
+    for prefix in _BEDROCK_PREFIXES:
+        if value.startswith(prefix):
+            value = value[len(prefix):]
+            break
+    if _BEDROCK_ARN_RE.match(value):
+        resource_type, value = _bedrock_arn_model(value)
+        if resource_type != "inference-profile":
+            return False
+    return _BEDROCK_GEOGRAPHY_CLAUDE_RE.match(value) is not None
+
+
 def get_model_pricing(
     model: str,
     pricing_table: Mapping[str, Mapping[str, float]] = PRICING,
@@ -715,6 +794,10 @@ def get_model_pricing(
     Unknown models deliberately return ``None`` rather than silently using the
     Sonnet fallback retained by :func:`_dollars` for backward compatibility.
     This keeps the cross-provider dashboard from fabricating spend.
+
+    A Bedrock geography inference profile of a Claude model that Bedrock bills
+    at a regional premium, such as ``us.anthropic.claude-sonnet-4-5-*``, gets
+    every rate of its key in *pricing_table* times 1.1.
     """
     key = _match_model_key(model, _MODEL_PROVIDERS)
     if key is None:
@@ -722,7 +805,7 @@ def get_model_pricing(
     rates = pricing_table.get(key)
     if rates is None:
         return None
-    return ModelPrice(
+    price = ModelPrice(
         model_key=key,
         provider=infer_provider(model),
         input_per_million=float(rates["input"]),
@@ -730,6 +813,29 @@ def get_model_pricing(
         cache_read_per_million=_optional_rate(rates, "cache_read"),
         cache_write_per_million=_optional_rate(rates, "cache_write"),
         cache_write_long_per_million=_optional_rate(rates, "cache_write_long"),
+    )
+    if (
+        key.startswith("claude-")
+        and key not in _BEDROCK_NO_REGIONAL_PREMIUM
+        and _bedrock_regional_profile(model)
+    ):
+        price = _with_premium(price, _BEDROCK_REGIONAL_PREMIUM)
+    return price
+
+
+def _with_premium(price: ModelPrice, factor: float) -> ModelPrice:
+    """Return *price* with each of its rates times *factor*."""
+
+    def scaled(rate: float | None) -> float | None:
+        return None if rate is None else rate * factor
+
+    return _replace(
+        price,
+        input_per_million=price.input_per_million * factor,
+        output_per_million=price.output_per_million * factor,
+        cache_read_per_million=scaled(price.cache_read_per_million),
+        cache_write_per_million=scaled(price.cache_write_per_million),
+        cache_write_long_per_million=scaled(price.cache_write_long_per_million),
     )
 
 

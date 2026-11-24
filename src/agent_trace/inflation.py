@@ -71,7 +71,7 @@ def _resolve_factor(model: str) -> float | None:
     """Return the tokenizer factor for *model*, or ``None`` if it has none.
 
     Names resolve as in :func:`agent_trace.cost.get_model_pricing`, so a
-    dated or provider-prefixed name gets the factor of its base model.
+    dated, provider-prefixed or Bedrock name gets the factor of its base model.
     """
     key = _match_model_key(model, TOKENIZER_FACTORS)
     return None if key is None else TOKENIZER_FACTORS[key]

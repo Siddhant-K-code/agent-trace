@@ -156,6 +156,24 @@ class TestInflationFactors(unittest.TestCase):
             with self.subTest(model=model):
                 self.assertIsNone(_resolve_factor(model))
 
+    def test_bedrock_ids_use_the_base_model_factor(self):
+        cases = {
+            "us.anthropic.claude-opus-4-7-v1:0": 1.38,
+            "global.anthropic.claude-opus-4-7-v1:0": 1.38,
+            "jp.anthropic.claude-sonnet-4-5-20250929-v1:0": 1.0,
+            "anthropic.claude-opus-4-7": 1.38,
+            "bedrock/us.anthropic.claude-opus-4-6-v1:0": 1.0,
+            "arn:aws:bedrock:us-east-1:123456789012:inference-profile/"
+            "us.anthropic.claude-opus-4-7-v1:0": 1.38,
+            "arn:aws:bedrock:us-east-1::foundation-model/"
+            "anthropic.claude-3-haiku-20240307-v1:0": 1.0,
+            "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/"
+            "a1b2c3d4e5f6": None,
+        }
+        for model, factor in cases.items():
+            with self.subTest(model=model):
+                self.assertEqual(_resolve_factor(model), factor)
+
     def test_the_longest_model_name_wins(self):
         # cost.py lists gpt-4o before gpt-4o-mini, so a lookup in that
         # order would price gpt-4o-mini at the gpt-4o rates.
@@ -302,6 +320,30 @@ class TestPricing(_StoreTestCase):
                     self.assertEqual(cells[column], "n/a", label)
                     self.assertTrue(cells[1 - column].startswith("$"), label)
                     self.assertEqual(cells[2], "n/a", label)
+
+
+class TestBedrockCompare(_StoreTestCase):
+    def setUp(self):
+        super().setUp()
+        _add_session(self.store, PROMPT_1000, REPLY_500)
+
+    def test_compare_accepts_bedrock_ids_and_prices_them_with_the_premium(self):
+        # Opus 4.6 and 4.7 list at $5 input and $25 output per 1M tokens. A us.
+        # profile costs 1.1 times the list rate, and global. costs the list rate.
+        for geography, rate, cells in (
+            ("us", 1.1, ["$       0.0193", "$       0.0266", "+38.0%"]),
+            ("global", 1.0, ["$       0.0175", "$       0.0241", "+38.0%"]),
+        ):
+            with self.subTest(geography=geography):
+                baseline = f"{geography}.anthropic.claude-opus-4-6-v1:0"
+                inflated = f"{geography}.anthropic.claude-opus-4-7-v1:0"
+                code, out, err = _run(self.trace_dir, "--compare", f"{baseline},{inflated}")
+                self.assertEqual((code, err), (0, ""))
+                self.assertEqual(_cells(_row(out, "Per session (cost)")), cells)
+                report = analyse_inflation(self.store, baseline, inflated)
+                per_session = (1000 * 5 + 500 * 25) * rate / 1e6
+                self.assertAlmostEqual(report.avg_cost_baseline, per_session, places=12)
+                self.assertAlmostEqual(report.avg_cost_inflated, per_session * 1.38, places=12)
 
 
 class TestSessionCount(_StoreTestCase):

@@ -77,6 +77,92 @@ class TestResolveLimit(unittest.TestCase):
         self.assertEqual(_resolve_limit("gpt-4o"), 128_000)
 
 
+US_SONNET_45 = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+
+
+class TestResolveLimitByCostNameRule(unittest.TestCase):
+    """A model name finds its context limit as cost finds its price."""
+
+    def test_bedrock_and_prefixed_names_get_their_base_model_limit(self):
+        cases = {
+            US_SONNET_45: 200_000,
+            "global.anthropic.claude-sonnet-4-5-20250929-v1:0": 200_000,
+            "jp.anthropic.claude-sonnet-4-5-20250929-v1:0": 200_000,
+            "anthropic.claude-3-haiku-20240307-v1:0": 200_000,
+            "bedrock/" + US_SONNET_45: 200_000,
+            "aws/bedrock/anthropic.claude-3-opus-20240229-v1:0": 200_000,
+            "arn:aws:bedrock:us-east-1:123456789012:inference-profile/" + US_SONNET_45: 200_000,
+            "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0":
+                200_000,
+            "anthropic/claude-sonnet-4-5": 200_000,
+            "openai/gpt-4o": 128_000,
+            "models/gemini-2.0-flash-001": 1_048_576,
+        }
+        for model, limit in cases.items():
+            with self.subTest(model=model):
+                self.assertEqual(_resolve_limit(model), limit)
+
+    def test_dated_name_uses_the_longest_key(self):
+        self.assertEqual(_resolve_limit("o1-mini-2024-09-12"), 128_000)
+
+    def test_name_with_no_key_of_its_own_gets_no_limit(self):
+        for model in (
+            "gpt-4.1", "gpt-4.1-2025-04-14", "claude", "claude-3", "claude-opus-47",
+            "claude-sonnet-4.5", "gpt", "o", "gemini",
+            "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/a1b2c3d4e5f6",
+        ):
+            with self.subTest(model=model):
+                self.assertIsNone(_resolve_limit(model))
+
+    def test_names_that_keep_their_limit(self):
+        cases = {
+            "gpt-4-turbo-2024-04-09": 128_000,
+            "gpt-4o-mini-2024-07-18": 128_000,
+            "gpt-4-0613": 8_192,
+            "o3-mini": 200_000,
+            "o1-preview": 200_000,
+            "gemini-2.0-flash-lite": 1_048_576,
+            "llama-3.1-70b-instruct": 131_072,
+            "claude-opus-4-5-20251101": 200_000,
+            "claude-sonnet-4-6": 200_000,
+        }
+        for model, limit in cases.items():
+            with self.subTest(model=model):
+                self.assertEqual(_resolve_limit(model), limit)
+
+
+class TestReportLimitByCostNameRule(unittest.TestCase):
+    """Requests of 10,000 then 150,000 input tokens, as in the bug report."""
+
+    def _report(self, model):
+        store, sid = _make_store_with_llm_events([10_000, 150_000], model=model)
+        self.addCleanup(shutil.rmtree, store.base_dir, True)
+        report = analyse_token_budget(store, sid)
+        return report, _render_budget(report)
+
+    def test_bedrock_session_gets_its_limit(self):
+        report, text = self._report(US_SONNET_45)
+        self.assertEqual(report.context_limit, 200_000)
+        self.assertIn("Context limit: 200,000 tokens", text)
+        self.assertIn("Current: 150,000 tokens  (75.0% of limit)", text)
+
+    def test_session_with_no_known_limit_prints_unknown(self):
+        report, text = self._report("gpt-4.1-2025-04-14")
+        self.assertIsNone(report.context_limit)
+        self.assertEqual([r.pct_used for r in report.requests], [None, None])
+        self.assertIn("Context limit: unknown tokens", text)
+        self.assertIn("Current: 150,000 tokens  (n/a of limit)", text)
+        self.assertNotIn("\u2190 warning", text)
+        self.assertNotIn("Headroom", text)
+
+    def test_dated_o1_mini_session_uses_the_o1_mini_limit(self):
+        report, text = self._report("o1-mini-2024-09-12")
+        self.assertEqual(report.context_limit, 128_000)
+        self.assertIn("Context limit: 128,000 tokens", text)
+        self.assertIn("117.2%  \u2190 warning", text)
+        self.assertEqual(text.count("\u2190 warning"), 1)
+
+
 class TestAnalyseTokenBudget(unittest.TestCase):
     def test_basic_accumulation(self):
         store, sid = _make_store_with_llm_events([1000, 2000, 3000])
@@ -220,6 +306,18 @@ class TestTokenBudgetWatcher(unittest.TestCase):
         )
         result = watcher.update(event)
         self.assertIsNone(result)
+
+    def test_no_fire_for_a_model_with_no_known_limit(self):
+        # gpt-4.1 has no limit in the table. gpt-4's 8,192 is not its limit.
+        watcher = TokenBudgetWatcher(threshold=0.9)
+        self.assertIsNone(watcher.update(_request(10_000, "gpt-4.1-2025-04-14")))
+        self.assertIsNone(watcher.context_limit)
+
+    def test_fires_for_a_bedrock_inference_profile(self):
+        watcher = TokenBudgetWatcher(threshold=0.9)
+        result = watcher.update(_request(190_000, US_SONNET_45))
+        self.assertIsNotNone(result)
+        self.assertIn("190,000 / 200,000 tokens (95.0%)", result)
 
     def test_non_llm_event_ignored(self):
         watcher = TokenBudgetWatcher(threshold=0.5)
