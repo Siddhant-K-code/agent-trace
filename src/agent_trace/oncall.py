@@ -27,7 +27,7 @@ from .event_data import (
     str_field,
 )
 from .inert import inert
-from .models import EventType
+from .models import EventType, usable_time
 from .store import TraceStore
 
 
@@ -139,7 +139,9 @@ def analyse_oncall(
 
     sessions_scanned = 0
     for meta in all_metas:
-        if meta.started_at < since_ts:
+        # A start that is not a usable time is in no window.
+        started = usable_time(meta.started_at)
+        if started is None or started < since_ts:
             continue
         sessions_scanned += 1
         try:

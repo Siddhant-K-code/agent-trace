@@ -18,7 +18,7 @@ from typing import TextIO
 from .cost import estimate_cost, DEFAULT_MODEL
 from .event_data import require_object_event_data, str_field
 from .inert import inert
-from .models import EventType, SessionMeta, usable_text
+from .models import EventType, SessionMeta, usable_text, usable_time
 from .store import TraceStore
 
 
@@ -167,8 +167,12 @@ def build_report(
     prior_end = window_start
 
     for meta in all_sessions:
-        in_window = window_start <= meta.started_at < window_end
-        in_prior = include_prior and (prior_start <= meta.started_at < prior_end)
+        # A start that is not a usable time is in no window.
+        started = usable_time(meta.started_at)
+        if started is None:
+            continue
+        in_window = window_start <= started < window_end
+        in_prior = include_prior and (prior_start <= started < prior_end)
 
         if not in_window and not in_prior:
             continue

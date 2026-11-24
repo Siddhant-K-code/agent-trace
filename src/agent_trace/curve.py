@@ -19,7 +19,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import TextIO
 
-from .models import usable_text
+from .models import usable_text, usable_time
 from .store import TraceStore
 
 
@@ -155,7 +155,11 @@ def analyse_curve(
 
         type_costs.setdefault(task_type, []).append(cost)
 
-        ts = meta.started_at
+        # A start that is not a usable time still counts the session, but
+        # takes no part in the days analysed.
+        ts = usable_time(meta.started_at)
+        if ts is None:
+            continue
         if earliest_ts is None or ts < earliest_ts:
             earliest_ts = ts
         if latest_ts is None or ts > latest_ts:

@@ -35,6 +35,7 @@ from .models import (
     usable_count,
     usable_number,
     usable_text,
+    usable_time,
 )
 from .store import TraceStore
 
@@ -238,8 +239,12 @@ def build_trend_report(
     all_meta = store.list_sessions()
 
     if since_days is not None:
+        # A start that is not a usable time is in no window.
         cutoff = time.time() - since_days * 86400
-        all_meta = [m for m in all_meta if m.started_at >= cutoff]
+        all_meta = [
+            m for m in all_meta
+            if (started := usable_time(m.started_at)) is not None and started >= cutoff
+        ]
 
     sessions = all_meta[:limit]
     # Oldest first for charts
@@ -396,15 +401,31 @@ def _svg_sparkline(
     )
 
 
+def _usable_starts(points: list[TrendPoint]) -> list[float]:
+    """Return the starts of the points that are usable times."""
+    return [
+        started for p in points
+        if (started := usable_time(p.started_at)) is not None
+    ]
+
+
 def _annotation_x_fracs(
     points: list[TrendPoint],
     annotations: list[TrendAnnotation],
 ) -> list[tuple[float, str]]:
-    """Map annotation dates to x-axis fractions based on session timestamps."""
+    """Map annotation dates to x-axis fractions based on session timestamps.
+
+    The axis runs from the earliest to the latest usable start. A start that
+    is not a usable time is left out, and with no usable start no annotation
+    is placed.
+    """
     if not points or not annotations:
         return []
-    t_min = points[0].started_at
-    t_max = points[-1].started_at
+    starts = _usable_starts(points)
+    if not starts:
+        return []
+    t_min = min(starts)
+    t_max = max(starts)
     t_rng = t_max - t_min or 1.0
     result = []
     for ann in annotations:
@@ -475,7 +496,7 @@ def render_html_trend(report: TrendReport) -> str:
     # Session table (last 20)
     table_rows = ""
     for p in reversed(pts[-20:]):
-        dt = datetime.fromtimestamp(p.started_at, tz=timezone.utc).strftime("%m-%d %H:%M")
+        dt = _fmt_ts(p.started_at)
         # A judge name in eval.json can be any JSON value, so escape it as text.
         scores_str = ", ".join(
             f"{html.escape(str(e.judge))}={e.score:.2f}" for e in p.eval_scores
@@ -493,9 +514,10 @@ def render_html_trend(report: TrendReport) -> str:
 
     n = len(pts)
     period = ""
-    if pts:
-        t0 = datetime.fromtimestamp(pts[0].started_at, tz=timezone.utc).strftime("%Y-%m-%d")
-        t1 = datetime.fromtimestamp(pts[-1].started_at, tz=timezone.utc).strftime("%Y-%m-%d")
+    starts = _usable_starts(pts)
+    if starts:
+        t0 = datetime.fromtimestamp(min(starts), tz=timezone.utc).strftime("%Y-%m-%d")
+        t1 = datetime.fromtimestamp(max(starts), tz=timezone.utc).strftime("%Y-%m-%d")
         period = f"{t0} to {t1}"
 
     return f"""<!DOCTYPE html>
@@ -660,9 +682,13 @@ def _fmt_cost(cost: float | None) -> str:
     return "n/a" if cost is None else f"${cost:.4f}"
 
 
-def _fmt_ts(ts: float) -> str:
+def _fmt_ts(ts: object) -> str:
+    """Format a session start in UTC, or "?" when it is not a usable time."""
+    started = usable_time(ts)
+    if started is None:
+        return "?"
     try:
-        dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+        dt = datetime.fromtimestamp(started, tz=timezone.utc)
         return dt.strftime("%m-%d %H:%M")
     except Exception:
         return "?"
