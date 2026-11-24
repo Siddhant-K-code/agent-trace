@@ -26,8 +26,10 @@ from agent_trace.cost import (
     infer_provider,
     parse_since,
 )
+from agent_trace.inflation import _resolve_factor
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
+from agent_trace.token_budget import _resolve_limit
 
 try:
     import _escapes
@@ -872,6 +874,162 @@ class TestBedrockClaudeModelIds(unittest.TestCase):
             "c07arn": ("AWS Bedrock", PROFILE_ARN, "19.80000000"),
             "c08appprof": ("AWS Bedrock", APP_PROFILE_ARN, "0.00000000"),
             "c09novajp": ("AWS Bedrock", "jp.amazon.nova-pro-v1:0", "4.00000000"),
+        }
+        usage = {"input_tokens": 1_000_000, "output_tokens": 1_000_000}
+        for session_id, (_, model, _) in sessions.items():
+            fixture.add_session(session_id, time.time() - 60, model, response_data=usage)
+        args = build_parser().parse_args([
+            "--trace-dir", fixture.temp_dir.name, "cost", "--breakdown", "provider", "--csv",
+        ])
+        stdout = io.StringIO()
+        with patch("sys.stdout", stdout):
+            self.assertEqual(cmd_cost(args), 0)
+        rows = list(csv.DictReader(io.StringIO(stdout.getvalue())))
+        self.assertEqual(
+            {row["session_id"]: (row["provider"], row["model"], row["cost_usd"]) for row in rows},
+            sessions,
+        )
+
+
+def _entry(model):
+    """Return the price key, provider and rates, context limit and tokenizer
+    factor that *model* resolves to."""
+    price = get_model_pricing(model)
+    priced = None if price is None else (price.model_key, price.provider, _rates(price))
+    return priced, _resolve_limit(model), _resolve_factor(model)
+
+
+# A Claude name with a dot in its version, and its dash form.
+DOT_DASH_PAIRS = (
+    ("claude-sonnet-4.5", "claude-sonnet-4-5"),
+    ("claude-sonnet-4.5-20250929", "claude-sonnet-4-5-20250929"),
+    ("claude-haiku-4.5", "claude-haiku-4-5"),
+    ("claude-opus-4.1", "claude-opus-4-1"),
+    ("claude-opus-4.7", "claude-opus-4-7"),
+    ("claude-3.5-sonnet", "claude-3-5-sonnet"),
+    ("claude-3.7-sonnet", "claude-3-7-sonnet"),
+    ("claude-opus-5.5", "claude-opus-5-5"),
+)
+NAME_FORMS = (
+    "{}",
+    "anthropic/{}",
+    "anthropic/{}:beta",
+    "anthropic/{}:thinking",
+    "bedrock/{}",
+    "anthropic.{}",
+    "anthropic.{}-v1:0",
+    "us.anthropic.{}-v1:0",
+    "eu.anthropic.{}-v1:0",
+    "global.anthropic.{}-v1:0",
+    "bedrock/us.anthropic.{}-v1:0",
+    "aws/bedrock/anthropic.{}-v1:0",
+    "arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.{}-v1:0",
+    "arn:aws:bedrock:us-east-1::foundation-model/anthropic.{}-v1:0",
+)
+
+
+class TestClaudeVersionDot(unittest.TestCase):
+    """Copilot and OpenRouter write a Claude version with a dot, as in
+    claude-sonnet-4.5. Such a name resolves as its dash form does."""
+
+    def test_dot_name_resolves_as_its_dash_form(self):
+        for dot, dash in DOT_DASH_PAIRS:
+            for form in NAME_FORMS:
+                dot_name, dash_name = form.format(dot), form.format(dash)
+                with self.subTest(model=dot_name):
+                    self.assertIsNotNone(get_model_pricing(dash_name))
+                    self.assertEqual(_entry(dot_name), _entry(dash_name))
+
+    def test_dot_names_get_the_dash_key_and_rates(self):
+        # A us. or eu. profile of Sonnet 4.5 or Haiku 4.5 costs 1.1 times the
+        # list rate. Opus 4.1 has no premium.
+        cases = {
+            "claude-sonnet-4.5": ("claude-sonnet-4-5", "Anthropic", 3, 15, 200_000, 1.0),
+            "Claude-Sonnet-4.5": ("claude-sonnet-4-5", "Anthropic", 3, 15, 200_000, 1.0),
+            "claude-haiku-4.5": ("claude-haiku-4-5", "Anthropic", 1, 5, None, None),
+            "claude-opus-4.1": ("claude-opus-4-1", "Anthropic", 15, 75, 200_000, None),
+            "claude-opus-4.7": ("claude-opus-4-7", "Anthropic", 5, 25, 200_000, 1.38),
+            "claude-3.7-sonnet-thought": ("claude-3-7-sonnet", "Anthropic", 3, 15, None, None),
+            "anthropic/claude-3.5-sonnet:beta":
+                ("claude-3-5-sonnet", "Anthropic", 3, 15, None, None),
+            "anthropic/claude-3.7-sonnet:thinking":
+                ("claude-3-7-sonnet", "Anthropic", 3, 15, None, None),
+            "anthropic.claude-sonnet-4.5":
+                ("claude-sonnet-4-5", "AWS Bedrock", 3, 15, 200_000, 1.0),
+            "us.anthropic.claude-sonnet-4.5":
+                ("claude-sonnet-4-5", "AWS Bedrock", 3.3, 16.5, 200_000, 1.0),
+            "us.anthropic.claude-opus-4.1":
+                ("claude-opus-4-1", "AWS Bedrock", 15, 75, 200_000, None),
+            "bedrock/eu.anthropic.claude-haiku-4.5":
+                ("claude-haiku-4-5", "AWS Bedrock", 1.1, 5.5, None, None),
+        }
+        for model, (key, provider, inp, out, limit, factor) in cases.items():
+            with self.subTest(model=model):
+                price = get_model_pricing(model)
+                self.assertIsNotNone(price)
+                self.assertEqual((price.model_key, price.provider), (key, provider))
+                self.assertAlmostEqual(price.input_per_million, inp)
+                self.assertAlmostEqual(price.output_per_million, out)
+                self.assertEqual((_resolve_limit(model), _resolve_factor(model)), (limit, factor))
+
+    def test_every_dot_between_two_digits_reads_as_a_dash(self):
+        # Read at its first dot only, claude-sonnet-4.5.1 would use
+        # claude-sonnet-4, which has the same rates but no tokenizer factor.
+        for model, dash in (
+            ("claude-sonnet-4.5.1", "claude-sonnet-4-5"),
+            ("claude-opus-4.5.1", "claude-opus-4-5"),
+        ):
+            with self.subTest(model=model):
+                self.assertEqual(_entry(model), _entry(dash))
+
+    def test_dash_form_replaces_the_dot_form(self):
+        # claude-opus-4-5.1 starts with claude-opus-4- too. Tried first, the dot
+        # form would use claude-opus-4.
+        self.assertEqual(_entry("claude-opus-4-5.1"), _entry("claude-opus-4-5"))
+
+    def test_dash_form_of_a_suffix_finds_the_key_it_starts_with(self):
+        # claude-sonnet-4-5x starts with claude-sonnet-4- and not claude-sonnet-4-5-.
+        self.assertEqual(_entry("claude-sonnet-4.5x"), _entry("claude-sonnet-4-5x"))
+        self.assertEqual(get_model_pricing("claude-sonnet-4.5x").model_key, "claude-sonnet-4")
+
+    def test_non_claude_dot_keys_keep_their_entries(self):
+        # The rule reads only claude- names. Read in these, the dot would turn
+        # gpt-4.1 into gpt-4 and leave gemini-2.5-pro with no price.
+        cases = {
+            "gpt-4.1": ("gpt-4.1", None, None),
+            "gpt-4.1-mini": ("gpt-4.1-mini", None, None),
+            "gpt-5.1": ("gpt-5.1", None, None),
+            "gemini-2.5-pro": ("gemini-2.5-pro", None, None),
+            "gpt-3.5-turbo": (None, 16_385, None),
+            "llama-3.1-70b": (None, 131_072, None),
+            "gemini-1.5-pro": (None, 1_048_576, 0.95),
+        }
+        for model, (key, limit, factor) in cases.items():
+            with self.subTest(model=model):
+                price = get_model_pricing(model)
+                self.assertEqual(None if price is None else price.model_key, key)
+                self.assertEqual((_resolve_limit(model), _resolve_factor(model)), (limit, factor))
+
+    def test_other_dots_stay_unread(self):
+        # A dot that is not between two digits, a name that does not start with
+        # claude-, and a version with no key of its own.
+        for model in (
+            "claude-sonnet-4..5", "claude.sonnet-4.5", "xclaude-sonnet-4.5",
+            "claude-3-5-sonnet.v2", "claude-3.5", "claude-2.1", "claude-instant-1.2",
+        ):
+            with self.subTest(model=model):
+                self.assertEqual(_entry(model), (None, None, None))
+
+    def test_cost_csv_prices_dot_names(self):
+        fixture = ProviderCostStore()
+        self.addCleanup(fixture.close)
+        sessions = {
+            "c01dot": ("Anthropic", "claude-sonnet-4.5", "18.00000000"),
+            "c02openrouter": ("Anthropic", "anthropic/claude-3.5-sonnet:beta", "18.00000000"),
+            "c03opus41": ("Anthropic", "claude-opus-4.1", "90.00000000"),
+            "c04dash": ("Anthropic", "claude-sonnet-4-5-20250929", "18.00000000"),
+            "c05us": ("AWS Bedrock", "us.anthropic.claude-sonnet-4.5", "19.80000000"),
+            "c06usopus41": ("AWS Bedrock", "us.anthropic.claude-opus-4.1", "90.00000000"),
         }
         usage = {"input_tokens": 1_000_000, "output_tokens": 1_000_000}
         for session_id, (_, model, _) in sessions.items():

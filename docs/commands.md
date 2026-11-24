@@ -697,11 +697,13 @@ Case is ignored. One provider prefix is dropped: `bedrock/`, `aws/bedrock/`,
 `aws-us-gov` or `aws-cn` partition stands for the model ID after its
 `foundation-model/` or `inference-profile/`. Then a Bedrock geography prefix
 is dropped (`us.`, `eu.`, `apac.`, `jp.`, `au.`, `us-gov.` or `global.`), and
-then a leading `anthropic.`. The name uses the longest table name that it
-equals, or that it starts with followed by `-`, `:` or `@`. So
+then a leading `anthropic.`. Then, in a name that starts with `claude-`, a dot
+between two digits reads as a dash. The name uses the longest table name that
+it equals, or that it starts with followed by `-`, `:` or `@`. So
 `us.anthropic.claude-sonnet-4-5-20250929-v1:0`,
-`anthropic.claude-sonnet-4-5-20250929-v1:0` and `claude-sonnet-4-5-20250929`
-use `claude-sonnet-4-5`, and `gpt-4o-2024-08-06` uses `gpt-4o`. A name such as
+`anthropic.claude-sonnet-4-5-20250929-v1:0`, `claude-sonnet-4-5-20250929` and
+`claude-sonnet-4.5` use `claude-sonnet-4-5`, `anthropic/claude-3.5-sonnet:beta`
+uses `claude-3-5-sonnet`, and `gpt-4o-2024-08-06` uses `gpt-4o`. A name such as
 `claude` or `claude-opus-47` has no price. [`compaction`](#compaction),
 [`inflation`](#inflation), [`token-budget`](#token-budget) and
 [`watch`](#watch) read model names by the same rule.
@@ -817,7 +819,7 @@ agent-strace token-budget [session-id] [--warning-threshold FRACTION]
 ```
 Show how full the model's context window is at each LLM request. The model is detected from the session (default: latest). A request's input tokens are the whole prompt it sent, so each request's fill is its own input tokens divided by the context limit; requests are not added together. A request at or above `--warning-threshold` of the limit (default: `0.9`) is marked `← warning`.
 
-The context limit comes from a bundled table of context windows. The model name finds its entry by the **Model names** rule of [`cost`](#cost). So `us.anthropic.claude-sonnet-4-5-20250929-v1:0` and `anthropic/claude-sonnet-4-5` get the 200,000 limit of `claude-sonnet-4-5`, and `o1-mini-2024-09-12` gets the 128,000 limit of `o1-mini`. A model with no entry, such as a `gpt-4.1` model, has no known limit. Then the header says `Context limit: unknown tokens`, each fill and the `Current` and `Peak` lines show `n/a`, no request is marked, and no `Headroom` line is printed. For such a model, [`watch`](#watch) gives no `--max-context-pct` alert, and [`compaction`](#compaction) and `--checkpoint-at` use a limit of 200,000 tokens.
+The context limit comes from a bundled table of context windows. The model name finds its entry by the **Model names** rule of [`cost`](#cost). So `us.anthropic.claude-sonnet-4-5-20250929-v1:0`, `anthropic/claude-sonnet-4-5` and `claude-sonnet-4.5` get the 200,000 limit of `claude-sonnet-4-5`, and `o1-mini-2024-09-12` gets the 128,000 limit of `o1-mini`. A model with no entry, such as a `gpt-4.1` model, has no known limit. Then the header says `Context limit: unknown tokens`, each fill and the `Current` and `Peak` lines show `n/a`, no request is marked, and no `Headroom` line is printed. For such a model, [`watch`](#watch) gives no `--max-context-pct` alert, and [`compaction`](#compaction) and `--checkpoint-at` use a limit of 200,000 tokens.
 
 The input tokens are read the way [`compaction`](#compaction) reads them: provider keys such as `input_tokens` or `prompt_tokens`, nested `usage` objects, and Anthropic cache read and write tokens. A request with no count is estimated from the size of its own recorded data and shown with `~`. That data may not hold the whole prompt, so an estimated fill can be lower than the real one.
 
@@ -2334,7 +2336,7 @@ These models have a tokenizer factor. `claude-opus-4-6` is the 1.0 baseline.
 | 1.35 | `claude-sonnet-4-7` |
 | 1.38 | `claude-opus-4-7` |
 
-A model name resolves by the **Model names** rule of [`cost`](#cost). Case is ignored. A provider prefix such as `anthropic/` or `bedrock/`, a Bedrock geography prefix such as `us.`, `jp.`, `au.`, `us-gov.` or `global.`, and then a leading `anthropic.` are dropped. A Bedrock foundation-model or inference-profile ARN stands for its model ID. A dated or suffixed name resolves to its base model: the longest name in the table that it equals, or that it starts with followed by `-`, `:` or `@`. So `gpt-4o-2024-08-06` uses `gpt-4o`, `gpt-4o-mini-2024-07-18` uses `gpt-4o-mini`, and `anthropic/claude-opus-4-7`, `anthropic.claude-opus-4-7` and `us.anthropic.claude-opus-4-7-v1:0` use `claude-opus-4-7`. A name such as `claude` or `claude-opus-47` has no factor.
+A model name resolves by the **Model names** rule of [`cost`](#cost). Case is ignored. A provider prefix such as `anthropic/` or `bedrock/`, a Bedrock geography prefix such as `us.`, `jp.`, `au.`, `us-gov.` or `global.`, and then a leading `anthropic.` are dropped. A Bedrock foundation-model or inference-profile ARN stands for its model ID. In a name that starts with `claude-`, a dot between two digits reads as a dash. A dated or suffixed name resolves to its base model: the longest name in the table that it equals, or that it starts with followed by `-`, `:` or `@`. So `gpt-4o-2024-08-06` uses `gpt-4o`, `gpt-4o-mini-2024-07-18` uses `gpt-4o-mini`, and `anthropic/claude-opus-4-7`, `anthropic.claude-opus-4-7`, `us.anthropic.claude-opus-4-7-v1:0` and `claude-opus-4.7` use `claude-opus-4-7`. A name such as `claude` or `claude-opus-47` has no factor.
 
 The header counts only the sessions with prompt or model content. A session with only tool calls is left out, so it does not lower the per-session average. With no such session, the count and the averages are 0. "Largest inflation source" names the content type that adds the most tokens. A tie keeps the first type in table order. The line is left out when no type adds tokens.
 

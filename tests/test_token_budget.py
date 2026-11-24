@@ -108,11 +108,19 @@ class TestResolveLimitByCostNameRule(unittest.TestCase):
     def test_name_with_no_key_of_its_own_gets_no_limit(self):
         for model in (
             "gpt-4.1", "gpt-4.1-2025-04-14", "claude", "claude-3", "claude-opus-47",
-            "claude-sonnet-4.5", "gpt", "o", "gemini",
+            "gpt", "o", "gemini",
             "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/a1b2c3d4e5f6",
         ):
             with self.subTest(model=model):
                 self.assertIsNone(_resolve_limit(model))
+
+    def test_claude_name_with_a_dot_gets_the_limit_of_its_dash_form(self):
+        for model in (
+            "claude-sonnet-4.5", "claude-opus-4.1", "claude-opus-4.7",
+            "anthropic/claude-opus-4.7", "us.anthropic.claude-sonnet-4.5-v1:0",
+        ):
+            with self.subTest(model=model):
+                self.assertEqual(_resolve_limit(model), 200_000)
 
     def test_names_that_keep_their_limit(self):
         cases = {
@@ -145,6 +153,14 @@ class TestReportLimitByCostNameRule(unittest.TestCase):
         self.assertEqual(report.context_limit, 200_000)
         self.assertIn("Context limit: 200,000 tokens", text)
         self.assertIn("Current: 150,000 tokens  (75.0% of limit)", text)
+
+    def test_session_of_a_claude_name_with_a_dot_gets_its_limit(self):
+        for model in ("claude-sonnet-4.5", "claude-opus-4.7"):
+            with self.subTest(model=model):
+                report, text = self._report(model)
+                self.assertEqual(report.context_limit, 200_000)
+                self.assertIn("Context limit: 200,000 tokens", text)
+                self.assertIn("Current: 150,000 tokens  (75.0% of limit)", text)
 
     def test_session_with_no_known_limit_prints_unknown(self):
         report, text = self._report("gpt-4.1-2025-04-14")
@@ -318,6 +334,15 @@ class TestTokenBudgetWatcher(unittest.TestCase):
         result = watcher.update(_request(190_000, US_SONNET_45))
         self.assertIsNotNone(result)
         self.assertIn("190,000 / 200,000 tokens (95.0%)", result)
+
+    def test_fires_for_a_claude_name_with_a_dot_in_its_version(self):
+        for model in ("claude-sonnet-4.5", "claude-opus-4.1", "anthropic/claude-opus-4.7"):
+            with self.subTest(model=model):
+                watcher = TokenBudgetWatcher(threshold=0.9)
+                result = watcher.update(_request(190_000, model))
+                self.assertEqual(watcher.context_limit, 200_000)
+                self.assertIsNotNone(result)
+                self.assertIn("190,000 / 200,000 tokens (95.0%)", result)
 
     def test_non_llm_event_ignored(self):
         watcher = TokenBudgetWatcher(threshold=0.5)
