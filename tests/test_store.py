@@ -67,6 +67,52 @@ def raw_separator_session(store: TraceStore, separator: str) -> tuple[str, list[
     return meta.session_id, lines
 
 
+# States that leave run1 in the trace directory, but not as a session that
+# find_session counts.
+NOT_A_SESSION_STATES = (
+    "meta.json moved out",
+    "meta.json a symlink",
+    "run1 a symlinked directory",
+    "run1 a dangling symlink",
+    "meta.json mode 000",
+)
+
+
+def make_run1_not_a_session(base_dir: Path, outside: Path, state: str) -> None:
+    """Put the session run1 in base_dir into one of NOT_A_SESSION_STATES.
+
+    outside is a directory outside the store. Raises unittest.SkipTest when
+    this account cannot make the state.
+    """
+    run1 = Path(base_dir) / "run1"
+    meta = run1 / "meta.json"
+    try:
+        if state == "meta.json moved out":
+            meta.rename(outside / "meta.json")
+        elif state == "meta.json a symlink":
+            meta.rename(outside / "meta.json")
+            meta.symlink_to(outside / "meta.json")
+        elif state == "run1 a symlinked directory":
+            run1.rename(outside / "run1")
+            run1.symlink_to(outside / "run1", target_is_directory=True)
+        elif state == "run1 a dangling symlink":
+            shutil.rmtree(run1)
+            run1.symlink_to(outside / "missing", target_is_directory=True)
+        elif state == "meta.json mode 000":
+            meta.chmod(0)
+        else:
+            raise ValueError(f"unknown state: {state}")
+    except OSError as exc:
+        raise unittest.SkipTest(f"cannot make {state}: {exc}")
+    if state == "meta.json mode 000":
+        try:
+            meta.read_bytes()
+        except PermissionError:
+            return
+        meta.chmod(0o600)
+        raise unittest.SkipTest("this account can read a file with mode 000")
+
+
 class TestTraceStore(unittest.TestCase):
     def setUp(self):
         os.environ.pop("AGENT_TRACE_NO_REDACT", None)
@@ -356,33 +402,22 @@ class TestTraceStore(unittest.TestCase):
 
     def test_find_session_does_not_let_a_longer_id_stand_in_for_an_exact_entry(self):
         # run1 is in the trace directory but is not a session. Before, run10 was used.
-        states = (
-            ("meta.json moved out", "run1/meta.json", False),
-            ("meta.json a symlink", "run1/meta.json", True),
-            ("run1 a symlinked directory", "run1", True),
-        )
-        for state, moved, linked in states:
-            tmp = tempfile.TemporaryDirectory()
-            self.addCleanup(tmp.cleanup)
-            store = TraceStore(os.path.join(tmp.name, "traces"))
-            for session_id in ("run1", "run10"):
-                store.create_session(
-                    SessionMeta(session_id=session_id, tenant_id="acme", started_at=1.0)
-                )
-            source = store.base_dir / moved
-            target = Path(tmp.name) / source.name
-            source.rename(target)
-            if linked:
-                try:
-                    source.symlink_to(target, target_is_directory=target.is_dir())
-                except OSError:
-                    continue  # This account cannot create symlinks.
-            for reverse in (False, True):
-                with self.subTest(state=state, reverse=reverse), self._scan_order(reverse):
-                    self.assertIsNone(store.find_session("run1"))
-                    self.assertEqual(store.find_session("run10"), "run10")
-                    # A lookup with a tenant skips this check, as before.
-                    self.assertEqual(store.find_session("run1", tenant_id="acme"), "run10")
+        for state in NOT_A_SESSION_STATES:
+            with self.subTest(state=state):
+                tmp = tempfile.TemporaryDirectory()
+                self.addCleanup(tmp.cleanup)
+                store = TraceStore(os.path.join(tmp.name, "traces"))
+                for session_id in ("run1", "run10"):
+                    store.create_session(
+                        SessionMeta(session_id=session_id, tenant_id="acme", started_at=1.0)
+                    )
+                make_run1_not_a_session(store.base_dir, Path(tmp.name), state)
+                for reverse in (False, True):
+                    with self.subTest(reverse=reverse), self._scan_order(reverse):
+                        self.assertIsNone(store.find_session("run1"))
+                        self.assertEqual(store.find_session("run10"), "run10")
+                        # A lookup with a tenant skips this check, as before.
+                        self.assertEqual(store.find_session("run1", tenant_id="acme"), "run10")
 
     def test_find_session_for_a_tenant_skips_a_corrupt_match(self):
         # The tenant of a corrupt session cannot be read, so the lookup must not reveal it.

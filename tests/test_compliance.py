@@ -31,9 +31,11 @@ try:
         _write_lines,
     )
     from test_store import (
+        NOT_A_SESSION_STATES,
         NOT_UTF8_LINE,
         OTHER_SESSION,
         event_line,
+        make_run1_not_a_session,
         raw_separator_session,
         tree_snapshot,
         write_session_lines,
@@ -54,9 +56,11 @@ except ImportError:
         _write_lines,
     )
     from tests.test_store import (
+        NOT_A_SESSION_STATES,
         NOT_UTF8_LINE,
         OTHER_SESSION,
         event_line,
+        make_run1_not_a_session,
         raw_separator_session,
         tree_snapshot,
         write_session_lines,
@@ -1471,6 +1475,31 @@ class TestRefusedSessions(_CliCase):
                     self.assertIs(report["ready"], False)
                 else:
                     self.assertIn(line, run.stdout)
+
+
+class TestEuAiActExportNamesTheExactSession(_CliCase):
+    """export run1 --format eu-ai-act never exports run10 in run1's place."""
+
+    def test_run1_that_is_not_a_session_is_not_found(self):
+        # Before, the export used run10.
+        for index, state in enumerate(NOT_A_SESSION_STATES):
+            with self.subTest(state=state):
+                outside = self.root / f"state-{index}"
+                trace_dir = outside / "traces"
+                store = TraceStore(str(trace_dir), use_workspace_env=False)
+                for session_id in ("run1", "run10"):
+                    _make_probe_session(store, session_id)
+                make_run1_not_a_session(trace_dir, outside, state)
+                output = outside / "eu.json"
+                run = self.cli(
+                    "export", "run1", "--format", "eu-ai-act", "-o", str(output),
+                    trace_dir=trace_dir,
+                )
+                self.assertEqual(
+                    (run.returncode, run.stdout, run.stderr),
+                    (1, "", "Session not found: run1\n"),
+                )
+                self.assertFalse(output.exists())
 
 
 if __name__ == "__main__":

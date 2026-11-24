@@ -181,11 +181,19 @@ def _parent_session_id(args: argparse.Namespace) -> str:
     )
 
 
-def _resolve_parent_session_id(store: TraceStore, args: argparse.Namespace) -> str:
+def _resolve_parent_session_id(store: TraceStore, args: argparse.Namespace) -> str | None:
+    """Return the parent's full session ID, or "" when no parent is given.
+
+    When no session matches, print one line and return None. The caller
+    then exits before it creates a session.
+    """
     raw = _parent_session_id(args)
     if not raw:
         return ""
-    return store.find_session(raw) or raw
+    found = store.find_session(raw)
+    if found is None:
+        sys.stderr.write(f"Parent session not found: {raw}\n")
+    return found
 
 
 def _parent_event_id() -> str:
@@ -227,6 +235,8 @@ def cmd_record(args: argparse.Namespace) -> int:
         return 1
 
     parent_session_id = _resolve_parent_session_id(store, args)
+    if parent_session_id is None:
+        return 1
     meta = SessionMeta(
         agent_name=args.name or "",
         command=" ".join(server_cmd),
@@ -285,6 +295,8 @@ def cmd_record_http(args: argparse.Namespace) -> int:
         return 1
 
     parent_session_id = _resolve_parent_session_id(store, args)
+    if parent_session_id is None:
+        return 1
     meta = SessionMeta(
         agent_name=args.name or "",
         command=f"http-proxy -> {args.url}",
@@ -370,7 +382,10 @@ def cmd_replay(args: argparse.Namespace) -> int:
     diff_session_id = getattr(args, "diff", "") or ""
     if diff_session_id:
         from .replay import replay_to_html_diff
-        diff_full = store.find_session(diff_session_id) or diff_session_id
+        diff_full = store.find_session(diff_session_id)
+        if diff_full is None:
+            sys.stderr.write(f"Session not found: {diff_session_id}\n")
+            return 1
         output_path = getattr(args, "output", "") or \
             f"diff-{session_id[:8]}-vs-{diff_full[:8]}.html"
         replay_to_html_diff(store, session_id, diff_full, output_path=output_path)
@@ -888,7 +903,13 @@ def cmd_verify(args: argparse.Namespace) -> int:
         if exc.session_id != session_id:
             raise
         full_id = session_id
-    if not store.session_exists(full_id):
+    try:
+        exists = store.session_exists(full_id)
+    except ValueError:
+        # session_exists refuses a symlinked session directory or meta.json,
+        # and a meta.json that is not a regular file. Treat these as not found.
+        exists = False
+    if not exists:
         sys.stderr.write(f"Session not found: {session_id}\n")
         return 1
 

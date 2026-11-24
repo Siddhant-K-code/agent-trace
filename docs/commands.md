@@ -29,7 +29,7 @@ An empty `AGENT_TRACE_DIR` is treated as unset. Relative paths resolve against t
 A command that takes a session ID also takes a prefix of one.
 
 - An exact ID wins, even when a longer ID starts with it. `run1` selects `run1`, not `run10`.
-- If `run1` is in the trace directory but is not a session, for example after its `meta.json` is moved out, `run1` finds no session. It does not select `run10`.
+- If `run1` is in the trace directory but is not a session, for example after its `meta.json` is moved out, `run1` finds no session. It does not select `run10`. `verify` reads only `events.ndjson`, so it still checks `run1` when `run1/meta.json` is a regular file it cannot read.
 - A prefix that matches one session selects that session.
 - A prefix that matches two or more sessions is refused. Nothing is read or written, and the command exits 1 with one line:
 
@@ -74,7 +74,7 @@ If the server cannot start, `record` prints `agent-strace: could not start the M
 | `--redact` | Strip secrets before writing to disk; kept for compatibility because this is now the default |
 | `--no-redact` | Disable automatic secret redaction |
 
-`AGENT_STRACE_PARENT_SESSION` can also be set by orchestrators that spawn child agents.
+`AGENT_STRACE_PARENT_SESSION` can also be set by orchestrators that spawn child agents. When `--parent` or `AGENT_STRACE_PARENT_SESSION` names no session, `record` prints `Parent session not found: <value>`, exits 1 and creates no session.
 
 ### `record-http`
 ```
@@ -98,6 +98,8 @@ For an `https://` URL the proxy verifies the server certificate and host name wi
 To refuse requests from web pages, the proxy answers 421 to a `Host` that is not `localhost`, an IP address or an `--allow-host` name, and 403 to an `Origin` that is not a page on `localhost`, a loopback address or an `--allow-host` name. It neither traces nor forwards these requests. If a client gets 421 because it connects by another name, such as `host.docker.internal` or a tunnel name, restart `record-http` with `--allow-host NAME` for that name.
 
 A `tracestate` header from the calling agent links this session as its child only when the caller's session is in the same trace store, and is ignored otherwise. If the parent session is gone when the proxy stops, the session is saved without the link and stderr says so. A linked session's depth is one more than its parent's, and a session linked later moves the sessions below it down with it. When the proxy stops it saves only its own counters and end time, so a link another proxy wrote to this session while it ran is kept.
+
+`--parent` and `AGENT_STRACE_PARENT_SESSION` work as in `record`. When either names no session, `record-http` prints `Parent session not found: <value>` and exits 1. It creates no session and starts no proxy.
 
 | Flag | Default | Description |
 |---|---|---|

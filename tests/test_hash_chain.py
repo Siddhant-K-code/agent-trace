@@ -23,9 +23,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 try:
     import _escapes
     from _no_telemetry import without_telemetry
+    from test_store import make_run1_not_a_session
 except ImportError:
     from tests import _escapes
     from tests._no_telemetry import without_telemetry
+    from tests.test_store import make_run1_not_a_session
 
 import agent_trace
 from agent_trace.audit import verify_chain, verify_chain_lines, ChainVerifyResult
@@ -715,29 +717,36 @@ class TestVerifyNamesTheExactSession(unittest.TestCase):
     """verify run1 checks run1, though run10 also starts with run1."""
 
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.trace_dir = Path(tmp.name) / "traces"
         env = patch.dict(os.environ)
         env.start()
         self.addCleanup(env.stop)
         os.environ.pop("AGENT_STRACE_WORKSPACE", None)
         os.environ.pop("AGENT_TRACE_DIR", None)
+        self.trace_dir = self._build()
         self.store = TraceStore(str(self.trace_dir), use_workspace_env=False)
+
+    def _build(self):
+        """Make a store with run1 and run10. run1's chain is broken, run10's holds."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        trace_dir = Path(tmp.name) / "traces"
+        store = TraceStore(str(trace_dir), use_workspace_env=False)
         for session_id in ("run1", "run10"):
-            self.store.create_session(SessionMeta(session_id=session_id, started_at=1.0))
+            store.create_session(SessionMeta(session_id=session_id, started_at=1.0))
             for prompt in ("one", "two"):
-                self.store.append_event(session_id, TraceEvent(
+                store.append_event(session_id, TraceEvent(
                     EventType.USER_PROMPT, timestamp=1.0, data={"prompt": prompt}
                 ))
         # Edit the first line of run1 only, so its chain breaks and run10's holds.
-        events = self.store._session_dir("run1") / "events.ndjson"
+        events = store._session_dir("run1") / "events.ndjson"
         raw = events.read_bytes()
         self.assertEqual(raw.count(b'"one"'), 1)
         events.write_bytes(raw.replace(b'"one"', b'"edited"'))
+        return trace_dir
 
-    def _verify(self, *argv):
-        args = build_parser().parse_args(["--trace-dir", str(self.trace_dir), "verify", *argv])
+    def _verify(self, *argv, trace_dir=None):
+        trace_dir = trace_dir or self.trace_dir
+        args = build_parser().parse_args(["--trace-dir", str(trace_dir), "verify", *argv])
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
             code = _run_handler(args, cmd_verify)
@@ -768,10 +777,35 @@ class TestVerifyNamesTheExactSession(unittest.TestCase):
 
     def test_verify_does_not_check_run10_when_run1_is_not_a_session(self):
         # Before, verify checked run10 and reported it as ok.
-        (self.trace_dir / "run1" / "meta.json").rename(self.trace_dir.parent / "meta.json")
-        for argv in (("run1",), ("run1", "--format", "json")):
-            with self.subTest(argv=argv):
-                self.assertEqual(self._verify(*argv), (1, "", "Session not found: run1\n"))
+        states = (
+            "meta.json moved out",
+            "meta.json a symlink",
+            "run1 a symlinked directory",
+            "run1 a dangling symlink",
+        )
+        for state in states:
+            with self.subTest(state=state):
+                trace_dir = self._build()
+                make_run1_not_a_session(trace_dir, trace_dir.parent, state)
+                for argv in (("run1",), ("run1", "--format", "json")):
+                    self.assertEqual(
+                        self._verify(*argv, trace_dir=trace_dir),
+                        (1, "", "Session not found: run1\n"),
+                    )
+
+    def test_verify_checks_run1_when_its_meta_json_cannot_be_read(self):
+        # verify reads only events.ndjson, so it still uses the ID it was given.
+        expected = verify_chain(self.store, "run1")
+        self.assertFalse(expected.ok)
+        text = io.StringIO()
+        expected.format(text)
+        make_run1_not_a_session(self.trace_dir, self.trace_dir.parent, "meta.json mode 000")
+        self.assertEqual(self._verify("run1"), (1, text.getvalue(), ""))
+        code, out, err = self._verify("run1", "--format", "json")
+        self.assertEqual(
+            (code, json.loads(out)["session_id"], json.loads(out)["ok"], err),
+            (1, "run1", False, ""),
+        )
 
 
 if __name__ == "__main__":

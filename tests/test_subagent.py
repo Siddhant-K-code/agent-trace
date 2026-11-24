@@ -14,7 +14,9 @@ from unittest.mock import patch
 
 import agent_trace
 from agent_trace.cli import (
+    _run_handler,
     build_parser,
+    cmd_record_http,
     cmd_stats,
     _parent_depth,
     _parent_session_id,
@@ -473,6 +475,15 @@ class TestAmbiguousParentSession(unittest.TestCase):
         self.env["HOME"] = self.env["USERPROFILE"] = str(self.root / "home")
         self.env["PYTHONIOENCODING"] = "utf-8"
 
+    def _record(self, argv, extra):
+        return subprocess.run(
+            [sys.executable, "-m", "agent_trace.entry", "--trace-dir",
+             str(self.trace_dir), "record", *argv, "--", sys.executable, "-c", "pass"],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            encoding="utf-8", env={**self.env, **extra}, cwd=self.root / "cwd",
+            timeout=120,
+        )
+
     def test_record_refuses_the_flag_or_the_env_and_creates_no_session(self):
         before = sorted(path.name for path in self.trace_dir.iterdir())
         for argv, extra in (
@@ -480,19 +491,62 @@ class TestAmbiguousParentSession(unittest.TestCase):
             ([], {"AGENT_STRACE_PARENT_SESSION": "aaaa"}),
         ):
             with self.subTest(argv=argv, env=extra):
-                result = subprocess.run(
-                    [sys.executable, "-m", "agent_trace.entry", "--trace-dir",
-                     str(self.trace_dir), "record", *argv, "--", sys.executable, "-c", "pass"],
-                    stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                    encoding="utf-8", env={**self.env, **extra}, cwd=self.root / "cwd",
-                    timeout=120,
-                )
+                result = self._record(argv, extra)
                 self.assertEqual(
                     (result.returncode, result.stdout, result.stderr),
                     (1, "", "Error: session ID prefix aaaa matches 2 sessions: "
                             "aaaa111100000001, aaaa222200000002\n"),
                 )
                 self.assertEqual(sorted(path.name for path in self.trace_dir.iterdir()), before)
+
+    def _run1_without_meta(self):
+        """Add run1 and run10, then move run1's meta.json out of the store."""
+        store = TraceStore(str(self.trace_dir), use_workspace_env=False)
+        for session_id in ("run1", "run10"):
+            store.create_session(SessionMeta(session_id=session_id, started_at=1.0))
+        (self.trace_dir / "run1" / "meta.json").rename(self.root / "meta.json")
+        return sorted(path.name for path in self.trace_dir.iterdir())
+
+    def test_record_refuses_a_parent_that_names_no_session(self):
+        # Before, run10 became the parent. A parent no session starts with
+        # made record end in a traceback.
+        before = self._run1_without_meta()
+        for parent in ("run1", "zzzz"):
+            for argv, extra in (
+                (["--parent", parent], {}),
+                ([], {"AGENT_STRACE_PARENT_SESSION": parent}),
+            ):
+                with self.subTest(argv=argv, env=extra):
+                    result = self._record(argv, extra)
+                    self.assertEqual(
+                        (result.returncode, result.stdout, result.stderr),
+                        (1, "", f"Parent session not found: {parent}\n"),
+                    )
+                    self.assertEqual(
+                        sorted(path.name for path in self.trace_dir.iterdir()), before
+                    )
+
+    def test_record_http_refuses_a_parent_that_names_no_session(self):
+        before = self._run1_without_meta()
+        with patch.dict(os.environ), patch(
+            "agent_trace.cli.HTTPProxyServer",
+            side_effect=AssertionError("proxy must not be built"),
+        ):
+            for name in ("AGENT_STRACE_PARENT_SESSION", "AGENT_STRACE_WORKSPACE", "AGENT_TRACE_DIR"):
+                os.environ.pop(name, None)
+            for parent in ("run1", "zzzz"):
+                args = build_parser().parse_args([
+                    "--trace-dir", str(self.trace_dir), "record-http",
+                    "--url", "http://127.0.0.1:1", "--parent", parent,
+                ])
+                with self.subTest(parent=parent), patch("sys.stderr", new_callable=io.StringIO) as err:
+                    code = _run_handler(args, cmd_record_http)
+                    self.assertEqual(
+                        (code, err.getvalue()), (1, f"Parent session not found: {parent}\n")
+                    )
+                    self.assertEqual(
+                        sorted(path.name for path in self.trace_dir.iterdir()), before
+                    )
 
     def test_an_exact_parent_id_wins_in_either_scan_order(self):
         store = TraceStore(str(self.trace_dir), use_workspace_env=False)

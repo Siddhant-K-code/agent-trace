@@ -1,25 +1,34 @@
 """Tests for replay --diff dual-session HTML viewer (issue #139)."""
 
+import io
 import os
 import sys
 import tempfile
 import time
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from agent_trace.cli import _run_handler, build_parser, cmd_replay
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.replay import replay_to_html_diff
 from agent_trace.store import TraceStore
 
 try:
+    import _no_telemetry  # noqa: F401
     from test_html_replay import (
         LEGACY_ID, PAYLOAD, SKIP_LEGACY_ON_WINDOWS, check_script_json, write_legacy_session,
     )
+    from test_store import NOT_A_SESSION_STATES, make_run1_not_a_session
 except ImportError:  # pragma: no cover - package-style test discovery
+    from tests import _no_telemetry  # noqa: F401
     from tests.test_html_replay import (
         LEGACY_ID, PAYLOAD, SKIP_LEGACY_ON_WINDOWS, check_script_json, write_legacy_session,
     )
+    from tests.test_store import NOT_A_SESSION_STATES, make_run1_not_a_session
 
 
 def _make_session(store: TraceStore, tool_names: list[str]) -> str:
@@ -152,6 +161,45 @@ class TestReplayDiffShowsTextAsText(unittest.TestCase):
         self.assertIn(f"{b}</h2>", page)
         self.assertNotIn('L<"', page)
         self.assertNotIn('M<"', page)
+
+
+class TestReplayDiffNamesTheExactSession(unittest.TestCase):
+    """replay other --diff run1 never diffs against run10 in run1's place."""
+
+    def setUp(self):
+        env = patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("AGENT_STRACE_WORKSPACE", None)
+        os.environ.pop("AGENT_TRACE_DIR", None)
+
+    def test_run1_that_is_not_a_session_is_not_found(self):
+        # Before, the diff used run10.
+        for state in NOT_A_SESSION_STATES:
+            with self.subTest(state=state):
+                tmp = tempfile.TemporaryDirectory()
+                self.addCleanup(tmp.cleanup)
+                trace_dir = Path(tmp.name) / "traces"
+                store = TraceStore(str(trace_dir), use_workspace_env=False)
+                for session_id in ("other", "run1", "run10"):
+                    store.create_session(SessionMeta(session_id=session_id, started_at=1.0))
+                    store.append_event(session_id, TraceEvent(
+                        EventType.TOOL_CALL, timestamp=1.0, data={"tool_name": "Bash"},
+                    ))
+                make_run1_not_a_session(trace_dir, Path(tmp.name), state)
+                output = Path(tmp.name) / "diff.html"
+                args = build_parser().parse_args([
+                    "--trace-dir", str(trace_dir),
+                    "replay", "other", "--diff", "run1", "-o", str(output),
+                ])
+                out, err = io.StringIO(), io.StringIO()
+                with redirect_stdout(out), redirect_stderr(err):
+                    code = _run_handler(args, cmd_replay)
+                self.assertEqual(
+                    (code, out.getvalue(), err.getvalue()),
+                    (1, "", "Session not found: run1\n"),
+                )
+                self.assertFalse(output.exists())
 
 
 if __name__ == "__main__":
