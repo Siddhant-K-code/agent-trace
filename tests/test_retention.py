@@ -7,6 +7,12 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
+
+try:  # keeps product telemetry off in this process and its children
+    import _no_telemetry  # noqa: F401
+except ImportError:  # pragma: no cover - run as a package module
+    from tests import _no_telemetry  # noqa: F401
 
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.retention import (
@@ -569,6 +575,243 @@ class TestSizePolicyMeasure(unittest.TestCase):
                 compute_sessions_to_delete(store, RetentionConfig(max_size_mb=1)), [],
             )
             self.assertTrue(store._session_dir(finished.session_id).exists())
+
+
+# ---------------------------------------------------------------------------
+# Stored times that are not usable
+# ---------------------------------------------------------------------------
+
+# meta.json can hold any JSON value. usable_time rejects each of these.
+_UNUSABLE_TIMES = [
+    float("nan"), float("inf"), float("-inf"), 1e308, -1e308, 1e12,
+    True, "x", None, [], {},
+]
+
+
+def _add_raw_session(
+    store: TraceStore, file_age_days: float = 0.0, ended: bool = True, **fields,
+) -> str:
+    """Add a session, write raw JSON values into its meta.json, and age its files."""
+    session_id = _add_session(store, age_days=file_age_days, ended=ended).session_id
+    meta_path = store._session_dir(session_id) / "meta.json"
+    data = json.loads(meta_path.read_text())
+    data.update(fields)
+    meta_path.write_text(json.dumps(data))
+    _make_idle(store, session_id, file_age_days)
+    return session_id
+
+
+def _left(store: TraceStore) -> set[str]:
+    return {meta.session_id for meta in store.list_sessions()}
+
+
+def _unlistable(session_dir: Path):
+    """Make listing ``session_dir`` raise OSError. Other directories still list."""
+    real_iterdir = Path.iterdir
+
+    def iterdir(self):
+        if self == session_dir:
+            raise OSError("cannot list")
+        return real_iterdir(self)
+
+    return mock.patch.object(Path, "iterdir", iterdir)
+
+
+class TestUnusableStoredTimes(unittest.TestCase):
+    def _store(self) -> TraceStore:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        return TraceStore(tmp.name)
+
+    def test_running_session_with_nan_start_survives_clean(self):
+        for marker in (True, False):
+            for policy in ({"max_sessions": 2}, {"max_size_mb": 0}):
+                with self.subTest(marker=marker, policy=policy):
+                    store = self._store()
+                    _add_session(store, age_days=100)
+                    _add_session(store, age_days=1)
+                    running = _add_raw_session(
+                        store, ended=False, started_at=float("nan"),
+                    )
+                    if marker:
+                        _claude_marker(store, running)
+                    out = io.StringIO()
+
+                    cmd_retention_clean(_clean_args(store, **policy), out=out)
+
+                    self.assertIn(running, _left(store))
+                    self.assertIn("Kept: 1 open session(s)", out.getvalue())
+
+    def test_recheck_under_lock_keeps_session_with_unusable_times(self):
+        cases = [
+            {"started_at": float("nan")},
+            {"started_at": "x"},
+            {"ended_at": "x"},
+            {"ended_at": float("nan")},
+        ]
+        for fields in cases:
+            with self.subTest(fields=fields):
+                store = self._store()
+                running = _add_raw_session(
+                    store, ended="ended_at" in fields, **fields,
+                )
+
+                deleted = delete_sessions(
+                    store, [running], RetentionConfig(on_delete="silent"),
+                )
+
+                self.assertEqual(deleted, 0)
+                self.assertIn(running, _left(store))
+
+    def test_start_that_is_not_a_number_does_not_crash(self):
+        policies = ({"max_age_days": 30}, {"max_sessions": 2}, {"max_size_mb": 0})
+        for value in ("x", None, [], {}):
+            for ended in (True, False):
+                with self.subTest(start=value, ended=ended, command="status"):
+                    store = self._store()
+                    _add_session(store, age_days=100)
+                    _add_session(store, age_days=1)
+                    _add_raw_session(store, ended=ended, started_at=value)
+                    out = io.StringIO()
+
+                    self.assertEqual(cmd_retention_status(_clean_args(store), out=out), 0)
+                    self.assertIn("Sessions:    3", out.getvalue())
+                for policy in policies:
+                    for dry_run in (True, False):
+                        with self.subTest(
+                            start=value, ended=ended, policy=policy, dry_run=dry_run,
+                        ):
+                            store = self._store()
+                            _add_session(store, age_days=100)
+                            _add_session(store, age_days=1)
+                            session_id = _add_raw_session(
+                                store, ended=ended, started_at=value,
+                            )
+                            args = _clean_args(store, dry_run=dry_run, **policy)
+
+                            self.assertEqual(
+                                cmd_retention_clean(args, out=io.StringIO()), 0,
+                            )
+                            if not ended:
+                                self.assertIn(session_id, _left(store))
+
+    def test_count_and_size_limits_order_by_newest_write(self):
+        for value in _UNUSABLE_TIMES:
+            for limit in ("count", "size"):
+                with self.subTest(start=value, limit=limit):
+                    store = self._store()
+                    _add_session(store, age_days=100)
+                    recent = _add_session(store, age_days=1).session_id
+                    unusable = _add_raw_session(store, file_age_days=1, started_at=value)
+                    if limit == "count":
+                        policy = {"max_sessions": 2}
+                    else:
+                        # One byte over the limit: the oldest session must go.
+                        policy = {"max_size_mb": (_store_size_bytes(store) - 1) / (1024 * 1024)}
+
+                    cmd_retention_clean(_clean_args(store, **policy), out=io.StringIO())
+
+                    self.assertEqual(_left(store), {recent, unusable})
+
+    def test_count_limit_breaks_a_start_tie_by_session_id(self):
+        store = self._store()
+        start = time.time() - 10 * 86400
+        ids = [
+            _add_raw_session(store, file_age_days=10, started_at=start)
+            for _ in range(2)
+        ]
+
+        cmd_retention_clean(_clean_args(store, max_sessions=1), out=io.StringIO())
+
+        self.assertEqual(_left(store), {max(ids)})
+
+    def test_age_limit_and_oldest_line_use_newest_write(self):
+        for value in _UNUSABLE_TIMES:
+            with self.subTest(start=value, files="200 days old"):
+                store = self._store()
+                _add_session(store, age_days=100)
+                recent = _add_session(store, age_days=1).session_id
+                unusable = _add_raw_session(store, file_age_days=200, started_at=value)
+                out = io.StringIO()
+
+                cmd_retention_status(_clean_args(store), out=out)
+                status = get_retention_status(store, RetentionConfig())
+                cmd_retention_clean(_clean_args(store, max_age_days=30), out=io.StringIO())
+
+                self.assertIn(f"Oldest:      {unusable} (200.0 days ago)", out.getvalue())
+                self.assertEqual(status.oldest_session_id, unusable)
+                self.assertAlmostEqual(status.oldest_session_age_days, 200, places=2)
+                self.assertEqual(_left(store), {recent})
+            with self.subTest(start=value, files="fresh"):
+                store = self._store()
+                _add_session(store, age_days=100)
+                recent = _add_session(store, age_days=1).session_id
+                unusable = _add_raw_session(store, started_at=value)
+
+                cmd_retention_clean(_clean_args(store, max_age_days=30), out=io.StringIO())
+
+                self.assertEqual(_left(store), {recent, unusable})
+
+    def test_newest_file_write_counts_not_the_oldest(self):
+        # `agent-strace record` writes meta.json when it starts and stops,
+        # and events.ndjson for each event in between.
+        for ended, start in ((False, time.time() - 100 * 86400), (True, "x")):
+            with self.subTest(ended=ended, start=start):
+                store = self._store()
+                session_id = _add_raw_session(
+                    store, file_age_days=100, ended=ended, started_at=start,
+                )
+                stamp = time.time() - 86400
+                events = store._session_dir(session_id) / "events.ndjson"
+                os.utime(events, (stamp, stamp))
+
+                cmd_retention_clean(_clean_args(store, max_age_days=30), out=io.StringIO())
+
+                self.assertEqual(_left(store), {session_id})
+
+    def test_end_that_is_not_a_usable_time_counts_as_no_end(self):
+        for value in _UNUSABLE_TIMES:
+            if value is None:
+                continue  # null is no end time already
+            with self.subTest(end=value, files="fresh"):
+                store = self._store()
+                running = _add_raw_session(store, ended_at=value)
+                out = io.StringIO()
+
+                cmd_retention_clean(_clean_args(store, max_size_mb=0), out=out)
+
+                self.assertEqual(_left(store), {running})
+                self.assertIn("Kept: 1 open session(s)", out.getvalue())
+            with self.subTest(end=value, files="idle"):
+                store = self._store()
+                _add_raw_session(
+                    store, file_age_days=OPEN_SESSION_IDLE_DAYS + 3, ended_at=value,
+                )
+
+                cmd_retention_clean(_clean_args(store, max_size_mb=0), out=io.StringIO())
+
+                self.assertEqual(_left(store), set())
+
+    def test_session_with_no_usable_time_is_kept(self):
+        for ended in (False, True):
+            with self.subTest(ended=ended):
+                store = self._store()
+                _add_session(store, age_days=100)
+                undated = _add_raw_session(store, ended=ended, started_at=float("nan"))
+                clean_out = io.StringIO()
+                status_out = io.StringIO()
+
+                with _unlistable(store._session_dir(undated)):
+                    cmd_retention_clean(_clean_args(store, max_sessions=0), out=clean_out)
+                    rc = cmd_retention_status(_clean_args(store), out=status_out)
+
+                self.assertEqual(_left(store), {undated})
+                self.assertEqual(rc, 0)
+                self.assertIn("Sessions:    1", status_out.getvalue())
+                self.assertNotIn("Oldest:", status_out.getvalue())
+                if not ended:
+                    self.assertIn("Kept: 1 open session(s)", clean_out.getvalue())
+                    self.assertIn("Open:        1 session(s)", status_out.getvalue())
 
 
 # ---------------------------------------------------------------------------
