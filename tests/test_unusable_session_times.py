@@ -326,6 +326,13 @@ class DashboardTest(SessionTimeCase):
                 self.assertNotIn('stroke="#e3b341"', page)
                 self.assertEqual(page.count("</td><td>?</td>"), 3)
 
+    def test_a_start_of_zero_counts(self):
+        result = self.outcome(self.trend_ws({GOOD: {"started_at": 0}}), self.TREND, "trend.html")
+        self.assertEqual(SUBTITLE.findall(result[4]["trend.html"]), [
+            f'<div class="subtitle">3 sessions &nbsp;·&nbsp; '
+            f'1970-01-01 to {utc_day(NOW - 3600 + 14.5)}</div>'
+        ])
+
 
 class FingerprintTest(SessionTimeCase):
     """fingerprint takes its period from the usable starts."""
