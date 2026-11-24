@@ -193,21 +193,22 @@ def _classify_message(msg: Any, direction: str) -> TraceEvent | None:
         if result and msg_id is not None:
             # tool results contain content array
             content = list_field(result, "content", [])
-            if content:
-                first = content[0]
-                return TraceEvent(
-                    event_type=EventType.TOOL_RESULT,
-                    data={
-                        "request_id": msg_id,
-                        "content_types": [
-                            str_field(c, "type", "unknown") if isinstance(c, Mapping) else "unknown"
-                            for c in content
-                        ],
-                        "content_preview": _truncate(
-                            str_field(first, "text", "") if isinstance(first, Mapping) else "", 200
-                        ),
-                    },
-                )
+            # MCP marks a failed tool call with "isError": true. Only JSON
+            # true counts, as in the jsonl import.
+            failed = result.get("isError") is True
+            if content or failed:
+                texts = [str_field(c, "text", "") for c in content if isinstance(c, Mapping)]
+                data = {
+                    "request_id": msg_id,
+                    "content_types": [
+                        str_field(c, "type", "unknown") if isinstance(c, Mapping) else "unknown"
+                        for c in content
+                    ],
+                    "content_preview": _truncate("\n".join(t for t in texts if t), 200),
+                }
+                if failed:
+                    data["is_error"] = True
+                return TraceEvent(event_type=EventType.TOOL_RESULT, data=data)
 
     # Notifications (no id)
     if direction == "server_to_agent" and method:
