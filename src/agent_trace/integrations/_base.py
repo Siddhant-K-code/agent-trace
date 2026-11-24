@@ -97,7 +97,8 @@ def _get_or_create_session(store: TraceStore, name: str) -> str:
     with _session_marker(store, name) as active_path:
         registered, live = _prune_runs(store, _runs_path(active_path))
         sid = _point_marker(active_path, registered, live)
-        if sid and store.session_exists(sid) and not _session_ended(store, sid):
+        # _meta_exists raises for a session the store refuses.
+        if sid and store._meta_exists(sid) and not _session_ended(store, sid):
             return sid
         return _new_session(store, name, active_path)
 

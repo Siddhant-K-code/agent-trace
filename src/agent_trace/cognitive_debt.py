@@ -26,7 +26,12 @@ from .budget_report import _parse_date
 from .event_data import require_object_event_data
 from .inert import inert
 from .models import EventType, SessionMeta, TraceEvent, usable_text
-from .store import AmbiguousSessionPrefixError, TraceStore, _write_atomic
+from .store import (
+    AmbiguousSessionPrefixError,
+    InvalidSessionIDError,
+    TraceStore,
+    _write_atomic,
+)
 
 
 COGNITIVE_DEBT_SCHEMA_VERSION = 1
@@ -35,6 +40,14 @@ COGNITIVE_DEBT_BADGE_SCHEMA_VERSION = 1
 
 class CognitiveDebtInputError(ValueError):
     """The report cannot safely interpret trace or review evidence."""
+
+
+class CognitiveDebtSessionNotFoundError(LookupError):
+    """``--session`` names no session the store can read."""
+
+    def __init__(self, session_id: str) -> None:
+        super().__init__(f"Session not found: {session_id}")
+        self.session_id = session_id
 
 
 @dataclass
@@ -706,11 +719,15 @@ def build_cognitive_debt_report(
                 for meta in store.list_sessions_strict(strict_event_tenants=False)
                 if window_start <= meta.started_at < window_end
             ]
-    except AmbiguousSessionPrefixError:
-        # Its message names the matching sessions, so the user can pick one.
+    except (AmbiguousSessionPrefixError, InvalidSessionIDError):
+        # Their messages name the argument, so the user can fix it.
         raise
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise CognitiveDebtInputError("trace input could not be read safely") from exc
+    if session_id and not metas:
+        # session_exists is False for a missing session and for one the
+        # store refuses to read.
+        raise CognitiveDebtSessionNotFoundError(session_id)
 
     sessions = [
         analyze_session_debt(
@@ -1052,15 +1069,19 @@ def cmd_cognitive_debt(args: argparse.Namespace) -> int:
         raise CognitiveDebtInputError("reporting window is invalid") from exc
     threshold = float(getattr(args, "threshold", 0.7))
     group_by = getattr(args, "by", "repository")
-    report = build_cognitive_debt_report(
-        store,
-        window_start=since,
-        window_end=until,
-        session_id=getattr(args, "session", "") or "",
-        group_by=group_by,
-        threshold=threshold,
-        github_token=getattr(args, "github_token", "") or "",
-    )
+    try:
+        report = build_cognitive_debt_report(
+            store,
+            window_start=since,
+            window_end=until,
+            session_id=getattr(args, "session", "") or "",
+            group_by=group_by,
+            threshold=threshold,
+            github_token=getattr(args, "github_token", "") or "",
+        )
+    except CognitiveDebtSessionNotFoundError as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 1
 
     output_format = getattr(args, "format", "text")
     if output_format == "json":

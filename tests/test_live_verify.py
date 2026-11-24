@@ -18,6 +18,10 @@ from agent_trace.cli import _codex_hooks_config, build_parser, cmd_setup
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
 
+try:
+    from test_store import make_run1_not_a_session
+except ImportError:
+    from tests.test_store import make_run1_not_a_session
 
 _AGENTS = {
     "claude": "claude-code",
@@ -346,6 +350,37 @@ class LiveSetupVerifyTests(unittest.TestCase):
             "Live capture verification failed: session ID prefix codex-s matches 2 sessions: "
             "codex-s1, codex-s2. Pass the full ID with --session SESSION_ID.\n",
         )
+
+    def test_invalid_requested_session_is_shown_with_repr(self):
+        for requested in ("..", "a/b", "a\\b", "x\x01y"):
+            with self.subTest(requested=requested):
+                status, out, err = self._run(session=requested)
+
+                self.assertEqual(status, 1)
+                self.assertIn("Codex static hook setup verified.", out)
+                self.assertEqual(
+                    err,
+                    "Live capture verification failed: invalid session ID or prefix: "
+                    f"{requested!r}\n",
+                )
+
+    def test_requested_session_the_store_refuses_is_not_found(self):
+        for number, state in enumerate(("run1 a symlinked directory", "meta.json a symlink")):
+            with self.subTest(state=state):
+                self.trace_dir = self.root / f"store{number}" / "traces"
+                self.trace_dir.mkdir(parents=True)
+                self._write_session("run1", "codex", 100)
+                make_run1_not_a_session(self.trace_dir, self.trace_dir.parent, state)
+
+                status, out, err = self._run(session="run1")
+
+                self.assertEqual(status, 1)
+                self.assertIn("Codex static hook setup verified.", out)
+                self.assertEqual(
+                    err,
+                    "Live capture verification failed: Session not found: run1. "
+                    "Run agent-strace list, then pass --session SESSION_ID.\n",
+                )
 
     def test_explicit_session_from_another_provider_fails(self):
         self._write_session("claude-session", "claude", 100)

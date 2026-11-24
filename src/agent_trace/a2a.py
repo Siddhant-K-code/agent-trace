@@ -282,7 +282,9 @@ def _stored_session(
     except ValueError:
         return None
     try:
-        if not store.session_exists(session_id):
+        # _meta_exists raises for a session the store refuses. That becomes
+        # RefusedSessionError below.
+        if not store._meta_exists(session_id):
             return None
         return store.load_meta(session_id), store.load_events(session_id)
     except FileNotFoundError:

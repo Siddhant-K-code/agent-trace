@@ -676,8 +676,9 @@ class CollectorHandler(BaseHTTPRequestHandler):
                     errors += 1
                     continue
                 with self._lock:
-                    # Auto-create session if it doesn't exist
-                    if not self.store.session_exists(session_id):
+                    # Auto-create session if it doesn't exist. _meta_exists
+                    # raises for a session the store refuses.
+                    if not self.store._meta_exists(session_id):
                         meta = SessionMeta(tenant_id=event.tenant_id)
                         meta.session_id = session_id
                         self.store.create_session(meta)
@@ -701,7 +702,8 @@ class CollectorHandler(BaseHTTPRequestHandler):
             session_id = validate_session_id(session_id)
 
             with self._lock:
-                if self.store.session_exists(session_id):
+                # _meta_exists raises for a session the store refuses.
+                if self.store._meta_exists(session_id):
                     # Update existing meta
                     meta = self.store.load_meta(session_id)
                     meta.tenant_id = validate_optional_tenant_id(meta.tenant_id)

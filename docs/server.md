@@ -210,6 +210,12 @@ An exact ID wins over a longer ID that starts with it. With `--dashboard`, the
 session's events and its review, compare, share, and OTLP actions answer the
 same way. See [Session IDs](commands.md#session-ids).
 
+`GET /sessions/<id>` and `GET /sessions/<id>/events` answer 404 with
+`{"error": "session not found: <id>"}`, as for a missing session, when the
+session's directory or `meta.json` is a symlink, or its `meta.json` is not a
+regular file. The collector does not follow the link, and `GET /sessions`
+leaves the session out. The POST routes still refuse to write to it.
+
 `GET /sessions/<id>/events` also answers 400 with `{"error": "<message>"}` when
 an event names another session or tenant, or a line of `events.ndjson` is not
 an event. `GET /sessions` still lists that session, so `org-report --endpoint`
