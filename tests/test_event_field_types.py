@@ -19,6 +19,7 @@ from __future__ import annotations
 import io
 import json
 import re
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -635,6 +636,28 @@ class TestCommands(CliTestCase):
                     found = self.output(_with(field, value, *positions), "stats", SID)
                     self.assertEqual(found, expected)
         self.assertIn("avg: 1000ms", self.output(_records(), "stats", SID)[1])
+
+    def test_stats_average_stays_finite_when_the_sum_overflows(self):
+        # Two durations of 1e308 sum past the largest float. Three of the
+        # largest float still do after each is divided by three.
+        for duration, count in ((1e308, 2), (sys.float_info.max, 3)):
+            with self.subTest(duration=duration, count=count):
+                records = _records()
+                pairs = []
+                for index in range(count):
+                    call_id = f"c1-{index}"
+                    pairs.append({**records[BASH_CALL], "event_id": call_id})
+                    pairs.append({
+                        **records[BASH_RESULT],
+                        "event_id": f"e06-{index}",
+                        "parent_id": call_id,
+                        "duration_ms": duration,
+                    })
+                records[BASH_CALL:BASH_RESULT + 1] = pairs
+                code, out, err = self.output(records, "stats", SID)
+                self.assertEqual((code, err), (0, ""))
+                self.assertNotIn("inf", out)
+                self.assertIn(f"\n    {'Bash':<30} {count:>4}x  avg: {duration:.0f}ms\n", out)
 
     def test_stats_pairs_no_call_through_an_empty_id(self):
         # The call's event_id and its result's parent_id both read as "".

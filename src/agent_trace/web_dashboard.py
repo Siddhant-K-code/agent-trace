@@ -25,6 +25,8 @@ from .compare import DECISION_DATA_EVENT_TYPES, decision_divergence
 from .diff import compare_sessions
 from .event_data import (
     require_object_event_data,
+    require_otlp_session_times,
+    require_otlp_timestamps,
     require_usable_session_times,
     require_usable_timestamps,
 )
@@ -871,4 +873,6 @@ def api_session_otlp(store: "TraceStore", session_id: str) -> str | None:
         events, event_types=OTLP_TIMESTAMP_EVENT_TYPES, session_id=full_id
     )
     require_usable_session_times(meta)
+    require_otlp_session_times(meta)
+    require_otlp_timestamps(events, event_types=OTLP_TIMESTAMP_EVENT_TYPES, session_id=full_id)
     return json.dumps(session_to_otlp(meta, events), indent=2) + "\n"

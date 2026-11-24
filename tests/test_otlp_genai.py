@@ -18,6 +18,29 @@ from agent_trace.otlp import (
 )
 from agent_trace.store import TraceStore
 
+try:
+    from test_otlp import (
+        LAST_NANOS,
+        UINT64_MAX,
+        all_spans,
+        assert_unix_nanos_in_range,
+        library_meta,
+        near_limit_session,
+        span_times,
+        tool_events,
+    )
+except ImportError:
+    from tests.test_otlp import (
+        LAST_NANOS,
+        UINT64_MAX,
+        all_spans,
+        assert_unix_nanos_in_range,
+        library_meta,
+        near_limit_session,
+        span_times,
+        tool_events,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1464,6 +1487,47 @@ class TestImportedModelResponses(unittest.TestCase):
         for convert in self.CONVERTERS:
             with self.subTest(convert=convert.__name__):
                 self.assertEqual(len(self._spans(convert, events)), 1)
+
+
+class TestGenAIOtlpTimeLimit(unittest.TestCase):
+    """Every time the GenAI converter writes is from 0 to 2**64 - 1 (see
+    TestOtlpTimeLimit in test_otlp.py)."""
+
+    def test_duration_past_the_limit_reads_as_missing(self):
+        payload = session_to_otlp_genai(library_meta(), tool_events(1e14))
+        self.assertEqual(payload, session_to_otlp_genai(library_meta(), tool_events()))
+        _, tool, error = all_spans(payload)
+        self.assertEqual(span_times(tool), ("1001000000000", "1001001000000"))
+        self.assertEqual(span_times(error), ("1003000000000", "1003001000000"))
+        assert_unix_nanos_in_range(self, payload)
+
+    def test_root_total_past_the_limit_ends_at_the_start(self):
+        without_total = session_to_otlp_genai(library_meta(ended_at=None), tool_events())
+        for total in (1e14, 1e308):
+            with self.subTest(total=total):
+                payload = session_to_otlp_genai(
+                    library_meta(ended_at=None, total_duration_ms=total), tool_events(),
+                )
+                self.assertEqual(payload, without_total)
+                self.assertEqual(
+                    span_times(all_spans(payload)[0]), ("1000000000000", "1000000000000"),
+                )
+                assert_unix_nanos_in_range(self, payload)
+
+    def test_spans_near_the_limit_end_at_the_limit(self):
+        payload = session_to_otlp_genai(*near_limit_session())
+        root, *children = all_spans(payload)
+        self.assertEqual(span_times(root), (LAST_NANOS, LAST_NANOS))
+        limit = (LAST_NANOS, str(UINT64_MAX))
+        self.assertEqual(sorted((span["name"], span_times(span)) for span in children), [
+            ("chat claude-sonnet-4-5", (LAST_NANOS, LAST_NANOS)),
+            ("chat m", limit),
+            ("chat m", limit),
+            ("execute_tool Bash", limit),
+            ("execute_tool Bash", limit),
+            ("execute_tool error", limit),
+        ])
+        assert_unix_nanos_in_range(self, payload)
 
 
 if __name__ == "__main__":

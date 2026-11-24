@@ -55,7 +55,7 @@ from .approval import APPROVAL_STATES, cmd_approval
 from .rbac import cmd_rbac
 from .iac import cmd_apply, cmd_config_diff
 from .sso import cmd_auth
-from .baseline import cmd_baseline
+from .baseline import _mean, cmd_baseline
 from .compliance import (
     _parse_time_bound,
     cmd_audit_readiness,
@@ -138,6 +138,8 @@ from .event_data import (
     event_id_of,
     parent_id_of,
     require_object_event_data,
+    require_otlp_session_times,
+    require_otlp_timestamps,
     require_usable_session_times,
     require_usable_timestamps,
     str_field,
@@ -733,17 +735,22 @@ def _export_otlp_tree(
             _walk(child)
 
     _walk(tree)
+    event_types = OTLP_GENAI_TIMESTAMP_EVENT_TYPES if use_genai else OTLP_TIMESTAMP_EVENT_TYPES
     for node in nodes:
         node_id = node.meta.session_id
         if use_genai:
             indexes = otlp_genai_data_indexes(node.events)
-            event_types = OTLP_GENAI_TIMESTAMP_EVENT_TYPES
         else:
             indexes = otlp_data_indexes(node.events)
-            event_types = OTLP_TIMESTAMP_EVENT_TYPES
         require_object_event_data(node.events, indexes=indexes, session_id=node_id)
         require_usable_timestamps(node.events, event_types=event_types, session_id=node_id)
         require_usable_session_times(node.meta, session_id=node_id)
+    # A tree these checks refuse keeps its message, so the OTLP time limit
+    # comes after them for every session.
+    for node in nodes:
+        node_id = node.meta.session_id
+        require_otlp_session_times(node.meta, session_id=node_id)
+        require_otlp_timestamps(node.events, event_types=event_types, session_id=node_id)
 
     try:
         payload = node_tree_to_otlp(tree, args.service_name, genai=use_genai)
@@ -878,7 +885,15 @@ def cmd_export(args: argparse.Namespace) -> int:
             require_object_event_data(events, indexes=otlp_data_indexes(events))
             require_usable_timestamps(events, event_types=OTLP_TIMESTAMP_EVENT_TYPES)
         if not use_temporal:
-            require_usable_session_times(store.load_meta(session_id))
+            session_meta = store.load_meta(session_id)
+            require_usable_session_times(session_meta)
+            require_otlp_session_times(session_meta)
+            require_otlp_timestamps(
+                events,
+                event_types=(
+                    OTLP_GENAI_TIMESTAMP_EVENT_TYPES if use_genai else OTLP_TIMESTAMP_EVENT_TYPES
+                ),
+            )
         endpoint = args.endpoint
 
         # When --endpoint is set and format is plain otlp, default to otlp-genai
@@ -1060,7 +1075,11 @@ def cmd_stats(args: argparse.Namespace) -> int:
             avg_ms = ""
             if name in tool_durations:
                 durations = tool_durations[name]
-                avg = sum(durations) / len(durations)
+                avg = _mean(durations)
+                if math.isinf(avg):
+                    # Dividing each value first can still round past the
+                    # float limit, and no mean is above the largest value.
+                    avg = max(durations)
                 avg_ms = f"  avg: {avg:.0f}ms"
             print(f"    {inert(name):<30} {count:>4}x{avg_ms}")
 

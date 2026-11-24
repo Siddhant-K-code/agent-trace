@@ -7,6 +7,49 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
+try:  # keeps product telemetry off in this process and its children
+    import _no_telemetry
+except ImportError:  # pragma: no cover - run as a package module
+    from tests import _no_telemetry
+
+try:
+    from test_otlp import (
+        LAST_FLOAT,
+        LAST_NANOS,
+        PAST_FLOAT,
+        PAST_LIMIT,
+        UINT64_MAX,
+        YEAR_3000,
+        all_spans,
+        assert_unix_nanos_in_range,
+        library_meta,
+        near_limit_session,
+        span_times,
+        tool_events,
+    )
+    from test_unusable_event_timestamps import BAD, ENDPOINT, TimestampCliTestCase, set_meta
+except ImportError:  # pragma: no cover - run as a package module
+    from tests.test_otlp import (
+        LAST_FLOAT,
+        LAST_NANOS,
+        PAST_FLOAT,
+        PAST_LIMIT,
+        UINT64_MAX,
+        YEAR_3000,
+        all_spans,
+        assert_unix_nanos_in_range,
+        library_meta,
+        near_limit_session,
+        span_times,
+        tool_events,
+    )
+    from tests.test_unusable_event_timestamps import (
+        BAD,
+        ENDPOINT,
+        TimestampCliTestCase,
+        set_meta,
+    )
+
 from agent_trace.cli import build_parser, cmd_export
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
@@ -263,6 +306,102 @@ class TestTemporalOtlp(unittest.TestCase):
 
         self.assertEqual(root["traceId"], TRACE_ID)
         self.assertEqual(root["parentSpanId"], PARENT_SPAN_ID)
+
+
+TEMPORAL_CONTEXT = {"trace_id": TRACE_ID, "parent_span_id": PARENT_SPAN_ID, "trace_flags": "01"}
+
+
+class TestTemporalOtlpTimeLimit(unittest.TestCase):
+    """Every time the Temporal export writes is from 0 to 2**64 - 1, the
+    range OTLP carries."""
+
+    def test_duration_past_the_limit_reads_as_missing(self):
+        meta = library_meta(**TEMPORAL_CONTEXT)
+        payload = session_to_temporal_otlp(meta, tool_events(1e14))
+        self.assertEqual(payload, session_to_temporal_otlp(meta, tool_events()))
+        _, tool, error = all_spans(payload)
+        self.assertEqual(span_times(tool), ("1001000000000", "1001001000000"))
+        self.assertEqual(span_times(error), ("1003000000000", "1003001000000"))
+        assert_unix_nanos_in_range(self, payload)
+
+    def test_root_total_past_the_limit_ends_at_the_start(self):
+        without_total = session_to_temporal_otlp(
+            library_meta(ended_at=None, **TEMPORAL_CONTEXT), tool_events(),
+        )
+        for total in (1e14, 1e308):
+            with self.subTest(total=total):
+                meta = library_meta(ended_at=None, total_duration_ms=total, **TEMPORAL_CONTEXT)
+                payload = session_to_temporal_otlp(meta, tool_events())
+                self.assertEqual(payload, without_total)
+                self.assertEqual(
+                    span_times(all_spans(payload)[0]), ("1000000000000", "1000000000000"),
+                )
+                assert_unix_nanos_in_range(self, payload)
+
+    def test_spans_near_the_limit_end_at_the_limit(self):
+        meta, events = near_limit_session()
+        for name, value in TEMPORAL_CONTEXT.items():
+            setattr(meta, name, value)
+        payload = session_to_temporal_otlp(meta, events)
+        root, *children = all_spans(payload)
+        self.assertEqual(span_times(root), (LAST_NANOS, LAST_NANOS))
+        limit = (LAST_NANOS, str(UINT64_MAX))
+        # The transcript response keeps its zero length. Each other span ends
+        # at the limit.
+        self.assertEqual(
+            sorted(span_times(span) for span in children), [(LAST_NANOS, LAST_NANOS)] + [limit] * 5,
+        )
+        assert_unix_nanos_in_range(self, payload)
+
+
+class TestTemporalExportTimeLimit(TimestampCliTestCase):
+    """export --format temporal refuses a time OTLP cannot carry before it
+    writes or sends anything."""
+
+    ARGVS = (
+        ["export", BAD, "--format", "temporal", "--output", "out.json"],
+        ["export", BAD, "--format", "temporal", "--endpoint", ENDPOINT],
+    )
+
+    def test_refuses_session_times_past_the_limit(self):
+        for field in ("started_at", "ended_at"):
+            for value in (YEAR_3000, PAST_FLOAT):
+                for argv in self.ARGVS:
+                    with self.subTest(field=field, value=value, argv=argv):
+                        root = self.make_ts_workspace(temporal=True)
+                        set_meta(root / "work" / ".agent-traces" / BAD, **{field: value})
+                        self.assert_refused(root, argv, f"Error: session {field} {PAST_LIMIT}\n")
+
+    def test_refuses_event_timestamps_past_the_limit(self):
+        expected = (
+            f"Error: session event timestamp {PAST_LIMIT}: event 6 of 25 (tool_call); "
+            "5 more events have timestamps past that time\n"
+        )
+        for value in (YEAR_3000, PAST_FLOAT):
+            for argv in self.ARGVS:
+                with self.subTest(value=value, argv=argv):
+                    root = self.make_ts_workspace(BAD, "tool_call", value, temporal=True)
+                    self.assert_refused(root, argv, expected)
+
+    def test_accepts_the_last_time_that_fits(self):
+        root = self.make_ts_workspace(
+            BAD, "tool_call", LAST_FLOAT, temporal=True,
+            where=lambda record: record["event_id"] == "bad-call-test2",
+        )
+        set_meta(root / "work" / ".agent-traces" / BAD, started_at=LAST_FLOAT, ended_at=LAST_FLOAT)
+        code, out, err, network, written = self.outcome(
+            root, self.ARGVS[0], files="out.json", read=json.loads,
+        )
+        self.assertEqual((code, out, network), (0, "", 0), err)
+        payload = written["out.json"]
+        root_span, *children = all_spans(payload)
+        self.assertEqual(span_times(root_span), (LAST_NANOS, LAST_NANOS))
+        # The call's result lasts 1 s, which would end past the limit.
+        self.assertEqual(
+            [span_times(span) for span in children if span["startTimeUnixNano"] == LAST_NANOS],
+            [(LAST_NANOS, str(UINT64_MAX))],
+        )
+        assert_unix_nanos_in_range(self, payload)
 
 
 if __name__ == "__main__":

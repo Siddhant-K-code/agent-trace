@@ -3323,6 +3323,32 @@ Langfuse reads no `ended_at`. The check runs after the credentials check and
 before anything is sent. With `--since`, the store listing refuses such a
 session first, as [`export`](#export) describes.
 
+OTLP carries each time as an unsigned 64-bit count of nanoseconds, so the
+latest time it can carry is 2554-07-21T23:34:33.709551615Z. A later time is
+still a Unix time in seconds, and the other commands accept it. `export
+--format otlp`, `otlp-genai`, and `temporal` refuse an event timestamp they
+check, `started_at`, or `ended_at` when set, if it is past that time. They run
+this check after the checks above, so a session those refuse keeps its
+message. The line looks like this:
+
+```
+Error: session event timestamp is past the latest time OTLP can carry (2554-07-21T23:34:33.709551615Z): event 6 of 25 (tool_call); 5 more events have timestamps past that time
+```
+
+For the session times, the line is `Error: session started_at is past the
+latest time OTLP can carry (2554-07-21T23:34:33.709551615Z)` or the same
+message for `ended_at`. With `--include-subagents`, export checks every
+session in the tree this way, once every session passes the checks above. The
+line then names the session, such as `Error: session <session-id> ended_at is
+past the latest time OTLP can carry (2554-07-21T23:34:33.709551615Z)`.
+
+A span ends at its start plus its duration. A `duration_ms` whose span would
+end past that time reads as missing, so the span lasts 1 ms, as it does when
+the duration is missing. A session with no `ended_at` ends its root span at
+`started_at` plus `total_duration_ms`. A total whose root span would end past
+that time reads as missing, so the root span ends at `started_at`. A 1 ms span
+that starts less than 1 ms before that time ends at that time.
+
 `drift` and `fingerprint` skip a session whose first or last event has an
 unusable timestamp, as they skip other sessions they cannot read. `baseline`
 leaves the cost out for a session that `agent-strace cost` refuses: the session
@@ -3336,9 +3362,12 @@ still show its cost.
 
 `watch --stream-otlp` leaves out each `user_prompt`, `assistant_response`,
 `tool_call`, `tool_result`, `error`, `llm_request`, and `llm_response` event
-whose timestamp is unusable. It prints one line per event on stderr, such as
-`[stream] Left one tool_call event out of the OTLP stream because its timestamp
-is not a Unix time in seconds.` The lines follow the order of the batch. An
+whose timestamp is unusable or past the latest time OTLP can carry. It prints
+one line per event on stderr, such as `[stream] Left one tool_call event out of
+the OTLP stream because its timestamp is not a Unix time in seconds.` For a
+timestamp past that time, the line is `[stream] Left one tool_call event out of
+the OTLP stream because its timestamp is past the latest time OTLP can carry
+(2554-07-21T23:34:33.709551615Z).` The lines follow the order of the batch. An
 event that also has non-object data gets only this line. The other events of
 the batch, and later batches, are still sent.
 
@@ -3351,8 +3380,8 @@ seconds.` The watch keeps running and passes the event to its other checks.
 
 With `agent-strace server --dashboard`, the review, compare, share, and OTLP
 actions answer 400 with the same message. The OTLP action checks the events
-and session times that `export --format otlp` checks. The others check every
-event.
+and session times that `export --format otlp` checks, including the latest time
+OTLP can carry. The others check every event.
 
 `health` and `skills` read an integer timestamp too large for a float as they
 read infinity, and `compliance-report` reads it as it reads 1e300. Earlier

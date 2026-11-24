@@ -56,7 +56,9 @@ from .event_data import (
     event_paths as _event_paths,
     is_edit as _is_edit,
     left_out_event_warning,
+    left_out_otlp_limit_warning,
     left_out_timestamp_warning,
+    otlp_unix_nanos,
     patch_paths,
     skipped_event_warning,
     str_field,
@@ -1681,9 +1683,10 @@ class EventStreamer:
 
         Each session in the batch is converted and sent on its own. Events
         whose timestamp the converter would read and that is not a Unix time
-        in seconds, and events whose non-object data it would read, are left
-        out (see :func:`_otlp_readable_events`), and a session with no event left
-        sends nothing. If the conversion still fails, one line on stderr
+        in seconds or is past the latest time OTLP can carry, and events whose
+        non-object data it would read, are left out (see
+        :func:`_otlp_readable_events`), and a session with no event left sends
+        nothing. If the conversion still fails, one line on stderr
         gives the number of events not sent and the exception class, never
         its message, and later batches are still sent.
         """
@@ -1745,25 +1748,28 @@ def _otlp_readable_events(events: list[TraceEvent]) -> tuple[list[TraceEvent], s
 
     ``session_to_otlp_genai`` reads the timestamps of the events of the
     ``OTLP_GENAI_TIMESTAMP_EVENT_TYPES`` types. Each of those whose timestamp
-    is not a Unix time in seconds is left out first. The converter also reads
-    the data of the events that ``otlp_genai_data_indexes`` names. Each of
-    those whose data is not a JSON object is left out. Leaving an event out
-    changes how the others pair, which can make the converter read another
-    event, so the data check repeats on the events that are left. Events
-    whose data the converter never reads are kept. The second value is the
-    stderr text for the events left out: one line per event, in batch order.
-    An event left out for its timestamp gets only the timestamp line.
+    is not a Unix time in seconds, or is past the latest time OTLP can carry,
+    is left out first. The converter also reads the data of the events that
+    ``otlp_genai_data_indexes`` names. Each of those whose data is not a JSON
+    object is left out. Leaving an event out changes how the others pair,
+    which can make the converter read another event, so the data check
+    repeats on the events that are left. Events whose data the converter
+    never reads are kept. The second value is the stderr text for the events
+    left out: one line per event, in batch order. An event left out for its
+    timestamp gets only the timestamp line.
     """
     from .otlp import OTLP_GENAI_TIMESTAMP_EVENT_TYPES, otlp_genai_data_indexes
 
-    unusable_times = {
-        position
-        for position, event in enumerate(events)
-        if event.event_type in OTLP_GENAI_TIMESTAMP_EVENT_TYPES
-        and usable_time(event.timestamp) is None
-    }
+    time_warnings = {}
+    for position, event in enumerate(events):
+        if event.event_type not in OTLP_GENAI_TIMESTAMP_EVENT_TYPES:
+            continue
+        if usable_time(event.timestamp) is None:
+            time_warnings[position] = left_out_timestamp_warning
+        elif otlp_unix_nanos(event.timestamp) is None:
+            time_warnings[position] = left_out_otlp_limit_warning
     positions = [
-        position for position in range(len(events)) if position not in unusable_times
+        position for position in range(len(events)) if position not in time_warnings
     ]
     while True:
         kept = [events[position] for position in positions]
@@ -1778,8 +1784,8 @@ def _otlp_readable_events(events: list[TraceEvent]) -> tuple[list[TraceEvent], s
             position for index, position in enumerate(positions) if index not in unreadable
         ]
     lines = "".join(
-        left_out_timestamp_warning("stream", events[position])
-        if position in unusable_times
+        time_warnings[position]("stream", events[position])
+        if position in time_warnings
         else left_out_event_warning("stream", events[position])
         for position in sorted(set(range(len(events))).difference(positions))
     )

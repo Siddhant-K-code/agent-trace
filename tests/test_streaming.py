@@ -700,6 +700,57 @@ class TestOtlpStreamNonObjectData(_ReceiverTestCase):
         )
 
 
+class TestOtlpStreamTimeLimit(_ReceiverTestCase):
+    """--stream-otlp leaves out an event whose timestamp is past the latest
+    time OTLP can carry, prints its own line for it, and sends the rest."""
+
+    _PAST_LIMIT = (
+        "[stream] Left one tool_call event out of the OTLP stream because its timestamp is "
+        "past the latest time OTLP can carry (2554-07-21T23:34:33.709551615Z).\n"
+    )
+
+    def test_event_past_the_limit_is_left_out_and_the_rest_is_sent(self) -> None:
+        events = [
+            _event("tool_call", {"tool_name": "Bash"}, "c1", ts=32503680000.0),
+            _event("llm_request", {"model": "m"}, "r1", ts=math.nan),
+            _event("tool_call", {"tool_name": "Bash"}, "c2", ts=3.0),
+            _event("tool_result", {"tool_name": "Bash", "result": "ok"}, "c3",
+                   parent_id="c2", ts=4.0),
+        ]
+        posts, stderr = self._stream(_wrapped(events))
+        self.assertEqual(
+            stderr,
+            self._PAST_LIMIT
+            + "[stream] Left one llm_request event out of the OTLP stream because its "
+            "timestamp is not a Unix time in seconds.\n",
+        )
+        self.assertEqual(self._sent(posts), [(_SESSION, [_USER, _ASSISTANT], [_BASH_SPAN])])
+        clean, clean_stderr = self._stream(_wrapped(events[2:]))
+        self.assertEqual(clean_stderr, "")
+        self.assertEqual(self._without_root_times(posts), self._without_root_times(clean))
+        self._assert_quotes_nothing(stderr)
+
+    def _without_root_times(self, posts: list[tuple[str, bytes]]) -> list[tuple[str, dict]]:
+        """Each flush starts the root span at the current time, so drop the
+        root's times before two streams are compared."""
+        payloads = []
+        for path, body in posts:
+            payload = json.loads(body)
+            spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
+            roots = [span for span in spans if not span.get("parentSpanId")]
+            self.assertEqual(len(roots), 1)
+            del roots[0]["startTimeUnixNano"], roots[0]["endTimeUnixNano"]
+            payloads.append((path, payload))
+        return payloads
+
+    def test_the_last_time_that_fits_is_kept(self) -> None:
+        last = _event("tool_call", {"tool_name": "Bash"}, "c1", ts=18446744073.70955)
+        past = _event("tool_call", {"tool_name": "Bash"}, "c2", ts=18446744073.709553)
+        kept, lines = watch_module._otlp_readable_events([last, past])
+        self.assertEqual([id(event) for event in kept], [id(last)])
+        self.assertEqual(lines, self._PAST_LIMIT)
+
+
 class TestOtlpStreamRootStatus(_ReceiverTestCase):
     """A streamed batch is not the whole session, so its root claims no outcome (#561)."""
 
