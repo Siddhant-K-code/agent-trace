@@ -10,7 +10,12 @@ from .evidence_health import EvidenceHealthReasonKind, EvidenceHealthStatus
 from .health import HealthReport, assess_session, load_capture_matrix
 from .hooks import _PROVIDER_AGENT
 from .models import SessionMeta, usable_text
-from .store import CorruptSessionMetaError, TraceStore, refusal_reason
+from .store import (
+    AmbiguousSessionPrefixError,
+    CorruptSessionMetaError,
+    TraceStore,
+    refusal_reason,
+)
 
 _SUPPORTED_PROVIDERS = frozenset({"claude", "codex"})
 _PROVIDER_NAMES = {
@@ -60,6 +65,8 @@ def _resolve_requested_session(store: TraceStore, requested: str) -> str | None:
     except CorruptSessionMetaError as exc:
         # Return the match so _load_report refuses it as it refuses a full ID.
         return exc.session_id
+    except AmbiguousSessionPrefixError as exc:
+        raise LiveCaptureError(f"{exc}. Pass the full ID with --session SESSION_ID.") from exc
     except ValueError as exc:
         raise LiveCaptureError(f"Invalid session ID or prefix {requested!r}: {exc}") from exc
 

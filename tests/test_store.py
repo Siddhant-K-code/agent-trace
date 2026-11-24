@@ -19,6 +19,7 @@ import agent_trace
 from agent_trace.fileutil import lock_descriptor, unlock_descriptor
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import (
+    AmbiguousSessionPrefixError,
     CorruptSessionMetaError,
     SessionMismatchError,
     TraceStore,
@@ -64,6 +65,52 @@ def raw_separator_session(store: TraceStore, separator: str) -> tuple[str, list[
     path = store.base_dir / meta.session_id / "events.ndjson"
     path.write_bytes("".join(line + "\n" for line in lines).encode("utf-8"))
     return meta.session_id, lines
+
+
+# States that leave run1 in the trace directory, but not as a session that
+# find_session counts.
+NOT_A_SESSION_STATES = (
+    "meta.json moved out",
+    "meta.json a symlink",
+    "run1 a symlinked directory",
+    "run1 a dangling symlink",
+    "meta.json mode 000",
+)
+
+
+def make_run1_not_a_session(base_dir: Path, outside: Path, state: str) -> None:
+    """Put the session run1 in base_dir into one of NOT_A_SESSION_STATES.
+
+    outside is a directory outside the store. Raises unittest.SkipTest when
+    this account cannot make the state.
+    """
+    run1 = Path(base_dir) / "run1"
+    meta = run1 / "meta.json"
+    try:
+        if state == "meta.json moved out":
+            meta.rename(outside / "meta.json")
+        elif state == "meta.json a symlink":
+            meta.rename(outside / "meta.json")
+            meta.symlink_to(outside / "meta.json")
+        elif state == "run1 a symlinked directory":
+            run1.rename(outside / "run1")
+            run1.symlink_to(outside / "run1", target_is_directory=True)
+        elif state == "run1 a dangling symlink":
+            shutil.rmtree(run1)
+            run1.symlink_to(outside / "missing", target_is_directory=True)
+        elif state == "meta.json mode 000":
+            meta.chmod(0)
+        else:
+            raise ValueError(f"unknown state: {state}")
+    except OSError as exc:
+        raise unittest.SkipTest(f"cannot make {state}: {exc}")
+    if state == "meta.json mode 000":
+        try:
+            meta.read_bytes()
+        except PermissionError:
+            return
+        meta.chmod(0o600)
+        raise unittest.SkipTest("this account can read a file with mode 000")
 
 
 class TestTraceStore(unittest.TestCase):
@@ -266,25 +313,111 @@ class TestTraceStore(unittest.TestCase):
         self.assertEqual(self.store.find_session("aaaa"), "aaaa1111")
         self.assertIsNone(self.store.find_session("cccc"))
 
-    def test_find_session_prefers_a_readable_match_in_either_scan_order(self):
+    def _assert_ambiguous(self, prefix, matches, message, tenant_id=None):
+        with self.assertRaises(AmbiguousSessionPrefixError) as raised:
+            self.store.find_session(prefix, tenant_id=tenant_id)
+        self.assertEqual(raised.exception.prefix, prefix)
+        self.assertEqual(raised.exception.matches, matches)
+        self.assertEqual(str(raised.exception), message)
+
+    def test_find_session_prefers_an_exact_id_in_either_scan_order(self):
+        self._add_session_with_meta("run1")
+        self._add_session_with_meta("run10")
+        self._add_session_with_meta("bbbb", "{")
+        self._add_session_with_meta("bbbb1111")
+        for reverse in (False, True):
+            with self.subTest(reverse=reverse), self._scan_order(reverse):
+                self.assertEqual(self.store.find_session("run1"), "run1")
+                self.assertEqual(self.store.find_session("run10"), "run10")
+                # An exact ID with a corrupt meta.json raises its own error.
+                with self.assertRaises(CorruptSessionMetaError) as raised:
+                    self.store.find_session("bbbb")
+                self.assertEqual(raised.exception.session_id, "bbbb")
+                self.assertEqual(self.store.find_session("bbbb1"), "bbbb1111")
+
+    def test_find_session_refuses_two_readable_matches_in_either_scan_order(self):
+        self._add_session_with_meta("aaaa111100000001")
+        self._add_session_with_meta("aaaa222200000002")
+        for reverse in (False, True):
+            with self.subTest(reverse=reverse), self._scan_order(reverse):
+                self._assert_ambiguous(
+                    "aaaa", ["aaaa111100000001", "aaaa222200000002"],
+                    "session ID prefix aaaa matches 2 sessions: "
+                    "aaaa111100000001, aaaa222200000002",
+                )
+                self.assertEqual(self.store.find_session("aaaa2"), "aaaa222200000002")
+
+    def test_find_session_refuses_a_readable_and_a_corrupt_match_in_either_scan_order(self):
+        # Before, the readable match won.
         self._add_session_with_meta("bbbb1111")
         self._add_session_with_meta("bbbb2222", "{")
         for reverse in (False, True):
             with self.subTest(reverse=reverse), self._scan_order(reverse):
-                self.assertEqual(self.store.find_session("bbbb"), "bbbb1111")
+                self._assert_ambiguous(
+                    "bbbb", ["bbbb1111", "bbbb2222"],
+                    "session ID prefix bbbb matches 2 sessions: bbbb1111, bbbb2222",
+                )
                 with self.assertRaises(CorruptSessionMetaError):
                     self.store.find_session("bbbb2")
 
-    def test_find_session_names_the_lowest_of_two_corrupt_matches(self):
+    def test_find_session_refuses_two_corrupt_matches_in_either_scan_order(self):
+        # Before, the error named the corrupt match with the lowest ID.
         self._add_session_with_meta("bbbb1111", "[]")
         self._add_session_with_meta("bbbb2222", "{")
         for reverse in (False, True):
             with self.subTest(reverse=reverse), self._scan_order(reverse):
-                with self.assertRaisesRegex(
-                    CorruptSessionMetaError,
-                    "^session bbbb1111 has a corrupt meta.json: metadata is not a JSON object$",
-                ):
-                    self.store.find_session("bbbb")
+                self._assert_ambiguous(
+                    "bbbb", ["bbbb1111", "bbbb2222"],
+                    "session ID prefix bbbb matches 2 sessions: bbbb1111, bbbb2222",
+                )
+
+    def test_find_session_names_five_matches_and_counts_the_rest(self):
+        for number in range(1, 8):
+            self._add_session_with_meta(f"cccc000{number}", "{" if number == 7 else None)
+        for reverse in (False, True):
+            with self.subTest(reverse=reverse), self._scan_order(reverse):
+                self._assert_ambiguous(
+                    "cccc", [f"cccc000{number}" for number in range(1, 8)],
+                    "session ID prefix cccc matches 7 sessions: cccc0001, cccc0002, "
+                    "cccc0003, cccc0004, cccc0005 and 2 more",
+                )
+
+    def test_find_session_for_a_tenant_counts_only_its_own_sessions(self):
+        self._add_session_with_meta("aaaa1111", tenant_id="acme")
+        self._add_session_with_meta("aaaa2222", tenant_id="other")
+        self._add_session_with_meta("aaaa3333", "{")
+        self._add_session_with_meta("bbbb1111", tenant_id="acme")
+        self._add_session_with_meta("bbbb2222", tenant_id="other")
+        self._add_session_with_meta("bbbb3333", tenant_id="acme")
+        for reverse in (False, True):
+            with self.subTest(reverse=reverse), self._scan_order(reverse):
+                self.assertEqual(self.store.find_session("aaaa", tenant_id="acme"), "aaaa1111")
+                self.assertEqual(self.store.find_session("aaaa", tenant_id="other"), "aaaa2222")
+                self._assert_ambiguous(
+                    "bbbb", ["bbbb1111", "bbbb3333"],
+                    "session ID prefix bbbb matches 2 sessions: bbbb1111, bbbb3333",
+                    tenant_id="acme",
+                )
+                self.assertEqual(self.store.find_session("bbbb", tenant_id="other"), "bbbb2222")
+
+    def test_find_session_does_not_let_a_longer_id_stand_in_for_an_exact_entry(self):
+        # run1 is in the trace directory but is not a session. Before, run10 was used.
+        for state in NOT_A_SESSION_STATES:
+            with self.subTest(state=state):
+                tmp = tempfile.TemporaryDirectory()
+                self.addCleanup(tmp.cleanup)
+                store = TraceStore(os.path.join(tmp.name, "traces"))
+                for session_id in ("run1", "run10"):
+                    store.create_session(
+                        SessionMeta(session_id=session_id, tenant_id="acme", started_at=1.0)
+                    )
+                make_run1_not_a_session(store.base_dir, Path(tmp.name), state)
+                for reverse in (False, True):
+                    with self.subTest(reverse=reverse), self._scan_order(reverse):
+                        self.assertIsNone(store.find_session("run1"))
+                        self.assertEqual(store.find_session("run10"), "run10")
+                        # A lookup with a tenant skips this check, as before.
+                        self.assertEqual(store.find_session("run1", tenant_id="acme"), "run10")
 
     def test_find_session_for_a_tenant_skips_a_corrupt_match(self):
         # The tenant of a corrupt session cannot be read, so the lookup must not reveal it.
@@ -1168,6 +1301,114 @@ class TestCorruptSessionMetaLookupCommands(unittest.TestCase):
             ("regression", str(self.fixture)): (1, "", no_session),
             ("optimize",): (1, "", "No sessions found.\n"),
         })
+
+
+AMBIGUOUS_IDS = ("aaaa111100000001", "aaaa222200000002")
+AMBIGUOUS = "session ID prefix aaaa matches 2 sessions: aaaa111100000001, aaaa222200000002"
+
+
+class TestAmbiguousSessionPrefixCommands(unittest.TestCase):
+    """A prefix that matches two sessions is refused, and nothing is written."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="ambiguous-lookup-"))
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        (self.root / "home").mkdir()
+        self.env = without_telemetry({
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("AGENT_STRACE_") and key != "AGENT_TRACE_DIR"
+        })
+        self.env["PYTHONPATH"] = str(SRC_ROOT)
+        self.env["HOME"] = self.env["USERPROFILE"] = str(self.root / "home")
+        self.env["PYTHONIOENCODING"] = "utf-8"
+        from agent_trace.freeze import freeze_session
+
+        self.trace_dir = self.root / "traces"
+        store = TraceStore(str(self.trace_dir), use_workspace_env=False)
+        for number, session_id in enumerate(AMBIGUOUS_IDS, start=1):
+            store.create_session(SessionMeta(session_id=session_id, started_at=float(number)))
+            store.append_event(session_id, TraceEvent(
+                EventType.USER_PROMPT, timestamp=float(number), data={"prompt": "hi"}
+            ))
+        self.fixture = self.root / "fixture.json"
+        self.fixture.write_text(
+            freeze_session(store, AMBIGUOUS_IDS[0]).to_json() + "\n", encoding="utf-8"
+        )
+        # eval gate reads its config before it looks up the session.
+        self.gate_config = self.root / "gate.yaml"
+        self.gate_config.write_text(
+            "evals:\n"
+            "  - name: no-errors\n"
+            "    scorer: error_count\n"
+            "    threshold: 0\n"
+            "    fail_on: above\n",
+            encoding="utf-8",
+        )
+
+    def test_each_command_refuses_the_prefix_and_writes_nothing(self):
+        first = AMBIGUOUS_IDS[0]
+        commands = [
+            ("inspect", "aaaa"),
+            ("replay", "aaaa"),
+            ("replay", "aaaa", "--tree"),
+            ("export", "aaaa", "--format", "json"),
+            ("export", "aaaa", "--format", "eu-ai-act"),
+            ("export", "aaaa", "--backend", "langfuse"),
+            ("export", "aaaa", "--anonymize"),
+            ("stats", "aaaa"),
+            ("stats", "aaaa", "--include-subagents"),
+            ("cost", "aaaa"),
+            ("explain", "aaaa"),
+            ("timeline", "--format", "json", "aaaa"),
+            ("tree", "--format", "json", "aaaa"),
+            ("a2a-tree", "aaaa"),
+            ("compare", first, "aaaa"),
+            ("diff", first, "aaaa"),
+            ("why", "aaaa", "1"),
+            ("share", "aaaa", "--stdout"),
+            ("share", "aaaa", "--assignment"),
+            ("freeze", "aaaa"),
+            ("regression", str(self.fixture), "aaaa"),
+            ("optimize", "aaaa"),
+            ("mcp-scan", "--session", "aaaa"),
+            ("verify", "aaaa"),
+            ("cognitive-debt", "--session", "aaaa"),
+            ("identity", "sign", "aaaa"),
+            ("identity", "verify", "aaaa"),
+            ("audit", "aaaa"),
+            ("postmortem", "aaaa"),
+            ("token-budget", "aaaa"),
+            ("standup", "--no-llm", "aaaa"),
+            ("lint", "aaaa"),
+            ("compaction", "aaaa"),
+            ("skills", "aaaa"),
+            ("baseline", "check", "aaaa"),
+            ("compliance", "export", "aaaa"),
+            ("policy", "generate", "--dry-run", "aaaa"),
+            ("eval", "run", "aaaa"),
+            ("eval", "gate", "aaaa", "--config", str(self.gate_config)),
+            ("eval", "compare", first, "aaaa"),
+        ]
+
+        def run(command):
+            return subprocess.run(
+                [sys.executable, "-m", "agent_trace.entry", "--trace-dir", str(self.trace_dir),
+                 *command],
+                capture_output=True, text=True, encoding="utf-8",
+                env=self.env, cwd=self.root, timeout=120,
+            )
+
+        before = tree_snapshot(self.root)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(run, commands))
+        for command, result in zip(commands, results):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    (result.returncode, result.stdout, result.stderr),
+                    (1, "", f"Error: {AMBIGUOUS}\n"),
+                )
+        self.assertEqual(tree_snapshot(self.root), before)
 
 
 OTHER_SESSION = "other-session-4c1d"

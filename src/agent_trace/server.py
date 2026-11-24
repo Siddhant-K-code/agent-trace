@@ -61,6 +61,7 @@ from .event_data import (
 from .fileutil import split_lf_lines
 from .models import SessionMeta, TraceEvent, usable_time
 from .store import (
+    AmbiguousSessionPrefixError,
     CorruptSessionMetaError,
     TraceStore,
     DEFAULT_TRACE_DIR,
@@ -415,7 +416,11 @@ class CollectorHandler(BaseHTTPRequestHandler):
                     return
                 try:
                     result = _wd.api_session_events(self.store, session_id)
-                except (CorruptSessionMetaError, RefusedSessionError) as exc:
+                except (
+                    CorruptSessionMetaError,
+                    AmbiguousSessionPrefixError,
+                    RefusedSessionError,
+                ) as exc:
                     self._send_json(400, {"error": str(exc)})
                     return
                 if result is None:
@@ -440,6 +445,7 @@ class CollectorHandler(BaseHTTPRequestHandler):
                     NonObjectEventDataError,
                     UnusableTimestampError,
                     CorruptSessionMetaError,
+                    AmbiguousSessionPrefixError,
                     RefusedSessionError,
                 ) as exc:
                     self._send_json(400, {"error": str(exc)})
@@ -470,6 +476,7 @@ class CollectorHandler(BaseHTTPRequestHandler):
                     NonObjectEventDataError,
                     UnusableTimestampError,
                     CorruptSessionMetaError,
+                    AmbiguousSessionPrefixError,
                     RefusedSessionError,
                 ) as exc:
                     self._send_json(400, {"error": str(exc)})
@@ -503,6 +510,7 @@ class CollectorHandler(BaseHTTPRequestHandler):
                     NonObjectEventDataError,
                     UnusableTimestampError,
                     CorruptSessionMetaError,
+                    AmbiguousSessionPrefixError,
                     RefusedSessionError,
                 ) as exc:
                     self._send_json(400, {"error": str(exc)})
@@ -529,6 +537,7 @@ class CollectorHandler(BaseHTTPRequestHandler):
                     NonObjectEventDataError,
                     UnusableTimestampError,
                     CorruptSessionMetaError,
+                    AmbiguousSessionPrefixError,
                     RefusedSessionError,
                 ) as exc:
                     self._send_json(400, {"error": str(exc)})
@@ -573,7 +582,11 @@ class CollectorHandler(BaseHTTPRequestHandler):
                         return
                     session_id = found
                 events = self.store.load_events(session_id)
-            except (CorruptSessionMetaError, RefusedSessionError) as exc:
+            except (
+                CorruptSessionMetaError,
+                AmbiguousSessionPrefixError,
+                RefusedSessionError,
+            ) as exc:
                 self._send_json(400, {"error": str(exc)})
                 return
             self._send_ndjson(200, [e.to_json() for e in events])
@@ -594,7 +607,7 @@ class CollectorHandler(BaseHTTPRequestHandler):
                         return
                     session_id = found
                 meta = self.store.load_meta(session_id)
-            except CorruptSessionMetaError as exc:
+            except (CorruptSessionMetaError, AmbiguousSessionPrefixError) as exc:
                 self._send_json(400, {"error": str(exc)})
                 return
             self._send_json(200, json.loads(meta.to_json()))

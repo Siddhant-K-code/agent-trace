@@ -198,8 +198,15 @@ session IDs.
 JSON, not a JSON object, or nested more than 128 levels. `GET /sessions/<id>`
 and `GET /sessions/<id>/events` answer 400 for it with
 `{"error": "<message>"}`, the message the CLI prints. They answer the same 400
-for an ID prefix that matches no readable session but does match a corrupt
-one, not 404. See [`list`](commands.md#list) for the fix.
+for an ID prefix whose only match is a corrupt session, not 404. See
+[`list`](commands.md#list) for the fix.
+
+They also answer 400 with `{"error": "<message>"}` for an ID prefix that
+matches two or more sessions, as in
+`{"error": "session ID prefix aaaa matches 2 sessions: aaaa111100000001, aaaa222200000002"}`.
+An exact ID wins over a longer ID that starts with it. With `--dashboard`, the
+session's events and its review, compare, share, and OTLP actions answer the
+same way. See [Session IDs](commands.md#session-ids).
 
 `GET /sessions/<id>/events` also answers 400 with `{"error": "<message>"}` when
 an event names another session or tenant, or a line of `events.ndjson` is not

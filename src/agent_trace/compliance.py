@@ -633,8 +633,10 @@ def cmd_export_eu_ai_act(args: argparse.Namespace) -> int:
         if not session_id:
             sys.stderr.write("No sessions found.\n")
             return 1
-        full_id = store.find_session(session_id) or session_id
-        if not store.session_exists(full_id):
+        # The export reads meta.json, so only a session find_session
+        # returns can be exported.
+        full_id = store.find_session(session_id)
+        if full_id is None:
             sys.stderr.write(f"Session not found: {session_id}\n")
             return 1
         session_ids = [full_id]

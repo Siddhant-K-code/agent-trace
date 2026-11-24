@@ -175,6 +175,29 @@ class CorruptSessionMetaError(ValueError):
         self.reason = str(reason)
 
 
+_AMBIGUOUS_NAMED = 5
+
+
+class AmbiguousSessionPrefixError(ValueError):
+    """A session ID prefix matches two or more sessions.
+
+    ``matches`` holds the matching IDs in sorted order. The message names at
+    most five of them. It is a ValueError, like CorruptSessionMetaError, and
+    the CLI and the collector print it the same way.
+    """
+
+    def __init__(self, prefix: str, matches: Iterable[str]) -> None:
+        self.prefix = prefix
+        self.matches = sorted(matches)
+        named = ", ".join(self.matches[:_AMBIGUOUS_NAMED])
+        more = len(self.matches) - _AMBIGUOUS_NAMED
+        if more > 0:
+            named += f" and {more} more"
+        super().__init__(
+            f"session ID prefix {prefix} matches {len(self.matches)} sessions: {named}"
+        )
+
+
 def _read_meta_file(path: Path, session_id: str) -> SessionMeta:
     """Parse the meta.json at ``path``, or raise CorruptSessionMetaError.
 
@@ -1658,20 +1681,31 @@ class TraceStore:
         ).exists()
 
     def find_session(self, prefix: str, tenant_id: str | None = None) -> str | None:
-        """Return the ID of a readable session whose ID starts with ``prefix``.
+        """Return the ID of the session that ``prefix`` names.
 
-        A readable match wins over a corrupt one. When no readable session
-        matches but a session with a corrupt meta.json does, this raises that
-        session's CorruptSessionMetaError. If several corrupt sessions match,
-        it raises the one with the lowest ID. A lookup with ``tenant_id``
-        skips corrupt sessions instead, because their tenant cannot be read.
+        The candidates are the readable sessions whose ID starts with
+        ``prefix``. A session with a corrupt meta.json is a candidate too.
+        A lookup with ``tenant_id`` counts only that tenant's readable
+        sessions, because a corrupt session's tenant cannot be read.
+
+        A candidate whose ID equals ``prefix`` wins. Otherwise a lone
+        candidate wins. This returns the winner's ID, or raises its
+        CorruptSessionMetaError. Two or more candidates and no exact one
+        raise AmbiguousSessionPrefixError. No candidate returns None.
+
+        Without ``tenant_id``, an entry named ``prefix`` that is not a
+        candidate returns None, so a longer ID never stands in for it.
+        A directory without meta.json and a symlink are such entries.
+        A lookup with ``tenant_id`` skips this check. There, an entry
+        that is not that tenant's readable session stays invisible.
         """
         validate_stored_id(prefix, "session ID prefix")
         if tenant_id is not None:
             tenant_id = validate_optional_tenant_id(tenant_id)
         if not self.base_dir.exists():
             return None
-        corrupt: CorruptSessionMetaError | None = None
+        # Each candidate maps to None when readable, or to its corrupt error.
+        candidates: dict[str, CorruptSessionMetaError | None] = {}
         for d in self.base_dir.iterdir():
             if d.is_symlink() or not d.is_dir() or not d.name.startswith(prefix):
                 continue
@@ -1679,16 +1713,29 @@ class TraceStore:
                 validate_stored_id(d.name, "stored session directory")
                 meta = self.load_meta(d.name)
             except CorruptSessionMetaError as exc:
-                if corrupt is None or exc.session_id < corrupt.session_id:
-                    corrupt = exc
+                if tenant_id is None:
+                    candidates[d.name] = exc
                 continue
             except (OSError, ValueError, TypeError, json.JSONDecodeError):
                 continue
             if tenant_id is None or meta.tenant_id == tenant_id:
-                return d.name
-        if corrupt is not None and tenant_id is None:
+                candidates[d.name] = None
+        if prefix in candidates:
+            chosen = prefix
+        elif tenant_id is None and os.path.lexists(self.base_dir / prefix):
+            # An entry named exactly prefix exists but is not a session.
+            # Do not pick a longer ID in its place.
+            return None
+        elif len(candidates) == 1:
+            (chosen,) = candidates
+        elif candidates:
+            raise AmbiguousSessionPrefixError(prefix, candidates)
+        else:
+            return None
+        corrupt = candidates[chosen]
+        if corrupt is not None:
             raise corrupt
-        return None
+        return chosen
 
     def tag_session(self, session_id: str, tenant_id: str) -> int:
         """Assign *tenant_id* to a session and every persisted event.

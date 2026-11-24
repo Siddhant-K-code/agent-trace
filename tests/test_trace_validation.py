@@ -913,6 +913,33 @@ class TestValidationCli(unittest.TestCase):
             self.assertFalse((root / ".gitignore").exists())
             self.assertEqual(json.loads(stdout.getvalue())["status"], "valid")
 
+    def test_an_ambiguous_prefix_is_named_not_reported_missing(self):
+        source = CORPUS_ROOT / "usage-zero"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for session_id in ("aaaa111100000001", "aaaa222200000002"):
+                case = root / session_id
+                case.mkdir()
+                for name in ("meta.json", "events.ndjson"):
+                    (case / name).write_bytes((source / name).read_bytes())
+            args = SimpleNamespace(
+                corpus=False,
+                format="json",
+                trace_dir=str(root),
+                target="aaaa",
+                allow_active=False,
+                replay_baseline=None,
+            )
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with patch.dict(os.environ, {"AGENT_STRACE_WORKSPACE": ""}, clear=False), \
+                    patch("sys.stdout", stdout), patch("sys.stderr", stderr):
+                result = cmd_validate(args)
+        self.assertEqual(
+            (result, stdout.getvalue(), stderr.getvalue()),
+            (1, "", "Error: session ID prefix aaaa matches 2 sessions: "
+                    "aaaa111100000001, aaaa222200000002\n"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

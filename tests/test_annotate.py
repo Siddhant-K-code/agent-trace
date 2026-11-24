@@ -8,6 +8,8 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -21,7 +23,7 @@ from agent_trace.annotate import (
     load_annotations,
     cmd_annotate,
 )
-from agent_trace.cli import build_parser
+from agent_trace.cli import _run_handler, build_parser
 from agent_trace.models import SessionMeta
 from agent_trace.share import cmd_share
 from agent_trace.store import TraceStore
@@ -508,6 +510,67 @@ class TestAnnotateAtWritesALineThatLoads(unittest.TestCase):
         result = _run_cli(trace_dir, "annotate", SESSION, "--list")
         self.assertEqual(result.returncode, 0, result.stderr[-2000:])
         self.assertIn("  offset=0.0s\n    N-AT0\n", result.stdout)
+
+
+class TestAnnotateNamesOneSession(unittest.TestCase):
+    """annotate refuses a prefix of two sessions and writes to an exact ID."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.trace_dir = tmp.name
+        self.store = TraceStore(tmp.name)
+        for session_id in ("aaaa111100000001", "aaaa222200000002", "run1", "run10"):
+            self.store.create_session(SessionMeta(session_id=session_id, started_at=1000.0))
+
+    def _files(self):
+        root = Path(self.trace_dir)
+        return {
+            path.relative_to(root).as_posix(): path.read_bytes()
+            for path in root.rglob("*") if path.is_file()
+        }
+
+    def _annotate(self, *argv):
+        args = build_parser().parse_args(["--trace-dir", self.trace_dir, "annotate", *argv])
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = _run_handler(args, cmd_annotate)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_an_ambiguous_prefix_writes_nothing(self):
+        before = self._files()
+        self.assertEqual(
+            self._annotate("aaaa", "--at", "0s", "--note", "x"),
+            (1, "", "Error: session ID prefix aaaa matches 2 sessions: "
+                    "aaaa111100000001, aaaa222200000002\n"),
+        )
+        self.assertEqual(self._files(), before)
+
+    def test_an_exact_id_gets_the_note_in_either_scan_order(self):
+        real_iterdir = Path.iterdir
+        for reverse in (False, True):
+            with self.subTest(reverse=reverse), patch.object(
+                type(self.store.base_dir), "iterdir",
+                lambda path, reverse=reverse: iter(sorted(real_iterdir(path), reverse=reverse)),
+            ):
+                code, _, err = self._annotate("run1", "--note", f"N-{reverse}")
+                self.assertEqual((code, err), (0, ""))
+        self.assertEqual(
+            [a.note for a in load_annotations(self.store, "run1")], ["N-False", "N-True"]
+        )
+        self.assertEqual(load_annotations(self.store, "run10"), [])
+
+    def test_run10_gets_no_note_when_run1_is_not_a_session(self):
+        # Before, the note went to run10.
+        outside = tempfile.TemporaryDirectory()
+        self.addCleanup(outside.cleanup)
+        (Path(self.trace_dir) / "run1" / "meta.json").rename(Path(outside.name) / "meta.json")
+        before = self._files()
+        self.assertEqual(
+            self._annotate("run1", "--note", "x"), (1, "", "Session not found: run1\n")
+        )
+        self.assertEqual(self._files(), before)
+        self.assertEqual(load_annotations(self.store, "run10"), [])
 
 
 if __name__ == "__main__":

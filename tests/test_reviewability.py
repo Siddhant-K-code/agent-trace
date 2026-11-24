@@ -1030,6 +1030,29 @@ class TestCommands(_StoreCase):
         self.assertEqual(code, 2)
         self.assertIn("Session not found", err)
 
+    def test_review_and_pr_comment_refuse_an_ambiguous_prefix(self):
+        for session_id in ("aaaa111100000001", "aaaa222200000002"):
+            _Builder(self.store, session_id).save()
+        message = ("session ID prefix aaaa matches 2 sessions: "
+                   "aaaa111100000001, aaaa222200000002\n")
+        self.assertEqual(self._run(["review", "aaaa"]), (2, "", f"review: {message}"))
+        self.assertEqual(
+            self._run(["pr-comment", "--dry-run", "aaaa"]), (1, "", f"pr-comment: {message}")
+        )
+
+    def test_an_exact_session_id_links_that_session_in_either_scan_order(self):
+        for session_id in ("run1", "run10"):
+            _Builder(self.store, session_id).save()
+        real_iterdir = Path.iterdir
+        for reverse in (False, True):
+            with self.subTest(reverse=reverse), patch.object(
+                type(self.store.base_dir), "iterdir",
+                lambda path, reverse=reverse: iter(sorted(real_iterdir(path), reverse=reverse)),
+            ):
+                self.assertEqual(
+                    link_sessions(self.store, ["run1"]), [LinkedSession("run1", "explicit")]
+                )
+
     def test_review_with_no_sessions(self):
         code, out, _ = self._run(["review"])
         self.assertEqual(code, 0)
