@@ -219,10 +219,29 @@ def _begin_tool_call(func: Callable, tool_name: str, args: Any, kwargs: Any) -> 
     )
 
 
-def _begin_llm_call(func: Callable, llm_name: str, args: Any, kwargs: Any) -> _Call | None:
+def _llm_arguments(func: Callable, args: Any, kwargs: Any) -> dict[str, Any]:
+    """Return the arguments that ``messages`` and ``model`` are read from.
+
+    A named parameter wins over a keyword collected by ``**kwargs``. A
+    ``*args`` or ``**kwargs`` parameter is never read by its own name. A call
+    that cannot be bound is read from its keyword arguments only.
+    """
     bound = _bind(func, args, kwargs)
-    # A call that cannot be bound is read from its keyword arguments only.
-    arguments = kwargs if bound is None else bound.arguments
+    if bound is None:
+        return kwargs
+    named: dict[str, Any] = {}
+    collected: dict[str, Any] = {}
+    for name, value in bound.arguments.items():
+        kind = bound.signature.parameters[name].kind
+        if kind is inspect.Parameter.VAR_KEYWORD:
+            collected = value
+        elif kind is not inspect.Parameter.VAR_POSITIONAL:
+            named[name] = value
+    return {**collected, **named}
+
+
+def _begin_llm_call(func: Callable, llm_name: str, args: Any, kwargs: Any) -> _Call | None:
+    arguments = _llm_arguments(func, args, kwargs)
 
     # try to extract message count
     messages = arguments.get("messages", [])
@@ -346,6 +365,11 @@ def trace_tool(_func: Callable | None = None, *, name: str = ""):
 
 def trace_llm_call(_func: Callable | None = None, *, name: str = ""):
     """Decorator to trace an LLM call function, sync or ``async def``.
+
+    It records the length of a ``messages`` list and the ``model``, each
+    from the parameter of that name or else from a keyword collected by
+    ``**kwargs``, and from the keyword arguments only when the call does not
+    fit the signature.
 
     Usage:
         @trace_llm_call

@@ -366,6 +366,11 @@ class NoStr(Exception):
         raise RuntimeError("no str")
 
 
+class Opaque:
+    def __repr__(self):
+        return "<opaque>"
+
+
 _BIG = "<Model.BIG: 'gpt-4o'>"
 _MODES = ("sync", "async")
 _WRITE_ERRORS = (OSError, RuntimeError)
@@ -397,6 +402,17 @@ def _sync_and_async(func):
         return func(*args, **kwargs)
 
     return {"sync": func, "async": twin}
+
+
+def _recorder(func, runs):
+    """Return a twin of the function that adds each call's arguments to runs."""
+
+    @functools.wraps(func)
+    def record(*args, **kwargs):
+        runs.append((args, kwargs))
+        return func(*args, **kwargs)
+
+    return record
 
 
 def _call(func, *args, **kwargs):
@@ -808,6 +824,95 @@ class TestValuesThatAreNotJson(_SessionTestCase):
                 end_session()
                 self.assertEqual(
                     self.event_types(sid), ["session_start", "session_end"])
+
+
+class TestLlmCallMessagesAndModel(_SessionTestCase):
+    def check(self, rows):
+        """Call each function traced, sync and async, and check its llm_request.
+
+        A row is (function, args, kwargs, (message_count, model)).
+        """
+        for mode in _MODES:
+            for func, args, kwargs, recorded in rows:
+                with self.subTest(
+                        func=func.__name__, args=args, kwargs=kwargs, mode=mode):
+                    runs = []
+                    traced = trace_llm_call(
+                        _sync_and_async(_recorder(func, runs))[mode])
+                    sid = self.start()
+                    self.assertEqual(_call(traced, *args, **kwargs), "ok")
+                    end_session()
+                    self.assertEqual(runs, [(args, kwargs)])
+                    requests = self.events(sid, EventType.LLM_REQUEST)
+                    self.assertEqual(
+                        [(r.data["message_count"], r.data["model"]) for r in requests],
+                        [recorded])
+                    self.assertEqual(self.meta(sid).llm_requests, 1)
+
+    def test_keywords_collected_by_var_keyword_are_read(self):
+        def kw_only(**kwargs):
+            return "ok"
+
+        def named_messages(messages, **kwargs):
+            return "ok"
+
+        def star_args(*args, **kwargs):
+            return "ok"
+
+        self.check((
+            (kw_only, (), {"messages": [1, 2], "model": "m"}, (2, "m")),
+            (kw_only, (), {"messages": [1, 2, 3], "model": "m"}, (3, "m")),
+            (named_messages, ([1, 2],), {"model": "m"}, (2, "m")),
+            (star_args, ([1],), {"model": "m"}, (0, "m")),
+            (kw_only, (), {"model": Opaque()}, (0, "<opaque>")),
+            (kw_only, (), {"messages": (1, 2)}, (0, "")),
+        ))
+
+    def test_var_positional_or_var_keyword_parameter_is_not_read_by_its_name(self):
+        def var_kw_named_model(**model):
+            return "ok"
+
+        def star_model(*model):
+            return "ok"
+
+        def star_messages_kw(*messages, **kw):
+            return "ok"
+
+        self.check((
+            (var_kw_named_model, (), {"model": "m", "messages": [1]}, (1, "m")),
+            (star_model, ("a",), {}, (0, "")),
+            (star_messages_kw, ([1],), {"messages": [1, 2]}, (2, "")),
+        ))
+
+    def test_named_parameter_is_read_before_a_collected_keyword(self):
+        def posonly_model(model, /, **kw):
+            return "ok"
+
+        def named_default(messages, model="gpt-4", **kwargs):
+            return "ok"
+
+        def named_both(messages, model):
+            return "ok"
+
+        self.check((
+            (posonly_model, ("a",), {"model": "b"}, (0, "a")),
+            (named_default, ([1],), {}, (1, "gpt-4")),
+            (named_default, ([1],), {"temperature": 0}, (1, "gpt-4")),
+            (named_both, ([1, 2], "m"), {}, (2, "m")),
+        ))
+
+    def test_call_that_cannot_be_bound_reads_its_keywords_only(self):
+        def chat(messages, **options):
+            return "ok"
+
+        @functools.wraps(chat)
+        def wrapper(*args, **kwargs):
+            return "ok"
+
+        self.check((
+            (wrapper, (), {"model": "m"}, (0, "m")),
+            (wrapper, (), {"options": {"messages": [1, 2], "model": "x"}}, (0, "")),
+        ))
 
 
 class TestUnprintableException(_SessionTestCase):
