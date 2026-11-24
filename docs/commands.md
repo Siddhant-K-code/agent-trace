@@ -2154,9 +2154,30 @@ Two or more failed tool calls in a row make an approach, named after the tool ca
 
 ### `freshness`
 ```
-agent-strace freshness [--since DATE] [--scope GLOB]
+agent-strace freshness [--since YYYY-MM-DD] [--scope GLOB] [--repo PATH]
 ```
-Check how stale the agent's last view of the codebase is. Reports files changed since last session and a freshness score 0–100.
+Check how stale the agent's last view of the codebase is. Reports the files changed since the last session and a freshness score from 0 to 100. A score of 100 means nothing changed.
+
+The base is the newest commit on the first-parent chain of HEAD made at or before the start of the newest session. A commit from a branch merged after that time does not count as seen. When no commit is that old, the base is the empty tree, so every file in HEAD shows as added. Each changed file has git's change type: added, deleted, modified or renamed. A renamed file shows under its new name.
+
+| Flag | Description |
+|---|---|
+| `--since YYYY-MM-DD` | Use 00:00 UTC on this date instead of the start of the newest session |
+| `--scope GLOB` | Count only the files that match `GLOB` as in scope |
+| `--repo PATH` | Check the repository that contains `PATH`. Default is `.` |
+
+File names and globs are relative to the repository's top level, as git prints them. So `--scope 'src/**'` matches `src/app.py` from any directory of the repository.
+
+Without `--scope`, the scope list comes from `CLAUDE.md` at the repository's top level. If that file lists no globs, it comes from `AGENTS.md` there. The list is the `-` and `*` bullets under a heading line that ends in `:` and mentions scope, files, include or watch. The bullet marker and any backticks around the glob are removed. With no scope list, every file is in scope.
+
+`freshness` prints one line to stderr and exits 1, with no report, when:
+
+- The store has no session and `--since` is not given. The line starts with `No sessions found.`
+- The newest session has no usable start time and `--since` is not given.
+- `--since` is not a date in the form `YYYY-MM-DD`.
+- The path does not exist, is not in a git repository, or the repository has no commits.
+- git is not installed, fails, or runs longer than 30 seconds.
+- The repository is a shallow clone with no commit that old. Run `git fetch --unshallow`, or pass a later `--since`.
 
 ### `oncall`
 ```
