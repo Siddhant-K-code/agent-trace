@@ -23,11 +23,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 import sys
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal, TextIO
 
@@ -79,7 +80,47 @@ def _iso(ts: float | None) -> str | None:
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _parse_time_bound(value: str | None, default: float | None = None) -> float | None:
+# The ISO forms of a --since or --until value. A fixed pattern reads a value
+# the same way on every Python: datetime.fromisoformat reads more forms on
+# 3.11 and later, and takes the + of a date with an offset as the separator.
+_ISO_TIME_BOUND_RE = re.compile(
+    r"([0-9]{4})-([0-9]{2})-([0-9]{2})"
+    r"(?:[Tt ]([0-9]{2})(?::([0-9]{2})(?::([0-9]{2})(?:\.([0-9]+))?)?)?"
+    r"([Zz]|[+-][0-9]{2}:[0-9]{2})?)?"
+)
+
+
+def _parse_iso_time_bound(raw: str, end_of_day: bool) -> float | None:
+    match = _ISO_TIME_BOUND_RE.fullmatch(raw)
+    if match is None:
+        return None
+    year, month, day, hour, minute, second, fraction, offset = match.groups()
+    zone = timezone.utc
+    if offset and offset not in ("Z", "z"):
+        if int(offset[4:6]) >= 60:
+            return None
+        shift = timedelta(hours=int(offset[1:3]), minutes=int(offset[4:6]))
+        zone = timezone(-shift if offset[0] == "-" else shift)
+    stamp = datetime(
+        int(year), int(month), int(day),
+        int(hour or 0), int(minute or 0), int(second or 0),
+        int((fraction or "0")[:6].ljust(6, "0")),
+        tzinfo=zone,
+    ).timestamp()
+    if hour is None and end_of_day:
+        # A date-only --until covers that whole UTC day.
+        return math.nextafter(stamp + 86400, -math.inf)
+    return stamp
+
+
+def _parse_time_bound(
+    value: str | None, default: float | None = None, *, end_of_day: bool = False,
+) -> float | None:
+    """Return the Unix time a --since or --until value names, or *default*.
+
+    A date, or a time with no offset, is UTC. With *end_of_day*, a date
+    ends at the last float before the next day's 00:00 UTC.
+    """
     if not value:
         return default
     raw = value.strip()
@@ -90,13 +131,15 @@ def _parse_time_bound(value: str | None, default: float | None = None) -> float 
     if raw.endswith("h") and raw[:-1].replace(".", "", 1).isdigit():
         return time.time() - float(raw[:-1]) * 3600
     try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+        return float(raw)
     except ValueError:
         pass
     try:
-        return float(raw)
+        stamp = _parse_iso_time_bound(raw, end_of_day)
     except ValueError:
+        # A field out of range, such as 2026-02-30 or +24:00.
         return default
+    return default if stamp is None else stamp
 
 
 def _load_event_lines(store: TraceStore, session_id: str) -> list[str]:
@@ -548,7 +591,7 @@ def select_sessions(
     refuses any session or entry in it, even one outside the window.
     """
     since_ts = _parse_time_bound(since, None)
-    until_ts = _parse_time_bound(until, None)
+    until_ts = _parse_time_bound(until, None, end_of_day=True)
     selected = []
     for meta in _export_sessions(store):
         if since_ts is not None and meta.started_at < since_ts:

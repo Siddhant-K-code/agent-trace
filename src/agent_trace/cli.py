@@ -603,7 +603,10 @@ def _export_agent_id(args: argparse.Namespace) -> tuple[str, str | None]:
 # The default _parse_time_bound returns when it cannot read a value.
 _UNREAD_TIME_BOUND = object()
 
-_TIME_BOUND_FORM = "use a duration such as 7d or 12h, an ISO date or time, or Unix seconds"
+_TIME_BOUND_FORM = (
+    "use a duration such as 7d or 12h, a date such as 2026-03-31, "
+    "a time such as 2026-03-31T12:00:00Z, or Unix seconds"
+)
 
 
 def _readable_time_bound(value: str) -> float | None:
@@ -2317,11 +2320,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_export.add_argument("--since", metavar="Nd",
                           help="with --scores, --metrics or --backend and no session ID: export the "
                                "sessions of the last N days, as N or Nd (e.g. 7d); with --format "
-                               "eu-ai-act --all: also 12h, an ISO date or time, or Unix seconds")
+                               "eu-ai-act --all: also 12h, a date such as 2026-01-01, a time such "
+                               "as 2026-01-01T12:00:00Z, or Unix seconds; a date, or a time with "
+                               "no offset, is UTC")
     p_export.add_argument("--until", metavar="DATE",
                           help="with --format eu-ai-act --all: export the sessions that started by "
-                               "this time (an ISO date or time, a duration back from now such as 1d, "
-                               "or Unix seconds)")
+                               "this time: a duration back from now such as 1d, a date such as "
+                               "2026-03-31, a time such as 2026-03-31T12:00:00Z, or Unix seconds; "
+                               "a date, or a time with no offset, is UTC, and a date covers that "
+                               "whole UTC day")
     p_export.add_argument("--all", action="store_true",
                           help="with --format eu-ai-act: export every session in the --since and "
                                "--until window instead of one session")
