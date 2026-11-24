@@ -72,6 +72,8 @@ def _resolve_factor(model: str) -> float | None:
 
     Names resolve as in :func:`agent_trace.cost.get_model_pricing`, so a
     dated, provider-prefixed or Bedrock name gets the factor of its base model.
+    A Claude name with a dot in its version, such as ``claude-opus-4.7``, gets
+    the factor of its dash form.
     """
     key = _match_model_key(model, TOKENIZER_FACTORS)
     return None if key is None else TOKENIZER_FACTORS[key]

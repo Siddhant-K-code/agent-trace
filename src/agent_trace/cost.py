@@ -657,6 +657,8 @@ _BEDROCK_MODEL_RE = re.compile(
 # A Bedrock ARN in any partition, up to its resource.
 _BEDROCK_ARN_RE = re.compile(r"^arn:aws(?:-us-gov|-cn)?:bedrock:[^:]*:[^:]*:")
 _BEDROCK_PREFIXES = ("bedrock/", "aws/bedrock/")
+# A dot between two digits, as in the Claude version of claude-sonnet-4.5.
+_CLAUDE_VERSION_DOT_RE = re.compile(r"(?<=\d)\.(?=\d)")
 _BEDROCK_GEOGRAPHY_CLAUDE_RE = re.compile(rf"^(?:{_BEDROCK_GEOGRAPHIES})\.anthropic\.")
 
 # Bedrock bills a geography inference profile of a recent Claude model at 1.1
@@ -744,6 +746,15 @@ def _pricing_candidates(model: str) -> list[str]:
     for candidate in list(candidates):
         if candidate.startswith("anthropic."):
             candidates.append(candidate[len("anthropic."):])
+
+    # Copilot and OpenRouter write a Claude version with a dot, as in
+    # claude-sonnet-4.5. The tables use a dash. In a claude- name, each dot
+    # between two digits reads as a dash. The dash form replaces the dot form:
+    # no Claude key has a dot, and the dot form can match a shorter key.
+    candidates = [
+        _CLAUDE_VERSION_DOT_RE.sub("-", c) if c.startswith("claude-") else c
+        for c in candidates
+    ]
 
     # Keep order deterministic while removing duplicates.
     return [c for c in dict.fromkeys(candidates) if c]

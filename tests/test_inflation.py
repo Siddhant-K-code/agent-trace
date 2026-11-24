@@ -346,6 +346,30 @@ class TestBedrockCompare(_StoreTestCase):
                 self.assertAlmostEqual(report.avg_cost_inflated, per_session * 1.38, places=12)
 
 
+class TestDotVersionCompare(_StoreTestCase):
+    def setUp(self):
+        super().setUp()
+        _add_session(self.store, PROMPT_1000, REPLY_500)
+
+    def test_compare_accepts_claude_names_with_a_dot_in_the_version(self):
+        # Each pair compares as claude-opus-4-6,claude-opus-4-7 does: the
+        # factors 1.0 and 1.38, at $5 input and $25 output per 1M tokens.
+        for pair in (
+            "claude-opus-4.6,claude-opus-4.7",
+            "anthropic/claude-opus-4.6,anthropic/claude-opus-4.7",
+        ):
+            with self.subTest(pair=pair):
+                code, out, err = _run(self.trace_dir, "--compare", pair)
+                self.assertEqual((code, err), (0, ""))
+                self.assertEqual(
+                    _cells(_row(out, "Per session (tokens)")), ["1,500", "2,070", "+38.0%"],
+                )
+                self.assertEqual(
+                    _cells(_row(out, "Per session (cost)")),
+                    ["$       0.0175", "$       0.0241", "+38.0%"],
+                )
+
+
 class TestSessionCount(_StoreTestCase):
     def test_sessions_without_content_count_as_none(self):
         for _ in range(3):

@@ -104,6 +104,18 @@ class CompactionDetectionTests(unittest.TestCase):
             direct * 1.1,
         )
 
+    def test_claude_name_with_a_dot_prices_dropped_context_at_its_own_rate(self):
+        # Input costs $5 per 1M tokens for Opus 4.5, $1 for Haiku 4.5 and $3.30
+        # for a us. profile of Sonnet 4.5. A model with no price uses $3.
+        cases = {
+            "claude-opus-4.5": 0.65,
+            "claude-haiku-4.5": 0.13,
+            "us.anthropic.claude-sonnet-4.5-v1:0": 0.429,
+        }
+        for model, cost in cases.items():
+            with self.subTest(model=model):
+                self.assertAlmostEqual(self._dropped_context_cost(model), cost)
+
     def test_exactly_fifty_percent_is_not_more_than_threshold(self):
         self.assertEqual(
             detect_compactions([_request(1, 1000), _request(2, 500)]),
@@ -825,6 +837,33 @@ class CompactionLintAndCommandTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertIn("Compaction events - session session-1", output.getvalue())
+
+    def test_cmd_compaction_prices_a_claude_name_with_a_dot(self):
+        # 150,000 then 20,000 input tokens drop 130,000 tokens.
+        for model, cost in (
+            ("claude-opus-4.5", "$0.6500"),
+            ("claude-haiku-4.5", "$0.1300"),
+            ("claude-opus-4-5", "$0.6500"),
+        ):
+            with self.subTest(model=model):
+                temporary, _store_instance, session_id = _store([
+                    _event(EventType.LLM_REQUEST, 1, model=model, input_tokens=150_000),
+                    _event(EventType.LLM_REQUEST, 2, model=model, input_tokens=20_000),
+                ])
+                self.addCleanup(temporary.cleanup)
+                args = argparse.Namespace(
+                    trace_dir=temporary.name,
+                    session_id=session_id,
+                    compaction_threshold=0.5,
+                    diff=False,
+                    behavior_diff=False,
+                )
+                output = io.StringIO()
+                with patch("sys.stdout", output):
+                    self.assertEqual(cmd_compaction(args), 0)
+                self.assertIn(
+                    f"Estimated cost of dropped context: {cost}\n", output.getvalue(),
+                )
 
 
 if __name__ == "__main__":

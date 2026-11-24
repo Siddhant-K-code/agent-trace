@@ -76,9 +76,9 @@ def _resolve_limit(model: str) -> int | None:
 
     The name finds its ``CONTEXT_LIMITS`` key by the rule that ``cost`` uses
     to price a recorded model name. Case is ignored, and a provider prefix, a
-    Bedrock prefix or a Bedrock ARN is read past. The name uses the longest
-    key that it equals, or that it starts with followed by ``-``, ``:`` or
-    ``@``.
+    Bedrock prefix or a Bedrock ARN is read past. In a ``claude-`` name, a dot
+    between two digits reads as a dash. The name uses the longest key that it
+    equals, or that it starts with followed by ``-``, ``:`` or ``@``.
     """
     if not model:
         return None
