@@ -805,6 +805,13 @@ The metrics are POSTed to `--otlp-endpoint`, else `OTEL_EXPORTER_OTLP_ENDPOINT`,
 with `/v1/metrics` appended. The POST does not follow redirects, so pass the
 final URL.
 
+`--since` takes a number of days, as `N` or `Nd`, such as `30d` or `0.5d`.
+Hours and dates are refused. Export reads every session in the store before it
+sends anything. A session or other entry that the store refuses, even one
+outside the window, stops the export with one line and exit 1, such as
+`Error: session <id> has a corrupt meta.json: <reason>`. See
+[`export`](commands.md#export).
+
 | Metric | Description |
 |---|---|
 | `agent_strace.session.cost_usd` | Session cost, as `agent-strace cost` reports it with its default model |

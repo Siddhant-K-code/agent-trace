@@ -381,7 +381,9 @@ def _read_refusal_reason(exc: BaseException) -> str:
     return refusal_reason(exc)
 
 
-def _export_sessions(store: TraceStore) -> list[SessionMeta]:
+def _export_sessions(
+    store: TraceStore, *, validate_events: bool = True
+) -> list[SessionMeta]:
     """Return every session in the store for a bulk export, newest first.
 
     A bulk export fails closed. A session the store refuses stops the export
@@ -389,10 +391,16 @@ def _export_sessions(store: TraceStore) -> list[SessionMeta]:
     leaves the session out or reports it as empty. The exports do not filter
     by tenant. So, as in ``load_events``, an event may carry a tenant when
     its session has none.
+
+    With ``validate_events=False`` the events are not read. The scores
+    ``--since`` batch in langfuse_export uses it, so ``--metrics`` still
+    exports a session with an unreadable line, without ``cost_usd``.
     """
     prefix = "corrupt session in tenant store: "
     try:
-        return store.list_sessions_strict(strict_event_tenants=False)
+        return store.list_sessions_strict(
+            strict_event_tenants=False, validate_events=validate_events
+        )
     except ValueError as exc:
         cause = exc.__cause__
         if isinstance(cause, (CorruptSessionMetaError, RefusedSessionError)):

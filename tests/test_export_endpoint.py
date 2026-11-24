@@ -18,10 +18,12 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -52,6 +54,20 @@ _ROUTE_ENV = (
     "LANGFUSE_PUBLIC_KEY",
     "LANGFUSE_SECRET_KEY",
     "LANGFUSE_HOST",
+)
+DAY = 86400
+SINCE_DAYS = "use a number of days as N or Nd, such as 7d"
+TIME_BOUND = "use a duration such as 7d or 12h, an ISO date or time, or Unix seconds"
+# The flags that send export to --scores, --metrics or --backend, and the
+# flag a refusal names for them.
+SCORES_PATHS = (
+    (("--metrics", "--backend", "otlp"), "--metrics"),
+    (("--scores", "--backend", "langfuse"), "--scores"),
+    (("--backend", "otlp"), "--backend"),
+    (("--backend", "langfuse"), "--backend"),
+    (("--scores",), "--scores"),
+    (("--metrics",), "--metrics"),
+    (("--metrics", "--scores"), "--scores"),
 )
 
 
@@ -219,10 +235,15 @@ class _ExportCase(unittest.TestCase):
         self.session_id = meta.session_id
 
     def export(self, *flags: str, session_id: str | None = None) -> tuple[int, str, str]:
-        """Run ``agent-strace export`` in self.cwd and return (code, stdout, stderr)."""
+        """Run ``agent-strace export`` in self.cwd and return (code, stdout, stderr).
+
+        *session_id* defaults to the session setUp made. An empty one runs
+        export without a session ID.
+        """
+        if session_id is None:
+            session_id = self.session_id
         args = build_parser().parse_args([
-            "--trace-dir", self.trace_dir, "export",
-            self.session_id if session_id is None else session_id, *flags,
+            "--trace-dir", self.trace_dir, "export", *([session_id] if session_id else []), *flags,
         ])
         out, err = io.StringIO(), io.StringIO()
         previous = os.getcwd()
@@ -265,6 +286,13 @@ class _CollectorCase(_ExportCase):
 
     def failure(self, detail: str, endpoint: str | None = None) -> str:
         return f"OTLP export to {self.base if endpoint is None else endpoint} failed: {detail}\n"
+
+    def assertRefused(self, flags: list[str], line: str, *, session_id: str | None = None) -> None:
+        before = _tree(self.root)
+        result = self.export(*flags, session_id=session_id)
+        self.assertEqual(result, (1, "", line + "\n"))
+        self.assertEqual(_tree(self.root), before)
+        self.assertEqual(self.collector.received(), [])
 
 
 class TestOtlpTracesUrl(unittest.TestCase):
@@ -732,13 +760,6 @@ class TestExportOtlpPayload(unittest.TestCase):
 class TestExportRefusals(_CollectorCase):
     """Refusals: one line on stderr, exit 1, nothing read, written or sent."""
 
-    def assertRefused(self, flags: list[str], line: str, *, session_id: str | None = None) -> None:
-        before = _tree(self.root)
-        result = self.export(*flags, session_id=session_id)
-        self.assertEqual(result, (1, "", line + "\n"))
-        self.assertEqual(_tree(self.root), before)
-        self.assertEqual(self.collector.received(), [])
-
     def test_endpoint_value(self):
         # E11 to E14, E18, E19. main tried to send, with a traceback for
         # E19, or wrote a file and exited 0 for E18.
@@ -863,12 +884,309 @@ class TestExportRefusals(_CollectorCase):
         )
 
 
+class TestExportWindowFlags(_CollectorCase):
+    """--all, --since and --until are refused where export would ignore them.
+
+    The store holds A, started 2.5 days ago, B, 40 days ago, and C, the
+    session setUp made, started now. --scores, --metrics and --backend read
+    only --since, as days. --format eu-ai-act reads --since and --until only
+    with --all. On main every other path exported one session with exit 0,
+    and some values gave a traceback.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        store = TraceStore(self.trace_dir)
+        self.now = time.time()
+        self.letters = {self.session_id: "C"}
+        for letter, days in (("A", 2.5), ("B", 40)):
+            start = self.now - days * DAY
+            meta = SessionMeta(agent_name="probe", started_at=start, ended_at=start + 60)
+            store.create_session(meta)
+            store.append_event(meta.session_id, TraceEvent(
+                event_type=EventType.TOOL_CALL, session_id=meta.session_id, timestamp=start + 1,
+                data={"tool_name": "Bash", "arguments": {"command": "ls"}},
+            ))
+            self.letters[meta.session_id] = letter
+        # Send OTLP metrics and Langfuse requests to the collector.
+        self.route = (
+            "--otlp-endpoint", self.base, "--langfuse-host", self.base,
+            "--langfuse-public-key", "pk", "--langfuse-secret-key", "sk",
+        )
+
+    def utc(self, days_ago: float, *, z: bool = False) -> str:
+        """Return the ISO time *days_ago* days before setUp, in UTC."""
+        moment = datetime.fromtimestamp(self.now - days_ago * DAY, timezone.utc)
+        return moment.strftime("%Y-%m-%dT%H:%M:%SZ") if z else moment.isoformat()
+
+    def sent(self, *flags: str) -> str:
+        """Export on a scores path without a session ID.
+
+        Return the letters of the sessions the collector received.
+        """
+        self.collector.script()
+        code, _, err = self.export(*flags, *self.route, session_id="")
+        self.assertEqual(code, 0, err)
+        prefixes = {sid[:12]: letter for sid, letter in self.letters.items()}
+        letters = set()
+        for request in self.collector.received():
+            body = json.loads(request.body)
+            if request.path == "/v1/metrics":
+                for metric in body["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]:
+                    for point in metric["gauge"]["dataPoints"]:
+                        letters.update(
+                            prefixes[attribute["value"]["stringValue"]]
+                            for attribute in point["attributes"] if attribute["key"] == "session_id"
+                        )
+            else:
+                self.assertEqual(request.path, "/api/public/ingestion")
+                letters.update(
+                    self.letters[item["body"]["id"]]
+                    for item in body["batch"] if item["type"] == "trace-create"
+                )
+        self.collector.script()
+        return "".join(sorted(letters))
+
+    def reported(self, *flags: str) -> str:
+        """Export --format eu-ai-act --all and return the letters of its sessions."""
+        code, out, err = self.export("--format", "eu-ai-act", "--all", *flags, session_id="")
+        self.assertEqual((code, err), (0, ""))
+        return "".join(sorted(self.letters[s["session_id"]] for s in json.loads(out)["sessions"]))
+
+    def test_single_session_paths_refuse_window_flags(self):
+        # main exported one session with exit 0 and ignored the flags.
+        eu = "use --format eu-ai-act --all"
+        one = "which exports one session"
+        output = ("--output", os.path.join(self.root, "out.json"))
+        paths = [((), f"--format json, {one}; {eu}")]
+        for fmt in ("json", "csv", "ndjson", "otlp", "otlp-genai", "temporal"):
+            paths.append((("--format", fmt), f"--format {fmt}, {one}; {eu}"))
+            paths.append((("--format", fmt, *output), f"--format {fmt}, {one}; {eu}"))
+        for fmt in FORMATS:
+            paths.append((
+                ("--format", fmt, "--endpoint", self.base, "--header", "X-Probe-Key: k"),
+                f"--format {fmt}, {one}; {eu}",
+            ))
+        for fmt in ("otlp", "otlp-genai"):
+            tree = f"--format {fmt}, {one} and its subagents; {eu}"
+            paths.append((("--format", fmt, "--include-subagents"), tree))
+            paths.append((("--format", fmt, "--include-subagents", "--endpoint", self.base), tree))
+        anonymize = f"--anonymize, {one}; {eu} without --anonymize"
+        for flags in ((), ("--format", "otlp"), ("--format", "eu-ai-act"), output):
+            paths.append((("--anonymize", *flags), anonymize))
+        windows = (
+            (("--all",), "--all"),
+            (("--since", "7d"), "--since"),
+            (("--since", ""), "--since"),
+            (("--until", "2026-01-01"), "--until"),
+            (("--until", ""), "--until"),
+            (("--until", "1d", "--since", "7d"), "--since"),
+            (("--until", "1d", "--since", "7d", "--all"), "--all"),
+        )
+        for path, rest in paths:
+            for window, flag in windows:
+                for session_id in (None, ""):
+                    with self.subTest(path=path, window=window, session_id=session_id):
+                        self.assertRefused(
+                            [*path, *window], f"{flag} is not used with {rest}", session_id=session_id,
+                        )
+
+    def test_scores_path_refuses_all_until_and_an_id_with_since(self):
+        # main ignored these flags. It exported the latest session, the
+        # --since window, or the one session.
+        days = "use --since Nd for the last N days"
+        for path, name in SCORES_PATHS:
+            every = f"--all is not used with {name}; {days}"
+            with_id = (
+                f"--since is not used with {name} and a session ID; "
+                "drop the session ID for the last N days"
+            )
+            until = f"--until is not used with {name}; {days}"
+            cases = (
+                (("--all",), None, every),
+                (("--all",), "", every),
+                (("--all", "--since", "7d", "--until", "1d"), "", every),
+                (("--since", "7d"), None, with_id),
+                (("--since", "nan"), None, with_id),
+                (("--since", "7d", "--until", "1d"), None, with_id),
+                (("--until", "1d"), None, until),
+                (("--until", "1d"), "", until),
+                (("--until", ""), "", until),
+                (("--since", "7d", "--until", "1d"), "", until),
+            )
+            for window, session_id, line in cases:
+                with self.subTest(path=path, window=window, session_id=session_id):
+                    self.assertRefused([*path, *window, *self.route], line, session_id=session_id)
+        self.assertEqual(self.sent("--metrics", "--backend", "otlp", "--since", "7d"), "AC")
+
+    def test_scores_since_takes_n_or_nd_days(self):
+        # main read float(value.rstrip("d")). It took 7dd as 7 and an empty
+        # value as no flag, exported every session or none for inf and nan,
+        # and gave a traceback for 12h or a date.
+        refused = (
+            "12h", "2026-01-01", "7dd", "nan", "inf", "1e400", "-1", "\u00b2", "", " 7", "7 ",
+            "7_0", ".5", "5.", "1.2.3", "+7", "7D", "\uff17", "0x10", "d", "9" * 400, "9" * 400 + "d",
+        )
+        for path, name in SCORES_PATHS:
+            for value in refused:
+                with self.subTest(path=path, value=value):
+                    self.assertRefused(
+                        [*path, f"--since={value}", *self.route],
+                        f"invalid --since value: with {name}, {SINCE_DAYS}",
+                        session_id="",
+                    )
+        kept = (
+            ("7", "AC"), ("7d", "AC"), ("3", "AC"), ("2d", "C"), ("0.5d", "C"), ("30d", "AC"),
+            ("45d", "ABC"),
+        )
+        for path in (("--metrics", "--backend", "otlp"), ("--scores", "--backend", "langfuse")):
+            for value, letters in kept:
+                with self.subTest(path=path, value=value):
+                    self.assertEqual(self.sent(*path, "--since", value), letters)
+            with self.subTest(path=path, value="0d"):
+                result = self.export(*path, "--since", "0d", *self.route, session_id="")
+                self.assertEqual(result, (1, "", "No sessions found.\n"))
+                self.assertEqual(self.collector.received(), [])
+
+    def test_eu_ai_act_window_needs_all(self):
+        # main ignored --since and --until without --all, and the session ID
+        # with --all.
+        not_used = "is not used with --format eu-ai-act without --all"
+        window = "add --all to export the sessions in the window"
+        drop_id = "add --all and drop the session ID to export the sessions in the window"
+        both = (
+            "a session ID is not used with --format eu-ai-act --all; drop it to export "
+            "the sessions in the window, or drop --all to export that session"
+        )
+        output = ("--output", os.path.join(self.root, "report.json"))
+        cases = (
+            (("--since", "7d"), "", f"--since {not_used}; {window}"),
+            (("--since", "7d"), None, f"--since {not_used}; {drop_id}"),
+            (("--until", "1d"), "", f"--until {not_used}; {window}"),
+            (("--until", "1d"), None, f"--until {not_used}; {drop_id}"),
+            (("--until", "1d", "--since", "7d"), "", f"--since {not_used}; {window}"),
+            (("--since", "garbage"), "", f"--since {not_used}; {window}"),
+            (("--until", ""), None, f"--until {not_used}; {drop_id}"),
+            (("--since", "7d", *output), "", f"--since {not_used}; {window}"),
+            (("--all",), None, both),
+            (("--all", "--since", "7d"), None, both),
+            (("--all", "--since", "garbage"), None, both),
+            (("--all", "--until", "1d", *output), None, both),
+        )
+        for flags, session_id, line in cases:
+            with self.subTest(flags=flags, session_id=session_id):
+                self.assertRefused(["--format", "eu-ai-act", *flags], line, session_id=session_id)
+        code, out, err = self.export("--format", "eu-ai-act")
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual([s["session_id"] for s in json.loads(out)["sessions"]], [self.session_id])
+        self.assertEqual(self.reported(), "ABC")
+
+    def test_eu_ai_act_all_reads_only_usable_bounds(self):
+        # main dropped a bound it could not read and exported every session,
+        # exported no session for 1e400, and gave a traceback for ²d.
+        refused = (
+            "garbage", "", " ", "nan", "inf", "-inf", "1e400", "-1e400", "\u00b2d", "\u00b2h",
+            "9" * 400 + "d", "9" * 400 + "h", "9" * 400,
+        )
+        for flag in ("--since", "--until"):
+            line = f"invalid {flag} value: with --format eu-ai-act --all, {TIME_BOUND}"
+            for value in refused:
+                with self.subTest(flag=flag, value=value):
+                    self.assertRefused(
+                        ["--format", "eu-ai-act", "--all", f"{flag}={value}"], line, session_id="",
+                    )
+            with self.subTest(flag=flag, value="nan", other="1d"):
+                other = "--until" if flag == "--since" else "--since"
+                self.assertRefused(
+                    ["--format", "eu-ai-act", "--all", f"{flag}=nan", other, "1d"], line,
+                    session_id="",
+                )
+        local_date = datetime.fromtimestamp(self.now - 3 * DAY).date().isoformat()
+        kept = (
+            (("--since", "7d"), "AC"),
+            (("--since", "12h"), "C"),
+            (("--since", "0.5d"), "C"),
+            (("--since", local_date), "AC"),
+            (("--since", self.utc(3)), "AC"),
+            (("--since", self.utc(3, z=True)), "AC"),
+            (("--since", str(int(self.now - 3 * DAY))), "AC"),
+            (("--since=-1",), "ABC"),
+            (("--until", self.utc(1)), "AB"),
+            (("--until", "1d"), "AB"),
+            (("--since", "7d", "--until", "1d"), "A"),
+            ((), "ABC"),
+        )
+        for flags, letters in kept:
+            with self.subTest(flags=flags):
+                self.assertEqual(self.reported(*flags), letters)
+
+    def test_window_refusal_comes_before_the_session_lookup(self):
+        # main reported the missing session instead.
+        self.assertRefused(
+            ["--format", "json", "--all"],
+            "--all is not used with --format json, which exports one session; "
+            "use --format eu-ai-act --all",
+            session_id="no-such-session",
+        )
+        self.assertRefused(
+            ["--metrics", "--backend", "otlp", "--since", "7d", *self.route],
+            "--since is not used with --metrics and a session ID; drop the session ID for the last N days",
+            session_id="no-such-session",
+        )
+
+    def test_other_export_checks_come_first(self):
+        # The --endpoint, --header, --include-subagents, --protocol and
+        # --agent-id lines are unchanged. A valid --endpoint no longer sends
+        # the session with --all: main sent it and exited 0.
+        cases = (
+            (
+                ("--endpoint", self.base, "--all"),
+                f"--endpoint is not used with --format json; {FORMATS_HINT}",
+            ),
+            (
+                ("--metrics", "--endpoint", self.base, "--all"),
+                "--endpoint is not used with --metrics; "
+                "use --langfuse-host, or --otlp-endpoint with --backend otlp",
+            ),
+            (("--format", "otlp", "--endpoint", "", "--since", "7d"), "invalid --endpoint value: it is empty"),
+            (
+                ("--format", "otlp", "--endpoint", self.base, "--header", "bad", "--all"),
+                "invalid --header 1: it has no colon; give it as NAME: VALUE",
+            ),
+            (
+                ("--anonymize", "--include-subagents", "--all"),
+                "--include-subagents is not used with --anonymize; "
+                "it exports one OTLP trace with --format otlp or otlp-genai",
+            ),
+            (
+                ("--format", "csv", "--include-subagents", "--since", "7d"),
+                "--include-subagents is not used with --format csv; use --format otlp or otlp-genai",
+            ),
+            (
+                ("--format", "otlp", "--protocol", "http/json", "--all"),
+                "--protocol is used only with --endpoint; OTLP files are always JSON",
+            ),
+            (
+                ("--metrics", "--agent-id", "a1", "--all"),
+                "--agent-id is not used with --metrics; use --format otlp, otlp-genai or temporal",
+            ),
+            (
+                ("--format", "otlp", "--endpoint", self.base, "--header", "X-Probe-Key: k", "--all"),
+                "--all is not used with --format otlp, which exports one session; "
+                "use --format eu-ai-act --all",
+            ),
+        )
+        for flags, line in cases:
+            with self.subTest(flags=flags):
+                self.assertRefused(list(flags), line)
+
+
 class TestExportRefusalThroughTheCli(_ExportCase):
-    def test_one_line_and_no_traceback(self):
-        # E19 and E29 printed a traceback on main, E29 with the secret.
+    def cli(self, *argv: str) -> subprocess.CompletedProcess:
+        """Run ``agent-strace --trace-dir <dir> export *argv`` in a child."""
         src = os.path.dirname(os.path.dirname(os.path.abspath(agent_trace.__file__)))
         home = os.path.join(self.root, "home")
-        os.makedirs(home)
+        os.makedirs(home, exist_ok=True)
         env = {
             **os.environ,
             "PYTHONPATH": src,
@@ -876,6 +1194,14 @@ class TestExportRefusalThroughTheCli(_ExportCase):
             "DO_NOT_TRACK": "1",
             "AGENT_STRACE_TELEMETRY": "0",
         }
+        return subprocess.run(
+            [sys.executable, "-m", "agent_trace.entry", "--trace-dir", self.trace_dir,
+             "export", *argv],
+            cwd=self.cwd, env=env, capture_output=True, text=True, timeout=60,
+        )
+
+    def test_one_line_and_no_traceback(self):
+        # E19 and E29 printed a traceback on main, E29 with the secret.
         cases = (
             (["--endpoint", "  "], "invalid --endpoint value: it is empty\n"),
             (
@@ -885,11 +1211,30 @@ class TestExportRefusalThroughTheCli(_ExportCase):
         )
         for flags, line in cases:
             with self.subTest(flags=flags):
-                run = subprocess.run(
-                    [sys.executable, "-m", "agent_trace.entry", "--trace-dir", self.trace_dir,
-                     "export", self.session_id, "--format", "otlp", *flags],
-                    cwd=self.cwd, env=env, capture_output=True, text=True, timeout=60,
-                )
+                run = self.cli(self.session_id, "--format", "otlp", *flags)
+                self.assertEqual((run.returncode, run.stdout, run.stderr), (1, "", line))
+                self.assertEqual(os.listdir(self.cwd), [])
+
+    def test_window_values_are_one_line_and_no_traceback(self):
+        # main printed a traceback for each of these.
+        cases = (
+            (
+                ["--metrics", "--backend", "otlp", "--otlp-endpoint", "http://127.0.0.1:9",
+                 "--since", "12h"],
+                f"invalid --since value: with --metrics, {SINCE_DAYS}\n",
+            ),
+            (
+                ["--scores", "--backend", "langfuse", "--since", "2026-01-01"],
+                f"invalid --since value: with --scores, {SINCE_DAYS}\n",
+            ),
+            (
+                ["--format", "eu-ai-act", "--all", "--since", "\u00b2d"],
+                f"invalid --since value: with --format eu-ai-act --all, {TIME_BOUND}\n",
+            ),
+        )
+        for flags, line in cases:
+            with self.subTest(flags=flags):
+                run = self.cli(*flags)
                 self.assertEqual((run.returncode, run.stdout, run.stderr), (1, "", line))
                 self.assertEqual(os.listdir(self.cwd), [])
 

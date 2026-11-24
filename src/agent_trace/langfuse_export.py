@@ -17,19 +17,24 @@ from __future__ import annotations
 
 import base64
 import json
+import math
+import re
 import sys
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 
+from .compliance import _export_sessions
 from .cost import TokenUsage, infer_provider
 from .event_data import (
+    UnusableTimestampError,
     event_id_of,
     require_object_event_data,
     require_usable_timestamps,
     str_field,
 )
+from .inert import inert
 from .models import (
     EventType,
     SessionMeta,
@@ -37,6 +42,7 @@ from .models import (
     usable_count,
     usable_number,
     usable_text,
+    usable_time,
 )
 from .failures import llm_failure, session_errors
 from .http_post import no_redirect_opener, post_error_detail
@@ -590,6 +596,36 @@ def _loadable_events(store: TraceStore, session_ids: list[str]):
         yield sid, events
 
 
+_SINCE_DAYS = re.compile(r"([0-9]+(?:\.[0-9]+)?)d?")
+
+SINCE_DAYS_FORM = "use a number of days as N or Nd, such as 7d"
+
+
+def parse_since_days(value: str) -> float | None:
+    """Return the days in a --since value for --scores, --metrics or --backend.
+
+    The value is N or Nd. N is ASCII digits with at most one dot between
+    digits, such as 7, 7d or 0.5d. Any other value gives None, and so does
+    an N with so many digits that it is not a finite float.
+    """
+    match = _SINCE_DAYS.fullmatch(value)
+    if match is None:
+        return None
+    days = float(match.group(1))
+    return days if math.isfinite(days) else None
+
+
+def _require_usable_started_at(meta: SessionMeta, *, session_id: str | None = None) -> None:
+    """Raise UnusableTimestampError if started_at is not a Unix time in seconds.
+
+    Langfuse reads started_at for the trace timestamp. It reads no ended_at,
+    so ended_at is not checked. The message never includes the value.
+    """
+    if usable_time(meta.started_at) is None:
+        subject = f"session {session_id}" if session_id else "session"
+        raise UnusableTimestampError(f"{subject} started_at must be a Unix time in seconds")
+
+
 def cmd_export_scores(args) -> int:
     """Handle: agent-strace export --scores --backend langfuse|otlp"""
     import os
@@ -607,13 +643,18 @@ def cmd_export_scores(args) -> int:
             sys.stderr.write(f"Session not found: {session_arg}\n")
             return 1
         session_ids = [found]
-    elif since_raw:
-        days = float(since_raw.rstrip("d"))
+    elif since_raw is not None:
+        days = parse_since_days(since_raw)
+        if days is None:
+            sys.stderr.write(f"invalid --since value: {SINCE_DAYS_FORM}\n")
+            return 1
         cutoff = time.time() - days * 86400
-        session_ids = [
-            m.session_id for m in store.list_sessions()
-            if m.started_at >= cutoff
-        ]
+        try:
+            sessions = _export_sessions(store, validate_events=False)
+        except ValueError as exc:
+            sys.stderr.write(f"Error: {inert(str(exc))}\n")
+            return 1
+        session_ids = [m.session_id for m in sessions if m.started_at >= cutoff]
     else:
         latest = store.get_latest_session_id()
         session_ids = [latest] if latest else []
@@ -621,7 +662,7 @@ def cmd_export_scores(args) -> int:
     if not session_ids:
         sys.stderr.write("No sessions found.\n")
         return 1
-    multi = not session_arg and bool(since_raw)
+    multi = not session_arg and since_raw is not None
 
     if backend == "langfuse":
         config = LangfuseConfig(
@@ -657,6 +698,7 @@ def cmd_export_scores(args) -> int:
                 event_types=LANGFUSE_TIMESTAMP_EVENT_TYPES,
                 session_id=sid if multi else None,
             )
+            _require_usable_started_at(store.load_meta(sid), session_id=sid if multi else None)
         success = 0
         for sid in session_ids:
             if export_session_to_langfuse(store, sid, config, include_scores=include_scores):

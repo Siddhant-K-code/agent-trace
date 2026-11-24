@@ -3,14 +3,16 @@
 import base64
 import io
 import json
+import os
 import tempfile
 import time
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from http import HTTPStatus
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
+from agent_trace.cli import _run_handler, build_parser, cmd_export
 from agent_trace.langfuse_export import (
     EvalScore,
     LangfuseConfig,
@@ -757,6 +759,173 @@ class TestPostsRefuseRedirects(unittest.TestCase):
                 self.assertEqual(stderr.getvalue(), f"OTLP metrics export failed: {detail}\n")
                 self.assertEqual(self.servers.a.methods(), ["POST"])
                 self.assertEqual(self.servers.b.received(), [])
+
+
+class TestExportScoresReadsSessionsStrictly(unittest.TestCase):
+    """export --scores, --metrics or --backend refuses a session it cannot read.
+
+    With --since the batch lists the store strictly and stops on a session or
+    store entry it refuses, before any request. On main it left out a session
+    with a corrupt meta.json and gave a traceback for a started_at stored as
+    text. Langfuse with a session ID gave that traceback too.
+    """
+
+    def setUp(self):
+        environ = patch.dict(os.environ)
+        environ.start()
+        self.addCleanup(environ.stop)
+        for name in list(os.environ):
+            if name.startswith(("LANGFUSE_", "OTEL_EXPORTER_OTLP_")):
+                del os.environ[name]
+        self.sink = RedirectServers(self).b
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = tmp.name
+        self.store = _make_store(tmp.name)
+        now = time.time()
+        # A started 2 days ago, B 40 days ago and C 1 hour ago.
+        for sid, days in (("sess_a", 2), ("sess_b", 40), ("sess_c", 1 / 24)):
+            start = now - days * 86400
+            _add_session(self.store, sid, [_tool_call("Bash", start + 1)], started_at=start)
+        self.keys = (
+            "--langfuse-host", self.sink.url,
+            "--langfuse-public-key", "pk", "--langfuse-secret-key", "sk",
+        )
+        self.routes = {
+            "metrics": ("--metrics", "--backend", "otlp", "--otlp-endpoint", self.sink.url),
+            "langfuse": ("--scores", "--backend", "langfuse", *self.keys),
+            "langfuse without keys": ("--scores", "--backend", "langfuse"),
+        }
+
+    def export(self, *flags):
+        """Run export as the CLI does and return (code, stdout, stderr)."""
+        args = build_parser().parse_args(["--trace-dir", self.dir, "export", *flags])
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = _run_handler(args, cmd_export)
+        return code, out.getvalue(), err.getvalue()
+
+    def assertStopped(self, flags, line):
+        self.assertEqual(self.export(*flags), (1, "", line))
+        self.assertEqual(self.sink.received(), [])
+
+    def set_started_at(self, sid, value):
+        path = self.store.base_dir / sid / "meta.json"
+        data = json.loads(path.read_text())
+        data["started_at"] = value
+        path.write_text(json.dumps(data))
+
+    def sent(self):
+        """Return the metric names the sink received for each session, and clear it."""
+        names = {}
+        for request in self.sink.received():
+            body = json.loads(request.body)
+            if request.path == "/v1/metrics":
+                for metric in body["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]:
+                    for point in metric["gauge"]["dataPoints"]:
+                        attributes = {a["key"]: a["value"]["stringValue"] for a in point["attributes"]}
+                        names.setdefault(attributes["session_id"], set()).add(metric["name"])
+            else:
+                self.assertEqual(request.path, "/api/public/ingestion")
+                for item in body["batch"]:
+                    if item["type"] == "trace-create":
+                        names.setdefault(item["body"]["id"], set()).add("trace")
+        self.sink.clear()
+        return names
+
+    def test_a_corrupt_meta_json_stops_the_batch(self):
+        # main left the session out and exported the others.
+        for sid in ("sess_a", "sess_b"):
+            path = self.store.base_dir / sid / "meta.json"
+            saved = path.read_text()
+            path.write_text("{")
+            line = (
+                f"Error: session {sid} has a corrupt meta.json: "
+                "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)\n"
+            )
+            for route, flags in self.routes.items():
+                with self.subTest(session=sid, route=route):
+                    self.assertStopped([*flags, "--since", "7d"], line)
+            path.write_text(saved)
+        for route in ("metrics", "langfuse"):
+            with self.subTest(route=route, store="restored"):
+                code, _, err = self.export(*self.routes[route], "--since", "7d")
+                self.assertEqual(code, 0, err)
+                self.assertEqual(sorted(self.sent()), ["sess_a", "sess_c"])
+
+    def test_an_unusable_started_at_stops_the_batch(self):
+        # main gave a TypeError traceback for a text or null started_at, and
+        # left the session out for true or NaN.
+        cases = (
+            ("sess_a", "soon"), ("sess_a", None), ("sess_a", True), ("sess_a", float("nan")),
+            ("sess_b", "soon"),
+        )
+        for sid, value in cases:
+            path = self.store.base_dir / sid / "meta.json"
+            saved = path.read_text()
+            self.set_started_at(sid, value)
+            line = f"Error: cannot read session {sid}: started_at is not a usable time\n"
+            for route, flags in self.routes.items():
+                with self.subTest(session=sid, value=value, route=route):
+                    self.assertStopped([*flags, "--since", "7d"], line)
+            path.write_text(saved)
+
+    def test_the_batch_reads_only_session_directories(self):
+        base = self.store.base_dir
+        for name in ("datasets", ".approvals", "checkpoints", ".tenant-journal", "workspaces"):
+            (base / name).mkdir()
+            (base / name / "notes.json").write_text("{}")
+        with open(base / "sess_a" / "events.ndjson", "ab") as f:
+            f.write(b"\xff\xfe not UTF-8\n")
+        code, out, err = self.export(*self.routes["metrics"], "--since", "7d")
+        self.assertEqual((code, out), (0, ""), err)
+        names = self.sent()
+        self.assertEqual(sorted(names), ["sess_a", "sess_c"])
+        # docs/production.md: a session whose events cannot be read has no cost.
+        self.assertNotIn("agent_strace.session.cost_usd", names["sess_a"])
+        self.assertIn("agent_strace.session.cost_usd", names["sess_c"])
+        self.assertIn("agent_strace.session.tool_calls", names["sess_a"])
+        # main skipped any other entry and exported A and C.
+        (base / "notes").mkdir()
+        (base / "notes" / "todo.txt").write_text("x")
+        for route, flags in self.routes.items():
+            with self.subTest(entry="notes", route=route):
+                self.assertStopped(
+                    [*flags, "--since", "7d"],
+                    "Error: unrecognized or incomplete session directory: notes\n",
+                )
+        (base / "notes" / "todo.txt").unlink()
+        (base / "notes").rmdir()
+        try:
+            os.symlink(base / "sess_c", base / "lnk\x1b[2J", target_is_directory=True)
+        except OSError as exc:
+            self.skipTest(f"cannot create a symlink here: {exc}")
+        for route, flags in self.routes.items():
+            with self.subTest(entry="symlink", route=route):
+                self.assertStopped(
+                    [*flags, "--since", "7d"],
+                    "Error: unsafe symlinked trace store entry: lnk\\x1b[2J\n",
+                )
+
+    def test_langfuse_with_a_session_id_refuses_an_unusable_started_at(self):
+        # main sent nothing and gave a traceback from _iso, or sent a trace
+        # dated 1970 for true.
+        paths = (
+            ("--scores", "--backend", "langfuse"), ("--scores",), ("--backend", "langfuse"),
+            ("--metrics",),
+        )
+        for value in ("soon", None, True, float("nan")):
+            self.set_started_at("sess_a", value)
+            for path in paths:
+                with self.subTest(value=value, path=path):
+                    self.assertStopped(
+                        [*path, "sess_a", *self.keys],
+                        "Error: session started_at must be a Unix time in seconds\n",
+                    )
+        # OTLP metrics read no started_at, so --backend otlp still exports it.
+        code, out, err = self.export(*self.routes["metrics"], "sess_a")
+        self.assertEqual((code, out), (0, ""), err)
+        self.assertEqual(sorted(self.sent()), ["sess_a"])
 
 
 if __name__ == "__main__":

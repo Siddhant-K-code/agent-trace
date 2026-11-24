@@ -423,8 +423,9 @@ nests objects and arrays more than 128 levels deep. `list`, `stats` and
 fails its hash chain integrity check and names the session. Commands that read
 that one session by its ID, such as `inspect`, `replay`, `explain`, `export`,
 `stats <id>` and `health <id>`, exit 1 with one line. So do the exports that
-read every session in the store: `compliance export` without a session ID and
-`export --format eu-ai-act --all`. The line names the session and the reason:
+read every session in the store: `compliance export` without a session ID,
+`export --format eu-ai-act --all`, and `export` with `--scores`, `--metrics` or
+`--backend` and `--since`. The line names the session and the reason:
 
 ```
 Error: session bbbb2222 has a corrupt meta.json: metadata nests more than 128 levels
@@ -2300,9 +2301,11 @@ Snapshots taken by older versions have no `workspace`. They belong to the direct
 agent-strace export <session-id> [--format json|csv|ndjson|otlp|otlp-genai|temporal|eu-ai-act]
                     [--endpoint URL] [--header 'NAME: VALUE'] [--service-name NAME]
                     [--protocol http/json|http/protobuf] [--agent-id ID]
-                    [--include-subagents]
-                    [--anonymize] [--scores] [--metrics] [--backend otlp|langfuse]
-                    [--all] [--since DURATION_OR_DATE] [--until DATE] [--output FILE]
+                    [--include-subagents] [--anonymize] [--output FILE]
+agent-strace export --format eu-ai-act --all [--since DURATION_OR_DATE]
+                    [--until DURATION_OR_DATE] [--output FILE]
+agent-strace export [<session-id> | --since Nd] [--scores] [--metrics]
+                    [--backend otlp|langfuse]
 ```
 Export a session. See [production.md](production.md) for per-backend OTLP setup.
 
@@ -2412,9 +2415,30 @@ with `--format otlp`, `otlp-genai` and `temporal`, to a file or with
 `--endpoint`; the agent-strace session ID stays on `session.id`. The
 OpenTelemetry GenAI conventions mark `gen_ai.agent.id` as Development.
 
-Export checks `--endpoint`, `--header`, `--protocol` and `--agent-id` before
-it reads the session or writes anything. It refuses these with one line on
-stderr and exit 1:
+`--all`, `--since` and `--until` select sessions by start time. Only two paths
+read them. Every other path exports one session and reads none of the three.
+
+| Path | Reads | Values |
+|---|---|---|
+| `--scores`, `--metrics` or `--backend`, with no session ID | `--since` | The last N days, as `N` or `Nd`, such as `7`, `7d` or `0.5d`. N is ASCII digits with at most one `.` between digits. `0d` selects nothing. |
+| `--format eu-ai-act --all` | `--since` and `--until` | A duration back from now, such as `7d` or `12h`, an ISO date or time, or Unix seconds. |
+
+`--scores`, `--metrics` and `--backend` with `--since` read every session in
+the store before they send anything. When the store refuses a session or
+another entry, even one outside the window, they print one line for the first
+one in name order and exit 1. A corrupt `meta.json` or an unusable start time
+cannot place a session in or out of the window. The line is `Error: session
+<id> has a corrupt meta.json: <reason>`, `Error: cannot read session <id>:
+<reason>`, such as `started_at is not a usable time`, or the store's line for
+an entry that is not a session, such as `Error: unrecognized or incomplete
+session directory: notes`. The store's own directories, such as `datasets` and
+`.approvals`, are not sessions and are skipped. The events are not read to list
+the sessions, so `--metrics` still exports a session with an unreadable line,
+without `cost_usd`.
+
+Export checks `--endpoint`, `--header`, `--protocol`, `--agent-id`, `--all`,
+`--since` and `--until` before it reads the session or writes anything. It
+refuses these with one line on stderr and exit 1:
 
 - `--endpoint` where it would be ignored: with `--format json`, `csv`,
   `ndjson` or `eu-ai-act`, or with `--anonymize`, `--scores`, `--metrics` or
@@ -2442,8 +2466,35 @@ stderr and exit 1:
   `--anonymize`, `--scores`, `--metrics` or `--backend`: `--agent-id is not
   used with --format csv; use --format otlp, otlp-genai or temporal`, or the
   flag it is not used with. These ignore `AGENT_STRACE_AGENT_ID`.
+- `--all`, `--since` or `--until` with `--format json`, `csv`, `ndjson`,
+  `otlp`, `otlp-genai` or `temporal`, or with `--anonymize`, which export one
+  session: `--since is not used with --format json, which exports one session;
+  use --format eu-ai-act --all`. With `--include-subagents` the line says `one
+  session and its subagents`. With `--anonymize` it ends `without
+  --anonymize`.
+- `--all` or `--until` with `--scores`, `--metrics` or `--backend`: `--all is
+  not used with --metrics; use --since Nd for the last N days`. The line names
+  the flags given. With a session ID, `--since` too: `--since is not used with
+  --metrics and a session ID; drop the session ID for the last N days`.
+- A `--since` with `--scores`, `--metrics` or `--backend` that is not `N` or
+  `Nd`, such as `12h`, a date, `7dd`, `-1`, `nan`, `inf` or an empty value:
+  `invalid --since value: with --metrics, use a number of days as N or Nd, such
+  as 7d`.
+- `--since` or `--until` with `--format eu-ai-act` and no `--all`: `--since is
+  not used with --format eu-ai-act without --all; add --all to export the
+  sessions in the window`. With a session ID, the line says `add --all and drop
+  the session ID`.
+- A session ID with `--format eu-ai-act --all`: `a session ID is not used with
+  --format eu-ai-act --all; drop it to export the sessions in the window, or
+  drop --all to export that session`.
+- A `--since` or `--until` with `--format eu-ai-act --all` that is not a
+  duration, an ISO date or time, or Unix seconds, or that is not a finite
+  time, such as `garbage`, an empty value, `nan` or `1e400`: `invalid --since
+  value: with --format eu-ai-act --all, use a duration such as 7d or 12h, an
+  ISO date or time, or Unix seconds`.
 
-The lines never repeat the URL or a header, which can carry a token.
+The lines never repeat the URL or a header, which can carry a token. They never
+repeat a `--since` or `--until` value either.
 
 The POST does not follow redirects, so pass the final URL. Any 2xx answer is
 success: export prints `Exported N events to scheme://host[:port] (HTTP code)`
@@ -3236,7 +3287,12 @@ whose `started_at`, or `ended_at` when set, is not a Unix time in seconds, with
 `Error: session started_at must be a Unix time in seconds` or the same message
 for `ended_at`. `export --format temporal` checks the session's Temporal trace
 context first, so a session without one keeps its `Temporal export failed`
-message.
+message. `export <session-id> --backend langfuse` refuses a session whose
+`started_at` is not a Unix time in seconds with the same `started_at` line. So
+do `--scores` and `--metrics` without `--backend`, which send to Langfuse too.
+Langfuse reads no `ended_at`. The check runs after the credentials check and
+before anything is sent. With `--since`, the store listing refuses such a
+session first, as [`export`](#export) describes.
 
 `drift` and `fingerprint` skip a session whose first or last event has an
 unusable timestamp, as they skip other sessions they cannot read. `baseline`
