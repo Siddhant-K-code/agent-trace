@@ -588,6 +588,7 @@ def require_otlp_timestamps(
     events: Sequence[TraceEvent],
     *,
     event_types: Collection[EventType] | None = None,
+    indexes: Collection[int] | None = None,
     session_id: str | None = None,
 ) -> None:
     """Raise :class:`UnusableTimestampError` if a checked event's ``timestamp``
@@ -598,7 +599,7 @@ def require_otlp_timestamps(
     the OTLP exports call this after it, :func:`require_usable_session_times`
     and :func:`require_otlp_session_times`. An event whose timestamp is not a
     Unix time in seconds is left to the first.
-    ``event_types`` and ``session_id`` work as they do there.
+    ``event_types``, ``indexes`` and ``session_id`` work as they do there.
 
     The message names that time and the first checked event past it by
     1-based position in ``events`` and its type, then counts every other
@@ -611,10 +612,12 @@ def require_otlp_timestamps(
         if usable_time(event.timestamp) is not None
         and otlp_unix_nanos(event.timestamp) is None
     ]
+    index_set = None if indexes is None else set(indexes)
     checked = [
         (position, event)
         for position, event in past_limit
-        if event_types is None or event.event_type in event_types
+        if (event_types is None or event.event_type in event_types)
+        and (index_set is None or position - 1 in index_set)
     ]
     if not checked:
         return

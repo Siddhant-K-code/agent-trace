@@ -22,7 +22,7 @@ try:  # keeps product telemetry off in this process and its children
 except ImportError:  # pragma: no cover - run as a package module
     from tests import _no_telemetry
 
-from agent_trace.event_data import UnusableTimestampError
+from agent_trace.event_data import UnusableTimestampError, require_otlp_timestamps
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.otlp import (
     _make_attributes,
@@ -1114,6 +1114,87 @@ class TestOtlpTimeLimit(unittest.TestCase):
                     with self.assertRaises(UnusableTimestampError) as caught:
                         convert(store, session_id)
                     self.assertEqual(str(caught.exception), f"timestamp {PAST_LIMIT}")
+
+
+class TestRequireOtlpTimestampsIndexes(unittest.TestCase):
+    """With ``indexes``, require_otlp_timestamps checks only the events at
+    those 0-based indexes. The count of other events still covers every
+    event past the limit."""
+
+    @staticmethod
+    def events(*timestamps, types=None) -> list:
+        """Return one event per timestamp. Each is a tool_call unless *types*
+        gives its type."""
+        types = types or [EventType.TOOL_CALL] * len(timestamps)
+        return [
+            TraceEvent(event_type=event_type, timestamp=timestamp, session_id="s",
+                       event_id=f"e{index}", data={})
+            for index, (event_type, timestamp) in enumerate(zip(types, timestamps))
+        ]
+
+    def message(self, events, **checks) -> str:
+        with self.assertRaises(UnusableTimestampError) as caught:
+            require_otlp_timestamps(events, **checks)
+        return str(caught.exception)
+
+    def test_indexes_without_the_event_past_the_limit_do_not_raise(self):
+        events = self.events(1.0, YEAR_3000, 3.0)
+        for indexes in (set(), {0}, [2], {0, 2}, {3}):
+            with self.subTest(indexes=indexes):
+                self.assertIsNone(require_otlp_timestamps(events, indexes=indexes))
+        self.assertEqual(
+            self.message(events), f"session event timestamp {PAST_LIMIT}: event 2 of 3 (tool_call)",
+        )
+
+    def test_the_message_names_the_checked_event_by_1_based_position(self):
+        cases = [
+            ((YEAR_3000, 1.0, 2.0), {0}, "event 1 of 3"),
+            ((1.0, 2.0, PAST_FLOAT), [2], "event 3 of 3"),
+        ]
+        for timestamps, indexes, event in cases:
+            with self.subTest(indexes=indexes):
+                self.assertEqual(
+                    self.message(self.events(*timestamps), indexes=indexes),
+                    f"session event timestamp {PAST_LIMIT}: {event} (tool_call)",
+                )
+        self.assertEqual(
+            self.message(self.events(1.0, YEAR_3000), indexes={1}, session_id="abc"),
+            f"session abc event timestamp {PAST_LIMIT}: event 2 of 2 (tool_call)",
+        )
+
+    def test_the_count_covers_events_past_the_limit_outside_the_indexes(self):
+        prefix = f"session event timestamp {PAST_LIMIT}: event 2 of"
+        cases = [
+            ((YEAR_3000, YEAR_3000, 1.0), {1},
+             "3 (tool_call); 1 more event has a timestamp past that time"),
+            ((YEAR_3000, YEAR_3000, 1.0, YEAR_3000), {1},
+             "4 (tool_call); 2 more events have timestamps past that time"),
+            ((YEAR_3000, YEAR_3000, 1.0, YEAR_3000), {1, 3},
+             "4 (tool_call); 2 more events have timestamps past that time"),
+        ]
+        for timestamps, indexes, rest in cases:
+            with self.subTest(timestamps=timestamps, indexes=indexes):
+                self.assertEqual(
+                    self.message(self.events(*timestamps), indexes=indexes), f"{prefix} {rest}",
+                )
+
+    def test_indexes_and_event_types_check_only_events_that_pass_both(self):
+        events = self.events(
+            YEAR_3000, YEAR_3000, YEAR_3000, 1.0,
+            types=[EventType.SESSION_START, EventType.TOOL_RESULT, EventType.TOOL_CALL,
+                   EventType.TOOL_CALL],
+        )
+        tool_calls = {EventType.TOOL_CALL}
+        for indexes in ({0, 1}, {3}, {0, 1, 3}):
+            with self.subTest(indexes=indexes):
+                self.assertIsNone(require_otlp_timestamps(
+                    events, event_types=tool_calls, indexes=indexes,
+                ))
+        self.assertEqual(
+            self.message(events, event_types=tool_calls, indexes={0, 2}),
+            f"session event timestamp {PAST_LIMIT}: event 3 of 4 (tool_call)"
+            "; 2 more events have timestamps past that time",
+        )
 
 
 class TestOtlpExportTimeLimit(TimestampCliTestCase):
