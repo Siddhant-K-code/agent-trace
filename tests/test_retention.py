@@ -713,6 +713,18 @@ class TestUnusableStoredTimes(unittest.TestCase):
 
                     self.assertEqual(_left(store), {recent, unusable})
 
+    def test_count_limit_breaks_a_start_tie_by_session_id(self):
+        store = self._store()
+        start = time.time() - 10 * 86400
+        ids = [
+            _add_raw_session(store, file_age_days=10, started_at=start)
+            for _ in range(2)
+        ]
+
+        cmd_retention_clean(_clean_args(store, max_sessions=1), out=io.StringIO())
+
+        self.assertEqual(_left(store), {max(ids)})
+
     def test_age_limit_and_oldest_line_use_newest_write(self):
         for value in _UNUSABLE_TIMES:
             with self.subTest(start=value, files="200 days old"):
@@ -739,6 +751,23 @@ class TestUnusableStoredTimes(unittest.TestCase):
                 cmd_retention_clean(_clean_args(store, max_age_days=30), out=io.StringIO())
 
                 self.assertEqual(_left(store), {recent, unusable})
+
+    def test_newest_file_write_counts_not_the_oldest(self):
+        # `agent-strace record` writes meta.json when it starts and stops,
+        # and events.ndjson for each event in between.
+        for ended, start in ((False, time.time() - 100 * 86400), (True, "x")):
+            with self.subTest(ended=ended, start=start):
+                store = self._store()
+                session_id = _add_raw_session(
+                    store, file_age_days=100, ended=ended, started_at=start,
+                )
+                stamp = time.time() - 86400
+                events = store._session_dir(session_id) / "events.ndjson"
+                os.utime(events, (stamp, stamp))
+
+                cmd_retention_clean(_clean_args(store, max_age_days=30), out=io.StringIO())
+
+                self.assertEqual(_left(store), {session_id})
 
     def test_end_that_is_not_a_usable_time_counts_as_no_end(self):
         for value in _UNUSABLE_TIMES:
