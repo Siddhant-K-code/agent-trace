@@ -946,14 +946,14 @@ class TestClaudeVersionDot(unittest.TestCase):
         cases = {
             "claude-sonnet-4.5": ("claude-sonnet-4-5", "Anthropic", 3, 15, 200_000, 1.0),
             "Claude-Sonnet-4.5": ("claude-sonnet-4-5", "Anthropic", 3, 15, 200_000, 1.0),
-            "claude-haiku-4.5": ("claude-haiku-4-5", "Anthropic", 1, 5, None, None),
+            "claude-haiku-4.5": ("claude-haiku-4-5", "Anthropic", 1, 5, 200_000, None),
             "claude-opus-4.1": ("claude-opus-4-1", "Anthropic", 15, 75, 200_000, None),
-            "claude-opus-4.7": ("claude-opus-4-7", "Anthropic", 5, 25, 200_000, 1.38),
-            "claude-3.7-sonnet-thought": ("claude-3-7-sonnet", "Anthropic", 3, 15, None, None),
+            "claude-opus-4.7": ("claude-opus-4-7", "Anthropic", 5, 25, 1_000_000, 1.38),
+            "claude-3.7-sonnet-thought": ("claude-3-7-sonnet", "Anthropic", 3, 15, 200_000, None),
             "anthropic/claude-3.5-sonnet:beta":
-                ("claude-3-5-sonnet", "Anthropic", 3, 15, None, None),
+                ("claude-3-5-sonnet", "Anthropic", 3, 15, 200_000, None),
             "anthropic/claude-3.7-sonnet:thinking":
-                ("claude-3-7-sonnet", "Anthropic", 3, 15, None, None),
+                ("claude-3-7-sonnet", "Anthropic", 3, 15, 200_000, None),
             "anthropic.claude-sonnet-4.5":
                 ("claude-sonnet-4-5", "AWS Bedrock", 3, 15, 200_000, 1.0),
             "us.anthropic.claude-sonnet-4.5":
@@ -961,7 +961,7 @@ class TestClaudeVersionDot(unittest.TestCase):
             "us.anthropic.claude-opus-4.1":
                 ("claude-opus-4-1", "AWS Bedrock", 15, 75, 200_000, None),
             "bedrock/eu.anthropic.claude-haiku-4.5":
-                ("claude-haiku-4-5", "AWS Bedrock", 1.1, 5.5, None, None),
+                ("claude-haiku-4-5", "AWS Bedrock", 1.1, 5.5, 200_000, None),
         }
         for model, (key, provider, inp, out, limit, factor) in cases.items():
             with self.subTest(model=model):

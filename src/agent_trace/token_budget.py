@@ -41,12 +41,33 @@ from .store import TraceStore
 # ---------------------------------------------------------------------------
 
 CONTEXT_LIMITS: dict[str, int] = {
-    # Anthropic
+    # Anthropic: each Claude model's context window, from
+    # https://platform.claude.com/docs/en/about-claude/models/overview
+    "claude-fable-5-2":     1_000_000,
+    "claude-mythos-5-2":    1_000_000,
+    "claude-fable-5-1":     1_000_000,
+    "claude-mythos-5-1":    1_000_000,
+    "claude-fable-5":       1_000_000,
+    "claude-mythos-5":      1_000_000,
+    "claude-opus-5-5":      1_000_000,
+    "claude-opus-5":        1_000_000,
+    "claude-opus-4-8":      1_000_000,
+    "claude-opus-4-7":      1_000_000,
+    "claude-opus-4-6":      1_000_000,
+    "claude-opus-4-5":        200_000,
+    "claude-opus-4-1":        200_000,
     "claude-opus-4":          200_000,
+    "claude-sonnet-5-5":    1_000_000,
+    "claude-sonnet-5":      1_000_000,
+    "claude-sonnet-4-6":    1_000_000,
     "claude-sonnet-4-5":      200_000,
     "claude-sonnet-4":        200_000,
-    "claude-haiku-3-5":       200_000,
-    "claude-haiku-3":         200_000,
+    "claude-haiku-5-5":     1_000_000,
+    "claude-haiku-4-5":       200_000,
+    # Retired Claude 3 models, no longer on that page
+    "claude-3-7-sonnet":      200_000,
+    "claude-3-5-sonnet":      200_000,
+    "claude-3-5-haiku":       200_000,
     "claude-3-opus":          200_000,
     "claude-3-sonnet":        200_000,
     "claude-3-haiku":         200_000,
