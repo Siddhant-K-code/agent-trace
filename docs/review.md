@@ -101,9 +101,9 @@ its quoted and `<<-` forms) and `#` comments are skipped, so text written to a
 file is never read as a test run.
 
 A run counts only when it has exactly one result recorded after the call, with
-an explicit status: an exit code, a success flag, or an error event. A missing,
-duplicate, earlier, status-less, or conflicting result makes the outcome
-unknown, and validation is `partial`.
+an explicit status: an exit code, a success flag, `is_error: true`, or an error
+event. A missing, duplicate, earlier, status-less, or conflicting result makes
+the outcome unknown, and validation is `partial`.
 
 The exit code belongs to the whole shell invocation. It is assigned to a check
 only when the check is the whole command, such as `pytest -k 'a && b'` or
@@ -113,15 +113,20 @@ in a chain joined only by `&&`, exit 0 means every part ran and passed, so a
 pass is kept. A failing `&&` chain is unknown because the failing part is not
 known.
 
-When the exit code is masked this way, or no exit code was recorded, the
-outcome is read from the test runner's own final summary in the linked result.
+When the exit code is masked this way, or the result has no explicit status,
+the outcome is read from the test runner's own final summary in the linked
+result. A result marked `is_error: true` with no exit code reads like a nonzero
+exit. A single command is failed, and in a compound command the failure is
+masked, so the summary is read.
+
 Copilot CLI often pipes test output through `tail`, which hides the runner's
 exit code but keeps its summary. The text output then reads
 `unittest passed (runner summary in output, not exit code)`, the source adds
 `runner summary lines in linked output`, and the JSON run facts carry
 `outcome_source: "runner_summary"` with `exit_code: null`. Runs read from an
-exit code carry `outcome_source: "exit_status"`. Only the runner name and the
-outcome are printed, never the command or the output.
+explicit status carry `outcome_source: "exit_status"`, with `exit_code: null`
+when no exit code was recorded. Only the runner name and the outcome are
+printed, never the command or the output.
 
 Supported summaries:
 
@@ -143,12 +148,15 @@ The parsing is strict, and any doubt keeps the outcome unknown:
   truncation marker, or when gh-aw marked it `outputTruncated`. The part cut
   off can hold a failure, such as a coverage gate printed after the summary.
   An output that really ends with three dots looks the same, so it stays
-  unknown too.
+  unknown too. A result marked `is_error: true` is not an error event, so its
+  summary is still read in a compound command.
 - No tests run, all tests skipped, counts that do not add up, unknown count
   words, and a coverage threshold failure all stay unknown.
 - An explicit exit code still wins. A single `pytest` call with exit code 1 is
-  failed even if its output shows a passing summary. A conflicting or missing
-  result is never repaired from text.
+  failed even if its output shows a passing summary. `is_error: true` also
+  makes a single command failed, whatever its output shows. With exit code 0,
+  `success: true` or `ok: true`, it conflicts, and the run is unknown. A
+  conflicting or missing result is never repaired from text.
 - `go test` and `cargo test` are not read. They print one line per package or
   test binary with no run-wide summary, so a `tail` can hide a failing package.
 
