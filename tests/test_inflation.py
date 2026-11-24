@@ -156,6 +156,13 @@ class TestInflationFactors(unittest.TestCase):
             with self.subTest(model=model):
                 self.assertIsNone(_resolve_factor(model))
 
+    def test_the_longest_model_name_wins(self):
+        # cost.py lists gpt-4o before gpt-4o-mini, so a lookup in that
+        # order would price gpt-4o-mini at the gpt-4o rates.
+        for model in ("gpt-4o-mini", "gpt-4o-mini-2024-07-18", "gpt-4o-mini:latest"):
+            with self.subTest(model=model):
+                self.assertEqual(get_model_pricing(model).model_key, "gpt-4o-mini")
+
 
 class TestInflationAnalysis(unittest.TestCase):
     def setUp(self):
