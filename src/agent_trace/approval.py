@@ -27,6 +27,9 @@ Usage:
 
     # Show details of a request
     agent-strace approval show <request-id>
+
+show, approve and deny take a request ID or a unique prefix of one. An exact
+ID wins. A prefix that matches several requests is refused.
 """
 
 from __future__ import annotations
@@ -43,7 +46,7 @@ from typing import Literal
 
 from .inert import inert
 from .process_identity import PID_REUSED_REASON, pid_reused
-from .store import TraceStore, _write_atomic
+from .store import TraceStore, _write_atomic, validate_stored_id
 
 ApprovalState = Literal["pending", "approved", "denied"]
 
@@ -180,17 +183,91 @@ def list_requests(store: TraceStore,
     return requests
 
 
+def _request_id_error(request_id: object) -> str:
+    """Return why ``request_id`` cannot name a request, or "" when it can.
+
+    The message never quotes the argument, so a control character in it
+    never reaches the terminal.
+    """
+    try:
+        # A value that is not a string is refused like an empty one.
+        validate_stored_id(
+            request_id if isinstance(request_id, str) else "", "request ID",
+        )
+    except ValueError as exc:
+        return str(exc)
+    return ""
+
+
+def _resolve_request(
+    store: TraceStore, request_id: str,
+) -> tuple[Path | None, ApprovalRequest | None, str]:
+    """Resolve a request ID or prefix to (path, request, error).
+
+    ``show``, ``approve`` and ``deny`` all use this lookup. An exact ID wins.
+    Otherwise the argument must start exactly one request ID. It is compared
+    as plain text, so ``*``, ``?`` and ``[`` match only themselves. A matching
+    file counts even when its record cannot be read, and a symlink counts but
+    is never followed, so a prefix never skips one request to reach another.
+    ``error`` is set when the argument is refused, matches no request or
+    several requests, or when the one request it names has an invalid record.
+    """
+    error = _request_id_error(request_id)
+    if error:
+        return None, None, error
+    matches: dict[str, os.DirEntry] = {}
+    try:
+        with os.scandir(_approvals_dir(store)) as entries:
+            for entry in entries:
+                name = entry.name
+                if (
+                    name.endswith(".json")
+                    and name[:-len(".json")].startswith(request_id)
+                ):
+                    matches[name[:-len(".json")]] = entry
+    except OSError:
+        # A missing or unreadable directory holds no requests. A listing that
+        # fails part way is dropped, so a partial list never picks a request.
+        matches = {}
+    if request_id in matches:
+        found = request_id
+    elif len(matches) == 1:
+        (found,) = matches
+    elif not matches:
+        return None, None, f"Request not found: {inert(request_id)}"
+    else:
+        ids = sorted(matches)
+        named = ", ".join(inert(i) for i in ids[:5])
+        if len(ids) > 5:
+            named += f" and {len(ids) - 5} more"
+        return None, None, (
+            f"Request ID prefix {inert(request_id)} matches "
+            f"{len(ids)} requests: {named}"
+        )
+    entry = matches[found]
+    path = Path(entry.path)
+    try:
+        # A symlink counts as a match but is never followed. Reading a FIFO
+        # or a device file could block, so only a regular file is opened.
+        if entry.is_symlink():
+            raise ValueError("is a symlink")
+        if not entry.is_file(follow_symlinks=False):
+            raise ValueError("not a regular file")
+        return path, ApprovalRequest.from_json(path.read_text()), ""
+    except (OSError, ValueError, RecursionError) as exc:
+        return None, None, (
+            f"Request {inert(found)} has an invalid record: {inert(exc)}"
+        )
+
+
 def find_request(store: TraceStore, prefix: str) -> ApprovalRequest | None:
-    """Find a request by ID prefix."""
-    d = _approvals_dir(store)
-    if not d.exists():
-        return None
-    for f in d.glob(f"{prefix}*.json"):
-        try:
-            return ApprovalRequest.from_json(f.read_text())
-        except Exception:
-            continue
-    return None
+    """Return the request that an ID or unique ID prefix names, or None.
+
+    The rules are those of ``approval show``, ``approve`` and ``deny``. None
+    means the argument was refused, matched no request or several requests,
+    or named a request whose record cannot be read.
+    """
+    return _resolve_request(store, prefix)[1]
 
 
 # ---------------------------------------------------------------------------
@@ -227,34 +304,6 @@ def create_approval_request(
     return req
 
 
-def _find_request_path(
-    store: TraceStore, request_id: str,
-) -> tuple[Path | None, ApprovalRequest | None, str]:
-    """Resolve an ID or prefix to (path, request, error) for an update.
-
-    An exact ID match is preferred over prefix matches. ``error`` is set when
-    matching files exist but none of them is a valid record.
-    """
-    d = _approvals_dir(store)
-    if not request_id or not d.is_dir():
-        return None, None, ""
-    candidates = sorted(
-        p for p in d.glob(f"{request_id}*.json")
-        if p.parent == d and not p.is_symlink()
-    )
-    exact = _request_path(store, request_id)
-    if exact in candidates:
-        candidates.remove(exact)
-        candidates.insert(0, exact)
-    error = ""
-    for path in candidates:
-        try:
-            return path, ApprovalRequest.from_json(path.read_text()), ""
-        except (OSError, ValueError) as exc:
-            error = error or str(exc)
-    return None, None, error
-
-
 def _decide(
     store: TraceStore,
     request_id: str,
@@ -268,14 +317,15 @@ def _decide(
     load, state check, and write happen under one lock, so when several
     deciders race exactly one succeeds and the rest see the recorded state.
     """
+    error = _request_id_error(request_id)
+    if error:
+        return None, error
     if not _approvals_dir(store).is_dir():
-        return None, f"Request not found: {request_id}"
+        return None, f"Request not found: {inert(request_id)}"
     with store.write_lock():
-        path, req, error = _find_request_path(store, request_id)
+        path, req, error = _resolve_request(store, request_id)
         if req is None or path is None:
-            if error:
-                return None, f"Request {request_id} has an invalid record: {error}"
-            return None, f"Request not found: {request_id}"
+            return None, error
         if not can_transition(req.state, target):
             return None, f"Request already {req.state}"
         req.state = target
@@ -452,8 +502,14 @@ def poll_for_decision(
 # ---------------------------------------------------------------------------
 
 def cmd_approval(args: argparse.Namespace) -> int:
-    store = TraceStore(args.trace_dir)
     sub = getattr(args, "approval_cmd", None)
+    if sub in ("show", "approve", "deny"):
+        # Refuse an unsafe argument before the store touches any file.
+        error = _request_id_error(args.request_id)
+        if error:
+            sys.stderr.write(f"{error}\n" if sub == "show" else f"❌ {error}\n")
+            return 1
+    store = TraceStore(args.trace_dir)
 
     if sub == "list":
         state_filter = getattr(args, "state", None) or None
@@ -477,9 +533,9 @@ def cmd_approval(args: argparse.Namespace) -> int:
         return 0
 
     elif sub == "show":
-        req = find_request(store, args.request_id)
-        if not req:
-            sys.stderr.write(f"Request not found: {args.request_id}\n")
+        _, req, error = _resolve_request(store, args.request_id)
+        if req is None:
+            sys.stderr.write(f"{error}\n")
             return 1
         sys.stdout.write(json.dumps(asdict(req), indent=2) + "\n")
         return 0
