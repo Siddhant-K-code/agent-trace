@@ -526,6 +526,12 @@ class TestFreshness(unittest.TestCase):
         report = self.analyse(scope_glob="src/a.py")
         self.assertEqual((report.scope_source, report.files_in_scope), ("--scope flag", 1))
 
+    def test_a_claude_md_directory_is_skipped(self):
+        os.makedirs(os.path.join(self.repo, "CLAUDE.md"))
+        self.write("AGENTS.md", "Scope:\n- src/**\n")
+        self._scope_repo()
+        self.assert_src_scope(self.analyse())
+
     # -- errors --------------------------------------------------------------
 
     def test_not_a_repository(self):
@@ -580,6 +586,27 @@ class TestFreshness(unittest.TestCase):
         self.assertEqual(
             str(caught.exception), f"git rev-parse timed out after 30s in {self.repo}"
         )
+
+    def test_git_errors_keep_the_reason_and_escape_it(self):
+        from agent_trace.freshness import FreshnessError
+        self.session(T0)
+        top = self.repo + "\x1b[2J"
+
+        def git(cmd, **kwargs):
+            if "--show-toplevel" in cmd:
+                return subprocess.CompletedProcess(cmd, 0, os.fsencode(top) + b"\n", b"")
+            return subprocess.CompletedProcess(cmd, 128, b"", b"fatal: bad\x1b[2J HEAD\n")
+
+        for effect, message in (
+            (PermissionError(13, "Permission denied"),
+             f"cannot run git in {self.repo}: [Errno 13] Permission denied"),
+            (git, f"git rev-parse failed in {self.repo}\\x1b[2J: fatal: bad\\x1b[2J HEAD"),
+        ):
+            with self.subTest(message=message):
+                with patch("agent_trace.freshness.subprocess.run", side_effect=effect), \
+                        self.assertRaises(FreshnessError) as caught:
+                    self.analyse()
+                self.assertEqual(str(caught.exception), message)
 
     def test_a_failed_diff_is_an_error(self):
         from agent_trace.freshness import FreshnessError
