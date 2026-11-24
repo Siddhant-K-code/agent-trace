@@ -1168,6 +1168,11 @@ class TestOtlpExportTimeLimit(TimestampCliTestCase):
                             root, argv, f"Error: session event timestamp {PAST_LIMIT}: {tail}\n",
                         )
 
+    def test_genai_export_skips_a_decision_past_the_limit(self):
+        # otlp-genai writes no span for a decision, so its time is not checked.
+        root = self.make_ts_workspace(BAD, "decision", YEAR_3000)
+        assert_unix_nanos_in_range(self, self._export(root, "otlp-genai"))
+
     def test_accepts_the_last_time_that_fits(self):
         for fmt in self.FORMATS:
             with self.subTest(fmt=fmt):
@@ -1218,6 +1223,22 @@ class TestOtlpExportTimeLimit(TimestampCliTestCase):
                         else:
                             set_meta(child, **{what: YEAR_3000})
                         self.assert_refused(root, argv, expected)
+
+    def test_subagent_tree_names_an_unusable_time_first(self):
+        # The root starts past the limit and a child call's time is text. The
+        # text is named, as it is when no time is past the limit.
+        expected = (
+            f"Error: session {CHILD} event timestamp must be a Unix time in seconds: "
+            "event 3 of 7 (tool_call) has a string timestamp\n"
+        )
+        for fmt in self.FORMATS:
+            for argv in self._argvs(fmt, "--include-subagents"):
+                with self.subTest(argv=argv):
+                    root = self.make_ts_workspace()
+                    traces = root / "work" / ".agent-traces"
+                    set_meta(traces / BAD, started_at=YEAR_3000)
+                    restamp(traces / CHILD, "tool_call", "soon")
+                    self.assert_refused(root, argv, expected)
 
     def test_subagent_tree_keeps_every_time_in_range(self):
         def tree(root: Path, fmt: str) -> dict:
