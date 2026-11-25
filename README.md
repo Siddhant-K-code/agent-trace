@@ -10,6 +10,7 @@
 [![PyPI Downloads](https://static.pepy.tech/personalized-badge/agent-strace?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/agent-strace)
 
 **Local evidence and replay for coding agents.**
+<p>Used by Meta, ByteDance, Zama.ai &amp; more<br><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/logos/meta-dark.svg"><img src="assets/logos/meta.svg" alt="Meta" height="26"></picture>&emsp;&emsp;&emsp;<picture><source media="(prefers-color-scheme: dark)" srcset="assets/logos/bytedance-dark.svg"><img src="assets/logos/bytedance.svg" alt="ByteDance" height="24"></picture>&emsp;&emsp;&emsp;<picture><source media="(prefers-color-scheme: dark)" srcset="assets/logos/zama-dark.svg"><img src="assets/logos/zama.svg" alt="Zama" height="18"></picture></p>
 
 `agent-strace` records what a coding agent did in a session (prompts, tool calls, file operations, commands, failures) as local files, then does three jobs:
 
