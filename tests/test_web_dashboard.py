@@ -839,6 +839,8 @@ _HEALTH_ACCEPTS = (
     ("xhtml", ["application/xhtml+xml"], False),
     ("longer type", ["text/html-sandboxed"], False),
     ("json header, then html header", ["application/json", "text/html"], True),
+    ("html after a comma and a space", ["application/json, text/html"], True),
+    ("space before the semicolon", ["text/html ;q=0.5"], True),
 )
 
 
