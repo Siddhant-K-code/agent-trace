@@ -5,6 +5,7 @@ import copy
 import hashlib
 import io
 import json
+import math
 import os
 import shutil
 import sys
@@ -12,6 +13,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -70,6 +72,7 @@ from agent_trace.audit import verify_chain
 from agent_trace.cli import build_parser
 from agent_trace.compliance import (
     _load_event_lines,
+    _parse_time_bound,
     build_audit_readiness,
     export_compliance,
     export_compliance_bulk,
@@ -1618,6 +1621,235 @@ class TestEuAiActExportNamesTheExactSession(_CliCase):
                     (1, "", "Session not found: run1\n"),
                 )
                 self.assertFalse(output.exists())
+
+
+# A copy of ZONES and use_time_zone in test_models.py. POSIX TZ strings, so no
+# tz database is needed. Each maps to its UTC offset in seconds on 1970-01-01.
+ZONES = {
+    "UTC0": 0,
+    "<-12>12": -12 * 3600,
+    "<+14>-14": 14 * 3600,
+    "<+0530>-5:30": 5 * 3600 + 30 * 60,
+    "PST8PDT,M3.2.0,M11.1.0": -8 * 3600,
+}
+
+
+def use_time_zone(test: unittest.TestCase, zone: str) -> None:
+    """Set this process's time zone to *zone*, a key of ZONES, until *test* ends."""
+    if not hasattr(time, "tzset"):
+        test.skipTest("time.tzset is not available on this platform")
+    old = os.environ.get("TZ")
+
+    def restore():
+        if old is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old
+        time.tzset()
+
+    test.addCleanup(restore)
+    os.environ["TZ"] = zone
+    time.tzset()
+    test.assertEqual(time.localtime(0).tm_gmtoff, ZONES[zone], f"TZ={zone!r} did not apply")
+
+
+JAN1 = 1767225600.0  # 2026-01-01T00:00:00Z
+MAR31 = JAN1 + 89 * DAY
+APR1 = MAR31 + DAY
+# Sessions that start at these UTC times, oldest first.
+WINDOW_SESSIONS = {
+    "dec31-2300Z": JAN1 - 3600,
+    "jan01-0300Z": JAN1 + 3 * 3600,
+    "jan01-1200Z": JAN1 + 12 * 3600,
+    "mar31-0030Z": MAR31 + 1800,
+    "mar31-1200Z": MAR31 + 12 * 3600,
+    "mar31-2330Z": MAR31 + 23 * 3600 + 1800,
+    "mar31-2359Z": APR1 - 0.5,
+    "apr01-0000Z": APR1,
+    "apr01-0300Z": APR1 + 3 * 3600,
+    "apr01-1200Z": APR1 + 12 * 3600,
+}
+Q1 = "jan01-0300Z jan01-1200Z mar31-0030Z mar31-1200Z mar31-2330Z mar31-2359Z"
+
+
+class TestParseTimeBound(unittest.TestCase):
+    """How export --format eu-ai-act --all reads a --since or --until value."""
+
+    def test_a_date_or_a_time_with_no_offset_is_utc(self):
+        # main read these in the host's time zone, and could not read
+        # 0001-01-01 in any zone.
+        cases = (
+            ("2026-01-01", JAN1),
+            ("2026-07-01", JAN1 + 181 * DAY),
+            ("2026-01-01T00:00:00", JAN1),
+            ("2026-03-31T23:59:59", APR1 - 1),
+            ("2026-01-01T12", JAN1 + 12 * 3600),
+            ("2026-01-01T12:30", JAN1 + 45000),
+            ("2026-01-01 12:30", JAN1 + 45000),
+            ("2026-01-01t12:30:15.25", JAN1 + 45015.25),
+            ("0001-01-01", -62135596800.0),
+            ("9999-12-31", 253402214400.0),
+        )
+        for zone in ZONES:
+            use_time_zone(self, zone)
+            for value, expected in cases:
+                with self.subTest(zone=zone, value=value):
+                    self.assertEqual(_parse_time_bound(value), expected)
+
+    def test_z_and_an_offset_keep_their_meaning(self):
+        # main refused a lowercase z.
+        cases = (
+            ("2026-01-01T00:00:00Z", JAN1),
+            ("2026-01-01T00Z", JAN1),
+            ("2026-01-01T00:00z", JAN1),
+            ("2026-01-01T00:00+00:00", JAN1),
+            ("2026-01-01T00:00-00:00", JAN1),
+            ("2026-01-01T00:00+05:30", 1767205800.0),
+            ("2026-01-01T00:00-05:30", 1767245400.0),
+            ("2026-01-01T00:00+23:59", 1767139260.0),
+            ("2026-01-01T00:00-23:59", 1767311940.0),
+            ("0001-01-01T00:00+14:00", -62135647200.0),
+        )
+        for zone in ZONES:
+            use_time_zone(self, zone)
+            for value, expected in cases:
+                with self.subTest(zone=zone, value=value):
+                    self.assertEqual(_parse_time_bound(value), expected)
+
+    def test_a_fraction_of_any_length_reads(self):
+        # Python 3.10 read a fraction of 3 or 6 digits only. Digits past the
+        # sixth are dropped.
+        cases = (
+            ("2026-01-01T00:00:00.5Z", 1767225600.5),
+            ("2026-01-01T00:00:00.123Z", 1767225600.123),
+            ("2026-01-01T00:00:00.1234567Z", 1767225600.123456),
+            ("2026-03-31T23:59:59.9999999Z", 1775001599.999999),
+            ("2026-01-01T00:00:00.123456789+05:30", 1767205800.123456),
+        )
+        for value, expected in cases:
+            with self.subTest(value=value):
+                self.assertEqual(_parse_time_bound(value), expected)
+
+    def test_a_value_of_only_digits_is_unix_seconds(self):
+        # Python 3.11 and later read 20260101 as a date.
+        cases = (
+            ("20260101", 20260101.0),
+            ("1767225600", JAN1),
+            ("1767225600.5", 1767225600.5),
+            ("1_767_225_600", JAN1),
+            ("-1", -1.0),
+        )
+        for value, expected in cases:
+            with self.subTest(value=value):
+                self.assertEqual(_parse_time_bound(value), expected)
+
+    def test_other_forms_are_refused(self):
+        refused = (
+            # A date with Z or an offset. main read 2026-01-01+05:00 as 05:00.
+            "2026-01-01Z", "2026-01-01z", "2026-01-01+00:00", "2026-01-01+05:00",
+            "2026-01-01-05:00",
+            # A separator other than T, t or a space.
+            "2026-01-01x00:00", "2026-01-01_07:00", "2026-01-01T",
+            # Week and ordinal dates, and basic forms.
+            "2026-W01-1", "2026-001", "20260101T00", "2026-01-01T0000",
+            "2026-01-01T00:00+0000", "2026-01-01T00:00+00",
+            # Offset seconds, offset minutes of 60 or more, and a 24 hour offset.
+            "2026-01-01T00:00+05:30:15", "2026-01-01T00:00+05:60", "2026-01-01T00:00+24:00",
+            # A comma before the fraction, a . with no digits, a fraction with no seconds.
+            "2026-01-01T00:00:00,5Z", "2026-01-01T00:00:00.Z", "2026-01-01T00:00.5Z",
+            # Hour 24, minute 60, second 60, and other fields out of range.
+            "2026-03-31T24:00Z", "2026-03-31T23:60Z", "2026-03-31T23:59:60Z",
+            "2026-02-30", "2026-13-01", "0000-01-01",
+            # Short fields, and digits that are not ASCII.
+            "2026-1-1", "2026-01-01T1:00", "\uff12\uff10\uff12\uff16-01-01", "2026-01-0\u0661",
+        )
+        for value in refused:
+            with self.subTest(value=value):
+                self.assertIsNone(_parse_time_bound(value))
+
+    def test_a_date_only_until_covers_its_whole_utc_day(self):
+        # select_sessions reads --until with end_of_day=True. main ended a
+        # date-only --until at 00:00 that day in the host's time zone.
+        cases = (
+            ("2026-01-01", math.nextafter(JAN1 + DAY, -math.inf)),
+            ("2026-03-31", math.nextafter(APR1, -math.inf)),
+            ("0001-01-01", math.nextafter(-62135510400.0, -math.inf)),
+            ("9999-12-31", math.nextafter(253402300800.0, -math.inf)),
+            # A time, Unix seconds or a duration ends where it says.
+            ("2026-03-31T23:59:59", APR1 - 1),
+            ("2026-03-31T00Z", MAR31),
+            ("2026-03-31 12:00+05:30", MAR31 + 12 * 3600 - 19800),
+            ("1775001600", APR1),
+            ("20260331", 20260331.0),
+            ("1d", JAN1 - DAY),
+            ("12h", JAN1 - 12 * 3600),
+            # A value that does not read still gives the default.
+            ("2026-03-31Z", None),
+            ("2026-02-30", None),
+        )
+        for zone in ZONES:
+            use_time_zone(self, zone)
+            for value, expected in cases:
+                with self.subTest(zone=zone, value=value), mock.patch(
+                    "time.time", return_value=JAN1
+                ):
+                    self.assertEqual(_parse_time_bound(value, end_of_day=True), expected)
+
+
+class TestSelectSessionsWindow(unittest.TestCase):
+    """select_sessions reads its window in UTC on every host."""
+
+    def setUp(self):
+        root = Path(tempfile.mkdtemp(prefix="compliance-window-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        self.store = TraceStore(str(root), use_workspace_env=False)
+        self.names = {}
+        for name, start in WINDOW_SESSIONS.items():
+            meta = SessionMeta(agent_name=name, started_at=start, ended_at=start + 12)
+            self.store.create_session(meta)
+            self.store.append_event(meta.session_id, TraceEvent(
+                event_type=EventType.SESSION_START, session_id=meta.session_id,
+                timestamp=start, data={},
+            ))
+            self.names[meta.session_id] = name
+
+    def selected(self, since: str | None, until: str | None) -> str:
+        """Return the names of the sessions select_sessions keeps, oldest first."""
+        names = {self.names[sid] for sid in select_sessions(self.store, since, until)}
+        return " ".join(name for name in WINDOW_SESSIONS if name in names)
+
+    def assertWindows(self, cases: tuple) -> None:
+        for zone in ZONES:
+            use_time_zone(self, zone)
+            for since, until, expected in cases:
+                with self.subTest(zone=zone, since=since, until=until):
+                    self.assertEqual(self.selected(since, until), expected)
+
+    def test_a_date_or_a_time_with_no_offset_is_utc(self):
+        # main read these in the host's time zone, so the window moved with it.
+        self.assertWindows((
+            ("2026-01-01", None, Q1 + " apr01-0000Z apr01-0300Z apr01-1200Z"),
+            (
+                "2026-01-01T00:00:00", "2026-03-31T23:59:59",
+                "jan01-0300Z jan01-1200Z mar31-0030Z mar31-1200Z mar31-2330Z",
+            ),
+            ("2026-01-01 12:00", "2026-03-31t12:00", "jan01-1200Z mar31-0030Z mar31-1200Z"),
+        ))
+
+    def test_a_date_only_until_covers_its_whole_utc_day(self):
+        # main ended a date-only --until at 00:00 that day in the host's time
+        # zone. So the Q1 window left out March 31, and D to D kept nothing.
+        self.assertWindows((
+            ("2026-01-01", "2026-03-31", Q1),
+            (None, "2026-03-31", "dec31-2300Z " + Q1),
+            (None, "2025-12-31", "dec31-2300Z"),
+            ("2026-01-01", "2026-01-01", "jan01-0300Z jan01-1200Z"),
+            ("2026-03-31", "2026-03-31", "mar31-0030Z mar31-1200Z mar31-2330Z mar31-2359Z"),
+            ("2026-04-01", "2026-04-01", "apr01-0000Z apr01-0300Z apr01-1200Z"),
+            # A --until with a time keeps a session that started at that instant.
+            (None, "2026-03-31T23:59:59.5Z", "dec31-2300Z " + Q1),
+            (None, "2026-04-01T00:00Z", "dec31-2300Z " + Q1 + " apr01-0000Z"),
+        ))
 
 
 if __name__ == "__main__":

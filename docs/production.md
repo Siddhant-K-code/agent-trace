@@ -774,6 +774,10 @@ agent-strace export --all --since 2026-01-01 --until 2026-03-31 \
   --format eu-ai-act --output Q1-2026-audit.json
 ```
 
+The dates are UTC days, and a `--until` date covers its whole day, so the Q1
+package includes the sessions that started on March 31. See
+[`export`](commands.md#export) for the values `--since` and `--until` take.
+
 The export includes event summaries, data categories processed, tools and
 models observed, human oversight points, and hash-chain integrity metadata.
 Verify the exported chain links with:

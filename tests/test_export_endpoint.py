@@ -57,7 +57,10 @@ _ROUTE_ENV = (
 )
 DAY = 86400
 SINCE_DAYS = "use a number of days as N or Nd, such as 7d"
-TIME_BOUND = "use a duration such as 7d or 12h, an ISO date or time, or Unix seconds"
+TIME_BOUND = (
+    "use a duration such as 7d or 12h, a date such as 2026-03-31, "
+    "a time such as 2026-03-31T12:00:00Z, or Unix seconds"
+)
 # The flags that send export to --scores, --metrics or --backend, and the
 # flag a refusal names for them.
 SCORES_PATHS = (
@@ -884,6 +887,54 @@ class TestExportRefusals(_CollectorCase):
         )
 
 
+# A copy of ZONES and use_time_zone in test_models.py. POSIX TZ strings, so no
+# tz database is needed. Each maps to its UTC offset in seconds on 1970-01-01.
+ZONES = {
+    "UTC0": 0,
+    "<-12>12": -12 * 3600,
+    "<+14>-14": 14 * 3600,
+    "<+0530>-5:30": 5 * 3600 + 30 * 60,
+    "PST8PDT,M3.2.0,M11.1.0": -8 * 3600,
+}
+
+
+def use_time_zone(test: unittest.TestCase, zone: str) -> None:
+    """Set this process's time zone to *zone*, a key of ZONES, until *test* ends."""
+    if not hasattr(time, "tzset"):
+        test.skipTest("time.tzset is not available on this platform")
+    old = os.environ.get("TZ")
+
+    def restore():
+        if old is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old
+        time.tzset()
+
+    test.addCleanup(restore)
+    os.environ["TZ"] = zone
+    time.tzset()
+    test.assertEqual(time.localtime(0).tm_gmtoff, ZONES[zone], f"TZ={zone!r} did not apply")
+
+
+JAN1 = 1767225600.0  # 2026-01-01T00:00:00Z
+MAR31 = JAN1 + 89 * DAY
+APR1 = MAR31 + DAY
+# Sessions that start at these UTC times, oldest first.
+WINDOW_SESSIONS = {
+    "dec31-2300Z": JAN1 - 3600,
+    "jan01-0300Z": JAN1 + 3 * 3600,
+    "jan01-1200Z": JAN1 + 12 * 3600,
+    "mar31-0030Z": MAR31 + 1800,
+    "mar31-1200Z": MAR31 + 12 * 3600,
+    "mar31-2330Z": MAR31 + 23 * 3600 + 1800,
+    "mar31-2359Z": APR1 - 0.5,
+    "apr01-0000Z": APR1,
+    "apr01-0300Z": APR1 + 3 * 3600,
+    "apr01-1200Z": APR1 + 12 * 3600,
+}
+
+
 class TestExportWindowFlags(_CollectorCase):
     """--all, --since and --until are refused where export would ignore them.
 
@@ -952,6 +1003,29 @@ class TestExportWindowFlags(_CollectorCase):
         code, out, err = self.export("--format", "eu-ai-act", "--all", *flags, session_id="")
         self.assertEqual((code, err), (0, ""))
         return "".join(sorted(self.letters[s["session_id"]] for s in json.loads(out)["sessions"]))
+
+    def add_window_sessions(self) -> None:
+        """Add a session for each start time in WINDOW_SESSIONS."""
+        store = TraceStore(self.trace_dir)
+        self.names = {}
+        for name, start in WINDOW_SESSIONS.items():
+            meta = SessionMeta(agent_name=name, started_at=start, ended_at=start + 12)
+            store.create_session(meta)
+            store.append_event(meta.session_id, TraceEvent(
+                event_type=EventType.SESSION_START, session_id=meta.session_id, timestamp=start,
+                data={},
+            ))
+            self.names[meta.session_id] = name
+
+    def window(self, *flags: str) -> str:
+        """Export --format eu-ai-act --all and return the window sessions it has.
+
+        The names come from WINDOW_SESSIONS, oldest first.
+        """
+        code, out, err = self.export("--format", "eu-ai-act", "--all", *flags, session_id="")
+        self.assertEqual((code, err), (0, ""))
+        names = {self.names.get(s["session_id"]) for s in json.loads(out)["sessions"]}
+        return " ".join(name for name in WINDOW_SESSIONS if name in names)
 
     def test_single_session_paths_refuse_window_flags(self):
         # main exported one session with exit 0 and ignored the flags.
@@ -1101,12 +1175,12 @@ class TestExportWindowFlags(_CollectorCase):
                     ["--format", "eu-ai-act", "--all", f"{flag}=nan", other, "1d"], line,
                     session_id="",
                 )
-        local_date = datetime.fromtimestamp(self.now - 3 * DAY).date().isoformat()
+        utc_date = datetime.fromtimestamp(self.now - 3 * DAY, timezone.utc).date().isoformat()
         kept = (
             (("--since", "7d"), "AC"),
             (("--since", "12h"), "C"),
             (("--since", "0.5d"), "C"),
-            (("--since", local_date), "AC"),
+            (("--since", utc_date), "AC"),
             (("--since", self.utc(3)), "AC"),
             (("--since", self.utc(3, z=True)), "AC"),
             (("--since", str(int(self.now - 3 * DAY))), "AC"),
@@ -1119,6 +1193,83 @@ class TestExportWindowFlags(_CollectorCase):
         for flags, letters in kept:
             with self.subTest(flags=flags):
                 self.assertEqual(self.reported(*flags), letters)
+
+    def test_eu_ai_act_all_reads_dates_and_times_in_utc(self):
+        # main read a date, or a time with no offset, in the host's time zone,
+        # and ended a date-only --until at 00:00 that day. So the window moved
+        # with the host, the Q1 window left out March 31, and --since D
+        # --until D exported nothing. It refused 0001-01-01.
+        self.add_window_sessions()
+        q1 = "jan01-0300Z jan01-1200Z mar31-0030Z mar31-1200Z mar31-2330Z mar31-2359Z"
+        q1_times = "jan01-0300Z jan01-1200Z mar31-0030Z mar31-1200Z mar31-2330Z"
+        every = " ".join(WINDOW_SESSIONS)
+        cases = (
+            (("--since", "2026-01-01", "--until", "2026-03-31"), q1),
+            (("--until", "2026-03-31"), "dec31-2300Z " + q1),
+            (("--since", "2026-01-01", "--until", "2026-01-01"), "jan01-0300Z jan01-1200Z"),
+            (("--since", "2026-01-01T00:00:00", "--until", "2026-03-31T23:59:59"), q1_times),
+            (("--since", "2026-01-01T00:00:00Z", "--until", "2026-03-31T23:59:59Z"), q1_times),
+            (("--since", "2026-01-01 00:00", "--until", "2026-03-31t23:59:59z"), q1_times),
+            (("--until", "9999-12-31"), every),
+            (("--since", "0001-01-01"), every),
+        )
+        for zone in ZONES:
+            use_time_zone(self, zone)
+            for flags, names in cases:
+                with self.subTest(zone=zone, flags=flags):
+                    self.assertEqual(self.window(*flags), names)
+
+    def test_eu_ai_act_all_reads_one_grammar_on_every_python(self):
+        # main read a value with datetime.fromisoformat, which reads more
+        # forms on Python 3.11 and later. It read 20260101 as a date there,
+        # read a date with Z or an offset as a time of day, and took any
+        # character after the date as the separator.
+        self.add_window_sessions()
+        every = " ".join(WINDOW_SESSIONS)
+        from_jan01 = " ".join(list(WINDOW_SESSIONS)[1:])
+        cases = (
+            (
+                ("--since", "1767225600", "--until", "1775001599"),
+                "jan01-0300Z jan01-1200Z mar31-0030Z mar31-1200Z mar31-2330Z",
+            ),
+            (("--since", "1767225600.5"), from_jan01),
+            (("--since", "20260101", "--until", "20260331"), ""),
+            (("--since", "2026-01-01T00Z"), from_jan01),
+            (("--since", "2026-01-01T00:00z"), from_jan01),
+            (("--since", "2026-01-01T00:00+14:00"), every),
+            (("--since", "2026-01-01T00:00-05:30"), " ".join(list(WINDOW_SESSIONS)[2:])),
+            (("--since", "2026-01-01T00:00:00.5Z"), from_jan01),
+            (("--until", "2026-03-31T23:59:59.9999999Z"), " ".join(list(WINDOW_SESSIONS)[:7])),
+            (("--since", "0001-01-01T00:00+14:00"), every),
+            (("--since", "2026-01-01", "--until", "2025-12-31"), ""),
+        )
+        for flags, names in cases:
+            with self.subTest(flags=flags):
+                self.assertEqual(self.window(*flags), names)
+        refused = (
+            ("--since", "2026-W01-1"),
+            ("--since", "2026-01-01Z"),
+            ("--since", "2026-01-01+00:00"),
+            ("--since", "2026-01-01x00:00"),
+            ("--since", "2026-01-01T00:00+0000"),
+            ("--since", "2026-01-01T00:00+00"),
+            ("--since", "2026-01-01T00:00+05:30:15"),
+            ("--since", "2026-01-01T00:00+24:00"),
+            ("--since", "2026-01-01T00:00+05:60"),
+            ("--since", "2026-01-01T00:00:00,5Z"),
+            ("--since", "2026-01-01T00:00:00.Z"),
+            ("--until", "2026-03-31T24:00Z"),
+            ("--until", "2026-03-31T23:59:60Z"),
+            ("--until", "2026-02-30"),
+            ("--since", "\uff12\uff10\uff12\uff16-01-01"),
+        )
+        for flag, value in refused:
+            with self.subTest(flag=flag, value=value):
+                self.assertRefused(
+                    ["--format", "eu-ai-act", "--all", flag, value],
+                    f"invalid {flag} value: with --format eu-ai-act --all, {TIME_BOUND}",
+                    session_id="",
+                )
 
     def test_window_refusal_comes_before_the_session_lookup(self):
         # main reported the missing session instead.

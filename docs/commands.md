@@ -2564,7 +2564,7 @@ read them. Every other path exports one session and reads none of the three.
 | Path | Reads | Values |
 |---|---|---|
 | `--scores`, `--metrics` or `--backend`, with no session ID | `--since` | The last N days, as `N` or `Nd`, such as `7`, `7d` or `0.5d`. N is ASCII digits with at most one `.` between digits. `0d` selects nothing. |
-| `--format eu-ai-act --all` | `--since` and `--until` | A duration back from now, such as `7d` or `12h`, an ISO date or time, or Unix seconds. |
+| `--format eu-ai-act --all` | `--since` and `--until` | A duration back from now, such as `7d` or `12h`, a date such as `2026-03-31`, a time such as `2026-03-31T12:00:00Z`, or Unix seconds. A date, or a time with no offset, is UTC. |
 
 `--scores`, `--metrics` and `--backend` with `--since` read every session in
 the store before they send anything. When the store refuses a session or
@@ -2631,10 +2631,11 @@ refuses these with one line on stderr and exit 1:
   --format eu-ai-act --all; drop it to export the sessions in the window, or
   drop --all to export that session`.
 - A `--since` or `--until` with `--format eu-ai-act --all` that is not a
-  duration, an ISO date or time, or Unix seconds, or that is not a finite
-  time, such as `garbage`, an empty value, `nan` or `1e400`: `invalid --since
-  value: with --format eu-ai-act --all, use a duration such as 7d or 12h, an
-  ISO date or time, or Unix seconds`.
+  duration, a date, a time or Unix seconds, or that is not a finite time, such
+  as `garbage`, an empty value, `2026-01-01Z`, `2026-W01-1`, `nan` or `1e400`:
+  `invalid --since value: with --format eu-ai-act --all, use a duration such as
+  7d or 12h, a date such as 2026-03-31, a time such as 2026-03-31T12:00:00Z, or
+  Unix seconds`.
 
 The lines never repeat the URL or a header, which can carry a token. They never
 repeat a `--since` or `--until` value either.
@@ -2691,6 +2692,31 @@ those that started within `--since` and `--until`. It refuses when the store
 refuses to read any session in it, even one outside that window, so the package
 never leaves out a session. See
 [Sessions with mismatched or unreadable events](#sessions-with-mismatched-or-unreadable-events).
+
+With `--all`, `--since` and `--until` take these values. Each reads the same
+way on every host and every Python:
+
+- A duration back from now, as `Nd` or `Nh`, such as `7d`, `0.5d` or `12h`.
+- Unix seconds, such as `1767225600`. A value of only digits is Unix seconds,
+  so `20260101` is not a date.
+- A date, as `YYYY-MM-DD`, such as `2026-03-31`, is a UTC day. A `--since`
+  date starts at 00:00 UTC. A `--until` date covers the whole UTC day.
+  `--until 2026-03-31` keeps a session that started at 23:59:59.5 UTC on March
+  31, and leaves out one that started at 00:00 UTC on April 1.
+  `--since 2026-01-01 --until 2026-03-31` keeps the sessions that started in
+  the first quarter of 2026 in UTC, March 31 included.
+- A time: a date, then `T`, `t` or a space, then `HH`, `HH:MM`, `HH:MM:SS` or
+  `HH:MM:SS.F`, where F is one or more digits. Digits past the sixth are
+  dropped. A time can end in `Z`, `z`, `+HH:MM` or `-HH:MM`. A time with no
+  offset is UTC. A `--until` time keeps a session that started at that
+  instant.
+
+A date or a time takes ASCII digits only. Offset minutes must be under 60, and
+the offset under 24 hours. A date with no time cannot take `Z` or an offset.
+Export refuses every other form, such as `2026-01-01Z`, a week date such as
+`2026-W01-1`, a basic form such as `20260101T00`, an offset such as `+0000`,
+`+00` or `+05:30:15`, a comma before the fraction, hour 24, second 60 and a
+separator other than `T`, `t` or a space.
 
 The eu-ai-act export also refuses to export a session whose `started_at`, or
 `ended_at` when set, is not a Unix time in seconds. It prints one `Error:` line
