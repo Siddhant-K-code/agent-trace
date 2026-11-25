@@ -41,6 +41,7 @@ from .models import (
     usable_count,
     usable_number,
     usable_object,
+    usable_time,
 )
 from .session_paths import normalise_path, session_cwd, shell_reads, shell_writes
 from .store import TraceStore
@@ -210,7 +211,9 @@ def _duration(meta: SessionMeta, events: list[TraceEvent]) -> float:
     total_ms = usable_number(meta.total_duration_ms)
     if total_ms:
         return total_ms / 1000.0
-    if meta.ended_at is not None and meta.ended_at >= meta.started_at:
+    started = usable_time(meta.started_at)
+    ended = usable_time(meta.ended_at)
+    if started is not None and ended is not None and ended >= started:
         return meta.ended_at - meta.started_at
     if len(events) >= 2:
         return max(0.0, events[-1].timestamp - events[0].timestamp)
@@ -218,7 +221,7 @@ def _duration(meta: SessionMeta, events: list[TraceEvent]) -> float:
 
 
 def _status(meta: SessionMeta, events: list[TraceEvent]) -> str:
-    ended = meta.ended_at is not None
+    ended = usable_time(meta.ended_at) is not None
     failed = False
     for event in events:
         if event.event_type == EventType.SESSION_END:
@@ -448,6 +451,8 @@ def select_sessions_with_link(
     closest to the head commit time was chosen, and ``latest`` otherwise. In
     a pull request job the head commit is the PR head, never the synthetic
     merge commit. When that head is not available there is no commit match.
+    Only a session whose start time is usable can be the commit match. When
+    no session has one, the link is ``latest``.
     """
 
     if requested_session:
@@ -470,12 +475,16 @@ def select_sessions_with_link(
             return [meta.session_id for meta in reversed(matching)], "branch"
 
     timestamp = head_commit_timestamp(cwd)
-    if timestamp is None:
+    starts = [
+        (started, meta) for meta in sessions
+        if (started := usable_time(meta.started_at)) is not None
+    ]
+    if timestamp is None or not starts:
         return [sessions[0].session_id], "latest"
 
-    closest = min(
-        sessions,
-        key=lambda meta: (abs(meta.started_at - timestamp), -meta.started_at),
+    _, closest = min(
+        starts,
+        key=lambda item: (abs(item[0] - timestamp), -item[0]),
     )
     return [closest.session_id], "commit_time"
 
@@ -490,8 +499,10 @@ def select_sessions(
     """Resolve an explicit session or all sessions attributed to the branch.
 
     Older/imported traces can lack branch attribution.  For those, the session
-    whose start time is closest to the current commit timestamp is selected,
-    as specified by the issue, with the latest trace as a final fallback.
+    whose usable start time is closest to the current commit timestamp is
+    selected, as specified by the issue, with the latest trace as a final
+    fallback. The latest trace is also used when no session has a usable
+    start time.
     """
 
     return select_sessions_with_link(

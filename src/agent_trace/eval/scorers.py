@@ -20,7 +20,7 @@ from ..cost import estimate_cost
 from ..event_data import object_field, str_field
 from ..failures import count_session_errors
 from ..http_post import no_redirect_opener, post_error_detail
-from ..models import EventType, TraceEvent
+from ..models import EventType, TraceEvent, usable_time
 from ..session_outcome import SESSION_END_REASON_KEYS, final_session_end, session_end_status
 from ..store import TraceStore
 
@@ -91,12 +91,13 @@ def measure_session_status(events: list[TraceEvent], meta: object | None = None)
     for ``terminated``. Unlike ``recorded_session_status``, it also reads a
     text exit code such as ``"1"`` and a reason that is not text. With no
     ``session_end``, or when a later ``session_start`` (a resume) reopened
-    the session, it is completed when its metadata has ``ended_at``.
+    the session, it is completed when its metadata has a usable
+    ``ended_at`` other than 0.
     """
 
     end_event = final_session_end(events)
     if end_event is None:
-        return "completed" if getattr(meta, "ended_at", None) else "killed"
+        return "completed" if usable_time(getattr(meta, "ended_at", None)) else "killed"
 
     data = end_event.data
     explicit = data.get("status") or data.get("session_status")
@@ -229,8 +230,8 @@ def _meta_duration_seconds(meta: object | None) -> float | None:
     duration_ms = _as_number(getattr(meta, "total_duration_ms", None))
     if duration_ms is not None and duration_ms > 0:
         return duration_ms / 1000.0
-    started_at = _as_number(getattr(meta, "started_at", None))
-    ended_at = _as_number(getattr(meta, "ended_at", None))
+    started_at = usable_time(getattr(meta, "started_at", None))
+    ended_at = usable_time(getattr(meta, "ended_at", None))
     if started_at is not None and ended_at is not None and ended_at >= started_at:
         return ended_at - started_at
     return None
@@ -239,8 +240,8 @@ def _meta_duration_seconds(meta: object | None) -> float | None:
 def duration_reads_event_times(events: list[TraceEvent], meta: object | None = None) -> bool:
     """Return True if measure_duration_seconds reads the event timestamps.
 
-    It does when the metadata holds no duration and there are 2 or more
-    events. It then reads every event's timestamp.
+    It does when the metadata holds no usable duration and there are 2 or
+    more events. It then reads every event's timestamp.
     """
     return _meta_duration_seconds(meta) is None and len(events) >= 2
 

@@ -379,8 +379,11 @@ def build_session_review(
     )
     items, unresolved_annotations = _review_items(events, annotations, standalone)
     content_mode, disclosure = _content_mode(events, len(annotations))
-    started_at = meta.started_at or (items[0]["timestamp"] if items else None)
-    ended_at = meta.ended_at or _recorded_end(events)
+    started_at = (
+        meta.started_at if usable_time(meta.started_at)
+        else (items[0]["timestamp"] if items else None)
+    )
+    ended_at = meta.ended_at if usable_time(meta.ended_at) else _recorded_end(events)
     duration_ms = (
         max(0.0, (float(ended_at) - float(started_at)) * 1000)
         if started_at is not None and ended_at is not None

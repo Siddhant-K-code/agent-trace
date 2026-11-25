@@ -19,7 +19,7 @@ from typing import Any, Iterable, Mapping, Sequence, TextIO
 from .event_data import require_object_event_data, require_usable_timestamps
 from .explain import PHASE_DATA_EVENT_TYPES, ExplainResult, explain_session
 from .inert import escape_surrogates, inert
-from .models import EventType, TraceEvent
+from .models import EventType, TraceEvent, usable_time
 from .pairing import Pairer, event_model, llm_pairer
 from .store import TraceStore, validate_optional_tenant_id, validate_tenant_id
 
@@ -1331,7 +1331,8 @@ def build_provider_cost_report(
     records: list[ProviderCostRecord] = []
 
     for meta in store.list_sessions(tenant_id=tenant_id):
-        if meta.started_at < cutoff or meta.started_at > generated_at:
+        started = usable_time(meta.started_at)
+        if started is None or started < cutoff or started > generated_at:
             continue
         try:
             events = store.load_events(meta.session_id)
@@ -1444,7 +1445,8 @@ def build_tenant_cost_report(
     sessions = total_input = total_output = total_read = total_write = 0
     total_cost = 0.0
     for meta in store.list_sessions(tenant_id=tenant_id):
-        if meta.started_at < cutoff or meta.started_at > generated_at:
+        started = usable_time(meta.started_at)
+        if started is None or started < cutoff or started > generated_at:
             continue
         try:
             events = store.load_events(meta.session_id)

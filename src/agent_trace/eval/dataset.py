@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..fileutil import split_lf_lines
+from ..models import usable_time
 
 if TYPE_CHECKING:
     from ..store import TraceStore
@@ -200,7 +201,8 @@ def auto_populate(
     existing = {e.session_id for e in list_entries(dataset_path)}
 
     for meta in store.list_sessions():
-        if meta.started_at < cutoff:
+        started = usable_time(meta.started_at)
+        if started is None or started < cutoff:
             continue
         if meta.session_id in existing:
             continue

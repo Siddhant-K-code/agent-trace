@@ -32,7 +32,7 @@ from .event_data import (
     require_usable_timestamps,
 )
 from .explain import PHASE_DATA_EVENT_TYPES
-from .models import usable_count, usable_number, usable_text
+from .models import usable_count, usable_number, usable_text, usable_time
 from .otlp import OTLP_TIMESTAMP_EVENT_TYPES, otlp_data_indexes, session_to_otlp
 from .review_surface import (
     build_minimized_review_payload,
@@ -800,6 +800,12 @@ def api_sessions(store: "TraceStore") -> str:
         duration = session.get("total_duration_ms")
         if duration is not None and usable_number(duration) is None:
             session.pop("total_duration_ms")
+        # The page reads these as Unix times in seconds. Drop a value that
+        # is not a usable time, such as text, a negative number or NaN, so
+        # the session shows as if the field were missing.
+        for field in ("started_at", "ended_at"):
+            if usable_time(session.get(field)) is None:
+                session.pop(field, None)
     return json.dumps(sessions)
 
 

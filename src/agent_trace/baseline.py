@@ -121,8 +121,9 @@ class AnomalyResult:
     anomalous: bool
     deviations: dict[str, float] = field(default_factory=dict)   # metric → z-score
     sigma_threshold: float = DEFAULT_SIGMA
-    # The session has no end time (still running, crashed, or killed), so it
-    # was scored on the events recorded so far.
+    # The session has no usable end time, or an end of 0. It may still be
+    # running, or it crashed or was killed. It was scored on the events
+    # recorded so far.
     open_session: bool = False
     # False when the session could not be measured at all. Such a result is
     # neither OK nor anomalous, and ``baseline check`` exits 1 for it.
@@ -206,11 +207,11 @@ def _measure_session(
     """Return ``(metrics, open_session, reason)`` for one session.
 
     ``metrics`` is None when the session cannot be measured, and ``reason``
-    says why. A session with no ``ended_at`` is measured only when
-    *allow_open* is set: its tool calls and LLM requests are the larger of
-    the metadata counter and the matching events, since a recorder killed
-    mid-run may never write its counters, and its duration runs to its last
-    event.
+    says why. A session with no usable ``ended_at``, or an end of 0, is
+    measured only when *allow_open* is set: its tool calls and LLM requests
+    are the larger of the metadata counter and the matching events, since a
+    recorder killed mid-run may never write its counters, and its duration
+    runs to its last event.
 
     ``cost_usd`` is left out when the session cannot be priced, so it adds no
     cost sample to a baseline and ``check`` does not compare its cost, rather
@@ -222,7 +223,7 @@ def _measure_session(
         return None, False, "its metadata cannot be read"
     if not meta:
         return None, False, "it has no metadata"
-    open_session = not meta.ended_at
+    open_session = not usable_time(meta.ended_at)
     if open_session and not allow_open:
         return None, True, "it has no end time"
     try:
@@ -274,7 +275,10 @@ def _session_metrics(store: TraceStore, session_id: str) -> dict[str, float] | N
 
 
 def build_baseline(store: TraceStore, since_days: float = 30.0) -> BaselineProfile:
-    """Build a baseline profile from sessions completed in the last *since_days* days."""
+    """Build a baseline profile from sessions completed in the last *since_days* days.
+
+    A session counts only when its start and end times are usable.
+    """
     cutoff = time.time() - since_days * 86400
     session_ids = store.list_sessions()
 
@@ -285,10 +289,10 @@ def build_baseline(store: TraceStore, since_days: float = 30.0) -> BaselineProfi
 
     session_count = 0
     for meta in session_ids:
-        try:
-            in_window = bool(meta.ended_at) and meta.started_at >= cutoff
-        except TypeError:
-            continue  # hand-edited metadata with a non-numeric start time
+        started = usable_time(meta.started_at)
+        in_window = (
+            bool(usable_time(meta.ended_at)) and started is not None and started >= cutoff
+        )
         if not in_window:
             continue
         m = _session_metrics(store, meta.session_id)
@@ -328,7 +332,7 @@ def check_session(
 ) -> AnomalyResult:
     """Compare a session's metrics against the baseline profile.
 
-    A session with no end time is scored on what it has recorded so far.
+    A session with no usable end time is scored on what it has recorded so far.
     Its lower-bound metrics count only when above the mean, because being
     below the mean says nothing about a session that has not finished. A
     session that cannot be measured gives a result with ``scored=False``.
