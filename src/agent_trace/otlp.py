@@ -17,7 +17,7 @@ Usage:
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 import hashlib
 import json
@@ -88,6 +88,7 @@ from .session_outcome import behavior_analysis, recorded_session_status
 from .store import TraceStore, validate_optional_tenant_id
 
 if TYPE_CHECKING:
+    from .eval.results import StoredEvaluation
     from .subagent import SessionNode
 
 
@@ -146,6 +147,15 @@ _SEMCONV_SERVER_ADDRESS = "server.address"
 _SEMCONV_SERVER_PORT = "server.port"
 _SEMCONV_CONVERSATION_ID = "gen_ai.conversation.id"
 _SEMCONV_ERROR_TYPE = "error.type"
+# The gen_ai.evaluation.result event (development stability in v0.1.0).
+_SEMCONV_EVALUATION_RESULT = "gen_ai.evaluation.result"
+_SEMCONV_EVALUATION_NAME = "gen_ai.evaluation.name"
+_SEMCONV_EVALUATION_SCORE_VALUE = "gen_ai.evaluation.score.value"
+_SEMCONV_EVALUATION_SCORE_LABEL = "gen_ai.evaluation.score.label"
+_SEMCONV_EVALUATION_EXPLANATION = "gen_ai.evaluation.explanation"
+# The only gen_ai.evaluation.score.label values the export writes.
+EVALUATION_LABEL_PASS = "pass"
+EVALUATION_LABEL_FAIL = "fail"
 
 # OpenInference compatibility attributes. These are emitted additively by the
 # GenAI exporter so the same OTLP/HTTP JSON payload remains useful in Phoenix.
@@ -404,6 +414,34 @@ def _make_event(name: str, timestamp: float, data: dict) -> dict:
         "timeUnixNano": _ts_to_nanos(timestamp),
         "name": name,
         "attributes": _make_attributes(data),
+    }
+
+
+# The longest gen_ai.evaluation.explanation the export writes, in characters.
+_EVALUATION_EXPLANATION_LIMIT = 1000
+
+
+def _evaluation_event(evaluation: StoredEvaluation, time_unix_nano: str) -> dict:
+    """Return the gen_ai.evaluation.result event for one stored eval result.
+
+    The score, the pass/fail label and the reason come from the stored
+    result as they are; nothing here judges the session.
+    """
+    attrs: dict[str, Any] = {
+        _SEMCONV_EVALUATION_NAME: evaluation.scorer,
+        _SEMCONV_EVALUATION_SCORE_VALUE: float(evaluation.score),
+        _SEMCONV_EVALUATION_SCORE_LABEL: (
+            EVALUATION_LABEL_PASS if evaluation.passed else EVALUATION_LABEL_FAIL
+        ),
+    }
+    if evaluation.reason:
+        attrs[_SEMCONV_EVALUATION_EXPLANATION] = (
+            evaluation.reason[:_EVALUATION_EXPLANATION_LIMIT]
+        )
+    return {
+        "timeUnixNano": time_unix_nano,
+        "name": _SEMCONV_EVALUATION_RESULT,
+        "attributes": _make_attributes(attrs),
     }
 
 
@@ -1634,6 +1672,7 @@ def node_tree_to_otlp(
     service_name: str = "agent-trace",
     *,
     genai: bool = False,
+    evaluations: Mapping[str, Sequence[StoredEvaluation]] | None = None,
 ) -> dict:
     """Export an already built subagent tree as a single OTLP trace.
 
@@ -1646,6 +1685,11 @@ def node_tree_to_otlp(
     the subagent to the parent session's root span instead. A session that
     appears twice in the tree, which only a parent link cycle produces, is
     exported once. The resource and scope are the root session's.
+
+    With ``genai``, ``evaluations`` maps a session ID to the stored eval
+    results that become ``gen_ai.evaluation.result`` events on that
+    session's root span (see :func:`session_to_otlp_genai`). The classic
+    mapping exports no evaluations.
     """
     from .subagent import parent_event_id_of
 
@@ -1661,10 +1705,14 @@ def node_tree_to_otlp(
         if meta.session_id in exported:
             return
         exported.add(meta.session_id)
+        extra: dict[str, Any] = {}
+        if genai and evaluations:
+            extra["evaluations"] = evaluations.get(meta.session_id, ())
         payload = convert(
             meta, node.events, service_name,
             parent_span_id=parent_span_id,
             parent_trace_id=root_trace_id,
+            **extra,
         )
         if not root_payload:
             root_payload = payload
@@ -1860,6 +1908,7 @@ def session_to_otlp_genai(
     parent_trace_id: str = "",
     *,
     root_outcome: bool = True,
+    evaluations: Sequence[StoredEvaluation] = (),
 ) -> dict:
     """Convert a session to OTLP JSON using the OTel GenAI semantic conventions.
 
@@ -1897,6 +1946,11 @@ def session_to_otlp_genai(
       them
     - A tool or chat span whose event names another by ``retry_of`` links
       to that event's span
+    - Each of ``evaluations``, the results `eval run` or `eval ci` stored in
+      the session's eval.json (see eval/results.py), becomes a
+      ``gen_ai.evaluation.result`` event on the root span, at the root span's
+      end, after the other root events. With none, the payload is the same
+      as before evaluations were exported
 
     The tenant_id works as in session_to_otlp().
 
@@ -2180,6 +2234,9 @@ def session_to_otlp_genai(
             "status": {"code": 0},
         }, call_event))
     retry_links.apply()
+
+    for evaluation in evaluations:
+        root_events.append(_evaluation_event(evaluation, root_end))
 
     root_span: dict = {
         "traceId": trace_id,

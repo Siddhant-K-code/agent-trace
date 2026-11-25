@@ -1869,6 +1869,13 @@ agent-strace dashboard [--limit N] [--since Nd] [--html FILE] [--trend]
 ```
 Multi-session aggregate view. `--trend` shows eval quality and behavioral metrics over time.
 
+The eval quality comes from the eval.json that [`eval run` and `eval ci`](#eval)
+save in each session. `--trend` prints a `Quality trend (eval pass rate):` line
+for each scorer, with its pass rate in the earlier and the later half of the
+sessions, and `--trend --html` draws a chart for each. A session with no
+eval.json has no eval scores, and with none in any session the section is left
+out.
+
 A session's errors include its [failed model requests](production.md#session-error-counts), and a session with any error is not
 counted as succeeded. Neither is a session whose `session_end` says it timed
 out or was killed (a timeout or killed status, a reason naming one, or a
@@ -2079,6 +2086,35 @@ sessions, the direct command, `run` and `ci` print `No sessions found.` and
 exit `1`. Earlier versions of `run` and `ci` printed `No sessions found.` for
 an unknown ID.
 
+`run` and `ci` save their results to `<trace-dir>/<session-id>/eval.json`,
+replacing the file an earlier run wrote, and print
+`Eval results written to <path>` on stderr. `ci --save-baseline` saves it too.
+The file is a JSON object with `version` (`1`), `session_id`, `command`
+(`eval run` or `eval ci`), `evaluated_at` (Unix seconds),
+`agent_strace_version`, `passed`, `pass_count`, `fail_count`,
+`weighted_score` and `results`: one entry per scorer, in config order, with
+`scorer`, `score`, `threshold`, `passed` and `reason`. A scorer that fails is
+a verdict and is saved. [`export --scores`](#export),
+[`export --format otlp-genai`](#export), [`dashboard --trend`](#dashboard) and
+`eval dataset auto --filter low-eval-score:N` read the file. Earlier versions
+wrote no eval.json, so those readers found no scores unless one was written by
+hand.
+
+`run` and `ci` save nothing when a scorer could not judge the session: an
+unknown scorer type, a `regex` scorer with an unknown event type or a bad
+pattern, an `llm_judge` with no endpoint or key or whose request or reply
+failed, a `custom` scorer that raised, or a `cost_under` scorer that could not
+estimate the cost. They also save nothing when a score or threshold is not a
+finite number, such as `threshold: nan`. They then print
+`Eval results not saved: <why>` on stderr and leave an earlier eval.json as it
+was. The report and the exit code do not change. An unknown session saves
+nothing either.
+
+The direct command and `compare` do not write eval.json. The direct command's
+values are raw measurements, such as dollars, seconds, counts or a status, and
+the readers of eval.json take each score as a number from 0 to 1. Its
+`--save-baseline` file keeps its results.
+
 `eval dataset auto` adds sessions from the last `--since` days (default: `7d`)
 that match `--filter` (default: `has-errors`) to
 `<trace-dir>/datasets/NAME.jsonl`, or to
@@ -2093,7 +2129,9 @@ The `has-errors` filter and the `error_count` scorer count `error` events and
 `long-duration:Ns` and `low-eval-score:N`. `cost-above:N` adds sessions whose
 `agent-strace cost` total, with its default model, is above $N. Earlier
 versions priced each session's token count at a flat $3 per million. A session
-that `agent-strace cost` refuses never matches it.
+that `agent-strace cost` refuses never matches it. `low-eval-score:N` adds
+sessions whose eval.json scores, from `eval run` or `eval ci`, average below
+N. A session with no eval.json never matches it.
 
 Configure named criteria in `.agent-evals.yaml`:
 ```yaml
@@ -2462,6 +2500,26 @@ conversation as `gen_ai.input.messages` and `gen_ai.output.messages`, and each
 tool span its input and result as `gen_ai.tool.call.arguments` and
 `gen_ai.tool.call.result`. See
 [Spans and attributes](production.md#spans-and-attributes).
+
+When the session has an eval.json from [`eval run` or `eval ci`](#eval),
+`--format otlp-genai` adds one `gen_ai.evaluation.result` event per saved
+result to the `invoke_agent` root span, at the span's end time:
+`gen_ai.evaluation.name` is the scorer, `gen_ai.evaluation.score.value` the
+score, `gen_ai.evaluation.score.label` `pass` or `fail` from the saved
+`passed`, and `gen_ai.evaluation.explanation` the reason, cut to 1,000
+characters and left out when empty. Export never scores the session itself: a
+result without a true or false `passed`, a finite number `score` and a
+non-empty `scorer` is left out, and an unreadable eval.json adds no events.
+With `--include-subagents` each session's results go on its own root span.
+Without eval.json the payload is unchanged. `--format otlp` and `temporal` add
+no evaluation events; `export --scores --backend otlp` sends the scores as
+`agent_strace.eval.score` gauges. See
+[Evaluation results](production.md#evaluation-results).
+
+`--scores` sends the scores in each session's eval.json: as Langfuse scores
+with `--backend langfuse` (the default), or as `agent_strace.eval.score` gauges
+with a `judge` attribute with `--backend otlp`. A session with no eval.json
+sends none.
 
 In `--format otlp`, a failed tool call and a tool call with no result are
 `tool/{tool}` spans with the same `gen_ai.*` identity as a call that returned

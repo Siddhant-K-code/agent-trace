@@ -1857,3 +1857,7 @@ class TraceStore:
         return self._session_file(
             session_id, "annotations.jsonl", "annotations sidecar"
         )
+
+    def eval_results_path(self, session_id: str) -> Path:
+        """Return the path to the eval results that `eval run` and `eval ci` write."""
+        return self._session_file(session_id, "eval.json", "eval results")

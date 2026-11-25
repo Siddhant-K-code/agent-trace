@@ -32,6 +32,9 @@ class ScoreResult:
     threshold: float      # minimum passing score
     passed: bool
     reason: str = ""
+    # True when the scorer could not judge the session (bad config, a
+    # failed request, an exception), so the score is not a verdict.
+    error: bool = False
 
     @property
     def status(self) -> str:
@@ -386,12 +389,14 @@ def score_regex(
     try:
         et = EventType(event_type)
     except ValueError:
-        return ScoreResult("regex", 0.0, threshold, False, f"unknown event_type: {event_type}")
+        return ScoreResult(
+            "regex", 0.0, threshold, False, f"unknown event_type: {event_type}", error=True,
+        )
 
     try:
         compiled = re.compile(pattern)
     except re.error as exc:
-        return ScoreResult("regex", 0.0, threshold, False, f"invalid pattern: {exc}")
+        return ScoreResult("regex", 0.0, threshold, False, f"invalid pattern: {exc}", error=True)
 
     for event in events:
         if event.event_type != et:
@@ -414,7 +419,10 @@ def score_cost_under(
         result = estimate_cost(store, session_id)
         actual = result.total_cost
     except Exception as exc:
-        return ScoreResult("cost_under", 0.0, threshold, False, f"cost estimation failed: {exc}")
+        return ScoreResult(
+            "cost_under", 0.0, threshold, False, f"cost estimation failed: {exc}",
+            error=True,
+        )
 
     if actual <= max_dollars:
         score = 1.0
@@ -495,7 +503,7 @@ def score_custom(
         score = float(fn(events))
         score = max(0.0, min(1.0, score))
     except Exception as exc:
-        return ScoreResult(name, 0.0, threshold, False, f"scorer raised: {exc}")
+        return ScoreResult(name, 0.0, threshold, False, f"scorer raised: {exc}", error=True)
     return ScoreResult(name, score, threshold, score >= threshold, "custom scorer")
 
 
@@ -519,7 +527,7 @@ def score_llm_judge(
 
     if not base_url or not api_key:
         return ScoreResult("llm_judge", 0.0, threshold, False,
-                           "base_url and api_key required for llm_judge scorer")
+                           "base_url and api_key required for llm_judge scorer", error=True)
 
     # Build a compact session summary for the LLM
     tool_calls = [e for e in events if e.event_type == EventType.TOOL_CALL]
@@ -576,10 +584,14 @@ def score_llm_judge(
         if isinstance(exc, urllib.error.HTTPError):
             exc.close()
         return ScoreResult(
-            "llm_judge", 0.0, threshold, False, f"LLM request failed: {post_error_detail(exc)}"
+            "llm_judge", 0.0, threshold, False, f"LLM request failed: {post_error_detail(exc)}",
+            error=True,
         )
     except (_json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
-        return ScoreResult("llm_judge", 0.0, threshold, False, f"LLM response parse error: {exc}")
+        return ScoreResult(
+            "llm_judge", 0.0, threshold, False, f"LLM response parse error: {exc}",
+            error=True,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -609,7 +621,10 @@ def run_scorer(
 
     if name == "cost_under":
         if store is None or not session_id:
-            return ScoreResult(name, 0.0, threshold, False, "store/session_id required for cost_under")
+            return ScoreResult(
+                name, 0.0, threshold, False, "store/session_id required for cost_under",
+                error=True,
+            )
         return score_cost_under(store, session_id, max_dollars=float(config.get("max_dollars", 10.0)), threshold=threshold)
 
     if name == "files_scoped":
@@ -637,4 +652,4 @@ def run_scorer(
             threshold=threshold,
         )
 
-    return ScoreResult(name, 0.0, threshold, False, f"unknown scorer: {name}")
+    return ScoreResult(name, 0.0, threshold, False, f"unknown scorer: {name}", error=True)
