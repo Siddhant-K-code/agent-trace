@@ -10,9 +10,11 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from agent_trace.cost import PRICING
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.store import TraceStore
 from agent_trace.token_budget import (
+    CONTEXT_LIMITS,
     TokenBudgetReport,
     TokenBudgetWatcher,
     _resolve_limit,
@@ -135,6 +137,7 @@ class TestResolveLimitByCostNameRule(unittest.TestCase):
     def test_name_with_no_key_of_its_own_gets_no_limit(self):
         for model in (
             "gpt-4.1", "gpt-4.1-2025-04-14", "claude", "claude-3", "claude-opus-47",
+            "claude-haiku-3-5", "claude-haiku-3",
             "gpt", "o", "gemini",
             "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/a1b2c3d4e5f6",
         ):
@@ -142,12 +145,16 @@ class TestResolveLimitByCostNameRule(unittest.TestCase):
                 self.assertIsNone(_resolve_limit(model))
 
     def test_claude_name_with_a_dot_gets_the_limit_of_its_dash_form(self):
-        for model in (
-            "claude-sonnet-4.5", "claude-opus-4.1", "claude-opus-4.7",
-            "anthropic/claude-opus-4.7", "us.anthropic.claude-sonnet-4.5-v1:0",
-        ):
+        cases = {
+            "claude-sonnet-4.5": 200_000,
+            "claude-opus-4.1": 200_000,
+            "claude-opus-4.7": 1_000_000,
+            "anthropic/claude-opus-4.7": 1_000_000,
+            "us.anthropic.claude-sonnet-4.5-v1:0": 200_000,
+        }
+        for model, limit in cases.items():
             with self.subTest(model=model):
-                self.assertEqual(_resolve_limit(model), 200_000)
+                self.assertEqual(_resolve_limit(model), limit)
 
     def test_names_that_keep_their_limit(self):
         cases = {
@@ -159,11 +166,57 @@ class TestResolveLimitByCostNameRule(unittest.TestCase):
             "gemini-2.0-flash-lite": 1_048_576,
             "llama-3.1-70b-instruct": 131_072,
             "claude-opus-4-5-20251101": 200_000,
-            "claude-sonnet-4-6": 200_000,
         }
         for model, limit in cases.items():
             with self.subTest(model=model):
                 self.assertEqual(_resolve_limit(model), limit)
+
+
+class TestClaudeContextWindows(unittest.TestCase):
+    """Each Claude model's window, from Anthropic's models overview:
+    https://platform.claude.com/docs/en/about-claude/models/overview"""
+
+    ONE_MILLION = (
+        "claude-fable-5-2", "claude-mythos-5-2", "claude-fable-5-1", "claude-mythos-5-1",
+        "claude-fable-5", "claude-mythos-5", "claude-opus-5-5", "claude-opus-5",
+        "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-5-5",
+        "claude-sonnet-5", "claude-sonnet-4-6", "claude-haiku-5-5",
+    )
+    TWO_HUNDRED_THOUSAND = (
+        "claude-opus-4-5", "claude-opus-4-1", "claude-opus-4", "claude-sonnet-4-5",
+        "claude-sonnet-4", "claude-haiku-4-5", "claude-3-7-sonnet", "claude-3-5-sonnet",
+        "claude-3-5-haiku", "claude-3-opus", "claude-3-sonnet", "claude-3-haiku",
+    )
+
+    def test_each_claude_model_gets_its_window(self):
+        for models, limit in ((self.ONE_MILLION, 1_000_000), (self.TWO_HUNDRED_THOUSAND, 200_000)):
+            for model in models:
+                with self.subTest(model=model):
+                    self.assertEqual(_resolve_limit(model), limit)
+
+    def test_model_ids_get_the_window_of_their_model(self):
+        cases = {
+            "us.anthropic.claude-opus-4-7": 1_000_000,
+            "global.anthropic.claude-fable-5-2": 1_000_000,
+            "anthropic/claude-opus-4.6": 1_000_000,
+            "claude-sonnet-4.6": 1_000_000,
+            "claude-haiku-4-5-20251001": 200_000,
+            "anthropic.claude-haiku-4-5-20251001-v1:0": 200_000,
+            "claude-3-7-sonnet-20250219": 200_000,
+            "claude-3-5-sonnet-20241022": 200_000,
+            "anthropic.claude-3-5-haiku-20241022-v1:0": 200_000,
+        }
+        for model, limit in cases.items():
+            with self.subTest(model=model):
+                self.assertEqual(_resolve_limit(model), limit)
+
+    def test_every_priced_claude_model_has_a_window(self):
+        # A Claude model added to PRICING needs its window too. Without one,
+        # token-budget prints unknown and watch gives no alert for it.
+        for key in PRICING:
+            if key.startswith("claude-"):
+                with self.subTest(model=key):
+                    self.assertIn(key, CONTEXT_LIMITS)
 
 
 class TestReportLimitByCostNameRule(unittest.TestCase):
@@ -182,12 +235,31 @@ class TestReportLimitByCostNameRule(unittest.TestCase):
         self.assertIn("Current: 150,000 tokens  (75.0% of limit)", text)
 
     def test_session_of_a_claude_name_with_a_dot_gets_its_limit(self):
-        for model in ("claude-sonnet-4.5", "claude-opus-4.7"):
+        cases = {
+            "claude-sonnet-4.5": (200_000, "200,000", "75.0%"),
+            "claude-opus-4.7": (1_000_000, "1,000,000", "15.0%"),
+        }
+        for model, (limit, shown, pct) in cases.items():
             with self.subTest(model=model):
                 report, text = self._report(model)
-                self.assertEqual(report.context_limit, 200_000)
-                self.assertIn("Context limit: 200,000 tokens", text)
-                self.assertIn("Current: 150,000 tokens  (75.0% of limit)", text)
+                self.assertEqual(report.context_limit, limit)
+                self.assertIn(f"Context limit: {shown} tokens", text)
+                self.assertIn(f"Current: 150,000 tokens  ({pct} of limit)", text)
+
+    def test_session_of_a_claude_model_gets_its_window(self):
+        # Opus 4.7 has 1,000,000 tokens. Haiku 4.5 has 200,000. Before, Haiku
+        # 4.5 had no limit, so the report printed unknown.
+        cases = {
+            "claude-opus-4-7": ("1,000,000", "15.0%", "Headroom: 850,000 tokens"),
+            "claude-haiku-4-5-20251001": ("200,000", "75.0%", "Headroom: 50,000 tokens"),
+        }
+        for model, (shown, pct, headroom) in cases.items():
+            with self.subTest(model=model):
+                _report, text = self._report(model)
+                self.assertIn(f"Context limit: {shown} tokens", text)
+                self.assertIn(f"Current: 150,000 tokens  ({pct} of limit)", text)
+                self.assertIn(headroom, text)
+                self.assertNotIn("\u2190 warning", text)
 
     def test_ca_and_in_sessions_get_their_limit_from_the_cli(self):
         for geography in ("ca", "in"):
@@ -379,13 +451,23 @@ class TestTokenBudgetWatcher(unittest.TestCase):
                 self.assertIn("190,000 / 200,000 tokens (95.0%)", result)
 
     def test_fires_for_a_claude_name_with_a_dot_in_its_version(self):
-        for model in ("claude-sonnet-4.5", "claude-opus-4.1", "anthropic/claude-opus-4.7"):
+        for model in ("claude-sonnet-4.5", "claude-opus-4.1", "anthropic/claude-haiku-4.5"):
             with self.subTest(model=model):
                 watcher = TokenBudgetWatcher(threshold=0.9)
                 result = watcher.update(_request(190_000, model))
                 self.assertEqual(watcher.context_limit, 200_000)
                 self.assertIsNotNone(result)
                 self.assertIn("190,000 / 200,000 tokens (95.0%)", result)
+
+    def test_one_million_token_model_fires_at_its_own_window(self):
+        for model in ("claude-opus-4-7", "anthropic/claude-opus-4.7", "claude-fable-5-2"):
+            with self.subTest(model=model):
+                watcher = TokenBudgetWatcher(threshold=0.9)
+                self.assertIsNone(watcher.update(_request(190_000, model)))
+                self.assertEqual(watcher.context_limit, 1_000_000)
+                result = watcher.update(_request(950_000, model))
+                self.assertIsNotNone(result)
+                self.assertIn("950,000 / 1,000,000 tokens (95.0%)", result)
 
     def test_non_llm_event_ignored(self):
         watcher = TokenBudgetWatcher(threshold=0.5)

@@ -659,6 +659,45 @@ class CheckpointTests(unittest.TestCase):
                 event = _event(EventType.LLM_REQUEST, 1, model=model, input_tokens=64_000)
                 self.assertAlmostEqual(context_fill_ratio(event), ratio)
 
+    def test_context_fill_ratio_uses_the_window_of_the_claude_model(self):
+        # Opus 4.7 and Sonnet 4.6 have 1,000,000 tokens. Haiku 4.5 has 200,000.
+        cases = {
+            "claude-opus-4-7": 0.16,
+            "anthropic/claude-sonnet-4.6": 0.16,
+            "claude-haiku-4-5-20251001": 0.8,
+        }
+        for model, ratio in cases.items():
+            with self.subTest(model=model):
+                event = _event(EventType.LLM_REQUEST, 1, model=model, input_tokens=160_000)
+                self.assertAlmostEqual(context_fill_ratio(event), ratio)
+
+    def test_recorded_context_window_wins_over_the_table(self):
+        # The table gives Opus 4.7 1,000,000 tokens. The request records 200,000.
+        event = _event(
+            EventType.LLM_REQUEST,
+            1,
+            model="claude-opus-4-7",
+            input_tokens=170_000,
+            context_window=200_000,
+        )
+        self.assertAlmostEqual(context_fill_ratio(event), 0.85)
+
+    def test_watcher_checkpoints_a_one_million_token_model_at_its_own_window(self):
+        temporary, store, session_id = _store(self.events[:-1])
+        self.addCleanup(temporary.cleanup)
+        watcher = CompactionCheckpointWatcher(store, session_id, checkpoint_at=0.8)
+
+        early = watcher.update(
+            _event(EventType.LLM_REQUEST, 138, model="claude-opus-4-7", input_tokens=170_000)
+        )
+        full = watcher.update(
+            _event(EventType.LLM_REQUEST, 140, model="claude-opus-4-7", input_tokens=800_000)
+        )
+
+        self.assertIsNone(early)
+        self.assertIsNotNone(full)
+        self.assertTrue(full.exists())
+
     def test_watcher_writes_once_then_rearms_after_compaction(self):
         temporary, store, session_id = _store(self.events[:-1])
         self.addCleanup(temporary.cleanup)
