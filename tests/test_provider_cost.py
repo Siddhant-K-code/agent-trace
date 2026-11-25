@@ -24,6 +24,7 @@ from agent_trace.cost import (
     format_provider_cost_report,
     get_model_pricing,
     infer_provider,
+    is_bedrock_model,
     parse_since,
 )
 from agent_trace.inflation import _resolve_factor
@@ -721,11 +722,26 @@ class TestBedrockClaudeModelIds(unittest.TestCase):
                     self.assertAlmostEqual(got, want)
 
     def test_each_geography_profile_costs_ten_percent_more(self):
-        for geography in ("us", "eu", "apac", "jp", "au", "us-gov"):
+        for geography in ("us", "eu", "apac", "jp", "au", "us-gov", "ca", "in"):
             with self.subTest(geography=geography):
                 self.assertPrice(
                     f"{geography}.anthropic.{SONNET_45}", "claude-sonnet-4-5", SONNET_45_REGIONAL,
                 )
+
+    def test_ca_and_in_profiles_of_opus_4_1_keep_the_list_rate(self):
+        for geography in ("ca", "in"):
+            with self.subTest(geography=geography):
+                self.assertPrice(
+                    f"{geography}.anthropic.claude-opus-4-1-20250805-v1:0", "claude-opus-4-1",
+                    _rates(get_model_pricing("claude-opus-4-1")),
+                )
+
+    def test_ca_nova_lite_profile_gets_the_nova_lite_price(self):
+        nova_lite = _rates(get_model_pricing("amazon.nova-lite-v1:0"))
+        self.assertEqual(nova_lite[:2], (0.06, 0.24))
+        for model in ("ca.amazon.nova-lite-v1:0", "  CA.Amazon.Nova-Lite-V1:0\n"):
+            with self.subTest(model=model):
+                self.assertPrice(model, "amazon.nova-lite-v1", nova_lite)
 
     def test_geography_profile_inside_a_prefix_or_arn_costs_ten_percent_more(self):
         for model in (
@@ -861,9 +877,27 @@ class TestBedrockClaudeModelIds(unittest.TestCase):
             with self.subTest(model=model):
                 self.assertEqual(infer_provider(model), "Anthropic")
 
-    def test_cost_csv_prices_each_bedrock_id(self):
+    def _cost_csv(self, sessions):
+        """Return ``cost --breakdown provider --csv`` rows in the shape of *sessions*.
+
+        *sessions* maps a session ID to ``(provider, model, cost_usd)``. Each
+        session spends 1M input and 1M output tokens on its model.
+        """
         fixture = ProviderCostStore()
         self.addCleanup(fixture.close)
+        usage = {"input_tokens": 1_000_000, "output_tokens": 1_000_000}
+        for session_id, (_, model, _) in sessions.items():
+            fixture.add_session(session_id, time.time() - 60, model, response_data=usage)
+        args = build_parser().parse_args([
+            "--trace-dir", fixture.temp_dir.name, "cost", "--breakdown", "provider", "--csv",
+        ])
+        stdout = io.StringIO()
+        with patch("sys.stdout", stdout):
+            self.assertEqual(cmd_cost(args), 0)
+        rows = csv.DictReader(io.StringIO(stdout.getvalue()))
+        return {row["session_id"]: (row["provider"], row["model"], row["cost_usd"]) for row in rows}
+
+    def test_cost_csv_prices_each_bedrock_id(self):
         sessions = {
             "c01direct": ("Anthropic", "claude-sonnet-4-5-20250929", "18.00000000"),
             "c02us": ("AWS Bedrock", US_SONNET_45, "19.80000000"),
@@ -875,20 +909,92 @@ class TestBedrockClaudeModelIds(unittest.TestCase):
             "c08appprof": ("AWS Bedrock", APP_PROFILE_ARN, "0.00000000"),
             "c09novajp": ("AWS Bedrock", "jp.amazon.nova-pro-v1:0", "4.00000000"),
         }
-        usage = {"input_tokens": 1_000_000, "output_tokens": 1_000_000}
-        for session_id, (_, model, _) in sessions.items():
-            fixture.add_session(session_id, time.time() - 60, model, response_data=usage)
-        args = build_parser().parse_args([
-            "--trace-dir", fixture.temp_dir.name, "cost", "--breakdown", "provider", "--csv",
-        ])
-        stdout = io.StringIO()
-        with patch("sys.stdout", stdout):
-            self.assertEqual(cmd_cost(args), 0)
-        rows = list(csv.DictReader(io.StringIO(stdout.getvalue())))
-        self.assertEqual(
-            {row["session_id"]: (row["provider"], row["model"], row["cost_usd"]) for row in rows},
-            sessions,
-        )
+        self.assertEqual(self._cost_csv(sessions), sessions)
+
+    def test_cost_csv_lists_ca_in_and_new_vendor_ids_under_aws_bedrock(self):
+        # Haiku 4.5 lists at $1 input and $5 output per 1M tokens, and an in.
+        # profile adds 10%. Nova Lite costs $0.06 and $0.24. DeepSeek has no
+        # bundled price.
+        sessions = {
+            "e1inhaiku": (
+                "AWS Bedrock", "in.anthropic.claude-haiku-4-5-20251001-v1:0", "6.60000000",
+            ),
+            "e2canovalite": ("AWS Bedrock", "ca.amazon.nova-lite-v1:0", "0.30000000"),
+            "e3usdeepseek": ("AWS Bedrock", "us.deepseek.r1-v1:0", "0.00000000"),
+        }
+        self.assertEqual(self._cost_csv(sessions), sessions)
+
+
+BEDROCK_VENDORS = (
+    "ai21", "amazon", "anthropic", "cohere", "deepseek", "luma", "meta", "minimax", "mistral",
+    "moonshot", "moonshotai", "nvidia", "openai", "qwen", "stability", "twelvelabs", "writer",
+    "xai", "zai",
+)
+BEDROCK_GEOGRAPHIES = ("us", "us-gov", "eu", "apac", "jp", "au", "ca", "in", "global")
+
+
+class TestIsBedrockModel(unittest.TestCase):
+    """is_bedrock_model decides AWS Bedrock in cost and aws.bedrock in OTLP export."""
+
+    def test_every_vendor_bare_and_after_every_geography(self):
+        for vendor in BEDROCK_VENDORS:
+            for prefix in ("", *(f"{geography}." for geography in BEDROCK_GEOGRAPHIES)):
+                model = f"{prefix}{vendor}.model-v1:0"
+                with self.subTest(model=model):
+                    self.assertTrue(is_bedrock_model(model))
+                    self.assertEqual(infer_provider(model), "AWS Bedrock")
+
+    def test_bedrock_prefixes_and_arns(self):
+        for model in (
+            "bedrock/custom-model",
+            "aws/bedrock/custom-model",
+            PROFILE_ARN,
+            FOUNDATION_ARN,
+            APP_PROFILE_ARN,
+            "arn:aws-us-gov:bedrock:us-gov-west-1::foundation-model/anthropic." + SONNET_45,
+            "arn:aws-cn:bedrock:cn-north-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0",
+        ):
+            with self.subTest(model=model):
+                self.assertTrue(is_bedrock_model(model))
+
+    def test_ignores_case_and_surrounding_whitespace(self):
+        # infer_provider strips and lowers the name first, so these call
+        # is_bedrock_model directly.
+        for model in (
+            "IN.ANTHROPIC.CLAUDE-HAIKU-4-5-20251001-V1:0",
+            "Bedrock/Custom-Model",
+            APP_PROFILE_ARN.upper(),
+            "  ca.amazon.nova-lite-v1:0\n",
+            "\tbedrock/custom-model ",
+            " " + APP_PROFILE_ARN,
+        ):
+            with self.subTest(model=model):
+                self.assertTrue(is_bedrock_model(model))
+
+    def test_other_names_are_not_bedrock(self):
+        for model in (
+            "google.gemma-3-27b-it", "google.gemini-2.5-pro", "in.foo-bar", "ca.acme.model-v1:0",
+            "xai/grok-4", "x.ai", "mistral-large-latest", "deepseek-chat", "claude-sonnet-4-5",
+            "", None,
+        ):
+            with self.subTest(model=model):
+                self.assertFalse(is_bedrock_model(model))
+                self.assertNotEqual(infer_provider(model), "AWS Bedrock")
+
+    def test_new_vendor_ids_are_listed_under_aws_bedrock_with_no_price(self):
+        for model in (
+            "deepseek.r1-v1:0", "us.deepseek.r1-v1:0", "deepseek.v3.2", "luma.ray-v2:0",
+            "minimax.minimax-m2", "moonshot.kimi-k2-thinking", "moonshotai.kimi-k2.5",
+            "global.moonshotai.kimi-k3", "nvidia.nemotron-nano-3-30b",
+            "us-gov.nvidia.nemotron-nano-12b-v2", "stability.sd3-5-large-v1:0",
+            "twelvelabs.pegasus-1-2-v1:0", "apac.twelvelabs.pegasus-1-2-v1:0", "xai.grok-4.3",
+            "us.xai.grok-4.7", "zai.glm-4.7", "global.zai.glm-5.3",
+            # ca. and in. IDs of a vendor with no bundled price
+            "in.openai.gpt-5.6-luna", "in.moonshotai.kimi-k3", "ca.meta.llama3-1-70b-instruct-v1:0",
+        ):
+            with self.subTest(model=model):
+                self.assertEqual(infer_provider(model), "AWS Bedrock")
+                self.assertIsNone(get_model_pricing(model))
 
 
 def _entry(model):

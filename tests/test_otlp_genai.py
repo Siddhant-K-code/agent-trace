@@ -11,6 +11,7 @@ from agent_trace import __version__
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.otlp import (
     _canonical_provider,
+    _provider_value,
     _to_span_id,
     _ts_to_nanos,
     session_to_otlp,
@@ -302,6 +303,20 @@ class TestGenAIProviderName(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertEqual(_canonical_provider(value), expected)
 
+    def test_provider_domains_keep_their_family(self):
+        # A recorded provider such as mistral.ai starts like a Bedrock model
+        # ID. Only a model name is read as a Bedrock model.
+        cases = {
+            "mistral.ai": "mistral",
+            "openai.com": "openai",
+            "cohere.ai": "cohere",
+            "deepseek.com": "deepseek",
+            "anthropic.com": "anthropic",
+        }
+        for value, expected in cases.items():
+            with self.subTest(value=value):
+                self.assertEqual(_canonical_provider(value), expected)
+
     def test_gemini_session_uses_gcp_gen_ai(self):
         req = TraceEvent(event_type=EventType.LLM_REQUEST, data={"model": "gemini-2.5-pro"})
         resp = TraceEvent(
@@ -336,6 +351,8 @@ class TestGenAIAgentProductProvider(unittest.TestCase):
     def test_product_provider_uses_the_model(self):
         cases = [
             ("openai-codex", "codex", "gpt-5.3-codex", ("openai", "openai", "openai", "codex")),
+            ("openai-codex", "codex", "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+             ("aws.bedrock", "aws.bedrock", "aws.bedrock", "codex")),
             ("github-copilot", "copilot", "claude-sonnet-4.5",
              ("anthropic", "anthropic", "anthropic", "copilot")),
             ("github-copilot", "copilot", "gpt-5", ("openai", "openai", "openai", "copilot")),
@@ -374,6 +391,101 @@ class TestGenAIAgentProductProvider(unittest.TestCase):
         claude.attribution = {"agent_provider": "claude-code"}
         root = _get_spans(session_to_otlp_genai(claude, []))[0]
         self.assertEqual(_get_attr(root, "gen_ai.provider.name"), "anthropic")
+
+
+US_SONNET_45 = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+
+
+class TestGenAIBedrockModelIds(unittest.TestCase):
+    """A Bedrock model ID or ARN names aws.bedrock when no provider is recorded."""
+
+    def test_bedrock_model_without_a_recorded_provider(self):
+        for model in (
+            US_SONNET_45,
+            "us.amazon.nova-pro-v1:0",
+            "deepseek.v3.2",
+            "eu.mistral.pixtral-large-2502-v1:0",
+            "in.anthropic.claude-haiku-4-5-20251001-v1:0",
+            "IN.ANTHROPIC.CLAUDE-HAIKU-4-5-20251001-V1:0",
+            "  ca.amazon.nova-lite-v1:0  ",
+        ):
+            with self.subTest(model=model):
+                self.assertEqual(
+                    _provider_value(_make_meta("claude-code"), model),
+                    ("aws.bedrock", "aws.bedrock"),
+                )
+
+    def test_recorded_provider_wins_over_a_bedrock_model(self):
+        cases = {
+            "codex": ("codex", "aws.bedrock"),
+            "anthropic": ("anthropic", "anthropic"),
+            "openai": ("openai", "openai"),
+            "bedrock": ("bedrock", "aws.bedrock"),
+            "mistral.ai": ("mistral.ai", "mistral"),
+        }
+        for provider, expected in cases.items():
+            with self.subTest(provider=provider):
+                self.assertEqual(
+                    _provider_value(_make_meta("claude-code"), US_SONNET_45, {"provider": provider}),
+                    expected,
+                )
+
+    def test_other_models_keep_their_provider(self):
+        agent = ("claude-code", "anthropic")
+        cases = {
+            "claude-sonnet-4-5-20250929": ("anthropic", "anthropic"),
+            "gpt-4o-2024-08-06": ("openai", "openai"),
+            "gemini-2.5-pro": ("gcp.gen_ai", "gcp.gen_ai"),
+            "bedrock/us.anthropic.claude-3-5-sonnet-20241022-v2:0": ("aws.bedrock", "aws.bedrock"),
+            "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc123":
+                ("aws.bedrock", "aws.bedrock"),
+            "deepseek-chat": ("deepseek", "deepseek"),
+            "grok-4": ("x_ai", "x_ai"),
+            "kimi-k2": ("moonshot_ai", "moonshot_ai"),
+            "mistral-large-latest": ("mistral", "mistral"),
+            "xai/grok-4": ("x_ai", "x_ai"),
+            "google.gemma-3-27b-it": ("gcp.gen_ai", "gcp.gen_ai"),
+            "google.gemini-2.5-pro": ("gcp.gen_ai", "gcp.gen_ai"),
+            "in.foo-bar": agent,
+            "ca.acme.model-v1:0": agent,
+            "moonshotai/kimi-k2": ("moonshot_ai", "moonshot_ai"),
+            "nvidia/llama-3.1-nemotron-70b-instruct": agent,
+            "zai-org/GLM-4.5": agent,
+            "x.ai": ("x_ai", "x_ai"),
+            "xai": ("x_ai", "x_ai"),
+            "anthropic": ("anthropic", "anthropic"),
+            "bedrock": ("aws.bedrock", "aws.bedrock"),
+            "us.gpt-4o": ("openai", "openai"),
+        }
+        for model, expected in cases.items():
+            with self.subTest(model=model):
+                self.assertEqual(_provider_value(_make_meta("claude-code"), model), expected)
+
+    def _session(self):
+        meta = SessionMeta(
+            session_id="s1", agent_name="claude-code", started_at=1000.0, ended_at=1100.0,
+        )
+        req = _event(EventType.LLM_REQUEST, 1000.0, "req1", model="us.amazon.nova-pro-v1:0")
+        resp = _event(EventType.LLM_RESPONSE, 1001.0, "resp1", "req1", output_tokens=1)
+        unmatched = _event(EventType.LLM_REQUEST, 1002.0, "req2", model="us.amazon.nova-pro-v1:0")
+        return meta, [req, resp, unmatched]
+
+    def test_chat_spans_of_a_bedrock_model_are_aws_bedrock(self):
+        spans = _get_spans(session_to_otlp_genai(*self._session()))
+        root, chats = spans[0], spans[1:]
+        self.assertEqual(len(chats), 2)
+        for span in chats:
+            for key in (
+                "gen_ai.provider.name", "gen_ai.system", "llm.provider", "agent.strace.provider",
+            ):
+                with self.subTest(span=span["spanId"], key=key):
+                    self.assertEqual(_get_attr(span, key), "aws.bedrock")
+        self.assertEqual(_get_attr(root, "gen_ai.provider.name"), "anthropic")
+        self.assertEqual(_get_attr(root, "gen_ai.system"), "anthropic")
+
+    def test_plain_otlp_keeps_the_agent_system(self):
+        spans = all_spans(session_to_otlp(*self._session()))
+        self.assertEqual({_get_attr(span, "gen_ai.system") for span in spans} - {None}, {"anthropic"})
 
 
 class TestGenAILLMPairingFallback(unittest.TestCase):

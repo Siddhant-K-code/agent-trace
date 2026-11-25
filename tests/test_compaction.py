@@ -99,10 +99,14 @@ class CompactionDetectionTests(unittest.TestCase):
     def test_bedrock_geography_profile_prices_dropped_context_with_the_premium(self):
         direct = self._dropped_context_cost("claude-sonnet-4-5-20250929")
         self.assertAlmostEqual(direct, 0.39)
-        self.assertAlmostEqual(
-            self._dropped_context_cost("us.anthropic.claude-sonnet-4-5-20250929-v1:0"),
-            direct * 1.1,
-        )
+        for geography in ("us", "ca", "in"):
+            with self.subTest(geography=geography):
+                self.assertAlmostEqual(
+                    self._dropped_context_cost(
+                        f"{geography}.anthropic.claude-sonnet-4-5-20250929-v1:0"
+                    ),
+                    direct * 1.1,
+                )
 
     def test_claude_name_with_a_dot_prices_dropped_context_at_its_own_rate(self):
         # Input costs $5 per 1M tokens for Opus 4.5, $1 for Haiku 4.5 and $3.30

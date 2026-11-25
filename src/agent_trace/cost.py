@@ -48,8 +48,8 @@ Batch, flex, fast and priority tiers, data-residency uplifts, long-context
 tiers, cache storage fees and other non-token charges are excluded.  So are
 regional uplifts, with one exception.  A Claude rate here is also the Bedrock
 global rate.  :func:`get_model_pricing` multiplies it by 1.1 for a ``us.``,
-``eu.``, ``apac.``, ``jp.``, ``au.`` or ``us-gov.`` Bedrock inference profile
-of Claude Sonnet 4.5, Haiku 4.5, Opus 4.5 or a later model.
+``eu.``, ``apac.``, ``jp.``, ``au.``, ``us-gov.``, ``ca.`` or ``in.`` Bedrock
+inference profile of Claude Sonnet 4.5, Haiku 4.5, Opus 4.5 or a later model.
 
 Updating this table requires checking each URL in ``PRICING_SOURCES``,
 updating ``PRICING`` (``_MODEL_PROVIDERS`` is derived from its keys),
@@ -647,12 +647,16 @@ def _dollars(input_tokens: int, output_tokens: int, model: str) -> float:
 
 # The geography prefixes of a Bedrock cross-region inference profile ID. A
 # ``global.`` profile routes worldwide.
-_BEDROCK_GEOGRAPHIES = r"us-gov|us|eu|apac|jp|au"
+_BEDROCK_GEOGRAPHIES = r"us-gov|us|eu|apac|jp|au|ca|in"
 _BEDROCK_REGION = rf"(?:{_BEDROCK_GEOGRAPHIES}|global)\."
 _BEDROCK_REGION_RE = re.compile(rf"^{_BEDROCK_REGION}")
+# The vendor prefixes of Bedrock model IDs. ``google.`` is left out. On
+# Bedrock it names only Gemma models, and Oracle OCI names Gemini models
+# ``google.gemini-*``.
 _BEDROCK_MODEL_RE = re.compile(
     rf"^(?:{_BEDROCK_REGION})?"
-    r"(?:amazon|anthropic|ai21|cohere|meta|mistral|openai|qwen|writer)\."
+    r"(?:ai21|amazon|anthropic|cohere|deepseek|luma|meta|minimax|mistral|moonshot"
+    r"|moonshotai|nvidia|openai|qwen|stability|twelvelabs|writer|xai|zai)\."
 )
 # A Bedrock ARN in any partition, up to its resource.
 _BEDROCK_ARN_RE = re.compile(r"^arn:aws(?:-us-gov|-cn)?:bedrock:[^:]*:[^:]*:")
@@ -680,21 +684,33 @@ _BEDROCK_NO_REGIONAL_PREMIUM = frozenset({
 _RELATIVE_SINCE_RE = re.compile(r"^(\d+(?:\.\d+)?)([dhw])$", re.IGNORECASE)
 
 
+def is_bedrock_model(model: object) -> bool:
+    """Return whether *model* names a model that AWS Bedrock serves.
+
+    That is a ``bedrock/`` or ``aws/bedrock/`` name, a model ID that starts
+    with a Bedrock vendor such as ``anthropic.`` or ``deepseek.``, with or
+    without a geography prefix, or a Bedrock ARN. Case and surrounding
+    whitespace are ignored.
+    """
+    value = str(model or "").strip().lower()
+    return bool(
+        value.startswith(_BEDROCK_PREFIXES)
+        or _BEDROCK_MODEL_RE.match(value)
+        or _BEDROCK_ARN_RE.match(value)
+    )
+
+
 def infer_provider(model: str) -> str:
     """Infer a billing provider from a stored model identifier.
 
-    Bedrock model IDs, inference-profile IDs and ARNs are detected before
-    their underlying model vendor, so ``us.anthropic.claude-*`` is correctly
-    attributed to AWS rather than Anthropic's direct API.
+    A name that :func:`is_bedrock_model` accepts is AWS Bedrock. It is read
+    before its model vendor, so ``us.anthropic.claude-*`` is AWS Bedrock and
+    not Anthropic's direct API.
     """
     value = str(model or "").strip().lower()
     if not value:
         return "Unknown"
-    if (
-        value.startswith(_BEDROCK_PREFIXES)
-        or _BEDROCK_MODEL_RE.match(value)
-        or _BEDROCK_ARN_RE.match(value)
-    ):
+    if is_bedrock_model(value):
         return "AWS Bedrock"
     if "claude" in value or value.startswith("anthropic/"):
         return "Anthropic"
@@ -778,11 +794,12 @@ def _match_model_key(model: str, keys: Iterable[str]) -> str | None:
 def _bedrock_regional_profile(model: str) -> bool:
     """Return whether *model* is a Bedrock geography profile of a Claude model.
 
-    That is a ``us.``, ``eu.``, ``apac.``, ``jp.``, ``au.`` or ``us-gov.``
-    profile of an ``anthropic.`` model: alone, after ``bedrock/`` or
-    ``aws/bedrock/``, or in an inference-profile ARN. A ``global.`` profile
-    is not one. Nor are a bare ``anthropic.`` model ID and a foundation-model
-    ARN, as they do not show whether the call went to a regional endpoint.
+    That is a ``us.``, ``eu.``, ``apac.``, ``jp.``, ``au.``, ``us-gov.``,
+    ``ca.`` or ``in.`` profile of an ``anthropic.`` model: alone, after
+    ``bedrock/`` or ``aws/bedrock/``, or in an inference-profile ARN. A
+    ``global.`` profile is not one. Nor are a bare ``anthropic.`` model ID
+    and a foundation-model ARN, as they do not show whether the call went to
+    a regional endpoint.
     """
     value = str(model or "").strip().lower()
     for prefix in _BEDROCK_PREFIXES:

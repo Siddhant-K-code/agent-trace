@@ -415,6 +415,9 @@ class TestCacheUsageEdges(unittest.TestCase):
             "jp.amazon.nova-pro-v1:0",
             "au.amazon.nova-lite-v1:0",
             "us-gov.meta.llama3-1-70b-instruct-v1:0",
+            "ca.amazon.nova-lite-v1:0",
+            "in.openai.gpt-5.6-luna",
+            "deepseek.v3.2",
         ):
             with self.subTest(model=model):
                 response = {

@@ -28,7 +28,13 @@ import urllib.request
 from typing import TYPE_CHECKING, Any
 
 from . import __version__
-from .cost import TokenUsage, reasoning_output_tokens, recorded_response_indexes, usage_detail
+from .cost import (
+    TokenUsage,
+    is_bedrock_model,
+    reasoning_output_tokens,
+    recorded_response_indexes,
+    usage_detail,
+)
 from .event_data import (
     OTLP_LATEST_TIME,
     OTLP_MAX_UNIX_NANOS,
@@ -469,7 +475,9 @@ def _provider_value(
     A recorded provider wins over the model, unless it names a multi-model
     agent product (``_AGENT_PRODUCTS``), as the Codex hook does on every
     model request. Then the model decides, and the product stays the raw
-    evidence; with no recognizable model the value is ``unknown``.
+    evidence; with no recognizable model the value is ``unknown``. A model
+    that :func:`agent_trace.cost.is_bedrock_model` accepts, such as a Bedrock
+    model ID, inference-profile ID or ARN, is ``aws.bedrock``.
     """
     product = ""
     for data in event_data:
@@ -481,7 +489,7 @@ def _provider_value(
                     continue
                 return value.strip(), _canonical_provider(value)
     if model:
-        canonical = _canonical_provider(model)
+        canonical = "aws.bedrock" if is_bedrock_model(model) else _canonical_provider(model)
         if canonical != "unknown":
             return product or canonical, canonical
     if product:

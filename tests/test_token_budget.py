@@ -3,6 +3,7 @@
 import io
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -23,6 +24,32 @@ try:
     import _escapes
 except ImportError:
     from tests import _escapes
+
+try:  # keeps product telemetry off in this process and its children
+    import _no_telemetry
+except ImportError:  # pragma: no cover - run as a package module
+    from tests import _no_telemetry
+
+SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
+
+
+def _run_cli(trace_dir, *argv):
+    """Run agent-strace in a child process, as a user runs it."""
+    env = _no_telemetry.without_telemetry({
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("AGENT_STRACE_") and key != "AGENT_TRACE_DIR"
+    })
+    env["PYTHONPATH"] = os.pathsep.join(item for item in (SRC, env.get("PYTHONPATH", "")) if item)
+    env["PYTHONIOENCODING"] = "utf-8"
+    return subprocess.run(
+        [sys.executable, "-m", "agent_trace.entry", "--trace-dir", trace_dir, *argv],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=env,
+        timeout=120,
+    )
 
 
 def _make_store_with_llm_events(input_tokens_per_req, model="claude-sonnet-4"):
@@ -161,6 +188,19 @@ class TestReportLimitByCostNameRule(unittest.TestCase):
                 self.assertEqual(report.context_limit, 200_000)
                 self.assertIn("Context limit: 200,000 tokens", text)
                 self.assertIn("Current: 150,000 tokens  (75.0% of limit)", text)
+
+    def test_ca_and_in_sessions_get_their_limit_from_the_cli(self):
+        for geography in ("ca", "in"):
+            with self.subTest(geography=geography):
+                store, sid = _make_store_with_llm_events(
+                    [10_000, 150_000],
+                    model=f"{geography}.anthropic.claude-sonnet-4-5-20250929-v1:0",
+                )
+                self.addCleanup(shutil.rmtree, store.base_dir, True)
+                result = _run_cli(store.base_dir, "token-budget", sid)
+                self.assertEqual((result.returncode, result.stderr), (0, ""))
+                self.assertIn("Context limit: 200,000 tokens", result.stdout)
+                self.assertIn("Current: 150,000 tokens  (75.0% of limit)", result.stdout)
 
     def test_session_with_no_known_limit_prints_unknown(self):
         report, text = self._report("gpt-4.1-2025-04-14")
@@ -330,10 +370,13 @@ class TestTokenBudgetWatcher(unittest.TestCase):
         self.assertIsNone(watcher.context_limit)
 
     def test_fires_for_a_bedrock_inference_profile(self):
-        watcher = TokenBudgetWatcher(threshold=0.9)
-        result = watcher.update(_request(190_000, US_SONNET_45))
-        self.assertIsNotNone(result)
-        self.assertIn("190,000 / 200,000 tokens (95.0%)", result)
+        for geography in ("us", "ca", "in"):
+            with self.subTest(geography=geography):
+                watcher = TokenBudgetWatcher(threshold=0.9)
+                model = f"{geography}.anthropic.claude-sonnet-4-5-20250929-v1:0"
+                result = watcher.update(_request(190_000, model))
+                self.assertIsNotNone(result)
+                self.assertIn("190,000 / 200,000 tokens (95.0%)", result)
 
     def test_fires_for_a_claude_name_with_a_dot_in_its_version(self):
         for model in ("claude-sonnet-4.5", "claude-opus-4.1", "anthropic/claude-opus-4.7"):

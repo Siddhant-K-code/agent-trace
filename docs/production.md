@@ -172,14 +172,20 @@ reports.
   provider it cannot name is `unknown`. Gemini and Google models are `gcp.gen_ai` unless
   the recorded provider or model says Vertex AI (`gcp.vertex_ai`) or the
   Gemini API (`gcp.gemini`), for example a LiteLLM `vertex_ai/` or `gemini/`
-  model prefix. The raw recorded provider stays on `agent.strace.provider`.
+  model prefix. A model request whose model is a Bedrock model ID or ARN,
+  such as `us.anthropic.claude-sonnet-4-5-20250929-v1:0`,
+  `amazon.nova-pro-v1:0` or `deepseek.v3.2`, is `aws.bedrock` unless the
+  request records a provider. These are the model names that
+  [`cost --breakdown provider`](commands.md#cost) lists under AWS Bedrock.
+  The raw recorded provider stays on `agent.strace.provider`.
 - Codex, GitHub Copilot and Cursor can run models from more than one
   provider, so their product name names none. The Codex hook records `codex`
   as the provider of each model request; for such a request, and for the
   product names `openai-codex`, `copilot`, `github-copilot`, `cursor` and
-  `cursor-agent`, the model decides: `gpt-5.3-codex` is `openai`, and a model
-  that names no provider is `unknown`. The root span has no model, so the root
-  of a Codex, Copilot or Cursor session is `unknown`.
+  `cursor-agent`, the model decides: `gpt-5.3-codex` is `openai`, a Bedrock
+  model ID is `aws.bedrock`, and a model that names no provider is `unknown`.
+  The root span has no model, so the root of a Codex, Copilot or Cursor
+  session is `unknown`.
 - `gen_ai.response.finish_reasons` is a string array (an OTLP `arrayValue`),
   one entry per generation, such as `["end_turn"]`. A recorded list keeps its
   order. The recorded value stays on `agent.strace.finish_reason`.
@@ -240,6 +246,7 @@ updating. `--format otlp` keeps its names, but two of its values change; see
 | Scope version `genai-semconv-1.27` | the agent-strace version |
 | `gen_ai.provider.name` `unknown` on a Codex `chat` span | from the model, such as `openai` for `gpt-5.3-codex`; `unknown` when the model names no provider |
 | `gen_ai.provider.name` `openai` on the root of an `openai-codex` session recorded without hook attribution | `unknown`, as for a hook-recorded Codex session |
+| `gen_ai.provider.name` from the model family or the agent on the `chat` span of a Bedrock model, such as `anthropic` for `us.anthropic.claude-sonnet-4-5-20250929-v1:0` | `aws.bedrock` |
 
 #### Changed values
 
