@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import re
 import shutil
@@ -45,11 +46,14 @@ except ImportError:  # pragma: no cover - package-style test discovery
 # The detail page title cuts the id at 12 characters, then escapes it.
 LEGACY_TITLE = "<title>Session L&lt;&quot;&amp;a #?%20&amp; | agent-trace</title>"
 
+# A browser sends this Accept when it opens a page.
+BROWSER_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
 
-def _start_server(tmp_dir, dashboard=True):
+
+def _start_server(tmp_dir, dashboard=True, auth_key=""):
     store = TraceStore(tmp_dir)
     lock = threading.Lock()
-    handler = _make_handler(store, lock, auth_key="", dashboard=dashboard)
+    handler = _make_handler(store, lock, auth_key=auth_key, dashboard=dashboard)
     server = HTTPServer(("127.0.0.1", 0), handler)
     port = server.server_address[1]
     t = threading.Thread(target=server.serve_forever, daemon=True)
@@ -473,9 +477,12 @@ class TestServerDashboardRoutes(unittest.TestCase):
     def test_health_route_returns_html_when_dashboard(self):
         server, port, _ = _start_server(self._tmp)
         try:
-            r = urllib.request.urlopen(f"http://127.0.0.1:{port}/health")
-            self.assertEqual(r.status, 200)
-            self.assertIn("text/html", r.headers.get("Content-Type", ""))
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{port}/health", headers={"Accept": BROWSER_ACCEPT})
+            with urllib.request.urlopen(request) as r:
+                self.assertEqual(r.status, 200)
+                self.assertIn("text/html", r.headers.get("Content-Type", ""))
+                self.assertEqual(r.headers.get_all("Vary"), ["Accept"])
         finally:
             server.shutdown()
             server.server_close()
@@ -810,6 +817,217 @@ class TestServerDashboardRoutes(unittest.TestCase):
         finally:
             server.shutdown()
             server.server_close()
+
+
+HEALTH_TITLE = "<title>Health | agent-trace</title>"
+
+# Each case: a name, the Accept headers to send, one header per value, and
+# whether the dashboard sends the Health page for them.
+_HEALTH_ACCEPTS = (
+    ("none", [], False),
+    ("any", ["*/*"], False),
+    ("json", ["application/json"], False),
+    ("browser", [BROWSER_ACCEPT], True),
+    ("upper case", ["TEXT/HTML"], True),
+    ("html at q=0, then json", ["text/html;q=0, application/json"], False),
+    ("q=0 after a space", ["text/html; q=0"], False),
+    ("q not a number", ["text/html;q=abc"], False),
+    ("q=0.5", ["text/html;q=0.5"], True),
+    ("upper case q=0", ["Text/Html;Q=0"], False),
+    ("q=nan", ["text/html;q=nan"], False),
+    ("text/*", ["text/*"], False),
+    ("xhtml", ["application/xhtml+xml"], False),
+    ("longer type", ["text/html-sandboxed"], False),
+    ("json header, then html header", ["application/json", "text/html"], True),
+    ("html after a comma and a space", ["application/json, text/html"], True),
+    ("space before the semicolon", ["text/html ;q=0.5"], True),
+)
+
+
+def _get_health(port, accepts, auth_key=None):
+    """GET /health. Return the status, content type, Vary values and body."""
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    try:
+        conn.putrequest("GET", "/health")
+        for value in accepts:
+            conn.putheader("Accept", value)
+        if auth_key is not None:
+            conn.putheader("Authorization", f"Bearer {auth_key}")
+        conn.endheaders()
+        response = conn.getresponse()
+        body = response.read().decode("utf-8")
+        return (response.status, response.getheader("Content-Type"),
+                response.msg.get_all("Vary"), body)
+    finally:
+        conn.close()
+
+
+class TestHealthRouteAccept(unittest.TestCase):
+    """With the dashboard, only an Accept that names text/html gets the Health page."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self._tmp, True)
+
+    def _serve(self, dashboard, auth_key=""):
+        server, port, store = _start_server(self._tmp, dashboard=dashboard, auth_key=auth_key)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        store.create_session(SessionMeta(session_id="health001"))
+        return port
+
+    def _check_json(self, response, vary):
+        status, content_type, varies, body = response
+        self.assertEqual(status, 200)
+        self.assertEqual(content_type, "application/json")
+        self.assertEqual(varies, vary)
+        self.assertEqual(json.loads(body), {"status": "ok", "sessions": 1})
+
+    def _check_page(self, response):
+        status, content_type, varies, body = response
+        self.assertEqual(status, 200)
+        self.assertEqual(content_type, "text/html; charset=utf-8")
+        self.assertEqual(varies, ["Accept"])
+        self.assertIn(HEALTH_TITLE, body)
+
+    def test_dashboard_sends_page_only_when_accept_names_html(self):
+        port = self._serve(dashboard=True)
+        for name, accepts, page in _HEALTH_ACCEPTS:
+            with self.subTest(accept=name):
+                response = _get_health(port, accepts)
+                if page:
+                    self._check_page(response)
+                else:
+                    self._check_json(response, ["Accept"])
+
+    def test_without_dashboard_every_accept_gets_json_without_vary(self):
+        port = self._serve(dashboard=False)
+        for name, accepts, _ in _HEALTH_ACCEPTS:
+            with self.subTest(accept=name):
+                self._check_json(_get_health(port, accepts), None)
+
+    def test_with_auth_key_accept_picks_page_or_json(self):
+        port = self._serve(dashboard=True, auth_key="ast_health")
+        with self.subTest(accept="browser"):
+            self._check_page(_get_health(port, [BROWSER_ACCEPT], "ast_health"))
+        with self.subTest(accept="none"):
+            self._check_json(_get_health(port, [], "ast_health"), ["Accept"])
+
+    def test_without_the_key_page_and_json_get_401(self):
+        port = self._serve(dashboard=True, auth_key="ast_health")
+        for name, accepts in (("browser", [BROWSER_ACCEPT]), ("none", [])):
+            with self.subTest(accept=name):
+                status, content_type, varies, body = _get_health(port, accepts)
+                self.assertEqual(status, 401)
+                self.assertEqual(content_type, "application/json")
+                self.assertIsNone(varies)
+                self.assertEqual(json.loads(body), {"error": "Unauthorized"})
+
+
+# Runs the Health page script under Node with a minimal fake DOM. Its fetch
+# goes to a live dashboard server and records each URL with the Accept the
+# script passed. Rejections are caught, since the script's load() has no catch.
+_HEALTH_HARNESS = r"""
+const script = __SCRIPT__;
+const base = __BASE__;
+class Node {}
+const elements = {};
+function makeEl() {
+  const el = new Node();
+  el.textContent = '';
+  el.className = '';
+  el.style = {};
+  el.children = [];
+  el.append = function () {
+    el.children = el.children.concat(Array.prototype.slice.call(arguments));
+  };
+  el.appendChild = function (child) { el.children.push(child); return child; };
+  return el;
+}
+const document = {
+  getElementById(id) { return elements[id] || (elements[id] = makeEl()); },
+  createElement() { return makeEl(); },
+};
+const fetched = [];
+function pageFetch(url, init) {
+  const headers = (init && init.headers) || {};
+  fetched.push([url, headers.Accept === undefined ? null : headers.Accept]);
+  return fetch(new URL(url, base), init);
+}
+let error = null;
+process.on('unhandledRejection', e => { error = e.name + ': ' + e.message; });
+new Function('document', 'fetch', 'Node', script)(document, pageFetch, Node);
+function text(el) {
+  let out = String(el.textContent);
+  for (const child of el.children) out += ' ' + text(child);
+  return out.trim();
+}
+const started = Date.now();
+(function report() {
+  const shown = document.getElementById('tbl').style.display === '';
+  if (!shown && error === null && Date.now() - started < 10000) {
+    setTimeout(report, 20);
+    return;
+  }
+  const stats = {};
+  for (const id of ['h-total', 'h-running', 'h-errors', 'h-ws']) {
+    stats[id] = String(document.getElementById(id).textContent);
+  }
+  process.stdout.write(JSON.stringify({
+    error: error,
+    fetched: fetched,
+    stats: stats,
+    loading: document.getElementById('loading').style.display,
+    rows: document.getElementById('tbody').children.map(text),
+  }));
+})();
+"""
+
+
+class TestHealthPageScript(unittest.TestCase):
+    """The Health page script loads its stats from a live dashboard server."""
+
+    def test_page_shows_stats_from_health_and_sessions(self):
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed")
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        server, port, store = _start_server(tmp)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        # Each session: its ID, ended_at, workspace_id and errors. Every stat
+        # then reads a different number.
+        for session_id, ended_at, workspace_id, errors in (
+            ("health-a", 1700000012, "team-a", 0),
+            ("health-b", None, "team-b", 2),
+            ("health-c", None, "", 0),
+            ("health-d", None, "team-a", 0),
+        ):
+            store.create_session(SessionMeta(
+                session_id=session_id, started_at=1700000000, ended_at=ended_at,
+                workspace_id=workspace_id, errors=errors,
+            ))
+        script = "".join(re.findall(r"<script>(.*?)</script>", render_health_page(), re.S))
+        harness = (_HEALTH_HARNESS
+                   .replace("__SCRIPT__", json.dumps(script))
+                   .replace("__BASE__", json.dumps(f"http://127.0.0.1:{port}")))
+        result = subprocess.run([node, "-"], input=harness, capture_output=True,
+                                text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        page = json.loads(result.stdout)
+        self.assertIsNone(page["error"])
+        self.assertEqual(page["fetched"], [
+            ["/health", "application/json"],
+            ["/api/sessions", None],
+        ])
+        self.assertEqual(page["stats"], {
+            "h-total": "4", "h-running": "3", "h-errors": "1", "h-ws": "2",
+        })
+        self.assertEqual(page["rows"], [
+            "Status ok", "Total sessions 4", "Running 3", "With errors 1", "Workspaces 2",
+        ])
+        self.assertEqual(page["loading"], "none")
 
 
 if __name__ == "__main__":

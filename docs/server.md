@@ -112,12 +112,18 @@ docker run -p 4317:4317 -v $(pwd)/traces:/data agent-strace-server
 | `GET` | `/sessions` | List all sessions |
 | `GET` | `/sessions/<id>` | Read metadata for a session |
 | `GET` | `/sessions/<id>/events` | Stream events for a session |
-| `GET` | `/health` | Liveness check |
+| `GET` | `/health` | Liveness check: `{"status": "ok", "sessions": N}` |
 
 Any POST with an `Origin` header gets `403`. On a loopback address without
 `--auth-key`, a GET whose `Host` is not `localhost`, an IP address or an
 `--allow-host` name gets `403` too. See
 [Local evidence review](#local-evidence-review).
+
+`GET /health` answers `{"status": "ok", "sessions": N}`. With `--dashboard`, a
+request whose `Accept` header names `text/html`, as a browser's does, gets the
+Health page instead. Every other request gets the JSON body, so curl, scripts
+and uptime checks keep working. With `--dashboard`, both responses carry
+`Vary: Accept`.
 
 Events are accepted as NDJSON (`application/x-ndjson`), one event per line.
 Each line is stored or refused on its own. The collector refuses a line that is
