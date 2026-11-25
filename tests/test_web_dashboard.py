@@ -70,6 +70,37 @@ def _append_raw_event(store, session_id, data):
         handle.write(line + "\n")
 
 
+def _tool_call_session(store, session_id, timestamp=2.0):
+    store.create_session(SessionMeta(session_id=session_id, started_at=1.0))
+    store.append_event(session_id, TraceEvent(
+        event_type=EventType.TOOL_CALL,
+        timestamp=timestamp,
+        session_id=session_id,
+        event_id="call",
+        data={"tool_name": "Bash"},
+    ))
+
+
+def _set_raw_meta(store, session_id, **fields):
+    """Write *fields* into meta.json as given, past the store's checks."""
+    path = store.base_dir / session_id / "meta.json"
+    meta = json.loads(path.read_text(encoding="utf-8"))
+    meta.update(fields)
+    path.write_text(json.dumps(meta), encoding="utf-8")
+
+
+def _otlp_refusal(port, session_id):
+    """The status and JSON body of the OTLP download, or 200 and None when it is served."""
+    url = f"http://127.0.0.1:{port}/api/sessions/{session_id}/otlp"
+    try:
+        with urllib.request.urlopen(url):
+            pass
+    except urllib.error.HTTPError as error:
+        with error:
+            return error.code, json.loads(error.read())
+    return 200, None
+
+
 class TestRenderPages(unittest.TestCase):
     def test_sessions_page_contains_nav(self):
         html = render_sessions_page()
@@ -669,6 +700,103 @@ class TestServerDashboardRoutes(unittest.TestCase):
                     with context.exception as error:
                         self.assertEqual(error.code, 400)
                         self.assertEqual(json.loads(error.read()), {"error": message})
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_otlp_route_returns_400_for_a_tenant_the_store_would_refuse(self):
+        refused = [(value, "must be a string") for value in (
+            None, 0, False, [], {}, 5, True, 1.5, float("nan"), float("inf"), ["acme"], {"a": 1},
+        )] + [
+            ("   ", "cannot be empty"),
+            ("ac\x01me", "cannot contain control characters"),
+            ("x" * 300, "cannot exceed 256 characters"),
+        ]
+        server, port, store = _start_server(self._tmp)
+        try:
+            for index, (value, reason) in enumerate(refused):
+                session_id = f"refused-tenant-{index}"
+                _tool_call_session(store, session_id)
+                _set_raw_meta(store, session_id, tenant_id=value)
+                with self.subTest(tenant=value):
+                    self.assertEqual(
+                        _otlp_refusal(port, session_id),
+                        (400, {"error": f"session tenant_id {reason}"}),
+                    )
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_otlp_route_exports_an_accepted_tenant_stripped(self):
+        server, port, store = _start_server(self._tmp)
+        try:
+            for index, (value, expected) in enumerate((
+                (" acme ", [{"stringValue": "acme"}]),
+                ("", []),
+            )):
+                session_id = f"accepted-tenant-{index}"
+                _tool_call_session(store, session_id)
+                _set_raw_meta(store, session_id, tenant_id=value)
+                with self.subTest(tenant=value):
+                    with urllib.request.urlopen(
+                        f"http://127.0.0.1:{port}/api/sessions/{session_id}/otlp"
+                    ) as response:
+                        self.assertEqual(response.status, 200)
+                        self.assertIn("attachment", response.headers.get("Content-Disposition", ""))
+                        payload = json.loads(response.read())
+                    resource_spans = payload["resourceSpans"][0]
+                    holders = [resource_spans["resource"], *resource_spans["scopeSpans"][0]["spans"]]
+                    values = [
+                        [a["value"] for a in holder.get("attributes", []) if a["key"] == "tenant_id"]
+                        for holder in holders
+                    ]
+                    self.assertGreaterEqual(len(values), 3)
+                    self.assertEqual(values, [expected] * len(values))
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_otlp_route_checks_the_tenant_after_the_other_session_checks(self):
+        limit = "is past the latest time OTLP can carry (2554-07-21T23:34:33.709551615Z)"
+        year_3000 = 32503680000.0
+
+        def null_timestamp(store, session_id):
+            path = store.base_dir / session_id / "events.ndjson"
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({
+                    "event_type": "tool_call",
+                    "timestamp": None,
+                    "event_id": "null-time",
+                    "session_id": session_id,
+                    "data": {"tool_name": "Bash"},
+                }) + "\n")
+
+        # Each case: the event timestamp, a change to the stored session, the
+        # meta.json fields besides the tenant, and the message.
+        cases = (
+            ("tenant-alone", 2.0, None, {}, "session tenant_id must be a string"),
+            ("tenant-data", 2.0, lambda store, sid: _append_raw_event(store, sid, "text"), {},
+             "session tenant-data event data must be an object: "
+             "event 2 of 2 (tool_call) has string data"),
+            ("tenant-event-time", 2.0, null_timestamp, {},
+             "session tenant-event-time event timestamp must be a Unix time in seconds: "
+             "event 2 of 2 (tool_call) has a null timestamp"),
+            ("tenant-start", 2.0, None, {"started_at": float("nan")},
+             "session started_at must be a Unix time in seconds"),
+            ("tenant-start-limit", 2.0, None, {"started_at": year_3000},
+             f"session started_at {limit}"),
+            ("tenant-event-limit", year_3000, None, {},
+             f"session tenant-event-limit event timestamp {limit}: event 1 of 1 (tool_call)"),
+        )
+        server, port, store = _start_server(self._tmp)
+        try:
+            for session_id, timestamp, change, fields, message in cases:
+                _tool_call_session(store, session_id, timestamp)
+                if change:
+                    change(store, session_id)
+                _set_raw_meta(store, session_id, tenant_id=5, **fields)
+                with self.subTest(session_id=session_id):
+                    self.assertEqual(_otlp_refusal(port, session_id), (400, {"error": message}))
         finally:
             server.shutdown()
             server.server_close()

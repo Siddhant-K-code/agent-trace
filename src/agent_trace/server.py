@@ -54,6 +54,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from .collector_client import check_session_meta
 from .event_data import (
     NonObjectEventDataError,
+    UnusableTenantError,
     UnusableTimestampError,
     refused_event_warning,
     refused_timestamp_warning,
@@ -537,6 +538,7 @@ class CollectorHandler(BaseHTTPRequestHandler):
                 except (
                     NonObjectEventDataError,
                     UnusableTimestampError,
+                    UnusableTenantError,
                     CorruptSessionMetaError,
                     AmbiguousSessionPrefixError,
                     RefusedSessionError,

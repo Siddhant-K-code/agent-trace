@@ -210,7 +210,7 @@ kept for backends and queries that read them:
   cost, evidence and provenance.
 - `agent.session_id` on the resource and the root, `agent.errors`,
   `agent.llm_requests` and `agent.tool_calls` on the root, `tenant_id` on the
-  resource when the session has one, and `session.id`.
+  resource and on every span when the session has one, and `session.id`.
 - The [OpenInference](#openinference-compatibility) keys: `openinference.span.kind`,
   `input.value`, `input.mime_type`, `output.value`, `output.mime_type`,
   `llm.*` and `metadata`.

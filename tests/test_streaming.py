@@ -933,6 +933,45 @@ class TestOtlpStreamConversionFailure(_ReceiverTestCase):
         self._assert_quotes_nothing(stderr)
 
 
+class TestOtlpStreamEventTenant(_ReceiverTestCase):
+    """--stream-otlp sends the event tenant as the store would return it, and
+    does not send a batch whose tenant the store would refuse."""
+
+    def _with_tenant(self, tenant):
+        prompt = _event("user_prompt", {"prompt": "hello"}, "p1")
+        prompt.tenant_id = tenant
+        return [prompt, _event("assistant_response", {"text": "done"}, "a1", ts=2.0)]
+
+    def _tenants(self, posts):
+        found = set()
+        for _, body in posts:
+            for resource_spans in json.loads(body)["resourceSpans"]:
+                for scope in resource_spans["scopeSpans"]:
+                    for span in scope["spans"]:
+                        found.update(
+                            json.dumps(attr["value"])
+                            for attr in span.get("attributes", [])
+                            if attr["key"] == "tenant_id"
+                        )
+        return found
+
+    def test_a_tenant_the_store_would_refuse_is_not_sent(self):
+        for tenant in (5, True, 1.5, ["acme"], {"a": 1}, "   ", "a\x01b", "x" * 257):
+            with self.subTest(tenant=repr(tenant)[:20]):
+                posts, stderr = self._stream(self._with_tenant(tenant))
+                self.assertEqual(posts, [])
+                self.assertEqual(
+                    stderr,
+                    "[stream] Could not convert 2 events to OTLP spans (ValueError); "
+                    "they were not sent.\n",
+                )
+
+    def test_a_padded_tenant_is_sent_stripped(self):
+        posts, stderr = self._stream(self._with_tenant(" acme "))
+        self.assertEqual(stderr, "")
+        self.assertEqual(self._tenants(posts), {'{"stringValue": "acme"}'})
+
+
 class TestWatchSessionOtlpStreamNonObjectData(_ReceiverTestCase):
     """watch passes a skipped event to the streamer, which leaves it out."""
 

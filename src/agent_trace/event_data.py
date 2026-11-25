@@ -58,6 +58,13 @@ is a Unix time in seconds. The OTLP exports also call
 :func:`require_otlp_timestamps` and :func:`require_otlp_session_times`, which
 refuse such a time, and ``watch --stream-otlp`` leaves out an event with such
 a timestamp (see :func:`left_out_otlp_limit_warning`).
+
+The OTLP exports put a session's ``tenant_id`` on the resource and on every
+span. The store checks a tenant ID on every write, but a hand edit or an
+older store can still leave one in meta.json that the store would refuse.
+The OTLP exports call :func:`require_usable_tenant` after the time checks,
+and the CLI turns :class:`UnusableTenantError` into one ``Error:`` line on
+stderr and exit code 1.
 """
 
 from __future__ import annotations
@@ -77,6 +84,7 @@ from .models import (
     usable_text,
     usable_time,
 )
+from .store import validate_optional_tenant_id
 
 # Longest argument text parse_mapping reads as a Python literal. JSON text is
 # read at any length.
@@ -308,6 +316,10 @@ class NonObjectEventDataError(ValueError):
 
 class UnusableTimestampError(ValueError):
     """An event or session time is not a Unix time in seconds, or OTLP cannot carry it."""
+
+
+class UnusableTenantError(ValueError):
+    """A session's ``tenant_id`` is one the store would refuse."""
 
 
 # OTLP JSON carries each time as a decimal string of an unsigned 64-bit count
@@ -670,3 +682,22 @@ def require_otlp_session_times(meta: SessionMeta, *, session_id: str | None = No
             raise UnusableTimestampError(
                 f"{subject} {field} is past the latest time OTLP can carry ({OTLP_LATEST_TIME})"
             )
+
+
+def require_usable_tenant(meta: SessionMeta, *, session_id: str | None = None) -> None:
+    """Raise :class:`UnusableTenantError` if the session's ``tenant_id`` is one
+    the store would refuse.
+
+    That is a value that is not a string, or a string that is only
+    whitespace, is over 256 characters after the strip, or holds a control
+    character. An empty string means no tenant. This is the check of
+    ``validate_optional_tenant_id`` in store.py. The message gives the reason
+    and never includes the value. ``session_id`` names the session for
+    commands that read more than one.
+    """
+    try:
+        validate_optional_tenant_id(meta.tenant_id)
+    except ValueError as exc:
+        subject = f"session {session_id}" if session_id else "session"
+        reason = str(exc).removeprefix("tenant ID ")
+        raise UnusableTenantError(f"{subject} tenant_id {reason}") from exc

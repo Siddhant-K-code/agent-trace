@@ -133,6 +133,7 @@ from .watch import cmd_watch
 from .why import cmd_why
 from .event_data import (
     NonObjectEventDataError,
+    UnusableTenantError,
     UnusableTimestampError,
     duration_ms_of,
     event_id_of,
@@ -141,6 +142,7 @@ from .event_data import (
     require_otlp_session_times,
     require_otlp_timestamps,
     require_usable_session_times,
+    require_usable_tenant,
     require_usable_timestamps,
     str_field,
 )
@@ -772,6 +774,9 @@ def _export_otlp_tree(
         node_id = node.meta.session_id
         require_otlp_session_times(node.meta, session_id=node_id)
         require_otlp_timestamps(node.events, event_types=event_types, session_id=node_id)
+    # The tenant check comes last for the same reason.
+    for node in nodes:
+        require_usable_tenant(node.meta, session_id=node.meta.session_id)
 
     try:
         payload = node_tree_to_otlp(tree, args.service_name, genai=use_genai)
@@ -915,6 +920,7 @@ def cmd_export(args: argparse.Namespace) -> int:
                     OTLP_GENAI_TIMESTAMP_EVENT_TYPES if use_genai else OTLP_TIMESTAMP_EVENT_TYPES
                 ),
             )
+            require_usable_tenant(session_meta)
         endpoint = args.endpoint
 
         # When --endpoint is set and format is plain otlp, default to otlp-genai
@@ -935,7 +941,7 @@ def cmd_export(args: argparse.Namespace) -> int:
                     payload = session_to_otlp_genai(meta, events, service_name=args.service_name)
                 else:
                     payload = session_to_otlp(meta, events, service_name=args.service_name)
-            except (NonObjectEventDataError, UnusableTimestampError):
+            except (NonObjectEventDataError, UnusableTimestampError, UnusableTenantError):
                 raise
             except ValueError as exc:
                 label = "Temporal" if use_temporal else "OTLP"
@@ -3809,15 +3815,17 @@ def _run_handler(args: argparse.Namespace, handler):
     anything, so the refusal matches ``share``: one ``Error:`` line on stderr
     and exit code 1. A session whose meta.json cannot be read is refused the
     same way. So is a session ID prefix that matches several sessions, a
-    session whose events name another session or tenant, and a session
-    whose events.ndjson holds a line that is not an event. So is a session
-    argument that cannot name a session, such as ``..`` or a path.
+    session whose events name another session or tenant, a session whose
+    events.ndjson holds a line that is not an event, and a session whose
+    tenant_id an OTLP export refuses. So is a session argument that cannot
+    name a session, such as ``..`` or a path.
     """
     try:
         return handler(args)
     except (
         NonObjectEventDataError,
         UnusableTimestampError,
+        UnusableTenantError,
         CognitiveDebtInputError,
         CorruptSessionMetaError,
         AmbiguousSessionPrefixError,
