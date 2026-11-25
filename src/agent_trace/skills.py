@@ -1639,6 +1639,7 @@ def aggregate_reports(
         "mode": "aggregate",
         "sessions": len(reports),
         "min_sessions": min_sessions,
+        "events_skipped_malformed": sum(report.get("events_skipped_malformed", 0) for report in reports),
         "availability_basis": basis,
         "availability_basis_sessions": basis_counts,
         "skills": skills,
@@ -1673,7 +1674,7 @@ def build_session_report(
         if catalog is None:
             catalog = catalogs[cwd] = discover_skills(cwd, extra_dirs, user_dirs=user_dirs)
     return analyze_session(
-        clean,
+        events,
         session_id=session_id,
         started_at=meta.started_at if meta else None,
         workspace=workspace,
@@ -1919,6 +1920,8 @@ def format_aggregate_text(report: Mapping[str, Any], out: TextIO | None = None) 
     else:
         availability = "Availability reflects the filesystem now, not session time."
     w(f"Skills across {_session_count(report, window)}. {availability}\n")
+    if report.get("events_skipped_malformed"):
+        w(f"Skipped {report['events_skipped_malformed']} malformed event(s).\n")
     w("Counts are shown as count/n. There is no score or grade.\n\n")
     if not report["skills"]:
         w("No skills available or loaded in the selected sessions.\n")

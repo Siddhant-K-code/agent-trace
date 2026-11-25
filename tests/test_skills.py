@@ -31,6 +31,7 @@ from agent_trace.skills import (
     _codex_skill_root,
     aggregate_reports,
     analyze_session,
+    build_session_report,
     cmd_skills,
     command_signatures,
     discover_skills,
@@ -643,6 +644,28 @@ class TestFollowSignals(SkillsTestBase):
 
 
 class TestRobustness(SkillsTestBase):
+    def test_build_session_report_counts_malformed_events(self):
+        store = TraceStore(self.tmp / ".agent-traces")
+        meta = SessionMeta(session_id="malformed-report", agent_name="claude-code", started_at=T0)
+        store.create_session(meta)
+        store.append_event(
+            meta.session_id,
+            TraceEvent(
+                event_type=EventType.SESSION_START,
+                timestamp=str(T0),
+                data={"cwd": str(self.repo)},
+            ),
+        )
+        store.append_event(
+            meta.session_id,
+            TraceEvent(event_type=EventType.TOOL_CALL, timestamp="not a time", data={}),
+        )
+
+        report = build_session_report(store, meta.session_id, user_dirs=())
+
+        self.assertEqual(report["events_skipped_malformed"], 1)
+        self.assertEqual(report["workspace_source"], "session_start")
+
     def test_malformed_event_fields_do_not_crash(self):
         events = [
             TraceEvent(event_type=EventType.SESSION_START, timestamp="1700000000", data={"cwd": str(self.repo)}),
@@ -767,6 +790,23 @@ class TestAggregate(SkillsTestBase):
         self.assertEqual(deploy["median_seconds_to_load"], 1.0)
         self.assertNotIn("score", json.dumps(report))
         self.assertNotIn("grade", json.dumps(report))
+
+    def test_counts_malformed_events_across_sessions(self):
+        reports = []
+        for index, malformed in enumerate((1, 2)):
+            events = _Events(str(self.repo)).events
+            events.extend(
+                TraceEvent(event_type=EventType.TOOL_CALL, timestamp="not a time", data={})
+                for _ in range(malformed)
+            )
+            reports.append(analyze_session(events, session_id=f"s{index}", user_dirs=()))
+
+        report = aggregate_reports(reports, min_sessions=1)
+        out = io.StringIO()
+        format_aggregate_text(report, out)
+
+        self.assertEqual(report["events_skipped_malformed"], 3)
+        self.assertIn("Skipped 3 malformed event(s).", out.getvalue())
 
     def test_never_loaded_respects_min_sessions(self):
         report = aggregate_reports(self._reports(0, 3), min_sessions=5)
@@ -1180,6 +1220,24 @@ class TestCli(SkillsTestBase):
         self.assertEqual(entry["follow"]["signals"]["command_match"]["signatures"], ["make deploy-check"])
         self.assertTrue(all(not item["load_observable"] for item in report["context_files"]))
 
+    def test_session_json_counts_malformed_events(self):
+        events = [
+            TraceEvent(
+                event_type=EventType.SESSION_START,
+                timestamp=str(T0),
+                data={"cwd": str(self.repo)},
+            ),
+            TraceEvent(event_type=EventType.TOOL_CALL, timestamp="not a time", data={}),
+        ]
+        sid = self._session("malformed-cli", events, T0)
+
+        code, output = self._run(sid, "--format", "json")
+
+        self.assertEqual(code, 0)
+        report = json.loads(output)
+        self.assertEqual(report["events_skipped_malformed"], 1)
+        self.assertEqual(report["workspace_source"], "session_start")
+
     def test_aggregate_json_smoke(self):
         self._seed()
         code, output = self._run("--since", "1d", "--min-sessions", "1", "--format", "json")
@@ -1189,6 +1247,25 @@ class TestCli(SkillsTestBase):
         self.assertEqual(report["mode"], "aggregate")
         self.assertEqual(report["sessions"], 1)
         self.assertEqual(report["min_sessions"], 1)
+
+    def test_aggregate_counts_malformed_events(self):
+        now = time.time()
+        events = [
+            TraceEvent(
+                event_type=EventType.SESSION_START,
+                timestamp=str(now),
+                data={"cwd": str(self.repo)},
+            ),
+            TraceEvent(event_type=EventType.TOOL_CALL, timestamp="not a time", data={}),
+        ]
+        self._session("malformed-aggregate", events, now)
+
+        json_code, json_output = self._run("--since", "1d", "--min-sessions", "1", "--format", "json")
+        text_code, text_output = self._run("--since", "1d", "--min-sessions", "1")
+
+        self.assertEqual((json_code, text_code), (0, 0))
+        self.assertEqual(json.loads(json_output)["events_skipped_malformed"], 1)
+        self.assertIn("Skipped 1 malformed event(s).", text_output)
 
     def test_unknown_session_and_bad_min_sessions(self):
         code, _ = self._run("doesnotexist")

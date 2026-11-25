@@ -658,6 +658,37 @@ class TestSkillsTool(unittest.TestCase):
         result = json.loads(_tool_skills(self.store, {"since": "7d", "min_sessions": 1}))
         self.assertIn("deploy-check", json.dumps(result["never_loaded"]))
 
+    def test_aggregate_report_counts_malformed_events(self):
+        events = [
+            TraceEvent(
+                event_type=EventType.SESSION_START,
+                timestamp="1.0",
+                data={"cwd": str(self.repo)},
+            ),
+            TraceEvent(event_type=EventType.TOOL_CALL, timestamp="not a time", data={}),
+        ]
+        _add_session(self.store, "malformed-aggregate", events)
+
+        result = json.loads(_tool_skills(self.store, {"since": "7d", "min_sessions": 1}))
+
+        self.assertEqual(result["events_skipped_malformed"], 1)
+
+    def test_session_report_counts_malformed_events(self):
+        events = [
+            TraceEvent(
+                event_type=EventType.SESSION_START,
+                timestamp="1.0",
+                data={"cwd": str(self.repo)},
+            ),
+            TraceEvent(event_type=EventType.TOOL_CALL, timestamp="not a time", data={}),
+        ]
+        _add_session(self.store, "malformed-skills", events)
+
+        result = json.loads(_tool_skills(self.store, {"session_id": "malformed-skills"}))
+
+        self.assertEqual(result["events_skipped_malformed"], 1)
+        self.assertEqual(result["workspace_source"], "session_start")
+
     def test_not_found_returns_error(self):
         result = json.loads(_tool_skills(self.store, {"session_id": "missing"}))
         self.assertIn("session not found", result["error"])
