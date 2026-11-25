@@ -734,6 +734,7 @@ def _export_otlp_tree(
         otlp_genai_data_indexes,
         set_agent_id,
     )
+    from .eval.results import load_stored_evaluations
     from .subagent import SessionNode, build_tree
 
     use_genai = args.format == "otlp-genai"
@@ -781,8 +782,16 @@ def _export_otlp_tree(
     for node in nodes:
         require_usable_tenant(node.meta, session_id=node.meta.session_id)
 
+    evaluations = None
+    if use_genai:
+        evaluations = {
+            node.meta.session_id: load_stored_evaluations(store, node.meta.session_id)
+            for node in nodes
+        }
     try:
-        payload = node_tree_to_otlp(tree, args.service_name, genai=use_genai)
+        payload = node_tree_to_otlp(
+            tree, args.service_name, genai=use_genai, evaluations=evaluations,
+        )
     except (NonObjectEventDataError, UnusableTimestampError):
         raise
     except ValueError as exc:
@@ -890,6 +899,7 @@ def cmd_export(args: argparse.Namespace) -> int:
         return 0
 
     elif args.format in ("otlp", "otlp-genai", "temporal"):
+        from .eval.results import load_stored_evaluations
         from .otlp import (
             OTLP_GENAI_TIMESTAMP_EVENT_TYPES,
             OTLP_TIMESTAMP_EVENT_TYPES,
@@ -941,7 +951,10 @@ def cmd_export(args: argparse.Namespace) -> int:
                     from .temporal import session_to_temporal_otlp
                     payload = session_to_temporal_otlp(meta, events, service_name=args.service_name)
                 elif use_genai:
-                    payload = session_to_otlp_genai(meta, events, service_name=args.service_name)
+                    payload = session_to_otlp_genai(
+                        meta, events, service_name=args.service_name,
+                        evaluations=load_stored_evaluations(store, session_id),
+                    )
                 else:
                     payload = session_to_otlp(meta, events, service_name=args.service_name)
             except (NonObjectEventDataError, UnusableTimestampError, UnusableTenantError):
@@ -981,7 +994,10 @@ def cmd_export(args: argparse.Namespace) -> int:
             # Export using GenAI conventions
             meta = store.load_meta(session_id)
             try:
-                payload = session_to_otlp_genai(meta, events, service_name=args.service_name)
+                payload = session_to_otlp_genai(
+                    meta, events, service_name=args.service_name,
+                    evaluations=load_stored_evaluations(store, session_id),
+                )
             except (NonObjectEventDataError, UnusableTimestampError):
                 raise
             except ValueError as exc:

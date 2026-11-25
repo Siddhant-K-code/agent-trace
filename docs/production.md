@@ -46,6 +46,7 @@ agent-strace export <session-id> --format otlp-genai \
 | Tool input and output | `tool.input.*` and `tool.output` | `input.value` and `output.value`, and `gen_ai.tool.call.arguments` and `gen_ai.tool.call.result` |
 | Retries (`retry_of`) | Span links on tool spans | Span links on tool and `chat` spans |
 | Subagents | One trace with `--include-subagents`; see [Subagents in one trace](#subagents-in-one-trace) | The same |
+| Evaluation results | None; `export --scores --backend otlp` sends them as `agent_strace.eval.score` gauges | A `gen_ai.evaluation.result` event on the root per result `eval run` or `eval ci` saved; see [Evaluation results](#evaluation-results) |
 
 `--format otlp` keeps its span and attribute names for backwards compatibility.
 Two of its values change in this release, as in `otlp-genai`: see
@@ -205,6 +206,36 @@ before. Secrets are removed when a session is recorded, unless it was recorded
 with `--no-redact`; see [Secret redaction](security.md#secret-redaction).
 Export has no option that leaves the content out, so do not send a session
 whose prompts or tool output must not leave the machine.
+
+#### Evaluation results
+
+`export --format otlp-genai` sends the results that
+[`eval run` and `eval ci`](commands.md#eval) saved in the session's
+`eval.json` as
+[`gen_ai.evaluation.result`](https://github.com/open-telemetry/semantic-conventions-genai/blob/v0.1.0/docs/gen-ai/gen-ai-events.md#event-gen_aievaluationresult)
+events, one per result in file order, on the `invoke_agent` root span: the
+span of the session they judged. Each event's time is the root span's end
+time.
+
+| Attribute | Value |
+|---|---|
+| `gen_ai.evaluation.name` | The scorer, such as `no_errors` or `llm_judge` |
+| `gen_ai.evaluation.score.value` | The score, a double |
+| `gen_ai.evaluation.score.label` | `pass` or `fail`, from the saved `passed`; no other value is sent |
+| `gen_ai.evaluation.explanation` | The scorer's reason, cut to 1,000 characters; left out when empty |
+
+The export reads the verdict; it never scores the session. A result without a
+true or false `passed`, a finite number `score` and a non-empty `scorer` is
+left out, and an eval.json that cannot be read adds no events. A session with
+no eval.json exports the same payload as before. With `--include-subagents`
+each session's results go on its own root. The event sets no
+`gen_ai.response.id`, since it is on the span it judges, and no `error.type`:
+`eval run` and `eval ci` save no results when a scorer could not judge the
+session.
+
+`--format otlp`, `--format temporal` and `watch --stream-otlp` send no
+evaluation events. The classic root, `agent-session ({agent})` with
+`gen_ai.operation.name` `agent.session`, is not a GenAI operation span.
 
 #### Keys outside the GenAI registry
 

@@ -16,6 +16,7 @@ from typing import Any, TextIO
 from ..event_data import UnusableTimestampError, require_usable_timestamps
 from ..store import TraceStore
 from .config import EvalConfig, EvalCriterionConfig, load_config, load_gate_config
+from .results import save_eval_results
 from .scorers import (
     MetricError,
     MetricValue,
@@ -539,6 +540,7 @@ def cmd_eval_run(args: argparse.Namespace) -> int:
         format_report_json(report)
     else:
         format_report_table(report)
+    save_eval_results(store, report, "eval run")
 
     return 0 if report.overall_passed else 1
 
@@ -649,6 +651,7 @@ def cmd_eval_ci(args: argparse.Namespace) -> int:
 
     report = run_eval(store, session_id, config)
     format_report_table(report, out=sys.stderr)
+    save_eval_results(store, report, "eval ci")
 
     # Save baseline if requested
     save_baseline_path = getattr(args, "save_baseline", None)
