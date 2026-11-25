@@ -266,6 +266,31 @@ def _is_ip_literal(name: str) -> bool:
     return True
 
 
+def _accept_names_html(values: Iterable[str]) -> bool:
+    """Return True when an Accept range is text/html with a q above 0.
+
+    *values* holds every Accept header of the request. The type is compared
+    in any case. ``*/*``, ``text/*`` and other types do not count. A q that
+    is not a number reads as 0, and NaN does not count. The other ranges do
+    not matter, so this is not full content negotiation.
+    """
+    for media_range in ",".join(values).split(","):
+        parts = media_range.split(";")
+        if parts[0].strip().lower() != "text/html":
+            continue
+        q = 1.0
+        for param in parts[1:]:
+            name, _, value = param.partition("=")
+            if name.strip().lower() == "q":
+                try:
+                    q = float(value)
+                except ValueError:
+                    q = 0.0
+        if q > 0:
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # HTTP request handler
 # ---------------------------------------------------------------------------
@@ -316,11 +341,13 @@ class CollectorHandler(BaseHTTPRequestHandler):
         auth = self.headers.get("Authorization", "")
         return auth == f"Bearer {self._auth_key}"
 
-    def _send_json(self, status: int, data: dict) -> None:
+    def _send_json(self, status: int, data: dict, *, vary: str | None = None) -> None:
         body = json.dumps(data).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        if vary:
+            self.send_header("Vary", vary)
         self.end_headers()
         self.wfile.write(body)
 
@@ -342,11 +369,13 @@ class CollectorHandler(BaseHTTPRequestHandler):
     # GET
     # ------------------------------------------------------------------
 
-    def _send_html(self, status: int, html: str) -> None:
+    def _send_html(self, status: int, html: str, *, vary: str | None = None) -> None:
         body = html.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        if vary:
+            self.send_header("Vary", vary)
         self.end_headers()
         self.wfile.write(body)
 
@@ -389,8 +418,14 @@ class CollectorHandler(BaseHTTPRequestHandler):
             if path == "/violations":
                 self._send_html(200, _wd.render_violations_page())
                 return
-            if path == "/health":
-                self._send_html(200, _wd.render_health_page())
+            # The page's script, curl, scripts and uptime checks read the JSON
+            # body that the /health route below sends. Only a request whose
+            # Accept names text/html, as a browser navigation's does, gets
+            # the page.
+            if path == "/health" and _accept_names_html(
+                self.headers.get_all("Accept") or []
+            ):
+                self._send_html(200, _wd.render_health_page(), vary="Accept")
                 return
             parts = path.split("/")
             if len(parts) == 3 and parts[1] == "session":
@@ -560,7 +595,13 @@ class CollectorHandler(BaseHTTPRequestHandler):
                 return
 
         if path == "/health":
-            self._send_json(200, {"status": "ok", "sessions": len(self.store.list_sessions())})
+            # With the dashboard on, Accept picks the page or this body, so a
+            # browser cache must not reuse one response for the other.
+            self._send_json(
+                200,
+                {"status": "ok", "sessions": len(self.store.list_sessions())},
+                vary="Accept" if self._dashboard else None,
+            )
             return
 
         if path == "/sessions":

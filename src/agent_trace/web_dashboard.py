@@ -9,7 +9,7 @@ Routes added when dashboard=True:
     GET /session/<id>  → session detail page
     GET /cost       → cost / team breakdown page
     GET /violations → policy violations page
-    GET /health     → server health page
+    GET /health     → server health page (Accept names text/html)
     GET /api/sessions              → JSON session list
     GET /api/sessions/<id>/events  → JSON events for a session
 """
@@ -744,7 +744,7 @@ _HEALTH_BODY = """\
 
 _HEALTH_SCRIPT = _ROW_HELPERS + r"""
 async function load(){
-  const [hr,sr]=await Promise.all([fetch('/health'),fetch('/api/sessions')]);
+  const [hr,sr]=await Promise.all([fetch('/health',{headers:{Accept:'application/json'}}),fetch('/api/sessions')]);
   const health=await hr.json();
   const sessions=await sr.json();
   const running=sessions.filter(s=>!s.ended_at).length;
