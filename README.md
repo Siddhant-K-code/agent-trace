@@ -55,9 +55,33 @@ Never loaded (available in >= 5 sessions, loaded in 0):
   web-design-guidelines (available in 139 sessions)
 ```
 
+## Install with your coding agent
+
+Paste this into Claude Code, Copilot CLI, Codex, Gemini CLI, or Cursor; it lists the commands before running them:
+```text
+Set up agent-strace (https://github.com/Siddhant-K-code/agent-trace) to record this coding
+agent's sessions as local traces. First, say which agent you are and list the commands you'll
+run. Never use sudo or hand-edit config files; if a step fails, stop and show me the error.
+1. Install or upgrade the CLI: `uv tool install --upgrade agent-strace` (no uv: use pipx).
+   If `agent-strace --version` fails, run `uv tool update-shell` (or `pipx ensurepath`), since
+   the hooks call it from PATH.
+2. Connect only this agent's capture path:
+   - Claude Code: `claude plugin marketplace add Siddhant-K-code/agent-trace`, then
+     `claude plugin install agent-strace@agent-trace`
+   - Copilot CLI: `copilot plugin marketplace add Siddhant-K-code/agent-trace`, then
+     `copilot plugin install agent-strace@agent-trace`
+   - Codex: `codex plugin marketplace add Siddhant-K-code/agent-trace`, then
+     `codex plugin add agent-strace@agent-trace`
+   - Gemini CLI: `agent-strace setup --cli gemini`. Cursor: `agent-strace setup --cli cursor`
+   - Other agents: stop and point me to the agent-trace docs/setup.md guide.
+3. Tell me to restart this agent from a new terminal (in Codex, trust the agent-strace hooks
+   in /hooks), do one task, then run `agent-strace replay` and `agent-strace health`. Traces
+   stay local in .agent-traces/; `agent-strace telemetry disable` turns off anonymous telemetry.
+```
+
 ## Quick start
 
-**Option 1: CLI hooks.** Captures the prompts, responses, and tool calls each CLI's hooks expose; coverage differs by provider
+**Option 1: CLI hooks.** Captures the prompts, responses, and tool calls each CLI's hooks expose; coverage and known gaps differ by provider: [docs/capture-matrix.md](docs/capture-matrix.md)
 
 ```bash
 agent-strace setup             # Claude Code hooks for ~/.claude/settings.json
@@ -72,34 +96,9 @@ agent-strace setup --cli copilot # GitHub Copilot CLI hooks in ~/.copilot/hooks
 agent-strace list              # list sessions
 ```
 
-Provider coverage and known gaps: [docs/capture-matrix.md](docs/capture-matrix.md)
+**Claude Code plugin:** run `claude plugin marketplace add Siddhant-K-code/agent-trace`, then `claude plugin install agent-strace@agent-trace`, for tracing hooks plus the trace analyst agent and skill. See the [Claude Code plugin guide](docs/claude-code-plugin.md).
 
-### Claude Code plugin
-
-After installing `agent-strace`, install the repository as a native Claude Code plugin to enable tracing hooks plus the shared trace analyst agent and skill:
-
-```bash
-claude plugin marketplace add Siddhant-K-code/agent-trace
-claude plugin install agent-strace@agent-trace
-```
-
-See the [Claude Code plugin guide](docs/claude-code-plugin.md) for verification, updates, uninstall steps, privacy boundaries, provider gaps, and release publication.
-
-### GitHub Copilot CLI plugin
-
-After installing `agent-strace`, install the repository as a Copilot CLI plugin to enable tracing hooks plus the trace analyst agent and skill:
-
-```bash
-copilot plugin marketplace add Siddhant-K-code/agent-trace
-copilot plugin install agent-strace@agent-trace
-```
-
-Restart Copilot CLI, then use `/agent` to select
-`agent-strace:trace-analyst`. Traces are written to `.agent-traces/` in the
-repository you opened. Do not also run `agent-strace setup --cli copilot`,
-which would register duplicate hooks.
-
-See the [Copilot CLI plugin guide](docs/copilot-plugin.md) for verification, updates, and usage.
+**GitHub Copilot CLI plugin:** run `copilot plugin marketplace add Siddhant-K-code/agent-trace`, then `copilot plugin install agent-strace@agent-trace`, and restart Copilot CLI. Don't also run `agent-strace setup --cli copilot`, which would register duplicate hooks. See the [Copilot CLI plugin guide](docs/copilot-plugin.md).
 
 **OpenAI Codex plugin:** run `codex plugin marketplace add Siddhant-K-code/agent-trace`, then `codex plugin add agent-strace@agent-trace`, and trust the hooks in `/hooks`. Don't also run `agent-strace setup --cli codex`. See the [Codex plugin guide](docs/codex-plugin.md).
 
