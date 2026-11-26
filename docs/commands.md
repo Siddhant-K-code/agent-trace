@@ -3069,6 +3069,12 @@ ranked and compared on its other scores only.
 A `started_at` that is not a usable time is written as `null`, and
 `--strategy recent` treats the session as the oldest. See [`list`](#list).
 
+Sessions whose event streams cannot be read are skipped with a reported count;
+the scoring count includes only readable sessions that remain after optional
+deduplication. The selected records use that same in-memory snapshot, and the
+output file is replaced atomically only after every record serializes. A
+serialization or write failure exits nonzero without leaving partial output.
+
 ### `server`
 ```
 agent-strace server [--port N] [--host HOST] [--storage DIR] [--auth-key KEY]

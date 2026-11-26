@@ -7,6 +7,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from agent_trace.cost import estimate_cost
 from agent_trace.models import EventType, SessionMeta, TraceEvent
@@ -76,6 +77,14 @@ def _add_session(
         )
         store.append_event(meta.session_id, ev)
 
+    return meta
+
+
+def _add_unreadable_session(store: TraceStore) -> SessionMeta:
+    meta = SessionMeta()
+    store.create_session(meta)
+    events_path = Path(store.base_dir) / meta.session_id / "events.ndjson"
+    events_path.write_text("{not json}\n", encoding="utf-8")
     return meta
 
 
@@ -287,6 +296,8 @@ class TestRunSample(unittest.TestCase):
             record = json.loads(line)
             self.assertIn("session_id", record)
             self.assertIn("events", record)
+        self.assertIn("Scoring 5 session(s)...", out.getvalue())
+        self.assertNotIn("unreadable", out.getvalue())
 
     def test_recent_strategy(self):
         for i in range(5):
@@ -330,6 +341,24 @@ class TestRunSample(unittest.TestCase):
         lines = Path(self.output).read_text().strip().splitlines()
         self.assertEqual(len(lines), 2)
 
+    def test_readable_sessions_are_loaded_once(self):
+        _add_session(self.store)
+        _add_session(self.store)
+
+        with patch.object(
+            self.store, "load_events", wraps=self.store.load_events
+        ) as load_events:
+            rc = run_sample(
+                self.store,
+                "worst",
+                n=2,
+                output_path=self.output,
+                out=io.StringIO(),
+            )
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(load_events.call_count, 2)
+
     def test_deduplicate_flag(self):
         # Add two sessions with identical tool call sequences
         for _ in range(3):
@@ -343,6 +372,67 @@ class TestRunSample(unittest.TestCase):
         lines = Path(self.output).read_text().strip().splitlines()
         # All three have identical sequences — only 1 should survive dedup
         self.assertEqual(len(lines), 1)
+        self.assertIn("Scoring 1 session(s)...", out.getvalue())
+        self.assertNotIn("unreadable", out.getvalue())
+
+    def test_unreadable_session_is_counted_and_readable_session_is_exported(self):
+        good = _add_session(self.store)
+        _add_unreadable_session(self.store)
+        out = io.StringIO()
+
+        rc = run_sample(
+            self.store, "recent", n=10, output_path=self.output, out=out
+        )
+
+        self.assertEqual(rc, 0)
+        records = [
+            json.loads(line) for line in Path(self.output).read_text().splitlines()
+        ]
+        self.assertEqual([record["session_id"] for record in records], [good.session_id])
+        self.assertIn("Skipped 1 unreadable session(s).", out.getvalue())
+        self.assertIn("Scoring 1 session(s)...", out.getvalue())
+
+    def test_all_unreadable_sessions_are_counted(self):
+        _add_unreadable_session(self.store)
+        _add_unreadable_session(self.store)
+        out = io.StringIO()
+
+        rc = run_sample(
+            self.store, "recent", n=10, output_path=self.output, out=out
+        )
+
+        self.assertEqual(rc, 1)
+        self.assertFalse(Path(self.output).exists())
+        self.assertIn("Skipped 2 unreadable session(s).", out.getvalue())
+        self.assertIn("Scoring 0 session(s)...", out.getvalue())
+        self.assertIn("No sessions available after filtering.", out.getvalue())
+
+    def test_serialization_failure_does_not_replace_output_with_partial_data(self):
+        _add_session(self.store)
+        _add_session(self.store)
+        Path(self.output).write_text("existing output\n", encoding="utf-8")
+        out = io.StringIO()
+        calls = 0
+
+        def fail_second_record(meta, events, score):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise TypeError("not serializable")
+            return _session_to_jsonl_record(meta, events, score)
+
+        with patch(
+            "agent_trace.sample._session_to_jsonl_record",
+            side_effect=fail_second_record,
+        ):
+            rc = run_sample(
+                self.store, "recent", n=2, output_path=self.output, out=out
+            )
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(Path(self.output).read_text(), "existing output\n")
+        self.assertIn("Error: could not serialize sampled session ", out.getvalue())
+        self.assertNotIn("Exported", out.getvalue())
 
 
 class TestSampleCost(unittest.TestCase):
