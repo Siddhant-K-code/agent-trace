@@ -112,6 +112,12 @@ def find_mismatches(markdown: str) -> tuple[list[str], int]:
                     f"line {lineno}: {label}: {flag} does not accept {sorted(unknown)}"
                 )
 
+    def check_span(lineno, text):
+        path = _resolve(root, _usage_tokens(text))
+        text = _SEPARATOR.split(text)[0]
+        label = "agent-strace " + " ".join(path)
+        check(lineno, label, text, actions_for(path, subtree=False))
+
     problems: list[str] = []
     checked = 0
     heading: tuple[str, ...] | None = None
@@ -129,6 +135,14 @@ def find_mismatches(markdown: str) -> tuple[list[str], int]:
             if not stripped or stripped.startswith("#"):
                 usage_path = None
                 continue
+            spans = _INLINE_COMMAND.findall(line)
+            if spans:
+                # Prose in a text block, such as a copyable prompt: check
+                # each `agent-strace ...` span, not the rest of the line.
+                usage_path = None
+                for text in spans:
+                    check_span(lineno, text)
+                continue
             index = line.find("agent-strace ")
             if index >= 0:
                 text = line[index + len("agent-strace "):]
@@ -144,10 +158,7 @@ def find_mismatches(markdown: str) -> tuple[list[str], int]:
             continue
 
         for text in _INLINE_COMMAND.findall(line):
-            path = _resolve(root, _usage_tokens(text))
-            text = _SEPARATOR.split(text)[0]
-            label = "agent-strace " + " ".join(path)
-            check(lineno, label, text, actions_for(path, subtree=False))
+            check_span(lineno, text)
 
         match = _HEADING.match(line)
         if match:
@@ -271,6 +282,18 @@ class CommandsDocFlagsTest(unittest.TestCase):
         self.assertEqual(checked, 3)
         self.assertEqual(len(problems), 1, problems)
         self.assertIn("agent-strace drift: --baseline-file", problems[0])
+
+    def test_checker_reads_command_spans_on_text_block_lines(self):
+        markdown = "\n".join([
+            "```text",
+            "Set up agent-strace (url): `uv tool install --upgrade agent-strace`, then "
+            "`agent-strace setup --cli gemini` and `agent-strace replay --no-such-flag`.",
+            "```",
+        ])
+        problems, checked = find_mismatches(markdown)
+        self.assertEqual(checked, 2)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("agent-strace replay: --no-such-flag", problems[0])
 
     def test_docs_do_not_use_positional_shell_parameters(self):
         for path in (COMMANDS_MD, *(REPO_ROOT / name for name in OTHER_DOCS)):
