@@ -3112,7 +3112,7 @@ Start an MCP server that exposes your session store as queryable tools for a deb
 ```
 agent-strace a2a-tree [session-id] [--format text|json]
 ```
-Visualise the A2A agent call graph. Exports as OTLP spans for Jaeger, Tempo, or any OpenTelemetry backend. A failed call span has status ERROR; a successful one leaves status UNSET (see [Span status](production.md#span-status)).
+Visualise the A2A agent call graph. Exports as OTLP spans for Jaeger, Tempo, or any OpenTelemetry backend. A failed call span has status ERROR; a successful one leaves status UNSET (see [Span status](production.md#span-status)). Each agent span starts at the session's `started_at` and lasts its `total_duration_ms`. A sub-session that is not in the store starts and ends where the first call that names it starts.
 
 Each sub-session is shown once under the agent that called it. When an agent calls the same sub-session more than once, every call is listed and the sub-session line ends with `N delegations`. A sub-session that another agent in the tree also calls (a diamond) is shown in full under its first caller and as `name  [shown above]` under the others. Only a session that is already on the path from the root is shown as `[cycle] → name`. References are not counted again in `Total agents`, the total cost, or `Max depth`. In the JSON output each session has one span with an `agent.delegations` attribute; a shared or cyclic reference adds a span link to the calling agent's span, with `agent.link` set to `shared` or `cycle`.
 
@@ -3130,7 +3130,8 @@ for a float, reads as 0. Only `success: false` marks a call failed. A call
 with any other `success` value, or with none, counts as successful.
 `--format json` refuses a call time that OTLP cannot carry, as
 [Sessions with unusable event timestamps](#sessions-with-unusable-event-timestamps)
-describes.
+describes. It also refuses a `started_at` that is not a Unix time in seconds,
+or that OTLP cannot carry, in any session of the tree.
 
 ### `identity`
 ```
@@ -3585,7 +3586,12 @@ message. `export <session-id> --backend langfuse` refuses a session whose
 do `--scores` and `--metrics` without `--backend`, which send to Langfuse too.
 Langfuse reads no `ended_at`. The check runs after the credentials check and
 before anything is sent. With `--since`, the store listing refuses such a
-session first, as [`export`](#export) describes.
+session first, as [`export`](#export) describes. `a2a-tree --format json`
+refuses a session of the tree whose `started_at` is not a Unix time in
+seconds, with
+`Error: session <session-id> started_at must be a Unix time in seconds`. It
+checks the session's `a2a_call` timestamps first. It reads no `ended_at`, and
+the text tree reads neither.
 
 OTLP carries each time as an unsigned 64-bit count of nanoseconds, so the
 latest time it can carry is 2554-07-21T23:34:33.709551615Z. A later time is
@@ -3605,11 +3611,14 @@ message for `ended_at`. With `--include-subagents`, export checks every
 session in the tree this way, once every session passes the checks above. The
 line then names the session, such as `Error: session <session-id> ended_at is
 past the latest time OTLP can carry (2554-07-21T23:34:33.709551615Z)`.
-`a2a-tree --format json` refuses an `a2a_call` timestamp past that time in any
-session of the tree, once every session passes the checks above. The line
+`a2a-tree --format json` refuses a `started_at` or an `a2a_call` timestamp
+past that time in any session of the tree, once every session passes the
+checks above. So an unusable time anywhere in the tree comes first. The line
 names the session, such as `Error: session <session-id> event timestamp is
 past the latest time OTLP can carry (2554-07-21T23:34:33.709551615Z): event 3
-of 4 (tool_call)`.
+of 4 (tool_call)`. For `started_at`, the line is
+`Error: session <session-id> started_at is past the latest time OTLP can carry (2554-07-21T23:34:33.709551615Z)`.
+In one session, a past `started_at` comes before a past call.
 
 A span ends at its start plus its duration. A `duration_ms` whose span would
 end past that time reads as missing, so the span lasts 1 ms, as it does when
@@ -3620,7 +3629,7 @@ that starts less than 1 ms before that time ends at that time.
 In `a2a-tree --format json`, a call `duration_ms` whose span would end past
 that time reads as missing, so the call span ends at its start, as it does
 when the duration is missing. A `total_duration_ms` whose agent span would end
-past that time reads as missing too, so the agent span ends at its start, 0.
+past that time reads as missing too, so the agent span ends at its start.
 
 `export --format otlp`, `otlp-genai`, and `temporal` also refuse a session
 whose `meta.json` `tenant_id` the store would refuse. The store strips

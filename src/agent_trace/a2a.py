@@ -145,6 +145,10 @@ class AgentNode:
     # the path from the root, "shared" for one already shown in full under
     # another parent. A reference has no children and is not counted twice.
     ref: str = ""
+    # The session's stored started_at when it is a Unix time in seconds, else
+    # None. A node with none starts its agent span where the first call in
+    # its parent that names it starts.
+    started_at: float | None = None
 
 
 @dataclass
@@ -316,21 +320,24 @@ def build_a2a_tree(
     session of the tree has data that is not an object.
 
     With ``check_call_timestamps``, also raises UnusableTimestampError, naming
-    the session, when an A2A call's timestamp is not a Unix time in seconds.
-    The OTLP spans read those timestamps. The text tree does not.
+    the session, when an A2A call's timestamp or the session's ``started_at``
+    is not a Unix time in seconds. The OTLP spans read those times. The text
+    tree does not. No check reads ``ended_at``.
 
     With ``check_call_timestamps``, it also raises UnusableTimestampError,
-    naming the session, when an A2A call's timestamp is past the latest time
-    OTLP can carry. It raises that only after every session of the tree
-    passes the other checks.
+    naming the session, when the session's ``started_at`` or an A2A call's
+    timestamp is past the latest time OTLP can carry. It raises that only
+    after every session of the tree passes the other checks. In one session,
+    a past ``started_at`` comes before a past call.
     """
     # A session already on the path from the root is a cycle. A session
     # already shown in full elsewhere (a diamond) is a shared reference.
     on_path: set[str] = set()
     built: dict[str, AgentNode] = {}
-    # One error per session with an A2A call past the latest time OTLP can
-    # carry, in pre-order. The first is raised once the whole tree is built,
-    # so a session that the other checks refuse keeps its own message.
+    # The errors for a started_at or A2A calls past the latest time OTLP can
+    # carry, in pre-order, with a session's started_at before its calls. The
+    # first is raised once the whole tree is built, so a session that the
+    # other checks refuse keeps its own message.
     past_limit: list[UnusableTimestampError] = []
 
     def _child_ids(sid: str, a2a_calls: list[A2ACallEvent]) -> dict[str, int]:
@@ -374,6 +381,15 @@ def build_a2a_tree(
                 if event.data.get("event_subtype") == A2A_CALL
             }
             require_usable_timestamps(events, indexes=call_indexes, session_id=sid)
+            if usable_time(meta.started_at) is None:
+                raise UnusableTimestampError(
+                    f"session {sid} started_at must be a Unix time in seconds"
+                )
+            if otlp_unix_nanos(meta.started_at) is None:
+                past_limit.append(UnusableTimestampError(
+                    f"session {sid} started_at is past the latest time OTLP can "
+                    f"carry ({OTLP_LATEST_TIME})"
+                ))
             try:
                 require_otlp_timestamps(events, indexes=call_indexes, session_id=sid)
             except UnusableTimestampError as exc:
@@ -395,6 +411,7 @@ def build_a2a_tree(
             tool_calls=usable_count(meta.tool_calls),
             a2a_calls=a2a_calls,
             delegations=delegations,
+            started_at=meta.started_at if usable_time(meta.started_at) is not None else None,
         )
         built[sid] = node
 
@@ -506,20 +523,29 @@ def _call_span_times(call: A2ACallEvent) -> tuple[int, int]:
     return start, end
 
 
-def _agent_span_end(duration_ms: object) -> int:
-    """Return the end of an agent span that starts at 0 and lasts *duration_ms*."""
-    duration = usable_number(duration_ms)
+def _agent_span_times(node: AgentNode, fallback_start: int) -> tuple[int, int]:
+    """Return the start and end of the agent span of *node* in Unix nanoseconds.
+
+    The span starts at the node's started_at, or at *fallback_start* when it
+    has none OTLP can carry. It lasts the node's duration_ms. A duration that
+    is not a usable number, or whose span would end past the latest time OTLP
+    can carry, ends the span at its start.
+    """
+    start = otlp_unix_nanos(node.started_at)
+    if start is None:
+        start = fallback_start
+    duration = usable_number(node.duration_ms)
     if duration is None:
-        return 0
+        return start, start
     # Multiply first: 0.009 ms gives 9000 ns this way, and 8999 the other.
     try:
-        end = int(duration * 1_000_000)
+        end = start + int(duration * 1_000_000)
     except OverflowError:
-        return 0
+        return start, start
     # Compare the int, because float(OTLP_MAX_UNIX_NANOS) is 2**64.
     if end > OTLP_MAX_UNIX_NANOS:
-        return 0
-    return end
+        return start, start
+    return start, end
 
 
 def a2a_calls_to_otlp_spans(
@@ -532,17 +558,25 @@ def a2a_calls_to_otlp_spans(
     on its session's span to the span of the agent that called it, with
     ``agent.link`` set to ``cycle`` or ``shared``.
 
+    An agent span starts at the session's ``started_at`` and lasts its
+    ``total_duration_ms``. A node with no start OTLP can carry, such as a
+    sub-session that is not in the store, starts where the first call in its
+    parent that names it starts. One that no call names starts where its
+    parent's span starts. A root with no start starts at 0.
+
     Raises UnusableTimestampError when a call's timestamp is not a Unix time
     in seconds, or is past the latest time OTLP can carry. A call or session
     duration that is not a usable number, or whose span would end past that
-    time, reads as 0.
+    time, reads as 0, so the span ends at its start.
     """
     spans = []
     trace_id = report.root.session_id[:32].ljust(32, "0")
     span_by_session: dict[str, dict] = {}
     links: list[tuple[str, dict]] = []
 
-    def _node_to_spans(node: AgentNode, parent_span_id: str = "") -> None:
+    def _node_to_spans(
+        node: AgentNode, parent_span_id: str = "", fallback_start: int = 0,
+    ) -> None:
         if node.ref:
             links.append((node.session_id, {
                 "traceId": trace_id,
@@ -554,13 +588,14 @@ def a2a_calls_to_otlp_spans(
             }))
             return
         span_id = node.session_id[:16]
+        agent_start, agent_end = _agent_span_times(node, fallback_start)
         span: dict = {
             "traceId": trace_id,
             "spanId": span_id,
             "name": f"agent:{node.agent_id}",
             "kind": 3,  # CLIENT
-            "startTimeUnixNano": 0,
-            "endTimeUnixNano": _agent_span_end(node.duration_ms),
+            "startTimeUnixNano": agent_start,
+            "endTimeUnixNano": agent_end,
             "attributes": [
                 {"key": "agent.id", "value": {"stringValue": node.agent_id}},
                 {"key": "agent.session_id", "value": {"stringValue": node.session_id}},
@@ -575,8 +610,13 @@ def a2a_calls_to_otlp_spans(
         spans.append(span)
         span_by_session[node.session_id] = span
 
+        # Where the first call that names each sub-session starts, in
+        # recorded order. A child with no start of its own starts there.
+        first_call_starts: dict[str, int] = {}
         for position, call in enumerate(node.a2a_calls):
             start, end = _call_span_times(call)
+            if call.sub_session_id:
+                first_call_starts.setdefault(call.sub_session_id, start)
             call_span_id = call.event_id[:16]
             if not call_span_id:
                 # A call without a usable event_id gets an ID from its session
@@ -601,8 +641,12 @@ def a2a_calls_to_otlp_spans(
                 "status": {"code": 0 if call.success else 2},  # UNSET or ERROR
             })
 
+        # A child with no start of its own that no call names, such as one
+        # linked only by its meta, starts where this span starts.
         for child in node.children:
-            _node_to_spans(child, span_id)
+            _node_to_spans(
+                child, span_id, first_call_starts.get(child.session_id, agent_start),
+            )
 
     _node_to_spans(report.root)
     for session_id, link in links:

@@ -959,7 +959,11 @@ class TestA2aTree(TimestampCliTestCase):
         self.assertEqual((result.code, result.err), (0, ""))
         spans = json.loads(result.out)["spans"]
         root_span = next(span for span in spans if span["spanId"] == A2A_ROOT[:16])
-        self.assertEqual(root_span["endTimeUnixNano"], 0)
+        # The span starts at the session's started_at and ends there.
+        start = event_data.otlp_unix_nanos(NOW - 1800)
+        self.assertEqual(
+            (root_span["startTimeUnixNano"], root_span["endTimeUnixNano"]), (start, start),
+        )
         text = self.run_cli(root, "a2a-tree", A2A_ROOT)
         self.assertEqual((text.code, text.err), (0, ""))
 
