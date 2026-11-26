@@ -29,6 +29,7 @@ from .event_data import (
     str_field,
 )
 from .failures import count_session_errors
+from .fileutil import write_atomic
 from .models import EventType, SessionMeta, TraceEvent, usable_text, usable_time
 from .store import TraceStore
 
@@ -51,6 +52,12 @@ class SessionScore:
     tool_calls: int
     # Composite "worst" score (higher = worse session)
     worst_score: float = 0.0
+
+
+@dataclass
+class _PreparedSession:
+    meta: SessionMeta
+    events: list[TraceEvent]
 
 
 # _score_session reads the data of every event of these types. Its cost is
@@ -253,26 +260,29 @@ def _tool_sequence_key(events: list[TraceEvent]) -> str:
     return str(seq)
 
 
-def _require_sampled_event_data(
+def _prepare_sessions(
     store: TraceStore,
     sessions: list[SessionMeta],
     deduplicate: bool,
-) -> None:
-    """Raise NonObjectEventDataError before run_sample prints anything.
+) -> tuple[list[_PreparedSession], int]:
+    """Load and validate the stable session snapshot used for scoring and export.
 
-    This mirrors the scoring loop: a session that fails to load is skipped,
-    and with deduplicate a repeated tool sequence is not scored, so only its
-    tool_call data is read.
+    A session that fails to load is counted as unreadable and skipped. With
+    deduplicate, a repeated tool sequence is not scored, so only its tool_call
+    data is read.
 
     Raise UnusableTimestampError when a scored session's first or last event
     timestamp is not a Unix time in seconds. Scoring reads only those two,
     for the duration, and only when the session has 2 or more events.
     """
+    prepared: list[_PreparedSession] = []
+    unreadable = 0
     seen_tool_sequences: set[str] = set()
     for meta in sessions:
         try:
             events = store.load_events(meta.session_id)
-        except Exception:
+        except (OSError, ValueError):
+            unreadable += 1
             continue
         if deduplicate:
             require_object_event_data(
@@ -289,6 +299,8 @@ def _require_sampled_event_data(
             require_usable_timestamps(
                 events, indexes={0, len(events) - 1}, session_id=meta.session_id
             )
+        prepared.append(_PreparedSession(meta=meta, events=events))
+    return prepared, unreadable
 
 
 def run_sample(
@@ -306,31 +318,21 @@ def run_sample(
         out.write("No sessions found.\n")
         return 1
 
-    _require_sampled_event_data(store, sessions, deduplicate)
+    prepared, unreadable = _prepare_sessions(store, sessions, deduplicate)
 
     out.write(f"Sampling {n} sessions by strategy '{strategy}'...\n")
-    out.write(f"Scoring {len(sessions)} session(s)...\n")
+    if unreadable:
+        out.write(f"Skipped {unreadable} unreadable session(s).\n")
+    out.write(f"Scoring {len(prepared)} session(s)...\n")
 
-    scores: list[SessionScore] = []
-    seen_tool_sequences: set[str] = set()
-
-    for meta in sessions:
-        try:
-            events = store.load_events(meta.session_id)
-        except Exception:
-            continue
-
-        if deduplicate:
-            key = _tool_sequence_key(events)
-            if key in seen_tool_sequences:
-                continue
-            seen_tool_sequences.add(key)
-
-        scores.append(_score_session(meta.session_id, meta, events))
-
-    if not scores:
+    if not prepared:
         out.write("No sessions available after filtering.\n")
         return 1
+
+    scores = [
+        _score_session(item.meta.session_id, item.meta, item.events)
+        for item in prepared
+    ]
 
     # Apply strategy
     sampler = STRATEGIES.get(strategy)
@@ -343,22 +345,28 @@ def run_sample(
     else:
         selected = sampler(scores, n)
 
-    # Write JSONL
-    p = Path(output_path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    written = 0
-    with open(p, "w", encoding="utf-8") as f:
-        for score in selected:
-            try:
-                meta = store.load_meta(score.session_id)
-                events = store.load_events(score.session_id)
-                record = _session_to_jsonl_record(meta, events, score)
-                f.write(json.dumps(record, separators=(",", ":")) + "\n")
-                written += 1
-            except Exception:
-                continue
+    prepared_by_id = {item.meta.session_id: item for item in prepared}
+    lines: list[str] = []
+    for score in selected:
+        item = prepared_by_id[score.session_id]
+        try:
+            record = _session_to_jsonl_record(item.meta, item.events, score)
+            lines.append(json.dumps(record, separators=(",", ":")) + "\n")
+        except (TypeError, ValueError, OverflowError, RecursionError):
+            out.write(
+                f"Error: could not serialize sampled session {score.session_id}.\n"
+            )
+            return 1
 
-    out.write(f"\nExported {written} session(s) to {output_path}\n")
+    p = Path(output_path)
+    try:
+        write_atomic(p, "".join(lines))
+    except (OSError, ValueError) as exc:
+        detail = exc.strerror if isinstance(exc, OSError) and exc.strerror else exc
+        out.write(f"Error: cannot write {output_path}: {detail}\n")
+        return 1
+
+    out.write(f"\nExported {len(selected)} session(s) to {output_path}\n")
     if selected:
         out.write("\nCriteria used:\n")
         if strategy == "worst":
