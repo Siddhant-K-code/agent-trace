@@ -146,6 +146,8 @@ _SEMCONV_RESPONSE_MODEL = "gen_ai.response.model"
 _SEMCONV_SERVER_ADDRESS = "server.address"
 _SEMCONV_SERVER_PORT = "server.port"
 _SEMCONV_CONVERSATION_ID = "gen_ai.conversation.id"
+_SEMCONV_CONVERSATION_COMPACTED = "gen_ai.conversation.compacted"
+_SEMCONV_SKILL_NAME = "gen_ai.skill.name"
 _SEMCONV_ERROR_TYPE = "error.type"
 # The gen_ai.evaluation.result event (development stability in v0.1.0).
 _SEMCONV_EVALUATION_RESULT = "gen_ai.evaluation.result"
@@ -618,8 +620,10 @@ def _model_span_name(model: object) -> str:
     return f"{_OP_CHAT} {model}" if isinstance(model, str) and model else _OP_CHAT
 
 
-def _tool_span_name(tool_name: object) -> str:
-    """``execute_tool {gen_ai.tool.name}``."""
+def _tool_span_name(tool_name: object, skill_name: str = "") -> str:
+    """``execute_tool {gen_ai.tool.name}``, then ``{gen_ai.skill.name}`` if any."""
+    if skill_name:
+        return f"{_OP_EXECUTE_TOOL} {tool_name} {skill_name}"
     return f"{_OP_EXECUTE_TOOL} {tool_name}"
 
 
@@ -1203,6 +1207,68 @@ def _imported_response_attributes(data: Mapping[str, Any]) -> dict[str, Any]:
     return attrs
 
 
+# Events a ``chat`` span is built from: its request, or without one its
+# response or the error that ended it.
+_CHAT_SPAN_EVENT_TYPES = frozenset({
+    EventType.LLM_REQUEST,
+    EventType.LLM_RESPONSE,
+    EventType.ASSISTANT_RESPONSE,
+    EventType.ERROR,
+})
+
+
+def _compacted_context_events(events: list[TraceEvent]) -> set[int]:
+    """Return ``id()`` of the events whose model request used a compacted context.
+
+    A context stream (see :func:`agent_trace.compaction._event_stream`) counts
+    as compacted from the first recorded sign that its context was compacted:
+
+    - a ``session_start`` whose ``source`` is ``compact``, which Claude Code
+      and Codex hooks record when a session continues after compaction (it
+      has no ``agent_id``, so it marks the main stream only);
+    - a ``user_prompt`` that ``agent-strace import`` marked
+      ``is_compaction_summary``, Claude Code's post-compaction summary;
+    - an ``assistant_response`` that import gave a ``context_summary``, the
+      first response after a Claude Code compaction boundary.
+
+    From there on every ``llm_request``, ``llm_response``,
+    ``assistant_response`` and ``error`` of that stream is returned, the
+    marking response included. A ``session_start`` with ``source`` resume
+    keeps the marks; any other ``session_start`` starts a new context for its
+    own stream and clears that stream's mark only, so a compacted subagent
+    stays marked when the main conversation starts again. Events whose data
+    is not an object are skipped. Nothing else counts, so a request with no
+    such sign before it is not returned.
+    """
+    from .compaction import _event_stream
+
+    compacted: set[str] = set()
+    marked: set[int] = set()
+    for event in events:
+        data = event.data
+        if not isinstance(data, Mapping):
+            continue
+        if event.event_type == EventType.SESSION_START:
+            source = data.get("source")
+            if source == "compact":
+                compacted.add(_event_stream(event))
+            elif source != "resume":
+                compacted.discard(_event_stream(event))
+            continue
+        stream = _event_stream(event)
+        if (
+            event.event_type == EventType.USER_PROMPT
+            and data.get("is_compaction_summary") is True
+        ) or (
+            event.event_type == EventType.ASSISTANT_RESPONSE
+            and usable_text(data.get("context_summary"))
+        ):
+            compacted.add(stream)
+        if event.event_type in _CHAT_SPAN_EVENT_TYPES and stream in compacted:
+            marked.add(id(event))
+    return marked
+
+
 def _classic_response_span(
     trace_id: str,
     root_span_id: str,
@@ -1300,7 +1366,9 @@ def otlp_genai_data_indexes(events: list[TraceEvent]) -> list[int]:
     Pairer.match_parent) or when it is still unpaired at the end. Pairing an
     llm_response without a matching parent_id also reads the model of each
     pending llm_request; a request whose data is not an object counts as
-    naming no model.
+    naming no model. With ``skills_and_compaction`` the converter also
+    looks at other events, and at a tool_call an error pairs with, but only
+    when their data is an object, so they are not listed.
     """
     read: set[int] = set()
     requests: Pairer[int] = llm_pairer()
@@ -1673,6 +1741,7 @@ def node_tree_to_otlp(
     *,
     genai: bool = False,
     evaluations: Mapping[str, Sequence[StoredEvaluation]] | None = None,
+    skills_and_compaction: bool = False,
 ) -> dict:
     """Export an already built subagent tree as a single OTLP trace.
 
@@ -1688,8 +1757,9 @@ def node_tree_to_otlp(
 
     With ``genai``, ``evaluations`` maps a session ID to the stored eval
     results that become ``gen_ai.evaluation.result`` events on that
-    session's root span (see :func:`session_to_otlp_genai`). The classic
-    mapping exports no evaluations.
+    session's root span, and ``skills_and_compaction`` is passed to every
+    session's conversion (see :func:`session_to_otlp_genai`). The classic
+    mapping exports neither.
     """
     from .subagent import parent_event_id_of
 
@@ -1708,6 +1778,8 @@ def node_tree_to_otlp(
         extra: dict[str, Any] = {}
         if genai and evaluations:
             extra["evaluations"] = evaluations.get(meta.session_id, ())
+        if genai and skills_and_compaction:
+            extra["skills_and_compaction"] = True
         payload = convert(
             meta, node.events, service_name,
             parent_span_id=parent_span_id,
@@ -1783,6 +1855,7 @@ def _genai_llm_span(
     span_id: str,
     *,
     inferred_start: float | None = None,
+    compacted: bool = False,
 ) -> dict:
     """Build the ``chat`` model request span for one model request.
 
@@ -1796,6 +1869,9 @@ def _genai_llm_span(
     (see :func:`_imported_response_starts`). The span starts there and may
     have zero length. It carries the recorded response model and ID and
     ``agent.strace.timing=inferred``.
+
+    ``compacted`` sets ``gen_ai.conversation.compacted`` to true (see
+    :func:`_compacted_context_events`); it is never set to false.
     """
     span_start = req_event.timestamp if req_event else event.timestamp
     if inferred_start is not None:
@@ -1823,6 +1899,8 @@ def _genai_llm_span(
         _OI_LLM_PROVIDER: system if system != "unknown" else raw_llm_provider,
         "agent.strace.provider": raw_llm_provider,
     }
+    if compacted:
+        llm_attrs[_SEMCONV_CONVERSATION_COMPACTED] = True
     if model:
         llm_attrs[_SEMCONV_MODEL] = model
         llm_attrs[_OI_LLM_MODEL] = model
@@ -1909,6 +1987,7 @@ def session_to_otlp_genai(
     *,
     root_outcome: bool = True,
     evaluations: Sequence[StoredEvaluation] = (),
+    skills_and_compaction: bool = False,
 ) -> dict:
     """Convert a session to OTLP JSON using the OTel GenAI semantic conventions.
 
@@ -1951,6 +2030,15 @@ def session_to_otlp_genai(
       ``gen_ai.evaluation.result`` event on the root span, at the root span's
       end, after the other root events. With none, the payload is the same
       as before evaluations were exported
+    - With ``skills_and_compaction``, which ``agent-strace export --format
+      otlp-genai`` sets, a dedicated skill tool call that names its skill
+      (see :func:`agent_trace.skills.skill_call_name`) gets
+      gen_ai.skill.name and the span name ``execute_tool {tool} {skill}``,
+      the load skill refinement, whether or not the skill loaded; and a
+      chat span whose request used a compacted context (see
+      :func:`_compacted_context_events`) gets
+      ``gen_ai.conversation.compacted=true``. Without it neither is emitted,
+      so Temporal and ``watch --stream-otlp`` spans stay as they were
 
     The tenant_id works as in session_to_otlp().
 
@@ -2017,6 +2105,16 @@ def session_to_otlp_genai(
     calls: Pairer[TraceEvent] = tool_pairer()
     # Model responses read from a transcript, which recorded no request
     response_starts = _imported_response_starts(events)
+    compacted_events = (
+        _compacted_context_events(events) if skills_and_compaction else set()
+    )
+
+    def skill_name(call_event: TraceEvent | None) -> str:
+        if not skills_and_compaction or call_event is None:
+            return ""
+        from .skills import skill_call_name
+
+        return skill_call_name(call_event)
 
     for event in events:
         if event.event_type == EventType.USER_PROMPT:
@@ -2048,6 +2146,7 @@ def session_to_otlp_genai(
                 child_spans.append(retry_links.add(_genai_llm_span(
                     meta, trace_id, root_span_id, None, event, span_id_of(event),
                     inferred_start=inferred_start,
+                    compacted=id(event) in compacted_events,
                 ), event))
 
         elif event.event_type == EventType.LLM_REQUEST:
@@ -2058,6 +2157,7 @@ def session_to_otlp_genai(
             child_spans.append(retry_links.add(_genai_llm_span(
                 meta, trace_id, root_span_id, req_event, event,
                 span_id_of(req_event if req_event else event),
+                compacted=id(req_event if req_event else event) in compacted_events,
             ), req_event, event))
 
         elif event.event_type == EventType.TOOL_CALL:
@@ -2081,6 +2181,9 @@ def session_to_otlp_genai(
                 **_conversation_attributes(meta),
                 _OI_TOOL_NAME: tool_name,
             }
+            skill = skill_name(call_event)
+            if skill:
+                tool_attrs[_SEMCONV_SKILL_NAME] = skill
             if call_event:
                 tool_attrs.update(_tool_input_attributes(call_event.data.get("arguments", {})))
                 tool_attrs.update(_event_trace_attributes(call_event, "request"))
@@ -2100,7 +2203,7 @@ def session_to_otlp_genai(
                 "traceId": trace_id,
                 "spanId": span_id_of(call_event if call_event else event),
                 "parentSpanId": root_span_id,
-                "name": _tool_span_name(tool_name),
+                "name": _tool_span_name(tool_name, skill),
                 "kind": 1,  # SPAN_KIND_INTERNAL
                 "startTimeUnixNano": _ts_to_nanos(span_start),
                 "endTimeUnixNano": _duration_end_nanos(span_start, duration_ns),
@@ -2120,6 +2223,7 @@ def session_to_otlp_genai(
                 child_spans.append(retry_links.add(_genai_llm_span(
                     meta, trace_id, root_span_id, req_event, event,
                     span_id_of(req_event),
+                    compacted=id(req_event) in compacted_events,
                 ), req_event, event))
                 continue
 
@@ -2148,6 +2252,9 @@ def session_to_otlp_genai(
                 **_conversation_attributes(meta),
                 _OI_TOOL_NAME: tool_name,
             }
+            skill = skill_name(call_event)
+            if skill:
+                error_attrs[_SEMCONV_SKILL_NAME] = skill
             if call_event and isinstance(call_event.data, Mapping):
                 error_attrs.update(_tool_input_attributes(call_event.data.get("arguments", {})))
                 error_attrs.update(_event_trace_attributes(call_event, "request"))
@@ -2158,7 +2265,7 @@ def session_to_otlp_genai(
                 "traceId": trace_id,
                 "spanId": span_id_of(call_event if call_event else event),
                 "parentSpanId": root_span_id,
-                "name": _tool_span_name(tool_name),
+                "name": _tool_span_name(tool_name, skill),
                 "kind": 1,  # SPAN_KIND_INTERNAL
                 "startTimeUnixNano": _ts_to_nanos(span_start),
                 "endTimeUnixNano": _duration_end_nanos(span_start, duration_ns),
@@ -2186,6 +2293,8 @@ def session_to_otlp_genai(
             "agent.strace.provider": raw_llm_provider,
             **_event_trace_attributes(req_event, "request"),
         }
+        if id(req_event) in compacted_events:
+            llm_attrs[_SEMCONV_CONVERSATION_COMPACTED] = True
         if model:
             llm_attrs[_SEMCONV_MODEL] = model
             llm_attrs[_OI_LLM_MODEL] = model
@@ -2220,13 +2329,16 @@ def session_to_otlp_genai(
             _OI_TOOL_NAME: tool_name,
             **_event_trace_attributes(call_event, "request"),
         }
+        skill = skill_name(call_event)
+        if skill:
+            tool_attrs[_SEMCONV_SKILL_NAME] = skill
         tool_attrs.update(_tool_input_attributes(call_event.data.get("arguments", {})))
         tool_attrs["metadata"] = _openinference_metadata(tool_attrs)
         child_spans.append(retry_links.add({
             "traceId": trace_id,
             "spanId": span_id_of(call_event),
             "parentSpanId": root_span_id,
-            "name": _tool_span_name(tool_name),
+            "name": _tool_span_name(tool_name, skill),
             "kind": 1,  # SPAN_KIND_INTERNAL
             "startTimeUnixNano": _ts_to_nanos(call_event.timestamp),
             "endTimeUnixNano": _one_ms_end_nanos(call_event.timestamp),

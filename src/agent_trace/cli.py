@@ -791,6 +791,7 @@ def _export_otlp_tree(
     try:
         payload = node_tree_to_otlp(
             tree, args.service_name, genai=use_genai, evaluations=evaluations,
+            skills_and_compaction=use_genai,
         )
     except (NonObjectEventDataError, UnusableTimestampError):
         raise
@@ -954,6 +955,7 @@ def cmd_export(args: argparse.Namespace) -> int:
                     payload = session_to_otlp_genai(
                         meta, events, service_name=args.service_name,
                         evaluations=load_stored_evaluations(store, session_id),
+                        skills_and_compaction=True,
                     )
                 else:
                     payload = session_to_otlp(meta, events, service_name=args.service_name)
@@ -997,6 +999,7 @@ def cmd_export(args: argparse.Namespace) -> int:
                 payload = session_to_otlp_genai(
                     meta, events, service_name=args.service_name,
                     evaluations=load_stored_evaluations(store, session_id),
+                    skills_and_compaction=True,
                 )
             except (NonObjectEventDataError, UnusableTimestampError):
                 raise

@@ -975,6 +975,40 @@ def _load_succeeded(result: TraceEvent | None) -> bool | None:
 # --------------------------------------------------------------------------- #
 
 
+def _skill_call_argument(event: TraceEvent) -> str:
+    """Return the skill argument of a dedicated skill tool call, as stored.
+
+    The call is a ``tool_call`` of a tool in ``_SKILL_TOOLS``: Claude Code's
+    and GitHub Copilot CLI's ``Skill``/``skill`` or Gemini CLI's
+    ``activate_skill``. The argument is the first of the tool's keys whose
+    value is a string that is not blank. Anything else gives "".
+    """
+    if event.event_type != EventType.TOOL_CALL or not isinstance(event.data, Mapping):
+        return ""
+    keys = _SKILL_TOOLS.get(_tool_name(event).lower())
+    if keys is None:
+        return ""
+    args = event_arguments(event)
+    for key in keys:
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
+
+
+def skill_call_name(event: TraceEvent) -> str:
+    """Return the skill a dedicated skill tool call names, or "".
+
+    The name is the call's skill argument (see ``_skill_call_argument``)
+    without surrounding spaces or a leading ``/`` or ``$``, as the
+    ``skills`` report reads it. A plugin skill keeps its ``plugin:`` prefix:
+    no skill catalog is read. The name comes from the call alone, so a call
+    whose skill failed to load still has it.
+    """
+    value = _skill_call_argument(event)
+    return _match_skill_name(value, ()).strip() if value else ""
+
+
 def _match_skill_name(raw: str, known: Iterable[str]) -> str:
     candidate = raw.strip().lstrip("/$")
     known_set = set(known)
@@ -1030,13 +1064,10 @@ def _find_loads(
 
         tool = _tool_name(event).lower()
         if event.event_type == EventType.TOOL_CALL and tool in _SKILL_TOOLS:
-            args = event_arguments(event)
-            for key in _SKILL_TOOLS[tool]:
-                value = args.get(key)
-                if isinstance(value, str) and value.strip():
-                    name = _match_skill_name(value, names)
-                    loads.append((name, "skill_tool", "model", tool, index, event))
-                    break
+            value = _skill_call_argument(event)
+            if value:
+                name = _match_skill_name(value, names)
+                loads.append((name, "skill_tool", "model", tool, index, event))
             continue
 
         for raw in _event_paths(event):
@@ -2290,5 +2321,6 @@ __all__ = [
     "load_codex_history",
     "load_copilot_history",
     "shell_reads",
+    "skill_call_name",
     "skill_hints",
 ]

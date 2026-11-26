@@ -1,13 +1,25 @@
 """Tests for OTLP GenAI semantic conventions export (issue #100)."""
 
+import io
+import itertools
 import json
 import os
 import sys
 import tempfile
 import time
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
+from unittest.mock import patch
+
+try:
+    import _no_telemetry  # noqa: F401
+except ImportError:
+    from tests import _no_telemetry  # noqa: F401
 
 from agent_trace import __version__
+from agent_trace.cli import build_parser, cmd_export
+from agent_trace.jsonl_import import import_jsonl
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.otlp import (
     _canonical_provider,
@@ -1640,6 +1652,343 @@ class TestGenAIOtlpTimeLimit(unittest.TestCase):
             ("execute_tool error", limit),
         ])
         assert_unix_nanos_in_range(self, payload)
+
+
+
+# ---------------------------------------------------------------------------
+# export --format otlp-genai: load skill spans and compacted context (#635)
+# ---------------------------------------------------------------------------
+
+_SKILL_NAME = "gen_ai.skill.name"
+_COMPACTED = "gen_ai.conversation.compacted"
+_TEMPORAL_CONTEXT = {"trace_id": "a" * 32, "parent_span_id": "b" * 16, "trace_flags": "01"}
+
+
+def _skill_call(call_id, timestamp, tool_name, arguments, **data):
+    return _event(EventType.TOOL_CALL, timestamp, event_id=call_id, tool_name=tool_name,
+                  tool_use_id=call_id, arguments=arguments, **data)
+
+
+def _skill_result(call_id, timestamp, tool_name, **data):
+    return _event(EventType.TOOL_RESULT, timestamp, parent_id=call_id, tool_name=tool_name,
+                  tool_use_id=call_id, **data)
+
+
+def _claude_line(uuid, second, entry_type, *, parent="", agent="", **fields):
+    """One Claude Code transcript line; ``agent`` makes it a sidechain's."""
+    entry = {
+        "type": entry_type,
+        "sessionId": "imported-session",
+        "timestamp": f"2025-01-01T00:00:{second:02d}Z",
+        "uuid": uuid,
+        **fields,
+    }
+    if parent:
+        entry["parentUuid"] = parent
+    if agent:
+        entry.update(isSidechain=True, agentId=agent)
+    return entry
+
+
+def _claude_user(uuid, second, text, **kwargs):
+    return _claude_line(uuid, second, "user", message={"role": "user", "content": text}, **kwargs)
+
+
+def _claude_reply(uuid, second, message_id, **kwargs):
+    return _claude_line(uuid, second, "assistant", message={
+        "id": message_id,
+        "role": "assistant",
+        "model": "claude-sonnet-4",
+        "content": [{"type": "text", "text": "Working on it."}],
+        "usage": {"input_tokens": 1000, "output_tokens": 10},
+    }, **kwargs)
+
+
+def _claude_boundary(uuid, second, **kwargs):
+    return _claude_line(uuid, second, "system", subtype="compact_boundary", **kwargs)
+
+
+class _GenAIExportCase(unittest.TestCase):
+    """Record sessions in a store and run ``agent-strace export`` on them."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.trace_dir = str(self.root / ".agent-traces")
+        self.store = TraceStore(self.trace_dir)
+
+    def record(self, events, agent_name="claude-code", **meta_fields):
+        meta = SessionMeta(agent_name=agent_name, started_at=1000.0, ended_at=1100.0,
+                           **_TEMPORAL_CONTEXT, **meta_fields)
+        self.store.create_session(meta)
+        for event in events:
+            event.session_id = meta.session_id
+            self.store.append_event(meta.session_id, event)
+        return meta.session_id
+
+    def export(self, session_id, fmt="otlp-genai", *flags, endpoint=False):
+        """Return the spans export writes to --output, or POSTs to --endpoint."""
+        output = str(self.root / f"{fmt}.json")
+        target = ["--endpoint", "http://collector.test:4318"] if endpoint else ["--output", output]
+        args = build_parser().parse_args([
+            "--trace-dir", self.trace_dir, "export", session_id, "--format", fmt, *flags, *target,
+        ])
+        err = io.StringIO()
+        with patch("agent_trace.otlp.export_otlp_payload", return_value=True) as post, \
+                redirect_stdout(io.StringIO()), redirect_stderr(err):
+            code = cmd_export(args)
+        self.assertEqual(code, 0, err.getvalue())
+        if endpoint:
+            payload = post.call_args.args[0]
+        else:
+            with open(output, encoding="utf-8") as exported:
+                payload = json.load(exported)
+        return all_spans(payload)
+
+    def assert_other_formats_unchanged(self, session_id, *flags, formats=("otlp", "temporal")):
+        """Only --format otlp-genai names skills and marks compacted context."""
+        for fmt in formats:
+            with self.subTest(fmt=fmt):
+                for span in self.export(session_id, fmt, *flags):
+                    keys = {attr["key"] for attr in span.get("attributes", [])}
+                    self.assertEqual(keys & {_SKILL_NAME, _COMPACTED}, set(), span["name"])
+
+
+class TestGenAIExportLoadSkillSpans(_GenAIExportCase):
+    """A dedicated tool call that loads a named skill is a load skill span."""
+
+    def _tool_spans(self, session_id, endpoint=False):
+        return {
+            _get_attr(span, "gen_ai.tool.call.id"): span
+            for span in self.export(session_id, endpoint=endpoint)
+            if _get_attr(span, "gen_ai.operation.name") == "execute_tool"
+        }
+
+    def test_skill_calls_name_their_skill(self):
+        calls = [
+            ("pdf", "Skill", {"skill": "pdf"}),
+            ("plugin", "Skill", {"skill": "document-skills:xlsx"}),
+            ("copilot", "skill", {"skill": "/release-notes"}),
+            ("spaced", "Skill", {"command": " / changelog "}),
+            ("gemini", "activate_skill", {"name": "code-review"}),
+            ("bash", "Bash", {"command": "ls"}),
+            ("no-name", "Skill", {}),
+            ("blank", "Skill", {"skill": "  "}),
+            ("slash", "Skill", {"skill": "/"}),
+            ("number", "Skill", {"skill": 3}),
+        ]
+        events = []
+        for index, (call_id, tool, arguments) in enumerate(calls):
+            events.append(_skill_call(call_id, 1001.0 + 2 * index, tool, arguments))
+            events.append(_skill_result(call_id, 1002.0 + 2 * index, tool, result="ok"))
+        session_id = self.record(events)
+        expected = {
+            "pdf": ("execute_tool Skill pdf", "pdf"),
+            "plugin": ("execute_tool Skill document-skills:xlsx", "document-skills:xlsx"),
+            "copilot": ("execute_tool skill release-notes", "release-notes"),
+            "spaced": ("execute_tool Skill changelog", "changelog"),
+            "gemini": ("execute_tool activate_skill code-review", "code-review"),
+            "bash": ("execute_tool Bash", None),
+            "no-name": ("execute_tool Skill", None),
+            "blank": ("execute_tool Skill", None),
+            "slash": ("execute_tool Skill", None),
+            "number": ("execute_tool Skill", None),
+        }
+        for endpoint in (False, True):
+            with self.subTest(endpoint=endpoint):
+                spans = self._tool_spans(session_id, endpoint)
+                self.assertEqual(
+                    {call_id: (span["name"], _get_attr(span, _SKILL_NAME))
+                     for call_id, span in spans.items()},
+                    expected,
+                )
+                self.assertEqual({span["kind"] for span in spans.values()}, {1})
+        self.assert_other_formats_unchanged(session_id)
+
+    def test_failed_skill_call_keeps_its_skill_name(self):
+        session_id = self.record([
+            _skill_call("unknown", 1001.0, "Skill", {"skill": "pdf"}),
+            _skill_result("unknown", 1002.0, "Skill", result="Unknown skill: pdf", is_error=True),
+            _skill_call("error", 1003.0, "Skill", {"skill": "xlsx"}),
+            _event(EventType.ERROR, 1004.0, parent_id="error", tool_name="Skill", error="boom"),
+            _skill_call("unfinished", 1005.0, "Skill", {"skill": "docx"}),
+        ])
+        spans = self._tool_spans(session_id)
+        self.assertEqual(
+            {call_id: (span["name"], _get_attr(span, _SKILL_NAME)) for call_id, span in spans.items()},
+            {
+                "unknown": ("execute_tool Skill pdf", "pdf"),
+                "error": ("execute_tool Skill xlsx", "xlsx"),
+                "unfinished": ("execute_tool Skill docx", "docx"),
+            },
+        )
+        for call_id in ("unknown", "error"):
+            with self.subTest(call_id=call_id):
+                self.assertEqual(spans[call_id]["status"]["code"], 2)
+                self.assertIsNotNone(_get_attr(spans[call_id], "error.type"))
+        self.assert_other_formats_unchanged(session_id)
+
+
+class TestGenAIExportCompactedContext(_GenAIExportCase):
+    """A chat span whose request used a compacted context says so, and only
+    then: gen_ai.conversation.compacted is never false."""
+
+    def _compacted(self, session_id, *flags, endpoint=False, key="name"):
+        """Map each chat span's ``key`` to whether it is marked compacted."""
+        result = {}
+        for span in self.export(session_id, "otlp-genai", *flags, endpoint=endpoint):
+            if _get_attr(span, "gen_ai.operation.name") != "chat":
+                continue
+            value = _get_attr(span, _COMPACTED)
+            self.assertIn(value, (None, True))
+            result[span["name"] if key == "name" else _get_attr(span, key)] = value is True
+        return result
+
+    def test_imported_claude_transcript_marks_each_stream_after_its_compaction(self):
+        # The worker sidechain compacts before the main conversation does.
+        side_summary = "Summary of the search so far."
+        main_summary = "Summary of the work so far."
+        cases = {
+            "summary message": (
+                [_claude_boundary("s3", 4, parent="s2", agent="worker"),
+                 _claude_user("s4", 5, side_summary, parent="s3", agent="worker",
+                              isCompactSummary=True)],
+                [_claude_boundary("c1", 8, parent="a2"),
+                 _claude_user("u2", 9, main_summary, parent="c1", isCompactSummary=True)],
+            ),
+            "boundary summary": (
+                [_claude_boundary("s3", 4, parent="s2", agent="worker", content=side_summary)],
+                [_claude_boundary("c1", 8, parent="a2", content=main_summary)],
+            ),
+        }
+        for label, (side_compaction, main_compaction) in cases.items():
+            with self.subTest(case=label):
+                entries = [
+                    _claude_user("u1", 0, "Add rate limiting."),
+                    _claude_reply("a1", 1, "msg_main_1", parent="u1"),
+                    _claude_user("s1", 2, "Find the middleware.", parent="a1", agent="worker"),
+                    _claude_reply("s2", 3, "msg_side_1", parent="s1", agent="worker"),
+                    *side_compaction,
+                    _claude_reply("s5", 6, "msg_side_2", parent="s4", agent="worker"),
+                    _claude_reply("a2", 7, "msg_main_2", parent="a1"),
+                    *main_compaction,
+                    _claude_reply("a3", 10, "msg_main_3", parent="u2"),
+                    _claude_reply("s6", 11, "msg_side_3", parent="s5", agent="worker"),
+                ]
+                source = self.root / f"{label}.jsonl"
+                source.write_text("".join(json.dumps(entry) + "\n" for entry in entries),
+                                  encoding="utf-8")
+                session_id = import_jsonl(source, store=self.store)
+                self.assertEqual(self._compacted(session_id, key="gen_ai.response.id"), {
+                    "msg_main_1": False,
+                    "msg_side_1": False,
+                    "msg_side_2": True,
+                    "msg_main_2": False,
+                    "msg_main_3": True,
+                    "msg_side_3": True,
+                })
+                self.assert_other_formats_unchanged(session_id, formats=("otlp",))
+
+    def test_compact_session_start_marks_the_main_requests_after_it(self):
+        def response(timestamp, model, parent_id="", **data):
+            return _event(EventType.LLM_RESPONSE, timestamp, parent_id=parent_id,
+                          provider="codex", model=model, **data)
+
+        session_id = self.record([
+            _event(EventType.SESSION_START, 1000.0, source="startup"),
+            response(1001.0, "before"),
+            # The compaction request itself ran on the old context.
+            _event(EventType.LLM_REQUEST, 1002.0, event_id="q-compaction", model="compaction"),
+            _event(EventType.SESSION_START, 1003.0, source="compact"),
+            response(1004.0, "compaction", parent_id="q-compaction"),
+            response(1005.0, "after"),
+            # A subagent's model requests use its own context.
+            response(1006.0, "subagent", agent_id="worker-1"),
+            _event(EventType.LLM_REQUEST, 1007.0, model="unanswered"),
+            _event(EventType.LLM_REQUEST, 1008.0, event_id="q-failed", model="failed"),
+            _event(EventType.ERROR, 1009.0, parent_id="q-failed", error="overloaded"),
+            _event(EventType.SESSION_START, 1010.0, source="resume"),
+            response(1011.0, "resumed"),
+            _event(EventType.SESSION_START, 1012.0, source="clear"),
+            response(1013.0, "cleared"),
+        ], agent_name="codex")
+        expected = {
+            "chat before": False,
+            "chat compaction": False,
+            "chat after": True,
+            "chat subagent": False,
+            "chat unanswered": True,
+            "chat failed": True,
+            "chat resumed": True,
+            "chat cleared": False,
+        }
+        for endpoint in (False, True):
+            with self.subTest(endpoint=endpoint):
+                self.assertEqual(self._compacted(session_id, endpoint=endpoint), expected)
+        self.assert_other_formats_unchanged(session_id)
+
+    def test_new_main_context_keeps_a_compacted_subagent_marked(self):
+        # A main-stream session_start resets the main conversation only.
+        main_marks = {
+            "compact session start": lambda: _event(
+                EventType.SESSION_START, 1001.0, source="compact"),
+            "main summary": lambda: _event(
+                EventType.USER_PROMPT, 1001.0, prompt="Summary.",
+                is_compaction_summary=True, context_stream="main"),
+        }
+        for label, side in (
+            ("claude sidechain", {"context_stream": "sidechain:worker"}),
+            ("codex subagent", {"agent_id": "worker"}),
+        ):
+            for main_mark, source in itertools.product(main_marks, ("clear", "startup")):
+                with self.subTest(stream=label, main_mark=main_mark, source=source):
+                    session_id = self.record([
+                        _event(EventType.SESSION_START, 1000.0, source="startup"),
+                        main_marks[main_mark](),
+                        _event(EventType.USER_PROMPT, 1002.0, prompt="Summary.",
+                               is_compaction_summary=True, **side),
+                        _event(EventType.LLM_RESPONSE, 1003.0, model="main-before"),
+                        _event(EventType.LLM_RESPONSE, 1004.0, model="side-before", **side),
+                        _event(EventType.SESSION_START, 1005.0, source=source),
+                        _event(EventType.LLM_RESPONSE, 1006.0, model="main-after"),
+                        _event(EventType.LLM_RESPONSE, 1007.0, model="side-after", **side),
+                    ])
+                    for endpoint in (False, True):
+                        self.assertEqual(self._compacted(session_id, endpoint=endpoint), {
+                            "chat main-before": True,
+                            "chat side-before": True,
+                            "chat main-after": False,
+                            "chat side-after": True,
+                        })
+
+    def test_include_subagents_marks_each_session_on_its_own(self):
+        parent_id = self.record([
+            _event(EventType.LLM_RESPONSE, 1001.0, model="parent-model"),
+            _skill_call("parent-skill", 1002.0, "Skill", {"skill": "pdf"}),
+            _skill_result("parent-skill", 1003.0, "Skill", result="ok"),
+        ])
+        self.record([
+            _event(EventType.SESSION_START, 1010.0, source="compact"),
+            _event(EventType.LLM_RESPONSE, 1011.0, model="child-model"),
+            _skill_call("child-skill", 1012.0, "Skill", {"skill": "xlsx"}),
+            _skill_result("child-skill", 1013.0, "Skill", result="ok"),
+        ], parent_session_id=parent_id)
+        for endpoint in (False, True):
+            with self.subTest(endpoint=endpoint):
+                spans = self.export(parent_id, "otlp-genai", "--include-subagents",
+                                    endpoint=endpoint)
+                self.assertEqual(
+                    sorted((span["name"], _get_attr(span, _SKILL_NAME), _get_attr(span, _COMPACTED))
+                           for span in spans if span["name"].startswith(("chat", "execute_tool"))),
+                    [
+                        ("chat child-model", None, True),
+                        ("chat parent-model", None, None),
+                        ("execute_tool Skill pdf", "pdf", None),
+                        ("execute_tool Skill xlsx", "xlsx", None),
+                    ],
+                )
+        self.assert_other_formats_unchanged(parent_id, "--include-subagents", formats=("otlp",))
 
 
 if __name__ == "__main__":

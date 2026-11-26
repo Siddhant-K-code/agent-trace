@@ -776,6 +776,28 @@ class TestOtlpStreamRootStatus(_ReceiverTestCase):
         self.assertEqual(tool["status"]["code"], 2)
 
 
+class TestOtlpStreamSkillsAndCompaction(_ReceiverTestCase):
+    """Only export --format otlp-genai names skills and marks compacted
+    context (#635); a streamed batch keeps its spans as they were."""
+
+    def test_skill_call_and_compacted_request_stream_unchanged(self) -> None:
+        events = [
+            _event("session_start", {"source": "compact"}, "s1", ts=2.0),
+            _event("llm_response", {"model": "m"}, "r1", ts=3.0),
+            _event("tool_call", {"tool_name": "Skill", "arguments": {"skill": "pdf"}}, "c1",
+                   ts=4.0),
+            _event("tool_result", {"tool_name": "Skill", "result": "ok"}, "t1", parent_id="c1",
+                   ts=5.0),
+        ]
+        posts, stderr = self._stream(_wrapped(events))
+        self.assertEqual(stderr, "")
+        self.assertEqual(
+            self._sent(posts), [(_SESSION, [_USER, _ASSISTANT], [_LLM_SPAN, "execute_tool Skill"])],
+        )
+        self.assertNotIn(b"gen_ai.skill.name", posts[0][1])
+        self.assertNotIn(b"gen_ai.conversation.compacted", posts[0][1])
+
+
 class TestOtlpStreamAgentId(_ReceiverTestCase):
     """StreamConfig.agent_id (watch --agent-id) is on every streamed span (#586)."""
 

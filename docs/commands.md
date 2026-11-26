@@ -2529,6 +2529,15 @@ tool span its input and result as `gen_ai.tool.call.arguments` and
 `gen_ai.tool.call.result`. See
 [Spans and attributes](production.md#spans-and-attributes).
 
+`--format otlp-genai` names skill loads and marks compacted context. A
+Claude Code `Skill`, Copilot CLI `skill` or Gemini CLI `activate_skill` call
+whose arguments name a skill gets `gen_ai.skill.name` and the span name
+`execute_tool {tool} {skill}`, also when the call failed. A `chat` span
+whose request came after a recorded compaction in the same context gets
+`gen_ai.conversation.compacted` `true`; the attribute is never `false`.
+`--format otlp`, `temporal` and `watch --stream-otlp` add neither. See
+[Skill loads and compacted context](production.md#skill-loads-and-compacted-context).
+
 When the session has an eval.json from [`eval run` or `eval ci`](#eval),
 `--format otlp-genai` adds one `gen_ai.evaluation.result` event per saved
 result to the `invoke_agent` root span, at the span's end time:
