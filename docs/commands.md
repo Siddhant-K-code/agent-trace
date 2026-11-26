@@ -1956,6 +1956,22 @@ and exits 1. That check comes before `--baseline` is read, and
 `--save-baseline` writes no file. With `--current`, `drift` does not read
 `--since`.
 
+`--baseline FILE` reads a fingerprint file, as `fingerprint --output` or
+`drift --save-baseline` writes. It must be UTF-8 JSON, and may start with a
+byte order mark. When `drift` cannot read it, `drift` prints
+`Could not read fingerprint file FILE: REASON` on stderr and exits 1, and
+`--save-baseline` writes no file. `drift` cannot read the file when:
+
+- the path is empty
+- the file is missing or cannot be read
+- it is not UTF-8 or not a JSON object
+- it nests more than 128 levels
+- it holds NaN, an infinity, a float out of range or an int of more than 4300 digits
+- its `period`, `tool_mix` or a statistic has the wrong type
+
+A `tool_mix` value must be a number of 0 or more. A statistic's `mean`, `p50`
+and `p95` must be numbers that fit in a float.
+
 ### `baseline`
 ```
 agent-strace baseline update [--since DAYS] [--output FILE]
@@ -2024,6 +2040,9 @@ The period runs from the earliest to the latest usable `started_at`. A session
 whose start is not usable still counts. When no start is usable, the text shows
 `ID: (none)` and `Period: - to -`, and the JSON `fingerprint_id` and both
 `period` fields are empty. See [`list`](#list).
+
+`--compare` reads both files the same way as [`drift --baseline`](#drift),
+and names the first file it cannot read.
 
 ### `freeze`
 ```
