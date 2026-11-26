@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import time
 import uuid
 from dataclasses import asdict, dataclass, field, fields
@@ -123,6 +124,25 @@ def usable_time(value: Any) -> float | None:
     except (OverflowError, ValueError, OSError):
         return None
     return number
+
+
+_SINCE_DAYS = re.compile(r"([0-9]+(?:\.[0-9]+)?)d?")
+
+SINCE_DAYS_FORM = "use a number of days as N or Nd, such as 7d"
+
+
+def parse_since_days(value: str) -> float | None:
+    """Return the days in a --since value that takes a number of days.
+
+    The value is N or Nd. N is ASCII digits with at most one dot between
+    digits, such as 7, 7d or 0.5d. Any other value gives None, and so does
+    an N with so many digits that it is not a finite float.
+    """
+    match = _SINCE_DAYS.fullmatch(value)
+    if match is None:
+        return None
+    days = float(match.group(1))
+    return days if math.isfinite(days) else None
 
 
 def usable_text(value: Any) -> str:
