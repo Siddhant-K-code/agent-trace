@@ -46,6 +46,7 @@ agent-strace export <session-id> --format otlp-genai \
 | Tool input and output | `tool.input.*` and `tool.output` | `input.value` and `output.value`, and `gen_ai.tool.call.arguments` and `gen_ai.tool.call.result` |
 | Retries (`retry_of`) | Span links on tool spans | Span links on tool and `chat` spans |
 | Subagents | One trace with `--include-subagents`; see [Subagents in one trace](#subagents-in-one-trace) | The same |
+| Skill loads and compacted context | Not marked | `gen_ai.skill.name` on skill load spans and `gen_ai.conversation.compacted` on `chat` spans; see [Skill loads and compacted context](#skill-loads-and-compacted-context) |
 | Evaluation results | None; `export --scores --backend otlp` sends them as `agent_strace.eval.score` gauges | A `gen_ai.evaluation.result` event on the root per result `eval run` or `eval ci` saved; see [Evaluation results](#evaluation-results) |
 
 `--format otlp` keeps its span and attribute names for backwards compatibility.
@@ -72,6 +73,11 @@ reports.
 | Session root | `invoke_agent {gen_ai.agent.name}`, or `invoke_agent` when the session has no agent name | `INTERNAL` (`1`) | `invoke_agent` | [Invoke agent internal span](https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-agent-spans.md) |
 | Model request | `chat {gen_ai.request.model}`, or `chat` when no model was recorded | `CLIENT` (`3`) | `chat` | [Inference](https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/client-inference.md) |
 | Tool call, including a failed one | `execute_tool {gen_ai.tool.name}` | `INTERNAL` (`1`) | `execute_tool` | [Execute tool](https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/execute-tool.md) |
+| Skill load, `export` only | `execute_tool {gen_ai.tool.name} {gen_ai.skill.name}`, or `execute_tool {gen_ai.tool.name}` when the call names no skill | `INTERNAL` (`1`) | `execute_tool` | [Load skill span](https://github.com/open-telemetry/semantic-conventions-genai/blob/v0.1.0/docs/gen-ai/execute-tool.md#load-skill-span) |
+
+`export --format otlp-genai` also names skill loads and marks `chat` spans
+that used a compacted context. Temporal and `watch --stream-otlp` do not; see
+[Skill loads and compacted context](#skill-loads-and-compacted-context).
 
 - The root carries `gen_ai.agent.name` only when the session has an agent
   name. The session ID is on `session.id` and `agent.session_id`, and the
@@ -194,6 +200,69 @@ reports.
   it. It is deprecated, since the conventions renamed it to
   `gen_ai.provider.name` in semantic conventions v1.37.0, and will be removed
   in a later release. Read `gen_ai.provider.name` instead.
+
+#### Skill loads and compacted context
+
+`agent-strace export --format otlp-genai`, to a file or with `--endpoint`
+and with `--include-subagents`, adds two parts of the conventions' `v0.1.0`
+release. `--format otlp`, `--format temporal` and `watch --stream-otlp` keep
+their spans as they were. A streamed batch is not the whole session, so it
+cannot tell which requests came after a compaction.
+
+A call to a tool that loads a skill is a
+[load skill span](https://github.com/open-telemetry/semantic-conventions-genai/blob/v0.1.0/docs/gen-ai/execute-tool.md#load-skill-span):
+it gets `gen_ai.skill.name`, and its span is named
+`execute_tool {gen_ai.tool.name} {gen_ai.skill.name}`, such as
+`execute_tool Skill pdf`.
+
+- The tools are the ones [`skills`](skills.md) counts as loads: Claude Code's
+  `Skill`, GitHub Copilot CLI's `skill` and Gemini CLI's `activate_skill`. The
+  name is the call's `skill`, `command` or `name` argument (`name` or `skill`
+  for `activate_skill`), trimmed, without a leading `/` or `$`. A plugin
+  prefix, as in `document-skills:xlsx`, is kept. Codex loads a skill by
+  reading its `SKILL.md` with a general tool, so its spans do not change.
+- A call whose arguments name no skill, because the argument is missing,
+  blank, only `/` or not a string, keeps the name
+  `execute_tool {gen_ai.tool.name}` and has no `gen_ai.skill.name`.
+- A failed call, and a call with no result, keep the skill name. The name is
+  what the call asked to load, read from its own arguments, as `skills`
+  reads it. The span has ERROR status and `error.type`, like any failed tool
+  call, so a backend can count the failed loads of each skill.
+- The skill name is the skill's identity, like `gen_ai.tool.name`, so it is
+  not treated as content. It is already in `gen_ai.tool.call.arguments`.
+- `gen_ai.skill.description` is not sent. The tool call does not carry it,
+  agent-strace does not record a skill catalog with each load, and the
+  conventions note it may contain sensitive information.
+  `gen_ai.skill.source.uri` is not sent either: for a coding agent it would be
+  a path on the machine that ran the agent.
+
+A `chat` span whose request used a compacted view of the earlier conversation
+gets
+[`gen_ai.conversation.compacted`](https://github.com/open-telemetry/semantic-conventions-genai/blob/v0.1.0/docs/registry/attributes/gen-ai.md#gen-ai-conversation-compacted)
+`true`. The attribute is a positive indicator: it is set only when the
+session recorded the compaction, and never to `false`. A `chat` span without
+it may still have used a compacted context.
+
+- These records mark a context as compacted:
+  - In a Claude Code transcript that [`import`](commands.md#import) read, the
+    summary message after a compaction boundary, or the summary on the
+    boundary itself.
+  - A `session_start` with source `compact`, which the Claude Code and Codex
+    hooks record when a session continues after compaction. Claude Code's
+    hooks record no model requests, so in practice this marks Codex's `chat`
+    spans.
+- Each request after the record in the same context is marked. The main
+  conversation, each Claude Code subagent (sidechain) and each Codex
+  subagent are separate contexts, so a subagent's compaction does not mark
+  the main conversation's spans, or the other way round. With
+  `--include-subagents`, each session's spans are marked from its own events.
+- The request that produced the summary is not marked: it read the context
+  before compaction. A `session_start` with source `resume` keeps the mark.
+  Any other `session_start`, such as `startup` or `clear`, starts a new
+  context and drops it.
+- GitHub Copilot CLI, Gemini CLI and Cursor sessions, gh-aw runs that
+  `import` read, and the SDK integrations record no compaction that
+  agent-strace can read, so their `chat` spans never have the attribute.
 
 #### Content capture
 
