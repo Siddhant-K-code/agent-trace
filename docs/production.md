@@ -259,7 +259,9 @@ it may still have used a compacted context.
 - The request that produced the summary is not marked: it read the context
   before compaction. A `session_start` with source `resume` keeps the mark.
   Any other `session_start`, such as `startup` or `clear`, starts a new
-  context and drops it.
+  context for the main conversation and drops its mark only. The hooks
+  record a session start for the main conversation, so a compacted subagent
+  stays marked.
 - GitHub Copilot CLI, Gemini CLI and Cursor sessions, gh-aw runs that
   `import` read, and the SDK integrations record no compaction that
   agent-strace can read, so their `chat` spans never have the attribute.

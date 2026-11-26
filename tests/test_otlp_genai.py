@@ -1,6 +1,7 @@
 """Tests for OTLP GenAI semantic conventions export (issue #100)."""
 
 import io
+import itertools
 import json
 import os
 import sys
@@ -1926,6 +1927,40 @@ class TestGenAIExportCompactedContext(_GenAIExportCase):
             with self.subTest(endpoint=endpoint):
                 self.assertEqual(self._compacted(session_id, endpoint=endpoint), expected)
         self.assert_other_formats_unchanged(session_id)
+
+    def test_new_main_context_keeps_a_compacted_subagent_marked(self):
+        # A main-stream session_start resets the main conversation only.
+        main_marks = {
+            "compact session start": lambda: _event(
+                EventType.SESSION_START, 1001.0, source="compact"),
+            "main summary": lambda: _event(
+                EventType.USER_PROMPT, 1001.0, prompt="Summary.",
+                is_compaction_summary=True, context_stream="main"),
+        }
+        for label, side in (
+            ("claude sidechain", {"context_stream": "sidechain:worker"}),
+            ("codex subagent", {"agent_id": "worker"}),
+        ):
+            for main_mark, source in itertools.product(main_marks, ("clear", "startup")):
+                with self.subTest(stream=label, main_mark=main_mark, source=source):
+                    session_id = self.record([
+                        _event(EventType.SESSION_START, 1000.0, source="startup"),
+                        main_marks[main_mark](),
+                        _event(EventType.USER_PROMPT, 1002.0, prompt="Summary.",
+                               is_compaction_summary=True, **side),
+                        _event(EventType.LLM_RESPONSE, 1003.0, model="main-before"),
+                        _event(EventType.LLM_RESPONSE, 1004.0, model="side-before", **side),
+                        _event(EventType.SESSION_START, 1005.0, source=source),
+                        _event(EventType.LLM_RESPONSE, 1006.0, model="main-after"),
+                        _event(EventType.LLM_RESPONSE, 1007.0, model="side-after", **side),
+                    ])
+                    for endpoint in (False, True):
+                        self.assertEqual(self._compacted(session_id, endpoint=endpoint), {
+                            "chat main-before": True,
+                            "chat side-before": True,
+                            "chat main-after": False,
+                            "chat side-after": True,
+                        })
 
     def test_include_subagents_marks_each_session_on_its_own(self):
         parent_id = self.record([

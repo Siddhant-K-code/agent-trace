@@ -1234,9 +1234,11 @@ def _compacted_context_events(events: list[TraceEvent]) -> set[int]:
     From there on every ``llm_request``, ``llm_response``,
     ``assistant_response`` and ``error`` of that stream is returned, the
     marking response included. A ``session_start`` with ``source`` resume
-    keeps the marks; any other ``session_start`` starts a new context and
-    clears them. Events whose data is not an object are skipped. Nothing
-    else counts, so a request with no such sign before it is not returned.
+    keeps the marks; any other ``session_start`` starts a new context for its
+    own stream and clears that stream's mark only, so a compacted subagent
+    stays marked when the main conversation starts again. Events whose data
+    is not an object are skipped. Nothing else counts, so a request with no
+    such sign before it is not returned.
     """
     from .compaction import _event_stream
 
@@ -1251,7 +1253,7 @@ def _compacted_context_events(events: list[TraceEvent]) -> set[int]:
             if source == "compact":
                 compacted.add(_event_stream(event))
             elif source != "resume":
-                compacted.clear()
+                compacted.discard(_event_stream(event))
             continue
         stream = _event_stream(event)
         if (
