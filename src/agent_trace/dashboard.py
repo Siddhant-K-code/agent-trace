@@ -29,9 +29,11 @@ from .fileutil import split_lf_lines
 from .inert import inert
 from .session_outcome import recorded_session_status
 from .models import (
+    SINCE_DAYS_FORM,
     EventType,
     SessionMeta,
     TraceEvent,
+    parse_since_days,
     usable_count,
     usable_number,
     usable_text,
@@ -876,8 +878,11 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
     if trend:
         since_raw = getattr(args, "since", None)
         since_days: float | None = None
-        if since_raw:
-            since_days = float(since_raw.rstrip("d"))
+        if since_raw is not None:
+            since_days = parse_since_days(since_raw)
+            if since_days is None:
+                sys.stderr.write(f"invalid --since value: {SINCE_DAYS_FORM}\n")
+                return 1
 
         trend_report = build_trend_report(store, since_days=since_days)
 

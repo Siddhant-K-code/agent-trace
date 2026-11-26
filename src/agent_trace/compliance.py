@@ -48,9 +48,11 @@ from .event_data import (
 from .fileutil import split_lf_lines
 from .inert import inert
 from .models import (
+    SINCE_DAYS_FORM,
     EventType,
     SessionMeta,
     TraceEvent,
+    parse_since_days,
     usable_number,
     usable_text,
     usable_time,
@@ -1126,12 +1128,17 @@ def cmd_compliance(args: argparse.Namespace) -> int:
     if sub == "export":
         framework = getattr(args, "framework", "all") or "all"
         output = getattr(args, "output", "") or ""
-        since_str = getattr(args, "since", "") or ""
+        since_raw = getattr(args, "since", None)
         session_id = getattr(args, "session_id", None)
 
-        if since_str or not session_id:
+        if since_raw is not None or not session_id:
             # Bulk export
-            since_days = float(since_str.rstrip("d")) if since_str else 30.0
+            since_days = 30.0
+            if since_raw is not None:
+                since_days = parse_since_days(since_raw)
+                if since_days is None:
+                    sys.stderr.write(f"invalid --since value: {SINCE_DAYS_FORM}\n")
+                    return 1
             try:
                 reports = export_compliance_bulk(store, framework=framework,
                                                  since_days=since_days)

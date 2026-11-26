@@ -256,10 +256,14 @@ def cmd_dataset(args: argparse.Namespace) -> int:
         return 0
 
     if dataset_command == "auto":
+        from ..models import SINCE_DAYS_FORM, parse_since_days
         from ..store import TraceStore, resolve_trace_dir
         filter_spec = getattr(args, "filter", "has-errors") or "has-errors"
-        since_raw = getattr(args, "since", "7d") or "7d"
-        since_days = float(since_raw.rstrip("d"))
+        since_raw = getattr(args, "since", None)
+        since_days = parse_since_days("7d" if since_raw is None else since_raw)
+        if since_days is None:
+            sys.stderr.write(f"invalid --since value: {SINCE_DAYS_FORM}\n")
+            return 1
         label = getattr(args, "label", "") or filter_spec
         trace_dir = resolve_trace_dir(getattr(args, "trace_dir", None))
         store = TraceStore(trace_dir)

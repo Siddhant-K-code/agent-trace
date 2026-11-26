@@ -24,7 +24,7 @@ from .cost import session_cost
 from .event_data import require_usable_timestamps, str_field
 from .failures import count_session_errors
 from .inert import inert
-from .models import EventType, TraceEvent, usable_time
+from .models import SINCE_DAYS_FORM, EventType, TraceEvent, parse_since_days, usable_time
 from .store import TraceStore
 
 
@@ -645,22 +645,29 @@ def cmd_drift(args: argparse.Namespace) -> int:
     store = TraceStore(args.trace_dir)
     threshold = getattr(args, "threshold", 0.20)
 
+    # Resolve current session window
+    since_raw = getattr(args, "since", None)
+    current_range = getattr(args, "current", None)
+    baseline_range = getattr(args, "baseline_range", None)
+
+    # With --current, --since is not read.
+    days: float | None = None
+    if not current_range and since_raw is not None:
+        days = parse_since_days(since_raw)
+        if days is None:
+            sys.stderr.write(f"invalid --since value: {SINCE_DAYS_FORM}\n")
+            return 1
+
     # Resolve baseline fingerprint
     baseline_fp: BehavioralFingerprint | None = None
     baseline_path = getattr(args, "baseline", None)
     if baseline_path and Path(baseline_path).exists():
         baseline_fp = BehavioralFingerprint.from_json(Path(baseline_path).read_text())
 
-    # Resolve current session window
-    since_days = getattr(args, "since", None)
-    current_range = getattr(args, "current", None)
-    baseline_range = getattr(args, "baseline_range", None)
-
     if current_range:
         start, end = _parse_date_range(current_range)
         current_ids = _sessions_in_range(store, start, end)
-    elif since_days:
-        days = float(since_days.rstrip("d"))
+    elif days is not None:
         all_ids = _sessions_in_window(store, days)
         # Split in half: first half = baseline (if no explicit baseline), second = current
         mid = len(all_ids) // 2

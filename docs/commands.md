@@ -1719,6 +1719,13 @@ That path refuses a bad `started_at` first, when it lists the store, even for a
 session outside the window. That line is
 `Error: cannot read session <session-id>: started_at is not a usable time`.
 
+`--since` is the last N days, as `N` or `Nd`, such as `7`, `7d` or `0.5d`. N is
+ASCII digits with at most one `.` between digits. `0d` selects nothing. Any
+other value, an empty one too, prints
+`invalid --since value: use a number of days as N or Nd, such as 7d` on stderr
+and exits 1, with or without a session ID. That check runs before the store is
+read, so it prints no report and writes no `--output` file.
+
 This is the legacy compatibility command. For a privacy-minimized, explicitly
 heuristic evidence crosswalk with current versioned framework manifests, use
 [`compliance-report`](#compliance-report). The two output schemas and claims
@@ -1903,6 +1910,13 @@ leaves the session out. `--trend --html` takes its period and annotation
 positions from the usable starts. With none, the period is empty and no
 annotation is placed. See [`list`](#list).
 
+`--trend --since` is the last N days, as `N` or `Nd`, such as `7`, `7d` or
+`0.5d`. N is ASCII digits with at most one `.` between digits. `0d` selects
+nothing. Any other value, an empty one too, prints
+`invalid --since value: use a number of days as N or Nd, such as 7d` on stderr
+and exits 1, and `--html` writes no file. Without `--trend`, `dashboard` does
+not read `--since`.
+
 ```bash
 # Add a timeline annotation (appears as a vertical marker on trend charts)
 agent-strace dashboard annotate --date 2026-05-10 --note "Added retry policy"
@@ -1933,6 +1947,14 @@ left them out; save them again to compare like with like.
 
 `--since`, `--current` and `--baseline-range` leave out a session whose
 `started_at` is not a usable time. See [`list`](#list).
+
+`--since` is the last N days, as `N` or `Nd`, such as `7`, `7d` or `0.5d`. N is
+ASCII digits with at most one `.` between digits. `0d` selects nothing. Any
+other value, an empty one too, prints
+`invalid --since value: use a number of days as N or Nd, such as 7d` on stderr
+and exits 1. That check comes before `--baseline` is read, and
+`--save-baseline` writes no file. With `--current`, `drift` does not read
+`--since`.
 
 ### `baseline`
 ```
@@ -2121,6 +2143,12 @@ that match `--filter` (default: `has-errors`) to
 `<trace-dir>/workspaces/<id>/datasets/NAME.jsonl` when `AGENT_STRACE_WORKSPACE`
 is set. `--dataset FILE` writes to a different path.
 `agent-strace optimize --dataset NAME` reads the same file.
+
+In `eval dataset auto`, `--since` is `N` or `Nd`, such as `7`, `7d` or `0.5d`.
+N is ASCII digits with at most one `.` between digits. `0d` selects nothing.
+Any other value, an empty one too, prints
+`invalid --since value: use a number of days as N or Nd, such as 7d` on stderr
+and exits 1. It adds no session and writes no `--dataset` file.
 
 The `has-errors` filter and the `error_count` scorer count `error` events and
 [failed model requests](production.md#session-error-counts), each failed request once. A cancelled request is not an error.

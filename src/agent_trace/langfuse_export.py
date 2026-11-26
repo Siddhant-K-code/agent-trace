@@ -17,8 +17,6 @@ from __future__ import annotations
 
 import base64
 import json
-import math
-import re
 import sys
 import time
 import urllib.error
@@ -36,9 +34,11 @@ from .event_data import (
 )
 from .inert import inert
 from .models import (
+    SINCE_DAYS_FORM,
     EventType,
     SessionMeta,
     TraceEvent,
+    parse_since_days,
     usable_count,
     usable_number,
     usable_text,
@@ -594,25 +594,6 @@ def _loadable_events(store: TraceStore, session_ids: list[str]):
         except Exception:
             continue
         yield sid, events
-
-
-_SINCE_DAYS = re.compile(r"([0-9]+(?:\.[0-9]+)?)d?")
-
-SINCE_DAYS_FORM = "use a number of days as N or Nd, such as 7d"
-
-
-def parse_since_days(value: str) -> float | None:
-    """Return the days in a --since value for --scores, --metrics or --backend.
-
-    The value is N or Nd. N is ASCII digits with at most one dot between
-    digits, such as 7, 7d or 0.5d. Any other value gives None, and so does
-    an N with so many digits that it is not a finite float.
-    """
-    match = _SINCE_DAYS.fullmatch(value)
-    if match is None:
-        return None
-    days = float(match.group(1))
-    return days if math.isfinite(days) else None
 
 
 def _require_usable_started_at(meta: SessionMeta, *, session_id: str | None = None) -> None:
