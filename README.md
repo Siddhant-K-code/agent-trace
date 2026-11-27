@@ -12,6 +12,12 @@
 **Local evidence and replay for coding agents.**
 <p>Used by Meta, ByteDance, Zama.ai &amp; more<br><br><picture><source media="(prefers-color-scheme: dark)" srcset="assets/logos/meta-dark.svg"><img src="assets/logos/meta.svg" alt="Meta" height="26"></picture>&emsp;&emsp;&emsp;<picture><source media="(prefers-color-scheme: dark)" srcset="assets/logos/bytedance-dark.svg"><img src="assets/logos/bytedance.svg" alt="ByteDance" height="24"></picture>&emsp;&emsp;&emsp;<picture><source media="(prefers-color-scheme: dark)" srcset="assets/logos/zama-dark.svg"><img src="assets/logos/zama.svg" alt="Zama" height="18"></picture></p>
 
+<a id="install-with-your-coding-agent"></a>**Install with your coding agent.** Paste this into Claude Code, Copilot CLI, Codex, Gemini CLI, or Cursor; it lists the commands before running them:
+
+```text
+Set up agent-strace (https://github.com/Siddhant-K-code/agent-trace) to record this coding agent's sessions as local traces. First, say which agent you are and list the commands you'll run. Never use sudo or hand-edit config files; if a step fails, stop and show me the error. 1. Install or upgrade the CLI: `uv tool install --upgrade agent-strace` (no uv: use pipx). If `agent-strace --version` fails, run `uv tool update-shell` (or `pipx ensurepath`), since the hooks call it from PATH. 2. Connect only this agent's capture path: Claude Code: `claude plugin marketplace add Siddhant-K-code/agent-trace`, then `claude plugin install agent-strace@agent-trace`. Copilot CLI: `copilot plugin marketplace add Siddhant-K-code/agent-trace`, then `copilot plugin install agent-strace@agent-trace`. Codex: `codex plugin marketplace add Siddhant-K-code/agent-trace`, then `codex plugin add agent-strace@agent-trace`. Gemini CLI: `agent-strace setup --cli gemini`. Cursor: `agent-strace setup --cli cursor`. Other agents: stop and point me to the agent-trace docs/setup.md guide. 3. Tell me to restart this agent from a new terminal (in Codex, trust the agent-strace hooks in /hooks), do one task, then run `agent-strace replay` and `agent-strace health`. Traces stay local in .agent-traces/; `agent-strace telemetry disable` turns off anonymous telemetry.
+```
+
 `agent-strace` records what a coding agent did in a session (prompts, tool calls, file operations, commands, failures) as local files, then does three jobs:
 
 1. **Replay what happened.** [`replay`](docs/commands.md#replay) shows the session in order. [`explain`](docs/commands.md#explain) summarizes it in phases.
@@ -32,14 +38,6 @@ Works with Claude Code, Codex, Copilot CLI, Gemini CLI, Cursor, and any MCP serv
 
 > [!WARNING]
 > Experimental. Do not treat it as a production security boundary without your own threat model, controls, and testing.
-
-## Install with your coding agent
-
-Paste this into Claude Code, Copilot CLI, Codex, Gemini CLI, or Cursor; it lists the commands before running them:
-
-```text
-Set up agent-strace (https://github.com/Siddhant-K-code/agent-trace) to record this coding agent's sessions as local traces. First, say which agent you are and list the commands you'll run. Never use sudo or hand-edit config files; if a step fails, stop and show me the error. 1. Install or upgrade the CLI: `uv tool install --upgrade agent-strace` (no uv: use pipx). If `agent-strace --version` fails, run `uv tool update-shell` (or `pipx ensurepath`), since the hooks call it from PATH. 2. Connect only this agent's capture path: Claude Code: `claude plugin marketplace add Siddhant-K-code/agent-trace`, then `claude plugin install agent-strace@agent-trace`. Copilot CLI: `copilot plugin marketplace add Siddhant-K-code/agent-trace`, then `copilot plugin install agent-strace@agent-trace`. Codex: `codex plugin marketplace add Siddhant-K-code/agent-trace`, then `codex plugin add agent-strace@agent-trace`. Gemini CLI: `agent-strace setup --cli gemini`. Cursor: `agent-strace setup --cli cursor`. Other agents: stop and point me to the agent-trace docs/setup.md guide. 3. Tell me to restart this agent from a new terminal (in Codex, trust the agent-strace hooks in /hooks), do one task, then run `agent-strace replay` and `agent-strace health`. Traces stay local in .agent-traces/; `agent-strace telemetry disable` turns off anonymous telemetry.
-```
 
 ## Try it without setup: which skills never load
 
