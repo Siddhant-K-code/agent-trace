@@ -254,6 +254,22 @@ def _finite_copy(value: Any) -> Any:
     return root[0]
 
 
+def finite_json_dumps(value: Any) -> str:
+    """Return ``value`` as strict JSON, with each NaN or infinite float as null.
+
+    NaN and infinity are not JSON, so a strict parser such as JavaScript's
+    JSON.parse refuses the bare tokens json.dumps writes for them. This
+    writes null instead, as JSON.stringify and TraceEvent.to_json do.
+    ``value`` is not changed.
+    """
+    try:
+        return json.dumps(value, allow_nan=False)
+    except ValueError:
+        pass
+    # Most values hold no NaN or infinity, so only a refused value is copied.
+    return json.dumps(_finite_copy(value), allow_nan=False)
+
+
 class EventType(str, Enum):
     SESSION_START = "session_start"
     SESSION_END = "session_end"

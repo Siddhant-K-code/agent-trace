@@ -166,6 +166,17 @@ refuses that session. The stored file is not rewritten. Older `watch --stream-to
 clients have one limit, described in
 [Live streaming from watch](#live-streaming-from-watch).
 
+`GET /sessions` and `GET /sessions/<id>` serve a NaN or infinite number in a
+stored `meta.json` as `null`. With `--dashboard`, `GET /api/sessions` does the
+same, and `GET /api/sessions/<id>/review` does it for `meta.json` and the
+events. `POST /sessions` refuses such a number, so only an older collector, a
+hand edit or another program that writes the store leaves one there.
+`org-report --endpoint` reads such an `ended_at` as no end, and such a number
+in `attribution` or in a key the collector does not know as `null`. It exits 1
+with `collector returned invalid session metadata` when `started_at`,
+`total_duration_ms` or a count, such as `tool_calls`, holds one. The stored
+file is not rewritten.
+
 `POST /sessions` checks the metadata before it writes anything. It returns
 400 with `{"error": "<message>"}` and stores nothing when
 `org-report --endpoint` could not read that metadata back from

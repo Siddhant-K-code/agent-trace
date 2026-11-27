@@ -20,7 +20,7 @@ from pathlib import Path
 
 from agent_trace.audit import verify_chain
 from agent_trace.cli import build_parser, cmd_export
-from agent_trace.collector_client import CollectorClient
+from agent_trace.collector_client import CollectorClient, CollectorClientError
 from agent_trace.hooks import handle_session_end, handle_session_start
 from agent_trace.integrations._base import emit
 from agent_trace.models import EventType, SessionMeta, TraceEvent
@@ -1807,6 +1807,93 @@ class TestEventsAreStrictJson(unittest.TestCase):
         text = events_path.read_text(encoding="utf-8")
         self.assertTrue(text.startswith(old_text))
         self.assertEqual(_strict_loads(text[len(old_text):])["data"], {"v": None})
+
+
+class TestSessionMetaIsStrictJson(unittest.TestCase):
+    """GET /sessions and GET /sessions/<id> serve NaN and infinity in meta.json as null."""
+
+    KEY = "ast_deadbeef1234567890abcdef123456"
+
+    # Each case is (session ID, a raw '"key": value' meta.json field, the key,
+    # the value served). POST /sessions refuses these numbers, but an older
+    # collector or a hand edit can leave them in the store.
+    READABLE = [
+        ("endinf0000000001", '"ended_at": Infinity', "ended_at", None),
+        ("unknown000000001", '"zzz": -Infinity', "zzz", None),
+        ("attribution00001", '"attribution": {"user": "a", "score": NaN}',
+         "attribution", {"user": "a", "score": None}),
+        ("nested0000000001", '"zzz": {"a": [1, Infinity]}', "zzz", {"a": [1, None]}),
+    ]
+    # org-report --endpoint needs these fields, so it refuses null in them.
+    REQUIRED = [
+        ("startnan00000001", '"started_at": NaN', "started_at", None),
+        ("duration00000001", '"total_duration_ms": NaN', "total_duration_ms", None),
+        ("tokens0000000001", '"total_tokens": Infinity', "total_tokens", None),
+    ]
+
+    def serve(self):
+        """Start an authenticated collector on an empty store. Returns the store and URL."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store = TraceStore(tmp.name, use_workspace_env=False)
+        server = HTTPServer(
+            ("127.0.0.1", 0), _make_handler(store, threading.Lock(), auth_key=self.KEY)
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return store, f"http://127.0.0.1:{server.server_address[1]}"
+
+    def write_meta(self, store, session_id, field):
+        """Create the session, then write its meta.json with ``field`` as raw text."""
+        store.create_session(SessionMeta(session_id=session_id, started_at=1780000000.0))
+        fields = [f'"session_id": "{session_id}"', field]
+        if not field.startswith('"started_at"'):
+            fields.insert(1, '"started_at": 1780000000.0')
+        (store.base_dir / session_id / "meta.json").write_text(
+            "{" + ", ".join(fields) + "}", encoding="utf-8"
+        )
+
+    def served(self, url):
+        request = urllib.request.Request(url, headers={"Authorization": f"Bearer {self.KEY}"})
+        with urllib.request.urlopen(request, timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+            return _strict_loads(resp.read().decode("utf-8"))
+
+    def test_get_routes_serve_nan_and_infinity_as_null(self):
+        store, base = self.serve()
+        cases = self.READABLE + self.REQUIRED
+        for session_id, field, _, _ in cases:
+            self.write_meta(store, session_id, field)
+        listed = {item["session_id"]: item for item in self.served(f"{base}/sessions")}
+        self.assertEqual(set(listed), {case[0] for case in cases})
+        for session_id, field, key, value in cases:
+            with self.subTest(field):
+                self.assertEqual(listed[session_id][key], value)
+                self.assertEqual(self.served(f"{base}/sessions/{session_id}"), listed[session_id])
+
+    def test_org_report_reads_nan_and_infinity_in_a_field_it_does_not_need(self):
+        store, base = self.serve()
+        for session_id, field, _, _ in self.READABLE:
+            self.write_meta(store, session_id, field)
+        sessions = {
+            meta.session_id: meta for meta in CollectorClient(base, self.KEY).list_sessions()
+        }
+        self.assertEqual(set(sessions), {case[0] for case in self.READABLE})
+        self.assertIsNone(sessions["endinf0000000001"].ended_at)
+        self.assertEqual(sessions["attribution00001"].attribution, {"user": "a", "score": None})
+
+    def test_org_report_refuses_nan_and_infinity_in_a_field_it_needs(self):
+        for session_id, field, _, _ in self.REQUIRED:
+            with self.subTest(field):
+                store, base = self.serve()
+                self.write_meta(store, session_id, field)
+                with self.assertRaisesRegex(
+                    CollectorClientError, "^collector returned invalid session metadata$"
+                ):
+                    CollectorClient(base, self.KEY).list_sessions()
 
 
 if __name__ == "__main__":
