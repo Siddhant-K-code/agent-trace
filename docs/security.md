@@ -260,7 +260,7 @@ at once, for example a hook and a CLI command:
 | File | Contents |
 |---|---|
 | `~/.agent-strace/auth.json` | Per-server CLI tokens from `agent-strace auth login` |
-| `~/.agent-strace/telemetry.json` | Telemetry preference and anonymous ID (path can be set with `AGENT_STRACE_TELEMETRY_CONFIG`) |
+| `~/.agent-strace/telemetry.json` | Telemetry preference, anonymous ID, and current analytics session (path can be set with `AGENT_STRACE_TELEMETRY_CONFIG`) |
 | `.agent-traces/rbac.json` | RBAC assignments |
 | `.agent-traces/identities.json`, `.agent-traces/team_budgets.json` | Entries written by `agent-strace apply` |
 | `.agent-traces/.config-snapshots.json` | `config-watch` snapshots |

@@ -4,6 +4,7 @@ import * as crypto from "crypto";
 import * as https from "https";
 import * as vscode from "vscode";
 import {
+  AnalyticsSession,
   COMMAND_COMPLETED,
   EXTENSION_ACTIVATED,
   ExtensionCommand,
@@ -11,7 +12,9 @@ import {
   SESSION_COMPLETED,
   SESSION_STARTED,
   TELEMETRY_ENABLED,
+  nextAnalyticsSession,
   sanitiseEventProperties,
+  uuidv7,
 } from "./telemetryCore";
 import { SessionState } from "./traceStore";
 
@@ -71,6 +74,8 @@ function errorType(error: unknown): string {
 
 export class ExtensionTelemetry implements vscode.Disposable {
   private anonymousId: string | undefined;
+  // Kept in memory only: one PostHog session per editor window's activity.
+  private analyticsSession: AnalyticsSession | undefined;
   private disclosurePending = false;
   private settingFromCommand = false;
   private readonly requests = new Set<ReturnType<typeof https.request>>();
@@ -101,7 +106,7 @@ export class ExtensionTelemetry implements vscode.Disposable {
       .then(async () => {
         const choice = await vscode.window.showInformationMessage(
           "agent-strace anonymous extension telemetry is enabled by default. " +
-            "Prompts, trace contents, paths, session IDs, and command arguments are never sent.",
+            "Prompts, trace contents, paths, trace session IDs, and command arguments are never sent.",
           "Disable telemetry",
           "Privacy details",
         );
@@ -283,12 +288,19 @@ export class ExtensionTelemetry implements vscode.Disposable {
       return;
     }
 
+    const now = Date.now();
+    this.analyticsSession = nextAnalyticsSession(
+      this.analyticsSession,
+      now,
+      (startedAt) => uuidv7(startedAt, crypto.randomBytes(10)),
+    );
     const body = JSON.stringify({
       api_key: POSTHOG_PROJECT_TOKEN,
       event,
       distinct_id: this.getAnonymousId(),
       properties: {
         ...clean,
+        $session_id: this.analyticsSession.id,
         $process_person_profile: false,
         $geoip_disable: true,
         $lib: "agent-strace-vscode",
@@ -301,7 +313,7 @@ export class ExtensionTelemetry implements vscode.Disposable {
         remote: Boolean(vscode.env.remoteName),
         os: process.platform,
       },
-      timestamp: new Date().toISOString(),
+      timestamp: new Date(now).toISOString(),
       uuid: crypto.randomUUID(),
     });
 
@@ -340,6 +352,7 @@ export class ExtensionTelemetry implements vscode.Disposable {
 
   private async clearAnonymousId(): Promise<void> {
     this.anonymousId = undefined;
+    this.analyticsSession = undefined;
     await this.context.globalState.update(ANONYMOUS_ID_KEY, undefined);
   }
 
