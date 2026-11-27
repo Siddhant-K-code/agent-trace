@@ -24,7 +24,16 @@ from .cost import session_cost
 from .event_data import require_usable_timestamps, str_field
 from .failures import count_session_errors
 from .inert import inert
-from .models import SINCE_DAYS_FORM, EventType, TraceEvent, parse_since_days, usable_time
+from .models import (
+    MAX_META_DEPTH,
+    SINCE_DAYS_FORM,
+    EventType,
+    TraceEvent,
+    _nests_deeper_than,
+    parse_since_days,
+    usable_number,
+    usable_time,
+)
 from .store import TraceStore
 
 
@@ -40,6 +49,39 @@ class DistStats:
 
     def to_dict(self) -> dict:
         return {"mean": round(self.mean, 4), "p50": round(self.p50, 4), "p95": round(self.p95, 4)}
+
+
+# int() refuses a decimal string of more than 4300 digits by default, with a
+# message that differs between Python versions. The parser counts the digits
+# first and gives its own reason.
+_MAX_INT_DIGITS = 4300
+
+
+def _refuse_constant(name: str) -> float:
+    raise ValueError("it has a number that is not finite")
+
+
+def _finite_float(text: str) -> float:
+    number = float(text)
+    if not math.isfinite(number):
+        raise ValueError("it has a number that is not finite")
+    return number
+
+
+def _bounded_int(text: str) -> int:
+    if len(text.removeprefix("-")) > _MAX_INT_DIGITS:
+        raise ValueError("it has a number with too many digits")
+    return int(text)
+
+
+def _finite_number(value: object) -> bool:
+    """Return True if ``value`` is an int or float, not a bool, that fits a finite float."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 @dataclass
@@ -83,13 +125,51 @@ class BehavioralFingerprint:
 
     @classmethod
     def from_json(cls, text: str) -> "BehavioralFingerprint":
-        d = json.loads(text)
+        """Build a fingerprint from ``text``, or raise ValueError with the reason.
+
+        drift and ``fingerprint --compare`` do math on ``tool_mix`` and the
+        seven statistics, and can print the result as JSON. So the text must
+        be a JSON object that nests at most MAX_META_DEPTH levels and holds
+        no NaN, infinity, float out of range or int of more than 4300 digits.
+        ``period``, ``tool_mix`` and each statistic must be objects, but
+        ``cost_usd`` may be null. Each ``tool_mix`` value must be a number of
+        0 or more. A statistic's ``mean``, ``p50`` and ``p95`` must be finite
+        numbers, not bools. A missing field reads as its default.
+
+        ``fingerprint_id``, ``sessions``, ``unpriced_sessions`` and the two
+        ``period`` fields keep any value. They are only shown, never used in
+        the math.
+        """
+        try:
+            d = json.loads(text, parse_constant=_refuse_constant,
+                           parse_float=_finite_float, parse_int=_bounded_int)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"it is not valid JSON ({exc.msg} at line {exc.lineno} column {exc.colno})"
+            ) from None
+        except RecursionError:
+            raise ValueError("it is nested too deeply") from None
+        # Check the depth before the type. Python 3.10 cannot parse a list
+        # nested 2000 levels and 3.14 can, so a deep list must be refused as
+        # too deep on both, not as "not a JSON object" on one.
+        if isinstance(d, (dict, list)) and _nests_deeper_than(d, MAX_META_DEPTH):
+            raise ValueError("it is nested too deeply")
+        if not isinstance(d, dict):
+            raise ValueError("it is not a JSON object")
+        period = d.get("period", {})
+        if not isinstance(period, dict):
+            raise ValueError("period is not an object")
+        tool_mix = d.get("tool_mix", {})
+        if not isinstance(tool_mix, dict):
+            raise ValueError("tool_mix is not an object")
+        if any(usable_number(share) is None for share in tool_mix.values()):
+            raise ValueError("a tool_mix value is not a number of 0 or more")
         fp = cls(
             fingerprint_id=d.get("fingerprint_id", ""),
             sessions=d.get("sessions", 0),
-            period_start=d.get("period", {}).get("start", ""),
-            period_end=d.get("period", {}).get("end", ""),
-            tool_mix=d.get("tool_mix", {}),
+            period_start=period.get("start", ""),
+            period_end=period.get("end", ""),
+            tool_mix=tool_mix,
             unpriced_sessions=d.get("unpriced_sessions", 0),
         )
         for attr in (
@@ -105,11 +185,15 @@ class BehavioralFingerprint:
             if raw is None and attr == "cost_usd":
                 fp.cost_usd = None
                 continue
-            setattr(fp, attr, DistStats(
-                mean=raw.get("mean", 0.0),
-                p50=raw.get("p50", 0.0),
-                p95=raw.get("p95", 0.0),
-            ))
+            if not isinstance(raw, dict):
+                raise ValueError(f"{attr} is not an object")
+            stats = {}
+            for key in ("mean", "p50", "p95"):
+                value = raw.get(key, 0.0)
+                if not _finite_number(value):
+                    raise ValueError(f"{attr}.{key} is not a finite number")
+                stats[key] = value
+            setattr(fp, attr, DistStats(**stats))
         return fp
 
 
@@ -641,6 +725,41 @@ def print_report(report: DriftReport, out: TextIO = sys.stdout) -> None:
 # CLI
 # ---------------------------------------------------------------------------
 
+def read_fingerprint_file(path: str) -> BehavioralFingerprint:
+    """Read the fingerprint file at ``path``, or raise ValueError with the reason.
+
+    The reason does not name the file. The file is opened with no check
+    that it exists or is a regular file, so a pipe such as ``--baseline
+    <(cmd)`` reads too. It is decoded as UTF-8 whatever the locale, since
+    the files this tool writes are ASCII JSON.
+    """
+    if not path:
+        raise ValueError("the path is empty")
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read()
+    except OSError as exc:
+        # str(exc) repeats the path, which the refusal line already shows.
+        raise ValueError(exc.strerror or "it cannot be read") from None
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ValueError("it is not valid UTF-8") from None
+    # Skip one byte order mark, which some Windows editors write. json.loads
+    # refuses text that starts with one.
+    if text.startswith("\ufeff"):
+        text = text[1:]
+    return BehavioralFingerprint.from_json(text)
+
+
+def _refuse_fingerprint_file(path: str, exc: ValueError) -> int:
+    # Show escapes in the path and the reason as text. An empty path shows
+    # as '' so that the line still shows a path.
+    shown = inert(path) if path else "''"
+    sys.stderr.write(f"Could not read fingerprint file {shown}: {inert(exc)}\n")
+    return 1
+
+
 def cmd_drift(args: argparse.Namespace) -> int:
     store = TraceStore(args.trace_dir)
     threshold = getattr(args, "threshold", 0.20)
@@ -658,11 +777,15 @@ def cmd_drift(args: argparse.Namespace) -> int:
             sys.stderr.write(f"invalid --since value: {SINCE_DAYS_FORM}\n")
             return 1
 
-    # Resolve baseline fingerprint
+    # Resolve baseline fingerprint. A --baseline that cannot be read stops
+    # drift before any session math, so --save-baseline writes nothing.
     baseline_fp: BehavioralFingerprint | None = None
     baseline_path = getattr(args, "baseline", None)
-    if baseline_path and Path(baseline_path).exists():
-        baseline_fp = BehavioralFingerprint.from_json(Path(baseline_path).read_text())
+    if baseline_path is not None:
+        try:
+            baseline_fp = read_fingerprint_file(baseline_path)
+        except ValueError as exc:
+            return _refuse_fingerprint_file(baseline_path, exc)
 
     if current_range:
         start, end = _parse_date_range(current_range)
@@ -733,13 +856,13 @@ def cmd_fingerprint(args: argparse.Namespace) -> int:
         if len(compare_paths) != 2:
             sys.stderr.write("Specify exactly two fingerprint files with --compare.\n")
             return 1
-        try:
-            first = BehavioralFingerprint.from_json(Path(compare_paths[0]).read_text())
-            second = BehavioralFingerprint.from_json(Path(compare_paths[1]).read_text())
-        except Exception as exc:
-            # Show escapes in the error message as text.
-            sys.stderr.write(f"Could not read fingerprint file: {inert(exc)}\n")
-            return 1
+        fingerprints = []
+        for path in compare_paths:
+            try:
+                fingerprints.append(read_fingerprint_file(path))
+            except ValueError as exc:
+                return _refuse_fingerprint_file(path, exc)
+        first, second = fingerprints
         report = compute_drift(first, second, threshold=getattr(args, "threshold", 0.20))
         if fmt == "json":
             data = {

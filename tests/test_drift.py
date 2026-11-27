@@ -738,5 +738,226 @@ class TestTraceTextShowsAsText(unittest.TestCase):
         self.assertEqual(data["baseline_unpriced_sessions"], _escapes.PAYLOAD)
 
 
+# Python 3.14 limits JSON nesting by stack size, not by a count, so it can
+# parse 100000 levels. A million levels raise RecursionError on 3.10+.
+TOO_DEEP = 1_000_000
+NOT_FINITE = "it has a number that is not finite"
+BAD_SHARE = "a tool_mix value is not a number of 0 or more"
+
+
+def _nested(depth):
+    """A fingerprint file that nests depth levels: an object around lists."""
+    return b'{"sessions": ' + b"[" * (depth - 1) + b"]" * (depth - 1) + b"}"
+
+
+REFUSED_FINGERPRINTS = [
+    ("empty", b"", "it is not valid JSON (Expecting value at line 1 column 1)"),
+    ("bad JSON", b"{", "it is not valid JSON "
+     "(Expecting property name enclosed in double quotes at line 1 column 2)"),
+    ("not UTF-8", b"\xff\xfe{}", "it is not valid UTF-8"),
+    ("list", b"[]", "it is not a JSON object"),
+    ("null", b"null", "it is not a JSON object"),
+    ("number", b"5", "it is not a JSON object"),
+    ("deep list", b"[" * 129 + b"]" * 129, "it is nested too deeply"),
+    ("depth 129", _nested(129), "it is nested too deeply"),
+    ("too deep to parse", b"[" * TOO_DEEP + b"]" * TOO_DEEP, "it is nested too deeply"),
+    ("NaN", b'{"sessions": NaN}', NOT_FINITE),
+    ("Infinity", b'{"error_rate": {"mean": -Infinity}}', NOT_FINITE),
+    ("float too large", b'{"sessions": 1e400}', NOT_FINITE),
+    ("4301 digits", b'{"sessions": 1' + b"0" * 4300 + b"}",
+     "it has a number with too many digits"),
+    ("period text", b'{"period": "x"}', "period is not an object"),
+    ("period null", b'{"period": null}', "period is not an object"),
+    ("stat number", b'{"error_rate": 0.5}', "error_rate is not an object"),
+    ("stat null", b'{"retry_rate": null}', "retry_rate is not an object"),
+    ("cost text", b'{"cost_usd": "x"}', "cost_usd is not an object"),
+    ("stat text", b'{"tool_calls": {"mean": "x"}}', "tool_calls.mean is not a finite number"),
+    ("stat null value", b'{"blast_radius": {"p50": null}}',
+     "blast_radius.p50 is not a finite number"),
+    ("stat bool", b'{"decision_depth": {"p95": true}}',
+     "decision_depth.p95 is not a finite number"),
+    ("stat too large", b'{"session_duration_s": {"mean": 1' + b"0" * 400 + b"}}",
+     "session_duration_s.mean is not a finite number"),
+    ("tool_mix list", b'{"tool_mix": []}', "tool_mix is not an object"),
+    ("tool_mix text", b'{"tool_mix": {"Read": "x"}}', BAD_SHARE),
+    ("tool_mix negative", b'{"tool_mix": {"Read": -0.5}}', BAD_SHARE),
+    ("tool_mix bool", b'{"tool_mix": {"Read": true}}', BAD_SHARE),
+    ("tool_mix too large", b'{"tool_mix": {"Read": 1' + b"0" * 400 + b"}}", BAD_SHARE),
+]
+
+ACCEPTED_FINGERPRINTS = [
+    ("empty object", b"{}"),
+    ("depth 128", _nested(128)),
+    ("4300 digits and a sign", b'{"sessions": -1' + b"0" * 4299 + b"}"),
+    ("negative stat", b'{"session_duration_s": {"mean": -5, "p50": -5, "p95": -5}}'),
+    ("null cost", b'{"cost_usd": null}'),
+    ("null period fields", b'{"period": {"start": null, "end": null}}'),
+    ("zero share", b'{"tool_mix": {"Read": 0, "Edit": 1}}'),
+    ("huge numbers", b'{"error_rate": {"mean": 1e308, "p50": -1e308, "p95": 1e308}, '
+     b'"tool_mix": {"Read": 1e308, "Edit": 1e308}}'),
+    ("extra keys", b'{"note": "x", "error_rate": {"mean": 0.5, "note": "x"}}'),
+]
+
+
+def _strict_json(text):
+    """Load text as JSON, and refuse a bare NaN or Infinity in it."""
+    def refuse(name):
+        raise ValueError(f"the output holds a bare {name}")
+    return json.loads(text, parse_constant=refuse)
+
+
+def _open_error(path):
+    """The reason open() gives for path, or None when it opens."""
+    try:
+        with open(path, "rb"):
+            return None
+    except OSError as exc:
+        return exc.strerror
+
+
+class TestUnreadableFingerprintFile(unittest.TestCase):
+    """drift --baseline and fingerprint --compare read a fingerprint file the
+    same way. When they cannot read one, they print one line on stderr that
+    names it, print nothing on stdout and exit 1."""
+
+    def setUp(self):
+        store_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(store_dir.cleanup)
+        self.tmp = store_dir.name
+        files_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(files_dir.cleanup)
+        self.files = Path(files_dir.name)
+        store = _make_store(self.tmp)
+        now = time.time()
+        for i in range(4):
+            _add_session(store, f"s{i}", [
+                _tool_call("Read", now - 100 + i),
+                _tool_call("Edit" if i % 2 else "Bash", now - 99 + i),
+            ], started_at=now - 100 + i)
+        day = 86400
+        self.last_30_days = (time.strftime("%Y-%m-%d", time.gmtime(now - 30 * day)) + ":"
+                             + time.strftime("%Y-%m-%d", time.gmtime(now + day)))
+        self.good = self.files / "good.json"
+        code, _, err = self._run(cmd_fingerprint, argparse.Namespace(
+            trace_dir=self.tmp, sessions=20, output=str(self.good), id="good",
+            compare=None, threshold=0.20, format="text"))
+        self.assertEqual((code, err), (0, ""))
+
+    def _run(self, command, args):
+        # The printers write to the sys.stdout that drift.py saw on import.
+        # Point them at the buffer.
+        out, err = io.StringIO(), io.StringIO()
+        with patch("sys.stdout", out), patch("sys.stderr", err), \
+                patch("agent_trace.drift.print_report", partial(print_report, out=out)), \
+                patch("agent_trace.drift.print_fingerprint", partial(print_fingerprint, out=out)):
+            code = command(args)
+        return code, out.getvalue(), err.getvalue()
+
+    def _drift(self, baseline, fmt="table", since="30d", current=None, save_baseline=None):
+        return self._run(cmd_drift, argparse.Namespace(
+            trace_dir=self.tmp, threshold=0.20, baseline=baseline, since=since,
+            current=current, baseline_range=None, save_baseline=save_baseline, format=fmt))
+
+    def _compare(self, first, second, fmt="text"):
+        return self._run(cmd_fingerprint, argparse.Namespace(
+            trace_dir=self.tmp, sessions=20, output=None, id="",
+            compare=[first, second], threshold=0.20, format=fmt))
+
+    def _forms(self, path):
+        """The six forms that read path, as names and calls."""
+        good = str(self.good)
+        return {
+            "drift --since": lambda: self._drift(path),
+            "drift --since json": lambda: self._drift(path, fmt="json"),
+            "drift --current": lambda: self._drift(path, since=None, current=self.last_30_days),
+            "compare first": lambda: self._compare(path, good),
+            "compare second": lambda: self._compare(good, path),
+            "compare second json": lambda: self._compare(good, path, fmt="json"),
+        }
+
+    def _file(self, name, data):
+        path = self.files / name
+        path.write_bytes(data)
+        return str(path)
+
+    def _open_reason(self, path):
+        reason = _open_error(path)
+        self.assertIsNotNone(reason, "the test file opened")
+        return reason
+
+    def _assert_refused(self, label, path, reason, shown=None):
+        shown = path if shown is None else shown
+        line = f"Could not read fingerprint file {shown}: {reason}\n"
+        for form, run in self._forms(path).items():
+            with self.subTest(case=label, form=form):
+                self.assertEqual(run(), (1, "", line))
+
+    def test_refuses_a_file_it_cannot_use(self):
+        for label, data, reason in REFUSED_FINGERPRINTS:
+            self._assert_refused(label, self._file("fingerprint.json", data), reason)
+
+    def test_reads_a_file_it_can_use(self):
+        for label, data in ACCEPTED_FINGERPRINTS:
+            path = self._file("fingerprint.json", data)
+            for form, run in self._forms(path).items():
+                with self.subTest(case=label, form=form):
+                    code, out, err = run()
+                    self.assertIn(code, (0, 1))
+                    self.assertEqual(err, "")
+                    self.assertNotEqual(out, "")
+                    if form.endswith("json"):
+                        _strict_json(out)
+
+    def test_missing_file(self):
+        path = str(self.files / "missing.json")
+        self._assert_refused("missing", path, self._open_reason(path))
+
+    def test_directory(self):
+        path = self.files / "dir"
+        path.mkdir()
+        self._assert_refused("directory", str(path), self._open_reason(path))
+
+    def test_file_it_has_no_permission_to_read(self):
+        path = self.files / "locked.json"
+        path.write_bytes(self.good.read_bytes())
+        path.chmod(0)
+        self.addCleanup(path.chmod, 0o600)
+        reason = _open_error(path)
+        if reason is None:
+            self.skipTest("this user can read a file with mode 0")
+        self._assert_refused("mode 0", str(path), reason)
+
+    def test_empty_path(self):
+        self._assert_refused("empty path", "", "the path is empty", shown="''")
+
+    def test_path_shows_escapes_as_text(self):
+        path = str(self.files / f"missing{_escapes.PAYLOAD}.json")
+        shown = f"{self.files}/missing{_escapes.PAYLOAD_TEXT}.json"
+        self._assert_refused("escapes in the path", path, self._open_reason(path), shown=shown)
+
+    def test_reads_a_file_that_starts_with_a_byte_order_mark(self):
+        good = self._forms(str(self.good))
+        bom = self._forms(self._file("bom.json", b"\xef\xbb\xbf" + self.good.read_bytes()))
+        for form, run in good.items():
+            with self.subTest(form=form):
+                expected = run()
+                self.assertEqual(expected[2], "")
+                self.assertEqual(bom[form](), expected)
+
+    def test_save_baseline_writes_nothing_when_it_cannot_read_the_baseline(self):
+        missing = str(self.files / "missing.json")
+        saved = self.files / "saved.json"
+        line = f"Could not read fingerprint file {missing}: {self._open_reason(missing)}\n"
+        self.assertEqual(self._drift(missing, save_baseline=str(saved)), (1, "", line))
+        self.assertFalse(saved.exists())
+
+    def test_compare_names_the_first_file_it_cannot_read(self):
+        first = self._file("first.json", b"{")
+        second = self._file("second.json", b"[]")
+        line = (f"Could not read fingerprint file {first}: it is not valid JSON "
+                "(Expecting property name enclosed in double quotes at line 1 column 2)\n")
+        self.assertEqual(self._compare(first, second), (1, "", line))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -148,6 +148,8 @@ jobs:
 
 `drift` exits 1 when the overall drift score is at or above `--threshold` (default 0.20). Do not add `--save-baseline` to the gate: it saves and exits 0 without comparing.
 
+With `--baseline`, `drift` exits 1 and names the file when it is missing or cannot be read. So save and commit the baseline before you add the gate.
+
 `eval ci` scores the latest session with the scorers in `.agent-evals.yaml` and exits 1 if any scorer fails or any score drops more than `--tolerance` below the baseline. Scores run from 0 to 1, so `--tolerance 0.05` allows a 0.05 drop. Create the baseline with `agent-strace eval ci --save-baseline .agent-strace/eval-baseline.json`.
 
 Both steps need the recorded sessions. `.agent-traces/` git-ignores itself, so a fresh checkout has none: with a baseline file and no sessions in the window, `drift` reports high drift, and `eval ci` exits 1 with "No sessions found." Restore the store before these steps, or pass the global `--trace-dir` (before the subcommand) to point at it.
