@@ -2,7 +2,7 @@
 
 Each LLM request's input token count is the whole prompt the model received,
 so it is the context fill at that request. This module compares that count
-with the model's context window limit; it never adds requests together.
+with the model's context limit; it never adds requests together.
 Provides:
 
   - `token-budget` command: per-request context fill table, with the peak
@@ -37,10 +37,13 @@ from .store import TraceStore
 
 
 # ---------------------------------------------------------------------------
-# Context window limits (tokens)
+# Context limits (tokens)
 # ---------------------------------------------------------------------------
 
 CONTEXT_LIMITS: dict[str, int] = {
+    # Each value is the most input tokens one request can carry: the model
+    # page's maximum input when it states one no larger than the context
+    # window, and the context window otherwise.
     # Anthropic: each Claude model's context window, from
     # https://platform.claude.com/docs/en/about-claude/models/overview
     "claude-fable-5-2":     1_000_000,
@@ -71,19 +74,89 @@ CONTEXT_LIMITS: dict[str, int] = {
     "claude-3-opus":          200_000,
     "claude-3-sonnet":        200_000,
     "claude-3-haiku":         200_000,
-    # OpenAI
-    "gpt-4o":                 128_000,
-    "gpt-4o-mini":            128_000,
-    "gpt-4-turbo":            128_000,
-    "gpt-4":                   8_192,
-    "gpt-3.5-turbo":          16_385,
-    "o1":                     200_000,
-    "o1-mini":                128_000,
-    "o3":                     200_000,
-    # Google
-    "gemini-1.5-pro":       1_048_576,
-    "gemini-1.5-flash":     1_048_576,
-    "gemini-2.0-flash":     1_048_576,
+    # OpenAI: each model's page under
+    # https://developers.openai.com/api/docs/models, and for gpt-5-search-api
+    # the web search guide,
+    # https://developers.openai.com/api/docs/guides/tools-web-search
+    "gpt-6-astra":                     922_000,
+    "gpt-6.1-sol":                     922_000,
+    "gpt-6.1-terra":                   922_000,
+    "gpt-6-sol":                       922_000,
+    "gpt-6-luna":                      922_000,
+    "gpt-5.6-sol":                     922_000,
+    "gpt-5.6-terra":                   922_000,
+    "gpt-5.6-luna":                    922_000,
+    "gpt-5.5":                       1_050_000,
+    "gpt-5.5-pro":                   1_050_000,
+    "gpt-5.4":                       1_050_000,
+    "gpt-5.4-pro":                   1_050_000,
+    "gpt-5.4-mini":                    272_000,
+    "gpt-5.4-nano":                    272_000,
+    "gpt-5.3-codex":                   272_000,
+    "gpt-5.2":                         400_000,
+    "gpt-5.2-pro":                     400_000,
+    "gpt-5.2-codex":                   272_000,
+    "gpt-5.2-chat-latest":             128_000,
+    "gpt-5.1":                         400_000,
+    "gpt-5.1-chat-latest":             128_000,
+    "gpt-5":                           272_000,
+    "gpt-5-mini":                      272_000,
+    "gpt-5-nano":                      272_000,
+    "gpt-5-pro":                       400_000,
+    "gpt-5-search-api":                200_000,
+    "gpt-5-chat-latest":               128_000,
+    "gpt-4.1":                       1_047_576,
+    "gpt-4.1-mini":                  1_047_576,
+    "gpt-4.1-nano":                  1_047_576,
+    "gpt-4o":                          128_000,
+    "gpt-4o-realtime-preview":          32_000,
+    "gpt-4o-transcribe":                16_000,
+    "gpt-4o-mini":                     128_000,
+    "gpt-4o-mini-realtime-preview":     16_000,
+    "gpt-4o-mini-transcribe":           16_000,
+    "gpt-4o-mini-tts":                   2_000,
+    "gpt-4-turbo":                     128_000,
+    "gpt-4-0125-preview":              128_000,
+    "gpt-4-1106-vision-preview":       128_000,
+    "gpt-4":                             8_192,
+    "gpt-3.5-turbo":                    16_385,
+    "o1":                              200_000,
+    "o1-mini":                         128_000,
+    "o1-preview":                      128_000,
+    "o3":                              200_000,
+    "o3-mini":                         200_000,
+    "o3-pro":                          200_000,
+    "o4-mini":                         200_000,
+    # Amazon Nova through AWS Bedrock: each model card, such as
+    # https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-amazon-nova-pro.html
+    "amazon.nova-pro-v1":              300_000,
+    "amazon.nova-lite-v1":             300_000,
+    "amazon.nova-micro-v1":            128_000,
+    # Google: the input token limit on each model's page under
+    # https://ai.google.dev/gemini-api/docs/models. Gemini 4 pages state only
+    # a context window. Gemini 1.5 is from that page as archived on
+    # 2025-02-28 by the Wayback Machine.
+    "gemini-4-carbon":               1_048_576,
+    "gemini-4-argon":                1_048_576,
+    "gemini-3.8-flash":              1_048_576,
+    "gemini-3.8-flash-tts":              8_192,
+    "gemini-3.8-flash-lite-tts":         8_192,
+    "gemini-3.6-flash":              1_048_576,
+    "gemini-3.5-flash-lite":         1_048_576,
+    "gemini-3.1-flash-lite":         1_048_576,
+    "gemini-3.1-flash-lite-image":      65_536,
+    "gemini-3.1-pro-preview":        1_048_576,
+    "gemini-3-flash-preview":        1_048_576,
+    "gemini-2.5-pro":                1_048_576,
+    "gemini-2.5-pro-preview-tts":        8_192,
+    "gemini-2.5-flash":              1_048_576,
+    "gemini-2.5-flash-image":           65_536,
+    "gemini-2.5-flash-native-audio":   131_072,
+    "gemini-2.5-flash-preview-tts":      8_192,
+    "gemini-2.5-flash-lite":         1_048_576,
+    "gemini-2.0-flash":              1_048_576,
+    "gemini-1.5-pro":                2_097_152,
+    "gemini-1.5-flash":              1_048_576,
     # Meta
     "llama-3.1-405b":        131_072,
     "llama-3.1-70b":         131_072,

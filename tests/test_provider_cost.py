@@ -1102,13 +1102,13 @@ class TestClaudeVersionDot(unittest.TestCase):
         # The rule reads only claude- names. Read in these, the dot would turn
         # gpt-4.1 into gpt-4 and leave gemini-2.5-pro with no price.
         cases = {
-            "gpt-4.1": ("gpt-4.1", None, None),
-            "gpt-4.1-mini": ("gpt-4.1-mini", None, None),
-            "gpt-5.1": ("gpt-5.1", None, None),
-            "gemini-2.5-pro": ("gemini-2.5-pro", None, None),
+            "gpt-4.1": ("gpt-4.1", 1_047_576, None),
+            "gpt-4.1-mini": ("gpt-4.1-mini", 1_047_576, None),
+            "gpt-5.1": ("gpt-5.1", 400_000, None),
+            "gemini-2.5-pro": ("gemini-2.5-pro", 1_048_576, None),
             "gpt-3.5-turbo": (None, 16_385, None),
             "llama-3.1-70b": (None, 131_072, None),
-            "gemini-1.5-pro": (None, 1_048_576, 0.95),
+            "gemini-1.5-pro": (None, 2_097_152, 0.95),
         }
         for model, (key, limit, factor) in cases.items():
             with self.subTest(model=model):
