@@ -298,6 +298,247 @@ class TestRuleContextSaturation(unittest.TestCase):
         self.assertEqual(len(results), 1)
 
 
+SONNET = "claude-sonnet-4-5"
+OPUS = "claude-opus-4-7"
+MODEL_EVENT_TYPES = (
+    EventType.LLM_REQUEST, EventType.LLM_RESPONSE, EventType.ASSISTANT_RESPONSE,
+)
+WINDOW_KEYS = ("context_window", "context_window_tokens", "max_context_tokens")
+
+
+def _prompt(chars: int) -> TraceEvent:
+    # The JSON of {"prompt": ""} is 14 characters, so the estimate of this
+    # event is (chars + 14) // 4 tokens.
+    return _ev(EventType.USER_PROMPT, prompt="x" * chars)
+
+
+def _usage(event_type: EventType = EventType.LLM_RESPONSE, **data) -> TraceEvent:
+    return _ev(event_type, **data)
+
+
+def _saturation(event: int, tokens: str, share: str, threshold: str = "80%") -> str:
+    return (
+        f"Input tokens exceeded {threshold} of model context window at event "
+        f"{event} ({tokens} tokens, {share})."
+    )
+
+
+class TestContextSaturationWindow(unittest.TestCase):
+    def _run(self, events, threshold=0.80):
+        cfg = {"enabled": True, "level": LintLevel.INFO, "threshold": threshold}
+        return [(f.line_start, f.message) for f in _rule_context_saturation(events, cfg)]
+
+    def _lines(self, events, threshold=0.80):
+        return [line for line, _ in self._run(events, threshold)]
+
+    def test_recorded_count_is_measured_against_the_model_window(self):
+        events = [
+            _ev(EventType.LLM_REQUEST, model=SONNET, message_count=3),
+            _usage(model=SONNET, input_tokens=190_000),
+        ]
+        self.assertEqual(
+            self._run(events), [(2, _saturation(2, "190,000", "95% of 200,000"))],
+        )
+
+    def test_reads_counts_only_from_model_events(self):
+        for event_type in MODEL_EVENT_TYPES:
+            with self.subTest(event_type=event_type.value):
+                events = [_usage(event_type, model=SONNET, input_tokens=190_000)]
+                self.assertEqual(self._lines(events), [1])
+        # A count on session_end leaves the estimate of the prompt in charge.
+        events = [_prompt(800_000), _ev(EventType.SESSION_END, input_tokens=5_000)]
+        self.assertEqual(
+            self._run(events), [(1, _saturation(1, "~200,003", "100% of 200,000"))],
+        )
+
+    def test_threshold_is_inclusive(self):
+        for tokens, lines in ((150_000, []), (159_999, []), (160_000, [1])):
+            with self.subTest(tokens=tokens):
+                events = [_usage(model=SONNET, input_tokens=tokens)]
+                self.assertEqual(self._lines(events), lines)
+
+    def test_uses_the_window_of_each_model(self):
+        cache = {
+            "input_tokens": 2,
+            "cache_read_input_tokens": 849_998,
+            "cache_creation_input_tokens": 0,
+        }
+        cases = (
+            ("gpt-4o", {"prompt_tokens": 110_000}, "110,000", "86% of 128,000"),
+            (OPUS, {"usage": cache}, "850,000", "85% of 1,000,000"),
+            ("my-model", {"input_tokens": 170_000}, "170,000", "85% of 200,000"),
+        )
+        for model, usage, tokens, share in cases:
+            with self.subTest(model=model):
+                events = [_usage(EventType.ASSISTANT_RESPONSE, model=model, **usage)]
+                self.assertEqual(self._run(events), [(1, _saturation(1, tokens, share))])
+        self.assertEqual(self._run([_usage(model=OPUS, input_tokens=790_000)]), [])
+
+    def test_recorded_window_wins(self):
+        for key in WINDOW_KEYS:
+            with self.subTest(key=key):
+                window = {key: 1_000_000}
+                self.assertEqual(
+                    self._run([_usage(model=SONNET, input_tokens=190_000, **window)]),
+                    [],
+                )
+                self.assertEqual(
+                    self._run([_usage(model=SONNET, input_tokens=850_000, **window)]),
+                    [(1, _saturation(1, "850,000", "85% of 1,000,000"))],
+                )
+
+    def test_recorded_counts_replace_the_estimate(self):
+        # The estimate of the prompt alone would reach 100% of 200,000.
+        events = [
+            _prompt(800_000),
+            _ev(EventType.LLM_REQUEST, model=SONNET),
+            _usage(model=SONNET, input_tokens=100_000),
+        ]
+        self.assertEqual(self._run(events), [])
+
+    def test_reports_the_first_count_to_reach_the_threshold(self):
+        events = [
+            _usage(model=SONNET, input_tokens=tokens)
+            for tokens in (100_000, 170_000, 175_000)
+        ]
+        self.assertEqual(
+            self._run(events), [(2, _saturation(2, "170,000", "85% of 200,000"))],
+        )
+
+    def test_measures_each_count_against_its_own_model_window(self):
+        events = [
+            _usage(model=SONNET, input_tokens=100_000),
+            _usage(model=OPUS, input_tokens=190_000),
+        ]
+        self.assertEqual(self._run(events), [])
+        events = [
+            _usage(model=SONNET, input_tokens=170_000),
+            _usage(model=OPUS, input_tokens=100_000),
+        ]
+        self.assertEqual(
+            self._run(events), [(1, _saturation(1, "170,000", "85% of 200,000"))],
+        )
+
+    def test_estimate_uses_the_window_of_the_first_model_event_naming_a_model(self):
+        opus = _ev(EventType.LLM_REQUEST, model=OPUS)
+        prompts = [_prompt(700_000) for _ in range(5)]
+        # Each prompt is about 175,003 tokens and the request about 7.
+        with self.subTest("model first"):
+            self.assertEqual(
+                self._run([opus] + prompts),
+                [(6, _saturation(6, "~875,022", "88% of 1,000,000"))],
+            )
+        with self.subTest("model last"):
+            self.assertEqual(
+                self._run(prompts + [opus]),
+                [(5, _saturation(5, "~875,015", "88% of 1,000,000"))],
+            )
+
+    def test_estimate_skips_a_model_event_with_no_model_or_window(self):
+        opus = _ev(EventType.LLM_REQUEST, model=OPUS)
+        for data in ({"model": ""}, {"context_window": "large"}, {"context_window": -1}):
+            with self.subTest(data=data):
+                events = [_ev(EventType.LLM_REQUEST, **data), opus, _prompt(800_000)]
+                self.assertEqual(self._run(events), [])
+
+    def test_estimate_uses_the_first_of_two_model_windows(self):
+        events = [
+            _ev(EventType.LLM_REQUEST, model=SONNET),
+            _ev(EventType.LLM_REQUEST, model=OPUS),
+            _prompt(800_000),
+        ]
+        self.assertEqual(
+            self._run(events), [(3, _saturation(3, "~200,017", "100% of 200,000"))],
+        )
+
+    def test_estimate_reads_each_model_key_and_recorded_window(self):
+        cases = [{key: OPUS} for key in ("model", "model_id", "modelId")]
+        cases += [{key: 1_000_000} for key in WINDOW_KEYS]
+        for data in cases:
+            with self.subTest(data=data):
+                events = [_ev(EventType.LLM_REQUEST, **data), _prompt(800_000)]
+                self.assertEqual(self._run(events), [])
+
+    def test_estimate_ignores_a_model_outside_model_events(self):
+        events = [_ev(EventType.SESSION_START, model=OPUS), _prompt(800_000)]
+        self.assertEqual(
+            self._run(events), [(2, _saturation(2, "~200,003", "100% of 200,000"))],
+        )
+
+    def test_threshold_compares_the_share(self):
+        # 200,000 * 0.55 is 110000.00000000001 as a float, so 110,000 tokens
+        # missed a threshold of 0.55 when the window was multiplied.
+        self.assertEqual(
+            self._run([_prompt(439_986)], threshold=0.55),
+            [(1, _saturation(1, "~110,000", "55% of 200,000", threshold="55%"))],
+        )
+        self.assertEqual(self._lines([_prompt(439_982)], threshold=0.55), [])
+        self.assertEqual(
+            self._lines([_usage(model=SONNET, input_tokens=110_000)], threshold=0.55),
+            [1],
+        )
+
+    def test_count_too_large_for_a_float_reads_as_missing(self):
+        # float() takes ints up to 2**1024 - 2**970 - 1 and rounds them down.
+        largest = 2**1024 - 2**970 - 1
+        nines = int("9" * 4300)
+        usages = {
+            "10**309": {"input_tokens": 10**309},
+            "one past the largest": {"input_tokens": largest + 1},
+            "sum past the largest": {
+                "input_tokens": 10**308, "cache_read_input_tokens": 10**308,
+            },
+            "4,301 digits": {"input_tokens": nines, "cache_read_input_tokens": nines},
+        }
+        for name, usage in usages.items():
+            with self.subTest(name):
+                huge = _usage(model=SONNET, **usage)
+                self.assertEqual(self._run([huge]), [])
+                self.assertEqual(
+                    self._run([huge, _usage(model=SONNET, input_tokens=190_000)]),
+                    [(2, _saturation(2, "190,000", "95% of 200,000"))],
+                )
+                # With no other count, the rule estimates the prompt.
+                self.assertEqual(
+                    self._run([huge, _prompt(800_000)]),
+                    [(2, _saturation(2, "~200,003", "100% of 200,000"))],
+                )
+        self.assertEqual(self._lines([_usage(model=SONNET, input_tokens=largest)]), [1])
+
+    def test_window_too_large_for_a_float_gives_no_finding(self):
+        events = [_usage(model=SONNET, input_tokens=190_000, context_window=10**400)]
+        self.assertEqual(self._run(events), [])
+        events = [_ev(EventType.LLM_REQUEST, context_window=10**400), _prompt(800_000)]
+        self.assertEqual(self._run(events), [])
+
+    def test_check_covers_model_event_data_while_the_rule_is_enabled(self):
+        config = {k: dict(v) for k, v in DEFAULT_CONFIG.items()}
+        config["post-compaction-regression"]["enabled"] = False
+        without_rule = {k: dict(v) for k, v in config.items()}
+        without_rule["context-saturation"]["enabled"] = False
+        for event_type in MODEL_EVENT_TYPES:
+            with self.subTest(event_type=event_type.value):
+                bad = TraceEvent(
+                    event_type=event_type, timestamp=1.0, session_id="s1", data=[1, 2],
+                )
+                store, sid = _make_store_with_events(
+                    [_tool_call("Write", file_path="a.py"), bad, _session_end()],
+                )
+                with self.assertRaises(NonObjectEventDataError):
+                    lint_session(store, sid, config=config)
+                report = lint_session(store, sid, config=without_rule)
+                self.assertEqual((report.findings, report.rule_errors), ([], []))
+        # No enabled rule reads decision data, so array data there is fine.
+        decision = TraceEvent(
+            event_type=EventType.DECISION, timestamp=1.0, session_id="s1", data=[1, 2],
+        )
+        store, sid = _make_store_with_events(
+            [_tool_call("Write", file_path="a.py"), decision, _session_end()],
+        )
+        report = lint_session(store, sid, config=config)
+        self.assertEqual((report.findings, report.rule_errors), ([], []))
+
+
 # ---------------------------------------------------------------------------
 # Rule: redundant-read
 # ---------------------------------------------------------------------------

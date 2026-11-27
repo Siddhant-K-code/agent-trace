@@ -873,7 +873,7 @@ agent-strace token-budget [session-id] [--warning-threshold FRACTION]
 ```
 Show how full the model's context window is at each LLM request. The model is detected from the session (default: latest). A request's input tokens are the whole prompt it sent, so each request's fill is its own input tokens divided by the context limit; requests are not added together. A request at or above `--warning-threshold` of the limit (default: `0.9`) is marked `← warning`.
 
-The context limit comes from a bundled table. Each entry is the most input tokens one request to the model can carry. Each Claude model's entry is its window from Anthropic's [models overview](https://platform.claude.com/docs/en/about-claude/models/overview): 1,000,000 tokens for Opus 4.6 and later Opus models, Sonnet 4.6 and later Sonnet models, Haiku 5.5, and every Fable and Mythos model, and 200,000 for Opus 4.5 and earlier, Sonnet 4.5 and earlier, Haiku 4.5 and the Claude 3 models. Each OpenAI, Gemini and Amazon Nova entry is from the model's page: the maximum input that the page states, when that is no larger than the context window, and the context window otherwise. So `gpt-5` gets 272,000, the maximum input on its page, not its 400,000 context window. The model name finds its entry by the **Model names** rule of [`cost`](#cost). So `us.anthropic.claude-sonnet-4-5-20250929-v1:0`, `anthropic/claude-sonnet-4-5` and `claude-sonnet-4.5` get the 200,000 limit of `claude-sonnet-4-5`, and `o1-mini-2024-09-12` gets the 128,000 limit of `o1-mini`. A model with no entry, such as `mistral-large-latest`, has no known limit. Then the header says `Context limit: unknown tokens`, each fill and the `Current` and `Peak` lines show `n/a`, no request is marked, and no `Headroom` line is printed. For such a model, [`watch`](#watch) gives no `--max-context-pct` alert, and [`compaction`](#compaction) and `--checkpoint-at` use a limit of 200,000 tokens.
+The context limit comes from a bundled table. Each entry is the most input tokens one request to the model can carry. Each Claude model's entry is its window from Anthropic's [models overview](https://platform.claude.com/docs/en/about-claude/models/overview): 1,000,000 tokens for Opus 4.6 and later Opus models, Sonnet 4.6 and later Sonnet models, Haiku 5.5, and every Fable and Mythos model, and 200,000 for Opus 4.5 and earlier, Sonnet 4.5 and earlier, Haiku 4.5 and the Claude 3 models. Each OpenAI, Gemini and Amazon Nova entry is from the model's page: the maximum input that the page states, when that is no larger than the context window, and the context window otherwise. So `gpt-5` gets 272,000, the maximum input on its page, not its 400,000 context window. The model name finds its entry by the **Model names** rule of [`cost`](#cost). So `us.anthropic.claude-sonnet-4-5-20250929-v1:0`, `anthropic/claude-sonnet-4-5` and `claude-sonnet-4.5` get the 200,000 limit of `claude-sonnet-4-5`, and `o1-mini-2024-09-12` gets the 128,000 limit of `o1-mini`. A model with no entry, such as `mistral-large-latest`, has no known limit. Then the header says `Context limit: unknown tokens`, each fill and the `Current` and `Peak` lines show `n/a`, no request is marked, and no `Headroom` line is printed. For such a model, [`watch`](#watch) gives no `--max-context-pct` alert, and [`compaction`](#compaction), `--checkpoint-at` and the `context-saturation` rule of [`lint`](#lint) use a limit of 200,000 tokens.
 
 The input tokens are read the way [`compaction`](#compaction) reads them: provider keys such as `input_tokens` or `prompt_tokens`, nested `usage` objects, and Anthropic cache read and write tokens. A request with no count is estimated from the size of its own recorded data and shown with `~`. That data may not hold the whole prompt, so an estimated fill can be lower than the real one.
 
@@ -896,12 +896,13 @@ and report the context discarded by compaction.
 
 The discarded context is priced at the model's input rate. The rate is found
 as [`cost --breakdown provider`](#cost) finds it, Bedrock premium included. A
-model with no price uses $3 per 1M tokens. With recorded token counts,
-`--behavior-diff` measures context saturation against the limit that a
-request records in `context_window`, `context_window_tokens` or
-`max_context_tokens`. Without one, the limit is found as for
-[`token-budget`](#token-budget), and a model with no known limit uses 200,000
-tokens.
+model with no price uses $3 per 1M tokens.
+
+`--behavior-diff` counts context saturation with the `context-saturation` rule
+of [`lint`](#lint) at its default threshold, so the two agree. Earlier versions
+replaced the rule's count with their own check whenever an event recorded input
+tokens, and `compaction` exited 1 with an `OverflowError` for a count such as
+`10**400`.
 
 See the [context compaction guide](compaction.md) for interpretation and live
 checkpoint setup.
@@ -2094,6 +2095,22 @@ default model, with the `budget_dollars` or `max_cost_dollars` in its
 `session_start` event, and fires at `threshold` (default 0.90) of the budget.
 Earlier versions estimated the cost from the size of prompts, model requests
 and responses at $9 per million tokens.
+
+`context-saturation` fires once, at the first model event (`llm_request`,
+`llm_response` or `assistant_response`) whose input tokens reach `threshold`
+(default 0.80) of the model's context limit. It reads the tokens as
+[`token-budget`](#token-budget) does, except that a count too large for a float
+reads as missing, as a count of 0 does. The limit is the one the event records
+in `context_window`, `context_window_tokens` or `max_context_tokens`, or else
+the limit of the event's model, found as for [`token-budget`](#token-budget).
+So `gpt-5` gets 272,000, its maximum input, not its 400,000 context window. A
+model with no known limit uses 200,000 tokens. When no model event records
+input tokens, the rule estimates them: it adds up the JSON size of each user
+prompt and `llm_request`, four characters to a token, and fires at the first
+one where the sum reaches `threshold`. The limit is then that of the first
+model event that names a model or records a limit, and the finding shows the
+tokens with `~`. Earlier versions always used the estimate, against 200,000
+tokens.
 
 `lint` refuses a session in which an event the enabled rules read has data
 that is not a JSON object, with the same `Error: session event data must be

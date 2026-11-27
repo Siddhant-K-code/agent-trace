@@ -29,7 +29,7 @@ from .event_data import (
 )
 from .explain import PHASE_DATA_EVENT_TYPES
 from .inert import inert
-from .models import EventType, TraceEvent, usable_time
+from .models import EventType, TraceEvent, usable_number, usable_time
 from .session_outcome import final_session_end_index
 from .store import RefusedSessionError, TraceStore
 
@@ -293,35 +293,85 @@ def _rule_budget_proximity(events: list[TraceEvent], cfg: dict) -> list[LintResu
     return []
 
 
+_MODEL_EVENT_TYPES = frozenset({
+    EventType.LLM_REQUEST, EventType.LLM_RESPONSE, EventType.ASSISTANT_RESPONSE,
+})
+
+
 def _rule_context_saturation(events: list[TraceEvent], cfg: dict) -> list[LintResult]:
-    """Input tokens exceeded N% of model context window."""
+    """Input tokens exceeded N% of model context window.
+
+    Reads the input tokens that llm_request, llm_response and
+    assistant_response events record, each against that event's context
+    window. A count too large for a float reads as missing. When no such event
+    has a usable count, the rule estimates the tokens from the JSON size of
+    user prompts and llm_request events, four characters to a token, against
+    the window of the first model event that names a model or records a
+    window.
+    """
+    # Imported here, as in _rule_post_compaction_regression, to keep module
+    # imports acyclic.
+    from .compaction import (
+        _CONTEXT_LIMIT_KEYS,
+        _context_limit,
+        _input_token_count,
+        _model_name,
+        _positive_int,
+    )
+    from .token_budget import DEFAULT_CONTEXT_LIMIT
+
     threshold = cfg.get("threshold", 0.80)
     level = cfg.get("level", LintLevel.INFO)
-    # Common context window sizes by model hint
-    context_window = 200_000  # claude default; conservative
 
-    results: list[LintResult] = []
+    def finding(index: int, tokens: str, window: int, share: float) -> LintResult:
+        return LintResult(
+            rule="context-saturation",
+            level=level,
+            message=(
+                f"Input tokens exceeded {threshold * 100:.0f}% of model context window "
+                f"at event {index + 1} ({tokens} tokens, "
+                f"{share * 100:.0f}% of {window:,})."
+            ),
+            line_start=index + 1,
+        )
+
+    recorded = [
+        (i, count, ev.data)
+        for i, ev in enumerate(events)
+        if ev.event_type in _MODEL_EVENT_TYPES
+        and (count := _input_token_count(ev.data)) is not None
+        and usable_number(count) is not None
+    ]
+    if recorded:
+        for i, count, data in recorded:
+            window = _context_limit(data)
+            # int / int rounds correctly and gives 0.0 for a huge window.
+            # window * threshold can round up: 200_000 * 0.55 > 110_000.
+            share = count / window
+            if share >= threshold:
+                return [finding(i, f"{count:,}", window, share)]
+        return []
+
+    window = next(
+        (
+            _context_limit(ev.data)
+            for ev in events
+            if ev.event_type in _MODEL_EVENT_TYPES
+            and (
+                _model_name(ev.data)
+                or any(_positive_int(ev.data.get(key)) for key in _CONTEXT_LIMIT_KEYS)
+            )
+        ),
+        DEFAULT_CONTEXT_LIMIT,
+    )
     cumulative_input = 0
-
     for i, ev in enumerate(events):
         if ev.event_type in {EventType.LLM_REQUEST, EventType.USER_PROMPT}:
-            tokens = len(json.dumps(ev.data)) // 4
-            cumulative_input += tokens
-            if cumulative_input >= context_window * threshold:
-                pct = cumulative_input / context_window * 100
-                results.append(LintResult(
-                    rule="context-saturation",
-                    level=level,
-                    message=(
-                        f"Input tokens exceeded {threshold * 100:.0f}% of model context window "
-                        f"at event {i + 1} (~{cumulative_input:,} tokens, "
-                        f"{pct:.0f}% of {context_window:,})."
-                    ),
-                    line_start=i + 1,
-                ))
-                break  # report once
-
-    return results
+            cumulative_input += len(json.dumps(ev.data)) // 4
+            share = cumulative_input / window
+            if share >= threshold:
+                return [finding(i, f"~{cumulative_input:,}", window, share)]
+    return []
 
 
 def _rule_redundant_read(events: list[TraceEvent], cfg: dict) -> list[LintResult]:
@@ -456,8 +506,9 @@ _RULE_DATA_EVENT_TYPES: dict[str, frozenset[EventType] | None] = {
     # session_start for the budget, then session_cost, which reads what
     # `agent-strace cost` reads.
     "budget-proximity": frozenset({EventType.SESSION_START}) | PHASE_DATA_EVENT_TYPES,
-    # Measures the JSON size of data and reads no keys.
-    "context-saturation": frozenset(),
+    # Reads the token counts, model and context window of model events. The
+    # estimate also measures the JSON size of user prompts, which reads no keys.
+    "context-saturation": _MODEL_EVENT_TYPES,
     # Compaction detection reads the stream keys of every event.
     "post-compaction-regression": None,
     "redundant-read": frozenset({EventType.TOOL_CALL, EventType.FILE_READ}),
