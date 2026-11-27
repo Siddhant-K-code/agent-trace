@@ -676,20 +676,6 @@ def _behavior_metrics(
             # not run rather than as zero findings.
             failed_rules.append(rule_name)
 
-    explicit_context = [
-        context_fill_ratio(event)
-        for event in events
-        if _input_token_count(event.data) is not None
-    ]
-    if explicit_context:
-        saturation_threshold = float(
-            lint_module.DEFAULT_CONFIG["context-saturation"].get("threshold", 0.8)
-        )
-        lint_counts["context-saturation"] = int(any(
-            ratio is not None and ratio >= saturation_threshold
-            for ratio in explicit_context
-        ))
-
     return BehaviorMetrics(
         unique_files_read=len(set(paths)),
         redundant_read_violations=sum(

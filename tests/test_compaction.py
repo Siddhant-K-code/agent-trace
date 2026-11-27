@@ -21,8 +21,10 @@ from agent_trace.compaction import (
     detect_compactions,
     format_compaction_report,
     write_checkpoint,
+    _behavior_metrics,
     _rule_post_compaction_regression,
 )
+from agent_trace.lint import DEFAULT_CONFIG, _rule_context_saturation
 from agent_trace.models import EventType, SessionMeta, TraceEvent
 from agent_trace.jsonl_import import import_jsonl
 from agent_trace.store import TraceStore
@@ -532,6 +534,47 @@ class ContextAndBehaviorDiffTests(unittest.TestCase):
             "context-saturation" in reason for reason in behavior.regressions
         ))
 
+    def test_behavior_saturation_count_is_the_lint_rule_count(self):
+        prompt = _event(EventType.USER_PROMPT, 1, prompt="x" * 800_000)
+        cases = {
+            "count on session_end": (
+                [prompt, _event(EventType.SESSION_END, 2, input_tokens=5_000)],
+                1,
+            ),
+            "count of 100,000 for sonnet": (
+                [
+                    prompt,
+                    _event(
+                        EventType.LLM_RESPONSE, 2,
+                        model="claude-sonnet-4-5", input_tokens=100_000,
+                    ),
+                ],
+                0,
+            ),
+            "no count, opus window": (
+                [prompt, _event(EventType.LLM_REQUEST, 2, model="claude-opus-4-7")],
+                0,
+            ),
+            "count of 190,000 for sonnet": ([_request(1, 190_000)], 1),
+        }
+        for name, (events, count) in cases.items():
+            with self.subTest(name):
+                metrics = _behavior_metrics(events, 3, 5)
+                lint_count = len(_rule_context_saturation(
+                    events, dict(DEFAULT_CONFIG["context-saturation"]),
+                ))
+                self.assertEqual(
+                    (metrics.context_saturation_violations, lint_count), (count, count),
+                )
+
+    def test_behavior_diff_reads_a_count_too_large_for_a_float_as_missing(self):
+        events = [_request(1, 100_000), _request(2, 10_000), _request(3, 10**400)]
+
+        behavior = behavior_diff_for_compaction(events, detect_compactions(events)[0])
+
+        self.assertEqual(behavior.after.context_saturation_violations, 0)
+        self.assertEqual(behavior.lint_rules_not_run, ())
+
     def test_behavior_window_counts_events_from_only_the_compacted_stream(self):
         events = [
             _read(1, "src/a.py"),
@@ -885,6 +928,28 @@ class CompactionLintAndCommandTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertIn("Compaction events - session session-1", output.getvalue())
+
+    def test_cmd_compaction_reads_a_count_too_large_for_a_float_as_missing(self):
+        temporary, _store_instance, session_id = _store([
+            _request(1, 100_000), _request(2, 10_000), _request(3, 10**400),
+        ])
+        self.addCleanup(temporary.cleanup)
+        # The report builds the behavior diff with or without --behavior-diff.
+        for behavior_diff in (False, True):
+            with self.subTest(behavior_diff=behavior_diff):
+                args = argparse.Namespace(
+                    trace_dir=temporary.name,
+                    session_id=session_id,
+                    compaction_threshold=0.5,
+                    diff=False,
+                    behavior_diff=behavior_diff,
+                )
+                output = io.StringIO()
+                with patch("sys.stdout", output):
+                    self.assertEqual(cmd_compaction(args), 0)
+                self.assertEqual(
+                    "  context-saturation: 0 -> 0\n" in output.getvalue(), behavior_diff,
+                )
 
     def test_cmd_compaction_prices_a_claude_name_with_a_dot(self):
         # 150,000 then 20,000 input tokens drop 130,000 tokens.
